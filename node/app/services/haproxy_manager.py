@@ -27,6 +27,9 @@ SYSCTL_CONF = Path("/etc/sysctl.d/99-haproxy.conf")
 LIMITS_CONF = Path("/etc/security/limits.d/haproxy.conf")
 SYSTEMD_HAPROXY = Path("/etc/systemd/system/haproxy.service.d/limits.conf")
 
+# HAProxy container ulimit - must match docker-compose.yml and start_haproxy()
+HAPROXY_CONTAINER_ULIMIT = 500000
+
 
 @dataclass
 class HAProxyRule:
@@ -100,30 +103,12 @@ class HAProxyManager:
             shutil.copy(backup_path, self.config_path)
     
     def _get_ulimit(self) -> int:
-        """Get nofile ulimit from host system (not container)
+        """Get nofile ulimit for HAProxy container
         
-        We need the host's ulimit to calculate HAProxy maxconn correctly.
-        The HAProxy container has ulimits configured in docker-compose.yml.
+        Returns the ulimit configured for HAProxy container (HAPROXY_CONTAINER_ULIMIT).
+        This must match the ulimits in docker-compose.yml and start_haproxy().
         """
-        # Try to read host ulimit from /proc (mounted as /host/proc)
-        try:
-            host_limits = Path(self.settings.host_proc) / "1" / "limits"
-            if host_limits.exists():
-                content = host_limits.read_text()
-                for line in content.split('\n'):
-                    if 'Max open files' in line:
-                        parts = line.split()
-                        # Format: "Max open files            1048576              1048576              files"
-                        # Soft limit is the 4th field (index 3)
-                        soft_limit = int(parts[3])
-                        if soft_limit > 0:
-                            return soft_limit
-        except Exception:
-            pass
-        
-        # Fallback: use HAProxy container's ulimit from docker-compose.yml
-        # HAProxy container is configured with nofile: 65536
-        return 65536
+        return HAPROXY_CONTAINER_ULIMIT
     
     def _get_system_info(self) -> dict:
         """Get system info for optimal config generation"""
@@ -619,7 +604,7 @@ LimitNPROC=1000000
                     "/etc/letsencrypt": {"bind": "/etc/letsencrypt", "mode": "ro"},
                 },
                 ulimits=[
-                    docker.types.Ulimit(name="nofile", soft=65536, hard=65536)
+                    docker.types.Ulimit(name="nofile", soft=HAPROXY_CONTAINER_ULIMIT, hard=HAPROXY_CONTAINER_ULIMIT)
                 ],
                 restart_policy={"Name": "unless-stopped"},
                 stop_signal="SIGUSR1",
