@@ -1,0 +1,104 @@
+services:
+  nginx:
+    image: nginx:alpine
+    container_name: panel-nginx
+    restart: unless-stopped
+    ports:
+      - "${PANEL_PORT:-443}:443"
+      - "${PANEL_HTTP_PORT:-80}:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+    environment:
+      - DOMAIN=${DOMAIN}
+    depends_on:
+      - frontend
+    networks:
+      - panel-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 128M
+        reservations:
+          cpus: '0.1'
+          memory: 32M
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        - PANEL_UID=${PANEL_UID}
+    container_name: panel-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    networks:
+      - panel-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 128M
+        reservations:
+          cpus: '0.1'
+          memory: 32M
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: panel-backend
+    restart: unless-stopped
+    # Root access for docker.sock and Let's Encrypt certificate reading (0600 perms)
+    user: root
+    environment:
+      - PANEL_UID=${PANEL_UID}
+      - PANEL_PASSWORD=${PANEL_PASSWORD}
+      - JWT_SECRET=${JWT_SECRET}
+      - JWT_EXPIRE_MINUTES=${JWT_EXPIRE_MINUTES:-1440}
+      - MAX_FAILED_ATTEMPTS=${MAX_FAILED_ATTEMPTS:-5}
+      - BAN_DURATION_SECONDS=${BAN_DURATION_SECONDS:-900}
+      - DATABASE_URL=sqlite+aiosqlite:///./data/panel.db
+      - DOMAIN=${DOMAIN}
+    volumes:
+      - panel-data:/app/data
+      # For update/renew scripts: access to project directory and docker
+      - /opt/monitoring-panel:/opt/monitoring-panel
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /usr/bin/docker:/usr/bin/docker:ro
+      # For reading SSL certificate info (need root for Let's Encrypt files with 0600 perms)
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+    networks:
+      - panel-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 256M
+        reservations:
+          cpus: '0.25'
+          memory: 64M
+
+volumes:
+  panel-data:
+
+networks:
+  panel-network:
+    driver: bridge

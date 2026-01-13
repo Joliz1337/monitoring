@@ -1,0 +1,106 @@
+services:
+  nginx:
+    image: nginx:alpine
+    container_name: monitoring-nginx
+    network_mode: host
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 128M
+        reservations:
+          cpus: '0.1'
+          memory: 32M
+
+  api:
+    build: .
+    container_name: monitoring-api
+    env_file:
+      - .env
+    privileged: true
+    pid: host
+    network_mode: host
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      # Host system access for metrics
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /etc/os-release:/host/etc/os-release:ro
+      # HAProxy config (shared with haproxy container)
+      - haproxy_config:/etc/haproxy
+      # Let's Encrypt certificates - bind mount to host directory
+      - /etc/letsencrypt:/etc/letsencrypt
+      # Docker socket for managing haproxy container and self-update
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Traffic statistics storage
+      - traffic_data:/var/lib/monitoring
+      # For update script: access to project directory
+      - /opt/monitoring-node:/opt/monitoring-node
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7500/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.1'
+          memory: 128M
+
+  haproxy:
+    image: haproxy:2.9-alpine
+    container_name: monitoring-haproxy
+    # HAProxy is disabled by default - enable via panel or: docker compose --profile haproxy up -d
+    profiles:
+      - haproxy
+    # Run as root to access Let's Encrypt certificates (they have 0600 permissions)
+    user: root
+    # Host network for full port access
+    network_mode: host
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      # HAProxy config - mount to standard alpine path
+      - haproxy_config:/usr/local/etc/haproxy
+      # Let's Encrypt certs - bind mount from host (same as api)
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+    restart: unless-stopped
+    # Graceful reload on config change
+    stop_signal: SIGUSR1
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+    # No resource limits - HAProxy needs max performance for proxying
+
+volumes:
+  haproxy_config:
+  traffic_data:

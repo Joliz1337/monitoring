@@ -1,0 +1,582 @@
+import axios, { AxiosError } from 'axios'
+
+const api = axios.create({
+  baseURL: '/api',
+  withCredentials: true,
+  headers: {
+    'Content-Type': 'application/json',
+  },
+})
+
+api.interceptors.response.use(
+  (response) => response,
+  (error: AxiosError) => {
+    if (error.response?.status === 401) {
+      const currentPath = window.location.pathname
+      const uid = currentPath.split('/')[1]
+      if (uid && !currentPath.includes('/login')) {
+        window.location.href = `/${uid}/login`
+      }
+    }
+    return Promise.reject(error)
+  }
+)
+
+export interface Server {
+  id: number
+  name: string
+  url: string
+  api_key?: string
+  position: number
+  is_active: boolean
+  last_seen?: string | null
+  last_error?: string | null
+  error_code?: number | null
+}
+
+export interface TimezoneInfo {
+  name: string
+  offset: string
+  offset_seconds: number
+}
+
+export interface CertificateExpiry {
+  domain: string
+  days_left: number
+  expiry_date: string
+  expired: boolean
+}
+
+export interface ServerMetrics {
+  timestamp: string
+  server_name: string
+  timezone?: TimezoneInfo
+  cpu: {
+    cores_physical: number
+    cores_logical: number
+    model: string
+    usage_percent: number
+    per_cpu_percent: number[]
+    load_avg_1: number
+    load_avg_5: number
+    load_avg_15: number
+    frequency?: {
+      current: number
+      min: number
+      max: number
+    }
+  }
+  memory: {
+    ram: {
+      total: number
+      used: number
+      free: number
+      available: number
+      percent: number
+    }
+    swap: {
+      total: number
+      used: number
+      free: number
+      percent: number
+    }
+  }
+  disk: {
+    partitions: Array<{
+      device: string
+      mountpoint: string
+      fstype: string
+      total: number
+      used: number
+      free: number
+      percent: number
+    }>
+    io: Record<string, {
+      read_bytes: number
+      write_bytes: number
+      read_bytes_per_sec: number
+      write_bytes_per_sec: number
+    }>
+  }
+  network: {
+    interfaces: Array<{
+      name: string
+      rx_bytes: number
+      tx_bytes: number
+      rx_bytes_per_sec: number
+      tx_bytes_per_sec: number
+      rx_peak_per_sec?: number
+      tx_peak_per_sec?: number
+      is_up: boolean
+    }>
+    total: {
+      rx_bytes: number
+      tx_bytes: number
+      rx_bytes_per_sec: number
+      tx_bytes_per_sec: number
+      rx_peak_per_sec?: number
+      tx_peak_per_sec?: number
+    }
+  }
+  system: {
+    hostname: string
+    os: string
+    kernel: string
+    architecture: string
+    boot_time: string
+    uptime_seconds: number
+    uptime_human: string
+    connections: {
+      established: number
+      listen: number
+      time_wait: number
+    }
+    connections_detailed?: {
+      tcp: {
+        total: number
+        established: number
+        listen: number
+        time_wait: number
+        close_wait: number
+        syn_sent: number
+        fin_wait: number
+        other: number
+      }
+      udp: {
+        total: number
+      }
+    }
+  }
+  processes: {
+    total: number
+    running: number
+    sleeping: number
+    top_by_cpu: Array<{
+      pid: number
+      name: string
+      cpu_percent: number
+      memory_percent: number
+      status: string
+    }>
+    top_by_memory: Array<{
+      pid: number
+      name: string
+      cpu_percent: number
+      memory_percent: number
+      status: string
+    }>
+  }
+  certificates?: {
+    count: number
+    closest_expiry: CertificateExpiry | null
+  }
+}
+
+export interface HAProxyRule {
+  name: string
+  rule_type: 'tcp' | 'https'
+  listen_port: number
+  target_ip: string
+  target_port: number
+  cert_domain?: string
+  target_ssl?: boolean
+}
+
+export interface HAProxyStatus {
+  running: boolean
+  config_valid: boolean
+  config_message: string
+}
+
+export interface CertificateFiles {
+  pem: string | null
+  key: string | null
+  cert: string | null
+  fullchain: string | null
+  chain: string | null
+}
+
+export interface Certificate {
+  domain: string
+  expiry_date: string
+  days_left: number
+  expired: boolean
+  combined_exists?: boolean
+  cert_path?: string
+  source?: 'letsencrypt' | 'custom'
+  files?: CertificateFiles
+}
+
+export interface FirewallRule {
+  number: number
+  port: number
+  protocol: string
+  action: string
+  from_ip: string
+  direction: string
+  ipv6: boolean
+}
+
+export interface FirewallStatus {
+  active: boolean
+  default_incoming: string
+  default_outgoing: string
+  logging: string
+  error?: string
+}
+
+export interface FirewallActionResponse {
+  success: boolean
+  message: string
+  error_log?: string
+}
+
+export interface SystemInfo {
+  cpu_cores: number
+  ram_mb: number
+  maxconn: number
+  nbthread: number
+  ulimit_nofile: number
+  optimizations_applied: boolean
+}
+
+export interface OptimizationsStatus {
+  sysctl: boolean
+  limits: boolean
+  systemd: boolean
+  all_applied: boolean
+}
+
+export interface OptimizationApplyResponse {
+  success: boolean
+  message: string
+  sysctl: boolean
+  limits: boolean
+  systemd: boolean
+}
+
+export interface CertificateGenerateResponse {
+  success: boolean
+  message: string
+  domain: string
+  error_log?: string
+}
+
+export interface TrafficDataPoint {
+  hour?: string
+  date?: string
+  month?: string
+  rx_bytes: number
+  tx_bytes: number
+}
+
+export interface TrafficData {
+  hours?: number
+  days?: number
+  months?: number
+  interface?: string
+  port?: number
+  data: TrafficDataPoint[]
+  total_rx: number
+  total_tx: number
+}
+
+export interface TrafficSummary {
+  days: number
+  total: {
+    rx_bytes: number
+    tx_bytes: number
+    days: number
+  }
+  by_interface: Array<{
+    interface: string
+    rx_bytes: number
+    tx_bytes: number
+  }>
+  by_port: Array<{
+    port: number
+    rx_bytes: number
+    tx_bytes: number
+  }>
+  tracked_ports: number[]
+}
+
+export interface PortsTraffic {
+  days: number
+  tracked_ports: number[]
+  data: Array<{
+    port: number
+    rx_bytes: number
+    tx_bytes: number
+  }>
+  total_rx: number
+  total_tx: number
+}
+
+export interface InterfacesTraffic {
+  days: number
+  data: Array<{
+    interface: string
+    rx_bytes: number
+    tx_bytes: number
+  }>
+  total_rx: number
+  total_tx: number
+}
+
+export const authApi = {
+  login: (password: string) => api.post('/auth/login', { password }),
+  logout: () => api.post('/auth/logout'),
+  check: () => api.get('/auth/check'),
+  getUid: () => api.get<{ uid: string }>('/auth/uid'),
+}
+
+export interface ServerWithMetrics extends Server {
+  metrics?: ServerMetrics | null
+  status?: 'online' | 'offline' | 'loading' | 'error'
+}
+
+export const serversApi = {
+  list: (includeMetrics?: boolean) => 
+    api.get<{ count: number; servers: ServerWithMetrics[] }>('/servers', { 
+      params: includeMetrics ? { include_metrics: true } : undefined 
+    }),
+  get: (id: number) => api.get<Server>(`/servers/${id}`),
+  create: (data: { name: string; url: string; api_key: string }) => 
+    api.post<{ success: boolean; server: Server }>('/servers', data),
+  update: (id: number, data: Partial<Server>) => api.put(`/servers/${id}`, data),
+  delete: (id: number) => api.delete(`/servers/${id}`),
+  reorder: (serverIds: number[]) => api.post('/servers/reorder', { server_ids: serverIds }),
+  test: (id: number) => api.post<{ success: boolean; status: string; message?: string }>(`/servers/${id}/test`),
+}
+
+export const proxyApi = {
+  // Returns cached metrics from panel's database (collected by background worker)
+  getMetrics: (serverId: number) => api.get<ServerMetrics>(`/proxy/${serverId}/metrics`),
+  // Returns live metrics directly from node (use sparingly, causes load)
+  getLiveMetrics: (serverId: number) => api.get<ServerMetrics>(`/proxy/${serverId}/metrics/live`),
+  // History is stored on the panel (collected every 5 seconds)
+  // period: '1h', '24h', '7d', '30d', '365d'
+  getHistory: (serverId: number, params?: { period?: string; from_time?: string; to_time?: string; limit?: number }) =>
+    api.get(`/proxy/${serverId}/metrics/history`, { params }),
+  
+  // Cached HAProxy data (status, rules, certs, firewall) - updated every 30s
+  getHAProxyCached: (serverId: number) => 
+    api.get<{ status?: HAProxyStatus; rules?: { count: number; rules: HAProxyRule[] }; certs?: { certificates: Certificate[]; count: number }; firewall?: { rules: FirewallRule[]; count: number; active: boolean }; cached_at?: string }>(`/proxy/${serverId}/haproxy/cached`),
+  
+  // Cached Traffic data (summary, tracked_ports) - updated every 30s
+  getTrafficCached: (serverId: number) =>
+    api.get<{ summary?: TrafficSummary; tracked_ports?: { tracked_ports: number[] }; cached_at?: string }>(`/proxy/${serverId}/traffic/cached`),
+  
+  getHAProxyStatus: (serverId: number) => api.get<HAProxyStatus>(`/proxy/${serverId}/haproxy/status`),
+  getHAProxyRules: (serverId: number) => 
+    api.get<{ count: number; rules: HAProxyRule[] }>(`/proxy/${serverId}/haproxy/rules`),
+  createHAProxyRule: (serverId: number, rule: Omit<HAProxyRule, 'name'> & { name: string }) =>
+    api.post(`/proxy/${serverId}/haproxy/rules`, rule),
+  updateHAProxyRule: (serverId: number, name: string, data: Partial<HAProxyRule>) =>
+    api.put(`/proxy/${serverId}/haproxy/rules/${name}`, data),
+  deleteHAProxyRule: (serverId: number, name: string) =>
+    api.delete(`/proxy/${serverId}/haproxy/rules/${name}`),
+  reloadHAProxy: (serverId: number) => api.post(`/proxy/${serverId}/haproxy/reload`),
+  restartHAProxy: (serverId: number) => api.post(`/proxy/${serverId}/haproxy/restart`),
+  startHAProxy: (serverId: number) => api.post(`/proxy/${serverId}/haproxy/start`),
+  stopHAProxy: (serverId: number) => api.post(`/proxy/${serverId}/haproxy/stop`),
+  applyHAProxyConfig: (serverId: number, configContent: string, reloadAfter: boolean = true) =>
+    api.post<{ success: boolean; message: string; config_valid: boolean; reloaded: boolean }>(
+      `/proxy/${serverId}/haproxy/config/apply`,
+      { config_content: configContent, reload_after: reloadAfter }
+    ),
+  getHAProxyConfig: (serverId: number) =>
+    api.get<{ content: string; path: string }>(`/proxy/${serverId}/haproxy/config`),
+  
+  getHAProxyCerts: (serverId: number) => 
+    api.get<{ certificates: string[] }>(`/proxy/${serverId}/haproxy/certs`),
+  getHAProxyCert: (serverId: number, domain: string) =>
+    api.get<Certificate>(`/proxy/${serverId}/haproxy/certs/${domain}`),
+  getAllCerts: (serverId: number) =>
+    api.get<{ certificates: Certificate[]; count: number }>(`/proxy/${serverId}/haproxy/certs/all`),
+  generateCert: (serverId: number, data: { domain: string; email?: string; method?: string }) =>
+    api.post(`/proxy/${serverId}/haproxy/certs/generate`, data),
+  renewCerts: (serverId: number) => api.post(`/proxy/${serverId}/haproxy/certs/renew`),
+  renewSingleCert: (serverId: number, domain: string) => 
+    api.post<{ success: boolean; message: string; domain: string; output_log?: string }>(`/proxy/${serverId}/haproxy/certs/${domain}/renew`),
+  deleteCert: (serverId: number, domain: string) =>
+    api.delete(`/proxy/${serverId}/haproxy/certs/${domain}`),
+  uploadCert: (serverId: number, data: { domain: string; cert_content: string; key_content: string }) =>
+    api.post(`/proxy/${serverId}/haproxy/certs/upload`, data),
+  
+  // Firewall management
+  getFirewallStatus: (serverId: number) =>
+    api.get<FirewallStatus>(`/proxy/${serverId}/haproxy/firewall/status`),
+  getFirewallRules: (serverId: number) =>
+    api.get<{ rules: FirewallRule[]; count: number; active: boolean }>(`/proxy/${serverId}/haproxy/firewall/rules`),
+  allowPort: (serverId: number, port: number, protocol: string = 'tcp') =>
+    api.post<FirewallActionResponse>(`/proxy/${serverId}/haproxy/firewall/allow`, { port, protocol }),
+  denyPort: (serverId: number, port: number, protocol: string = 'tcp') =>
+    api.post<FirewallActionResponse>(`/proxy/${serverId}/haproxy/firewall/deny`, { port, protocol }),
+  addFirewallRule: (serverId: number, data: {
+    port: number
+    protocol: string
+    action: 'allow' | 'deny'
+    from_ip?: string | null
+    direction: 'in' | 'out'
+  }) => api.post<FirewallActionResponse>(`/proxy/${serverId}/haproxy/firewall/rule`, data),
+  deleteFirewallRule: (serverId: number, port: number, protocol: string = 'tcp') =>
+    api.delete<FirewallActionResponse>(`/proxy/${serverId}/haproxy/firewall/${port}?protocol=${protocol}`),
+  deleteFirewallRuleByNumber: (serverId: number, ruleNumber: number) =>
+    api.delete<FirewallActionResponse>(`/proxy/${serverId}/haproxy/firewall/rule/${ruleNumber}`),
+  enableFirewall: (serverId: number) =>
+    api.post<FirewallActionResponse>(`/proxy/${serverId}/haproxy/firewall/enable`),
+  disableFirewall: (serverId: number) =>
+    api.post<FirewallActionResponse>(`/proxy/${serverId}/haproxy/firewall/disable`),
+  
+  // System optimization
+  getSystemInfo: (serverId: number) =>
+    api.get<SystemInfo>(`/proxy/${serverId}/haproxy/system/info`),
+  getOptimizationsStatus: (serverId: number) =>
+    api.get<OptimizationsStatus>(`/proxy/${serverId}/haproxy/system/optimizations`),
+  applyOptimizations: (serverId: number) =>
+    api.post<OptimizationApplyResponse>(`/proxy/${serverId}/haproxy/system/optimize`),
+  
+  // Traffic tracking
+  getTrafficSummary: (serverId: number, days: number = 30) =>
+    api.get<TrafficSummary>(`/proxy/${serverId}/traffic/summary`, { params: { days } }),
+  getHourlyTraffic: (serverId: number, params?: { hours?: number; interface?: string; port?: number }) =>
+    api.get<TrafficData>(`/proxy/${serverId}/traffic/hourly`, { params }),
+  getDailyTraffic: (serverId: number, params?: { days?: number; interface?: string; port?: number }) =>
+    api.get<TrafficData>(`/proxy/${serverId}/traffic/daily`, { params }),
+  getMonthlyTraffic: (serverId: number, params?: { months?: number; interface?: string; port?: number }) =>
+    api.get<TrafficData>(`/proxy/${serverId}/traffic/monthly`, { params }),
+  getPortsTraffic: (serverId: number, days: number = 30) =>
+    api.get<PortsTraffic>(`/proxy/${serverId}/traffic/ports`, { params: { days } }),
+  getInterfacesTraffic: (serverId: number, days: number = 30) =>
+    api.get<InterfacesTraffic>(`/proxy/${serverId}/traffic/interfaces`, { params: { days } }),
+  getTrackedPorts: (serverId: number) =>
+    api.get<{ tracked_ports: number[] }>(`/proxy/${serverId}/traffic/ports/tracked`),
+  addTrackedPort: (serverId: number, port: number) =>
+    api.post<{ success: boolean; message: string }>(`/proxy/${serverId}/traffic/ports/add`, { port }),
+  removeTrackedPort: (serverId: number, port: number) =>
+    api.post<{ success: boolean; message: string }>(`/proxy/${serverId}/traffic/ports/remove`, { port }),
+}
+
+export const settingsApi = {
+  getAll: () => api.get<{ settings: Record<string, string> }>('/settings'),
+  get: (key: string) => api.get<{ key: string; value: string }>(`/settings/${key}`),
+  set: (key: string, value: string) => api.put(`/settings/${key}`, { value }),
+}
+
+export interface NodeVersionInfo {
+  id: number
+  name: string
+  url: string
+  version: string | null
+  status: 'online' | 'offline'
+}
+
+export interface VersionInfo {
+  panel: {
+    version: string
+    latest_version: string | null
+    update_available: boolean
+  }
+  node: {
+    latest_version: string | null
+  }
+  nodes: NodeVersionInfo[]
+  update_in_progress: boolean
+}
+
+export interface UpdateResponse {
+  success: boolean
+  message: string
+  target_version: string
+}
+
+export interface UpdateStatus {
+  in_progress: boolean
+  last_result: 'success' | 'failed' | 'not_due' | null
+  last_error: string | null
+  output?: string | null
+  started_at?: string | null
+  completed_at?: string | null
+}
+
+export interface PanelCertificateInfo {
+  domain: string | null
+  expiry_date?: string
+  days_left?: number
+  expired?: boolean
+  error?: string
+  renewal_in_progress?: boolean
+}
+
+export interface CertRenewalResponse {
+  success: boolean
+  message: string
+}
+
+export interface BulkResult {
+  server_id: number
+  server_name: string
+  success: boolean
+  message: string
+}
+
+export const bulkApi = {
+  // HAProxy rules
+  createHAProxyRule: (serverIds: number[], rule: {
+    name: string
+    rule_type: 'tcp' | 'https'
+    listen_port: number
+    target_ip: string
+    target_port: number
+    cert_domain?: string
+    target_ssl?: boolean
+  }) => api.post<BulkResult[]>('/bulk/haproxy/rules', { server_ids: serverIds, ...rule }),
+  
+  deleteHAProxyRule: (serverIds: number[], listenPort: number, targetIp: string, targetPort: number) =>
+    api.delete<BulkResult[]>('/bulk/haproxy/rules', { 
+      data: { server_ids: serverIds, listen_port: listenPort, target_ip: targetIp, target_port: targetPort }
+    }),
+  
+  // Traffic ports
+  addTrackedPort: (serverIds: number[], port: number) =>
+    api.post<BulkResult[]>('/bulk/traffic/ports', { server_ids: serverIds, port }),
+  
+  removeTrackedPort: (serverIds: number[], port: number) =>
+    api.delete<BulkResult[]>('/bulk/traffic/ports', { data: { server_ids: serverIds, port } }),
+  
+  // Firewall rules
+  addFirewallRule: (serverIds: number[], rule: {
+    port: number
+    protocol: 'tcp' | 'udp' | 'any'
+    action: 'allow' | 'deny'
+    from_ip?: string | null
+    direction: 'in' | 'out'
+  }) => api.post<BulkResult[]>('/bulk/firewall/rules', { server_ids: serverIds, ...rule }),
+  
+  deleteFirewallRule: (serverIds: number[], port: number) =>
+    api.delete<BulkResult[]>('/bulk/firewall/rules', { data: { server_ids: serverIds, port } }),
+}
+
+export const systemApi = {
+  getVersion: () => api.get<VersionInfo>('/system/version'),
+  updatePanel: (targetVersion?: string) => 
+    api.post<UpdateResponse>('/system/update', targetVersion ? { target_version: targetVersion } : {}),
+  getUpdateStatus: () => api.get<UpdateStatus>('/system/update/status'),
+  
+  // Node updates via proxy
+  getNodeVersion: (serverId: number) => 
+    api.get<{ version: string; component: string; node_name: string }>(`/proxy/${serverId}/system/version`),
+  updateNode: (serverId: number, targetVersion?: string) =>
+    api.post<UpdateResponse>(`/proxy/${serverId}/system/update`, targetVersion ? { target_version: targetVersion } : {}),
+  getNodeUpdateStatus: (serverId: number) =>
+    api.get<UpdateStatus>(`/proxy/${serverId}/system/update/status`),
+  
+  // Panel SSL certificate
+  getCertificate: () => api.get<PanelCertificateInfo>('/system/certificate'),
+  renewCertificate: () => api.post<CertRenewalResponse>('/system/certificate/renew?force=true'),
+  getCertRenewalStatus: () => api.get<UpdateStatus>('/system/certificate/renew/status'),
+}
+
+export default api

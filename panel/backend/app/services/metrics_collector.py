@@ -1,0 +1,621 @@
+"""
+Background metrics collector for the panel.
+Polls all servers every N seconds and stores metrics in local DB.
+Calculates network/disk speeds based on byte differences.
+"""
+
+import asyncio
+import json
+import logging
+import time
+from datetime import datetime, timedelta, timezone
+from typing import Optional
+
+import httpx
+from sqlalchemy import select, delete, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.database import async_session
+from app.models import Server, MetricsSnapshot, AggregatedMetrics
+from sqlalchemy import func as sql_func
+
+logger = logging.getLogger(__name__)
+
+
+class ErrorTypes:
+    TIMEOUT = "Connection timeout"
+    CONNECTION_REFUSED = "Connection refused"
+    SSL_ERROR = "SSL certificate error"
+    AUTH_ERROR = "Authentication failed"
+    SERVER_ERROR = "Server error"
+    UNKNOWN = "Unknown error"
+
+
+class ServerMetricsState:
+    """Tracks previous values for speed calculation per server"""
+    
+    def __init__(self):
+        self.prev_net_rx: int = 0
+        self.prev_net_tx: int = 0
+        self.prev_disk_read: int = 0
+        self.prev_disk_write: int = 0
+        self.prev_time: float = 0
+        self.initialized: bool = False
+
+
+class MetricsCollector:
+    """Collects metrics from all servers and stores in panel DB"""
+    
+    def __init__(self):
+        self._running = False
+        self._task: Optional[asyncio.Task] = None
+        self._aggregation_task: Optional[asyncio.Task] = None
+        self._haproxy_task: Optional[asyncio.Task] = None
+        self._server_states: dict[int, ServerMetricsState] = {}
+        self._collect_interval = 5  # seconds
+        self._haproxy_interval = 30  # HAProxy/Traffic cache interval
+        
+        # Retention periods
+        self._raw_retention_hours = 24  # keep raw data 24 hours
+        self._hourly_retention_days = 30  # keep hourly data 30 days  
+        self._daily_retention_days = 365  # keep daily data 365 days
+        
+        # Track last aggregation times (naive UTC for consistency)
+        now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+        self._last_hourly_aggregation: datetime = now_utc - timedelta(hours=2)
+        self._last_daily_aggregation: datetime = now_utc - timedelta(days=2)
+    
+    async def start(self):
+        """Start background collection"""
+        if self._running:
+            return
+        
+        self._running = True
+        self._task = asyncio.create_task(self._collection_loop())
+        self._aggregation_task = asyncio.create_task(self._aggregation_loop())
+        self._haproxy_task = asyncio.create_task(self._haproxy_cache_loop())
+        logger.info(f"Metrics collector started (interval: {self._collect_interval}s, haproxy: {self._haproxy_interval}s)")
+    
+    async def stop(self):
+        """Stop background collection"""
+        self._running = False
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+        if self._aggregation_task:
+            self._aggregation_task.cancel()
+            try:
+                await self._aggregation_task
+            except asyncio.CancelledError:
+                pass
+        if self._haproxy_task:
+            self._haproxy_task.cancel()
+            try:
+                await self._haproxy_task
+            except asyncio.CancelledError:
+                pass
+        logger.info("Metrics collector stopped")
+    
+    async def _collection_loop(self):
+        """Main collection loop"""
+        while self._running:
+            try:
+                await self._collect_all_servers()
+            except Exception as e:
+                logger.error(f"Collection error: {e}")
+            
+            await asyncio.sleep(self._collect_interval)
+    
+    async def _collect_all_servers(self):
+        """Collect metrics from all active servers"""
+        async with async_session() as db:
+            # Get all active servers
+            result = await db.execute(
+                select(Server).where(Server.is_active == True)
+            )
+            servers = result.scalars().all()
+        
+        # Collect from each server concurrently (each with its own session)
+        tasks = [self._collect_server(server) for server in servers]
+        await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Cleanup old data periodically
+        async with async_session() as db:
+            await self._cleanup_old_data(db)
+    
+    async def _collect_server(self, server: Server):
+        """Collect metrics from a single server (uses own DB session)"""
+        try:
+            metrics, error_info = await self._fetch_metrics(server)
+            
+            async with async_session() as db:
+                if metrics:
+                    await self._save_metrics(server.id, metrics, db)
+                    # Update server status: online + cache full metrics JSON
+                    await db.execute(
+                        update(Server).where(Server.id == server.id).values(
+                            last_seen=datetime.now(timezone.utc).replace(tzinfo=None),
+                            last_error=None,
+                            error_code=None,
+                            last_metrics=json.dumps(metrics)
+                        )
+                    )
+                elif error_info:
+                    # Update server status: error
+                    await db.execute(
+                        update(Server).where(Server.id == server.id).values(
+                            last_error=error_info["message"],
+                            error_code=error_info["code"]
+                        )
+                    )
+                await db.commit()
+        except Exception as e:
+            logger.debug(f"Failed to collect from {server.name}: {e}")
+    
+    async def _fetch_metrics(self, server: Server) -> tuple[Optional[dict], Optional[dict]]:
+        """Fetch current metrics from server API. Returns (metrics, error_info)"""
+        url = f"{server.url}/api/metrics"
+        
+        try:
+            async with httpx.AsyncClient(verify=False, timeout=5.0) as client:
+                response = await client.get(
+                    url,
+                    headers={"X-API-Key": server.api_key}
+                )
+                if response.status_code == 200:
+                    return response.json(), None
+                elif response.status_code == 401 or response.status_code == 403:
+                    return None, {"message": ErrorTypes.AUTH_ERROR, "code": response.status_code}
+                else:
+                    return None, {"message": f"{ErrorTypes.SERVER_ERROR}: HTTP {response.status_code}", "code": response.status_code}
+        except httpx.TimeoutException:
+            logger.debug(f"Timeout connecting to {server.name}")
+            return None, {"message": ErrorTypes.TIMEOUT, "code": 504}
+        except httpx.ConnectError as e:
+            error_str = str(e).lower()
+            if "refused" in error_str:
+                return None, {"message": ErrorTypes.CONNECTION_REFUSED, "code": 502}
+            elif "ssl" in error_str or "certificate" in error_str:
+                return None, {"message": ErrorTypes.SSL_ERROR, "code": 495}
+            return None, {"message": f"{ErrorTypes.CONNECTION_REFUSED}: {str(e)[:100]}", "code": 502}
+        except Exception as e:
+            logger.debug(f"Request to {server.name} failed: {e}")
+            return None, {"message": f"{ErrorTypes.UNKNOWN}: {str(e)[:100]}", "code": 500}
+    
+    async def _save_metrics(self, server_id: int, metrics: dict, db: AsyncSession):
+        """Save metrics snapshot with calculated speeds"""
+        current_time = time.time()
+        
+        # Get or create server state
+        if server_id not in self._server_states:
+            self._server_states[server_id] = ServerMetricsState()
+        
+        state = self._server_states[server_id]
+        
+        # Extract values from metrics
+        cpu = metrics.get("cpu", {})
+        memory = metrics.get("memory", {}).get("ram", {})
+        swap = metrics.get("memory", {}).get("swap", {})
+        network = metrics.get("network", {}).get("total", {})
+        disk = metrics.get("disk", {})
+        processes = metrics.get("processes", {})
+        system = metrics.get("system", {})
+        
+        # Current network bytes
+        net_rx = network.get("rx_bytes", 0)
+        net_tx = network.get("tx_bytes", 0)
+        
+        # Current disk bytes (sum all disks)
+        disk_read = sum(d.get("read_bytes", 0) for d in disk.get("io", {}).values())
+        disk_write = sum(d.get("write_bytes", 0) for d in disk.get("io", {}).values())
+        
+        # Calculate speeds
+        net_rx_speed = 0.0
+        net_tx_speed = 0.0
+        disk_read_speed = 0.0
+        disk_write_speed = 0.0
+        
+        if state.initialized and state.prev_time > 0:
+            dt = current_time - state.prev_time
+            if dt > 0.5:  # At least 500ms between measurements
+                # Network speed
+                rx_diff = net_rx - state.prev_net_rx
+                tx_diff = net_tx - state.prev_net_tx
+                if rx_diff >= 0:  # Handle counter reset
+                    net_rx_speed = rx_diff / dt
+                if tx_diff >= 0:
+                    net_tx_speed = tx_diff / dt
+                
+                # Disk speed
+                read_diff = disk_read - state.prev_disk_read
+                write_diff = disk_write - state.prev_disk_write
+                if read_diff >= 0:
+                    disk_read_speed = read_diff / dt
+                if write_diff >= 0:
+                    disk_write_speed = write_diff / dt
+        
+        # Update state for next calculation
+        state.prev_net_rx = net_rx
+        state.prev_net_tx = net_tx
+        state.prev_disk_read = disk_read
+        state.prev_disk_write = disk_write
+        state.prev_time = current_time
+        state.initialized = True
+        
+        # Get main disk percent
+        disk_percent = 0.0
+        partitions = disk.get("partitions", [])
+        if partitions:
+            disk_percent = partitions[0].get("percent", 0)
+        
+        # Get connections count
+        connections = system.get("connections", {})
+        connections_count = connections.get("established", 0) + connections.get("listen", 0)
+        
+        # Create snapshot with naive UTC timestamp (SQLite doesn't preserve timezone)
+        snapshot = MetricsSnapshot(
+            server_id=server_id,
+            timestamp=datetime.now(timezone.utc).replace(tzinfo=None),
+            cpu_usage=cpu.get("usage_percent", 0),
+            load_avg_1=cpu.get("load_avg_1", 0),
+            load_avg_5=cpu.get("load_avg_5", 0),
+            load_avg_15=cpu.get("load_avg_15", 0),
+            memory_total=memory.get("total", 0),
+            memory_used=memory.get("used", 0),
+            memory_available=memory.get("available", 0),
+            memory_percent=memory.get("percent", 0),
+            swap_used=swap.get("used", 0),
+            swap_percent=swap.get("percent", 0),
+            net_rx_bytes_per_sec=net_rx_speed,
+            net_tx_bytes_per_sec=net_tx_speed,
+            net_rx_bytes=net_rx,
+            net_tx_bytes=net_tx,
+            disk_percent=disk_percent,
+            disk_read_bytes_per_sec=disk_read_speed,
+            disk_write_bytes_per_sec=disk_write_speed,
+            process_count=processes.get("total", 0),
+            connections_count=connections_count
+        )
+        
+        db.add(snapshot)
+    
+    async def _cleanup_old_data(self, db: AsyncSession):
+        """Remove data older than retention periods.
+        
+        Note: SQLite stores datetime without timezone info, so we use naive UTC
+        datetime for comparisons to avoid timezone conversion issues on Windows.
+        """
+        now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+        
+        # Cleanup raw data (24 hours)
+        raw_cutoff = now_utc - timedelta(hours=self._raw_retention_hours)
+        await db.execute(
+            delete(MetricsSnapshot).where(MetricsSnapshot.timestamp < raw_cutoff)
+        )
+        
+        # Cleanup hourly aggregated data (30 days)
+        hourly_cutoff = now_utc - timedelta(days=self._hourly_retention_days)
+        await db.execute(
+            delete(AggregatedMetrics).where(
+                AggregatedMetrics.period_type == 'hour',
+                AggregatedMetrics.timestamp < hourly_cutoff
+            )
+        )
+        
+        # Cleanup daily aggregated data (365 days)
+        daily_cutoff = now_utc - timedelta(days=self._daily_retention_days)
+        await db.execute(
+            delete(AggregatedMetrics).where(
+                AggregatedMetrics.period_type == 'day',
+                AggregatedMetrics.timestamp < daily_cutoff
+            )
+        )
+        
+        await db.commit()
+    
+    async def _aggregation_loop(self):
+        """Background loop for data aggregation"""
+        while self._running:
+            try:
+                await asyncio.sleep(60)  # Check every minute
+                
+                now = datetime.now(timezone.utc).replace(tzinfo=None)
+                
+                # Hourly aggregation (run at the start of each hour)
+                if now - self._last_hourly_aggregation >= timedelta(hours=1):
+                    async with async_session() as db:
+                        await self._aggregate_hourly(db)
+                    self._last_hourly_aggregation = now.replace(minute=0, second=0, microsecond=0)
+                
+                # Daily aggregation (run once per day at midnight)
+                if now - self._last_daily_aggregation >= timedelta(days=1):
+                    async with async_session() as db:
+                        await self._aggregate_daily(db)
+                    self._last_daily_aggregation = now.replace(hour=0, minute=0, second=0, microsecond=0)
+                    
+            except Exception as e:
+                logger.error(f"Aggregation error: {e}")
+    
+    async def _haproxy_cache_loop(self):
+        """Background loop for caching HAProxy and Traffic data (every 30 seconds)"""
+        while self._running:
+            try:
+                await asyncio.sleep(self._haproxy_interval)
+                await self._cache_haproxy_traffic_data()
+            except Exception as e:
+                logger.error(f"HAProxy/Traffic cache error: {e}")
+    
+    async def _cache_haproxy_traffic_data(self):
+        """Cache HAProxy status/rules/certs and Traffic summary for all servers"""
+        async with async_session() as db:
+            result = await db.execute(
+                select(Server).where(Server.is_active == True)
+            )
+            servers = result.scalars().all()
+        
+        # Each server uses its own session
+        tasks = [self._cache_server_haproxy_traffic(server) for server in servers]
+        await asyncio.gather(*tasks, return_exceptions=True)
+    
+    async def _cache_server_haproxy_traffic(self, server: Server):
+        """Cache HAProxy and Traffic data for a single server (uses own DB session)"""
+        try:
+            async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+                headers = {"X-API-Key": server.api_key}
+                haproxy_data = {}
+                traffic_data = {}
+                
+                # Fetch HAProxy status
+                try:
+                    status_res = await client.get(
+                        f"{server.url}/api/haproxy/status",
+                        headers=headers
+                    )
+                    if status_res.status_code == 200:
+                        haproxy_data["status"] = status_res.json()
+                except Exception:
+                    pass
+                
+                # Fetch HAProxy rules
+                try:
+                    rules_res = await client.get(
+                        f"{server.url}/api/haproxy/rules",
+                        headers=headers
+                    )
+                    if rules_res.status_code == 200:
+                        haproxy_data["rules"] = rules_res.json()
+                except Exception:
+                    pass
+                
+                # Fetch HAProxy certs (all in one request)
+                try:
+                    certs_res = await client.get(
+                        f"{server.url}/api/haproxy/certs/all",
+                        headers=headers
+                    )
+                    if certs_res.status_code == 200:
+                        haproxy_data["certs"] = certs_res.json()
+                except Exception:
+                    pass
+                
+                # Fetch Firewall rules
+                try:
+                    fw_res = await client.get(
+                        f"{server.url}/api/haproxy/firewall/rules",
+                        headers=headers
+                    )
+                    if fw_res.status_code == 200:
+                        haproxy_data["firewall"] = fw_res.json()
+                except Exception:
+                    pass
+                
+                # Fetch Traffic summary
+                try:
+                    traffic_res = await client.get(
+                        f"{server.url}/api/traffic/summary",
+                        headers=headers,
+                        params={"days": 30}
+                    )
+                    if traffic_res.status_code == 200:
+                        traffic_data["summary"] = traffic_res.json()
+                except Exception:
+                    pass
+                
+                # Fetch tracked ports
+                try:
+                    ports_res = await client.get(
+                        f"{server.url}/api/traffic/ports/tracked",
+                        headers=headers
+                    )
+                    if ports_res.status_code == 200:
+                        traffic_data["tracked_ports"] = ports_res.json()
+                except Exception:
+                    pass
+                
+                # Update cache in DB (own session)
+                update_values = {}
+                if haproxy_data:
+                    haproxy_data["cached_at"] = datetime.now(timezone.utc).isoformat()
+                    update_values["last_haproxy_data"] = json.dumps(haproxy_data)
+                if traffic_data:
+                    traffic_data["cached_at"] = datetime.now(timezone.utc).isoformat()
+                    update_values["last_traffic_data"] = json.dumps(traffic_data)
+                
+                if update_values:
+                    async with async_session() as db:
+                        await db.execute(
+                            update(Server).where(Server.id == server.id).values(**update_values)
+                        )
+                        await db.commit()
+                    
+        except Exception as e:
+            logger.debug(f"Failed to cache HAProxy/Traffic for {server.name}: {e}")
+    
+    async def _aggregate_hourly(self, db: AsyncSession):
+        """Aggregate raw metrics to hourly summaries"""
+        # Get all servers
+        result = await db.execute(select(Server.id))
+        server_ids = [row[0] for row in result.fetchall()]
+        
+        # Aggregate last complete hour (use naive UTC for SQLite compatibility)
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        hour_end = now.replace(minute=0, second=0, microsecond=0)
+        hour_start = hour_end - timedelta(hours=1)
+        
+        for server_id in server_ids:
+            # Check if already aggregated
+            existing = await db.execute(
+                select(AggregatedMetrics).where(
+                    AggregatedMetrics.server_id == server_id,
+                    AggregatedMetrics.period_type == 'hour',
+                    AggregatedMetrics.timestamp == hour_start
+                )
+            )
+            if existing.scalar_one_or_none():
+                continue
+            
+            # Get raw data for this hour
+            result = await db.execute(
+                select(
+                    sql_func.avg(MetricsSnapshot.cpu_usage).label('avg_cpu'),
+                    sql_func.max(MetricsSnapshot.cpu_usage).label('max_cpu'),
+                    sql_func.avg(MetricsSnapshot.load_avg_1).label('avg_load'),
+                    sql_func.avg(MetricsSnapshot.memory_percent).label('avg_memory'),
+                    sql_func.max(MetricsSnapshot.memory_percent).label('max_memory'),
+                    sql_func.avg(MetricsSnapshot.disk_percent).label('avg_disk'),
+                    sql_func.sum(MetricsSnapshot.net_rx_bytes_per_sec * 5).label('total_rx'),  # 5 sec intervals
+                    sql_func.sum(MetricsSnapshot.net_tx_bytes_per_sec * 5).label('total_tx'),
+                    sql_func.avg(MetricsSnapshot.net_rx_bytes_per_sec).label('avg_rx'),
+                    sql_func.avg(MetricsSnapshot.net_tx_bytes_per_sec).label('avg_tx'),
+                    sql_func.avg(MetricsSnapshot.disk_read_bytes_per_sec).label('avg_disk_read'),
+                    sql_func.avg(MetricsSnapshot.disk_write_bytes_per_sec).label('avg_disk_write'),
+                    sql_func.count().label('data_points')
+                ).where(
+                    MetricsSnapshot.server_id == server_id,
+                    MetricsSnapshot.timestamp >= hour_start,
+                    MetricsSnapshot.timestamp < hour_end
+                )
+            )
+            row = result.fetchone()
+            
+            if row and row.data_points > 0:
+                aggregated = AggregatedMetrics(
+                    server_id=server_id,
+                    timestamp=hour_start,
+                    period_type='hour',
+                    avg_cpu=row.avg_cpu or 0,
+                    max_cpu=row.max_cpu or 0,
+                    avg_load=row.avg_load or 0,
+                    avg_memory_percent=row.avg_memory or 0,
+                    max_memory_percent=row.max_memory or 0,
+                    avg_disk_percent=row.avg_disk or 0,
+                    total_rx_bytes=int(row.total_rx or 0),
+                    total_tx_bytes=int(row.total_tx or 0),
+                    avg_rx_speed=row.avg_rx or 0,
+                    avg_tx_speed=row.avg_tx or 0,
+                    avg_disk_read_speed=row.avg_disk_read or 0,
+                    avg_disk_write_speed=row.avg_disk_write or 0,
+                    data_points=row.data_points
+                )
+                db.add(aggregated)
+        
+        await db.commit()
+        logger.info(f"Hourly aggregation completed for {hour_start}")
+    
+    async def _aggregate_daily(self, db: AsyncSession):
+        """Aggregate hourly metrics to daily summaries"""
+        result = await db.execute(select(Server.id))
+        server_ids = [row[0] for row in result.fetchall()]
+        
+        # Aggregate last complete day (use naive UTC for SQLite compatibility)
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        day_end = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        day_start = day_end - timedelta(days=1)
+        
+        for server_id in server_ids:
+            # Check if already aggregated
+            existing = await db.execute(
+                select(AggregatedMetrics).where(
+                    AggregatedMetrics.server_id == server_id,
+                    AggregatedMetrics.period_type == 'day',
+                    AggregatedMetrics.timestamp == day_start
+                )
+            )
+            if existing.scalar_one_or_none():
+                continue
+            
+            # Get hourly data for this day
+            result = await db.execute(
+                select(
+                    sql_func.avg(AggregatedMetrics.avg_cpu).label('avg_cpu'),
+                    sql_func.max(AggregatedMetrics.max_cpu).label('max_cpu'),
+                    sql_func.avg(AggregatedMetrics.avg_load).label('avg_load'),
+                    sql_func.avg(AggregatedMetrics.avg_memory_percent).label('avg_memory'),
+                    sql_func.max(AggregatedMetrics.max_memory_percent).label('max_memory'),
+                    sql_func.avg(AggregatedMetrics.avg_disk_percent).label('avg_disk'),
+                    sql_func.sum(AggregatedMetrics.total_rx_bytes).label('total_rx'),
+                    sql_func.sum(AggregatedMetrics.total_tx_bytes).label('total_tx'),
+                    sql_func.avg(AggregatedMetrics.avg_rx_speed).label('avg_rx'),
+                    sql_func.avg(AggregatedMetrics.avg_tx_speed).label('avg_tx'),
+                    sql_func.avg(AggregatedMetrics.avg_disk_read_speed).label('avg_disk_read'),
+                    sql_func.avg(AggregatedMetrics.avg_disk_write_speed).label('avg_disk_write'),
+                    sql_func.sum(AggregatedMetrics.data_points).label('data_points')
+                ).where(
+                    AggregatedMetrics.server_id == server_id,
+                    AggregatedMetrics.period_type == 'hour',
+                    AggregatedMetrics.timestamp >= day_start,
+                    AggregatedMetrics.timestamp < day_end
+                )
+            )
+            row = result.fetchone()
+            
+            if row and row.data_points and row.data_points > 0:
+                aggregated = AggregatedMetrics(
+                    server_id=server_id,
+                    timestamp=day_start,
+                    period_type='day',
+                    avg_cpu=row.avg_cpu or 0,
+                    max_cpu=row.max_cpu or 0,
+                    avg_load=row.avg_load or 0,
+                    avg_memory_percent=row.avg_memory or 0,
+                    max_memory_percent=row.max_memory or 0,
+                    avg_disk_percent=row.avg_disk or 0,
+                    total_rx_bytes=int(row.total_rx or 0),
+                    total_tx_bytes=int(row.total_tx or 0),
+                    avg_rx_speed=row.avg_rx or 0,
+                    avg_tx_speed=row.avg_tx or 0,
+                    avg_disk_read_speed=row.avg_disk_read or 0,
+                    avg_disk_write_speed=row.avg_disk_write or 0,
+                    data_points=row.data_points
+                )
+                db.add(aggregated)
+        
+        await db.commit()
+        logger.info(f"Daily aggregation completed for {day_start}")
+
+
+# Singleton instance
+_collector: Optional[MetricsCollector] = None
+
+
+def get_collector() -> MetricsCollector:
+    """Get or create metrics collector instance"""
+    global _collector
+    if _collector is None:
+        _collector = MetricsCollector()
+    return _collector
+
+
+async def start_collector():
+    """Start the metrics collector"""
+    collector = get_collector()
+    await collector.start()
+
+
+async def stop_collector():
+    """Stop the metrics collector"""
+    collector = get_collector()
+    await collector.stop()
