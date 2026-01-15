@@ -508,53 +508,6 @@ start_haproxy_container_if_needed() {
     fi
 }
 
-# Apply system optimizations for high-performance TCP/network
-apply_system_optimizations() {
-    log_info "Applying system optimizations..."
-    
-    # Copy sysctl config from repository
-    SYSCTL_SRC="$(dirname "$0")/sysctl/99-vless-tuning.conf"
-    SYSCTL_DST="/etc/sysctl.d/99-vless-tuning.conf"
-    
-    if [ -f "$SYSCTL_SRC" ]; then
-        cp "$SYSCTL_SRC" "$SYSCTL_DST"
-        chmod 644 "$SYSCTL_DST"
-        log_success "sysctl config copied"
-    else
-        log_warn "sysctl config not found in repository"
-    fi
-    
-    # Remove old haproxy config if exists
-    rm -f /etc/sysctl.d/99-haproxy.conf 2>/dev/null || true
-    
-    # Apply sysctl settings (some may fail if module not loaded - that's ok)
-    sysctl -p "$SYSCTL_DST" 2>/dev/null || log_warn "Some sysctl settings may require kernel support"
-    log_success "sysctl optimizations applied"
-    
-    # File descriptor limits (match sysctl fs.file-max = 2097152)
-    cat > /etc/security/limits.d/99-nofile.conf << 'EOF'
-# File descriptor limits for high connections
-* soft nofile 2097152
-* hard nofile 2097152
-root soft nofile 2097152
-root hard nofile 2097152
-EOF
-    log_success "limits.conf optimizations applied"
-    
-    # systemd default limits override
-    if [ -d /etc/systemd/system ]; then
-        mkdir -p /etc/systemd/system/user-.slice.d
-        cat > /etc/systemd/system/user-.slice.d/limits.conf << 'EOF'
-[Slice]
-DefaultLimitNOFILE=2097152
-EOF
-        systemctl daemon-reload 2>/dev/null || true
-        log_success "systemd limits applied"
-    fi
-    
-    log_success "System optimizations complete"
-}
-
 # Validate IP address format
 validate_ip() {
     local ip=$1
@@ -790,11 +743,6 @@ show_status() {
     echo "  - SSH (port 22): Open for all"
     echo "  - HTTP (port 80): Open for all"
     echo ""
-    echo -e "${GREEN}System Optimizations:${NC}"
-    echo "  - sysctl (TCP/Network, BBR, Anti-DDoS): $([ -f /etc/sysctl.d/99-vless-tuning.conf ] && echo 'Applied' || echo 'Not applied')"
-    echo "  - limits.conf (2M file descriptors): $([ -f /etc/security/limits.d/99-nofile.conf ] && echo 'Applied' || echo 'Not applied')"
-    echo "  - systemd override: $([ -f /etc/systemd/system/user-.slice.d/limits.conf ] && echo 'Applied' || echo 'Not applied')"
-    echo ""
     echo -e "${GREEN}SSL Auto-Renewal:${NC}"
     echo "  - Cron job: $([ -f /etc/cron.d/certbot-renew ] && echo 'Enabled (daily at 3:00 AM)' || echo 'Not configured')"
     echo "  - Renewal script: $([ -f /opt/monitoring-node/renew-certs.sh ] && echo 'Installed' || echo 'Not found')"
@@ -867,7 +815,6 @@ main() {
     check_os
     migrate_native_haproxy      # Check and stop native HAProxy before Docker
     install_docker
-    apply_system_optimizations
     setup_firewall
     setup_env
     setup_ssl

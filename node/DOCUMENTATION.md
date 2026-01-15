@@ -158,7 +158,7 @@ node/
 
 ## Системные оптимизации
 
-`deploy.sh` автоматически применяет системный конфиг `/etc/sysctl.d/99-vless-tuning.conf`:
+Оптимизации применяются **отдельно** через главный установщик (`monitoring` → пункт 7):
 
 - **BBR** — TCP congestion control
 - **Буферы** — оптимизированные сетевые буферы (128MB max)
@@ -169,9 +169,8 @@ node/
 - **Conntrack** — 1M max connections, оптимизированные таймауты
 - **File descriptors** — fs.file-max = 2M
 - **limits.conf** — 2M nofile для всех пользователей
-- **SSL auto-renewal** — cron для автообновления сертификатов (3:00 AM daily)
 
-При обновлении ноды (`update.sh`) sysctl конфиг обновляется автоматически.
+**SSL auto-renewal** — cron для автообновления сертификатов (3:00 AM daily) настраивается при установке ноды.
 
 ## SSL сертификаты
 

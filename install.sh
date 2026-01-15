@@ -84,6 +84,12 @@ MSG_EN[update_complete]="Update complete!"
 MSG_EN[run_as_root]="Please run as root: sudo bash install.sh"
 MSG_EN[cli_installed]="Command 'monitoring' installed. Run it anytime to manage your installation."
 MSG_EN[run_monitoring]="You can now run: monitoring"
+MSG_EN[menu_optimize_system]="System optimizations (BBR, sysctl, limits)"
+MSG_EN[optimizing_system]="Applying system optimizations..."
+MSG_EN[optimizations_applied]="System optimizations applied!"
+MSG_EN[optimizations_status]="Optimizations"
+MSG_EN[applied]="applied"
+MSG_EN[not_applied]="not applied"
 
 # Network/Docker messages - English
 MSG_EN[checking_docker_network]="Checking Docker Hub availability..."
@@ -150,6 +156,12 @@ MSG_RU[update_complete]="Обновление завершено!"
 MSG_RU[run_as_root]="Запустите от root: sudo bash install.sh"
 MSG_RU[cli_installed]="Команда 'monitoring' установлена. Используйте её для управления установкой."
 MSG_RU[run_monitoring]="Теперь можно запускать: monitoring"
+MSG_RU[menu_optimize_system]="Системные оптимизации (BBR, sysctl, limits)"
+MSG_RU[optimizing_system]="Применение системных оптимизаций..."
+MSG_RU[optimizations_applied]="Системные оптимизации применены!"
+MSG_RU[optimizations_status]="Оптимизации"
+MSG_RU[applied]="применены"
+MSG_RU[not_applied]="не применены"
 
 # Network/Docker messages - Russian
 MSG_RU[checking_docker_network]="Проверка доступности Docker Hub..."
@@ -522,6 +534,125 @@ copy_installer() {
     fi
 }
 
+# ==================== System Optimizations ====================
+
+apply_system_optimizations() {
+    log_info "$(msg optimizing_system)"
+    
+    # sysctl config for high connections + anti-DDoS
+    cat > /etc/sysctl.d/99-vless-tuning.conf << 'EOF'
+# System optimization for high connections + anti-DDoS
+
+# BBR
+net.ipv4.tcp_congestion_control = bbr
+net.core.default_qdisc = fq
+
+# File Descriptors
+fs.file-max = 2097152
+fs.nr_open = 2097152
+
+# Buffers
+net.core.rmem_max = 134217728
+net.core.wmem_max = 134217728
+net.ipv4.tcp_rmem = 4096 131072 67108864
+net.ipv4.tcp_wmem = 4096 87380 67108864
+net.ipv4.tcp_moderate_rcvbuf = 1
+
+# Queues
+net.core.somaxconn = 65535
+net.ipv4.tcp_max_syn_backlog = 65535
+net.core.netdev_max_backlog = 65535
+net.core.netdev_budget = 600
+
+# TCP Performance
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_timestamps = 1
+net.ipv4.tcp_sack = 1
+
+# TIME-WAIT
+net.ipv4.tcp_max_tw_buckets = 2000000
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.ip_local_port_range = 1024 65535
+
+# Orphans
+net.ipv4.tcp_max_orphans = 262144
+net.ipv4.tcp_orphan_retries = 1
+
+# Keepalive
+net.ipv4.tcp_keepalive_time = 600
+net.ipv4.tcp_keepalive_probes = 3
+net.ipv4.tcp_keepalive_intvl = 30
+
+# Anti-DDoS
+net.ipv4.tcp_syncookies = 1
+net.ipv4.tcp_syn_retries = 3
+net.ipv4.tcp_synack_retries = 3
+net.ipv4.tcp_fin_timeout = 20
+
+# IP spoofing protection
+net.ipv4.conf.all.rp_filter = 1
+net.ipv4.conf.default.rp_filter = 1
+
+# ICMP protection
+net.ipv4.icmp_echo_ignore_broadcasts = 1
+net.ipv4.icmp_ignore_bogus_error_responses = 1
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.default.accept_redirects = 0
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.default.send_redirects = 0
+net.ipv4.conf.all.secure_redirects = 0
+
+# Conntrack
+net.netfilter.nf_conntrack_max = 1048576
+net.netfilter.nf_conntrack_tcp_timeout_time_wait = 60
+net.netfilter.nf_conntrack_tcp_timeout_close_wait = 30
+net.netfilter.nf_conntrack_tcp_timeout_fin_wait = 60
+net.netfilter.nf_conntrack_tcp_timeout_established = 3600
+EOF
+    chmod 644 /etc/sysctl.d/99-vless-tuning.conf
+    log_success "sysctl config created"
+    
+    # Remove old config if exists
+    rm -f /etc/sysctl.d/99-haproxy.conf 2>/dev/null || true
+    
+    # Apply sysctl settings
+    sysctl -p /etc/sysctl.d/99-vless-tuning.conf 2>/dev/null || log_warn "Some sysctl settings may require kernel support"
+    log_success "sysctl settings applied"
+    
+    # File descriptor limits
+    cat > /etc/security/limits.d/99-nofile.conf << 'EOF'
+# File descriptor limits for high connections
+* soft nofile 2097152
+* hard nofile 2097152
+root soft nofile 2097152
+root hard nofile 2097152
+EOF
+    log_success "limits.conf configured"
+    
+    # systemd limits
+    if [ -d /etc/systemd/system ]; then
+        mkdir -p /etc/systemd/system/user-.slice.d
+        cat > /etc/systemd/system/user-.slice.d/limits.conf << 'EOF'
+[Slice]
+DefaultLimitNOFILE=2097152
+EOF
+        systemctl daemon-reload 2>/dev/null || true
+        log_success "systemd limits configured"
+    fi
+    
+    log_success "$(msg optimizations_applied)"
+}
+
+check_optimizations_status() {
+    if [ -f /etc/sysctl.d/99-vless-tuning.conf ]; then
+        echo "$(msg applied)"
+    else
+        echo "$(msg not_applied)"
+    fi
+}
+
 # ==================== Panel Functions ====================
 
 install_panel() {
@@ -745,6 +876,9 @@ show_menu() {
     fi
     
     echo ""
+    echo -e "  ${CYAN}7)${NC} $(msg menu_optimize_system)"
+    
+    echo ""
     echo -e "  ${YELLOW}0)${NC} $(msg menu_exit)"
     echo ""
     
@@ -763,6 +897,13 @@ show_menu() {
         echo -e "  Node:  ${GREEN}$(msg installed)${NC} v$node_version ($NODE_DIR)"
     else
         echo -e "  Node:  ${YELLOW}$(msg not_installed)${NC}"
+    fi
+    
+    # Optimizations status
+    if [ -f /etc/sysctl.d/99-vless-tuning.conf ]; then
+        echo -e "  $(msg optimizations_status): ${GREEN}$(msg applied)${NC}"
+    else
+        echo -e "  $(msg optimizations_status): ${YELLOW}$(msg not_applied)${NC}"
     fi
     echo ""
 }
@@ -835,6 +976,10 @@ main() {
                     log_error "$(msg invalid_option)"
                     sleep 1
                 fi
+                read -p "$(msg press_enter)"
+                ;;
+            7)
+                apply_system_optimizations
                 read -p "$(msg press_enter)"
                 ;;
             0)
