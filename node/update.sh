@@ -95,6 +95,15 @@ if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "monitoring-haproxy"; t
 fi
 
 docker compose down --timeout 30 || true
+
+# Wait for port 7500 to be released
+log_info "Waiting for port 7500 to be released..."
+for i in {1..15}; do
+    if ! ss -tlnp 2>/dev/null | grep -q ':7500 '; then
+        break
+    fi
+    sleep 1
+done
 log_success "Containers stopped"
 
 # Copy files (preserve .env and SSL certs)
@@ -121,17 +130,17 @@ chmod +x "$NODE_DIR"/*.sh 2>/dev/null || true
 
 log_success "Files updated"
 
+# Clean up Docker before build to free space
+log_info "Cleaning up Docker cache..."
+docker image prune -f > /dev/null 2>&1 || true
+docker builder prune -af > /dev/null 2>&1 || true
+log_success "Docker cleanup done"
+
 # Rebuild Docker image
 log_info "Building new Docker image..."
 cd "$NODE_DIR"
 docker compose build --no-cache
 log_success "Image built"
-
-# Clean up old Docker images and build cache
-log_info "Cleaning up old Docker images..."
-docker image prune -f > /dev/null 2>&1 || true
-docker builder prune -f > /dev/null 2>&1 || true
-log_success "Docker cleanup done"
 
 # Start containers
 log_info "Starting containers..."
