@@ -9,7 +9,7 @@ import asyncio
 import logging
 import time
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -26,28 +26,27 @@ class ConnectionDrop(Exception):
 
 @dataclass
 class IPRecord:
-    """Track IP activity for rate limiting and banning"""
+    """Track IP activity for banning on failed logins"""
     failed_attempts: int = 0
     last_attempt: float = 0
     banned_until: float = 0
-    request_times: list = field(default_factory=list)
 
 
 class SecurityManager:
-    """Rate limiting and IP banning with connection drop"""
+    """IP banning for auth failures with connection drop.
+    
+    Note: Rate limiting is handled by Nginx (10 req/s), not here.
+    This class only tracks failed login attempts for IP banning.
+    """
     
     def __init__(
         self,
         max_failed_attempts: int = 5,
         ban_duration_seconds: int = 900,
-        rate_limit_requests: int = 60,
-        rate_limit_window: int = 60,
         cleanup_interval: int = 300
     ):
         self.max_failed_attempts = max_failed_attempts
         self.ban_duration = ban_duration_seconds
-        self.rate_limit_requests = rate_limit_requests
-        self.rate_limit_window = rate_limit_window
         self.cleanup_interval = cleanup_interval
         
         self._records: dict[str, IPRecord] = defaultdict(IPRecord)
@@ -92,18 +91,11 @@ class SecurityManager:
             return False
         return record.banned_until > time.time()
     
-    def _check_rate_limit(self, ip: str) -> bool:
-        """Check if rate limited"""
-        record = self._records[ip]
-        now = time.time()
-        
-        window_start = now - self.rate_limit_window
-        record.request_times = [t for t in record.request_times if t > window_start]
-        
-        return len(record.request_times) >= self.rate_limit_requests
-    
     async def check_request(self, request: Request) -> str:
-        """Check request - raises ConnectionDrop if blocked"""
+        """Check request - raises ConnectionDrop if IP is banned.
+        
+        Note: Rate limiting is handled by Nginx, not here.
+        """
         await self._cleanup_old_records()
         
         ip = self._get_client_ip(request)
@@ -112,16 +104,6 @@ class SecurityManager:
         if self.is_banned(ip):
             logger.warning(f"Dropping connection from banned IP: {ip}")
             raise ConnectionDrop()
-        
-        # Rate limited - drop connection
-        if self._check_rate_limit(ip):
-            logger.warning(f"Dropping connection - rate limit exceeded: {ip}")
-            raise ConnectionDrop()
-        
-        # Record request
-        async with self._lock:
-            self._records[ip].request_times.append(time.time())
-            self._records[ip].last_attempt = time.time()
         
         return ip
     
@@ -177,13 +159,14 @@ def get_security_manager() -> SecurityManager:
 
 class SecurityMiddleware(BaseHTTPMiddleware):
     """
-    Middleware that drops connections instead of returning error responses.
+    Middleware that drops connections for banned IPs and failed login attempts.
     
-    For security-sensitive errors (401, 403, 429), connection is dropped
-    without any response - giving attackers zero information.
+    Rate limiting is handled by Nginx. This middleware only:
+    - Drops connections from banned IPs
+    - Records failed login attempts and bans IPs after too many failures
+    - Returns 444 (no response) for login failures to give attackers no info
     """
     
-    # Paths that don't require auth (still rate limited)
     PUBLIC_PATHS = {"/health", "/auth/login"}
     
     async def dispatch(self, request: Request, call_next):
@@ -199,16 +182,16 @@ class SecurityMiddleware(BaseHTTPMiddleware):
         try:
             response = await call_next(request)
             
-            # Drop connection on auth/security errors
+            # Drop connection on auth failures - only for login endpoint
+            # For other endpoints, 401 is normal (expired token) - let frontend redirect to login
             if response.status_code in (401, 403):
-                ip = security._get_client_ip(request)
-                await security.record_auth_failure(ip)
-                logger.warning(f"Auth failure from {ip}: {request.url.path}")
-                return Response(status_code=444, content=b"")
-            
-            # Drop connection on rate limit
-            if response.status_code == 429:
-                return Response(status_code=444, content=b"")
+                if request.url.path.endswith("/auth/login"):
+                    # Only record failure for actual login attempts
+                    ip = security._get_client_ip(request)
+                    await security.record_auth_failure(ip)
+                    logger.warning(f"Auth failure from {ip}: {request.url.path}")
+                    return Response(status_code=444, content=b"")
+                # For other endpoints, return normal 401 to allow proper redirect
             
             return response
             

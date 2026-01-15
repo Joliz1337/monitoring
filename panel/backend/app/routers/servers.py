@@ -1,7 +1,8 @@
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select, update, desc
+from sqlalchemy import select, update, desc, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel
 from typing import Optional
 import httpx
 import json
@@ -11,6 +12,21 @@ from app.models import Server, MetricsSnapshot
 from app.auth import verify_auth
 
 router = APIRouter(prefix="/servers", tags=["servers"])
+
+
+def to_iso_utc(dt: Optional[datetime]) -> Optional[str]:
+    """Convert datetime to ISO format with explicit UTC timezone suffix.
+    
+    SQLite stores datetime without timezone info. All our timestamps are stored
+    as naive UTC, so we just add 'Z' suffix for frontend consumption.
+    Truncates microseconds to milliseconds for better JS compatibility.
+    """
+    if dt is None:
+        return None
+    # Truncate to milliseconds (JS ISO format standard)
+    dt = dt.replace(microsecond=(dt.microsecond // 1000) * 1000)
+    # Format as ISO and append Z (all our times are UTC)
+    return dt.strftime('%Y-%m-%dT%H:%M:%S.') + f'{dt.microsecond // 1000:03d}Z'
 
 
 def enrich_metrics_with_speeds(metrics: dict, snapshot: MetricsSnapshot) -> dict:
@@ -77,6 +93,38 @@ async def get_latest_snapshot(server_id: int, db: AsyncSession) -> Optional[Metr
     return result.scalar_one_or_none()
 
 
+async def get_latest_snapshots_bulk(server_ids: list[int], db: AsyncSession) -> dict[int, MetricsSnapshot]:
+    """Get the most recent metrics snapshot for multiple servers in one query."""
+    if not server_ids:
+        return {}
+    
+    # Subquery to get max timestamp per server
+    subquery = (
+        select(
+            MetricsSnapshot.server_id,
+            func.max(MetricsSnapshot.timestamp).label('max_ts')
+        )
+        .where(MetricsSnapshot.server_id.in_(server_ids))
+        .group_by(MetricsSnapshot.server_id)
+        .subquery()
+    )
+    
+    # Join to get full snapshot records
+    result = await db.execute(
+        select(MetricsSnapshot)
+        .join(
+            subquery,
+            and_(
+                MetricsSnapshot.server_id == subquery.c.server_id,
+                MetricsSnapshot.timestamp == subquery.c.max_ts
+            )
+        )
+    )
+    
+    snapshots = result.scalars().all()
+    return {s.server_id: s for s in snapshots}
+
+
 class ServerCreate(BaseModel):
     name: str
     url: str
@@ -116,6 +164,12 @@ async def list_servers(
     )
     servers = result.scalars().all()
     
+    # Get all snapshots in ONE query if metrics requested (fixes N+1 problem)
+    snapshots_map = {}
+    if include_metrics:
+        server_ids = [s.id for s in servers]
+        snapshots_map = await get_latest_snapshots_bulk(server_ids, db)
+    
     servers_data = []
     for s in servers:
         server_info = {
@@ -124,7 +178,7 @@ async def list_servers(
             "url": s.url,
             "position": s.position,
             "is_active": s.is_active,
-            "last_seen": s.last_seen.isoformat() if s.last_seen else None,
+            "last_seen": to_iso_utc(s.last_seen),
             "last_error": s.last_error,
             "error_code": s.error_code
         }
@@ -132,8 +186,8 @@ async def list_servers(
         if include_metrics and s.last_metrics:
             try:
                 metrics = json.loads(s.last_metrics)
-                # Enrich metrics with calculated speeds from latest snapshot
-                snapshot = await get_latest_snapshot(s.id, db)
+                # Get snapshot from bulk map instead of separate query
+                snapshot = snapshots_map.get(s.id)
                 server_info["metrics"] = enrich_metrics_with_speeds(metrics, snapshot)
                 server_info["status"] = "online"
             except json.JSONDecodeError:
@@ -216,7 +270,7 @@ async def get_server(
         "api_key": server.api_key,
         "position": server.position,
         "is_active": server.is_active,
-        "last_seen": server.last_seen.isoformat() if server.last_seen else None,
+        "last_seen": to_iso_utc(server.last_seen),
         "last_error": server.last_error,
         "error_code": server.error_code
     }

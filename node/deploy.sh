@@ -613,6 +613,12 @@ setup_firewall() {
         apt-get install -y ufw
     fi
     
+    # Check if UFW was already active before we make changes
+    local ufw_was_active=false
+    if ufw status | grep -q "Status: active"; then
+        ufw_was_active=true
+    fi
+    
     # Ask for panel IP
     ask_panel_ip
     
@@ -627,15 +633,18 @@ setup_firewall() {
     # Open port 80 for Let's Encrypt certificate verification
     ufw allow 80/tcp comment "HTTP for Let's Encrypt" 2>/dev/null || true
     
-    # Enable UFW if not already enabled
-    if ! ufw status | grep -q "Status: active"; then
-        log_info "Enabling UFW..."
-        # Allow SSH first to avoid lockout
-        ufw allow ssh 2>/dev/null || ufw allow 22/tcp 2>/dev/null || true
-        ufw --force enable
+    # Allow SSH to avoid lockout (rule is added but only applied if UFW is active)
+    ufw allow ssh 2>/dev/null || ufw allow 22/tcp 2>/dev/null || true
+    
+    # Only enable UFW if it was already active
+    # If UFW was disabled, keep it disabled - rules are added but won't be applied
+    if [ "$ufw_was_active" = true ]; then
+        log_success "Firewall configured (UFW was active)"
+    else
+        log_warn "UFW is not active - rules added but firewall remains disabled"
+        log_info "To enable firewall manually: ufw --force enable"
     fi
     
-    log_success "Firewall configured"
     log_info "Port 9100 accessible only from: $PANEL_IP"
     log_info "Ports 22 (SSH), 80 (HTTP) open for all"
 }

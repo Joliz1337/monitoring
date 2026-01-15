@@ -268,16 +268,28 @@ setup_firewall() {
     # Try UFW first
     if command -v ufw &> /dev/null; then
         print_info "Using UFW..."
+        
+        # Check if UFW was already active before we make changes
+        local ufw_was_active=false
+        if ufw status | grep -q "Status: active"; then
+            ufw_was_active=true
+        fi
+        
+        # Add rules (they will be stored even if UFW is inactive)
         ufw allow 22/tcp 2>/dev/null || true
         ufw allow 80/tcp 2>/dev/null || true
         ufw allow 443/tcp 2>/dev/null || true
         
-        if ! ufw status | grep -q "Status: active"; then
-            ufw --force enable 2>/dev/null || true
+        # Only enable UFW if it was already active
+        # If UFW was disabled, keep it disabled - rules are added but won't be applied
+        if [ "$ufw_was_active" = true ]; then
+            print_status "UFW: ports 22, 80, 443 opened (firewall active)"
+        else
+            print_warning "UFW is not active - rules added but firewall remains disabled"
+            print_info "To enable firewall manually: ufw --force enable"
         fi
         
         firewall_configured=true
-        print_status "UFW: ports 22, 80, 443 opened"
     fi
     
     # Also configure iptables directly as fallback

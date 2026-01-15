@@ -168,6 +168,7 @@ class HAProxyManager:
         return f"""global
     maxconn {info['maxconn']}
     nbthread {info['nbthread']}
+    stats socket /var/run/haproxy.sock mode 660 level admin expose-fd listeners
     # No logging for minimal overhead
     
 defaults

@@ -64,7 +64,7 @@ const itemVariants = {
 export default function Dashboard() {
   const { uid } = useParams()
   const navigate = useNavigate()
-  const { servers, fetchServersWithMetrics, fetchAllMetrics, fetchAllTraffic, reorderServers, isLoading } = useServersStore()
+  const { servers, fetchServersWithMetrics, fetchAllTraffic, reorderServers, isLoading } = useServersStore()
   const { refreshInterval, compactView, trafficPeriod, setCompactView, fetchSettings, detailLevel, cardScale, setDetailLevel, setCardScale } = useSettingsStore()
   const { t } = useTranslation()
   
@@ -103,10 +103,10 @@ export default function Dashboard() {
   // Traffic is fetched separately with longer interval
   const { isPageVisible } = useSmartRefresh(
     async () => {
-      await fetchAllMetrics() // Always use cached data from panel DB
+      await fetchServersWithMetrics() // Cached data - ONE request for all servers
     },
     async () => {
-      await fetchAllMetrics() // Same for background - cached data
+      await fetchServersWithMetrics() // Same for background
     },
     { immediate: false }
   )
