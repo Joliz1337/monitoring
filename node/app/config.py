@@ -37,9 +37,6 @@ class Settings(BaseSettings):
     traffic_collect_interval: int = 60  # seconds between collections
     traffic_retention_days: int = 90  # how long to keep detailed data
     
-    # HAProxy auto-optimization
-    ram_change_threshold_mb: int = 500  # regenerate config if RAM changes by this amount
-    
     # Host proc/sys paths (mounted from host)
     host_proc: str = "/host/proc"
     host_sys: str = "/host/sys"

@@ -110,6 +110,23 @@ if [ -f "$TMP_DIR/VERSION" ]; then
     cp "$TMP_DIR/VERSION" "$NODE_DIR/VERSION"
 fi
 
+# Update sysctl config
+log_info "Updating sysctl config..."
+SYSCTL_SRC="$NODE_DIR/sysctl/99-vless-tuning.conf"
+SYSCTL_DST="/etc/sysctl.d/99-vless-tuning.conf"
+
+if [ -f "$SYSCTL_SRC" ]; then
+    cp "$SYSCTL_SRC" "$SYSCTL_DST"
+    chmod 644 "$SYSCTL_DST"
+    # Remove old config if exists
+    rm -f /etc/sysctl.d/99-haproxy.conf 2>/dev/null || true
+    # Apply sysctl settings
+    sysctl -p "$SYSCTL_DST" 2>/dev/null || log_warn "Some sysctl settings may require kernel support"
+    log_success "sysctl config updated"
+else
+    log_warn "sysctl config not found in update"
+fi
+
 # Restore .env
 if [ -f "$NODE_DIR/.env.backup" ]; then
     mv "$NODE_DIR/.env.backup" "$NODE_DIR/.env"

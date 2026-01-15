@@ -22,13 +22,8 @@ logger = logging.getLogger(__name__)
 RULES_START_MARKER = "# === RULES START ==="
 RULES_END_MARKER = "# === RULES END ==="
 
-# System optimization paths
-SYSCTL_CONF = Path("/etc/sysctl.d/99-haproxy.conf")
-LIMITS_CONF = Path("/etc/security/limits.d/haproxy.conf")
-SYSTEMD_HAPROXY = Path("/etc/systemd/system/haproxy.service.d/limits.conf")
-
 # HAProxy container ulimit - must match docker-compose.yml and start_haproxy()
-HAPROXY_CONTAINER_ULIMIT = 500000
+HAPROXY_CONTAINER_ULIMIT = 1048576
 
 
 @dataclass
@@ -45,13 +40,12 @@ class HAProxyRule:
 
 @dataclass
 class SystemInfo:
-    """System information for optimization"""
+    """System information for HAProxy config"""
     cpu_cores: int
     ram_mb: int
     maxconn: int
     nbthread: int
     ulimit_nofile: int
-    optimizations_applied: bool
 
 
 class HAProxyManager:
@@ -148,17 +142,15 @@ class HAProxyManager:
         }
     
     def get_system_info(self) -> SystemInfo:
-        """Get system information with optimization status"""
+        """Get system information for HAProxy config"""
         info = self._get_system_info()
-        optimizations = self.check_optimizations()
         
         return SystemInfo(
             cpu_cores=info['cpu'],
             ram_mb=info['ram_mb'],
             maxconn=info['maxconn'],
             nbthread=info['nbthread'],
-            ulimit_nofile=info['ulimit'],
-            optimizations_applied=optimizations['all_applied']
+            ulimit_nofile=info['ulimit']
         )
     
     def _generate_base_config(self) -> str:
@@ -186,128 +178,6 @@ defaults
 {RULES_START_MARKER}
 {RULES_END_MARKER}
 """
-    
-    def check_optimizations(self) -> dict:
-        """Check which system optimizations are applied"""
-        # Check sysctl by reading actual kernel values (not just file existence)
-        sysctl_applied = False
-        try:
-            result = subprocess.run(
-                ["sysctl", "net.core.somaxconn"],
-                capture_output=True, text=True, check=False
-            )
-            if result.returncode == 0:
-                # Check if somaxconn is set to our optimized value (65535)
-                value = result.stdout.strip().split('=')[-1].strip()
-                sysctl_applied = int(value) >= 65535
-        except Exception:
-            sysctl_applied = SYSCTL_CONF.exists()
-        
-        return {
-            'sysctl': sysctl_applied,
-            'limits': LIMITS_CONF.exists(),
-            'systemd': SYSTEMD_HAPROXY.exists(),
-            'all_applied': sysctl_applied and LIMITS_CONF.exists() and SYSTEMD_HAPROXY.exists()
-        }
-    
-    def apply_system_optimizations(self) -> tuple[bool, str, dict]:
-        """Apply system optimizations for high performance
-        
-        With privileged:true and pid:host, we can apply sysctl settings directly
-        to the host system even from inside a container.
-        """
-        results = {'sysctl': False, 'limits': False, 'systemd': False}
-        errors = []
-        skipped = []
-        
-        # sysctl settings optimized for VPN/proxy (xray vless+reality)
-        sysctl_settings = {
-            'net.core.somaxconn': '65535',
-            'net.ipv4.tcp_max_syn_backlog': '8192',
-            'net.ipv4.ip_local_port_range': '1024 65535',
-            'net.ipv4.tcp_tw_reuse': '1',
-            'net.ipv4.tcp_fin_timeout': '30',
-            'net.core.netdev_max_backlog': '5000',
-            'net.ipv4.tcp_keepalive_time': '300',
-            'net.ipv4.tcp_keepalive_probes': '5',
-            'net.ipv4.tcp_keepalive_intvl': '15',
-            'net.core.default_qdisc': 'fq',
-            'net.ipv4.tcp_congestion_control': 'bbr',
-        }
-        
-        # Apply sysctl settings directly (works with privileged:true and pid:host)
-        applied_count = 0
-        for key, value in sysctl_settings.items():
-            try:
-                result = subprocess.run(
-                    ["sysctl", "-w", f"{key}={value}"],
-                    capture_output=True, text=True, check=False
-                )
-                if result.returncode == 0:
-                    applied_count += 1
-            except Exception:
-                pass
-        
-        if applied_count > 0:
-            results['sysctl'] = True
-            logger.info(f"sysctl optimizations applied ({applied_count}/{len(sysctl_settings)} settings)")
-        else:
-            skipped.append("sysctl (no permission or not privileged)")
-        
-        # Also try to write config file for persistence (may fail in container)
-        sysctl_content = "# Network tuning for high TCP connections (VPN/Proxy)\n"
-        sysctl_content += "\n".join(f"{k} = {v}" for k, v in sysctl_settings.items())
-        sysctl_content += "\n"
-        
-        try:
-            SYSCTL_CONF.parent.mkdir(parents=True, exist_ok=True)
-            SYSCTL_CONF.write_text(sysctl_content)
-        except Exception:
-            pass  # File persistence is optional, runtime settings are applied
-        
-        # limits.conf
-        limits_content = """# HAProxy file descriptor limits
-haproxy soft nofile 1000000
-haproxy hard nofile 1000000
-root soft nofile 1000000
-root hard nofile 1000000
-* soft nofile 1000000
-* hard nofile 1000000
-"""
-        try:
-            LIMITS_CONF.parent.mkdir(parents=True, exist_ok=True)
-            LIMITS_CONF.write_text(limits_content)
-            results['limits'] = True
-            logger.info("limits.conf optimizations applied")
-        except PermissionError:
-            skipped.append("limits (no permission)")
-        except Exception as e:
-            errors.append(f"limits: {e}")
-        
-        # systemd override
-        systemd_content = """[Service]
-LimitNOFILE=1000000
-LimitNPROC=1000000
-"""
-        try:
-            SYSTEMD_HAPROXY.parent.mkdir(parents=True, exist_ok=True)
-            SYSTEMD_HAPROXY.write_text(systemd_content)
-            subprocess.run(["systemctl", "daemon-reload"], capture_output=True, check=False)
-            results['systemd'] = True
-            logger.info("systemd limits applied")
-        except PermissionError:
-            skipped.append("systemd (no permission)")
-        except Exception as e:
-            errors.append(f"systemd: {e}")
-        
-        if skipped:
-            message = f"Skipped (apply on host): {', '.join(skipped)}"
-        elif errors:
-            message = f"Errors: {'; '.join(errors)}"
-        else:
-            message = "All optimizations applied"
-        
-        return len(errors) == 0, message, results
     
     def regenerate_config(self, preserve_rules: bool = True) -> tuple[bool, str]:
         """Regenerate HAProxy config with current system parameters"""
@@ -348,11 +218,7 @@ LimitNPROC=1000000
         return True, "Config already exists"
     
     def full_init(self) -> tuple[bool, str]:
-        """Full initialization: apply optimizations and create config"""
-        # Apply system optimizations
-        opt_success, opt_message, opt_results = self.apply_system_optimizations()
-        logger.info(f"System optimizations: {opt_message}")
-        
+        """Full initialization: create/regenerate HAProxy config"""
         # Initialize or regenerate config
         if self.config_path.exists():
             cfg_success, cfg_message = self.regenerate_config(preserve_rules=True)
@@ -362,8 +228,7 @@ LimitNPROC=1000000
         info = self._get_system_info()
         message = (
             f"System: {info['cpu']} CPU, {info['ram_mb']}MB RAM, ulimit={info['ulimit']}. "
-            f"HAProxy: maxconn={info['maxconn']}, threads={info['nbthread']}. "
-            f"Optimizations: sysctl={opt_results['sysctl']}, limits={opt_results['limits']}, systemd={opt_results['systemd']}"
+            f"HAProxy: maxconn={info['maxconn']}, threads={info['nbthread']}"
         )
         
         return cfg_success, message

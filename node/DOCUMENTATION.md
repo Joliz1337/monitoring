@@ -56,8 +56,6 @@ node/
 | PANEL_IP | IP панели (для UFW) | задаётся при установке |
 | TRAFFIC_COLLECT_INTERVAL | Интервал сбора (сек) | 60 |
 | TRAFFIC_RETENTION_DAYS | Хранение данных (дни) | 90 |
-| RAM_CHANGE_THRESHOLD_MB | Порог изменения RAM для реоптимизации HAProxy | 500 |
-
 ## Порты
 
 | Порт | Доступ | Описание |
@@ -152,33 +150,28 @@ node/
 | POST | /api/haproxy/certs/cron/enable | Включить автообновление |
 | POST | /api/haproxy/certs/cron/disable | Выключить автообновление |
 
-### Системные оптимизации
+### Системная информация
 
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
-| GET | /api/haproxy/system/info | Информация о системе |
-| GET | /api/haproxy/system/optimizations | Статус оптимизаций |
-| POST | /api/haproxy/system/optimize | Применить оптимизации |
+| GET | /api/haproxy/system/info | Информация о системе (CPU, RAM, maxconn) |
 
 ## Системные оптимизации
 
-`deploy.sh` автоматически применяет:
+`deploy.sh` автоматически применяет системный конфиг `/etc/sysctl.d/99-vless-tuning.conf`:
 
-- **sysctl** — TCP/network настройки, BBR congestion control
-- **limits.conf** — 1M file descriptors для HAProxy
-- **systemd** — LimitNOFILE для сервиса
+- **BBR** — TCP congestion control
+- **Буферы** — оптимизированные сетевые буферы (128MB max)
+- **Очереди** — somaxconn, netdev_max_backlog = 65535
+- **TCP Performance** — fastopen, no slow start after idle, MTU probing
+- **TIME-WAIT** — 2M tw_buckets, tw_reuse
+- **Anti-DDoS** — syncookies, rp_filter, ICMP protection
+- **Conntrack** — 1M max connections, оптимизированные таймауты
+- **File descriptors** — fs.file-max = 2M
+- **limits.conf** — 2M nofile для всех пользователей
 - **SSL auto-renewal** — cron для автообновления сертификатов (3:00 AM daily)
 
-### Авто-оптимизация HAProxy
-
-Конфиг HAProxy автоматически перегенерируется при изменении ресурсов сервера:
-- **CPU**: любое изменение количества ядер
-- **RAM**: изменение объёма на ±500 MB (настраивается через `RAM_CHANGE_THRESHOLD_MB`)
-
-Проверка выполняется каждые 60 секунд вместе со сбором трафика. При изменениях:
-1. Перегенерируется конфиг с новыми `maxconn`/`nbthread`
-2. Правила (frontend/backend) сохраняются
-3. HAProxy перезагружается (reload)
+При обновлении ноды (`update.sh`) sysctl конфиг обновляется автоматически.
 
 ## SSL сертификаты
 

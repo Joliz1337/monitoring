@@ -130,30 +130,12 @@ class CertificateUpdateResponse(BaseModel):
 
 
 class SystemInfoResponse(BaseModel):
-    """System information for HAProxy optimization"""
+    """System information for HAProxy config"""
     cpu_cores: int
     ram_mb: int
     maxconn: int
     nbthread: int
     ulimit_nofile: int
-    optimizations_applied: bool
-
-
-class OptimizationsStatusResponse(BaseModel):
-    """System optimizations status"""
-    sysctl: bool
-    limits: bool
-    systemd: bool
-    all_applied: bool
-
-
-class OptimizationApplyResponse(BaseModel):
-    """Optimization apply result"""
-    success: bool
-    message: str
-    sysctl: bool
-    limits: bool
-    systemd: bool
 
 
 class ConfigRegenerateResponse(BaseModel):

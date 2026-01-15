@@ -34,8 +34,6 @@ from app.models.haproxy import (
     HAProxyRuleUpdate,
     HAProxyStatusResponse,
     HAProxyValidateResponse,
-    OptimizationApplyResponse,
-    OptimizationsStatusResponse,
     SystemInfoResponse,
 )
 from app.services.haproxy_manager import HAProxyRule, get_haproxy_manager
@@ -441,7 +439,7 @@ async def disable_cron():
     return CronActionResponse(success=True, message=message)
 
 
-# ==================== System Optimization Endpoints ====================
+# ==================== System Info Endpoints ====================
 
 @router.get("/system/info", response_model=SystemInfoResponse)
 async def get_system_info():
@@ -454,32 +452,7 @@ async def get_system_info():
         ram_mb=info.ram_mb,
         maxconn=info.maxconn,
         nbthread=info.nbthread,
-        ulimit_nofile=info.ulimit_nofile,
-        optimizations_applied=info.optimizations_applied
-    )
-
-
-@router.get("/system/optimizations", response_model=OptimizationsStatusResponse)
-async def get_optimizations_status():
-    """Check which system optimizations are applied"""
-    manager = get_haproxy_manager()
-    status = manager.check_optimizations()
-    
-    return OptimizationsStatusResponse(**status)
-
-
-@router.post("/system/optimize", response_model=OptimizationApplyResponse)
-async def apply_system_optimizations():
-    """Apply system optimizations for high performance (sysctl, limits, systemd)"""
-    manager = get_haproxy_manager()
-    success, message, results = manager.apply_system_optimizations()
-    
-    return OptimizationApplyResponse(
-        success=success,
-        message=message,
-        sysctl=results['sysctl'],
-        limits=results['limits'],
-        systemd=results['systemd']
+        ulimit_nofile=info.ulimit_nofile
     )
 
 

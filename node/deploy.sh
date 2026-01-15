@@ -512,45 +512,41 @@ start_haproxy_container_if_needed() {
 apply_system_optimizations() {
     log_info "Applying system optimizations..."
     
-    # sysctl settings for TCP/network optimization (BBR, keepalive, etc)
-    cat > /etc/sysctl.d/99-haproxy.conf << 'EOF'
-# Network tuning for high TCP connections (VPN/Proxy)
-net.core.somaxconn = 65535
-net.ipv4.tcp_max_syn_backlog = 8192
-net.ipv4.ip_local_port_range = 1024 65535
-net.ipv4.tcp_tw_reuse = 1
-net.ipv4.tcp_fin_timeout = 30
-net.core.netdev_max_backlog = 5000
-net.ipv4.tcp_keepalive_time = 300
-net.ipv4.tcp_keepalive_probes = 5
-net.ipv4.tcp_keepalive_intvl = 15
-net.core.default_qdisc = fq
-net.ipv4.tcp_congestion_control = bbr
-EOF
+    # Copy sysctl config from repository
+    SYSCTL_SRC="$(dirname "$0")/sysctl/99-vless-tuning.conf"
+    SYSCTL_DST="/etc/sysctl.d/99-vless-tuning.conf"
     
-    # Apply sysctl settings
-    sysctl -p /etc/sysctl.d/99-haproxy.conf 2>/dev/null || log_warn "Some sysctl settings may require kernel support"
+    if [ -f "$SYSCTL_SRC" ]; then
+        cp "$SYSCTL_SRC" "$SYSCTL_DST"
+        chmod 644 "$SYSCTL_DST"
+        log_success "sysctl config copied"
+    else
+        log_warn "sysctl config not found in repository"
+    fi
+    
+    # Remove old haproxy config if exists
+    rm -f /etc/sysctl.d/99-haproxy.conf 2>/dev/null || true
+    
+    # Apply sysctl settings (some may fail if module not loaded - that's ok)
+    sysctl -p "$SYSCTL_DST" 2>/dev/null || log_warn "Some sysctl settings may require kernel support"
     log_success "sysctl optimizations applied"
     
-    # File descriptor limits
-    cat > /etc/security/limits.d/haproxy.conf << 'EOF'
-# HAProxy file descriptor limits
-haproxy soft nofile 1000000
-haproxy hard nofile 1000000
-root soft nofile 1000000
-root hard nofile 1000000
-* soft nofile 1000000
-* hard nofile 1000000
+    # File descriptor limits (match sysctl fs.file-max = 2097152)
+    cat > /etc/security/limits.d/99-nofile.conf << 'EOF'
+# File descriptor limits for high connections
+* soft nofile 2097152
+* hard nofile 2097152
+root soft nofile 2097152
+root hard nofile 2097152
 EOF
     log_success "limits.conf optimizations applied"
     
-    # systemd override for HAProxy service (if exists)
+    # systemd default limits override
     if [ -d /etc/systemd/system ]; then
-        mkdir -p /etc/systemd/system/haproxy.service.d
-        cat > /etc/systemd/system/haproxy.service.d/limits.conf << 'EOF'
-[Service]
-LimitNOFILE=1000000
-LimitNPROC=1000000
+        mkdir -p /etc/systemd/system/user-.slice.d
+        cat > /etc/systemd/system/user-.slice.d/limits.conf << 'EOF'
+[Slice]
+DefaultLimitNOFILE=2097152
 EOF
         systemctl daemon-reload 2>/dev/null || true
         log_success "systemd limits applied"
@@ -795,9 +791,9 @@ show_status() {
     echo "  - HTTP (port 80): Open for all"
     echo ""
     echo -e "${GREEN}System Optimizations:${NC}"
-    echo "  - sysctl (TCP/Network, BBR): $([ -f /etc/sysctl.d/99-haproxy.conf ] && echo 'Applied' || echo 'Not applied')"
-    echo "  - limits.conf (1M file descriptors): $([ -f /etc/security/limits.d/haproxy.conf ] && echo 'Applied' || echo 'Not applied')"
-    echo "  - systemd override: $([ -f /etc/systemd/system/haproxy.service.d/limits.conf ] && echo 'Applied' || echo 'Not applied')"
+    echo "  - sysctl (TCP/Network, BBR, Anti-DDoS): $([ -f /etc/sysctl.d/99-vless-tuning.conf ] && echo 'Applied' || echo 'Not applied')"
+    echo "  - limits.conf (2M file descriptors): $([ -f /etc/security/limits.d/99-nofile.conf ] && echo 'Applied' || echo 'Not applied')"
+    echo "  - systemd override: $([ -f /etc/systemd/system/user-.slice.d/limits.conf ] && echo 'Applied' || echo 'Not applied')"
     echo ""
     echo -e "${GREEN}SSL Auto-Renewal:${NC}"
     echo "  - Cron job: $([ -f /etc/cron.d/certbot-renew ] && echo 'Enabled (daily at 3:00 AM)' || echo 'Not configured')"

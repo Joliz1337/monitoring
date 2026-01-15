@@ -41,9 +41,6 @@ class TrafficCollector:
         self._total_cache: dict[int, tuple[float, dict]] = {}  # days -> (timestamp, result)
         self._port_cache: dict[int, tuple[float, list]] = {}  # days -> (timestamp, result)
         self._iface_cache: dict[int, tuple[float, list]] = {}  # days -> (timestamp, result)
-        # System resources tracking for HAProxy auto-optimization
-        self._prev_cpu_cores: int = 0
-        self._prev_ram_mb: int = 0
     
     async def init(self):
         """Initialize database, config and iptables rules."""
@@ -55,7 +52,6 @@ class TrafficCollector:
         self._load_state()
         self._check_iptables_available()
         await self._setup_iptables()
-        self._init_system_resources()
         logger.info(f"Traffic collector initialized, db: {self.db_path}, iptables: {self._iptables_available}")
     
     async def _create_tables(self):
@@ -293,57 +289,6 @@ class TrafficCollector:
         for port in self._tracked_ports:
             self._add_iptables_rules(port)
     
-    def _init_system_resources(self):
-        """Initialize system resources tracking for HAProxy auto-optimization."""
-        from app.services.haproxy_manager import get_haproxy_manager
-        
-        try:
-            manager = get_haproxy_manager()
-            info = manager._get_system_info()
-            self._prev_cpu_cores = info['cpu']
-            self._prev_ram_mb = info['ram_mb']
-            logger.info(f"System resources initialized: CPU={self._prev_cpu_cores}, RAM={self._prev_ram_mb}MB")
-        except Exception as e:
-            logger.warning(f"Failed to init system resources tracking: {e}")
-    
-    def _check_system_resources(self):
-        """Check if CPU/RAM changed and regenerate HAProxy config if needed."""
-        from app.services.haproxy_manager import get_haproxy_manager
-        
-        try:
-            manager = get_haproxy_manager()
-            info = manager._get_system_info()
-            
-            cpu_changed = info['cpu'] != self._prev_cpu_cores
-            ram_diff = abs(info['ram_mb'] - self._prev_ram_mb)
-            ram_changed = ram_diff >= self.settings.ram_change_threshold_mb
-            
-            if cpu_changed or ram_changed:
-                reason = []
-                if cpu_changed:
-                    reason.append(f"CPU: {self._prev_cpu_cores} -> {info['cpu']}")
-                if ram_changed:
-                    reason.append(f"RAM: {self._prev_ram_mb}MB -> {info['ram_mb']}MB")
-                
-                logger.info(f"System resources changed: {', '.join(reason)}. Regenerating HAProxy config...")
-                
-                success, msg = manager.regenerate_config(preserve_rules=True)
-                if success:
-                    logger.info(f"HAProxy config regenerated: {msg}")
-                    if manager.is_running():
-                        reload_ok, reload_msg = manager.reload()
-                        if reload_ok:
-                            logger.info("HAProxy reloaded with new config")
-                        else:
-                            logger.warning(f"HAProxy reload failed: {reload_msg}")
-                else:
-                    logger.error(f"Failed to regenerate HAProxy config: {msg}")
-                
-                self._prev_cpu_cores = info['cpu']
-                self._prev_ram_mb = info['ram_mb']
-        except Exception as e:
-            logger.error(f"Error checking system resources: {e}")
-    
     async def _setup_iptables(self):
         """Setup iptables chains for port traffic accounting."""
         if not self._iptables_available:
@@ -565,9 +510,6 @@ class TrafficCollector:
                 cleanup_counter += 1
                 state_save_counter += 1
                 self._rules_check_counter += 1
-                
-                # Check system resources for HAProxy auto-optimization
-                self._check_system_resources()
                 
                 # Save state every 5 minutes
                 if state_save_counter >= 300 // self.settings.traffic_collect_interval:
