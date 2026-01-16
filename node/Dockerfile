@@ -21,12 +21,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements and install Python dependencies
-# Use trusted-host flags to bypass SSL issues in corporate networks
+# Use mirror to bypass SSL/network issues
 COPY requirements.txt .
 RUN pip install --no-cache-dir \
-    --trusted-host pypi.org \
-    --trusted-host pypi.python.org \
-    --trusted-host files.pythonhosted.org \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    --trusted-host pypi.tuna.tsinghua.edu.cn \
     -r requirements.txt
 
 # Copy application code
