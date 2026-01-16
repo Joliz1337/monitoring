@@ -16,7 +16,9 @@ NC='\033[0m' # No Color
 
 # Global flag: was native HAProxy running before installation
 NATIVE_HAPROXY_WAS_RUNNING=false
-NATIVE_HAPROXY_CONFIG=""
+NATIVE_HAPROXY_CONFIG_PATH=""
+NATIVE_HAPROXY_CONFIG_CONTENT=""
+NATIVE_HAPROXY_CONFIG_BACKUP="/tmp/haproxy-native-migration.cfg"
 
 log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
 log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
@@ -367,7 +369,7 @@ migrate_native_haproxy() {
     NATIVE_HAPROXY_WAS_RUNNING=true
     log_warn "Native HAProxy detected! Will migrate to container..."
     
-    # Find and backup config
+    # Find and backup config BEFORE stopping HAProxy
     local config_paths=(
         "/etc/haproxy/haproxy.cfg"
         "/usr/local/etc/haproxy/haproxy.cfg"
@@ -375,18 +377,31 @@ migrate_native_haproxy() {
     
     for cfg in "${config_paths[@]}"; do
         if [ -f "$cfg" ]; then
-            NATIVE_HAPROXY_CONFIG="$cfg"
+            NATIVE_HAPROXY_CONFIG_PATH="$cfg"
             log_info "Found HAProxy config: $cfg"
             
-            # Create backup
-            cp "$cfg" "/tmp/haproxy.cfg.backup.$(date +%Y%m%d_%H%M%S)"
-            log_success "Config backed up to /tmp/"
+            # CRITICAL: Read and save config content NOW before anything can change it
+            NATIVE_HAPROXY_CONFIG_CONTENT=$(cat "$cfg" 2>/dev/null)
+            
+            if [ -n "$NATIVE_HAPROXY_CONFIG_CONTENT" ]; then
+                # Save to backup file as well
+                echo "$NATIVE_HAPROXY_CONFIG_CONTENT" > "$NATIVE_HAPROXY_CONFIG_BACKUP"
+                chmod 644 "$NATIVE_HAPROXY_CONFIG_BACKUP"
+                
+                # Also create timestamped backup
+                cp "$cfg" "/tmp/haproxy.cfg.backup.$(date +%Y%m%d_%H%M%S)"
+                
+                log_success "Config content saved ($(echo "$NATIVE_HAPROXY_CONFIG_CONTENT" | wc -l) lines)"
+                log_info "Backup saved to: $NATIVE_HAPROXY_CONFIG_BACKUP"
+            else
+                log_warn "Config file exists but is empty!"
+            fi
             break
         fi
     done
     
-    if [ -z "$NATIVE_HAPROXY_CONFIG" ]; then
-        log_warn "HAProxy config not found in standard locations"
+    if [ -z "$NATIVE_HAPROXY_CONFIG_CONTENT" ]; then
+        log_warn "HAProxy config not found or empty"
         log_warn "Container will start with default config"
     fi
     
@@ -426,38 +441,103 @@ migrate_native_haproxy() {
     echo ""
 }
 
-# Copy native HAProxy config to container volume
-copy_haproxy_config_to_volume() {
-    if [ -z "$NATIVE_HAPROXY_CONFIG" ] || [ ! -f "$NATIVE_HAPROXY_CONFIG" ]; then
-        return 0
-    fi
-    
-    log_info "Copying HAProxy config to container volume..."
-    
-    # Find the haproxy_config volume mount path
-    # The volume is mounted in monitoring-api container at /etc/haproxy
+# Get the full Docker volume name for haproxy_config
+get_haproxy_volume_name() {
+    # Try multiple methods to find the volume
     local volume_name=""
     
-    # Get volume name from docker
-    volume_name=$(docker volume ls -q | grep haproxy_config | head -1)
+    # Method 1: Use docker compose config to get exact volume name
+    volume_name=$(docker compose config --volumes 2>/dev/null | grep haproxy_config | head -1)
+    if [ -n "$volume_name" ]; then
+        # docker compose config returns just the name, add project prefix
+        local project_name
+        project_name=$(docker compose config --format json 2>/dev/null | grep -o '"name":"[^"]*"' | head -1 | cut -d'"' -f4)
+        if [ -n "$project_name" ]; then
+            volume_name="${project_name}_haproxy_config"
+        fi
+    fi
+    
+    # Method 2: Search for volume containing haproxy_config
+    if [ -z "$volume_name" ] || ! docker volume inspect "$volume_name" >/dev/null 2>&1; then
+        volume_name=$(docker volume ls -q --filter "name=haproxy_config" | head -1)
+    fi
+    
+    # Method 3: Grep through all volumes
+    if [ -z "$volume_name" ] || ! docker volume inspect "$volume_name" >/dev/null 2>&1; then
+        volume_name=$(docker volume ls -q | grep -E "(monitoring|node|server).*haproxy_config" | head -1)
+    fi
+    
+    # Method 4: Just grep for haproxy_config
+    if [ -z "$volume_name" ] || ! docker volume inspect "$volume_name" >/dev/null 2>&1; then
+        volume_name=$(docker volume ls -q | grep "haproxy_config" | head -1)
+    fi
+    
+    echo "$volume_name"
+}
+
+# Copy saved HAProxy config content to container volume
+copy_config_to_volume() {
+    local config_content="$1"
+    
+    if [ -z "$config_content" ]; then
+        log_warn "No config content to copy"
+        return 1
+    fi
+    
+    local volume_name
+    volume_name=$(get_haproxy_volume_name)
     
     if [ -z "$volume_name" ]; then
-        log_warn "HAProxy config volume not found, creating..."
-        # Start containers first to create volume
-        return 0
+        log_error "HAProxy config volume not found!"
+        log_info "Available volumes:"
+        docker volume ls
+        return 1
     fi
     
-    # Copy config using a temporary container
-    docker run --rm \
-        -v "$volume_name:/etc/haproxy" \
-        -v "$NATIVE_HAPROXY_CONFIG:/tmp/haproxy.cfg:ro" \
-        alpine sh -c "cp /tmp/haproxy.cfg /etc/haproxy/haproxy.cfg && chmod 644 /etc/haproxy/haproxy.cfg"
+    log_info "Found volume: $volume_name"
+    log_info "Copying config to volume..."
     
-    if [ $? -eq 0 ]; then
-        log_success "HAProxy config copied to volume"
-    else
-        log_warn "Failed to copy config, container will use default"
+    # Method 1: Try using docker cp via api container (most reliable)
+    if docker ps -q -f name=monitoring-api | grep -q .; then
+        log_info "Using monitoring-api container to copy config..."
+        
+        # Write config content to temp file in container
+        echo "$config_content" | docker exec -i monitoring-api sh -c 'cat > /etc/haproxy/haproxy.cfg && chmod 644 /etc/haproxy/haproxy.cfg'
+        
+        if [ $? -eq 0 ]; then
+            log_success "Config copied via monitoring-api container"
+            return 0
+        fi
+        log_warn "Failed to copy via api container, trying alternative method..."
     fi
+    
+    # Method 2: Use temporary container with busybox (more common than alpine)
+    local temp_file="/tmp/haproxy-temp-$$.cfg"
+    echo "$config_content" > "$temp_file"
+    
+    # Try busybox first (smaller, often available), then alpine
+    local copy_success=false
+    
+    for image in busybox alpine; do
+        if docker run --rm \
+            -v "$volume_name:/haproxy_config" \
+            -v "$temp_file:/tmp/haproxy.cfg:ro" \
+            "$image" sh -c "cp /tmp/haproxy.cfg /haproxy_config/haproxy.cfg && chmod 644 /haproxy_config/haproxy.cfg" 2>/dev/null; then
+            copy_success=true
+            log_success "Config copied using $image container"
+            break
+        fi
+    done
+    
+    rm -f "$temp_file"
+    
+    if ! $copy_success; then
+        log_error "Failed to copy config to volume"
+        log_info "You may need to manually copy the config from: $NATIVE_HAPROXY_CONFIG_BACKUP"
+        return 1
+    fi
+    
+    return 0
 }
 
 # Start HAProxy container if native was running
@@ -468,44 +548,68 @@ start_haproxy_container_if_needed() {
     
     log_info "Starting HAProxy container (migrating from native)..."
     
-    # Copy config to volume first (now volume exists)
-    if [ -n "$NATIVE_HAPROXY_CONFIG" ] && [ -f "$NATIVE_HAPROXY_CONFIG" ]; then
-        local volume_name=""
-        volume_name=$(docker volume ls -q | grep haproxy_config | head -1)
+    # Use saved config content (not file path which may be stale)
+    local config_to_copy=""
+    
+    # Try saved content first
+    if [ -n "$NATIVE_HAPROXY_CONFIG_CONTENT" ]; then
+        config_to_copy="$NATIVE_HAPROXY_CONFIG_CONTENT"
+        log_info "Using saved config content from memory"
+    # Fall back to backup file
+    elif [ -f "$NATIVE_HAPROXY_CONFIG_BACKUP" ]; then
+        config_to_copy=$(cat "$NATIVE_HAPROXY_CONFIG_BACKUP")
+        log_info "Using saved config from backup file: $NATIVE_HAPROXY_CONFIG_BACKUP"
+    # Last resort: try original path
+    elif [ -n "$NATIVE_HAPROXY_CONFIG_PATH" ] && [ -f "$NATIVE_HAPROXY_CONFIG_PATH" ]; then
+        config_to_copy=$(cat "$NATIVE_HAPROXY_CONFIG_PATH")
+        log_warn "Using original config path (may have changed): $NATIVE_HAPROXY_CONFIG_PATH"
+    fi
+    
+    if [ -n "$config_to_copy" ]; then
+        # Wait a moment for volumes to be fully ready
+        sleep 2
         
-        if [ -n "$volume_name" ]; then
-            log_info "Copying native config to container volume..."
-            
-            docker run --rm \
-                -v "$volume_name:/etc/haproxy" \
-                -v "$NATIVE_HAPROXY_CONFIG:/tmp/haproxy.cfg:ro" \
-                alpine sh -c "cp /tmp/haproxy.cfg /etc/haproxy/haproxy.cfg && chmod 644 /etc/haproxy/haproxy.cfg"
-            
-            if [ $? -eq 0 ]; then
-                log_success "Native HAProxy config migrated"
-            fi
+        copy_config_to_volume "$config_to_copy"
+        
+        if [ $? -ne 0 ]; then
+            log_warn "Config migration failed, container will start with default config"
         fi
+    else
+        log_warn "No saved config found, container will use default config"
     fi
     
     # Start HAProxy container with profile
-    docker compose --profile haproxy up -d haproxy
+    log_info "Starting HAProxy container..."
+    docker compose --profile haproxy up -d
     
     if [ $? -eq 0 ]; then
-        log_success "HAProxy container started"
-        
-        # Wait for HAProxy to be healthy
+        # Wait for HAProxy to start
+        log_info "Waiting for HAProxy to start..."
         sleep 3
         
+        # Check if container is running
         if docker ps -q -f name=monitoring-haproxy | grep -q .; then
             log_success "HAProxy container is running"
+            
+            # Verify config was applied
+            local container_config
+            container_config=$(docker exec monitoring-haproxy cat /usr/local/etc/haproxy/haproxy.cfg 2>/dev/null | head -5)
+            if [ -n "$container_config" ]; then
+                log_success "HAProxy config verified in container"
+            fi
         else
-            log_warn "HAProxy container may have issues, check logs:"
-            log_warn "  docker logs monitoring-haproxy"
+            log_warn "HAProxy container may have issues, checking logs..."
+            docker logs monitoring-haproxy --tail 20 2>&1 || true
+            log_warn "You can restart manually: docker compose --profile haproxy up -d"
         fi
     else
         log_error "Failed to start HAProxy container"
+        log_warn "Check docker compose logs: docker compose logs haproxy"
         log_warn "You can start it manually: docker compose --profile haproxy up -d"
     fi
+    
+    # Cleanup backup file
+    rm -f "$NATIVE_HAPROXY_CONFIG_BACKUP" 2>/dev/null || true
 }
 
 # Validate IP address format
@@ -753,13 +857,14 @@ show_status() {
         echo -e "${GREEN}HAProxy Migration:${NC}"
         echo "  - Native HAProxy was detected and stopped"
         echo "  - Native HAProxy autostart disabled"
-        if [ -n "$NATIVE_HAPROXY_CONFIG" ]; then
-            echo "  - Config migrated from: $NATIVE_HAPROXY_CONFIG"
+        if [ -n "$NATIVE_HAPROXY_CONFIG_PATH" ]; then
+            echo "  - Config migrated from: $NATIVE_HAPROXY_CONFIG_PATH"
         fi
         if docker ps -q -f name=monitoring-haproxy | grep -q .; then
             echo -e "  - Container HAProxy: ${GREEN}Running${NC}"
         else
             echo -e "  - Container HAProxy: ${YELLOW}Not running (check logs)${NC}"
+            echo "    Check logs: docker logs monitoring-haproxy"
         fi
     else
         echo -e "${YELLOW}NOTE: HAProxy is DISABLED by default.${NC}"

@@ -20,10 +20,190 @@ log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
-REPO_URL="https://github.com/Joliz1337/monitoring.git"
 NODE_DIR="/opt/monitoring-node"
 TMP_DIR="/tmp/monitoring-update-$$"
 TARGET_REF="${1:-main}"
+
+# GitHub mirrors for Russia
+GITHUB_MIRRORS_RU=(
+    "https://ghproxy.com/https://github.com"
+    "https://mirror.ghproxy.com/https://github.com"
+    "https://github.moeyy.xyz/https://github.com"
+    "https://gh.ddlc.top/https://github.com"
+)
+
+# Server country and active mirror
+SERVER_COUNTRY=""
+ACTIVE_GITHUB_MIRROR=""
+
+# ==================== Geo Detection & Mirrors ====================
+
+detect_country() {
+    log_info "Detecting server location..."
+    
+    local country=""
+    local geo_apis=(
+        "http://ip-api.com/json?fields=countryCode"
+        "https://ipapi.co/country_code/"
+        "https://ipinfo.io/country"
+    )
+    
+    for api in "${geo_apis[@]}"; do
+        local response
+        response=$(curl -fsSL --connect-timeout 5 --max-time 10 "$api" 2>/dev/null)
+        
+        if [ -n "$response" ]; then
+            if echo "$response" | grep -q "countryCode"; then
+                country=$(echo "$response" | grep -o '"countryCode":"[^"]*"' | cut -d'"' -f4)
+            else
+                country=$(echo "$response" | tr -d '[:space:]' | head -c 2)
+            fi
+            
+            if [ -n "$country" ] && [ ${#country} -eq 2 ]; then
+                break
+            fi
+        fi
+    done
+    
+    if [ -n "$country" ]; then
+        SERVER_COUNTRY="$country"
+        if [ "$country" = "RU" ]; then
+            log_info "Server in Russia - using GitHub mirrors"
+        else
+            log_info "Server location: $country - using direct GitHub"
+        fi
+    else
+        SERVER_COUNTRY=""
+        log_warn "Could not detect location, using direct GitHub"
+    fi
+}
+
+test_mirror_speed() {
+    local mirror_base="$1"
+    local test_url
+    
+    if [ "$mirror_base" = "https://github.com" ]; then
+        test_url="https://raw.githubusercontent.com/Joliz1337/monitoring/main/VERSION"
+    else
+        test_url="${mirror_base}/Joliz1337/monitoring/raw/main/VERSION"
+    fi
+    
+    local result
+    result=$(curl -fsSL --connect-timeout 5 --max-time 10 -w "%{speed_download}" -o /dev/null "$test_url" 2>/dev/null)
+    
+    if [ $? -eq 0 ] && [ -n "$result" ]; then
+        echo "$result" | awk '{printf "%.0f", $1/1024}'
+    else
+        echo "0"
+    fi
+}
+
+select_best_mirror() {
+    log_info "Testing GitHub mirrors..."
+    
+    local mirrors=()
+    local best_mirror=""
+    local best_speed=0
+    
+    if [ "$SERVER_COUNTRY" = "RU" ]; then
+        mirrors=("${GITHUB_MIRRORS_RU[@]}")
+    else
+        mirrors=("https://github.com")
+    fi
+    
+    for mirror in "${mirrors[@]}"; do
+        local display_name
+        if [ "$mirror" = "https://github.com" ]; then
+            display_name="GitHub (direct)"
+        else
+            display_name=$(echo "$mirror" | sed 's|https://||' | cut -d'/' -f1)
+        fi
+        
+        echo -n "  Testing $display_name... "
+        
+        local speed
+        speed=$(test_mirror_speed "$mirror")
+        
+        if [ "$speed" -gt 0 ]; then
+            echo -e "${GREEN}${speed} KB/s${NC}"
+            if [ "$speed" -gt "$best_speed" ]; then
+                best_speed="$speed"
+                best_mirror="$mirror"
+            fi
+        else
+            echo -e "${RED}unavailable${NC}"
+        fi
+    done
+    
+    if [ -z "$best_mirror" ]; then
+        log_warn "All mirrors failed, using direct GitHub"
+        best_mirror="https://github.com"
+    else
+        local display_name
+        if [ "$best_mirror" = "https://github.com" ]; then
+            display_name="GitHub (direct)"
+        else
+            display_name=$(echo "$best_mirror" | sed 's|https://||' | cut -d'/' -f1)
+        fi
+        log_success "Selected: $display_name (${best_speed} KB/s)"
+    fi
+    
+    ACTIVE_GITHUB_MIRROR="$best_mirror"
+}
+
+clone_with_mirror() {
+    local target_dir="$1"
+    local branch="$2"
+    
+    if [ -z "$ACTIVE_GITHUB_MIRROR" ]; then
+        select_best_mirror
+    fi
+    
+    local mirrors=()
+    if [ "$SERVER_COUNTRY" = "RU" ]; then
+        mirrors=("$ACTIVE_GITHUB_MIRROR" "${GITHUB_MIRRORS_RU[@]}" "https://github.com")
+    else
+        mirrors=("$ACTIVE_GITHUB_MIRROR" "https://github.com")
+    fi
+    
+    # Remove duplicates
+    local unique_mirrors=()
+    local seen=""
+    for m in "${mirrors[@]}"; do
+        if [[ ! " $seen " =~ " $m " ]]; then
+            unique_mirrors+=("$m")
+            seen="$seen $m"
+        fi
+    done
+    
+    for mirror in "${unique_mirrors[@]}"; do
+        local repo_url
+        if [ "$mirror" = "https://github.com" ]; then
+            repo_url="https://github.com/Joliz1337/monitoring.git"
+        else
+            repo_url="${mirror}/Joliz1337/monitoring.git"
+        fi
+        
+        local display_name
+        if [ "$mirror" = "https://github.com" ]; then
+            display_name="GitHub (direct)"
+        else
+            display_name=$(echo "$mirror" | sed 's|https://||' | cut -d'/' -f1)
+        fi
+        
+        log_info "Downloading from $display_name..."
+        rm -rf "$target_dir"
+        
+        if timeout 120 git clone --depth 1 --branch "$branch" "$repo_url" "$target_dir" 2>&1; then
+            log_success "Download complete"
+            return 0
+        fi
+        
+        log_warn "Download failed, trying next mirror..."
+    done
+    
+    return 1
+}
 
 cleanup() {
     rm -rf "$TMP_DIR"
@@ -65,10 +245,16 @@ if [ -f "$NODE_DIR/.env" ]; then
     log_success ".env backed up"
 fi
 
-# Clone repository
-log_info "Downloading from GitHub..."
-rm -rf "$TMP_DIR"
-git clone --depth 1 --branch "$TARGET_REF" "$REPO_URL" "$TMP_DIR" 2>&1
+# Detect country and select best mirror
+detect_country
+select_best_mirror
+echo ""
+
+# Clone repository with mirror fallback
+if ! clone_with_mirror "$TMP_DIR" "$TARGET_REF"; then
+    log_error "Failed to download repository from all mirrors"
+    exit 1
+fi
 
 # Check if download succeeded
 if [ ! -d "$TMP_DIR/node" ]; then

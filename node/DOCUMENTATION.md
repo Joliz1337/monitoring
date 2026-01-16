@@ -23,14 +23,29 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/in
 При установке скрипт автоматически обнаруживает работающий нативный HAProxy:
 
 - **Если HAProxy работает**:
-  1. Останавливает нативный HAProxy
-  2. Отключает автозапуск systemd сервиса
-  3. Копирует конфиг `/etc/haproxy/haproxy.cfg` в Docker volume
-  4. Запускает контейнерный HAProxy с тем же конфигом
+  1. Читает и сохраняет содержимое конфига ДО остановки сервиса
+  2. Останавливает нативный HAProxy (systemd + kill процессов)
+  3. Отключает автозапуск systemd сервиса
+  4. После запуска контейнеров копирует конфиг в Docker volume
+  5. Запускает контейнерный HAProxy с тем же конфигом
 
 - **Если HAProxy не работает**: контейнерный HAProxy остаётся выключенным
 
-Оригинальный конфиг сохраняется в `/tmp/haproxy.cfg.backup.*`.
+**Бэкапы конфига**:
+- Временный: `/tmp/haproxy-native-migration.cfg` (удаляется после миграции)
+- Постоянный: `/tmp/haproxy.cfg.backup.YYYYMMDD_HHMMSS`
+
+**Устранение проблем миграции**:
+```bash
+# Проверить конфиг в контейнере
+docker exec monitoring-haproxy cat /usr/local/etc/haproxy/haproxy.cfg
+
+# Проверить логи HAProxy
+docker logs monitoring-haproxy
+
+# Перезапустить HAProxy
+docker compose --profile haproxy restart
+```
 
 ## Структура
 

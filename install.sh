@@ -30,6 +30,25 @@ BIN_PATH="/usr/local/bin/monitoring"
 # Language (default: auto-detect or English)
 LANG_CODE="en"
 
+# Server country (auto-detect)
+SERVER_COUNTRY=""
+
+# GitHub mirrors for Russia (proxy-based)
+GITHUB_MIRRORS_RU=(
+    "https://ghproxy.com/https://github.com"
+    "https://mirror.ghproxy.com/https://github.com"
+    "https://github.moeyy.xyz/https://github.com"
+    "https://gh.ddlc.top/https://github.com"
+)
+
+# GitHub mirrors for other countries (direct or CDN)
+GITHUB_MIRRORS_OTHER=(
+    "https://github.com"
+)
+
+# Current active mirror
+ACTIVE_GITHUB_MIRROR=""
+
 # Docker mirror list
 DOCKER_MIRRORS=(
     "https://mirror.gcr.io"
@@ -90,6 +109,20 @@ MSG_EN[optimizations_applied]="System optimizations applied!"
 MSG_EN[optimizations_status]="Optimizations"
 MSG_EN[applied]="applied"
 MSG_EN[not_applied]="not applied"
+
+# Geo-detection messages - English
+MSG_EN[detecting_country]="Detecting server location..."
+MSG_EN[country_detected]="Server location"
+MSG_EN[country_russia]="Russia - using GitHub mirrors"
+MSG_EN[country_other]="using direct GitHub"
+MSG_EN[country_detection_failed]="Could not detect location, using direct GitHub"
+MSG_EN[testing_mirrors]="Testing GitHub mirrors speed..."
+MSG_EN[mirror_selected]="Selected mirror"
+MSG_EN[mirror_speed]="Speed"
+MSG_EN[mirror_failed]="Mirror unavailable"
+MSG_EN[all_mirrors_failed]="All mirrors failed, trying direct GitHub"
+MSG_EN[download_slow]="Download is slow, trying next mirror..."
+MSG_EN[download_timeout]="Download timeout, trying next mirror..."
 
 # Network/Docker messages - English
 MSG_EN[checking_docker_network]="Checking Docker Hub availability..."
@@ -163,6 +196,20 @@ MSG_RU[optimizations_status]="Оптимизации"
 MSG_RU[applied]="применены"
 MSG_RU[not_applied]="не применены"
 
+# Geo-detection messages - Russian
+MSG_RU[detecting_country]="Определение местоположения сервера..."
+MSG_RU[country_detected]="Местоположение сервера"
+MSG_RU[country_russia]="Россия - используются зеркала GitHub"
+MSG_RU[country_other]="используется прямой GitHub"
+MSG_RU[country_detection_failed]="Не удалось определить местоположение, используется прямой GitHub"
+MSG_RU[testing_mirrors]="Тестирование скорости зеркал GitHub..."
+MSG_RU[mirror_selected]="Выбрано зеркало"
+MSG_RU[mirror_speed]="Скорость"
+MSG_RU[mirror_failed]="Зеркало недоступно"
+MSG_RU[all_mirrors_failed]="Все зеркала недоступны, пробуем прямой GitHub"
+MSG_RU[download_slow]="Медленная загрузка, пробуем следующее зеркало..."
+MSG_RU[download_timeout]="Таймаут загрузки, пробуем следующее зеркало..."
+
 # Network/Docker messages - Russian
 MSG_RU[checking_docker_network]="Проверка доступности Docker Hub..."
 MSG_RU[docker_network_ok]="Docker Hub доступен"
@@ -202,6 +249,211 @@ log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
 log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+
+# ==================== Geo Detection & GitHub Mirrors ====================
+
+# Detect server country using IP geolocation APIs
+detect_country() {
+    log_info "$(msg detecting_country)"
+    
+    local country=""
+    
+    # Try multiple geo APIs
+    local geo_apis=(
+        "http://ip-api.com/json?fields=countryCode"
+        "https://ipapi.co/country_code/"
+        "https://ipinfo.io/country"
+    )
+    
+    for api in "${geo_apis[@]}"; do
+        local response
+        response=$(curl -fsSL --connect-timeout 5 --max-time 10 "$api" 2>/dev/null)
+        
+        if [ -n "$response" ]; then
+            # ip-api.com returns JSON
+            if echo "$response" | grep -q "countryCode"; then
+                country=$(echo "$response" | grep -o '"countryCode":"[^"]*"' | cut -d'"' -f4)
+            else
+                # Other APIs return plain text
+                country=$(echo "$response" | tr -d '[:space:]' | head -c 2)
+            fi
+            
+            if [ -n "$country" ] && [ ${#country} -eq 2 ]; then
+                break
+            fi
+        fi
+    done
+    
+    if [ -n "$country" ]; then
+        SERVER_COUNTRY="$country"
+        log_success "$(msg country_detected): $country"
+        
+        if [ "$country" = "RU" ]; then
+            log_info "$(msg country_russia)"
+        else
+            log_info "$(msg country_other)"
+        fi
+    else
+        SERVER_COUNTRY=""
+        log_warn "$(msg country_detection_failed)"
+    fi
+}
+
+# Test download speed from a mirror (returns speed in KB/s or 0 if failed)
+test_mirror_speed() {
+    local mirror_base="$1"
+    local test_file="main/VERSION"
+    local test_url
+    
+    # Build test URL based on mirror type
+    if [ "$mirror_base" = "https://github.com" ]; then
+        test_url="https://raw.githubusercontent.com/Joliz1337/monitoring/main/VERSION"
+    else
+        # Proxy mirrors: append raw URL
+        test_url="${mirror_base}/Joliz1337/monitoring/raw/main/VERSION"
+    fi
+    
+    # Download with speed measurement (5 second timeout)
+    local start_time=$(date +%s%N)
+    local result
+    result=$(curl -fsSL --connect-timeout 5 --max-time 10 -w "%{speed_download}" -o /dev/null "$test_url" 2>/dev/null)
+    
+    if [ $? -eq 0 ] && [ -n "$result" ]; then
+        # Convert bytes/sec to KB/s
+        local speed_kbs=$(echo "$result" | awk '{printf "%.0f", $1/1024}')
+        echo "$speed_kbs"
+    else
+        echo "0"
+    fi
+}
+
+# Select the best GitHub mirror based on speed
+select_best_mirror() {
+    log_info "$(msg testing_mirrors)"
+    
+    local mirrors=()
+    local best_mirror=""
+    local best_speed=0
+    
+    # Select mirror list based on country
+    if [ "$SERVER_COUNTRY" = "RU" ]; then
+        mirrors=("${GITHUB_MIRRORS_RU[@]}")
+    else
+        mirrors=("${GITHUB_MIRRORS_OTHER[@]}")
+    fi
+    
+    # Test each mirror
+    for mirror in "${mirrors[@]}"; do
+        local display_name
+        if [ "$mirror" = "https://github.com" ]; then
+            display_name="GitHub (direct)"
+        else
+            display_name=$(echo "$mirror" | sed 's|https://||' | cut -d'/' -f1)
+        fi
+        
+        echo -n "  Testing $display_name... "
+        
+        local speed
+        speed=$(test_mirror_speed "$mirror")
+        
+        if [ "$speed" -gt 0 ]; then
+            echo -e "${GREEN}${speed} KB/s${NC}"
+            
+            if [ "$speed" -gt "$best_speed" ]; then
+                best_speed="$speed"
+                best_mirror="$mirror"
+            fi
+        else
+            echo -e "${RED}$(msg mirror_failed)${NC}"
+        fi
+    done
+    
+    # If all mirrors failed, try direct GitHub as fallback
+    if [ -z "$best_mirror" ]; then
+        log_warn "$(msg all_mirrors_failed)"
+        best_mirror="https://github.com"
+    else
+        local display_name
+        if [ "$best_mirror" = "https://github.com" ]; then
+            display_name="GitHub (direct)"
+        else
+            display_name=$(echo "$best_mirror" | sed 's|https://||' | cut -d'/' -f1)
+        fi
+        log_success "$(msg mirror_selected): $display_name (${best_speed} KB/s)"
+    fi
+    
+    ACTIVE_GITHUB_MIRROR="$best_mirror"
+}
+
+# Clone repository using selected mirror with fallback
+clone_repo_with_mirror() {
+    local target_dir="$1"
+    local branch="${2:-main}"
+    local max_retries=3
+    local retry=0
+    
+    # Ensure we have a mirror selected
+    if [ -z "$ACTIVE_GITHUB_MIRROR" ]; then
+        select_best_mirror
+    fi
+    
+    local mirrors=()
+    
+    # Build mirror list: active first, then others as fallback
+    if [ "$SERVER_COUNTRY" = "RU" ]; then
+        mirrors=("$ACTIVE_GITHUB_MIRROR" "${GITHUB_MIRRORS_RU[@]}" "https://github.com")
+    else
+        mirrors=("$ACTIVE_GITHUB_MIRROR" "${GITHUB_MIRRORS_OTHER[@]}")
+    fi
+    
+    # Remove duplicates while preserving order
+    local unique_mirrors=()
+    local seen=""
+    for m in "${mirrors[@]}"; do
+        if [[ ! " $seen " =~ " $m " ]]; then
+            unique_mirrors+=("$m")
+            seen="$seen $m"
+        fi
+    done
+    
+    for mirror in "${unique_mirrors[@]}"; do
+        local repo_url
+        
+        if [ "$mirror" = "https://github.com" ]; then
+            repo_url="https://github.com/Joliz1337/monitoring.git"
+        else
+            # For proxy mirrors, we need to use HTTP clone through proxy
+            repo_url="${mirror}/Joliz1337/monitoring.git"
+        fi
+        
+        local display_name
+        if [ "$mirror" = "https://github.com" ]; then
+            display_name="GitHub (direct)"
+        else
+            display_name=$(echo "$mirror" | sed 's|https://||' | cut -d'/' -f1)
+        fi
+        
+        log_info "Downloading from $display_name..."
+        
+        rm -rf "$target_dir"
+        
+        # Try to clone with timeout
+        if timeout 120 git clone --depth 1 --branch "$branch" "$repo_url" "$target_dir" 2>&1; then
+            log_success "$(msg repo_downloaded)"
+            return 0
+        fi
+        
+        log_warn "$(msg download_timeout)"
+        retry=$((retry + 1))
+        
+        if [ $retry -lt ${#unique_mirrors[@]} ]; then
+            log_info "$(msg download_slow)"
+        fi
+    done
+    
+    log_error "Failed to download repository from all mirrors"
+    return 1
+}
 
 # ==================== Network Fix Functions ====================
 
@@ -492,9 +744,7 @@ check_git() {
 
 clone_repo() {
     log_info "$(msg downloading_repo)"
-    rm -rf "$TMP_DIR"
-    git clone --depth 1 "$REPO_URL" "$TMP_DIR"
-    log_success "$(msg repo_downloaded)"
+    clone_repo_with_mirror "$TMP_DIR" "main"
 }
 
 cleanup() {
@@ -917,6 +1167,13 @@ main() {
     # First run - select language
     if [ ! -f /etc/monitoring/language ]; then
         select_language
+    fi
+    
+    # Detect server country for mirror selection (once per session)
+    if [ -z "$SERVER_COUNTRY" ]; then
+        detect_country
+        select_best_mirror
+        echo ""
     fi
     
     while true; do

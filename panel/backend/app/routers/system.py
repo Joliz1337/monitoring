@@ -202,8 +202,9 @@ async def run_panel_update_in_container(target_ref: str | None = None):
         
         # Updater script:
         # 1. Install dependencies
-        # 2. Clone fresh repo
-        # 3. Run update.sh from cloned repo
+        # 2. Detect country and select mirror
+        # 3. Clone fresh repo with fallback mirrors
+        # 4. Run update.sh from cloned repo
         updater_script = f"""#!/bin/sh
 set -e
 
@@ -216,10 +217,60 @@ curl -sL https://github.com/docker/compose/releases/latest/download/docker-compo
     -o /usr/local/lib/docker/cli-plugins/docker-compose
 chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
 
-echo "[INFO] Cloning repository..."
+echo "[INFO] Detecting server location..."
+COUNTRY=""
+COUNTRY=$(curl -fsSL --connect-timeout 5 --max-time 10 "http://ip-api.com/json?fields=countryCode" 2>/dev/null | grep -o '"countryCode":"[^"]*"' | cut -d'"' -f4 || echo "")
+if [ -z "$COUNTRY" ]; then
+    COUNTRY=$(curl -fsSL --connect-timeout 5 --max-time 10 "https://ipapi.co/country_code/" 2>/dev/null | tr -d '[:space:]' | head -c 2 || echo "")
+fi
+echo "[INFO] Server location: $COUNTRY"
+
+# GitHub mirrors for Russia
+MIRRORS_RU="https://ghproxy.com/https://github.com https://mirror.ghproxy.com/https://github.com https://github.moeyy.xyz/https://github.com"
+
 TMP_CLONE=/tmp/monitoring-fresh
 rm -rf $TMP_CLONE
-git clone --depth 1 --branch {ref_arg} https://github.com/Joliz1337/monitoring.git $TMP_CLONE
+CLONE_SUCCESS=0
+
+clone_repo() {{
+    local mirror="$1"
+    local repo_url
+    if [ "$mirror" = "direct" ]; then
+        repo_url="https://github.com/Joliz1337/monitoring.git"
+        echo "[INFO] Trying direct GitHub..."
+    else
+        repo_url="${{mirror}}/Joliz1337/monitoring.git"
+        echo "[INFO] Trying mirror: $(echo $mirror | sed 's|https://||' | cut -d'/' -f1)..."
+    fi
+    timeout 120 git clone --depth 1 --branch {ref_arg} "$repo_url" $TMP_CLONE 2>&1
+}}
+
+if [ "$COUNTRY" = "RU" ]; then
+    echo "[INFO] Russia detected - using GitHub mirrors"
+    for mirror in $MIRRORS_RU; do
+        if clone_repo "$mirror"; then
+            CLONE_SUCCESS=1
+            break
+        fi
+        rm -rf $TMP_CLONE
+        echo "[WARN] Mirror failed, trying next..."
+    done
+    if [ $CLONE_SUCCESS -eq 0 ]; then
+        echo "[INFO] All mirrors failed, trying direct GitHub..."
+        if clone_repo "direct"; then
+            CLONE_SUCCESS=1
+        fi
+    fi
+else
+    if clone_repo "direct"; then
+        CLONE_SUCCESS=1
+    fi
+fi
+
+if [ $CLONE_SUCCESS -eq 0 ]; then
+    echo "[ERROR] Failed to clone repository from all sources"
+    exit 1
+fi
 
 echo "[INFO] Running update script..."
 chmod +x $TMP_CLONE/panel/update.sh
