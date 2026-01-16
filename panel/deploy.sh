@@ -589,10 +589,15 @@ generate_nginx_config() {
         exit 1
     fi
     
-    export DOMAIN
-    envsubst '${DOMAIN}' < nginx/nginx.conf.template > nginx/nginx.conf
+    if [ -z "$PANEL_UID" ]; then
+        print_error "PANEL_UID variable is empty!"
+        exit 1
+    fi
     
-    print_status "nginx.conf generated for ${DOMAIN}"
+    export DOMAIN PANEL_UID
+    envsubst '${DOMAIN} ${PANEL_UID}' < nginx/nginx.conf.template > nginx/nginx.conf
+    
+    print_status "nginx.conf generated for ${DOMAIN} with UID protection"
 }
 
 build_and_start() {

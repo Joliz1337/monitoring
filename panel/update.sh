@@ -229,10 +229,10 @@ fi
 # Regenerate nginx config from template if domain is set
 if [ -f "$PANEL_DIR/.env" ]; then
     source "$PANEL_DIR/.env"
-    if [ -n "$DOMAIN" ] && [ -f "$PANEL_DIR/nginx/nginx.conf.template" ]; then
-        export DOMAIN
-        envsubst '${DOMAIN}' < "$PANEL_DIR/nginx/nginx.conf.template" > "$PANEL_DIR/nginx/nginx.conf"
-        log_success "Regenerated nginx.conf for $DOMAIN"
+    if [ -n "$DOMAIN" ] && [ -n "$PANEL_UID" ] && [ -f "$PANEL_DIR/nginx/nginx.conf.template" ]; then
+        export DOMAIN PANEL_UID
+        envsubst '${DOMAIN} ${PANEL_UID}' < "$PANEL_DIR/nginx/nginx.conf.template" > "$PANEL_DIR/nginx/nginx.conf"
+        log_success "Regenerated nginx.conf for $DOMAIN with UID protection"
     fi
 fi
 
