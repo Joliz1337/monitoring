@@ -1,7 +1,6 @@
 #!/bin/bash
 #
-# Panel Update Script - Simple and reliable
-# Updates monitoring panel from GitHub repository
+# Panel Update Script - Downloads update and runs fresh updater
 #
 # Usage: ./update.sh [commit_hash|tag|branch]
 #   If no argument provided, updates to latest commit from main branch
@@ -28,9 +27,13 @@ TARGET_REF="${1:-main}"
 GITHUB_MIRROR="https://ghfast.top"
 ACTIVE_GITHUB_MIRROR=""
 
+cleanup() {
+    rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT
+
 # ==================== GitHub Mirror Functions ====================
 
-# Test if GitHub is accessible
 test_github_access() {
     log_info "Testing GitHub access..."
     echo -n "  Testing GitHub (direct)... "
@@ -46,7 +49,6 @@ test_github_access() {
     return 1
 }
 
-# Test if mirror is accessible
 test_mirror_access() {
     echo -n "  Testing ghfast.top... "
     
@@ -61,7 +63,6 @@ test_mirror_access() {
     return 1
 }
 
-# Select GitHub or mirror
 select_best_mirror() {
     if test_github_access; then
         ACTIVE_GITHUB_MIRROR=""
@@ -79,7 +80,6 @@ select_best_mirror() {
     ACTIVE_GITHUB_MIRROR=""
 }
 
-# Clone with mirror fallback
 clone_with_mirror() {
     local target_dir="$1"
     local branch="$2"
@@ -119,10 +119,7 @@ clone_with_mirror() {
     return 1
 }
 
-cleanup() {
-    rm -rf "$TMP_DIR"
-}
-trap cleanup EXIT
+# ==================== Main ====================
 
 log_info "=== Monitoring Panel Update ==="
 log_info "Target: $TARGET_REF"
@@ -164,133 +161,76 @@ if [ -f "$PANEL_DIR/backend/.env" ]; then
     log_success "backend/.env backed up"
 fi
 
-# Select best mirror (GitHub or ghfast.top)
+# Select best mirror
 select_best_mirror
 echo ""
 
-# Clone repository with mirror fallback
+# Clone repository
 if ! clone_with_mirror "$TMP_DIR" "$TARGET_REF"; then
     log_error "Failed to download repository from all mirrors"
     exit 1
 fi
 
-# Check if download succeeded
+# Check download succeeded
 if [ ! -d "$TMP_DIR/panel" ]; then
     log_error "Failed to download repository"
     exit 1
 fi
 
-# Get new version
-NEW_VERSION="unknown"
-if [ -f "$TMP_DIR/panel/VERSION" ]; then
-    NEW_VERSION=$(cat "$TMP_DIR/panel/VERSION")
-fi
-log_info "New version: $NEW_VERSION"
+# Run the FRESH apply-update.sh from downloaded version
+log_info "Running fresh updater from downloaded version..."
+echo ""
 
-# Stop containers
-log_info "Stopping containers..."
-cd "$PANEL_DIR"
-docker compose down --timeout 30 || true
-
-# Wait for ports to be released
-log_info "Waiting for ports to be released..."
-for i in {1..15}; do
-    if ! ss -tlnp 2>/dev/null | grep -qE ':(80|443|8000) '; then
-        break
+if [ -f "$TMP_DIR/panel/scripts/apply-update.sh" ]; then
+    chmod +x "$TMP_DIR/panel/scripts/apply-update.sh"
+    exec bash "$TMP_DIR/panel/scripts/apply-update.sh" "$TMP_DIR" "$PANEL_DIR" "$CURRENT_VERSION"
+else
+    # Fallback for older versions without apply-update.sh
+    log_warn "Downloaded version doesn't have apply-update.sh, using inline update..."
+    
+    # Get new version
+    NEW_VERSION="unknown"
+    if [ -f "$TMP_DIR/panel/VERSION" ]; then
+        NEW_VERSION=$(cat "$TMP_DIR/panel/VERSION")
     fi
-    sleep 1
-done
-log_success "Containers stopped"
-
-# Copy files (preserve .env, database, generated nginx.conf)
-log_info "Copying new files..."
-rsync -av --delete \
-    --exclude='.env' \
-    --exclude='.env.backup' \
-    --exclude='backend/.env' \
-    --exclude='backend/.env.backup' \
-    --exclude='backend/data' \
-    --exclude='nginx/nginx.conf' \
-    "$TMP_DIR/panel/" "$PANEL_DIR/"
-
-# VERSION file is already copied with rsync from panel/VERSION
-
-# Restore .env files
-if [ -f "$PANEL_DIR/.env.backup" ]; then
-    mv "$PANEL_DIR/.env.backup" "$PANEL_DIR/.env"
-    log_success ".env restored"
-fi
-
-if [ -f "$PANEL_DIR/backend/.env.backup" ]; then
-    mv "$PANEL_DIR/backend/.env.backup" "$PANEL_DIR/backend/.env"
-    log_success "backend/.env restored"
-fi
-
-# Regenerate nginx config from template if domain is set
-if [ -f "$PANEL_DIR/.env" ]; then
-    source "$PANEL_DIR/.env"
-    if [ -n "$DOMAIN" ] && [ -n "$PANEL_UID" ] && [ -f "$PANEL_DIR/nginx/nginx.conf.template" ]; then
-        export DOMAIN PANEL_UID
-        envsubst '${DOMAIN} ${PANEL_UID}' < "$PANEL_DIR/nginx/nginx.conf.template" > "$PANEL_DIR/nginx/nginx.conf"
-        log_success "Regenerated nginx.conf for $DOMAIN with UID protection"
+    log_info "New version: $NEW_VERSION"
+    
+    # Stop containers
+    log_info "Stopping containers..."
+    cd "$PANEL_DIR"
+    docker compose down --timeout 30 || true
+    log_success "Containers stopped"
+    
+    # Copy files
+    log_info "Copying new files..."
+    rsync -av --delete \
+        --exclude='.env' \
+        --exclude='.env.backup' \
+        --exclude='backend/.env' \
+        --exclude='backend/.env.backup' \
+        --exclude='backend/data' \
+        --exclude='nginx/nginx.conf' \
+        "$TMP_DIR/panel/" "$PANEL_DIR/"
+    
+    # Restore .env
+    if [ -f "$PANEL_DIR/.env.backup" ]; then
+        mv "$PANEL_DIR/.env.backup" "$PANEL_DIR/.env"
     fi
-fi
-
-# Make scripts executable
-chmod +x "$PANEL_DIR"/*.sh 2>/dev/null || true
-
-log_success "Files updated"
-
-# Clean up Docker before build to free space
-log_info "Cleaning up Docker cache..."
-docker image prune -f > /dev/null 2>&1 || true
-docker builder prune -af > /dev/null 2>&1 || true
-log_success "Docker cleanup done"
-
-# Rebuild Docker images
-log_info "Building new Docker images..."
-cd "$PANEL_DIR"
-docker compose build --no-cache
-log_success "Images built"
-
-# Start containers
-log_info "Starting containers..."
-docker compose up -d
-log_success "Containers started"
-
-# Wait for panel to be healthy
-log_info "Waiting for panel..."
-MAX_ATTEMPTS=30
-ATTEMPT=0
-
-# Load domain from .env
-if [ -f "$PANEL_DIR/.env" ]; then
-    source "$PANEL_DIR/.env"
-fi
-
-while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
-    if curl -sfk "https://localhost/health" > /dev/null 2>&1; then
-        log_success "Panel is healthy"
-        break
+    
+    # Generate nginx config
+    if [ -f "$PANEL_DIR/.env" ]; then
+        source "$PANEL_DIR/.env"
+        if [ -n "$DOMAIN" ] && [ -f "$PANEL_DIR/nginx/nginx.conf.template" ]; then
+            export DOMAIN PANEL_UID
+            envsubst '${DOMAIN} ${PANEL_UID}' < "$PANEL_DIR/nginx/nginx.conf.template" > "$PANEL_DIR/nginx/nginx.conf"
+        fi
     fi
-    if [ -n "$DOMAIN" ] && curl -sfk "https://${DOMAIN}/health" > /dev/null 2>&1; then
-        log_success "Panel is healthy"
-        break
-    fi
-    ATTEMPT=$((ATTEMPT + 1))
-    sleep 2
-done
-
-if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
-    log_warn "Health check timed out, but containers are running"
+    
+    # Build and start
+    chmod +x "$PANEL_DIR"/*.sh 2>/dev/null || true
+    docker compose build --no-cache
+    docker compose up -d
+    
+    log_success "=== Update Complete ==="
+    log_info "Version: $CURRENT_VERSION → $NEW_VERSION"
 fi
-
-# Final version check
-FINAL_VERSION="unknown"
-if [ -f "$PANEL_DIR/VERSION" ]; then
-    FINAL_VERSION=$(cat "$PANEL_DIR/VERSION")
-fi
-
-log_success "=== Update Complete ==="
-log_info "Version: $CURRENT_VERSION → $FINAL_VERSION"
-log_info "Preserved: .env, database, server list, SSL config"

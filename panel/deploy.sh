@@ -584,6 +584,14 @@ EOF
 generate_nginx_config() {
     print_info "Generating nginx configuration..."
     
+    # Use separate script if available
+    if [ -f "$SCRIPT_DIR/scripts/generate-nginx-config.sh" ]; then
+        chmod +x "$SCRIPT_DIR/scripts/generate-nginx-config.sh"
+        bash "$SCRIPT_DIR/scripts/generate-nginx-config.sh" "$SCRIPT_DIR"
+        return
+    fi
+    
+    # Fallback inline generation
     if [ -z "$DOMAIN" ]; then
         print_error "DOMAIN variable is empty!"
         exit 1
