@@ -238,7 +238,8 @@ log_success "Docker cleanup done"
 # Rebuild Docker image
 log_info "Building new Docker image..."
 cd "$NODE_DIR"
-docker compose build --no-cache
+# Use --network=host to bypass Docker network isolation issues during build
+docker build --network=host -t monitoring-node-api .
 log_success "Image built"
 
 # Start containers

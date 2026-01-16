@@ -736,7 +736,8 @@ start_containers() {
         
         log_info "Building containers (attempt $((retry + 1))/$max_retries)..."
         
-        if docker compose build --no-cache 2>&1; then
+        # Use --network=host to bypass Docker network isolation issues during build
+        if docker build --network=host -t monitoring-node-api . 2>&1; then
             build_success=true
             break
         fi
