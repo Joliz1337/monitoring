@@ -95,63 +95,34 @@ apk add --no-cache git curl rsync bash >/dev/null 2>&1
 
 echo "[INFO] Installing Docker Compose..."
 mkdir -p /usr/local/lib/docker/cli-plugins
-COMPOSE_FILE="docker/compose/releases/latest/download/docker-compose-linux-x86_64"
-COMPOSE_MIRRORS="https://kkgithub.com/$COMPOSE_FILE https://hub.gitmirror.com/$COMPOSE_FILE https://ghproxy.com/https://github.com/$COMPOSE_FILE https://github.com/$COMPOSE_FILE"
-for mirror in $COMPOSE_MIRRORS; do
-    echo "  Trying: $(echo $mirror | sed 's|https://||' | cut -d'/' -f1)..."
-    if curl -fsSL --connect-timeout 15 --max-time 180 -o /usr/local/lib/docker/cli-plugins/docker-compose "$mirror" 2>/dev/null; then
-        chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
-        echo "  Docker Compose installed"
-        break
-    fi
-done
-
-echo "[INFO] Detecting server location..."
-COUNTRY=""
-COUNTRY=$(curl -fsSL --connect-timeout 5 --max-time 10 "http://ip-api.com/json?fields=countryCode" 2>/dev/null | grep -o '"countryCode":"[^"]*"' | cut -d'"' -f4 || echo "")
-if [ -z "$COUNTRY" ]; then
-    COUNTRY=$(curl -fsSL --connect-timeout 5 --max-time 10 "https://ipapi.co/country_code/" 2>/dev/null | tr -d '[:space:]' | head -c 2 || echo "")
+COMPOSE_URL="https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64"
+echo "  Trying GitHub (direct)..."
+if curl -fsSL --connect-timeout 15 --max-time 180 -o /usr/local/lib/docker/cli-plugins/docker-compose "$COMPOSE_URL" 2>/dev/null; then
+    chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+    echo "  Docker Compose installed"
+else
+    echo "  GitHub failed, trying ghfast.top..."
+    curl -fsSL --connect-timeout 15 --max-time 180 -o /usr/local/lib/docker/cli-plugins/docker-compose "https://ghfast.top/$COMPOSE_URL"
+    chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+    echo "  Docker Compose installed"
 fi
-echo "[INFO] Server location: $COUNTRY"
 
-# GitHub mirrors for Russia (replace-type mirrors that work with git clone)
-MIRRORS_RU="https://kkgithub.com https://hub.gitmirror.com"
+echo "[INFO] Cloning repository..."
+
+# GitHub mirror
+GITHUB_MIRROR="https://ghfast.top"
 
 TMP_CLONE=/tmp/monitoring-fresh
 rm -rf $TMP_CLONE
 CLONE_SUCCESS=0
 
-clone_repo() {{
-    local mirror="$1"
-    local repo_url
-    if [ "$mirror" = "direct" ]; then
-        repo_url="https://github.com/Joliz1337/monitoring.git"
-        echo "[INFO] Trying direct GitHub..."
-    else
-        repo_url="${{mirror}}/Joliz1337/monitoring.git"
-        echo "[INFO] Trying mirror: $(echo $mirror | sed 's|https://||')..."
-    fi
-    timeout 180 git clone --depth 1 --branch {ref_arg} "$repo_url" $TMP_CLONE 2>&1
-}}
-
-if [ "$COUNTRY" = "RU" ]; then
-    echo "[INFO] Russia detected - using GitHub mirrors"
-    for mirror in $MIRRORS_RU; do
-        if clone_repo "$mirror"; then
-            CLONE_SUCCESS=1
-            break
-        fi
-        rm -rf $TMP_CLONE
-        echo "[WARN] Mirror failed, trying next..."
-    done
-    if [ $CLONE_SUCCESS -eq 0 ]; then
-        echo "[INFO] All mirrors failed, trying direct GitHub..."
-        if clone_repo "direct"; then
-            CLONE_SUCCESS=1
-        fi
-    fi
+echo "[INFO] Trying GitHub (direct)..."
+if timeout 180 git clone --depth 1 --branch {ref_arg} "https://github.com/Joliz1337/monitoring.git" $TMP_CLONE 2>&1; then
+    CLONE_SUCCESS=1
 else
-    if clone_repo "direct"; then
+    rm -rf $TMP_CLONE
+    echo "[WARN] GitHub failed, trying ghfast.top..."
+    if timeout 180 git clone --depth 1 --branch {ref_arg} "$GITHUB_MIRROR/https://github.com/Joliz1337/monitoring.git" $TMP_CLONE 2>&1; then
         CLONE_SUCCESS=1
     fi
 fi
