@@ -189,13 +189,18 @@ async def list_servers(
                 # Get snapshot from bulk map instead of separate query
                 snapshot = snapshots_map.get(s.id)
                 server_info["metrics"] = enrich_metrics_with_speeds(metrics, snapshot)
-                server_info["status"] = "online"
+                # Status depends on whether server has recent errors
+                # If last_error is set, server is offline/error even if we have cached metrics
+                if s.last_error:
+                    server_info["status"] = "offline"
+                else:
+                    server_info["status"] = "online"
             except json.JSONDecodeError:
                 server_info["metrics"] = None
                 server_info["status"] = "error" if s.last_error else "loading"
         elif include_metrics:
             server_info["metrics"] = None
-            server_info["status"] = "error" if s.last_error else "loading"
+            server_info["status"] = "offline" if s.last_error else "loading"
         
         # Include cached traffic data if available
         if include_metrics and s.last_traffic_data:

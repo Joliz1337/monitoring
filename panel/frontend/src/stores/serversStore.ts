@@ -82,7 +82,9 @@ export const useServersStore = create<ServersState>((set, get) => ({
         ...s,
         // Traffic data now comes from server response
         traffic: (s as { traffic?: ServerTraffic }).traffic || null,
-        status: (s.status || (s.metrics ? 'online' : (s.last_error ? 'error' : 'loading'))) as 'online' | 'offline' | 'loading' | 'error',
+        // Status priority: backend status > error check > metrics check > loading
+        // If last_error exists, server is offline even if we have cached metrics
+        status: (s.status || (s.last_error ? 'offline' : (s.metrics ? 'online' : 'loading'))) as 'online' | 'offline' | 'loading' | 'error',
         lastUpdated: new Date(),
       }))
       set({ servers: serversWithStatus, isLoading: false })
