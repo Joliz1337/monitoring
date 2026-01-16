@@ -19,11 +19,11 @@ http {
         server backend:8000;
     }
 
-    # Redirect HTTP to HTTPS
+    # Drop all HTTP connections (no redirect - reveals nothing)
     server {
         listen 80;
         server_name ${DOMAIN};
-        return 301 https://$host$request_uri;
+        return 444;
     }
 
     # HTTPS server
@@ -46,14 +46,42 @@ http {
         # Request size limit
         client_max_body_size 10m;
 
-        # Security headers
+        # Security headers (only for valid paths)
         add_header X-Frame-Options DENY always;
         add_header X-Content-Type-Options nosniff always;
         add_header X-XSS-Protection "1; mode=block" always;
         add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
         add_header Referrer-Policy "strict-origin-when-cross-origin" always;
 
-        # Login endpoint - strict rate limiting (1 req/sec)
+        # Health check - internal only (for update scripts)
+        location = /health {
+            allow 127.0.0.1;
+            allow 172.16.0.0/12;
+            allow 10.0.0.0/8;
+            allow 192.168.0.0/16;
+            deny all;
+
+            proxy_pass http://backend/health;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+        }
+
+        # ===== PROTECTED PATHS (require correct UID) =====
+
+        # Frontend - only valid UID path
+        location ~ ^/${PANEL_UID}(/.*)?$ {
+            proxy_pass http://panel;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection 'upgrade';
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_cache_bypass $http_upgrade;
+        }
+
+        # Login endpoint - strict rate limiting
         location = /api/auth/login {
             limit_req zone=login_limit burst=3 nodelay;
             limit_conn conn_limit 5;
@@ -66,28 +94,30 @@ http {
             proxy_set_header X-Forwarded-Proto $scheme;
         }
 
-        # Public health check - minimal response for monitoring/update scripts
-        location = /health {
-            proxy_pass http://backend/health;
+        # UID validation endpoint
+        location = /api/auth/validate-uid {
+            limit_req zone=login_limit burst=5 nodelay;
+            limit_conn conn_limit 5;
+            
+            proxy_pass http://backend/auth/validate-uid;
             proxy_http_version 1.1;
             proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
         }
 
-        # Health endpoint - internal only (detailed)
-        location = /api/health {
-            # Only allow from internal networks
-            allow 127.0.0.1;
-            allow 172.16.0.0/12;
-            allow 10.0.0.0/8;
-            allow 192.168.0.0/16;
-            deny all;
-
-            proxy_pass http://backend/health;
+        # Auth check/logout
+        location ~ ^/api/auth/(check|logout)$ {
+            proxy_pass http://backend/auth/$1;
             proxy_http_version 1.1;
             proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
         }
 
-        # Certificate operations - longer timeout (certbot can take 2-3 minutes)
+        # Certificate operations - longer timeout
         location ~ ^/api/(proxy/\d+/haproxy/certs/(generate|renew|[^/]+/renew))$ {
             limit_req zone=api_limit burst=5 nodelay;
             limit_conn conn_limit 5;
@@ -99,7 +129,6 @@ http {
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto $scheme;
             
-            # Extended timeouts for certificate operations
             proxy_connect_timeout 60s;
             proxy_send_timeout 300s;
             proxy_read_timeout 300s;
@@ -134,23 +163,29 @@ http {
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto $scheme;
             
-            # Default timeouts
             proxy_connect_timeout 60s;
             proxy_send_timeout 60s;
             proxy_read_timeout 60s;
         }
 
-        # Frontend
-        location / {
-            proxy_pass http://panel;
+        # Static assets (required for frontend to load)
+        location /assets/ {
+            proxy_pass http://panel/assets/;
             proxy_http_version 1.1;
-            proxy_set_header Upgrade $http_upgrade;
-            proxy_set_header Connection 'upgrade';
             proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Proto $scheme;
-            proxy_cache_bypass $http_upgrade;
+        }
+
+        # Favicon
+        location = /favicon.svg {
+            proxy_pass http://panel/favicon.svg;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+        }
+
+        # ===== DROP ALL OTHER CONNECTIONS =====
+        # Any path not matching above = connection drop (no response)
+        location / {
+            return 444;
         }
     }
 }

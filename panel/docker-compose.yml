@@ -11,6 +11,7 @@ services:
       - /etc/letsencrypt:/etc/letsencrypt:ro
     environment:
       - DOMAIN=${DOMAIN}
+      - PANEL_UID=${PANEL_UID}
     depends_on:
       - frontend
     networks:

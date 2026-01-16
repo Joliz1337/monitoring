@@ -88,23 +88,9 @@ export default function Login() {
     )
   }
   
+  // Invalid UID - connection was dropped by nginx/backend, show nothing
   if (isValidUid === false) {
-    return (
-      <div className="min-h-screen bg-dark-950 flex items-center justify-center relative overflow-hidden">
-        <div className="absolute inset-0">
-          <div className="absolute top-1/4 left-1/4 w-64 h-64 bg-red-500/5 rounded-full blur-[80px]" />
-          <div className="absolute bottom-1/4 right-1/4 w-64 h-64 bg-dark-700/20 rounded-full blur-[80px]" />
-        </div>
-        <motion.div
-          initial={{ opacity: 0, scale: 0.9 }}
-          animate={{ opacity: 1, scale: 1 }}
-          className="relative z-10 text-center py-12 px-8"
-        >
-          <div className="text-8xl font-bold text-dark-700 mb-4">404</div>
-          <p className="text-dark-500 text-lg">Page not found</p>
-        </motion.div>
-      </div>
-    )
+    return <div className="min-h-screen bg-dark-950" />
   }
   
   return (
