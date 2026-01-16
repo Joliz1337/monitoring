@@ -374,7 +374,17 @@ check_connectivity() {
 disable_ipv6() {
     log_info "$(msg disabling_ipv6)"
     
-    # sysctl settings
+    # Check if IPv6 is already disabled in optimization config
+    if [ -f /etc/sysctl.d/99-vless-tuning.conf ] && grep -q "disable_ipv6 = 1" /etc/sysctl.d/99-vless-tuning.conf; then
+        log_success "IPv6 already disabled in optimization config"
+        # Just apply the existing settings
+        sysctl -w net.ipv6.conf.all.disable_ipv6=1 2>/dev/null || true
+        sysctl -w net.ipv6.conf.default.disable_ipv6=1 2>/dev/null || true
+        sysctl -w net.ipv6.conf.lo.disable_ipv6=1 2>/dev/null || true
+        return 0
+    fi
+    
+    # sysctl settings (separate file if optimizations not applied)
     cat > /etc/sysctl.d/99-disable-ipv6.conf << 'EOF'
 net.ipv6.conf.all.disable_ipv6 = 1
 net.ipv6.conf.default.disable_ipv6 = 1
@@ -657,9 +667,17 @@ copy_installer() {
 apply_system_optimizations() {
     log_info "$(msg optimizing_system)"
     
+    # Remove old separate IPv6 config if exists (now integrated into main config)
+    rm -f /etc/sysctl.d/99-disable-ipv6.conf 2>/dev/null || true
+    
     # sysctl config for high connections + anti-DDoS
     cat > /etc/sysctl.d/99-vless-tuning.conf << 'EOF'
 # System optimization for high connections + anti-DDoS
+
+# Disable IPv6 (improves network stability)
+net.ipv6.conf.all.disable_ipv6 = 1
+net.ipv6.conf.default.disable_ipv6 = 1
+net.ipv6.conf.lo.disable_ipv6 = 1
 
 # BBR
 net.ipv4.tcp_congestion_control = bbr

@@ -20,24 +20,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     dos2unix \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Docker Compose V2 plugin
-# Try multiple methods: GitHub -> ghfast.top mirror -> with SSL skip (for proxied networks)
-RUN mkdir -p /usr/local/lib/docker/cli-plugins \
-    && COMPOSE_URL="https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64" \
-    && COMPOSE_BIN="/usr/local/lib/docker/cli-plugins/docker-compose" \
-    && (echo "Trying GitHub (direct)..." \
-        && curl -fsSL --connect-timeout 15 --max-time 180 -o "$COMPOSE_BIN" "$COMPOSE_URL" \
-        && chmod +x "$COMPOSE_BIN" && "$COMPOSE_BIN" version) \
-    || (echo "Trying ghfast.top mirror..." \
-        && curl -fsSL --connect-timeout 15 --max-time 180 -o "$COMPOSE_BIN" "https://ghfast.top/$COMPOSE_URL" \
-        && chmod +x "$COMPOSE_BIN" && "$COMPOSE_BIN" version) \
-    || (echo "Trying with SSL skip (proxied network)..." \
-        && curl -fsSLk --connect-timeout 15 --max-time 180 -o "$COMPOSE_BIN" "https://ghfast.top/$COMPOSE_URL" \
-        && chmod +x "$COMPOSE_BIN" && "$COMPOSE_BIN" version) \
-    || (echo "Trying GitHub with SSL skip..." \
-        && curl -fsSLk --connect-timeout 15 --max-time 180 -o "$COMPOSE_BIN" "$COMPOSE_URL" \
-        && chmod +x "$COMPOSE_BIN" && "$COMPOSE_BIN" version) \
-    && test -x "$COMPOSE_BIN"
+# Install Docker Compose via pip (works behind corporate proxies)
+RUN pip install --no-cache-dir docker-compose \
+    && docker-compose --version
 
 # Copy requirements and install Python dependencies
 COPY requirements.txt .
