@@ -20,18 +20,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     dos2unix \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Docker Compose V2 plugin (try GitHub first, then ghfast.top mirror)
+# Install Docker Compose V2 plugin
+# Try multiple methods: GitHub -> ghfast.top mirror -> with SSL skip (for proxied networks)
 RUN mkdir -p /usr/local/lib/docker/cli-plugins \
     && COMPOSE_URL="https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64" \
-    && echo "Trying GitHub (direct)..." \
-    && (curl -fsSL --connect-timeout 15 --max-time 180 -o /usr/local/lib/docker/cli-plugins/docker-compose "$COMPOSE_URL" \
-        && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose \
-        && /usr/local/lib/docker/cli-plugins/docker-compose version) \
-    || (echo "GitHub failed, trying ghfast.top..." \
-        && curl -fsSL --connect-timeout 15 --max-time 180 -o /usr/local/lib/docker/cli-plugins/docker-compose "https://ghfast.top/$COMPOSE_URL" \
-        && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose \
-        && /usr/local/lib/docker/cli-plugins/docker-compose version) \
-    && test -x /usr/local/lib/docker/cli-plugins/docker-compose || exit 1
+    && COMPOSE_BIN="/usr/local/lib/docker/cli-plugins/docker-compose" \
+    && (echo "Trying GitHub (direct)..." \
+        && curl -fsSL --connect-timeout 15 --max-time 180 -o "$COMPOSE_BIN" "$COMPOSE_URL" \
+        && chmod +x "$COMPOSE_BIN" && "$COMPOSE_BIN" version) \
+    || (echo "Trying ghfast.top mirror..." \
+        && curl -fsSL --connect-timeout 15 --max-time 180 -o "$COMPOSE_BIN" "https://ghfast.top/$COMPOSE_URL" \
+        && chmod +x "$COMPOSE_BIN" && "$COMPOSE_BIN" version) \
+    || (echo "Trying with SSL skip (proxied network)..." \
+        && curl -fsSLk --connect-timeout 15 --max-time 180 -o "$COMPOSE_BIN" "https://ghfast.top/$COMPOSE_URL" \
+        && chmod +x "$COMPOSE_BIN" && "$COMPOSE_BIN" version) \
+    || (echo "Trying GitHub with SSL skip..." \
+        && curl -fsSLk --connect-timeout 15 --max-time 180 -o "$COMPOSE_BIN" "$COMPOSE_URL" \
+        && chmod +x "$COMPOSE_BIN" && "$COMPOSE_BIN" version) \
+    && test -x "$COMPOSE_BIN"
 
 # Copy requirements and install Python dependencies
 COPY requirements.txt .
