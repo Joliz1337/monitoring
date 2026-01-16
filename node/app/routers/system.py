@@ -93,23 +93,8 @@ set -e
 echo "[INFO] Installing dependencies..."
 apk add --no-cache git curl rsync bash >/dev/null 2>&1
 
-echo "[INFO] Installing Docker Compose..."
-mkdir -p /usr/local/lib/docker/cli-plugins
-COMPOSE_URL="https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64"
-COMPOSE_BIN="/usr/local/lib/docker/cli-plugins/docker-compose"
-COMPOSE_OK=0
-for method in "direct" "mirror" "direct-k" "mirror-k"; do
-    case $method in
-        direct)   echo "  Trying GitHub..."; curl -fsSL --connect-timeout 15 --max-time 180 -o "$COMPOSE_BIN" "$COMPOSE_URL" 2>/dev/null ;;
-        mirror)   echo "  Trying ghfast.top..."; curl -fsSL --connect-timeout 15 --max-time 180 -o "$COMPOSE_BIN" "https://ghfast.top/$COMPOSE_URL" 2>/dev/null ;;
-        direct-k) echo "  Trying GitHub (skip SSL)..."; curl -fsSLk --connect-timeout 15 --max-time 180 -o "$COMPOSE_BIN" "$COMPOSE_URL" 2>/dev/null ;;
-        mirror-k) echo "  Trying ghfast.top (skip SSL)..."; curl -fsSLk --connect-timeout 15 --max-time 180 -o "$COMPOSE_BIN" "https://ghfast.top/$COMPOSE_URL" 2>/dev/null ;;
-    esac
-    if [ -f "$COMPOSE_BIN" ] && chmod +x "$COMPOSE_BIN" && "$COMPOSE_BIN" version >/dev/null 2>&1; then
-        echo "  Docker Compose installed"; COMPOSE_OK=1; break
-    fi
-done
-[ $COMPOSE_OK -eq 0 ] && echo "  WARNING: Docker Compose installation failed"
+echo "[INFO] Docker Compose version:"
+docker compose version
 
 echo "[INFO] Cloning repository..."
 

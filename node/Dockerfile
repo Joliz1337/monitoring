@@ -20,13 +20,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     dos2unix \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Docker Compose via pip (works behind corporate proxies)
-RUN pip install --no-cache-dir docker-compose \
-    && docker-compose --version
-
 # Copy requirements and install Python dependencies
+# Use trusted-host flags to bypass SSL issues in corporate networks
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir \
+    --trusted-host pypi.org \
+    --trusted-host pypi.python.org \
+    --trusted-host files.pythonhosted.org \
+    -r requirements.txt
 
 # Copy application code
 COPY app/ ./app/
