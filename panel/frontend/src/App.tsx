@@ -1,5 +1,5 @@
 import { Routes, Route, Navigate } from 'react-router-dom'
-import { useEffect, useState } from 'react'
+import { useEffect } from 'react'
 import { motion } from 'framer-motion'
 import { Activity } from 'lucide-react'
 import { useAuthStore } from './stores/authStore'
@@ -110,36 +110,22 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>
 }
 
-function UidRedirect() {
-  const { fetchUid } = useAuthStore()
-  const { t } = useTranslation()
-  const [loading, setLoading] = useState(true)
-  const [uid, setUid] = useState<string | null>(null)
-  
-  useEffect(() => {
-    fetchUid().then((id) => {
-      setUid(id)
-      setLoading(false)
-    })
-  }, [fetchUid])
-  
-  if (loading) {
-    return <LoadingScreen />
-  }
-  
-  if (uid) {
-    return <Navigate to={`/${uid}`} replace />
-  }
-  
+function NotFoundPage() {
   return (
-    <div className="min-h-screen bg-dark-950 flex items-center justify-center">
+    <div className="min-h-screen bg-dark-950 flex items-center justify-center relative overflow-hidden">
+      {/* Background */}
+      <div className="absolute inset-0">
+        <div className="absolute top-1/4 left-1/4 w-64 h-64 bg-red-500/5 rounded-full blur-[80px]" />
+        <div className="absolute bottom-1/4 right-1/4 w-64 h-64 bg-dark-700/20 rounded-full blur-[80px]" />
+      </div>
+      
       <motion.div
         initial={{ opacity: 0, scale: 0.9 }}
         animate={{ opacity: 1, scale: 1 }}
-        className="card text-center py-12 px-8"
+        className="relative z-10 text-center py-12 px-8"
       >
-        <Activity className="w-12 h-12 text-dark-600 mx-auto mb-4" />
-        <p className="text-dark-400">{t('app.panel_not_configured')}</p>
+        <div className="text-8xl font-bold text-dark-700 mb-4">404</div>
+        <p className="text-dark-500 text-lg">Page not found</p>
       </motion.div>
     </div>
   )
@@ -148,7 +134,7 @@ function UidRedirect() {
 export default function App() {
   return (
     <Routes>
-      <Route path="/" element={<UidRedirect />} />
+      <Route path="/" element={<NotFoundPage />} />
       <Route path="/:uid/login" element={<Login />} />
       <Route
         path="/:uid"
@@ -167,6 +153,8 @@ export default function App() {
         <Route path="settings" element={<Settings />} />
         <Route path="updates" element={<Updates />} />
       </Route>
+      {/* Catch-all for unknown routes */}
+      <Route path="*" element={<NotFoundPage />} />
     </Routes>
   )
 }

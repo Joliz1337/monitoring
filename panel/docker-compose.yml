@@ -33,8 +33,6 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-      args:
-        - PANEL_UID=${PANEL_UID}
     container_name: panel-frontend
     restart: unless-stopped
     depends_on:

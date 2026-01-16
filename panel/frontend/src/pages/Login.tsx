@@ -15,7 +15,7 @@ const floatingShapes = [
 export default function Login() {
   const { uid } = useParams()
   const navigate = useNavigate()
-  const { login, checkAuth, fetchUid } = useAuthStore()
+  const { login, checkAuth, validateUid } = useAuthStore()
   const { t } = useTranslation()
   
   const [password, setPassword] = useState('')
@@ -27,8 +27,14 @@ export default function Login() {
   
   useEffect(() => {
     const validateAndCheck = async () => {
-      const correctUid = await fetchUid()
-      if (correctUid && uid !== correctUid) {
+      if (!uid) {
+        setIsValidUid(false)
+        return
+      }
+      
+      // Validate UID on backend (connection drops if invalid)
+      const isValid = await validateUid(uid)
+      if (!isValid) {
         setIsValidUid(false)
         return
       }
@@ -40,7 +46,7 @@ export default function Login() {
       }
     }
     validateAndCheck()
-  }, [uid, fetchUid, checkAuth, navigate])
+  }, [uid, validateUid, checkAuth, navigate])
   
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
@@ -84,22 +90,18 @@ export default function Login() {
   
   if (isValidUid === false) {
     return (
-      <div className="min-h-screen bg-dark-950 flex items-center justify-center p-4">
-        <motion.div 
-          className="card max-w-md w-full text-center py-12"
-          initial={{ opacity: 0, scale: 0.9, y: 20 }}
-          animate={{ opacity: 1, scale: 1, y: 0 }}
-          transition={{ duration: 0.5 }}
+      <div className="min-h-screen bg-dark-950 flex items-center justify-center relative overflow-hidden">
+        <div className="absolute inset-0">
+          <div className="absolute top-1/4 left-1/4 w-64 h-64 bg-red-500/5 rounded-full blur-[80px]" />
+          <div className="absolute bottom-1/4 right-1/4 w-64 h-64 bg-dark-700/20 rounded-full blur-[80px]" />
+        </div>
+        <motion.div
+          initial={{ opacity: 0, scale: 0.9 }}
+          animate={{ opacity: 1, scale: 1 }}
+          className="relative z-10 text-center py-12 px-8"
         >
-          <motion.div
-            initial={{ scale: 0 }}
-            animate={{ scale: 1 }}
-            transition={{ delay: 0.2, type: 'spring' }}
-          >
-            <AlertCircle className="w-16 h-16 text-danger mx-auto mb-4" />
-          </motion.div>
-          <h1 className="text-xl font-semibold text-dark-100 mb-2">{t('login.access_denied')}</h1>
-          <p className="text-dark-400">{t('login.invalid_url')}</p>
+          <div className="text-8xl font-bold text-dark-700 mb-4">404</div>
+          <p className="text-dark-500 text-lg">Page not found</p>
         </motion.div>
       </div>
     )

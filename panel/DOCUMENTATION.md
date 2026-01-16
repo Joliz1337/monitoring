@@ -54,7 +54,7 @@ panel/
 | Параметр | Описание | Default |
 |----------|----------|---------|
 | DOMAIN | Домен панели | required |
-| PANEL_UID | Уникальный ID для URL | auto |
+| PANEL_UID | Секретный путь для доступа (domain.com/{uid}) | auto |
 | PANEL_PASSWORD | Пароль для входа | auto |
 | JWT_SECRET | Секрет для JWT | auto |
 | JWT_EXPIRE_MINUTES | Время жизни токена | 1440 |
@@ -68,11 +68,12 @@ panel/
 
 ## Безопасность
 
+- **Секретный URL**: панель доступна только по `domain.com/{PANEL_UID}` — при неверном UID соединение разрывается
 - **JWT в httpOnly cookie** (secure, samesite=strict)
 - **Anti-brute force**: 5 попыток = бан на 15 минут
 - **TLS 1.2/1.3** с сильными шифрами
 - **Rate limiting**: 60 req/min для неавторизованных
-- **Connection drop**: все ошибки авторизации (401/403/429) приводят к разрыву соединения без HTTP-ответа — атакующий не получает никакой информации
+- **Connection drop**: все ошибки авторизации (401/403/429) и неверный UID приводят к разрыву соединения без HTTP-ответа — атакующий не получает никакой информации
 
 ## API
 
@@ -100,6 +101,7 @@ panel/
 
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
+| POST | /api/auth/validate-uid | Проверка UID (drop connection при неверном) |
 | POST | /api/auth/login | Вход |
 | POST | /api/auth/logout | Выход |
 | GET | /api/auth/check | Проверка сессии |

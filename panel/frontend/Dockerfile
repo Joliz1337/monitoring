@@ -2,10 +2,6 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-# Build argument for panel UID (injected at build time)
-ARG PANEL_UID
-ENV VITE_PANEL_UID=${PANEL_UID}
-
 COPY package.json ./
 RUN npm install
 

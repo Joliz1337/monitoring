@@ -4,18 +4,16 @@ import { authApi } from '../api/client'
 interface AuthState {
   isAuthenticated: boolean
   isLoading: boolean
-  panelUid: string | null
   
   checkAuth: () => Promise<boolean>
   login: (password: string) => Promise<{ success: boolean; error?: string }>
   logout: () => Promise<void>
-  fetchUid: () => Promise<string | null>
+  validateUid: (uid: string) => Promise<boolean>
 }
 
 export const useAuthStore = create<AuthState>((set) => ({
   isAuthenticated: false,
   isLoading: true,
-  panelUid: null,
   
   checkAuth: async () => {
     try {
@@ -48,20 +46,13 @@ export const useAuthStore = create<AuthState>((set) => ({
     }
   },
   
-  fetchUid: async () => {
-    // Get UID from build-time env variable (secure - not exposed via API)
-    const envUid = import.meta.env.VITE_PANEL_UID
-    if (envUid) {
-      set({ panelUid: envUid })
-      return envUid
-    }
-    // Fallback for development only
+  validateUid: async (uid: string) => {
     try {
-      const { data } = await authApi.getUid()
-      set({ panelUid: data.uid })
-      return data.uid
+      const { data } = await authApi.validateUid(uid)
+      return data.valid
     } catch {
-      return null
+      // Connection dropped or error = invalid UID
+      return false
     }
   },
 }))

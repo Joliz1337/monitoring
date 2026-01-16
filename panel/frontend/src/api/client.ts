@@ -328,7 +328,7 @@ export const authApi = {
   login: (password: string) => api.post('/auth/login', { password }),
   logout: () => api.post('/auth/logout'),
   check: () => api.get('/auth/check'),
-  getUid: () => api.get<{ uid: string }>('/auth/uid'),
+  validateUid: (uid: string) => api.post<{ valid: boolean }>('/auth/validate-uid', { uid }),
 }
 
 export interface ServerWithMetrics extends Server {

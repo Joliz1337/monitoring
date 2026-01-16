@@ -1,3 +1,5 @@
+import secrets
+
 from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
@@ -5,6 +7,7 @@ from pydantic import BaseModel
 from app.database import get_db
 from app.auth import login, verify_auth
 from app.config import get_settings
+from app.security import drop_connection
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 settings = get_settings()
@@ -12,6 +15,19 @@ settings = get_settings()
 
 class LoginRequest(BaseModel):
     password: str
+
+
+class ValidateUidRequest(BaseModel):
+    uid: str
+
+
+@router.post("/validate-uid")
+async def validate_uid(data: ValidateUidRequest):
+    """Validate panel UID - timing-safe comparison, drops connection on invalid"""
+    is_valid = secrets.compare_digest(data.uid, settings.panel_uid)
+    if not is_valid:
+        drop_connection()
+    return {"valid": True}
 
 
 @router.post("/login")
@@ -33,9 +49,3 @@ async def auth_logout(response: Response):
 @router.get("/check")
 async def check_auth(_: dict = Depends(verify_auth)):
     return {"authenticated": True}
-
-
-@router.get("/uid")
-async def get_panel_uid(_: dict = Depends(verify_auth)):
-    """Get panel UID - requires authentication (use VITE_PANEL_UID env in production)"""
-    return {"uid": settings.panel_uid}
