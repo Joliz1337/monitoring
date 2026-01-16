@@ -29,48 +29,6 @@ ensure_haproxy_dir() {
     fi
 }
 
-# Migrate config from old Docker volume to /etc/haproxy (for upgrades from older versions)
-migrate_from_docker_volume() {
-    # Find old haproxy_config volume
-    local volume_name
-    volume_name=$(docker volume ls -q | grep "haproxy_config" | head -1)
-    
-    if [ -z "$volume_name" ]; then
-        return 0  # No old volume to migrate
-    fi
-    
-    # Check if host config already exists
-    if [ -f "/etc/haproxy/haproxy.cfg" ]; then
-        log_info "Host config already exists at /etc/haproxy/haproxy.cfg"
-        return 0
-    fi
-    
-    log_info "Found old Docker volume: $volume_name"
-    log_info "Migrating config from Docker volume to /etc/haproxy..."
-    
-    # Extract config from old volume
-    local old_config
-    old_config=$(docker run --rm -v "$volume_name:/vol:ro" busybox cat /vol/haproxy.cfg 2>/dev/null) || \
-    old_config=$(docker run --rm -v "$volume_name:/vol:ro" alpine cat /vol/haproxy.cfg 2>/dev/null) || \
-    old_config=""
-    
-    if [ -n "$old_config" ]; then
-        ensure_haproxy_dir
-        echo "$old_config" > /etc/haproxy/haproxy.cfg
-        chmod 644 /etc/haproxy/haproxy.cfg
-        log_success "Config migrated from Docker volume to /etc/haproxy/haproxy.cfg"
-        
-        # Create backup before removing volume
-        cp /etc/haproxy/haproxy.cfg "/tmp/haproxy.cfg.backup.$(date +%Y%m%d_%H%M%S)"
-        
-        # Remove old volume (will be recreated as bind mount)
-        log_info "Removing old Docker volume: $volume_name"
-        docker volume rm "$volume_name" 2>/dev/null || true
-    else
-        log_warn "Could not read config from old volume"
-    fi
-}
-
 NODE_DIR="/opt/monitoring-node"
 TMP_DIR="/tmp/monitoring-update-$$"
 TARGET_REF="${1:-main}"
@@ -295,9 +253,6 @@ log_success "Image built"
 
 # Ensure /etc/haproxy directory exists for bind mount
 ensure_haproxy_dir
-
-# Migrate config from old Docker volume if upgrading from older version
-migrate_from_docker_volume
 
 # Start containers
 log_info "Starting containers..."

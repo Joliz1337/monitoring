@@ -437,50 +437,29 @@ defaults
         
         # Container doesn't exist - create it via Docker API
         try:
-            # Find the haproxy_config volume (created by docker-compose)
-            # Docker-compose prefixes volume names with project directory name
-            volumes = self.docker_client.volumes.list()
-            config_volume = None
-            
-            # Priority: exact match "server_haproxy_config", then any containing "haproxy_config"
-            for v in volumes:
-                if v.name == "server_haproxy_config":
-                    config_volume = v.name
-                    break
-                if 'haproxy_config' in v.name and config_volume is None:
-                    config_volume = v.name
-            
-            if not config_volume:
-                # Create volume if not exists
-                config_volume = self.docker_client.volumes.create(
-                    name="server_haproxy_config"
-                ).name
-                logger.info(f"Created volume: {config_volume}")
-                
-                # Initialize config in new volume
-                self.init_config()
-            
-            # Make sure config exists before starting container
+            # Check if config exists on host (bind mount path)
             if not self.config_path.exists():
-                logger.info("HAProxy config not found, initializing...")
-                self.init_config()
+                return False, f"HAProxy config not found at {self.config_path}. Create config first."
             
             # Validate config before creating container
             is_valid, config_error = self.check_config()
             if not is_valid:
                 return False, f"Config validation failed: {config_error}"
             
-            logger.info(f"Creating HAProxy container with volume: {config_volume}")
+            # Ensure config directory exists
+            self.config_path.parent.mkdir(parents=True, exist_ok=True)
             
-            # Create container with same params as docker-compose
-            # Note: haproxy:alpine expects config in /usr/local/etc/haproxy
+            logger.info("Creating HAProxy container with bind mount /etc/haproxy")
+            
+            # Create container with bind mount (same as docker-compose.yml)
+            # /etc/haproxy on host -> /usr/local/etc/haproxy in container
             container = self.docker_client.containers.create(
                 image="haproxy:2.9-alpine",
                 name=self.settings.haproxy_container_name,
                 user="root",
                 network_mode="host",
                 volumes={
-                    config_volume: {"bind": "/usr/local/etc/haproxy", "mode": "rw"},
+                    "/etc/haproxy": {"bind": "/usr/local/etc/haproxy", "mode": "rw"},
                     "/etc/letsencrypt": {"bind": "/etc/letsencrypt", "mode": "ro"},
                 },
                 ulimits=[
@@ -492,7 +471,7 @@ defaults
             )
             
             container.start()
-            logger.info(f"HAProxy container created and started via Docker API (volume: {config_volume})")
+            logger.info("HAProxy container created and started via Docker API (bind mount: /etc/haproxy)")
             # Invalidate cache
             self._status_cache = None
             
@@ -656,9 +635,15 @@ defaults
         self._backup_config()
         content = self._read_config()
         
-        if not content or RULES_START_MARKER not in content:
+        if not content:
+            # No config exists - initialize with base config
             self.init_config()
             content = self._read_config()
+        elif RULES_START_MARKER not in content:
+            # Config exists but doesn't have our markers - add them at the end
+            logger.info("Adding rule markers to existing config")
+            content = content.rstrip() + f"\n\n{RULES_START_MARKER}\n{RULES_END_MARKER}\n"
+            self._write_config(content)
         
         frontend_name = f"{rule.rule_type}_{rule.name}"
         backend_name = f"backend_{rule.rule_type}_{rule.name}"
