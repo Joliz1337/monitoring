@@ -95,11 +95,11 @@ apk add --no-cache git curl rsync bash >/dev/null 2>&1
 
 echo "[INFO] Installing Docker Compose..."
 mkdir -p /usr/local/lib/docker/cli-plugins
-COMPOSE_URL="https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64"
-COMPOSE_MIRRORS="https://ghproxy.com/$COMPOSE_URL https://mirror.ghproxy.com/$COMPOSE_URL https://github.moeyy.xyz/$COMPOSE_URL $COMPOSE_URL"
+COMPOSE_FILE="docker/compose/releases/latest/download/docker-compose-linux-x86_64"
+COMPOSE_MIRRORS="https://kkgithub.com/$COMPOSE_FILE https://hub.gitmirror.com/$COMPOSE_FILE https://ghproxy.com/https://github.com/$COMPOSE_FILE https://github.com/$COMPOSE_FILE"
 for mirror in $COMPOSE_MIRRORS; do
-    echo "  Trying: $(echo $mirror | cut -d'/' -f3)..."
-    if curl -fsSL --connect-timeout 10 --max-time 120 -o /usr/local/lib/docker/cli-plugins/docker-compose "$mirror" 2>/dev/null; then
+    echo "  Trying: $(echo $mirror | sed 's|https://||' | cut -d'/' -f1)..."
+    if curl -fsSL --connect-timeout 15 --max-time 180 -o /usr/local/lib/docker/cli-plugins/docker-compose "$mirror" 2>/dev/null; then
         chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
         echo "  Docker Compose installed"
         break
@@ -114,8 +114,8 @@ if [ -z "$COUNTRY" ]; then
 fi
 echo "[INFO] Server location: $COUNTRY"
 
-# GitHub mirrors for Russia
-MIRRORS_RU="https://ghproxy.com/https://github.com https://mirror.ghproxy.com/https://github.com https://github.moeyy.xyz/https://github.com"
+# GitHub mirrors for Russia (replace-type mirrors that work with git clone)
+MIRRORS_RU="https://kkgithub.com https://hub.gitmirror.com"
 
 TMP_CLONE=/tmp/monitoring-fresh
 rm -rf $TMP_CLONE
@@ -129,9 +129,9 @@ clone_repo() {{
         echo "[INFO] Trying direct GitHub..."
     else
         repo_url="${{mirror}}/Joliz1337/monitoring.git"
-        echo "[INFO] Trying mirror: $(echo $mirror | sed 's|https://||' | cut -d'/' -f1)..."
+        echo "[INFO] Trying mirror: $(echo $mirror | sed 's|https://||')..."
     fi
-    timeout 120 git clone --depth 1 --branch {ref_arg} "$repo_url" $TMP_CLONE 2>&1
+    timeout 180 git clone --depth 1 --branch {ref_arg} "$repo_url" $TMP_CLONE 2>&1
 }}
 
 if [ "$COUNTRY" = "RU" ]; then

@@ -22,12 +22,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install Docker Compose V2 plugin with mirror fallback for Russia
 RUN mkdir -p /usr/local/lib/docker/cli-plugins \
-    && COMPOSE_URL="https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64" \
-    && MIRRORS="https://ghproxy.com/$COMPOSE_URL https://mirror.ghproxy.com/$COMPOSE_URL https://github.moeyy.xyz/$COMPOSE_URL $COMPOSE_URL" \
+    && COMPOSE_FILE="docker/compose/releases/latest/download/docker-compose-linux-x86_64" \
+    && MIRRORS="https://kkgithub.com/$COMPOSE_FILE https://hub.gitmirror.com/$COMPOSE_FILE https://ghproxy.com/https://github.com/$COMPOSE_FILE https://github.com/$COMPOSE_FILE" \
     && for mirror in $MIRRORS; do \
-         echo "Trying: $(echo $mirror | cut -d'/' -f3)..." \
-         && curl -fsSL --connect-timeout 10 --max-time 120 -o /usr/local/lib/docker/cli-plugins/docker-compose "$mirror" \
+         echo "Trying: $(echo $mirror | sed 's|https://||' | cut -d'/' -f1)..." \
+         && curl -fsSL --connect-timeout 15 --max-time 180 -o /usr/local/lib/docker/cli-plugins/docker-compose "$mirror" \
          && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose \
+         && /usr/local/lib/docker/cli-plugins/docker-compose version \
          && break || echo "Failed, trying next..."; \
        done \
     && test -x /usr/local/lib/docker/cli-plugins/docker-compose || exit 1

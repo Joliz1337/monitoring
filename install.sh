@@ -33,20 +33,22 @@ LANG_CODE="en"
 # Server country (auto-detect)
 SERVER_COUNTRY=""
 
-# GitHub mirrors for Russia (proxy-based)
+# GitHub mirrors for Russia
+# Format: "type:base_url" where type is 'proxy' (prepend full URL) or 'replace' (replace github.com)
 GITHUB_MIRRORS_RU=(
-    "https://ghproxy.com/https://github.com"
-    "https://mirror.ghproxy.com/https://github.com"
-    "https://github.moeyy.xyz/https://github.com"
-    "https://gh.ddlc.top/https://github.com"
+    "replace:https://kkgithub.com"
+    "replace:https://hub.gitmirror.com"
+    "proxy:https://ghproxy.com"
+    "proxy:https://gh-proxy.com"
+    "direct:https://github.com"
 )
 
-# GitHub mirrors for other countries (direct or CDN)
+# GitHub mirrors for other countries
 GITHUB_MIRRORS_OTHER=(
-    "https://github.com"
+    "direct:https://github.com"
 )
 
-# Current active mirror
+# Current active mirror (format: "type:base_url")
 ACTIVE_GITHUB_MIRROR=""
 
 # Docker mirror list
@@ -299,29 +301,83 @@ detect_country() {
     fi
 }
 
+# Build raw file URL based on mirror type
+# Usage: build_raw_url "type:base_url" "user/repo" "branch" "file_path"
+build_raw_url() {
+    local mirror="$1"
+    local repo="$2"
+    local branch="$3"
+    local file_path="$4"
+    
+    local mirror_type="${mirror%%:*}"
+    local mirror_base="${mirror#*:}"
+    
+    case "$mirror_type" in
+        direct)
+            echo "https://raw.githubusercontent.com/${repo}/${branch}/${file_path}"
+            ;;
+        replace)
+            # Replace github.com with mirror domain, use raw path
+            echo "${mirror_base}/${repo}/raw/${branch}/${file_path}"
+            ;;
+        proxy)
+            # Proxy: prepend proxy URL to full raw URL
+            echo "${mirror_base}/https://raw.githubusercontent.com/${repo}/${branch}/${file_path}"
+            ;;
+    esac
+}
+
+# Build git clone URL based on mirror type
+# Usage: build_clone_url "type:base_url" "user/repo"
+build_clone_url() {
+    local mirror="$1"
+    local repo="$2"
+    
+    local mirror_type="${mirror%%:*}"
+    local mirror_base="${mirror#*:}"
+    
+    case "$mirror_type" in
+        direct)
+            echo "https://github.com/${repo}.git"
+            ;;
+        replace)
+            # Replace github.com with mirror domain
+            echo "${mirror_base}/${repo}.git"
+            ;;
+        proxy)
+            # Proxy: prepend proxy URL to full github URL
+            echo "${mirror_base}/https://github.com/${repo}.git"
+            ;;
+    esac
+}
+
+# Get display name for mirror
+get_mirror_name() {
+    local mirror="$1"
+    local mirror_type="${mirror%%:*}"
+    local mirror_base="${mirror#*:}"
+    
+    if [ "$mirror_type" = "direct" ]; then
+        echo "GitHub (direct)"
+    else
+        echo "$mirror_base" | sed 's|https://||'
+    fi
+}
+
 # Test download speed from a mirror (returns speed in KB/s or 0 if failed)
 test_mirror_speed() {
-    local mirror_base="$1"
-    local test_file="main/VERSION"
+    local mirror="$1"
     local test_url
     
-    # Build test URL based on mirror type
-    if [ "$mirror_base" = "https://github.com" ]; then
-        test_url="https://raw.githubusercontent.com/Joliz1337/monitoring/main/VERSION"
-    else
-        # Proxy mirrors: append raw URL
-        test_url="${mirror_base}/Joliz1337/monitoring/raw/main/VERSION"
-    fi
+    test_url=$(build_raw_url "$mirror" "Joliz1337/monitoring" "main" "VERSION")
     
-    # Download with speed measurement (5 second timeout)
-    local start_time=$(date +%s%N)
+    # Download with speed measurement
     local result
-    result=$(curl -fsSL --connect-timeout 5 --max-time 10 -w "%{speed_download}" -o /dev/null "$test_url" 2>/dev/null)
+    result=$(curl -fsSL --connect-timeout 10 --max-time 15 -w "%{speed_download}" -o /dev/null "$test_url" 2>/dev/null)
     
     if [ $? -eq 0 ] && [ -n "$result" ]; then
         # Convert bytes/sec to KB/s
-        local speed_kbs=$(echo "$result" | awk '{printf "%.0f", $1/1024}')
-        echo "$speed_kbs"
+        echo "$result" | awk '{printf "%.0f", $1/1024}'
     else
         echo "0"
     fi
@@ -345,11 +401,7 @@ select_best_mirror() {
     # Test each mirror
     for mirror in "${mirrors[@]}"; do
         local display_name
-        if [ "$mirror" = "https://github.com" ]; then
-            display_name="GitHub (direct)"
-        else
-            display_name=$(echo "$mirror" | sed 's|https://||' | cut -d'/' -f1)
-        fi
+        display_name=$(get_mirror_name "$mirror")
         
         echo -n "  Testing $display_name... "
         
@@ -368,17 +420,13 @@ select_best_mirror() {
         fi
     done
     
-    # If all mirrors failed, try direct GitHub as fallback
+    # If all mirrors failed, use direct GitHub as fallback
     if [ -z "$best_mirror" ]; then
         log_warn "$(msg all_mirrors_failed)"
-        best_mirror="https://github.com"
+        best_mirror="direct:https://github.com"
     else
         local display_name
-        if [ "$best_mirror" = "https://github.com" ]; then
-            display_name="GitHub (direct)"
-        else
-            display_name=$(echo "$best_mirror" | sed 's|https://||' | cut -d'/' -f1)
-        fi
+        display_name=$(get_mirror_name "$best_mirror")
         log_success "$(msg mirror_selected): $display_name (${best_speed} KB/s)"
     fi
     
@@ -389,8 +437,6 @@ select_best_mirror() {
 clone_repo_with_mirror() {
     local target_dir="$1"
     local branch="${2:-main}"
-    local max_retries=3
-    local retry=0
     
     # Ensure we have a mirror selected
     if [ -z "$ACTIVE_GITHUB_MIRROR" ]; then
@@ -401,7 +447,7 @@ clone_repo_with_mirror() {
     
     # Build mirror list: active first, then others as fallback
     if [ "$SERVER_COUNTRY" = "RU" ]; then
-        mirrors=("$ACTIVE_GITHUB_MIRROR" "${GITHUB_MIRRORS_RU[@]}" "https://github.com")
+        mirrors=("$ACTIVE_GITHUB_MIRROR" "${GITHUB_MIRRORS_RU[@]}")
     else
         mirrors=("$ACTIVE_GITHUB_MIRROR" "${GITHUB_MIRRORS_OTHER[@]}")
     fi
@@ -416,38 +462,28 @@ clone_repo_with_mirror() {
         fi
     done
     
+    local attempt=0
     for mirror in "${unique_mirrors[@]}"; do
         local repo_url
-        
-        if [ "$mirror" = "https://github.com" ]; then
-            repo_url="https://github.com/Joliz1337/monitoring.git"
-        else
-            # For proxy mirrors, we need to use HTTP clone through proxy
-            repo_url="${mirror}/Joliz1337/monitoring.git"
-        fi
+        repo_url=$(build_clone_url "$mirror" "Joliz1337/monitoring")
         
         local display_name
-        if [ "$mirror" = "https://github.com" ]; then
-            display_name="GitHub (direct)"
-        else
-            display_name=$(echo "$mirror" | sed 's|https://||' | cut -d'/' -f1)
-        fi
+        display_name=$(get_mirror_name "$mirror")
         
         log_info "Downloading from $display_name..."
         
         rm -rf "$target_dir"
         
         # Try to clone with timeout
-        if timeout 120 git clone --depth 1 --branch "$branch" "$repo_url" "$target_dir" 2>&1; then
+        if timeout 180 git clone --depth 1 --branch "$branch" "$repo_url" "$target_dir" 2>&1; then
             log_success "$(msg repo_downloaded)"
             return 0
         fi
         
-        log_warn "$(msg download_timeout)"
-        retry=$((retry + 1))
+        attempt=$((attempt + 1))
         
-        if [ $retry -lt ${#unique_mirrors[@]} ]; then
-            log_info "$(msg download_slow)"
+        if [ $attempt -lt ${#unique_mirrors[@]} ]; then
+            log_warn "$(msg download_slow)"
         fi
     done
     
