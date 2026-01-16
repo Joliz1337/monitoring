@@ -670,82 +670,142 @@ apply_system_optimizations() {
     # Remove old separate IPv6 config if exists (now integrated into main config)
     rm -f /etc/sysctl.d/99-disable-ipv6.conf 2>/dev/null || true
     
-    # sysctl config for high connections + anti-DDoS
+    # sysctl config for VLESS+Reality VPN, gaming stability, anti-DDoS
     cat > /etc/sysctl.d/99-vless-tuning.conf << 'EOF'
-# System optimization for high connections + anti-DDoS
+# =============================================================================
+# System optimization for VLESS+Reality VPN
+# - High connection limits (no bottlenecks)
+# - Fast dead connection cleanup
+# - Gaming stability (low latency, no drops)
+# - Basic anti-DDoS protection
+# =============================================================================
 
-# Disable IPv6 (improves network stability)
+# --- Disable IPv6 (improves stability, reduces attack surface) ---
 net.ipv6.conf.all.disable_ipv6 = 1
 net.ipv6.conf.default.disable_ipv6 = 1
 net.ipv6.conf.lo.disable_ipv6 = 1
 
-# BBR
+# --- BBR Congestion Control (best for VPN throughput) ---
 net.ipv4.tcp_congestion_control = bbr
 net.core.default_qdisc = fq
 
-# File Descriptors
-fs.file-max = 2097152
-fs.nr_open = 2097152
+# --- File Descriptors (massive limits) ---
+fs.file-max = 10485760
+fs.nr_open = 10485760
 
-# Buffers
-net.core.rmem_max = 134217728
-net.core.wmem_max = 134217728
-net.ipv4.tcp_rmem = 4096 131072 67108864
-net.ipv4.tcp_wmem = 4096 87380 67108864
-net.ipv4.tcp_moderate_rcvbuf = 1
+# --- Socket Buffers (large for high throughput) ---
+net.core.rmem_default = 1048576
+net.core.wmem_default = 1048576
+net.core.rmem_max = 536870912
+net.core.wmem_max = 536870912
+net.core.optmem_max = 65536
+net.ipv4.tcp_rmem = 4096 1048576 536870912
+net.ipv4.tcp_wmem = 4096 65536 536870912
+net.ipv4.udp_rmem_min = 8192
+net.ipv4.udp_wmem_min = 8192
+net.ipv4.tcp_mem = 786432 1048576 26777216
+net.ipv4.udp_mem = 65536 131072 262144
 
-# Queues
+# --- Connection Queues (high limits) ---
 net.core.somaxconn = 65535
 net.ipv4.tcp_max_syn_backlog = 65535
-net.core.netdev_max_backlog = 65535
-net.core.netdev_budget = 600
+net.core.netdev_max_backlog = 250000
+net.core.netdev_budget = 50000
+net.core.netdev_budget_usecs = 5000
 
-# TCP Performance
+# --- TCP Performance (gaming + VPN optimized) ---
 net.ipv4.tcp_fastopen = 3
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
 net.ipv4.tcp_timestamps = 1
 net.ipv4.tcp_sack = 1
+net.ipv4.tcp_dsack = 1
+net.ipv4.tcp_window_scaling = 1
+net.ipv4.tcp_adv_win_scale = 2
+net.ipv4.tcp_moderate_rcvbuf = 1
+net.ipv4.tcp_no_metrics_save = 1
+net.ipv4.tcp_ecn = 0
+net.ipv4.tcp_frto = 2
 
-# TIME-WAIT
+# --- TCP Retries (balanced for stability) ---
+net.ipv4.tcp_retries1 = 3
+net.ipv4.tcp_retries2 = 8
+
+# --- TIME-WAIT (fast cleanup, huge limits) ---
 net.ipv4.tcp_max_tw_buckets = 2000000
 net.ipv4.tcp_tw_reuse = 1
 net.ipv4.ip_local_port_range = 1024 65535
 
-# Orphans
-net.ipv4.tcp_max_orphans = 262144
-net.ipv4.tcp_orphan_retries = 1
+# --- Orphaned Connections (moderate - don't break VPN) ---
+net.ipv4.tcp_max_orphans = 524288
+net.ipv4.tcp_orphan_retries = 2
 
-# Keepalive
-net.ipv4.tcp_keepalive_time = 600
-net.ipv4.tcp_keepalive_probes = 3
-net.ipv4.tcp_keepalive_intvl = 30
+# --- Keepalive (detect dead connections faster) ---
+net.ipv4.tcp_keepalive_time = 120
+net.ipv4.tcp_keepalive_probes = 5
+net.ipv4.tcp_keepalive_intvl = 15
 
-# Anti-DDoS
+# --- Fast Close of Dead Connections ---
+net.ipv4.tcp_fin_timeout = 10
+
+# --- Anti-DDoS: SYN Flood Protection ---
 net.ipv4.tcp_syncookies = 1
-net.ipv4.tcp_syn_retries = 3
-net.ipv4.tcp_synack_retries = 3
-net.ipv4.tcp_fin_timeout = 20
+net.ipv4.tcp_syn_retries = 2
+net.ipv4.tcp_synack_retries = 2
+net.ipv4.tcp_rfc1337 = 1
 
-# IP spoofing protection
+# --- Anti-DDoS: IP Spoofing Protection ---
 net.ipv4.conf.all.rp_filter = 1
 net.ipv4.conf.default.rp_filter = 1
+net.ipv4.conf.all.log_martians = 0
+net.ipv4.conf.default.log_martians = 0
 
-# ICMP protection
+# --- Anti-DDoS: ICMP Protection ---
 net.ipv4.icmp_echo_ignore_broadcasts = 1
 net.ipv4.icmp_ignore_bogus_error_responses = 1
+net.ipv4.icmp_echo_ignore_all = 0
+net.ipv4.icmp_ratelimit = 1000
+net.ipv4.icmp_ratemask = 6168
+
+# --- Anti-DDoS: Redirect Protection ---
 net.ipv4.conf.all.accept_redirects = 0
 net.ipv4.conf.default.accept_redirects = 0
 net.ipv4.conf.all.send_redirects = 0
 net.ipv4.conf.default.send_redirects = 0
 net.ipv4.conf.all.secure_redirects = 0
+net.ipv4.conf.default.secure_redirects = 0
+net.ipv4.conf.all.accept_source_route = 0
+net.ipv4.conf.default.accept_source_route = 0
 
-# Conntrack
-net.netfilter.nf_conntrack_max = 1048576
-net.netfilter.nf_conntrack_tcp_timeout_time_wait = 60
-net.netfilter.nf_conntrack_tcp_timeout_close_wait = 30
-net.netfilter.nf_conntrack_tcp_timeout_fin_wait = 60
-net.netfilter.nf_conntrack_tcp_timeout_established = 3600
+# --- Conntrack (high limits, fast timeouts) ---
+# Note: nf_conntrack_buckets is set via modprobe, not sysctl
+net.netfilter.nf_conntrack_max = 2097152
+net.netfilter.nf_conntrack_tcp_timeout_syn_sent = 30
+net.netfilter.nf_conntrack_tcp_timeout_syn_recv = 30
+net.netfilter.nf_conntrack_tcp_timeout_established = 7200
+net.netfilter.nf_conntrack_tcp_timeout_fin_wait = 30
+net.netfilter.nf_conntrack_tcp_timeout_close_wait = 15
+net.netfilter.nf_conntrack_tcp_timeout_last_ack = 15
+net.netfilter.nf_conntrack_tcp_timeout_time_wait = 30
+net.netfilter.nf_conntrack_tcp_timeout_close = 10
+net.netfilter.nf_conntrack_tcp_timeout_max_retrans = 60
+net.netfilter.nf_conntrack_tcp_timeout_unacknowledged = 60
+net.netfilter.nf_conntrack_udp_timeout = 30
+net.netfilter.nf_conntrack_udp_timeout_stream = 60
+net.netfilter.nf_conntrack_icmp_timeout = 10
+net.netfilter.nf_conntrack_generic_timeout = 60
+
+# --- ARP Cache (prevent table overflow) ---
+net.ipv4.neigh.default.gc_thresh1 = 4096
+net.ipv4.neigh.default.gc_thresh2 = 8192
+net.ipv4.neigh.default.gc_thresh3 = 16384
+net.ipv4.neigh.default.gc_stale_time = 60
+
+# --- Memory Pressure ---
+vm.swappiness = 10
+vm.dirty_ratio = 40
+vm.dirty_background_ratio = 10
+vm.overcommit_memory = 1
 EOF
     chmod 644 /etc/sysctl.d/99-vless-tuning.conf
     log_success "sysctl config created"
@@ -757,25 +817,66 @@ EOF
     sysctl -p /etc/sysctl.d/99-vless-tuning.conf 2>/dev/null || log_warn "Some sysctl settings may require kernel support"
     log_success "sysctl settings applied"
     
-    # File descriptor limits
+    # File descriptor limits (match fs.file-max)
     cat > /etc/security/limits.d/99-nofile.conf << 'EOF'
 # File descriptor limits for high connections
-* soft nofile 2097152
-* hard nofile 2097152
-root soft nofile 2097152
-root hard nofile 2097152
+* soft nofile 10485760
+* hard nofile 10485760
+* soft nproc 65535
+* hard nproc 65535
+* soft memlock unlimited
+* hard memlock unlimited
+root soft nofile 10485760
+root hard nofile 10485760
+root soft nproc 65535
+root hard nproc 65535
+root soft memlock unlimited
+root hard memlock unlimited
 EOF
     log_success "limits.conf configured"
     
     # systemd limits
     if [ -d /etc/systemd/system ]; then
+        # User slice limits
         mkdir -p /etc/systemd/system/user-.slice.d
         cat > /etc/systemd/system/user-.slice.d/limits.conf << 'EOF'
 [Slice]
-DefaultLimitNOFILE=2097152
+DefaultLimitNOFILE=10485760
+DefaultLimitNPROC=65535
+DefaultLimitMEMLOCK=infinity
 EOF
+
+        # System-wide systemd config
+        mkdir -p /etc/systemd/system.conf.d
+        cat > /etc/systemd/system.conf.d/limits.conf << 'EOF'
+[Manager]
+DefaultLimitNOFILE=10485760
+DefaultLimitNPROC=65535
+DefaultLimitMEMLOCK=infinity
+EOF
+
         systemctl daemon-reload 2>/dev/null || true
         log_success "systemd limits configured"
+    fi
+    
+    # PAM limits (for SSH sessions)
+    if [ -f /etc/pam.d/common-session ]; then
+        if ! grep -q "pam_limits.so" /etc/pam.d/common-session; then
+            echo "session required pam_limits.so" >> /etc/pam.d/common-session
+        fi
+    fi
+    
+    # Load conntrack module if not loaded
+    modprobe nf_conntrack 2>/dev/null || true
+    
+    # Set conntrack hashsize (buckets)
+    if [ -f /sys/module/nf_conntrack/parameters/hashsize ]; then
+        echo 524288 > /sys/module/nf_conntrack/parameters/hashsize 2>/dev/null || true
+    fi
+    
+    # Make conntrack hashsize persistent
+    if [ -d /etc/modprobe.d ]; then
+        echo "options nf_conntrack hashsize=524288" > /etc/modprobe.d/nf_conntrack.conf
     fi
     
     log_success "$(msg optimizations_applied)"
