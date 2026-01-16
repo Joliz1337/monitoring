@@ -20,11 +20,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     dos2unix \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Docker Compose V2 plugin
+# Install Docker Compose V2 plugin with mirror fallback for Russia
 RUN mkdir -p /usr/local/lib/docker/cli-plugins \
-    && curl -SL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64" \
-       -o /usr/local/lib/docker/cli-plugins/docker-compose \
-    && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+    && COMPOSE_URL="https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64" \
+    && MIRRORS="https://ghproxy.com/$COMPOSE_URL https://mirror.ghproxy.com/$COMPOSE_URL https://github.moeyy.xyz/$COMPOSE_URL $COMPOSE_URL" \
+    && for mirror in $MIRRORS; do \
+         echo "Trying: $(echo $mirror | cut -d'/' -f3)..." \
+         && curl -fsSL --connect-timeout 10 --max-time 120 -o /usr/local/lib/docker/cli-plugins/docker-compose "$mirror" \
+         && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose \
+         && break || echo "Failed, trying next..."; \
+       done \
+    && test -x /usr/local/lib/docker/cli-plugins/docker-compose || exit 1
 
 # Copy requirements and install Python dependencies
 COPY requirements.txt .

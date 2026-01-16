@@ -95,9 +95,16 @@ apk add --no-cache git curl rsync bash >/dev/null 2>&1
 
 echo "[INFO] Installing Docker Compose..."
 mkdir -p /usr/local/lib/docker/cli-plugins
-curl -sL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 \
-    -o /usr/local/lib/docker/cli-plugins/docker-compose
-chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+COMPOSE_URL="https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64"
+COMPOSE_MIRRORS="https://ghproxy.com/$COMPOSE_URL https://mirror.ghproxy.com/$COMPOSE_URL https://github.moeyy.xyz/$COMPOSE_URL $COMPOSE_URL"
+for mirror in $COMPOSE_MIRRORS; do
+    echo "  Trying: $(echo $mirror | cut -d'/' -f3)..."
+    if curl -fsSL --connect-timeout 10 --max-time 120 -o /usr/local/lib/docker/cli-plugins/docker-compose "$mirror" 2>/dev/null; then
+        chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+        echo "  Docker Compose installed"
+        break
+    fi
+done
 
 echo "[INFO] Detecting server location..."
 COUNTRY=""
