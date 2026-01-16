@@ -37,8 +37,8 @@ services:
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
       - /etc/os-release:/host/etc/os-release:ro
-      # HAProxy config (shared with haproxy container)
-      - haproxy_config:/etc/haproxy
+      # HAProxy config (bind mount - shared with host and haproxy container)
+      - /etc/haproxy:/etc/haproxy
       # Let's Encrypt certificates - bind mount to host directory
       - /etc/letsencrypt:/etc/letsencrypt
       # Docker socket for managing haproxy container and self-update
@@ -75,8 +75,8 @@ services:
         soft: 1048576
         hard: 1048576
     volumes:
-      # HAProxy config - mount to standard alpine path
-      - haproxy_config:/usr/local/etc/haproxy
+      # HAProxy config - bind mount from host to standard alpine path
+      - /etc/haproxy:/usr/local/etc/haproxy
       # Let's Encrypt certs - bind mount from host (same as api)
       - /etc/letsencrypt:/etc/letsencrypt:ro
     restart: unless-stopped
@@ -89,5 +89,4 @@ services:
         max-file: "5"
 
 volumes:
-  haproxy_config:
   traffic_data:

@@ -37,7 +37,10 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/in
 
 **Устранение проблем миграции**:
 ```bash
-# Проверить конфиг в контейнере
+# Проверить конфиг на хосте (bind mount)
+cat /etc/haproxy/haproxy.cfg
+
+# Проверить конфиг в контейнере (должен быть идентичен)
 docker exec monitoring-haproxy cat /usr/local/etc/haproxy/haproxy.cfg
 
 # Проверить логи HAProxy
@@ -46,6 +49,8 @@ docker logs monitoring-haproxy
 # Перезапустить HAProxy
 docker compose --profile haproxy restart
 ```
+
+**Важно**: HAProxy конфиг хранится на хосте в `/etc/haproxy/haproxy.cfg` и монтируется в контейнеры через bind mount. Редактирование конфига на хосте или через панель даёт одинаковый результат.
 
 ## Структура
 

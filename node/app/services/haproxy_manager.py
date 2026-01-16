@@ -244,40 +244,40 @@ defaults
             return None
     
     def check_config(self) -> tuple[bool, str]:
-        """Validate HAProxy configuration using container"""
+        """Validate HAProxy configuration using local haproxy binary or container"""
         if not self.config_path.exists():
             return False, "Config file not found"
         
-        container = self._get_container()
-        container_running = container and container.status == "running"
-        
-        if not container_running:
-            # Try local haproxy binary if available
-            if shutil.which("haproxy"):
-                result = subprocess.run(
-                    ["haproxy", "-c", "-f", str(self.config_path)],
-                    capture_output=True,
-                    text=True
-                )
-                is_valid = result.returncode in (0, 2)
-                error_msg = result.stderr.strip() if result.stderr else result.stdout.strip()
-                return is_valid, error_msg if not is_valid else "Configuration valid"
-            return True, "Container not running, config syntax not verified"
-        
-        # Validate using container
-        try:
-            exit_code, output = container.exec_run(
-                ["haproxy", "-c", "-f", "/usr/local/etc/haproxy/haproxy.cfg"],
-                demux=True
+        # Prefer local haproxy binary (installed in API container)
+        if shutil.which("haproxy"):
+            result = subprocess.run(
+                ["haproxy", "-c", "-f", str(self.config_path)],
+                capture_output=True,
+                text=True
             )
-            stdout, stderr = output if output else (b"", b"")
-            error_msg = (stderr or stdout or b"").decode('utf-8', errors='replace').strip()
-            
-            is_valid = exit_code in (0, 2)
+            is_valid = result.returncode in (0, 2)
+            error_msg = result.stderr.strip() if result.stderr else result.stdout.strip()
             return is_valid, error_msg if not is_valid else "Configuration valid"
-        except Exception as e:
-            logger.error(f"Config check failed: {e}")
-            return False, str(e)
+        
+        # Fallback: validate using HAProxy container if running
+        container = self._get_container()
+        if container and container.status == "running":
+            try:
+                exit_code, output = container.exec_run(
+                    ["haproxy", "-c", "-f", "/usr/local/etc/haproxy/haproxy.cfg"],
+                    demux=True
+                )
+                stdout, stderr = output if output else (b"", b"")
+                error_msg = (stderr or stdout or b"").decode('utf-8', errors='replace').strip()
+                
+                is_valid = exit_code in (0, 2)
+                return is_valid, error_msg if not is_valid else "Configuration valid"
+            except Exception as e:
+                logger.error(f"Config check via container failed: {e}")
+                return False, str(e)
+        
+        # Cannot validate - no haproxy binary and container not running
+        return False, "Cannot validate: haproxy not available"
     
     def is_running(self) -> bool:
         """Check if HAProxy container is running"""
@@ -381,6 +381,20 @@ defaults
         # Send SIGHUP for graceful reload
         try:
             container.kill(signal="SIGHUP")
+            # Wait for HAProxy to process the reload
+            time.sleep(0.5)
+            # Refresh container status
+            container.reload()
+            
+            # Verify HAProxy is still running after reload
+            if container.status != "running":
+                logs = container.logs(tail=30).decode('utf-8', errors='replace')
+                logger.error(f"HAProxy crashed after reload. Logs: {logs}")
+                return False, f"HAProxy crashed after reload. Check logs for details."
+            
+            # Invalidate status cache
+            self._status_cache = None
+            
             logger.info("HAProxy reloaded (SIGHUP)")
             return True, "HAProxy reloaded successfully"
         except Exception as e:
@@ -606,15 +620,24 @@ defaults
         fullchain = cert_dir / "fullchain.pem"
         privkey = cert_dir / "privkey.pem"
         
-        if fullchain.exists() and privkey.exists():
+        if not fullchain.exists():
+            logger.warning(f"Certificate fullchain.pem not found for {domain} at {fullchain}")
+            return None
+        
+        if not privkey.exists():
+            logger.warning(f"Certificate privkey.pem not found for {domain} at {privkey}")
+            return None
+        
+        try:
             combined = cert_dir / "combined.pem"
             content = fullchain.read_text() + privkey.read_text()
             combined.write_text(content)
             combined.chmod(0o600)
-            logger.info(f"Created combined cert for {domain}")
+            logger.info(f"Created/updated combined cert for {domain} at {combined}")
             return combined
-        
-        return None
+        except Exception as e:
+            logger.error(f"Failed to create combined cert for {domain}: {e}")
+            return None
     
     def add_rule(self, rule: HAProxyRule) -> tuple[bool, str]:
         """Add new rule to config"""
@@ -1151,16 +1174,24 @@ backend {backend_name}
                 logger.debug(f"Certbot stderr: {stderr_str[:500]}")
             
             renewed = []
+            failed = []
             
-            # Update combined certs for all available certificates
-            for domain in self.get_available_certs():
+            # Update combined certs for ALL available certificates
+            available_certs = self.get_available_certs()
+            logger.info(f"Updating combined certificates for {len(available_certs)} domains: {available_certs}")
+            
+            for domain in available_certs:
+                logger.info(f"Processing certificate for {domain}")
                 if self._create_combined_cert(domain):
                     renewed.append(domain)
+                else:
+                    failed.append(domain)
+                    logger.warning(f"Failed to update combined cert for {domain}")
             
             if returncode == 0:
-                message = "Renewal check completed"
+                message = f"Renewal completed. Updated: {len(renewed)}, Failed: {len(failed)}"
                 success = True
-                logger.info(f"Renewal completed, updated {len(renewed)} certificates")
+                logger.info(f"Renewal completed, updated {len(renewed)} certificates, failed {len(failed)}")
             else:
                 message = stderr_str or stdout_str or "Renewal failed"
                 success = False
