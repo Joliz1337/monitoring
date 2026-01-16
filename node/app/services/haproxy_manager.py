@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import os
 import re
 import shutil
 import subprocess
@@ -22,7 +21,7 @@ logger = logging.getLogger(__name__)
 RULES_START_MARKER = "# === RULES START ==="
 RULES_END_MARKER = "# === RULES END ==="
 
-# HAProxy container ulimit - must match docker-compose.yml and start_haproxy()
+# HAProxy container ulimit (for start_haproxy via Docker API)
 HAPROXY_CONTAINER_ULIMIT = 1048576
 
 
@@ -36,16 +35,6 @@ class HAProxyRule:
     target_port: int
     cert_domain: Optional[str] = None
     target_ssl: bool = False  # Use SSL when connecting to target server
-
-
-@dataclass
-class SystemInfo:
-    """System information for HAProxy config"""
-    cpu_cores: int
-    ram_mb: int
-    maxconn: int
-    nbthread: int
-    ulimit_nofile: int
 
 
 class HAProxyManager:
@@ -96,76 +85,13 @@ class HAProxyManager:
         if backup_path.exists():
             shutil.copy(backup_path, self.config_path)
     
-    def _get_ulimit(self) -> int:
-        """Get nofile ulimit for HAProxy container
-        
-        Returns the ulimit configured for HAProxy container (HAPROXY_CONTAINER_ULIMIT).
-        This must match the ulimits in docker-compose.yml and start_haproxy().
-        """
-        return HAPROXY_CONTAINER_ULIMIT
-    
-    def _get_system_info(self) -> dict:
-        """Get system info for optimal config generation"""
-        cpu_count = os.cpu_count() or 1
-        
-        ram_mb = 1024
-        try:
-            host_meminfo = Path(self.settings.host_proc) / "meminfo"
-            if host_meminfo.exists():
-                content = host_meminfo.read_text()
-                for line in content.split('\n'):
-                    if line.startswith('MemTotal:'):
-                        ram_mb = int(line.split()[1]) // 1024
-                        break
-        except Exception:
-            pass
-        
-        # Get ulimit from host (HAProxy container has 65536 configured)
-        ulimit = self._get_ulimit()
-        
-        # Calculate maxconn based on RAM and ulimit
-        # Each TCP connection needs ~2 file descriptors (client + server)
-        # Reserve 10% for system overhead
-        ram_based_maxconn = min(int((ram_mb * 1024 * 0.7) / 2), 500000)
-        ulimit_based_maxconn = int(ulimit * 0.9) // 2  # 90% of ulimit, divided by 2 for bidirectional
-        
-        # Use the smaller of the two, but ensure reasonable minimum for VPN
-        max_conn = min(ram_based_maxconn, ulimit_based_maxconn)
-        max_conn = max(max_conn, 10000)  # Minimum 10000 for VPN workloads
-        
-        return {
-            'cpu': cpu_count,
-            'ram_mb': ram_mb,
-            'maxconn': max_conn,
-            'nbthread': cpu_count,
-            'ulimit': ulimit,
-        }
-    
-    def get_system_info(self) -> SystemInfo:
-        """Get system information for HAProxy config"""
-        info = self._get_system_info()
-        
-        return SystemInfo(
-            cpu_cores=info['cpu'],
-            ram_mb=info['ram_mb'],
-            maxconn=info['maxconn'],
-            nbthread=info['nbthread'],
-            ulimit_nofile=info['ulimit']
-        )
-    
     def _generate_base_config(self) -> str:
-        """Generate base HAProxy config"""
-        info = self._get_system_info()
-        
+        """Generate simple base HAProxy config (no auto-optimization)"""
         return f"""global
-    maxconn {info['maxconn']}
-    nbthread {info['nbthread']}
     stats socket /var/run/haproxy.sock mode 660 level admin expose-fd listeners
-    # No logging for minimal overhead
     
 defaults
     mode tcp
-    maxconn {info['maxconn'] // 2}
     option dontlognull
     option redispatch
     timeout connect 5s
@@ -180,7 +106,7 @@ defaults
 """
     
     def regenerate_config(self, preserve_rules: bool = True) -> tuple[bool, str]:
-        """Regenerate HAProxy config with current system parameters"""
+        """Regenerate HAProxy config preserving rules"""
         rules_content = ""
         
         if preserve_rules and self.config_path.exists():
@@ -202,11 +128,9 @@ defaults
             )
         
         self._write_config(new_config)
+        logger.info("Config regenerated")
         
-        info = self._get_system_info()
-        logger.info(f"Config regenerated: maxconn={info['maxconn']}, nbthread={info['nbthread']}")
-        
-        return True, f"Config regenerated: maxconn={info['maxconn']}, threads={info['nbthread']}"
+        return True, "Config regenerated"
     
     def init_config(self) -> tuple[bool, str]:
         """Initialize base HAProxy config if not exists"""
@@ -218,20 +142,10 @@ defaults
         return True, "Config already exists"
     
     def full_init(self) -> tuple[bool, str]:
-        """Full initialization: create/regenerate HAProxy config"""
-        # Initialize or regenerate config
+        """Full initialization: create HAProxy config if needed"""
         if self.config_path.exists():
-            cfg_success, cfg_message = self.regenerate_config(preserve_rules=True)
-        else:
-            cfg_success, cfg_message = self.init_config()
-        
-        info = self._get_system_info()
-        message = (
-            f"System: {info['cpu']} CPU, {info['ram_mb']}MB RAM, ulimit={info['ulimit']}. "
-            f"HAProxy: maxconn={info['maxconn']}, threads={info['nbthread']}"
-        )
-        
-        return cfg_success, message
+            return True, "Config already exists"
+        return self.init_config()
     
     def _get_container(self):
         """Get HAProxy container"""

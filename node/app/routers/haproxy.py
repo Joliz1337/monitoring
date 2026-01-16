@@ -16,7 +16,6 @@ from app.models.haproxy import (
     CertificateUploadResponse,
     ConfigApplyRequest,
     ConfigApplyResponse,
-    ConfigRegenerateResponse,
     CronActionResponse,
     CronStatus,
     FirewallActionRequest,
@@ -34,7 +33,6 @@ from app.models.haproxy import (
     HAProxyRuleUpdate,
     HAProxyStatusResponse,
     HAProxyValidateResponse,
-    SystemInfoResponse,
 )
 from app.services.haproxy_manager import HAProxyRule, get_haproxy_manager
 from app.services.firewall_manager import get_firewall_manager
@@ -439,40 +437,16 @@ async def disable_cron():
     return CronActionResponse(success=True, message=message)
 
 
-# ==================== System Info Endpoints ====================
-
-@router.get("/system/info", response_model=SystemInfoResponse)
-async def get_system_info():
-    """Get system information and current HAProxy parameters"""
-    manager = get_haproxy_manager()
-    info = manager.get_system_info()
-    
-    return SystemInfoResponse(
-        cpu_cores=info.cpu_cores,
-        ram_mb=info.ram_mb,
-        maxconn=info.maxconn,
-        nbthread=info.nbthread,
-        ulimit_nofile=info.ulimit_nofile
-    )
-
-
-@router.post("/config/regenerate", response_model=ConfigRegenerateResponse)
+@router.post("/config/regenerate", response_model=HAProxyActionResponse)
 async def regenerate_config(preserve_rules: bool = True):
-    """Regenerate HAProxy config with optimal parameters for current system"""
+    """Regenerate HAProxy config (preserving rules by default)"""
     manager = get_haproxy_manager()
     success, message = manager.regenerate_config(preserve_rules=preserve_rules)
     
     if not success:
         raise HTTPException(status_code=500)
     
-    info = manager.get_system_info()
-    
-    return ConfigRegenerateResponse(
-        success=success,
-        message=message,
-        maxconn=info.maxconn,
-        nbthread=info.nbthread
-    )
+    return HAProxyActionResponse(success=success, message=message)
 
 
 @router.post("/system/full-init", response_model=HAProxyActionResponse)

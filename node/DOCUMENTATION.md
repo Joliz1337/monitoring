@@ -170,28 +170,24 @@ node/
 | POST | /api/haproxy/certs/cron/enable | Включить автообновление |
 | POST | /api/haproxy/certs/cron/disable | Выключить автообновление |
 
-### Системная информация
-
-| Метод | Endpoint | Описание |
-|-------|----------|----------|
-| GET | /api/haproxy/system/info | Информация о системе (CPU, RAM, maxconn) |
-
 ## Системные оптимизации
 
 Оптимизации применяются **отдельно** через главный установщик (`monitoring` → пункт 7):
 
 - **IPv6** — отключение (улучшает стабильность сети)
-- **BBR** — TCP congestion control
-- **Буферы** — оптимизированные сетевые буферы (128MB max)
-- **Очереди** — somaxconn, netdev_max_backlog = 65535
+- **BBR + fq_codel** — лучшая комбинация для низкого джиттера и анти-bufferbloat
+- **Буферы** — оптимизированы для низкого latency (16MB max вместо 512MB)
+- **UDP буферы** — увеличены для игр и VoIP
+- **Busy Polling** — снижает latency обработки пакетов
+- **TCP ECN** — Explicit Congestion Notification (предотвращает потерю пакетов)
+- **Очереди** — somaxconn, netdev_max_backlog оптимизированы
 - **TCP Performance** — fastopen, no slow start after idle, MTU probing
 - **TIME-WAIT** — 2M tw_buckets, tw_reuse
-- **Anti-DDoS** — syncookies, rp_filter, ICMP protection
-- **Conntrack** — 1M max connections, оптимизированные таймауты
-- **File descriptors** — fs.file-max = 2M
-- **limits.conf** — 2M nofile для всех пользователей
+- **Anti-DDoS** — syncookies, rp_filter, ICMP protection, IGMP limits
+- **Conntrack** — авто-масштабируемый по RAM, оптимизированные таймауты
+- **File descriptors** — 10M nofile для всех пользователей
 
-**Примечание**: При проблемах с сетью во время установки/обновления IPv6 отключается автоматически. Если оптимизации уже применены, настройки IPv6 берутся из основного файла конфигурации.
+**Примечание**: Настройки универсальны для любых машин (от 1GB RAM до 128GB+). При проблемах с сетью во время установки/обновления IPv6 отключается автоматически.
 
 **SSL auto-renewal** — cron для автообновления сертификатов (3:00 AM daily) настраивается при установке ноды.
 

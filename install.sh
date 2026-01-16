@@ -673,11 +673,12 @@ apply_system_optimizations() {
     # sysctl config for VLESS+Reality VPN, gaming stability, anti-DDoS
     cat > /etc/sysctl.d/99-vless-tuning.conf << 'EOF'
 # =============================================================================
-# System optimization for VLESS+Reality VPN
+# System optimization for VLESS+Reality VPN v2.0
+# - Anti-bufferbloat (low jitter for gaming)
 # - High connection limits (no bottlenecks)
 # - Fast dead connection cleanup
 # - Gaming stability (low latency, no drops)
-# - Basic anti-DDoS protection
+# - Enhanced anti-DDoS protection
 # =============================================================================
 
 # --- Disable IPv6 (improves stability, reduces attack surface) ---
@@ -685,33 +686,46 @@ net.ipv6.conf.all.disable_ipv6 = 1
 net.ipv6.conf.default.disable_ipv6 = 1
 net.ipv6.conf.lo.disable_ipv6 = 1
 
-# --- BBR Congestion Control (best for VPN throughput) ---
+# --- BBR + fq_codel (best combo for low latency + anti-bufferbloat) ---
 net.ipv4.tcp_congestion_control = bbr
-net.core.default_qdisc = fq
+net.core.default_qdisc = fq_codel
 
 # --- File Descriptors (massive limits) ---
 fs.file-max = 10485760
 fs.nr_open = 10485760
 
-# --- Socket Buffers (large for high throughput) ---
-net.core.rmem_default = 1048576
-net.core.wmem_default = 1048576
-net.core.rmem_max = 536870912
-net.core.wmem_max = 536870912
+# --- Socket Buffers (OPTIMIZED for low jitter) ---
+# Key insight: huge buffers cause bufferbloat (packets queue up = latency spikes)
+# These values balance throughput with low latency for gaming/VoIP
+net.core.rmem_default = 262144
+net.core.wmem_default = 262144
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
 net.core.optmem_max = 65536
-net.ipv4.tcp_rmem = 4096 1048576 536870912
-net.ipv4.tcp_wmem = 4096 65536 536870912
-net.ipv4.udp_rmem_min = 8192
-net.ipv4.udp_wmem_min = 8192
-net.ipv4.tcp_mem = 786432 1048576 26777216
+
+# TCP buffers: min/default/max - optimized for 1Gbps with low latency
+# Max 16MB prevents bufferbloat while allowing high throughput
+net.ipv4.tcp_rmem = 4096 131072 16777216
+net.ipv4.tcp_wmem = 4096 65536 16777216
+net.ipv4.tcp_mem = 786432 1048576 1572864
+
+# UDP buffers (important for gaming/VoIP) - larger for game packets
+net.ipv4.udp_rmem_min = 16384
+net.ipv4.udp_wmem_min = 16384
 net.ipv4.udp_mem = 65536 131072 262144
 
 # --- Connection Queues (high limits) ---
 net.core.somaxconn = 65535
 net.ipv4.tcp_max_syn_backlog = 65535
-net.core.netdev_max_backlog = 250000
+net.core.netdev_max_backlog = 50000
 net.core.netdev_budget = 50000
-net.core.netdev_budget_usecs = 5000
+net.core.netdev_budget_usecs = 8000
+
+# --- Busy Polling (reduces latency for network packets) ---
+# Disabled by default - can increase CPU on weak VPS
+# Uncomment if you have spare CPU and need lowest latency:
+# net.core.busy_read = 50
+# net.core.busy_poll = 50
 
 # --- TCP Performance (gaming + VPN optimized) ---
 net.ipv4.tcp_fastopen = 3
@@ -721,10 +735,16 @@ net.ipv4.tcp_timestamps = 1
 net.ipv4.tcp_sack = 1
 net.ipv4.tcp_dsack = 1
 net.ipv4.tcp_window_scaling = 1
-net.ipv4.tcp_adv_win_scale = 2
+net.ipv4.tcp_adv_win_scale = 1
 net.ipv4.tcp_moderate_rcvbuf = 1
 net.ipv4.tcp_no_metrics_save = 1
-net.ipv4.tcp_ecn = 0
+
+# ECN: Explicit Congestion Notification (helps prevent packet loss)
+# Value 2 = server-side only (safe - responds to ECN but doesn't initiate)
+# Some ISPs/routers incorrectly drop ECN=1 packets, so 2 is safer
+net.ipv4.tcp_ecn = 2
+net.ipv4.tcp_ecn_fallback = 1
+
 net.ipv4.tcp_frto = 2
 
 # --- TCP Retries (balanced for stability) ---
@@ -741,9 +761,9 @@ net.ipv4.tcp_max_orphans = 524288
 net.ipv4.tcp_orphan_retries = 2
 
 # --- Keepalive (detect dead connections faster) ---
-net.ipv4.tcp_keepalive_time = 120
+net.ipv4.tcp_keepalive_time = 60
 net.ipv4.tcp_keepalive_probes = 5
-net.ipv4.tcp_keepalive_intvl = 15
+net.ipv4.tcp_keepalive_intvl = 10
 
 # --- Fast Close of Dead Connections ---
 net.ipv4.tcp_fin_timeout = 10
@@ -753,6 +773,8 @@ net.ipv4.tcp_syncookies = 1
 net.ipv4.tcp_syn_retries = 2
 net.ipv4.tcp_synack_retries = 2
 net.ipv4.tcp_rfc1337 = 1
+net.ipv4.tcp_abort_on_overflow = 0
+net.ipv4.tcp_max_syn_backlog = 65535
 
 # --- Anti-DDoS: IP Spoofing Protection ---
 net.ipv4.conf.all.rp_filter = 1
@@ -777,9 +799,12 @@ net.ipv4.conf.default.secure_redirects = 0
 net.ipv4.conf.all.accept_source_route = 0
 net.ipv4.conf.default.accept_source_route = 0
 
-# --- Conntrack (high limits, fast timeouts) ---
-# Note: nf_conntrack_buckets is set via modprobe, not sysctl
-net.netfilter.nf_conntrack_max = 2097152
+# --- Anti-DDoS: IGMP/Multicast limits ---
+net.ipv4.igmp_max_memberships = 256
+net.ipv4.igmp_max_msf = 256
+
+# --- Conntrack (auto-scaled, fast timeouts) ---
+# max is auto-calculated by kernel based on RAM, we just set timeouts
 net.netfilter.nf_conntrack_tcp_timeout_syn_sent = 30
 net.netfilter.nf_conntrack_tcp_timeout_syn_recv = 30
 net.netfilter.nf_conntrack_tcp_timeout_established = 7200
@@ -791,7 +816,7 @@ net.netfilter.nf_conntrack_tcp_timeout_close = 10
 net.netfilter.nf_conntrack_tcp_timeout_max_retrans = 60
 net.netfilter.nf_conntrack_tcp_timeout_unacknowledged = 60
 net.netfilter.nf_conntrack_udp_timeout = 30
-net.netfilter.nf_conntrack_udp_timeout_stream = 60
+net.netfilter.nf_conntrack_udp_timeout_stream = 120
 net.netfilter.nf_conntrack_icmp_timeout = 10
 net.netfilter.nf_conntrack_generic_timeout = 60
 
@@ -869,15 +894,8 @@ EOF
     # Load conntrack module if not loaded
     modprobe nf_conntrack 2>/dev/null || true
     
-    # Set conntrack hashsize (buckets)
-    if [ -f /sys/module/nf_conntrack/parameters/hashsize ]; then
-        echo 524288 > /sys/module/nf_conntrack/parameters/hashsize 2>/dev/null || true
-    fi
-    
-    # Make conntrack hashsize persistent
-    if [ -d /etc/modprobe.d ]; then
-        echo "options nf_conntrack hashsize=524288" > /etc/modprobe.d/nf_conntrack.conf
-    fi
+    # Conntrack hashsize is auto-calculated by kernel based on RAM
+    # No need to set it manually - it scales automatically
     
     log_success "$(msg optimizations_applied)"
 }

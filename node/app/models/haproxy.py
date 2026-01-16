@@ -129,23 +129,6 @@ class CertificateUpdateResponse(BaseModel):
     count: int
 
 
-class SystemInfoResponse(BaseModel):
-    """System information for HAProxy config"""
-    cpu_cores: int
-    ram_mb: int
-    maxconn: int
-    nbthread: int
-    ulimit_nofile: int
-
-
-class ConfigRegenerateResponse(BaseModel):
-    """Config regeneration result"""
-    success: bool
-    message: str
-    maxconn: int
-    nbthread: int
-
-
 class AllCertificatesResponse(BaseModel):
     """All certificates with details"""
     certificates: list[dict]
