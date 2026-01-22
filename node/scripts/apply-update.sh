@@ -6,13 +6,22 @@
 
 set -e
 
+# Build log file for error reporting
+BUILD_LOG="/tmp/docker_build_$$.log"
+
 # Trap для обработки прерываний
 cleanup() {
     local exit_code=$?
     if [ $exit_code -ne 0 ]; then
         echo ""
         echo -e "\033[0;31m[ERROR] Script interrupted or failed (exit code: $exit_code)\033[0m"
-        echo -e "\033[0;31m[ERROR] Last operation may have failed. Check logs above.\033[0m"
+        if [ -f "$BUILD_LOG" ] && [ -s "$BUILD_LOG" ]; then
+            echo -e "\033[0;31m[ERROR] Last 50 lines of build output:\033[0m"
+            echo -e "\033[0;31m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
+            tail -50 "$BUILD_LOG"
+            echo -e "\033[0;31m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
+        fi
+        rm -f "$BUILD_LOG"
     fi
     exit $exit_code
 }
@@ -383,17 +392,30 @@ BUILD_ARGS="$BUILD_ARGS --build-arg APT_TIMEOUT=${APT_TIMEOUT}"
 BUILD_ARGS="$BUILD_ARGS --build-arg CACHE_BUST=${CACHE_BUST}"
 
 log_info "Using mirrors: APT=${BEST_APT_MIRROR:-default}, PyPI=${BEST_PYPI_MIRROR:-default}"
-echo ""
 
-BUILD_LOG="/tmp/docker_build_$$.log"
-
-# Run build with timeout, show output in real-time AND capture to log
+# Run build in background, capture output to log file
 set +e
-timeout "$DOCKER_BUILD_TIMEOUT" docker build --network=host $BUILD_ARGS -t monitoring-node-api . 2>&1 | tee "$BUILD_LOG"
-BUILD_EXIT_CODE=${PIPESTATUS[0]}
-set -e
+timeout "$DOCKER_BUILD_TIMEOUT" docker build --network=host $BUILD_ARGS -t monitoring-node-api . > "$BUILD_LOG" 2>&1 &
+BUILD_PID=$!
 
-echo ""
+# Show progress while building
+DOTS=""
+while kill -0 $BUILD_PID 2>/dev/null; do
+    DOTS="${DOTS}."
+    if [ ${#DOTS} -gt 3 ]; then DOTS="."; fi
+    CURRENT_STEP=$(grep -oE 'Step [0-9]+/[0-9]+|#[0-9]+ \[[0-9]+/[0-9]+\]' "$BUILD_LOG" 2>/dev/null | tail -1)
+    if [ -n "$CURRENT_STEP" ]; then
+        printf "\r${CYAN}[INFO]${NC} Building${DOTS} %-30s" "($CURRENT_STEP)"
+    else
+        printf "\r${CYAN}[INFO]${NC} Building${DOTS}   "
+    fi
+    sleep 2
+done
+printf "\r%-60s\r" " "
+
+wait $BUILD_PID
+BUILD_EXIT_CODE=$?
+set -e
 
 if [ $BUILD_EXIT_CODE -eq 0 ]; then
     log_success "Image built"
@@ -402,16 +424,19 @@ elif [ $BUILD_EXIT_CODE -eq 124 ]; then
     log_error "Build timeout after ${DOCKER_BUILD_TIMEOUT}s"
     echo "Try increasing timeout: export DOCKER_BUILD_TIMEOUT=3600"
     echo "Or check server memory: free -h"
-    rm -f "$BUILD_LOG"
+    echo ""
+    echo -e "${YELLOW}Last 50 lines of build output:${NC}"
+    echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    tail -50 "$BUILD_LOG" 2>/dev/null || echo "(no log available)"
+    echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     exit 1
 else
     log_error "Build failed (exit code: $BUILD_EXIT_CODE)"
     echo ""
-    echo -e "${YELLOW}Last 30 lines of build output:${NC}"
+    echo -e "${YELLOW}Last 50 lines of build output:${NC}"
     echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    tail -30 "$BUILD_LOG" 2>/dev/null || echo "(no log available)"
+    tail -50 "$BUILD_LOG" 2>/dev/null || echo "(no log available)"
     echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    rm -f "$BUILD_LOG"
     exit 1
 fi
 

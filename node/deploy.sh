@@ -6,13 +6,22 @@
 
 set -e
 
+# Build log file for error reporting
+BUILD_LOG="/tmp/docker_build_$$.log"
+
 # Trap для обработки прерываний
 cleanup() {
     local exit_code=$?
     if [ $exit_code -ne 0 ]; then
         echo ""
         echo -e "\033[0;31m[ERROR] Script interrupted or failed (exit code: $exit_code)\033[0m"
-        echo -e "\033[0;31m[ERROR] Last operation may have failed. Check logs above.\033[0m"
+        if [ -f "$BUILD_LOG" ] && [ -s "$BUILD_LOG" ]; then
+            echo -e "\033[0;31m[ERROR] Last 50 lines of build output:\033[0m"
+            echo -e "\033[0;31m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
+            tail -50 "$BUILD_LOG"
+            echo -e "\033[0;31m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
+        fi
+        rm -f "$BUILD_LOG"
     fi
     exit $exit_code
 }
@@ -646,23 +655,37 @@ start_containers() {
         log_info "Building containers (attempt $((retry + 1))/$max_retries, timeout: ${build_timeout}s)..."
         log_info "BuildKit enabled for faster cached builds"
         log_info "Using mirrors: APT=${BEST_APT_MIRROR:-default}, PyPI=${BEST_PYPI_MIRROR:-default}"
-        echo ""
         
         local build_exit_code
-        local build_log="/tmp/docker_build_$$.log"
         
-        # Run build with timeout, show output in real-time AND capture to log
+        # Run build in background, capture output to log file
         set +e
-        timeout "$build_timeout" docker build --network=host $build_args -t monitoring-node-api . 2>&1 | tee "$build_log"
-        build_exit_code=${PIPESTATUS[0]}
-        set -e
+        timeout "$build_timeout" docker build --network=host $build_args -t monitoring-node-api . > "$BUILD_LOG" 2>&1 &
+        local build_pid=$!
         
-        echo ""
+        # Show progress while building
+        local dots=""
+        while kill -0 $build_pid 2>/dev/null; do
+            dots="${dots}."
+            if [ ${#dots} -gt 3 ]; then dots="."; fi
+            local current_step=$(grep -oE 'Step [0-9]+/[0-9]+|#[0-9]+ \[[0-9]+/[0-9]+\]' "$BUILD_LOG" 2>/dev/null | tail -1)
+            if [ -n "$current_step" ]; then
+                printf "\r${BLUE}[INFO]${NC} Building${dots} %-30s" "($current_step)"
+            else
+                printf "\r${BLUE}[INFO]${NC} Building${dots}   "
+            fi
+            sleep 2
+        done
+        printf "\r%-60s\r" " "
+        
+        wait $build_pid
+        build_exit_code=$?
+        set -e
         
         if [ $build_exit_code -eq 0 ]; then
             build_success=true
             log_success "Docker build completed"
-            rm -f "$build_log"
+            rm -f "$BUILD_LOG"
             break
         elif [ $build_exit_code -eq 124 ]; then
             log_error "Build timeout after ${build_timeout}s"
@@ -670,16 +693,19 @@ start_containers() {
             echo "  - Very slow internet connection"
             echo "  - Package mirrors are unreachable"
             echo "  - Server ran out of memory (check: free -h)"
+            echo ""
+            echo -e "${YELLOW}Last 50 lines of build output:${NC}"
+            echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+            tail -50 "$BUILD_LOG" 2>/dev/null || echo "(no log available)"
+            echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         else
             log_error "Build failed (exit code: $build_exit_code)"
             echo ""
-            echo -e "${YELLOW}Last 30 lines of build output:${NC}"
+            echo -e "${YELLOW}Last 50 lines of build output:${NC}"
             echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-            tail -30 "$build_log" 2>/dev/null || echo "(no log available)"
+            tail -50 "$BUILD_LOG" 2>/dev/null || echo "(no log available)"
             echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         fi
-        
-        rm -f "$build_log"
         
         retry=$((retry + 1))
         

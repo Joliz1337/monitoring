@@ -10,13 +10,22 @@
 
 set -e
 
+# Build log file for error reporting
+BUILD_LOG="/tmp/docker_build_$$.log"
+
 # Trap для обработки прерываний
 cleanup() {
     local exit_code=$?
     if [ $exit_code -ne 0 ]; then
         echo ""
         echo -e "\033[0;31m[ERROR] Script interrupted or failed (exit code: $exit_code)\033[0m"
-        echo -e "\033[0;31m[ERROR] Last operation may have failed. Check logs above.\033[0m"
+        if [ -f "$BUILD_LOG" ] && [ -s "$BUILD_LOG" ]; then
+            echo -e "\033[0;31m[ERROR] Last 50 lines of build output:\033[0m"
+            echo -e "\033[0;31m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
+            tail -50 "$BUILD_LOG"
+            echo -e "\033[0;31m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
+        fi
+        rm -f "$BUILD_LOG"
     fi
     exit $exit_code
 }
@@ -44,8 +53,10 @@ BIN_PATH="/usr/local/bin/monitoring"
 # Language (default: auto-detect or English)
 LANG_CODE="en"
 
-# GitHub mirror (ghfast.top proxy)
-GITHUB_MIRROR="https://ghfast.top"
+# GitHub mirror domain (change this to use different mirror)
+# Supported: ghfast.top, ghproxy.com, gh-proxy.com
+GITHUB_MIRROR_DOMAIN="ghfast.top"
+GITHUB_MIRROR="https://${GITHUB_MIRROR_DOMAIN}"
 
 # Default timeouts (in seconds)
 GIT_CLONE_TIMEOUT=60
@@ -78,6 +89,7 @@ NPM_MIRRORS=(
 BEST_PYPI_MIRROR=""
 BEST_NPM_MIRROR=""
 BEST_APT_MIRROR=""
+BEST_GITHUB_URL=""
 
 # ==================== Translations ====================
 
@@ -436,9 +448,58 @@ detect_best_apt_mirror() {
     fi
 }
 
+# Find fastest GitHub source (direct or mirror)
+detect_best_github_source() {
+    log_info "Testing GitHub sources..."
+    local direct_url="https://github.com/Joliz1337/monitoring.git"
+    local mirror_url="${GITHUB_MIRROR}/https://github.com/Joliz1337/monitoring.git"
+    
+    # Test direct GitHub (using git ls-remote which is faster than clone)
+    local direct_time=9999
+    local mirror_time=9999
+    
+    local start_time end_time
+    
+    # Test direct GitHub
+    start_time=$(date +%s%N 2>/dev/null || date +%s)
+    if timeout 10 git ls-remote --exit-code "$direct_url" HEAD >/dev/null 2>&1; then
+        end_time=$(date +%s%N 2>/dev/null || date +%s)
+        if [[ "$start_time" =~ ^[0-9]{10,}$ ]]; then
+            direct_time=$(( (end_time - start_time) / 1000000 ))
+        else
+            direct_time=$(( (end_time - start_time) * 1000 ))
+        fi
+    fi
+    
+    # Test mirror
+    start_time=$(date +%s%N 2>/dev/null || date +%s)
+    if timeout 10 git ls-remote --exit-code "$mirror_url" HEAD >/dev/null 2>&1; then
+        end_time=$(date +%s%N 2>/dev/null || date +%s)
+        if [[ "$start_time" =~ ^[0-9]{10,}$ ]]; then
+            mirror_time=$(( (end_time - start_time) / 1000000 ))
+        else
+            mirror_time=$(( (end_time - start_time) * 1000 ))
+        fi
+    fi
+    
+    # Select best source
+    if [ "$direct_time" -lt 9999 ] && [ "$direct_time" -le "$mirror_time" ]; then
+        BEST_GITHUB_URL="$direct_url"
+        log_success "Best GitHub source: direct (${direct_time}ms)"
+    elif [ "$mirror_time" -lt 9999 ]; then
+        BEST_GITHUB_URL="$mirror_url"
+        log_success "Best GitHub source: ${GITHUB_MIRROR_DOMAIN} (${mirror_time}ms)"
+    else
+        # Both failed, default to direct (will retry with fallback later)
+        BEST_GITHUB_URL="$direct_url"
+        log_warn "GitHub sources slow, will try with extended timeout"
+    fi
+}
+
 # Detect all best mirrors
 detect_best_mirrors() {
     log_info "Detecting fastest mirrors for your location..."
+    detect_best_github_source
     detect_best_pypi_mirror
     detect_best_npm_mirror
     detect_best_apt_mirror
@@ -446,26 +507,46 @@ detect_best_mirrors() {
 
 # ==================== GitHub Clone Functions ====================
 
-# Clone repository: GitHub first (30s timeout), fallback to mirror
+# Clone repository using best detected source, with fallback
 clone_repo_with_fallback() {
     local target_dir="$1"
     local branch="${2:-main}"
+    local direct_url="https://github.com/Joliz1337/monitoring.git"
+    local mirror_url="${GITHUB_MIRROR}/https://github.com/Joliz1337/monitoring.git"
     
     rm -rf "$target_dir"
     
-    # Try direct GitHub first (30 second timeout)
+    # Auto-detect best source if not done yet
+    if [ -z "$BEST_GITHUB_URL" ]; then
+        detect_best_github_source
+    fi
+    
+    # If best source was detected, try it first
+    if [ -n "$BEST_GITHUB_URL" ]; then
+        local source_name="GitHub"
+        [[ "$BEST_GITHUB_URL" == *"$GITHUB_MIRROR_DOMAIN"* ]] && source_name="mirror"
+        
+        log_info "$(msg downloading_repo) ($source_name)..."
+        if run_quiet_timeout 60 "git clone ($source_name)" git clone --depth 1 --branch "$branch" "$BEST_GITHUB_URL" "$target_dir"; then
+            log_success "$(msg repo_downloaded)"
+            return 0
+        fi
+        rm -rf "$target_dir"
+    fi
+    
+    # Fallback: try direct GitHub
     log_info "$(msg downloading_repo) (GitHub)..."
-    if run_quiet_timeout 30 "git clone (GitHub)" git clone --depth 1 --branch "$branch" "https://github.com/Joliz1337/monitoring.git" "$target_dir"; then
+    if run_quiet_timeout 30 "git clone (GitHub)" git clone --depth 1 --branch "$branch" "$direct_url" "$target_dir"; then
         log_success "$(msg repo_downloaded)"
         return 0
     fi
     
-    # GitHub failed, try mirror
+    # Fallback: try mirror with extended timeout
     rm -rf "$target_dir"
     log_warn "$(msg download_slow)"
-    log_info "$(msg downloading_repo) (mirror)..."
+    log_info "$(msg downloading_repo) (${GITHUB_MIRROR_DOMAIN})..."
     
-    if run_quiet_timeout 120 "git clone (mirror)" git clone --depth 1 --branch "$branch" "${GITHUB_MIRROR}/https://github.com/Joliz1337/monitoring.git" "$target_dir"; then
+    if run_quiet_timeout 120 "git clone (mirror)" git clone --depth 1 --branch "$branch" "$mirror_url" "$target_dir"; then
         log_success "$(msg repo_downloaded)"
         return 0
     fi
@@ -746,22 +827,36 @@ docker_build_with_retry() {
         # Try to build with timeout
         log_info "Building containers (attempt $((retry + 1))/$max_retries, timeout: ${build_timeout}s)..."
         log_info "Using mirrors: APT=${BEST_APT_MIRROR:-default}, PyPI=${BEST_PYPI_MIRROR:-default}"
-        echo ""
         
         local build_exit_code
-        local build_log="/tmp/docker_build_$$.log"
         
-        # Run build with timeout, show output in real-time AND capture to log
+        # Run build in background, capture output to log file
         set +e
-        timeout "$build_timeout" docker compose build --no-cache $build_args 2>&1 | tee "$build_log"
-        build_exit_code=${PIPESTATUS[0]}
-        set -e
+        timeout "$build_timeout" docker compose build --no-cache $build_args > "$BUILD_LOG" 2>&1 &
+        local build_pid=$!
         
-        echo ""
+        # Show progress while building
+        local dots=""
+        while kill -0 $build_pid 2>/dev/null; do
+            dots="${dots}."
+            if [ ${#dots} -gt 3 ]; then dots="."; fi
+            local current_step=$(grep -oE 'Step [0-9]+/[0-9]+|#[0-9]+ \[[0-9]+/[0-9]+\]' "$BUILD_LOG" 2>/dev/null | tail -1)
+            if [ -n "$current_step" ]; then
+                printf "\r${BLUE}[INFO]${NC} Building${dots} %-30s" "($current_step)"
+            else
+                printf "\r${BLUE}[INFO]${NC} Building${dots}   "
+            fi
+            sleep 2
+        done
+        printf "\r%-60s\r" " "
+        
+        wait $build_pid
+        build_exit_code=$?
+        set -e
         
         if [ $build_exit_code -eq 0 ]; then
             log_success "$(msg build_success)"
-            rm -f "$build_log"
+            rm -f "$BUILD_LOG"
             return 0
         elif [ $build_exit_code -eq 124 ]; then
             log_error "Build timeout after ${build_timeout}s"
@@ -770,16 +865,19 @@ docker_build_with_retry() {
             echo "  - Package mirrors are unreachable"
             echo "  - Network issues with Docker Hub"
             echo "  - Server ran out of memory (check: free -h)"
+            echo ""
+            echo -e "${YELLOW}Last 50 lines of build output:${NC}"
+            echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+            tail -50 "$BUILD_LOG" 2>/dev/null || echo "(no log available)"
+            echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         else
             log_error "Build failed (exit code: $build_exit_code)"
             echo ""
-            echo -e "${YELLOW}Last 30 lines of build output:${NC}"
+            echo -e "${YELLOW}Last 50 lines of build output:${NC}"
             echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-            tail -30 "$build_log" 2>/dev/null || echo "(no log available)"
+            tail -50 "$BUILD_LOG" 2>/dev/null || echo "(no log available)"
             echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         fi
-        
-        rm -f "$build_log"
         
         retry=$((retry + 1))
         
@@ -841,27 +939,27 @@ cleanup() {
 
 # Install CLI command
 install_cli() {
-    cat > "$BIN_PATH" << 'SCRIPT'
+    cat > "$BIN_PATH" << SCRIPT
 #!/bin/bash
 # Monitoring System Manager
 # Run this command to manage your monitoring installation
 
 GITHUB_URL="https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh"
-MIRROR_URL="https://ghfast.top/https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh"
+MIRROR_URL="https://${GITHUB_MIRROR_DOMAIN}/https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh"
 
 # Check if we have a local copy
 if [ -f "/opt/monitoring-panel/install.sh" ]; then
-    exec bash "/opt/monitoring-panel/install.sh" "$@"
+    exec bash "/opt/monitoring-panel/install.sh" "\$@"
 elif [ -f "/opt/monitoring-node/install.sh" ]; then
-    exec bash "/opt/monitoring-node/install.sh" "$@"
+    exec bash "/opt/monitoring-node/install.sh" "\$@"
 else
     # Download and run (try GitHub first, then mirror)
-    SCRIPT_CONTENT=$(curl -fsSL --connect-timeout 10 --max-time 30 "$GITHUB_URL" 2>/dev/null)
-    if [ -z "$SCRIPT_CONTENT" ]; then
-        SCRIPT_CONTENT=$(curl -fsSL --connect-timeout 10 --max-time 60 "$MIRROR_URL" 2>/dev/null)
+    SCRIPT_CONTENT=\$(curl -fsSL --connect-timeout 10 --max-time 30 "\$GITHUB_URL" 2>/dev/null)
+    if [ -z "\$SCRIPT_CONTENT" ]; then
+        SCRIPT_CONTENT=\$(curl -fsSL --connect-timeout 10 --max-time 60 "\$MIRROR_URL" 2>/dev/null)
     fi
-    if [ -n "$SCRIPT_CONTENT" ]; then
-        exec bash -c "$SCRIPT_CONTENT" -- "$@"
+    if [ -n "\$SCRIPT_CONTENT" ]; then
+        exec bash -c "\$SCRIPT_CONTENT" -- "\$@"
     else
         echo "Failed to download installer from GitHub and mirror"
         exit 1

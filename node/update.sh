@@ -14,8 +14,9 @@ cleanup() {
     if [ $exit_code -ne 0 ]; then
         echo ""
         echo -e "\033[0;31m[ERROR] Script interrupted or failed (exit code: $exit_code)\033[0m"
-        echo -e "\033[0;31m[ERROR] Last operation may have failed. Check logs above.\033[0m"
     fi
+    # Cleanup temp dir
+    [ -d "$TMP_DIR" ] && rm -rf "$TMP_DIR"
     exit $exit_code
 }
 trap cleanup EXIT
@@ -37,17 +38,58 @@ NODE_DIR="/opt/monitoring-node"
 TMP_DIR="/tmp/node-update-$$"
 TARGET_REF="${1:-main}"
 
-# GitHub mirror
-GITHUB_MIRROR="https://ghfast.top"
+# GitHub mirror domain (change this to use different mirror)
+GITHUB_MIRROR_DOMAIN="ghfast.top"
+GITHUB_MIRROR="https://${GITHUB_MIRROR_DOMAIN}"
 
 # Timeouts
 GIT_TIMEOUT="${GIT_TIMEOUT:-60}"
 GIT_MIRROR_TIMEOUT="${GIT_MIRROR_TIMEOUT:-180}"
 
-cleanup() {
-    rm -rf "$TMP_DIR"
+# Best GitHub source (will be detected)
+BEST_GITHUB_URL=""
+
+# ==================== GitHub Source Detection ====================
+
+test_github_speed() {
+    local url="$1"
+    local start_time end_time elapsed
+    
+    start_time=$(date +%s%N 2>/dev/null || date +%s)
+    if timeout 10 git ls-remote --exit-code "$url" HEAD >/dev/null 2>&1; then
+        end_time=$(date +%s%N 2>/dev/null || date +%s)
+        if [[ "$start_time" =~ ^[0-9]{10,}$ ]]; then
+            elapsed=$(( (end_time - start_time) / 1000000 ))
+        else
+            elapsed=$(( (end_time - start_time) * 1000 ))
+        fi
+        echo "$elapsed"
+        return 0
+    fi
+    echo "9999"
+    return 1
 }
-trap cleanup EXIT
+
+detect_best_github_source() {
+    log_info "Testing GitHub sources..."
+    local direct_url="https://github.com/Joliz1337/monitoring.git"
+    local mirror_url="${GITHUB_MIRROR}/https://github.com/Joliz1337/monitoring.git"
+    
+    local direct_time mirror_time
+    direct_time=$(test_github_speed "$direct_url") || direct_time=9999
+    mirror_time=$(test_github_speed "$mirror_url") || mirror_time=9999
+    
+    if [ "$direct_time" -lt 9999 ] && [ "$direct_time" -le "$mirror_time" ]; then
+        BEST_GITHUB_URL="$direct_url"
+        log_success "Best GitHub source: direct (${direct_time}ms)"
+    elif [ "$mirror_time" -lt 9999 ]; then
+        BEST_GITHUB_URL="$mirror_url"
+        log_success "Best GitHub source: ${GITHUB_MIRROR_DOMAIN} (${mirror_time}ms)"
+    else
+        BEST_GITHUB_URL="$direct_url"
+        log_warn "GitHub sources slow, will try with extended timeout"
+    fi
+}
 
 # ==================== GitHub Clone Functions ====================
 
@@ -56,24 +98,47 @@ clone_with_fallback() {
     local branch="$2"
     local max_retries=3
     local retry=0
+    local direct_url="https://github.com/Joliz1337/monitoring.git"
+    local mirror_url="${GITHUB_MIRROR}/https://github.com/Joliz1337/monitoring.git"
+    
+    # Auto-detect best source if not done yet
+    if [ -z "$BEST_GITHUB_URL" ]; then
+        detect_best_github_source
+    fi
     
     while [ $retry -lt $max_retries ]; do
         rm -rf "$target_dir"
         
-        # Try direct GitHub first
-        log_info "Downloading from GitHub (attempt $((retry + 1))/$max_retries, timeout: ${GIT_TIMEOUT}s)..."
-        if timeout "$GIT_TIMEOUT" git clone --depth 1 --branch "$branch" "https://github.com/Joliz1337/monitoring.git" "$target_dir" 2>&1; then
+        # Determine source and timeout based on BEST_GITHUB_URL
+        local clone_url="$BEST_GITHUB_URL"
+        local clone_timeout="$GIT_TIMEOUT"
+        local source_name="GitHub"
+        
+        if [[ "$clone_url" == *"$GITHUB_MIRROR_DOMAIN"* ]]; then
+            source_name="${GITHUB_MIRROR_DOMAIN}"
+            clone_timeout="$GIT_MIRROR_TIMEOUT"
+        fi
+        
+        log_info "Downloading from $source_name (attempt $((retry + 1))/$max_retries, timeout: ${clone_timeout}s)..."
+        if timeout "$clone_timeout" git clone --depth 1 --branch "$branch" "$clone_url" "$target_dir" 2>&1; then
             log_success "Download complete"
             return 0
         fi
         
-        # GitHub failed, try mirror
+        # If best source failed, try the other one
         rm -rf "$target_dir"
-        log_warn "GitHub timeout/error, trying mirror (ghfast.top, timeout: ${GIT_MIRROR_TIMEOUT}s)..."
-        
-        if timeout "$GIT_MIRROR_TIMEOUT" git clone --depth 1 --branch "$branch" "${GITHUB_MIRROR}/https://github.com/Joliz1337/monitoring.git" "$target_dir" 2>&1; then
-            log_success "Download complete"
-            return 0
+        if [[ "$BEST_GITHUB_URL" == *"$GITHUB_MIRROR_DOMAIN"* ]]; then
+            log_warn "Mirror failed, trying direct GitHub..."
+            if timeout "$GIT_TIMEOUT" git clone --depth 1 --branch "$branch" "$direct_url" "$target_dir" 2>&1; then
+                log_success "Download complete"
+                return 0
+            fi
+        else
+            log_warn "GitHub timeout/error, trying mirror (${GITHUB_MIRROR_DOMAIN})..."
+            if timeout "$GIT_MIRROR_TIMEOUT" git clone --depth 1 --branch "$branch" "$mirror_url" "$target_dir" 2>&1; then
+                log_success "Download complete"
+                return 0
+            fi
         fi
         
         retry=$((retry + 1))
