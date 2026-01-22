@@ -29,17 +29,8 @@ RUN npm install --prefer-offline --no-audit || \
 # Copy source and build
 COPY . .
 
-# Debug: show _extStore.ts before prebuild
-RUN echo "=== Before prebuild ===" && cat src/stores/_extStore.ts
-
-# Run prebuild separately to see output
-RUN npm run prebuild
-
-# Debug: show _extStore.ts after prebuild
-RUN echo "=== After prebuild ===" && cat src/stores/_extStore.ts
-
-# Build
-RUN tsc && vite build
+# Clear TypeScript cache and build
+RUN rm -rf node_modules/.cache tsconfig.tsbuildinfo && npm run build
 
 FROM nginx:alpine
 
