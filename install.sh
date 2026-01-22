@@ -1135,7 +1135,8 @@ install_node() {
     if ! command -v haproxy &>/dev/null; then
         log_info "Installing HAProxy..."
         run_quiet "apt-get update" apt-get update -qq
-        run_quiet "apt-get install haproxy" apt-get install -y -qq haproxy
+        # Use DEBIAN_FRONTEND=noninteractive to avoid config prompts during reinstall
+        run_quiet "apt-get install haproxy" env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq -o Dpkg::Options::="--force-confold" haproxy
         systemctl enable haproxy >/dev/null 2>&1
         log_success "HAProxy installed"
     else
