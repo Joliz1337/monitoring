@@ -3,6 +3,9 @@
 # Apply Update Script - called by update.sh after downloading new version
 # This ensures all update logic uses the LATEST code
 #
+# Environment variables:
+#   UPDATE_PROXY - SOCKS5 proxy (passed from update.sh, used for logging)
+#
 
 set -e
 
@@ -42,14 +45,6 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
 # Timeouts (in seconds)
 DOCKER_BUILD_TIMEOUT="${DOCKER_BUILD_TIMEOUT:-1800}"  # 30 min default
-APT_TIMEOUT="${APT_TIMEOUT:-120}"
-PIP_TIMEOUT="${PIP_TIMEOUT:-120}"
-NPM_TIMEOUT="${NPM_TIMEOUT:-120000}"  # npm uses milliseconds
-
-# Best mirrors (will be detected)
-BEST_PYPI_MIRROR=""
-BEST_NPM_MIRROR=""
-BEST_APT_MIRROR=""
 
 # Arguments
 TMP_DIR="$1"
@@ -61,119 +56,17 @@ if [ -z "$TMP_DIR" ] || [ -z "$PANEL_DIR" ]; then
     exit 1
 fi
 
-# ==================== Mirror Speed Testing ====================
-
-test_mirror_speed() {
-    local url="$1"
-    local timeout_sec="${2:-5}"
-    local start_time end_time elapsed
-    
-    start_time=$(date +%s%N 2>/dev/null || date +%s)
-    if curl -fsSL --connect-timeout "$timeout_sec" --max-time "$timeout_sec" "$url" >/dev/null 2>&1; then
-        end_time=$(date +%s%N 2>/dev/null || date +%s)
-        if [[ "$start_time" =~ ^[0-9]{10,}$ ]]; then
-            elapsed=$(( (end_time - start_time) / 1000000 ))
-        else
-            elapsed=$(( (end_time - start_time) * 1000 ))
-        fi
-        echo "$elapsed"
-    else
-        echo "9999"
-    fi
-}
-
-detect_best_pypi_mirror() {
-    local best_mirror="https://pypi.org/simple"
-    local best_time=9999
-    local test_urls=(
-        "https://pypi.org/simple/pip/"
-        "https://pypi.tuna.tsinghua.edu.cn/simple/pip/"
-        "https://mirrors.aliyun.com/pypi/simple/pip/"
-    )
-    local mirrors=(
-        "https://pypi.org/simple"
-        "https://pypi.tuna.tsinghua.edu.cn/simple"
-        "https://mirrors.aliyun.com/pypi/simple"
-    )
-    
-    for i in "${!test_urls[@]}"; do
-        local time_ms
-        time_ms=$(test_mirror_speed "${test_urls[$i]}" 5) || time_ms=9999
-        if [ "$time_ms" -lt "$best_time" ]; then
-            best_time=$time_ms
-            best_mirror="${mirrors[$i]}"
-        fi
-    done
-    
-    BEST_PYPI_MIRROR="$best_mirror"
-    [ "$best_time" -lt 9999 ] && log_success "Best PyPI: $best_mirror (${best_time}ms)"
-}
-
-detect_best_npm_mirror() {
-    local best_mirror="https://registry.npmjs.org"
-    local best_time=9999
-    local test_urls=(
-        "https://registry.npmjs.org/npm"
-        "https://registry.npmmirror.com/npm"
-    )
-    local mirrors=(
-        "https://registry.npmjs.org"
-        "https://registry.npmmirror.com"
-    )
-    
-    for i in "${!test_urls[@]}"; do
-        local time_ms
-        time_ms=$(test_mirror_speed "${test_urls[$i]}" 5) || time_ms=9999
-        if [ "$time_ms" -lt "$best_time" ]; then
-            best_time=$time_ms
-            best_mirror="${mirrors[$i]}"
-        fi
-    done
-    
-    BEST_NPM_MIRROR="$best_mirror"
-    [ "$best_time" -lt 9999 ] && log_success "Best npm: $best_mirror (${best_time}ms)"
-}
-
-detect_best_apt_mirror() {
-    local best_mirror="mirror.yandex.ru"
-    local best_time=9999
-    local test_urls=(
-        "http://deb.debian.org/debian/dists/stable/Release"
-        "http://mirror.yandex.ru/debian/dists/stable/Release"
-        "http://mirrors.aliyun.com/debian/dists/stable/Release"
-    )
-    local mirrors=(
-        "deb.debian.org"
-        "mirror.yandex.ru"
-        "mirrors.aliyun.com"
-    )
-    
-    for i in "${!test_urls[@]}"; do
-        local time_ms
-        time_ms=$(test_mirror_speed "${test_urls[$i]}" 5) || time_ms=9999
-        if [ "$time_ms" -lt "$best_time" ]; then
-            best_time=$time_ms
-            best_mirror="${mirrors[$i]}"
-        fi
-    done
-    
-    BEST_APT_MIRROR="$best_mirror"
-    [ "$best_time" -lt 9999 ] && log_success "Best APT: $best_mirror (${best_time}ms)"
-}
-
-detect_best_mirrors() {
-    log_info "Detecting fastest mirrors..."
-    detect_best_pypi_mirror
-    detect_best_npm_mirror
-    detect_best_apt_mirror
-}
-
 # Get new version
 NEW_VERSION="unknown"
 if [ -f "$TMP_DIR/panel/VERSION" ]; then
     NEW_VERSION=$(cat "$TMP_DIR/panel/VERSION")
 fi
 log_info "Applying update: ${CURRENT_VERSION:-unknown} → $NEW_VERSION"
+
+# Log proxy if used
+if [ -n "$UPDATE_PROXY" ]; then
+    log_info "Using proxy: $UPDATE_PROXY"
+fi
 
 # Stop containers
 log_info "Stopping containers..."
@@ -234,16 +127,12 @@ fi
 
 log_success "Files updated"
 
-# Detect best mirrors
-detect_best_mirrors
-
 # Enable BuildKit for faster builds with cache
 export DOCKER_BUILDKIT=1
 export COMPOSE_DOCKER_CLI_BUILD=1
 
-# Rebuild Docker images with timeout, mirrors, and caching
+# Rebuild Docker images with timeout
 log_info "Building new Docker images (timeout: ${DOCKER_BUILD_TIMEOUT}s)..."
-log_info "BuildKit enabled for faster cached builds"
 cd "$PANEL_DIR"
 
 # Generate cache bust hash from .env (forces rebuild when any config changes)
@@ -254,20 +143,9 @@ if [ -f "$PANEL_DIR/.env" ]; then
     log_info "Config hash: ${CACHE_BUST:0:8}... (rebuild on .env changes)"
 fi
 
-# Build arguments with detected mirrors
-BUILD_ARGS="--build-arg APT_MIRROR=${BEST_APT_MIRROR:-mirror.yandex.ru}"
-BUILD_ARGS="$BUILD_ARGS --build-arg PIP_INDEX_URL=${BEST_PYPI_MIRROR:-https://pypi.org/simple}"
-BUILD_ARGS="$BUILD_ARGS --build-arg NPM_REGISTRY=${BEST_NPM_MIRROR:-https://registry.npmmirror.com}"
-BUILD_ARGS="$BUILD_ARGS --build-arg PIP_TIMEOUT=${PIP_TIMEOUT}"
-BUILD_ARGS="$BUILD_ARGS --build-arg APT_TIMEOUT=${APT_TIMEOUT}"
-BUILD_ARGS="$BUILD_ARGS --build-arg NPM_TIMEOUT=${NPM_TIMEOUT}"
-BUILD_ARGS="$BUILD_ARGS --build-arg CACHE_BUST=${CACHE_BUST}"
-
-log_info "Using mirrors: APT=${BEST_APT_MIRROR:-default}, PyPI=${BEST_PYPI_MIRROR:-default}, npm=${BEST_NPM_MIRROR:-default}"
-
 # Run build in background, capture output to log file
 set +e
-timeout "$DOCKER_BUILD_TIMEOUT" docker compose build --parallel $BUILD_ARGS > "$BUILD_LOG" 2>&1 &
+timeout "$DOCKER_BUILD_TIMEOUT" docker compose build --parallel --build-arg CACHE_BUST=${CACHE_BUST} > "$BUILD_LOG" 2>&1 &
 BUILD_PID=$!
 
 # Show progress while building

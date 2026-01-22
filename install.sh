@@ -13,9 +13,27 @@ set -e
 # Build log file for error reporting
 BUILD_LOG="/tmp/docker_build_$$.log"
 
+# Cleanup proxy on exit (inline, doesn't depend on functions)
+cleanup_proxy_on_exit() {
+    # Remove temporary APT proxy config
+    rm -f /etc/apt/apt.conf.d/99proxy-temp 2>/dev/null || true
+    # Remove Docker proxy config
+    rm -f /etc/systemd/system/docker.service.d/proxy.conf 2>/dev/null || true
+    rmdir /etc/systemd/system/docker.service.d 2>/dev/null || true
+    # Unset git proxy
+    git config --global --unset http.proxy 2>/dev/null || true
+    git config --global --unset https.proxy 2>/dev/null || true
+    # Reload docker daemon config
+    systemctl daemon-reload 2>/dev/null || true
+}
+
 # Trap для обработки прерываний
 cleanup() {
     local exit_code=$?
+    
+    # Always cleanup proxy settings on exit
+    cleanup_proxy_on_exit
+    
     if [ $exit_code -ne 0 ]; then
         echo ""
         echo -e "\033[0;31m[ERROR] Script interrupted or failed (exit code: $exit_code)\033[0m"
@@ -53,43 +71,11 @@ BIN_PATH="/usr/local/bin/monitoring"
 # Language (default: auto-detect or English)
 LANG_CODE="en"
 
-# GitHub mirror domain (change this to use different mirror)
-# Supported: ghfast.top, ghproxy.com, gh-proxy.com
-GITHUB_MIRROR_DOMAIN="ghfast.top"
-GITHUB_MIRROR="https://${GITHUB_MIRROR_DOMAIN}"
-
 # Default timeouts (in seconds)
-GIT_CLONE_TIMEOUT=60
 DOCKER_BUILD_TIMEOUT=1800  # 30 minutes
-APT_TIMEOUT=120
-PIP_TIMEOUT=120
-CURL_TIMEOUT=30
 
-# Docker mirror list
-DOCKER_MIRRORS=(
-    "https://mirror.gcr.io"
-    "https://registry.docker-cn.com"
-    "https://docker.mirrors.ustc.edu.cn"
-)
-
-# PyPI mirror list (for testing speed)
-PYPI_MIRRORS=(
-    "https://pypi.org/simple"
-    "https://pypi.tuna.tsinghua.edu.cn/simple"
-    "https://mirrors.aliyun.com/pypi/simple"
-)
-
-# npm mirror list
-NPM_MIRRORS=(
-    "https://registry.npmjs.org"
-    "https://registry.npmmirror.com"
-)
-
-# Best mirrors (will be detected)
-BEST_PYPI_MIRROR=""
-BEST_NPM_MIRROR=""
-BEST_APT_MIRROR=""
-BEST_GITHUB_URL=""
+# Proxy settings (empty = no proxy)
+SOCKS5_PROXY=""
 
 # ==================== Translations ====================
 
@@ -175,6 +161,15 @@ MSG_EN[connectivity_ok]="Network connectivity OK"
 MSG_EN[connectivity_failed]="Network connectivity failed"
 MSG_EN[applying_fix]="Applying fix"
 
+# Proxy messages - English
+MSG_EN[proxy_prompt]="Use SOCKS5 proxy? (Enter to skip, or enter proxy)"
+MSG_EN[proxy_format_hint]="Formats: ip:port | ip:port:user:pass | socks5://user:pass@ip:port"
+MSG_EN[proxy_localhost_hint]="You can use localhost:1080 if xray is running locally"
+MSG_EN[proxy_configured]="Proxy configured for all network operations"
+MSG_EN[proxy_not_used]="No proxy"
+MSG_EN[proxy_invalid]="Invalid proxy format"
+MSG_EN[proxy_enabled]="Proxy enabled"
+
 # Russian messages
 MSG_RU[select_language]="Select language / Выберите язык:"
 MSG_RU[installing_git]="Установка git..."
@@ -254,6 +249,15 @@ MSG_RU[connectivity_ok]="Сетевое подключение в порядке
 MSG_RU[connectivity_failed]="Сетевое подключение не работает"
 MSG_RU[applying_fix]="Применяется исправление"
 
+# Proxy messages - Russian
+MSG_RU[proxy_prompt]="Использовать SOCKS5 прокси? (Enter - пропустить, или введите прокси)"
+MSG_RU[proxy_format_hint]="Форматы: ip:port | ip:port:user:pass | socks5://user:pass@ip:port"
+MSG_RU[proxy_localhost_hint]="Можно использовать localhost:1080 если xray запущен локально"
+MSG_RU[proxy_configured]="Прокси настроен для всех сетевых операций"
+MSG_RU[proxy_not_used]="Без прокси"
+MSG_RU[proxy_invalid]="Неверный формат прокси"
+MSG_RU[proxy_enabled]="Прокси включён"
+
 # Get message in current language
 msg() {
     local key="$1"
@@ -324,231 +328,219 @@ run_quiet_timeout() {
     return 0
 }
 
-# ==================== Mirror Speed Testing ====================
+# ==================== Proxy Functions ====================
 
-# Test mirror speed and return response time in ms (or 9999 if failed)
-test_mirror_speed() {
-    local url="$1"
-    local timeout_sec="${2:-5}"
-    local start_time end_time elapsed
+# Parse proxy input and normalize to socks5h:// format
+# Input formats:
+#   ip:port                      -> socks5h://ip:port
+#   ip:port:user:pass            -> socks5h://user:pass@ip:port
+#   socks5://user:pass@ip:port   -> socks5h://user:pass@ip:port
+#   socks5h://user:pass@ip:port  -> socks5h://user:pass@ip:port (unchanged)
+parse_proxy_input() {
+    local input="$1"
     
-    start_time=$(date +%s%N 2>/dev/null || date +%s)
-    if curl -fsSL --connect-timeout "$timeout_sec" --max-time "$timeout_sec" "$url" >/dev/null 2>&1; then
-        end_time=$(date +%s%N 2>/dev/null || date +%s)
-        # Calculate elapsed time in ms
-        if [[ "$start_time" =~ ^[0-9]{10,}$ ]]; then
-            elapsed=$(( (end_time - start_time) / 1000000 ))
-        else
-            elapsed=$(( (end_time - start_time) * 1000 ))
-        fi
-        echo "$elapsed"
+    # Empty input = no proxy
+    if [ -z "$input" ]; then
+        echo ""
         return 0
     fi
-    echo "9999"
+    
+    # Already has socks5h:// prefix
+    if [[ "$input" == socks5h://* ]]; then
+        echo "$input"
+        return 0
+    fi
+    
+    # Has socks5:// prefix - convert to socks5h://
+    if [[ "$input" == socks5://* ]]; then
+        echo "socks5h://${input#socks5://}"
+        return 0
+    fi
+    
+    # Format: ip:port:user:pass (4 parts separated by colons)
+    # Need to handle IPv4 addresses
+    local colon_count=$(echo "$input" | tr -cd ':' | wc -c)
+    
+    if [ "$colon_count" -eq 3 ]; then
+        # ip:port:user:pass format
+        local ip=$(echo "$input" | cut -d: -f1)
+        local port=$(echo "$input" | cut -d: -f2)
+        local user=$(echo "$input" | cut -d: -f3)
+        local pass=$(echo "$input" | cut -d: -f4)
+        
+        if [[ "$port" =~ ^[0-9]+$ ]] && [ -n "$user" ] && [ -n "$pass" ]; then
+            echo "socks5h://${user}:${pass}@${ip}:${port}"
+            return 0
+        fi
+    fi
+    
+    # Simple format: ip:port (validate it has exactly one colon for port)
+    if [[ "$input" =~ ^[^:]+:[0-9]+$ ]]; then
+        echo "socks5h://$input"
+        return 0
+    fi
+    
+    # Invalid format
     return 1
 }
 
-# Find fastest PyPI mirror
-detect_best_pypi_mirror() {
-    log_info "Testing PyPI mirrors..."
-    local best_mirror="https://pypi.org/simple"
-    local best_time=9999
-    local test_urls=(
-        "https://pypi.org/simple/pip/"
-        "https://pypi.tuna.tsinghua.edu.cn/simple/pip/"
-        "https://mirrors.aliyun.com/pypi/simple/pip/"
-    )
-    local mirrors=(
-        "https://pypi.org/simple"
-        "https://pypi.tuna.tsinghua.edu.cn/simple"
-        "https://mirrors.aliyun.com/pypi/simple"
-    )
+# Ask user for proxy configuration (called before each install/update)
+ask_proxy() {
+    echo ""
+    echo -e "${CYAN}╔════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║              SOCKS5 Proxy                  ║${NC}"
+    echo -e "${CYAN}╚════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "  $(msg proxy_format_hint)"
+    echo -e "  ${YELLOW}$(msg proxy_localhost_hint)${NC}"
+    echo ""
     
-    for i in "${!test_urls[@]}"; do
-        local time_ms
-        time_ms=$(test_mirror_speed "${test_urls[$i]}" 5) || true
-        if [ "$time_ms" -lt "$best_time" ]; then
-            best_time=$time_ms
-            best_mirror="${mirrors[$i]}"
-        fi
-    done
+    read -p "$(msg proxy_prompt): " proxy_input
     
-    BEST_PYPI_MIRROR="$best_mirror"
-    if [ "$best_time" -lt 9999 ]; then
-        log_success "Best PyPI mirror: $best_mirror (${best_time}ms)"
+    if [ -z "$proxy_input" ]; then
+        SOCKS5_PROXY=""
+        log_info "$(msg proxy_not_used)"
+        return 0
+    fi
+    
+    local parsed_proxy
+    parsed_proxy=$(parse_proxy_input "$proxy_input")
+    
+    if [ $? -eq 0 ] && [ -n "$parsed_proxy" ]; then
+        SOCKS5_PROXY="$parsed_proxy"
+        log_success "$(msg proxy_configured): $SOCKS5_PROXY"
+        # Enable proxy for all operations
+        enable_system_proxy
     else
-        log_warn "All PyPI mirrors slow, using default"
-        BEST_PYPI_MIRROR="https://pypi.org/simple"
+        log_error "$(msg proxy_invalid): $proxy_input"
+        SOCKS5_PROXY=""
+        return 1
     fi
 }
 
-# Find fastest npm mirror
-detect_best_npm_mirror() {
-    log_info "Testing npm mirrors..."
-    local best_mirror="https://registry.npmjs.org"
-    local best_time=9999
-    local test_urls=(
-        "https://registry.npmjs.org/npm"
-        "https://registry.npmmirror.com/npm"
-    )
-    local mirrors=(
-        "https://registry.npmjs.org"
-        "https://registry.npmmirror.com"
-    )
+# Enable proxy for ALL system operations (apt, pip, docker, wget, curl, git, etc.)
+enable_system_proxy() {
+    if [ -z "$SOCKS5_PROXY" ]; then
+        return 0
+    fi
     
-    for i in "${!test_urls[@]}"; do
-        local time_ms
-        time_ms=$(test_mirror_speed "${test_urls[$i]}" 5) || true
-        if [ "$time_ms" -lt "$best_time" ]; then
-            best_time=$time_ms
-            best_mirror="${mirrors[$i]}"
-        fi
-    done
+    log_info "$(msg proxy_enabled): $SOCKS5_PROXY"
     
-    BEST_NPM_MIRROR="$best_mirror"
-    if [ "$best_time" -lt 9999 ]; then
-        log_success "Best npm mirror: $best_mirror (${best_time}ms)"
-    else
-        log_warn "All npm mirrors slow, using default"
-        BEST_NPM_MIRROR="https://registry.npmjs.org"
+    # Set environment variables for all tools
+    export http_proxy="$SOCKS5_PROXY"
+    export https_proxy="$SOCKS5_PROXY"
+    export HTTP_PROXY="$SOCKS5_PROXY"
+    export HTTPS_PROXY="$SOCKS5_PROXY"
+    export ALL_PROXY="$SOCKS5_PROXY"
+    export all_proxy="$SOCKS5_PROXY"
+    
+    # Git proxy config
+    git config --global http.proxy "$SOCKS5_PROXY" 2>/dev/null || true
+    git config --global https.proxy "$SOCKS5_PROXY" 2>/dev/null || true
+    
+    # APT proxy config (temporary file, will be removed after install)
+    mkdir -p /etc/apt/apt.conf.d 2>/dev/null || true
+    cat > /etc/apt/apt.conf.d/99proxy-temp << EOF
+Acquire::http::Proxy "$SOCKS5_PROXY";
+Acquire::https::Proxy "$SOCKS5_PROXY";
+EOF
+    
+    # Docker daemon proxy (for pulling images)
+    mkdir -p /etc/systemd/system/docker.service.d 2>/dev/null || true
+    cat > /etc/systemd/system/docker.service.d/proxy.conf << EOF
+[Service]
+Environment="HTTP_PROXY=$SOCKS5_PROXY"
+Environment="HTTPS_PROXY=$SOCKS5_PROXY"
+Environment="NO_PROXY=localhost,127.0.0.1"
+EOF
+    
+    # Reload docker if it's running
+    if systemctl is-active --quiet docker 2>/dev/null; then
+        systemctl daemon-reload 2>/dev/null || true
+        systemctl restart docker 2>/dev/null || true
+        # Wait for docker to be ready
+        local count=0
+        while [ $count -lt 30 ]; do
+            if docker info >/dev/null 2>&1; then
+                break
+            fi
+            sleep 1
+            count=$((count + 1))
+        done
     fi
 }
 
-# Find fastest APT mirror
-detect_best_apt_mirror() {
-    log_info "Testing APT mirrors..."
-    local best_mirror="deb.debian.org"
-    local best_time=9999
-    local test_urls=(
-        "http://deb.debian.org/debian/dists/stable/Release"
-        "http://mirror.yandex.ru/debian/dists/stable/Release"
-        "http://mirrors.aliyun.com/debian/dists/stable/Release"
-    )
-    local mirrors=(
-        "deb.debian.org"
-        "mirror.yandex.ru"
-        "mirrors.aliyun.com"
-    )
+# Disable/cleanup proxy settings after install
+# Args: $1 = "no_docker_restart" to skip docker restart (used after successful install)
+disable_system_proxy() {
+    local skip_docker_restart="${1:-}"
     
-    for i in "${!test_urls[@]}"; do
-        local time_ms
-        time_ms=$(test_mirror_speed "${test_urls[$i]}" 5) || true
-        if [ "$time_ms" -lt "$best_time" ]; then
-            best_time=$time_ms
-            best_mirror="${mirrors[$i]}"
+    # Remove temporary APT proxy config
+    rm -f /etc/apt/apt.conf.d/99proxy-temp 2>/dev/null || true
+    
+    # Remove Docker proxy config
+    rm -f /etc/systemd/system/docker.service.d/proxy.conf 2>/dev/null || true
+    rmdir /etc/systemd/system/docker.service.d 2>/dev/null || true
+    
+    # Unset git proxy
+    git config --global --unset http.proxy 2>/dev/null || true
+    git config --global --unset https.proxy 2>/dev/null || true
+    
+    # Reload docker to apply changes (skip restart if containers just started)
+    if [ "$skip_docker_restart" != "no_docker_restart" ]; then
+        if systemctl is-active --quiet docker 2>/dev/null; then
+            systemctl daemon-reload 2>/dev/null || true
+            # Don't restart docker - just reload daemon config
+            # Docker will use new config on next restart
         fi
-    done
-    
-    BEST_APT_MIRROR="$best_mirror"
-    if [ "$best_time" -lt 9999 ]; then
-        log_success "Best APT mirror: $best_mirror (${best_time}ms)"
     else
-        log_warn "All APT mirrors slow, using default"
-        BEST_APT_MIRROR="mirror.yandex.ru"
+        # Just reload daemon without restart to preserve running containers
+        systemctl daemon-reload 2>/dev/null || true
+    fi
+    
+    # Unset environment variables
+    unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy
+    
+    SOCKS5_PROXY=""
+}
+
+# Get curl proxy arguments (for commands that need explicit proxy arg)
+get_curl_proxy_args() {
+    if [ -n "$SOCKS5_PROXY" ]; then
+        echo "--proxy $SOCKS5_PROXY"
     fi
 }
 
-# Find fastest GitHub source (direct or mirror)
-detect_best_github_source() {
-    log_info "Testing GitHub sources..."
-    local direct_url="https://github.com/Joliz1337/monitoring.git"
-    local mirror_url="${GITHUB_MIRROR}/https://github.com/Joliz1337/monitoring.git"
-    
-    # Test direct GitHub (using git ls-remote which is faster than clone)
-    local direct_time=9999
-    local mirror_time=9999
-    
-    local start_time end_time
-    
-    # Test direct GitHub
-    start_time=$(date +%s%N 2>/dev/null || date +%s)
-    if timeout 10 git ls-remote --exit-code "$direct_url" HEAD >/dev/null 2>&1; then
-        end_time=$(date +%s%N 2>/dev/null || date +%s)
-        if [[ "$start_time" =~ ^[0-9]{10,}$ ]]; then
-            direct_time=$(( (end_time - start_time) / 1000000 ))
-        else
-            direct_time=$(( (end_time - start_time) * 1000 ))
-        fi
+# Get git proxy config (for commands that need explicit proxy arg)
+get_git_proxy_args() {
+    if [ -n "$SOCKS5_PROXY" ]; then
+        echo "-c http.proxy=$SOCKS5_PROXY -c https.proxy=$SOCKS5_PROXY"
     fi
-    
-    # Test mirror
-    start_time=$(date +%s%N 2>/dev/null || date +%s)
-    if timeout 10 git ls-remote --exit-code "$mirror_url" HEAD >/dev/null 2>&1; then
-        end_time=$(date +%s%N 2>/dev/null || date +%s)
-        if [[ "$start_time" =~ ^[0-9]{10,}$ ]]; then
-            mirror_time=$(( (end_time - start_time) / 1000000 ))
-        else
-            mirror_time=$(( (end_time - start_time) * 1000 ))
-        fi
-    fi
-    
-    # Select best source
-    if [ "$direct_time" -lt 9999 ] && [ "$direct_time" -le "$mirror_time" ]; then
-        BEST_GITHUB_URL="$direct_url"
-        log_success "Best GitHub source: direct (${direct_time}ms)"
-    elif [ "$mirror_time" -lt 9999 ]; then
-        BEST_GITHUB_URL="$mirror_url"
-        log_success "Best GitHub source: ${GITHUB_MIRROR_DOMAIN} (${mirror_time}ms)"
-    else
-        # Both failed, default to direct (will retry with fallback later)
-        BEST_GITHUB_URL="$direct_url"
-        log_warn "GitHub sources slow, will try with extended timeout"
-    fi
-}
-
-# Detect all best mirrors
-detect_best_mirrors() {
-    log_info "Detecting fastest mirrors for your location..."
-    detect_best_github_source
-    detect_best_pypi_mirror
-    detect_best_npm_mirror
-    detect_best_apt_mirror
 }
 
 # ==================== GitHub Clone Functions ====================
 
-# Clone repository using best detected source, with fallback
+# Clone repository from GitHub
 clone_repo_with_fallback() {
     local target_dir="$1"
     local branch="${2:-main}"
-    local direct_url="https://github.com/Joliz1337/monitoring.git"
-    local mirror_url="${GITHUB_MIRROR}/https://github.com/Joliz1337/monitoring.git"
+    local repo_url="https://github.com/Joliz1337/monitoring.git"
+    local git_proxy_args=$(get_git_proxy_args)
     
     rm -rf "$target_dir"
     
-    # Auto-detect best source if not done yet
-    if [ -z "$BEST_GITHUB_URL" ]; then
-        detect_best_github_source
-    fi
-    
-    # If best source was detected, try it first
-    if [ -n "$BEST_GITHUB_URL" ]; then
-        local source_name="GitHub"
-        [[ "$BEST_GITHUB_URL" == *"$GITHUB_MIRROR_DOMAIN"* ]] && source_name="mirror"
-        
-        log_info "$(msg downloading_repo) ($source_name)..."
-        if run_quiet_timeout 60 "git clone ($source_name)" git clone --depth 1 --branch "$branch" "$BEST_GITHUB_URL" "$target_dir"; then
+    log_info "$(msg downloading_repo)..."
+    if [ -n "$git_proxy_args" ]; then
+        log_info "Using proxy: $SOCKS5_PROXY"
+        if run_quiet_timeout 120 "git clone" git $git_proxy_args clone --depth 1 --branch "$branch" "$repo_url" "$target_dir"; then
             log_success "$(msg repo_downloaded)"
             return 0
         fi
-        rm -rf "$target_dir"
-    fi
-    
-    # Fallback: try direct GitHub
-    log_info "$(msg downloading_repo) (GitHub)..."
-    if run_quiet_timeout 30 "git clone (GitHub)" git clone --depth 1 --branch "$branch" "$direct_url" "$target_dir"; then
-        log_success "$(msg repo_downloaded)"
-        return 0
-    fi
-    
-    # Fallback: try mirror with extended timeout
-    rm -rf "$target_dir"
-    log_warn "$(msg download_slow)"
-    log_info "$(msg downloading_repo) (${GITHUB_MIRROR_DOMAIN})..."
-    
-    if run_quiet_timeout 120 "git clone (mirror)" git clone --depth 1 --branch "$branch" "$mirror_url" "$target_dir"; then
-        log_success "$(msg repo_downloaded)"
-        return 0
+    else
+        if run_quiet_timeout 120 "git clone" git clone --depth 1 --branch "$branch" "$repo_url" "$target_dir"; then
+            log_success "$(msg repo_downloaded)"
+            return 0
+        fi
     fi
     
     log_error "Failed to download repository"
@@ -560,9 +552,10 @@ clone_repo_with_fallback() {
 # Check if Docker Hub is accessible (with logs)
 check_docker_hub() {
     log_info "$(msg checking_docker_network)"
+    local curl_proxy_args=$(get_curl_proxy_args)
     
     # Try to reach Docker Hub auth endpoint
-    if curl -fsSL --connect-timeout 10 --max-time 15 \
+    if curl -fsSL $curl_proxy_args --connect-timeout 10 --max-time 15 \
         "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/alpine:pull" \
         >/dev/null 2>&1; then
         log_success "$(msg docker_network_ok)"
@@ -570,7 +563,7 @@ check_docker_hub() {
     fi
     
     # Try alternative check - ping registry
-    if curl -fsSL --connect-timeout 10 --max-time 15 \
+    if curl -fsSL $curl_proxy_args --connect-timeout 10 --max-time 15 \
         "https://registry-1.docker.io/v2/" \
         >/dev/null 2>&1; then
         log_success "$(msg docker_network_ok)"
@@ -583,15 +576,17 @@ check_docker_hub() {
 
 # Check if Docker Hub is accessible (quiet, no logs)
 check_docker_hub_quiet() {
+    local curl_proxy_args=$(get_curl_proxy_args)
+    
     # Try to reach Docker Hub auth endpoint
-    if curl -fsSL --connect-timeout 10 --max-time 15 \
+    if curl -fsSL $curl_proxy_args --connect-timeout 10 --max-time 15 \
         "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/alpine:pull" \
         >/dev/null 2>&1; then
         return 0
     fi
     
     # Try alternative check - ping registry
-    if curl -fsSL --connect-timeout 10 --max-time 15 \
+    if curl -fsSL $curl_proxy_args --connect-timeout 10 --max-time 15 \
         "https://registry-1.docker.io/v2/" \
         >/dev/null 2>&1; then
         return 0
@@ -602,6 +597,7 @@ check_docker_hub_quiet() {
 
 # Check general internet connectivity (quiet version for internal use)
 check_connectivity_quiet() {
+    local curl_proxy_args=$(get_curl_proxy_args)
     local test_urls=(
         "https://1.1.1.1"
         "https://8.8.8.8"
@@ -609,7 +605,7 @@ check_connectivity_quiet() {
     )
     
     for url in "${test_urls[@]}"; do
-        if curl -fsSL --connect-timeout 5 --max-time 10 "$url" >/dev/null 2>&1; then
+        if curl -fsSL $curl_proxy_args --connect-timeout 5 --max-time 10 "$url" >/dev/null 2>&1; then
             return 0
         fi
     done
@@ -697,53 +693,37 @@ EOF
     log_success "$(msg dns_configured)"
 }
 
-# Configure Docker registry mirrors
-configure_docker_mirrors() {
-    log_info "$(msg configuring_mirrors)"
+# Configure Docker DNS
+configure_docker_dns() {
+    log_info "$(msg configuring_dns)"
     
     local docker_config_dir="/etc/docker"
     local daemon_json="$docker_config_dir/daemon.json"
     
     mkdir -p "$docker_config_dir"
     
-    # Create or update daemon.json
+    # Create or update daemon.json with DNS only
     if [ -f "$daemon_json" ]; then
-        # Backup existing config
         cp "$daemon_json" "${daemon_json}.backup.$(date +%Y%m%d_%H%M%S)"
-        
-        # Try to merge with existing config using jq if available
         if command -v jq &>/dev/null; then
-            local mirrors_json='["https://mirror.gcr.io","https://registry.docker-cn.com","https://docker.mirrors.ustc.edu.cn"]'
-            jq --argjson mirrors "$mirrors_json" '. + {"registry-mirrors": $mirrors}' "$daemon_json" > "${daemon_json}.tmp" && \
+            jq '. + {"dns": ["1.1.1.1", "8.8.8.8"]}' "$daemon_json" > "${daemon_json}.tmp" && \
                 mv "${daemon_json}.tmp" "$daemon_json"
         else
-            # Simple replacement if jq not available
             cat > "$daemon_json" << 'EOF'
 {
-    "registry-mirrors": [
-        "https://mirror.gcr.io",
-        "https://registry.docker-cn.com",
-        "https://docker.mirrors.ustc.edu.cn"
-    ],
     "dns": ["1.1.1.1", "8.8.8.8"]
 }
 EOF
         fi
     else
-        # Create new daemon.json
         cat > "$daemon_json" << 'EOF'
 {
-    "registry-mirrors": [
-        "https://mirror.gcr.io",
-        "https://registry.docker-cn.com",
-        "https://docker.mirrors.ustc.edu.cn"
-    ],
     "dns": ["1.1.1.1", "8.8.8.8"]
 }
 EOF
     fi
     
-    log_success "$(msg mirrors_configured)"
+    log_success "$(msg dns_configured)"
 }
 
 # Restart Docker service
@@ -779,8 +759,8 @@ fix_docker_network() {
     # Fix 2: Configure DNS
     configure_dns
     
-    # Fix 3: Configure Docker mirrors
-    configure_docker_mirrors
+    # Fix 3: Configure Docker DNS
+    configure_docker_dns
     
     # Restart Docker to apply changes
     restart_docker
@@ -791,7 +771,7 @@ fix_docker_network() {
     return 0
 }
 
-# Build with retry, network fix, and configurable mirrors
+# Build with retry and network fix
 docker_build_with_retry() {
     local build_dir="$1"
     local max_retries=3
@@ -799,11 +779,6 @@ docker_build_with_retry() {
     local build_timeout="${DOCKER_BUILD_TIMEOUT:-1800}"  # 30 min default
     
     cd "$build_dir"
-    
-    # Detect best mirrors if not already done
-    if [ -z "$BEST_PYPI_MIRROR" ]; then
-        detect_best_mirrors
-    fi
     
     while [ $retry -lt $max_retries ]; do
         # First check if Docker Hub is accessible (quietly)
@@ -816,23 +791,14 @@ docker_build_with_retry() {
             fi
         fi
         
-        # Build arguments with detected mirrors
-        local build_args=""
-        build_args="--build-arg APT_MIRROR=${BEST_APT_MIRROR:-mirror.yandex.ru}"
-        build_args="$build_args --build-arg PIP_INDEX_URL=${BEST_PYPI_MIRROR:-https://pypi.org/simple}"
-        build_args="$build_args --build-arg NPM_REGISTRY=${BEST_NPM_MIRROR:-https://registry.npmmirror.com}"
-        build_args="$build_args --build-arg PIP_TIMEOUT=${PIP_TIMEOUT:-120}"
-        build_args="$build_args --build-arg APT_TIMEOUT=${APT_TIMEOUT:-120}"
-        
         # Try to build with timeout
         log_info "Building containers (attempt $((retry + 1))/$max_retries, timeout: ${build_timeout}s)..."
-        log_info "Using mirrors: APT=${BEST_APT_MIRROR:-default}, PyPI=${BEST_PYPI_MIRROR:-default}"
         
         local build_exit_code
         
         # Run build in background, capture output to log file
         set +e
-        timeout "$build_timeout" docker compose build --no-cache $build_args > "$BUILD_LOG" 2>&1 &
+        timeout "$build_timeout" docker compose build --no-cache > "$BUILD_LOG" 2>&1 &
         local build_pid=$!
         
         # Show progress while building
@@ -862,7 +828,6 @@ docker_build_with_retry() {
             log_error "Build timeout after ${build_timeout}s"
             echo -e "${YELLOW}Build was taking too long. This usually means:${NC}"
             echo "  - Very slow internet connection"
-            echo "  - Package mirrors are unreachable"
             echo "  - Network issues with Docker Hub"
             echo "  - Server ran out of memory (check: free -h)"
             echo ""
@@ -888,8 +853,6 @@ docker_build_with_retry() {
             # Apply additional fixes on subsequent retries
             if [ $retry -eq 1 ]; then
                 fix_docker_network
-                # Re-detect mirrors after network fix
-                detect_best_mirrors
             fi
             
             sleep 5
@@ -939,29 +902,25 @@ cleanup() {
 
 # Install CLI command
 install_cli() {
-    cat > "$BIN_PATH" << SCRIPT
+    cat > "$BIN_PATH" << 'SCRIPT'
 #!/bin/bash
 # Monitoring System Manager
 # Run this command to manage your monitoring installation
 
 GITHUB_URL="https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh"
-MIRROR_URL="https://${GITHUB_MIRROR_DOMAIN}/https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh"
 
 # Check if we have a local copy
 if [ -f "/opt/monitoring-panel/install.sh" ]; then
-    exec bash "/opt/monitoring-panel/install.sh" "\$@"
+    exec bash "/opt/monitoring-panel/install.sh" "$@"
 elif [ -f "/opt/monitoring-node/install.sh" ]; then
-    exec bash "/opt/monitoring-node/install.sh" "\$@"
+    exec bash "/opt/monitoring-node/install.sh" "$@"
 else
-    # Download and run (try GitHub first, then mirror)
-    SCRIPT_CONTENT=\$(curl -fsSL --connect-timeout 10 --max-time 30 "\$GITHUB_URL" 2>/dev/null)
-    if [ -z "\$SCRIPT_CONTENT" ]; then
-        SCRIPT_CONTENT=\$(curl -fsSL --connect-timeout 10 --max-time 60 "\$MIRROR_URL" 2>/dev/null)
-    fi
-    if [ -n "\$SCRIPT_CONTENT" ]; then
-        exec bash -c "\$SCRIPT_CONTENT" -- "\$@"
+    # Download and run from GitHub
+    SCRIPT_CONTENT=$(curl -fsSL --connect-timeout 30 --max-time 120 "$GITHUB_URL" 2>/dev/null)
+    if [ -n "$SCRIPT_CONTENT" ]; then
+        exec bash -c "$SCRIPT_CONTENT" -- "$@"
     else
-        echo "Failed to download installer from GitHub and mirror"
+        echo "Failed to download installer from GitHub"
         exit 1
     fi
 fi
@@ -1053,23 +1012,18 @@ apply_system_optimizations() {
             log_success "configs VERSION installed"
         fi
     else
-        # Fallback: download configs from GitHub (30s timeout, then mirror)
+        # Fallback: download configs from GitHub
         log_info "Downloading optimization configs..."
         
         local GITHUB_RAW="https://raw.githubusercontent.com/Joliz1337/monitoring/main/configs"
-        local MIRROR_RAW="${GITHUB_MIRROR}/https://raw.githubusercontent.com/Joliz1337/monitoring/main/configs"
         
-        # Helper function: download with fallback
+        # Helper function: download from GitHub
         download_config() {
             local filename="$1"
             local dest="$2"
+            local curl_proxy_args=$(get_curl_proxy_args)
             
-            # Try GitHub first (30s timeout)
-            if curl -fsSL --connect-timeout 10 --max-time 30 "$GITHUB_RAW/$filename" -o "$dest" 2>/dev/null; then
-                return 0
-            fi
-            # Try mirror
-            if curl -fsSL --connect-timeout 10 --max-time 60 "$MIRROR_RAW/$filename" -o "$dest" 2>/dev/null; then
+            if curl -fsSL $curl_proxy_args --connect-timeout 30 --max-time 120 "$GITHUB_RAW/$filename" -o "$dest" 2>/dev/null; then
                 return 0
             fi
             return 1
@@ -1470,24 +1424,30 @@ main() {
         
         case $choice in
             1)
+                ask_proxy
                 check_git
                 clone_repo
                 install_panel
                 cleanup
+                disable_system_proxy "no_docker_restart"
                 read -p "$(msg press_enter)"
                 ;;
             2)
+                ask_proxy
                 check_git
                 clone_repo
                 install_node
                 cleanup
+                disable_system_proxy "no_docker_restart"
                 read -p "$(msg press_enter)"
                 ;;
             3)
                 if [ -d "$PANEL_DIR" ]; then
+                    ask_proxy
                     check_git
                     update_panel
                     cleanup
+                    disable_system_proxy "no_docker_restart"
                 else
                     log_error "$(msg invalid_option)"
                     sleep 1
@@ -1496,9 +1456,11 @@ main() {
                 ;;
             4)
                 if [ -d "$NODE_DIR" ]; then
+                    ask_proxy
                     check_git
                     update_node
                     cleanup
+                    disable_system_proxy "no_docker_restart"
                 else
                     log_error "$(msg invalid_option)"
                     sleep 1

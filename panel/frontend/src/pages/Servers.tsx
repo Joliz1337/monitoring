@@ -23,6 +23,7 @@ interface ServerFormData {
   host: string
   port: string
   api_key: string
+  update_proxy: string
 }
 
 const parseServerUrl = (url: string): { host: string; port: string } => {
@@ -56,7 +57,7 @@ export default function Servers() {
   
   const [showForm, setShowForm] = useState(false)
   const [editingId, setEditingId] = useState<number | null>(null)
-  const [formData, setFormData] = useState<ServerFormData>({ name: '', host: '', port: '9100', api_key: '' })
+  const [formData, setFormData] = useState<ServerFormData>({ name: '', host: '', port: '9100', api_key: '', update_proxy: '' })
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [testResults, setTestResults] = useState<Record<number, { status: string; message?: string }>>({})
@@ -75,14 +76,15 @@ export default function Servers() {
     const serverData = {
       name: formData.name,
       url: buildServerUrl(formData.host, formData.port),
-      api_key: formData.api_key
+      api_key: formData.api_key,
+      update_proxy: formData.update_proxy || null
     }
     
     if (editingId) {
       try {
         await updateServer(editingId, serverData)
         setEditingId(null)
-        setFormData({ name: '', host: '', port: '9100', api_key: '' })
+        setFormData({ name: '', host: '', port: '9100', api_key: '', update_proxy: '' })
         setShowForm(false)
       } catch {
         setError(t('servers.failed_update'))
@@ -91,7 +93,7 @@ export default function Servers() {
       const result = await addServer(serverData)
       if (result.success) {
         setShowForm(false)
-        setFormData({ name: '', host: '', port: '9100', api_key: '' })
+        setFormData({ name: '', host: '', port: '9100', api_key: '', update_proxy: '' })
       } else {
         setError(result.error || t('servers.failed_add'))
       }
@@ -108,6 +110,7 @@ export default function Servers() {
       host,
       port,
       api_key: '',
+      update_proxy: server.update_proxy || '',
     })
     setShowForm(true)
     setError('')
@@ -116,7 +119,7 @@ export default function Servers() {
   const handleCancel = () => {
     setShowForm(false)
     setEditingId(null)
-    setFormData({ name: '', host: '', port: '9100', api_key: '' })
+    setFormData({ name: '', host: '', port: '9100', api_key: '', update_proxy: '' })
     setError('')
   }
   
@@ -310,11 +313,33 @@ export default function Servers() {
                 />
               </motion.div>
               
+              <motion.div
+                initial={{ opacity: 0, x: -20 }}
+                animate={{ opacity: 1, x: 0 }}
+                transition={{ delay: 0.25 }}
+              >
+                <label className="block text-sm text-dark-300 mb-2 flex items-center gap-2">
+                  <LinkIcon className="w-4 h-4" />
+                  {t('servers.update_proxy')}
+                  <span className="text-dark-500 font-normal">({t('common.optional')})</span>
+                </label>
+                <input
+                  type="text"
+                  value={formData.update_proxy}
+                  onChange={(e) => setFormData(d => ({ ...d, update_proxy: e.target.value }))}
+                  placeholder={t('servers.update_proxy_placeholder')}
+                  className="input"
+                />
+                <p className="text-xs text-dark-500 mt-1.5">
+                  {t('servers.update_proxy_hint')}
+                </p>
+              </motion.div>
+              
               <motion.div 
                 className="flex gap-3 pt-3"
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.25 }}
+                transition={{ delay: 0.3 }}
               >
                 <motion.button 
                   type="submit" 

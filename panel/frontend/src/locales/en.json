@@ -47,7 +47,8 @@
     "panel_version": "Panel v1.0",
     "value": "Value",
     "server": "Server",
-    "updates": "Updates"
+    "updates": "Updates",
+    "optional": "optional"
   },
   "units": {
     "bps": "bit/s",
@@ -118,7 +119,10 @@
     "failed_update": "Failed to update server",
     "monitoring_enabled": "Monitoring enabled",
     "monitoring_disabled": "Monitoring disabled",
-    "disabled": "Disabled"
+    "disabled": "Disabled",
+    "update_proxy": "Proxy for Updates",
+    "update_proxy_placeholder": "ip:port or socks5://user:pass@ip:port",
+    "update_proxy_hint": "SOCKS5 proxy for downloading updates. Leave empty if not needed. You can use localhost:1080 if xray is running on the server."
   },
   "server_details": {
     "loading": "Loading server data...",

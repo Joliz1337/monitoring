@@ -32,6 +32,7 @@ export interface Server {
   last_seen?: string | null
   last_error?: string | null
   error_code?: number | null
+  update_proxy?: string | null
 }
 
 export interface TimezoneInfo {
@@ -370,7 +371,7 @@ export const serversApi = {
       params: includeMetrics ? { include_metrics: true } : undefined 
     }),
   get: (id: number) => api.get<Server>(`/servers/${id}`),
-  create: (data: { name: string; url: string; api_key: string }) => 
+  create: (data: { name: string; url: string; api_key: string; update_proxy?: string | null }) => 
     api.post<{ success: boolean; server: Server }>('/servers', data),
   update: (id: number, data: Partial<Server>) => api.put(`/servers/${id}`, data),
   delete: (id: number) => api.delete(`/servers/${id}`),

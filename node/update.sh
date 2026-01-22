@@ -5,12 +5,28 @@
 # Usage: ./update.sh [commit_hash|tag|branch]
 #   If no argument provided, updates to latest commit from main branch
 #
+# Environment variables:
+#   UPDATE_PROXY - SOCKS5 proxy for downloading (e.g., socks5h://127.0.0.1:1080)
+#
 
 set -e
+
+# Cleanup proxy on exit
+cleanup_proxy() {
+    # Unset git proxy (only if we set it)
+    if [ -n "$SOCKS5_PROXY" ]; then
+        git config --global --unset http.proxy 2>/dev/null || true
+        git config --global --unset https.proxy 2>/dev/null || true
+    fi
+}
 
 # Trap для обработки прерываний
 cleanup() {
     local exit_code=$?
+    
+    # Cleanup proxy settings
+    cleanup_proxy
+    
     if [ $exit_code -ne 0 ]; then
         echo ""
         echo -e "\033[0;31m[ERROR] Script interrupted or failed (exit code: $exit_code)\033[0m"
@@ -37,105 +53,62 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 NODE_DIR="/opt/monitoring-node"
 TMP_DIR="/tmp/node-update-$$"
 TARGET_REF="${1:-main}"
+REPO_URL="https://github.com/Joliz1337/monitoring.git"
 
-# GitHub mirror domain (change this to use different mirror)
-GITHUB_MIRROR_DOMAIN="ghfast.top"
-GITHUB_MIRROR="https://${GITHUB_MIRROR_DOMAIN}"
+# Proxy from environment variable
+SOCKS5_PROXY="${UPDATE_PROXY:-}"
 
-# Timeouts
-GIT_TIMEOUT="${GIT_TIMEOUT:-60}"
-GIT_MIRROR_TIMEOUT="${GIT_MIRROR_TIMEOUT:-180}"
+# ==================== Proxy Functions ====================
 
-# Best GitHub source (will be detected)
-BEST_GITHUB_URL=""
-
-# ==================== GitHub Source Detection ====================
-
-test_github_speed() {
-    local url="$1"
-    local start_time end_time elapsed
-    
-    start_time=$(date +%s%N 2>/dev/null || date +%s)
-    if timeout 10 git ls-remote --exit-code "$url" HEAD >/dev/null 2>&1; then
-        end_time=$(date +%s%N 2>/dev/null || date +%s)
-        if [[ "$start_time" =~ ^[0-9]{10,}$ ]]; then
-            elapsed=$(( (end_time - start_time) / 1000000 ))
-        else
-            elapsed=$(( (end_time - start_time) * 1000 ))
-        fi
-        echo "$elapsed"
+# Enable proxy for all network operations
+enable_system_proxy() {
+    if [ -z "$SOCKS5_PROXY" ]; then
         return 0
     fi
-    echo "9999"
-    return 1
+    
+    log_info "Enabling proxy: $SOCKS5_PROXY"
+    
+    # Set environment variables for all tools
+    export http_proxy="$SOCKS5_PROXY"
+    export https_proxy="$SOCKS5_PROXY"
+    export HTTP_PROXY="$SOCKS5_PROXY"
+    export HTTPS_PROXY="$SOCKS5_PROXY"
+    export ALL_PROXY="$SOCKS5_PROXY"
+    export all_proxy="$SOCKS5_PROXY"
+    
+    # Git proxy config
+    git config --global http.proxy "$SOCKS5_PROXY" 2>/dev/null || true
+    git config --global https.proxy "$SOCKS5_PROXY" 2>/dev/null || true
 }
 
-detect_best_github_source() {
-    log_info "Testing GitHub sources..."
-    local direct_url="https://github.com/Joliz1337/monitoring.git"
-    local mirror_url="${GITHUB_MIRROR}/https://github.com/Joliz1337/monitoring.git"
-    
-    local direct_time mirror_time
-    direct_time=$(test_github_speed "$direct_url") || direct_time=9999
-    mirror_time=$(test_github_speed "$mirror_url") || mirror_time=9999
-    
-    if [ "$direct_time" -lt 9999 ] && [ "$direct_time" -le "$mirror_time" ]; then
-        BEST_GITHUB_URL="$direct_url"
-        log_success "Best GitHub source: direct (${direct_time}ms)"
-    elif [ "$mirror_time" -lt 9999 ]; then
-        BEST_GITHUB_URL="$mirror_url"
-        log_success "Best GitHub source: ${GITHUB_MIRROR_DOMAIN} (${mirror_time}ms)"
-    else
-        BEST_GITHUB_URL="$direct_url"
-        log_warn "GitHub sources slow, will try with extended timeout"
+# Get git proxy config
+get_git_proxy_args() {
+    if [ -n "$SOCKS5_PROXY" ]; then
+        echo "-c http.proxy=$SOCKS5_PROXY -c https.proxy=$SOCKS5_PROXY"
     fi
 }
 
 # ==================== GitHub Clone Functions ====================
 
-clone_with_fallback() {
+clone_repo() {
     local target_dir="$1"
     local branch="$2"
     local max_retries=3
     local retry=0
-    local direct_url="https://github.com/Joliz1337/monitoring.git"
-    local mirror_url="${GITHUB_MIRROR}/https://github.com/Joliz1337/monitoring.git"
-    
-    # Auto-detect best source if not done yet
-    if [ -z "$BEST_GITHUB_URL" ]; then
-        detect_best_github_source
-    fi
+    local git_proxy_args=$(get_git_proxy_args)
     
     while [ $retry -lt $max_retries ]; do
         rm -rf "$target_dir"
         
-        # Determine source and timeout based on BEST_GITHUB_URL
-        local clone_url="$BEST_GITHUB_URL"
-        local clone_timeout="$GIT_TIMEOUT"
-        local source_name="GitHub"
-        
-        if [[ "$clone_url" == *"$GITHUB_MIRROR_DOMAIN"* ]]; then
-            source_name="${GITHUB_MIRROR_DOMAIN}"
-            clone_timeout="$GIT_MIRROR_TIMEOUT"
-        fi
-        
-        log_info "Downloading from $source_name (attempt $((retry + 1))/$max_retries, timeout: ${clone_timeout}s)..."
-        if timeout "$clone_timeout" git clone --depth 1 --branch "$branch" "$clone_url" "$target_dir" 2>&1; then
-            log_success "Download complete"
-            return 0
-        fi
-        
-        # If best source failed, try the other one
-        rm -rf "$target_dir"
-        if [[ "$BEST_GITHUB_URL" == *"$GITHUB_MIRROR_DOMAIN"* ]]; then
-            log_warn "Mirror failed, trying direct GitHub..."
-            if timeout "$GIT_TIMEOUT" git clone --depth 1 --branch "$branch" "$direct_url" "$target_dir" 2>&1; then
+        log_info "Downloading from GitHub (attempt $((retry + 1))/$max_retries)..."
+        if [ -n "$git_proxy_args" ]; then
+            log_info "Using proxy: $SOCKS5_PROXY"
+            if timeout 120 git $git_proxy_args clone --depth 1 --branch "$branch" "$REPO_URL" "$target_dir" 2>&1; then
                 log_success "Download complete"
                 return 0
             fi
         else
-            log_warn "GitHub timeout/error, trying mirror (${GITHUB_MIRROR_DOMAIN})..."
-            if timeout "$GIT_MIRROR_TIMEOUT" git clone --depth 1 --branch "$branch" "$mirror_url" "$target_dir" 2>&1; then
+            if timeout 120 git clone --depth 1 --branch "$branch" "$REPO_URL" "$target_dir" 2>&1; then
                 log_success "Download complete"
                 return 0
             fi
@@ -153,6 +126,9 @@ clone_with_fallback() {
 }
 
 # ==================== Main ====================
+
+# Enable proxy if provided
+enable_system_proxy
 
 log_info "=== Monitoring Node Update ==="
 log_info "Target: $TARGET_REF"
@@ -189,8 +165,8 @@ if [ -f "$NODE_DIR/.env" ]; then
     log_success ".env backed up"
 fi
 
-# Clone repository (GitHub first, then mirror fallback)
-if ! clone_with_fallback "$TMP_DIR" "$TARGET_REF"; then
+# Clone repository
+if ! clone_repo "$TMP_DIR" "$TARGET_REF"; then
     log_error "Failed to download repository"
     exit 1
 fi
@@ -207,7 +183,8 @@ echo ""
 
 if [ -f "$TMP_DIR/node/scripts/apply-update.sh" ]; then
     chmod +x "$TMP_DIR/node/scripts/apply-update.sh"
-    exec bash "$TMP_DIR/node/scripts/apply-update.sh" "$TMP_DIR" "$NODE_DIR" "$CURRENT_VERSION"
+    # Pass proxy via environment variable
+    UPDATE_PROXY="$SOCKS5_PROXY" exec bash "$TMP_DIR/node/scripts/apply-update.sh" "$TMP_DIR" "$NODE_DIR" "$CURRENT_VERSION"
 else
     # Fallback for older versions without apply-update.sh
     log_warn "Downloaded version doesn't have apply-update.sh, using inline update..."

@@ -47,7 +47,8 @@
     "panel_version": "Панель v1.0",
     "value": "Значение",
     "server": "Сервер",
-    "updates": "Обновления"
+    "updates": "Обновления",
+    "optional": "необязательно"
   },
   "units": {
     "bps": "бит/с",
@@ -118,7 +119,10 @@
     "failed_update": "Не удалось обновить сервер",
     "monitoring_enabled": "Мониторинг включён",
     "monitoring_disabled": "Мониторинг отключён",
-    "disabled": "Отключён"
+    "disabled": "Отключён",
+    "update_proxy": "Прокси для обновлений",
+    "update_proxy_placeholder": "ip:port или socks5://user:pass@ip:port",
+    "update_proxy_hint": "SOCKS5 прокси для скачивания обновлений. Оставьте пустым если не нужен. Можно использовать localhost:1080 если на сервере запущен xray."
   },
   "server_details": {
     "loading": "Загрузка данных сервера...",

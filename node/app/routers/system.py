@@ -54,12 +54,13 @@ async def get_version():
     }
 
 
-async def run_update_in_container(target_ref: str | None = None):
+async def run_update_in_container(target_ref: str | None = None, proxy: str | None = None):
     """
     Run update in separate Docker container.
     
     Args:
         target_ref: Git reference (commit hash, tag, or branch). Default: 'main'
+        proxy: SOCKS5 proxy for git (e.g., socks5h://127.0.0.1:1080)
     """
     global _update_status
     
@@ -85,13 +86,19 @@ async def run_update_in_container(target_ref: str | None = None):
             client.images.pull(UPDATER_IMAGE)
         
         ref_arg = target_ref if target_ref else "main"
-        logger.info(f"Starting update to: {ref_arg}")
+        proxy_info = f" (via proxy: {proxy})" if proxy else ""
+        logger.info(f"Starting update to: {ref_arg}{proxy_info}")
+        
+        # Build git proxy args
+        git_proxy_args = ""
+        if proxy:
+            git_proxy_args = f'-c http.proxy={proxy} -c https.proxy={proxy}'
         
         # Updater script:
         # 1. Install dependencies
         # 2. Detect country and select mirror
-        # 3. Clone repo with fallback mirrors
-        # 4. Run update.sh from cloned repo
+        # 3. Clone repo with fallback mirrors (using proxy if provided)
+        # 4. Run update.sh from cloned repo (passing proxy via environment)
         updater_script = f"""#!/bin/sh
 set -e
 
@@ -103,6 +110,10 @@ docker compose version
 
 echo "[INFO] Cloning repository..."
 
+# Proxy settings
+GIT_PROXY_ARGS="{git_proxy_args}"
+UPDATE_PROXY="{proxy if proxy else ''}"
+
 # GitHub mirror
 GITHUB_MIRROR="https://ghfast.top"
 
@@ -110,14 +121,22 @@ TMP_CLONE=/tmp/monitoring-fresh
 rm -rf $TMP_CLONE
 CLONE_SUCCESS=0
 
-echo "[INFO] Trying GitHub (30s timeout)..."
-if timeout 30 git clone --depth 1 --branch {ref_arg} "https://github.com/Joliz1337/monitoring.git" $TMP_CLONE 2>&1; then
-    CLONE_SUCCESS=1
-else
-    rm -rf $TMP_CLONE
-    echo "[WARN] GitHub timeout/error, trying mirror (ghfast.top)..."
-    if timeout 120 git clone --depth 1 --branch {ref_arg} "$GITHUB_MIRROR/https://github.com/Joliz1337/monitoring.git" $TMP_CLONE 2>&1; then
+if [ -n "$GIT_PROXY_ARGS" ]; then
+    echo "[INFO] Using proxy for git: {proxy}"
+    echo "[INFO] Trying GitHub via proxy (60s timeout)..."
+    if timeout 60 git $GIT_PROXY_ARGS clone --depth 1 --branch {ref_arg} "https://github.com/Joliz1337/monitoring.git" $TMP_CLONE 2>&1; then
         CLONE_SUCCESS=1
+    fi
+else
+    echo "[INFO] Trying GitHub (30s timeout)..."
+    if timeout 30 git clone --depth 1 --branch {ref_arg} "https://github.com/Joliz1337/monitoring.git" $TMP_CLONE 2>&1; then
+        CLONE_SUCCESS=1
+    else
+        rm -rf $TMP_CLONE
+        echo "[WARN] GitHub timeout/error, trying mirror (ghfast.top)..."
+        if timeout 120 git clone --depth 1 --branch {ref_arg} "$GITHUB_MIRROR/https://github.com/Joliz1337/monitoring.git" $TMP_CLONE 2>&1; then
+            CLONE_SUCCESS=1
+        fi
     fi
 fi
 
@@ -128,13 +147,26 @@ fi
 
 echo "[INFO] Running update script..."
 chmod +x $TMP_CLONE/node/update.sh
-bash $TMP_CLONE/node/update.sh {ref_arg}
+UPDATE_PROXY="$UPDATE_PROXY" bash $TMP_CLONE/node/update.sh {ref_arg}
 
 echo "[INFO] Cleanup..."
 rm -rf $TMP_CLONE
 
 echo "[SUCCESS] Update completed!"
 """
+        
+        # Build environment variables for container
+        env_vars = {}
+        if proxy:
+            env_vars = {
+                "http_proxy": proxy,
+                "https_proxy": proxy,
+                "HTTP_PROXY": proxy,
+                "HTTPS_PROXY": proxy,
+                "ALL_PROXY": proxy,
+                "all_proxy": proxy,
+                "UPDATE_PROXY": proxy,
+            }
         
         container = client.containers.run(
             image=UPDATER_IMAGE,
@@ -144,6 +176,7 @@ echo "[SUCCESS] Update completed!"
                 "/var/run/docker.sock": {"bind": "/var/run/docker.sock", "mode": "rw"},
                 "/opt/monitoring-node": {"bind": "/opt/monitoring-node", "mode": "rw"},
             },
+            environment=env_vars if env_vars else None,
             network_mode="host",
             privileged=True,
             detach=True,
@@ -196,18 +229,25 @@ echo "[SUCCESS] Update completed!"
         _update_status["in_progress"] = False
 
 
+class UpdateRequest(BaseModel):
+    """Request model for node update"""
+    target_version: Optional[str] = Field(None, description="Git reference (branch/tag/commit). Default: 'main'")
+    proxy: Optional[str] = Field(None, description="SOCKS5 proxy for downloads (e.g., socks5h://127.0.0.1:1080)")
+
+
 @router.post("/update")
-async def trigger_update(target_ref: str | None = None):
+async def trigger_update(data: UpdateRequest = None):
     """
     Trigger node update from GitHub.
     
     Creates a separate updater container that:
-    1. Clones fresh repository
+    1. Clones fresh repository (using proxy if provided)
     2. Runs update.sh from the cloned version
     3. update.sh stops containers, copies files, rebuilds, restarts
     
-    Args:
-        target_ref: Git reference (branch/tag/commit). Default: 'main' (latest)
+    Request body:
+        target_version: Git reference (branch/tag/commit). Default: 'main' (latest)
+        proxy: SOCKS5 proxy for git clone (e.g., socks5h://127.0.0.1:1080)
     """
     if _update_status["in_progress"]:
         raise HTTPException(
@@ -215,12 +255,16 @@ async def trigger_update(target_ref: str | None = None):
             detail="Update already in progress"
         )
     
-    asyncio.create_task(run_update_in_container(target_ref))
+    target_ref = data.target_version if data else None
+    proxy = data.proxy if data else None
+    
+    asyncio.create_task(run_update_in_container(target_ref, proxy))
     
     return {
         "success": True,
         "message": "Update started",
-        "target": target_ref or "main"
+        "target": target_ref or "main",
+        "proxy": proxy or "none"
     }
 
 
