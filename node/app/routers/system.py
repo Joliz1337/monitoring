@@ -344,14 +344,7 @@ SYSCTL_CONFIG_PATH = "/etc/sysctl.d/99-vless-tuning.conf"
 LIMITS_CONFIG_PATH = "/etc/security/limits.d/99-nofile.conf"
 SYSTEMD_LIMITS_PATH = "/etc/systemd/system.conf.d/limits.conf"
 SYSTEMD_USER_LIMITS_PATH = "/etc/systemd/system/user-.slice.d/limits.conf"
-
-
-def parse_optimization_version(content: str) -> Optional[str]:
-    """Parse OPTIMIZATION_VERSION from config content"""
-    for line in content.split('\n')[:5]:
-        if line.startswith('# OPTIMIZATION_VERSION='):
-            return line.split('=', 1)[1].strip()
-    return None
+OPTIMIZATIONS_VERSION_PATH = "/opt/monitoring-node/configs/VERSION"
 
 
 async def read_host_file(path: str) -> Optional[str]:
@@ -382,21 +375,21 @@ async def get_optimizations_version():
     """
     Get current system optimizations version from the node.
     
-    Reads version from /etc/sysctl.d/99-vless-tuning.conf header.
+    Reads version from /opt/monitoring-node/configs/VERSION file.
+    Falls back to checking if sysctl config exists for installed status.
     """
-    content = await read_host_file(SYSCTL_CONFIG_PATH)
+    # Read version from dedicated VERSION file
+    version = await read_host_file(OPTIMIZATIONS_VERSION_PATH)
+    if version:
+        version = version.strip()
     
-    if content is None:
-        return {
-            "installed": False,
-            "version": None
-        }
-    
-    version = parse_optimization_version(content)
+    # Check if optimizations are installed (sysctl config exists)
+    sysctl_content = await read_host_file(SYSCTL_CONFIG_PATH)
+    installed = sysctl_content is not None
     
     return {
-        "installed": True,
-        "version": version
+        "installed": installed,
+        "version": version if version else None
     }
 
 
@@ -405,6 +398,7 @@ class ApplyOptimizationsRequest(BaseModel):
     sysctl_content: str = Field(..., min_length=10, description="Sysctl config content")
     limits_content: str = Field(..., min_length=10, description="Limits config content")
     systemd_content: str = Field(..., min_length=10, description="Systemd limits content")
+    version: Optional[str] = Field(None, description="Optimizations version")
 
 
 @router.post("/optimizations/apply")
@@ -438,6 +432,12 @@ async def apply_optimizations(request: ApplyOptimizationsRequest):
     if not await write_host_file(SYSTEMD_USER_LIMITS_PATH, user_slice_content):
         errors.append("Failed to write systemd user slice limits")
     
+    # Save optimizations version to file
+    if request.version:
+        await executor.execute("mkdir -p /opt/monitoring-node/configs", timeout=5)
+        if not await write_host_file(OPTIMIZATIONS_VERSION_PATH, request.version + "\n"):
+            errors.append("Failed to write version file")
+    
     # Apply sysctl settings
     apply_result = await executor.execute(
         f"sysctl -p {SYSCTL_CONFIG_PATH}",
@@ -459,11 +459,8 @@ async def apply_optimizations(request: ApplyOptimizationsRequest):
             detail={"message": "Partial failure", "errors": errors}
         )
     
-    # Get applied version
-    version = parse_optimization_version(request.sysctl_content)
-    
     return {
         "success": True,
         "message": "Optimizations applied successfully",
-        "version": version
+        "version": request.version
     }

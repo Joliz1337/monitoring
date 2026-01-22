@@ -27,6 +27,7 @@ UPDATER_CONTAINER_NAME = "panel-updater"
 UPDATER_IMAGE = "docker:cli"
 GITHUB_PANEL_VERSION_URL = "https://raw.githubusercontent.com/Joliz1337/monitoring/main/panel/VERSION"
 GITHUB_NODE_VERSION_URL = "https://raw.githubusercontent.com/Joliz1337/monitoring/main/node/VERSION"
+GITHUB_CONFIGS_VERSION_URL = "https://raw.githubusercontent.com/Joliz1337/monitoring/main/configs/VERSION"
 GITHUB_SYSCTL_URL = "https://raw.githubusercontent.com/Joliz1337/monitoring/main/configs/sysctl.conf"
 GITHUB_LIMITS_URL = "https://raw.githubusercontent.com/Joliz1337/monitoring/main/configs/limits.conf"
 GITHUB_SYSTEMD_LIMITS_URL = "https://raw.githubusercontent.com/Joliz1337/monitoring/main/configs/systemd-limits.conf"
@@ -572,16 +573,8 @@ async def get_renewal_status(_: dict = Depends(verify_auth)):
 
 # ==================== System Optimizations ====================
 
-def parse_optimization_version(content: str) -> Optional[str]:
-    """Parse OPTIMIZATION_VERSION from config content"""
-    for line in content.split('\n')[:5]:
-        if line.startswith('# OPTIMIZATION_VERSION='):
-            return line.split('=', 1)[1].strip()
-    return None
-
-
 async def get_optimizations_from_github() -> dict:
-    """Fetch optimization configs from GitHub"""
+    """Fetch optimization configs and version from GitHub"""
     result = {
         "version": None,
         "sysctl_content": None,
@@ -591,21 +584,27 @@ async def get_optimizations_from_github() -> dict:
     
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            # Fetch all configs in parallel
+            # Fetch version and all configs in parallel
             responses = await asyncio.gather(
+                client.get(GITHUB_CONFIGS_VERSION_URL),
                 client.get(GITHUB_SYSCTL_URL),
                 client.get(GITHUB_LIMITS_URL),
                 client.get(GITHUB_SYSTEMD_LIMITS_URL),
                 return_exceptions=True
             )
             
-            sysctl_resp, limits_resp, systemd_resp = responses
+            version_resp, sysctl_resp, limits_resp, systemd_resp = responses
+            
+            # Parse version from configs/VERSION file
+            if isinstance(version_resp, Exception):
+                logger.error(f"Failed to fetch configs version: {version_resp}")
+            elif version_resp.status_code == 200:
+                result["version"] = version_resp.text.strip()
             
             if isinstance(sysctl_resp, Exception):
                 logger.error(f"Failed to fetch sysctl config: {sysctl_resp}")
             elif sysctl_resp.status_code == 200:
                 result["sysctl_content"] = sysctl_resp.text
-                result["version"] = parse_optimization_version(sysctl_resp.text)
             
             if isinstance(limits_resp, Exception):
                 logger.error(f"Failed to fetch limits config: {limits_resp}")

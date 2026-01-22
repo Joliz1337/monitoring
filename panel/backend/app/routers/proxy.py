@@ -1047,11 +1047,12 @@ async def apply_node_optimizations(
     if not github_data.get("sysctl_content"):
         raise HTTPException(status_code=502, detail="Failed to fetch configs from GitHub")
     
-    # Apply to node
+    # Apply to node (include version for tracking)
     apply_data = {
         "sysctl_content": github_data["sysctl_content"],
         "limits_content": github_data["limits_content"],
-        "systemd_content": github_data["systemd_content"]
+        "systemd_content": github_data["systemd_content"],
+        "version": github_data.get("version")
     }
     
     return await proxy_request(

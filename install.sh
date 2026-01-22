@@ -912,6 +912,14 @@ apply_system_optimizations() {
             chmod 644 /etc/systemd/system/network-tune.service
             log_success "network-tune.service installed"
         fi
+        
+        # Copy configs VERSION file for version tracking
+        if [ -f "$CONFIG_SRC/VERSION" ]; then
+            mkdir -p /opt/monitoring-node/configs
+            cp "$CONFIG_SRC/VERSION" /opt/monitoring-node/configs/VERSION
+            chmod 644 /opt/monitoring-node/configs/VERSION
+            log_success "configs VERSION installed"
+        fi
     else
         # Fallback: download configs from GitHub (30s timeout, then mirror)
         log_info "Downloading optimization configs..."
@@ -975,6 +983,13 @@ apply_system_optimizations() {
         if download_config "network-tune.service" "/etc/systemd/system/network-tune.service"; then
             chmod 644 /etc/systemd/system/network-tune.service
             log_success "network-tune.service downloaded"
+        fi
+        
+        # Download configs VERSION file for version tracking
+        mkdir -p /opt/monitoring-node/configs
+        if download_config "VERSION" "/opt/monitoring-node/configs/VERSION"; then
+            chmod 644 /opt/monitoring-node/configs/VERSION
+            log_success "configs VERSION downloaded"
         fi
     fi
     
