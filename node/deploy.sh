@@ -769,17 +769,6 @@ show_status() {
     echo "  - Renewal script: $([ -f /opt/monitoring-node/renew-certs.sh ] && echo 'Installed' || echo 'Not found')"
     echo ""
     
-    echo -e "${GREEN}Network Tuning (RPS/RFS):${NC}"
-    if systemctl is-enabled network-tune.service &>/dev/null 2>&1; then
-        echo -e "  - Status: ${GREEN}Enabled (auto-start on boot)${NC}"
-        local main_iface=$(ip route show default 2>/dev/null | awk '/default/ {print $5}' | head -1)
-        [ -n "$main_iface" ] && echo "  - Interface: $main_iface"
-        echo "  - CPU cores: $(nproc)"
-    else
-        echo -e "  - Status: ${YELLOW}Not configured${NC}"
-    fi
-    echo ""
-    
     # HAProxy status (native systemd service)
     echo -e "${GREEN}HAProxy (native systemd service):${NC}"
     if systemctl is-active --quiet haproxy 2>/dev/null; then
@@ -831,51 +820,6 @@ show_status() {
     read -p "Press Enter to finish / Нажмите Enter для завершения..."
 }
 
-# Setup RPS/RFS network tuning service
-setup_network_tuning() {
-    log_info "Setting up RPS/RFS network tuning..."
-    
-    mkdir -p /opt/monitoring-node/scripts
-    
-    if [ -f "scripts/network-tune.sh" ]; then
-        cp scripts/network-tune.sh /opt/monitoring-node/scripts/network-tune.sh
-        chmod +x /opt/monitoring-node/scripts/network-tune.sh
-        log_success "Network tuning script installed"
-    else
-        log_warn "Network tuning script not found in scripts/"
-        return 0
-    fi
-    
-    cat > /etc/systemd/system/network-tune.service << 'EOF'
-[Unit]
-Description=Network RPS/RFS tuning for multi-core packet distribution
-Documentation=https://www.kernel.org/doc/Documentation/networking/scaling.txt
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=/opt/monitoring-node/scripts/network-tune.sh
-RemainAfterExit=yes
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    
-    systemctl daemon-reload >/dev/null 2>&1
-    systemctl enable network-tune.service >/dev/null 2>&1 || true
-    
-    if /opt/monitoring-node/scripts/network-tune.sh >/dev/null 2>&1; then
-        log_success "Network tuning applied"
-    else
-        log_warn "Network tuning failed (may work after reboot)"
-    fi
-    
-    log_success "RPS/RFS network tuning service enabled"
-}
-
 # Main
 main() {
     echo ""
@@ -892,7 +836,6 @@ main() {
     setup_env
     setup_ssl
     setup_cert_renewal_cron
-    setup_network_tuning        # Setup RPS/RFS for multi-core packet distribution
     start_containers
     wait_for_services
     check_endpoints
