@@ -48,21 +48,92 @@ check_native_haproxy() {
     command -v haproxy &>/dev/null
 }
 
+wait_for_apt_lock() {
+    local max_wait=60
+    local waited=0
+    
+    while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || \
+          fuser /var/lib/apt/lists/lock >/dev/null 2>&1 || \
+          fuser /var/lib/dpkg/lock >/dev/null 2>&1; do
+        if [ $waited -eq 0 ]; then
+            log_warn "Waiting for apt lock (another process is using apt)..."
+        fi
+        sleep 2
+        waited=$((waited + 2))
+        if [ $waited -ge $max_wait ]; then
+            log_error "Timeout waiting for apt lock after ${max_wait}s"
+            return 1
+        fi
+    done
+    return 0
+}
+
 install_native_haproxy() {
     log_info "Installing native HAProxy..."
-    apt-get update -qq >/dev/null 2>&1 || true
-    if apt-get install -y -qq haproxy >/dev/null 2>&1; then
+    
+    # Wait for apt lock if needed
+    if ! wait_for_apt_lock; then
+        log_error "Cannot acquire apt lock"
+        return 1
+    fi
+    
+    # Update with timeout (2 minutes max)
+    log_info "Updating package lists (timeout: 120s)..."
+    if ! timeout 120 apt-get update -qq 2>&1 | tail -5; then
+        log_warn "apt-get update had issues, continuing anyway..."
+    fi
+    
+    # Install with timeout (3 minutes max)
+    log_info "Installing haproxy package (timeout: 180s)..."
+    if timeout 180 apt-get install -y haproxy 2>&1 | tail -10; then
         log_success "HAProxy installed"
         return 0
     else
-        log_error "Failed to install HAProxy"
+        log_error "Failed to install HAProxy (timeout or error)"
         return 1
     fi
+}
+
+migrate_haproxy_config_from_volume() {
+    # Check for config in Docker volume (old container setup)
+    local volume_config="/var/lib/docker/volumes/monitoring-node_haproxy_config/_data/haproxy.cfg"
+    local host_config="/etc/haproxy/haproxy.cfg"
+    
+    if [ -f "$volume_config" ]; then
+        log_info "Found HAProxy config in Docker volume"
+        
+        # Check if volume config has actual rules (not just defaults)
+        if grep -q "RULES START" "$volume_config" && grep -q "frontend\|backend" "$volume_config"; then
+            log_info "Migrating config from Docker volume..."
+            
+            # Backup existing config if present
+            if [ -f "$host_config" ]; then
+                cp "$host_config" "${host_config}.bak.$(date +%s)"
+            fi
+            
+            # Copy from volume to host
+            cp "$volume_config" "$host_config"
+            chmod 644 "$host_config"
+            log_success "Config migrated from Docker volume"
+            return 0
+        else
+            log_info "Volume config has no rules, skipping migration"
+        fi
+    fi
+    
+    return 1
 }
 
 migrate_haproxy_container_to_native() {
     log_info "=== HAProxy Migration: Container → Native ==="
     
+    # First, try to migrate config from Docker volume BEFORE stopping container
+    local config_migrated=0
+    if migrate_haproxy_config_from_volume; then
+        config_migrated=1
+    fi
+    
+    # Install native HAProxy if not present
     if ! check_native_haproxy; then
         if ! install_native_haproxy; then
             log_error "Failed to install native HAProxy"
@@ -72,11 +143,18 @@ migrate_haproxy_container_to_native() {
         log_success "Native HAProxy already installed"
     fi
     
+    # Stop and remove container
     log_info "Stopping HAProxy container..."
     docker stop monitoring-haproxy >/dev/null 2>&1 || true
     docker rm -f monitoring-haproxy >/dev/null 2>&1 || true
     log_success "HAProxy container removed"
     
+    # If config wasn't migrated yet, try again (in case volume check failed earlier)
+    if [ $config_migrated -eq 0 ]; then
+        migrate_haproxy_config_from_volume || true
+    fi
+    
+    # Validate and start HAProxy
     if [ -f "/etc/haproxy/haproxy.cfg" ]; then
         log_info "Validating HAProxy config..."
         if haproxy -c -f /etc/haproxy/haproxy.cfg >/dev/null 2>&1; then
