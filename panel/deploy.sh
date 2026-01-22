@@ -749,6 +749,10 @@ build_and_start() {
     
     docker compose down --remove-orphans >/dev/null 2>&1 || true
     
+    # Enable BuildKit for faster builds with cache
+    export DOCKER_BUILDKIT=1
+    export COMPOSE_DOCKER_CLI_BUILD=1
+    
     # Detect best mirrors first
     detect_best_mirrors
     
@@ -765,6 +769,12 @@ build_and_start() {
             fi
         fi
         
+        # Generate cache bust hash from .env (forces rebuild when any config changes)
+        if [ -f .env ]; then
+            export CACHE_BUST=$(md5sum .env | cut -d' ' -f1)
+            print_info "Config hash: ${CACHE_BUST:0:8}... (rebuild on .env changes)"
+        fi
+        
         # Build arguments with detected mirrors
         local build_args=""
         build_args="--build-arg APT_MIRROR=${BEST_APT_MIRROR:-mirror.yandex.ru}"
@@ -773,15 +783,17 @@ build_and_start() {
         build_args="$build_args --build-arg PIP_TIMEOUT=${PIP_TIMEOUT}"
         build_args="$build_args --build-arg APT_TIMEOUT=${APT_TIMEOUT}"
         build_args="$build_args --build-arg NPM_TIMEOUT=${NPM_TIMEOUT}"
+        build_args="$build_args --build-arg CACHE_BUST=${CACHE_BUST:-}"
         
         print_info "Building containers (attempt $((retry + 1))/$max_retries, timeout: ${build_timeout}s)..."
+        print_info "BuildKit enabled for faster cached builds"
         print_info "Using mirrors: APT=${BEST_APT_MIRROR:-default}, PyPI=${BEST_PYPI_MIRROR:-default}, npm=${BEST_NPM_MIRROR:-default}"
         
         local build_output
         local build_exit_code
         
-        # Run build with timeout
-        build_output=$(timeout "$build_timeout" docker compose build --no-cache $build_args 2>&1)
+        # Run build with timeout and parallel building
+        build_output=$(timeout "$build_timeout" docker compose build --parallel $build_args 2>&1)
         build_exit_code=$?
         
         if [ $build_exit_code -eq 0 ]; then

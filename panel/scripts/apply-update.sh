@@ -211,18 +211,25 @@ fi
 
 log_success "Files updated"
 
-# Clean up Docker before build
-log_info "Cleaning up Docker cache..."
-docker image prune -f > /dev/null 2>&1 || true
-docker builder prune -af > /dev/null 2>&1 || true
-log_success "Docker cleanup done"
-
 # Detect best mirrors
 detect_best_mirrors
 
-# Rebuild Docker images with timeout and mirrors
+# Enable BuildKit for faster builds with cache
+export DOCKER_BUILDKIT=1
+export COMPOSE_DOCKER_CLI_BUILD=1
+
+# Rebuild Docker images with timeout, mirrors, and caching
 log_info "Building new Docker images (timeout: ${DOCKER_BUILD_TIMEOUT}s)..."
+log_info "BuildKit enabled for faster cached builds"
 cd "$PANEL_DIR"
+
+# Generate cache bust hash from .env (forces rebuild when any config changes)
+CACHE_BUST=""
+if [ -f "$PANEL_DIR/.env" ]; then
+    CACHE_BUST=$(md5sum "$PANEL_DIR/.env" | cut -d' ' -f1)
+    export CACHE_BUST
+    log_info "Config hash: ${CACHE_BUST:0:8}... (rebuild on .env changes)"
+fi
 
 # Build arguments with detected mirrors
 BUILD_ARGS="--build-arg APT_MIRROR=${BEST_APT_MIRROR:-mirror.yandex.ru}"
@@ -231,12 +238,14 @@ BUILD_ARGS="$BUILD_ARGS --build-arg NPM_REGISTRY=${BEST_NPM_MIRROR:-https://regi
 BUILD_ARGS="$BUILD_ARGS --build-arg PIP_TIMEOUT=${PIP_TIMEOUT}"
 BUILD_ARGS="$BUILD_ARGS --build-arg APT_TIMEOUT=${APT_TIMEOUT}"
 BUILD_ARGS="$BUILD_ARGS --build-arg NPM_TIMEOUT=${NPM_TIMEOUT}"
+BUILD_ARGS="$BUILD_ARGS --build-arg CACHE_BUST=${CACHE_BUST}"
 
 log_info "Using mirrors: APT=${BEST_APT_MIRROR:-default}, PyPI=${BEST_PYPI_MIRROR:-default}, npm=${BEST_NPM_MIRROR:-default}"
 
 # Disable set -e for build command to capture exit code properly
 set +e
-BUILD_OUTPUT=$(timeout "$DOCKER_BUILD_TIMEOUT" docker compose build --no-cache $BUILD_ARGS 2>&1)
+# Note: removed --no-cache to enable layer caching for faster rebuilds
+BUILD_OUTPUT=$(timeout "$DOCKER_BUILD_TIMEOUT" docker compose build --parallel $BUILD_ARGS 2>&1)
 BUILD_EXIT_CODE=$?
 set -e
 

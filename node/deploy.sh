@@ -596,6 +596,9 @@ start_containers() {
     
     docker compose down >/dev/null 2>&1 || true
     
+    # Enable BuildKit for faster builds with cache
+    export DOCKER_BUILDKIT=1
+    
     # Detect best mirrors first
     detect_best_mirrors
     
@@ -612,14 +615,22 @@ start_containers() {
             fi
         fi
         
+        # Generate cache bust hash from .env (forces rebuild when any config changes)
+        if [ -f .env ]; then
+            export CACHE_BUST=$(md5sum .env | cut -d' ' -f1)
+            log_info "Config hash: ${CACHE_BUST:0:8}... (rebuild on .env changes)"
+        fi
+        
         # Build arguments with detected mirrors
         local build_args=""
         build_args="--build-arg APT_MIRROR=${BEST_APT_MIRROR:-mirror.yandex.ru}"
         build_args="$build_args --build-arg PIP_INDEX_URL=${BEST_PYPI_MIRROR:-https://pypi.org/simple}"
         build_args="$build_args --build-arg PIP_TIMEOUT=${PIP_TIMEOUT}"
         build_args="$build_args --build-arg APT_TIMEOUT=${APT_TIMEOUT}"
+        build_args="$build_args --build-arg CACHE_BUST=${CACHE_BUST:-}"
         
         log_info "Building containers (attempt $((retry + 1))/$max_retries, timeout: ${build_timeout}s)..."
+        log_info "BuildKit enabled for faster cached builds"
         log_info "Using mirrors: APT=${BEST_APT_MIRROR:-default}, PyPI=${BEST_PYPI_MIRROR:-default}"
         
         local build_output

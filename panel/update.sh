@@ -177,9 +177,17 @@ else
         fi
     fi
     
-    # Build and start
+    # Build and start with BuildKit
     chmod +x "$PANEL_DIR"/*.sh 2>/dev/null || true
-    docker compose build --no-cache
+    export DOCKER_BUILDKIT=1
+    export COMPOSE_DOCKER_CLI_BUILD=1
+    
+    # Generate cache bust hash from .env (forces rebuild when any config changes)
+    if [ -f "$PANEL_DIR/.env" ]; then
+        export CACHE_BUST=$(md5sum "$PANEL_DIR/.env" | cut -d' ' -f1)
+    fi
+    
+    docker compose build --parallel
     docker compose up -d
     
     log_success "=== Update Complete ==="

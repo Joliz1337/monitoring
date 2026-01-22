@@ -159,9 +159,16 @@ else
         mv "$NODE_DIR/.env.backup" "$NODE_DIR/.env"
     fi
     
-    # Build and start
+    # Build and start with BuildKit
     chmod +x "$NODE_DIR"/*.sh 2>/dev/null || true
-    docker build --network=host -t monitoring-node-api .
+    export DOCKER_BUILDKIT=1
+    
+    # Generate cache bust hash from .env
+    if [ -f "$NODE_DIR/.env" ]; then
+        export CACHE_BUST=$(md5sum "$NODE_DIR/.env" | cut -d' ' -f1)
+    fi
+    
+    docker build --network=host --build-arg CACHE_BUST=${CACHE_BUST:-} -t monitoring-node-api .
     docker compose up -d
     
     log_success "=== Update Complete ==="

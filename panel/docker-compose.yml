@@ -36,6 +36,7 @@ services:
       dockerfile: Dockerfile
       args:
         - EXT_KEY=${EXT_KEY:-}
+        - CACHE_BUST=${CACHE_BUST:-}
     container_name: panel-frontend
     restart: unless-stopped
     depends_on:
@@ -60,6 +61,8 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
+      args:
+        - CACHE_BUST=${CACHE_BUST:-}
     container_name: panel-backend
     restart: unless-stopped
     # Root access for docker.sock and Let's Encrypt certificate reading (0600 perms)

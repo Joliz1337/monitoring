@@ -21,7 +21,10 @@ services:
         max-file: "3"
 
   api:
-    build: .
+    build:
+      context: .
+      args:
+        - CACHE_BUST=${CACHE_BUST:-}
     container_name: monitoring-api
     env_file:
       - .env

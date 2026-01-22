@@ -341,18 +341,24 @@ chmod +x "$NODE_DIR"/scripts/*.sh 2>/dev/null || true
 
 log_success "Files updated"
 
-# Clean up Docker before build
-log_info "Cleaning up Docker cache..."
-docker image prune -f > /dev/null 2>&1 || true
-docker builder prune -af > /dev/null 2>&1 || true
-log_success "Docker cleanup done"
-
 # Detect best mirrors
 log_info "Detecting fastest mirrors..."
 detect_best_mirrors
 
-# Rebuild Docker image with timeout and mirrors
+# Enable BuildKit for faster builds with cache
+export DOCKER_BUILDKIT=1
+
+# Generate cache bust hash from .env (forces rebuild when any config changes)
+CACHE_BUST=""
+if [ -f "$NODE_DIR/.env" ]; then
+    CACHE_BUST=$(md5sum "$NODE_DIR/.env" | cut -d' ' -f1)
+    export CACHE_BUST
+    log_info "Config hash: ${CACHE_BUST:0:8}... (rebuild on .env changes)"
+fi
+
+# Rebuild Docker image with timeout, mirrors, and caching
 log_info "Building new Docker image (timeout: ${DOCKER_BUILD_TIMEOUT}s)..."
+log_info "BuildKit enabled for faster cached builds"
 cd "$NODE_DIR"
 
 # Build arguments with detected mirrors
@@ -360,11 +366,13 @@ BUILD_ARGS="--build-arg APT_MIRROR=${BEST_APT_MIRROR:-mirror.yandex.ru}"
 BUILD_ARGS="$BUILD_ARGS --build-arg PIP_INDEX_URL=${BEST_PYPI_MIRROR:-https://pypi.org/simple}"
 BUILD_ARGS="$BUILD_ARGS --build-arg PIP_TIMEOUT=${PIP_TIMEOUT}"
 BUILD_ARGS="$BUILD_ARGS --build-arg APT_TIMEOUT=${APT_TIMEOUT}"
+BUILD_ARGS="$BUILD_ARGS --build-arg CACHE_BUST=${CACHE_BUST}"
 
 log_info "Using mirrors: APT=${BEST_APT_MIRROR:-default}, PyPI=${BEST_PYPI_MIRROR:-default}"
 
 # Disable set -e for build command to capture exit code properly
 set +e
+# Note: removed --no-cache to enable layer caching for faster rebuilds
 BUILD_OUTPUT=$(timeout "$DOCKER_BUILD_TIMEOUT" docker build --network=host $BUILD_ARGS -t monitoring-node-api . 2>&1)
 BUILD_EXIT_CODE=$?
 set -e
