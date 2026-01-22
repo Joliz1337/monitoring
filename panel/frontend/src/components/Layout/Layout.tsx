@@ -59,14 +59,14 @@ export default function Layout() {
   
   const baseNavItems = [
     { to: `/${uid}`, icon: LayoutDashboard, label: t('common.dashboard'), end: true },
-    { to: `/${uid}/servers`, icon: Server, label: t('common.servers') },
-    { to: `/${uid}/bulk-actions`, icon: Layers, label: t('bulk_actions.title') },
-    { to: `/${uid}/updates`, icon: Package, label: t('common.updates') },
-    { to: `/${uid}/settings`, icon: Settings, label: t('common.settings') },
+    { to: `/${uid}/servers`, icon: Server, label: t('common.servers'), end: false },
+    { to: `/${uid}/bulk-actions`, icon: Layers, label: t('bulk_actions.title'), end: false },
+    { to: `/${uid}/updates`, icon: Package, label: t('common.updates'), end: false },
+    { to: `/${uid}/settings`, icon: Settings, label: t('common.settings'), end: false },
   ]
   
   const navItems = navItem 
-    ? [...baseNavItems.slice(0, 3), { to: `/${uid}/${navItem.path}`, icon: iconMap[navItem.icon] || Search, label: navItem.label }, ...baseNavItems.slice(3)]
+    ? [...baseNavItems.slice(0, 3), { to: `/${uid}/${navItem.path}`, icon: iconMap[navItem.icon] || Search, label: navItem.label, end: false }, ...baseNavItems.slice(3)]
     : baseNavItems
   
   return (
