@@ -11,10 +11,11 @@ import {
   ArrowUpCircle,
   AlertTriangle,
   Clock,
-  Check
+  Check,
+  Settings2
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import { systemApi, VersionInfo, NodeVersionInfo } from '../api/client'
+import { systemApi, VersionInfo, NodeVersionInfo, OptimizationsVersionInfo, OptimizationsNodeInfo } from '../api/client'
 
 const containerVariants = {
   hidden: { opacity: 0 },
@@ -44,12 +45,27 @@ export default function Updates() {
   
   const [isChecking, setIsChecking] = useState(false)
   
+  // System Optimizations state
+  const [optimizationsInfo, setOptimizationsInfo] = useState<OptimizationsVersionInfo | null>(null)
+  const [applyingOptimizations, setApplyingOptimizations] = useState<Set<number>>(new Set())
+  const [applyingAllOptimizations, setApplyingAllOptimizations] = useState(false)
+  const [optimizationsResults, setOptimizationsResults] = useState<Record<string, { success: boolean; message: string }>>({})
+  
   const fetchVersionInfo = useCallback(async (showCheckingState = false) => {
     try {
       setError('')
       if (showCheckingState) setIsChecking(true)
-      const response = await systemApi.getVersion()
-      setVersionInfo(response.data)
+      
+      // Fetch both version info and optimizations in parallel
+      const [versionResponse, optimizationsResponse] = await Promise.all([
+        systemApi.getVersion(),
+        systemApi.getOptimizationsVersion().catch(() => ({ data: null }))
+      ])
+      
+      setVersionInfo(versionResponse.data)
+      if (optimizationsResponse.data) {
+        setOptimizationsInfo(optimizationsResponse.data)
+      }
     } catch (err) {
       setError(t('updates.failed_fetch'))
       console.error('Failed to fetch version info:', err)
@@ -144,6 +160,67 @@ export default function Updates() {
     
     setUpdatingAll(false)
   }
+  
+  // System Optimizations handlers
+  const handleApplyOptimizations = async (node: OptimizationsNodeInfo) => {
+    if (applyingOptimizations.has(node.id)) return
+    
+    setApplyingOptimizations(prev => new Set(prev).add(node.id))
+    setOptimizationsResults(prev => ({ 
+      ...prev, 
+      [`opt-${node.id}`]: { success: true, message: t('updates.in_progress') } 
+    }))
+    
+    try {
+      const response = await systemApi.applyNodeOptimizations(node.id)
+      setOptimizationsResults(prev => ({ 
+        ...prev, 
+        [`opt-${node.id}`]: { success: true, message: response.data.message } 
+      }))
+      
+      // Refresh optimizations info after a delay
+      setTimeout(() => {
+        systemApi.getOptimizationsVersion()
+          .then(res => setOptimizationsInfo(res.data))
+          .catch(() => {})
+        setApplyingOptimizations(prev => {
+          const next = new Set(prev)
+          next.delete(node.id)
+          return next
+        })
+      }, 3000)
+    } catch (err: any) {
+      setOptimizationsResults(prev => ({ 
+        ...prev, 
+        [`opt-${node.id}`]: { success: false, message: err.response?.data?.detail || t('updates.failed_update') } 
+      }))
+      setApplyingOptimizations(prev => {
+        const next = new Set(prev)
+        next.delete(node.id)
+        return next
+      })
+    }
+  }
+  
+  const handleApplyAllOptimizations = async () => {
+    if (applyingAllOptimizations || !optimizationsInfo) return
+    
+    setApplyingAllOptimizations(true)
+    const nodesToUpdate = optimizationsInfo.nodes.filter(n => 
+      n.status === 'online' && n.update_available
+    )
+    
+    for (const node of nodesToUpdate) {
+      await handleApplyOptimizations(node)
+      await new Promise(resolve => setTimeout(resolve, 1000))
+    }
+    
+    setApplyingAllOptimizations(false)
+  }
+  
+  const optimizationsNeedUpdate = optimizationsInfo?.nodes.filter(n => 
+    n.status === 'online' && n.update_available
+  ).length || 0
   
   const getNodeUpdateAvailable = (node: NodeVersionInfo): boolean => {
     if (!node.version || !versionInfo?.node.latest_version) return false
@@ -499,8 +576,176 @@ export default function Updates() {
         </div>
       </motion.div>
       
+      {/* System Optimizations Section */}
+      {optimizationsInfo && (
+        <motion.div variants={itemVariants} className="mt-8">
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h2 className="text-lg font-semibold text-dark-100 flex items-center gap-2">
+                <Settings2 className="w-5 h-5 text-accent-500" />
+                {t('updates.optimizations')}
+                <span className="text-dark-500 font-normal text-sm">
+                  ({optimizationsInfo.nodes.length})
+                </span>
+              </h2>
+              {optimizationsInfo.latest_version && (
+                <p className="text-sm text-dark-500 mt-1 ml-7">
+                  {t('updates.latest')}: 
+                  <span className="text-dark-300 ml-1 font-mono">
+                    v{optimizationsInfo.latest_version}
+                  </span>
+                </p>
+              )}
+            </div>
+            
+            {optimizationsNeedUpdate > 0 && (
+              <motion.button
+                onClick={handleApplyAllOptimizations}
+                disabled={applyingAllOptimizations || optimizationsNeedUpdate === 0}
+                className="btn btn-secondary"
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
+              >
+                {applyingAllOptimizations ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <ArrowUpCircle className="w-4 h-4" />
+                )}
+                {t('updates.update_all_optimizations')} ({optimizationsNeedUpdate})
+              </motion.button>
+            )}
+          </div>
+          
+          <div className="space-y-3">
+            <AnimatePresence mode="popLayout">
+              {optimizationsInfo.nodes.map((node, index) => {
+                const isApplying = applyingOptimizations.has(node.id)
+                const applyResult = optimizationsResults[`opt-${node.id}`]
+                
+                return (
+                  <motion.div 
+                    key={`opt-${node.id}`}
+                    className="card group hover:border-dark-700 transition-all"
+                    initial={{ opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, x: -100 }}
+                    transition={{ delay: index * 0.05 }}
+                    layout
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-4">
+                        <motion.div 
+                          className={`w-12 h-12 rounded-xl flex items-center justify-center border
+                            ${node.status === 'online' 
+                              ? 'bg-gradient-to-br from-dark-700 to-dark-800 border-dark-700/50 group-hover:border-accent-500/30' 
+                              : 'bg-dark-800/50 border-dark-700/30'
+                            } transition-colors`}
+                          whileHover={{ rotate: 5, scale: 1.05 }}
+                        >
+                          <Settings2 className={`w-5 h-5 ${
+                            node.status === 'online' ? 'text-accent-500' : 'text-dark-500'
+                          }`} />
+                        </motion.div>
+                        <div>
+                          <h3 className="font-semibold text-dark-100 flex items-center gap-2">
+                            {node.name}
+                            <span className={`w-2 h-2 rounded-full ${
+                              node.status === 'online' ? 'bg-success' : 'bg-dark-500'
+                            }`} />
+                          </h3>
+                          <div className="flex items-center gap-3 mt-0.5">
+                            <span className="text-sm text-dark-500">
+                              {t('updates.version')}: 
+                              <span className={`ml-1 font-mono ${
+                                node.version ? 'text-dark-300' : 'text-dark-500'
+                              }`}>
+                                {node.installed 
+                                  ? (node.version ? `v${node.version}` : t('updates.unknown'))
+                                  : t('updates.not_installed')
+                                }
+                              </span>
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                      
+                      <div className="flex items-center gap-3">
+                        {/* Apply result */}
+                        <AnimatePresence>
+                          {applyResult && (
+                            <motion.div 
+                              className={`flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-lg ${
+                                applyResult.success 
+                                  ? 'text-success bg-success/10' 
+                                  : 'text-danger bg-danger/10'
+                              }`}
+                              initial={{ opacity: 0, scale: 0.8 }}
+                              animate={{ opacity: 1, scale: 1 }}
+                              exit={{ opacity: 0, scale: 0.8 }}
+                            >
+                              {isApplying ? (
+                                <Loader2 className="w-4 h-4 animate-spin" />
+                              ) : applyResult.success ? (
+                                <CheckCircle2 className="w-4 h-4" />
+                              ) : (
+                                <XCircle className="w-4 h-4" />
+                              )}
+                              <span className="max-w-[150px] truncate">{applyResult.message}</span>
+                            </motion.div>
+                          )}
+                        </AnimatePresence>
+                        
+                        {/* Status indicators */}
+                        {node.status === 'offline' && (
+                          <span className="flex items-center gap-1.5 text-sm text-dark-500">
+                            <Clock className="w-4 h-4" />
+                            {t('updates.offline')}
+                          </span>
+                        )}
+                        
+                        {node.status === 'online' && node.update_available && !isApplying && !applyResult && (
+                          <motion.span 
+                            className="px-2.5 py-1 text-xs font-medium bg-accent-500/20 text-accent-400 rounded-full"
+                            initial={{ scale: 0 }}
+                            animate={{ scale: 1 }}
+                          >
+                            {t('updates.update_available')}
+                          </motion.span>
+                        )}
+                        
+                        {node.status === 'online' && !node.update_available && !isApplying && !applyResult && (
+                          <span className="flex items-center gap-1.5 text-sm text-success">
+                            <Check className="w-4 h-4" />
+                            {t('updates.up_to_date')}
+                          </span>
+                        )}
+                        
+                        <motion.button
+                          onClick={() => handleApplyOptimizations(node)}
+                          disabled={isApplying || node.status === 'offline' || !node.update_available}
+                          className="btn btn-secondary text-sm"
+                          whileHover={{ scale: 1.05 }}
+                          whileTap={{ scale: 0.95 }}
+                        >
+                          {isApplying ? (
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                          ) : (
+                            <Download className="w-4 h-4" />
+                          )}
+                          {t('updates.update')}
+                        </motion.button>
+                      </div>
+                    </div>
+                  </motion.div>
+                )
+              })}
+            </AnimatePresence>
+          </div>
+        </motion.div>
+      )}
+      
       {/* All Up To Date Card */}
-      {versionInfo && !versionInfo.panel.update_available && nodesNeedUpdate === 0 && (
+      {versionInfo && !versionInfo.panel.update_available && nodesNeedUpdate === 0 && optimizationsNeedUpdate === 0 && (
         <motion.div 
           variants={itemVariants} 
           className="card bg-success/5 border-success/20 mt-6"

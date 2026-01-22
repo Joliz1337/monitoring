@@ -6,8 +6,9 @@ API агент для сбора метрик сервера, отслежива
 
 - **Метрики** — CPU, RAM, диск, сеть, процессы
 - **Трафик** — история по интерфейсам и портам (SQLite + iptables)
-- **HAProxy** — управление конфигом, правилами, сертификатами
+- **HAProxy** — управление нативным systemd сервисом, конфигом, правилами, сертификатами
 - **Firewall** — управление UFW через API
+- **Терминал** — выполнение произвольных команд на хосте
 
 ## Быстрый старт
 
@@ -18,39 +19,37 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/in
 
 При установке скрипт запросит **IP-адрес панели** для настройки firewall.
 
-## Миграция нативного HAProxy
+## HAProxy
 
-При установке скрипт автоматически обнаруживает работающий нативный HAProxy:
+HAProxy работает как **нативный systemd сервис** на хосте (не в Docker). При установке ноды HAProxy устанавливается автоматически если не установлен.
 
-- **Если HAProxy работает**:
-  1. Читает и сохраняет содержимое конфига ДО остановки сервиса
-  2. Останавливает нативный HAProxy (systemd + kill процессов)
-  3. Отключает автозапуск systemd сервиса
-  4. После запуска контейнеров копирует конфиг в Docker volume
-  5. Запускает контейнерный HAProxy с тем же конфигом
+**Конфиг**: `/etc/haproxy/haproxy.cfg`
 
-- **Если HAProxy не работает**: контейнерный HAProxy остаётся выключенным
-
-**Бэкапы конфига**:
-- Временный: `/tmp/haproxy-native-migration.cfg` (удаляется после миграции)
-- Постоянный: `/tmp/haproxy.cfg.backup.YYYYMMDD_HHMMSS`
-
-**Устранение проблем миграции**:
+**Управление через терминал панели**:
 ```bash
-# Проверить конфиг на хосте (bind mount)
-cat /etc/haproxy/haproxy.cfg
-
-# Проверить конфиг в контейнере (должен быть идентичен)
-docker exec monitoring-haproxy cat /usr/local/etc/haproxy/haproxy.cfg
-
-# Проверить логи HAProxy
-docker logs monitoring-haproxy
-
-# Перезапустить HAProxy
-docker compose --profile haproxy restart
+systemctl status haproxy       # Статус
+systemctl start haproxy        # Запуск
+systemctl stop haproxy         # Остановка
+systemctl restart haproxy      # Полный перезапуск
+systemctl reload haproxy       # Reload конфига (без разрыва соединений)
+haproxy -c -f /etc/haproxy/haproxy.cfg  # Проверка конфига
+journalctl -u haproxy -n 100   # Логи
 ```
 
-**Важно**: HAProxy конфиг хранится на хосте в `/etc/haproxy/haproxy.cfg` (стандартный путь) и монтируется в контейнеры через bind mount. Редактирование конфига на хосте или через панель даёт одинаковый результат. Если HAProxy был установлен нативно - существующий конфиг будет использоваться.
+**При установке/обновлении ноды**:
+- Если HAProxy уже работает — не перезапускается, конфиг не меняется
+- Если не установлен — устанавливается через apt
+- API адаптируется к текущему состоянию сервиса
+
+**Миграция с контейнерной версии**:
+
+При обновлении со старой версии (где HAProxy работал в Docker контейнере) скрипт автоматически:
+1. Обнаруживает старый контейнер `monitoring-haproxy`
+2. Устанавливает native HAProxy если не установлен (`apt install haproxy`)
+3. Останавливает и удаляет контейнер (конфиг уже на хосте — был bind mount)
+4. Включает автозапуск и запускает native HAProxy как systemd сервис
+
+Миграция происходит автоматически при вызове `./update.sh`.
 
 ## Структура
 
@@ -102,6 +101,57 @@ node/
 | GET | /api/version | Версия ноды |
 | POST | /api/system/update | Запуск обновления (target_ref: branch/tag/commit, по умолчанию main) |
 | GET | /api/system/update/status | Статус обновления |
+| POST | /api/system/execute | Выполнить команду на хосте |
+| POST | /api/system/execute-stream | Выполнить команду с потоковым выводом (SSE) |
+
+**Выполнение команд на хосте**:
+
+Эндпоинт `/api/system/execute` позволяет выполнять произвольные shell-команды на хост-системе через `nsenter`. Работает из Docker контейнера благодаря `privileged: true` и `pid: host`.
+
+**PATH**: Все команды выполняются с расширенным PATH (`/snap/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`), что позволяет использовать snap-пакеты (speedtest, etc.) и локально установленные бинарники.
+
+```json
+// Request
+{
+    "command": "sysctl -p /etc/sysctl.d/99-network-tuning.conf",
+    "timeout": 30,
+    "shell": "sh"
+}
+
+// Response
+{
+    "success": true,
+    "exit_code": 0,
+    "stdout": "net.ipv4.tcp_fin_timeout = 15\n...",
+    "stderr": "",
+    "execution_time_ms": 45,
+    "error": null
+}
+```
+
+Параметры:
+- `command` (required) — shell-команда для выполнения
+- `timeout` (optional) — таймаут в секундах, 1-600 (default: 30)
+- `shell` (optional) — shell: "sh" или "bash" (default: "sh")
+
+**Потоковое выполнение команд (SSE)**:
+
+Эндпоинт `/api/system/execute-stream` выполняет команду с потоковым выводом через Server-Sent Events.
+
+```
+// SSE Events
+event: stdout
+data: {"line": "output line"}
+
+event: stderr
+data: {"line": "error line"}
+
+event: done
+data: {"exit_code": 0, "execution_time_ms": 1234, "success": true}
+
+event: error
+data: {"message": "error description"}
+```
 
 **Механизм обновления**:
 1. API создаёт временный контейнер `monitoring-updater` (образ `docker:cli`)
@@ -142,18 +192,18 @@ node/
 
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
-| GET | /api/haproxy/status | Статус |
+| GET | /api/haproxy/status | Статус сервиса |
 | GET | /api/haproxy/rules | Список правил |
 | POST | /api/haproxy/rules | Создать правило |
 | PUT | /api/haproxy/rules/{name} | Обновить правило |
 | DELETE | /api/haproxy/rules/{name} | Удалить правило |
-| POST | /api/haproxy/start | Запустить |
-| POST | /api/haproxy/stop | Остановить |
-| POST | /api/haproxy/reload | Reload конфига |
-| POST | /api/haproxy/restart | Restart контейнера |
+| POST | /api/haproxy/start | Запустить (systemctl start) |
+| POST | /api/haproxy/stop | Остановить (systemctl stop) |
+| POST | /api/haproxy/reload | Reload конфига (systemctl reload) |
+| POST | /api/haproxy/restart | Restart сервиса (systemctl restart) |
 | GET | /api/haproxy/config | Получить конфиг |
 | POST | /api/haproxy/config/apply | Применить конфиг |
-| GET | /api/haproxy/logs | Логи (tail=100) |
+| GET | /api/haproxy/logs | Логи (journalctl, tail=100) |
 
 ### Сертификаты
 
@@ -187,34 +237,64 @@ node/
 - **Conntrack** — авто-масштабируемый по RAM, оптимизированные таймауты
 - **File descriptors** — 10M nofile для всех пользователей
 
+### RPS/RFS Network Tuning
+
+При установке ноды автоматически настраивается **RPS/RFS** — распределение сетевой нагрузки по ядрам CPU:
+
+- **RPS (Receive Packet Steering)** — распределяет входящие пакеты по всем ядрам CPU
+- **RFS (Receive Flow Steering)** — оптимизирует привязку потоков к ядрам
+- **XPS (Transmit Packet Steering)** — распределяет исходящие пакеты по очередям TX
+
+**Systemd сервис**: `network-tune.service`
+- Автоматически определяет основной сетевой интерфейс
+- Вычисляет оптимальные значения на основе количества ядер CPU
+- Запускается при каждой загрузке системы
+
+```bash
+# Статус сервиса
+systemctl status network-tune
+
+# Ручной перезапуск (после изменения железа)
+systemctl restart network-tune
+
+# Логи
+journalctl -u network-tune
+```
+
 **Примечание**: Настройки универсальны для любых машин (от 1GB RAM до 128GB+). При проблемах с сетью во время установки/обновления IPv6 отключается автоматически.
 
 **SSL auto-renewal** — cron для автообновления сертификатов (3:00 AM daily) настраивается при установке ноды.
 
 ## SSL сертификаты
 
-- Создаются через certbot внутри контейнера
+- Создаются через certbot (установлен в API контейнере)
+- Хранятся на хосте: `/etc/letsencrypt/live/{domain}/`
 - Автоматически обновляются через cron (ежедневно в 3:00)
 - При создании первого сертификата cron настраивается автоматически
 - Логи обновления: `/var/log/certbot-renew.log`
+- HAProxy использует combined.pem (fullchain + privkey)
 
 ## Команды
 
 ```bash
-# Логи
+# Логи API
 docker compose logs -f
 
-# Перезапуск
+# Перезапуск API
 docker compose restart
 
-# Остановка
+# Остановка API
 docker compose down
 
-# Включить HAProxy
-docker compose --profile haproxy up -d
+# HAProxy (нативный сервис)
+systemctl status haproxy    # Статус
+systemctl start haproxy     # Запуск
+systemctl stop haproxy      # Остановка
+systemctl restart haproxy   # Перезапуск
+systemctl reload haproxy    # Reload конфига
 
-# Выключить HAProxy
-docker compose --profile haproxy down
+# Логи HAProxy
+journalctl -u haproxy -n 100
 
 # Изменить IP панели
 ufw delete allow from OLD_IP to any port 9100 proto tcp

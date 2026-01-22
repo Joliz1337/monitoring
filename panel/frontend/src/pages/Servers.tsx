@@ -12,7 +12,8 @@ import {
   X,
   Link as LinkIcon,
   Key,
-  AlertTriangle
+  AlertTriangle,
+  Power
 } from 'lucide-react'
 import { useServersStore } from '../stores/serversStore'
 import { useTranslation } from 'react-i18next'
@@ -50,7 +51,7 @@ const itemVariants = {
 }
 
 export default function Servers() {
-  const { servers, fetchServers, addServer, deleteServer, testServer, updateServer } = useServersStore()
+  const { servers, fetchServers, addServer, deleteServer, testServer, updateServer, toggleServer } = useServersStore()
   const { t } = useTranslation()
   
   const [showForm, setShowForm] = useState(false)
@@ -382,29 +383,47 @@ export default function Servers() {
             servers.map((server, index) => (
               <motion.div 
                 key={server.id} 
-                className="card group hover:border-dark-700 transition-all duration-300"
+                className={`card group transition-all duration-300 ${
+                  server.is_active 
+                    ? 'hover:border-dark-700' 
+                    : 'opacity-60 border-dark-700/50'
+                }`}
                 variants={itemVariants}
                 layout
                 initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
+                animate={{ opacity: server.is_active ? 1 : 0.6, y: 0 }}
                 exit={{ opacity: 0, x: -100 }}
                 transition={{ delay: index * 0.05 }}
-                whileHover={{ scale: 1.01 }}
+                whileHover={{ scale: server.is_active ? 1.01 : 1 }}
               >
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-4">
                     <motion.div 
-                      className="w-12 h-12 rounded-xl bg-gradient-to-br from-dark-700 to-dark-800 
-                                 flex items-center justify-center border border-dark-700/50
-                                 group-hover:border-accent-500/30 transition-colors"
-                      whileHover={{ rotate: 5, scale: 1.05 }}
+                      className={`w-12 h-12 rounded-xl bg-gradient-to-br from-dark-700 to-dark-800 
+                                 flex items-center justify-center border transition-colors ${
+                                   server.is_active 
+                                     ? 'border-dark-700/50 group-hover:border-accent-500/30' 
+                                     : 'border-dark-700/30'
+                                 }`}
+                      whileHover={{ rotate: server.is_active ? 5 : 0, scale: server.is_active ? 1.05 : 1 }}
                     >
-                      <ServerIcon className="w-5 h-5 text-accent-500" />
+                      <ServerIcon className={`w-5 h-5 ${server.is_active ? 'text-accent-500' : 'text-dark-500'}`} />
                     </motion.div>
                     <div>
-                      <h3 className="font-semibold text-dark-100 group-hover:text-white transition-colors">
-                        {server.name}
-                      </h3>
+                      <div className="flex items-center gap-2">
+                        <h3 className={`font-semibold transition-colors ${
+                          server.is_active 
+                            ? 'text-dark-100 group-hover:text-white' 
+                            : 'text-dark-400'
+                        }`}>
+                          {server.name}
+                        </h3>
+                        {!server.is_active && (
+                          <span className="text-xs px-2 py-0.5 rounded-md bg-dark-700/50 text-dark-400">
+                            {t('servers.disabled')}
+                          </span>
+                        )}
+                      </div>
                       <p className="text-sm text-dark-500 flex items-center gap-1.5">
                         {server.url}
                         <a 
@@ -447,12 +466,36 @@ export default function Servers() {
                       )}
                     </AnimatePresence>
                     
+                    {/* Monitoring toggle */}
+                    <motion.button
+                      onClick={() => toggleServer(server.id, !server.is_active)}
+                      className={`relative flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm transition-all ${
+                        server.is_active
+                          ? 'bg-success/10 text-success hover:bg-success/20'
+                          : 'bg-dark-700/50 text-dark-400 hover:bg-dark-700'
+                      }`}
+                      whileHover={{ scale: 1.02 }}
+                      whileTap={{ scale: 0.98 }}
+                      title={server.is_active ? t('servers.monitoring_enabled') : t('servers.monitoring_disabled')}
+                    >
+                      <Power className="w-4 h-4" />
+                      <div className={`w-8 h-4 rounded-full transition-colors ${
+                        server.is_active ? 'bg-success' : 'bg-dark-600'
+                      }`}>
+                        <motion.div
+                          className="w-3 h-3 rounded-full bg-white shadow-sm mt-0.5"
+                          animate={{ x: server.is_active ? 17 : 2 }}
+                          transition={{ type: 'spring', stiffness: 500, damping: 30 }}
+                        />
+                      </div>
+                    </motion.button>
+                    
                     <motion.button
                       onClick={() => handleTest(server.id)}
-                      disabled={testingId === server.id}
-                      className="btn btn-secondary text-sm"
-                      whileHover={{ scale: 1.05 }}
-                      whileTap={{ scale: 0.95 }}
+                      disabled={testingId === server.id || !server.is_active}
+                      className={`btn btn-secondary text-sm ${!server.is_active ? 'opacity-50 cursor-not-allowed' : ''}`}
+                      whileHover={{ scale: server.is_active ? 1.05 : 1 }}
+                      whileTap={{ scale: server.is_active ? 0.95 : 1 }}
                     >
                       {testingId === server.id ? (
                         <motion.div

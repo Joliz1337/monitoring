@@ -272,6 +272,7 @@ class MetricsCollector:
     def get_processes_info(self, top_n: int = 10) -> dict:
         """Get process statistics and top processes with caching to avoid blocking"""
         current_time = time.time()
+        cpu_count = psutil.cpu_count() or 1
         
         # Cache processes for 5 seconds to avoid blocking on frequent requests
         if current_time - self._processes_cache_time > self._processes_cache_ttl or not self._processes_cache:
@@ -279,10 +280,13 @@ class MetricsCollector:
             for proc in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_percent', 'status']):
                 try:
                     pinfo = proc.info
+                    # Normalize cpu_percent to 0-100% range (psutil returns 0 to 100*cpu_count)
+                    raw_cpu = pinfo['cpu_percent'] or 0
+                    normalized_cpu = raw_cpu / cpu_count
                     processes.append({
                         "pid": pinfo['pid'],
                         "name": pinfo['name'],
-                        "cpu_percent": pinfo['cpu_percent'] or 0,
+                        "cpu_percent": round(normalized_cpu, 1),
                         "memory_percent": pinfo['memory_percent'] or 0,
                         "status": pinfo['status']
                     })

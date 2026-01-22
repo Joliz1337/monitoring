@@ -2,6 +2,7 @@ import { useMemo } from 'react'
 import ReactApexChart from 'react-apexcharts'
 import { ApexOptions } from 'apexcharts'
 import { useTranslation } from 'react-i18next'
+import { downsampleLTTB, MAX_CHART_POINTS } from '../../utils/chartUtils'
 
 interface MetricChartProps {
   data: Array<{ timestamp: string; value: number }>
@@ -113,10 +114,14 @@ export default function MetricChart({
   const { series, options } = useMemo(() => {
     const lang = i18n.language || 'en'
     
-    const seriesData = data.map(d => ({
+    // Convert to chart points
+    const rawData = data.map(d => ({
       x: parseTimestamp(d.timestamp),
       y: d.value,
     }))
+    
+    // Apply LTTB downsampling to reduce points while preserving visual quality
+    const seriesData = downsampleLTTB(rawData, MAX_CHART_POINTS)
     
     const dateFormat = getDateTimeFormat(period)
     
@@ -126,17 +131,18 @@ export default function MetricChart({
         toolbar: { show: false },
         zoom: { enabled: false },
         animations: {
-          enabled: true,
-          speed: 500,
+          enabled: false, // Disabled for performance
         },
         background: 'transparent',
+        redrawOnParentResize: true,
+        redrawOnWindowResize: true,
       },
       theme: {
         mode: 'dark',
       },
       colors: [color],
       stroke: {
-        curve: 'smooth',
+        curve: 'monotoneCubic', // Better than 'smooth' - no artifacts on sharp spikes
         width: 2,
       },
       fill: {

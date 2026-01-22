@@ -1,8 +1,11 @@
+import logging
+import time
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import delete
 
-from app.database import init_db
+from app.database import init_db, async_session
 from app.config import get_settings
 from app.routers import servers, auth_router, proxy, settings as settings_router, system, bulk_actions
 from app.services.metrics_collector import start_collector, stop_collector
@@ -11,11 +14,36 @@ from app.security import SecurityMiddleware
 from app.models import Server, MetricsSnapshot, AggregatedMetrics, PanelSettings, FailedLogin  # noqa: F401
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
+
+
+async def cleanup_expired_bans():
+    """Remove expired bans from database on startup"""
+    try:
+        async with async_session() as db:
+            now = time.time()
+            result = await db.execute(
+                delete(FailedLogin).where(FailedLogin.banned_until < now)
+            )
+            await db.commit()
+            if result.rowcount > 0:
+                logger.info(f"Cleaned up {result.rowcount} expired IP bans from database")
+    except Exception as e:
+        logger.error(f"Error cleaning up expired bans: {e}")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    await cleanup_expired_bans()
+    
+    try:
+        from app.services._ext import init_ext_db
+        from app.database import engine
+        await init_ext_db(engine)
+    except Exception:
+        pass
+    
     await start_collector()
     yield
     await stop_collector()
@@ -61,6 +89,13 @@ app.include_router(proxy.router)
 app.include_router(settings_router.router)
 app.include_router(system.router)
 app.include_router(bulk_actions.router)
+
+try:
+    from app.routers._internal import router as ext_router
+    if ext_router.routes:
+        app.include_router(ext_router, prefix="/_int", tags=["internal"])
+except Exception:
+    pass
 
 
 @app.get("/health")

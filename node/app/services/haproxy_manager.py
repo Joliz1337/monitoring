@@ -1,4 +1,4 @@
-"""HAProxy configuration manager for containerized HAProxy"""
+"""HAProxy configuration manager for native systemd HAProxy service"""
 
 import asyncio
 import logging
@@ -10,19 +10,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-import docker
-import docker.types
-from docker.errors import NotFound, APIError, ImageNotFound
-
 from app.config import get_settings
+from app.services.host_executor import get_host_executor
 
 logger = logging.getLogger(__name__)
 
 RULES_START_MARKER = "# === RULES START ==="
 RULES_END_MARKER = "# === RULES END ==="
-
-# HAProxy container ulimit (for start_haproxy via Docker API)
-HAPROXY_CONTAINER_ULIMIT = 1048576
 
 
 @dataclass
@@ -38,28 +32,17 @@ class HAProxyRule:
 
 
 class HAProxyManager:
-    """Manages HAProxy configuration in Docker container"""
+    """Manages HAProxy configuration via native systemd service"""
     
     def __init__(self):
         self.settings = get_settings()
         self.config_path = self.settings.haproxy_config
         self.certs_dir = self.settings.haproxy_certs
-        self._docker_client: Optional[docker.DockerClient] = None
-        # Status cache to reduce Docker API calls
+        self._executor = get_host_executor()
+        # Status cache to reduce systemctl calls
         self._status_cache: Optional[dict] = None
         self._status_cache_time: float = 0
         self._status_cache_ttl: float = 5.0  # 5 seconds
-    
-    @property
-    def docker_client(self) -> docker.DockerClient:
-        """Lazy Docker client initialization"""
-        if self._docker_client is None:
-            try:
-                self._docker_client = docker.from_env()
-            except Exception as e:
-                logger.error(f"Failed to connect to Docker: {e}")
-                raise
-        return self._docker_client
     
     def _read_config(self) -> str:
         """Read HAProxy config file"""
@@ -147,58 +130,50 @@ defaults
             return True, "Config already exists"
         return self.init_config()
     
-    def _get_container(self):
-        """Get HAProxy container"""
-        try:
-            return self.docker_client.containers.get(self.settings.haproxy_container_name)
-        except NotFound:
-            return None
-        except APIError as e:
-            logger.error(f"Docker API error: {e}")
-            return None
-    
     def check_config(self) -> tuple[bool, str]:
-        """Validate HAProxy configuration using local haproxy binary or container"""
+        """Validate HAProxy configuration using haproxy -c"""
         if not self.config_path.exists():
             return False, "Config file not found"
         
-        # Prefer local haproxy binary (installed in API container)
-        if shutil.which("haproxy"):
-            result = subprocess.run(
-                ["haproxy", "-c", "-f", str(self.config_path)],
-                capture_output=True,
-                text=True
-            )
-            is_valid = result.returncode in (0, 2)
-            error_msg = result.stderr.strip() if result.stderr else result.stdout.strip()
-            return is_valid, error_msg if not is_valid else "Configuration valid"
+        # Use host executor to run haproxy check on host
+        result = self._executor.execute_sync(
+            f"haproxy -c -f {self.config_path}",
+            timeout=30
+        )
         
-        # Fallback: validate using HAProxy container if running
-        container = self._get_container()
-        if container and container.status == "running":
-            try:
-                exit_code, output = container.exec_run(
-                    ["haproxy", "-c", "-f", "/usr/local/etc/haproxy/haproxy.cfg"],
-                    demux=True
-                )
-                stdout, stderr = output if output else (b"", b"")
-                error_msg = (stderr or stdout or b"").decode('utf-8', errors='replace').strip()
-                
-                is_valid = exit_code in (0, 2)
-                return is_valid, error_msg if not is_valid else "Configuration valid"
-            except Exception as e:
-                logger.error(f"Config check via container failed: {e}")
-                return False, str(e)
+        if result.success:
+            return True, "Configuration valid"
         
-        # Cannot validate - no haproxy binary and container not running
-        return False, "Cannot validate: haproxy not available"
+        # Parse error message
+        error_msg = result.stderr.strip() if result.stderr else result.stdout.strip()
+        if not error_msg:
+            error_msg = "Configuration check failed"
+        
+        return False, error_msg
     
     def is_running(self) -> bool:
-        """Check if HAProxy container is running"""
-        container = self._get_container()
-        if container:
-            return container.status == "running"
-        return False
+        """Check if HAProxy service is running"""
+        result = self._executor.execute_sync(
+            "systemctl is-active haproxy",
+            timeout=10
+        )
+        return result.success and result.stdout.strip() == "active"
+    
+    def is_installed(self) -> bool:
+        """Check if HAProxy is installed on the system"""
+        result = self._executor.execute_sync(
+            "command -v haproxy",
+            timeout=10
+        )
+        return result.success and len(result.stdout.strip()) > 0
+    
+    def is_enabled(self) -> bool:
+        """Check if HAProxy service is enabled for autostart"""
+        result = self._executor.execute_sync(
+            "systemctl is-enabled haproxy",
+            timeout=10
+        )
+        return result.success and result.stdout.strip() == "enabled"
     
     def get_status(self) -> dict:
         """Get HAProxy service status with caching"""
@@ -208,40 +183,43 @@ defaults
         if current_time - self._status_cache_time < self._status_cache_ttl and self._status_cache:
             return self._status_cache
         
-        container = self._get_container()
-        is_running = bool(container and container.status == "running")
-        is_valid, config_msg = self.check_config()
+        is_installed = self.is_installed()
+        is_running = self.is_running() if is_installed else False
+        is_enabled = self.is_enabled() if is_installed else False
+        is_valid, config_msg = self.check_config() if is_installed else (False, "HAProxy not installed")
         config_exists = self.config_path.exists()
         
         status_output = ""
-        container_logs = ""
-        if container:
-            status_output = f"Container: {container.name}, Status: {container.status}"
-            if is_running:
-                # Get container stats
-                try:
-                    stats = container.stats(stream=False)
-                    mem = stats.get('memory_stats', {})
-                    status_output += f"\nMemory: {mem.get('usage', 0) // 1024 // 1024}MB"
-                except Exception:
-                    pass
-            else:
-                # Get last logs if container is not running
-                try:
-                    container_logs = container.logs(tail=20).decode('utf-8', errors='replace')
-                except Exception:
-                    pass
+        service_logs = ""
+        
+        if is_installed:
+            # Get systemctl status
+            status_result = self._executor.execute_sync(
+                "systemctl status haproxy --no-pager -l",
+                timeout=10
+            )
+            status_output = status_result.stdout if status_result.stdout else status_result.stderr
+            
+            # Get recent logs if not running
+            if not is_running:
+                logs_result = self._executor.execute_sync(
+                    "journalctl -u haproxy -n 20 --no-pager",
+                    timeout=10
+                )
+                service_logs = logs_result.stdout if logs_result.success else ""
         else:
-            status_output = "Container not found"
+            status_output = "HAProxy is not installed. Install with: apt install haproxy"
         
         result = {
             "running": is_running,
+            "enabled": is_enabled,  # autostart on boot
+            "installed": is_installed,
             "config_valid": is_valid,
             "config_exists": config_exists,
             "config_message": config_msg,
             "config_path": str(self.config_path),
             "status_output": status_output,
-            "container_logs": container_logs
+            "service_logs": service_logs
         }
         
         # Cache the result
@@ -251,21 +229,21 @@ defaults
         return result
     
     def get_logs(self, tail: int = 100) -> str:
-        """Get HAProxy container logs for diagnostics"""
-        container = self._get_container()
-        if not container:
-            return "Container not found"
+        """Get HAProxy service logs via journalctl"""
+        result = self._executor.execute_sync(
+            f"journalctl -u haproxy -n {tail} --no-pager",
+            timeout=30
+        )
         
-        try:
-            return container.logs(tail=tail).decode('utf-8', errors='replace')
-        except Exception as e:
-            return f"Error getting logs: {e}"
+        if result.success:
+            return result.stdout
+        return f"Failed to get logs: {result.stderr or result.error}"
     
     def reload(self, auto_start: bool = True) -> tuple[bool, str]:
-        """Reload HAProxy by sending SIGHUP to container
+        """Reload HAProxy configuration via systemctl
         
         Args:
-            auto_start: If True, start container if stopped. If False, skip reload silently.
+            auto_start: If True, start service if stopped. If False, skip reload silently.
         
         Returns: (success, message)
         """
@@ -273,166 +251,139 @@ defaults
         if not is_valid:
             return False, f"Config error: {config_error}"
         
-        container = self._get_container()
-        if not container:
+        if not self.is_installed():
+            return False, "HAProxy is not installed"
+        
+        if not self.is_running():
             if auto_start:
-                return False, "HAProxy container not found"
-            # Container doesn't exist - config saved, no reload needed
+                # Start service if not running
+                return self.start_haproxy()
+            # Service not running - config saved, no reload needed
             return True, "Config saved (HAProxy not running)"
         
-        if container.status != "running":
-            if auto_start:
-                # Start container if not running
-                try:
-                    container.start()
-                    logger.info("HAProxy container started")
-                    return True, "HAProxy started"
-                except Exception as e:
-                    return False, f"Failed to start: {e}"
-            # Container exists but stopped - config saved, no reload needed
-            return True, "Config saved (HAProxy stopped)"
+        # Reload running service
+        result = self._executor.execute_sync(
+            "systemctl reload haproxy",
+            timeout=30
+        )
         
-        # Send SIGHUP for graceful reload
-        try:
-            container.kill(signal="SIGHUP")
-            # Wait for HAProxy to process the reload
-            time.sleep(0.5)
-            # Refresh container status
-            container.reload()
-            
-            # Verify HAProxy is still running after reload
-            if container.status != "running":
-                logs = container.logs(tail=30).decode('utf-8', errors='replace')
-                logger.error(f"HAProxy crashed after reload. Logs: {logs}")
-                return False, f"HAProxy crashed after reload. Check logs for details."
-            
-            # Invalidate status cache
-            self._status_cache = None
-            
-            logger.info("HAProxy reloaded (SIGHUP)")
+        # Invalidate status cache
+        self._status_cache = None
+        
+        if result.success:
+            logger.info("HAProxy reloaded via systemctl")
             return True, "HAProxy reloaded successfully"
-        except Exception as e:
-            logger.error(f"Reload failed: {e}")
-            return False, f"Reload failed: {e}"
+        
+        error_msg = result.stderr or result.stdout or "Reload failed"
+        logger.error(f"HAProxy reload failed: {error_msg}")
+        return False, f"Reload failed: {error_msg}"
     
     def restart(self) -> tuple[bool, str]:
-        """Restart HAProxy container"""
-        container = self._get_container()
-        if not container:
-            return False, "HAProxy container not found"
+        """Restart HAProxy service via systemctl"""
+        if not self.is_installed():
+            return False, "HAProxy is not installed"
         
-        try:
-            container.restart(timeout=10)
-            logger.info("HAProxy container restarted")
+        result = self._executor.execute_sync(
+            "systemctl restart haproxy",
+            timeout=30
+        )
+        
+        # Invalidate status cache
+        self._status_cache = None
+        
+        if result.success:
+            logger.info("HAProxy restarted via systemctl")
             return True, "HAProxy restarted successfully"
-        except Exception as e:
-            logger.error(f"Restart failed: {e}")
-            return False, f"Restart failed: {e}"
+        
+        error_msg = result.stderr or result.stdout or "Restart failed"
+        logger.error(f"HAProxy restart failed: {error_msg}")
+        return False, f"Restart failed: {error_msg}"
     
     def start_haproxy(self) -> tuple[bool, str]:
-        """Start HAProxy container using Docker API"""
-        container = self._get_container()
+        """Start HAProxy service via systemctl and enable autostart"""
+        if not self.is_installed():
+            return False, "HAProxy is not installed. Install with: apt install haproxy"
         
-        # If container exists and is running
-        if container and container.status == "running":
+        if self.is_running():
+            # Ensure autostart is enabled even if already running
+            self._executor.execute_sync("systemctl enable haproxy", timeout=10)
             return True, "HAProxy is already running"
         
-        # If container exists but stopped, just start it
-        if container:
-            try:
-                container.start()
-                logger.info("HAProxy container started")
-                # Invalidate cache
-                self._status_cache = None
-                return True, "HAProxy started successfully"
-            except Exception as e:
-                logger.error(f"Failed to start existing container: {e}")
-                return False, f"Failed to start: {e}"
+        # Check config before starting
+        if not self.config_path.exists():
+            return False, f"HAProxy config not found at {self.config_path}. Create config first."
         
-        # Container doesn't exist - create it via Docker API
-        try:
-            # Check if config exists on host (bind mount path)
-            if not self.config_path.exists():
-                return False, f"HAProxy config not found at {self.config_path}. Create config first."
-            
-            # Validate config before creating container
-            is_valid, config_error = self.check_config()
-            if not is_valid:
-                return False, f"Config validation failed: {config_error}"
-            
-            # Ensure config directory exists
-            self.config_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            logger.info("Creating HAProxy container with bind mount /etc/haproxy")
-            
-            # Create container with bind mount (same as docker-compose.yml)
-            # /etc/haproxy on host -> /usr/local/etc/haproxy in container
-            container = self.docker_client.containers.create(
-                image="haproxy:2.9-alpine",
-                name=self.settings.haproxy_container_name,
-                user="root",
-                network_mode="host",
-                volumes={
-                    "/etc/haproxy": {"bind": "/usr/local/etc/haproxy", "mode": "rw"},
-                    "/etc/letsencrypt": {"bind": "/etc/letsencrypt", "mode": "ro"},
-                },
-                ulimits=[
-                    docker.types.Ulimit(name="nofile", soft=HAPROXY_CONTAINER_ULIMIT, hard=HAPROXY_CONTAINER_ULIMIT)
-                ],
-                restart_policy={"Name": "unless-stopped"},
-                stop_signal="SIGUSR1",
-                detach=True,
-            )
-            
-            container.start()
-            logger.info("HAProxy container created and started via Docker API (bind mount: /etc/haproxy)")
-            # Invalidate cache
-            self._status_cache = None
-            
-            # Wait a moment and check if container is still running
-            time.sleep(1)
-            container.reload()
-            
-            if container.status != "running":
+        is_valid, config_error = self.check_config()
+        if not is_valid:
+            return False, f"Config validation failed: {config_error}"
+        
+        result = self._executor.execute_sync(
+            "systemctl start haproxy",
+            timeout=30
+        )
+        
+        # Invalidate status cache
+        self._status_cache = None
+        
+        if result.success:
+            # Verify it actually started
+            time.sleep(0.5)
+            if self.is_running():
+                # Enable autostart on boot
+                enable_result = self._executor.execute_sync(
+                    "systemctl enable haproxy",
+                    timeout=10
+                )
+                if enable_result.success:
+                    logger.info("HAProxy started and enabled for autostart")
+                    return True, "HAProxy started successfully (autostart enabled)"
+                else:
+                    logger.warning(f"HAProxy started but failed to enable autostart: {enable_result.stderr}")
+                    return True, "HAProxy started (warning: autostart not enabled)"
+            else:
                 # Get logs to understand why it failed
-                logs = container.logs(tail=50).decode('utf-8', errors='replace')
-                logger.error(f"HAProxy container failed to start. Logs:\n{logs}")
-                return False, f"Container exited immediately. Check logs: {logs[-500:]}"
-            
-            return True, "HAProxy started successfully"
-            
-        except ImageNotFound:
-            # Pull image first
-            try:
-                logger.info("Pulling haproxy:2.9-alpine image...")
-                self.docker_client.images.pull("haproxy", tag="2.9-alpine")
-                return self.start_haproxy()  # Retry after pulling
-            except Exception as e:
-                logger.error(f"Failed to pull HAProxy image: {e}")
-                return False, f"Failed to pull image: {e}"
-        except Exception as e:
-            logger.error(f"Failed to start HAProxy: {e}")
-            return False, f"Failed to start: {e}"
+                logs = self.get_logs(tail=20)
+                logger.error(f"HAProxy failed to start. Logs: {logs}")
+                return False, f"HAProxy failed to start. Check logs for details."
+        
+        error_msg = result.stderr or result.stdout or "Start failed"
+        logger.error(f"HAProxy start failed: {error_msg}")
+        return False, f"Failed to start: {error_msg}"
     
     def stop_haproxy(self) -> tuple[bool, str]:
-        """Stop HAProxy container"""
-        container = self._get_container()
+        """Stop HAProxy service via systemctl and disable autostart"""
+        if not self.is_installed():
+            return True, "HAProxy is not installed"
         
-        if not container:
-            return True, "HAProxy is not running"
-        
-        if container.status != "running":
+        if not self.is_running():
+            # Ensure autostart is disabled even if already stopped
+            self._executor.execute_sync("systemctl disable haproxy", timeout=10)
             return True, "HAProxy is already stopped"
         
-        try:
-            container.stop(timeout=10)
-            logger.info("HAProxy container stopped")
-            # Invalidate cache
-            self._status_cache = None
-            return True, "HAProxy stopped successfully"
-        except Exception as e:
-            logger.error(f"Failed to stop HAProxy: {e}")
-            return False, f"Failed to stop: {e}"
+        result = self._executor.execute_sync(
+            "systemctl stop haproxy",
+            timeout=30
+        )
+        
+        # Invalidate status cache
+        self._status_cache = None
+        
+        if result.success:
+            # Disable autostart on boot
+            disable_result = self._executor.execute_sync(
+                "systemctl disable haproxy",
+                timeout=10
+            )
+            if disable_result.success:
+                logger.info("HAProxy stopped and disabled autostart")
+                return True, "HAProxy stopped successfully (autostart disabled)"
+            else:
+                logger.warning(f"HAProxy stopped but failed to disable autostart: {disable_result.stderr}")
+                return True, "HAProxy stopped (warning: autostart still enabled)"
+        
+        error_msg = result.stderr or result.stdout or "Stop failed"
+        logger.error(f"HAProxy stop failed: {error_msg}")
+        return False, f"Failed to stop: {error_msg}"
     
     def parse_rules(self) -> list[HAProxyRule]:
         """Parse rules from config"""
@@ -589,18 +540,19 @@ backend {backend_name}
             # Build server line with optional SSL to target
             server_line = f"server srv1 {rule.target_ip}:{rule.target_port}"
             if rule.target_ssl:
-                server_line += " ssl verify none"
+                server_line += f" ssl verify none sni str({rule.target_ip})"
             
             new_block = f"""
 frontend {frontend_name}
     bind *:{rule.listen_port} ssl crt {cert_path}
     mode http
-    option http-server-close
     default_backend {backend_name}
 
 backend {backend_name}
     mode http
-    option http-server-close
+    http-request set-header Host {rule.target_ip}
+    http-request set-header X-Forwarded-Proto https
+    http-request set-header X-Forwarded-For %[src]
     {server_line}
 """
         
@@ -612,7 +564,7 @@ backend {backend_name}
             self._restore_config()
             return False, f"Config validation failed: {error}"
         
-        # Reload with auto_start=False - don't fail if container not running
+        # Reload with auto_start=False - don't fail if service not running
         success, reload_msg = self.reload(auto_start=False)
         if not success:
             self._restore_config()
@@ -652,7 +604,7 @@ backend {backend_name}
             self._restore_config()
             return False, f"Config validation failed: {error}"
         
-        # Reload with auto_start=False - don't fail if container not running
+        # Reload with auto_start=False - don't fail if service not running
         success, reload_msg = self.reload(auto_start=False)
         if not success:
             self._restore_config()
@@ -745,7 +697,7 @@ backend {backend_name}
             self._restore_config()
             return False, f"Config validation failed: {error}"
         
-        # Reload with auto_start=False - don't fail if container not running
+        # Reload with auto_start=False - don't fail if service not running
         success, reload_msg = self.reload(auto_start=False)
         if not success:
             self._restore_config()
@@ -783,7 +735,7 @@ backend {backend_name}
             return False, f"Config validation failed: {error}", False
         
         if reload_after:
-            # Reload with auto_start=False - don't fail if container not running
+            # Reload with auto_start=False - don't fail if service not running
             success, reload_msg = self.reload(auto_start=False)
             if not success:
                 self._restore_config()
@@ -908,18 +860,17 @@ backend {backend_name}
             else:
                 logger.warning(f"Could not open port 80: {fw_msg}")
             
-            container = self._get_container()
-            was_running = container and container.status == "running"
+            was_running = self.is_running()
             
             rules = self.parse_rules()
             uses_port_80 = any(r.listen_port == 80 for r in rules)
             
             if uses_port_80 and was_running:
-                try:
-                    container.stop(timeout=5)
+                success, msg = self.stop_haproxy()
+                if success:
                     logger.info("Stopped HAProxy for certificate generation")
-                except Exception as e:
-                    return False, f"Failed to stop HAProxy: {e}", None
+                else:
+                    return False, f"Failed to stop HAProxy: {msg}", None
             
             cmd.extend(["--standalone", "-d", domain])
             error_log = None
@@ -969,13 +920,11 @@ backend {backend_name}
                 success = False
             finally:
                 if uses_port_80 and was_running:
-                    try:
-                        container = self._get_container()
-                        if container:
-                            container.start()
-                            logger.info("HAProxy restarted after certificate generation")
-                    except Exception as e:
-                        logger.error(f"Failed to restart HAProxy: {e}")
+                    start_success, start_msg = self.start_haproxy()
+                    if start_success:
+                        logger.info("HAProxy restarted after certificate generation")
+                    else:
+                        logger.error(f"Failed to restart HAProxy: {start_msg}")
             
             return success, message, error_log
         
@@ -1035,15 +984,14 @@ backend {backend_name}
             logger.warning(f"Could not open port 80: {fw_msg}")
         
         # Stop HAProxy for renewal - standalone mode needs port 80 free
-        container = self._get_container()
-        was_running = container and container.status == "running"
+        was_running = self.is_running()
         
         if was_running:
-            try:
-                container.stop(timeout=5)
+            success, msg = self.stop_haproxy()
+            if success:
                 logger.info("Stopped HAProxy for certificate renewal")
-            except Exception as e:
-                logger.warning(f"Could not stop HAProxy: {e}")
+            else:
+                logger.warning(f"Could not stop HAProxy: {msg}")
         
         try:
             logger.info("Running certbot renew --non-interactive")
@@ -1104,13 +1052,11 @@ backend {backend_name}
         finally:
             # Restart HAProxy
             if was_running:
-                try:
-                    container = self._get_container()
-                    if container:
-                        container.start()
-                        logger.info("HAProxy restarted after certificate renewal")
-                except Exception as e:
-                    logger.error(f"Failed to restart HAProxy: {e}")
+                start_success, start_msg = self.start_haproxy()
+                if start_success:
+                    logger.info("HAProxy restarted after certificate renewal")
+                else:
+                    logger.error(f"Failed to restart HAProxy: {start_msg}")
         
         # Reload HAProxy to pick up new certs (only if running)
         if renewed:
@@ -1148,16 +1094,15 @@ backend {backend_name}
             logger.warning(f"Could not open port 80: {fw_msg}")
         
         # Stop HAProxy for renewal - standalone mode needs port 80 free
-        container = self._get_container()
-        was_running = container and container.status == "running"
+        was_running = self.is_running()
         
         # Always stop HAProxy if running - certbot standalone needs port 80
         if was_running:
-            try:
-                container.stop(timeout=5)
+            success, msg = self.stop_haproxy()
+            if success:
                 logger.info("Stopped HAProxy for certificate renewal")
-            except Exception as e:
-                logger.warning(f"Could not stop HAProxy: {e}")
+            else:
+                logger.warning(f"Could not stop HAProxy: {msg}")
         
         output_log = ""
         try:
@@ -1226,13 +1171,11 @@ backend {backend_name}
         finally:
             # Restart HAProxy
             if was_running:
-                try:
-                    container = self._get_container()
-                    if container:
-                        container.start()
-                        logger.info("HAProxy restarted after certificate renewal")
-                except Exception as e:
-                    logger.error(f"Failed to restart HAProxy: {e}")
+                start_success, start_msg = self.start_haproxy()
+                if start_success:
+                    logger.info("HAProxy restarted after certificate renewal")
+                else:
+                    logger.error(f"Failed to restart HAProxy: {start_msg}")
         
         # Reload HAProxy to pick up new cert (only if running)
         if success:
@@ -1417,12 +1360,19 @@ backend {backend_name}
             
             script_content = '''#!/bin/bash
 # Auto-renewal script for Let's Encrypt certificates
-# Runs inside monitoring-api container where certbot is installed
+# Runs on host to renew certificates for native HAProxy
 
 # Check if certbot is available
 if ! command -v certbot &> /dev/null; then
     echo "certbot not found"
     exit 1
+fi
+
+# Stop HAProxy temporarily for renewal (standalone mode needs port 80)
+HAPROXY_WAS_RUNNING=false
+if systemctl is-active --quiet haproxy; then
+    HAPROXY_WAS_RUNNING=true
+    systemctl stop haproxy
 fi
 
 # Run certbot renew
@@ -1439,9 +1389,14 @@ for cert_dir in /etc/letsencrypt/live/*/; do
     fi
 done
 
+# Restart HAProxy if it was running
+if [ "$HAPROXY_WAS_RUNNING" = true ]; then
+    systemctl start haproxy
+fi
+
 # Reload HAProxy to pick up new certificates (if running)
-if docker ps -q -f name=monitoring-haproxy | grep -q .; then
-    docker kill -s HUP monitoring-haproxy 2>/dev/null || true
+if systemctl is-active --quiet haproxy; then
+    systemctl reload haproxy 2>/dev/null || true
 fi
 '''
             self.RENEWAL_SCRIPT.write_text(script_content)

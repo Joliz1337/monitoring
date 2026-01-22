@@ -2,6 +2,11 @@
 
 Система мониторинга серверов с веб-панелью. Собирает метрики в реальном времени, отслеживает трафик, управляет HAProxy и SSL сертификатами.
 
+> ⚠️ **ALPHA VERSION**
+>
+> Проект находится в стадии активной разработки. Возможны баги, нестабильная работа и breaking changes без предупреждения. Используйте на свой страх и риск. Не рекомендуется для production-окружений.
+
+![Alpha](https://img.shields.io/badge/status-alpha-orange.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.11+-green.svg)
 ![Docker](https://img.shields.io/badge/docker-required-blue.svg)

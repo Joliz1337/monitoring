@@ -18,10 +18,9 @@ class Settings(BaseSettings):
     ssl_key_path: str = "/etc/nginx/ssl/key.pem"
     domain: str = "monitoring.example.com"
     
-    # HAProxy
+    # HAProxy (native systemd service on host)
     haproxy_config_path: str = "/etc/haproxy/haproxy.cfg"
     haproxy_certs_dir: str = "/etc/letsencrypt/live"
-    haproxy_container_name: str = "monitoring-haproxy"
     
     # Node identity
     node_name: str = "node-01"

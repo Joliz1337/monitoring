@@ -110,6 +110,78 @@ async def proxy_request_safe(
         return False, str(e)
 
 
+# ==================== HAProxy Service ====================
+
+class BulkHAProxyService(BaseModel):
+    server_ids: list[int]
+
+
+@router.post("/haproxy/start", response_model=list[BulkResult])
+async def bulk_start_haproxy(
+    data: BulkHAProxyService,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Start HAProxy on multiple servers."""
+    servers = await get_servers_by_ids(data.server_ids, db)
+    
+    if not servers:
+        raise HTTPException(status_code=404)
+    
+    async def start_haproxy(server: Server) -> BulkResult:
+        success, result = await proxy_request_safe(
+            server, "/api/haproxy/start", method="POST"
+        )
+        
+        if success:
+            msg = result.get("message", "HAProxy started") if isinstance(result, dict) else "HAProxy started"
+        else:
+            msg = str(result)
+        
+        return BulkResult(
+            server_id=server.id,
+            server_name=server.name,
+            success=success,
+            message=msg
+        )
+    
+    results = await asyncio.gather(*[start_haproxy(s) for s in servers])
+    return list(results)
+
+
+@router.post("/haproxy/stop", response_model=list[BulkResult])
+async def bulk_stop_haproxy(
+    data: BulkHAProxyService,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Stop HAProxy on multiple servers."""
+    servers = await get_servers_by_ids(data.server_ids, db)
+    
+    if not servers:
+        raise HTTPException(status_code=404)
+    
+    async def stop_haproxy(server: Server) -> BulkResult:
+        success, result = await proxy_request_safe(
+            server, "/api/haproxy/stop", method="POST"
+        )
+        
+        if success:
+            msg = result.get("message", "HAProxy stopped") if isinstance(result, dict) else "HAProxy stopped"
+        else:
+            msg = str(result)
+        
+        return BulkResult(
+            server_id=server.id,
+            server_name=server.name,
+            success=success,
+            message=msg
+        )
+    
+    results = await asyncio.gather(*[stop_haproxy(s) for s in servers])
+    return list(results)
+
+
 # ==================== HAProxy Rules ====================
 
 @router.post("/haproxy/rules", response_model=list[BulkResult])

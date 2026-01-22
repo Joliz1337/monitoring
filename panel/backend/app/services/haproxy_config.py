@@ -81,7 +81,7 @@ backend {backend_name}
             cert_path = f"{certs_base_path}/{rule.cert_domain}/combined.pem"
             server_line = f"server srv1 {rule.target_ip}:{rule.target_port}"
             if rule.target_ssl:
-                server_line += " ssl verify none"
+                server_line += f" ssl verify none sni str({rule.target_ip})"
             
             return f"""
 frontend {frontend_name}
@@ -91,6 +91,9 @@ frontend {frontend_name}
 
 backend {backend_name}
     mode http
+    http-request set-header Host {rule.target_ip}
+    http-request set-header X-Forwarded-Proto https
+    http-request set-header X-Forwarded-For %[src]
     {server_line}
 """
     

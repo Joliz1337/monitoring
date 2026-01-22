@@ -32,7 +32,8 @@ import {
   Equal,
   AlignJustify,
   Grid3x3,
-  Square
+  Square,
+  PowerOff
 } from 'lucide-react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useServersStore } from '../stores/serversStore'
@@ -131,9 +132,11 @@ export default function Dashboard() {
   const activeServer = activeId ? servers.find(s => s.id === activeId) : null
   
   // Memoize server counts to avoid recalculating on every render
-  const { onlineCount, offlineCount, serverIds } = useMemo(() => ({
-    onlineCount: servers.filter(s => s.status === 'online').length,
-    offlineCount: servers.filter(s => s.status === 'offline').length,
+  // Only count active servers for online/offline stats
+  const { onlineCount, offlineCount, disabledCount, serverIds } = useMemo(() => ({
+    onlineCount: servers.filter(s => s.is_active && s.status === 'online').length,
+    offlineCount: servers.filter(s => s.is_active && s.status === 'offline').length,
+    disabledCount: servers.filter(s => !s.is_active).length,
     serverIds: servers.map(s => s.id)
   }), [servers])
   
@@ -177,6 +180,12 @@ export default function Dashboard() {
               <span className="flex items-center gap-1.5">
                 <WifiOff className="w-3.5 h-3.5 text-danger" />
                 <span className="text-danger">{offlineCount}</span>
+              </span>
+            )}
+            {disabledCount > 0 && (
+              <span className="flex items-center gap-1.5">
+                <PowerOff className="w-3.5 h-3.5 text-dark-500" />
+                <span className="text-dark-500">{disabledCount}</span>
               </span>
             )}
           </motion.p>

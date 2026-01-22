@@ -240,19 +240,47 @@ export interface SystemInfo {
   optimizations_applied: boolean
 }
 
+export interface SysctlConfig {
+  path: string
+  exists: boolean
+  content: string
+}
+
+export interface LimitsConfig {
+  path: string
+  exists: boolean
+  content: string
+}
+
+export interface CurrentOptimizationValues {
+  tcp_congestion: string
+  ipv6_disabled: boolean
+  file_max: number
+  somaxconn: number
+  tcp_tw_reuse: boolean
+  tcp_fastopen: number
+}
+
 export interface OptimizationsStatus {
-  sysctl: boolean
-  limits: boolean
-  systemd: boolean
-  all_applied: boolean
+  applied: boolean
+  sysctl: SysctlConfig
+  limits: LimitsConfig
+  current_values: CurrentOptimizationValues
 }
 
 export interface OptimizationApplyResponse {
   success: boolean
   message: string
-  sysctl: boolean
-  limits: boolean
-  systemd: boolean
+  sysctl_applied: boolean
+  limits_applied: boolean
+  systemd_applied: boolean
+  errors: string[]
+}
+
+export interface OptimizationsUpdateRequest {
+  sysctl_content?: string
+  limits_content?: string
+  apply?: boolean
 }
 
 export interface CertificateGenerateResponse {
@@ -397,7 +425,8 @@ export const proxyApi = {
     api.get<{ certificates: Certificate[]; count: number }>(`/proxy/${serverId}/haproxy/certs/all`),
   generateCert: (serverId: number, data: { domain: string; email?: string; method?: string }) =>
     api.post(`/proxy/${serverId}/haproxy/certs/generate`, data),
-  renewCerts: (serverId: number) => api.post(`/proxy/${serverId}/haproxy/certs/renew`),
+  renewCerts: (serverId: number) => 
+    api.post<{ success: boolean; message: string; renewed_domains: string[] }>(`/proxy/${serverId}/haproxy/certs/renew`),
   renewSingleCert: (serverId: number, domain: string) => 
     api.post<{ success: boolean; message: string; domain: string; output_log?: string }>(`/proxy/${serverId}/haproxy/certs/${domain}/renew`),
   deleteCert: (serverId: number, domain: string) =>
@@ -437,6 +466,8 @@ export const proxyApi = {
     api.get<OptimizationsStatus>(`/proxy/${serverId}/haproxy/system/optimizations`),
   applyOptimizations: (serverId: number) =>
     api.post<OptimizationApplyResponse>(`/proxy/${serverId}/haproxy/system/optimize`),
+  updateOptimizations: (serverId: number, data: OptimizationsUpdateRequest) =>
+    api.put<OptimizationApplyResponse>(`/proxy/${serverId}/haproxy/system/optimizations`, data),
   
   // Traffic tracking
   getTrafficSummary: (serverId: number, days: number = 30) =>
@@ -457,6 +488,50 @@ export const proxyApi = {
     api.post<{ success: boolean; message: string }>(`/proxy/${serverId}/traffic/ports/add`, { port }),
   removeTrackedPort: (serverId: number, port: number) =>
     api.post<{ success: boolean; message: string }>(`/proxy/${serverId}/traffic/ports/remove`, { port }),
+  
+  // Command execution
+  executeCommand: (serverId: number, command: string, timeout?: number, shell?: 'sh' | 'bash') =>
+    api.post<ExecuteResponse>(`/proxy/${serverId}/system/execute`, {
+      command,
+      timeout: timeout || 30,
+      shell: shell || 'sh'
+    }),
+  
+  // Get SSE URL for streaming command execution
+  getExecuteStreamUrl: (serverId: number) => `/api/proxy/${serverId}/system/execute-stream`,
+}
+
+export interface ExecuteRequest {
+  command: string
+  timeout?: number
+  shell?: 'sh' | 'bash'
+}
+
+export interface ExecuteResponse {
+  success: boolean
+  exit_code: number
+  stdout: string
+  stderr: string
+  execution_time_ms: number
+  error: string | null
+}
+
+export interface SSEStdoutEvent {
+  line: string
+}
+
+export interface SSEStderrEvent {
+  line: string
+}
+
+export interface SSEDoneEvent {
+  exit_code: number
+  execution_time_ms: number
+  success: boolean
+}
+
+export interface SSEErrorEvent {
+  message: string
 }
 
 export const settingsApi = {
@@ -515,6 +590,26 @@ export interface CertRenewalResponse {
   message: string
 }
 
+export interface OptimizationsNodeInfo {
+  id: number
+  name: string
+  installed: boolean
+  version: string | null
+  status: 'online' | 'offline'
+  update_available: boolean
+}
+
+export interface OptimizationsVersionInfo {
+  latest_version: string | null
+  nodes: OptimizationsNodeInfo[]
+}
+
+export interface ApplyOptimizationsResponse {
+  success: boolean
+  message: string
+  version: string | null
+}
+
 export interface BulkResult {
   server_id: number
   server_name: string
@@ -523,6 +618,13 @@ export interface BulkResult {
 }
 
 export const bulkApi = {
+  // HAProxy service
+  startHAProxy: (serverIds: number[]) =>
+    api.post<BulkResult[]>('/bulk/haproxy/start', { server_ids: serverIds }),
+  
+  stopHAProxy: (serverIds: number[]) =>
+    api.post<BulkResult[]>('/bulk/haproxy/stop', { server_ids: serverIds }),
+  
   // HAProxy rules
   createHAProxyRule: (serverIds: number[], rule: {
     name: string
@@ -577,6 +679,11 @@ export const systemApi = {
   getCertificate: () => api.get<PanelCertificateInfo>('/system/certificate'),
   renewCertificate: () => api.post<CertRenewalResponse>('/system/certificate/renew?force=true'),
   getCertRenewalStatus: () => api.get<UpdateStatus>('/system/certificate/renew/status'),
+  
+  // System Optimizations
+  getOptimizationsVersion: () => api.get<OptimizationsVersionInfo>('/system/optimizations/version'),
+  applyNodeOptimizations: (serverId: number) => 
+    api.post<ApplyOptimizationsResponse>(`/proxy/${serverId}/system/optimizations/apply`),
 }
 
 export default api

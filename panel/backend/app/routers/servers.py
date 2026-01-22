@@ -354,8 +354,10 @@ async def test_server_connection(
     
     try:
         async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+            # Use /api/version with API key (not /health which is localhost-only)
             response = await client.get(
-                f"{server.url}/health"
+                f"{server.url}/api/version",
+                headers={"X-API-Key": server.api_key}
             )
             
             if response.status_code == 200:
@@ -363,7 +365,8 @@ async def test_server_connection(
                 return {
                     "success": True,
                     "status": "online",
-                    "server_name": data.get("server_name", "Unknown")
+                    "server_name": data.get("node_name", "Unknown"),
+                    "version": data.get("version")
                 }
             else:
                 return {

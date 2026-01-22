@@ -49,6 +49,18 @@
     "server": "Server",
     "updates": "Updates"
   },
+  "units": {
+    "bps": "bit/s",
+    "kbps": "Kbit/s",
+    "mbps": "Mbit/s",
+    "gbps": "Gbit/s",
+    "tbps": "Tbit/s",
+    "b_per_s": "B/s",
+    "kb_per_s": "KB/s",
+    "mb_per_s": "MB/s",
+    "gb_per_s": "GB/s",
+    "tb_per_s": "TB/s"
+  },
   "app": {
     "panel_not_configured": "Panel not configured"
   },
@@ -68,6 +80,7 @@
     "subtitle_other": "{{count}} servers",
     "online_count": "{{count}} online",
     "offline_count": "{{count}} offline",
+    "disabled_count": "{{count}} disabled",
     "no_servers": "No servers yet",
     "add_first": "Add your first server to start monitoring",
     "grid_view": "Grid view",
@@ -102,7 +115,10 @@
     "no_servers": "No servers added yet",
     "add_first_server": "Add Your First Server",
     "failed_add": "Failed to add server",
-    "failed_update": "Failed to update server"
+    "failed_update": "Failed to update server",
+    "monitoring_enabled": "Monitoring enabled",
+    "monitoring_disabled": "Monitoring disabled",
+    "disabled": "Disabled"
   },
   "server_details": {
     "loading": "Loading server data...",
@@ -129,7 +145,17 @@
     "tcp_connections": "TCP Connections",
     "tcp_states": "TCP States",
     "udp_sockets": "UDP Sockets",
-    "connections": "Connections"
+    "connections": "Connections",
+    "power_control": "Power Control",
+    "reboot": "Reboot",
+    "shutdown": "Shutdown",
+    "rebooting": "Rebooting...",
+    "shutting_down": "Shutting down...",
+    "confirm_reboot": "Are you sure you want to reboot this server?",
+    "confirm_shutdown": "Are you sure you want to shut down this server? You will need physical access or IPMI to turn it back on.",
+    "reboot_initiated": "Reboot initiated",
+    "shutdown_initiated": "Shutdown initiated",
+    "power_action_failed": "Failed to execute power action"
   },
   "settings": {
     "title": "Settings",
@@ -273,6 +299,8 @@
     "renew_success": "Certificate renewed successfully",
     "renew_error": "Certificate renewal failed",
     "renewal_failed": "Renewal failed",
+    "renewed_domains": "Renewed domains",
+    "certs_renewed": "certificates renewed",
     "certificate_files": "Certificate Files",
     "loading": "Loading HAProxy data...",
     "listen_port": "Listen Port",
@@ -320,6 +348,32 @@
     "docker_warning_title": "Docker Limitation",
     "docker_warning_text": "System optimizations (sysctl, limits.conf, systemd) must be applied on the host machine, not inside the container. Run commands manually on the server or use the deploy.sh script."
   },
+  "optimizations": {
+    "title": "System Optimizations",
+    "applied": "Applied",
+    "not_applied": "Not applied",
+    "apply_default": "Apply Default",
+    "confirm_apply": "Apply default system optimizations? This will configure BBR, TCP/network settings, and file descriptors limits.",
+    "failed_fetch": "Failed to fetch optimizations status",
+    "failed_apply": "Failed to apply optimizations",
+    "failed_save": "Failed to save config",
+    "save_apply": "Save & Apply",
+    "current_values": "Current Values",
+    "tcp_congestion": "TCP Congestion",
+    "ipv6": "IPv6",
+    "enabled": "Enabled",
+    "disabled": "Disabled",
+    "file_max": "File Max",
+    "somaxconn": "Somaxconn",
+    "tcp_tw_reuse": "TW Reuse",
+    "tcp_fastopen": "Fast Open",
+    "sysctl_config": "Sysctl Config",
+    "limits_config": "Limits Config",
+    "exists": "Exists",
+    "not_exists": "Not exists",
+    "no_config": "No config file found",
+    "click_to_load": "Click to load optimization status"
+  },
   "traffic": {
     "title": "Traffic Statistics",
     "loading": "Loading traffic data...",
@@ -351,7 +405,8 @@
     "upload": "Upload",
     "failed_fetch": "Failed to fetch traffic data",
     "failed_add_port": "Failed to add port",
-    "failed_remove_port": "Failed to remove port"
+    "failed_remove_port": "Failed to remove port",
+    "network_speed": "Network Speed"
   },
   "updates": {
     "title": "Updates",
@@ -379,7 +434,10 @@
     "all_up_to_date": "All components are up to date",
     "all_up_to_date_desc": "Panel and all nodes are running the latest versions. No updates required.",
     "duration_title": "Update Duration",
-    "duration_text": "Updates may take 5-10 minutes to complete. Do not close the page and wait for the process to finish."
+    "duration_text": "Updates may take 5-10 minutes to complete. Do not close the page and wait for the process to finish.",
+    "optimizations": "System Optimizations",
+    "update_all_optimizations": "Update All",
+    "not_installed": "Not installed"
   },
   "bulk_actions": {
     "title": "Bulk Actions",
@@ -390,16 +448,23 @@
     "selected_count": "Selected: {{count}}",
     "no_servers_selected": "Select at least one server",
     "no_servers": "No servers added",
+    "haproxy_service": "HAProxy Service",
     "haproxy_rules": "HAProxy Rules",
     "traffic_ports": "Traffic Port Tracking",
     "firewall_rules": "Firewall Rules",
     "create": "Create",
     "delete": "Delete",
+    "start": "Start",
+    "stop": "Stop",
     "execute": "Execute",
     "executing": "Executing...",
     "results": "Results",
     "success": "Success",
     "failed": "Failed",
+    "start_haproxy_title": "Start HAProxy",
+    "start_haproxy_hint": "HAProxy will be started on all selected servers",
+    "stop_haproxy_title": "Stop HAProxy",
+    "stop_haproxy_hint": "HAProxy will be stopped on all selected servers. All active connections will be closed.",
     "rule_name": "Rule Name",
     "rule_type": "Rule Type",
     "listen_port": "Listen Port",
@@ -420,5 +485,21 @@
     "delete_traffic_hint": "Enter port to remove from tracking",
     "delete_firewall_hint": "All rules for the specified port will be deleted",
     "clear_results": "Clear results"
+  },
+  "terminal": {
+    "title": "Terminal",
+    "placeholder": "Enter command...",
+    "execute": "Execute",
+    "running": "Running...",
+    "clear": "Clear",
+    "cancel": "Cancel",
+    "history": "History",
+    "clear_history": "Clear history",
+    "empty_hint": "Enter a command and press Enter or click Execute",
+    "command_completed": "Command completed",
+    "command_failed": "Command failed",
+    "command_cancelled": "Command cancelled",
+    "connection_error": "Connection error",
+    "timeout_error": "Command timed out"
   }
 }

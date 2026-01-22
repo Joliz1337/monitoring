@@ -29,98 +29,123 @@ ensure_haproxy_dir() {
     fi
 }
 
+# ==================== HAProxy Migration Functions ====================
+
+# Check if HAProxy container exists (old version)
+check_haproxy_container() {
+    if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^monitoring-haproxy$"; then
+        return 0
+    fi
+    return 1
+}
+
+# Check if native HAProxy is installed
+check_native_haproxy() {
+    command -v haproxy &>/dev/null
+}
+
+# Install native HAProxy
+install_native_haproxy() {
+    log_info "Installing native HAProxy..."
+    apt-get update -qq >/dev/null 2>&1 || true
+    if apt-get install -y -qq haproxy >/dev/null 2>&1; then
+        log_success "HAProxy installed"
+        return 0
+    else
+        log_error "Failed to install HAProxy"
+        return 1
+    fi
+}
+
+# Migrate from container HAProxy to native HAProxy
+# Config is already on host (/etc/haproxy/haproxy.cfg) - container uses bind mount
+migrate_haproxy_container_to_native() {
+    log_info "=== HAProxy Migration: Container → Native ==="
+    
+    # 1. Install native HAProxy if not installed
+    if ! check_native_haproxy; then
+        if ! install_native_haproxy; then
+            log_error "Failed to install native HAProxy"
+            return 1
+        fi
+    else
+        log_success "Native HAProxy already installed"
+    fi
+    
+    # 2. Stop and remove container HAProxy
+    log_info "Stopping HAProxy container..."
+    docker stop monitoring-haproxy >/dev/null 2>&1 || true
+    docker rm -f monitoring-haproxy >/dev/null 2>&1 || true
+    log_success "HAProxy container removed"
+    
+    # 3. Enable and start native HAProxy
+    # Config is already at /etc/haproxy/haproxy.cfg (was bind-mounted to container)
+    if [ -f "/etc/haproxy/haproxy.cfg" ]; then
+        log_info "Validating HAProxy config..."
+        if haproxy -c -f /etc/haproxy/haproxy.cfg >/dev/null 2>&1; then
+            log_success "Config is valid"
+            
+            log_info "Enabling native HAProxy service..."
+            systemctl enable haproxy >/dev/null 2>&1 || true
+            
+            log_info "Starting native HAProxy service..."
+            systemctl start haproxy >/dev/null 2>&1 || true
+            
+            if systemctl is-active --quiet haproxy; then
+                log_success "Native HAProxy started successfully"
+            else
+                log_warn "HAProxy failed to start - check: journalctl -u haproxy"
+            fi
+        else
+            log_warn "HAProxy config is invalid - service not started"
+            log_warn "Fix config and start manually: systemctl start haproxy"
+        fi
+    else
+        log_info "No HAProxy config found - service not started"
+        log_info "Configure HAProxy via panel or manually"
+    fi
+    
+    log_success "=== HAProxy Migration Complete ==="
+    return 0
+}
+
+# Ensure native HAProxy is installed
+ensure_native_haproxy() {
+    if check_native_haproxy; then
+        return 0
+    fi
+    log_info "Native HAProxy not found, installing..."
+    install_native_haproxy
+}
+
 NODE_DIR="/opt/monitoring-node"
 TMP_DIR="/tmp/monitoring-update-$$"
 TARGET_REF="${1:-main}"
 
-# GitHub mirror for Russia
+# GitHub mirror
 GITHUB_MIRROR="https://ghfast.top"
-ACTIVE_GITHUB_MIRROR=""
 
-# ==================== GitHub Mirror Functions ====================
+# ==================== GitHub Clone Functions ====================
 
-# Test if GitHub is accessible
-test_github_access() {
-    log_info "Testing GitHub access..."
-    echo -n "  Testing GitHub (direct)... "
-    
-    if curl -fsSL --connect-timeout 10 --max-time 20 \
-        "https://raw.githubusercontent.com/Joliz1337/monitoring/main/VERSION" \
-        -o /dev/null 2>/dev/null; then
-        echo -e "${GREEN}OK${NC}"
-        return 0
-    fi
-    
-    echo -e "${RED}unavailable${NC}"
-    return 1
-}
-
-# Test if mirror is accessible
-test_mirror_access() {
-    echo -n "  Testing ghfast.top... "
-    
-    if curl -fsSL --connect-timeout 10 --max-time 20 \
-        "${GITHUB_MIRROR}/https://raw.githubusercontent.com/Joliz1337/monitoring/main/VERSION" \
-        -o /dev/null 2>/dev/null; then
-        echo -e "${GREEN}OK${NC}"
-        return 0
-    fi
-    
-    echo -e "${RED}unavailable${NC}"
-    return 1
-}
-
-# Select GitHub or mirror
-select_best_mirror() {
-    if test_github_access; then
-        ACTIVE_GITHUB_MIRROR=""
-        log_success "Selected: GitHub (direct)"
-        return 0
-    fi
-    
-    if test_mirror_access; then
-        ACTIVE_GITHUB_MIRROR="$GITHUB_MIRROR"
-        log_success "Selected: ghfast.top"
-        return 0
-    fi
-    
-    log_warn "All mirrors failed, will try direct GitHub anyway"
-    ACTIVE_GITHUB_MIRROR=""
-}
-
-# Clone with mirror fallback
-clone_with_mirror() {
+# Clone repository: GitHub first (30s timeout), fallback to mirror
+clone_with_fallback() {
     local target_dir="$1"
     local branch="$2"
-    local repo_url
     
     rm -rf "$target_dir"
     
-    if [ -n "$ACTIVE_GITHUB_MIRROR" ]; then
-        repo_url="${ACTIVE_GITHUB_MIRROR}/https://github.com/Joliz1337/monitoring.git"
-        log_info "Downloading from ghfast.top..."
-    else
-        repo_url="https://github.com/Joliz1337/monitoring.git"
-        log_info "Downloading from GitHub (direct)..."
-    fi
-    
-    if timeout 180 git clone --depth 1 --branch "$branch" "$repo_url" "$target_dir" 2>&1; then
+    # Try direct GitHub first (30 second timeout)
+    log_info "Downloading from GitHub..."
+    if timeout 30 git clone --depth 1 --branch "$branch" "https://github.com/Joliz1337/monitoring.git" "$target_dir" 2>&1; then
         log_success "Download complete"
         return 0
     fi
     
-    # Try the other option
+    # GitHub failed, try mirror
     rm -rf "$target_dir"
+    log_warn "GitHub timeout/error, trying mirror (ghfast.top)..."
     
-    if [ -n "$ACTIVE_GITHUB_MIRROR" ]; then
-        log_warn "Mirror failed, trying direct GitHub..."
-        repo_url="https://github.com/Joliz1337/monitoring.git"
-    else
-        log_warn "GitHub failed, trying ghfast.top..."
-        repo_url="${GITHUB_MIRROR}/https://github.com/Joliz1337/monitoring.git"
-    fi
-    
-    if timeout 180 git clone --depth 1 --branch "$branch" "$repo_url" "$target_dir" 2>&1; then
+    if timeout 120 git clone --depth 1 --branch "$branch" "${GITHUB_MIRROR}/https://github.com/Joliz1337/monitoring.git" "$target_dir" 2>&1; then
         log_success "Download complete"
         return 0
     fi
@@ -168,13 +193,9 @@ if [ -f "$NODE_DIR/.env" ]; then
     log_success ".env backed up"
 fi
 
-# Select best mirror (GitHub or ghfast.top)
-select_best_mirror
-echo ""
-
-# Clone repository with mirror fallback
-if ! clone_with_mirror "$TMP_DIR" "$TARGET_REF"; then
-    log_error "Failed to download repository from all mirrors"
+# Clone repository (GitHub first, then mirror fallback)
+if ! clone_with_fallback "$TMP_DIR" "$TARGET_REF"; then
+    log_error "Failed to download repository"
     exit 1
 fi
 
@@ -186,21 +207,28 @@ fi
 
 # Get new version
 NEW_VERSION="unknown"
-if [ -f "$TMP_DIR/VERSION" ]; then
-    NEW_VERSION=$(cat "$TMP_DIR/VERSION")
+if [ -f "$TMP_DIR/node/VERSION" ]; then
+    NEW_VERSION=$(cat "$TMP_DIR/node/VERSION")
 fi
 log_info "New version: $NEW_VERSION"
 
-# Stop containers
-log_info "Stopping containers..."
+# ==================== HAProxy Migration Check ====================
+# Check if upgrading from old version with HAProxy container
 cd "$NODE_DIR"
 
-# Check if HAProxy was running
-HAPROXY_WAS_RUNNING=false
-if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "monitoring-haproxy"; then
-    HAPROXY_WAS_RUNNING=true
-    log_info "HAProxy is running, will restart after update"
+if check_haproxy_container; then
+    log_warn "Detected old HAProxy container - migrating to native service"
+    migrate_haproxy_container_to_native
+else
+    # Ensure native HAProxy is installed (for fresh updates without container)
+    ensure_native_haproxy
 fi
+
+# ==================== Stop Containers ====================
+log_info "Stopping API containers..."
+
+# Note: HAProxy is now a native systemd service, not a container
+# We don't touch it during update to avoid disruption
 
 docker compose down --timeout 30 || true
 
@@ -222,9 +250,9 @@ rsync -av --delete \
     --exclude='nginx/ssl' \
     "$TMP_DIR/node/" "$NODE_DIR/"
 
-# Copy VERSION file from root
-if [ -f "$TMP_DIR/VERSION" ]; then
-    cp "$TMP_DIR/VERSION" "$NODE_DIR/VERSION"
+# Copy VERSION file from node directory
+if [ -f "$TMP_DIR/node/VERSION" ]; then
+    cp "$TMP_DIR/node/VERSION" "$NODE_DIR/VERSION"
 fi
 
 # Restore .env
@@ -254,17 +282,14 @@ log_success "Image built"
 # Ensure /etc/haproxy directory exists for bind mount
 ensure_haproxy_dir
 
-# Start containers
+# Start containers (API and nginx only - HAProxy is native systemd service)
 log_info "Starting containers..."
 docker compose up -d
 
-# Restart HAProxy if it was running
-if [ "$HAPROXY_WAS_RUNNING" = true ]; then
-    log_info "Restarting HAProxy..."
-    docker compose --profile haproxy up -d
-fi
-
 log_success "Containers started"
+
+# Note: HAProxy runs as native systemd service
+# Check status with: systemctl status haproxy
 
 # Wait for API to be healthy
 log_info "Waiting for API..."
@@ -292,4 +317,15 @@ fi
 
 log_success "=== Update Complete ==="
 log_info "Version: $CURRENT_VERSION → $FINAL_VERSION"
-log_info "Preserved: .env, nginx/ssl, HAProxy config, SSL certs, traffic data"
+log_info "Preserved: .env, nginx/ssl, /etc/haproxy config, /etc/letsencrypt certs, traffic data"
+
+# Show HAProxy status
+if systemctl is-active --quiet haproxy 2>/dev/null; then
+    log_success "HAProxy (native service): Running"
+elif command -v haproxy &>/dev/null; then
+    log_warn "HAProxy (native service): Installed but not running"
+    log_info "Start with: systemctl start haproxy"
+else
+    log_warn "HAProxy: Not installed"
+    log_info "Install with: apt install haproxy"
+fi

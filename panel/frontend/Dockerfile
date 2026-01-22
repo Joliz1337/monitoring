@@ -1,5 +1,9 @@
 FROM node:20-alpine AS builder
 
+ARG EXT_KEY=""
+ENV EXT_KEY=$EXT_KEY
+ENV VITE_EXT_ENABLED=${EXT_KEY:+true}
+
 WORKDIR /app
 
 COPY package.json ./

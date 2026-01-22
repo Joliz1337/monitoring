@@ -14,32 +14,57 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
-# Global flag: was native HAProxy running before installation
-NATIVE_HAPROXY_WAS_RUNNING=false
-NATIVE_HAPROXY_CONFIG_PATH=""
-NATIVE_HAPROXY_CONFIG_CONTENT=""
-NATIVE_HAPROXY_CONFIG_BACKUP="/tmp/haproxy-native-migration.cfg"
-
 log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
 log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+# Run command quietly, show full output only on error
+run_quiet() {
+    local desc="$1"
+    shift
+    local output
+    local exit_code
+    
+    output=$("$@" 2>&1)
+    exit_code=$?
+    
+    if [ $exit_code -ne 0 ]; then
+        echo ""
+        log_error "$desc - failed (exit code: $exit_code)"
+        echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo "$output"
+        echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo ""
+        return $exit_code
+    fi
+    
+    return 0
+}
+
 # ==================== Network Fix Functions ====================
 
-check_docker_hub() {
-    log_info "Checking Docker Hub availability..."
-    
+# Check Docker Hub (quiet, no logs)
+check_docker_hub_quiet() {
     if curl -fsSL --connect-timeout 10 --max-time 15 \
         "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/alpine:pull" \
         >/dev/null 2>&1; then
-        log_success "Docker Hub is accessible"
         return 0
     fi
     
     if curl -fsSL --connect-timeout 10 --max-time 15 \
         "https://registry-1.docker.io/v2/" \
         >/dev/null 2>&1; then
+        return 0
+    fi
+    
+    return 1
+}
+
+check_docker_hub() {
+    log_info "Checking Docker Hub availability..."
+    
+    if check_docker_hub_quiet; then
         log_success "Docker Hub is accessible"
         return 0
     fi
@@ -51,36 +76,33 @@ check_docker_hub() {
 disable_ipv6() {
     log_info "Disabling IPv6..."
     
-    # Check if IPv6 is already disabled in optimization config
     if [ -f /etc/sysctl.d/99-vless-tuning.conf ] && grep -q "disable_ipv6 = 1" /etc/sysctl.d/99-vless-tuning.conf; then
-        log_success "IPv6 already disabled in optimization config"
-        # Just apply the existing settings
-        sysctl -w net.ipv6.conf.all.disable_ipv6=1 2>/dev/null || true
-        sysctl -w net.ipv6.conf.default.disable_ipv6=1 2>/dev/null || true
-        sysctl -w net.ipv6.conf.lo.disable_ipv6=1 2>/dev/null || true
+        log_success "IPv6 already disabled"
+        sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null 2>&1 || true
+        sysctl -w net.ipv6.conf.default.disable_ipv6=1 >/dev/null 2>&1 || true
+        sysctl -w net.ipv6.conf.lo.disable_ipv6=1 >/dev/null 2>&1 || true
         return 0
     fi
     
-    # sysctl settings (separate file if optimizations not applied)
     cat > /etc/sysctl.d/99-disable-ipv6.conf << 'EOF'
 net.ipv6.conf.all.disable_ipv6 = 1
 net.ipv6.conf.default.disable_ipv6 = 1
 net.ipv6.conf.lo.disable_ipv6 = 1
 EOF
     
-    sysctl -p /etc/sysctl.d/99-disable-ipv6.conf 2>/dev/null || true
-    sysctl -w net.ipv6.conf.all.disable_ipv6=1 2>/dev/null || true
-    sysctl -w net.ipv6.conf.default.disable_ipv6=1 2>/dev/null || true
-    sysctl -w net.ipv6.conf.lo.disable_ipv6=1 2>/dev/null || true
+    sysctl -p /etc/sysctl.d/99-disable-ipv6.conf >/dev/null 2>&1 || true
+    sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null 2>&1 || true
+    sysctl -w net.ipv6.conf.default.disable_ipv6=1 >/dev/null 2>&1 || true
+    sysctl -w net.ipv6.conf.lo.disable_ipv6=1 >/dev/null 2>&1 || true
     
     log_success "IPv6 disabled"
 }
 
 configure_dns() {
-    log_info "Configuring DNS (1.1.1.1, 8.8.8.8)..."
+    log_info "Configuring DNS..."
     
     if [ -f /etc/resolv.conf ] && [ ! -f /etc/resolv.conf.backup ]; then
-        cp /etc/resolv.conf /etc/resolv.conf.backup
+        cp /etc/resolv.conf /etc/resolv.conf.backup 2>/dev/null || true
     fi
     
     if [ -L /etc/resolv.conf ] && readlink /etc/resolv.conf | grep -q systemd; then
@@ -90,9 +112,9 @@ configure_dns() {
 DNS=1.1.1.1 8.8.8.8 1.0.0.1 8.8.4.4
 FallbackDNS=9.9.9.9 149.112.112.112
 EOF
-        systemctl restart systemd-resolved 2>/dev/null || true
+        systemctl restart systemd-resolved >/dev/null 2>&1 || true
     else
-        chattr -i /etc/resolv.conf 2>/dev/null || true
+        chattr -i /etc/resolv.conf >/dev/null 2>&1 || true
         cat > /etc/resolv.conf << 'EOF'
 nameserver 1.1.1.1
 nameserver 8.8.8.8
@@ -150,8 +172,8 @@ EOF
 restart_docker() {
     log_info "Restarting Docker service..."
     
-    systemctl daemon-reload 2>/dev/null || true
-    systemctl restart docker 2>/dev/null || service docker restart 2>/dev/null || true
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl restart docker >/dev/null 2>&1 || service docker restart >/dev/null 2>&1 || true
     
     local max_wait=30
     local count=0
@@ -169,23 +191,11 @@ restart_docker() {
 }
 
 fix_docker_network() {
-    log_info "Attempting to fix network issues..."
-    
-    echo ""
-    log_info "Applying fix 1/3: IPv6"
+    log_info "Fixing network issues..."
     disable_ipv6
-    
-    echo ""
-    log_info "Applying fix 2/3: DNS"
     configure_dns
-    
-    echo ""
-    log_info "Applying fix 3/3: Docker mirrors"
     configure_docker_mirrors
-    
-    echo ""
     restart_docker
-    
     sleep 3
     return 0
 }
@@ -224,15 +234,15 @@ install_docker() {
     log_info "Installing Docker..."
 
     # Remove old versions
-    apt-get remove -y docker docker-engine docker.io containerd runc 2>/dev/null || true
+    apt-get remove -y docker docker-engine docker.io containerd runc >/dev/null 2>&1 || true
 
     # Install dependencies
-    apt-get update
-    apt-get install -y ca-certificates curl gnupg lsb-release
+    run_quiet "apt-get update" apt-get update -qq
+    run_quiet "installing dependencies" apt-get install -y -qq ca-certificates curl gnupg lsb-release
 
     # Add Docker GPG key
     install -m 0755 -d /etc/apt/keyrings
-    curl -fsSL "https://download.docker.com/linux/$OS/gpg" | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+    curl -fsSL "https://download.docker.com/linux/$OS/gpg" 2>/dev/null | gpg --dearmor -o /etc/apt/keyrings/docker.gpg 2>/dev/null
     chmod a+r /etc/apt/keyrings/docker.gpg
 
     # Add repository
@@ -241,12 +251,12 @@ install_docker() {
         $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
 
     # Install Docker
-    apt-get update
-    apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    run_quiet "apt-get update" apt-get update -qq
+    run_quiet "installing docker" apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
     # Start Docker
-    systemctl start docker
-    systemctl enable docker
+    systemctl start docker >/dev/null 2>&1
+    systemctl enable docker >/dev/null 2>&1
 
     log_success "Docker installed successfully"
 }
@@ -313,24 +323,47 @@ setup_ssl() {
 setup_cert_renewal_cron() {
     log_info "Setting up certificate auto-renewal..."
     
-    # Create renewal script
+    # Create renewal script for native HAProxy
     cat > /opt/monitoring-node/renew-certs.sh << 'EOF'
 #!/bin/bash
 # Auto-renewal script for Let's Encrypt certificates
-# Runs inside monitoring-api container where certbot is installed
+# Works with native HAProxy (systemd service)
 
-# Check if container is running
+# Check if certbot is available (runs inside monitoring-api container)
 if ! docker ps -q -f name=monitoring-api | grep -q .; then
     echo "monitoring-api container not running, skipping renewal"
     exit 0
 fi
 
+# Stop HAProxy temporarily for renewal (standalone mode needs port 80)
+HAPROXY_WAS_RUNNING=false
+if systemctl is-active --quiet haproxy; then
+    HAPROXY_WAS_RUNNING=true
+    systemctl stop haproxy
+fi
+
 # Run certbot renew inside container
 docker exec monitoring-api certbot renew --non-interactive --quiet
 
+# Update combined certificates for HAProxy
+for cert_dir in /etc/letsencrypt/live/*/; do
+    if [ -d "$cert_dir" ]; then
+        domain=$(basename "$cert_dir")
+        if [ -f "$cert_dir/fullchain.pem" ] && [ -f "$cert_dir/privkey.pem" ]; then
+            cat "$cert_dir/fullchain.pem" "$cert_dir/privkey.pem" > "$cert_dir/combined.pem"
+            chmod 600 "$cert_dir/combined.pem"
+        fi
+    fi
+done
+
+# Restart HAProxy if it was running
+if [ "$HAPROXY_WAS_RUNNING" = true ]; then
+    systemctl start haproxy
+fi
+
 # Reload HAProxy to pick up new certificates (if running)
-if docker ps -q -f name=monitoring-haproxy | grep -q .; then
-    docker kill -s HUP monitoring-haproxy 2>/dev/null || true
+if systemctl is-active --quiet haproxy; then
+    systemctl reload haproxy 2>/dev/null || true
 fi
 EOF
     chmod +x /opt/monitoring-node/renew-certs.sh
@@ -346,110 +379,17 @@ EOF
     log_success "Certificate auto-renewal cron configured (daily at 3:00 AM)"
 }
 
-# Check and migrate native HAProxy
-migrate_native_haproxy() {
-    log_info "Checking for native HAProxy installation..."
-    
-    # Check if native HAProxy is running (systemd or process)
-    local haproxy_running=false
-    local haproxy_enabled=false
-    
-    # Check systemd service
-    if systemctl is-active --quiet haproxy 2>/dev/null; then
-        haproxy_running=true
-        log_info "Native HAProxy service is running (systemd)"
-    fi
-    
-    # Check if enabled in systemd
-    if systemctl is-enabled --quiet haproxy 2>/dev/null; then
-        haproxy_enabled=true
-    fi
-    
-    # Also check for process (in case it's running without systemd)
-    if ! $haproxy_running && pgrep -x haproxy > /dev/null 2>&1; then
-        haproxy_running=true
-        log_info "Native HAProxy process is running"
-    fi
-    
-    if ! $haproxy_running; then
-        log_info "Native HAProxy is not running - container HAProxy will stay disabled"
-        return 0
-    fi
-    
-    # HAProxy is running - prepare for migration
-    NATIVE_HAPROXY_WAS_RUNNING=true
-    log_warn "Native HAProxy detected! Will migrate to container..."
-    
-    # Find and backup config BEFORE stopping HAProxy
-    local config_paths=(
-        "/etc/haproxy/haproxy.cfg"
-        "/usr/local/etc/haproxy/haproxy.cfg"
-    )
-    
-    for cfg in "${config_paths[@]}"; do
-        if [ -f "$cfg" ]; then
-            NATIVE_HAPROXY_CONFIG_PATH="$cfg"
-            log_info "Found HAProxy config: $cfg"
-            
-            # CRITICAL: Read and save config content NOW before anything can change it
-            NATIVE_HAPROXY_CONFIG_CONTENT=$(cat "$cfg" 2>/dev/null)
-            
-            if [ -n "$NATIVE_HAPROXY_CONFIG_CONTENT" ]; then
-                # Save to backup file as well
-                echo "$NATIVE_HAPROXY_CONFIG_CONTENT" > "$NATIVE_HAPROXY_CONFIG_BACKUP"
-                chmod 644 "$NATIVE_HAPROXY_CONFIG_BACKUP"
-                
-                # Also create timestamped backup
-                cp "$cfg" "/tmp/haproxy.cfg.backup.$(date +%Y%m%d_%H%M%S)"
-                
-                log_success "Config content saved ($(echo "$NATIVE_HAPROXY_CONFIG_CONTENT" | wc -l) lines)"
-                log_info "Backup saved to: $NATIVE_HAPROXY_CONFIG_BACKUP"
-            else
-                log_warn "Config file exists but is empty!"
-            fi
-            break
-        fi
-    done
-    
-    if [ -z "$NATIVE_HAPROXY_CONFIG_CONTENT" ]; then
-        log_warn "HAProxy config not found or empty"
-        log_warn "Container will start with default config"
-    fi
-    
-    # Stop native HAProxy
-    log_info "Stopping native HAProxy..."
+# Check HAProxy status (native systemd service)
+check_haproxy_status() {
+    log_info "Checking HAProxy status..."
     
     if systemctl is-active --quiet haproxy 2>/dev/null; then
-        systemctl stop haproxy
-        log_success "HAProxy service stopped"
+        log_success "HAProxy service is running (will not be restarted)"
+    elif command -v haproxy &>/dev/null; then
+        log_info "HAProxy is installed but not running"
+    else
+        log_info "HAProxy is not installed"
     fi
-    
-    # Kill any remaining haproxy processes
-    pkill -x haproxy 2>/dev/null || true
-    sleep 1
-    
-    # Verify it's stopped
-    if pgrep -x haproxy > /dev/null 2>&1; then
-        log_warn "Some HAProxy processes still running, force killing..."
-        pkill -9 -x haproxy 2>/dev/null || true
-        sleep 1
-    fi
-    
-    # Disable native HAProxy autostart
-    if $haproxy_enabled; then
-        log_info "Disabling native HAProxy autostart..."
-        systemctl disable haproxy 2>/dev/null || true
-        log_success "Native HAProxy autostart disabled"
-    fi
-    
-    log_success "Native HAProxy stopped and disabled"
-    echo ""
-    echo -e "${YELLOW}╔════════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${YELLOW}║  Native HAProxy was running and has been stopped.              ║${NC}"
-    echo -e "${YELLOW}║  Config will be migrated to container HAProxy.                 ║${NC}"
-    echo -e "${YELLOW}║  Container HAProxy will be started automatically.              ║${NC}"
-    echo -e "${YELLOW}╚════════════════════════════════════════════════════════════════╝${NC}"
-    echo ""
 }
 
 # Ensure /etc/haproxy directory exists on host
@@ -461,99 +401,6 @@ ensure_haproxy_dir() {
     fi
 }
 
-# Copy saved HAProxy config to /etc/haproxy on host
-copy_config_to_host() {
-    local config_content="$1"
-    
-    if [ -z "$config_content" ]; then
-        log_warn "No config content to copy"
-        return 1
-    fi
-    
-    ensure_haproxy_dir
-    
-    # Don't overwrite existing config
-    if [ -f "/etc/haproxy/haproxy.cfg" ]; then
-        log_info "HAProxy config already exists at /etc/haproxy/haproxy.cfg, keeping it"
-        return 0
-    fi
-    
-    log_info "Copying config to /etc/haproxy/haproxy.cfg..."
-    echo "$config_content" > /etc/haproxy/haproxy.cfg
-    chmod 644 /etc/haproxy/haproxy.cfg
-    log_success "Config copied to /etc/haproxy/haproxy.cfg"
-    return 0
-}
-
-# Start HAProxy container if native was running
-start_haproxy_container_if_needed() {
-    if ! $NATIVE_HAPROXY_WAS_RUNNING; then
-        return 0
-    fi
-    
-    log_info "Starting HAProxy container (migrating from native)..."
-    
-    # Use saved config content (not file path which may be stale)
-    local config_to_copy=""
-    
-    # Try saved content first
-    if [ -n "$NATIVE_HAPROXY_CONFIG_CONTENT" ]; then
-        config_to_copy="$NATIVE_HAPROXY_CONFIG_CONTENT"
-        log_info "Using saved config content from memory"
-    # Fall back to backup file
-    elif [ -f "$NATIVE_HAPROXY_CONFIG_BACKUP" ]; then
-        config_to_copy=$(cat "$NATIVE_HAPROXY_CONFIG_BACKUP")
-        log_info "Using saved config from backup file: $NATIVE_HAPROXY_CONFIG_BACKUP"
-    # Last resort: try original path
-    elif [ -n "$NATIVE_HAPROXY_CONFIG_PATH" ] && [ -f "$NATIVE_HAPROXY_CONFIG_PATH" ]; then
-        config_to_copy=$(cat "$NATIVE_HAPROXY_CONFIG_PATH")
-        log_warn "Using original config path (may have changed): $NATIVE_HAPROXY_CONFIG_PATH"
-    fi
-    
-    if [ -n "$config_to_copy" ]; then
-        # Copy config to /etc/haproxy on host (bind mount)
-        copy_config_to_host "$config_to_copy"
-        
-        if [ $? -ne 0 ]; then
-            log_warn "Config migration failed, container will start with default config"
-        fi
-    else
-        log_warn "No saved config found, container will use default config"
-    fi
-    
-    # Start HAProxy container with profile
-    log_info "Starting HAProxy container..."
-    docker compose --profile haproxy up -d
-    
-    if [ $? -eq 0 ]; then
-        # Wait for HAProxy to start
-        log_info "Waiting for HAProxy to start..."
-        sleep 3
-        
-        # Check if container is running
-        if docker ps -q -f name=monitoring-haproxy | grep -q .; then
-            log_success "HAProxy container is running"
-            
-            # Verify config was applied (should match host /etc/haproxy/haproxy.cfg)
-            local container_config
-            container_config=$(docker exec monitoring-haproxy cat /usr/local/etc/haproxy/haproxy.cfg 2>/dev/null | head -5)
-            if [ -n "$container_config" ]; then
-                log_success "HAProxy config verified in container"
-            fi
-        else
-            log_warn "HAProxy container may have issues, checking logs..."
-            docker logs monitoring-haproxy --tail 20 2>&1 || true
-            log_warn "You can restart manually: docker compose --profile haproxy up -d"
-        fi
-    else
-        log_error "Failed to start HAProxy container"
-        log_warn "Check docker compose logs: docker compose logs haproxy"
-        log_warn "You can start it manually: docker compose --profile haproxy up -d"
-    fi
-    
-    # Cleanup backup file
-    rm -f "$NATIVE_HAPROXY_CONFIG_BACKUP" 2>/dev/null || true
-}
 
 # Validate IP address format
 validate_ip() {
@@ -605,13 +452,12 @@ setup_firewall() {
     # Check if UFW is installed
     if ! command -v ufw &> /dev/null; then
         log_info "Installing UFW..."
-        apt-get update
-        apt-get install -y ufw
+        run_quiet "apt-get update" apt-get update -qq
+        run_quiet "installing ufw" apt-get install -y -qq ufw
     fi
     
-    # Check if UFW was already active before we make changes
     local ufw_was_active=false
-    if ufw status | grep -q "Status: active"; then
+    if ufw status 2>/dev/null | grep -q "Status: active"; then
         ufw_was_active=true
     fi
     
@@ -619,57 +465,49 @@ setup_firewall() {
     ask_panel_ip
     
     # Remove old rule if exists (allow from anywhere)
-    ufw delete allow 9100/tcp 2>/dev/null || true
+    ufw delete allow 9100/tcp >/dev/null 2>&1 || true
     
     # Allow API port (9100) ONLY from panel IP
     log_info "Adding UFW rule: allow port 9100 from $PANEL_IP"
-    ufw allow from "$PANEL_IP" to any port 9100 proto tcp comment "Monitoring API from Panel" 2>/dev/null || \
-    ufw allow from "$PANEL_IP" to any port 9100 proto tcp 2>/dev/null || true
+    ufw allow from "$PANEL_IP" to any port 9100 proto tcp comment "Monitoring API from Panel" >/dev/null 2>&1 || \
+    ufw allow from "$PANEL_IP" to any port 9100 proto tcp >/dev/null 2>&1 || true
     
     # Open port 80 for Let's Encrypt certificate verification
-    ufw allow 80/tcp comment "HTTP for Let's Encrypt" 2>/dev/null || true
+    ufw allow 80/tcp comment "HTTP for Let's Encrypt" >/dev/null 2>&1 || true
     
-    # Allow SSH to avoid lockout (rule is added but only applied if UFW is active)
-    ufw allow ssh 2>/dev/null || ufw allow 22/tcp 2>/dev/null || true
+    # Allow SSH to avoid lockout
+    ufw allow ssh >/dev/null 2>&1 || ufw allow 22/tcp >/dev/null 2>&1 || true
     
-    # Only enable UFW if it was already active
-    # If UFW was disabled, keep it disabled - rules are added but won't be applied
     if [ "$ufw_was_active" = true ]; then
-        log_success "Firewall configured (UFW was active)"
+        log_success "Firewall configured"
     else
         log_warn "UFW is not active - rules added but firewall remains disabled"
-        log_info "To enable firewall manually: ufw --force enable"
     fi
     
     log_info "Port 9100 accessible only from: $PANEL_IP"
-    log_info "Ports 22 (SSH), 80 (HTTP) open for all"
 }
 
 # Build and start containers
 start_containers() {
     log_info "Building and starting containers..."
     
-    docker compose down 2>/dev/null || true
+    docker compose down >/dev/null 2>&1 || true
     
-    # Try to build with retry on network errors
     local max_retries=3
     local retry=0
     local build_success=false
     
     while [ $retry -lt $max_retries ]; do
-        # Check Docker Hub availability first
-        if ! check_docker_hub; then
+        if ! check_docker_hub_quiet; then
+            log_warn "Docker Hub is not accessible"
             if [ $retry -eq 0 ]; then
-                echo ""
                 fix_docker_network
-                echo ""
             fi
         fi
         
         log_info "Building containers (attempt $((retry + 1))/$max_retries)..."
         
-        # Use --network=host to bypass Docker network isolation issues during build
-        if docker build --network=host -t monitoring-node-api . 2>&1; then
+        if run_quiet "docker build" docker build --network=host -t monitoring-node-api .; then
             build_success=true
             break
         fi
@@ -678,9 +516,7 @@ start_containers() {
         
         if [ $retry -lt $max_retries ]; then
             log_warn "Build failed, retrying after network fix..."
-            echo ""
             fix_docker_network
-            echo ""
             sleep 5
         fi
     done
@@ -700,7 +536,7 @@ start_containers() {
     # Ensure /etc/haproxy directory exists for bind mount
     ensure_haproxy_dir
     
-    docker compose up -d
+    docker compose up -d >/dev/null 2>&1
 
     log_success "Containers started"
 }
@@ -717,12 +553,10 @@ wait_for_services() {
             log_success "Services are ready"
             return 0
         fi
-        echo -n "."
         sleep 2
         attempt=$((attempt + 1))
     done
 
-    echo ""
     log_error "Services failed to start in time"
     return 1
 }
@@ -755,10 +589,10 @@ check_endpoints() {
         echo -e "${RED}FAIL${NC}"
     fi
 
-    # HAProxy API (HAProxy container disabled by default)
+    # HAProxy API (native systemd service)
     echo -n "  /api/haproxy/status: "
     RESPONSE=$(curl -sk -H "X-API-Key: $API_KEY" "$BASE_URL/api/haproxy/status" 2>/dev/null)
-    if echo "$RESPONSE" | grep -q '"running"'; then
+    if echo "$RESPONSE" | grep -q '"running":true'; then
         echo -e "${GREEN}OK (running)${NC}"
     elif echo "$RESPONSE" | grep -q '"running":false'; then
         echo -e "${YELLOW}OK (stopped)${NC}"
@@ -799,35 +633,41 @@ show_status() {
     echo "  - Renewal script: $([ -f /opt/monitoring-node/renew-certs.sh ] && echo 'Installed' || echo 'Not found')"
     echo ""
     
-    # HAProxy status
-    if $NATIVE_HAPROXY_WAS_RUNNING; then
-        echo -e "${GREEN}HAProxy Migration:${NC}"
-        echo "  - Native HAProxy was detected and stopped"
-        echo "  - Native HAProxy autostart disabled"
-        if [ -n "$NATIVE_HAPROXY_CONFIG_PATH" ]; then
-            echo "  - Config migrated from: $NATIVE_HAPROXY_CONFIG_PATH"
-        fi
-        if docker ps -q -f name=monitoring-haproxy | grep -q .; then
-            echo -e "  - Container HAProxy: ${GREEN}Running${NC}"
-        else
-            echo -e "  - Container HAProxy: ${YELLOW}Not running (check logs)${NC}"
-            echo "    Check logs: docker logs monitoring-haproxy"
-        fi
+    echo -e "${GREEN}Network Tuning (RPS/RFS):${NC}"
+    if systemctl is-enabled network-tune.service &>/dev/null 2>&1; then
+        echo -e "  - Status: ${GREEN}Enabled (auto-start on boot)${NC}"
+        local main_iface=$(ip route show default 2>/dev/null | awk '/default/ {print $5}' | head -1)
+        [ -n "$main_iface" ] && echo "  - Interface: $main_iface"
+        echo "  - CPU cores: $(nproc)"
     else
-        echo -e "${YELLOW}NOTE: HAProxy is DISABLED by default.${NC}"
-        echo "Enable HAProxy from the panel or manually:"
-        echo "  docker compose --profile haproxy up -d"
+        echo -e "  - Status: ${YELLOW}Not configured${NC}"
     fi
     echo ""
-    echo "Container status:"
+    
+    # HAProxy status (native systemd service)
+    echo -e "${GREEN}HAProxy (native systemd service):${NC}"
+    if systemctl is-active --quiet haproxy 2>/dev/null; then
+        echo -e "  - Status: ${GREEN}Running${NC}"
+    elif command -v haproxy &>/dev/null; then
+        echo -e "  - Status: ${YELLOW}Stopped (start with: systemctl start haproxy)${NC}"
+    else
+        echo -e "  - Status: ${YELLOW}Not installed${NC}"
+    fi
+    echo "  - Config: /etc/haproxy/haproxy.cfg"
+    echo "  - Manage via panel terminal or: systemctl start/stop/restart haproxy"
+    echo ""
+    echo "Container status (API only):"
     docker compose ps
     echo ""
     echo "Commands:"
-    echo "  docker compose logs -f                    # View logs"
-    echo "  docker compose restart                    # Restart all"
-    echo "  docker compose down                       # Stop all"
-    echo "  docker compose --profile haproxy up -d    # Enable HAProxy"
-    echo "  docker compose --profile haproxy down     # Disable HAProxy"
+    echo "  docker compose logs -f          # View API logs"
+    echo "  docker compose restart          # Restart API"
+    echo "  docker compose down             # Stop API"
+    echo ""
+    echo "  systemctl status haproxy        # HAProxy status"
+    echo "  systemctl start haproxy         # Start HAProxy"
+    echo "  systemctl stop haproxy          # Stop HAProxy"
+    echo "  systemctl restart haproxy       # Restart HAProxy"
     echo ""
     echo -e "${YELLOW}To change Panel IP later:${NC}"
     echo "  ufw delete allow from $PANEL_IP to any port 9100 proto tcp"
@@ -855,6 +695,51 @@ show_status() {
     read -p "Press Enter to finish / Нажмите Enter для завершения..."
 }
 
+# Setup RPS/RFS network tuning service
+setup_network_tuning() {
+    log_info "Setting up RPS/RFS network tuning..."
+    
+    mkdir -p /opt/monitoring-node/scripts
+    
+    if [ -f "scripts/network-tune.sh" ]; then
+        cp scripts/network-tune.sh /opt/monitoring-node/scripts/network-tune.sh
+        chmod +x /opt/monitoring-node/scripts/network-tune.sh
+        log_success "Network tuning script installed"
+    else
+        log_warn "Network tuning script not found in scripts/"
+        return 0
+    fi
+    
+    cat > /etc/systemd/system/network-tune.service << 'EOF'
+[Unit]
+Description=Network RPS/RFS tuning for multi-core packet distribution
+Documentation=https://www.kernel.org/doc/Documentation/networking/scaling.txt
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/monitoring-node/scripts/network-tune.sh
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    
+    systemctl daemon-reload >/dev/null 2>&1
+    systemctl enable network-tune.service >/dev/null 2>&1 || true
+    
+    if /opt/monitoring-node/scripts/network-tune.sh >/dev/null 2>&1; then
+        log_success "Network tuning applied"
+    else
+        log_warn "Network tuning failed (may work after reboot)"
+    fi
+    
+    log_success "RPS/RFS network tuning service enabled"
+}
+
 # Main
 main() {
     echo ""
@@ -865,15 +750,15 @@ main() {
 
     check_root
     check_os
-    migrate_native_haproxy      # Check and stop native HAProxy before Docker
+    check_haproxy_status        # Check HAProxy status (don't modify it)
     install_docker
     setup_firewall
     setup_env
     setup_ssl
     setup_cert_renewal_cron
+    setup_network_tuning        # Setup RPS/RFS for multi-core packet distribution
     start_containers
     wait_for_services
-    start_haproxy_container_if_needed  # Start HAProxy container if native was running
     check_endpoints
     show_status
 }

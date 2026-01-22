@@ -203,15 +203,29 @@ export default function ProcessTable({ processes, className = '' }: ProcessTable
                       {proc.name}
                     </td>
                     <td className="py-2 px-2 text-right font-mono text-sm">
-                      <span className={proc.cpu_percent >= 80 ? 'text-danger' : proc.cpu_percent >= 50 ? 'text-warning' : 'text-accent-400'}>
+                      <span className={
+                        sortField === 'cpu_percent'
+                          ? (proc.cpu_percent >= 80 ? 'text-danger' : proc.cpu_percent >= 50 ? 'text-warning' : 'text-accent-400')
+                          : 'text-dark-400'
+                      }>
                         {proc.cpu_percent.toFixed(1)}%
                       </span>
                     </td>
-                    <td className="py-2 px-2 text-right font-mono text-dark-300 text-sm">
-                      {proc.memory_percent.toFixed(1)}%
+                    <td className="py-2 px-2 text-right font-mono text-sm">
+                      <span className={
+                        sortField === 'memory_percent'
+                          ? (proc.memory_percent >= 80 ? 'text-danger' : proc.memory_percent >= 50 ? 'text-warning' : 'text-accent-400')
+                          : 'text-dark-400'
+                      }>
+                        {proc.memory_percent.toFixed(1)}%
+                      </span>
                     </td>
                     <td className="py-2 px-2 text-right text-xs">
-                      <span className={statusColors[proc.status] || 'text-dark-400'}>
+                      <span className={
+                        sortField === 'status'
+                          ? (statusColors[proc.status] || 'text-accent-400')
+                          : (statusColors[proc.status] || 'text-dark-400')
+                      }>
                         {proc.status}
                       </span>
                     </td>

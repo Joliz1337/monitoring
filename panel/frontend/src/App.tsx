@@ -1,5 +1,5 @@
 import { Routes, Route, Navigate } from 'react-router-dom'
-import { useEffect } from 'react'
+import { useEffect, Suspense, lazy } from 'react'
 import { motion } from 'framer-motion'
 import { Activity } from 'lucide-react'
 import { useAuthStore } from './stores/authStore'
@@ -14,6 +14,11 @@ import Settings from './pages/Settings'
 import Servers from './pages/Servers'
 import Updates from './pages/Updates'
 import BulkActions from './pages/BulkActions'
+import { isExtEnabled } from './pages/_internal'
+
+const ExtPageLazy = isExtEnabled 
+  ? lazy(() => import('./pages/_internal/ExtPage'))
+  : null
 
 function LoadingScreen() {
   const { t } = useTranslation()
@@ -130,6 +135,16 @@ export default function App() {
         <Route path="server/:serverId/traffic" element={<Traffic />} />
         <Route path="settings" element={<Settings />} />
         <Route path="updates" element={<Updates />} />
+        {ExtPageLazy && (
+          <Route 
+            path="ext" 
+            element={
+              <Suspense fallback={<LoadingScreen />}>
+                <ExtPageLazy />
+              </Suspense>
+            } 
+          />
+        )}
       </Route>
     </Routes>
   )

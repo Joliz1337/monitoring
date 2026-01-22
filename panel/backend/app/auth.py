@@ -125,20 +125,29 @@ async def verify_auth(request: Request, db: AsyncSession = Depends(get_db)):
 
 async def login(password: str, request: Request, response: Response, db: AsyncSession) -> dict:
     """Login - drops connection on any failure"""
+    import logging
+    logger = logging.getLogger(__name__)
+    
     ip = get_client_ip(request)
     security = get_security_manager()
     
     # Check ban in both memory and database
-    if security.is_banned(ip) or await check_ip_banned(ip, db):
+    memory_banned = security.is_banned(ip)
+    db_banned = await check_ip_banned(ip, db)
+    
+    if memory_banned or db_banned:
+        logger.warning(f"Login blocked for {ip}: memory_banned={memory_banned}, db_banned={db_banned}")
         drop_connection()
     
     # Timing-safe password comparison
     if not secrets.compare_digest(password, settings.panel_password):
+        logger.warning(f"Invalid password from {ip}, password length: {len(password)}")
         await record_failed_attempt(ip, db)
         await security.record_auth_failure(ip)
         drop_connection()
     
     # Success - clear failed attempts
+    logger.info(f"Successful login from {ip}")
     await clear_failed_attempts(ip, db)
     await security.record_auth_success(ip)
     

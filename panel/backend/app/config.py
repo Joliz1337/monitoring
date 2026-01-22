@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     # Domain for CORS (optional, defaults to same-origin only)
     domain: str = ""
     
+    ext_key: str = ""
+    
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

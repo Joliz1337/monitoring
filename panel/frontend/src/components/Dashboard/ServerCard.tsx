@@ -17,11 +17,12 @@ import {
   ShieldAlert,
   ArrowDownToLine,
   ArrowUpFromLine,
+  PowerOff,
 } from 'lucide-react'
 import { Server, ServerMetrics } from '../../api/client'
 import StatusBadge from '../ui/StatusBadge'
 import ProgressBar from '../ui/ProgressBar'
-import { formatBytes, formatBytesPerSec, formatUptime, formatTimeAgo } from '../../utils/format'
+import { formatBytes, formatBitsPerSecLocalized, formatUptime, formatTimeAgo } from '../../utils/format'
 import { useTranslation } from 'react-i18next'
 import type { DetailLevel } from '../../stores/settingsStore'
 
@@ -100,6 +101,101 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
       y: -4,
       transition: { duration: 0.2, ease: 'easeOut' }
     }
+  }
+  
+  // Server disabled (monitoring off)
+  if (!server.is_active) {
+    if (compact) {
+      return (
+        <div ref={setNodeRef} style={sortableStyle}>
+          <motion.div
+            variants={cardVariants}
+            initial="hidden"
+            animate={isDragging ? undefined : "visible"}
+            className={`server-card card group cursor-pointer transition-all duration-300 opacity-50 ${
+              isDragging ? 'shadow-2xl ring-2 ring-dark-600/30' : ''
+            }`}
+            onClick={handleClick}
+          >
+            <div className="flex items-center gap-4">
+              <button
+                {...attributes}
+                {...listeners}
+                className="p-1.5 text-dark-600 hover:text-dark-400 cursor-grab active:cursor-grabbing 
+                           hover:bg-dark-800 rounded-lg transition-colors touch-none"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <GripVertical className="w-5 h-5" />
+              </button>
+              
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-3">
+                  <h3 className="font-semibold text-dark-400 truncate">
+                    {server.name}
+                  </h3>
+                  <span className="text-xs text-dark-600 font-mono hidden sm:inline">{extractHost(server.url)}</span>
+                  <span className="text-xs px-2 py-0.5 rounded-md bg-dark-700/50 text-dark-500">
+                    {t('servers.disabled')}
+                  </span>
+                </div>
+              </div>
+              
+              <div className="flex items-center">
+                <ChevronRight className="w-5 h-5 text-dark-600" />
+              </div>
+            </div>
+          </motion.div>
+        </div>
+      )
+    }
+    
+    return (
+      <div ref={setNodeRef} style={sortableStyle}>
+        <motion.div
+          variants={cardVariants}
+          initial="hidden"
+          animate={isDragging ? undefined : "visible"}
+          className={`server-card card group cursor-pointer transition-all duration-300 opacity-50 ${
+            isDragging ? 'shadow-2xl ring-2 ring-dark-600/30' : ''
+          }`}
+          onClick={handleClick}
+        >
+          <div className="flex items-start justify-between mb-4">
+            <div className="flex items-center gap-3">
+              <button
+                {...attributes}
+                {...listeners}
+                className="p-1.5 text-dark-600 hover:text-dark-400 cursor-grab active:cursor-grabbing
+                           hover:bg-dark-800 rounded-lg transition-colors touch-none"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <GripVertical className="w-5 h-5" />
+              </button>
+              <div>
+                <div className="flex items-center gap-2">
+                  <h3 className="font-semibold text-dark-400">
+                    {server.name}
+                  </h3>
+                  <span className="text-xs text-dark-600 font-mono">{extractHost(server.url)}</span>
+                </div>
+              </div>
+            </div>
+            <span className="text-xs px-2 py-1 rounded-lg bg-dark-700/50 text-dark-500">
+              {t('servers.disabled')}
+            </span>
+          </div>
+          
+          <div className="h-24 flex flex-col items-center justify-center gap-3">
+            <PowerOff className="w-8 h-8 text-dark-600" />
+            <span className="text-dark-500 text-sm">{t('servers.monitoring_disabled')}</span>
+          </div>
+          
+          <div className="absolute right-4 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity">
+            <ChevronRight className="w-5 h-5 text-dark-500" />
+          </div>
+        </motion.div>
+      </div>
+    )
   }
   
   if (compact) {
@@ -281,6 +377,8 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
                     label={t('common.ram')}
                     value={metrics.memory.ram.percent}
                     delay={0.15}
+                    usedBytes={metrics.memory.ram.used}
+                    totalBytes={metrics.memory.ram.total}
                   />
                 </div>
                 
@@ -290,6 +388,8 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
                     label={t('common.disk')}
                     value={metrics.disk.partitions[0]?.percent || 0}
                     delay={0.2}
+                    usedBytes={metrics.disk.partitions[0]?.used}
+                    totalBytes={metrics.disk.partitions[0]?.total}
                   />
                   <div>
                     <div className="flex items-center gap-2 mb-2">
@@ -298,13 +398,15 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
                     </div>
                     <div className="flex gap-2 text-xs font-mono">
                       <span className="text-success flex items-center gap-1">
-                        ↓ {formatBytesPerSec(
-                          metrics.network.interfaces.reduce((acc, i) => acc + (i.rx_bytes_per_sec || 0), 0)
+                        ↓ {formatBitsPerSecLocalized(
+                          metrics.network.interfaces.reduce((acc, i) => acc + (i.rx_bytes_per_sec || 0), 0),
+                          t
                         )}
                       </span>
                       <span className="text-accent-400 flex items-center gap-1">
-                        ↑ {formatBytesPerSec(
-                          metrics.network.interfaces.reduce((acc, i) => acc + (i.tx_bytes_per_sec || 0), 0)
+                        ↑ {formatBitsPerSecLocalized(
+                          metrics.network.interfaces.reduce((acc, i) => acc + (i.tx_bytes_per_sec || 0), 0),
+                          t
                         )}
                       </span>
                     </div>
@@ -367,6 +469,8 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
                     label={t('common.ram')}
                     value={metrics.memory.ram.percent}
                     delay={0.15}
+                    usedBytes={metrics.memory.ram.used}
+                    totalBytes={metrics.memory.ram.total}
                   />
                 </div>
                 
@@ -376,6 +480,8 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
                     label={t('common.disk')}
                     value={metrics.disk.partitions[0]?.percent || 0}
                     delay={0.2}
+                    usedBytes={metrics.disk.partitions[0]?.used}
+                    totalBytes={metrics.disk.partitions[0]?.total}
                   />
                   <div>
                     <div className="flex items-center gap-2 mb-2">
@@ -384,13 +490,15 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
                     </div>
                     <div className="flex gap-2 text-xs font-mono">
                       <span className="text-success flex items-center gap-1">
-                        ↓ {formatBytesPerSec(
-                          metrics.network.interfaces.reduce((acc, i) => acc + (i.rx_bytes_per_sec || 0), 0)
+                        ↓ {formatBitsPerSecLocalized(
+                          metrics.network.interfaces.reduce((acc, i) => acc + (i.rx_bytes_per_sec || 0), 0),
+                          t
                         )}
                       </span>
                       <span className="text-accent-400 flex items-center gap-1">
-                        ↑ {formatBytesPerSec(
-                          metrics.network.interfaces.reduce((acc, i) => acc + (i.tx_bytes_per_sec || 0), 0)
+                        ↑ {formatBitsPerSecLocalized(
+                          metrics.network.interfaces.reduce((acc, i) => acc + (i.tx_bytes_per_sec || 0), 0),
+                          t
                         )}
                       </span>
                     </div>
@@ -515,6 +623,7 @@ const ServerCard = memo(ServerCardComponent, (prevProps, nextProps) => {
   return (
     prevProps.server.id === nextProps.server.id &&
     prevProps.server.status === nextProps.server.status &&
+    prevProps.server.is_active === nextProps.server.is_active &&
     prevProps.compact === nextProps.compact &&
     prevProps.detailLevel === nextProps.detailLevel &&
     prevProps.index === nextProps.index &&
@@ -531,9 +640,11 @@ interface MetricItemProps {
   label: string
   value: number
   delay: number
+  usedBytes?: number
+  totalBytes?: number
 }
 
-function MetricItem({ icon, label, value, delay }: MetricItemProps) {
+function MetricItem({ icon, label, value, delay, usedBytes, totalBytes }: MetricItemProps) {
   return (
     <motion.div
       initial={{ opacity: 0, x: -10 }}
@@ -548,6 +659,11 @@ function MetricItem({ icon, label, value, delay }: MetricItemProps) {
         </span>
       </div>
       <ProgressBar value={value} size="sm" animated />
+      {usedBytes !== undefined && totalBytes !== undefined && (
+        <div className="text-xs text-dark-500 mt-1 font-mono">
+          {formatBytes(usedBytes)} / {formatBytes(totalBytes)}
+        </div>
+      )}
     </motion.div>
   )
 }

@@ -27,6 +27,9 @@ UPDATER_CONTAINER_NAME = "panel-updater"
 UPDATER_IMAGE = "docker:cli"
 GITHUB_PANEL_VERSION_URL = "https://raw.githubusercontent.com/Joliz1337/monitoring/main/panel/VERSION"
 GITHUB_NODE_VERSION_URL = "https://raw.githubusercontent.com/Joliz1337/monitoring/main/node/VERSION"
+GITHUB_SYSCTL_URL = "https://raw.githubusercontent.com/Joliz1337/monitoring/main/configs/sysctl.conf"
+GITHUB_LIMITS_URL = "https://raw.githubusercontent.com/Joliz1337/monitoring/main/configs/limits.conf"
+GITHUB_SYSTEMD_LIMITS_URL = "https://raw.githubusercontent.com/Joliz1337/monitoring/main/configs/systemd-limits.conf"
 
 _update_status = {
     "in_progress": False,
@@ -216,17 +219,23 @@ mkdir -p /usr/local/lib/docker/cli-plugins
 COMPOSE_URL="https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64"
 COMPOSE_BIN="/usr/local/lib/docker/cli-plugins/docker-compose"
 COMPOSE_OK=0
-for method in "direct" "mirror" "direct-k" "mirror-k"; do
-    case $method in
-        direct)   echo "  Trying GitHub..."; curl -fsSL --connect-timeout 15 --max-time 180 -o "$COMPOSE_BIN" "$COMPOSE_URL" 2>/dev/null ;;
-        mirror)   echo "  Trying ghfast.top..."; curl -fsSL --connect-timeout 15 --max-time 180 -o "$COMPOSE_BIN" "https://ghfast.top/$COMPOSE_URL" 2>/dev/null ;;
-        direct-k) echo "  Trying GitHub (skip SSL)..."; curl -fsSLk --connect-timeout 15 --max-time 180 -o "$COMPOSE_BIN" "$COMPOSE_URL" 2>/dev/null ;;
-        mirror-k) echo "  Trying ghfast.top (skip SSL)..."; curl -fsSLk --connect-timeout 15 --max-time 180 -o "$COMPOSE_BIN" "https://ghfast.top/$COMPOSE_URL" 2>/dev/null ;;
-    esac
-    if [ -f "$COMPOSE_BIN" ] && chmod +x "$COMPOSE_BIN" && "$COMPOSE_BIN" version >/dev/null 2>&1; then
-        echo "  Docker Compose installed"; COMPOSE_OK=1; break
+
+# Try GitHub first (30s timeout for large binary)
+echo "  Trying GitHub (30s timeout)..."
+if curl -fsSL --connect-timeout 10 --max-time 30 -o "$COMPOSE_BIN" "$COMPOSE_URL" 2>/dev/null && \
+   [ -f "$COMPOSE_BIN" ] && chmod +x "$COMPOSE_BIN" && "$COMPOSE_BIN" version >/dev/null 2>&1; then
+    echo "  Docker Compose installed"
+    COMPOSE_OK=1
+else
+    # Try mirror with longer timeout
+    echo "  Trying mirror (ghfast.top)..."
+    rm -f "$COMPOSE_BIN" 2>/dev/null
+    if curl -fsSL --connect-timeout 10 --max-time 120 -o "$COMPOSE_BIN" "https://ghfast.top/$COMPOSE_URL" 2>/dev/null && \
+       [ -f "$COMPOSE_BIN" ] && chmod +x "$COMPOSE_BIN" && "$COMPOSE_BIN" version >/dev/null 2>&1; then
+        echo "  Docker Compose installed"
+        COMPOSE_OK=1
     fi
-done
+fi
 [ $COMPOSE_OK -eq 0 ] && echo "  WARNING: Docker Compose installation failed"
 
 echo "[INFO] Cloning repository..."
@@ -238,19 +247,19 @@ TMP_CLONE=/tmp/monitoring-fresh
 rm -rf $TMP_CLONE
 CLONE_SUCCESS=0
 
-echo "[INFO] Trying GitHub (direct)..."
-if timeout 180 git clone --depth 1 --branch {ref_arg} "https://github.com/Joliz1337/monitoring.git" $TMP_CLONE 2>&1; then
+echo "[INFO] Trying GitHub (30s timeout)..."
+if timeout 30 git clone --depth 1 --branch {ref_arg} "https://github.com/Joliz1337/monitoring.git" $TMP_CLONE 2>&1; then
     CLONE_SUCCESS=1
 else
     rm -rf $TMP_CLONE
-    echo "[WARN] GitHub failed, trying ghfast.top..."
-    if timeout 180 git clone --depth 1 --branch {ref_arg} "$GITHUB_MIRROR/https://github.com/Joliz1337/monitoring.git" $TMP_CLONE 2>&1; then
+    echo "[WARN] GitHub timeout/error, trying mirror (ghfast.top)..."
+    if timeout 120 git clone --depth 1 --branch {ref_arg} "$GITHUB_MIRROR/https://github.com/Joliz1337/monitoring.git" $TMP_CLONE 2>&1; then
         CLONE_SUCCESS=1
     fi
 fi
 
 if [ $CLONE_SUCCESS -eq 0 ]; then
-    echo "[ERROR] Failed to clone repository from all sources"
+    echo "[ERROR] Failed to clone repository"
     exit 1
 fi
 
@@ -558,4 +567,142 @@ async def get_renewal_status(_: dict = Depends(verify_auth)):
         "output": _cert_renewal_status.get("output"),
         "started_at": _cert_renewal_status.get("started_at"),
         "completed_at": _cert_renewal_status.get("completed_at")
+    }
+
+
+# ==================== System Optimizations ====================
+
+def parse_optimization_version(content: str) -> Optional[str]:
+    """Parse OPTIMIZATION_VERSION from config content"""
+    for line in content.split('\n')[:5]:
+        if line.startswith('# OPTIMIZATION_VERSION='):
+            return line.split('=', 1)[1].strip()
+    return None
+
+
+async def get_optimizations_from_github() -> dict:
+    """Fetch optimization configs from GitHub"""
+    result = {
+        "version": None,
+        "sysctl_content": None,
+        "limits_content": None,
+        "systemd_content": None
+    }
+    
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            # Fetch all configs in parallel
+            responses = await asyncio.gather(
+                client.get(GITHUB_SYSCTL_URL),
+                client.get(GITHUB_LIMITS_URL),
+                client.get(GITHUB_SYSTEMD_LIMITS_URL),
+                return_exceptions=True
+            )
+            
+            sysctl_resp, limits_resp, systemd_resp = responses
+            
+            if isinstance(sysctl_resp, Exception):
+                logger.error(f"Failed to fetch sysctl config: {sysctl_resp}")
+            elif sysctl_resp.status_code == 200:
+                result["sysctl_content"] = sysctl_resp.text
+                result["version"] = parse_optimization_version(sysctl_resp.text)
+            
+            if isinstance(limits_resp, Exception):
+                logger.error(f"Failed to fetch limits config: {limits_resp}")
+            elif limits_resp.status_code == 200:
+                result["limits_content"] = limits_resp.text
+            
+            if isinstance(systemd_resp, Exception):
+                logger.error(f"Failed to fetch systemd config: {systemd_resp}")
+            elif systemd_resp.status_code == 200:
+                result["systemd_content"] = systemd_resp.text
+                
+    except Exception as e:
+        logger.error(f"Failed to fetch optimizations from GitHub: {e}")
+    
+    return result
+
+
+async def get_node_optimizations_version(url: str, api_key: str) -> dict:
+    """Fetch optimizations version from a node"""
+    try:
+        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+            response = await client.get(
+                f"{url}/api/system/optimizations/version",
+                headers={"X-API-Key": api_key}
+            )
+            
+            if response.status_code == 200:
+                return response.json()
+            
+            return {"installed": False, "version": None}
+    except Exception as e:
+        logger.debug(f"Failed to get optimizations version from {url}: {e}")
+        return {"installed": False, "version": None, "error": str(e)}
+
+
+@router.get("/optimizations/version")
+async def get_optimizations_version_info(
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """
+    Get system optimizations version information:
+    - Latest version from GitHub
+    - Versions installed on all nodes
+    """
+    # Get latest version from GitHub
+    github_data = await get_optimizations_from_github()
+    latest_version = github_data.get("version")
+    
+    # Get all servers and their optimizations versions
+    result = await db.execute(
+        select(Server).where(Server.is_active == True).order_by(Server.position)
+    )
+    servers = result.scalars().all()
+    
+    nodes_info = []
+    for server in servers:
+        opt_info = await get_node_optimizations_version(server.url, server.api_key)
+        node_version = opt_info.get("version")
+        installed = opt_info.get("installed", False)
+        
+        # Determine update availability
+        update_available = False
+        if installed and latest_version and node_version:
+            update_available = node_version != latest_version
+        elif not installed and latest_version:
+            update_available = True
+        
+        nodes_info.append({
+            "id": server.id,
+            "name": server.name,
+            "installed": installed,
+            "version": node_version,
+            "status": "online" if "error" not in opt_info else "offline",
+            "update_available": update_available
+        })
+    
+    return {
+        "latest_version": latest_version,
+        "nodes": nodes_info
+    }
+
+
+@router.get("/optimizations/configs")
+async def get_optimizations_configs(_: dict = Depends(verify_auth)):
+    """
+    Get optimization config contents from GitHub.
+    Used by proxy endpoint to apply configs to nodes.
+    """
+    github_data = await get_optimizations_from_github()
+    
+    if not github_data.get("sysctl_content"):
+        raise HTTPException(status_code=502, detail="Failed to fetch configs from GitHub")
+    
+    return {
+        "version": github_data.get("version"),
+        "sysctl_content": github_data.get("sysctl_content"),
+        "limits_content": github_data.get("limits_content"),
+        "systemd_content": github_data.get("systemd_content")
     }

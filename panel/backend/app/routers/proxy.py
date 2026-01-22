@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import Optional, Any
+from typing import Optional, Any, AsyncGenerator
 from datetime import datetime, timedelta, timezone
 import httpx
 import json
@@ -730,6 +731,18 @@ async def apply_system_optimizations(
     return await proxy_request(server, "/api/haproxy/system/optimize", method="POST")
 
 
+@router.put("/{server_id}/haproxy/system/optimizations")
+async def update_optimizations(
+    server_id: int,
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Update system optimization configs with custom content"""
+    server = await get_server_by_id(server_id, db)
+    return await proxy_request(server, "/api/haproxy/system/optimizations", method="PUT", json_data=data)
+
+
 # ==================== Traffic Tracking ====================
 
 @router.get("/{server_id}/traffic/summary")
@@ -889,3 +902,162 @@ async def get_node_update_status(
     """Get node update status"""
     server = await get_server_by_id(server_id, db)
     return await proxy_request(server, "/api/system/update/status")
+
+
+@router.post("/{server_id}/system/execute")
+async def execute_command_on_node(
+    server_id: int,
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """
+    Execute a shell command on the node's host system.
+    
+    Uses nsenter to run commands in the host namespace from Docker container.
+    
+    Request body:
+        command: str - Shell command to execute (required)
+        timeout: int - Timeout in seconds, 1-600 (default: 30)
+        shell: str - Shell to use: "sh" or "bash" (default: "sh")
+    
+    Response:
+        success: bool - Whether command exited with code 0
+        exit_code: int - Command exit code
+        stdout: str - Standard output
+        stderr: str - Standard error
+        execution_time_ms: int - Execution time in milliseconds
+        error: str | null - Error message if execution failed
+    
+    Examples:
+        {"command": "sysctl -p /etc/sysctl.d/99-network-tuning.conf"}
+        {"command": "systemctl restart nginx", "timeout": 60}
+        {"command": "cat /etc/os-release && uname -a", "shell": "bash"}
+    """
+    server = await get_server_by_id(server_id, db)
+    # Use longer timeout for potentially long-running commands
+    request_timeout = min((data.get("timeout", 30) or 30) + 10, 620)
+    return await proxy_request(
+        server,
+        "/api/system/execute",
+        method="POST",
+        json_data=data,
+        timeout=float(request_timeout)
+    )
+
+
+@router.post("/{server_id}/system/execute-stream")
+async def execute_command_stream_on_node(
+    server_id: int,
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """
+    Execute a shell command on the node's host system with streaming output (SSE).
+    
+    Returns Server-Sent Events with real-time stdout/stderr output.
+    Proxies SSE stream from the node to the client.
+    
+    SSE Event types:
+        - stdout: {"line": "output line"}
+        - stderr: {"line": "error line"}
+        - done: {"exit_code": 0, "execution_time_ms": 1234, "success": true}
+        - error: {"message": "error description"}
+    
+    Request body:
+        command: str - Shell command to execute (required)
+        timeout: int - Timeout in seconds, 1-600 (default: 30)
+        shell: str - Shell to use: "sh" or "bash" (default: "sh")
+    """
+    server = await get_server_by_id(server_id, db)
+    url = f"{server.url}/api/system/execute-stream"
+    request_timeout = min((data.get("timeout", 30) or 30) + 15, 620)
+    
+    async def stream_proxy() -> AsyncGenerator[bytes, None]:
+        try:
+            async with httpx.AsyncClient(verify=False, timeout=request_timeout) as client:
+                async with client.stream(
+                    "POST",
+                    url,
+                    headers={"X-API-Key": server.api_key},
+                    json=data
+                ) as response:
+                    if response.status_code != 200:
+                        error_event = f'event: error\ndata: {{"message": "Node returned status {response.status_code}"}}\n\n'
+                        yield error_event.encode()
+                        return
+                    
+                    async for chunk in response.aiter_bytes():
+                        yield chunk
+        except httpx.TimeoutException:
+            error_event = 'event: error\ndata: {"message": "Connection to node timed out"}\n\n'
+            yield error_event.encode()
+        except httpx.RequestError as e:
+            error_event = f'event: error\ndata: {{"message": "Connection error: {str(e)}"}}\n\n'
+            yield error_event.encode()
+        except Exception as e:
+            logger.error(f"SSE proxy error: {e}")
+            error_event = f'event: error\ndata: {{"message": "Proxy error: {str(e)}"}}\n\n'
+            yield error_event.encode()
+    
+    return StreamingResponse(
+        stream_proxy(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
+
+# ==================== System Optimizations ====================
+
+@router.get("/{server_id}/system/optimizations/version")
+async def get_node_optimizations_version(
+    server_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Get node system optimizations version"""
+    server = await get_server_by_id(server_id, db)
+    return await proxy_request(server, "/api/system/optimizations/version")
+
+
+@router.post("/{server_id}/system/optimizations/apply")
+async def apply_node_optimizations(
+    server_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """
+    Apply system optimizations to a node.
+    
+    Fetches latest configs from GitHub and applies them to the node.
+    """
+    import httpx as httpx_client
+    
+    server = await get_server_by_id(server_id, db)
+    
+    # Fetch configs from GitHub via system router
+    from app.routers.system import get_optimizations_from_github
+    github_data = await get_optimizations_from_github()
+    
+    if not github_data.get("sysctl_content"):
+        raise HTTPException(status_code=502, detail="Failed to fetch configs from GitHub")
+    
+    # Apply to node
+    apply_data = {
+        "sysctl_content": github_data["sysctl_content"],
+        "limits_content": github_data["limits_content"],
+        "systemd_content": github_data["systemd_content"]
+    }
+    
+    return await proxy_request(
+        server,
+        "/api/system/optimizations/apply",
+        method="POST",
+        json_data=apply_data,
+        timeout=60.0
+    )

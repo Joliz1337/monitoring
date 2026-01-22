@@ -12,6 +12,62 @@ export function formatBytesPerSec(bytesPerSec: number): string {
   return `${formatBytes(bytesPerSec)}/s`
 }
 
+// Unit keys for localization
+const BITS_UNITS = ['bps', 'kbps', 'mbps', 'gbps', 'tbps'] as const
+const BYTES_UNITS = ['b_per_s', 'kb_per_s', 'mb_per_s', 'gb_per_s', 'tb_per_s'] as const
+
+// Fallback units (English-style)
+const BITS_FALLBACK = ['bit/s', 'Kbit/s', 'Mbit/s', 'Gbit/s', 'Tbit/s']
+
+type TranslateFunction = (key: string) => string
+
+export function formatBitsPerSec(bytesPerSec: number, decimals = 1): string {
+  const bitsPerSec = bytesPerSec * 8
+  if (bitsPerSec === 0) return `0 ${BITS_FALLBACK[0]}`
+  
+  const k = 1000
+  const i = Math.min(Math.floor(Math.log(bitsPerSec) / Math.log(k)), BITS_FALLBACK.length - 1)
+  
+  return `${parseFloat((bitsPerSec / Math.pow(k, i)).toFixed(decimals))} ${BITS_FALLBACK[i]}`
+}
+
+export function formatBitsPerSecLocalized(
+  bytesPerSec: number,
+  t: TranslateFunction,
+  decimals = 1
+): string {
+  const bitsPerSec = bytesPerSec * 8
+  if (bitsPerSec === 0) return `0 ${t(`units.${BITS_UNITS[0]}`)}`
+  
+  const k = 1000
+  const i = Math.min(Math.floor(Math.log(bitsPerSec) / Math.log(k)), BITS_UNITS.length - 1)
+  const unit = t(`units.${BITS_UNITS[i]}`)
+  
+  return `${parseFloat((bitsPerSec / Math.pow(k, i)).toFixed(decimals))} ${unit}`
+}
+
+export function createBitsFormatter(t: TranslateFunction, decimals = 1) {
+  return (bytesPerSec: number) => formatBitsPerSecLocalized(bytesPerSec, t, decimals)
+}
+
+export function formatBytesPerSecLocalized(
+  bytesPerSec: number,
+  t: TranslateFunction,
+  decimals = 1
+): string {
+  if (bytesPerSec === 0) return `0 ${t(`units.${BYTES_UNITS[0]}`)}`
+  
+  const k = 1024
+  const i = Math.min(Math.floor(Math.log(bytesPerSec) / Math.log(k)), BYTES_UNITS.length - 1)
+  const unit = t(`units.${BYTES_UNITS[i]}`)
+  
+  return `${parseFloat((bytesPerSec / Math.pow(k, i)).toFixed(decimals))} ${unit}`
+}
+
+export function createBytesPerSecFormatter(t: TranslateFunction, decimals = 1) {
+  return (bytesPerSec: number) => formatBytesPerSecLocalized(bytesPerSec, t, decimals)
+}
+
 export function formatUptime(seconds: number): string {
   const days = Math.floor(seconds / 86400)
   const hours = Math.floor((seconds % 86400) / 3600)

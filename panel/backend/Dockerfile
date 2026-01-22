@@ -22,9 +22,10 @@ COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY backend/app/ ./app/
+COPY backend/ext/ ./ext/
 COPY VERSION ./VERSION
 
-RUN mkdir -p /app/data
+RUN mkdir -p /app/data /app/ext/logs
 
 ENV PYTHONUNBUFFERED=1
 

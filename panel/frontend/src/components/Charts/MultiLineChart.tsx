@@ -2,6 +2,7 @@ import { useMemo } from 'react'
 import ReactApexChart from 'react-apexcharts'
 import { ApexOptions } from 'apexcharts'
 import { useTranslation } from 'react-i18next'
+import { downsampleLTTB, calculateMultiSeriesYMax, MAX_CHART_POINTS } from '../../utils/chartUtils'
 
 interface Series {
   name: string
@@ -122,13 +123,23 @@ export default function MultiLineChart({
   const { chartSeries, options } = useMemo(() => {
     const lang = i18n.language || 'en'
     
-    const chartSeries = series.map((s) => ({
-      name: s.name,
-      data: s.data.map(d => ({
+    // Convert and downsample each series
+    const processedSeries = series.map((s) => {
+      const rawData = s.data.map(d => ({
         x: parseTimestamp(d.timestamp),
         y: d.value,
-      })),
+      }))
+      // Apply LTTB downsampling
+      return downsampleLTTB(rawData, MAX_CHART_POINTS)
+    })
+    
+    const chartSeries = series.map((s, i) => ({
+      name: s.name,
+      data: processedSeries[i],
     }))
+    
+    // Calculate dynamic Y-max for all series
+    const dynamicYMax = calculateMultiSeriesYMax(processedSeries)
     
     const colors = series.map((s, i) => s.color || DEFAULT_COLORS[i % DEFAULT_COLORS.length])
     const dateFormat = getDateTimeFormat(period)
@@ -140,11 +151,16 @@ export default function MultiLineChart({
         toolbar: { show: false },
         zoom: { enabled: false },
         background: 'transparent',
+        animations: {
+          enabled: false, // Disabled for performance
+        },
+        redrawOnParentResize: true,
+        redrawOnWindowResize: true,
       },
       theme: { mode: 'dark' },
       colors,
       stroke: {
-        curve: 'smooth',
+        curve: 'monotoneCubic', // Better than 'smooth' - no artifacts on sharp spikes
         width: 2,
       },
       fill: {
@@ -172,6 +188,8 @@ export default function MultiLineChart({
         axisTicks: { show: false },
       },
       yaxis: {
+        min: 0,
+        max: dynamicYMax,
         labels: {
           style: { colors: '#8e8ea0', fontSize: '11px' },
           formatter: (val) => formatValue ? formatValue(val) : `${val.toFixed(1)}${unit}`,

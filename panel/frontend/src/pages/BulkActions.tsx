@@ -15,6 +15,9 @@ import {
   Check,
   X,
   AlertTriangle,
+  Power,
+  Play,
+  Square,
 } from 'lucide-react'
 import { serversApi, bulkApi, BulkResult, Server as ServerType } from '../api/client'
 
@@ -31,8 +34,8 @@ const itemVariants = {
   visible: { opacity: 1, y: 0, transition: { duration: 0.4 } }
 }
 
-type ActionType = 'haproxy' | 'traffic' | 'firewall'
-type ActionMode = 'create' | 'delete'
+type ActionType = 'haproxy_service' | 'haproxy' | 'traffic' | 'firewall'
+type ActionMode = 'create' | 'delete' | 'start' | 'stop'
 
 export default function BulkActions() {
   const { t } = useTranslation()
@@ -42,8 +45,8 @@ export default function BulkActions() {
   const [isLoading, setIsLoading] = useState(true)
   const [isExecuting, setIsExecuting] = useState(false)
   
-  const [activeType, setActiveType] = useState<ActionType>('haproxy')
-  const [activeMode, setActiveMode] = useState<ActionMode>('create')
+  const [activeType, setActiveType] = useState<ActionType>('haproxy_service')
+  const [activeMode, setActiveMode] = useState<ActionMode>('start')
   
   const [results, setResults] = useState<BulkResult[]>([])
   
@@ -133,7 +136,15 @@ export default function BulkActions() {
     try {
       let response: BulkResult[] = []
       
-      if (activeType === 'haproxy') {
+      if (activeType === 'haproxy_service') {
+        if (activeMode === 'start') {
+          const res = await bulkApi.startHAProxy(selectedServerIds)
+          response = res.data
+        } else if (activeMode === 'stop') {
+          const res = await bulkApi.stopHAProxy(selectedServerIds)
+          response = res.data
+        }
+      } else if (activeType === 'haproxy') {
         if (activeMode === 'create') {
           const res = await bulkApi.createHAProxyRule(selectedServerIds, {
             name: haproxyForm.name,
@@ -312,8 +323,9 @@ export default function BulkActions() {
         {/* Right column - Action forms */}
         <motion.div className="lg:col-span-2" variants={itemVariants}>
           {/* Action type tabs */}
-          <div className="flex gap-2 mb-4">
+          <div className="flex flex-wrap gap-2 mb-4">
             {[
+              { type: 'haproxy_service' as const, icon: Power, label: t('bulk_actions.haproxy_service') },
               { type: 'haproxy' as const, icon: Shield, label: t('bulk_actions.haproxy_rules') },
               { type: 'traffic' as const, icon: Network, label: t('bulk_actions.traffic_ports') },
               { type: 'firewall' as const, icon: Flame, label: t('bulk_actions.firewall_rules') },
@@ -322,6 +334,12 @@ export default function BulkActions() {
                 key={type}
                 onClick={() => {
                   setActiveType(type)
+                  // Set appropriate default mode for each type
+                  if (type === 'haproxy_service') {
+                    setActiveMode('start')
+                  } else {
+                    setActiveMode('create')
+                  }
                   setResults([])
                   setFormError('')
                 }}
@@ -341,46 +359,104 @@ export default function BulkActions() {
           
           {/* Action mode tabs */}
           <div className="flex gap-2 mb-4">
-            <motion.button
-              onClick={() => {
-                setActiveMode('create')
-                setResults([])
-                setFormError('')
-              }}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all
-                ${activeMode === 'create'
-                  ? 'bg-success/20 text-success border border-success/30'
-                  : 'bg-dark-800/50 text-dark-400 border border-transparent hover:bg-dark-800'
-                }`}
-              whileHover={{ scale: 1.02 }}
-              whileTap={{ scale: 0.98 }}
-            >
-              <Plus className="w-4 h-4" />
-              {t('bulk_actions.create')}
-            </motion.button>
-            <motion.button
-              onClick={() => {
-                setActiveMode('delete')
-                setResults([])
-                setFormError('')
-              }}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all
-                ${activeMode === 'delete'
-                  ? 'bg-danger/20 text-danger border border-danger/30'
-                  : 'bg-dark-800/50 text-dark-400 border border-transparent hover:bg-dark-800'
-                }`}
-              whileHover={{ scale: 1.02 }}
-              whileTap={{ scale: 0.98 }}
-            >
-              <Trash2 className="w-4 h-4" />
-              {t('bulk_actions.delete')}
-            </motion.button>
+            {activeType === 'haproxy_service' ? (
+              <>
+                <motion.button
+                  onClick={() => {
+                    setActiveMode('start')
+                    setResults([])
+                    setFormError('')
+                  }}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all
+                    ${activeMode === 'start'
+                      ? 'bg-success/20 text-success border border-success/30'
+                      : 'bg-dark-800/50 text-dark-400 border border-transparent hover:bg-dark-800'
+                    }`}
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
+                >
+                  <Play className="w-4 h-4" />
+                  {t('bulk_actions.start')}
+                </motion.button>
+                <motion.button
+                  onClick={() => {
+                    setActiveMode('stop')
+                    setResults([])
+                    setFormError('')
+                  }}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all
+                    ${activeMode === 'stop'
+                      ? 'bg-danger/20 text-danger border border-danger/30'
+                      : 'bg-dark-800/50 text-dark-400 border border-transparent hover:bg-dark-800'
+                    }`}
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
+                >
+                  <Square className="w-4 h-4" />
+                  {t('bulk_actions.stop')}
+                </motion.button>
+              </>
+            ) : (
+              <>
+                <motion.button
+                  onClick={() => {
+                    setActiveMode('create')
+                    setResults([])
+                    setFormError('')
+                  }}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all
+                    ${activeMode === 'create'
+                      ? 'bg-success/20 text-success border border-success/30'
+                      : 'bg-dark-800/50 text-dark-400 border border-transparent hover:bg-dark-800'
+                    }`}
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
+                >
+                  <Plus className="w-4 h-4" />
+                  {t('bulk_actions.create')}
+                </motion.button>
+                <motion.button
+                  onClick={() => {
+                    setActiveMode('delete')
+                    setResults([])
+                    setFormError('')
+                  }}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all
+                    ${activeMode === 'delete'
+                      ? 'bg-danger/20 text-danger border border-danger/30'
+                      : 'bg-dark-800/50 text-dark-400 border border-transparent hover:bg-dark-800'
+                    }`}
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
+                >
+                  <Trash2 className="w-4 h-4" />
+                  {t('bulk_actions.delete')}
+                </motion.button>
+              </>
+            )}
           </div>
           
           {/* Form */}
           <div className="card">
             <form onSubmit={handleExecute}>
-              {/* HAProxy Forms */}
+              {/* HAProxy Service Forms */}
+              {activeType === 'haproxy_service' && (
+                <div className="space-y-4">
+                  <div className="flex items-start gap-3 p-4 bg-dark-800/50 rounded-xl">
+                    <Power className={`w-5 h-5 mt-0.5 shrink-0 ${activeMode === 'start' ? 'text-success' : 'text-danger'}`} />
+                    <div>
+                      <p className="text-dark-100 font-medium">
+                        {activeMode === 'start' ? t('bulk_actions.start_haproxy_title') : t('bulk_actions.stop_haproxy_title')}
+                      </p>
+                      <p className="text-sm text-dark-400 mt-1">
+                        {activeMode === 'start' ? t('bulk_actions.start_haproxy_hint') : t('bulk_actions.stop_haproxy_hint')}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
+              
+              {/* HAProxy Rules Forms */}
               {activeType === 'haproxy' && activeMode === 'create' && (
                 <div className="space-y-4">
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -647,7 +723,9 @@ export default function BulkActions() {
                   type="submit"
                   disabled={isExecuting || selectedServerIds.length === 0}
                   className={`btn flex items-center gap-2 ${
-                    activeMode === 'create' ? 'btn-primary' : 'bg-danger hover:bg-danger/80 text-white'
+                    activeMode === 'create' || activeMode === 'start' 
+                      ? 'btn-primary' 
+                      : 'bg-danger hover:bg-danger/80 text-white'
                   }`}
                   whileHover={{ scale: 1.02 }}
                   whileTap={{ scale: 0.98 }}
@@ -659,7 +737,10 @@ export default function BulkActions() {
                     </>
                   ) : (
                     <>
-                      {activeMode === 'create' ? <Plus className="w-4 h-4" /> : <Trash2 className="w-4 h-4" />}
+                      {activeMode === 'create' && <Plus className="w-4 h-4" />}
+                      {activeMode === 'delete' && <Trash2 className="w-4 h-4" />}
+                      {activeMode === 'start' && <Play className="w-4 h-4" />}
+                      {activeMode === 'stop' && <Square className="w-4 h-4" />}
                       {t('bulk_actions.execute')}
                     </>
                   )}

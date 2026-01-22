@@ -13,13 +13,14 @@ import {
   Server,
   AlertCircle,
   Wifi,
-  Radio
+  Radio,
+  Gauge
 } from 'lucide-react'
 import { proxyApi, TrafficSummary, ServerMetrics } from '../api/client'
 import { useServersStore } from '../stores/serversStore'
 import { useTranslation } from 'react-i18next'
 import { useAutoRefresh } from '../hooks/useAutoRefresh'
-import { formatBytes } from '../utils/format'
+import { formatBytes, createBitsFormatter } from '../utils/format'
 import PeriodSelector from '../components/ui/PeriodSelector'
 import MultiLineChart from '../components/Charts/MultiLineChart'
 
@@ -44,11 +45,13 @@ export default function Traffic() {
   
   const [summary, setSummary] = useState<TrafficSummary | null>(null)
   const [trafficHistory, setTrafficHistory] = useState<{ timestamp: string; rx: number; tx: number }[]>([])
+  const [speedHistory, setSpeedHistory] = useState<{ timestamp: string; rx: number; tx: number }[]>([])
   const [metrics, setMetrics] = useState<ServerMetrics | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [period, setPeriod] = useState('24h')
+  const [speedPeriod, setSpeedPeriod] = useState('1h')
   const [newPort, setNewPort] = useState('')
   const [isAddingPort, setIsAddingPort] = useState(false)
   
@@ -58,14 +61,15 @@ export default function Traffic() {
     if (!serverId) return
     
     try {
-      const [summaryRes, historyRes, metricsRes] = await Promise.all([
+      const [summaryRes, historyRes, metricsRes, speedRes] = await Promise.all([
         proxyApi.getTrafficSummary(Number(serverId), 30),
         period === '24h' 
           ? proxyApi.getHourlyTraffic(Number(serverId), { hours: 24 })
           : period === '7d'
           ? proxyApi.getDailyTraffic(Number(serverId), { days: 7 })
           : proxyApi.getDailyTraffic(Number(serverId), { days: 30 }),
-        proxyApi.getMetrics(Number(serverId)) // Use cached metrics instead of live
+        proxyApi.getMetrics(Number(serverId)),
+        proxyApi.getHistory(Number(serverId), { period: speedPeriod })
       ])
       
       setSummary(summaryRes.data)
@@ -77,6 +81,16 @@ export default function Traffic() {
         tx: d.tx_bytes
       }))
       setTrafficHistory(history)
+      
+      // Speed history from metrics
+      const speedData = (speedRes.data as { data: Array<{ timestamp: string; net_rx_bytes_per_sec: number; net_tx_bytes_per_sec: number }> }).data || []
+      const speed = speedData.map(d => ({
+        timestamp: d.timestamp,
+        rx: d.net_rx_bytes_per_sec || 0,
+        tx: d.net_tx_bytes_per_sec || 0
+      }))
+      setSpeedHistory(speed)
+      
       setError(null)
     } catch (err: unknown) {
       const error = err as { response?: { status: number; data?: { detail?: string } } }
@@ -84,7 +98,7 @@ export default function Traffic() {
     } finally {
       setIsLoading(false)
     }
-  }, [serverId, period])
+  }, [serverId, period, speedPeriod])
   
   useEffect(() => {
     fetchServers()
@@ -147,6 +161,21 @@ export default function Traffic() {
       color: '#22d3ee' 
     },
   ], [trafficHistory, t])
+  
+  const speedSeries = useMemo(() => [
+    { 
+      name: t('common.download'), 
+      data: speedHistory.map(h => ({ timestamp: h.timestamp, value: h.rx })), 
+      color: '#10b981' 
+    },
+    { 
+      name: t('common.upload'), 
+      data: speedHistory.map(h => ({ timestamp: h.timestamp, value: h.tx })), 
+      color: '#22d3ee' 
+    },
+  ], [speedHistory, t])
+  
+  const formatSpeed = useMemo(() => createBitsFormatter(t), [t])
   
   if (isLoading) {
     return (
@@ -389,6 +418,33 @@ export default function Traffic() {
               </div>
             </motion.div>
           )}
+          
+          {/* Network Speed Chart */}
+          <motion.div className="card mb-6" variants={itemVariants}>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="font-semibold text-dark-100 flex items-center gap-2">
+                <Gauge className="w-4 h-4 text-accent-500" />
+                {t('traffic.network_speed')}
+              </h3>
+              <PeriodSelector 
+                value={speedPeriod} 
+                onChange={setSpeedPeriod}
+                options={[
+                  { value: '1h', label: '1h' },
+                  { value: '24h', label: '24h' },
+                  { value: '7d', label: '7d' },
+                  { value: '30d', label: '30d' },
+                  { value: '365d', label: '1y' },
+                ]}
+              />
+            </div>
+            <MultiLineChart
+              series={speedSeries}
+              formatValue={formatSpeed}
+              height={250}
+              period={speedPeriod}
+            />
+          </motion.div>
           
           {/* Traffic Chart */}
           <motion.div className="card mb-6" variants={itemVariants}>

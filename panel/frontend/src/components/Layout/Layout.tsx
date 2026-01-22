@@ -10,11 +10,23 @@ import {
   X,
   Sparkles,
   Package,
-  Layers
+  Layers,
+  Search,
+  type LucideIcon
 } from 'lucide-react'
 import { useState } from 'react'
 import { useAuthStore } from '../../stores/authStore'
+import { useExtStore } from '../../stores/_extStore'
 import { useTranslation } from 'react-i18next'
+
+const iconMap: Record<string, LucideIcon> = {
+  Search,
+  LayoutDashboard,
+  Server,
+  Settings,
+  Package,
+  Layers
+}
 
 const overlayVariants = {
   hidden: { opacity: 0 },
@@ -36,6 +48,7 @@ export default function Layout() {
   const navigate = useNavigate()
   const location = useLocation()
   const { logout } = useAuthStore()
+  const navItem = useExtStore(s => s.navItem)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const { t } = useTranslation()
   
@@ -44,13 +57,17 @@ export default function Layout() {
     navigate(`/${uid}/login`)
   }
   
-  const navItems = [
+  const baseNavItems = [
     { to: `/${uid}`, icon: LayoutDashboard, label: t('common.dashboard'), end: true },
     { to: `/${uid}/servers`, icon: Server, label: t('common.servers') },
     { to: `/${uid}/bulk-actions`, icon: Layers, label: t('bulk_actions.title') },
     { to: `/${uid}/updates`, icon: Package, label: t('common.updates') },
     { to: `/${uid}/settings`, icon: Settings, label: t('common.settings') },
   ]
+  
+  const navItems = navItem 
+    ? [...baseNavItems.slice(0, 3), { to: `/${uid}/${navItem.path}`, icon: iconMap[navItem.icon] || Search, label: navItem.label }, ...baseNavItems.slice(3)]
+    : baseNavItems
   
   return (
     <div className="min-h-screen bg-dark-950 flex overflow-hidden">

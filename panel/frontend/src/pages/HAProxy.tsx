@@ -31,8 +31,9 @@ import {
   Code,
   Save,
 } from 'lucide-react'
-import { proxyApi, HAProxyRule, HAProxyStatus, Certificate, FirewallRule } from '../api/client'
+import { proxyApi, HAProxyRule, HAProxyStatus, Certificate, FirewallRule, OptimizationsStatus } from '../api/client'
 import { useServersStore } from '../stores/serversStore'
+import { useAutoRefresh } from '../hooks/useAutoRefresh'
 
 const containerVariants = {
   hidden: { opacity: 0 },
@@ -103,6 +104,7 @@ export default function HAProxy() {
   const [configSaving, setConfigSaving] = useState(false)
   const [configError, setConfigError] = useState<string | null>(null)
   const [configSuccess, setConfigSuccess] = useState<string | null>(null)
+  const [configModalMouseDownOnOverlay, setConfigModalMouseDownOnOverlay] = useState(false)
   
   // Firewall states
   const [firewallRules, setFirewallRules] = useState<FirewallRule[]>([])
@@ -119,14 +121,25 @@ export default function HAProxy() {
   const [firewallErrorLog, setFirewallErrorLog] = useState<string | null>(null)
   const [firewallErrorExpanded, setFirewallErrorExpanded] = useState(false)
   
+  // System optimizations states
+  const [optimizations, setOptimizations] = useState<OptimizationsStatus | null>(null)
+  const [optimizationsLoading, setOptimizationsLoading] = useState(false)
+  const [optimizationsError, setOptimizationsError] = useState<string | null>(null)
+  const [showSysctlEditor, setShowSysctlEditor] = useState(false)
+  const [showLimitsEditor, setShowLimitsEditor] = useState(false)
+  const [editedSysctl, setEditedSysctl] = useState('')
+  const [editedLimits, setEditedLimits] = useState('')
+  const [optimizationsSaving, setOptimizationsSaving] = useState(false)
+  
   // Collapsed sections states
   const [collapsedSections, setCollapsedSections] = useState<{
     proxyRules: boolean
     sslCerts: boolean
     firewall: boolean
-  }>({ proxyRules: false, sslCerts: false, firewall: false })
+    optimizations: boolean
+  }>({ proxyRules: false, sslCerts: false, firewall: false, optimizations: true })
   
-  const toggleSection = (section: 'proxyRules' | 'sslCerts' | 'firewall') => {
+  const toggleSection = (section: 'proxyRules' | 'sslCerts' | 'firewall' | 'optimizations') => {
     setCollapsedSections(prev => ({ ...prev, [section]: !prev[section] }))
   }
   
@@ -144,11 +157,12 @@ export default function HAProxy() {
     setIsLoading(true)
     
     try {
-      const [statusRes, rulesRes, certsRes, fwRes] = await Promise.all([
+      const [statusRes, rulesRes, certsRes, fwRes, optRes] = await Promise.all([
         proxyApi.getHAProxyStatus(Number(serverId)),
         proxyApi.getHAProxyRules(Number(serverId)),
         proxyApi.getHAProxyCerts(Number(serverId)),
         proxyApi.getFirewallRules(Number(serverId)).catch(() => ({ data: { rules: [], active: false } })),
+        proxyApi.getOptimizationsStatus(Number(serverId)).catch(() => ({ data: null })),
       ])
       
       setStatus(statusRes.data)
@@ -156,6 +170,7 @@ export default function HAProxy() {
       setCerts(certsRes.data.certificates || [])
       setFirewallRules(fwRes.data.rules || [])
       setFirewallActive(fwRes.data.active || false)
+      if (optRes.data) setOptimizations(optRes.data)
       setError(null)
       
       // Load cert details in background (single request)
@@ -173,11 +188,12 @@ export default function HAProxy() {
     setIsRefreshing(true)
     
     try {
-      const [statusRes, rulesRes, certsRes, fwRes] = await Promise.all([
+      const [statusRes, rulesRes, certsRes, fwRes, optRes] = await Promise.all([
         proxyApi.getHAProxyStatus(Number(serverId)),
         proxyApi.getHAProxyRules(Number(serverId)),
         proxyApi.getHAProxyCerts(Number(serverId)),
         proxyApi.getFirewallRules(Number(serverId)).catch(() => ({ data: { rules: [], active: false } })),
+        proxyApi.getOptimizationsStatus(Number(serverId)).catch(() => ({ data: null })),
       ])
       
       setStatus(statusRes.data)
@@ -185,6 +201,7 @@ export default function HAProxy() {
       setCerts(certsRes.data.certificates || [])
       setFirewallRules(fwRes.data.rules || [])
       setFirewallActive(fwRes.data.active || false)
+      if (optRes.data) setOptimizations(optRes.data)
       setError(null)
       
       loadCertDetails()
@@ -223,7 +240,8 @@ export default function HAProxy() {
     fetchData()
   }, [serverId])
   
-  // Auto-refresh removed - data is cached on panel (every 30s)
+  // Auto-refresh based on user settings
+  useAutoRefresh(refreshData, { immediate: false })
   
   const handleReload = async () => {
     setActionLoading('reload')
@@ -298,11 +316,62 @@ export default function HAProxy() {
   }
   
   const handleRenewCerts = async () => {
+    if (certs.length === 0) return
+    
     setActionLoading('renew')
-    try {
-      await proxyApi.renewCerts(Number(serverId))
+    setRenewLog(null)
+    setRenewLogExpanded(false)
+    
+    const results: { domain: string; success: boolean; message: string }[] = []
+    let fullLog = ''
+    
+    for (const domain of certs) {
+      try {
+        const res = await proxyApi.renewSingleCert(Number(serverId), domain)
+        results.push({
+          domain,
+          success: res.data.success,
+          message: res.data.message,
+        })
+        fullLog += `[${domain}] ${res.data.success ? '✓' : '✗'} ${res.data.message}\n`
+        if (res.data.output_log) {
+          fullLog += `${res.data.output_log}\n`
+        }
+        fullLog += '\n'
+      } catch (err: unknown) {
+        const error = err as { response?: { data?: { detail?: string | Array<{ msg?: string }>; message?: string } } }
+        const detail = error.response?.data?.detail
+        let errorMessage: string
+        if (Array.isArray(detail)) {
+          errorMessage = detail.map(d => d.msg || JSON.stringify(d)).join('; ') || t('haproxy.renewal_failed')
+        } else {
+          errorMessage = detail || error.response?.data?.message || t('haproxy.renewal_failed')
+        }
+        results.push({
+          domain,
+          success: false,
+          message: errorMessage,
+        })
+        fullLog += `[${domain}] ✗ ${errorMessage}\n\n`
+      }
+    }
+    
+    const successCount = results.filter(r => r.success).length
+    const allSuccess = successCount === results.length
+    const renewedDomains = results.filter(r => r.success).map(r => r.domain)
+    
+    setRenewLog({
+      domain: renewedDomains.length > 0 ? renewedDomains.join(', ') : t('haproxy.renew_all'),
+      success: allSuccess,
+      message: `${successCount}/${results.length} ${t('haproxy.certs_renewed')}`,
+      log: fullLog.trim(),
+    })
+    setRenewLogExpanded(true)
+    
+    if (successCount > 0) {
       await refreshData()
-    } catch {}
+    }
+    
     setActionLoading(null)
   }
   
@@ -550,6 +619,88 @@ export default function HAProxy() {
       }
     }
     setActionLoading(null)
+  }
+  
+  // System optimizations handlers
+  const fetchOptimizations = async () => {
+    if (!serverId) return
+    setOptimizationsLoading(true)
+    setOptimizationsError(null)
+    
+    try {
+      const res = await proxyApi.getOptimizationsStatus(Number(serverId))
+      setOptimizations(res.data)
+      setEditedSysctl(res.data.sysctl.content || '')
+      setEditedLimits(res.data.limits.content || '')
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { detail?: string } } }
+      setOptimizationsError(error.response?.data?.detail || t('optimizations.failed_fetch'))
+    } finally {
+      setOptimizationsLoading(false)
+    }
+  }
+  
+  const handleApplyDefaultOptimizations = async () => {
+    if (!confirm(t('optimizations.confirm_apply'))) return
+    setActionLoading('apply-optimizations')
+    setOptimizationsError(null)
+    
+    try {
+      const res = await proxyApi.applyOptimizations(Number(serverId))
+      if (res.data.success) {
+        await fetchOptimizations()
+      } else {
+        setOptimizationsError(res.data.message + (res.data.errors.length > 0 ? `: ${res.data.errors.join(', ')}` : ''))
+      }
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { detail?: string } } }
+      setOptimizationsError(error.response?.data?.detail || t('optimizations.failed_apply'))
+    }
+    setActionLoading(null)
+  }
+  
+  const handleSaveSysctl = async () => {
+    setOptimizationsSaving(true)
+    setOptimizationsError(null)
+    
+    try {
+      const res = await proxyApi.updateOptimizations(Number(serverId), {
+        sysctl_content: editedSysctl,
+        apply: true
+      })
+      if (res.data.success) {
+        setShowSysctlEditor(false)
+        await fetchOptimizations()
+      } else {
+        setOptimizationsError(res.data.message)
+      }
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { detail?: string } } }
+      setOptimizationsError(error.response?.data?.detail || t('optimizations.failed_save'))
+    }
+    setOptimizationsSaving(false)
+  }
+  
+  const handleSaveLimits = async () => {
+    setOptimizationsSaving(true)
+    setOptimizationsError(null)
+    
+    try {
+      const res = await proxyApi.updateOptimizations(Number(serverId), {
+        limits_content: editedLimits,
+        apply: false
+      })
+      if (res.data.success) {
+        setShowLimitsEditor(false)
+        await fetchOptimizations()
+      } else {
+        setOptimizationsError(res.data.message)
+      }
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { detail?: string } } }
+      setOptimizationsError(error.response?.data?.detail || t('optimizations.failed_save'))
+    }
+    setOptimizationsSaving(false)
   }
   
   // Config editor handlers
@@ -1768,14 +1919,24 @@ export default function HAProxy() {
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
                   exit={{ opacity: 0 }}
-                  onClick={() => setShowConfigModal(false)}
+                  onMouseDown={(e) => {
+                    if (e.target === e.currentTarget) {
+                      setConfigModalMouseDownOnOverlay(true)
+                    }
+                  }}
+                  onClick={(e) => {
+                    if (e.target === e.currentTarget && configModalMouseDownOnOverlay) {
+                      setShowConfigModal(false)
+                    }
+                    setConfigModalMouseDownOnOverlay(false)
+                  }}
                 >
                   <motion.div
                     className="bg-dark-900 border border-dark-700 rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col"
                     initial={{ opacity: 0, scale: 0.95, y: 20 }}
                     animate={{ opacity: 1, scale: 1, y: 0 }}
                     exit={{ opacity: 0, scale: 0.95, y: 20 }}
-                    onClick={(e) => e.stopPropagation()}
+                    onMouseDown={() => setConfigModalMouseDownOnOverlay(false)}
                   >
                     {/* Modal Header */}
                     <div className="flex items-center justify-between p-5 border-b border-dark-700">
@@ -2261,6 +2422,364 @@ export default function HAProxy() {
                   ))}
                 </motion.div>
               )}
+              </div>
+              </div>
+            </motion.div>
+            
+            {/* System Optimizations */}
+            <motion.div 
+              className="card mt-6"
+              variants={itemVariants}
+            >
+              <div className="flex items-center justify-between mb-4">
+                <button 
+                  onClick={() => {
+                    toggleSection('optimizations')
+                    if (collapsedSections.optimizations && !optimizations) {
+                      fetchOptimizations()
+                    }
+                  }}
+                  className="flex items-center gap-3 hover:opacity-80 transition-opacity"
+                >
+                  <Zap className="w-5 h-5 text-warning" />
+                  <h2 className="text-lg font-semibold text-dark-100">{t('optimizations.title')}</h2>
+                  {collapsedSections.optimizations ? (
+                    <ChevronDown className="w-4 h-4 text-dark-400" />
+                  ) : (
+                    <ChevronUp className="w-4 h-4 text-dark-400" />
+                  )}
+                  <span className={`text-xs px-2 py-0.5 rounded-full ${
+                    optimizations?.applied 
+                      ? 'bg-success/10 text-success border border-success/20' 
+                      : 'bg-warning/10 text-warning border border-warning/20'
+                  }`}>
+                    {optimizations?.applied ? t('optimizations.applied') : t('optimizations.not_applied')}
+                  </span>
+                </button>
+                <div className="flex items-center gap-2">
+                  <motion.button
+                    onClick={handleApplyDefaultOptimizations}
+                    disabled={!!actionLoading}
+                    className="btn btn-warning text-sm"
+                    whileHover={{ scale: 1.02 }}
+                    whileTap={{ scale: 0.98 }}
+                  >
+                    {actionLoading === 'apply-optimizations' ? (
+                      <motion.div
+                        animate={{ rotate: 360 }}
+                        transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}
+                      >
+                        <Loader2 className="w-4 h-4" />
+                      </motion.div>
+                    ) : (
+                      <>
+                        <Zap className="w-4 h-4" />
+                        {t('optimizations.apply_default')}
+                      </>
+                    )}
+                  </motion.button>
+                  <motion.button
+                    onClick={fetchOptimizations}
+                    disabled={optimizationsLoading}
+                    className="btn btn-secondary text-sm"
+                    whileHover={{ scale: 1.02 }}
+                    whileTap={{ scale: 0.98 }}
+                  >
+                    {optimizationsLoading ? (
+                      <motion.div
+                        animate={{ rotate: 360 }}
+                        transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}
+                      >
+                        <Loader2 className="w-4 h-4" />
+                      </motion.div>
+                    ) : (
+                      <RefreshCw className="w-4 h-4" />
+                    )}
+                  </motion.button>
+                </div>
+              </div>
+              
+              <div className={`collapse-grid ${!collapsedSections.optimizations ? 'open' : ''}`}>
+              <div className="collapse-content">
+              
+              {/* Error display */}
+              <AnimatePresence>
+                {optimizationsError && (
+                  <motion.div 
+                    className="mb-4 p-4 bg-danger/10 border border-danger/20 rounded-xl text-danger text-sm"
+                    initial={{ opacity: 0, y: -10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -10 }}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span>{optimizationsError}</span>
+                      <button onClick={() => setOptimizationsError(null)} className="p-1 hover:bg-danger/20 rounded">
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+              
+              {optimizationsLoading && !optimizations ? (
+                <div className="flex items-center justify-center py-8">
+                  <motion.div
+                    animate={{ rotate: 360 }}
+                    transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}
+                  >
+                    <Loader2 className="w-6 h-6 text-accent-500" />
+                  </motion.div>
+                </div>
+              ) : optimizations ? (
+                <div className="space-y-6">
+                  {/* Current Values */}
+                  <div>
+                    <h3 className="text-sm font-medium text-dark-300 mb-3">{t('optimizations.current_values')}</h3>
+                    <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+                      <div className="p-3 bg-dark-800/50 rounded-lg">
+                        <div className="text-xs text-dark-500 mb-1">{t('optimizations.tcp_congestion')}</div>
+                        <div className={`font-mono text-sm ${optimizations.current_values.tcp_congestion === 'bbr' ? 'text-success' : 'text-dark-300'}`}>
+                          {optimizations.current_values.tcp_congestion || 'N/A'}
+                        </div>
+                      </div>
+                      <div className="p-3 bg-dark-800/50 rounded-lg">
+                        <div className="text-xs text-dark-500 mb-1">{t('optimizations.ipv6')}</div>
+                        <div className={`font-mono text-sm ${optimizations.current_values.ipv6_disabled ? 'text-success' : 'text-warning'}`}>
+                          {optimizations.current_values.ipv6_disabled ? t('optimizations.disabled') : t('optimizations.enabled')}
+                        </div>
+                      </div>
+                      <div className="p-3 bg-dark-800/50 rounded-lg">
+                        <div className="text-xs text-dark-500 mb-1">{t('optimizations.file_max')}</div>
+                        <div className="font-mono text-sm text-dark-300">
+                          {optimizations.current_values.file_max.toLocaleString()}
+                        </div>
+                      </div>
+                      <div className="p-3 bg-dark-800/50 rounded-lg">
+                        <div className="text-xs text-dark-500 mb-1">{t('optimizations.somaxconn')}</div>
+                        <div className="font-mono text-sm text-dark-300">
+                          {optimizations.current_values.somaxconn.toLocaleString()}
+                        </div>
+                      </div>
+                      <div className="p-3 bg-dark-800/50 rounded-lg">
+                        <div className="text-xs text-dark-500 mb-1">{t('optimizations.tcp_tw_reuse')}</div>
+                        <div className={`font-mono text-sm ${optimizations.current_values.tcp_tw_reuse ? 'text-success' : 'text-dark-400'}`}>
+                          {optimizations.current_values.tcp_tw_reuse ? 'ON' : 'OFF'}
+                        </div>
+                      </div>
+                      <div className="p-3 bg-dark-800/50 rounded-lg">
+                        <div className="text-xs text-dark-500 mb-1">{t('optimizations.tcp_fastopen')}</div>
+                        <div className={`font-mono text-sm ${optimizations.current_values.tcp_fastopen > 0 ? 'text-success' : 'text-dark-400'}`}>
+                          {optimizations.current_values.tcp_fastopen}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                  
+                  {/* Sysctl Config */}
+                  <div>
+                    <div className="flex items-center justify-between mb-3">
+                      <h3 className="text-sm font-medium text-dark-300 flex items-center gap-2">
+                        <FileText className="w-4 h-4" />
+                        {t('optimizations.sysctl_config')}
+                        {optimizations.sysctl.exists ? (
+                          <span className="text-xs px-2 py-0.5 bg-success/10 text-success rounded-full">{t('optimizations.exists')}</span>
+                        ) : (
+                          <span className="text-xs px-2 py-0.5 bg-dark-700 text-dark-400 rounded-full">{t('optimizations.not_exists')}</span>
+                        )}
+                      </h3>
+                      <motion.button
+                        onClick={() => {
+                          setShowSysctlEditor(!showSysctlEditor)
+                          setEditedSysctl(optimizations.sysctl.content || '')
+                        }}
+                        className="btn btn-secondary text-sm"
+                        whileHover={{ scale: 1.02 }}
+                        whileTap={{ scale: 0.98 }}
+                      >
+                        {showSysctlEditor ? <X className="w-4 h-4" /> : <Edit2 className="w-4 h-4" />}
+                        {showSysctlEditor ? t('common.cancel') : t('common.edit')}
+                      </motion.button>
+                    </div>
+                    
+                    <AnimatePresence mode="wait">
+                      {showSysctlEditor ? (
+                        <motion.div
+                          key="editor"
+                          initial={{ opacity: 0, height: 0 }}
+                          animate={{ opacity: 1, height: 'auto' }}
+                          exit={{ opacity: 0, height: 0 }}
+                        >
+                          <textarea
+                            value={editedSysctl}
+                            onChange={(e) => setEditedSysctl(e.target.value)}
+                            className="w-full h-64 p-4 bg-dark-900 border border-dark-700 rounded-lg font-mono text-xs text-dark-200 resize-y"
+                            spellCheck={false}
+                          />
+                          <div className="flex justify-end gap-2 mt-3">
+                            <motion.button
+                              onClick={() => setShowSysctlEditor(false)}
+                              className="btn btn-secondary"
+                              whileHover={{ scale: 1.02 }}
+                              whileTap={{ scale: 0.98 }}
+                            >
+                              {t('common.cancel')}
+                            </motion.button>
+                            <motion.button
+                              onClick={handleSaveSysctl}
+                              disabled={optimizationsSaving}
+                              className="btn btn-primary"
+                              whileHover={{ scale: 1.02 }}
+                              whileTap={{ scale: 0.98 }}
+                            >
+                              {optimizationsSaving ? (
+                                <motion.div animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}>
+                                  <Loader2 className="w-4 h-4" />
+                                </motion.div>
+                              ) : (
+                                <>
+                                  <Save className="w-4 h-4" />
+                                  {t('optimizations.save_apply')}
+                                </>
+                              )}
+                            </motion.button>
+                          </div>
+                        </motion.div>
+                      ) : optimizations.sysctl.content ? (
+                        <motion.div
+                          key="preview"
+                          initial={{ opacity: 0 }}
+                          animate={{ opacity: 1 }}
+                          className="relative"
+                        >
+                          <pre className="p-4 bg-dark-900 border border-dark-700 rounded-lg font-mono text-xs text-dark-400 overflow-x-auto max-h-48 overflow-y-auto">
+                            {optimizations.sysctl.content.slice(0, 1500)}
+                            {optimizations.sysctl.content.length > 1500 && '\n...'}
+                          </pre>
+                          <div className="absolute top-2 right-2">
+                            <motion.button
+                              onClick={() => navigator.clipboard.writeText(optimizations.sysctl.content)}
+                              className="p-2 bg-dark-800 hover:bg-dark-700 rounded-lg text-dark-400"
+                              whileHover={{ scale: 1.1 }}
+                              whileTap={{ scale: 0.9 }}
+                              title={t('common.copy')}
+                            >
+                              <Copy className="w-4 h-4" />
+                            </motion.button>
+                          </div>
+                        </motion.div>
+                      ) : (
+                        <div className="p-4 bg-dark-800/30 border border-dark-700/50 rounded-lg text-dark-500 text-sm text-center">
+                          {t('optimizations.no_config')}
+                        </div>
+                      )}
+                    </AnimatePresence>
+                  </div>
+                  
+                  {/* Limits Config */}
+                  <div>
+                    <div className="flex items-center justify-between mb-3">
+                      <h3 className="text-sm font-medium text-dark-300 flex items-center gap-2">
+                        <FileText className="w-4 h-4" />
+                        {t('optimizations.limits_config')}
+                        {optimizations.limits.exists ? (
+                          <span className="text-xs px-2 py-0.5 bg-success/10 text-success rounded-full">{t('optimizations.exists')}</span>
+                        ) : (
+                          <span className="text-xs px-2 py-0.5 bg-dark-700 text-dark-400 rounded-full">{t('optimizations.not_exists')}</span>
+                        )}
+                      </h3>
+                      <motion.button
+                        onClick={() => {
+                          setShowLimitsEditor(!showLimitsEditor)
+                          setEditedLimits(optimizations.limits.content || '')
+                        }}
+                        className="btn btn-secondary text-sm"
+                        whileHover={{ scale: 1.02 }}
+                        whileTap={{ scale: 0.98 }}
+                      >
+                        {showLimitsEditor ? <X className="w-4 h-4" /> : <Edit2 className="w-4 h-4" />}
+                        {showLimitsEditor ? t('common.cancel') : t('common.edit')}
+                      </motion.button>
+                    </div>
+                    
+                    <AnimatePresence mode="wait">
+                      {showLimitsEditor ? (
+                        <motion.div
+                          key="editor"
+                          initial={{ opacity: 0, height: 0 }}
+                          animate={{ opacity: 1, height: 'auto' }}
+                          exit={{ opacity: 0, height: 0 }}
+                        >
+                          <textarea
+                            value={editedLimits}
+                            onChange={(e) => setEditedLimits(e.target.value)}
+                            className="w-full h-48 p-4 bg-dark-900 border border-dark-700 rounded-lg font-mono text-xs text-dark-200 resize-y"
+                            spellCheck={false}
+                          />
+                          <div className="flex justify-end gap-2 mt-3">
+                            <motion.button
+                              onClick={() => setShowLimitsEditor(false)}
+                              className="btn btn-secondary"
+                              whileHover={{ scale: 1.02 }}
+                              whileTap={{ scale: 0.98 }}
+                            >
+                              {t('common.cancel')}
+                            </motion.button>
+                            <motion.button
+                              onClick={handleSaveLimits}
+                              disabled={optimizationsSaving}
+                              className="btn btn-primary"
+                              whileHover={{ scale: 1.02 }}
+                              whileTap={{ scale: 0.98 }}
+                            >
+                              {optimizationsSaving ? (
+                                <motion.div animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}>
+                                  <Loader2 className="w-4 h-4" />
+                                </motion.div>
+                              ) : (
+                                <>
+                                  <Save className="w-4 h-4" />
+                                  {t('common.save')}
+                                </>
+                              )}
+                            </motion.button>
+                          </div>
+                        </motion.div>
+                      ) : optimizations.limits.content ? (
+                        <motion.div
+                          key="preview"
+                          initial={{ opacity: 0 }}
+                          animate={{ opacity: 1 }}
+                          className="relative"
+                        >
+                          <pre className="p-4 bg-dark-900 border border-dark-700 rounded-lg font-mono text-xs text-dark-400 overflow-x-auto max-h-32 overflow-y-auto">
+                            {optimizations.limits.content}
+                          </pre>
+                          <div className="absolute top-2 right-2">
+                            <motion.button
+                              onClick={() => navigator.clipboard.writeText(optimizations.limits.content)}
+                              className="p-2 bg-dark-800 hover:bg-dark-700 rounded-lg text-dark-400"
+                              whileHover={{ scale: 1.1 }}
+                              whileTap={{ scale: 0.9 }}
+                              title={t('common.copy')}
+                            >
+                              <Copy className="w-4 h-4" />
+                            </motion.button>
+                          </div>
+                        </motion.div>
+                      ) : (
+                        <div className="p-4 bg-dark-800/30 border border-dark-700/50 rounded-lg text-dark-500 text-sm text-center">
+                          {t('optimizations.no_config')}
+                        </div>
+                      )}
+                    </AnimatePresence>
+                  </div>
+                </div>
+              ) : (
+                <div className="text-center py-8 text-dark-500">
+                  {t('optimizations.click_to_load')}
+                </div>
+              )}
+              
               </div>
               </div>
             </motion.div>

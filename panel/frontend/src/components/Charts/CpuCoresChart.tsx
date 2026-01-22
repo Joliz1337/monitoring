@@ -73,9 +73,12 @@ export default function CpuCoresChart({ perCpuPercent, className = '' }: CpuCore
             </div>
             
             {/* Core percent label */}
-            <div className="absolute inset-0 flex items-center justify-center">
-              <span className={`text-xs font-mono ${getTextColorForPercent(core.percent)} opacity-80 group-hover:opacity-100 transition-opacity`}>
-                {core.percent.toFixed(0)}%
+            <div className="absolute inset-0 flex items-center justify-center overflow-hidden">
+              <span 
+                className={`font-mono ${getTextColorForPercent(core.percent)} opacity-80 group-hover:opacity-100 transition-opacity whitespace-nowrap`}
+                style={{ fontSize: cores.length > 16 ? '9px' : cores.length > 8 ? '10px' : '12px' }}
+              >
+                {core.percent.toFixed(0)}
               </span>
             </div>
             

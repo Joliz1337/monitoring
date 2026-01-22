@@ -44,12 +44,14 @@ class HAProxyRuleResponse(BaseModel):
 class HAProxyStatusResponse(BaseModel):
     """HAProxy status response"""
     running: bool
+    enabled: bool = False  # autostart on boot
+    installed: bool = True
     config_valid: bool
     config_exists: bool = True
     config_message: str
     config_path: str = ""
     status_output: str = ""
-    container_logs: str = ""
+    service_logs: str = ""
 
 
 class HAProxyRulesListResponse(BaseModel):
@@ -261,3 +263,54 @@ class CronActionResponse(BaseModel):
     """Cron action result"""
     success: bool
     message: str
+
+
+# ==================== System Optimizations Models ====================
+
+class SysctlConfig(BaseModel):
+    """Sysctl config file info"""
+    path: str
+    exists: bool
+    content: str = ""
+
+
+class LimitsConfig(BaseModel):
+    """Limits config file info"""
+    path: str
+    exists: bool
+    content: str = ""
+
+
+class CurrentOptimizationValues(BaseModel):
+    """Current system optimization values"""
+    tcp_congestion: str = ""
+    ipv6_disabled: bool = False
+    file_max: int = 0
+    somaxconn: int = 0
+    tcp_tw_reuse: bool = False
+    tcp_fastopen: int = 0
+
+
+class OptimizationsStatusResponse(BaseModel):
+    """System optimizations status response"""
+    applied: bool
+    sysctl: SysctlConfig
+    limits: LimitsConfig
+    current_values: CurrentOptimizationValues
+
+
+class OptimizationsApplyResponse(BaseModel):
+    """Response for applying optimizations"""
+    success: bool
+    message: str
+    sysctl_applied: bool = False
+    limits_applied: bool = False
+    systemd_applied: bool = False
+    errors: list[str] = []
+
+
+class OptimizationsUpdateRequest(BaseModel):
+    """Request to update optimization configs"""
+    sysctl_content: Optional[str] = Field(None, description="Sysctl config content")
+    limits_content: Optional[str] = Field(None, description="Limits config content")
+    apply: bool = Field(True, description="Apply settings after saving")

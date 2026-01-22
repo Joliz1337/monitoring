@@ -22,6 +22,7 @@ dist/
 .vscode/
 *.swp
 *.swo
+.cursor
 
 # OS
 .DS_Store
@@ -41,3 +42,22 @@ logs/
 
 # Docker
 docker-compose.override.yml
+
+# Development tools
+_tools/
+
+# Runtime generated
+panel/backend/ext/*.py
+panel/backend/ext/logs/
+
+# Build artifacts
+*.dec.tsx
+*.dec.ts
+*.dec.py
+panel/frontend/src/pages/_internal/ExtPage.tsx
+panel/frontend/src/stores/_extStore.dec.*
+panel/frontend/src/api/_ext.dec.*
+
+# Local configs
+profiles.conf
+*.local.conf

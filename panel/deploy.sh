@@ -14,6 +14,29 @@ print_warning() { echo -e "${YELLOW}[!]${NC} $1"; }
 print_error() { echo -e "${RED}[✗]${NC} $1"; }
 print_info() { echo -e "${CYAN}[i]${NC} $1"; }
 
+# Run command quietly, show full output only on error
+run_quiet() {
+    local desc="$1"
+    shift
+    local output
+    local exit_code
+    
+    output=$("$@" 2>&1)
+    exit_code=$?
+    
+    if [ $exit_code -ne 0 ]; then
+        echo ""
+        print_error "$desc - failed (exit code: $exit_code)"
+        echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo "$output"
+        echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo ""
+        return $exit_code
+    fi
+    
+    return 0
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
@@ -35,19 +58,27 @@ echo ""
 
 # ==================== Network Fix Functions ====================
 
-check_docker_hub() {
-    print_info "Checking Docker Hub availability..."
-    
+# Check Docker Hub (quiet, no logs)
+check_docker_hub_quiet() {
     if curl -fsSL --connect-timeout 10 --max-time 15 \
         "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/alpine:pull" \
         >/dev/null 2>&1; then
-        print_status "Docker Hub is accessible"
         return 0
     fi
     
     if curl -fsSL --connect-timeout 10 --max-time 15 \
         "https://registry-1.docker.io/v2/" \
         >/dev/null 2>&1; then
+        return 0
+    fi
+    
+    return 1
+}
+
+check_docker_hub() {
+    print_info "Checking Docker Hub availability..."
+    
+    if check_docker_hub_quiet; then
         print_status "Docker Hub is accessible"
         return 0
     fi
@@ -61,34 +92,32 @@ disable_ipv6() {
     
     # Check if IPv6 is already disabled in optimization config
     if [ -f /etc/sysctl.d/99-vless-tuning.conf ] && grep -q "disable_ipv6 = 1" /etc/sysctl.d/99-vless-tuning.conf; then
-        print_status "IPv6 already disabled in optimization config"
-        # Just apply the existing settings
-        sysctl -w net.ipv6.conf.all.disable_ipv6=1 2>/dev/null || true
-        sysctl -w net.ipv6.conf.default.disable_ipv6=1 2>/dev/null || true
-        sysctl -w net.ipv6.conf.lo.disable_ipv6=1 2>/dev/null || true
+        print_status "IPv6 already disabled"
+        sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null 2>&1 || true
+        sysctl -w net.ipv6.conf.default.disable_ipv6=1 >/dev/null 2>&1 || true
+        sysctl -w net.ipv6.conf.lo.disable_ipv6=1 >/dev/null 2>&1 || true
         return 0
     fi
     
-    # sysctl settings (separate file if optimizations not applied)
     cat > /etc/sysctl.d/99-disable-ipv6.conf << 'EOF'
 net.ipv6.conf.all.disable_ipv6 = 1
 net.ipv6.conf.default.disable_ipv6 = 1
 net.ipv6.conf.lo.disable_ipv6 = 1
 EOF
     
-    sysctl -p /etc/sysctl.d/99-disable-ipv6.conf 2>/dev/null || true
-    sysctl -w net.ipv6.conf.all.disable_ipv6=1 2>/dev/null || true
-    sysctl -w net.ipv6.conf.default.disable_ipv6=1 2>/dev/null || true
-    sysctl -w net.ipv6.conf.lo.disable_ipv6=1 2>/dev/null || true
+    sysctl -p /etc/sysctl.d/99-disable-ipv6.conf >/dev/null 2>&1 || true
+    sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null 2>&1 || true
+    sysctl -w net.ipv6.conf.default.disable_ipv6=1 >/dev/null 2>&1 || true
+    sysctl -w net.ipv6.conf.lo.disable_ipv6=1 >/dev/null 2>&1 || true
     
     print_status "IPv6 disabled"
 }
 
 configure_dns() {
-    print_info "Configuring DNS (1.1.1.1, 8.8.8.8)..."
+    print_info "Configuring DNS..."
     
     if [ -f /etc/resolv.conf ] && [ ! -f /etc/resolv.conf.backup ]; then
-        cp /etc/resolv.conf /etc/resolv.conf.backup
+        cp /etc/resolv.conf /etc/resolv.conf.backup 2>/dev/null || true
     fi
     
     if [ -L /etc/resolv.conf ] && readlink /etc/resolv.conf | grep -q systemd; then
@@ -98,9 +127,9 @@ configure_dns() {
 DNS=1.1.1.1 8.8.8.8 1.0.0.1 8.8.4.4
 FallbackDNS=9.9.9.9 149.112.112.112
 EOF
-        systemctl restart systemd-resolved 2>/dev/null || true
+        systemctl restart systemd-resolved >/dev/null 2>&1 || true
     else
-        chattr -i /etc/resolv.conf 2>/dev/null || true
+        chattr -i /etc/resolv.conf >/dev/null 2>&1 || true
         cat > /etc/resolv.conf << 'EOF'
 nameserver 1.1.1.1
 nameserver 8.8.8.8
@@ -158,8 +187,8 @@ EOF
 restart_docker() {
     print_info "Restarting Docker service..."
     
-    systemctl daemon-reload 2>/dev/null || true
-    systemctl restart docker 2>/dev/null || service docker restart 2>/dev/null || true
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl restart docker >/dev/null 2>&1 || service docker restart >/dev/null 2>&1 || true
     
     local max_wait=30
     local count=0
@@ -177,23 +206,11 @@ restart_docker() {
 }
 
 fix_docker_network() {
-    print_info "Attempting to fix network issues..."
-    
-    echo ""
-    print_info "Applying fix 1/3: IPv6"
+    print_info "Fixing network issues..."
     disable_ipv6
-    
-    echo ""
-    print_info "Applying fix 2/3: DNS"
     configure_dns
-    
-    echo ""
-    print_info "Applying fix 3/3: Docker mirrors"
     configure_docker_mirrors
-    
-    echo ""
     restart_docker
-    
     sleep 3
     return 0
 }
@@ -212,22 +229,22 @@ install_docker() {
     print_info "Installing Docker..."
     
     if [ -f /etc/debian_version ]; then
-        apt-get update
-        apt-get install -y ca-certificates curl gnupg
+        run_quiet "apt-get update" apt-get update -qq
+        run_quiet "installing dependencies" apt-get install -y -qq ca-certificates curl gnupg
         install -m 0755 -d /etc/apt/keyrings
-        curl -fsSL https://download.docker.com/linux/$(. /etc/os-release && echo "$ID")/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+        curl -fsSL https://download.docker.com/linux/$(. /etc/os-release && echo "$ID")/gpg 2>/dev/null | gpg --dearmor -o /etc/apt/keyrings/docker.gpg 2>/dev/null
         chmod a+r /etc/apt/keyrings/docker.gpg
         echo \
           "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$(. /etc/os-release && echo "$ID") \
           $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
-        apt-get update
-        apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+        run_quiet "apt-get update" apt-get update -qq
+        run_quiet "installing docker" apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-compose-plugin
     elif [ -f /etc/redhat-release ]; then
-        yum install -y yum-utils
-        yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
-        yum install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-        systemctl start docker
-        systemctl enable docker
+        run_quiet "installing yum-utils" yum install -y -q yum-utils
+        yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo >/dev/null 2>&1
+        run_quiet "installing docker" yum install -y -q docker-ce docker-ce-cli containerd.io docker-compose-plugin
+        systemctl start docker >/dev/null 2>&1
+        systemctl enable docker >/dev/null 2>&1
     else
         print_error "Unsupported OS. Please install Docker manually."
         exit 1
@@ -272,32 +289,25 @@ prompt_domain() {
 }
 
 setup_firewall() {
-    print_info "Configuring firewall (opening ports 80, 443)..."
+    print_info "Configuring firewall..."
     
     local firewall_configured=false
     
     # Try UFW first
     if command -v ufw &> /dev/null; then
-        print_info "Using UFW..."
-        
-        # Check if UFW was already active before we make changes
         local ufw_was_active=false
-        if ufw status | grep -q "Status: active"; then
+        if ufw status 2>/dev/null | grep -q "Status: active"; then
             ufw_was_active=true
         fi
         
-        # Add rules (they will be stored even if UFW is inactive)
-        ufw allow 22/tcp 2>/dev/null || true
-        ufw allow 80/tcp 2>/dev/null || true
-        ufw allow 443/tcp 2>/dev/null || true
+        ufw allow 22/tcp >/dev/null 2>&1 || true
+        ufw allow 80/tcp >/dev/null 2>&1 || true
+        ufw allow 443/tcp >/dev/null 2>&1 || true
         
-        # Only enable UFW if it was already active
-        # If UFW was disabled, keep it disabled - rules are added but won't be applied
         if [ "$ufw_was_active" = true ]; then
-            print_status "UFW: ports 22, 80, 443 opened (firewall active)"
+            print_status "UFW: ports 22, 80, 443 opened"
         else
             print_warning "UFW is not active - rules added but firewall remains disabled"
-            print_info "To enable firewall manually: ufw --force enable"
         fi
         
         firewall_configured=true
@@ -305,19 +315,15 @@ setup_firewall() {
     
     # Also configure iptables directly as fallback
     if command -v iptables &> /dev/null; then
-        print_info "Configuring iptables..."
+        iptables -I INPUT -p tcp --dport 80 -j ACCEPT >/dev/null 2>&1 || true
+        iptables -I INPUT -p tcp --dport 443 -j ACCEPT >/dev/null 2>&1 || true
         
-        # Accept incoming on ports 80 and 443
-        iptables -I INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null || true
-        iptables -I INPUT -p tcp --dport 443 -j ACCEPT 2>/dev/null || true
-        
-        # Save iptables rules
         if command -v netfilter-persistent &> /dev/null; then
-            netfilter-persistent save 2>/dev/null || true
+            netfilter-persistent save >/dev/null 2>&1 || true
         elif [ -f /etc/debian_version ]; then
             iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
         elif [ -f /etc/redhat-release ]; then
-            service iptables save 2>/dev/null || true
+            service iptables save >/dev/null 2>&1 || true
         fi
         
         firewall_configured=true
@@ -326,10 +332,9 @@ setup_firewall() {
     
     # Try firewalld (CentOS/RHEL)
     if command -v firewall-cmd &> /dev/null; then
-        print_info "Configuring firewalld..."
-        firewall-cmd --permanent --add-port=80/tcp 2>/dev/null || true
-        firewall-cmd --permanent --add-port=443/tcp 2>/dev/null || true
-        firewall-cmd --reload 2>/dev/null || true
+        firewall-cmd --permanent --add-port=80/tcp >/dev/null 2>&1 || true
+        firewall-cmd --permanent --add-port=443/tcp >/dev/null 2>&1 || true
+        firewall-cmd --reload >/dev/null 2>&1 || true
         firewall_configured=true
         print_status "firewalld: ports 80, 443 opened"
     fi
@@ -338,7 +343,6 @@ setup_firewall() {
         print_warning "No firewall tool found. Make sure ports 80 and 443 are open!"
     fi
     
-    # Verify port 80 is accessible
     sleep 1
     if ss -tuln 2>/dev/null | grep -q ':80 '; then
         print_warning "Port 80 is currently in use by another service"
@@ -354,13 +358,13 @@ install_certbot() {
     print_info "Installing Certbot..."
     
     if [ -f /etc/debian_version ]; then
-        apt-get update
-        apt-get install -y certbot
+        run_quiet "apt-get update" apt-get update -qq
+        run_quiet "installing certbot" apt-get install -y -qq certbot
     elif [ -f /etc/redhat-release ]; then
         if command -v dnf &> /dev/null; then
-            dnf install -y certbot
+            run_quiet "installing certbot" dnf install -y -q certbot
         else
-            yum install -y certbot
+            run_quiet "installing certbot" yum install -y -q certbot
         fi
     else
         print_error "Unsupported OS for automatic Certbot installation"
@@ -403,15 +407,10 @@ get_cert_days_remaining() {
 
 # Stop services that might use port 80
 stop_port_80_services() {
-    # Stop our containers if running
-    docker compose down 2>/dev/null || true
-    
-    # Stop common services that use port 80
-    systemctl stop nginx 2>/dev/null || true
-    systemctl stop apache2 2>/dev/null || true
-    systemctl stop httpd 2>/dev/null || true
-    
-    # Wait a moment for ports to be released
+    docker compose down >/dev/null 2>&1 || true
+    systemctl stop nginx >/dev/null 2>&1 || true
+    systemctl stop apache2 >/dev/null 2>&1 || true
+    systemctl stop httpd >/dev/null 2>&1 || true
     sleep 2
 }
 
@@ -611,26 +610,23 @@ generate_nginx_config() {
 build_and_start() {
     print_info "Building and starting containers..."
     
-    docker compose down --remove-orphans 2>/dev/null || true
+    docker compose down --remove-orphans >/dev/null 2>&1 || true
     
-    # Try to build with retry on network errors
     local max_retries=3
     local retry=0
     local build_success=false
     
     while [ $retry -lt $max_retries ]; do
-        # Check Docker Hub availability first
-        if ! check_docker_hub; then
+        if ! check_docker_hub_quiet; then
+            print_warning "Docker Hub is not accessible"
             if [ $retry -eq 0 ]; then
-                echo ""
                 fix_docker_network
-                echo ""
             fi
         fi
         
         print_info "Building containers (attempt $((retry + 1))/$max_retries)..."
         
-        if docker compose build --no-cache 2>&1; then
+        if run_quiet "docker compose build" docker compose build --no-cache; then
             build_success=true
             break
         fi
@@ -639,9 +635,7 @@ build_and_start() {
         
         if [ $retry -lt $max_retries ]; then
             print_warning "Build failed, retrying after network fix..."
-            echo ""
             fix_docker_network
-            echo ""
             sleep 5
         fi
     done
@@ -658,7 +652,7 @@ build_and_start() {
         exit 1
     fi
     
-    docker compose up -d
+    docker compose up -d >/dev/null 2>&1
     
     print_status "Containers started"
 }

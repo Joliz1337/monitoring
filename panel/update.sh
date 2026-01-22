@@ -23,95 +23,35 @@ PANEL_DIR="/opt/monitoring-panel"
 TMP_DIR="/tmp/panel-update-$$"
 TARGET_REF="${1:-main}"
 
-# GitHub mirror for Russia
+# GitHub mirror
 GITHUB_MIRROR="https://ghfast.top"
-ACTIVE_GITHUB_MIRROR=""
 
 cleanup() {
     rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT
 
-# ==================== GitHub Mirror Functions ====================
+# ==================== GitHub Clone Functions ====================
 
-test_github_access() {
-    log_info "Testing GitHub access..."
-    echo -n "  Testing GitHub (direct)... "
-    
-    if curl -fsSL --connect-timeout 10 --max-time 20 \
-        "https://raw.githubusercontent.com/Joliz1337/monitoring/main/VERSION" \
-        -o /dev/null 2>/dev/null; then
-        echo -e "${GREEN}OK${NC}"
-        return 0
-    fi
-    
-    echo -e "${RED}unavailable${NC}"
-    return 1
-}
-
-test_mirror_access() {
-    echo -n "  Testing ghfast.top... "
-    
-    if curl -fsSL --connect-timeout 10 --max-time 20 \
-        "${GITHUB_MIRROR}/https://raw.githubusercontent.com/Joliz1337/monitoring/main/VERSION" \
-        -o /dev/null 2>/dev/null; then
-        echo -e "${GREEN}OK${NC}"
-        return 0
-    fi
-    
-    echo -e "${RED}unavailable${NC}"
-    return 1
-}
-
-select_best_mirror() {
-    if test_github_access; then
-        ACTIVE_GITHUB_MIRROR=""
-        log_success "Selected: GitHub (direct)"
-        return 0
-    fi
-    
-    if test_mirror_access; then
-        ACTIVE_GITHUB_MIRROR="$GITHUB_MIRROR"
-        log_success "Selected: ghfast.top"
-        return 0
-    fi
-    
-    log_warn "All mirrors failed, will try direct GitHub anyway"
-    ACTIVE_GITHUB_MIRROR=""
-}
-
-clone_with_mirror() {
+# Clone repository: GitHub first (30s timeout), fallback to mirror
+clone_with_fallback() {
     local target_dir="$1"
     local branch="$2"
-    local repo_url
     
     rm -rf "$target_dir"
     
-    if [ -n "$ACTIVE_GITHUB_MIRROR" ]; then
-        repo_url="${ACTIVE_GITHUB_MIRROR}/https://github.com/Joliz1337/monitoring.git"
-        log_info "Downloading from ghfast.top..."
-    else
-        repo_url="https://github.com/Joliz1337/monitoring.git"
-        log_info "Downloading from GitHub (direct)..."
-    fi
-    
-    if timeout 180 git clone --depth 1 --branch "$branch" "$repo_url" "$target_dir" 2>&1; then
+    # Try direct GitHub first (30 second timeout)
+    log_info "Downloading from GitHub..."
+    if timeout 30 git clone --depth 1 --branch "$branch" "https://github.com/Joliz1337/monitoring.git" "$target_dir" 2>&1; then
         log_success "Download complete"
         return 0
     fi
     
-    # Try the other option
+    # GitHub failed, try mirror
     rm -rf "$target_dir"
+    log_warn "GitHub timeout/error, trying mirror (ghfast.top)..."
     
-    if [ -n "$ACTIVE_GITHUB_MIRROR" ]; then
-        log_warn "Mirror failed, trying direct GitHub..."
-        repo_url="https://github.com/Joliz1337/monitoring.git"
-    else
-        log_warn "GitHub failed, trying ghfast.top..."
-        repo_url="${GITHUB_MIRROR}/https://github.com/Joliz1337/monitoring.git"
-    fi
-    
-    if timeout 180 git clone --depth 1 --branch "$branch" "$repo_url" "$target_dir" 2>&1; then
+    if timeout 120 git clone --depth 1 --branch "$branch" "${GITHUB_MIRROR}/https://github.com/Joliz1337/monitoring.git" "$target_dir" 2>&1; then
         log_success "Download complete"
         return 0
     fi
@@ -161,13 +101,9 @@ if [ -f "$PANEL_DIR/backend/.env" ]; then
     log_success "backend/.env backed up"
 fi
 
-# Select best mirror
-select_best_mirror
-echo ""
-
-# Clone repository
-if ! clone_with_mirror "$TMP_DIR" "$TARGET_REF"; then
-    log_error "Failed to download repository from all mirrors"
+# Clone repository (GitHub first, then mirror fallback)
+if ! clone_with_fallback "$TMP_DIR" "$TARGET_REF"; then
+    log_error "Failed to download repository"
     exit 1
 fi
 

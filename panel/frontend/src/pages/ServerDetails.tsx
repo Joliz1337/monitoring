@@ -17,7 +17,10 @@ import {
   Zap,
   Globe,
   Layers,
-  Database
+  Database,
+  Power,
+  RotateCcw,
+  AlertTriangle
 } from 'lucide-react'
 import { proxyApi, ServerMetrics } from '../api/client'
 import { useServersStore } from '../stores/serversStore'
@@ -29,7 +32,8 @@ import MetricChart from '../components/Charts/MetricChart'
 import MultiLineChart from '../components/Charts/MultiLineChart'
 import ProcessTable from '../components/Processes/ProcessTable'
 import CpuCoresChart from '../components/Charts/CpuCoresChart'
-import { formatBytes, formatUptime, formatPercent, formatBytesPerSec, formatTimeAgo } from '../utils/format'
+import Terminal from '../components/Terminal/Terminal'
+import { formatBytes, formatUptime, formatPercent, createBitsFormatter, formatTimeAgo } from '../utils/format'
 
 function getLoadColor(percent: number): string {
   if (percent >= 80) return 'text-danger'
@@ -77,6 +81,10 @@ export default function ServerDetails() {
   const [isHistoryLoading, setIsHistoryLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [period, setPeriod] = useState('1h')
+  
+  const [powerAction, setPowerAction] = useState<'reboot' | 'shutdown' | null>(null)
+  const [isPowerActionLoading, setIsPowerActionLoading] = useState(false)
+  const [powerActionError, setPowerActionError] = useState<string | null>(null)
   
   const server = servers.find(s => s.id === Number(serverId))
   
@@ -173,6 +181,24 @@ export default function ServerDetails() {
     setIsRefreshing(false)
   }
   
+  const handlePowerAction = async () => {
+    if (!serverId || !powerAction) return
+    
+    setIsPowerActionLoading(true)
+    setPowerActionError(null)
+    
+    try {
+      const command = powerAction === 'reboot' ? 'reboot' : 'poweroff'
+      await proxyApi.executeCommand(Number(serverId), command, 30, 'sh')
+      setPowerAction(null)
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { detail?: string } } }
+      setPowerActionError(error.response?.data?.detail || t('server_details.power_action_failed'))
+    } finally {
+      setIsPowerActionLoading(false)
+    }
+  }
+  
   // Memoized chart data - must be before any conditional returns to follow React hooks rules
   const cpuHistory = useMemo(() => 
     history.map(h => ({ timestamp: h.timestamp, value: h.cpu_usage || 0 })),
@@ -207,6 +233,9 @@ export default function ServerDetails() {
       color: '#22d3ee' 
     },
   ], [history, t])
+  
+  // Memoized localized bits formatter
+  const bitsFormatter = useMemo(() => createBitsFormatter(t), [t])
   
   if (isLoading) {
     return (
@@ -307,6 +336,27 @@ export default function ServerDetails() {
               <RefreshCw className="w-4 h-4" />
             </motion.div>
           </motion.button>
+          
+          {/* Power control buttons */}
+          <motion.button
+            onClick={() => setPowerAction('reboot')}
+            className="btn btn-secondary"
+            whileHover={{ scale: 1.02 }}
+            whileTap={{ scale: 0.98 }}
+            title={t('server_details.reboot')}
+          >
+            <RotateCcw className="w-4 h-4" />
+          </motion.button>
+          <motion.button
+            onClick={() => setPowerAction('shutdown')}
+            className="btn btn-secondary text-danger hover:bg-danger/10"
+            whileHover={{ scale: 1.02 }}
+            whileTap={{ scale: 0.98 }}
+            title={t('server_details.shutdown')}
+          >
+            <Power className="w-4 h-4" />
+          </motion.button>
+          
           <Link to={`/${uid}/server/${serverId}/traffic`}>
             <motion.div
               className="btn btn-secondary"
@@ -403,18 +453,18 @@ export default function ServerDetails() {
               >
                 <div className="flex items-center gap-2 mb-3">
                   <Clock className="w-5 h-5 text-accent-500" />
-                  <span className="text-sm text-dark-400">{t('common.uptime')}</span>
+                  <span className="text-base text-dark-400">{t('common.uptime')}</span>
                 </div>
                 <motion.div 
-                  className="text-2xl font-bold font-mono text-dark-100"
+                  className="text-4xl font-bold font-mono text-dark-100"
                   initial={{ scale: 0.9 }}
                   animate={{ scale: 1 }}
                   transition={{ delay: 0.4, type: 'spring' }}
                 >
                   {formatUptime(metrics.system.uptime_seconds)}
                 </motion.div>
-                <p className="text-xs text-dark-500 mt-4 flex items-center gap-2">
-                  <Layers className="w-3.5 h-3.5" />
+                <p className="text-sm text-dark-400 mt-4 flex items-center gap-2 font-medium">
+                  <Layers className="w-4 h-4" />
                   {metrics.processes.total} proc • TCP: {metrics.system.connections_detailed?.tcp.total ?? metrics.system.connections.established} • UDP: {metrics.system.connections_detailed?.udp.total ?? 0}
                 </p>
               </motion.div>
@@ -476,7 +526,7 @@ export default function ServerDetails() {
               >
                 <MultiLineChart
                   series={networkHistory}
-                  formatValue={formatBytesPerSec}
+                  formatValue={bitsFormatter}
                   height={250}
                   period={period}
                 />
@@ -512,7 +562,7 @@ export default function ServerDetails() {
                   <InfoRow label={t('server_details.os')} value={metrics.system.os} />
                   <InfoRow label={t('server_details.kernel')} value={metrics.system.kernel} mono />
                   <InfoRow label={t('server_details.architecture')} value={metrics.system.architecture} />
-                  <InfoRow label={t('server_details.cpu_model')} value={metrics.cpu.model} truncate />
+                  <InfoRow label={t('server_details.cpu_model')} value={metrics.cpu.model} />
                   {metrics.timezone && (
                     <InfoRow 
                       label={t('server_details.timezone')} 
@@ -543,6 +593,92 @@ export default function ServerDetails() {
                 </div>
               </div>
             </motion.div>
+            
+            {/* Terminal section */}
+            <motion.div variants={itemVariants} className="mt-6">
+              <Terminal serverId={Number(serverId)} />
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+      
+      {/* Power action confirmation modal */}
+      <AnimatePresence>
+        {powerAction && (
+          <motion.div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => !isPowerActionLoading && setPowerAction(null)}
+          >
+            <motion.div
+              className="bg-dark-800 rounded-2xl p-6 max-w-md w-full mx-4 border border-dark-700"
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center gap-3 mb-4">
+                <div className={`p-2 rounded-xl ${powerAction === 'shutdown' ? 'bg-danger/20' : 'bg-warning/20'}`}>
+                  <AlertTriangle className={`w-6 h-6 ${powerAction === 'shutdown' ? 'text-danger' : 'text-warning'}`} />
+                </div>
+                <h3 className="text-lg font-semibold text-dark-100">
+                  {powerAction === 'reboot' ? t('server_details.reboot') : t('server_details.shutdown')}
+                </h3>
+              </div>
+              
+              <p className="text-dark-300 mb-6">
+                {powerAction === 'reboot' 
+                  ? t('server_details.confirm_reboot')
+                  : t('server_details.confirm_shutdown')
+                }
+              </p>
+              
+              {powerActionError && (
+                <div className="mb-4 p-3 bg-danger/10 border border-danger/30 rounded-lg text-danger text-sm">
+                  {powerActionError}
+                </div>
+              )}
+              
+              <div className="flex justify-end gap-3">
+                <motion.button
+                  className="btn btn-secondary"
+                  onClick={() => setPowerAction(null)}
+                  disabled={isPowerActionLoading}
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
+                >
+                  {t('common.cancel')}
+                </motion.button>
+                <motion.button
+                  className={`btn ${powerAction === 'shutdown' ? 'bg-danger hover:bg-danger/80' : 'bg-warning hover:bg-warning/80'} text-white`}
+                  onClick={handlePowerAction}
+                  disabled={isPowerActionLoading}
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
+                >
+                  {isPowerActionLoading ? (
+                    <motion.div
+                      animate={{ rotate: 360 }}
+                      transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}
+                    >
+                      <RefreshCw className="w-4 h-4" />
+                    </motion.div>
+                  ) : powerAction === 'reboot' ? (
+                    <>
+                      <RotateCcw className="w-4 h-4" />
+                      {t('server_details.reboot')}
+                    </>
+                  ) : (
+                    <>
+                      <Power className="w-4 h-4" />
+                      {t('server_details.shutdown')}
+                    </>
+                  )}
+                </motion.button>
+              </div>
+            </motion.div>
           </motion.div>
         )}
       </AnimatePresence>
@@ -570,18 +706,18 @@ function MetricCard({ icon, label, value, subtext, delay, showCores, perCpuPerce
     >
       <div className="flex items-center gap-2 mb-3">
         <span className="text-accent-500">{icon}</span>
-        <span className="text-sm text-dark-400">{label}</span>
+        <span className="text-base text-dark-400">{label}</span>
       </div>
       <motion.div 
-        className={`text-2xl font-bold font-mono ${getLoadColor(value)}`}
+        className={`text-4xl font-bold font-mono ${getLoadColor(value)}`}
         initial={{ scale: 0.9 }}
         animate={{ scale: 1 }}
         transition={{ delay: delay + 0.1, type: 'spring' }}
       >
         {formatPercent(value)}
       </motion.div>
-      <ProgressBar value={value} size="sm" className="mt-2" animated />
-      <p className="text-xs text-dark-500 mt-2">{subtext}</p>
+      <ProgressBar value={value} size="md" className="mt-3" animated />
+      <p className="text-sm text-dark-400 mt-3 font-medium">{subtext}</p>
       
       {showCores && perCpuPercent && (
         <div className="mt-4 pt-4 border-t border-dark-700/50">
@@ -643,22 +779,18 @@ interface InfoRowProps {
   label: string
   value: string
   mono?: boolean
-  truncate?: boolean
 }
 
-function InfoRow({ label, value, mono, truncate }: InfoRowProps) {
+function InfoRow({ label, value, mono }: InfoRowProps) {
   return (
     <motion.div 
-      className="flex justify-between items-center"
+      className="flex justify-between items-start gap-4"
       initial={{ opacity: 0, x: -10 }}
       animate={{ opacity: 1, x: 0 }}
       transition={{ duration: 0.3 }}
     >
-      <span className="text-dark-400">{label}</span>
-      <span 
-        className={`text-dark-200 ${mono ? 'font-mono' : ''} ${truncate ? 'truncate ml-4 max-w-[200px]' : ''}`}
-        title={truncate ? value : undefined}
-      >
+      <span className="text-dark-400 flex-shrink-0">{label}</span>
+      <span className={`text-dark-200 text-right break-words ${mono ? 'font-mono' : ''}`}>
         {value}
       </span>
     </motion.div>

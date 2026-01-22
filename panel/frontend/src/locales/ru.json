@@ -49,6 +49,18 @@
     "server": "Сервер",
     "updates": "Обновления"
   },
+  "units": {
+    "bps": "бит/с",
+    "kbps": "Кбит/с",
+    "mbps": "Мбит/с",
+    "gbps": "Гбит/с",
+    "tbps": "Тбит/с",
+    "b_per_s": "Б/с",
+    "kb_per_s": "КБ/с",
+    "mb_per_s": "МБ/с",
+    "gb_per_s": "ГБ/с",
+    "tb_per_s": "ТБ/с"
+  },
   "app": {
     "panel_not_configured": "Панель не настроена"
   },
@@ -68,6 +80,7 @@
     "subtitle_other": "{{count}} серверов",
     "online_count": "{{count}} онлайн",
     "offline_count": "{{count}} оффлайн",
+    "disabled_count": "{{count}} отключён",
     "no_servers": "Серверов пока нет",
     "add_first": "Добавьте первый сервер для начала мониторинга",
     "grid_view": "Сетка",
@@ -102,7 +115,10 @@
     "no_servers": "Серверы не добавлены",
     "add_first_server": "Добавить первый сервер",
     "failed_add": "Не удалось добавить сервер",
-    "failed_update": "Не удалось обновить сервер"
+    "failed_update": "Не удалось обновить сервер",
+    "monitoring_enabled": "Мониторинг включён",
+    "monitoring_disabled": "Мониторинг отключён",
+    "disabled": "Отключён"
   },
   "server_details": {
     "loading": "Загрузка данных сервера...",
@@ -129,7 +145,17 @@
     "tcp_connections": "TCP соединения",
     "tcp_states": "Состояния TCP",
     "udp_sockets": "UDP сокеты",
-    "connections": "Соединения"
+    "connections": "Соединения",
+    "power_control": "Управление питанием",
+    "reboot": "Перезагрузить",
+    "shutdown": "Выключить",
+    "rebooting": "Перезагрузка...",
+    "shutting_down": "Выключение...",
+    "confirm_reboot": "Вы уверены, что хотите перезагрузить этот сервер?",
+    "confirm_shutdown": "Вы уверены, что хотите выключить этот сервер? Для включения потребуется физический доступ или IPMI.",
+    "reboot_initiated": "Перезагрузка запущена",
+    "shutdown_initiated": "Выключение запущено",
+    "power_action_failed": "Не удалось выполнить действие"
   },
   "settings": {
     "title": "Настройки",
@@ -273,6 +299,8 @@
     "renew_success": "Сертификат успешно продлён",
     "renew_error": "Ошибка продления сертификата",
     "renewal_failed": "Не удалось продлить",
+    "renewed_domains": "Продлённые домены",
+    "certs_renewed": "сертификатов продлено",
     "certificate_files": "Файлы сертификата",
     "loading": "Загрузка данных HAProxy...",
     "listen_port": "Порт прослушивания",
@@ -321,6 +349,32 @@
     "docker_warning_title": "Ограничение Docker",
     "docker_warning_text": "Оптимизации системы (sysctl, limits.conf, systemd) требуют применения на хостовой машине, а не внутри контейнера. Выполните команды вручную на сервере или используйте скрипт deploy.sh."
   },
+  "optimizations": {
+    "title": "Системные оптимизации",
+    "applied": "Применены",
+    "not_applied": "Не применены",
+    "apply_default": "Применить стандартные",
+    "confirm_apply": "Применить стандартные системные оптимизации? Будут настроены BBR, параметры TCP/сети и лимиты файловых дескрипторов.",
+    "failed_fetch": "Не удалось получить статус оптимизаций",
+    "failed_apply": "Не удалось применить оптимизации",
+    "failed_save": "Не удалось сохранить конфиг",
+    "save_apply": "Сохранить и применить",
+    "current_values": "Текущие значения",
+    "tcp_congestion": "TCP Congestion",
+    "ipv6": "IPv6",
+    "enabled": "Включён",
+    "disabled": "Отключён",
+    "file_max": "File Max",
+    "somaxconn": "Somaxconn",
+    "tcp_tw_reuse": "TW Reuse",
+    "tcp_fastopen": "Fast Open",
+    "sysctl_config": "Конфиг Sysctl",
+    "limits_config": "Конфиг Limits",
+    "exists": "Существует",
+    "not_exists": "Не существует",
+    "no_config": "Файл конфигурации не найден",
+    "click_to_load": "Нажмите для загрузки статуса оптимизаций"
+  },
   "traffic": {
     "title": "Статистика трафика",
     "loading": "Загрузка данных трафика...",
@@ -352,7 +406,8 @@
     "upload": "Отправка",
     "failed_fetch": "Не удалось загрузить данные трафика",
     "failed_add_port": "Не удалось добавить порт",
-    "failed_remove_port": "Не удалось удалить порт"
+    "failed_remove_port": "Не удалось удалить порт",
+    "network_speed": "Скорость сети"
   },
   "updates": {
     "title": "Обновления",
@@ -380,7 +435,10 @@
     "all_up_to_date": "Все компоненты актуальны",
     "all_up_to_date_desc": "Панель и все ноды работают на последних версиях. Обновлений не требуется.",
     "duration_title": "Длительность обновления",
-    "duration_text": "Обновление может занять от 5 до 10 минут. Не закрывайте страницу и дождитесь завершения процесса."
+    "duration_text": "Обновление может занять от 5 до 10 минут. Не закрывайте страницу и дождитесь завершения процесса.",
+    "optimizations": "Системные оптимизации",
+    "update_all_optimizations": "Обновить все",
+    "not_installed": "Не установлено"
   },
   "bulk_actions": {
     "title": "Массовые действия",
@@ -391,16 +449,23 @@
     "selected_count": "Выбрано: {{count}}",
     "no_servers_selected": "Выберите хотя бы один сервер",
     "no_servers": "Серверы не добавлены",
+    "haproxy_service": "HAProxy сервис",
     "haproxy_rules": "Правила HAProxy",
     "traffic_ports": "Отслеживание портов",
     "firewall_rules": "Правила фаервола",
     "create": "Создать",
     "delete": "Удалить",
+    "start": "Запустить",
+    "stop": "Остановить",
     "execute": "Выполнить",
     "executing": "Выполнение...",
     "results": "Результаты",
     "success": "Успешно",
     "failed": "Ошибка",
+    "start_haproxy_title": "Запуск HAProxy",
+    "start_haproxy_hint": "HAProxy будет запущен на всех выбранных серверах",
+    "stop_haproxy_title": "Остановка HAProxy",
+    "stop_haproxy_hint": "HAProxy будет остановлен на всех выбранных серверах. Все активные соединения будут закрыты.",
     "rule_name": "Имя правила",
     "rule_type": "Тип правила",
     "listen_port": "Порт прослушивания",
@@ -421,5 +486,21 @@
     "delete_traffic_hint": "Введите порт для удаления из отслеживания",
     "delete_firewall_hint": "Будут удалены все правила для указанного порта",
     "clear_results": "Очистить результаты"
+  },
+  "terminal": {
+    "title": "Терминал",
+    "placeholder": "Введите команду...",
+    "execute": "Выполнить",
+    "running": "Выполняется...",
+    "clear": "Очистить",
+    "cancel": "Отмена",
+    "history": "История",
+    "clear_history": "Очистить историю",
+    "empty_hint": "Введите команду и нажмите Enter или кнопку Выполнить",
+    "command_completed": "Команда выполнена",
+    "command_failed": "Команда завершилась с ошибкой",
+    "command_cancelled": "Команда отменена",
+    "connection_error": "Ошибка подключения",
+    "timeout_error": "Превышено время ожидания"
   }
 }

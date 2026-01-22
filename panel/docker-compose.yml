@@ -34,6 +34,8 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      args:
+        - EXT_KEY=${EXT_KEY:-}
     container_name: panel-frontend
     restart: unless-stopped
     depends_on:
@@ -71,6 +73,7 @@ services:
       - BAN_DURATION_SECONDS=${BAN_DURATION_SECONDS:-900}
       - DATABASE_URL=sqlite+aiosqlite:///./data/panel.db
       - DOMAIN=${DOMAIN}
+      - EXT_KEY=${EXT_KEY:-}
     volumes:
       - panel-data:/app/data
       # For update/renew scripts: access to project directory and docker

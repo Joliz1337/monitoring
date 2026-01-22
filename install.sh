@@ -33,8 +33,6 @@ LANG_CODE="en"
 # GitHub mirror (ghfast.top proxy)
 GITHUB_MIRROR="https://ghfast.top"
 
-# Selected mirror URL (empty = direct GitHub, "checked" = already tested)
-ACTIVE_GITHUB_MIRROR=""
 
 # Docker mirror list
 DOCKER_MIRRORS=(
@@ -223,98 +221,81 @@ log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
-# ==================== GitHub Mirror Functions ====================
-
-# Test if GitHub is accessible
-test_github_access() {
-    log_info "$(msg testing_mirrors)"
-    echo -n "  Testing GitHub (direct)... "
+# Run command quietly, show full output only on error
+# Usage: run_quiet "description" command arg1 arg2 ...
+run_quiet() {
+    local desc="$1"
+    shift
+    local output
+    local exit_code
     
-    if curl -fsSL --connect-timeout 10 --max-time 20 \
-        "https://raw.githubusercontent.com/Joliz1337/monitoring/main/VERSION" \
-        -o /dev/null 2>/dev/null; then
-        echo -e "${GREEN}OK${NC}"
-        return 0
+    output=$("$@" 2>&1)
+    exit_code=$?
+    
+    if [ $exit_code -ne 0 ]; then
+        echo ""
+        log_error "$desc - failed (exit code: $exit_code)"
+        echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo "$output"
+        echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo ""
+        return $exit_code
     fi
     
-    echo -e "${RED}$(msg mirror_failed)${NC}"
-    return 1
+    return 0
 }
 
-# Test if mirror is accessible
-test_mirror_access() {
-    echo -n "  Testing ghfast.top... "
+# Run command quietly with timeout, show full output only on error
+# Usage: run_quiet_timeout timeout_sec "description" command arg1 arg2 ...
+run_quiet_timeout() {
+    local timeout_sec="$1"
+    local desc="$2"
+    shift 2
+    local output
+    local exit_code
     
-    if curl -fsSL --connect-timeout 10 --max-time 20 \
-        "${GITHUB_MIRROR}/https://raw.githubusercontent.com/Joliz1337/monitoring/main/VERSION" \
-        -o /dev/null 2>/dev/null; then
-        echo -e "${GREEN}OK${NC}"
-        return 0
+    output=$(timeout "$timeout_sec" "$@" 2>&1)
+    exit_code=$?
+    
+    if [ $exit_code -ne 0 ]; then
+        if [ $exit_code -eq 124 ]; then
+            log_warn "$desc - timeout (${timeout_sec}s)"
+        else
+            echo ""
+            log_error "$desc - failed (exit code: $exit_code)"
+            echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+            echo "$output"
+            echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+            echo ""
+        fi
+        return $exit_code
     fi
     
-    echo -e "${RED}$(msg mirror_failed)${NC}"
-    return 1
+    return 0
 }
 
-# Select GitHub or mirror based on availability
-select_best_mirror() {
-    # First try direct GitHub
-    if test_github_access; then
-        ACTIVE_GITHUB_MIRROR=""
-        log_success "$(msg mirror_selected): GitHub (direct)"
-        return 0
-    fi
-    
-    # GitHub not accessible, try mirror
-    if test_mirror_access; then
-        ACTIVE_GITHUB_MIRROR="$GITHUB_MIRROR"
-        log_success "$(msg mirror_selected): ghfast.top"
-        return 0
-    fi
-    
-    # Both failed, will try direct GitHub anyway
-    log_warn "$(msg all_mirrors_failed)"
-    ACTIVE_GITHUB_MIRROR=""
-}
+# ==================== GitHub Clone Functions ====================
 
-# Clone repository using selected mirror with fallback
-clone_repo_with_mirror() {
+# Clone repository: GitHub first (30s timeout), fallback to mirror
+clone_repo_with_fallback() {
     local target_dir="$1"
     local branch="${2:-main}"
-    local repo_url
     
     rm -rf "$target_dir"
     
-    # Try with selected mirror (or direct GitHub if ACTIVE_GITHUB_MIRROR is empty)
-    if [ -n "$ACTIVE_GITHUB_MIRROR" ]; then
-        repo_url="${ACTIVE_GITHUB_MIRROR}/https://github.com/Joliz1337/monitoring.git"
-        log_info "Downloading from ghfast.top..."
-    else
-        repo_url="https://github.com/Joliz1337/monitoring.git"
-        log_info "Downloading from GitHub (direct)..."
-    fi
-    
-    if timeout 180 git clone --depth 1 --branch "$branch" "$repo_url" "$target_dir" 2>&1; then
+    # Try direct GitHub first (30 second timeout)
+    log_info "$(msg downloading_repo) (GitHub)..."
+    if run_quiet_timeout 30 "git clone (GitHub)" git clone --depth 1 --branch "$branch" "https://github.com/Joliz1337/monitoring.git" "$target_dir"; then
         log_success "$(msg repo_downloaded)"
         return 0
     fi
     
-    # First attempt failed, try the other option
+    # GitHub failed, try mirror
     rm -rf "$target_dir"
+    log_warn "$(msg download_slow)"
+    log_info "$(msg downloading_repo) (mirror)..."
     
-    if [ -n "$ACTIVE_GITHUB_MIRROR" ]; then
-        # Mirror failed, try direct GitHub
-        log_warn "$(msg download_slow)"
-        repo_url="https://github.com/Joliz1337/monitoring.git"
-        log_info "Trying GitHub (direct)..."
-    else
-        # Direct GitHub failed, try mirror
-        log_warn "$(msg download_slow)"
-        repo_url="${GITHUB_MIRROR}/https://github.com/Joliz1337/monitoring.git"
-        log_info "Trying ghfast.top..."
-    fi
-    
-    if timeout 180 git clone --depth 1 --branch "$branch" "$repo_url" "$target_dir" 2>&1; then
+    if run_quiet_timeout 120 "git clone (mirror)" git clone --depth 1 --branch "$branch" "${GITHUB_MIRROR}/https://github.com/Joliz1337/monitoring.git" "$target_dir"; then
         log_success "$(msg repo_downloaded)"
         return 0
     fi
@@ -325,7 +306,7 @@ clone_repo_with_mirror() {
 
 # ==================== Network Fix Functions ====================
 
-# Check if Docker Hub is accessible
+# Check if Docker Hub is accessible (with logs)
 check_docker_hub() {
     log_info "$(msg checking_docker_network)"
     
@@ -349,10 +330,27 @@ check_docker_hub() {
     return 1
 }
 
-# Check general internet connectivity
-check_connectivity() {
-    log_info "$(msg checking_connectivity)"
+# Check if Docker Hub is accessible (quiet, no logs)
+check_docker_hub_quiet() {
+    # Try to reach Docker Hub auth endpoint
+    if curl -fsSL --connect-timeout 10 --max-time 15 \
+        "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/alpine:pull" \
+        >/dev/null 2>&1; then
+        return 0
+    fi
     
+    # Try alternative check - ping registry
+    if curl -fsSL --connect-timeout 10 --max-time 15 \
+        "https://registry-1.docker.io/v2/" \
+        >/dev/null 2>&1; then
+        return 0
+    fi
+    
+    return 1
+}
+
+# Check general internet connectivity (quiet version for internal use)
+check_connectivity_quiet() {
     local test_urls=(
         "https://1.1.1.1"
         "https://8.8.8.8"
@@ -361,10 +359,21 @@ check_connectivity() {
     
     for url in "${test_urls[@]}"; do
         if curl -fsSL --connect-timeout 5 --max-time 10 "$url" >/dev/null 2>&1; then
-            log_success "$(msg connectivity_ok)"
             return 0
         fi
     done
+    
+    return 1
+}
+
+# Check general internet connectivity (with logs)
+check_connectivity() {
+    log_info "$(msg checking_connectivity)"
+    
+    if check_connectivity_quiet; then
+        log_success "$(msg connectivity_ok)"
+        return 0
+    fi
     
     log_error "$(msg connectivity_failed)"
     return 1
@@ -376,11 +385,11 @@ disable_ipv6() {
     
     # Check if IPv6 is already disabled in optimization config
     if [ -f /etc/sysctl.d/99-vless-tuning.conf ] && grep -q "disable_ipv6 = 1" /etc/sysctl.d/99-vless-tuning.conf; then
-        log_success "IPv6 already disabled in optimization config"
-        # Just apply the existing settings
-        sysctl -w net.ipv6.conf.all.disable_ipv6=1 2>/dev/null || true
-        sysctl -w net.ipv6.conf.default.disable_ipv6=1 2>/dev/null || true
-        sysctl -w net.ipv6.conf.lo.disable_ipv6=1 2>/dev/null || true
+        log_success "IPv6 already disabled"
+        # Just apply the existing settings quietly
+        sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null 2>&1 || true
+        sysctl -w net.ipv6.conf.default.disable_ipv6=1 >/dev/null 2>&1 || true
+        sysctl -w net.ipv6.conf.lo.disable_ipv6=1 >/dev/null 2>&1 || true
         return 0
     fi
     
@@ -391,13 +400,13 @@ net.ipv6.conf.default.disable_ipv6 = 1
 net.ipv6.conf.lo.disable_ipv6 = 1
 EOF
     
-    # Apply immediately
-    sysctl -p /etc/sysctl.d/99-disable-ipv6.conf 2>/dev/null || true
+    # Apply immediately (quietly)
+    sysctl -p /etc/sysctl.d/99-disable-ipv6.conf >/dev/null 2>&1 || true
     
     # Also apply directly in case sysctl.d is not read
-    sysctl -w net.ipv6.conf.all.disable_ipv6=1 2>/dev/null || true
-    sysctl -w net.ipv6.conf.default.disable_ipv6=1 2>/dev/null || true
-    sysctl -w net.ipv6.conf.lo.disable_ipv6=1 2>/dev/null || true
+    sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null 2>&1 || true
+    sysctl -w net.ipv6.conf.default.disable_ipv6=1 >/dev/null 2>&1 || true
+    sysctl -w net.ipv6.conf.lo.disable_ipv6=1 >/dev/null 2>&1 || true
     
     log_success "$(msg ipv6_disabled)"
 }
@@ -408,7 +417,7 @@ configure_dns() {
     
     # Backup existing resolv.conf
     if [ -f /etc/resolv.conf ] && [ ! -f /etc/resolv.conf.backup ]; then
-        cp /etc/resolv.conf /etc/resolv.conf.backup
+        cp /etc/resolv.conf /etc/resolv.conf.backup 2>/dev/null || true
     fi
     
     # Check if resolv.conf is managed by systemd-resolved
@@ -420,11 +429,11 @@ configure_dns() {
 DNS=1.1.1.1 8.8.8.8 1.0.0.1 8.8.4.4
 FallbackDNS=9.9.9.9 149.112.112.112
 EOF
-        systemctl restart systemd-resolved 2>/dev/null || true
+        systemctl restart systemd-resolved >/dev/null 2>&1 || true
     else
         # Direct modification of resolv.conf
         # Remove immutable attribute if set
-        chattr -i /etc/resolv.conf 2>/dev/null || true
+        chattr -i /etc/resolv.conf >/dev/null 2>&1 || true
         
         cat > /etc/resolv.conf << 'EOF'
 nameserver 1.1.1.1
@@ -490,8 +499,8 @@ EOF
 restart_docker() {
     log_info "$(msg restarting_docker)"
     
-    systemctl daemon-reload 2>/dev/null || true
-    systemctl restart docker 2>/dev/null || service docker restart 2>/dev/null || true
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl restart docker >/dev/null 2>&1 || service docker restart >/dev/null 2>&1 || true
     
     # Wait for Docker to be ready
     local max_wait=30
@@ -513,28 +522,16 @@ restart_docker() {
 fix_docker_network() {
     log_info "$(msg fixing_docker_network)"
     
-    local fixes_applied=0
-    
     # Fix 1: Disable IPv6
-    echo ""
-    log_info "$(msg applying_fix) 1/3: IPv6"
     disable_ipv6
-    fixes_applied=$((fixes_applied + 1))
     
     # Fix 2: Configure DNS
-    echo ""
-    log_info "$(msg applying_fix) 2/3: DNS"
     configure_dns
-    fixes_applied=$((fixes_applied + 1))
     
     # Fix 3: Configure Docker mirrors
-    echo ""
-    log_info "$(msg applying_fix) 3/3: Docker mirrors"
     configure_docker_mirrors
-    fixes_applied=$((fixes_applied + 1))
     
     # Restart Docker to apply changes
-    echo ""
     restart_docker
     
     # Wait a bit for network to stabilize
@@ -552,24 +549,20 @@ docker_build_with_retry() {
     cd "$build_dir"
     
     while [ $retry -lt $max_retries ]; do
-        log_info "$(msg checking_docker_network)"
-        
-        # First check if Docker Hub is accessible
-        if ! check_docker_hub; then
+        # First check if Docker Hub is accessible (quietly)
+        if ! check_docker_hub_quiet; then
             log_warn "$(msg docker_network_error)"
             
             if [ $retry -eq 0 ]; then
-                echo ""
                 log_info "$(msg fixing_docker_network)"
                 fix_docker_network
-                echo ""
             fi
         fi
         
         # Try to build
         log_info "Building containers (attempt $((retry + 1))/$max_retries)..."
         
-        if docker compose build --no-cache 2>&1; then
+        if run_quiet "docker compose build" docker compose build --no-cache; then
             log_success "$(msg build_success)"
             return 0
         fi
@@ -579,7 +572,6 @@ docker_build_with_retry() {
         if [ $retry -lt $max_retries ]; then
             log_warn "$(msg build_failed)"
             log_info "$(msg retrying_build)"
-            echo ""
             
             # Apply additional fixes on subsequent retries
             if [ $retry -eq 1 ]; then
@@ -616,13 +608,14 @@ check_root() {
 check_git() {
     if ! command -v git &> /dev/null; then
         log_info "$(msg installing_git)"
-        apt-get update && apt-get install -y git
+        run_quiet "apt-get update" apt-get update -qq
+        run_quiet "apt-get install git" apt-get install -y -qq git
     fi
 }
 
 clone_repo() {
     log_info "$(msg downloading_repo)"
-    clone_repo_with_mirror "$TMP_DIR" "main"
+    clone_repo_with_fallback "$TMP_DIR" "main"
 }
 
 cleanup() {
@@ -668,221 +661,136 @@ apply_system_optimizations() {
     log_info "$(msg optimizing_system)"
     
     # Remove old separate IPv6 config if exists (now integrated into main config)
-    rm -f /etc/sysctl.d/99-disable-ipv6.conf 2>/dev/null || true
-    
-    # sysctl config for VLESS+Reality VPN, gaming stability, anti-DDoS
-    cat > /etc/sysctl.d/99-vless-tuning.conf << 'EOF'
-# =============================================================================
-# System optimization for VLESS+Reality VPN v2.0
-# - Anti-bufferbloat (low jitter for gaming)
-# - High connection limits (no bottlenecks)
-# - Fast dead connection cleanup
-# - Gaming stability (low latency, no drops)
-# - Enhanced anti-DDoS protection
-# =============================================================================
-
-# --- Disable IPv6 (improves stability, reduces attack surface) ---
-net.ipv6.conf.all.disable_ipv6 = 1
-net.ipv6.conf.default.disable_ipv6 = 1
-net.ipv6.conf.lo.disable_ipv6 = 1
-
-# --- BBR + fq_codel (best combo for low latency + anti-bufferbloat) ---
-net.ipv4.tcp_congestion_control = bbr
-net.core.default_qdisc = fq_codel
-
-# --- File Descriptors (massive limits) ---
-fs.file-max = 10485760
-fs.nr_open = 10485760
-
-# --- Socket Buffers (OPTIMIZED for low jitter) ---
-# Key insight: huge buffers cause bufferbloat (packets queue up = latency spikes)
-# These values balance throughput with low latency for gaming/VoIP
-net.core.rmem_default = 262144
-net.core.wmem_default = 262144
-net.core.rmem_max = 16777216
-net.core.wmem_max = 16777216
-net.core.optmem_max = 65536
-
-# TCP buffers: min/default/max - optimized for 1Gbps with low latency
-# Max 16MB prevents bufferbloat while allowing high throughput
-net.ipv4.tcp_rmem = 4096 131072 16777216
-net.ipv4.tcp_wmem = 4096 65536 16777216
-net.ipv4.tcp_mem = 786432 1048576 1572864
-
-# UDP buffers (important for gaming/VoIP) - larger for game packets
-net.ipv4.udp_rmem_min = 16384
-net.ipv4.udp_wmem_min = 16384
-net.ipv4.udp_mem = 65536 131072 262144
-
-# --- Connection Queues (high limits) ---
-net.core.somaxconn = 65535
-net.ipv4.tcp_max_syn_backlog = 65535
-net.core.netdev_max_backlog = 50000
-net.core.netdev_budget = 50000
-net.core.netdev_budget_usecs = 8000
-
-# --- Busy Polling (reduces latency for network packets) ---
-# Disabled by default - can increase CPU on weak VPS
-# Uncomment if you have spare CPU and need lowest latency:
-# net.core.busy_read = 50
-# net.core.busy_poll = 50
-
-# --- TCP Performance (gaming + VPN optimized) ---
-net.ipv4.tcp_fastopen = 3
-net.ipv4.tcp_slow_start_after_idle = 0
-net.ipv4.tcp_mtu_probing = 1
-net.ipv4.tcp_timestamps = 1
-net.ipv4.tcp_sack = 1
-net.ipv4.tcp_dsack = 1
-net.ipv4.tcp_window_scaling = 1
-net.ipv4.tcp_adv_win_scale = 1
-net.ipv4.tcp_moderate_rcvbuf = 1
-net.ipv4.tcp_no_metrics_save = 1
-
-# ECN: Explicit Congestion Notification (helps prevent packet loss)
-# Value 2 = server-side only (safe - responds to ECN but doesn't initiate)
-# Some ISPs/routers incorrectly drop ECN=1 packets, so 2 is safer
-net.ipv4.tcp_ecn = 2
-net.ipv4.tcp_ecn_fallback = 1
-
-net.ipv4.tcp_frto = 2
-
-# --- TCP Retries (balanced for stability) ---
-net.ipv4.tcp_retries1 = 3
-net.ipv4.tcp_retries2 = 8
-
-# --- TIME-WAIT (fast cleanup, huge limits) ---
-net.ipv4.tcp_max_tw_buckets = 2000000
-net.ipv4.tcp_tw_reuse = 1
-net.ipv4.ip_local_port_range = 1024 65535
-
-# --- Orphaned Connections (moderate - don't break VPN) ---
-net.ipv4.tcp_max_orphans = 524288
-net.ipv4.tcp_orphan_retries = 2
-
-# --- Keepalive (detect dead connections faster) ---
-net.ipv4.tcp_keepalive_time = 60
-net.ipv4.tcp_keepalive_probes = 5
-net.ipv4.tcp_keepalive_intvl = 10
-
-# --- Fast Close of Dead Connections ---
-net.ipv4.tcp_fin_timeout = 10
-
-# --- Anti-DDoS: SYN Flood Protection ---
-net.ipv4.tcp_syncookies = 1
-net.ipv4.tcp_syn_retries = 2
-net.ipv4.tcp_synack_retries = 2
-net.ipv4.tcp_rfc1337 = 1
-net.ipv4.tcp_abort_on_overflow = 0
-net.ipv4.tcp_max_syn_backlog = 65535
-
-# --- Anti-DDoS: IP Spoofing Protection ---
-net.ipv4.conf.all.rp_filter = 1
-net.ipv4.conf.default.rp_filter = 1
-net.ipv4.conf.all.log_martians = 0
-net.ipv4.conf.default.log_martians = 0
-
-# --- Anti-DDoS: ICMP Protection ---
-net.ipv4.icmp_echo_ignore_broadcasts = 1
-net.ipv4.icmp_ignore_bogus_error_responses = 1
-net.ipv4.icmp_echo_ignore_all = 0
-net.ipv4.icmp_ratelimit = 1000
-net.ipv4.icmp_ratemask = 6168
-
-# --- Anti-DDoS: Redirect Protection ---
-net.ipv4.conf.all.accept_redirects = 0
-net.ipv4.conf.default.accept_redirects = 0
-net.ipv4.conf.all.send_redirects = 0
-net.ipv4.conf.default.send_redirects = 0
-net.ipv4.conf.all.secure_redirects = 0
-net.ipv4.conf.default.secure_redirects = 0
-net.ipv4.conf.all.accept_source_route = 0
-net.ipv4.conf.default.accept_source_route = 0
-
-# --- Anti-DDoS: IGMP/Multicast limits ---
-net.ipv4.igmp_max_memberships = 256
-net.ipv4.igmp_max_msf = 256
-
-# --- Conntrack (auto-scaled, fast timeouts) ---
-# max is auto-calculated by kernel based on RAM, we just set timeouts
-net.netfilter.nf_conntrack_tcp_timeout_syn_sent = 30
-net.netfilter.nf_conntrack_tcp_timeout_syn_recv = 30
-net.netfilter.nf_conntrack_tcp_timeout_established = 7200
-net.netfilter.nf_conntrack_tcp_timeout_fin_wait = 30
-net.netfilter.nf_conntrack_tcp_timeout_close_wait = 15
-net.netfilter.nf_conntrack_tcp_timeout_last_ack = 15
-net.netfilter.nf_conntrack_tcp_timeout_time_wait = 30
-net.netfilter.nf_conntrack_tcp_timeout_close = 10
-net.netfilter.nf_conntrack_tcp_timeout_max_retrans = 60
-net.netfilter.nf_conntrack_tcp_timeout_unacknowledged = 60
-net.netfilter.nf_conntrack_udp_timeout = 30
-net.netfilter.nf_conntrack_udp_timeout_stream = 120
-net.netfilter.nf_conntrack_icmp_timeout = 10
-net.netfilter.nf_conntrack_generic_timeout = 60
-
-# --- ARP Cache (prevent table overflow) ---
-net.ipv4.neigh.default.gc_thresh1 = 4096
-net.ipv4.neigh.default.gc_thresh2 = 8192
-net.ipv4.neigh.default.gc_thresh3 = 16384
-net.ipv4.neigh.default.gc_stale_time = 60
-
-# --- Memory Pressure ---
-vm.swappiness = 10
-vm.dirty_ratio = 40
-vm.dirty_background_ratio = 10
-vm.overcommit_memory = 1
-EOF
-    chmod 644 /etc/sysctl.d/99-vless-tuning.conf
-    log_success "sysctl config created"
+    rm -f /etc/sysctl.d/99-disable-ipv6.conf >/dev/null 2>&1 || true
     
     # Remove old config if exists
-    rm -f /etc/sysctl.d/99-haproxy.conf 2>/dev/null || true
+    rm -f /etc/sysctl.d/99-haproxy.conf >/dev/null 2>&1 || true
     
-    # Apply sysctl settings
-    sysctl -p /etc/sysctl.d/99-vless-tuning.conf 2>/dev/null || log_warn "Some sysctl settings may require kernel support"
-    log_success "sysctl settings applied"
-    
-    # File descriptor limits (match fs.file-max)
-    cat > /etc/security/limits.d/99-nofile.conf << 'EOF'
-# File descriptor limits for high connections
-* soft nofile 10485760
-* hard nofile 10485760
-* soft nproc 65535
-* hard nproc 65535
-* soft memlock unlimited
-* hard memlock unlimited
-root soft nofile 10485760
-root hard nofile 10485760
-root soft nproc 65535
-root hard nproc 65535
-root soft memlock unlimited
-root hard memlock unlimited
-EOF
-    log_success "limits.conf configured"
-    
-    # systemd limits
-    if [ -d /etc/systemd/system ]; then
-        # User slice limits
-        mkdir -p /etc/systemd/system/user-.slice.d
-        cat > /etc/systemd/system/user-.slice.d/limits.conf << 'EOF'
-[Slice]
-DefaultLimitNOFILE=10485760
-DefaultLimitNPROC=65535
-DefaultLimitMEMLOCK=infinity
-EOF
-
-        # System-wide systemd config
-        mkdir -p /etc/systemd/system.conf.d
-        cat > /etc/systemd/system.conf.d/limits.conf << 'EOF'
-[Manager]
-DefaultLimitNOFILE=10485760
-DefaultLimitNPROC=65535
-DefaultLimitMEMLOCK=infinity
-EOF
-
-        systemctl daemon-reload 2>/dev/null || true
-        log_success "systemd limits configured"
+    # Determine config source directory (from cloned repo or local configs/)
+    local CONFIG_SRC=""
+    if [ -d "$TMP_DIR/configs" ]; then
+        CONFIG_SRC="$TMP_DIR/configs"
+    elif [ -d "$(dirname "$0")/configs" ]; then
+        CONFIG_SRC="$(dirname "$0")/configs"
     fi
+    
+    if [ -n "$CONFIG_SRC" ] && [ -f "$CONFIG_SRC/sysctl.conf" ]; then
+        # Use configs from repository
+        log_info "Installing optimization configs..."
+        
+        # Copy sysctl config
+        cp "$CONFIG_SRC/sysctl.conf" /etc/sysctl.d/99-vless-tuning.conf
+        chmod 644 /etc/sysctl.d/99-vless-tuning.conf
+        log_success "sysctl config installed"
+        
+        # Copy limits config
+        if [ -f "$CONFIG_SRC/limits.conf" ]; then
+            cp "$CONFIG_SRC/limits.conf" /etc/security/limits.d/99-nofile.conf
+            chmod 644 /etc/security/limits.d/99-nofile.conf
+            log_success "limits.conf installed"
+        fi
+        
+        # Copy systemd limits config
+        if [ -f "$CONFIG_SRC/systemd-limits.conf" ]; then
+            mkdir -p /etc/systemd/system.conf.d
+            cp "$CONFIG_SRC/systemd-limits.conf" /etc/systemd/system.conf.d/limits.conf
+            chmod 644 /etc/systemd/system.conf.d/limits.conf
+            
+            # Create user slice limits (replace [Manager] with [Slice])
+            mkdir -p /etc/systemd/system/user-.slice.d
+            sed 's/\[Manager\]/[Slice]/' "$CONFIG_SRC/systemd-limits.conf" > /etc/systemd/system/user-.slice.d/limits.conf
+            chmod 644 /etc/systemd/system/user-.slice.d/limits.conf
+            
+            systemctl daemon-reload >/dev/null 2>&1 || true
+            log_success "systemd limits installed"
+        fi
+        
+        # Copy network-tune.sh
+        if [ -f "$CONFIG_SRC/network-tune.sh" ]; then
+            mkdir -p /opt/monitoring-node/scripts
+            cp "$CONFIG_SRC/network-tune.sh" /opt/monitoring-node/scripts/network-tune.sh
+            chmod +x /opt/monitoring-node/scripts/network-tune.sh
+            log_success "network-tune.sh installed"
+        fi
+        
+        # Copy network-tune.service
+        if [ -f "$CONFIG_SRC/network-tune.service" ]; then
+            cp "$CONFIG_SRC/network-tune.service" /etc/systemd/system/network-tune.service
+            chmod 644 /etc/systemd/system/network-tune.service
+            log_success "network-tune.service installed"
+        fi
+    else
+        # Fallback: download configs from GitHub (30s timeout, then mirror)
+        log_info "Downloading optimization configs..."
+        
+        local GITHUB_RAW="https://raw.githubusercontent.com/Joliz1337/monitoring/main/configs"
+        local MIRROR_RAW="${GITHUB_MIRROR}/https://raw.githubusercontent.com/Joliz1337/monitoring/main/configs"
+        
+        # Helper function: download with fallback
+        download_config() {
+            local filename="$1"
+            local dest="$2"
+            
+            # Try GitHub first (30s timeout)
+            if curl -fsSL --connect-timeout 10 --max-time 30 "$GITHUB_RAW/$filename" -o "$dest" 2>/dev/null; then
+                return 0
+            fi
+            # Try mirror
+            if curl -fsSL --connect-timeout 10 --max-time 60 "$MIRROR_RAW/$filename" -o "$dest" 2>/dev/null; then
+                return 0
+            fi
+            return 1
+        }
+        
+        # Download sysctl config
+        if download_config "sysctl.conf" "/etc/sysctl.d/99-vless-tuning.conf"; then
+            chmod 644 /etc/sysctl.d/99-vless-tuning.conf
+            log_success "sysctl config downloaded"
+        else
+            log_error "Failed to download sysctl.conf"
+            return 1
+        fi
+        
+        # Download limits config
+        if download_config "limits.conf" "/etc/security/limits.d/99-nofile.conf"; then
+            chmod 644 /etc/security/limits.d/99-nofile.conf
+            log_success "limits.conf downloaded"
+        fi
+        
+        # Download systemd limits config
+        mkdir -p /etc/systemd/system.conf.d
+        if download_config "systemd-limits.conf" "/etc/systemd/system.conf.d/limits.conf"; then
+            chmod 644 /etc/systemd/system.conf.d/limits.conf
+            
+            # Create user slice limits
+            mkdir -p /etc/systemd/system/user-.slice.d
+            sed 's/\[Manager\]/[Slice]/' /etc/systemd/system.conf.d/limits.conf > /etc/systemd/system/user-.slice.d/limits.conf
+            chmod 644 /etc/systemd/system/user-.slice.d/limits.conf
+            
+            systemctl daemon-reload >/dev/null 2>&1 || true
+            log_success "systemd limits downloaded"
+        fi
+        
+        # Download network-tune.sh
+        mkdir -p /opt/monitoring-node/scripts
+        if download_config "network-tune.sh" "/opt/monitoring-node/scripts/network-tune.sh"; then
+            chmod +x /opt/monitoring-node/scripts/network-tune.sh
+            log_success "network-tune.sh downloaded"
+        fi
+        
+        # Download network-tune.service
+        if download_config "network-tune.service" "/etc/systemd/system/network-tune.service"; then
+            chmod 644 /etc/systemd/system/network-tune.service
+            log_success "network-tune.service downloaded"
+        fi
+    fi
+    
+    # Apply sysctl settings (quietly, show warning only if needed)
+    log_info "Applying sysctl settings..."
+    if ! sysctl -p /etc/sysctl.d/99-vless-tuning.conf >/dev/null 2>&1; then
+        log_warn "Some sysctl settings may require kernel support"
+    fi
+    log_success "sysctl settings applied"
     
     # PAM limits (for SSH sessions)
     if [ -f /etc/pam.d/common-session ]; then
@@ -892,16 +800,31 @@ EOF
     fi
     
     # Load conntrack module if not loaded
-    modprobe nf_conntrack 2>/dev/null || true
+    modprobe nf_conntrack >/dev/null 2>&1 || true
     
-    # Conntrack hashsize is auto-calculated by kernel based on RAM
-    # No need to set it manually - it scales automatically
+    # Enable and start network-tune service
+    log_info "Enabling network-tune service..."
+    systemctl daemon-reload >/dev/null 2>&1
+    systemctl enable network-tune.service >/dev/null 2>&1 || true
+    if ! systemctl start network-tune.service >/dev/null 2>&1; then
+        log_warn "Could not start network-tune service (may need reboot)"
+    else
+        log_success "Network tuning service enabled"
+    fi
     
     log_success "$(msg optimizations_applied)"
 }
 
 check_optimizations_status() {
     if [ -f /etc/sysctl.d/99-vless-tuning.conf ]; then
+        echo "$(msg applied)"
+    else
+        echo "$(msg not_applied)"
+    fi
+}
+
+check_network_tune_status() {
+    if systemctl is-enabled network-tune.service &>/dev/null; then
         echo "$(msg applied)"
     else
         echo "$(msg not_applied)"
@@ -926,14 +849,13 @@ install_panel() {
     cp -r "$TMP_DIR/panel" "$PANEL_DIR"
     copy_installer "$PANEL_DIR"
     cd "$PANEL_DIR"
-    chmod +x deploy.sh update.sh 2>/dev/null || true
+    chmod +x deploy.sh update.sh >/dev/null 2>&1 || true
     
     # Run deploy with network-aware build
     ./deploy.sh
     
     install_cli
     log_success "$(msg panel_installed)"
-    echo ""
     log_info "$(msg run_monitoring)"
 }
 
@@ -973,7 +895,7 @@ remove_panel() {
     fi
     
     log_info "$(msg stopping_containers)"
-    cd "$PANEL_DIR" && docker compose down -v 2>/dev/null || true
+    cd "$PANEL_DIR" && docker compose down -v >/dev/null 2>&1 || true
     
     log_info "$(msg removing_files)"
     rm -rf "$PANEL_DIR"
@@ -1001,17 +923,37 @@ install_node() {
         rm -rf "$NODE_DIR"
     fi
     
+    # Install HAProxy if not already installed (native systemd service)
+    if ! command -v haproxy &>/dev/null; then
+        log_info "Installing HAProxy..."
+        run_quiet "apt-get update" apt-get update -qq
+        run_quiet "apt-get install haproxy" apt-get install -y -qq haproxy
+        systemctl enable haproxy >/dev/null 2>&1
+        log_success "HAProxy installed"
+    else
+        log_success "HAProxy already installed"
+    fi
+    
+    # Create HAProxy config directory if not exists
+    mkdir -p /etc/haproxy
+    
+    # Check if HAProxy is already running - don't interfere
+    if systemctl is-active --quiet haproxy; then
+        log_info "HAProxy is already running"
+    else
+        log_info "HAProxy is not running (will start when rules are configured)"
+    fi
+    
     cp -r "$TMP_DIR/node" "$NODE_DIR"
     copy_installer "$NODE_DIR"
     cd "$NODE_DIR"
-    chmod +x deploy.sh update.sh generate-ssl.sh 2>/dev/null || true
+    chmod +x deploy.sh update.sh generate-ssl.sh >/dev/null 2>&1 || true
     
     # Run deploy with network-aware build
     ./deploy.sh
     
     install_cli
     log_success "$(msg node_installed)"
-    echo ""
     log_info "$(msg run_monitoring)"
 }
 
@@ -1051,7 +993,7 @@ remove_node() {
     fi
     
     log_info "$(msg stopping_containers)"
-    cd "$NODE_DIR" && docker compose down -v 2>/dev/null || true
+    cd "$NODE_DIR" && docker compose down -v >/dev/null 2>&1 || true
     
     log_info "$(msg removing_files)"
     rm -rf "$NODE_DIR"
@@ -1160,6 +1102,13 @@ show_menu() {
     else
         echo -e "  $(msg optimizations_status): ${YELLOW}$(msg not_applied)${NC}"
     fi
+    
+    # RPS/RFS status
+    if systemctl is-enabled network-tune.service &>/dev/null 2>&1; then
+        echo -e "  RPS/RFS: ${GREEN}$(msg applied)${NC}"
+    else
+        echo -e "  RPS/RFS: ${YELLOW}$(msg not_applied)${NC}"
+    fi
     echo ""
 }
 
@@ -1172,15 +1121,6 @@ main() {
     # First run - select language
     if [ ! -f /etc/monitoring/language ]; then
         select_language
-    fi
-    
-    # Check GitHub access and select mirror (once per session)
-    if [ -z "$ACTIVE_GITHUB_MIRROR" ] && [ "$ACTIVE_GITHUB_MIRROR" != "checked" ]; then
-        select_best_mirror
-        if [ -z "$ACTIVE_GITHUB_MIRROR" ]; then
-            ACTIVE_GITHUB_MIRROR="checked"
-        fi
-        echo ""
     fi
     
     while true; do

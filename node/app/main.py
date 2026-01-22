@@ -75,7 +75,6 @@ app.include_router(haproxy.router, dependencies=[Depends(verify_api_key)])
 app.include_router(traffic.router, dependencies=[Depends(verify_api_key)])
 app.include_router(system.router, dependencies=[Depends(verify_api_key)])
 
-
 @app.get("/health")
 async def health_check():
     """Health check (rate limited)"""

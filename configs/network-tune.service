@@ -1,0 +1,18 @@
+# OPTIMIZATION_VERSION=1.0
+[Unit]
+Description=Network RPS/RFS tuning for multi-core packet distribution
+Documentation=https://www.kernel.org/doc/Documentation/networking/scaling.txt
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/monitoring-node/scripts/network-tune.sh
+RemainAfterExit=yes
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

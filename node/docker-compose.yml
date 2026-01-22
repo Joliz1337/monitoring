@@ -37,11 +37,11 @@ services:
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
       - /etc/os-release:/host/etc/os-release:ro
-      # HAProxy config (bind mount - shared with host and haproxy container)
+      # HAProxy config (native systemd service on host)
       - /etc/haproxy:/etc/haproxy
       # Let's Encrypt certificates - bind mount to host directory
       - /etc/letsencrypt:/etc/letsencrypt
-      # Docker socket for managing haproxy container and self-update
+      # Docker socket for self-update mechanism
       - /var/run/docker.sock:/var/run/docker.sock
       # Traffic statistics storage
       - traffic_data:/var/lib/monitoring
@@ -54,34 +54,6 @@ services:
       retries: 10
       start_period: 10s
     restart: unless-stopped
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "50m"
-        max-file: "5"
-
-  haproxy:
-    image: haproxy:2.9-alpine
-    container_name: monitoring-haproxy
-    # HAProxy is disabled by default - enable via panel or: docker compose --profile haproxy up -d
-    profiles:
-      - haproxy
-    # Run as root to access Let's Encrypt certificates (they have 0600 permissions)
-    user: root
-    # Host network for full port access
-    network_mode: host
-    ulimits:
-      nofile:
-        soft: 1048576
-        hard: 1048576
-    volumes:
-      # HAProxy config - bind mount from host to standard alpine path
-      - /etc/haproxy:/usr/local/etc/haproxy
-      # Let's Encrypt certs - bind mount from host (same as api)
-      - /etc/letsencrypt:/etc/letsencrypt:ro
-    restart: unless-stopped
-    # Graceful reload on config change
-    stop_signal: SIGUSR1
     logging:
       driver: "json-file"
       options:

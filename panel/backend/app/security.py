@@ -89,7 +89,11 @@ class SecurityManager:
         record = self._records.get(ip)
         if not record:
             return False
-        return record.banned_until > time.time()
+        is_banned = record.banned_until > time.time()
+        if is_banned:
+            remaining = int(record.banned_until - time.time())
+            logger.debug(f"IP {ip} is banned, {remaining}s remaining")
+        return is_banned
     
     async def check_request(self, request: Request) -> str:
         """Check request - raises ConnectionDrop if IP is banned.
@@ -114,15 +118,19 @@ class SecurityManager:
             record.failed_attempts += 1
             record.last_attempt = time.time()
             
+            logger.warning(f"Auth failure from {ip}: attempt {record.failed_attempts}/{self.max_failed_attempts}")
+            
             if record.failed_attempts >= self.max_failed_attempts:
                 record.banned_until = time.time() + self.ban_duration
-                logger.warning(f"IP {ip} banned after {record.failed_attempts} failed attempts")
+                logger.warning(f"IP {ip} banned for {self.ban_duration}s after {record.failed_attempts} failed attempts")
     
     async def record_auth_success(self, ip: str):
-        """Reset failures on success"""
+        """Reset failures and ban on success"""
         async with self._lock:
             if ip in self._records:
                 self._records[ip].failed_attempts = 0
+                self._records[ip].banned_until = 0
+                logger.info(f"Auth success from {ip}, cleared ban and failures")
     
     async def ban_ip(self, ip: str, duration: int = None):
         """Manually ban IP"""

@@ -33,6 +33,7 @@ interface ServersState {
   fetchAllTraffic: (days?: number) => Promise<void>
   addServer: (data: { name: string; url: string; api_key: string }) => Promise<{ success: boolean; error?: string }>
   updateServer: (id: number, data: Partial<Server>) => Promise<void>
+  toggleServer: (id: number, isActive: boolean) => Promise<void>
   deleteServer: (id: number) => Promise<void>
   reorderServers: (serverIds: number[]) => Promise<void>
   testServer: (id: number) => Promise<{ success: boolean; status: string; message?: string }>
@@ -252,6 +253,25 @@ export const useServersStore = create<ServersState>((set, get) => ({
   updateServer: async (id, data) => {
     await serversApi.update(id, data)
     await get().fetchServers()
+  },
+  
+  toggleServer: async (id, isActive) => {
+    // Optimistic update
+    set({
+      servers: get().servers.map(s => 
+        s.id === id ? { ...s, is_active: isActive } : s
+      )
+    })
+    try {
+      await serversApi.update(id, { is_active: isActive })
+    } catch {
+      // Revert on error
+      set({
+        servers: get().servers.map(s => 
+          s.id === id ? { ...s, is_active: !isActive } : s
+        )
+      })
+    }
   },
   
   deleteServer: async (id) => {
