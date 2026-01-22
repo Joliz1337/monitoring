@@ -52,10 +52,9 @@ test_mirror_speed() {
             elapsed=$(( (end_time - start_time) * 1000 ))
         fi
         echo "$elapsed"
-        return 0
+    else
+        echo "9999"
     fi
-    echo "9999"
-    return 1
 }
 
 detect_best_pypi_mirror() {
@@ -75,7 +74,7 @@ detect_best_pypi_mirror() {
     
     for i in "${!test_urls[@]}"; do
         local time_ms
-        time_ms=$(test_mirror_speed "${test_urls[$i]}" 5)
+        time_ms=$(test_mirror_speed "${test_urls[$i]}" 5) || time_ms=9999
         if [ "$time_ms" -lt "$best_time" ]; then
             best_time=$time_ms
             best_mirror="${mirrors[$i]}"
@@ -103,7 +102,7 @@ detect_best_apt_mirror() {
     
     for i in "${!test_urls[@]}"; do
         local time_ms
-        time_ms=$(test_mirror_speed "${test_urls[$i]}" 5)
+        time_ms=$(test_mirror_speed "${test_urls[$i]}" 5) || time_ms=9999
         if [ "$time_ms" -lt "$best_time" ]; then
             best_time=$time_ms
             best_mirror="${mirrors[$i]}"
