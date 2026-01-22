@@ -29,8 +29,20 @@ RUN npm install --prefer-offline --no-audit || \
 # Copy source and build
 COPY . .
 
-# Clear TypeScript cache and build
-RUN rm -rf node_modules/.cache tsconfig.tsbuildinfo && npm run build
+# Debug: check if prebuild.js has navItem fix
+RUN echo "=== prebuild.js navItem check ===" && grep -n "navItem" scripts/prebuild.js || echo "navItem NOT FOUND in prebuild.js"
+
+# Debug: show _extStore.ts BEFORE prebuild
+RUN echo "=== _extStore.ts BEFORE prebuild ===" && cat src/stores/_extStore.ts
+
+# Run prebuild
+RUN npm run prebuild
+
+# Debug: show _extStore.ts AFTER prebuild
+RUN echo "=== _extStore.ts AFTER prebuild ===" && cat src/stores/_extStore.ts
+
+# Build TypeScript and Vite
+RUN npx tsc && npx vite build
 
 FROM nginx:alpine
 

@@ -152,6 +152,12 @@ if [ -f "$TMP_DIR/panel/VERSION" ]; then
 fi
 log_info "Applying update: ${CURRENT_VERSION:-unknown} → $NEW_VERSION"
 
+# Show downloaded commit hash for debugging
+if [ -d "$TMP_DIR/.git" ]; then
+    COMMIT_HASH=$(git -C "$TMP_DIR" rev-parse --short HEAD 2>/dev/null || echo "unknown")
+    log_info "Downloaded commit: $COMMIT_HASH"
+fi
+
 # Stop containers
 log_info "Stopping containers..."
 cd "$PANEL_DIR"
@@ -210,6 +216,13 @@ else
 fi
 
 log_success "Files updated"
+
+# Debug: verify files were copied correctly
+log_info "Verifying copied files..."
+echo "=== Dockerfile line 33 ==="
+sed -n '33p' "$PANEL_DIR/frontend/Dockerfile"
+echo "=== prebuild.js navItem check ==="
+grep -n "navItem" "$PANEL_DIR/frontend/scripts/prebuild.js" | head -3 || echo "navItem NOT FOUND"
 
 # Clean up Docker before build
 log_info "Cleaning up Docker cache..."
