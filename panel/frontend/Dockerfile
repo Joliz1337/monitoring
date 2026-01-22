@@ -10,7 +10,7 @@ WORKDIR /app
 
 # Configure npm for faster downloads with mirrors and timeouts
 RUN npm config set registry ${NPM_REGISTRY} && \
-    npm config set timeout ${NPM_TIMEOUT} && \
+    npm config set fetch-timeout ${NPM_TIMEOUT} && \
     npm config set fetch-retries 3 && \
     npm config set fetch-retry-mintimeout 10000 && \
     npm config set fetch-retry-maxtimeout 60000
