@@ -26,6 +26,7 @@ RUN npm install --prefer-offline --no-audit || \
      npm config set registry https://registry.npmjs.org && \
      npm install --prefer-offline --no-audit)
 
+# Copy source and build
 COPY . .
 RUN npm run build
 
