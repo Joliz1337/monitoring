@@ -41,6 +41,9 @@ RUN npm run prebuild
 # Debug: show _extStore.ts AFTER prebuild
 RUN echo "=== _extStore.ts AFTER prebuild ===" && cat src/stores/_extStore.ts
 
+# Debug: show _extStore.ts right before tsc
+RUN echo "=== _extStore.ts before tsc ===" && cat src/stores/_extStore.ts && echo "=== END ==="
+
 # Build TypeScript and Vite
 RUN npx tsc && npx vite build
 
