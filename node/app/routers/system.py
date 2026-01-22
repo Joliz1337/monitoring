@@ -370,6 +370,36 @@ async def write_host_file(path: str, content: str) -> bool:
     return result.success and result.exit_code == 0
 
 
+@router.get("/versions")
+async def get_all_versions():
+    """
+    Combined endpoint: returns node version and optimizations version in one request.
+    
+    This reduces the number of API calls from panel (1 instead of 2 per node).
+    """
+    # Get node version
+    node_version = get_current_version()
+    
+    # Get optimizations info (parallel reads)
+    opt_version_task = read_host_file(OPTIMIZATIONS_VERSION_PATH)
+    sysctl_task = read_host_file(SYSCTL_CONFIG_PATH)
+    
+    opt_version_raw, sysctl_content = await asyncio.gather(
+        opt_version_task, sysctl_task
+    )
+    
+    opt_version = opt_version_raw.strip() if opt_version_raw else None
+    opt_installed = sysctl_content is not None
+    
+    return {
+        "node_version": node_version if node_version != "unknown" else None,
+        "optimizations": {
+            "installed": opt_installed,
+            "version": opt_version
+        }
+    }
+
+
 @router.get("/optimizations/version")
 async def get_optimizations_version():
     """
@@ -377,6 +407,8 @@ async def get_optimizations_version():
     
     Reads version from /opt/monitoring-node/configs/VERSION file.
     Falls back to checking if sysctl config exists for installed status.
+    
+    Note: Prefer using /api/system/versions which combines node + optimizations.
     """
     # Read version from dedicated VERSION file
     version = await read_host_file(OPTIMIZATIONS_VERSION_PATH)

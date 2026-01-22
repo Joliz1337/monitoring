@@ -540,12 +540,18 @@ export const settingsApi = {
   set: (key: string, value: string) => api.put(`/settings/${key}`, { value }),
 }
 
+export interface NodeOptimizationsInfo {
+  installed: boolean
+  version: string | null
+}
+
 export interface NodeVersionInfo {
   id: number
   name: string
   url: string
   version: string | null
   status: 'online' | 'offline'
+  optimizations?: NodeOptimizationsInfo
 }
 
 export interface VersionInfo {
@@ -555,6 +561,9 @@ export interface VersionInfo {
     update_available: boolean
   }
   node: {
+    latest_version: string | null
+  }
+  optimizations: {
     latest_version: string | null
   }
   nodes: NodeVersionInfo[]

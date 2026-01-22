@@ -83,12 +83,14 @@ panel/
 
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
-| GET | /api/system/version | Версии панели и нод (панель из panel/VERSION, ноды из node/VERSION на GitHub) |
+| GET | /api/system/version | Версии панели, нод и оптимизаций (всё в одном запросе, параллельные запросы к нодам) |
 | POST | /api/system/update | Обновление панели (target_ref: branch/tag/commit, по умолчанию main) |
 | GET | /api/system/update/status | Статус обновления |
 | GET | /api/system/certificate | Информация о SSL сертификате панели |
 | POST | /api/system/certificate/renew?force=bool | Продление SSL сертификата (force=true для принудительного) |
 | GET | /api/system/certificate/renew/status | Статус продления сертификата |
+| GET | /api/system/optimizations/version | Версии системных оптимизаций (устаревший, данные уже в /version) |
+| POST | /api/proxy/{id}/system/optimizations/apply | Применить системные оптимизации на ноду |
 
 **Механизм обновления**:
 1. API создаёт временный контейнер `panel-updater` (образ `docker:cli`)
@@ -97,7 +99,12 @@ panel/
 4. `update.sh` останавливает контейнеры, копирует файлы, пересобирает образы, запускает
 5. Контейнер удаляется после завершения
 
-Проверка версий: панель скачивает `panel/VERSION` и `node/VERSION` файлы с GitHub и сравнивает с локальными. Никаких тегов не требуется.
+Проверка версий: панель скачивает `panel/VERSION`, `node/VERSION` и `configs/VERSION` файлы с GitHub и сравнивает с локальными. Все запросы к нодам выполняются параллельно через `asyncio.gather` для быстрой загрузки.
+
+**Системные оптимизации**:
+- Не применяются автоматически при обновлении нод
+- Применяются только через UI панели (раздел Обновления) или API
+- Включают: sysctl настройки, limits, systemd limits
 
 ### Авторизация
 

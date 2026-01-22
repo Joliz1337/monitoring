@@ -88,10 +88,38 @@ async def get_latest_node_version_from_github() -> Optional[str]:
         return None
 
 
-async def get_node_version(url: str, api_key: str) -> Optional[str]:
-    """Fetch version from a node"""
+async def get_latest_optimizations_version_from_github() -> Optional[str]:
+    """Fetch latest optimizations version from configs/VERSION file on GitHub"""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(GITHUB_CONFIGS_VERSION_URL)
+            
+            if response.status_code == 200:
+                version = response.text.strip()
+                return version if version else None
+            
+            return None
+    except Exception as e:
+        logger.error(f"Failed to fetch latest optimizations version from GitHub: {e}")
+        return None
+
+
+async def get_node_all_versions(url: str, api_key: str) -> Optional[dict]:
+    """
+    Fetch all versions from a node using combined endpoint.
+    Returns dict with node_version and optimizations, or None if unreachable.
+    """
     try:
         async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+            response = await client.get(
+                f"{url}/api/system/versions",
+                headers={"X-API-Key": api_key}
+            )
+            
+            if response.status_code == 200:
+                return response.json()
+            
+            # Fallback to old endpoint if new one not available
             response = await client.get(
                 f"{url}/api/version",
                 headers={"X-API-Key": api_key}
@@ -99,12 +127,23 @@ async def get_node_version(url: str, api_key: str) -> Optional[str]:
             
             if response.status_code == 200:
                 data = response.json()
-                return data.get("version")
+                return {
+                    "node_version": data.get("version"),
+                    "optimizations": {"installed": False, "version": None}
+                }
             
             return None
     except Exception as e:
-        logger.debug(f"Failed to get version from {url}: {e}")
+        logger.debug(f"Failed to get versions from {url}: {e}")
         return None
+
+
+async def get_node_version(url: str, api_key: str) -> Optional[str]:
+    """Fetch version from a node (legacy, prefer get_node_all_versions)"""
+    result = await get_node_all_versions(url, api_key)
+    if result:
+        return result.get("node_version")
+    return None
 
 
 def get_docker_client():
@@ -125,32 +164,71 @@ async def get_version_info(
     Get comprehensive version information:
     - Current panel version and latest available
     - Latest available node version from GitHub
-    - Versions of all connected nodes
+    - Latest optimizations version from GitHub
+    - Versions of all connected nodes (including optimizations)
+    
+    All node requests are made in parallel for faster response.
     """
     current_version = get_current_version()
     
-    # Fetch both versions in parallel
-    latest_version, latest_node_version = await asyncio.gather(
-        get_latest_version_from_github(),
-        get_latest_node_version_from_github()
-    )
-    
-    # Get all servers and their versions
+    # Get all servers from DB
     result = await db.execute(
         select(Server).where(Server.is_active == True).order_by(Server.position)
     )
     servers = result.scalars().all()
     
-    nodes_versions = []
-    for server in servers:
-        version = await get_node_version(server.url, server.api_key)
-        nodes_versions.append({
+    # Fetch GitHub versions and all node versions in parallel
+    async def fetch_node_data(server: Server) -> dict:
+        """Fetch version data from a single node"""
+        versions_data = await get_node_all_versions(server.url, server.api_key)
+        
+        # Determine online/offline based on whether we got a response
+        is_online = versions_data is not None
+        
+        return {
             "id": server.id,
             "name": server.name,
             "url": server.url,
-            "version": version,
-            "status": "online" if version else "offline"
-        })
+            "version": versions_data.get("node_version") if versions_data else None,
+            "status": "online" if is_online else "offline",
+            "optimizations": versions_data.get("optimizations", {"installed": False, "version": None}) if versions_data else {"installed": False, "version": None}
+        }
+    
+    # Execute all requests in parallel
+    github_panel_task = get_latest_version_from_github()
+    github_node_task = get_latest_node_version_from_github()
+    github_opt_task = get_latest_optimizations_version_from_github()
+    node_tasks = [fetch_node_data(server) for server in servers]
+    
+    # Gather all results
+    results = await asyncio.gather(
+        github_panel_task,
+        github_node_task,
+        github_opt_task,
+        *node_tasks,
+        return_exceptions=True
+    )
+    
+    # Parse results
+    latest_version = results[0] if not isinstance(results[0], Exception) else None
+    latest_node_version = results[1] if not isinstance(results[1], Exception) else None
+    latest_opt_version = results[2] if not isinstance(results[2], Exception) else None
+    
+    # Process node results
+    nodes_versions = []
+    for i, node_result in enumerate(results[3:]):
+        if isinstance(node_result, Exception):
+            server = servers[i]
+            nodes_versions.append({
+                "id": server.id,
+                "name": server.name,
+                "url": server.url,
+                "version": None,
+                "status": "offline",
+                "optimizations": {"installed": False, "version": None}
+            })
+        else:
+            nodes_versions.append(node_result)
     
     # Check if panel update is available
     panel_update_available = False
@@ -165,6 +243,9 @@ async def get_version_info(
         },
         "node": {
             "latest_version": latest_node_version
+        },
+        "optimizations": {
+            "latest_version": latest_opt_version
         },
         "nodes": nodes_versions,
         "update_in_progress": _update_status["in_progress"]
@@ -622,24 +703,6 @@ async def get_optimizations_from_github() -> dict:
     return result
 
 
-async def get_node_optimizations_version(url: str, api_key: str) -> dict:
-    """Fetch optimizations version from a node"""
-    try:
-        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
-            response = await client.get(
-                f"{url}/api/system/optimizations/version",
-                headers={"X-API-Key": api_key}
-            )
-            
-            if response.status_code == 200:
-                return response.json()
-            
-            return {"installed": False, "version": None}
-    except Exception as e:
-        logger.debug(f"Failed to get optimizations version from {url}: {e}")
-        return {"installed": False, "version": None, "error": str(e)}
-
-
 @router.get("/optimizations/version")
 async def get_optimizations_version_info(
     db: AsyncSession = Depends(get_db),
@@ -649,38 +712,79 @@ async def get_optimizations_version_info(
     Get system optimizations version information:
     - Latest version from GitHub
     - Versions installed on all nodes
-    """
-    # Get latest version from GitHub
-    github_data = await get_optimizations_from_github()
-    latest_version = github_data.get("version")
     
-    # Get all servers and their optimizations versions
+    Note: This data is also available in /system/version endpoint.
+    All node requests are made in parallel for faster response.
+    """
+    # Get all servers from DB
     result = await db.execute(
         select(Server).where(Server.is_active == True).order_by(Server.position)
     )
     servers = result.scalars().all()
     
-    nodes_info = []
-    for server in servers:
-        opt_info = await get_node_optimizations_version(server.url, server.api_key)
-        node_version = opt_info.get("version")
-        installed = opt_info.get("installed", False)
+    async def fetch_node_opt_data(server: Server) -> dict:
+        """Fetch optimizations data from a single node"""
+        versions_data = await get_node_all_versions(server.url, server.api_key)
+        is_online = versions_data is not None
         
-        # Determine update availability
-        update_available = False
-        if installed and latest_version and node_version:
-            update_available = node_version != latest_version
-        elif not installed and latest_version:
-            update_available = True
+        opt_data = versions_data.get("optimizations", {}) if versions_data else {}
+        installed = opt_data.get("installed", False)
+        node_version = opt_data.get("version")
         
-        nodes_info.append({
+        return {
             "id": server.id,
             "name": server.name,
             "installed": installed,
             "version": node_version,
-            "status": "online" if "error" not in opt_info else "offline",
-            "update_available": update_available
-        })
+            "status": "online" if is_online else "offline",
+            "_online": is_online  # internal flag for update_available calculation
+        }
+    
+    # Execute all requests in parallel
+    github_task = get_latest_optimizations_version_from_github()
+    node_tasks = [fetch_node_opt_data(server) for server in servers]
+    
+    results = await asyncio.gather(
+        github_task,
+        *node_tasks,
+        return_exceptions=True
+    )
+    
+    latest_version = results[0] if not isinstance(results[0], Exception) else None
+    
+    nodes_info = []
+    for i, node_result in enumerate(results[1:]):
+        if isinstance(node_result, Exception):
+            server = servers[i]
+            nodes_info.append({
+                "id": server.id,
+                "name": server.name,
+                "installed": False,
+                "version": None,
+                "status": "offline",
+                "update_available": False
+            })
+        else:
+            # Calculate update_available
+            installed = node_result.get("installed", False)
+            node_version = node_result.get("version")
+            is_online = node_result.get("_online", False)
+            
+            update_available = False
+            if is_online and latest_version:
+                if installed and node_version:
+                    update_available = node_version != latest_version
+                elif not installed:
+                    update_available = True
+            
+            nodes_info.append({
+                "id": node_result["id"],
+                "name": node_result["name"],
+                "installed": installed,
+                "version": node_version,
+                "status": node_result["status"],
+                "update_available": update_available
+            })
     
     return {
         "latest_version": latest_version,

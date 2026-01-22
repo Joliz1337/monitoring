@@ -103,10 +103,25 @@ node/
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
 | GET | /api/version | Версия ноды |
+| GET | /api/system/versions | Объединённый endpoint: версия ноды + оптимизации |
 | POST | /api/system/update | Запуск обновления (target_ref: branch/tag/commit, по умолчанию main) |
 | GET | /api/system/update/status | Статус обновления |
+| GET | /api/system/optimizations/version | Версия системных оптимизаций (installed + version) |
+| POST | /api/system/optimizations/apply | Применить системные оптимизации |
 | POST | /api/system/execute | Выполнить команду на хосте |
 | POST | /api/system/execute-stream | Выполнить команду с потоковым выводом (SSE) |
+
+**Объединённый endpoint версий** (`/api/system/versions`):
+```json
+{
+    "node_version": "1.2.3",
+    "optimizations": {
+        "installed": true,
+        "version": "2.0.0"
+    }
+}
+```
+Панель использует этот endpoint для получения всей информации о ноде одним запросом вместо двух.
 
 **Выполнение команд на хосте**:
 
@@ -227,8 +242,11 @@ data: {"message": "error description"}
 
 ## Системные оптимизации
 
-Оптимизации применяются **отдельно** через главный установщик (`monitoring` → пункт 7):
+Оптимизации **не применяются автоматически** при обновлении ноды. Применяются только:
+- Через UI панели (раздел **Обновления**)
+- Через главный установщик (`monitoring` → пункт 7)
 
+Включают:
 - **IPv6** — отключение (улучшает стабильность сети)
 - **BBR + fq_codel** — лучшая комбинация для низкого джиттера и анти-bufferbloat
 - **Буферы** — оптимизированы для низкого latency (16MB max вместо 512MB)

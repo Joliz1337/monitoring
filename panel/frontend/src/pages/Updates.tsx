@@ -15,7 +15,16 @@ import {
   Settings2
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import { systemApi, VersionInfo, NodeVersionInfo, OptimizationsVersionInfo, OptimizationsNodeInfo } from '../api/client'
+import { systemApi, VersionInfo, NodeVersionInfo } from '../api/client'
+
+interface OptimizationsNodeInfo {
+  id: number
+  name: string
+  installed: boolean
+  version: string | null
+  status: 'online' | 'offline'
+  update_available: boolean
+}
 
 const containerVariants = {
   hidden: { opacity: 0 },
@@ -46,7 +55,6 @@ export default function Updates() {
   const [isChecking, setIsChecking] = useState(false)
   
   // System Optimizations state
-  const [optimizationsInfo, setOptimizationsInfo] = useState<OptimizationsVersionInfo | null>(null)
   const [applyingOptimizations, setApplyingOptimizations] = useState<Set<number>>(new Set())
   const [applyingAllOptimizations, setApplyingAllOptimizations] = useState(false)
   const [optimizationsResults, setOptimizationsResults] = useState<Record<string, { success: boolean; message: string }>>({})
@@ -56,16 +64,9 @@ export default function Updates() {
       setError('')
       if (showCheckingState) setIsChecking(true)
       
-      // Fetch both version info and optimizations in parallel
-      const [versionResponse, optimizationsResponse] = await Promise.all([
-        systemApi.getVersion(),
-        systemApi.getOptimizationsVersion().catch(() => ({ data: null }))
-      ])
-      
+      // Single request now contains all version info including optimizations
+      const versionResponse = await systemApi.getVersion()
       setVersionInfo(versionResponse.data)
-      if (optimizationsResponse.data) {
-        setOptimizationsInfo(optimizationsResponse.data)
-      }
     } catch (err) {
       setError(t('updates.failed_fetch'))
       console.error('Failed to fetch version info:', err)
@@ -161,6 +162,37 @@ export default function Updates() {
     setUpdatingAll(false)
   }
   
+  // Build optimizations info from versionInfo (combined data)
+  const getOptimizationsNodes = (): OptimizationsNodeInfo[] => {
+    if (!versionInfo) return []
+    const latestOptVersion = versionInfo.optimizations?.latest_version
+    
+    return versionInfo.nodes.map(node => {
+      const opt = node.optimizations || { installed: false, version: null }
+      
+      // Calculate update_available based on combined data
+      let update_available = false
+      if (node.status === 'online' && latestOptVersion) {
+        if (opt.installed && opt.version) {
+          update_available = opt.version !== latestOptVersion
+        } else if (!opt.installed) {
+          update_available = true
+        }
+      }
+      
+      return {
+        id: node.id,
+        name: node.name,
+        installed: opt.installed,
+        version: opt.version,
+        status: node.status,
+        update_available
+      }
+    })
+  }
+  
+  const optimizationsNodes = getOptimizationsNodes()
+  
   // System Optimizations handlers
   const handleApplyOptimizations = async (node: OptimizationsNodeInfo) => {
     if (applyingOptimizations.has(node.id)) return
@@ -178,11 +210,9 @@ export default function Updates() {
         [`opt-${node.id}`]: { success: true, message: response.data.message } 
       }))
       
-      // Refresh optimizations info after a delay
+      // Refresh version info after a delay
       setTimeout(() => {
-        systemApi.getOptimizationsVersion()
-          .then(res => setOptimizationsInfo(res.data))
-          .catch(() => {})
+        fetchVersionInfo()
         setApplyingOptimizations(prev => {
           const next = new Set(prev)
           next.delete(node.id)
@@ -203,10 +233,10 @@ export default function Updates() {
   }
   
   const handleApplyAllOptimizations = async () => {
-    if (applyingAllOptimizations || !optimizationsInfo) return
+    if (applyingAllOptimizations || !versionInfo) return
     
     setApplyingAllOptimizations(true)
-    const nodesToUpdate = optimizationsInfo.nodes.filter(n => 
+    const nodesToUpdate = optimizationsNodes.filter(n => 
       n.status === 'online' && n.update_available
     )
     
@@ -218,9 +248,9 @@ export default function Updates() {
     setApplyingAllOptimizations(false)
   }
   
-  const optimizationsNeedUpdate = optimizationsInfo?.nodes.filter(n => 
+  const optimizationsNeedUpdate = optimizationsNodes.filter(n => 
     n.status === 'online' && n.update_available
-  ).length || 0
+  ).length
   
   const getNodeUpdateAvailable = (node: NodeVersionInfo): boolean => {
     if (!node.version || !versionInfo?.node.latest_version) return false
@@ -577,7 +607,7 @@ export default function Updates() {
       </motion.div>
       
       {/* System Optimizations Section */}
-      {optimizationsInfo && (
+      {versionInfo && optimizationsNodes.length > 0 && (
         <motion.div variants={itemVariants} className="mt-8">
           <div className="flex items-center justify-between mb-4">
             <div>
@@ -585,14 +615,14 @@ export default function Updates() {
                 <Settings2 className="w-5 h-5 text-accent-500" />
                 {t('updates.optimizations')}
                 <span className="text-dark-500 font-normal text-sm">
-                  ({optimizationsInfo.nodes.length})
+                  ({optimizationsNodes.length})
                 </span>
               </h2>
-              {optimizationsInfo.latest_version && (
+              {versionInfo.optimizations?.latest_version && (
                 <p className="text-sm text-dark-500 mt-1 ml-7">
                   {t('updates.latest')}: 
                   <span className="text-dark-300 ml-1 font-mono">
-                    v{optimizationsInfo.latest_version}
+                    v{versionInfo.optimizations.latest_version}
                   </span>
                 </p>
               )}
@@ -618,7 +648,7 @@ export default function Updates() {
           
           <div className="space-y-3">
             <AnimatePresence mode="popLayout">
-              {optimizationsInfo.nodes.map((node, index) => {
+              {optimizationsNodes.map((node, index) => {
                 const isApplying = applyingOptimizations.has(node.id)
                 const applyResult = optimizationsResults[`opt-${node.id}`]
                 
