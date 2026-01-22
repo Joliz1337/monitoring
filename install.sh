@@ -33,6 +33,12 @@ LANG_CODE="en"
 # GitHub mirror (ghfast.top proxy)
 GITHUB_MIRROR="https://ghfast.top"
 
+# Default timeouts (in seconds)
+GIT_CLONE_TIMEOUT=60
+DOCKER_BUILD_TIMEOUT=1800  # 30 minutes
+APT_TIMEOUT=120
+PIP_TIMEOUT=120
+CURL_TIMEOUT=30
 
 # Docker mirror list
 DOCKER_MIRRORS=(
@@ -40,6 +46,24 @@ DOCKER_MIRRORS=(
     "https://registry.docker-cn.com"
     "https://docker.mirrors.ustc.edu.cn"
 )
+
+# PyPI mirror list (for testing speed)
+PYPI_MIRRORS=(
+    "https://pypi.org/simple"
+    "https://pypi.tuna.tsinghua.edu.cn/simple"
+    "https://mirrors.aliyun.com/pypi/simple"
+)
+
+# npm mirror list
+NPM_MIRRORS=(
+    "https://registry.npmjs.org"
+    "https://registry.npmmirror.com"
+)
+
+# Best mirrors (will be detected)
+BEST_PYPI_MIRROR=""
+BEST_NPM_MIRROR=""
+BEST_APT_MIRROR=""
 
 # ==================== Translations ====================
 
@@ -272,6 +296,138 @@ run_quiet_timeout() {
     fi
     
     return 0
+}
+
+# ==================== Mirror Speed Testing ====================
+
+# Test mirror speed and return response time in ms (or 9999 if failed)
+test_mirror_speed() {
+    local url="$1"
+    local timeout_sec="${2:-5}"
+    local start_time end_time elapsed
+    
+    start_time=$(date +%s%N 2>/dev/null || date +%s)
+    if curl -fsSL --connect-timeout "$timeout_sec" --max-time "$timeout_sec" "$url" >/dev/null 2>&1; then
+        end_time=$(date +%s%N 2>/dev/null || date +%s)
+        # Calculate elapsed time in ms
+        if [[ "$start_time" =~ ^[0-9]{10,}$ ]]; then
+            elapsed=$(( (end_time - start_time) / 1000000 ))
+        else
+            elapsed=$(( (end_time - start_time) * 1000 ))
+        fi
+        echo "$elapsed"
+        return 0
+    fi
+    echo "9999"
+    return 1
+}
+
+# Find fastest PyPI mirror
+detect_best_pypi_mirror() {
+    log_info "Testing PyPI mirrors..."
+    local best_mirror="https://pypi.org/simple"
+    local best_time=9999
+    local test_urls=(
+        "https://pypi.org/simple/pip/"
+        "https://pypi.tuna.tsinghua.edu.cn/simple/pip/"
+        "https://mirrors.aliyun.com/pypi/simple/pip/"
+    )
+    local mirrors=(
+        "https://pypi.org/simple"
+        "https://pypi.tuna.tsinghua.edu.cn/simple"
+        "https://mirrors.aliyun.com/pypi/simple"
+    )
+    
+    for i in "${!test_urls[@]}"; do
+        local time_ms
+        time_ms=$(test_mirror_speed "${test_urls[$i]}" 5)
+        if [ "$time_ms" -lt "$best_time" ]; then
+            best_time=$time_ms
+            best_mirror="${mirrors[$i]}"
+        fi
+    done
+    
+    BEST_PYPI_MIRROR="$best_mirror"
+    if [ "$best_time" -lt 9999 ]; then
+        log_success "Best PyPI mirror: $best_mirror (${best_time}ms)"
+    else
+        log_warn "All PyPI mirrors slow, using default"
+        BEST_PYPI_MIRROR="https://pypi.org/simple"
+    fi
+}
+
+# Find fastest npm mirror
+detect_best_npm_mirror() {
+    log_info "Testing npm mirrors..."
+    local best_mirror="https://registry.npmjs.org"
+    local best_time=9999
+    local test_urls=(
+        "https://registry.npmjs.org/npm"
+        "https://registry.npmmirror.com/npm"
+    )
+    local mirrors=(
+        "https://registry.npmjs.org"
+        "https://registry.npmmirror.com"
+    )
+    
+    for i in "${!test_urls[@]}"; do
+        local time_ms
+        time_ms=$(test_mirror_speed "${test_urls[$i]}" 5)
+        if [ "$time_ms" -lt "$best_time" ]; then
+            best_time=$time_ms
+            best_mirror="${mirrors[$i]}"
+        fi
+    done
+    
+    BEST_NPM_MIRROR="$best_mirror"
+    if [ "$best_time" -lt 9999 ]; then
+        log_success "Best npm mirror: $best_mirror (${best_time}ms)"
+    else
+        log_warn "All npm mirrors slow, using default"
+        BEST_NPM_MIRROR="https://registry.npmjs.org"
+    fi
+}
+
+# Find fastest APT mirror
+detect_best_apt_mirror() {
+    log_info "Testing APT mirrors..."
+    local best_mirror="deb.debian.org"
+    local best_time=9999
+    local test_urls=(
+        "http://deb.debian.org/debian/dists/stable/Release"
+        "http://mirror.yandex.ru/debian/dists/stable/Release"
+        "http://mirrors.aliyun.com/debian/dists/stable/Release"
+    )
+    local mirrors=(
+        "deb.debian.org"
+        "mirror.yandex.ru"
+        "mirrors.aliyun.com"
+    )
+    
+    for i in "${!test_urls[@]}"; do
+        local time_ms
+        time_ms=$(test_mirror_speed "${test_urls[$i]}" 5)
+        if [ "$time_ms" -lt "$best_time" ]; then
+            best_time=$time_ms
+            best_mirror="${mirrors[$i]}"
+        fi
+    done
+    
+    BEST_APT_MIRROR="$best_mirror"
+    if [ "$best_time" -lt 9999 ]; then
+        log_success "Best APT mirror: $best_mirror (${best_time}ms)"
+    else
+        log_warn "All APT mirrors slow, using default"
+        BEST_APT_MIRROR="mirror.yandex.ru"
+    fi
+}
+
+# Detect all best mirrors
+detect_best_mirrors() {
+    log_info "Detecting fastest mirrors for your location..."
+    detect_best_pypi_mirror
+    detect_best_npm_mirror
+    detect_best_apt_mirror
 }
 
 # ==================== GitHub Clone Functions ====================
@@ -540,13 +696,19 @@ fix_docker_network() {
     return 0
 }
 
-# Build with retry and network fix
+# Build with retry, network fix, and configurable mirrors
 docker_build_with_retry() {
     local build_dir="$1"
     local max_retries=3
     local retry=0
+    local build_timeout="${DOCKER_BUILD_TIMEOUT:-1800}"  # 30 min default
     
     cd "$build_dir"
+    
+    # Detect best mirrors if not already done
+    if [ -z "$BEST_PYPI_MIRROR" ]; then
+        detect_best_mirrors
+    fi
     
     while [ $retry -lt $max_retries ]; do
         # First check if Docker Hub is accessible (quietly)
@@ -559,12 +721,40 @@ docker_build_with_retry() {
             fi
         fi
         
-        # Try to build
-        log_info "Building containers (attempt $((retry + 1))/$max_retries)..."
+        # Build arguments with detected mirrors
+        local build_args=""
+        build_args="--build-arg APT_MIRROR=${BEST_APT_MIRROR:-mirror.yandex.ru}"
+        build_args="$build_args --build-arg PIP_INDEX_URL=${BEST_PYPI_MIRROR:-https://pypi.org/simple}"
+        build_args="$build_args --build-arg NPM_REGISTRY=${BEST_NPM_MIRROR:-https://registry.npmmirror.com}"
+        build_args="$build_args --build-arg PIP_TIMEOUT=${PIP_TIMEOUT:-120}"
+        build_args="$build_args --build-arg APT_TIMEOUT=${APT_TIMEOUT:-120}"
         
-        if run_quiet "docker compose build" docker compose build --no-cache; then
+        # Try to build with timeout
+        log_info "Building containers (attempt $((retry + 1))/$max_retries, timeout: ${build_timeout}s)..."
+        log_info "Using mirrors: APT=${BEST_APT_MIRROR:-default}, PyPI=${BEST_PYPI_MIRROR:-default}"
+        
+        local build_output
+        local build_exit_code
+        
+        # Run build with timeout
+        build_output=$(timeout "$build_timeout" docker compose build --no-cache $build_args 2>&1)
+        build_exit_code=$?
+        
+        if [ $build_exit_code -eq 0 ]; then
             log_success "$(msg build_success)"
             return 0
+        elif [ $build_exit_code -eq 124 ]; then
+            log_error "Build timeout after ${build_timeout}s"
+            echo -e "${YELLOW}Build was taking too long. This usually means:${NC}"
+            echo "  - Very slow internet connection"
+            echo "  - Package mirrors are unreachable"
+            echo "  - Network issues with Docker Hub"
+        else
+            log_error "Build failed (exit code: $build_exit_code)"
+            # Show last 20 lines of output
+            echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+            echo "$build_output" | tail -20
+            echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         fi
         
         retry=$((retry + 1))
@@ -576,6 +766,8 @@ docker_build_with_retry() {
             # Apply additional fixes on subsequent retries
             if [ $retry -eq 1 ]; then
                 fix_docker_network
+                # Re-detect mirrors after network fix
+                detect_best_mirrors
             fi
             
             sleep 5
@@ -592,6 +784,7 @@ docker_build_with_retry() {
     echo "  2. Try using a VPN"
     echo "  3. Check firewall settings"
     echo "  4. Try again later (Docker Hub may be temporarily unavailable)"
+    echo "  5. Increase timeout: export DOCKER_BUILD_TIMEOUT=3600"
     echo ""
     return 1
 }

@@ -1,12 +1,14 @@
 #!/bin/bash
 #
-# Network Tuning Script - RPS/RFS Configuration
+# Network Tuning Script - RPS/RFS/Conntrack Configuration
 # Distributes network load across all CPU cores
 #
 # This script automatically:
 # - Detects the main network interface
 # - Configures RPS (Receive Packet Steering) to spread packets across CPUs
 # - Configures RFS (Receive Flow Steering) for flow-aware packet distribution
+# - Sets conntrack hashsize for optimal performance
+# - Configures ring buffers if supported
 #
 # Should run at system startup via systemd service
 #
@@ -28,6 +30,11 @@ log_error() {
 log_success() {
     echo "[OK] $1"
     logger -t "$LOG_TAG" "OK: $1" 2>/dev/null || true
+}
+
+log_warn() {
+    echo "[WARN] $1"
+    logger -t "$LOG_TAG" "WARN: $1" 2>/dev/null || true
 }
 
 # Get main network interface (the one with default route)
@@ -83,12 +90,80 @@ get_rx_queues() {
     fi
 }
 
+# Configure conntrack hashsize based on max connections
+configure_conntrack() {
+    local hashsize_file="/sys/module/nf_conntrack/parameters/hashsize"
+    
+    # Check if conntrack module is loaded
+    if [ ! -f "$hashsize_file" ]; then
+        # Try to load module
+        modprobe nf_conntrack 2>/dev/null || true
+        sleep 1
+    fi
+    
+    if [ -f "$hashsize_file" ]; then
+        # Get current max from sysctl or use default
+        local conntrack_max=$(sysctl -n net.netfilter.nf_conntrack_max 2>/dev/null || echo 262144)
+        
+        # Ideal hashsize = max / 4 (for ~4 entries per bucket)
+        local ideal_hashsize=$(( conntrack_max / 4 ))
+        
+        # Minimum 65536, maximum 1048576
+        if [ $ideal_hashsize -lt 65536 ]; then
+            ideal_hashsize=65536
+        elif [ $ideal_hashsize -gt 1048576 ]; then
+            ideal_hashsize=1048576
+        fi
+        
+        local current_hashsize=$(cat "$hashsize_file" 2>/dev/null || echo 0)
+        
+        if [ "$current_hashsize" -lt "$ideal_hashsize" ]; then
+            echo "$ideal_hashsize" > "$hashsize_file" 2>/dev/null || true
+            log_info "Set conntrack hashsize: $current_hashsize -> $ideal_hashsize"
+        else
+            log_info "Conntrack hashsize already optimal: $current_hashsize"
+        fi
+    else
+        log_warn "Conntrack module not available, skipping hashsize config"
+    fi
+}
+
+# Configure network ring buffers (if ethtool available and supported)
+configure_ring_buffer() {
+    local iface=$1
+    
+    # Check if ethtool is available
+    if ! command -v ethtool &> /dev/null; then
+        log_info "ethtool not found, skipping ring buffer config"
+        return 0
+    fi
+    
+    # Get current settings
+    local current=$(ethtool -g "$iface" 2>/dev/null)
+    if [ -z "$current" ]; then
+        log_info "Ring buffer not supported on $iface"
+        return 0
+    fi
+    
+    # Try to set larger ring buffers (may fail on virtual NICs)
+    ethtool -G "$iface" rx 4096 2>/dev/null && log_info "Set RX ring buffer to 4096" || true
+    ethtool -G "$iface" tx 4096 2>/dev/null && log_info "Set TX ring buffer to 4096" || true
+}
+
 # Configure RPS/RFS for a single interface
 configure_interface() {
     local iface=$1
     local cpu_count=$(nproc)
     local cpu_mask=$(get_cpu_mask)
-    local flow_entries=$(( cpu_count * 4096 ))
+    
+    # Flow entries: 32768 per CPU for high connection count
+    local flow_entries=$(( cpu_count * 32768 ))
+    
+    # Cap at 1M entries to prevent memory issues
+    if [ $flow_entries -gt 1048576 ]; then
+        flow_entries=1048576
+    fi
+    
     local rx_queues=$(get_rx_queues "$iface")
     
     log_info "Configuring $iface: CPUs=$cpu_count, mask=0x$cpu_mask, queues=$rx_queues"
@@ -178,9 +253,19 @@ configure_irq_affinity() {
     log_info "IRQ affinity configured for $iface"
 }
 
+# Disable GRO/GSO/TSO if causing issues (optional, commented by default)
+# configure_offload() {
+#     local iface=$1
+#     ethtool -K "$iface" gro off gso off tso off 2>/dev/null || true
+#     log_info "Disabled GRO/GSO/TSO on $iface"
+# }
+
 # Main function
 main() {
     log_info "Starting network tuning..."
+    
+    # Configure conntrack first (important for high connections)
+    configure_conntrack
     
     # Get main interface
     local main_iface=$(get_main_interface)
@@ -192,6 +277,9 @@ main() {
     
     log_info "Detected main interface: $main_iface"
     log_info "CPU count: $(nproc)"
+    
+    # Configure ring buffers (if supported)
+    configure_ring_buffer "$main_iface"
     
     # Configure RPS/RFS
     configure_interface "$main_iface"
@@ -211,6 +299,11 @@ main() {
     echo "CPU cores: $(nproc)"
     echo "RPS CPU mask: 0x$(get_cpu_mask)"
     echo "RPS flow entries: $(cat /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null || echo 'N/A')"
+    
+    local hashsize=$(cat /sys/module/nf_conntrack/parameters/hashsize 2>/dev/null || echo 'N/A')
+    local conntrack_max=$(sysctl -n net.netfilter.nf_conntrack_max 2>/dev/null || echo 'N/A')
+    echo "Conntrack max: $conntrack_max"
+    echo "Conntrack hashsize: $hashsize"
     echo ""
 }
 

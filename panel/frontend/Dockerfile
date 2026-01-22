@@ -1,13 +1,30 @@
 FROM node:20-alpine AS builder
 
 ARG EXT_KEY=""
+ARG NPM_REGISTRY="https://registry.npmmirror.com"
+ARG NPM_TIMEOUT=120000
 ENV EXT_KEY=$EXT_KEY
 ENV VITE_EXT_ENABLED=${EXT_KEY:+true}
 
 WORKDIR /app
 
+# Configure npm for faster downloads with mirrors and timeouts
+RUN npm config set registry ${NPM_REGISTRY} && \
+    npm config set timeout ${NPM_TIMEOUT} && \
+    npm config set fetch-retries 3 && \
+    npm config set fetch-retry-mintimeout 10000 && \
+    npm config set fetch-retry-maxtimeout 60000
+
 COPY package.json ./
-RUN npm install
+
+# Install with fallback to official registry
+RUN npm install --prefer-offline --no-audit || \
+    (echo "First npm attempt failed, retrying with npmmirror..." && \
+     npm config set registry https://registry.npmmirror.com && \
+     npm install --prefer-offline --no-audit) || \
+    (echo "Second npm attempt failed, retrying with official registry..." && \
+     npm config set registry https://registry.npmjs.org && \
+     npm install --prefer-offline --no-audit)
 
 COPY . .
 RUN npm run build

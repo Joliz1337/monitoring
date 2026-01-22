@@ -17,6 +17,15 @@ log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+# Timeouts (in seconds)
+DOCKER_BUILD_TIMEOUT="${DOCKER_BUILD_TIMEOUT:-1800}"  # 30 min default
+APT_TIMEOUT="${APT_TIMEOUT:-120}"
+PIP_TIMEOUT="${PIP_TIMEOUT:-120}"
+
+# Best mirrors (will be detected)
+BEST_PYPI_MIRROR=""
+BEST_APT_MIRROR=""
+
 # Arguments
 TMP_DIR="$1"
 NODE_DIR="$2"
@@ -26,6 +35,89 @@ if [ -z "$TMP_DIR" ] || [ -z "$NODE_DIR" ]; then
     log_error "Usage: apply-update.sh <tmp_dir> <node_dir> [current_version]"
     exit 1
 fi
+
+# ==================== Mirror Speed Testing ====================
+
+test_mirror_speed() {
+    local url="$1"
+    local timeout_sec="${2:-5}"
+    local start_time end_time elapsed
+    
+    start_time=$(date +%s%N 2>/dev/null || date +%s)
+    if curl -fsSL --connect-timeout "$timeout_sec" --max-time "$timeout_sec" "$url" >/dev/null 2>&1; then
+        end_time=$(date +%s%N 2>/dev/null || date +%s)
+        if [[ "$start_time" =~ ^[0-9]{10,}$ ]]; then
+            elapsed=$(( (end_time - start_time) / 1000000 ))
+        else
+            elapsed=$(( (end_time - start_time) * 1000 ))
+        fi
+        echo "$elapsed"
+        return 0
+    fi
+    echo "9999"
+    return 1
+}
+
+detect_best_pypi_mirror() {
+    log_info "Testing PyPI mirrors..."
+    local best_mirror="https://pypi.org/simple"
+    local best_time=9999
+    local test_urls=(
+        "https://pypi.org/simple/pip/"
+        "https://pypi.tuna.tsinghua.edu.cn/simple/pip/"
+        "https://mirrors.aliyun.com/pypi/simple/pip/"
+    )
+    local mirrors=(
+        "https://pypi.org/simple"
+        "https://pypi.tuna.tsinghua.edu.cn/simple"
+        "https://mirrors.aliyun.com/pypi/simple"
+    )
+    
+    for i in "${!test_urls[@]}"; do
+        local time_ms
+        time_ms=$(test_mirror_speed "${test_urls[$i]}" 5)
+        if [ "$time_ms" -lt "$best_time" ]; then
+            best_time=$time_ms
+            best_mirror="${mirrors[$i]}"
+        fi
+    done
+    
+    BEST_PYPI_MIRROR="$best_mirror"
+    [ "$best_time" -lt 9999 ] && log_success "Best PyPI: $best_mirror (${best_time}ms)"
+}
+
+detect_best_apt_mirror() {
+    log_info "Testing APT mirrors..."
+    local best_mirror="mirror.yandex.ru"
+    local best_time=9999
+    local test_urls=(
+        "http://deb.debian.org/debian/dists/stable/Release"
+        "http://mirror.yandex.ru/debian/dists/stable/Release"
+        "http://mirrors.aliyun.com/debian/dists/stable/Release"
+    )
+    local mirrors=(
+        "deb.debian.org"
+        "mirror.yandex.ru"
+        "mirrors.aliyun.com"
+    )
+    
+    for i in "${!test_urls[@]}"; do
+        local time_ms
+        time_ms=$(test_mirror_speed "${test_urls[$i]}" 5)
+        if [ "$time_ms" -lt "$best_time" ]; then
+            best_time=$time_ms
+            best_mirror="${mirrors[$i]}"
+        fi
+    done
+    
+    BEST_APT_MIRROR="$best_mirror"
+    [ "$best_time" -lt 9999 ] && log_success "Best APT: $best_mirror (${best_time}ms)"
+}
+
+detect_best_mirrors() {
+    detect_best_pypi_mirror
+    detect_best_apt_mirror
+}
 
 # ==================== HAProxy Functions ====================
 
@@ -256,11 +348,38 @@ docker image prune -f > /dev/null 2>&1 || true
 docker builder prune -af > /dev/null 2>&1 || true
 log_success "Docker cleanup done"
 
-# Rebuild Docker image
-log_info "Building new Docker image..."
+# Detect best mirrors
+log_info "Detecting fastest mirrors..."
+detect_best_mirrors
+
+# Rebuild Docker image with timeout and mirrors
+log_info "Building new Docker image (timeout: ${DOCKER_BUILD_TIMEOUT}s)..."
 cd "$NODE_DIR"
-docker build --network=host -t monitoring-node-api .
-log_success "Image built"
+
+# Build arguments with detected mirrors
+BUILD_ARGS="--build-arg APT_MIRROR=${BEST_APT_MIRROR:-mirror.yandex.ru}"
+BUILD_ARGS="$BUILD_ARGS --build-arg PIP_INDEX_URL=${BEST_PYPI_MIRROR:-https://pypi.org/simple}"
+BUILD_ARGS="$BUILD_ARGS --build-arg PIP_TIMEOUT=${PIP_TIMEOUT}"
+BUILD_ARGS="$BUILD_ARGS --build-arg APT_TIMEOUT=${APT_TIMEOUT}"
+
+log_info "Using mirrors: APT=${BEST_APT_MIRROR:-default}, PyPI=${BEST_PYPI_MIRROR:-default}"
+
+BUILD_OUTPUT=$(timeout "$DOCKER_BUILD_TIMEOUT" docker build --network=host $BUILD_ARGS -t monitoring-node-api . 2>&1)
+BUILD_EXIT_CODE=$?
+
+if [ $BUILD_EXIT_CODE -eq 0 ]; then
+    log_success "Image built"
+elif [ $BUILD_EXIT_CODE -eq 124 ]; then
+    log_error "Build timeout after ${DOCKER_BUILD_TIMEOUT}s"
+    echo "Try increasing timeout: export DOCKER_BUILD_TIMEOUT=3600"
+    exit 1
+else
+    log_error "Build failed (exit code: $BUILD_EXIT_CODE)"
+    echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo "$BUILD_OUTPUT" | tail -30
+    echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    exit 1
+fi
 
 # Ensure /etc/haproxy directory exists
 ensure_haproxy_dir

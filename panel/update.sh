@@ -26,6 +26,10 @@ TARGET_REF="${1:-main}"
 # GitHub mirror
 GITHUB_MIRROR="https://ghfast.top"
 
+# Timeouts
+GIT_TIMEOUT="${GIT_TIMEOUT:-60}"
+GIT_MIRROR_TIMEOUT="${GIT_MIRROR_TIMEOUT:-180}"
+
 cleanup() {
     rm -rf "$TMP_DIR"
 }
@@ -33,29 +37,40 @@ trap cleanup EXIT
 
 # ==================== GitHub Clone Functions ====================
 
-# Clone repository: GitHub first (30s timeout), fallback to mirror
+# Clone repository: GitHub first, fallback to mirror, with retries
 clone_with_fallback() {
     local target_dir="$1"
     local branch="$2"
+    local max_retries=3
+    local retry=0
     
-    rm -rf "$target_dir"
+    while [ $retry -lt $max_retries ]; do
+        rm -rf "$target_dir"
+        
+        # Try direct GitHub first
+        log_info "Downloading from GitHub (attempt $((retry + 1))/$max_retries, timeout: ${GIT_TIMEOUT}s)..."
+        if timeout "$GIT_TIMEOUT" git clone --depth 1 --branch "$branch" "https://github.com/Joliz1337/monitoring.git" "$target_dir" 2>&1; then
+            log_success "Download complete"
+            return 0
+        fi
+        
+        # GitHub failed, try mirror
+        rm -rf "$target_dir"
+        log_warn "GitHub timeout/error, trying mirror (ghfast.top, timeout: ${GIT_MIRROR_TIMEOUT}s)..."
+        
+        if timeout "$GIT_MIRROR_TIMEOUT" git clone --depth 1 --branch "$branch" "${GITHUB_MIRROR}/https://github.com/Joliz1337/monitoring.git" "$target_dir" 2>&1; then
+            log_success "Download complete"
+            return 0
+        fi
+        
+        retry=$((retry + 1))
+        if [ $retry -lt $max_retries ]; then
+            log_warn "Download failed, retrying in 5s..."
+            sleep 5
+        fi
+    done
     
-    # Try direct GitHub first (30 second timeout)
-    log_info "Downloading from GitHub..."
-    if timeout 30 git clone --depth 1 --branch "$branch" "https://github.com/Joliz1337/monitoring.git" "$target_dir" 2>&1; then
-        log_success "Download complete"
-        return 0
-    fi
-    
-    # GitHub failed, try mirror
-    rm -rf "$target_dir"
-    log_warn "GitHub timeout/error, trying mirror (ghfast.top)..."
-    
-    if timeout 120 git clone --depth 1 --branch "$branch" "${GITHUB_MIRROR}/https://github.com/Joliz1337/monitoring.git" "$target_dir" 2>&1; then
-        log_success "Download complete"
-        return 0
-    fi
-    
+    log_error "Failed to download after $max_retries attempts"
     return 1
 }
 
