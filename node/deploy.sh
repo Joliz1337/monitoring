@@ -6,6 +6,20 @@
 
 set -e
 
+# Trap для обработки прерываний
+cleanup() {
+    local exit_code=$?
+    if [ $exit_code -ne 0 ]; then
+        echo ""
+        echo -e "\033[0;31m[ERROR] Script interrupted or failed (exit code: $exit_code)\033[0m"
+        echo -e "\033[0;31m[ERROR] Last operation may have failed. Check logs above.\033[0m"
+    fi
+    exit $exit_code
+}
+trap cleanup EXIT
+trap 'echo ""; echo -e "\033[0;31m[ERROR] Interrupted by user (Ctrl+C)\033[0m"; exit 130' INT
+trap 'echo ""; echo -e "\033[0;31m[ERROR] Terminated by signal\033[0m"; exit 143' TERM
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -632,29 +646,40 @@ start_containers() {
         log_info "Building containers (attempt $((retry + 1))/$max_retries, timeout: ${build_timeout}s)..."
         log_info "BuildKit enabled for faster cached builds"
         log_info "Using mirrors: APT=${BEST_APT_MIRROR:-default}, PyPI=${BEST_PYPI_MIRROR:-default}"
+        echo ""
         
-        local build_output
         local build_exit_code
+        local build_log="/tmp/docker_build_$$.log"
         
-        # Run build with timeout
-        build_output=$(timeout "$build_timeout" docker build --network=host $build_args -t monitoring-node-api . 2>&1)
-        build_exit_code=$?
+        # Run build with timeout, show output in real-time AND capture to log
+        set +e
+        timeout "$build_timeout" docker build --network=host $build_args -t monitoring-node-api . 2>&1 | tee "$build_log"
+        build_exit_code=${PIPESTATUS[0]}
+        set -e
+        
+        echo ""
         
         if [ $build_exit_code -eq 0 ]; then
             build_success=true
             log_success "Docker build completed"
+            rm -f "$build_log"
             break
         elif [ $build_exit_code -eq 124 ]; then
             log_error "Build timeout after ${build_timeout}s"
             echo -e "${YELLOW}Build was taking too long. Possible causes:${NC}"
             echo "  - Very slow internet connection"
             echo "  - Package mirrors are unreachable"
+            echo "  - Server ran out of memory (check: free -h)"
         else
             log_error "Build failed (exit code: $build_exit_code)"
+            echo ""
+            echo -e "${YELLOW}Last 30 lines of build output:${NC}"
             echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-            echo "$build_output" | tail -20
+            tail -30 "$build_log" 2>/dev/null || echo "(no log available)"
             echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         fi
+        
+        rm -f "$build_log"
         
         retry=$((retry + 1))
         
@@ -676,6 +701,7 @@ start_containers() {
         echo "  3. Check firewall settings"
         echo "  4. Try again later (Docker Hub may be temporarily unavailable)"
         echo "  5. Increase timeout: export DOCKER_BUILD_TIMEOUT=3600"
+        echo "  6. Check server memory: free -h (need at least 1GB free)"
         echo ""
         exit 1
     fi
@@ -683,7 +709,20 @@ start_containers() {
     # Ensure /etc/haproxy directory exists for bind mount
     ensure_haproxy_dir
     
-    docker compose up -d >/dev/null 2>&1
+    log_info "Starting containers..."
+    set +e
+    local up_output
+    up_output=$(docker compose up -d 2>&1)
+    local up_exit_code=$?
+    set -e
+    
+    if [ $up_exit_code -ne 0 ]; then
+        log_error "Failed to start containers (exit code: $up_exit_code)"
+        echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo "$up_output"
+        echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        exit 1
+    fi
 
     log_success "Containers started"
 }

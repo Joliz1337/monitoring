@@ -10,6 +10,20 @@
 
 set -e
 
+# Trap для обработки прерываний
+cleanup() {
+    local exit_code=$?
+    if [ $exit_code -ne 0 ]; then
+        echo ""
+        echo -e "\033[0;31m[ERROR] Script interrupted or failed (exit code: $exit_code)\033[0m"
+        echo -e "\033[0;31m[ERROR] Last operation may have failed. Check logs above.\033[0m"
+    fi
+    exit $exit_code
+}
+trap cleanup EXIT
+trap 'echo ""; echo -e "\033[0;31m[ERROR] Interrupted by user (Ctrl+C)\033[0m"; exit 130' INT
+trap 'echo ""; echo -e "\033[0;31m[ERROR] Terminated by signal\033[0m"; exit 143' TERM
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -732,16 +746,22 @@ docker_build_with_retry() {
         # Try to build with timeout
         log_info "Building containers (attempt $((retry + 1))/$max_retries, timeout: ${build_timeout}s)..."
         log_info "Using mirrors: APT=${BEST_APT_MIRROR:-default}, PyPI=${BEST_PYPI_MIRROR:-default}"
+        echo ""
         
-        local build_output
         local build_exit_code
+        local build_log="/tmp/docker_build_$$.log"
         
-        # Run build with timeout
-        build_output=$(timeout "$build_timeout" docker compose build --no-cache $build_args 2>&1)
-        build_exit_code=$?
+        # Run build with timeout, show output in real-time AND capture to log
+        set +e
+        timeout "$build_timeout" docker compose build --no-cache $build_args 2>&1 | tee "$build_log"
+        build_exit_code=${PIPESTATUS[0]}
+        set -e
+        
+        echo ""
         
         if [ $build_exit_code -eq 0 ]; then
             log_success "$(msg build_success)"
+            rm -f "$build_log"
             return 0
         elif [ $build_exit_code -eq 124 ]; then
             log_error "Build timeout after ${build_timeout}s"
@@ -749,13 +769,17 @@ docker_build_with_retry() {
             echo "  - Very slow internet connection"
             echo "  - Package mirrors are unreachable"
             echo "  - Network issues with Docker Hub"
+            echo "  - Server ran out of memory (check: free -h)"
         else
             log_error "Build failed (exit code: $build_exit_code)"
-            # Show last 20 lines of output
+            echo ""
+            echo -e "${YELLOW}Last 30 lines of build output:${NC}"
             echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-            echo "$build_output" | tail -20
+            tail -30 "$build_log" 2>/dev/null || echo "(no log available)"
             echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         fi
+        
+        rm -f "$build_log"
         
         retry=$((retry + 1))
         
@@ -822,7 +846,8 @@ install_cli() {
 # Monitoring System Manager
 # Run this command to manage your monitoring installation
 
-SCRIPT_URL="https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh"
+GITHUB_URL="https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh"
+MIRROR_URL="https://ghfast.top/https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh"
 
 # Check if we have a local copy
 if [ -f "/opt/monitoring-panel/install.sh" ]; then
@@ -830,8 +855,17 @@ if [ -f "/opt/monitoring-panel/install.sh" ]; then
 elif [ -f "/opt/monitoring-node/install.sh" ]; then
     exec bash "/opt/monitoring-node/install.sh" "$@"
 else
-    # Download and run
-    exec bash <(curl -fsSL "$SCRIPT_URL") "$@"
+    # Download and run (try GitHub first, then mirror)
+    SCRIPT_CONTENT=$(curl -fsSL --connect-timeout 10 --max-time 30 "$GITHUB_URL" 2>/dev/null)
+    if [ -z "$SCRIPT_CONTENT" ]; then
+        SCRIPT_CONTENT=$(curl -fsSL --connect-timeout 10 --max-time 60 "$MIRROR_URL" 2>/dev/null)
+    fi
+    if [ -n "$SCRIPT_CONTENT" ]; then
+        exec bash -c "$SCRIPT_CONTENT" -- "$@"
+    else
+        echo "Failed to download installer from GitHub and mirror"
+        exit 1
+    fi
 fi
 SCRIPT
     chmod +x "$BIN_PATH"

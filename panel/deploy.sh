@@ -2,6 +2,20 @@
 
 set -e
 
+# Trap для обработки прерываний
+cleanup() {
+    local exit_code=$?
+    if [ $exit_code -ne 0 ]; then
+        echo ""
+        echo -e "\033[0;31m[✗] Script interrupted or failed (exit code: $exit_code)\033[0m"
+        echo -e "\033[0;31m[✗] Last operation may have failed. Check logs above.\033[0m"
+    fi
+    exit $exit_code
+}
+trap cleanup EXIT
+trap 'echo ""; echo -e "\033[0;31m[✗] Interrupted by user (Ctrl+C)\033[0m"; exit 130' INT
+trap 'echo ""; echo -e "\033[0;31m[✗] Terminated by signal\033[0m"; exit 143' TERM
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -788,29 +802,41 @@ build_and_start() {
         print_info "Building containers (attempt $((retry + 1))/$max_retries, timeout: ${build_timeout}s)..."
         print_info "BuildKit enabled for faster cached builds"
         print_info "Using mirrors: APT=${BEST_APT_MIRROR:-default}, PyPI=${BEST_PYPI_MIRROR:-default}, npm=${BEST_NPM_MIRROR:-default}"
+        echo ""
         
-        local build_output
         local build_exit_code
+        local build_log="/tmp/docker_build_$$.log"
         
-        # Run build with timeout and parallel building
-        build_output=$(timeout "$build_timeout" docker compose build --parallel $build_args 2>&1)
-        build_exit_code=$?
+        # Run build with timeout, show output in real-time AND capture to log
+        # Using tee to show progress and save output for error analysis
+        set +e  # Temporarily disable exit on error
+        timeout "$build_timeout" docker compose build --parallel $build_args 2>&1 | tee "$build_log"
+        build_exit_code=${PIPESTATUS[0]}
+        set -e  # Re-enable exit on error
+        
+        echo ""
         
         if [ $build_exit_code -eq 0 ]; then
             build_success=true
             print_status "Docker build completed"
+            rm -f "$build_log"
             break
         elif [ $build_exit_code -eq 124 ]; then
             print_error "Build timeout after ${build_timeout}s"
             echo -e "${YELLOW}Build was taking too long. Possible causes:${NC}"
             echo "  - Very slow internet connection"
             echo "  - Package mirrors are unreachable"
+            echo "  - Server ran out of memory (check: free -h)"
         else
             print_error "Build failed (exit code: $build_exit_code)"
+            echo ""
+            echo -e "${YELLOW}Last 30 lines of build output:${NC}"
             echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-            echo "$build_output" | tail -20
+            tail -30 "$build_log" 2>/dev/null || echo "(no log available)"
             echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         fi
+        
+        rm -f "$build_log"
         
         retry=$((retry + 1))
         
@@ -832,11 +858,25 @@ build_and_start() {
         echo "  3. Check firewall settings"
         echo "  4. Try again later (Docker Hub may be temporarily unavailable)"
         echo "  5. Increase timeout: export DOCKER_BUILD_TIMEOUT=3600"
+        echo "  6. Check server memory: free -h (need at least 2GB free)"
         echo ""
         exit 1
     fi
     
-    docker compose up -d >/dev/null 2>&1
+    print_info "Starting containers..."
+    set +e
+    local up_output
+    up_output=$(docker compose up -d 2>&1)
+    local up_exit_code=$?
+    set -e
+    
+    if [ $up_exit_code -ne 0 ]; then
+        print_error "Failed to start containers (exit code: $up_exit_code)"
+        echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo "$up_output"
+        echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        exit 1
+    fi
     
     print_status "Containers started"
 }

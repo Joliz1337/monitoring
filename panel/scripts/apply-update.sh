@@ -6,6 +6,20 @@
 
 set -e
 
+# Trap для обработки прерываний
+cleanup() {
+    local exit_code=$?
+    if [ $exit_code -ne 0 ]; then
+        echo ""
+        echo -e "\033[0;31m[ERROR] Script interrupted or failed (exit code: $exit_code)\033[0m"
+        echo -e "\033[0;31m[ERROR] Last operation may have failed. Check logs above.\033[0m"
+    fi
+    exit $exit_code
+}
+trap cleanup EXIT
+trap 'echo ""; echo -e "\033[0;31m[ERROR] Interrupted by user (Ctrl+C)\033[0m"; exit 130' INT
+trap 'echo ""; echo -e "\033[0;31m[ERROR] Terminated by signal\033[0m"; exit 143' TERM
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -241,25 +255,35 @@ BUILD_ARGS="$BUILD_ARGS --build-arg NPM_TIMEOUT=${NPM_TIMEOUT}"
 BUILD_ARGS="$BUILD_ARGS --build-arg CACHE_BUST=${CACHE_BUST}"
 
 log_info "Using mirrors: APT=${BEST_APT_MIRROR:-default}, PyPI=${BEST_PYPI_MIRROR:-default}, npm=${BEST_NPM_MIRROR:-default}"
+echo ""
 
-# Disable set -e for build command to capture exit code properly
+BUILD_LOG="/tmp/docker_build_$$.log"
+
+# Run build with timeout, show output in real-time AND capture to log
 set +e
-# Note: removed --no-cache to enable layer caching for faster rebuilds
-BUILD_OUTPUT=$(timeout "$DOCKER_BUILD_TIMEOUT" docker compose build --parallel $BUILD_ARGS 2>&1)
-BUILD_EXIT_CODE=$?
+timeout "$DOCKER_BUILD_TIMEOUT" docker compose build --parallel $BUILD_ARGS 2>&1 | tee "$BUILD_LOG"
+BUILD_EXIT_CODE=${PIPESTATUS[0]}
 set -e
+
+echo ""
 
 if [ $BUILD_EXIT_CODE -eq 0 ]; then
     log_success "Images built"
+    rm -f "$BUILD_LOG"
 elif [ $BUILD_EXIT_CODE -eq 124 ]; then
     log_error "Build timeout after ${DOCKER_BUILD_TIMEOUT}s"
     echo "Try increasing timeout: export DOCKER_BUILD_TIMEOUT=3600"
+    echo "Or check server memory: free -h"
+    rm -f "$BUILD_LOG"
     exit 1
 else
     log_error "Build failed (exit code: $BUILD_EXIT_CODE)"
+    echo ""
+    echo -e "${YELLOW}Last 30 lines of build output:${NC}"
     echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo "$BUILD_OUTPUT" | tail -30
+    tail -30 "$BUILD_LOG" 2>/dev/null || echo "(no log available)"
     echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    rm -f "$BUILD_LOG"
     exit 1
 fi
 

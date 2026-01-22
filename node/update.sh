@@ -8,6 +8,20 @@
 
 set -e
 
+# Trap для обработки прерываний
+cleanup() {
+    local exit_code=$?
+    if [ $exit_code -ne 0 ]; then
+        echo ""
+        echo -e "\033[0;31m[ERROR] Script interrupted or failed (exit code: $exit_code)\033[0m"
+        echo -e "\033[0;31m[ERROR] Last operation may have failed. Check logs above.\033[0m"
+    fi
+    exit $exit_code
+}
+trap cleanup EXIT
+trap 'echo ""; echo -e "\033[0;31m[ERROR] Interrupted by user (Ctrl+C)\033[0m"; exit 130' INT
+trap 'echo ""; echo -e "\033[0;31m[ERROR] Terminated by signal\033[0m"; exit 143' TERM
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
