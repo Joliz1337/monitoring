@@ -234,8 +234,11 @@ BUILD_ARGS="$BUILD_ARGS --build-arg NPM_TIMEOUT=${NPM_TIMEOUT}"
 
 log_info "Using mirrors: APT=${BEST_APT_MIRROR:-default}, PyPI=${BEST_PYPI_MIRROR:-default}, npm=${BEST_NPM_MIRROR:-default}"
 
+# Disable set -e for build command to capture exit code properly
+set +e
 BUILD_OUTPUT=$(timeout "$DOCKER_BUILD_TIMEOUT" docker compose build --no-cache $BUILD_ARGS 2>&1)
 BUILD_EXIT_CODE=$?
+set -e
 
 if [ $BUILD_EXIT_CODE -eq 0 ]; then
     log_success "Images built"
