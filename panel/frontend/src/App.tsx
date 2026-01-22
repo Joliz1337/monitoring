@@ -3,6 +3,7 @@ import { useEffect, Suspense, lazy } from 'react'
 import { motion } from 'framer-motion'
 import { Activity } from 'lucide-react'
 import { useAuthStore } from './stores/authStore'
+import { useExtStore } from './stores/_extStore'
 import { useTranslation } from 'react-i18next'
 import Layout from './components/Layout/Layout'
 import Login from './pages/Login'
@@ -116,6 +117,9 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 }
 
 export default function App() {
+  const navItem = useExtStore(s => s.navItem)
+  const extPath = navItem?.path || 'ext'
+  
   return (
     <Routes>
       <Route path="/:uid/login" element={<Login />} />
@@ -137,7 +141,7 @@ export default function App() {
         <Route path="updates" element={<Updates />} />
         {ExtPageLazy && (
           <Route 
-            path="ext" 
+            path={extPath}
             element={
               <Suspense fallback={<LoadingScreen />}>
                 <ExtPageLazy />

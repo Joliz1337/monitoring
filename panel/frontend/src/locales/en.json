@@ -437,7 +437,8 @@
     "duration_text": "Updates may take 5-10 minutes to complete. Do not close the page and wait for the process to finish.",
     "optimizations": "System Optimizations",
     "update_all_optimizations": "Update All",
-    "not_installed": "Not installed"
+    "not_installed": "Not installed",
+    "legacy_version": "Legacy"
   },
   "bulk_actions": {
     "title": "Bulk Actions",

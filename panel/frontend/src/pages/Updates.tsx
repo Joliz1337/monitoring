@@ -173,9 +173,11 @@ export default function Updates() {
       // Calculate update_available based on combined data
       let update_available = false
       if (node.status === 'online' && latestOptVersion) {
-        if (opt.installed && opt.version) {
-          update_available = opt.version !== latestOptVersion
-        } else if (!opt.installed) {
+        if (opt.installed) {
+          // If installed but version unknown (legacy) or version mismatch - update available
+          update_available = !opt.version || opt.version !== latestOptVersion
+        } else {
+          // Not installed - update available (install)
           update_available = true
         }
       }
@@ -690,7 +692,7 @@ export default function Updates() {
                                 node.version ? 'text-dark-300' : 'text-dark-500'
                               }`}>
                                 {node.installed 
-                                  ? (node.version ? `v${node.version}` : t('updates.unknown'))
+                                  ? (node.version ? `v${node.version}` : t('updates.legacy_version'))
                                   : t('updates.not_installed')
                                 }
                               </span>
