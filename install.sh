@@ -702,89 +702,58 @@ install_xray_binary() {
     esac
     
     local filename="Xray-linux-${xray_arch}.zip"
+    local download_url="https://github.com/XTLS/Xray-core/releases/latest/download/${filename}"
     local tmp_zip="/tmp/xray-$$.zip"
     
-    # Download mirrors (in order of preference)
-    local mirrors=(
-        "https://github.com/XTLS/Xray-core/releases/latest/download/${filename}"
-        "https://ghproxy.com/https://github.com/XTLS/Xray-core/releases/latest/download/${filename}"
-        "https://mirror.ghproxy.com/https://github.com/XTLS/Xray-core/releases/latest/download/${filename}"
-        "https://gh-proxy.com/https://github.com/XTLS/Xray-core/releases/latest/download/${filename}"
-        "https://drive.google.com/uc?export=download&id=18DUYu8r0ZjueoPUrYa2uH8mVsMN3mFGE"
-    )
-    
-    local curl_proxy_args=$(get_curl_proxy_args)
-    local downloaded=false
-    
     log_info "$(msg xray_downloading)"
+    log_info "URL: $download_url"
     
-    for url in "${mirrors[@]}"; do
-        # Get mirror name for logging
-        local mirror_name
-        if [[ "$url" == *"drive.google.com"* ]]; then
-            mirror_name="Google Drive"
-        elif [[ "$url" == *"github.com"* ]]; then
-            mirror_name="GitHub"
-        else
-            mirror_name="${url%%/https*}"
-            mirror_name="${mirror_name#https://}"
-        fi
-        
-        log_info "Trying: $mirror_name... (15s timeout)"
-        
-        # 15 second timeout - if not downloaded, try next mirror
-        if curl -fSL $curl_proxy_args \
-            --max-time 15 \
-            -o "$tmp_zip" \
-            "$url" 2>/dev/null; then
-            
-            # Verify it's a valid zip
-            if unzip -t "$tmp_zip" >/dev/null 2>&1; then
-                downloaded=true
-                log_success "Downloaded from $mirror_name"
-                break
-            else
-                log_warn "Invalid archive, trying next mirror..."
+    # Try to download from GitHub (15 sec timeout)
+    if curl -fSL --max-time 15 -o "$tmp_zip" "$download_url" 2>/dev/null; then
+        if unzip -t "$tmp_zip" >/dev/null 2>&1; then
+            # Extract
+            if unzip -q -o "$tmp_zip" -d "$XRAY_DIR" 2>/dev/null; then
                 rm -f "$tmp_zip"
+                chmod +x "$XRAY_BIN"
+                log_success "$(msg xray_installed)"
+                return 0
             fi
-        else
-            log_warn "Failed, trying next mirror..."
-            rm -f "$tmp_zip"
         fi
-    done
-    
-    if [ "$downloaded" = false ]; then
-        log_error "Failed to download xray from all mirrors"
-        echo ""
-        echo -e "${YELLOW}You can download xray manually:${NC}"
-        echo "  1. Download: https://github.com/XTLS/Xray-core/releases"
-        echo "  2. Extract xray binary to: $XRAY_DIR/xray"
-        echo "  3. Run this setup again"
-        echo ""
-        read -p "Or enter path to existing xray binary (Enter to skip): " manual_path
-        
-        if [ -n "$manual_path" ] && [ -x "$manual_path" ]; then
-            cp "$manual_path" "$XRAY_BIN"
-            chmod +x "$XRAY_BIN"
-            log_success "$(msg xray_installed) (from $manual_path)"
-            return 0
-        fi
-        
-        return 1
-    fi
-    
-    # Extract
-    if ! unzip -q -o "$tmp_zip" -d "$XRAY_DIR" 2>/dev/null; then
-        log_error "Failed to extract xray"
         rm -f "$tmp_zip"
+    fi
+    
+    # Download failed - ask for manual path
+    log_error "Failed to download xray"
+    echo ""
+    echo -e "${YELLOW}Download manually:${NC}"
+    echo "  https://github.com/XTLS/Xray-core/releases"
+    echo ""
+    echo -e "${YELLOW}Then enter path to zip file or xray binary:${NC}"
+    read -p "> " manual_path
+    
+    if [ -z "$manual_path" ]; then
         return 1
     fi
     
-    rm -f "$tmp_zip"
-    chmod +x "$XRAY_BIN"
+    # Check if it's a zip file
+    if [[ "$manual_path" == *.zip ]]; then
+        if [ -f "$manual_path" ]; then
+            if unzip -q -o "$manual_path" -d "$XRAY_DIR" 2>/dev/null; then
+                chmod +x "$XRAY_BIN"
+                log_success "$(msg xray_installed)"
+                return 0
+            fi
+        fi
+    # Or a binary
+    elif [ -f "$manual_path" ]; then
+        cp "$manual_path" "$XRAY_BIN"
+        chmod +x "$XRAY_BIN"
+        log_success "$(msg xray_installed)"
+        return 0
+    fi
     
-    log_success "$(msg xray_installed)"
-    return 0
+    log_error "Invalid path: $manual_path"
+    return 1
 }
 
 # Generate xray config with HTTP inbound and VLESS outbound
@@ -923,40 +892,10 @@ enable_xray() {
     
     log_info "Server: $VLESS_SERVER:$VLESS_PORT"
     
-    # Ask for external proxy to download xray (if not already installed)
-    if [ ! -x "$XRAY_BIN" ]; then
-        echo ""
-        echo -e "${YELLOW}Xray binary not found. Need to download it.${NC}"
-        echo -e "If GitHub is blocked, you can use an external proxy for download."
-        echo -e "$(msg proxy_format_hint)"
-        echo ""
-        read -p "External proxy for download (Enter to skip): " download_proxy
-        
-        if [ -n "$download_proxy" ]; then
-            local parsed_proxy
-            parsed_proxy=$(parse_proxy_input "$download_proxy")
-            if [ $? -eq 0 ] && [ -n "$parsed_proxy" ]; then
-                HTTP_PROXY_URL="$parsed_proxy"
-                export http_proxy="$HTTP_PROXY_URL"
-                export https_proxy="$HTTP_PROXY_URL"
-                export HTTP_PROXY="$HTTP_PROXY_URL"
-                export HTTPS_PROXY="$HTTP_PROXY_URL"
-                log_info "Using proxy for download: $HTTP_PROXY_URL"
-            fi
-        fi
-    fi
-    
     # Install xray if needed
     if ! install_xray_binary; then
-        # Cleanup proxy env if we set it
-        unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
-        HTTP_PROXY_URL=""
         return 1
     fi
-    
-    # Cleanup download proxy
-    unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
-    HTTP_PROXY_URL=""
     
     # Generate random port
     local port=$(generate_random_port)
