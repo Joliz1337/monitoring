@@ -886,7 +886,7 @@ async def trigger_node_update(
 ):
     """
     Trigger node update.
-    Optional data: { "target_version": "v1.1.0", "proxy": "socks5h://..." }
+    Optional data: { "target_version": "v1.1.0", "proxy": "http://..." }
     If not specified, updates to latest version.
     The proxy from server settings is automatically included if configured.
     """

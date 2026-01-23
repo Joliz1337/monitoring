@@ -4,7 +4,7 @@
 # This ensures all update logic uses the LATEST code
 #
 # Environment variables:
-#   UPDATE_PROXY - SOCKS5 proxy (passed from update.sh, used for logging)
+#   UPDATE_PROXY - HTTP proxy (passed from update.sh, used for logging)
 #
 
 set -e

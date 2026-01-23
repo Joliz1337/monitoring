@@ -60,7 +60,7 @@ async def run_update_in_container(target_ref: str | None = None, proxy: str | No
     
     Args:
         target_ref: Git reference (commit hash, tag, or branch). Default: 'main'
-        proxy: SOCKS5 proxy for git (e.g., socks5h://127.0.0.1:1080)
+        proxy: HTTP proxy for git (e.g., http://127.0.0.1:3128)
     """
     global _update_status
     
@@ -232,7 +232,7 @@ echo "[SUCCESS] Update completed!"
 class UpdateRequest(BaseModel):
     """Request model for node update"""
     target_version: Optional[str] = Field(None, description="Git reference (branch/tag/commit). Default: 'main'")
-    proxy: Optional[str] = Field(None, description="SOCKS5 proxy for downloads (e.g., socks5h://127.0.0.1:1080)")
+    proxy: Optional[str] = Field(None, description="HTTP proxy for downloads (e.g., http://127.0.0.1:3128)")
 
 
 @router.post("/update")
@@ -247,7 +247,7 @@ async def trigger_update(data: UpdateRequest = None):
     
     Request body:
         target_version: Git reference (branch/tag/commit). Default: 'main' (latest)
-        proxy: SOCKS5 proxy for git clone (e.g., socks5h://127.0.0.1:1080)
+        proxy: HTTP proxy for git clone (e.g., http://127.0.0.1:3128)
     """
     if _update_status["in_progress"]:
         raise HTTPException(

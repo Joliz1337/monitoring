@@ -121,8 +121,8 @@
     "monitoring_disabled": "Мониторинг отключён",
     "disabled": "Отключён",
     "update_proxy": "Прокси для обновлений",
-    "update_proxy_placeholder": "ip:port или socks5://user:pass@ip:port",
-    "update_proxy_hint": "SOCKS5 прокси для скачивания обновлений. Оставьте пустым если не нужен. Можно использовать localhost:1080 если на сервере запущен xray."
+    "update_proxy_placeholder": "ip:port или http://user:pass@ip:port",
+    "update_proxy_hint": "HTTP прокси для скачивания обновлений. Оставьте пустым если не нужен."
   },
   "server_details": {
     "loading": "Загрузка данных сервера...",
@@ -446,7 +446,7 @@
     "legacy_version": "Устаревшая",
     "proxy_placeholder": "ip:port",
     "proxy_help_title": "Форматы прокси",
-    "proxy_help_text": "Поддерживаемые форматы:\n• ip:port\n• ip:port:user:pass\n• socks5://user:pass@ip:port\n\nМожно использовать localhost:1080 если на сервере запущен xray"
+    "proxy_help_text": "Поддерживаемые форматы:\n• ip:port\n• ip:port:user:pass\n• http://user:pass@ip:port"
   },
   "bulk_actions": {
     "title": "Массовые действия",

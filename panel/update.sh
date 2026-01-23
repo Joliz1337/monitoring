@@ -6,7 +6,7 @@
 #   If no argument provided, updates to latest commit from main branch
 #
 # Environment variables:
-#   UPDATE_PROXY - SOCKS5 proxy for downloading (e.g., socks5h://127.0.0.1:1080)
+#   UPDATE_PROXY - HTTP proxy for downloading (e.g., http://127.0.0.1:3128)
 #
 
 set -e
@@ -14,7 +14,7 @@ set -e
 # Cleanup proxy on exit
 cleanup_proxy() {
     # Unset git proxy (only if we set it)
-    if [ -n "$SOCKS5_PROXY" ]; then
+    if [ -n "$HTTP_PROXY_URL" ]; then
         git config --global --unset http.proxy 2>/dev/null || true
         git config --global --unset https.proxy 2>/dev/null || true
     fi
@@ -56,35 +56,35 @@ TARGET_REF="${1:-main}"
 REPO_URL="https://github.com/Joliz1337/monitoring.git"
 
 # Proxy from environment variable
-SOCKS5_PROXY="${UPDATE_PROXY:-}"
+HTTP_PROXY_URL="${UPDATE_PROXY:-}"
 
 # ==================== Proxy Functions ====================
 
 # Enable proxy for all network operations
 enable_system_proxy() {
-    if [ -z "$SOCKS5_PROXY" ]; then
+    if [ -z "$HTTP_PROXY_URL" ]; then
         return 0
     fi
     
-    log_info "Enabling proxy: $SOCKS5_PROXY"
+    log_info "Enabling proxy: $HTTP_PROXY_URL"
     
     # Set environment variables for all tools
-    export http_proxy="$SOCKS5_PROXY"
-    export https_proxy="$SOCKS5_PROXY"
-    export HTTP_PROXY="$SOCKS5_PROXY"
-    export HTTPS_PROXY="$SOCKS5_PROXY"
-    export ALL_PROXY="$SOCKS5_PROXY"
-    export all_proxy="$SOCKS5_PROXY"
+    export http_proxy="$HTTP_PROXY_URL"
+    export https_proxy="$HTTP_PROXY_URL"
+    export HTTP_PROXY="$HTTP_PROXY_URL"
+    export HTTPS_PROXY="$HTTP_PROXY_URL"
+    export ALL_PROXY="$HTTP_PROXY_URL"
+    export all_proxy="$HTTP_PROXY_URL"
     
     # Git proxy config
-    git config --global http.proxy "$SOCKS5_PROXY" 2>/dev/null || true
-    git config --global https.proxy "$SOCKS5_PROXY" 2>/dev/null || true
+    git config --global http.proxy "$HTTP_PROXY_URL" 2>/dev/null || true
+    git config --global https.proxy "$HTTP_PROXY_URL" 2>/dev/null || true
 }
 
 # Get git proxy config
 get_git_proxy_args() {
-    if [ -n "$SOCKS5_PROXY" ]; then
-        echo "-c http.proxy=$SOCKS5_PROXY -c https.proxy=$SOCKS5_PROXY"
+    if [ -n "$HTTP_PROXY_URL" ]; then
+        echo "-c http.proxy=$HTTP_PROXY_URL -c https.proxy=$HTTP_PROXY_URL"
     fi
 }
 
@@ -102,7 +102,7 @@ clone_repo() {
         
         log_info "Downloading from GitHub (attempt $((retry + 1))/$max_retries)..."
         if [ -n "$git_proxy_args" ]; then
-            log_info "Using proxy: $SOCKS5_PROXY"
+            log_info "Using proxy: $HTTP_PROXY_URL"
             if timeout 120 git $git_proxy_args clone --depth 1 --branch "$branch" "$REPO_URL" "$target_dir" 2>&1; then
                 log_success "Download complete"
                 return 0
@@ -189,7 +189,7 @@ echo ""
 if [ -f "$TMP_DIR/panel/scripts/apply-update.sh" ]; then
     chmod +x "$TMP_DIR/panel/scripts/apply-update.sh"
     # Pass proxy via environment variable
-    UPDATE_PROXY="$SOCKS5_PROXY" exec bash "$TMP_DIR/panel/scripts/apply-update.sh" "$TMP_DIR" "$PANEL_DIR" "$CURRENT_VERSION"
+    UPDATE_PROXY="$HTTP_PROXY_URL" exec bash "$TMP_DIR/panel/scripts/apply-update.sh" "$TMP_DIR" "$PANEL_DIR" "$CURRENT_VERSION"
 else
     # Fallback for older versions without apply-update.sh
     log_warn "Downloaded version doesn't have apply-update.sh, using inline update..."

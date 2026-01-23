@@ -121,8 +121,8 @@
     "monitoring_disabled": "Monitoring disabled",
     "disabled": "Disabled",
     "update_proxy": "Proxy for Updates",
-    "update_proxy_placeholder": "ip:port or socks5://user:pass@ip:port",
-    "update_proxy_hint": "SOCKS5 proxy for downloading updates. Leave empty if not needed. You can use localhost:1080 if xray is running on the server."
+    "update_proxy_placeholder": "ip:port or http://user:pass@ip:port",
+    "update_proxy_hint": "HTTP proxy for downloading updates. Leave empty if not needed."
   },
   "server_details": {
     "loading": "Loading server data...",
@@ -445,7 +445,7 @@
     "legacy_version": "Legacy",
     "proxy_placeholder": "ip:port",
     "proxy_help_title": "Proxy Formats",
-    "proxy_help_text": "Supported formats:\n• ip:port\n• ip:port:user:pass\n• socks5://user:pass@ip:port\n\nYou can use localhost:1080 if xray is running on the server"
+    "proxy_help_text": "Supported formats:\n• ip:port\n• ip:port:user:pass\n• http://user:pass@ip:port"
   },
   "bulk_actions": {
     "title": "Bulk Actions",

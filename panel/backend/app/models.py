@@ -29,7 +29,7 @@ class Server(Base):
     # Cached Traffic data (updated every 60 seconds)
     last_traffic_data = Column(Text, nullable=True)
     
-    # SOCKS5 proxy for updates (e.g., socks5h://127.0.0.1:1080 or socks5h://user:pass@ip:port)
+    # HTTP proxy for updates (e.g., http://127.0.0.1:3128 or http://user:pass@ip:port)
     update_proxy = Column(String(500), nullable=True)
 
 

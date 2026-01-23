@@ -536,7 +536,7 @@ export default function Updates() {
                 return (
                   <motion.div 
                     key={node.id}
-                    className="card group hover:border-dark-700 transition-all"
+                    className="card group hover:border-dark-700 transition-all overflow-visible"
                     initial={{ opacity: 0, y: 20 }}
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, x: -100 }}

@@ -75,7 +75,7 @@ LANG_CODE="en"
 DOCKER_BUILD_TIMEOUT=1800  # 30 minutes
 
 # Proxy settings (empty = no proxy)
-SOCKS5_PROXY=""
+HTTP_PROXY_URL=""
 
 # ==================== Translations ====================
 
@@ -162,9 +162,9 @@ MSG_EN[connectivity_failed]="Network connectivity failed"
 MSG_EN[applying_fix]="Applying fix"
 
 # Proxy messages - English
-MSG_EN[proxy_prompt]="Use SOCKS5 proxy? (Enter to skip, or enter proxy)"
-MSG_EN[proxy_format_hint]="Formats: ip:port | ip:port:user:pass | socks5://user:pass@ip:port"
-MSG_EN[proxy_localhost_hint]="You can use localhost:1080 if xray is running locally"
+MSG_EN[proxy_prompt]="Use HTTP proxy? (Enter to skip, or enter proxy)"
+MSG_EN[proxy_format_hint]="Formats: ip:port | ip:port:user:pass | http://user:pass@ip:port"
+MSG_EN[proxy_localhost_hint]="Example: 192.168.1.1:3128 or http://user:pass@proxy.local:8080"
 MSG_EN[proxy_configured]="Proxy configured for all network operations"
 MSG_EN[proxy_not_used]="No proxy"
 MSG_EN[proxy_invalid]="Invalid proxy format"
@@ -250,9 +250,9 @@ MSG_RU[connectivity_failed]="Сетевое подключение не рабо
 MSG_RU[applying_fix]="Применяется исправление"
 
 # Proxy messages - Russian
-MSG_RU[proxy_prompt]="Использовать SOCKS5 прокси? (Enter - пропустить, или введите прокси)"
-MSG_RU[proxy_format_hint]="Форматы: ip:port | ip:port:user:pass | socks5://user:pass@ip:port"
-MSG_RU[proxy_localhost_hint]="Можно использовать localhost:1080 если xray запущен локально"
+MSG_RU[proxy_prompt]="Использовать HTTP прокси? (Enter - пропустить, или введите прокси)"
+MSG_RU[proxy_format_hint]="Форматы: ip:port | ip:port:user:pass | http://user:pass@ip:port"
+MSG_RU[proxy_localhost_hint]="Пример: 192.168.1.1:3128 или http://user:pass@proxy.local:8080"
 MSG_RU[proxy_configured]="Прокси настроен для всех сетевых операций"
 MSG_RU[proxy_not_used]="Без прокси"
 MSG_RU[proxy_invalid]="Неверный формат прокси"
@@ -330,12 +330,12 @@ run_quiet_timeout() {
 
 # ==================== Proxy Functions ====================
 
-# Parse proxy input and normalize to socks5h:// format
+# Parse proxy input and normalize to http:// format
 # Input formats:
-#   ip:port                      -> socks5h://ip:port
-#   ip:port:user:pass            -> socks5h://user:pass@ip:port
-#   socks5://user:pass@ip:port   -> socks5h://user:pass@ip:port
-#   socks5h://user:pass@ip:port  -> socks5h://user:pass@ip:port (unchanged)
+#   ip:port                      -> http://ip:port
+#   ip:port:user:pass            -> http://user:pass@ip:port
+#   http://user:pass@ip:port     -> http://user:pass@ip:port (unchanged)
+#   http://ip:port               -> http://ip:port (unchanged)
 parse_proxy_input() {
     local input="$1"
     
@@ -345,15 +345,15 @@ parse_proxy_input() {
         return 0
     fi
     
-    # Already has socks5h:// prefix
-    if [[ "$input" == socks5h://* ]]; then
+    # Already has http:// prefix - keep as is
+    if [[ "$input" == http://* ]]; then
         echo "$input"
         return 0
     fi
     
-    # Has socks5:// prefix - convert to socks5h://
-    if [[ "$input" == socks5://* ]]; then
-        echo "socks5h://${input#socks5://}"
+    # Has https:// prefix - keep as is
+    if [[ "$input" == https://* ]]; then
+        echo "$input"
         return 0
     fi
     
@@ -369,14 +369,14 @@ parse_proxy_input() {
         local pass=$(echo "$input" | cut -d: -f4)
         
         if [[ "$port" =~ ^[0-9]+$ ]] && [ -n "$user" ] && [ -n "$pass" ]; then
-            echo "socks5h://${user}:${pass}@${ip}:${port}"
+            echo "http://${user}:${pass}@${ip}:${port}"
             return 0
         fi
     fi
     
     # Simple format: ip:port (validate it has exactly one colon for port)
     if [[ "$input" =~ ^[^:]+:[0-9]+$ ]]; then
-        echo "socks5h://$input"
+        echo "http://$input"
         return 0
     fi
     
@@ -388,7 +388,7 @@ parse_proxy_input() {
 ask_proxy() {
     echo ""
     echo -e "${CYAN}╔════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║              SOCKS5 Proxy                  ║${NC}"
+    echo -e "${CYAN}║              HTTP Proxy                    ║${NC}"
     echo -e "${CYAN}╚════════════════════════════════════════════╝${NC}"
     echo ""
     echo -e "  $(msg proxy_format_hint)"
@@ -398,7 +398,7 @@ ask_proxy() {
     read -p "$(msg proxy_prompt): " proxy_input
     
     if [ -z "$proxy_input" ]; then
-        SOCKS5_PROXY=""
+        HTTP_PROXY_URL=""
         log_info "$(msg proxy_not_used)"
         return 0
     fi
@@ -407,50 +407,50 @@ ask_proxy() {
     parsed_proxy=$(parse_proxy_input "$proxy_input")
     
     if [ $? -eq 0 ] && [ -n "$parsed_proxy" ]; then
-        SOCKS5_PROXY="$parsed_proxy"
-        log_success "$(msg proxy_configured): $SOCKS5_PROXY"
+        HTTP_PROXY_URL="$parsed_proxy"
+        log_success "$(msg proxy_configured): $HTTP_PROXY_URL"
         # Enable proxy for all operations
         enable_system_proxy
     else
         log_error "$(msg proxy_invalid): $proxy_input"
-        SOCKS5_PROXY=""
+        HTTP_PROXY_URL=""
         return 1
     fi
 }
 
 # Enable proxy for ALL system operations (apt, pip, docker, wget, curl, git, etc.)
 enable_system_proxy() {
-    if [ -z "$SOCKS5_PROXY" ]; then
+    if [ -z "$HTTP_PROXY_URL" ]; then
         return 0
     fi
     
-    log_info "$(msg proxy_enabled): $SOCKS5_PROXY"
+    log_info "$(msg proxy_enabled): $HTTP_PROXY_URL"
     
     # Set environment variables for all tools
-    export http_proxy="$SOCKS5_PROXY"
-    export https_proxy="$SOCKS5_PROXY"
-    export HTTP_PROXY="$SOCKS5_PROXY"
-    export HTTPS_PROXY="$SOCKS5_PROXY"
-    export ALL_PROXY="$SOCKS5_PROXY"
-    export all_proxy="$SOCKS5_PROXY"
+    export http_proxy="$HTTP_PROXY_URL"
+    export https_proxy="$HTTP_PROXY_URL"
+    export HTTP_PROXY="$HTTP_PROXY_URL"
+    export HTTPS_PROXY="$HTTP_PROXY_URL"
+    export ALL_PROXY="$HTTP_PROXY_URL"
+    export all_proxy="$HTTP_PROXY_URL"
     
     # Git proxy config
-    git config --global http.proxy "$SOCKS5_PROXY" 2>/dev/null || true
-    git config --global https.proxy "$SOCKS5_PROXY" 2>/dev/null || true
+    git config --global http.proxy "$HTTP_PROXY_URL" 2>/dev/null || true
+    git config --global https.proxy "$HTTP_PROXY_URL" 2>/dev/null || true
     
     # APT proxy config (temporary file, will be removed after install)
     mkdir -p /etc/apt/apt.conf.d 2>/dev/null || true
     cat > /etc/apt/apt.conf.d/99proxy-temp << EOF
-Acquire::http::Proxy "$SOCKS5_PROXY";
-Acquire::https::Proxy "$SOCKS5_PROXY";
+Acquire::http::Proxy "$HTTP_PROXY_URL";
+Acquire::https::Proxy "$HTTP_PROXY_URL";
 EOF
     
     # Docker daemon proxy (for pulling images)
     mkdir -p /etc/systemd/system/docker.service.d 2>/dev/null || true
     cat > /etc/systemd/system/docker.service.d/proxy.conf << EOF
 [Service]
-Environment="HTTP_PROXY=$SOCKS5_PROXY"
-Environment="HTTPS_PROXY=$SOCKS5_PROXY"
+Environment="HTTP_PROXY=$HTTP_PROXY_URL"
+Environment="HTTPS_PROXY=$HTTP_PROXY_URL"
 Environment="NO_PROXY=localhost,127.0.0.1"
 EOF
     
@@ -501,20 +501,20 @@ disable_system_proxy() {
     # Unset environment variables
     unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy
     
-    SOCKS5_PROXY=""
+    HTTP_PROXY_URL=""
 }
 
 # Get curl proxy arguments (for commands that need explicit proxy arg)
 get_curl_proxy_args() {
-    if [ -n "$SOCKS5_PROXY" ]; then
-        echo "--proxy $SOCKS5_PROXY"
+    if [ -n "$HTTP_PROXY_URL" ]; then
+        echo "--proxy $HTTP_PROXY_URL"
     fi
 }
 
 # Get git proxy config (for commands that need explicit proxy arg)
 get_git_proxy_args() {
-    if [ -n "$SOCKS5_PROXY" ]; then
-        echo "-c http.proxy=$SOCKS5_PROXY -c https.proxy=$SOCKS5_PROXY"
+    if [ -n "$HTTP_PROXY_URL" ]; then
+        echo "-c http.proxy=$HTTP_PROXY_URL -c https.proxy=$HTTP_PROXY_URL"
     fi
 }
 
@@ -531,7 +531,7 @@ clone_repo_with_fallback() {
     
     log_info "$(msg downloading_repo)..."
     if [ -n "$git_proxy_args" ]; then
-        log_info "Using proxy: $SOCKS5_PROXY"
+        log_info "Using proxy: $HTTP_PROXY_URL"
         if run_quiet_timeout 120 "git clone" git $git_proxy_args clone --depth 1 --branch "$branch" "$repo_url" "$target_dir"; then
             log_success "$(msg repo_downloaded)"
             return 0
