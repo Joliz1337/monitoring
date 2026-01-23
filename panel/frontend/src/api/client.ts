@@ -680,8 +680,11 @@ export const systemApi = {
   // Node updates via proxy
   getNodeVersion: (serverId: number) => 
     api.get<{ version: string; component: string; node_name: string }>(`/proxy/${serverId}/system/version`),
-  updateNode: (serverId: number, targetVersion?: string) =>
-    api.post<UpdateResponse>(`/proxy/${serverId}/system/update`, targetVersion ? { target_version: targetVersion } : {}),
+  updateNode: (serverId: number, targetVersion?: string, proxy?: string) =>
+    api.post<UpdateResponse>(`/proxy/${serverId}/system/update`, { 
+      ...(targetVersion && { target_version: targetVersion }),
+      ...(proxy && { proxy })
+    }),
   getNodeUpdateStatus: (serverId: number) =>
     api.get<UpdateStatus>(`/proxy/${serverId}/system/update/status`),
   

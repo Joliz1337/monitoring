@@ -442,7 +442,10 @@
     "optimizations": "System Optimizations",
     "update_all_optimizations": "Update All",
     "not_installed": "Not installed",
-    "legacy_version": "Legacy"
+    "legacy_version": "Legacy",
+    "proxy_placeholder": "ip:port",
+    "proxy_help_title": "Proxy Formats",
+    "proxy_help_text": "Supported formats:\n• ip:port\n• ip:port:user:pass\n• socks5://user:pass@ip:port\n\nYou can use localhost:1080 if xray is running on the server"
   },
   "bulk_actions": {
     "title": "Bulk Actions",

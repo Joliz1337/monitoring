@@ -12,7 +12,8 @@ import {
   AlertTriangle,
   Clock,
   Check,
-  Settings2
+  Settings2,
+  HelpCircle
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { systemApi, VersionInfo, NodeVersionInfo } from '../api/client'
@@ -58,6 +59,11 @@ export default function Updates() {
   const [applyingOptimizations, setApplyingOptimizations] = useState<Set<number>>(new Set())
   const [applyingAllOptimizations, setApplyingAllOptimizations] = useState(false)
   const [optimizationsResults, setOptimizationsResults] = useState<Record<string, { success: boolean; message: string }>>({})
+  
+  // Proxy state for updates
+  const [nodeProxies, setNodeProxies] = useState<Record<number, string>>({})
+  const [globalProxy, setGlobalProxy] = useState('')
+  const [showProxyHelp, setShowProxyHelp] = useState<string | null>(null)
   
   const fetchVersionInfo = useCallback(async (showCheckingState = false) => {
     try {
@@ -109,7 +115,7 @@ export default function Updates() {
     }
   }
   
-  const handleUpdateNode = async (node: NodeVersionInfo) => {
+  const handleUpdateNode = async (node: NodeVersionInfo, proxyOverride?: string) => {
     if (updatingNodes.has(node.id)) return
     
     setUpdatingNodes(prev => new Set(prev).add(node.id))
@@ -119,7 +125,9 @@ export default function Updates() {
     }))
     
     try {
-      const response = await systemApi.updateNode(node.id)
+      // Use proxy override (for bulk update) or node-specific proxy
+      const proxy = proxyOverride || nodeProxies[node.id] || undefined
+      const response = await systemApi.updateNode(node.id, undefined, proxy)
       setUpdateResults(prev => ({ 
         ...prev, 
         [`node-${node.id}`]: { success: true, message: response.data.message } 
@@ -154,7 +162,8 @@ export default function Updates() {
     const onlineNodes = versionInfo.nodes.filter(n => n.status === 'online')
     
     for (const node of onlineNodes) {
-      await handleUpdateNode(node)
+      // Pass global proxy to all nodes when using "Update All"
+      await handleUpdateNode(node, globalProxy || undefined)
       // Small delay between updates
       await new Promise(resolve => setTimeout(resolve, 1000))
     }
@@ -454,20 +463,55 @@ export default function Updates() {
           </div>
           
           {nodesNeedUpdate > 0 && (
-            <motion.button
-              onClick={handleUpdateAllNodes}
-              disabled={updatingAll || nodesNeedUpdate === 0}
-              className="btn btn-secondary"
-              whileHover={{ scale: 1.02 }}
-              whileTap={{ scale: 0.98 }}
-            >
-              {updatingAll ? (
-                <Loader2 className="w-4 h-4 animate-spin" />
-              ) : (
-                <ArrowUpCircle className="w-4 h-4" />
-              )}
-              {t('updates.update_all_nodes')} ({nodesNeedUpdate})
-            </motion.button>
+            <div className="flex items-center gap-2">
+              {/* Global Proxy Input */}
+              <div className="relative flex items-center">
+                <input
+                  type="text"
+                  value={globalProxy}
+                  onChange={(e) => setGlobalProxy(e.target.value)}
+                  placeholder={t('updates.proxy_placeholder')}
+                  className="input text-sm py-1.5 px-3 w-40 pr-8"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowProxyHelp(showProxyHelp === 'global' ? null : 'global')}
+                  className="absolute right-2 text-dark-500 hover:text-dark-300 transition-colors"
+                >
+                  <HelpCircle className="w-4 h-4" />
+                </button>
+                
+                {/* Proxy Help Tooltip */}
+                <AnimatePresence>
+                  {showProxyHelp === 'global' && (
+                    <motion.div
+                      initial={{ opacity: 0, y: 5 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: 5 }}
+                      className="absolute top-full right-0 mt-2 p-3 bg-dark-800 border border-dark-700 rounded-lg shadow-xl z-50 w-64"
+                    >
+                      <h4 className="text-sm font-medium text-dark-100 mb-2">{t('updates.proxy_help_title')}</h4>
+                      <p className="text-xs text-dark-400 whitespace-pre-line">{t('updates.proxy_help_text')}</p>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+              
+              <motion.button
+                onClick={handleUpdateAllNodes}
+                disabled={updatingAll || nodesNeedUpdate === 0}
+                className="btn btn-secondary"
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
+              >
+                {updatingAll ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <ArrowUpCircle className="w-4 h-4" />
+                )}
+                {t('updates.update_all_nodes')} ({nodesNeedUpdate})
+              </motion.button>
+            </div>
           )}
         </div>
         
@@ -582,6 +626,42 @@ export default function Updates() {
                             <Check className="w-4 h-4" />
                             {t('updates.up_to_date')}
                           </span>
+                        )}
+                        
+                        {/* Node Proxy Input */}
+                        {node.status === 'online' && needsUpdate && (
+                          <div className="relative flex items-center">
+                            <input
+                              type="text"
+                              value={nodeProxies[node.id] || ''}
+                              onChange={(e) => setNodeProxies(prev => ({ ...prev, [node.id]: e.target.value }))}
+                              placeholder={t('updates.proxy_placeholder')}
+                              className="input text-sm py-1 px-2 w-32 pr-7"
+                              disabled={isUpdating}
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setShowProxyHelp(showProxyHelp === `node-${node.id}` ? null : `node-${node.id}`)}
+                              className="absolute right-1.5 text-dark-500 hover:text-dark-300 transition-colors"
+                            >
+                              <HelpCircle className="w-3.5 h-3.5" />
+                            </button>
+                            
+                            {/* Proxy Help Tooltip */}
+                            <AnimatePresence>
+                              {showProxyHelp === `node-${node.id}` && (
+                                <motion.div
+                                  initial={{ opacity: 0, y: 5 }}
+                                  animate={{ opacity: 1, y: 0 }}
+                                  exit={{ opacity: 0, y: 5 }}
+                                  className="absolute top-full right-0 mt-2 p-3 bg-dark-800 border border-dark-700 rounded-lg shadow-xl z-50 w-64"
+                                >
+                                  <h4 className="text-sm font-medium text-dark-100 mb-2">{t('updates.proxy_help_title')}</h4>
+                                  <p className="text-xs text-dark-400 whitespace-pre-line">{t('updates.proxy_help_text')}</p>
+                                </motion.div>
+                              )}
+                            </AnimatePresence>
+                          </div>
                         )}
                         
                         <motion.button

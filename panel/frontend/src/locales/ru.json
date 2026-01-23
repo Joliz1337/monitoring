@@ -443,7 +443,10 @@
     "optimizations": "Системные оптимизации",
     "update_all_optimizations": "Обновить все",
     "not_installed": "Не установлено",
-    "legacy_version": "Устаревшая"
+    "legacy_version": "Устаревшая",
+    "proxy_placeholder": "ip:port",
+    "proxy_help_title": "Форматы прокси",
+    "proxy_help_text": "Поддерживаемые форматы:\n• ip:port\n• ip:port:user:pass\n• socks5://user:pass@ip:port\n\nМожно использовать localhost:1080 если на сервере запущен xray"
   },
   "bulk_actions": {
     "title": "Массовые действия",
