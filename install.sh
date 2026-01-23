@@ -689,8 +689,6 @@ install_xray_binary() {
         return 0
     fi
     
-    log_info "$(msg xray_downloading)"
-    
     mkdir -p "$XRAY_DIR"
     
     # Determine architecture
@@ -703,15 +701,67 @@ install_xray_binary() {
         *) xray_arch="64" ;;
     esac
     
-    # Get latest release URL
-    local download_url="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${xray_arch}.zip"
+    local filename="Xray-linux-${xray_arch}.zip"
     local tmp_zip="/tmp/xray-$$.zip"
     
-    # Download with proxy if configured
+    # Download mirrors (in order of preference)
+    local mirrors=(
+        "https://github.com/XTLS/Xray-core/releases/latest/download/${filename}"
+        "https://ghproxy.com/https://github.com/XTLS/Xray-core/releases/latest/download/${filename}"
+        "https://mirror.ghproxy.com/https://github.com/XTLS/Xray-core/releases/latest/download/${filename}"
+        "https://gh-proxy.com/https://github.com/XTLS/Xray-core/releases/latest/download/${filename}"
+    )
+    
     local curl_proxy_args=$(get_curl_proxy_args)
-    if ! curl -fsSL $curl_proxy_args --connect-timeout 30 --max-time 300 -o "$tmp_zip" "$download_url"; then
-        log_error "Failed to download xray"
-        rm -f "$tmp_zip"
+    local downloaded=false
+    
+    log_info "$(msg xray_downloading)"
+    
+    for url in "${mirrors[@]}"; do
+        log_info "Trying: ${url%%/Xray*}..."
+        
+        # Try download with resume support (-C -)
+        if curl -fSL $curl_proxy_args \
+            --connect-timeout 30 \
+            --max-time 600 \
+            --retry 3 \
+            --retry-delay 5 \
+            -C - \
+            -o "$tmp_zip" \
+            "$url" 2>/dev/null; then
+            
+            # Verify it's a valid zip
+            if unzip -t "$tmp_zip" >/dev/null 2>&1; then
+                downloaded=true
+                log_success "Downloaded from ${url%%/Xray*}"
+                break
+            else
+                log_warn "Invalid archive, trying next mirror..."
+                rm -f "$tmp_zip"
+            fi
+        else
+            log_warn "Failed, trying next mirror..."
+            rm -f "$tmp_zip"
+        fi
+    done
+    
+    if [ "$downloaded" = false ]; then
+        log_error "Failed to download xray from all mirrors"
+        echo ""
+        echo -e "${YELLOW}You can download xray manually:${NC}"
+        echo "  1. Download: https://github.com/XTLS/Xray-core/releases"
+        echo "  2. Extract xray binary to: $XRAY_DIR/xray"
+        echo "  3. Run this setup again"
+        echo ""
+        read -p "Or enter path to existing xray binary (Enter to skip): " manual_path
+        
+        if [ -n "$manual_path" ] && [ -x "$manual_path" ]; then
+            cp "$manual_path" "$XRAY_BIN"
+            chmod +x "$XRAY_BIN"
+            log_success "$(msg xray_installed) (from $manual_path)"
+            return 0
+        fi
+        
         return 1
     fi
     
@@ -865,10 +915,40 @@ enable_xray() {
     
     log_info "Server: $VLESS_SERVER:$VLESS_PORT"
     
+    # Ask for external proxy to download xray (if not already installed)
+    if [ ! -x "$XRAY_BIN" ]; then
+        echo ""
+        echo -e "${YELLOW}Xray binary not found. Need to download it.${NC}"
+        echo -e "If GitHub is blocked, you can use an external proxy for download."
+        echo -e "$(msg proxy_format_hint)"
+        echo ""
+        read -p "External proxy for download (Enter to skip): " download_proxy
+        
+        if [ -n "$download_proxy" ]; then
+            local parsed_proxy
+            parsed_proxy=$(parse_proxy_input "$download_proxy")
+            if [ $? -eq 0 ] && [ -n "$parsed_proxy" ]; then
+                HTTP_PROXY_URL="$parsed_proxy"
+                export http_proxy="$HTTP_PROXY_URL"
+                export https_proxy="$HTTP_PROXY_URL"
+                export HTTP_PROXY="$HTTP_PROXY_URL"
+                export HTTPS_PROXY="$HTTP_PROXY_URL"
+                log_info "Using proxy for download: $HTTP_PROXY_URL"
+            fi
+        fi
+    fi
+    
     # Install xray if needed
     if ! install_xray_binary; then
+        # Cleanup proxy env if we set it
+        unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
+        HTTP_PROXY_URL=""
         return 1
     fi
+    
+    # Cleanup download proxy
+    unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
+    HTTP_PROXY_URL=""
     
     # Generate random port
     local port=$(generate_random_port)
