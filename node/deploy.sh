@@ -43,7 +43,7 @@ log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
 # Timeouts (in seconds)
-DOCKER_BUILD_TIMEOUT="${DOCKER_BUILD_TIMEOUT:-1800}"  # 30 min default
+DOCKER_BUILD_TIMEOUT="${DOCKER_BUILD_TIMEOUT:-600}"  # 10 min default
 
 # Run command quietly, show full output only on error
 run_quiet() {
@@ -538,20 +538,19 @@ start_containers() {
         timeout "$build_timeout" docker build --network=host --build-arg CACHE_BUST=${CACHE_BUST:-} -t monitoring-node-api . > "$BUILD_LOG" 2>&1 &
         local build_pid=$!
         
-        # Show progress while building
-        local dots=""
+        # Show progress while building (last 30 lines of log)
         while kill -0 $build_pid 2>/dev/null; do
-            dots="${dots}."
-            if [ ${#dots} -gt 3 ]; then dots="."; fi
-            local current_step=$(grep -oE 'Step [0-9]+/[0-9]+|#[0-9]+ \[[0-9]+/[0-9]+\]' "$BUILD_LOG" 2>/dev/null | tail -1)
-            if [ -n "$current_step" ]; then
-                printf "\r${BLUE}[INFO]${NC} Building${dots} %-30s" "($current_step)"
-            else
-                printf "\r${BLUE}[INFO]${NC} Building${dots}   "
+            if [ -f "$BUILD_LOG" ] && [ -s "$BUILD_LOG" ]; then
+                # Clear screen and show last 30 lines
+                clear
+                echo -e "${BLUE}[INFO]${NC} Building Docker image (attempt $((retry + 1))/$max_retries)... (press Ctrl+C to cancel)"
+                echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+                tail -30 "$BUILD_LOG" 2>/dev/null
+                echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
             fi
-            sleep 2
+            sleep 3
         done
-        printf "\r%-60s\r" " "
+        echo ""
         
         wait $build_pid
         build_exit_code=$?
@@ -569,16 +568,16 @@ start_containers() {
             echo "  - Network issues with Docker Hub"
             echo "  - Server ran out of memory (check: free -h)"
             echo ""
-            echo -e "${YELLOW}Last 50 lines of build output:${NC}"
+            echo -e "${YELLOW}Last 30 lines of build output:${NC}"
             echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-            tail -50 "$BUILD_LOG" 2>/dev/null || echo "(no log available)"
+            tail -30 "$BUILD_LOG" 2>/dev/null || echo "(no log available)"
             echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         else
             log_error "Build failed (exit code: $build_exit_code)"
             echo ""
-            echo -e "${YELLOW}Last 50 lines of build output:${NC}"
+            echo -e "${YELLOW}Last 30 lines of build output:${NC}"
             echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-            tail -50 "$BUILD_LOG" 2>/dev/null || echo "(no log available)"
+            tail -30 "$BUILD_LOG" 2>/dev/null || echo "(no log available)"
             echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         fi
         
