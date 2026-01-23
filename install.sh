@@ -1241,6 +1241,14 @@ install_node() {
     
     cp -r "$TMP_DIR/node" "$NODE_DIR"
     copy_installer "$NODE_DIR"
+    
+    # Copy configs/VERSION for optimizations version tracking
+    if [ -f "$TMP_DIR/configs/VERSION" ]; then
+        mkdir -p "$NODE_DIR/configs"
+        cp "$TMP_DIR/configs/VERSION" "$NODE_DIR/configs/VERSION"
+        chmod 644 "$NODE_DIR/configs/VERSION"
+    fi
+    
     cd "$NODE_DIR"
     chmod +x deploy.sh update.sh generate-ssl.sh >/dev/null 2>&1 || true
     
