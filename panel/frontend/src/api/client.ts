@@ -553,6 +553,7 @@ export interface NodeVersionInfo {
   version: string | null
   status: 'online' | 'offline'
   optimizations?: NodeOptimizationsInfo
+  update_proxy?: string | null
 }
 
 export interface VersionInfo {

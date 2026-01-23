@@ -73,6 +73,17 @@ export default function Updates() {
       // Single request now contains all version info including optimizations
       const versionResponse = await systemApi.getVersion()
       setVersionInfo(versionResponse.data)
+      
+      // Load saved proxies from server settings
+      if (versionResponse.data.nodes) {
+        const savedProxies: Record<number, string> = {}
+        versionResponse.data.nodes.forEach((node: any) => {
+          if (node.update_proxy) {
+            savedProxies[node.id] = node.update_proxy
+          }
+        })
+        setNodeProxies(prev => ({ ...savedProxies, ...prev }))
+      }
     } catch (err) {
       setError(t('updates.failed_fetch'))
       console.error('Failed to fetch version info:', err)

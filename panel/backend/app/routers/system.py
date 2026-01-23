@@ -191,7 +191,8 @@ async def get_version_info(
             "url": server.url,
             "version": versions_data.get("node_version") if versions_data else None,
             "status": "online" if is_online else "offline",
-            "optimizations": versions_data.get("optimizations", {"installed": False, "version": None}) if versions_data else {"installed": False, "version": None}
+            "optimizations": versions_data.get("optimizations", {"installed": False, "version": None}) if versions_data else {"installed": False, "version": None},
+            "update_proxy": server.update_proxy
         }
     
     # Execute all requests in parallel

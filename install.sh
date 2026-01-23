@@ -77,13 +77,6 @@ DOCKER_BUILD_TIMEOUT=1800  # 30 minutes
 # Proxy settings (empty = no proxy)
 HTTP_PROXY_URL=""
 
-# Xray local proxy paths
-XRAY_DIR="/opt/xray-local"
-XRAY_BIN="$XRAY_DIR/xray"
-XRAY_CONFIG="$XRAY_DIR/config.json"
-XRAY_PID_FILE="$XRAY_DIR/xray.pid"
-XRAY_PORT_FILE="$XRAY_DIR/port"
-
 # ==================== Translations ====================
 
 declare -A MSG_EN
@@ -177,24 +170,6 @@ MSG_EN[proxy_not_used]="No proxy"
 MSG_EN[proxy_invalid]="Invalid proxy format"
 MSG_EN[proxy_enabled]="Proxy enabled"
 
-# Xray messages - English
-MSG_EN[menu_xray]="Xray proxy (local)"
-MSG_EN[xray_submenu_enable]="Enable xray proxy"
-MSG_EN[xray_submenu_disable]="Disable xray proxy"
-MSG_EN[xray_submenu_back]="Back"
-MSG_EN[xray_status]="Xray"
-MSG_EN[xray_running]="running"
-MSG_EN[xray_stopped]="stopped"
-MSG_EN[xray_enter_vless]="Enter VLESS key (vless://...)"
-MSG_EN[xray_downloading]="Downloading xray..."
-MSG_EN[xray_installed]="Xray installed"
-MSG_EN[xray_started]="Xray proxy started"
-MSG_EN[xray_stopped_msg]="Xray proxy stopped"
-MSG_EN[xray_invalid_key]="Invalid VLESS key format"
-MSG_EN[xray_already_running]="Xray is already running"
-MSG_EN[xray_not_running]="Xray is not running"
-MSG_EN[xray_using_local]="Using local xray proxy"
-
 # Russian messages
 MSG_RU[select_language]="Select language / Выберите язык:"
 MSG_RU[installing_git]="Установка git..."
@@ -282,24 +257,6 @@ MSG_RU[proxy_configured]="Прокси настроен для всех сете
 MSG_RU[proxy_not_used]="Без прокси"
 MSG_RU[proxy_invalid]="Неверный формат прокси"
 MSG_RU[proxy_enabled]="Прокси включён"
-
-# Xray messages - Russian
-MSG_RU[menu_xray]="Xray прокси (локальный)"
-MSG_RU[xray_submenu_enable]="Включить xray прокси"
-MSG_RU[xray_submenu_disable]="Выключить xray прокси"
-MSG_RU[xray_submenu_back]="Назад"
-MSG_RU[xray_status]="Xray"
-MSG_RU[xray_running]="работает"
-MSG_RU[xray_stopped]="остановлен"
-MSG_RU[xray_enter_vless]="Введите VLESS ключ (vless://...)"
-MSG_RU[xray_downloading]="Скачивание xray..."
-MSG_RU[xray_installed]="Xray установлен"
-MSG_RU[xray_started]="Xray прокси запущен"
-MSG_RU[xray_stopped_msg]="Xray прокси остановлен"
-MSG_RU[xray_invalid_key]="Неверный формат VLESS ключа"
-MSG_RU[xray_already_running]="Xray уже запущен"
-MSG_RU[xray_not_running]="Xray не запущен"
-MSG_RU[xray_using_local]="Используется локальный xray прокси"
 
 # Get message in current language
 msg() {
@@ -429,17 +386,6 @@ parse_proxy_input() {
 
 # Ask user for proxy configuration (called before each install/update)
 ask_proxy() {
-    # Auto-use local xray proxy if running
-    if check_xray_running; then
-        local xray_port=$(cat "$XRAY_PORT_FILE" 2>/dev/null)
-        if [ -n "$xray_port" ]; then
-            HTTP_PROXY_URL="http://127.0.0.1:$xray_port"
-            log_success "$(msg xray_using_local): $HTTP_PROXY_URL"
-            enable_system_proxy
-            return 0
-        fi
-    fi
-    
     echo ""
     echo -e "${CYAN}╔════════════════════════════════════════════╗${NC}"
     echo -e "${CYAN}║              HTTP Proxy                    ║${NC}"
@@ -570,400 +516,6 @@ get_git_proxy_args() {
     if [ -n "$HTTP_PROXY_URL" ]; then
         echo "-c http.proxy=$HTTP_PROXY_URL -c https.proxy=$HTTP_PROXY_URL"
     fi
-}
-
-# ==================== Xray Local Proxy Functions ====================
-
-# Parse VLESS URI and extract parameters
-# Usage: parse_vless_key "vless://uuid@server:port?params#remark"
-# Sets global variables: VLESS_UUID, VLESS_SERVER, VLESS_PORT, VLESS_SECURITY, VLESS_TYPE, VLESS_FLOW, VLESS_SNI, VLESS_PBK, VLESS_SID, VLESS_FP
-parse_vless_key() {
-    local vless_uri="$1"
-    
-    # Validate format
-    if [[ ! "$vless_uri" =~ ^vless:// ]]; then
-        return 1
-    fi
-    
-    # Remove vless:// prefix
-    local uri_body="${vless_uri#vless://}"
-    
-    # Remove fragment (#remark) if present
-    uri_body="${uri_body%%#*}"
-    
-    # Extract UUID (before @)
-    VLESS_UUID="${uri_body%%@*}"
-    if [ -z "$VLESS_UUID" ]; then
-        return 1
-    fi
-    
-    # Extract server:port?params (after @)
-    local server_part="${uri_body#*@}"
-    
-    # Extract server and port (before ?)
-    local server_port="${server_part%%\?*}"
-    VLESS_SERVER="${server_port%:*}"
-    VLESS_PORT="${server_port##*:}"
-    
-    if [ -z "$VLESS_SERVER" ] || [ -z "$VLESS_PORT" ]; then
-        return 1
-    fi
-    
-    # Extract query parameters (after ?)
-    local params=""
-    if [[ "$server_part" == *"?"* ]]; then
-        params="${server_part#*\?}"
-    fi
-    
-    # Parse parameters
-    VLESS_SECURITY=""
-    VLESS_TYPE="tcp"
-    VLESS_FLOW=""
-    VLESS_SNI=""
-    VLESS_PBK=""
-    VLESS_SID=""
-    VLESS_FP="chrome"
-    
-    # URL decode function
-    urldecode() {
-        local url_encoded="${1//+/ }"
-        printf '%b' "${url_encoded//%/\\x}"
-    }
-    
-    # Parse each parameter
-    IFS='&' read -ra PARAM_ARRAY <<< "$params"
-    for param in "${PARAM_ARRAY[@]}"; do
-        local key="${param%%=*}"
-        local value="${param#*=}"
-        value=$(urldecode "$value")
-        
-        case "$key" in
-            security) VLESS_SECURITY="$value" ;;
-            type) VLESS_TYPE="$value" ;;
-            flow) VLESS_FLOW="$value" ;;
-            sni) VLESS_SNI="$value" ;;
-            pbk) VLESS_PBK="$value" ;;
-            sid) VLESS_SID="$value" ;;
-            fp) [ -n "$value" ] && VLESS_FP="$value" ;;
-        esac
-    done
-    
-    return 0
-}
-
-# Generate random free port in range 10800-10899
-generate_random_port() {
-    local port
-    local max_attempts=100
-    local attempt=0
-    
-    while [ $attempt -lt $max_attempts ]; do
-        port=$((10800 + RANDOM % 100))
-        # Check if port is free
-        if ! ss -tlnp 2>/dev/null | grep -q ":$port "; then
-            echo "$port"
-            return 0
-        fi
-        attempt=$((attempt + 1))
-    done
-    
-    # Fallback to default
-    echo "10819"
-}
-
-# Check if xray is running
-check_xray_running() {
-    if [ -f "$XRAY_PID_FILE" ]; then
-        local pid=$(cat "$XRAY_PID_FILE" 2>/dev/null)
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-            return 0
-        fi
-    fi
-    return 1
-}
-
-# Install xray binary
-install_xray_binary() {
-    if [ -x "$XRAY_BIN" ]; then
-        log_success "$(msg xray_installed)"
-        return 0
-    fi
-    
-    mkdir -p "$XRAY_DIR"
-    
-    # Determine architecture
-    local arch=$(uname -m)
-    local xray_arch
-    case "$arch" in
-        x86_64) xray_arch="64" ;;
-        aarch64) xray_arch="arm64-v8a" ;;
-        armv7l) xray_arch="arm32-v7a" ;;
-        *) xray_arch="64" ;;
-    esac
-    
-    local filename="Xray-linux-${xray_arch}.zip"
-    local download_url="https://github.com/XTLS/Xray-core/releases/latest/download/${filename}"
-    local tmp_zip="/tmp/xray-$$.zip"
-    
-    log_info "$(msg xray_downloading)"
-    log_info "URL: $download_url"
-    
-    # Try to download from GitHub (15 sec timeout)
-    if curl -fSL --max-time 15 -o "$tmp_zip" "$download_url" 2>/dev/null; then
-        if unzip -t "$tmp_zip" >/dev/null 2>&1; then
-            # Extract
-            if unzip -q -o "$tmp_zip" -d "$XRAY_DIR" 2>/dev/null; then
-                rm -f "$tmp_zip"
-                chmod +x "$XRAY_BIN"
-                log_success "$(msg xray_installed)"
-                return 0
-            fi
-        fi
-        rm -f "$tmp_zip"
-    fi
-    
-    # Download failed - ask for manual path
-    log_error "Failed to download xray"
-    echo ""
-    echo -e "${YELLOW}Download manually:${NC}"
-    echo "  https://github.com/XTLS/Xray-core/releases"
-    echo ""
-    echo -e "${YELLOW}Then enter path to zip file or xray binary:${NC}"
-    read -p "> " manual_path
-    
-    if [ -z "$manual_path" ]; then
-        return 1
-    fi
-    
-    # Check if it's a zip file
-    if [[ "$manual_path" == *.zip ]]; then
-        if [ -f "$manual_path" ]; then
-            if unzip -q -o "$manual_path" -d "$XRAY_DIR" 2>/dev/null; then
-                chmod +x "$XRAY_BIN"
-                log_success "$(msg xray_installed)"
-                return 0
-            fi
-        fi
-    # Or a binary
-    elif [ -f "$manual_path" ]; then
-        cp "$manual_path" "$XRAY_BIN"
-        chmod +x "$XRAY_BIN"
-        log_success "$(msg xray_installed)"
-        return 0
-    fi
-    
-    log_error "Invalid path: $manual_path"
-    return 1
-}
-
-# Generate xray config with HTTP inbound and VLESS outbound
-generate_xray_config() {
-    local port="$1"
-    
-    cat > "$XRAY_CONFIG" << EOF
-{
-  "log": {
-    "loglevel": "warning"
-  },
-  "inbounds": [
-    {
-      "port": $port,
-      "listen": "127.0.0.1",
-      "protocol": "http",
-      "settings": {}
-    }
-  ],
-  "outbounds": [
-    {
-      "protocol": "vless",
-      "settings": {
-        "vnext": [
-          {
-            "address": "$VLESS_SERVER",
-            "port": $VLESS_PORT,
-            "users": [
-              {
-                "id": "$VLESS_UUID",
-                "flow": "$VLESS_FLOW",
-                "encryption": "none"
-              }
-            ]
-          }
-        ]
-      },
-      "streamSettings": {
-        "network": "$VLESS_TYPE",
-        "security": "$VLESS_SECURITY",
-        "realitySettings": {
-          "serverName": "$VLESS_SNI",
-          "publicKey": "$VLESS_PBK",
-          "shortId": "$VLESS_SID",
-          "fingerprint": "$VLESS_FP"
-        }
-      }
-    }
-  ]
-}
-EOF
-}
-
-# Start xray process
-start_xray() {
-    if check_xray_running; then
-        log_warn "$(msg xray_already_running)"
-        return 0
-    fi
-    
-    # Start xray in background
-    nohup "$XRAY_BIN" run -c "$XRAY_CONFIG" > "$XRAY_DIR/xray.log" 2>&1 &
-    local pid=$!
-    
-    # Wait a bit and check if it started
-    sleep 2
-    
-    if kill -0 "$pid" 2>/dev/null; then
-        echo "$pid" > "$XRAY_PID_FILE"
-        local port=$(cat "$XRAY_PORT_FILE" 2>/dev/null)
-        log_success "$(msg xray_started) (127.0.0.1:$port)"
-        return 0
-    else
-        log_error "Failed to start xray"
-        [ -f "$XRAY_DIR/xray.log" ] && tail -10 "$XRAY_DIR/xray.log"
-        return 1
-    fi
-}
-
-# Stop xray process
-stop_xray() {
-    if [ -f "$XRAY_PID_FILE" ]; then
-        local pid=$(cat "$XRAY_PID_FILE" 2>/dev/null)
-        if [ -n "$pid" ]; then
-            kill "$pid" 2>/dev/null || true
-            # Wait for process to terminate
-            local count=0
-            while kill -0 "$pid" 2>/dev/null && [ $count -lt 10 ]; do
-                sleep 0.5
-                count=$((count + 1))
-            done
-            # Force kill if still running
-            kill -9 "$pid" 2>/dev/null || true
-        fi
-        rm -f "$XRAY_PID_FILE"
-    fi
-    log_success "$(msg xray_stopped_msg)"
-}
-
-# Enable xray proxy (main function)
-enable_xray() {
-    echo ""
-    echo -e "${CYAN}╔════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║           Xray Proxy Setup                 ║${NC}"
-    echo -e "${CYAN}╚════════════════════════════════════════════╝${NC}"
-    echo ""
-    
-    # Check if already running
-    if check_xray_running; then
-        local current_port=$(cat "$XRAY_PORT_FILE" 2>/dev/null)
-        log_warn "$(msg xray_already_running) (127.0.0.1:$current_port)"
-        echo ""
-        read -p "Stop and reconfigure? (y/N): " reconfigure
-        if [ "$reconfigure" != "y" ] && [ "$reconfigure" != "Y" ]; then
-            return 0
-        fi
-        stop_xray
-    fi
-    
-    # Ask for VLESS key
-    echo -e "$(msg xray_enter_vless):"
-    echo -e "${YELLOW}Example: vless://uuid@server:port?security=reality&...${NC}"
-    echo ""
-    read -p "> " vless_key
-    
-    if [ -z "$vless_key" ]; then
-        log_error "$(msg xray_invalid_key)"
-        return 1
-    fi
-    
-    # Parse VLESS key
-    if ! parse_vless_key "$vless_key"; then
-        log_error "$(msg xray_invalid_key)"
-        return 1
-    fi
-    
-    log_info "Server: $VLESS_SERVER:$VLESS_PORT"
-    
-    # Install xray if needed
-    if ! install_xray_binary; then
-        return 1
-    fi
-    
-    # Generate random port
-    local port=$(generate_random_port)
-    echo "$port" > "$XRAY_PORT_FILE"
-    
-    # Generate config
-    generate_xray_config "$port"
-    log_info "Config generated with local port: $port"
-    
-    # Start xray
-    start_xray
-}
-
-# Disable xray proxy
-disable_xray() {
-    if ! check_xray_running; then
-        log_warn "$(msg xray_not_running)"
-        return 0
-    fi
-    
-    stop_xray
-}
-
-# Show xray submenu
-show_xray_submenu() {
-    while true; do
-        clear
-        echo ""
-        echo -e "${CYAN}╔════════════════════════════════════════════╗${NC}"
-        echo -e "${CYAN}║           $(msg menu_xray)                 ║${NC}"
-        echo -e "${CYAN}╚════════════════════════════════════════════╝${NC}"
-        echo ""
-        
-        # Show status
-        if check_xray_running; then
-            local xray_port=$(cat "$XRAY_PORT_FILE" 2>/dev/null)
-            echo -e "  $(msg xray_status): ${GREEN}$(msg xray_running)${NC} (127.0.0.1:$xray_port)"
-        else
-            echo -e "  $(msg xray_status): ${YELLOW}$(msg xray_stopped)${NC}"
-        fi
-        echo ""
-        
-        echo -e "  ${GREEN}1)${NC} $(msg xray_submenu_enable)"
-        echo -e "  ${RED}2)${NC} $(msg xray_submenu_disable)"
-        echo ""
-        echo -e "  ${YELLOW}0)${NC} $(msg xray_submenu_back)"
-        echo ""
-        
-        read -p "$(msg select_action): " xray_choice
-        
-        case $xray_choice in
-            1)
-                enable_xray
-                read -p "$(msg press_enter)"
-                ;;
-            2)
-                disable_xray
-                read -p "$(msg press_enter)"
-                ;;
-            0)
-                return
-                ;;
-            *)
-                log_error "$(msg invalid_option)"
-                sleep 1
-                ;;
-        esac
-    done
 }
 
 # ==================== GitHub Clone Functions ====================
@@ -1817,7 +1369,6 @@ show_menu() {
     
     echo ""
     echo -e "  ${CYAN}7)${NC} $(msg menu_optimize_system)"
-    echo -e "  ${CYAN}8)${NC} $(msg menu_xray)"
     
     echo ""
     echo -e "  ${YELLOW}0)${NC} $(msg menu_exit)"
@@ -1852,14 +1403,6 @@ show_menu() {
         echo -e "  RPS/RFS: ${GREEN}$(msg applied)${NC}"
     else
         echo -e "  RPS/RFS: ${YELLOW}$(msg not_applied)${NC}"
-    fi
-    
-    # Xray status
-    if check_xray_running; then
-        local xray_port=$(cat "$XRAY_PORT_FILE" 2>/dev/null)
-        echo -e "  $(msg xray_status): ${GREEN}$(msg xray_running)${NC} (127.0.0.1:$xray_port)"
-    else
-        echo -e "  $(msg xray_status): ${YELLOW}$(msg xray_stopped)${NC}"
     fi
     echo ""
 }
@@ -1945,9 +1488,6 @@ main() {
             7)
                 apply_system_optimizations
                 read -p "$(msg press_enter)"
-                ;;
-            8)
-                show_xray_submenu
                 ;;
             0)
                 echo ""
