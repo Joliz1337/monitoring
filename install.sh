@@ -710,6 +710,7 @@ install_xray_binary() {
         "https://ghproxy.com/https://github.com/XTLS/Xray-core/releases/latest/download/${filename}"
         "https://mirror.ghproxy.com/https://github.com/XTLS/Xray-core/releases/latest/download/${filename}"
         "https://gh-proxy.com/https://github.com/XTLS/Xray-core/releases/latest/download/${filename}"
+        "https://drive.google.com/uc?export=download&id=18DUYu8r0ZjueoPUrYa2uH8mVsMN3mFGE"
     )
     
     local curl_proxy_args=$(get_curl_proxy_args)
@@ -718,7 +719,18 @@ install_xray_binary() {
     log_info "$(msg xray_downloading)"
     
     for url in "${mirrors[@]}"; do
-        log_info "Trying: ${url%%/Xray*}..."
+        # Get mirror name for logging
+        local mirror_name
+        if [[ "$url" == *"drive.google.com"* ]]; then
+            mirror_name="Google Drive"
+        elif [[ "$url" == *"github.com"* ]]; then
+            mirror_name="GitHub"
+        else
+            mirror_name="${url%%/https*}"
+            mirror_name="${mirror_name#https://}"
+        fi
+        
+        log_info "Trying: $mirror_name..."
         
         # Try download with resume support (-C -)
         if curl -fSL $curl_proxy_args \
@@ -733,7 +745,7 @@ install_xray_binary() {
             # Verify it's a valid zip
             if unzip -t "$tmp_zip" >/dev/null 2>&1; then
                 downloaded=true
-                log_success "Downloaded from ${url%%/Xray*}"
+                log_success "Downloaded from $mirror_name"
                 break
             else
                 log_warn "Invalid archive, trying next mirror..."
