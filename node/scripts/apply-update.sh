@@ -272,14 +272,6 @@ if [ -f "$TMP_DIR/node/VERSION" ]; then
     cp "$TMP_DIR/node/VERSION" "$NODE_DIR/VERSION"
 fi
 
-# Copy configs VERSION file for optimizations version tracking
-if [ -f "$TMP_DIR/configs/VERSION" ]; then
-    mkdir -p "$NODE_DIR/configs"
-    cp "$TMP_DIR/configs/VERSION" "$NODE_DIR/configs/VERSION"
-    chmod 644 "$NODE_DIR/configs/VERSION"
-    log_info "Optimizations version updated"
-fi
-
 # Restore .env from backup
 if [ -f "$NODE_DIR/.env.backup" ]; then
     mv "$NODE_DIR/.env.backup" "$NODE_DIR/.env"
