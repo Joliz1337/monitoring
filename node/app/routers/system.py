@@ -404,8 +404,6 @@ async def write_host_file(path: str, content: str) -> bool:
     """Write file to host filesystem via nsenter"""
     executor = get_host_executor()
     
-    escaped_content = content.replace("'", "'\"'\"'")
-    
     result = await executor.execute(
         f"mkdir -p $(dirname {path}) && cat > {path} << 'EOFCONFIG'\n{content}\nEOFCONFIG",
         timeout=10,
@@ -514,6 +512,9 @@ async def apply_optimizations(request: ApplyOptimizationsRequest):
         if not await write_host_file(OPTIMIZATIONS_VERSION_PATH, request.version + "\n"):
             errors.append("Failed to write version file")
     
+    # Load conntrack module BEFORE sysctl (required for nf_conntrack_* params)
+    await executor.execute("modprobe nf_conntrack", timeout=5)
+    
     # Apply sysctl settings
     apply_result = await executor.execute(
         f"sysctl -p {SYSCTL_CONFIG_PATH}",
@@ -525,9 +526,6 @@ async def apply_optimizations(request: ApplyOptimizationsRequest):
     
     # Reload systemd
     await executor.execute("systemctl daemon-reload", timeout=10)
-    
-    # Load conntrack module
-    await executor.execute("modprobe nf_conntrack", timeout=5)
     
     if errors:
         raise HTTPException(
