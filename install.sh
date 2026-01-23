@@ -730,19 +730,11 @@ install_xray_binary() {
             mirror_name="${mirror_name#https://}"
         fi
         
-        log_info "Trying: $mirror_name..."
+        log_info "Trying: $mirror_name... (15s timeout)"
         
-        # Try download with aggressive timeouts for faster failover
-        # --connect-timeout 10: fail fast if can't connect
-        # --max-time 120: 2 min max for ~20MB file
-        # --speed-limit 10000 --speed-time 15: abort if <10KB/s for 15 sec
+        # 15 second timeout - if not downloaded, try next mirror
         if curl -fSL $curl_proxy_args \
-            --connect-timeout 10 \
-            --max-time 120 \
-            --speed-limit 10000 \
-            --speed-time 15 \
-            --retry 2 \
-            --retry-delay 3 \
+            --max-time 15 \
             -o "$tmp_zip" \
             "$url" 2>/dev/null; then
             
