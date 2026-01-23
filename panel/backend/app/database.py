@@ -50,6 +50,10 @@ async def run_migrations(conn):
         await conn.execute(text("ALTER TABLE servers ADD COLUMN last_traffic_data TEXT"))
         logger.info("Added column: servers.last_traffic_data")
     
+    if "update_proxy" not in columns:
+        await conn.execute(text("ALTER TABLE servers ADD COLUMN update_proxy VARCHAR(500)"))
+        logger.info("Added column: servers.update_proxy")
+    
     # Check if aggregated_metrics table exists
     result = await conn.execute(text(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='aggregated_metrics'"
