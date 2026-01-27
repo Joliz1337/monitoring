@@ -241,6 +241,7 @@ export default function Login() {
             
             <input
               type={showPassword ? 'text' : 'password'}
+              name="panel-auth-password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               onFocus={() => setIsFocused(true)}
@@ -251,6 +252,7 @@ export default function Login() {
               }`}
               autoFocus
               disabled={isLoading}
+              autoComplete="current-password"
             />
             
             <motion.button

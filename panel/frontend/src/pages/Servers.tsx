@@ -236,7 +236,7 @@ export default function Servers() {
               )}
             </AnimatePresence>
             
-            <form onSubmit={handleSubmit} className="space-y-5">
+            <form onSubmit={handleSubmit} className="space-y-5" autoComplete="off" data-form-type="other">
               <motion.div
                 initial={{ opacity: 0, x: -20 }}
                 animate={{ opacity: 1, x: 0 }}
@@ -310,6 +310,9 @@ export default function Servers() {
                   placeholder={t('servers.api_key_placeholder')}
                   className="input"
                   required={!editingId}
+                  autoComplete="new-password"
+                  data-lpignore="true"
+                  data-form-type="other"
                 />
               </motion.div>
               
