@@ -2,7 +2,7 @@ import { useMemo } from 'react'
 import ReactApexChart from 'react-apexcharts'
 import { ApexOptions } from 'apexcharts'
 import { useTranslation } from 'react-i18next'
-import { downsampleLTTB, MAX_CHART_POINTS } from '../../utils/chartUtils'
+import { downsampleLTTB, smoothDataDEMA, MAX_CHART_POINTS } from '../../utils/chartUtils'
 
 interface MetricChartProps {
   data: Array<{ timestamp: string; value: number }>
@@ -14,6 +14,7 @@ interface MetricChartProps {
   min?: number
   max?: number
   period?: string
+  smoothing?: number // Smoothing factor 0-1 (0 = no smoothing, 1 = max smoothing)
 }
 
 // Локализованные названия месяцев
@@ -108,6 +109,7 @@ export default function MetricChart({
   min,
   max,
   period = '1h',
+  smoothing = 0.35, // Default smoothing factor for pleasant curves
 }: MetricChartProps) {
   const { t, i18n } = useTranslation()
   
@@ -120,8 +122,11 @@ export default function MetricChart({
       y: d.value,
     }))
     
+    // Apply smoothing to reduce sharp spikes (DEMA for lag-free smoothing)
+    const smoothedData = smoothing > 0 ? smoothDataDEMA(rawData, smoothing) : rawData
+    
     // Apply LTTB downsampling to reduce points while preserving visual quality
-    const seriesData = downsampleLTTB(rawData, MAX_CHART_POINTS)
+    const seriesData = downsampleLTTB(smoothedData, MAX_CHART_POINTS)
     
     const dateFormat = getDateTimeFormat(period)
     
@@ -193,7 +198,7 @@ export default function MetricChart({
       series: [{ name: title || t('common.value'), data: seriesData }],
       options,
     }
-  }, [data, color, type, unit, min, max, title, period, i18n.language, t])
+  }, [data, color, type, unit, min, max, title, period, smoothing, i18n.language, t])
   
   if (data.length === 0) {
     return (

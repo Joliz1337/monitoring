@@ -241,49 +241,6 @@ export interface SystemInfo {
   optimizations_applied: boolean
 }
 
-export interface SysctlConfig {
-  path: string
-  exists: boolean
-  content: string
-}
-
-export interface LimitsConfig {
-  path: string
-  exists: boolean
-  content: string
-}
-
-export interface CurrentOptimizationValues {
-  tcp_congestion: string
-  ipv6_disabled: boolean
-  file_max: number
-  somaxconn: number
-  tcp_tw_reuse: boolean
-  tcp_fastopen: number
-}
-
-export interface OptimizationsStatus {
-  applied: boolean
-  sysctl: SysctlConfig
-  limits: LimitsConfig
-  current_values: CurrentOptimizationValues
-}
-
-export interface OptimizationApplyResponse {
-  success: boolean
-  message: string
-  sysctl_applied: boolean
-  limits_applied: boolean
-  systemd_applied: boolean
-  errors: string[]
-}
-
-export interface OptimizationsUpdateRequest {
-  sysctl_content?: string
-  limits_content?: string
-  apply?: boolean
-}
-
 export interface CertificateGenerateResponse {
   success: boolean
   message: string
@@ -460,15 +417,9 @@ export const proxyApi = {
   disableFirewall: (serverId: number) =>
     api.post<FirewallActionResponse>(`/proxy/${serverId}/haproxy/firewall/disable`),
   
-  // System optimization
+  // System info
   getSystemInfo: (serverId: number) =>
     api.get<SystemInfo>(`/proxy/${serverId}/haproxy/system/info`),
-  getOptimizationsStatus: (serverId: number) =>
-    api.get<OptimizationsStatus>(`/proxy/${serverId}/haproxy/system/optimizations`),
-  applyOptimizations: (serverId: number) =>
-    api.post<OptimizationApplyResponse>(`/proxy/${serverId}/haproxy/system/optimize`),
-  updateOptimizations: (serverId: number, data: OptimizationsUpdateRequest) =>
-    api.put<OptimizationApplyResponse>(`/proxy/${serverId}/haproxy/system/optimizations`, data),
   
   // Traffic tracking
   getTrafficSummary: (serverId: number, days: number = 30) =>

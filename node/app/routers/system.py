@@ -481,9 +481,14 @@ async def apply_optimizations(request: ApplyOptimizationsRequest):
     Apply system optimizations to the node.
     
     Writes config files and applies sysctl settings.
+    Removes old separate config files to prevent conflicts.
     """
     executor = get_host_executor()
     errors = []
+    
+    # Remove old separate config files (now integrated into main config)
+    await executor.execute("rm -f /etc/sysctl.d/99-disable-ipv6.conf", timeout=5)
+    await executor.execute("rm -f /etc/sysctl.d/99-haproxy.conf", timeout=5)
     
     # Write sysctl config
     if not await write_host_file(SYSCTL_CONFIG_PATH, request.sysctl_content):

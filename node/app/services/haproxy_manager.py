@@ -69,20 +69,21 @@ class HAProxyManager:
             shutil.copy(backup_path, self.config_path)
     
     def _generate_base_config(self) -> str:
-        """Generate simple base HAProxy config (no auto-optimization)"""
+        """Generate base HAProxy config for high-speed TCP proxying"""
         return f"""global
     stats socket /var/run/haproxy.sock mode 660 level admin expose-fd listeners
-    
+
 defaults
     mode tcp
+    timeout connect 5s
+    timeout client 1h
+    timeout server 1h
+    timeout tunnel 12h
     option dontlognull
     option redispatch
-    timeout connect 5s
-    timeout client 300s
-    timeout server 300s
-    timeout tunnel 3600s
-    timeout client-fin 30s
-    timeout server-fin 30s
+    option tcp-smart-accept
+    option tcp-smart-connect
+    option splice-auto
 
 {RULES_START_MARKER}
 {RULES_END_MARKER}

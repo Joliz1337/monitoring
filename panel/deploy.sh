@@ -39,7 +39,7 @@ print_error() { echo -e "${RED}[✗]${NC} $1"; }
 print_info() { echo -e "${CYAN}[i]${NC} $1"; }
 
 # Timeouts (in seconds)
-DOCKER_BUILD_TIMEOUT="${DOCKER_BUILD_TIMEOUT:-1800}"  # 30 min default
+DOCKER_BUILD_TIMEOUT="${DOCKER_BUILD_TIMEOUT:-1000}"  # ~17 min default
 
 # Run command quietly, show full output only on error
 run_quiet() {
@@ -673,8 +673,15 @@ build_and_start() {
         
         if [ $build_exit_code -eq 0 ]; then
             build_success=true
-            print_status "Docker build completed"
             rm -f "$BUILD_LOG"
+            # Clear screen after successful build to show only important info
+            clear
+            echo ""
+            echo -e "${CYAN}╔════════════════════════════════════════════╗${NC}"
+            echo -e "${CYAN}║       Monitoring Panel Deployment          ║${NC}"
+            echo -e "${CYAN}╚════════════════════════════════════════════╝${NC}"
+            echo ""
+            print_status "Docker build completed successfully"
             break
         elif [ $build_exit_code -eq 124 ]; then
             print_error "Build timeout after ${build_timeout}s"

@@ -337,7 +337,9 @@
     "saving_config": "Saving...",
     "config_saved": "Configuration saved",
     "config_save_error": "Failed to save configuration",
-    "config_loading": "Loading configuration..."
+    "config_loading": "Loading configuration...",
+    "apply_default_template": "Apply Default Template",
+    "apply_default_template_hint": "Replace global/defaults with standard template, preserving rules"
   },
   "optimization": {
     "title": "System Optimization",
@@ -509,5 +511,13 @@
     "command_cancelled": "Command cancelled",
     "connection_error": "Connection error",
     "timeout_error": "Command timed out"
+  },
+  "cache": {
+    "cached": "Cached",
+    "showing_cached": "Showing cached data",
+    "last_update": "Last update: {{time}}",
+    "server_unavailable": "Server unavailable",
+    "data_may_be_outdated": "Data may be outdated",
+    "stale_data": "Stale data"
   }
 }

@@ -43,7 +43,7 @@ log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
 # Timeouts (in seconds)
-DOCKER_BUILD_TIMEOUT="${DOCKER_BUILD_TIMEOUT:-600}"  # 10 min default
+DOCKER_BUILD_TIMEOUT="${DOCKER_BUILD_TIMEOUT:-1000}"  # ~17 min default
 
 # Run command quietly, show full output only on error
 run_quiet() {
@@ -558,8 +558,15 @@ start_containers() {
         
         if [ $build_exit_code -eq 0 ]; then
             build_success=true
-            log_success "Docker build completed"
             rm -f "$BUILD_LOG"
+            # Clear screen after successful build to show only important info
+            clear
+            echo ""
+            echo -e "${CYAN}╔════════════════════════════════════════════╗${NC}"
+            echo -e "${CYAN}║     Monitoring Node Agent - Deploy         ║${NC}"
+            echo -e "${CYAN}╚════════════════════════════════════════════╝${NC}"
+            echo ""
+            log_success "Docker build completed successfully"
             break
         elif [ $build_exit_code -eq 124 ]; then
             log_error "Build timeout after ${build_timeout}s"

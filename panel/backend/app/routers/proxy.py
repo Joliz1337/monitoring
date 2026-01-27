@@ -711,38 +711,6 @@ async def get_system_info(
     return await proxy_request(server, "/api/haproxy/system/info")
 
 
-@router.get("/{server_id}/haproxy/system/optimizations")
-async def get_optimizations_status(
-    server_id: int,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    server = await get_server_by_id(server_id, db)
-    return await proxy_request(server, "/api/haproxy/system/optimizations")
-
-
-@router.post("/{server_id}/haproxy/system/optimize")
-async def apply_system_optimizations(
-    server_id: int,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    server = await get_server_by_id(server_id, db)
-    return await proxy_request(server, "/api/haproxy/system/optimize", method="POST")
-
-
-@router.put("/{server_id}/haproxy/system/optimizations")
-async def update_optimizations(
-    server_id: int,
-    data: dict,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """Update system optimization configs with custom content"""
-    server = await get_server_by_id(server_id, db)
-    return await proxy_request(server, "/api/haproxy/system/optimizations", method="PUT", json_data=data)
-
-
 # ==================== Traffic Tracking ====================
 
 @router.get("/{server_id}/traffic/summary")

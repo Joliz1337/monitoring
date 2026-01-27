@@ -34,6 +34,8 @@ import ProcessTable from '../components/Processes/ProcessTable'
 import CpuCoresChart from '../components/Charts/CpuCoresChart'
 import Terminal from '../components/Terminal/Terminal'
 import { formatBytes, formatUptime, formatPercent, createBitsFormatter, formatTimeAgo } from '../utils/format'
+import { useCachedData, createServerCacheKey } from '../hooks/useCachedData'
+import CachedDataBanner from '../components/ui/CachedDataBanner'
 
 function getLoadColor(percent: number): string {
   if (percent >= 80) return 'text-danger'
@@ -86,6 +88,14 @@ export default function ServerDetails() {
   const [isPowerActionLoading, setIsPowerActionLoading] = useState(false)
   const [powerActionError, setPowerActionError] = useState<string | null>(null)
   
+  // Cache for offline data
+  interface MetricsCacheData {
+    metrics: ServerMetrics | null
+    history: HistoryData[]
+  }
+  const cacheKey = serverId ? createServerCacheKey(serverId, 'metrics') : ''
+  const { isCached, cachedAt, saveToCache, loadFromCache, setIsCached, setCachedAt } = useCachedData<MetricsCacheData>(cacheKey)
+  
   const server = servers.find(s => s.id === Number(serverId))
   
   const fetchLiveData = useCallback(async (historyOnly = false, useCached = false) => {
@@ -95,8 +105,14 @@ export default function ServerDetails() {
       if (historyOnly) {
         setIsHistoryLoading(true)
         const historyRes = await proxyApi.getHistory(Number(serverId), { period, limit: 1000 })
-        setHistory(historyRes.data.data || [])
+        const historyData = historyRes.data.data || []
+        setHistory(historyData)
         setIsHistoryLoading(false)
+        
+        // Update cache with new history
+        if (metrics) {
+          saveToCache({ metrics, history: historyData })
+        }
       } else {
         const [metricsRes, historyRes] = await Promise.all([
           useCached 
@@ -105,53 +121,85 @@ export default function ServerDetails() {
           proxyApi.getHistory(Number(serverId), { period, limit: 1000 }),
         ])
         
-        setMetrics(metricsRes.data)
-        setHistory(historyRes.data.data || [])
+        const metricsData = metricsRes.data
+        const historyData = historyRes.data.data || []
+        
+        setMetrics(metricsData)
+        setHistory(historyData)
         setError(null)
+        setIsCached(false)
+        setCachedAt(null)
+        
+        // Save to cache
+        saveToCache({ metrics: metricsData, history: historyData })
       }
     } catch (err: unknown) {
-      const error = err as { response?: { status: number; data?: { detail?: string } } }
-      const errorCode = error.response?.status
-      const detail = error.response?.data?.detail
-      
-      if (errorCode === 504) {
-        setError(t('server_details.connection_timeout'))
-      } else if (errorCode === 502) {
-        setError(detail || t('server_details.connection_refused'))
-      } else if (errorCode === 401 || errorCode === 403) {
-        setError(t('server_details.auth_failed'))
+      // Try to load from localStorage cache on error
+      const cached = loadFromCache()
+      if (cached && cached.metrics) {
+        setMetrics(cached.metrics)
+        setHistory(cached.history)
+        setError(null)
+        // isCached and cachedAt are set by loadFromCache
       } else {
-        setError(detail || t('server_details.fetch_failed'))
+        const error = err as { response?: { status: number; data?: { detail?: string } } }
+        const errorCode = error.response?.status
+        const detail = error.response?.data?.detail
+        
+        if (errorCode === 504) {
+          setError(t('server_details.connection_timeout'))
+        } else if (errorCode === 502) {
+          setError(detail || t('server_details.connection_refused'))
+        } else if (errorCode === 401 || errorCode === 403) {
+          setError(t('server_details.auth_failed'))
+        } else {
+          setError(detail || t('server_details.fetch_failed'))
+        }
       }
       setIsHistoryLoading(false)
     } finally {
       setIsLoading(false)
     }
-  }, [serverId, period])
+  }, [serverId, period, metrics, saveToCache, loadFromCache, setIsCached, setCachedAt, t])
   
   const fetchCachedData = useCallback(async () => {
     if (!serverId) return
     
     try {
       const metricsRes = await proxyApi.getMetrics(Number(serverId)) // Cached from DB
-      setMetrics(metricsRes.data)
+      const metricsData = metricsRes.data
+      setMetrics(metricsData)
       setError(null)
-    } catch (err: unknown) {
-      const error = err as { response?: { status: number; data?: { detail?: string } } }
-      const errorCode = error.response?.status
-      const detail = error.response?.data?.detail
+      setIsCached(false)
+      setCachedAt(null)
       
-      if (errorCode === 504) {
-        setError(t('server_details.connection_timeout'))
-      } else if (errorCode === 502) {
-        setError(detail || t('server_details.connection_refused'))
-      } else if (errorCode === 401 || errorCode === 403) {
-        setError(t('server_details.auth_failed'))
+      // Save to cache
+      saveToCache({ metrics: metricsData, history })
+    } catch (err: unknown) {
+      // Try to load from localStorage cache on error
+      const cached = loadFromCache()
+      if (cached && cached.metrics) {
+        setMetrics(cached.metrics)
+        setHistory(cached.history)
+        setError(null)
+        // isCached and cachedAt are set by loadFromCache
       } else {
-        setError(detail || t('server_details.fetch_failed'))
+        const error = err as { response?: { status: number; data?: { detail?: string } } }
+        const errorCode = error.response?.status
+        const detail = error.response?.data?.detail
+        
+        if (errorCode === 504) {
+          setError(t('server_details.connection_timeout'))
+        } else if (errorCode === 502) {
+          setError(detail || t('server_details.connection_refused'))
+        } else if (errorCode === 401 || errorCode === 403) {
+          setError(t('server_details.auth_failed'))
+        } else {
+          setError(detail || t('server_details.fetch_failed'))
+        }
       }
     }
-  }, [serverId, t])
+  }, [serverId, history, saveToCache, loadFromCache, setIsCached, setCachedAt, t])
   
   useEffect(() => {
     fetchServers()
@@ -414,6 +462,13 @@ export default function ServerDetails() {
           </motion.div>
         ) : metrics && (
           <motion.div key="content" variants={containerVariants}>
+            {/* Cached data indicator */}
+            <AnimatePresence>
+              {isCached && (
+                <CachedDataBanner cachedAt={cachedAt} />
+              )}
+            </AnimatePresence>
+            
             {/* Metric cards */}
             <motion.div 
               className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6"

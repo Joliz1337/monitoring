@@ -13,26 +13,9 @@ set -e
 # Build log file for error reporting
 BUILD_LOG="/tmp/docker_build_$$.log"
 
-# Cleanup proxy on exit (inline, doesn't depend on functions)
-cleanup_proxy_on_exit() {
-    # Remove temporary APT proxy config
-    rm -f /etc/apt/apt.conf.d/99proxy-temp 2>/dev/null || true
-    # Remove Docker proxy config
-    rm -f /etc/systemd/system/docker.service.d/proxy.conf 2>/dev/null || true
-    rmdir /etc/systemd/system/docker.service.d 2>/dev/null || true
-    # Unset git proxy
-    git config --global --unset http.proxy 2>/dev/null || true
-    git config --global --unset https.proxy 2>/dev/null || true
-    # Reload docker daemon config
-    systemctl daemon-reload 2>/dev/null || true
-}
-
 # Trap для обработки прерываний
 cleanup() {
     local exit_code=$?
-    
-    # Always cleanup proxy settings on exit
-    cleanup_proxy_on_exit
     
     if [ $exit_code -ne 0 ]; then
         echo ""
@@ -72,10 +55,7 @@ BIN_PATH="/usr/local/bin/monitoring"
 LANG_CODE="en"
 
 # Default timeouts (in seconds)
-DOCKER_BUILD_TIMEOUT=1800  # 30 minutes
-
-# Proxy settings (empty = no proxy)
-HTTP_PROXY_URL=""
+DOCKER_BUILD_TIMEOUT=1000  # ~17 minutes
 
 # ==================== Translations ====================
 
@@ -161,15 +141,6 @@ MSG_EN[connectivity_ok]="Network connectivity OK"
 MSG_EN[connectivity_failed]="Network connectivity failed"
 MSG_EN[applying_fix]="Applying fix"
 
-# Proxy messages - English
-MSG_EN[proxy_prompt]="Use HTTP proxy? (Enter to skip, or enter proxy)"
-MSG_EN[proxy_format_hint]="Formats: ip:port | ip:port:user:pass | http://user:pass@ip:port"
-MSG_EN[proxy_localhost_hint]="Example: 192.168.1.1:3128 or http://user:pass@proxy.local:8080"
-MSG_EN[proxy_configured]="Proxy configured for all network operations"
-MSG_EN[proxy_not_used]="No proxy"
-MSG_EN[proxy_invalid]="Invalid proxy format"
-MSG_EN[proxy_enabled]="Proxy enabled"
-
 # Russian messages
 MSG_RU[select_language]="Select language / Выберите язык:"
 MSG_RU[installing_git]="Установка git..."
@@ -249,15 +220,6 @@ MSG_RU[connectivity_ok]="Сетевое подключение в порядке
 MSG_RU[connectivity_failed]="Сетевое подключение не работает"
 MSG_RU[applying_fix]="Применяется исправление"
 
-# Proxy messages - Russian
-MSG_RU[proxy_prompt]="Использовать HTTP прокси? (Enter - пропустить, или введите прокси)"
-MSG_RU[proxy_format_hint]="Форматы: ip:port | ip:port:user:pass | http://user:pass@ip:port"
-MSG_RU[proxy_localhost_hint]="Пример: 192.168.1.1:3128 или http://user:pass@proxy.local:8080"
-MSG_RU[proxy_configured]="Прокси настроен для всех сетевых операций"
-MSG_RU[proxy_not_used]="Без прокси"
-MSG_RU[proxy_invalid]="Неверный формат прокси"
-MSG_RU[proxy_enabled]="Прокси включён"
-
 # Get message in current language
 msg() {
     local key="$1"
@@ -328,196 +290,6 @@ run_quiet_timeout() {
     return 0
 }
 
-# ==================== Proxy Functions ====================
-
-# Parse proxy input and normalize to http:// format
-# Input formats:
-#   ip:port                      -> http://ip:port
-#   ip:port:user:pass            -> http://user:pass@ip:port
-#   http://user:pass@ip:port     -> http://user:pass@ip:port (unchanged)
-#   http://ip:port               -> http://ip:port (unchanged)
-parse_proxy_input() {
-    local input="$1"
-    
-    # Empty input = no proxy
-    if [ -z "$input" ]; then
-        echo ""
-        return 0
-    fi
-    
-    # Already has http:// prefix - keep as is
-    if [[ "$input" == http://* ]]; then
-        echo "$input"
-        return 0
-    fi
-    
-    # Has https:// prefix - keep as is
-    if [[ "$input" == https://* ]]; then
-        echo "$input"
-        return 0
-    fi
-    
-    # Format: ip:port:user:pass (4 parts separated by colons)
-    # Need to handle IPv4 addresses
-    local colon_count=$(echo "$input" | tr -cd ':' | wc -c)
-    
-    if [ "$colon_count" -eq 3 ]; then
-        # ip:port:user:pass format
-        local ip=$(echo "$input" | cut -d: -f1)
-        local port=$(echo "$input" | cut -d: -f2)
-        local user=$(echo "$input" | cut -d: -f3)
-        local pass=$(echo "$input" | cut -d: -f4)
-        
-        if [[ "$port" =~ ^[0-9]+$ ]] && [ -n "$user" ] && [ -n "$pass" ]; then
-            echo "http://${user}:${pass}@${ip}:${port}"
-            return 0
-        fi
-    fi
-    
-    # Simple format: ip:port (validate it has exactly one colon for port)
-    if [[ "$input" =~ ^[^:]+:[0-9]+$ ]]; then
-        echo "http://$input"
-        return 0
-    fi
-    
-    # Invalid format
-    return 1
-}
-
-# Ask user for proxy configuration (called before each install/update)
-ask_proxy() {
-    echo ""
-    echo -e "${CYAN}╔════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║              HTTP Proxy                    ║${NC}"
-    echo -e "${CYAN}╚════════════════════════════════════════════╝${NC}"
-    echo ""
-    echo -e "  $(msg proxy_format_hint)"
-    echo -e "  ${YELLOW}$(msg proxy_localhost_hint)${NC}"
-    echo ""
-    
-    read -p "$(msg proxy_prompt): " proxy_input
-    
-    if [ -z "$proxy_input" ]; then
-        HTTP_PROXY_URL=""
-        log_info "$(msg proxy_not_used)"
-        return 0
-    fi
-    
-    local parsed_proxy
-    parsed_proxy=$(parse_proxy_input "$proxy_input")
-    
-    if [ $? -eq 0 ] && [ -n "$parsed_proxy" ]; then
-        HTTP_PROXY_URL="$parsed_proxy"
-        log_success "$(msg proxy_configured): $HTTP_PROXY_URL"
-        # Enable proxy for all operations
-        enable_system_proxy
-    else
-        log_error "$(msg proxy_invalid): $proxy_input"
-        HTTP_PROXY_URL=""
-        return 1
-    fi
-}
-
-# Enable proxy for ALL system operations (apt, pip, docker, wget, curl, git, etc.)
-enable_system_proxy() {
-    if [ -z "$HTTP_PROXY_URL" ]; then
-        return 0
-    fi
-    
-    log_info "$(msg proxy_enabled): $HTTP_PROXY_URL"
-    
-    # Set environment variables for all tools
-    export http_proxy="$HTTP_PROXY_URL"
-    export https_proxy="$HTTP_PROXY_URL"
-    export HTTP_PROXY="$HTTP_PROXY_URL"
-    export HTTPS_PROXY="$HTTP_PROXY_URL"
-    export ALL_PROXY="$HTTP_PROXY_URL"
-    export all_proxy="$HTTP_PROXY_URL"
-    
-    # Git proxy config
-    git config --global http.proxy "$HTTP_PROXY_URL" 2>/dev/null || true
-    git config --global https.proxy "$HTTP_PROXY_URL" 2>/dev/null || true
-    
-    # APT proxy config (temporary file, will be removed after install)
-    mkdir -p /etc/apt/apt.conf.d 2>/dev/null || true
-    cat > /etc/apt/apt.conf.d/99proxy-temp << EOF
-Acquire::http::Proxy "$HTTP_PROXY_URL";
-Acquire::https::Proxy "$HTTP_PROXY_URL";
-EOF
-    
-    # Docker daemon proxy (for pulling images)
-    mkdir -p /etc/systemd/system/docker.service.d 2>/dev/null || true
-    cat > /etc/systemd/system/docker.service.d/proxy.conf << EOF
-[Service]
-Environment="HTTP_PROXY=$HTTP_PROXY_URL"
-Environment="HTTPS_PROXY=$HTTP_PROXY_URL"
-Environment="NO_PROXY=localhost,127.0.0.1"
-EOF
-    
-    # Reload docker if it's running
-    if systemctl is-active --quiet docker 2>/dev/null; then
-        systemctl daemon-reload 2>/dev/null || true
-        systemctl restart docker 2>/dev/null || true
-        # Wait for docker to be ready
-        local count=0
-        while [ $count -lt 30 ]; do
-            if docker info >/dev/null 2>&1; then
-                break
-            fi
-            sleep 1
-            count=$((count + 1))
-        done
-    fi
-}
-
-# Disable/cleanup proxy settings after install
-# Args: $1 = "no_docker_restart" to skip docker restart (used after successful install)
-disable_system_proxy() {
-    local skip_docker_restart="${1:-}"
-    
-    # Remove temporary APT proxy config
-    rm -f /etc/apt/apt.conf.d/99proxy-temp 2>/dev/null || true
-    
-    # Remove Docker proxy config
-    rm -f /etc/systemd/system/docker.service.d/proxy.conf 2>/dev/null || true
-    rmdir /etc/systemd/system/docker.service.d 2>/dev/null || true
-    
-    # Unset git proxy
-    git config --global --unset http.proxy 2>/dev/null || true
-    git config --global --unset https.proxy 2>/dev/null || true
-    
-    # Reload docker to apply changes (skip restart if containers just started)
-    if [ "$skip_docker_restart" != "no_docker_restart" ]; then
-        if systemctl is-active --quiet docker 2>/dev/null; then
-            systemctl daemon-reload 2>/dev/null || true
-            # Don't restart docker - just reload daemon config
-            # Docker will use new config on next restart
-        fi
-    else
-        # Just reload daemon without restart to preserve running containers
-        systemctl daemon-reload 2>/dev/null || true
-    fi
-    
-    # Unset environment variables
-    unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy
-    
-    HTTP_PROXY_URL=""
-}
-
-# Get curl proxy arguments (for commands that need explicit proxy arg)
-get_curl_proxy_args() {
-    if [ -n "$HTTP_PROXY_URL" ]; then
-        echo "--proxy $HTTP_PROXY_URL"
-    fi
-}
-
-# Get git proxy config (for commands that need explicit proxy arg)
-get_git_proxy_args() {
-    if [ -n "$HTTP_PROXY_URL" ]; then
-        echo "-c http.proxy=$HTTP_PROXY_URL -c https.proxy=$HTTP_PROXY_URL"
-    fi
-}
-
 # ==================== GitHub Clone Functions ====================
 
 # Clone repository from GitHub
@@ -525,22 +297,13 @@ clone_repo_with_fallback() {
     local target_dir="$1"
     local branch="${2:-main}"
     local repo_url="https://github.com/Joliz1337/monitoring.git"
-    local git_proxy_args=$(get_git_proxy_args)
     
     rm -rf "$target_dir"
     
     log_info "$(msg downloading_repo)..."
-    if [ -n "$git_proxy_args" ]; then
-        log_info "Using proxy: $HTTP_PROXY_URL"
-        if run_quiet_timeout 120 "git clone" git $git_proxy_args clone --depth 1 --branch "$branch" "$repo_url" "$target_dir"; then
-            log_success "$(msg repo_downloaded)"
-            return 0
-        fi
-    else
-        if run_quiet_timeout 120 "git clone" git clone --depth 1 --branch "$branch" "$repo_url" "$target_dir"; then
-            log_success "$(msg repo_downloaded)"
-            return 0
-        fi
+    if run_quiet_timeout 120 "git clone" git clone --depth 1 --branch "$branch" "$repo_url" "$target_dir"; then
+        log_success "$(msg repo_downloaded)"
+        return 0
     fi
     
     log_error "Failed to download repository"
@@ -552,10 +315,9 @@ clone_repo_with_fallback() {
 # Check if Docker Hub is accessible (with logs)
 check_docker_hub() {
     log_info "$(msg checking_docker_network)"
-    local curl_proxy_args=$(get_curl_proxy_args)
     
     # Try to reach Docker Hub auth endpoint
-    if curl -fsSL $curl_proxy_args --connect-timeout 10 --max-time 15 \
+    if curl -fsSL --connect-timeout 10 --max-time 15 \
         "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/alpine:pull" \
         >/dev/null 2>&1; then
         log_success "$(msg docker_network_ok)"
@@ -563,7 +325,7 @@ check_docker_hub() {
     fi
     
     # Try alternative check - ping registry
-    if curl -fsSL $curl_proxy_args --connect-timeout 10 --max-time 15 \
+    if curl -fsSL --connect-timeout 10 --max-time 15 \
         "https://registry-1.docker.io/v2/" \
         >/dev/null 2>&1; then
         log_success "$(msg docker_network_ok)"
@@ -576,17 +338,15 @@ check_docker_hub() {
 
 # Check if Docker Hub is accessible (quiet, no logs)
 check_docker_hub_quiet() {
-    local curl_proxy_args=$(get_curl_proxy_args)
-    
     # Try to reach Docker Hub auth endpoint
-    if curl -fsSL $curl_proxy_args --connect-timeout 10 --max-time 15 \
+    if curl -fsSL --connect-timeout 10 --max-time 15 \
         "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/alpine:pull" \
         >/dev/null 2>&1; then
         return 0
     fi
     
     # Try alternative check - ping registry
-    if curl -fsSL $curl_proxy_args --connect-timeout 10 --max-time 15 \
+    if curl -fsSL --connect-timeout 10 --max-time 15 \
         "https://registry-1.docker.io/v2/" \
         >/dev/null 2>&1; then
         return 0
@@ -597,7 +357,6 @@ check_docker_hub_quiet() {
 
 # Check general internet connectivity (quiet version for internal use)
 check_connectivity_quiet() {
-    local curl_proxy_args=$(get_curl_proxy_args)
     local test_urls=(
         "https://1.1.1.1"
         "https://8.8.8.8"
@@ -605,7 +364,7 @@ check_connectivity_quiet() {
     )
     
     for url in "${test_urls[@]}"; do
-        if curl -fsSL $curl_proxy_args --connect-timeout 5 --max-time 10 "$url" >/dev/null 2>&1; then
+        if curl -fsSL --connect-timeout 5 --max-time 10 "$url" >/dev/null 2>&1; then
             return 0
         fi
     done
@@ -776,7 +535,7 @@ docker_build_with_retry() {
     local build_dir="$1"
     local max_retries=3
     local retry=0
-    local build_timeout="${DOCKER_BUILD_TIMEOUT:-1800}"  # 30 min default
+    local build_timeout="${DOCKER_BUILD_TIMEOUT:-1000}"  # ~17 min default
     
     cd "$build_dir"
     
@@ -821,8 +580,15 @@ docker_build_with_retry() {
         set -e
         
         if [ $build_exit_code -eq 0 ]; then
-            log_success "$(msg build_success)"
             rm -f "$BUILD_LOG"
+            # Clear screen after successful build to show only important info
+            clear
+            echo ""
+            echo -e "${CYAN}╔════════════════════════════════════════════╗${NC}"
+            echo -e "${CYAN}║       $(msg menu_title)          ║${NC}"
+            echo -e "${CYAN}╚════════════════════════════════════════════╝${NC}"
+            echo ""
+            log_success "$(msg build_success)"
             return 0
         elif [ $build_exit_code -eq 124 ]; then
             log_error "Build timeout after ${build_timeout}s"
@@ -1021,9 +787,8 @@ apply_system_optimizations() {
         download_config() {
             local filename="$1"
             local dest="$2"
-            local curl_proxy_args=$(get_curl_proxy_args)
             
-            if curl -fsSL $curl_proxy_args --connect-timeout 30 --max-time 120 "$GITHUB_RAW/$filename" -o "$dest" 2>/dev/null; then
+            if curl -fsSL --connect-timeout 30 --max-time 120 "$GITHUB_RAW/$filename" -o "$dest" 2>/dev/null; then
                 return 0
             fi
             return 1
@@ -1195,7 +960,7 @@ remove_panel() {
     rm -rf "$PANEL_DIR"
     
     # Remove CLI if both panel and node are uninstalled
-    if [ ! -d "$NODE_DIR" ] && [ -f "$BIN_PATH" ]; then
+    if { [ ! -d "$NODE_DIR" ] || [ ! -f "$NODE_DIR/docker-compose.yml" ]; } && [ -f "$BIN_PATH" ]; then
         rm -f "$BIN_PATH"
     fi
     
@@ -1298,6 +1063,11 @@ remove_node() {
         rm -f "$BIN_PATH"
     fi
     
+    # Clean up orphan directories from optimizations
+    if [ -d "$NODE_DIR" ] && [ ! -f "$NODE_DIR/docker-compose.yml" ]; then
+        rm -rf "$NODE_DIR"
+    fi
+    
     log_success "$(msg node_removed)"
 }
 
@@ -1352,18 +1122,18 @@ show_menu() {
     if [ -d "$PANEL_DIR" ]; then
         echo -e "  ${BLUE}3)${NC} $(msg menu_update_panel)"
     fi
-    if [ -d "$NODE_DIR" ]; then
+    if [ -d "$NODE_DIR" ] && [ -f "$NODE_DIR/docker-compose.yml" ]; then
         echo -e "  ${BLUE}4)${NC} $(msg menu_update_node)"
     fi
     
     # Remove options
-    if [ -d "$PANEL_DIR" ] || [ -d "$NODE_DIR" ]; then
+    if [ -d "$PANEL_DIR" ] || { [ -d "$NODE_DIR" ] && [ -f "$NODE_DIR/docker-compose.yml" ]; }; then
         echo ""
     fi
     if [ -d "$PANEL_DIR" ]; then
         echo -e "  ${RED}5)${NC} $(msg menu_remove_panel)"
     fi
-    if [ -d "$NODE_DIR" ]; then
+    if [ -d "$NODE_DIR" ] && [ -f "$NODE_DIR/docker-compose.yml" ]; then
         echo -e "  ${RED}6)${NC} $(msg menu_remove_node)"
     fi
     
@@ -1383,7 +1153,7 @@ show_menu() {
     else
         echo -e "  Panel: ${YELLOW}$(msg not_installed)${NC}"
     fi
-    if [ -d "$NODE_DIR" ]; then
+    if [ -d "$NODE_DIR" ] && [ -f "$NODE_DIR/docker-compose.yml" ]; then
         local node_version="?"
         [ -f "$NODE_DIR/VERSION" ] && node_version=$(cat "$NODE_DIR/VERSION")
         echo -e "  Node:  ${GREEN}$(msg installed)${NC} v$node_version ($NODE_DIR)"
@@ -1424,30 +1194,24 @@ main() {
         
         case $choice in
             1)
-                ask_proxy
                 check_git
                 clone_repo
                 install_panel
                 cleanup
-                disable_system_proxy "no_docker_restart"
                 read -p "$(msg press_enter)"
                 ;;
             2)
-                ask_proxy
                 check_git
                 clone_repo
                 install_node
                 cleanup
-                disable_system_proxy "no_docker_restart"
                 read -p "$(msg press_enter)"
                 ;;
             3)
                 if [ -d "$PANEL_DIR" ]; then
-                    ask_proxy
                     check_git
                     update_panel
                     cleanup
-                    disable_system_proxy "no_docker_restart"
                 else
                     log_error "$(msg invalid_option)"
                     sleep 1
@@ -1455,12 +1219,10 @@ main() {
                 read -p "$(msg press_enter)"
                 ;;
             4)
-                if [ -d "$NODE_DIR" ]; then
-                    ask_proxy
+                if [ -d "$NODE_DIR" ] && [ -f "$NODE_DIR/docker-compose.yml" ]; then
                     check_git
                     update_node
                     cleanup
-                    disable_system_proxy "no_docker_restart"
                 else
                     log_error "$(msg invalid_option)"
                     sleep 1
@@ -1477,7 +1239,7 @@ main() {
                 read -p "$(msg press_enter)"
                 ;;
             6)
-                if [ -d "$NODE_DIR" ]; then
+                if [ -d "$NODE_DIR" ] && [ -f "$NODE_DIR/docker-compose.yml" ]; then
                     remove_node
                 else
                     log_error "$(msg invalid_option)"

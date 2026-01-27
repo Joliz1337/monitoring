@@ -1,6 +1,7 @@
 /**
  * Chart optimization utilities
  * LTTB (Largest Triangle Three Buckets) downsampling algorithm
+ * Exponential Moving Average (EMA) smoothing
  */
 
 export interface ChartPoint {
@@ -13,6 +14,62 @@ export const MAX_CHART_POINTS = 150
 
 // Y-axis padding multiplier for stability
 export const Y_AXIS_PADDING = 1.1
+
+// Default smoothing factor for EMA (0-1, higher = more smoothing)
+export const DEFAULT_SMOOTHING_FACTOR = 0.3
+
+/**
+ * Exponential Moving Average (EMA) smoothing
+ * Smooths out sharp spikes while preserving overall trends
+ * 
+ * @param data - Array of chart points
+ * @param alpha - Smoothing factor (0-1). Higher = more smoothing, slower response
+ * @returns Smoothed array of points
+ */
+export function smoothDataEMA(data: ChartPoint[], alpha: number = DEFAULT_SMOOTHING_FACTOR): ChartPoint[] {
+  if (data.length < 2) return data
+  
+  const smoothed: ChartPoint[] = []
+  
+  // First point stays the same
+  smoothed.push({ ...data[0] })
+  
+  // Apply EMA: smoothed[i] = alpha * smoothed[i-1] + (1 - alpha) * data[i]
+  for (let i = 1; i < data.length; i++) {
+    smoothed.push({
+      x: data[i].x,
+      y: alpha * smoothed[i - 1].y + (1 - alpha) * data[i].y
+    })
+  }
+  
+  return smoothed
+}
+
+/**
+ * Double Exponential Moving Average (DEMA) for even smoother curves
+ * Applies EMA twice - forward and backward to reduce lag
+ * 
+ * @param data - Array of chart points
+ * @param alpha - Smoothing factor (0-1)
+ * @returns Smoothed array of points
+ */
+export function smoothDataDEMA(data: ChartPoint[], alpha: number = DEFAULT_SMOOTHING_FACTOR): ChartPoint[] {
+  if (data.length < 3) return data
+  
+  // Forward pass
+  const forward = smoothDataEMA(data, alpha)
+  
+  // Backward pass (reverse, apply EMA, reverse back)
+  const reversed = [...forward].reverse()
+  const backwardEMA = smoothDataEMA(reversed, alpha)
+  const backward = backwardEMA.reverse()
+  
+  // Average forward and backward for lag-free smoothing
+  return data.map((point, i) => ({
+    x: point.x,
+    y: (forward[i].y + backward[i].y) / 2
+  }))
+}
 
 /**
  * LTTB (Largest Triangle Three Buckets) downsampling algorithm

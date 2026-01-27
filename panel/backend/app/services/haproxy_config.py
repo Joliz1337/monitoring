@@ -27,34 +27,27 @@ class HAProxyConfigGenerator:
     """Generates HAProxy configuration on the panel side"""
     
     def __init__(self, cpu_cores: int = 1, ram_mb: int = 1024, ulimit: int = 1024):
+        # Kept for API compatibility but not used
         self.cpu_cores = cpu_cores
         self.ram_mb = ram_mb
         self.ulimit = ulimit
     
-    def calculate_maxconn(self) -> int:
-        """Calculate optimal maxconn based on system resources"""
-        ram_based = min(int((self.ram_mb * 1024 * 0.7) / 2), 500000)
-        ulimit_based = (self.ulimit - 100) // 2
-        return max(min(ram_based, ulimit_based), 100)
-    
     def generate_base_config(self) -> str:
-        """Generate base HAProxy config without rules"""
-        maxconn = self.calculate_maxconn()
-        nbthread = self.cpu_cores
-        
+        """Generate base HAProxy config for high-speed TCP proxying"""
         return f"""global
-    maxconn {maxconn}
-    nbthread {nbthread}
-    
+    stats socket /var/run/haproxy.sock mode 660 level admin expose-fd listeners
+
 defaults
     mode tcp
-    maxconn {maxconn // 2}
     timeout connect 5s
-    timeout client 300s
-    timeout server 300s
-    timeout tunnel 3600s
-    timeout client-fin 30s
-    timeout server-fin 30s
+    timeout client 1h
+    timeout server 1h
+    timeout tunnel 12h
+    option dontlognull
+    option redispatch
+    option tcp-smart-accept
+    option tcp-smart-connect
+    option splice-auto
 
 {RULES_START_MARKER}
 {RULES_END_MARKER}

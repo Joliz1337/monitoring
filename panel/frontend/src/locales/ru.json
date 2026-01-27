@@ -338,7 +338,9 @@
     "saving_config": "Сохранение...",
     "config_saved": "Конфигурация сохранена",
     "config_save_error": "Ошибка сохранения конфигурации",
-    "config_loading": "Загрузка конфигурации..."
+    "config_loading": "Загрузка конфигурации...",
+    "apply_default_template": "Применить стандартный шаблон",
+    "apply_default_template_hint": "Заменить global/defaults на стандартный шаблон, сохранив правила"
   },
   "optimization": {
     "title": "Оптимизация системы",
@@ -510,5 +512,13 @@
     "command_cancelled": "Команда отменена",
     "connection_error": "Ошибка подключения",
     "timeout_error": "Превышено время ожидания"
+  },
+  "cache": {
+    "cached": "Кэш",
+    "showing_cached": "Показаны кэшированные данные",
+    "last_update": "Последнее обновление: {{time}}",
+    "server_unavailable": "Сервер недоступен",
+    "data_may_be_outdated": "Данные могут быть устаревшими",
+    "stale_data": "Устаревшие данные"
   }
 }

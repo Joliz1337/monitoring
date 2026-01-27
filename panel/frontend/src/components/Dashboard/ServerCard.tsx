@@ -18,6 +18,7 @@ import {
   ArrowDownToLine,
   ArrowUpFromLine,
   PowerOff,
+  Database,
 } from 'lucide-react'
 import { Server, ServerMetrics } from '../../api/client'
 import StatusBadge from '../ui/StatusBadge'
@@ -232,8 +233,14 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
               </div>
             </div>
             
-            {metrics && server.status === 'online' && (
+            {metrics && (
               <div className="hidden sm:flex items-center gap-6 text-sm">
+                {/* Cached indicator in compact view */}
+                {server.status === 'offline' && (
+                  <div className="flex items-center gap-1 px-1.5 py-0.5 bg-warning/15 border border-warning/25 rounded text-[10px] text-warning" title={t('cache.cached')}>
+                    <Database className="w-2.5 h-2.5" />
+                  </div>
+                )}
                 <div className="flex items-center gap-2 text-dark-400">
                   <Cpu className="w-4 h-4" />
                   <span className="font-mono">{metrics.cpu.usage_percent.toFixed(1)}%</span>
@@ -337,10 +344,24 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
               )}
             </div>
           </div>
-          <StatusBadge status={server.status} />
+          <div className="flex items-center gap-2">
+            {/* Show cached indicator when offline but have metrics */}
+            {server.status === 'offline' && metrics && (
+              <motion.div
+                initial={{ opacity: 0, scale: 0.8 }}
+                animate={{ opacity: 1, scale: 1 }}
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-warning/15 border border-warning/25 rounded text-[10px] text-warning"
+                title={server.last_seen ? t('cache.last_update', { time: formatTimeAgo(server.last_seen) }) : t('cache.cached')}
+              >
+                <Database className="w-2.5 h-2.5" />
+                <span className="font-medium">{t('cache.cached')}</span>
+              </motion.div>
+            )}
+            <StatusBadge status={server.status} />
+          </div>
         </div>
         
-        {metrics && server.status === 'online' ? (
+        {metrics ? (
           <div>
             {/* Minimal: только CPU и RAM в одну строку */}
             {detailLevel === 'minimal' && (

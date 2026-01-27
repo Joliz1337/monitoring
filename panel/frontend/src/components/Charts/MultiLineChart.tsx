@@ -2,7 +2,7 @@ import { useMemo } from 'react'
 import ReactApexChart from 'react-apexcharts'
 import { ApexOptions } from 'apexcharts'
 import { useTranslation } from 'react-i18next'
-import { downsampleLTTB, calculateMultiSeriesYMax, MAX_CHART_POINTS } from '../../utils/chartUtils'
+import { downsampleLTTB, smoothDataDEMA, calculateMultiSeriesYMax, MAX_CHART_POINTS } from '../../utils/chartUtils'
 
 interface Series {
   name: string
@@ -17,6 +17,7 @@ interface MultiLineChartProps {
   stacked?: boolean
   formatValue?: (val: number) => string
   period?: string
+  smoothing?: number // Smoothing factor 0-1 (0 = no smoothing, 1 = max smoothing)
 }
 
 const DEFAULT_COLORS = [
@@ -117,20 +118,23 @@ export default function MultiLineChart({
   stacked = false,
   formatValue,
   period = '1h',
+  smoothing = 0.35, // Default smoothing factor for pleasant curves
 }: MultiLineChartProps) {
   const { t, i18n } = useTranslation()
   
   const { chartSeries, options } = useMemo(() => {
     const lang = i18n.language || 'en'
     
-    // Convert and downsample each series
+    // Convert, smooth and downsample each series
     const processedSeries = series.map((s) => {
       const rawData = s.data.map(d => ({
         x: parseTimestamp(d.timestamp),
         y: d.value,
       }))
+      // Apply smoothing to reduce sharp spikes (DEMA for lag-free smoothing)
+      const smoothedData = smoothing > 0 ? smoothDataDEMA(rawData, smoothing) : rawData
       // Apply LTTB downsampling
-      return downsampleLTTB(rawData, MAX_CHART_POINTS)
+      return downsampleLTTB(smoothedData, MAX_CHART_POINTS)
     })
     
     const chartSeries = series.map((s, i) => ({
@@ -213,7 +217,7 @@ export default function MultiLineChart({
     }
     
     return { chartSeries, options }
-  }, [series, unit, stacked, formatValue, period, i18n.language])
+  }, [series, unit, stacked, formatValue, period, smoothing, i18n.language])
   
   if (series.every(s => s.data.length === 0)) {
     return (

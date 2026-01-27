@@ -23,6 +23,8 @@ import { useAutoRefresh } from '../hooks/useAutoRefresh'
 import { formatBytes, createBitsFormatter } from '../utils/format'
 import PeriodSelector from '../components/ui/PeriodSelector'
 import MultiLineChart from '../components/Charts/MultiLineChart'
+import { useCachedData, createServerCacheKey } from '../hooks/useCachedData'
+import CachedDataBanner from '../components/ui/CachedDataBanner'
 
 const containerVariants = {
   hidden: { opacity: 0 },
@@ -55,6 +57,16 @@ export default function Traffic() {
   const [newPort, setNewPort] = useState('')
   const [isAddingPort, setIsAddingPort] = useState(false)
   
+  // Cache for offline data
+  interface TrafficCacheData {
+    summary: TrafficSummary | null
+    trafficHistory: { timestamp: string; rx: number; tx: number }[]
+    speedHistory: { timestamp: string; rx: number; tx: number }[]
+    metrics: ServerMetrics | null
+  }
+  const cacheKey = serverId ? createServerCacheKey(serverId, 'traffic') : ''
+  const { isCached, cachedAt, saveToCache, loadFromCache, setIsCached, setCachedAt } = useCachedData<TrafficCacheData>(cacheKey)
+  
   const server = servers.find(s => s.id === Number(serverId))
   
   const fetchData = useCallback(async () => {
@@ -72,15 +84,14 @@ export default function Traffic() {
         proxyApi.getHistory(Number(serverId), { period: speedPeriod })
       ])
       
-      setSummary(summaryRes.data)
-      setMetrics(metricsRes.data)
+      const summaryData = summaryRes.data
+      const metricsData = metricsRes.data
       
       const history = historyRes.data.data.map(d => ({
         timestamp: d.hour || d.date || d.month || '',
         rx: d.rx_bytes,
         tx: d.tx_bytes
       }))
-      setTrafficHistory(history)
       
       // Speed history from metrics
       const speedData = (speedRes.data as { data: Array<{ timestamp: string; net_rx_bytes_per_sec: number; net_tx_bytes_per_sec: number }> }).data || []
@@ -89,16 +100,40 @@ export default function Traffic() {
         rx: d.net_rx_bytes_per_sec || 0,
         tx: d.net_tx_bytes_per_sec || 0
       }))
-      setSpeedHistory(speed)
       
+      setSummary(summaryData)
+      setMetrics(metricsData)
+      setTrafficHistory(history)
+      setSpeedHistory(speed)
       setError(null)
+      setIsCached(false)
+      setCachedAt(null)
+      
+      // Save to cache
+      saveToCache({
+        summary: summaryData,
+        trafficHistory: history,
+        speedHistory: speed,
+        metrics: metricsData,
+      })
     } catch (err: unknown) {
-      const error = err as { response?: { status: number; data?: { detail?: string } } }
-      setError(error.response?.data?.detail || t('traffic.failed_fetch'))
+      // Try to load from cache on error
+      const cached = loadFromCache()
+      if (cached) {
+        setSummary(cached.summary)
+        setTrafficHistory(cached.trafficHistory)
+        setSpeedHistory(cached.speedHistory)
+        setMetrics(cached.metrics)
+        setError(null)
+        // isCached and cachedAt are set by loadFromCache
+      } else {
+        const error = err as { response?: { status: number; data?: { detail?: string } } }
+        setError(error.response?.data?.detail || t('traffic.failed_fetch'))
+      }
     } finally {
       setIsLoading(false)
     }
-  }, [serverId, period, speedPeriod])
+  }, [serverId, period, speedPeriod, saveToCache, loadFromCache, setIsCached, setCachedAt, t])
   
   useEffect(() => {
     fetchServers()
@@ -250,6 +285,13 @@ export default function Traffic() {
               <span className="text-danger">{error}</span>
             </div>
           </motion.div>
+        )}
+      </AnimatePresence>
+      
+      {/* Cached data indicator */}
+      <AnimatePresence>
+        {isCached && (
+          <CachedDataBanner cachedAt={cachedAt} />
         )}
       </AnimatePresence>
       

@@ -120,29 +120,32 @@ export default function Dashboard() {
     const { active, over } = event
     
     if (over && active.id !== over.id) {
-      const oldIndex = servers.findIndex(s => s.id === active.id)
-      const newIndex = servers.findIndex(s => s.id === over.id)
-      const newOrder = arrayMove(servers, oldIndex, newIndex)
+      const oldIndex = activeServers.findIndex(s => s.id === active.id)
+      const newIndex = activeServers.findIndex(s => s.id === over.id)
+      const newOrder = arrayMove(activeServers, oldIndex, newIndex)
       reorderServers(newOrder.map(s => s.id))
     }
     
     setActiveId(null)
   }
   
-  const activeServer = activeId ? servers.find(s => s.id === activeId) : null
+  const activeServer = activeId ? activeServers.find(s => s.id === activeId) : null
   
-  // Memoize server counts to avoid recalculating on every render
-  // Only count active servers for online/offline stats
-  const { onlineCount, offlineCount, disabledCount, serverIds } = useMemo(() => ({
-    onlineCount: servers.filter(s => s.is_active && s.status === 'online').length,
-    offlineCount: servers.filter(s => s.is_active && s.status === 'offline').length,
-    disabledCount: servers.filter(s => !s.is_active).length,
-    serverIds: servers.map(s => s.id)
-  }), [servers])
+  // Memoize server counts and filter out disabled servers
+  const { activeServers, onlineCount, offlineCount, disabledCount, serverIds } = useMemo(() => {
+    const active = servers.filter(s => s.is_active)
+    return {
+      activeServers: active,
+      onlineCount: active.filter(s => s.status === 'online').length,
+      offlineCount: active.filter(s => s.status === 'offline').length,
+      disabledCount: servers.filter(s => !s.is_active).length,
+      serverIds: active.map(s => s.id)
+    }
+  }, [servers])
   
-  const subtitle = servers.length === 1 
-    ? t('dashboard.subtitle_one', { count: servers.length })
-    : t('dashboard.subtitle_other', { count: servers.length })
+  const subtitle = activeServers.length === 1 
+    ? t('dashboard.subtitle_one', { count: activeServers.length })
+    : t('dashboard.subtitle_other', { count: activeServers.length })
 
   return (
     <motion.div 
@@ -351,7 +354,7 @@ export default function Dashboard() {
       
       {/* Content */}
       <AnimatePresence mode="wait">
-        {isLoading && servers.length === 0 ? (
+        {isLoading && activeServers.length === 0 ? (
           <motion.div 
             className="flex flex-col items-center justify-center h-64 gap-4"
             initial={{ opacity: 0 }}
@@ -373,7 +376,7 @@ export default function Dashboard() {
             </div>
             <p className="text-dark-400">{t('dashboard.loading_servers')}</p>
           </motion.div>
-        ) : servers.length === 0 ? (
+        ) : activeServers.length === 0 ? (
           <motion.div 
             className="card text-center py-20"
             initial={{ opacity: 0, scale: 0.9 }}
@@ -429,7 +432,7 @@ export default function Dashboard() {
                 variants={containerVariants}
                 key="servers"
               >
-                {servers.map((server, index) => (
+                {activeServers.map((server, index) => (
                   <ServerCard
                     key={server.id}
                     server={server}
