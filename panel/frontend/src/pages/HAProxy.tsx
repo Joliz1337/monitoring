@@ -182,12 +182,11 @@ export default function HAProxy() {
     setIsLoading(true)
     
     try {
-      const [statusRes, rulesRes, certsRes, fwRes, optRes] = await Promise.all([
+      const [statusRes, rulesRes, certsRes, fwRes] = await Promise.all([
         proxyApi.getHAProxyStatus(Number(serverId)),
         proxyApi.getHAProxyRules(Number(serverId)),
         proxyApi.getHAProxyCerts(Number(serverId)),
         proxyApi.getFirewallRules(Number(serverId)).catch(() => ({ data: { rules: [], active: false } })),
-        proxyApi.getOptimizationsStatus(Number(serverId)).catch(() => ({ data: null })),
       ])
       
       const statusData = statusRes.data
@@ -201,7 +200,6 @@ export default function HAProxy() {
       setCerts(certsData)
       setFirewallRules(fwRulesData)
       setFirewallActive(fwActiveData)
-      if (optRes.data) setOptimizations(optRes.data)
       setError(null)
       setIsCached(false)
       setCachedAt(null)
@@ -249,12 +247,11 @@ export default function HAProxy() {
     setIsRefreshing(true)
     
     try {
-      const [statusRes, rulesRes, certsRes, fwRes, optRes, allCertsRes] = await Promise.all([
+      const [statusRes, rulesRes, certsRes, fwRes, allCertsRes] = await Promise.all([
         proxyApi.getHAProxyStatus(Number(serverId)),
         proxyApi.getHAProxyRules(Number(serverId)),
         proxyApi.getHAProxyCerts(Number(serverId)),
         proxyApi.getFirewallRules(Number(serverId)).catch(() => ({ data: { rules: [], active: false } })),
-        proxyApi.getOptimizationsStatus(Number(serverId)).catch(() => ({ data: null })),
         proxyApi.getAllCerts(Number(serverId)).catch(() => ({ data: { certificates: [] } })),
       ])
       
@@ -275,7 +272,6 @@ export default function HAProxy() {
       setFirewallRules(fwRulesData)
       setFirewallActive(fwActiveData)
       setCertDetails(details)
-      if (optRes.data) setOptimizations(optRes.data)
       setError(null)
       setIsCached(false)
       setCachedAt(null)

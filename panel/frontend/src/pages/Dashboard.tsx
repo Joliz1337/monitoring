@@ -112,6 +112,18 @@ export default function Dashboard() {
     { immediate: false }
   )
   
+  // Memoize server counts and filter out disabled servers
+  const { activeServers, onlineCount, offlineCount, disabledCount, serverIds } = useMemo(() => {
+    const active = servers.filter(s => s.is_active)
+    return {
+      activeServers: active,
+      onlineCount: active.filter(s => s.status === 'online').length,
+      offlineCount: active.filter(s => s.status === 'offline').length,
+      disabledCount: servers.filter(s => !s.is_active).length,
+      serverIds: active.map(s => s.id)
+    }
+  }, [servers])
+  
   const handleDragStart = (event: DragStartEvent) => {
     setActiveId(event.active.id as number)
   }
@@ -130,18 +142,6 @@ export default function Dashboard() {
   }
   
   const activeServer = activeId ? activeServers.find(s => s.id === activeId) : null
-  
-  // Memoize server counts and filter out disabled servers
-  const { activeServers, onlineCount, offlineCount, disabledCount, serverIds } = useMemo(() => {
-    const active = servers.filter(s => s.is_active)
-    return {
-      activeServers: active,
-      onlineCount: active.filter(s => s.status === 'online').length,
-      offlineCount: active.filter(s => s.status === 'offline').length,
-      disabledCount: servers.filter(s => !s.is_active).length,
-      serverIds: active.map(s => s.id)
-    }
-  }, [servers])
   
   const subtitle = activeServers.length === 1 
     ? t('dashboard.subtitle_one', { count: activeServers.length })
