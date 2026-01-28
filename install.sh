@@ -861,14 +861,47 @@ apply_system_optimizations() {
     # Load conntrack module if not loaded
     modprobe nf_conntrack >/dev/null 2>&1 || true
     
-    # Enable and start network-tune service
+    # Enable and restart network-tune service (restart ensures new settings are applied)
     log_info "Enabling network-tune service..."
     systemctl daemon-reload >/dev/null 2>&1
     systemctl enable network-tune.service >/dev/null 2>&1 || true
-    if ! systemctl start network-tune.service >/dev/null 2>&1; then
-        log_warn "Could not start network-tune service (may need reboot)"
+    if ! systemctl restart network-tune.service >/dev/null 2>&1; then
+        # Try running script directly if service fails
+        log_warn "Service restart failed, trying direct execution..."
+        if /opt/monitoring-node/scripts/network-tune.sh >/dev/null 2>&1; then
+            log_success "Network tuning applied (direct execution)"
+        else
+            log_warn "Could not apply network tuning (may need reboot)"
+        fi
     else
-        log_success "Network tuning service enabled"
+        log_success "Network tuning service enabled and applied"
+    fi
+    
+    # Verify critical settings
+    log_info "Verifying optimizations..."
+    local verify_ok=true
+    
+    # Check BBR
+    if [ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)" != "bbr" ]; then
+        log_warn "BBR not active (kernel may not support it)"
+        verify_ok=false
+    fi
+    
+    # Check conntrack hashsize
+    local hashsize=$(cat /sys/module/nf_conntrack/parameters/hashsize 2>/dev/null || echo "0")
+    if [ "$hashsize" -lt 524288 ]; then
+        log_warn "Conntrack hashsize is $hashsize (expected >=524288)"
+        verify_ok=false
+    fi
+    
+    # Check key sysctl values
+    if [ "$(sysctl -n net.netfilter.nf_conntrack_tcp_timeout_syn_sent 2>/dev/null)" != "10" ]; then
+        log_warn "SYN_SENT timeout not set correctly"
+        verify_ok=false
+    fi
+    
+    if [ "$verify_ok" = true ]; then
+        log_success "All optimizations verified successfully"
     fi
     
     log_success "$(msg optimizations_applied)"

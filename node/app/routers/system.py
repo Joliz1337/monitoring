@@ -388,7 +388,25 @@ SYSCTL_CONFIG_PATH = "/etc/sysctl.d/99-vless-tuning.conf"
 LIMITS_CONFIG_PATH = "/etc/security/limits.d/99-nofile.conf"
 SYSTEMD_LIMITS_PATH = "/etc/systemd/system.conf.d/limits.conf"
 SYSTEMD_USER_LIMITS_PATH = "/etc/systemd/system/user-.slice.d/limits.conf"
+NETWORK_TUNE_SCRIPT_PATH = "/opt/monitoring-node/scripts/network-tune.sh"
+NETWORK_TUNE_SERVICE_PATH = "/etc/systemd/system/network-tune.service"
+PAM_SESSION_PATH = "/etc/pam.d/common-session"
 OPTIMIZATIONS_VERSION_PATH = "/opt/monitoring-node/configs/VERSION"
+
+# Expected values for verification
+EXPECTED_SYSCTL_VALUES = {
+    "net.netfilter.nf_conntrack_tcp_timeout_syn_sent": "10",
+    "net.netfilter.nf_conntrack_tcp_timeout_syn_recv": "10",
+    "net.ipv4.tcp_syn_retries": "3",
+    "net.ipv4.tcp_synack_retries": "3",
+    "net.ipv4.tcp_keepalive_time": "600",
+    "net.ipv4.tcp_keepalive_probes": "6",
+    "net.ipv4.tcp_keepalive_intvl": "15",
+    "net.ipv4.tcp_congestion_control": "bbr",
+    "net.core.default_qdisc": "fq",
+    "net.ipv4.ip_forward": "1",
+    "net.ipv4.conf.all.rp_filter": "2",
+}
 
 
 async def read_host_file(path: str) -> Optional[str]:
@@ -472,7 +490,37 @@ class ApplyOptimizationsRequest(BaseModel):
     sysctl_content: str = Field(..., min_length=10, description="Sysctl config content")
     limits_content: str = Field(..., min_length=10, description="Limits config content")
     systemd_content: str = Field(..., min_length=10, description="Systemd limits content")
+    network_tune_content: Optional[str] = Field(None, description="Network tune script content")
+    network_tune_service_content: Optional[str] = Field(None, description="Network tune service unit")
     version: Optional[str] = Field(None, description="Optimizations version")
+
+
+async def verify_sysctl_values(executor) -> dict:
+    """Verify that critical sysctl values are applied correctly"""
+    verification = {"success": True, "checked": {}, "failed": []}
+    
+    for param, expected in EXPECTED_SYSCTL_VALUES.items():
+        result = await executor.execute(f"sysctl -n {param}", timeout=5)
+        if result.success and result.exit_code == 0:
+            actual = result.stdout.strip()
+            verification["checked"][param] = {"expected": expected, "actual": actual}
+            if actual != expected:
+                verification["failed"].append(f"{param}: expected {expected}, got {actual}")
+                verification["success"] = False
+        else:
+            verification["failed"].append(f"{param}: failed to read")
+            verification["success"] = False
+    
+    # Check conntrack hashsize (should be >= 524288 for 2M conntrack_max)
+    result = await executor.execute("cat /sys/module/nf_conntrack/parameters/hashsize", timeout=5)
+    if result.success and result.exit_code == 0:
+        hashsize = int(result.stdout.strip())
+        verification["checked"]["conntrack_hashsize"] = {"expected": ">=524288", "actual": str(hashsize)}
+        if hashsize < 524288:
+            verification["failed"].append(f"conntrack_hashsize: expected >=524288, got {hashsize}")
+            verification["success"] = False
+    
+    return verification
 
 
 @router.post("/optimizations/apply")
@@ -480,66 +528,130 @@ async def apply_optimizations(request: ApplyOptimizationsRequest):
     """
     Apply system optimizations to the node.
     
-    Writes config files and applies sysctl settings.
-    Removes old separate config files to prevent conflicts.
+    1. Writes ALL config files (sysctl, limits, systemd, network-tune.sh, network-tune.service)
+    2. Configures PAM limits
+    3. Applies sysctl settings
+    4. Restarts network-tune service (for hashsize, RPS/RFS)
+    5. Verifies all values are applied correctly
     """
     executor = get_host_executor()
     errors = []
+    warnings = []
+    applied_files = []
     
     # Remove old separate config files (now integrated into main config)
     await executor.execute("rm -f /etc/sysctl.d/99-disable-ipv6.conf", timeout=5)
     await executor.execute("rm -f /etc/sysctl.d/99-haproxy.conf", timeout=5)
     
-    # Write sysctl config
-    if not await write_host_file(SYSCTL_CONFIG_PATH, request.sysctl_content):
+    # 1. Write sysctl config
+    if await write_host_file(SYSCTL_CONFIG_PATH, request.sysctl_content):
+        applied_files.append("sysctl.conf")
+    else:
         errors.append("Failed to write sysctl config")
     
-    # Write limits config
-    if not await write_host_file(LIMITS_CONFIG_PATH, request.limits_content):
+    # 2. Write limits config
+    if await write_host_file(LIMITS_CONFIG_PATH, request.limits_content):
+        applied_files.append("limits.conf")
+    else:
         errors.append("Failed to write limits config")
     
-    # Write systemd limits
-    if not await write_host_file(SYSTEMD_LIMITS_PATH, request.systemd_content):
+    # 3. Write systemd limits
+    await executor.execute("mkdir -p /etc/systemd/system.conf.d", timeout=5)
+    if await write_host_file(SYSTEMD_LIMITS_PATH, request.systemd_content):
+        applied_files.append("systemd-limits.conf")
+    else:
         errors.append("Failed to write systemd limits")
     
-    # Write systemd user slice limits
+    # 4. Write systemd user slice limits
     user_slice_content = request.systemd_content.replace("[Manager]", "[Slice]")
-    result = await executor.execute(
-        f"mkdir -p /etc/systemd/system/user-.slice.d",
-        timeout=5
-    )
-    if not await write_host_file(SYSTEMD_USER_LIMITS_PATH, user_slice_content):
+    await executor.execute("mkdir -p /etc/systemd/system/user-.slice.d", timeout=5)
+    if await write_host_file(SYSTEMD_USER_LIMITS_PATH, user_slice_content):
+        applied_files.append("user-slice-limits.conf")
+    else:
         errors.append("Failed to write systemd user slice limits")
     
-    # Save optimizations version to file
+    # 5. Write network-tune.sh script
+    if request.network_tune_content:
+        await executor.execute("mkdir -p /opt/monitoring-node/scripts", timeout=5)
+        if await write_host_file(NETWORK_TUNE_SCRIPT_PATH, request.network_tune_content):
+            await executor.execute(f"chmod +x {NETWORK_TUNE_SCRIPT_PATH}", timeout=5)
+            applied_files.append("network-tune.sh")
+        else:
+            errors.append("Failed to write network-tune.sh")
+    
+    # 6. Write network-tune.service
+    if request.network_tune_service_content:
+        if await write_host_file(NETWORK_TUNE_SERVICE_PATH, request.network_tune_service_content):
+            applied_files.append("network-tune.service")
+        else:
+            errors.append("Failed to write network-tune.service")
+    
+    # 7. Configure PAM limits (for SSH sessions to respect limits.conf)
+    pam_check = await executor.execute(f"grep -q 'pam_limits.so' {PAM_SESSION_PATH}", timeout=5)
+    if pam_check.exit_code != 0:
+        # pam_limits.so not configured, add it
+        pam_result = await executor.execute(
+            f"echo 'session required pam_limits.so' >> {PAM_SESSION_PATH}",
+            timeout=5
+        )
+        if pam_result.success and pam_result.exit_code == 0:
+            applied_files.append("pam-limits")
+        else:
+            warnings.append("Failed to configure PAM limits")
+    
+    # 8. Save optimizations version to file
     if request.version:
         await executor.execute("mkdir -p /opt/monitoring-node/configs", timeout=5)
-        if not await write_host_file(OPTIMIZATIONS_VERSION_PATH, request.version + "\n"):
+        if await write_host_file(OPTIMIZATIONS_VERSION_PATH, request.version + "\n"):
+            applied_files.append("VERSION")
+        else:
             errors.append("Failed to write version file")
     
-    # Load conntrack module BEFORE sysctl (required for nf_conntrack_* params)
+    # 9. Load conntrack module BEFORE sysctl (required for nf_conntrack_* params)
     await executor.execute("modprobe nf_conntrack", timeout=5)
     
-    # Apply sysctl settings
-    apply_result = await executor.execute(
-        f"sysctl -p {SYSCTL_CONFIG_PATH}",
-        timeout=30
-    )
+    # 10. Apply sysctl settings
+    apply_result = await executor.execute(f"sysctl -p {SYSCTL_CONFIG_PATH}", timeout=30)
     if not apply_result.success or apply_result.exit_code != 0:
         if apply_result.stderr:
-            logger.warning(f"Some sysctl settings may not be applied: {apply_result.stderr}")
+            warnings.append(f"Sysctl warnings: {apply_result.stderr.strip()}")
     
-    # Reload systemd
+    # 11. Reload systemd (to pick up new service file and limits)
     await executor.execute("systemctl daemon-reload", timeout=10)
     
+    # 12. Enable and restart network-tune service
+    await executor.execute("systemctl enable network-tune.service", timeout=10)
+    tune_result = await executor.execute("systemctl restart network-tune.service", timeout=30)
+    if not tune_result.success or tune_result.exit_code != 0:
+        # Try running script directly if service fails
+        if request.network_tune_content:
+            direct_result = await executor.execute(f"bash {NETWORK_TUNE_SCRIPT_PATH}", timeout=30)
+            if not direct_result.success:
+                warnings.append("network-tune service failed, direct execution also failed")
+            else:
+                warnings.append("network-tune service failed, but direct script execution succeeded")
+        else:
+            warnings.append("network-tune service restart failed")
+    
+    # Critical errors - fail the request
     if errors:
         raise HTTPException(
             status_code=500,
-            detail={"message": "Partial failure", "errors": errors}
+            detail={"message": "Partial failure", "errors": errors, "warnings": warnings, "applied": applied_files}
         )
     
+    # 13. Verify all values are applied correctly
+    verification = await verify_sysctl_values(executor)
+    
     return {
-        "success": True,
-        "message": "Optimizations applied successfully",
-        "version": request.version
+        "success": verification["success"],
+        "message": "Optimizations applied" + (" with issues" if not verification["success"] else " successfully"),
+        "version": request.version,
+        "applied_files": applied_files,
+        "warnings": warnings if warnings else None,
+        "verification": {
+            "all_passed": verification["success"],
+            "failed": verification["failed"] if verification["failed"] else None,
+            "checked_count": len(verification["checked"])
+        }
     }

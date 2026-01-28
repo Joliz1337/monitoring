@@ -31,6 +31,8 @@ GITHUB_CONFIGS_VERSION_URL = "https://raw.githubusercontent.com/Joliz1337/monito
 GITHUB_SYSCTL_URL = "https://raw.githubusercontent.com/Joliz1337/monitoring/main/configs/sysctl.conf"
 GITHUB_LIMITS_URL = "https://raw.githubusercontent.com/Joliz1337/monitoring/main/configs/limits.conf"
 GITHUB_SYSTEMD_LIMITS_URL = "https://raw.githubusercontent.com/Joliz1337/monitoring/main/configs/systemd-limits.conf"
+GITHUB_NETWORK_TUNE_URL = "https://raw.githubusercontent.com/Joliz1337/monitoring/main/configs/network-tune.sh"
+GITHUB_NETWORK_TUNE_SERVICE_URL = "https://raw.githubusercontent.com/Joliz1337/monitoring/main/configs/network-tune.service"
 
 _update_status = {
     "in_progress": False,
@@ -661,7 +663,9 @@ async def get_optimizations_from_github() -> dict:
         "version": None,
         "sysctl_content": None,
         "limits_content": None,
-        "systemd_content": None
+        "systemd_content": None,
+        "network_tune_content": None,
+        "network_tune_service_content": None
     }
     
     try:
@@ -672,10 +676,12 @@ async def get_optimizations_from_github() -> dict:
                 client.get(GITHUB_SYSCTL_URL),
                 client.get(GITHUB_LIMITS_URL),
                 client.get(GITHUB_SYSTEMD_LIMITS_URL),
+                client.get(GITHUB_NETWORK_TUNE_URL),
+                client.get(GITHUB_NETWORK_TUNE_SERVICE_URL),
                 return_exceptions=True
             )
             
-            version_resp, sysctl_resp, limits_resp, systemd_resp = responses
+            version_resp, sysctl_resp, limits_resp, systemd_resp, network_tune_resp, service_resp = responses
             
             # Parse version from configs/VERSION file
             if isinstance(version_resp, Exception):
@@ -697,6 +703,16 @@ async def get_optimizations_from_github() -> dict:
                 logger.error(f"Failed to fetch systemd config: {systemd_resp}")
             elif systemd_resp.status_code == 200:
                 result["systemd_content"] = systemd_resp.text
+            
+            if isinstance(network_tune_resp, Exception):
+                logger.error(f"Failed to fetch network-tune.sh: {network_tune_resp}")
+            elif network_tune_resp.status_code == 200:
+                result["network_tune_content"] = network_tune_resp.text
+            
+            if isinstance(service_resp, Exception):
+                logger.error(f"Failed to fetch network-tune.service: {service_resp}")
+            elif service_resp.status_code == 200:
+                result["network_tune_service_content"] = service_resp.text
                 
     except Exception as e:
         logger.error(f"Failed to fetch optimizations from GitHub: {e}")
@@ -808,5 +824,7 @@ async def get_optimizations_configs(_: dict = Depends(verify_auth)):
         "version": github_data.get("version"),
         "sysctl_content": github_data.get("sysctl_content"),
         "limits_content": github_data.get("limits_content"),
-        "systemd_content": github_data.get("systemd_content")
+        "systemd_content": github_data.get("systemd_content"),
+        "network_tune_content": github_data.get("network_tune_content"),
+        "network_tune_service_content": github_data.get("network_tune_service_content")
     }

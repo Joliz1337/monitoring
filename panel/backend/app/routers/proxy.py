@@ -1029,6 +1029,8 @@ async def apply_node_optimizations(
         "sysctl_content": github_data["sysctl_content"],
         "limits_content": github_data["limits_content"],
         "systemd_content": github_data["systemd_content"],
+        "network_tune_content": github_data.get("network_tune_content"),
+        "network_tune_service_content": github_data.get("network_tune_service_content"),
         "version": github_data.get("version")
     }
     
