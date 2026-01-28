@@ -119,10 +119,7 @@
     "failed_update": "Failed to update server",
     "monitoring_enabled": "Monitoring enabled",
     "monitoring_disabled": "Monitoring disabled",
-    "disabled": "Disabled",
-    "update_proxy": "Proxy for Updates",
-    "update_proxy_placeholder": "ip:port or http://user:pass@ip:port",
-    "update_proxy_hint": "HTTP proxy for downloading updates. Leave empty if not needed."
+    "disabled": "Disabled"
   },
   "server_details": {
     "loading": "Loading server data...",
@@ -444,10 +441,7 @@
     "optimizations": "System Optimizations",
     "update_all_optimizations": "Update All",
     "not_installed": "Not installed",
-    "legacy_version": "Legacy",
-    "proxy_placeholder": "ip:port",
-    "proxy_help_title": "Proxy Formats",
-    "proxy_help_text": "Supported formats:\n• ip:port\n• ip:port:user:pass\n• http://user:pass@ip:port"
+    "legacy_version": "Legacy"
   },
   "bulk_actions": {
     "title": "Bulk Actions",

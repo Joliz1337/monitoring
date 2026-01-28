@@ -119,10 +119,7 @@
     "failed_update": "Не удалось обновить сервер",
     "monitoring_enabled": "Мониторинг включён",
     "monitoring_disabled": "Мониторинг отключён",
-    "disabled": "Отключён",
-    "update_proxy": "Прокси для обновлений",
-    "update_proxy_placeholder": "ip:port или http://user:pass@ip:port",
-    "update_proxy_hint": "HTTP прокси для скачивания обновлений. Оставьте пустым если не нужен."
+    "disabled": "Отключён"
   },
   "server_details": {
     "loading": "Загрузка данных сервера...",
@@ -445,10 +442,7 @@
     "optimizations": "Системные оптимизации",
     "update_all_optimizations": "Обновить все",
     "not_installed": "Не установлено",
-    "legacy_version": "Устаревшая",
-    "proxy_placeholder": "ip:port",
-    "proxy_help_title": "Форматы прокси",
-    "proxy_help_text": "Поддерживаемые форматы:\n• ip:port\n• ip:port:user:pass\n• http://user:pass@ip:port"
+    "legacy_version": "Устаревшая"
   },
   "bulk_actions": {
     "title": "Массовые действия",

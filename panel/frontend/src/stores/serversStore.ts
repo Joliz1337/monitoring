@@ -31,7 +31,7 @@ interface ServersState {
   fetchAllMetrics: () => Promise<void>
   fetchAllLiveMetrics: () => Promise<void>
   fetchAllTraffic: (days?: number) => Promise<void>
-  addServer: (data: { name: string; url: string; api_key: string; update_proxy?: string | null }) => Promise<{ success: boolean; error?: string }>
+  addServer: (data: { name: string; url: string; api_key: string }) => Promise<{ success: boolean; error?: string }>
   updateServer: (id: number, data: Partial<Server>) => Promise<void>
   toggleServer: (id: number, isActive: boolean) => Promise<void>
   deleteServer: (id: number) => Promise<void>

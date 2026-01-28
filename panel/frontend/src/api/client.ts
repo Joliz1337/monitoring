@@ -32,7 +32,6 @@ export interface Server {
   last_seen?: string | null
   last_error?: string | null
   error_code?: number | null
-  update_proxy?: string | null
 }
 
 export interface TimezoneInfo {
@@ -328,7 +327,7 @@ export const serversApi = {
       params: includeMetrics ? { include_metrics: true } : undefined 
     }),
   get: (id: number) => api.get<Server>(`/servers/${id}`),
-  create: (data: { name: string; url: string; api_key: string; update_proxy?: string | null }) => 
+  create: (data: { name: string; url: string; api_key: string }) => 
     api.post<{ success: boolean; server: Server }>('/servers', data),
   update: (id: number, data: Partial<Server>) => api.put(`/servers/${id}`, data),
   delete: (id: number) => api.delete(`/servers/${id}`),
@@ -504,7 +503,6 @@ export interface NodeVersionInfo {
   version: string | null
   status: 'online' | 'offline'
   optimizations?: NodeOptimizationsInfo
-  update_proxy?: string | null
 }
 
 export interface VersionInfo {
@@ -632,10 +630,9 @@ export const systemApi = {
   // Node updates via proxy
   getNodeVersion: (serverId: number) => 
     api.get<{ version: string; component: string; node_name: string }>(`/proxy/${serverId}/system/version`),
-  updateNode: (serverId: number, targetVersion?: string, proxy?: string) =>
+  updateNode: (serverId: number, targetVersion?: string) =>
     api.post<UpdateResponse>(`/proxy/${serverId}/system/update`, { 
-      ...(targetVersion && { target_version: targetVersion }),
-      ...(proxy && { proxy })
+      ...(targetVersion && { target_version: targetVersion })
     }),
   getNodeUpdateStatus: (serverId: number) =>
     api.get<UpdateStatus>(`/proxy/${serverId}/system/update/status`),

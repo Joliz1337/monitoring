@@ -129,7 +129,6 @@ class ServerCreate(BaseModel):
     name: str
     url: str
     api_key: str
-    update_proxy: Optional[str] = None
 
 
 class ServerUpdate(BaseModel):
@@ -137,7 +136,6 @@ class ServerUpdate(BaseModel):
     url: Optional[str] = None
     api_key: Optional[str] = None
     is_active: Optional[bool] = None
-    update_proxy: Optional[str] = None
 
 
 class ServerReorder(BaseModel):
@@ -241,8 +239,7 @@ async def create_server(
         name=server.name,
         url=server.url.rstrip("/"),
         api_key=server.api_key,
-        position=next_position,
-        update_proxy=server.update_proxy
+        position=next_position
     )
     db.add(new_server)
     await db.commit()
@@ -280,8 +277,7 @@ async def get_server(
         "is_active": server.is_active,
         "last_seen": to_iso_utc(server.last_seen),
         "last_error": server.last_error,
-        "error_code": server.error_code,
-        "update_proxy": server.update_proxy
+        "error_code": server.error_code
     }
 
 

@@ -854,20 +854,11 @@ async def trigger_node_update(
 ):
     """
     Trigger node update.
-    Optional data: { "target_version": "v1.1.0", "proxy": "http://..." }
+    Optional data: { "target_version": "v1.1.0" }
     If not specified, updates to latest version.
-    The proxy from server settings is automatically included if configured.
     """
     server = await get_server_by_id(server_id, db)
-    
-    # Build request data, include proxy from server settings if configured
-    request_data = data.copy() if data else {}
-    
-    # Add proxy from server settings if not explicitly provided and server has proxy configured
-    if "proxy" not in request_data and server.update_proxy:
-        request_data["proxy"] = server.update_proxy
-    
-    return await proxy_request(server, "/api/system/update", method="POST", json_data=request_data)
+    return await proxy_request(server, "/api/system/update", method="POST", json_data=data or {})
 
 
 @router.get("/{server_id}/system/update/status")
