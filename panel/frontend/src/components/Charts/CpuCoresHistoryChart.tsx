@@ -12,6 +12,7 @@ interface HistoryDataPoint {
 interface CpuCoresHistoryChartProps {
   history: HistoryDataPoint[]
   period: string
+  coreCount: number  // Current core count from live metrics
   isLoading?: boolean
   className?: string
 }
@@ -43,21 +44,12 @@ function getCoreColor(index: number): string {
 export default function CpuCoresHistoryChart({
   history,
   period,
+  coreCount,
   isLoading = false,
   className = ''
 }: CpuCoresHistoryChartProps) {
   const { t } = useTranslation()
   const [isExpanded, setIsExpanded] = useState(false)
-  
-  // Determine number of cores from first data point with per_cpu data
-  const coreCount = useMemo(() => {
-    for (const h of history) {
-      if (h.per_cpu_percent && h.per_cpu_percent.length > 0) {
-        return h.per_cpu_percent.length
-      }
-    }
-    return 0
-  }, [history])
   
   // Build series for MultiLineChart
   const series = useMemo(() => {
@@ -75,8 +67,8 @@ export default function CpuCoresHistoryChart({
     }))
   }, [history, coreCount, t])
   
-  // Don't show if no per_cpu data available
-  if (coreCount === 0) {
+  // Don't show if no cores
+  if (!coreCount || coreCount === 0) {
     return null
   }
   

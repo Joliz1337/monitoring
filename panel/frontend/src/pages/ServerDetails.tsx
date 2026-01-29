@@ -563,10 +563,11 @@ export default function ServerDetails() {
                 </ChartCard>
                 
                 {/* Per-CPU cores history (collapsible) */}
-                {(period === '1h' || period === '24h') && (
+                {(period === '1h' || period === '24h') && metrics?.cpu?.per_cpu_percent && (
                   <CpuCoresHistoryChart
                     history={history}
                     period={period}
+                    coreCount={metrics.cpu.per_cpu_percent.length}
                     isLoading={isHistoryLoading}
                   />
                 )}
