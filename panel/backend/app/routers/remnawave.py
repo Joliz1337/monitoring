@@ -1,4 +1,9 @@
-"""Remnawave integration router for Xray visit statistics"""
+"""Remnawave integration router for Xray visit statistics
+
+Optimized version with cumulative counters:
+- XrayVisitStats: total counts per (server, destination, email)
+- XrayHourlyStats: timeline data per (server, hour)
+"""
 
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -12,7 +17,7 @@ from app.auth import verify_auth
 from app.database import get_db
 from app.models import (
     Server, RemnawaveSettings, RemnawaveNode, 
-    XrayVisitStats, RemnawaveUserCache
+    XrayVisitStats, XrayHourlyStats, RemnawaveUserCache
 )
 from app.services.remnawave_api import get_remnawave_api
 from app.services.xray_stats_collector import get_xray_stats_collector
@@ -34,21 +39,8 @@ class AddNodeRequest(BaseModel):
     server_id: int
 
 
-class AddNodesRequest(BaseModel):
-    server_ids: list[int]
-
-
 class SyncNodesRequest(BaseModel):
     server_ids: list[int]
-
-
-class NodeResponse(BaseModel):
-    id: int
-    server_id: int
-    server_name: str
-    enabled: bool
-    last_collected: Optional[str]
-    last_error: Optional[str]
 
 
 # === Settings Endpoints ===
@@ -73,8 +65,8 @@ async def get_settings(
     
     return {
         "api_url": settings.api_url,
-        "api_token": "***" if settings.api_token else None,  # Hide token
-        "cookie_secret": "***" if settings.cookie_secret else None,  # Hide secret
+        "api_token": "***" if settings.api_token else None,
+        "cookie_secret": "***" if settings.cookie_secret else None,
         "enabled": settings.enabled,
         "collection_interval": settings.collection_interval
     }
@@ -166,7 +158,6 @@ async def get_nodes(
     _: dict = Depends(verify_auth)
 ):
     """Get list of Remnawave nodes and all servers"""
-    # Get existing nodes with server info
     result = await db.execute(
         select(RemnawaveNode, Server)
         .join(Server, RemnawaveNode.server_id == Server.id)
@@ -174,11 +165,9 @@ async def get_nodes(
     )
     rows = result.all()
     
-    # Get all servers
     all_servers = await db.execute(select(Server).order_by(Server.name))
     servers = all_servers.scalars().all()
     
-    # Build node map for quick lookup
     node_map = {row[0].server_id: row[0] for row in rows}
     
     return {
@@ -213,12 +202,10 @@ async def add_node(
     _: dict = Depends(verify_auth)
 ):
     """Add a server as Remnawave node"""
-    # Check server exists
     server = await db.execute(select(Server).where(Server.id == request.server_id))
     if not server.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="Server not found")
     
-    # Check not already added
     existing = await db.execute(
         select(RemnawaveNode).where(RemnawaveNode.server_id == request.server_id)
     )
@@ -254,11 +241,9 @@ async def sync_nodes(
     _: dict = Depends(verify_auth)
 ):
     """Sync Remnawave nodes - add/remove to match provided server_ids list"""
-    # Get current nodes
     result = await db.execute(select(RemnawaveNode))
     current_nodes = {n.server_id: n for n in result.scalars().all()}
     
-    # Validate all server_ids exist
     if request.server_ids:
         servers_result = await db.execute(
             select(Server.id).where(Server.id.in_(request.server_ids))
@@ -274,14 +259,12 @@ async def sync_nodes(
     new_server_ids = set(request.server_ids)
     current_server_ids = set(current_nodes.keys())
     
-    # Remove nodes not in new list
     to_remove = current_server_ids - new_server_ids
     if to_remove:
         await db.execute(
             delete(RemnawaveNode).where(RemnawaveNode.server_id.in_(to_remove))
         )
     
-    # Add new nodes
     to_add = new_server_ids - current_server_ids
     for server_id in to_add:
         db.add(RemnawaveNode(server_id=server_id, enabled=True))
@@ -320,70 +303,88 @@ async def update_node(
 
 # === Statistics Endpoints ===
 
-def _get_period_filter(period: str):
+def _get_time_filter(period: str) -> datetime:
     """Get datetime filter for period."""
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     
     if period == "1h":
-        return now - timedelta(hours=1), 'hour'
+        return now - timedelta(hours=1)
     elif period == "24h":
-        return now - timedelta(hours=24), 'hour'
+        return now - timedelta(hours=24)
     elif period == "7d":
-        return now - timedelta(days=7), 'hour'
+        return now - timedelta(days=7)
     elif period == "30d":
-        return now - timedelta(days=30), 'day'
+        return now - timedelta(days=30)
     elif period == "365d":
-        return now - timedelta(days=365), 'day'
+        return now - timedelta(days=365)
+    elif period == "all":
+        return datetime(2020, 1, 1)  # All time
     else:
-        return now - timedelta(hours=24), 'hour'
+        return now - timedelta(hours=24)
 
 
 @router.get("/stats/summary")
 async def get_stats_summary(
-    period: str = Query("24h", regex="^(1h|24h|7d|30d|365d)$"),
+    period: str = Query("all", regex="^(1h|24h|7d|30d|365d|all)$"),
     server_ids: Optional[str] = Query(None, description="Comma-separated server IDs"),
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    """Get summary statistics"""
-    start_time, period_type = _get_period_filter(period)
+    """Get summary statistics
     
-    # Build query
-    conditions = [
-        XrayVisitStats.period_start >= start_time
-    ]
-    
-    # For short periods use hourly, for long use both
-    if period in ["1h", "24h", "7d"]:
-        conditions.append(XrayVisitStats.period_type == 'hour')
+    For period="all": uses cumulative counters (XrayVisitStats)
+    For time-limited: uses hourly stats (XrayHourlyStats)
+    """
+    if period == "all":
+        # Use cumulative counters
+        conditions = []
+        
+        if server_ids:
+            ids = [int(x.strip()) for x in server_ids.split(",") if x.strip().isdigit()]
+            if ids:
+                conditions.append(XrayVisitStats.server_id.in_(ids))
+        
+        # Total visits
+        total_query = select(sql_func.sum(XrayVisitStats.visit_count))
+        if conditions:
+            total_query = total_query.where(and_(*conditions))
+        total_result = await db.execute(total_query)
+        total_visits = total_result.scalar() or 0
+        
+        # Unique users
+        users_query = select(sql_func.count(sql_func.distinct(XrayVisitStats.email)))
+        if conditions:
+            users_query = users_query.where(and_(*conditions))
+        users_result = await db.execute(users_query)
+        unique_users = users_result.scalar() or 0
+        
+        # Unique destinations
+        dest_query = select(sql_func.count(sql_func.distinct(XrayVisitStats.destination)))
+        if conditions:
+            dest_query = dest_query.where(and_(*conditions))
+        dest_result = await db.execute(dest_query)
+        unique_destinations = dest_result.scalar() or 0
     else:
-        conditions.append(XrayVisitStats.period_type == 'day')
-    
-    if server_ids:
-        ids = [int(x.strip()) for x in server_ids.split(",") if x.strip().isdigit()]
-        if ids:
-            conditions.append(XrayVisitStats.server_id.in_(ids))
-    
-    # Total visits
-    total_result = await db.execute(
-        select(sql_func.sum(XrayVisitStats.visit_count))
-        .where(and_(*conditions))
-    )
-    total_visits = total_result.scalar() or 0
-    
-    # Unique users
-    users_result = await db.execute(
-        select(sql_func.count(sql_func.distinct(XrayVisitStats.email)))
-        .where(and_(*conditions))
-    )
-    unique_users = users_result.scalar() or 0
-    
-    # Unique destinations
-    dest_result = await db.execute(
-        select(sql_func.count(sql_func.distinct(XrayVisitStats.destination)))
-        .where(and_(*conditions))
-    )
-    unique_destinations = dest_result.scalar() or 0
+        # Use hourly stats
+        start_time = _get_time_filter(period)
+        conditions = [XrayHourlyStats.hour >= start_time]
+        
+        if server_ids:
+            ids = [int(x.strip()) for x in server_ids.split(",") if x.strip().isdigit()]
+            if ids:
+                conditions.append(XrayHourlyStats.server_id.in_(ids))
+        
+        result = await db.execute(
+            select(
+                sql_func.sum(XrayHourlyStats.visit_count),
+                sql_func.max(XrayHourlyStats.unique_users),
+                sql_func.max(XrayHourlyStats.unique_destinations)
+            ).where(and_(*conditions))
+        )
+        row = result.one()
+        total_visits = row[0] or 0
+        unique_users = row[1] or 0
+        unique_destinations = row[2] or 0
     
     return {
         "period": period,
@@ -395,40 +396,38 @@ async def get_stats_summary(
 
 @router.get("/stats/top-destinations")
 async def get_top_destinations(
-    period: str = Query("24h", regex="^(1h|24h|7d|30d|365d)$"),
+    period: str = Query("all", regex="^(1h|24h|7d|30d|365d|all)$"),
     limit: int = Query(50, ge=1, le=500),
     email: Optional[int] = Query(None, description="Filter by user email/ID"),
     server_id: Optional[int] = Query(None, description="Filter by server"),
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    """Get top visited destinations"""
-    start_time, period_type = _get_period_filter(period)
+    """Get top visited destinations (all time or filtered by last_seen)"""
+    conditions = []
     
-    conditions = [XrayVisitStats.period_start >= start_time]
-    
-    if period in ["1h", "24h", "7d"]:
-        conditions.append(XrayVisitStats.period_type == 'hour')
-    else:
-        conditions.append(XrayVisitStats.period_type == 'day')
+    if period != "all":
+        start_time = _get_time_filter(period)
+        conditions.append(XrayVisitStats.last_seen >= start_time)
     
     if email:
         conditions.append(XrayVisitStats.email == email)
     if server_id:
         conditions.append(XrayVisitStats.server_id == server_id)
     
-    result = await db.execute(
-        select(
-            XrayVisitStats.destination,
-            XrayVisitStats.destination_domain,
-            sql_func.sum(XrayVisitStats.visit_count).label('total')
-        )
-        .where(and_(*conditions))
-        .group_by(XrayVisitStats.destination, XrayVisitStats.destination_domain)
-        .order_by(sql_func.sum(XrayVisitStats.visit_count).desc())
-        .limit(limit)
+    query = select(
+        XrayVisitStats.destination,
+        sql_func.sum(XrayVisitStats.visit_count).label('total')
     )
     
+    if conditions:
+        query = query.where(and_(*conditions))
+    
+    query = query.group_by(XrayVisitStats.destination) \
+                 .order_by(sql_func.sum(XrayVisitStats.visit_count).desc()) \
+                 .limit(limit)
+    
+    result = await db.execute(query)
     rows = result.fetchall()
     
     return {
@@ -436,7 +435,6 @@ async def get_top_destinations(
         "destinations": [
             {
                 "destination": row.destination,
-                "domain": row.destination_domain,
                 "visits": row.total
             }
             for row in rows
@@ -446,37 +444,36 @@ async def get_top_destinations(
 
 @router.get("/stats/top-users")
 async def get_top_users(
-    period: str = Query("24h", regex="^(1h|24h|7d|30d|365d)$"),
+    period: str = Query("all", regex="^(1h|24h|7d|30d|365d|all)$"),
     limit: int = Query(50, ge=1, le=500),
     server_id: Optional[int] = Query(None, description="Filter by server"),
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
     """Get top active users"""
-    start_time, period_type = _get_period_filter(period)
+    conditions = []
     
-    conditions = [XrayVisitStats.period_start >= start_time]
-    
-    if period in ["1h", "24h", "7d"]:
-        conditions.append(XrayVisitStats.period_type == 'hour')
-    else:
-        conditions.append(XrayVisitStats.period_type == 'day')
+    if period != "all":
+        start_time = _get_time_filter(period)
+        conditions.append(XrayVisitStats.last_seen >= start_time)
     
     if server_id:
         conditions.append(XrayVisitStats.server_id == server_id)
     
-    result = await db.execute(
-        select(
-            XrayVisitStats.email,
-            sql_func.sum(XrayVisitStats.visit_count).label('total'),
-            sql_func.count(sql_func.distinct(XrayVisitStats.destination)).label('unique_sites')
-        )
-        .where(and_(*conditions))
-        .group_by(XrayVisitStats.email)
-        .order_by(sql_func.sum(XrayVisitStats.visit_count).desc())
-        .limit(limit)
+    query = select(
+        XrayVisitStats.email,
+        sql_func.sum(XrayVisitStats.visit_count).label('total'),
+        sql_func.count(sql_func.distinct(XrayVisitStats.destination)).label('unique_sites')
     )
     
+    if conditions:
+        query = query.where(and_(*conditions))
+    
+    query = query.group_by(XrayVisitStats.email) \
+                 .order_by(sql_func.sum(XrayVisitStats.visit_count).desc()) \
+                 .limit(limit)
+    
+    result = await db.execute(query)
     rows = result.fetchall()
     user_ids = [row.email for row in rows]
     
@@ -510,22 +507,17 @@ async def get_top_users(
 @router.get("/stats/user/{email}")
 async def get_user_stats(
     email: int,
-    period: str = Query("24h", regex="^(1h|24h|7d|30d|365d)$"),
+    period: str = Query("all", regex="^(1h|24h|7d|30d|365d|all)$"),
+    limit: int = Query(100, ge=1, le=500),
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
     """Get detailed statistics for a specific user"""
-    start_time, period_type = _get_period_filter(period)
+    conditions = [XrayVisitStats.email == email]
     
-    conditions = [
-        XrayVisitStats.period_start >= start_time,
-        XrayVisitStats.email == email
-    ]
-    
-    if period in ["1h", "24h", "7d"]:
-        conditions.append(XrayVisitStats.period_type == 'hour')
-    else:
-        conditions.append(XrayVisitStats.period_type == 'day')
+    if period != "all":
+        start_time = _get_time_filter(period)
+        conditions.append(XrayVisitStats.last_seen >= start_time)
     
     # Get user info
     user_result = await db.execute(
@@ -544,13 +536,13 @@ async def get_user_stats(
     dest_result = await db.execute(
         select(
             XrayVisitStats.destination,
-            XrayVisitStats.destination_domain,
-            sql_func.sum(XrayVisitStats.visit_count).label('total')
+            XrayVisitStats.visit_count,
+            XrayVisitStats.first_seen,
+            XrayVisitStats.last_seen
         )
         .where(and_(*conditions))
-        .group_by(XrayVisitStats.destination, XrayVisitStats.destination_domain)
-        .order_by(sql_func.sum(XrayVisitStats.visit_count).desc())
-        .limit(100)
+        .order_by(XrayVisitStats.visit_count.desc())
+        .limit(limit)
     )
     
     destinations = dest_result.fetchall()
@@ -564,8 +556,9 @@ async def get_user_stats(
         "destinations": [
             {
                 "destination": row.destination,
-                "domain": row.destination_domain,
-                "visits": row.total
+                "visits": row.visit_count,
+                "first_seen": row.first_seen.isoformat() if row.first_seen else None,
+                "last_seen": row.last_seen.isoformat() if row.last_seen else None
             }
             for row in destinations
         ]
@@ -575,23 +568,17 @@ async def get_user_stats(
 @router.get("/stats/destination/users")
 async def get_destination_users(
     destination: str = Query(..., description="Destination to get users for"),
-    period: str = Query("24h", regex="^(1h|24h|7d|30d|365d)$"),
+    period: str = Query("all", regex="^(1h|24h|7d|30d|365d|all)$"),
     limit: int = Query(100, ge=1, le=500),
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
     """Get users who visited a specific destination"""
-    start_time, period_type = _get_period_filter(period)
+    conditions = [XrayVisitStats.destination == destination]
     
-    conditions = [
-        XrayVisitStats.period_start >= start_time,
-        XrayVisitStats.destination == destination
-    ]
-    
-    if period in ["1h", "24h", "7d"]:
-        conditions.append(XrayVisitStats.period_type == 'hour')
-    else:
-        conditions.append(XrayVisitStats.period_type == 'day')
+    if period != "all":
+        start_time = _get_time_filter(period)
+        conditions.append(XrayVisitStats.last_seen >= start_time)
     
     # Get total visits for this destination
     total_result = await db.execute(
@@ -604,11 +591,12 @@ async def get_destination_users(
     result = await db.execute(
         select(
             XrayVisitStats.email,
-            sql_func.sum(XrayVisitStats.visit_count).label('total')
+            XrayVisitStats.visit_count,
+            XrayVisitStats.first_seen,
+            XrayVisitStats.last_seen
         )
         .where(and_(*conditions))
-        .group_by(XrayVisitStats.email)
-        .order_by(sql_func.sum(XrayVisitStats.visit_count).desc())
+        .order_by(XrayVisitStats.visit_count.desc())
         .limit(limit)
     )
     
@@ -636,8 +624,10 @@ async def get_destination_users(
                 "email": row.email,
                 "username": user_cache.get(row.email, {}).get("username"),
                 "status": user_cache.get(row.email, {}).get("status"),
-                "visits": row.total,
-                "percentage": round((row.total / total_visits * 100), 1) if total_visits > 0 else 0
+                "visits": row.visit_count,
+                "percentage": round((row.visit_count / total_visits * 100), 1) if total_visits > 0 else 0,
+                "first_seen": row.first_seen.isoformat() if row.first_seen else None,
+                "last_seen": row.last_seen.isoformat() if row.last_seen else None
             }
             for row in rows
         ]
@@ -646,33 +636,29 @@ async def get_destination_users(
 
 @router.get("/stats/timeline")
 async def get_timeline(
-    period: str = Query("24h", regex="^(1h|24h|7d|30d)$"),
-    email: Optional[int] = Query(None),
+    period: str = Query("24h", regex="^(1h|24h|7d|30d|365d)$"),
     server_id: Optional[int] = Query(None),
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    """Get timeline of visits for charting"""
-    start_time, _ = _get_period_filter(period)
+    """Get timeline of visits for charting (from XrayHourlyStats)"""
+    start_time = _get_time_filter(period)
     
-    conditions = [
-        XrayVisitStats.period_start >= start_time,
-        XrayVisitStats.period_type == 'hour'
-    ]
+    conditions = [XrayHourlyStats.hour >= start_time]
     
-    if email:
-        conditions.append(XrayVisitStats.email == email)
     if server_id:
-        conditions.append(XrayVisitStats.server_id == server_id)
+        conditions.append(XrayHourlyStats.server_id == server_id)
     
     result = await db.execute(
         select(
-            XrayVisitStats.period_start,
-            sql_func.sum(XrayVisitStats.visit_count).label('total')
+            XrayHourlyStats.hour,
+            sql_func.sum(XrayHourlyStats.visit_count).label('total'),
+            sql_func.sum(XrayHourlyStats.unique_users).label('users'),
+            sql_func.sum(XrayHourlyStats.unique_destinations).label('destinations')
         )
         .where(and_(*conditions))
-        .group_by(XrayVisitStats.period_start)
-        .order_by(XrayVisitStats.period_start)
+        .group_by(XrayHourlyStats.hour)
+        .order_by(XrayHourlyStats.hour)
     )
     
     rows = result.fetchall()
@@ -681,8 +667,10 @@ async def get_timeline(
         "period": period,
         "data": [
             {
-                "timestamp": row.period_start.isoformat() if row.period_start else None,
-                "visits": row.total
+                "timestamp": row.hour.isoformat() if row.hour else None,
+                "visits": row.total,
+                "unique_users": row.users,
+                "unique_destinations": row.destinations
             }
             for row in rows
         ]
@@ -720,4 +708,51 @@ async def get_users(
             }
             for u in users
         ]
+    }
+
+
+@router.get("/stats/db-info")
+async def get_db_info(
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Get database statistics for monitoring"""
+    # Count records in each table
+    visit_count = await db.execute(select(sql_func.count()).select_from(XrayVisitStats))
+    hourly_count = await db.execute(select(sql_func.count()).select_from(XrayHourlyStats))
+    user_count = await db.execute(select(sql_func.count()).select_from(RemnawaveUserCache))
+    
+    # Get date ranges
+    visit_range = await db.execute(
+        select(
+            sql_func.min(XrayVisitStats.first_seen),
+            sql_func.max(XrayVisitStats.last_seen)
+        )
+    )
+    hourly_range = await db.execute(
+        select(
+            sql_func.min(XrayHourlyStats.hour),
+            sql_func.max(XrayHourlyStats.hour)
+        )
+    )
+    
+    v_range = visit_range.one()
+    h_range = hourly_range.one()
+    
+    return {
+        "tables": {
+            "xray_visit_stats": {
+                "count": visit_count.scalar() or 0,
+                "first_seen": v_range[0].isoformat() if v_range[0] else None,
+                "last_seen": v_range[1].isoformat() if v_range[1] else None
+            },
+            "xray_hourly_stats": {
+                "count": hourly_count.scalar() or 0,
+                "first_hour": h_range[0].isoformat() if h_range[0] else None,
+                "last_hour": h_range[1].isoformat() if h_range[1] else None
+            },
+            "remnawave_user_cache": {
+                "count": user_count.scalar() or 0
+            }
+        }
     }

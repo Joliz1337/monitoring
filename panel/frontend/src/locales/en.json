@@ -237,6 +237,7 @@
     "cores_history": "Per-Core History"
   },
   "period": {
+    "all": "All",
     "1h": "1h",
     "24h": "24h",
     "7d": "7d",
@@ -573,7 +574,7 @@
     "username": "Username",
     "status": "Status",
     "destination": "Destination",
-    "domain": "Domain",
+    "last_seen": "Last seen",
     "search_users": "Search users...",
     "search_destinations": "Search destinations...",
     "api_settings": "API Settings",

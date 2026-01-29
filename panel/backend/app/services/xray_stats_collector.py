@@ -1,24 +1,25 @@
 """
 Xray stats collector for Remnawave integration.
 
-Periodically collects visit statistics from nodes with Remnawave,
-stores in panel DB, aggregates hourly/daily, and caches Remnawave users.
+Optimized version: stores cumulative counters instead of time-series data.
+- XrayVisitStats: (server, destination, email) -> total_count (incremented)
+- XrayHourlyStats: (server, hour) -> counts (for timeline charts)
 """
 
 import asyncio
 import logging
-import socket
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
-from sqlalchemy import select, delete, update, func as sql_func
+from sqlalchemy import select, delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from app.database import async_session
 from app.models import (
     Server, RemnawaveSettings, RemnawaveNode,
-    XrayVisitStats, RemnawaveUserCache
+    XrayVisitStats, XrayHourlyStats, RemnawaveUserCache
 )
 from app.services.remnawave_api import get_remnawave_api, RemnawaveAPIError
 
@@ -32,22 +33,14 @@ class XrayStatsCollector:
         self._running = False
         self._task: Optional[asyncio.Task] = None
         self._user_cache_task: Optional[asyncio.Task] = None
-        self._aggregation_task: Optional[asyncio.Task] = None
         self._cleanup_task: Optional[asyncio.Task] = None
         
-        # Default intervals (will be updated from settings)
-        self._collection_interval = 60  # seconds
-        self._user_cache_interval = 3600  # 1 hour
+        self._collection_interval = 60
+        self._user_cache_interval = 3600
         
-        # Retention periods
-        self._hourly_retention_days = 7
-        self._daily_retention_days = 365
+        # Retention: hourly stats for timeline (365 days)
+        self._hourly_retention_days = 365
         
-        # DNS cache for IP resolution
-        self._dns_cache: dict[str, tuple[str, float]] = {}  # ip -> (domain, timestamp)
-        self._dns_cache_ttl = 3600  # 1 hour
-        
-        # Timing for status
         self._last_collect_time: Optional[datetime] = None
         self._collecting = False
     
@@ -59,7 +52,6 @@ class XrayStatsCollector:
         self._running = True
         self._task = asyncio.create_task(self._collection_loop())
         self._user_cache_task = asyncio.create_task(self._user_cache_loop())
-        self._aggregation_task = asyncio.create_task(self._aggregation_loop())
         self._cleanup_task = asyncio.create_task(self._cleanup_loop())
         logger.info("Xray stats collector started")
     
@@ -67,7 +59,7 @@ class XrayStatsCollector:
         """Stop background collection."""
         self._running = False
         
-        for task in [self._task, self._user_cache_task, self._aggregation_task, self._cleanup_task]:
+        for task in [self._task, self._user_cache_task, self._cleanup_task]:
             if task:
                 task.cancel()
                 try:
@@ -104,7 +96,6 @@ class XrayStatsCollector:
     async def _collect_from_all_nodes(self):
         """Collect stats from all enabled Remnawave nodes."""
         async with async_session() as db:
-            # Get all enabled Remnawave nodes with their server info
             result = await db.execute(
                 select(RemnawaveNode, Server)
                 .join(Server, RemnawaveNode.server_id == Server.id)
@@ -118,7 +109,6 @@ class XrayStatsCollector:
         
         self._collecting = True
         try:
-            # Collect from each node concurrently
             tasks = [self._collect_from_node(node, server) for node, server in nodes]
             await asyncio.gather(*tasks, return_exceptions=True)
             self._last_collect_time = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -145,7 +135,6 @@ class XrayStatsCollector:
                 "nodes_count": 0
             }
         
-        # Get node count
         async with async_session() as db:
             result = await db.execute(
                 select(RemnawaveNode, Server)
@@ -167,7 +156,6 @@ class XrayStatsCollector:
         """Get collector status with timing info."""
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         
-        # Calculate next collect time
         next_collect_in = None
         if self._running and self._last_collect_time:
             elapsed = (now - self._last_collect_time).total_seconds()
@@ -201,7 +189,6 @@ class XrayStatsCollector:
                 if stats:
                     await self._save_stats(server.id, stats)
                 
-                # Update node status
                 async with async_session() as db:
                     await db.execute(
                         update(RemnawaveNode)
@@ -228,28 +215,39 @@ class XrayStatsCollector:
                 await db.commit()
     
     async def _save_stats(self, server_id: int, stats: list[dict]):
-        """Save collected stats to DB (hourly aggregation)."""
+        """Save collected stats to DB (increment counters)."""
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         hour_start = now.replace(minute=0, second=0, microsecond=0)
         
+        # Aggregate stats for batch processing
+        visit_updates: dict[tuple[str, int], int] = {}  # (destination, email) -> count
+        total_count = 0
+        unique_users = set()
+        unique_destinations = set()
+        
+        for stat in stats:
+            destination = stat.get("destination", "")
+            email = stat.get("email", 0)
+            count = stat.get("count", 0)
+            
+            if not destination or not email or not count:
+                continue
+            
+            key = (destination, email)
+            visit_updates[key] = visit_updates.get(key, 0) + count
+            total_count += count
+            unique_users.add(email)
+            unique_destinations.add(destination)
+        
+        if not visit_updates:
+            return
+        
         async with async_session() as db:
-            for stat in stats:
-                destination = stat.get("destination", "")
-                email = stat.get("email", 0)
-                count = stat.get("count", 0)
-                
-                if not destination or not email or not count:
-                    continue
-                
-                # Try to resolve IP to domain
-                domain = await self._resolve_domain(destination)
-                
-                # Upsert: increment count if exists, insert if not
+            # Update visit counters (batch upsert)
+            for (destination, email), count in visit_updates.items():
                 existing = await db.execute(
                     select(XrayVisitStats).where(
                         XrayVisitStats.server_id == server_id,
-                        XrayVisitStats.period_start == hour_start,
-                        XrayVisitStats.period_type == 'hour',
                         XrayVisitStats.destination == destination,
                         XrayVisitStats.email == email
                     )
@@ -258,55 +256,46 @@ class XrayStatsCollector:
                 
                 if row:
                     row.visit_count += count
-                    if domain:
-                        row.destination_domain = domain
+                    row.last_seen = now
                 else:
                     db.add(XrayVisitStats(
                         server_id=server_id,
-                        period_start=hour_start,
-                        period_type='hour',
                         destination=destination,
-                        destination_domain=domain,
                         email=email,
-                        visit_count=count
+                        visit_count=count,
+                        first_seen=now,
+                        last_seen=now
                     ))
             
+            # Update hourly stats for timeline
+            hourly_existing = await db.execute(
+                select(XrayHourlyStats).where(
+                    XrayHourlyStats.server_id == server_id,
+                    XrayHourlyStats.hour == hour_start
+                )
+            )
+            hourly_row = hourly_existing.scalar_one_or_none()
+            
+            if hourly_row:
+                hourly_row.visit_count += total_count
+                # Update unique counts (approximate - may count same user twice in hour)
+                hourly_row.unique_users = max(hourly_row.unique_users, len(unique_users))
+                hourly_row.unique_destinations = max(hourly_row.unique_destinations, len(unique_destinations))
+            else:
+                db.add(XrayHourlyStats(
+                    server_id=server_id,
+                    hour=hour_start,
+                    visit_count=total_count,
+                    unique_users=len(unique_users),
+                    unique_destinations=len(unique_destinations)
+                ))
+            
             await db.commit()
-    
-    async def _resolve_domain(self, destination: str) -> Optional[str]:
-        """Resolve IP address to domain name (cached)."""
-        # Extract host from destination (format: host:port)
-        host = destination.rsplit(':', 1)[0] if ':' in destination else destination
         
-        # Check if it's already a domain name (not an IP)
-        try:
-            socket.inet_aton(host)
-        except socket.error:
-            # Not an IP address, it's already a domain
-            return None
-        
-        # Check cache
-        now = datetime.now().timestamp()
-        if host in self._dns_cache:
-            domain, cached_time = self._dns_cache[host]
-            if now - cached_time < self._dns_cache_ttl:
-                return domain
-        
-        # Try reverse DNS lookup
-        try:
-            domain = socket.gethostbyaddr(host)[0]
-            self._dns_cache[host] = (domain, now)
-            return domain
-        except socket.herror:
-            # No reverse DNS
-            self._dns_cache[host] = (None, now)
-            return None
-        except Exception:
-            return None
+        logger.debug(f"Saved {len(visit_updates)} stat entries, {total_count} total visits")
     
     async def _user_cache_loop(self):
         """Background loop for caching Remnawave users."""
-        # Initial delay to let things settle
         await asyncio.sleep(30)
         
         while self._running:
@@ -338,11 +327,10 @@ class XrayStatsCollector:
             
             async with async_session() as db:
                 for user in users:
-                    user_id = user.get("id")  # This is the numeric ID (email in logs)
+                    user_id = user.get("id")
                     if not user_id:
                         continue
                     
-                    # Upsert user cache
                     existing = await db.execute(
                         select(RemnawaveUserCache).where(
                             RemnawaveUserCache.email == user_id
@@ -375,81 +363,6 @@ class XrayStatsCollector:
         finally:
             await api.close()
     
-    async def _aggregation_loop(self):
-        """Background loop for daily aggregation."""
-        while self._running:
-            try:
-                await asyncio.sleep(3600)  # Check every hour
-                
-                now = datetime.now(timezone.utc).replace(tzinfo=None)
-                
-                # Daily aggregation at midnight
-                if now.hour == 0:
-                    await self._aggregate_daily()
-                    
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                logger.error(f"Aggregation error: {e}")
-    
-    async def _aggregate_daily(self):
-        """Aggregate hourly stats to daily."""
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
-        day_end = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        day_start = day_end - timedelta(days=1)
-        
-        async with async_session() as db:
-            # Get hourly data for yesterday
-            result = await db.execute(
-                select(
-                    XrayVisitStats.server_id,
-                    XrayVisitStats.destination,
-                    XrayVisitStats.destination_domain,
-                    XrayVisitStats.email,
-                    sql_func.sum(XrayVisitStats.visit_count).label('total_count')
-                )
-                .where(
-                    XrayVisitStats.period_type == 'hour',
-                    XrayVisitStats.period_start >= day_start,
-                    XrayVisitStats.period_start < day_end
-                )
-                .group_by(
-                    XrayVisitStats.server_id,
-                    XrayVisitStats.destination,
-                    XrayVisitStats.destination_domain,
-                    XrayVisitStats.email
-                )
-            )
-            
-            rows = result.fetchall()
-            
-            for row in rows:
-                # Check if daily record exists
-                existing = await db.execute(
-                    select(XrayVisitStats).where(
-                        XrayVisitStats.server_id == row.server_id,
-                        XrayVisitStats.period_start == day_start,
-                        XrayVisitStats.period_type == 'day',
-                        XrayVisitStats.destination == row.destination,
-                        XrayVisitStats.email == row.email
-                    )
-                )
-                
-                if not existing.scalar_one_or_none():
-                    db.add(XrayVisitStats(
-                        server_id=row.server_id,
-                        period_start=day_start,
-                        period_type='day',
-                        destination=row.destination,
-                        destination_domain=row.destination_domain,
-                        email=row.email,
-                        visit_count=row.total_count or 0
-                    ))
-            
-            await db.commit()
-        
-        logger.info(f"Daily aggregation completed for {day_start.date()}")
-    
     async def _cleanup_loop(self):
         """Background loop for cleaning old data."""
         while self._running:
@@ -462,25 +375,15 @@ class XrayStatsCollector:
                 logger.error(f"Cleanup error: {e}")
     
     async def _cleanup_old_data(self):
-        """Remove old stats data."""
+        """Remove old hourly stats and stale user cache."""
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         
         async with async_session() as db:
             # Remove hourly data older than retention period
             hourly_cutoff = now - timedelta(days=self._hourly_retention_days)
             await db.execute(
-                delete(XrayVisitStats).where(
-                    XrayVisitStats.period_type == 'hour',
-                    XrayVisitStats.period_start < hourly_cutoff
-                )
-            )
-            
-            # Remove daily data older than retention period
-            daily_cutoff = now - timedelta(days=self._daily_retention_days)
-            await db.execute(
-                delete(XrayVisitStats).where(
-                    XrayVisitStats.period_type == 'day',
-                    XrayVisitStats.period_start < daily_cutoff
+                delete(XrayHourlyStats).where(
+                    XrayHourlyStats.hour < hourly_cutoff
                 )
             )
             

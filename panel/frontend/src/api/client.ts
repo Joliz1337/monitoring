@@ -776,7 +776,6 @@ export interface RemnawaveSummary {
 
 export interface RemnawaveDestination {
   destination: string
-  domain: string | null
   visits: number
 }
 
@@ -788,18 +787,27 @@ export interface RemnawaveUser {
   unique_sites: number
 }
 
+export interface RemnawaveUserDestination {
+  destination: string
+  visits: number
+  first_seen: string | null
+  last_seen: string | null
+}
+
 export interface RemnawaveUserDetails {
   email: number
   username: string | null
   status: string | null
   period: string
   total_visits: number
-  destinations: RemnawaveDestination[]
+  destinations: RemnawaveUserDestination[]
 }
 
 export interface RemnawaveTimelinePoint {
   timestamp: string
   visits: number
+  unique_users: number
+  unique_destinations: number
 }
 
 export interface RemnawaveDestinationUser {
@@ -808,6 +816,8 @@ export interface RemnawaveDestinationUser {
   status: string | null
   visits: number
   percentage: number
+  first_seen: string | null
+  last_seen: string | null
 }
 
 export interface RemnawaveDestinationUsers {

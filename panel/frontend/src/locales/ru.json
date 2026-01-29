@@ -237,6 +237,7 @@
     "cores_history": "История по ядрам"
   },
   "period": {
+    "all": "Всё",
     "1h": "1ч",
     "24h": "24ч",
     "7d": "7д",
@@ -574,7 +575,7 @@
     "username": "Имя пользователя",
     "status": "Статус",
     "destination": "Назначение",
-    "domain": "Домен",
+    "last_seen": "Последний раз",
     "search_users": "Поиск пользователей...",
     "search_destinations": "Поиск сайтов...",
     "api_settings": "Настройки API",

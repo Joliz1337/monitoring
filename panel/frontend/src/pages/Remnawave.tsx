@@ -56,7 +56,7 @@ export default function Remnawave() {
   const [isLoading, setIsLoading] = useState(true)
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [period, setPeriod] = useState('24h')
+  const [period, setPeriod] = useState('all')
   
   // Settings state
   const [settings, setSettings] = useState<RemnawaveSettings | null>(null)
@@ -340,8 +340,7 @@ export default function Remnawave() {
   
   // Filter destinations and users
   const filteredDestinations = topDestinations.filter(d => 
-    destSearch ? (d.destination.toLowerCase().includes(destSearch.toLowerCase()) ||
-                  d.domain?.toLowerCase().includes(destSearch.toLowerCase())) : true
+    destSearch ? d.destination.toLowerCase().includes(destSearch.toLowerCase()) : true
   )
   
   const filteredUsers = topUsers.filter(u =>
@@ -404,7 +403,17 @@ export default function Remnawave() {
               <RefreshCw className="w-4 h-4" />
               <span>{nextRefreshIn}s</span>
             </div>
-            <PeriodSelector value={period} onChange={setPeriod} />
+            <PeriodSelector 
+              value={period} 
+              onChange={setPeriod}
+              options={[
+                { value: 'all', label: t('period.all') },
+                { value: '24h', label: t('period.24h') },
+                { value: '7d', label: t('period.7d') },
+                { value: '30d', label: t('period.30d') },
+                { value: '365d', label: t('period.365d') },
+              ]}
+            />
             <motion.button
               onClick={() => {
                 handleRefresh()
@@ -495,7 +504,7 @@ export default function Remnawave() {
                   {barChartData.map((dest, idx) => {
                     const percentage = (dest.visits / maxVisits) * 100
                     const visitPercentage = totalVisits > 0 ? ((dest.visits / totalVisits) * 100).toFixed(1) : '0'
-                    const displayName = dest.domain || dest.destination.split(':')[0]
+                    const displayName = dest.destination.split(':')[0]
                     
                     return (
                       <div 
@@ -551,11 +560,8 @@ export default function Remnawave() {
                       <span className="text-dark-500 text-sm w-6">{idx + 1}</span>
                       <div className="flex-1 min-w-0">
                         <div className="text-dark-200 text-sm truncate">
-                          {dest.domain || dest.destination}
+                          {dest.destination}
                         </div>
-                        {dest.domain && (
-                          <div className="text-dark-500 text-xs truncate">{dest.destination}</div>
-                        )}
                       </div>
                       <span className="text-dark-400 text-sm">{dest.visits.toLocaleString()}</span>
                       <a
@@ -704,7 +710,6 @@ export default function Remnawave() {
                   <tr className="border-b border-dark-700">
                     <th className="text-left p-4 text-dark-400 font-medium text-sm">#</th>
                     <th className="text-left p-4 text-dark-400 font-medium text-sm">{t('remnawave.destination')}</th>
-                    <th className="text-left p-4 text-dark-400 font-medium text-sm">{t('remnawave.domain')}</th>
                     <th className="text-right p-4 text-dark-400 font-medium text-sm">{t('remnawave.visits')}</th>
                     <th className="w-10"></th>
                   </tr>
@@ -718,7 +723,6 @@ export default function Remnawave() {
                     >
                       <td className="p-4 text-dark-500">{idx + 1}</td>
                       <td className="p-4 text-dark-200 font-mono text-sm">{dest.destination}</td>
-                      <td className="p-4 text-dark-400">{dest.domain || '-'}</td>
                       <td className="p-4 text-right text-dark-200">{dest.visits.toLocaleString()}</td>
                       <td className="p-4">
                         <div className="flex items-center gap-2">
@@ -830,7 +834,6 @@ export default function Remnawave() {
                 <div>
                   <label className="block text-sm text-dark-400 mb-2">
                     {t('remnawave.cookie_secret')}
-                    <span className="text-dark-500 ml-2">({t('common.optional')})</span>
                   </label>
                   <input
                     type="password"
@@ -1066,15 +1069,15 @@ export default function Remnawave() {
               
               <h4 className="text-sm font-medium text-dark-400 mb-3">{t('remnawave.visited_sites')}</h4>
               <div className="space-y-2 max-h-[300px] overflow-auto">
-                {selectedUser.destinations.map((dest, idx) => (
+                  {selectedUser.destinations.map((dest, idx) => (
                   <div key={dest.destination} className="flex items-center gap-3 p-2 rounded-lg hover:bg-dark-800 transition-colors">
                     <span className="text-dark-500 text-sm w-6">{idx + 1}</span>
                     <div className="flex-1 min-w-0">
                       <div className="text-dark-200 text-sm truncate font-mono">
                         {dest.destination}
                       </div>
-                      {dest.domain && (
-                        <div className="text-dark-500 text-xs">{dest.domain}</div>
+                      {dest.last_seen && (
+                        <div className="text-dark-500 text-xs">{t('remnawave.last_seen')}: {new Date(dest.last_seen).toLocaleDateString()}</div>
                       )}
                     </div>
                     <span className="text-dark-400 text-sm">{dest.visits.toLocaleString()}</span>

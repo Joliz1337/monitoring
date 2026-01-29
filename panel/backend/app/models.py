@@ -176,11 +176,11 @@ class RemnawaveSettings(Base):
     __tablename__ = "remnawave_settings"
     
     id = Column(Integer, primary_key=True)
-    api_url = Column(String(500), nullable=True)  # URL Remnawave Panel API
-    api_token = Column(String(500), nullable=True)  # API ключ
-    cookie_secret = Column(String(500), nullable=True)  # Формат: name:value для Nginx auth
+    api_url = Column(String(500), nullable=True)
+    api_token = Column(String(500), nullable=True)
+    cookie_secret = Column(String(500), nullable=True)
     enabled = Column(Boolean, default=False)
-    collection_interval = Column(Integer, default=60)  # секунды между сборами
+    collection_interval = Column(Integer, default=60)
 
 
 class RemnawaveNode(Base):
@@ -195,25 +195,48 @@ class RemnawaveNode(Base):
 
 
 class XrayVisitStats(Base):
-    """Агрегированная статистика посещений Xray"""
+    """Счётчик посещений: (server, destination, email) -> total_count
+    
+    Оптимизированная схема — одна запись на комбинацию, счётчик инкрементируется.
+    Без временных периодов — хранит общую статистику за всё время.
+    """
     __tablename__ = "xray_visit_stats"
     
     id = Column(Integer, primary_key=True)
     server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), nullable=False)
-    period_start = Column(DateTime(timezone=True), nullable=False)  # Начало часа
-    period_type = Column(String(10), nullable=False)  # 'hour' или 'day'
-    destination = Column(String(500), nullable=False)  # Хост или IP:port
-    destination_domain = Column(String(500), nullable=True)  # Резолвленный домен (если IP)
+    destination = Column(String(500), nullable=False)  # Хост:port (google.com:443)
     email = Column(Integer, nullable=False)  # User ID в Remnawave
-    visit_count = Column(Integer, default=0)  # Количество посещений
+    visit_count = Column(BigInteger, default=0)  # Общий счётчик посещений
+    first_seen = Column(DateTime(timezone=True), server_default=func.now())
+    last_seen = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     
     __table_args__ = (
-        UniqueConstraint('server_id', 'period_start', 'period_type', 'destination', 'email', 
-                        name='uq_xray_stats_unique'),
-        Index('idx_xray_stats_server_period', 'server_id', 'period_type', 'period_start'),
+        UniqueConstraint('server_id', 'destination', 'email', name='uq_xray_stats_unique'),
+        Index('idx_xray_stats_server', 'server_id'),
         Index('idx_xray_stats_email', 'email'),
         Index('idx_xray_stats_destination', 'destination'),
-        Index('idx_xray_stats_period_start', 'period_start'),
+        Index('idx_xray_stats_visits', 'visit_count'),
+    )
+
+
+class XrayHourlyStats(Base):
+    """Почасовая статистика для timeline графиков.
+    
+    Лёгкая таблица без детализации по сайтам/пользователям.
+    Хранит только общее число посещений за час.
+    """
+    __tablename__ = "xray_hourly_stats"
+    
+    id = Column(Integer, primary_key=True)
+    server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), nullable=False)
+    hour = Column(DateTime(timezone=True), nullable=False)  # Начало часа (округлено)
+    visit_count = Column(BigInteger, default=0)
+    unique_users = Column(Integer, default=0)
+    unique_destinations = Column(Integer, default=0)
+    
+    __table_args__ = (
+        UniqueConstraint('server_id', 'hour', name='uq_xray_hourly_unique'),
+        Index('idx_xray_hourly_server_hour', 'server_id', 'hour'),
     )
 
 
@@ -222,9 +245,9 @@ class RemnawaveUserCache(Base):
     __tablename__ = "remnawave_user_cache"
     
     id = Column(Integer, primary_key=True)
-    email = Column(Integer, unique=True, nullable=False, index=True)  # ID пользователя (email field в логах)
-    uuid = Column(String(100), nullable=True)  # UUID пользователя в Remnawave
+    email = Column(Integer, unique=True, nullable=False, index=True)
+    uuid = Column(String(100), nullable=True)
     username = Column(String(200), nullable=True)
     telegram_id = Column(BigInteger, nullable=True)
-    status = Column(String(50), nullable=True)  # ACTIVE/DISABLED/LIMITED/EXPIRED
+    status = Column(String(50), nullable=True)
     updated_at = Column(DateTime(timezone=True), server_default=func.now())
