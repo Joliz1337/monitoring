@@ -662,7 +662,7 @@ clone_repo() {
     clone_repo_with_fallback "$TMP_DIR" "main"
 }
 
-cleanup() {
+cleanup_temp() {
     rm -rf "$TMP_DIR"
 }
 
@@ -1239,21 +1239,21 @@ main() {
                 check_git
                 clone_repo
                 install_panel
-                cleanup
+                cleanup_temp
                 read -p "$(msg press_enter)"
                 ;;
             2)
                 check_git
                 clone_repo
                 install_node
-                cleanup
+                cleanup_temp
                 read -p "$(msg press_enter)"
                 ;;
             3)
                 if [ -d "$PANEL_DIR" ]; then
                     check_git
                     update_panel
-                    cleanup
+                    cleanup_temp
                 else
                     log_error "$(msg invalid_option)"
                     sleep 1
@@ -1264,7 +1264,7 @@ main() {
                 if [ -d "$NODE_DIR" ] && [ -f "$NODE_DIR/docker-compose.yml" ]; then
                     check_git
                     update_node
-                    cleanup
+                    cleanup_temp
                 else
                     log_error "$(msg invalid_option)"
                     sleep 1
@@ -1296,7 +1296,7 @@ main() {
             0)
                 echo ""
                 log_info "$(msg goodbye)"
-                cleanup
+                cleanup_temp
                 exit 0
                 ;;
             l|L|lang)
@@ -1309,9 +1309,6 @@ main() {
         esac
     done
 }
-
-# Trap cleanup on exit
-trap cleanup EXIT
 
 # Run
 main "$@"
