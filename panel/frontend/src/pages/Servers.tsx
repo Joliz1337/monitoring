@@ -20,6 +20,7 @@ import {
 } from 'lucide-react'
 import { useServersStore } from '../stores/serversStore'
 import { useTranslation } from 'react-i18next'
+import { systemApi } from '../api/client'
 
 interface ServerFormData {
   name: string
@@ -66,18 +67,18 @@ export default function Servers() {
   const [testingId, setTestingId] = useState<number | null>(null)
   const [deleteConfirm, setDeleteConfirm] = useState<number | null>(null)
   const [copied, setCopied] = useState(false)
-  
-  const panelHost = window.location.hostname
+  const [panelIp, setPanelIp] = useState<string | null>(null)
   
   const handleCopyPanelIp = async () => {
+    if (!panelIp) return
     try {
-      await navigator.clipboard.writeText(panelHost)
+      await navigator.clipboard.writeText(panelIp)
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
     } catch {
       // Fallback for older browsers
       const textArea = document.createElement('textarea')
-      textArea.value = panelHost
+      textArea.value = panelIp
       document.body.appendChild(textArea)
       textArea.select()
       document.execCommand('copy')
@@ -89,6 +90,9 @@ export default function Servers() {
   
   useEffect(() => {
     fetchServers()
+    systemApi.getPanelIp().then(res => {
+      setPanelIp(res.data.ip)
+    }).catch(() => {})
   }, [fetchServers])
   
   const handleSubmit = async (e: FormEvent) => {
@@ -168,36 +172,38 @@ export default function Servers() {
       animate="visible"
     >
       {/* Panel IP */}
-      <motion.div
-        className="mb-6 p-4 rounded-xl bg-dark-800/40 border border-dark-700/50 flex items-center justify-between"
-        variants={itemVariants}
-      >
-        <div className="flex items-center gap-3">
-          <Globe className="w-5 h-5 text-accent-500" />
-          <span className="text-dark-300">{t('servers.panel_ip')}</span>
-          <code className="px-2 py-1 bg-dark-900/50 rounded-lg text-dark-100 font-mono text-sm">
-            {panelHost}
-          </code>
-        </div>
-        <motion.button
-          onClick={handleCopyPanelIp}
-          className={`btn btn-secondary text-sm ${copied ? 'bg-success/20 text-success border-success/30' : ''}`}
-          whileHover={{ scale: 1.02 }}
-          whileTap={{ scale: 0.98 }}
+      {panelIp && (
+        <motion.div
+          className="mb-6 p-4 rounded-xl bg-dark-800/40 border border-dark-700/50 flex items-center justify-between"
+          variants={itemVariants}
         >
-          {copied ? (
-            <>
-              <Check className="w-4 h-4" />
-              {t('servers.copied')}
-            </>
-          ) : (
-            <>
-              <Copy className="w-4 h-4" />
-              {t('common.copy')}
-            </>
-          )}
-        </motion.button>
-      </motion.div>
+          <div className="flex items-center gap-3">
+            <Globe className="w-5 h-5 text-accent-500" />
+            <span className="text-dark-300">{t('servers.panel_ip')}</span>
+            <code className="px-2 py-1 bg-dark-900/50 rounded-lg text-dark-100 font-mono text-sm">
+              {panelIp}
+            </code>
+          </div>
+          <motion.button
+            onClick={handleCopyPanelIp}
+            className={`btn btn-secondary text-sm ${copied ? 'bg-success/20 text-success border-success/30' : ''}`}
+            whileHover={{ scale: 1.02 }}
+            whileTap={{ scale: 0.98 }}
+          >
+            {copied ? (
+              <>
+                <Check className="w-4 h-4" />
+                {t('servers.copied')}
+              </>
+            ) : (
+              <>
+                <Copy className="w-4 h-4" />
+                {t('common.copy')}
+              </>
+            )}
+          </motion.button>
+        </motion.div>
+      )}
 
       {/* Header */}
       <motion.div 

@@ -687,7 +687,13 @@ export const bulkApi = {
     api.delete<BulkResult[]>('/bulk/firewall/rules', { data: { server_ids: serverIds, port } }),
 }
 
+export interface PanelIpInfo {
+  ip: string | null
+  domain: string
+}
+
 export const systemApi = {
+  getPanelIp: () => api.get<PanelIpInfo>('/system/panel-ip'),
   getVersion: () => api.get<VersionInfo>('/system/version'),
   updatePanel: (targetVersion?: string) => 
     api.post<UpdateResponse>('/system/update', targetVersion ? { target_version: targetVersion } : {}),

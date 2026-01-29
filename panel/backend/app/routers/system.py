@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import socket
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -21,6 +22,33 @@ from app.models import Server
 
 router = APIRouter(prefix="/system", tags=["system"])
 logger = logging.getLogger(__name__)
+
+
+def get_panel_ip() -> str | None:
+    """Get panel's IP address by resolving the configured domain"""
+    settings = get_settings()
+    domain = settings.domain
+    
+    if not domain:
+        return None
+    
+    try:
+        ip = socket.gethostbyname(domain)
+        return ip
+    except socket.gaierror:
+        logger.warning(f"Failed to resolve domain: {domain}")
+        return None
+
+
+@router.get("/panel-ip")
+async def get_panel_ip_endpoint(_: dict = Depends(verify_auth)):
+    """Get panel's IP address"""
+    ip = get_panel_ip()
+    settings = get_settings()
+    return {
+        "ip": ip,
+        "domain": settings.domain
+    }
 
 VERSION_FILE = Path("/app/VERSION")
 UPDATER_CONTAINER_NAME = "panel-updater"

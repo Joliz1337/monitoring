@@ -85,6 +85,7 @@ panel/
 
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
+| GET | /api/system/panel-ip | IP-адрес панели (резолвится из домена) |
 | GET | /api/system/version | Версии панели, нод и оптимизаций (всё в одном запросе, параллельные запросы к нодам) |
 | POST | /api/system/update | Обновление панели (target_ref: branch/tag/commit, по умолчанию main) |
 | GET | /api/system/update/status | Статус обновления |
