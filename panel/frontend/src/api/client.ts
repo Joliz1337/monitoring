@@ -732,9 +732,39 @@ export interface RemnawaveNode {
   last_error: string | null
 }
 
+export interface RemnawaveServerInfo {
+  id: number
+  name: string
+  is_active: boolean
+  is_node: boolean
+  node_enabled: boolean
+}
+
 export interface RemnawaveNodesResponse {
   nodes: RemnawaveNode[]
-  available_servers: Array<{ id: number; name: string }>
+  all_servers: RemnawaveServerInfo[]
+}
+
+export interface RemnawaveCollectorStatus {
+  running: boolean
+  collecting: boolean
+  collection_interval: number
+  last_collect_time: string | null
+  next_collect_in: number | null
+}
+
+export interface RemnawaveCollectResponse {
+  success: boolean
+  collected_at: string | null
+  nodes_count: number
+  error?: string
+}
+
+export interface RemnawaveSyncResponse {
+  success: boolean
+  added: number
+  removed: number
+  total: number
 }
 
 export interface RemnawaveSummary {
@@ -788,6 +818,10 @@ export const remnawaveApi = {
   testConnection: () => 
     api.post<{ success: boolean; api_reachable: boolean; error: string | null }>('/remnawave/settings/test'),
   
+  // Collector status & control
+  getCollectorStatus: () => api.get<RemnawaveCollectorStatus>('/remnawave/status'),
+  collectNow: () => api.post<RemnawaveCollectResponse>('/remnawave/collect'),
+  
   // Nodes
   getNodes: () => api.get<RemnawaveNodesResponse>('/remnawave/nodes'),
   addNode: (serverId: number) => 
@@ -796,6 +830,8 @@ export const remnawaveApi = {
     api.delete<{ success: boolean; message: string }>(`/remnawave/nodes/${serverId}`),
   updateNode: (serverId: number, enabled: boolean) =>
     api.put<{ success: boolean; message: string }>(`/remnawave/nodes/${serverId}?enabled=${enabled}`),
+  syncNodes: (serverIds: number[]) =>
+    api.post<RemnawaveSyncResponse>('/remnawave/nodes/sync', { server_ids: serverIds }),
   
   // Stats
   getSummary: (period: string, serverIds?: number[]) =>

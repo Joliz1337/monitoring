@@ -254,12 +254,20 @@ panel/
 | PUT | /api/remnawave/settings | Обновить настройки (api_url, api_token, cookie_secret, enabled, collection_interval) |
 | POST | /api/remnawave/settings/test | Проверить подключение к Remnawave API |
 
+**Статус коллектора:**
+
+| Метод | Endpoint | Описание |
+|-------|----------|----------|
+| GET | /api/remnawave/status | Статус коллектора (running, collecting, interval, last_collect_time, next_collect_in) |
+| POST | /api/remnawave/collect | Принудительный сбор статистики со всех нод |
+
 **Ноды:**
 
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
-| GET | /api/remnawave/nodes | Список Remnawave нод |
+| GET | /api/remnawave/nodes | Список Remnawave нод и все серверы |
 | POST | /api/remnawave/nodes | Добавить сервер как Remnawave ноду |
+| POST | /api/remnawave/nodes/sync | Синхронизировать ноды (массовое добавление/удаление) |
 | PUT | /api/remnawave/nodes/{server_id}?enabled=bool | Включить/выключить ноду |
 | DELETE | /api/remnawave/nodes/{server_id} | Удалить ноду |
 

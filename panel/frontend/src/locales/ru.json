@@ -587,11 +587,22 @@
     "select_nodes": "Ноды Remnawave",
     "select_server": "Выберите сервер для добавления...",
     "no_nodes": "Ноды не настроены",
+    "no_servers": "Серверы не найдены",
     "last_collected": "Последний сбор",
+    "last_collected_at": "Последний сбор",
     "no_data": "Нет данных за выбранный период",
     "user_details": "Детали пользователя",
     "visited_sites": "Посещённые сайты",
     "enter_token": "Введите API токен",
-    "failed_fetch": "Не удалось загрузить данные"
+    "failed_fetch": "Не удалось загрузить данные",
+    "collector_status": "Статус сбора",
+    "collector_running": "Сбор активен",
+    "collector_stopped": "Сбор остановлен",
+    "collect_now": "Собрать сейчас",
+    "collecting": "Сбор данных...",
+    "next_collect_in": "Следующий сбор через",
+    "select_all": "Выбрать все",
+    "deselect_all": "Снять все",
+    "save_nodes": "Сохранить ноды"
   }
 }

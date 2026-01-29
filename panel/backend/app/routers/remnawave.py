@@ -15,6 +15,7 @@ from app.models import (
     XrayVisitStats, RemnawaveUserCache
 )
 from app.services.remnawave_api import get_remnawave_api
+from app.services.xray_stats_collector import get_xray_stats_collector
 
 router = APIRouter(prefix="/remnawave", tags=["remnawave"])
 
@@ -31,6 +32,14 @@ class UpdateSettingsRequest(BaseModel):
 
 class AddNodeRequest(BaseModel):
     server_id: int
+
+
+class AddNodesRequest(BaseModel):
+    server_ids: list[int]
+
+
+class SyncNodesRequest(BaseModel):
+    server_ids: list[int]
 
 
 class NodeResponse(BaseModel):
@@ -129,6 +138,26 @@ async def test_connection(
         await api.close()
 
 
+# === Collector Status & Control ===
+
+@router.get("/status")
+async def get_collector_status(
+    _: dict = Depends(verify_auth)
+):
+    """Get Xray stats collector status"""
+    collector = get_xray_stats_collector()
+    return collector.get_status()
+
+
+@router.post("/collect")
+async def force_collect(
+    _: dict = Depends(verify_auth)
+):
+    """Force immediate collection from all nodes"""
+    collector = get_xray_stats_collector()
+    return await collector.collect_now()
+
+
 # === Nodes Endpoints ===
 
 @router.get("/nodes")
@@ -136,7 +165,8 @@ async def get_nodes(
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    """Get list of Remnawave nodes"""
+    """Get list of Remnawave nodes and all servers"""
+    # Get existing nodes with server info
     result = await db.execute(
         select(RemnawaveNode, Server)
         .join(Server, RemnawaveNode.server_id == Server.id)
@@ -144,11 +174,12 @@ async def get_nodes(
     )
     rows = result.all()
     
-    # Also get all servers for selection
+    # Get all servers
     all_servers = await db.execute(select(Server).order_by(Server.name))
     servers = all_servers.scalars().all()
     
-    node_server_ids = {row[0].server_id for row in rows}
+    # Build node map for quick lookup
+    node_map = {row[0].server_id: row[0] for row in rows}
     
     return {
         "nodes": [
@@ -162,10 +193,15 @@ async def get_nodes(
             }
             for node, server in rows
         ],
-        "available_servers": [
-            {"id": s.id, "name": s.name}
+        "all_servers": [
+            {
+                "id": s.id,
+                "name": s.name,
+                "is_active": s.is_active,
+                "is_node": s.id in node_map,
+                "node_enabled": node_map[s.id].enabled if s.id in node_map else False
+            }
             for s in servers
-            if s.id not in node_server_ids
         ]
     }
 
@@ -209,6 +245,55 @@ async def remove_node(
     await db.commit()
     
     return {"success": True, "message": "Node removed"}
+
+
+@router.post("/nodes/sync")
+async def sync_nodes(
+    request: SyncNodesRequest,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Sync Remnawave nodes - add/remove to match provided server_ids list"""
+    # Get current nodes
+    result = await db.execute(select(RemnawaveNode))
+    current_nodes = {n.server_id: n for n in result.scalars().all()}
+    
+    # Validate all server_ids exist
+    if request.server_ids:
+        servers_result = await db.execute(
+            select(Server.id).where(Server.id.in_(request.server_ids))
+        )
+        existing_server_ids = {s[0] for s in servers_result.fetchall()}
+        invalid_ids = set(request.server_ids) - existing_server_ids
+        if invalid_ids:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Invalid server IDs: {list(invalid_ids)}"
+            )
+    
+    new_server_ids = set(request.server_ids)
+    current_server_ids = set(current_nodes.keys())
+    
+    # Remove nodes not in new list
+    to_remove = current_server_ids - new_server_ids
+    if to_remove:
+        await db.execute(
+            delete(RemnawaveNode).where(RemnawaveNode.server_id.in_(to_remove))
+        )
+    
+    # Add new nodes
+    to_add = new_server_ids - current_server_ids
+    for server_id in to_add:
+        db.add(RemnawaveNode(server_id=server_id, enabled=True))
+    
+    await db.commit()
+    
+    return {
+        "success": True,
+        "added": len(to_add),
+        "removed": len(to_remove),
+        "total": len(new_server_ids)
+    }
 
 
 @router.put("/nodes/{server_id}")

@@ -586,11 +586,22 @@
     "select_nodes": "Remnawave Nodes",
     "select_server": "Select server to add...",
     "no_nodes": "No nodes configured",
+    "no_servers": "No servers found",
     "last_collected": "Last collected",
+    "last_collected_at": "Last collected",
     "no_data": "No data for selected period",
     "user_details": "User Details",
     "visited_sites": "Visited Sites",
     "enter_token": "Enter API token",
-    "failed_fetch": "Failed to fetch data"
+    "failed_fetch": "Failed to fetch data",
+    "collector_status": "Collector Status",
+    "collector_running": "Collector running",
+    "collector_stopped": "Collector stopped",
+    "collect_now": "Collect Now",
+    "collecting": "Collecting...",
+    "next_collect_in": "Next collection in",
+    "select_all": "Select all",
+    "deselect_all": "Deselect all",
+    "save_nodes": "Save nodes"
   }
 }

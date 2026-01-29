@@ -46,6 +46,10 @@ class XrayStatsCollector:
         # DNS cache for IP resolution
         self._dns_cache: dict[str, tuple[str, float]] = {}  # ip -> (domain, timestamp)
         self._dns_cache_ttl = 3600  # 1 hour
+        
+        # Timing for status
+        self._last_collect_time: Optional[datetime] = None
+        self._collecting = False
     
     async def start(self):
         """Start background collection."""
@@ -112,9 +116,72 @@ class XrayStatsCollector:
         if not nodes:
             return
         
-        # Collect from each node concurrently
-        tasks = [self._collect_from_node(node, server) for node, server in nodes]
-        await asyncio.gather(*tasks, return_exceptions=True)
+        self._collecting = True
+        try:
+            # Collect from each node concurrently
+            tasks = [self._collect_from_node(node, server) for node, server in nodes]
+            await asyncio.gather(*tasks, return_exceptions=True)
+            self._last_collect_time = datetime.now(timezone.utc).replace(tzinfo=None)
+        finally:
+            self._collecting = False
+    
+    async def collect_now(self) -> dict:
+        """Force immediate collection from all nodes."""
+        settings = await self._get_settings()
+        
+        if not settings or not settings.enabled:
+            return {
+                "success": False,
+                "error": "Collection is disabled",
+                "collected_at": None,
+                "nodes_count": 0
+            }
+        
+        if self._collecting:
+            return {
+                "success": False,
+                "error": "Collection already in progress",
+                "collected_at": None,
+                "nodes_count": 0
+            }
+        
+        # Get node count
+        async with async_session() as db:
+            result = await db.execute(
+                select(RemnawaveNode, Server)
+                .join(Server, RemnawaveNode.server_id == Server.id)
+                .where(RemnawaveNode.enabled == True)
+                .where(Server.is_active == True)
+            )
+            nodes_count = len(result.all())
+        
+        await self._collect_from_all_nodes()
+        
+        return {
+            "success": True,
+            "collected_at": self._last_collect_time.isoformat() if self._last_collect_time else None,
+            "nodes_count": nodes_count
+        }
+    
+    def get_status(self) -> dict:
+        """Get collector status with timing info."""
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        
+        # Calculate next collect time
+        next_collect_in = None
+        if self._running and self._last_collect_time:
+            elapsed = (now - self._last_collect_time).total_seconds()
+            next_collect_in = max(0, self._collection_interval - int(elapsed))
+        elif self._running:
+            next_collect_in = self._collection_interval
+        
+        return {
+            "running": self._running,
+            "collecting": self._collecting,
+            "collection_interval": self._collection_interval,
+            "last_collect_time": self._last_collect_time.isoformat() if self._last_collect_time else None,
+            "next_collect_in": next_collect_in
+        }
     
     async def _collect_from_node(self, node: RemnawaveNode, server: Server):
         """Collect stats from a single node."""

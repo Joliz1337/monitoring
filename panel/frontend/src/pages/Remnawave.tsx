@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Radio,
@@ -7,14 +7,15 @@ import {
   Users,
   Globe,
   BarChart3,
-  Plus,
-  Trash2,
   Check,
   X,
   AlertCircle,
   Search,
   ChevronRight,
-  ExternalLink
+  ExternalLink,
+  Play,
+  Clock,
+  Server
 } from 'lucide-react'
 import { 
   remnawaveApi, 
@@ -24,7 +25,9 @@ import {
   RemnawaveDestination,
   RemnawaveUser,
   RemnawaveUserDetails,
-  RemnawaveTimelinePoint
+  RemnawaveTimelinePoint,
+  RemnawaveServerInfo,
+  RemnawaveCollectorStatus
 } from '../api/client'
 import { useTranslation } from 'react-i18next'
 import PeriodSelector from '../components/ui/PeriodSelector'
@@ -64,8 +67,15 @@ export default function Remnawave() {
   
   // Nodes state
   const [nodes, setNodes] = useState<RemnawaveNode[]>([])
-  const [availableServers, setAvailableServers] = useState<Array<{ id: number; name: string }>>([])
-  const [selectedServerToAdd, setSelectedServerToAdd] = useState<number | null>(null)
+  const [allServers, setAllServers] = useState<RemnawaveServerInfo[]>([])
+  const [selectedNodeIds, setSelectedNodeIds] = useState<Set<number>>(new Set())
+  const [isSyncingNodes, setIsSyncingNodes] = useState(false)
+  
+  // Collector status state
+  const [collectorStatus, setCollectorStatus] = useState<RemnawaveCollectorStatus | null>(null)
+  const [isCollecting, setIsCollecting] = useState(false)
+  const [nextCollectIn, setNextCollectIn] = useState<number | null>(null)
+  const timerRef = useRef<NodeJS.Timeout | null>(null)
   
   // Stats state
   const [summary, setSummary] = useState<RemnawaveSummary | null>(null)
@@ -81,9 +91,10 @@ export default function Remnawave() {
   // Fetch settings
   const fetchSettings = useCallback(async () => {
     try {
-      const [settingsRes, nodesRes] = await Promise.all([
+      const [settingsRes, nodesRes, statusRes] = await Promise.all([
         remnawaveApi.getSettings(),
-        remnawaveApi.getNodes()
+        remnawaveApi.getNodes(),
+        remnawaveApi.getCollectorStatus()
       ])
       setSettings(settingsRes.data)
       setEditSettings({
@@ -94,7 +105,13 @@ export default function Remnawave() {
         collection_interval: settingsRes.data.collection_interval
       })
       setNodes(nodesRes.data.nodes)
-      setAvailableServers(nodesRes.data.available_servers)
+      setAllServers(nodesRes.data.all_servers)
+      // Initialize selected nodes from current nodes
+      const nodeIds = new Set(nodesRes.data.all_servers.filter(s => s.is_node).map(s => s.id))
+      setSelectedNodeIds(nodeIds)
+      // Update collector status
+      setCollectorStatus(statusRes.data)
+      setNextCollectIn(statusRes.data.next_collect_in)
     } catch (err) {
       console.error('Failed to fetch settings:', err)
     }
@@ -137,6 +154,35 @@ export default function Remnawave() {
     }
   }, [period, fetchStats, isLoading])
   
+  // Timer countdown effect
+  useEffect(() => {
+    if (timerRef.current) {
+      clearInterval(timerRef.current)
+    }
+    
+    if (nextCollectIn !== null && nextCollectIn > 0 && !isCollecting) {
+      timerRef.current = setInterval(() => {
+        setNextCollectIn(prev => {
+          if (prev === null || prev <= 1) {
+            // Refresh status when timer reaches 0
+            remnawaveApi.getCollectorStatus().then(res => {
+              setCollectorStatus(res.data)
+              setNextCollectIn(res.data.next_collect_in)
+            })
+            return null
+          }
+          return prev - 1
+        })
+      }, 1000)
+    }
+    
+    return () => {
+      if (timerRef.current) {
+        clearInterval(timerRef.current)
+      }
+    }
+  }, [nextCollectIn, isCollecting])
+  
   const handleRefresh = async () => {
     setIsRefreshing(true)
     await fetchStats()
@@ -177,27 +223,39 @@ export default function Remnawave() {
     }
   }
   
-  const handleAddNode = async () => {
-    if (!selectedServerToAdd) return
+  const handleToggleNodeSelection = (serverId: number) => {
+    setSelectedNodeIds(prev => {
+      const newSet = new Set(prev)
+      if (newSet.has(serverId)) {
+        newSet.delete(serverId)
+      } else {
+        newSet.add(serverId)
+      }
+      return newSet
+    })
+  }
+  
+  const handleSelectAllNodes = () => {
+    setSelectedNodeIds(new Set(allServers.map(s => s.id)))
+  }
+  
+  const handleDeselectAllNodes = () => {
+    setSelectedNodeIds(new Set())
+  }
+  
+  const handleSyncNodes = async () => {
+    setIsSyncingNodes(true)
     try {
-      await remnawaveApi.addNode(selectedServerToAdd)
+      await remnawaveApi.syncNodes(Array.from(selectedNodeIds))
       await fetchSettings()
-      setSelectedServerToAdd(null)
     } catch (err) {
-      console.error('Failed to add node:', err)
+      console.error('Failed to sync nodes:', err)
+    } finally {
+      setIsSyncingNodes(false)
     }
   }
   
-  const handleRemoveNode = async (serverId: number) => {
-    try {
-      await remnawaveApi.removeNode(serverId)
-      await fetchSettings()
-    } catch (err) {
-      console.error('Failed to remove node:', err)
-    }
-  }
-  
-  const handleToggleNode = async (serverId: number, enabled: boolean) => {
+  const handleToggleNodeEnabled = async (serverId: number, enabled: boolean) => {
     try {
       await remnawaveApi.updateNode(serverId, enabled)
       await fetchSettings()
@@ -205,6 +263,26 @@ export default function Remnawave() {
       console.error('Failed to toggle node:', err)
     }
   }
+  
+  const handleForceCollect = async () => {
+    setIsCollecting(true)
+    try {
+      const res = await remnawaveApi.collectNow()
+      if (res.data.success) {
+        // Refresh stats and status after collection
+        await Promise.all([fetchStats(), fetchSettings()])
+      }
+    } catch (err) {
+      console.error('Failed to force collect:', err)
+    } finally {
+      setIsCollecting(false)
+    }
+  }
+  
+  // Check if selected nodes differ from current nodes
+  const currentNodeIds = new Set(allServers.filter(s => s.is_node).map(s => s.id))
+  const hasNodeChanges = selectedNodeIds.size !== currentNodeIds.size || 
+    ![...selectedNodeIds].every(id => currentNodeIds.has(id))
   
   const handleUserClick = async (email: number) => {
     try {
@@ -544,6 +622,53 @@ export default function Remnawave() {
             exit={{ opacity: 0, y: -20 }}
             className="space-y-6"
           >
+            {/* Collector Status */}
+            <div className="p-6 rounded-xl bg-dark-800/50 border border-dark-700/50">
+              <h3 className="text-lg font-semibold text-dark-100 mb-4">{t('remnawave.collector_status')}</h3>
+              <div className="flex flex-wrap items-center gap-6">
+                <div className="flex items-center gap-3">
+                  <div className={`w-3 h-3 rounded-full ${collectorStatus?.running ? 'bg-success' : 'bg-dark-500'}`} />
+                  <span className="text-dark-300">
+                    {collectorStatus?.running ? t('remnawave.collector_running') : t('remnawave.collector_stopped')}
+                  </span>
+                </div>
+                
+                {collectorStatus?.last_collect_time && (
+                  <div className="flex items-center gap-2 text-dark-400">
+                    <Clock className="w-4 h-4" />
+                    <span className="text-sm">
+                      {t('remnawave.last_collected_at')}: {new Date(collectorStatus.last_collect_time).toLocaleString()}
+                    </span>
+                  </div>
+                )}
+                
+                {nextCollectIn !== null && nextCollectIn > 0 && (
+                  <div className="flex items-center gap-2 text-dark-400">
+                    <RefreshCw className="w-4 h-4" />
+                    <span className="text-sm">
+                      {t('remnawave.next_collect_in')}: {nextCollectIn} {t('common.seconds')}
+                    </span>
+                  </div>
+                )}
+                
+                <motion.button
+                  onClick={handleForceCollect}
+                  disabled={isCollecting || !collectorStatus?.running}
+                  className="ml-auto px-4 py-2 rounded-lg bg-purple-500 hover:bg-purple-600 text-white 
+                           transition-colors disabled:opacity-50 flex items-center gap-2"
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
+                >
+                  {isCollecting ? (
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Play className="w-4 h-4" />
+                  )}
+                  {isCollecting ? t('remnawave.collecting') : t('remnawave.collect_now')}
+                </motion.button>
+              </div>
+            </div>
+            
             {/* API Settings */}
             <div className="p-6 rounded-xl bg-dark-800/50 border border-dark-700/50">
               <h3 className="text-lg font-semibold text-dark-100 mb-4">{t('remnawave.api_settings')}</h3>
@@ -657,83 +782,117 @@ export default function Remnawave() {
               </div>
             </div>
             
-            {/* Nodes */}
+            {/* Nodes Selection */}
             <div className="p-6 rounded-xl bg-dark-800/50 border border-dark-700/50">
-              <h3 className="text-lg font-semibold text-dark-100 mb-4">{t('remnawave.select_nodes')}</h3>
-              
-              {/* Add Node */}
-              {availableServers.length > 0 && (
-                <div className="flex items-center gap-3 mb-4 pb-4 border-b border-dark-700">
-                  <select
-                    value={selectedServerToAdd || ''}
-                    onChange={(e) => setSelectedServerToAdd(e.target.value ? parseInt(e.target.value) : null)}
-                    className="flex-1 px-4 py-2 rounded-lg bg-dark-900 border border-dark-700 
-                             text-dark-100 focus:outline-none focus:border-accent-500"
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-lg font-semibold text-dark-100">{t('remnawave.select_nodes')}</h3>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleSelectAllNodes}
+                    className="px-3 py-1 text-sm rounded-lg bg-dark-700 hover:bg-dark-600 text-dark-300 transition-colors"
                   >
-                    <option value="">{t('remnawave.select_server')}</option>
-                    {availableServers.map(s => (
-                      <option key={s.id} value={s.id}>{s.name}</option>
-                    ))}
-                  </select>
+                    {t('remnawave.select_all')}
+                  </button>
+                  <button
+                    onClick={handleDeselectAllNodes}
+                    className="px-3 py-1 text-sm rounded-lg bg-dark-700 hover:bg-dark-600 text-dark-300 transition-colors"
+                  >
+                    {t('remnawave.deselect_all')}
+                  </button>
+                </div>
+              </div>
+              
+              {/* Server List with Checkboxes */}
+              <div className="space-y-2 max-h-[400px] overflow-y-auto">
+                {allServers.map(server => {
+                  const node = nodes.find(n => n.server_id === server.id)
+                  const isSelected = selectedNodeIds.has(server.id)
+                  
+                  return (
+                    <div
+                      key={server.id}
+                      className={`flex items-center gap-4 p-3 rounded-lg border transition-colors cursor-pointer ${
+                        isSelected 
+                          ? 'bg-accent-500/10 border-accent-500/30' 
+                          : 'bg-dark-900/50 border-dark-700/50 hover:border-dark-600'
+                      }`}
+                      onClick={() => handleToggleNodeSelection(server.id)}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={isSelected}
+                        onChange={() => handleToggleNodeSelection(server.id)}
+                        onClick={(e) => e.stopPropagation()}
+                        className="w-4 h-4 rounded border-dark-600 bg-dark-800 text-accent-500 
+                                 focus:ring-accent-500 focus:ring-offset-0 cursor-pointer"
+                      />
+                      <Server className={`w-4 h-4 ${server.is_active ? 'text-dark-400' : 'text-dark-600'}`} />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className={`${server.is_active ? 'text-dark-200' : 'text-dark-500'}`}>
+                            {server.name}
+                          </span>
+                          <span className={`text-xs px-1.5 py-0.5 rounded ${
+                            server.is_active ? 'bg-success/20 text-success' : 'bg-dark-600 text-dark-400'
+                          }`}>
+                            {server.is_active ? 'online' : 'offline'}
+                          </span>
+                        </div>
+                        {node?.last_collected && (
+                          <div className="text-xs text-dark-500">
+                            {t('remnawave.last_collected')}: {new Date(node.last_collected).toLocaleString()}
+                          </div>
+                        )}
+                        {node?.last_error && (
+                          <div className="text-xs text-danger truncate">{node.last_error}</div>
+                        )}
+                      </div>
+                      {server.is_node && (
+                        <label 
+                          className="relative inline-flex items-center cursor-pointer"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={server.node_enabled}
+                            onChange={(e) => handleToggleNodeEnabled(server.id, e.target.checked)}
+                            className="sr-only peer"
+                          />
+                          <div className="w-9 h-5 bg-dark-700 peer-focus:outline-none rounded-full peer 
+                                        peer-checked:after:translate-x-full peer-checked:after:border-white 
+                                        after:content-[''] after:absolute after:top-[2px] after:left-[2px] 
+                                        after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all 
+                                        peer-checked:bg-accent-500"></div>
+                        </label>
+                      )}
+                    </div>
+                  )
+                })}
+                {allServers.length === 0 && (
+                  <div className="text-center text-dark-500 py-4">{t('remnawave.no_servers')}</div>
+                )}
+              </div>
+              
+              {/* Save Nodes Button */}
+              {hasNodeChanges && (
+                <div className="mt-4 pt-4 border-t border-dark-700">
                   <motion.button
-                    onClick={handleAddNode}
-                    disabled={!selectedServerToAdd}
+                    onClick={handleSyncNodes}
+                    disabled={isSyncingNodes}
                     className="px-4 py-2 rounded-lg bg-accent-500 hover:bg-accent-600 text-white 
                              transition-colors disabled:opacity-50 flex items-center gap-2"
                     whileHover={{ scale: 1.02 }}
                     whileTap={{ scale: 0.98 }}
                   >
-                    <Plus className="w-4 h-4" />
-                    {t('common.add')}
+                    {isSyncingNodes ? (
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <Check className="w-4 h-4" />
+                    )}
+                    {t('remnawave.save_nodes')} ({selectedNodeIds.size})
                   </motion.button>
                 </div>
               )}
-              
-              {/* Node List */}
-              <div className="space-y-3">
-                {nodes.map(node => (
-                  <div
-                    key={node.id}
-                    className="flex items-center gap-4 p-3 rounded-lg bg-dark-900/50 border border-dark-700/50"
-                  >
-                    <label className="relative inline-flex items-center cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={node.enabled}
-                        onChange={(e) => handleToggleNode(node.server_id, e.target.checked)}
-                        className="sr-only peer"
-                      />
-                      <div className="w-9 h-5 bg-dark-700 peer-focus:outline-none rounded-full peer 
-                                    peer-checked:after:translate-x-full peer-checked:after:border-white 
-                                    after:content-[''] after:absolute after:top-[2px] after:left-[2px] 
-                                    after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all 
-                                    peer-checked:bg-accent-500"></div>
-                    </label>
-                    <div className="flex-1">
-                      <div className="text-dark-200">{node.server_name}</div>
-                      {node.last_collected && (
-                        <div className="text-xs text-dark-500">
-                          {t('remnawave.last_collected')}: {new Date(node.last_collected).toLocaleString()}
-                        </div>
-                      )}
-                      {node.last_error && (
-                        <div className="text-xs text-danger">{node.last_error}</div>
-                      )}
-                    </div>
-                    <motion.button
-                      onClick={() => handleRemoveNode(node.server_id)}
-                      className="p-2 rounded-lg hover:bg-danger/20 text-dark-400 hover:text-danger transition-colors"
-                      whileHover={{ scale: 1.1 }}
-                      whileTap={{ scale: 0.9 }}
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </motion.button>
-                  </div>
-                ))}
-                {nodes.length === 0 && (
-                  <div className="text-center text-dark-500 py-4">{t('remnawave.no_nodes')}</div>
-                )}
-              </div>
             </div>
           </motion.div>
         )}
