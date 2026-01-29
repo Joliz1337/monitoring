@@ -75,7 +75,7 @@ export default function Remnawave() {
   const [collectorStatus, setCollectorStatus] = useState<RemnawaveCollectorStatus | null>(null)
   const [isCollecting, setIsCollecting] = useState(false)
   const [nextCollectIn, setNextCollectIn] = useState<number | null>(null)
-  const timerRef = useRef<NodeJS.Timeout | null>(null)
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   
   // Stats state
   const [summary, setSummary] = useState<RemnawaveSummary | null>(null)
