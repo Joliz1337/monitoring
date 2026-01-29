@@ -545,8 +545,8 @@ export default function Remnawave() {
               {/* Top Sites */}
               <div className="p-6 rounded-xl bg-dark-800/50 border border-dark-700/50">
                 <h3 className="text-lg font-semibold text-dark-100 mb-4">{t('remnawave.top_sites')}</h3>
-                <div className="space-y-3">
-                  {topDestinations.slice(0, 10).map((dest, idx) => (
+                <div className="space-y-3 max-h-[600px] overflow-auto">
+                  {topDestinations.slice(0, 20).map((dest, idx) => (
                     <div key={dest.destination} className="flex items-center gap-3">
                       <span className="text-dark-500 text-sm w-6">{idx + 1}</span>
                       <div className="flex-1 min-w-0">
@@ -558,6 +558,15 @@ export default function Remnawave() {
                         )}
                       </div>
                       <span className="text-dark-400 text-sm">{dest.visits.toLocaleString()}</span>
+                      <a
+                        href={getIpInfoUrl(dest.destination)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="p-1 rounded hover:bg-dark-600 text-dark-500 hover:text-accent-400 transition-colors"
+                        title={t('remnawave.ip_info')}
+                      >
+                        <Info className="w-3.5 h-3.5" />
+                      </a>
                     </div>
                   ))}
                   {topDestinations.length === 0 && (
@@ -1069,6 +1078,15 @@ export default function Remnawave() {
                       )}
                     </div>
                     <span className="text-dark-400 text-sm">{dest.visits.toLocaleString()}</span>
+                    <a
+                      href={getIpInfoUrl(dest.destination)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="p-1.5 rounded-lg hover:bg-dark-700 text-dark-500 hover:text-accent-400 transition-colors"
+                      title={t('remnawave.ip_info')}
+                    >
+                      <Info className="w-4 h-4" />
+                    </a>
                   </div>
                 ))}
               </div>
