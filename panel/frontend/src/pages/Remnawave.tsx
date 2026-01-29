@@ -25,13 +25,13 @@ import {
   RemnawaveDestination,
   RemnawaveUser,
   RemnawaveUserDetails,
-  RemnawaveTimelinePoint,
   RemnawaveServerInfo,
-  RemnawaveCollectorStatus
+  RemnawaveCollectorStatus,
+  RemnawaveDestinationUsers
 } from '../api/client'
 import { useTranslation } from 'react-i18next'
 import PeriodSelector from '../components/ui/PeriodSelector'
-import MultiLineChart from '../components/Charts/MultiLineChart'
+import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip, Legend } from 'recharts'
 
 const containerVariants = {
   hidden: { opacity: 0 },
@@ -81,12 +81,19 @@ export default function Remnawave() {
   const [summary, setSummary] = useState<RemnawaveSummary | null>(null)
   const [topDestinations, setTopDestinations] = useState<RemnawaveDestination[]>([])
   const [topUsers, setTopUsers] = useState<RemnawaveUser[]>([])
-  const [timeline, setTimeline] = useState<RemnawaveTimelinePoint[]>([])
   
   // User details modal
   const [selectedUser, setSelectedUser] = useState<RemnawaveUserDetails | null>(null)
   const [userSearch, setUserSearch] = useState('')
   const [destSearch, setDestSearch] = useState('')
+  
+  // Destination users modal
+  const [selectedDestination, setSelectedDestination] = useState<RemnawaveDestinationUsers | null>(null)
+  const [isLoadingDestUsers, setIsLoadingDestUsers] = useState(false)
+  
+  // Auto-refresh
+  const autoRefreshRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const [nextRefreshIn, setNextRefreshIn] = useState(30)
   
   // Fetch settings
   const fetchSettings = useCallback(async () => {
@@ -120,16 +127,14 @@ export default function Remnawave() {
   // Fetch stats
   const fetchStats = useCallback(async () => {
     try {
-      const [summaryRes, destRes, usersRes, timelineRes] = await Promise.all([
+      const [summaryRes, destRes, usersRes] = await Promise.all([
         remnawaveApi.getSummary(period),
         remnawaveApi.getTopDestinations({ period, limit: 20 }),
-        remnawaveApi.getTopUsers({ period, limit: 20 }),
-        remnawaveApi.getTimeline({ period })
+        remnawaveApi.getTopUsers({ period, limit: 20 })
       ])
       setSummary(summaryRes.data)
       setTopDestinations(destRes.data.destinations)
       setTopUsers(usersRes.data.users)
-      setTimeline(timelineRes.data.data)
       setError(null)
     } catch (err) {
       console.error('Failed to fetch stats:', err)
@@ -182,6 +187,33 @@ export default function Remnawave() {
       }
     }
   }, [nextCollectIn, isCollecting])
+  
+  // Auto-refresh effect (30 seconds)
+  useEffect(() => {
+    if (autoRefreshRef.current) {
+      clearInterval(autoRefreshRef.current)
+    }
+    
+    // Reset countdown
+    setNextRefreshIn(30)
+    
+    autoRefreshRef.current = setInterval(() => {
+      setNextRefreshIn(prev => {
+        if (prev <= 1) {
+          // Perform refresh
+          fetchStats()
+          return 30
+        }
+        return prev - 1
+      })
+    }, 1000)
+    
+    return () => {
+      if (autoRefreshRef.current) {
+        clearInterval(autoRefreshRef.current)
+      }
+    }
+  }, [fetchStats])
   
   const handleRefresh = async () => {
     setIsRefreshing(true)
@@ -284,6 +316,18 @@ export default function Remnawave() {
     }
   }
   
+  const handleDestinationClick = async (destination: string) => {
+    setIsLoadingDestUsers(true)
+    try {
+      const res = await remnawaveApi.getDestinationUsers(destination, period, 100)
+      setSelectedDestination(res.data)
+    } catch (err) {
+      console.error('Failed to fetch destination users:', err)
+    } finally {
+      setIsLoadingDestUsers(false)
+    }
+  }
+  
   // Filter destinations and users
   const filteredDestinations = topDestinations.filter(d => 
     destSearch ? (d.destination.toLowerCase().includes(destSearch.toLowerCase()) ||
@@ -295,12 +339,14 @@ export default function Remnawave() {
                   u.email.toString().includes(userSearch)) : true
   )
   
-  // Timeline chart data
-  const timelineSeries = [{
-    name: t('remnawave.visits'),
-    data: timeline.map(t => ({ timestamp: t.timestamp, value: t.visits })),
-    color: '#8b5cf6'
-  }]
+  // Pie chart data and colors
+  const pieColors = ['#8b5cf6', '#6366f1', '#3b82f6', '#0ea5e9', '#14b8a6', '#22c55e', '#84cc16', '#eab308', '#f97316', '#ef4444']
+  const pieData = topDestinations.slice(0, 10).map((dest, idx) => ({
+    name: dest.domain || dest.destination.split(':')[0],
+    value: dest.visits,
+    fullDestination: dest.destination,
+    fill: pieColors[idx % pieColors.length]
+  }))
   
   // Tabs
   const tabs: { id: TabType; label: string; icon: React.ReactNode }[] = [
@@ -342,9 +388,16 @@ export default function Remnawave() {
         
         {activeTab !== 'settings' && (
           <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2 text-dark-500 text-sm">
+              <RefreshCw className="w-4 h-4" />
+              <span>{nextRefreshIn}s</span>
+            </div>
             <PeriodSelector value={period} onChange={setPeriod} />
             <motion.button
-              onClick={handleRefresh}
+              onClick={() => {
+                handleRefresh()
+                setNextRefreshIn(30)
+              }}
               disabled={isRefreshing}
               className="p-2 rounded-lg bg-dark-800 hover:bg-dark-700 text-dark-300 
                        hover:text-dark-100 transition-colors disabled:opacity-50"
@@ -416,15 +469,40 @@ export default function Remnawave() {
               </div>
             </div>
             
-            {/* Timeline Chart */}
-            {timeline.length > 0 && (
+            {/* Top Sites Pie Chart */}
+            {pieData.length > 0 && (
               <div className="p-6 rounded-xl bg-dark-800/50 border border-dark-700/50">
-                <h3 className="text-lg font-semibold text-dark-100 mb-4">{t('remnawave.visits_timeline')}</h3>
-                <MultiLineChart
-                  series={timelineSeries}
-                  height={250}
-                  period={period}
-                />
+                <h3 className="text-lg font-semibold text-dark-100 mb-4">{t('remnawave.top_sites_chart')}</h3>
+                <div className="h-[300px]">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie
+                        data={pieData}
+                        cx="50%"
+                        cy="50%"
+                        innerRadius={60}
+                        outerRadius={100}
+                        paddingAngle={2}
+                        dataKey="value"
+                        label={({ name, percent }) => `${name.length > 15 ? name.slice(0, 15) + '...' : name} (${(percent * 100).toFixed(0)}%)`}
+                        labelLine={{ stroke: '#64748b', strokeWidth: 1 }}
+                      >
+                        {pieData.map((entry, index) => (
+                          <Cell key={`cell-${index}`} fill={entry.fill} />
+                        ))}
+                      </Pie>
+                      <Tooltip
+                        contentStyle={{
+                          backgroundColor: '#1e293b',
+                          border: '1px solid #334155',
+                          borderRadius: '8px',
+                          color: '#e2e8f0'
+                        }}
+                        formatter={(value: number, name: string) => [value.toLocaleString() + ' ' + t('remnawave.visits'), name]}
+                      />
+                    </PieChart>
+                  </ResponsiveContainer>
+                </div>
               </div>
             )}
             
@@ -585,15 +663,23 @@ export default function Remnawave() {
                     <th className="text-left p-4 text-dark-400 font-medium text-sm">{t('remnawave.destination')}</th>
                     <th className="text-left p-4 text-dark-400 font-medium text-sm">{t('remnawave.domain')}</th>
                     <th className="text-right p-4 text-dark-400 font-medium text-sm">{t('remnawave.visits')}</th>
+                    <th className="w-10"></th>
                   </tr>
                 </thead>
                 <tbody>
                   {filteredDestinations.map((dest, idx) => (
-                    <tr key={dest.destination} className="border-b border-dark-700/50 hover:bg-dark-700/30 transition-colors">
+                    <tr 
+                      key={dest.destination} 
+                      className="border-b border-dark-700/50 hover:bg-dark-700/30 cursor-pointer transition-colors"
+                      onClick={() => handleDestinationClick(dest.destination)}
+                    >
                       <td className="p-4 text-dark-500">{idx + 1}</td>
                       <td className="p-4 text-dark-200 font-mono text-sm">{dest.destination}</td>
                       <td className="p-4 text-dark-400">{dest.domain || '-'}</td>
                       <td className="p-4 text-right text-dark-200">{dest.visits.toLocaleString()}</td>
+                      <td className="p-4">
+                        <ChevronRight className="w-4 h-4 text-dark-500" />
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -940,6 +1026,98 @@ export default function Remnawave() {
                   </div>
                 ))}
               </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+      
+      {/* Destination Users Modal */}
+      <AnimatePresence>
+        {selectedDestination && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+            onClick={() => setSelectedDestination(null)}
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="w-full max-w-2xl max-h-[80vh] overflow-auto bg-dark-900 rounded-xl border border-dark-700 p-6"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between mb-6">
+                <div>
+                  <h3 className="text-xl font-semibold text-dark-100">
+                    {t('remnawave.destination_users')}
+                  </h3>
+                  <div className="text-dark-400 text-sm font-mono mt-1 truncate max-w-md">
+                    {selectedDestination.destination}
+                  </div>
+                </div>
+                <motion.button
+                  onClick={() => setSelectedDestination(null)}
+                  className="p-2 rounded-lg hover:bg-dark-700 text-dark-400 transition-colors"
+                  whileHover={{ scale: 1.1 }}
+                  whileTap={{ scale: 0.9 }}
+                >
+                  <X className="w-5 h-5" />
+                </motion.button>
+              </div>
+              
+              <div className="mb-4 p-4 rounded-lg bg-dark-800">
+                <span className="text-dark-400">{t('remnawave.total_visits')}:</span>
+                <span className="text-dark-100 text-xl font-bold ml-2">
+                  {selectedDestination.total_visits.toLocaleString()}
+                </span>
+              </div>
+              
+              <h4 className="text-sm font-medium text-dark-400 mb-3">{t('remnawave.users_visited')}</h4>
+              
+              {isLoadingDestUsers ? (
+                <div className="flex items-center justify-center py-8">
+                  <div className="w-6 h-6 border-2 border-accent-500 border-t-transparent rounded-full animate-spin" />
+                </div>
+              ) : (
+                <div className="space-y-2 max-h-[300px] overflow-auto">
+                  {selectedDestination.users.map((user, idx) => (
+                    <div 
+                      key={user.email} 
+                      className="flex items-center gap-3 p-2 rounded-lg hover:bg-dark-800 transition-colors cursor-pointer"
+                      onClick={() => {
+                        setSelectedDestination(null)
+                        handleUserClick(user.email)
+                      }}
+                    >
+                      <span className="text-dark-500 text-sm w-6">{idx + 1}</span>
+                      <div className="flex-1 min-w-0">
+                        <div className="text-dark-200 text-sm truncate">
+                          {user.username || `User #${user.email}`}
+                        </div>
+                        {user.status && (
+                          <span className={`text-xs px-1.5 py-0.5 rounded ${
+                            user.status === 'ACTIVE' ? 'bg-success/20 text-success' :
+                            user.status === 'DISABLED' ? 'bg-danger/20 text-danger' :
+                            'bg-dark-600 text-dark-300'
+                          }`}>
+                            {user.status}
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-right">
+                        <div className="text-dark-200 text-sm">{user.visits.toLocaleString()}</div>
+                        <div className="text-dark-500 text-xs">{user.percentage}%</div>
+                      </div>
+                      <ChevronRight className="w-4 h-4 text-dark-500" />
+                    </div>
+                  ))}
+                  {selectedDestination.users.length === 0 && (
+                    <div className="text-dark-500 text-sm text-center py-4">{t('remnawave.no_data')}</div>
+                  )}
+                </div>
+              )}
             </motion.div>
           </motion.div>
         )}

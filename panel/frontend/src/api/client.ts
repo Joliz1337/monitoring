@@ -802,6 +802,21 @@ export interface RemnawaveTimelinePoint {
   visits: number
 }
 
+export interface RemnawaveDestinationUser {
+  email: number
+  username: string | null
+  status: string | null
+  visits: number
+  percentage: number
+}
+
+export interface RemnawaveDestinationUsers {
+  destination: string
+  period: string
+  total_visits: number
+  users: RemnawaveDestinationUser[]
+}
+
 export interface RemnawaveCachedUser {
   email: number
   uuid: string | null
@@ -851,6 +866,10 @@ export const remnawaveApi = {
   }) => api.get<{ period: string; users: RemnawaveUser[] }>('/remnawave/stats/top-users', { params }),
   getUserStats: (email: number, period: string) =>
     api.get<RemnawaveUserDetails>(`/remnawave/stats/user/${email}`, { params: { period } }),
+  getDestinationUsers: (destination: string, period: string, limit?: number) =>
+    api.get<RemnawaveDestinationUsers>('/remnawave/stats/destination/users', { 
+      params: { destination, period, limit } 
+    }),
   getTimeline: (params: { 
     period: string
     email?: number

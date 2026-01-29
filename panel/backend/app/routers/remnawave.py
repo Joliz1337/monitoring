@@ -572,6 +572,78 @@ async def get_user_stats(
     }
 
 
+@router.get("/stats/destination/users")
+async def get_destination_users(
+    destination: str = Query(..., description="Destination to get users for"),
+    period: str = Query("24h", regex="^(1h|24h|7d|30d|365d)$"),
+    limit: int = Query(100, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Get users who visited a specific destination"""
+    start_time, period_type = _get_period_filter(period)
+    
+    conditions = [
+        XrayVisitStats.period_start >= start_time,
+        XrayVisitStats.destination == destination
+    ]
+    
+    if period in ["1h", "24h", "7d"]:
+        conditions.append(XrayVisitStats.period_type == 'hour')
+    else:
+        conditions.append(XrayVisitStats.period_type == 'day')
+    
+    # Get total visits for this destination
+    total_result = await db.execute(
+        select(sql_func.sum(XrayVisitStats.visit_count))
+        .where(and_(*conditions))
+    )
+    total_visits = total_result.scalar() or 0
+    
+    # Get users with their visit counts
+    result = await db.execute(
+        select(
+            XrayVisitStats.email,
+            sql_func.sum(XrayVisitStats.visit_count).label('total')
+        )
+        .where(and_(*conditions))
+        .group_by(XrayVisitStats.email)
+        .order_by(sql_func.sum(XrayVisitStats.visit_count).desc())
+        .limit(limit)
+    )
+    
+    rows = result.fetchall()
+    user_ids = [row.email for row in rows]
+    
+    # Get user info from cache
+    user_cache = {}
+    if user_ids:
+        cache_result = await db.execute(
+            select(RemnawaveUserCache).where(RemnawaveUserCache.email.in_(user_ids))
+        )
+        for user in cache_result.scalars().all():
+            user_cache[user.email] = {
+                "username": user.username,
+                "status": user.status
+            }
+    
+    return {
+        "destination": destination,
+        "period": period,
+        "total_visits": total_visits,
+        "users": [
+            {
+                "email": row.email,
+                "username": user_cache.get(row.email, {}).get("username"),
+                "status": user_cache.get(row.email, {}).get("status"),
+                "visits": row.total,
+                "percentage": round((row.total / total_visits * 100), 1) if total_visits > 0 else 0
+            }
+            for row in rows
+        ]
+    }
+
+
 @router.get("/stats/timeline")
 async def get_timeline(
     period: str = Query("24h", regex="^(1h|24h|7d|30d)$"),
