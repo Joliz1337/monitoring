@@ -20,6 +20,11 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     gcc libc-dev procps certbot openssl curl iptables git rsync
 
+# Install Docker CLI for accessing remnanode container logs (Xray stats collection)
+RUN curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-26.1.4.tgz | tar xz -C /tmp && \
+    mv /tmp/docker/docker /usr/local/bin/ && \
+    rm -rf /tmp/docker
+
 # Copy requirements and install Python dependencies with cache
 COPY requirements.txt .
 RUN --mount=type=cache,target=/root/.cache/pip \
