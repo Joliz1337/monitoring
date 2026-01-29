@@ -325,7 +325,7 @@ def _get_time_filter(period: str) -> datetime:
 
 @router.get("/stats/summary")
 async def get_stats_summary(
-    period: str = Query("all", regex="^(1h|24h|7d|30d|365d|all)$"),
+    period: str = Query("all", pattern="^(1h|24h|7d|30d|365d|all)$"),
     server_ids: Optional[str] = Query(None, description="Comma-separated server IDs"),
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
@@ -396,7 +396,7 @@ async def get_stats_summary(
 
 @router.get("/stats/top-destinations")
 async def get_top_destinations(
-    period: str = Query("all", regex="^(1h|24h|7d|30d|365d|all)$"),
+    period: str = Query("all", pattern="^(1h|24h|7d|30d|365d|all)$"),
     limit: int = Query(50, ge=1, le=500),
     email: Optional[int] = Query(None, description="Filter by user email/ID"),
     server_id: Optional[int] = Query(None, description="Filter by server"),
@@ -444,7 +444,7 @@ async def get_top_destinations(
 
 @router.get("/stats/top-users")
 async def get_top_users(
-    period: str = Query("all", regex="^(1h|24h|7d|30d|365d|all)$"),
+    period: str = Query("all", pattern="^(1h|24h|7d|30d|365d|all)$"),
     limit: int = Query(50, ge=1, le=500),
     server_id: Optional[int] = Query(None, description="Filter by server"),
     db: AsyncSession = Depends(get_db),
@@ -507,7 +507,7 @@ async def get_top_users(
 @router.get("/stats/user/{email}")
 async def get_user_stats(
     email: int,
-    period: str = Query("all", regex="^(1h|24h|7d|30d|365d|all)$"),
+    period: str = Query("all", pattern="^(1h|24h|7d|30d|365d|all)$"),
     limit: int = Query(100, ge=1, le=500),
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
@@ -568,7 +568,7 @@ async def get_user_stats(
 @router.get("/stats/destination/users")
 async def get_destination_users(
     destination: str = Query(..., description="Destination to get users for"),
-    period: str = Query("all", regex="^(1h|24h|7d|30d|365d|all)$"),
+    period: str = Query("all", pattern="^(1h|24h|7d|30d|365d|all)$"),
     limit: int = Query(100, ge=1, le=500),
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
@@ -636,7 +636,7 @@ async def get_destination_users(
 
 @router.get("/stats/timeline")
 async def get_timeline(
-    period: str = Query("24h", regex="^(1h|24h|7d|30d|365d)$"),
+    period: str = Query("24h", pattern="^(1h|24h|7d|30d|365d)$"),
     server_id: Optional[int] = Query(None),
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
