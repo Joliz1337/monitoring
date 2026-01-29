@@ -10,6 +10,7 @@
 - **Traffic** — статистика по интерфейсам и портам, TCP/UDP соединения
 - **Bulk Actions** — массовое создание/удаление правил HAProxy, портов трафика и firewall
 - **IP Blocklist** — блокировка IP/CIDR через ipset с автообновлением списков из GitHub
+- **Remnawave** — интеграция с Remnawave Panel, статистика посещений из Xray логов
 
 ## Быстрый старт
 
@@ -240,6 +241,52 @@ panel/
 - Government Networks: `https://raw.githubusercontent.com/shadow-netlab/traffic-guard-lists/refs/heads/main/public/government_networks.list`
 
 Списки автоматически обновляются каждые 24 часа. При обнаружении изменений блоклисты синхронизируются со всеми активными нодами.
+
+### Remnawave Integration
+
+Интеграция с Remnawave Panel для сбора статистики посещений из Xray логов.
+
+**Настройки:**
+
+| Метод | Endpoint | Описание |
+|-------|----------|----------|
+| GET | /api/remnawave/settings | Текущие настройки |
+| PUT | /api/remnawave/settings | Обновить настройки (api_url, api_token, cookie_secret, enabled, collection_interval) |
+| POST | /api/remnawave/settings/test | Проверить подключение к Remnawave API |
+
+**Ноды:**
+
+| Метод | Endpoint | Описание |
+|-------|----------|----------|
+| GET | /api/remnawave/nodes | Список Remnawave нод |
+| POST | /api/remnawave/nodes | Добавить сервер как Remnawave ноду |
+| PUT | /api/remnawave/nodes/{server_id}?enabled=bool | Включить/выключить ноду |
+| DELETE | /api/remnawave/nodes/{server_id} | Удалить ноду |
+
+**Статистика:**
+
+| Метод | Endpoint | Описание |
+|-------|----------|----------|
+| GET | /api/remnawave/stats/summary | Общая сводка (total_visits, unique_users, unique_destinations) |
+| GET | /api/remnawave/stats/top-destinations | Топ посещаемых сайтов |
+| GET | /api/remnawave/stats/top-users | Топ активных пользователей |
+| GET | /api/remnawave/stats/user/{email} | Детальная статистика пользователя |
+| GET | /api/remnawave/stats/timeline | Временной график посещений |
+| GET | /api/remnawave/users | Кэш пользователей Remnawave |
+
+Параметры запросов:
+- `period` — 1h, 24h, 7d, 30d, 365d
+- `limit` — количество записей (1-500)
+- `server_id` — фильтр по серверу
+- `email` — фильтр по пользователю (ID в Remnawave)
+
+**Принцип работы:**
+1. На нодах запускается `XrayLogCollector`, читающий логи через `docker exec remnanode tail -f`
+2. Логи парсятся и агрегируются в памяти ноды (destination + email → count)
+3. Панель периодически (по умолчанию каждые 60 сек) вызывает `POST /api/remnawave/stats/collect` на каждой ноде
+4. Нода отдаёт накопленные данные и очищает память
+5. Панель сохраняет почасовую и дневную статистику в SQLite
+6. Раз в час панель обновляет кэш пользователей через Remnawave API
 
 ### Выполнение команд на нодах
 

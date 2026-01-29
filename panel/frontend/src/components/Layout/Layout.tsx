@@ -13,6 +13,7 @@ import {
   Layers,
   Search,
   Shield,
+  Radio,
   type LucideIcon
 } from 'lucide-react'
 import { useState } from 'react'
@@ -27,7 +28,8 @@ const iconMap: Record<string, LucideIcon> = {
   Settings,
   Package,
   Layers,
-  Shield
+  Shield,
+  Radio
 }
 
 const overlayVariants = {
@@ -64,6 +66,7 @@ export default function Layout() {
     { to: `/${uid}/servers`, icon: Server, label: t('common.servers'), end: false },
     { to: `/${uid}/bulk-actions`, icon: Layers, label: t('bulk_actions.title'), end: false },
     { to: `/${uid}/blocklist`, icon: Shield, label: t('common.blocklist'), end: false },
+    { to: `/${uid}/remnawave`, icon: Radio, label: t('common.remnawave'), end: false },
     { to: `/${uid}/updates`, icon: Package, label: t('common.updates'), end: false },
     { to: `/${uid}/settings`, icon: Settings, label: t('common.settings'), end: false },
   ]

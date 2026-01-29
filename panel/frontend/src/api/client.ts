@@ -714,4 +714,116 @@ export const systemApi = {
     api.post<ApplyOptimizationsResponse>(`/proxy/${serverId}/system/optimizations/apply`),
 }
 
+// Remnawave types
+export interface RemnawaveSettings {
+  api_url: string | null
+  api_token: string | null
+  cookie_secret: string | null
+  enabled: boolean
+  collection_interval: number
+}
+
+export interface RemnawaveNode {
+  id: number
+  server_id: number
+  server_name: string
+  enabled: boolean
+  last_collected: string | null
+  last_error: string | null
+}
+
+export interface RemnawaveNodesResponse {
+  nodes: RemnawaveNode[]
+  available_servers: Array<{ id: number; name: string }>
+}
+
+export interface RemnawaveSummary {
+  period: string
+  total_visits: number
+  unique_users: number
+  unique_destinations: number
+}
+
+export interface RemnawaveDestination {
+  destination: string
+  domain: string | null
+  visits: number
+}
+
+export interface RemnawaveUser {
+  email: number
+  username: string | null
+  status: string | null
+  total_visits: number
+  unique_sites: number
+}
+
+export interface RemnawaveUserDetails {
+  email: number
+  username: string | null
+  status: string | null
+  period: string
+  total_visits: number
+  destinations: RemnawaveDestination[]
+}
+
+export interface RemnawaveTimelinePoint {
+  timestamp: string
+  visits: number
+}
+
+export interface RemnawaveCachedUser {
+  email: number
+  uuid: string | null
+  username: string | null
+  telegram_id: number | null
+  status: string | null
+}
+
+export const remnawaveApi = {
+  // Settings
+  getSettings: () => api.get<RemnawaveSettings>('/remnawave/settings'),
+  updateSettings: (data: Partial<RemnawaveSettings>) => 
+    api.put<{ success: boolean; message: string }>('/remnawave/settings', data),
+  testConnection: () => 
+    api.post<{ success: boolean; api_reachable: boolean; error: string | null }>('/remnawave/settings/test'),
+  
+  // Nodes
+  getNodes: () => api.get<RemnawaveNodesResponse>('/remnawave/nodes'),
+  addNode: (serverId: number) => 
+    api.post<{ success: boolean; message: string }>('/remnawave/nodes', { server_id: serverId }),
+  removeNode: (serverId: number) => 
+    api.delete<{ success: boolean; message: string }>(`/remnawave/nodes/${serverId}`),
+  updateNode: (serverId: number, enabled: boolean) =>
+    api.put<{ success: boolean; message: string }>(`/remnawave/nodes/${serverId}?enabled=${enabled}`),
+  
+  // Stats
+  getSummary: (period: string, serverIds?: number[]) =>
+    api.get<RemnawaveSummary>('/remnawave/stats/summary', { 
+      params: { period, server_ids: serverIds?.join(',') } 
+    }),
+  getTopDestinations: (params: { 
+    period: string
+    limit?: number
+    email?: number
+    server_id?: number 
+  }) => api.get<{ period: string; destinations: RemnawaveDestination[] }>('/remnawave/stats/top-destinations', { params }),
+  getTopUsers: (params: { 
+    period: string
+    limit?: number
+    server_id?: number 
+  }) => api.get<{ period: string; users: RemnawaveUser[] }>('/remnawave/stats/top-users', { params }),
+  getUserStats: (email: number, period: string) =>
+    api.get<RemnawaveUserDetails>(`/remnawave/stats/user/${email}`, { params: { period } }),
+  getTimeline: (params: { 
+    period: string
+    email?: number
+    server_id?: number 
+  }) => api.get<{ period: string; data: RemnawaveTimelinePoint[] }>('/remnawave/stats/timeline', { params }),
+  
+  // Users cache
+  getUsers: (params?: { search?: string; limit?: number }) =>
+    api.get<{ count: number; users: RemnawaveCachedUser[] }>('/remnawave/users', { params }),
+}
+
 export default api

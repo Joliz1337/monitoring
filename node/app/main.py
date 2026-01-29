@@ -13,10 +13,11 @@ from fastapi import Depends, FastAPI
 
 from app.auth import verify_api_key
 from app.config import get_settings
-from app.routers import haproxy, metrics, traffic, system, ipset
+from app.routers import haproxy, metrics, traffic, system, ipset, remnawave
 from app.security import get_security_manager, SecurityMiddleware
 from app.services.traffic_collector import get_traffic_collector
 from app.services.ipset_manager import get_ipset_manager
+from app.services.xray_log_collector import get_xray_log_collector
 
 logging.basicConfig(
     level=logging.INFO,
@@ -53,9 +54,21 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"IPSet init failed: {e}")
     
+    # Xray log collector (for Remnawave nodes)
+    xray_collector = get_xray_log_collector()
+    try:
+        await xray_collector.start()
+        logger.info("Xray log collector started")
+    except Exception as e:
+        logger.warning(f"Xray log collector init failed (remnanode may not be present): {e}")
+    
     logger.info("Server ready")
     yield
     
+    try:
+        await xray_collector.stop()
+    except Exception:
+        pass
     try:
         await traffic_collector.stop()
     except Exception:
@@ -84,6 +97,7 @@ app.include_router(haproxy.router, dependencies=[Depends(verify_api_key)])
 app.include_router(traffic.router, dependencies=[Depends(verify_api_key)])
 app.include_router(system.router, dependencies=[Depends(verify_api_key)])
 app.include_router(ipset.router, dependencies=[Depends(verify_api_key)])
+app.include_router(remnawave.router, dependencies=[Depends(verify_api_key)])
 
 @app.get("/health")
 async def health_check():

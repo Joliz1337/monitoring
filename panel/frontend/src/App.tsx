@@ -16,6 +16,7 @@ import Servers from './pages/Servers'
 import Updates from './pages/Updates'
 import BulkActions from './pages/BulkActions'
 import Blocklist from './pages/Blocklist'
+import Remnawave from './pages/Remnawave'
 import { isExtEnabled } from './pages/_internal'
 
 const ExtPageLazy = isExtEnabled 
@@ -136,6 +137,7 @@ export default function App() {
         <Route path="servers" element={<Servers />} />
         <Route path="bulk-actions" element={<BulkActions />} />
         <Route path="blocklist" element={<Blocklist />} />
+        <Route path="remnawave" element={<Remnawave />} />
         <Route path="server/:serverId" element={<ServerDetails />} />
         <Route path="server/:serverId/haproxy" element={<HAProxy />} />
         <Route path="server/:serverId/traffic" element={<Traffic />} />

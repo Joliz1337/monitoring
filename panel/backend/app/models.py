@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, Float, BigInteger, Index, ForeignKey
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, Float, BigInteger, Index, ForeignKey, UniqueConstraint
 from sqlalchemy.sql import func
 from app.database import Base
 
@@ -167,3 +167,64 @@ class BlocklistSource(Base):
     ip_count = Column(Integer, default=0)
     error_message = Column(String(500), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+# ==================== Remnawave Integration ====================
+
+class RemnawaveSettings(Base):
+    """Настройки подключения к Remnawave API"""
+    __tablename__ = "remnawave_settings"
+    
+    id = Column(Integer, primary_key=True)
+    api_url = Column(String(500), nullable=True)  # URL Remnawave Panel API
+    api_token = Column(String(500), nullable=True)  # API ключ
+    cookie_secret = Column(String(500), nullable=True)  # Формат: name:value для Nginx auth
+    enabled = Column(Boolean, default=False)
+    collection_interval = Column(Integer, default=60)  # секунды между сборами
+
+
+class RemnawaveNode(Base):
+    """Связь server_id с Remnawave мониторингом"""
+    __tablename__ = "remnawave_nodes"
+    
+    id = Column(Integer, primary_key=True)
+    server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), nullable=False, unique=True)
+    enabled = Column(Boolean, default=True)
+    last_collected = Column(DateTime(timezone=True), nullable=True)
+    last_error = Column(String(500), nullable=True)
+
+
+class XrayVisitStats(Base):
+    """Агрегированная статистика посещений Xray"""
+    __tablename__ = "xray_visit_stats"
+    
+    id = Column(Integer, primary_key=True)
+    server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), nullable=False)
+    period_start = Column(DateTime(timezone=True), nullable=False)  # Начало часа
+    period_type = Column(String(10), nullable=False)  # 'hour' или 'day'
+    destination = Column(String(500), nullable=False)  # Хост или IP:port
+    destination_domain = Column(String(500), nullable=True)  # Резолвленный домен (если IP)
+    email = Column(Integer, nullable=False)  # User ID в Remnawave
+    visit_count = Column(Integer, default=0)  # Количество посещений
+    
+    __table_args__ = (
+        UniqueConstraint('server_id', 'period_start', 'period_type', 'destination', 'email', 
+                        name='uq_xray_stats_unique'),
+        Index('idx_xray_stats_server_period', 'server_id', 'period_type', 'period_start'),
+        Index('idx_xray_stats_email', 'email'),
+        Index('idx_xray_stats_destination', 'destination'),
+        Index('idx_xray_stats_period_start', 'period_start'),
+    )
+
+
+class RemnawaveUserCache(Base):
+    """Кеш пользователей Remnawave для отображения имён"""
+    __tablename__ = "remnawave_user_cache"
+    
+    id = Column(Integer, primary_key=True)
+    email = Column(Integer, unique=True, nullable=False, index=True)  # ID пользователя (email field в логах)
+    uuid = Column(String(100), nullable=True)  # UUID пользователя в Remnawave
+    username = Column(String(200), nullable=True)
+    telegram_id = Column(BigInteger, nullable=True)
+    status = Column(String(50), nullable=True)  # ACTIVE/DISABLED/LIMITED/EXPIRED
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())

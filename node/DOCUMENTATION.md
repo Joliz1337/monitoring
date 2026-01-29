@@ -10,6 +10,7 @@ API агент для сбора метрик сервера, отслежива
 - **Firewall** — управление UFW через API
 - **IPSet Blocklist** — блокировка IP/CIDR через ipset (постоянный и временный списки)
 - **Терминал** — выполнение произвольных команд на хосте
+- **Remnawave** — сбор статистики посещений из логов Xray (remnanode)
 
 ## Быстрый старт
 
@@ -240,6 +241,36 @@ data: {"message": "error description"}
 | GET | /api/haproxy/certs/cron/status | Статус автообновления |
 | POST | /api/haproxy/certs/cron/enable | Включить автообновление |
 | POST | /api/haproxy/certs/cron/disable | Выключить автообновление |
+
+### Remnawave (Xray Logs)
+
+Сбор статистики посещений из логов Xray на нодах с Remnawave Panel.
+
+| Метод | Endpoint | Описание |
+|-------|----------|----------|
+| GET | /api/remnawave/status | Статус коллектора (available, running, entries_collected) |
+| POST | /api/remnawave/stats/collect | Забрать накопленные данные и очистить память |
+
+**Принцип работы:**
+- Сервис `XrayLogCollector` запускается автоматически при старте ноды
+- Читает логи через `docker exec remnanode tail -f /var/log/supervisor/xray.out.log`
+- Парсит строки и агрегирует статистику в памяти (destination + email → count)
+- При вызове `/collect` отдаёт данные и очищает память
+
+**Формат ответа `/collect`:**
+```json
+{
+  "collected_at": "2026-01-29T17:10:00Z",
+  "period_start": "2026-01-29T17:00:00Z",
+  "entries_count": 1234,
+  "stats": [
+    {"destination": "google.com:443", "email": 4385, "count": 15},
+    {"destination": "tiktok.com:443", "email": 4879, "count": 8}
+  ]
+}
+```
+
+Нода **не хранит данные постоянно** — только в памяти между сборами. Если контейнер `remnanode` не найден, коллектор ожидает и проверяет каждые 30 секунд.
 
 ### IPSet Blocklist
 
