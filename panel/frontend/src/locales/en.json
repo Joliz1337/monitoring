@@ -605,6 +605,8 @@
     "next_collect_in": "Next collection in",
     "select_all": "Select all",
     "deselect_all": "Deselect all",
-    "save_nodes": "Save nodes"
+    "save_nodes": "Save nodes",
+    "no_results": "No results found",
+    "ip_info": "IP/Domain Info"
   }
 }
