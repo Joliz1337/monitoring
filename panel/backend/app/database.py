@@ -56,6 +56,14 @@ async def run_migrations(conn):
     ))
     if not result.fetchone():
         logger.info("Table aggregated_metrics will be created by create_all")
+    
+    # Add per_cpu_percent column to metrics_snapshots table
+    result = await conn.execute(text("PRAGMA table_info(metrics_snapshots)"))
+    snapshot_columns = {row[1] for row in result.fetchall()}
+    
+    if "per_cpu_percent" not in snapshot_columns:
+        await conn.execute(text("ALTER TABLE metrics_snapshots ADD COLUMN per_cpu_percent TEXT"))
+        logger.info("Added column: metrics_snapshots.per_cpu_percent")
 
 
 async def init_db():
