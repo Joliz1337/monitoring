@@ -17,7 +17,6 @@ from app.routers import haproxy, metrics, traffic, system, ipset, remnawave
 from app.security import get_security_manager, SecurityMiddleware
 from app.services.traffic_collector import get_traffic_collector
 from app.services.ipset_manager import get_ipset_manager
-from app.services.xray_log_collector import get_xray_log_collector
 
 logging.basicConfig(
     level=logging.INFO,
@@ -54,19 +53,17 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"IPSet init failed: {e}")
     
-    # Xray log collector (for Remnawave nodes)
-    xray_collector = get_xray_log_collector()
-    try:
-        await xray_collector.start()
-        logger.info("Xray log collector started")
-    except Exception as e:
-        logger.warning(f"Xray log collector init failed (remnanode may not be present): {e}")
+    # Xray log collector starts lazily on first request (not all nodes need it)
     
     logger.info("Server ready")
     yield
     
+    # Stop Xray collector if it was started
+    from app.services.xray_log_collector import get_xray_log_collector
     try:
-        await xray_collector.stop()
+        collector = get_xray_log_collector()
+        if collector._running:
+            await collector.stop()
     except Exception:
         pass
     try:

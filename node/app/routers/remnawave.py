@@ -1,4 +1,7 @@
-"""Remnawave Xray log statistics API endpoints."""
+"""Remnawave Xray log statistics API endpoints.
+
+Collector starts lazily on first /stats/collect call from panel.
+"""
 
 from fastapi import APIRouter
 
@@ -20,6 +23,7 @@ async def collect_stats():
     Collect accumulated Xray statistics and clear memory.
     
     Called by the panel periodically to fetch stats.
+    Starts collector on first call if not running.
     After this call, the node's memory is cleared.
     
     Returns:
@@ -29,4 +33,9 @@ async def collect_stats():
         stats: List of {destination, email, count} aggregated visits
     """
     collector = get_xray_log_collector()
+    
+    # Lazy start: collector starts on first request from panel
+    if not collector._running:
+        await collector.start()
+    
     return collector.collect_and_clear()

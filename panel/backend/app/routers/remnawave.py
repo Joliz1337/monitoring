@@ -303,6 +303,14 @@ async def update_node(
 
 # === Statistics Endpoints ===
 
+async def _get_active_server_ids(db: AsyncSession) -> list[int]:
+    """Get list of active server IDs for filtering statistics."""
+    result = await db.execute(
+        select(Server.id).where(Server.is_active == True)
+    )
+    return [row[0] for row in result.fetchall()]
+
+
 def _get_time_filter(period: str) -> datetime:
     """Get datetime filter for period."""
     now = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -334,13 +342,26 @@ async def get_stats_summary(
     
     For period="all": uses cumulative counters (XrayVisitStats)
     For time-limited: uses hourly stats (XrayHourlyStats)
+    Only includes data from active servers.
     """
+    # Get active servers for filtering
+    active_server_ids = await _get_active_server_ids(db)
+    if not active_server_ids:
+        return {
+            "period": period,
+            "total_visits": 0,
+            "unique_users": 0,
+            "unique_destinations": 0
+        }
+    
     if period == "all":
         # Use cumulative counters
-        conditions = []
+        conditions = [XrayVisitStats.server_id.in_(active_server_ids)]
         
         if server_ids:
             ids = [int(x.strip()) for x in server_ids.split(",") if x.strip().isdigit()]
+            # Intersect with active servers
+            ids = [i for i in ids if i in active_server_ids]
             if ids:
                 conditions.append(XrayVisitStats.server_id.in_(ids))
         
@@ -367,10 +388,14 @@ async def get_stats_summary(
     else:
         # Use hourly stats
         start_time = _get_time_filter(period)
-        conditions = [XrayHourlyStats.hour >= start_time]
+        conditions = [
+            XrayHourlyStats.hour >= start_time,
+            XrayHourlyStats.server_id.in_(active_server_ids)
+        ]
         
         if server_ids:
             ids = [int(x.strip()) for x in server_ids.split(",") if x.strip().isdigit()]
+            ids = [i for i in ids if i in active_server_ids]
             if ids:
                 conditions.append(XrayHourlyStats.server_id.in_(ids))
         
@@ -403,8 +428,13 @@ async def get_top_destinations(
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    """Get top visited destinations (all time or filtered by last_seen)"""
-    conditions = []
+    """Get top visited destinations (all time or filtered by last_seen).
+    Only includes data from active servers."""
+    active_server_ids = await _get_active_server_ids(db)
+    if not active_server_ids:
+        return {"period": period, "destinations": []}
+    
+    conditions = [XrayVisitStats.server_id.in_(active_server_ids)]
     
     if period != "all":
         start_time = _get_time_filter(period)
@@ -412,7 +442,7 @@ async def get_top_destinations(
     
     if email:
         conditions.append(XrayVisitStats.email == email)
-    if server_id:
+    if server_id and server_id in active_server_ids:
         conditions.append(XrayVisitStats.server_id == server_id)
     
     query = select(
@@ -450,14 +480,18 @@ async def get_top_users(
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    """Get top active users"""
-    conditions = []
+    """Get top active users. Only includes data from active servers."""
+    active_server_ids = await _get_active_server_ids(db)
+    if not active_server_ids:
+        return {"period": period, "users": []}
+    
+    conditions = [XrayVisitStats.server_id.in_(active_server_ids)]
     
     if period != "all":
         start_time = _get_time_filter(period)
         conditions.append(XrayVisitStats.last_seen >= start_time)
     
-    if server_id:
+    if server_id and server_id in active_server_ids:
         conditions.append(XrayVisitStats.server_id == server_id)
     
     query = select(
@@ -512,8 +546,22 @@ async def get_user_stats(
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    """Get detailed statistics for a specific user"""
-    conditions = [XrayVisitStats.email == email]
+    """Get detailed statistics for a specific user. Only includes data from active servers."""
+    active_server_ids = await _get_active_server_ids(db)
+    if not active_server_ids:
+        return {
+            "email": email,
+            "username": None,
+            "status": None,
+            "period": period,
+            "total_visits": 0,
+            "destinations": []
+        }
+    
+    conditions = [
+        XrayVisitStats.email == email,
+        XrayVisitStats.server_id.in_(active_server_ids)
+    ]
     
     if period != "all":
         start_time = _get_time_filter(period)
@@ -573,8 +621,20 @@ async def get_destination_users(
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    """Get users who visited a specific destination"""
-    conditions = [XrayVisitStats.destination == destination]
+    """Get users who visited a specific destination. Only includes data from active servers."""
+    active_server_ids = await _get_active_server_ids(db)
+    if not active_server_ids:
+        return {
+            "destination": destination,
+            "period": period,
+            "total_visits": 0,
+            "users": []
+        }
+    
+    conditions = [
+        XrayVisitStats.destination == destination,
+        XrayVisitStats.server_id.in_(active_server_ids)
+    ]
     
     if period != "all":
         start_time = _get_time_filter(period)
@@ -641,12 +701,20 @@ async def get_timeline(
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    """Get timeline of visits for charting (from XrayHourlyStats)"""
+    """Get timeline of visits for charting (from XrayHourlyStats).
+    Only includes data from active servers."""
+    active_server_ids = await _get_active_server_ids(db)
+    if not active_server_ids:
+        return {"period": period, "data": []}
+    
     start_time = _get_time_filter(period)
     
-    conditions = [XrayHourlyStats.hour >= start_time]
+    conditions = [
+        XrayHourlyStats.hour >= start_time,
+        XrayHourlyStats.server_id.in_(active_server_ids)
+    ]
     
-    if server_id:
+    if server_id and server_id in active_server_ids:
         conditions.append(XrayHourlyStats.server_id == server_id)
     
     result = await db.execute(
