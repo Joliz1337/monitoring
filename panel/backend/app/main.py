@@ -16,7 +16,7 @@ from app.security import SecurityMiddleware
 from app.models import (  # noqa: F401
     Server, MetricsSnapshot, AggregatedMetrics, PanelSettings, FailedLogin, 
     BlocklistRule, BlocklistSource, RemnawaveSettings, RemnawaveNode, 
-    XrayVisitStats, RemnawaveUserCache
+    XrayVisitStats, XrayHourlyStats, RemnawaveUserCache
 )
 
 settings = get_settings()

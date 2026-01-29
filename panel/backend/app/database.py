@@ -64,6 +64,30 @@ async def run_migrations(conn):
     if "per_cpu_percent" not in snapshot_columns:
         await conn.execute(text("ALTER TABLE metrics_snapshots ADD COLUMN per_cpu_percent TEXT"))
         logger.info("Added column: metrics_snapshots.per_cpu_percent")
+    
+    # Migration: Remnawave xray_visit_stats schema change (v2)
+    # Old schema had: period_start, period_type columns
+    # New schema has: first_seen, last_seen columns (cumulative counters)
+    result = await conn.execute(text("PRAGMA table_info(xray_visit_stats)"))
+    xray_columns = {row[1] for row in result.fetchall()}
+    
+    if xray_columns and "period_start" in xray_columns:
+        # Old schema detected - drop and recreate
+        logger.info("Migrating xray_visit_stats to new schema (dropping old data)...")
+        await conn.execute(text("DROP TABLE IF EXISTS xray_visit_stats"))
+        logger.info("Dropped old xray_visit_stats table")
+    elif xray_columns and "first_seen" not in xray_columns:
+        # Table exists but missing new columns - drop and recreate
+        logger.info("xray_visit_stats missing required columns, recreating...")
+        await conn.execute(text("DROP TABLE IF EXISTS xray_visit_stats"))
+        logger.info("Dropped incompatible xray_visit_stats table")
+    
+    # Check if xray_hourly_stats table exists (new table)
+    result = await conn.execute(text(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='xray_hourly_stats'"
+    ))
+    if not result.fetchone():
+        logger.info("Table xray_hourly_stats will be created by create_all")
 
 
 async def init_db():
