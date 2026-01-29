@@ -354,7 +354,7 @@ export default function Remnawave() {
                 <MultiLineChart
                   series={timelineSeries}
                   height={250}
-                  showLegend={false}
+                  period={period}
                 />
               </div>
             )}
