@@ -31,7 +31,8 @@ import {
 } from '../api/client'
 import { useTranslation } from 'react-i18next'
 import PeriodSelector from '../components/ui/PeriodSelector'
-import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip, Legend } from 'recharts'
+import ReactApexChart from 'react-apexcharts'
+import { ApexOptions } from 'apexcharts'
 
 const containerVariants = {
   hidden: { opacity: 0 },
@@ -341,12 +342,68 @@ export default function Remnawave() {
   
   // Pie chart data and colors
   const pieColors = ['#8b5cf6', '#6366f1', '#3b82f6', '#0ea5e9', '#14b8a6', '#22c55e', '#84cc16', '#eab308', '#f97316', '#ef4444']
-  const pieData = topDestinations.slice(0, 10).map((dest, idx) => ({
-    name: dest.domain || dest.destination.split(':')[0],
-    value: dest.visits,
-    fullDestination: dest.destination,
-    fill: pieColors[idx % pieColors.length]
-  }))
+  const pieLabels = topDestinations.slice(0, 10).map(dest => {
+    const name = dest.domain || dest.destination.split(':')[0]
+    return name.length > 20 ? name.slice(0, 20) + '...' : name
+  })
+  const pieValues = topDestinations.slice(0, 10).map(dest => dest.visits)
+  
+  const pieChartOptions: ApexOptions = {
+    chart: {
+      type: 'donut',
+      background: 'transparent',
+    },
+    labels: pieLabels,
+    colors: pieColors,
+    legend: {
+      position: 'right',
+      labels: {
+        colors: '#e2e8f0',
+      },
+    },
+    dataLabels: {
+      enabled: true,
+      formatter: (val: number) => `${val.toFixed(0)}%`,
+      style: {
+        fontSize: '11px',
+        colors: ['#fff'],
+      },
+      dropShadow: {
+        enabled: false,
+      },
+    },
+    plotOptions: {
+      pie: {
+        donut: {
+          size: '55%',
+          labels: {
+            show: true,
+            total: {
+              show: true,
+              label: t('remnawave.total_visits'),
+              color: '#94a3b8',
+              formatter: () => pieValues.reduce((a, b) => a + b, 0).toLocaleString(),
+            },
+            value: {
+              color: '#e2e8f0',
+              fontSize: '18px',
+              fontWeight: 600,
+            },
+          },
+        },
+      },
+    },
+    stroke: {
+      show: false,
+    },
+    tooltip: {
+      enabled: true,
+      theme: 'dark',
+      y: {
+        formatter: (val: number) => val.toLocaleString() + ' ' + t('remnawave.visits'),
+      },
+    },
+  }
   
   // Tabs
   const tabs: { id: TabType; label: string; icon: React.ReactNode }[] = [
@@ -470,38 +527,16 @@ export default function Remnawave() {
             </div>
             
             {/* Top Sites Pie Chart */}
-            {pieData.length > 0 && (
+            {pieValues.length > 0 && (
               <div className="p-6 rounded-xl bg-dark-800/50 border border-dark-700/50">
                 <h3 className="text-lg font-semibold text-dark-100 mb-4">{t('remnawave.top_sites_chart')}</h3>
                 <div className="h-[300px]">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <PieChart>
-                      <Pie
-                        data={pieData}
-                        cx="50%"
-                        cy="50%"
-                        innerRadius={60}
-                        outerRadius={100}
-                        paddingAngle={2}
-                        dataKey="value"
-                        label={({ name, percent }) => `${name.length > 15 ? name.slice(0, 15) + '...' : name} (${(percent * 100).toFixed(0)}%)`}
-                        labelLine={{ stroke: '#64748b', strokeWidth: 1 }}
-                      >
-                        {pieData.map((entry, index) => (
-                          <Cell key={`cell-${index}`} fill={entry.fill} />
-                        ))}
-                      </Pie>
-                      <Tooltip
-                        contentStyle={{
-                          backgroundColor: '#1e293b',
-                          border: '1px solid #334155',
-                          borderRadius: '8px',
-                          color: '#e2e8f0'
-                        }}
-                        formatter={(value: number, name: string) => [value.toLocaleString() + ' ' + t('remnawave.visits'), name]}
-                      />
-                    </PieChart>
-                  </ResponsiveContainer>
+                  <ReactApexChart
+                    options={pieChartOptions}
+                    series={pieValues}
+                    type="donut"
+                    height={280}
+                  />
                 </div>
               </div>
             )}
