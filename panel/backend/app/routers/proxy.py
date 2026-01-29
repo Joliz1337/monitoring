@@ -1032,3 +1032,112 @@ async def apply_node_optimizations(
         json_data=apply_data,
         timeout=60.0
     )
+
+
+# ==================== IPSet Management ====================
+
+@router.get("/{server_id}/ipset/status")
+async def get_ipset_status(
+    server_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Get ipset status from node"""
+    server = await get_server_by_id(server_id, db)
+    return await proxy_request(server, "/api/ipset/status")
+
+
+@router.get("/{server_id}/ipset/list/{set_type}")
+async def get_ipset_list(
+    server_id: int,
+    set_type: str,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Get IPs from ipset list (permanent or temp)"""
+    server = await get_server_by_id(server_id, db)
+    return await proxy_request(server, f"/api/ipset/list/{set_type}")
+
+
+@router.post("/{server_id}/ipset/add")
+async def add_to_ipset(
+    server_id: int,
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Add IP/CIDR to ipset"""
+    server = await get_server_by_id(server_id, db)
+    return await proxy_request(server, "/api/ipset/add", method="POST", json_data=data)
+
+
+@router.post("/{server_id}/ipset/bulk-add")
+async def bulk_add_to_ipset(
+    server_id: int,
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Add multiple IPs to ipset"""
+    server = await get_server_by_id(server_id, db)
+    return await proxy_request(server, "/api/ipset/bulk-add", method="POST", json_data=data, timeout=120.0)
+
+
+@router.delete("/{server_id}/ipset/remove")
+async def remove_from_ipset(
+    server_id: int,
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Remove IP/CIDR from ipset"""
+    server = await get_server_by_id(server_id, db)
+    return await proxy_request(server, "/api/ipset/remove", method="DELETE", json_data=data)
+
+
+@router.post("/{server_id}/ipset/bulk-remove")
+async def bulk_remove_from_ipset(
+    server_id: int,
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Remove multiple IPs from ipset"""
+    server = await get_server_by_id(server_id, db)
+    return await proxy_request(server, "/api/ipset/bulk-remove", method="POST", json_data=data, timeout=120.0)
+
+
+@router.post("/{server_id}/ipset/clear/{set_type}")
+async def clear_ipset(
+    server_id: int,
+    set_type: str,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Clear all IPs from ipset list"""
+    server = await get_server_by_id(server_id, db)
+    return await proxy_request(server, f"/api/ipset/clear/{set_type}", method="POST")
+
+
+@router.put("/{server_id}/ipset/timeout")
+async def set_ipset_timeout(
+    server_id: int,
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Set timeout for temp ipset list"""
+    server = await get_server_by_id(server_id, db)
+    return await proxy_request(server, "/api/ipset/timeout", method="PUT", json_data=data)
+
+
+@router.post("/{server_id}/ipset/sync")
+async def sync_ipset(
+    server_id: int,
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Sync (replace) entire ipset list"""
+    server = await get_server_by_id(server_id, db)
+    return await proxy_request(server, "/api/ipset/sync", method="POST", json_data=data, timeout=120.0)

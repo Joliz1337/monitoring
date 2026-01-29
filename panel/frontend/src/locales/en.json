@@ -48,7 +48,8 @@
     "value": "Value",
     "server": "Server",
     "updates": "Updates",
-    "optional": "optional"
+    "optional": "optional",
+    "blocklist": "IP Blocklist"
   },
   "units": {
     "bps": "bit/s",
@@ -513,5 +514,35 @@
     "server_unavailable": "Server unavailable",
     "data_may_be_outdated": "Data may be outdated",
     "stale_data": "Stale data"
+  },
+  "blocklist": {
+    "title": "IP/CIDR Blocklist",
+    "subtitle": "Manage IP address blocking via ipset",
+    "global_rules": "Global Rules",
+    "server_rules": "Server Rules",
+    "auto_lists": "Auto Lists",
+    "add_global": "Add Global Rules",
+    "add_global_desc": "These IP/CIDR will be blocked on all servers",
+    "add_server_rule": "Add Server Rule",
+    "ip_placeholder": "Enter IP or CIDR (one per line)\n192.168.1.1\n10.0.0.0/8",
+    "add": "Add",
+    "current_rules": "Current Rules",
+    "rules": "rules",
+    "no_rules": "No global rules",
+    "no_server_rules": "No rules for this server",
+    "select_server": "Select Server",
+    "server_rules_info": "Local: {{local}}, Global: {{global}}",
+    "server_rules_only": "Rules only for this server",
+    "sources": "Sources",
+    "default": "Default",
+    "last_updated": "Updated",
+    "refresh": "Refresh",
+    "refresh_all": "Refresh All",
+    "add_source": "Add Source",
+    "confirm_delete_source": "Delete this source?",
+    "settings": "Blocklist Settings",
+    "temp_timeout": "Temporary block timeout",
+    "temp_timeout_desc": "Time in seconds for temporary list (default 300)",
+    "sync_all": "Sync All"
   }
 }

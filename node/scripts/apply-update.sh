@@ -123,6 +123,29 @@ install_native_haproxy() {
     fi
 }
 
+install_ipset() {
+    if command -v ipset &>/dev/null; then
+        log_success "ipset already installed"
+        return 0
+    fi
+    
+    log_info "Installing ipset (required for IP blocklist)..."
+    
+    # Wait for apt lock if needed
+    if ! wait_for_apt_lock; then
+        log_error "Cannot acquire apt lock"
+        return 1
+    fi
+    
+    if timeout 60 apt-get install -y -qq ipset 2>&1 | tail -5; then
+        log_success "ipset installed"
+        return 0
+    else
+        log_warn "Failed to install ipset - IP blocklist may not work"
+        return 1
+    fi
+}
+
 migrate_haproxy_config_from_volume() {
     # Check for config in Docker volume (old container setup)
     local volume_config="/var/lib/docker/volumes/monitoring-node_haproxy_config/_data/haproxy.cfg"
@@ -244,6 +267,9 @@ if check_haproxy_container; then
 else
     ensure_native_haproxy
 fi
+
+# Ensure ipset is installed (required for IP blocklist via nsenter)
+install_ipset
 
 # Stop containers
 log_info "Stopping API containers..."

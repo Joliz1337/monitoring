@@ -13,9 +13,10 @@ from fastapi import Depends, FastAPI
 
 from app.auth import verify_api_key
 from app.config import get_settings
-from app.routers import haproxy, metrics, traffic, system
+from app.routers import haproxy, metrics, traffic, system, ipset
 from app.security import get_security_manager, SecurityMiddleware
 from app.services.traffic_collector import get_traffic_collector
+from app.services.ipset_manager import get_ipset_manager
 
 logging.basicConfig(
     level=logging.INFO,
@@ -43,6 +44,14 @@ async def lifespan(app: FastAPI):
         logger.info("Traffic collector started")
     except Exception as e:
         logger.warning(f"Traffic collector init failed: {e}")
+    
+    # IPSet manager initialization
+    ipset_manager = get_ipset_manager()
+    try:
+        success, msg = ipset_manager.init_sets()
+        logger.info(f"IPSet initialization: {msg}")
+    except Exception as e:
+        logger.warning(f"IPSet init failed: {e}")
     
     logger.info("Server ready")
     yield
@@ -74,6 +83,7 @@ app.include_router(metrics.router, dependencies=[Depends(verify_api_key)])
 app.include_router(haproxy.router, dependencies=[Depends(verify_api_key)])
 app.include_router(traffic.router, dependencies=[Depends(verify_api_key)])
 app.include_router(system.router, dependencies=[Depends(verify_api_key)])
+app.include_router(ipset.router, dependencies=[Depends(verify_api_key)])
 
 @app.get("/health")
 async def health_check():

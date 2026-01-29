@@ -7,11 +7,12 @@ from sqlalchemy import delete
 
 from app.database import init_db, async_session
 from app.config import get_settings
-from app.routers import servers, auth_router, proxy, settings as settings_router, system, bulk_actions
+from app.routers import servers, auth_router, proxy, settings as settings_router, system, bulk_actions, blocklist
 from app.services.metrics_collector import start_collector, stop_collector
+from app.services.blocklist_manager import get_blocklist_manager
 from app.security import SecurityMiddleware
 # Import all models to register them with Base.metadata
-from app.models import Server, MetricsSnapshot, AggregatedMetrics, PanelSettings, FailedLogin  # noqa: F401
+from app.models import Server, MetricsSnapshot, AggregatedMetrics, PanelSettings, FailedLogin, BlocklistRule, BlocklistSource  # noqa: F401
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -45,7 +46,14 @@ async def lifespan(app: FastAPI):
         pass
     
     await start_collector()
+    
+    # Start blocklist manager for auto-updates
+    blocklist_manager = get_blocklist_manager()
+    await blocklist_manager.start()
+    
     yield
+    
+    await blocklist_manager.stop()
     await stop_collector()
 
 
@@ -89,6 +97,7 @@ app.include_router(proxy.router)
 app.include_router(settings_router.router)
 app.include_router(system.router)
 app.include_router(bulk_actions.router)
+app.include_router(blocklist.router)
 
 try:
     from app.routers._internal import router as ext_router

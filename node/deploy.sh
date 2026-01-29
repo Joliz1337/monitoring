@@ -470,6 +470,13 @@ setup_firewall() {
         run_quiet "installing ufw" apt-get install -y -qq ufw
     fi
     
+    # Check if ipset is installed (required for IP blocklist via nsenter from container)
+    if ! command -v ipset &> /dev/null; then
+        log_info "Installing ipset..."
+        run_quiet "installing ipset" apt-get install -y -qq ipset
+        log_success "ipset installed"
+    fi
+    
     local ufw_was_active=false
     if ufw status 2>/dev/null | grep -q "Status: active"; then
         ufw_was_active=true

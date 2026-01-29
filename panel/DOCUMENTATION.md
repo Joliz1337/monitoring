@@ -9,6 +9,7 @@
 - **HAProxy** — управление правилами, сертификатами, firewall (UFW)
 - **Traffic** — статистика по интерфейсам и портам, TCP/UDP соединения
 - **Bulk Actions** — массовое создание/удаление правил HAProxy, портов трафика и firewall
+- **IP Blocklist** — блокировка IP/CIDR через ipset с автообновлением списков из GitHub
 
 ## Быстрый старт
 
@@ -191,6 +192,54 @@ panel/
 
 Все bulk-эндпоинты принимают `server_ids: list[int]` и возвращают результат для каждого сервера.
 При удалении выполняется проверка наличия правила перед удалением.
+
+### IP Blocklist
+
+Блокировка IP/CIDR через ipset. Поддержка глобальных правил (для всех серверов), правил по серверам и автоматических списков из GitHub.
+
+**Глобальные правила:**
+
+| Метод | Endpoint | Описание |
+|-------|----------|----------|
+| GET | /api/blocklist/global | Все глобальные правила |
+| POST | /api/blocklist/global | Добавить глобальное правило |
+| POST | /api/blocklist/global/bulk | Массовое добавление |
+| DELETE | /api/blocklist/global/{id} | Удалить правило |
+
+**Правила по серверам:**
+
+| Метод | Endpoint | Описание |
+|-------|----------|----------|
+| GET | /api/blocklist/server/{id} | Правила сервера |
+| POST | /api/blocklist/server/{id} | Добавить правило для сервера |
+| DELETE | /api/blocklist/server/{id}/{rule_id} | Удалить правило |
+| GET | /api/blocklist/server/{id}/status | Статус ipset на ноде |
+
+**Автоматические списки:**
+
+| Метод | Endpoint | Описание |
+|-------|----------|----------|
+| GET | /api/blocklist/sources | Все источники |
+| POST | /api/blocklist/sources | Добавить источник |
+| PUT | /api/blocklist/sources/{id} | Обновить (вкл/выкл) |
+| DELETE | /api/blocklist/sources/{id} | Удалить источник |
+| POST | /api/blocklist/sources/{id}/refresh | Обновить источник |
+| POST | /api/blocklist/sources/refresh-all | Обновить все |
+
+**Настройки и синхронизация:**
+
+| Метод | Endpoint | Описание |
+|-------|----------|----------|
+| GET | /api/blocklist/settings | Текущие настройки |
+| PUT | /api/blocklist/settings | Обновить настройки |
+| POST | /api/blocklist/sync | Синхронизировать все ноды |
+| POST | /api/blocklist/sync/{id} | Синхронизировать одну ноду |
+
+**Дефолтные списки (включены по умолчанию):**
+- AntiScanner: `https://raw.githubusercontent.com/shadow-netlab/traffic-guard-lists/refs/heads/main/public/antiscanner.list`
+- Government Networks: `https://raw.githubusercontent.com/shadow-netlab/traffic-guard-lists/refs/heads/main/public/government_networks.list`
+
+Списки автоматически обновляются каждые 24 часа. При обнаружении изменений блоклисты синхронизируются со всеми активными нодами.
 
 ### Выполнение команд на нодах
 

@@ -491,6 +491,71 @@ export const settingsApi = {
   set: (key: string, value: string) => api.put(`/settings/${key}`, { value }),
 }
 
+// Blocklist types
+export interface BlocklistRule {
+  id: number
+  ip_cidr: string
+  server_id: number | null
+  is_permanent: boolean
+  comment: string | null
+  source: string
+  created_at: string
+}
+
+export interface BlocklistSource {
+  id: number
+  name: string
+  url: string
+  enabled: boolean
+  is_default: boolean
+  last_updated: string | null
+  ip_count: number
+  error_message: string | null
+}
+
+export interface BlocklistSettings {
+  temp_timeout: number
+  auto_update_enabled: boolean
+  auto_update_interval: number
+}
+
+export const blocklistApi = {
+  // Global rules
+  getGlobal: () => api.get<{ count: number; rules: BlocklistRule[] }>('/blocklist/global'),
+  addGlobal: (data: { ip_cidr: string; is_permanent?: boolean; comment?: string }) =>
+    api.post('/blocklist/global', data),
+  addGlobalBulk: (ips: string[], is_permanent: boolean = true) =>
+    api.post('/blocklist/global/bulk', { ips, is_permanent }),
+  deleteGlobal: (id: number) => api.delete(`/blocklist/global/${id}`),
+  
+  // Server rules
+  getServer: (serverId: number) => 
+    api.get<{ server_id: number; count: number; global_count: number; rules: BlocklistRule[] }>(`/blocklist/server/${serverId}`),
+  addServer: (serverId: number, data: { ip_cidr: string; is_permanent?: boolean; comment?: string }) =>
+    api.post(`/blocklist/server/${serverId}`, data),
+  deleteServer: (serverId: number, ruleId: number) =>
+    api.delete(`/blocklist/server/${serverId}/${ruleId}`),
+  getServerStatus: (serverId: number) =>
+    api.get(`/blocklist/server/${serverId}/status`),
+  
+  // Sources
+  getSources: () => api.get<{ count: number; sources: BlocklistSource[] }>('/blocklist/sources'),
+  addSource: (data: { name: string; url: string }) =>
+    api.post('/blocklist/sources', data),
+  updateSource: (id: number, data: { enabled?: boolean; name?: string }) =>
+    api.put(`/blocklist/sources/${id}`, data),
+  deleteSource: (id: number) => api.delete(`/blocklist/sources/${id}`),
+  refreshSource: (id: number) => api.post(`/blocklist/sources/${id}/refresh`),
+  refreshAll: () => api.post('/blocklist/sources/refresh-all'),
+  
+  // Settings & sync
+  getSettings: () => api.get<{ settings: BlocklistSettings }>('/blocklist/settings'),
+  updateSettings: (data: { temp_timeout?: number; auto_update_enabled?: boolean; auto_update_interval?: number }) =>
+    api.put('/blocklist/settings', data),
+  sync: () => api.post('/blocklist/sync'),
+  syncServer: (serverId: number) => api.post(`/blocklist/sync/${serverId}`),
+}
+
 export interface NodeOptimizationsInfo {
   installed: boolean
   version: string | null

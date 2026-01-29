@@ -12,6 +12,7 @@ import {
   Package,
   Layers,
   Search,
+  Shield,
   type LucideIcon
 } from 'lucide-react'
 import { useState } from 'react'
@@ -25,7 +26,8 @@ const iconMap: Record<string, LucideIcon> = {
   Server,
   Settings,
   Package,
-  Layers
+  Layers,
+  Shield
 }
 
 const overlayVariants = {
@@ -61,6 +63,7 @@ export default function Layout() {
     { to: `/${uid}`, icon: LayoutDashboard, label: t('common.dashboard'), end: true },
     { to: `/${uid}/servers`, icon: Server, label: t('common.servers'), end: false },
     { to: `/${uid}/bulk-actions`, icon: Layers, label: t('bulk_actions.title'), end: false },
+    { to: `/${uid}/blocklist`, icon: Shield, label: t('common.blocklist'), end: false },
     { to: `/${uid}/updates`, icon: Package, label: t('common.updates'), end: false },
     { to: `/${uid}/settings`, icon: Settings, label: t('common.settings'), end: false },
   ]

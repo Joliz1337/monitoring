@@ -129,3 +129,38 @@ class FailedLogin(Base):
     attempts = Column(Integer, default=1)
     banned_until = Column(Float, nullable=True)
     last_attempt = Column(Float)
+
+
+class BlocklistRule(Base):
+    """Правило блокировки IP/CIDR"""
+    __tablename__ = "blocklist_rules"
+    
+    id = Column(Integer, primary_key=True)
+    ip_cidr = Column(String(50), nullable=False)
+    server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), nullable=True, index=True)
+    # server_id = NULL означает глобальное правило (для всех серверов)
+    is_permanent = Column(Boolean, default=True)
+    comment = Column(String(200), nullable=True)
+    source = Column(String(50), default="manual")  # manual, auto_list
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    __table_args__ = (
+        Index('idx_blocklist_server', 'server_id'),
+        Index('idx_blocklist_source', 'source'),
+    )
+
+
+class BlocklistSource(Base):
+    """Источник автоматических списков"""
+    __tablename__ = "blocklist_sources"
+    
+    id = Column(Integer, primary_key=True)
+    name = Column(String(100), nullable=False)
+    url = Column(String(500), nullable=False, unique=True)
+    enabled = Column(Boolean, default=True)
+    is_default = Column(Boolean, default=False)
+    last_updated = Column(DateTime(timezone=True), nullable=True)
+    last_hash = Column(String(64), nullable=True)  # SHA256 для проверки изменений
+    ip_count = Column(Integer, default=0)
+    error_message = Column(String(500), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())

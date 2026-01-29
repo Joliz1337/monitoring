@@ -1027,6 +1027,15 @@ install_node() {
         log_success "HAProxy already installed"
     fi
     
+    # Install ipset for IP blocklist management (required on host for nsenter)
+    if ! command -v ipset &>/dev/null; then
+        log_info "Installing ipset..."
+        run_quiet "apt-get install ipset" apt-get install -y -qq ipset
+        log_success "ipset installed"
+    else
+        log_success "ipset already installed"
+    fi
+    
     # Create HAProxy config directory if not exists
     mkdir -p /etc/haproxy
     

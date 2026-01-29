@@ -8,6 +8,7 @@ API агент для сбора метрик сервера, отслежива
 - **Трафик** — история по интерфейсам и портам (SQLite + iptables)
 - **HAProxy** — управление нативным systemd сервисом, конфигом, правилами, сертификатами
 - **Firewall** — управление UFW через API
+- **IPSet Blocklist** — блокировка IP/CIDR через ipset (постоянный и временный списки)
 - **Терминал** — выполнение произвольных команд на хосте
 
 ## Быстрый старт
@@ -239,6 +240,28 @@ data: {"message": "error description"}
 | GET | /api/haproxy/certs/cron/status | Статус автообновления |
 | POST | /api/haproxy/certs/cron/enable | Включить автообновление |
 | POST | /api/haproxy/certs/cron/disable | Выключить автообновление |
+
+### IPSet Blocklist
+
+Блокировка IP/CIDR через ipset. Два списка: `blocklist_permanent` (постоянный) и `blocklist_temp` (временный с таймаутом).
+
+| Метод | Endpoint | Описание |
+|-------|----------|----------|
+| GET | /api/ipset/status | Статус списков (count, timeout) |
+| GET | /api/ipset/list/{set_type} | Получить IP из списка (permanent/temp) |
+| POST | /api/ipset/add | Добавить IP/CIDR |
+| POST | /api/ipset/bulk-add | Массовое добавление |
+| DELETE | /api/ipset/remove | Удалить IP/CIDR |
+| POST | /api/ipset/bulk-remove | Массовое удаление |
+| POST | /api/ipset/clear/{set_type} | Очистить список |
+| PUT | /api/ipset/timeout | Изменить timeout temp списка |
+| POST | /api/ipset/sync | Синхронизация (замена всего списка) |
+
+**Особенности:**
+- Тип ipset: `hash:net` (поддержка IP и CIDR)
+- Правила iptables: `INPUT -m set --match-set blocklist_* src -j DROP`
+- Постоянные правила сохраняются в `/var/lib/monitoring/blocklist.json`
+- При старте ноды: постоянные правила восстанавливаются, временный список пустой
 
 ## Системные оптимизации
 

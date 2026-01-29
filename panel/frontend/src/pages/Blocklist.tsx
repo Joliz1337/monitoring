@@ -1,0 +1,742 @@
+import { useEffect, useState, useCallback } from 'react'
+import { Shield, Plus, Trash2, RefreshCw, Server, Globe, List, Settings2, Loader2, ExternalLink, AlertCircle, Check, X } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
+import { motion, AnimatePresence } from 'framer-motion'
+import { blocklistApi, serversApi, Server as ServerType, BlocklistRule, BlocklistSource } from '../api/client'
+
+type TabType = 'global' | 'servers' | 'sources'
+
+export default function Blocklist() {
+  const { t } = useTranslation()
+  
+  // State
+  const [activeTab, setActiveTab] = useState<TabType>('global')
+  const [loading, setLoading] = useState(true)
+  const [syncing, setSyncing] = useState(false)
+  
+  // Global rules
+  const [globalRules, setGlobalRules] = useState<BlocklistRule[]>([])
+  const [newGlobalIps, setNewGlobalIps] = useState('')
+  const [addingGlobal, setAddingGlobal] = useState(false)
+  
+  // Server rules
+  const [servers, setServers] = useState<ServerType[]>([])
+  const [selectedServerId, setSelectedServerId] = useState<number | null>(null)
+  const [serverRules, setServerRules] = useState<BlocklistRule[]>([])
+  const [newServerIp, setNewServerIp] = useState('')
+  const [addingServer, setAddingServer] = useState(false)
+  const [serverGlobalCount, setServerGlobalCount] = useState(0)
+  
+  // Sources
+  const [sources, setSources] = useState<BlocklistSource[]>([])
+  const [newSourceName, setNewSourceName] = useState('')
+  const [newSourceUrl, setNewSourceUrl] = useState('')
+  const [addingSource, setAddingSource] = useState(false)
+  const [refreshingSource, setRefreshingSource] = useState<number | null>(null)
+  
+  // Settings
+  const [showSettings, setShowSettings] = useState(false)
+  const [tempTimeout, setTempTimeout] = useState(300)
+  const [savingSettings, setSavingSettings] = useState(false)
+  
+  // Fetch data
+  const fetchGlobalRules = useCallback(async () => {
+    try {
+      const response = await blocklistApi.getGlobal()
+      setGlobalRules(response.data.rules)
+    } catch (err) {
+      console.error('Failed to fetch global rules:', err)
+    }
+  }, [])
+  
+  const fetchServers = useCallback(async () => {
+    try {
+      const response = await serversApi.list()
+      setServers(response.data.servers)
+      if (response.data.servers.length > 0 && !selectedServerId) {
+        setSelectedServerId(response.data.servers[0].id)
+      }
+    } catch (err) {
+      console.error('Failed to fetch servers:', err)
+    }
+  }, [selectedServerId])
+  
+  const fetchServerRules = useCallback(async () => {
+    if (!selectedServerId) return
+    try {
+      const response = await blocklistApi.getServer(selectedServerId)
+      setServerRules(response.data.rules)
+      setServerGlobalCount(response.data.global_count)
+    } catch (err) {
+      console.error('Failed to fetch server rules:', err)
+    }
+  }, [selectedServerId])
+  
+  const fetchSources = useCallback(async () => {
+    try {
+      const response = await blocklistApi.getSources()
+      setSources(response.data.sources)
+    } catch (err) {
+      console.error('Failed to fetch sources:', err)
+    }
+  }, [])
+  
+  const fetchSettings = useCallback(async () => {
+    try {
+      const response = await blocklistApi.getSettings()
+      setTempTimeout(response.data.settings.temp_timeout || 300)
+    } catch (err) {
+      console.error('Failed to fetch settings:', err)
+    }
+  }, [])
+  
+  useEffect(() => {
+    const loadData = async () => {
+      setLoading(true)
+      await Promise.all([
+        fetchGlobalRules(),
+        fetchServers(),
+        fetchSources(),
+        fetchSettings()
+      ])
+      setLoading(false)
+    }
+    loadData()
+  }, [fetchGlobalRules, fetchServers, fetchSources, fetchSettings])
+  
+  useEffect(() => {
+    if (selectedServerId) {
+      fetchServerRules()
+    }
+  }, [selectedServerId, fetchServerRules])
+  
+  // Handlers
+  const handleAddGlobalRules = async () => {
+    if (!newGlobalIps.trim()) return
+    
+    setAddingGlobal(true)
+    try {
+      const ips = newGlobalIps.split('\n').map(ip => ip.trim()).filter(ip => ip)
+      await blocklistApi.addGlobalBulk(ips)
+      setNewGlobalIps('')
+      await fetchGlobalRules()
+    } catch (err: any) {
+      console.error('Failed to add rules:', err)
+      alert(err.response?.data?.detail || 'Failed to add rules')
+    } finally {
+      setAddingGlobal(false)
+    }
+  }
+  
+  const handleDeleteGlobalRule = async (ruleId: number) => {
+    try {
+      await blocklistApi.deleteGlobal(ruleId)
+      await fetchGlobalRules()
+    } catch (err) {
+      console.error('Failed to delete rule:', err)
+    }
+  }
+  
+  const handleAddServerRule = async () => {
+    if (!newServerIp.trim() || !selectedServerId) return
+    
+    setAddingServer(true)
+    try {
+      await blocklistApi.addServer(selectedServerId, { ip_cidr: newServerIp.trim() })
+      setNewServerIp('')
+      await fetchServerRules()
+    } catch (err: any) {
+      console.error('Failed to add rule:', err)
+      alert(err.response?.data?.detail || 'Failed to add rule')
+    } finally {
+      setAddingServer(false)
+    }
+  }
+  
+  const handleDeleteServerRule = async (ruleId: number) => {
+    if (!selectedServerId) return
+    try {
+      await blocklistApi.deleteServer(selectedServerId, ruleId)
+      await fetchServerRules()
+    } catch (err) {
+      console.error('Failed to delete rule:', err)
+    }
+  }
+  
+  const handleAddSource = async () => {
+    if (!newSourceName.trim() || !newSourceUrl.trim()) return
+    
+    setAddingSource(true)
+    try {
+      await blocklistApi.addSource({ name: newSourceName.trim(), url: newSourceUrl.trim() })
+      setNewSourceName('')
+      setNewSourceUrl('')
+      await fetchSources()
+    } catch (err: any) {
+      console.error('Failed to add source:', err)
+      alert(err.response?.data?.detail || 'Failed to add source')
+    } finally {
+      setAddingSource(false)
+    }
+  }
+  
+  const handleToggleSource = async (sourceId: number, enabled: boolean) => {
+    try {
+      await blocklistApi.updateSource(sourceId, { enabled })
+      await fetchSources()
+    } catch (err) {
+      console.error('Failed to update source:', err)
+    }
+  }
+  
+  const handleRefreshSource = async (sourceId: number) => {
+    setRefreshingSource(sourceId)
+    try {
+      await blocklistApi.refreshSource(sourceId)
+      await fetchSources()
+    } catch (err: any) {
+      console.error('Failed to refresh source:', err)
+      alert(err.response?.data?.detail || 'Failed to refresh')
+    } finally {
+      setRefreshingSource(null)
+    }
+  }
+  
+  const handleRefreshAllSources = async () => {
+    setRefreshingSource(-1)
+    try {
+      await blocklistApi.refreshAll()
+      await fetchSources()
+    } catch (err) {
+      console.error('Failed to refresh sources:', err)
+    } finally {
+      setRefreshingSource(null)
+    }
+  }
+  
+  const handleDeleteSource = async (sourceId: number) => {
+    if (!confirm(t('blocklist.confirm_delete_source'))) return
+    try {
+      await blocklistApi.deleteSource(sourceId)
+      await fetchSources()
+    } catch (err: any) {
+      console.error('Failed to delete source:', err)
+      alert(err.response?.data?.detail || 'Cannot delete default source')
+    }
+  }
+  
+  const handleSyncAll = async () => {
+    setSyncing(true)
+    try {
+      await blocklistApi.sync()
+    } catch (err) {
+      console.error('Failed to sync:', err)
+    } finally {
+      setSyncing(false)
+    }
+  }
+  
+  const handleSaveSettings = async () => {
+    setSavingSettings(true)
+    try {
+      await blocklistApi.updateSettings({ temp_timeout: tempTimeout })
+    } catch (err) {
+      console.error('Failed to save settings:', err)
+    } finally {
+      setSavingSettings(false)
+    }
+  }
+  
+  const tabs = [
+    { id: 'global' as TabType, icon: Globe, label: t('blocklist.global_rules') },
+    { id: 'servers' as TabType, icon: Server, label: t('blocklist.server_rules') },
+    { id: 'sources' as TabType, icon: List, label: t('blocklist.auto_lists') }
+  ]
+  
+  const containerVariants = {
+    hidden: { opacity: 0 },
+    visible: { 
+      opacity: 1,
+      transition: { staggerChildren: 0.1 }
+    }
+  }
+  
+  const itemVariants = {
+    hidden: { opacity: 0, y: 20 },
+    visible: { opacity: 1, y: 0 }
+  }
+  
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <Loader2 className="w-8 h-8 text-accent-500 animate-spin" />
+      </div>
+    )
+  }
+  
+  return (
+    <motion.div
+      initial="hidden"
+      animate="visible"
+      variants={containerVariants}
+      className="space-y-6"
+    >
+      {/* Header */}
+      <motion.div variants={itemVariants} className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <Shield className="w-7 h-7 text-accent-400" />
+          <div>
+            <h1 className="text-2xl font-bold text-dark-50">{t('blocklist.title')}</h1>
+            <p className="text-dark-400 text-sm">{t('blocklist.subtitle')}</p>
+          </div>
+        </div>
+        
+        <div className="flex items-center gap-3">
+          <motion.button
+            onClick={() => setShowSettings(!showSettings)}
+            className="btn btn-secondary"
+            whileHover={{ scale: 1.02 }}
+            whileTap={{ scale: 0.98 }}
+          >
+            <Settings2 className="w-4 h-4" />
+            {t('common.settings')}
+          </motion.button>
+          
+          <motion.button
+            onClick={handleSyncAll}
+            disabled={syncing}
+            className="btn btn-primary"
+            whileHover={{ scale: 1.02 }}
+            whileTap={{ scale: 0.98 }}
+          >
+            {syncing ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <RefreshCw className="w-4 h-4" />
+            )}
+            {t('blocklist.sync_all')}
+          </motion.button>
+        </div>
+      </motion.div>
+      
+      {/* Settings Panel */}
+      <AnimatePresence>
+        {showSettings && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            className="overflow-hidden"
+          >
+            <div className="card">
+              <h3 className="text-lg font-semibold text-dark-100 mb-4">{t('blocklist.settings')}</h3>
+              
+              <div className="flex items-end gap-4">
+                <div className="flex-1 max-w-xs">
+                  <label className="block text-sm text-dark-400 mb-2">
+                    {t('blocklist.temp_timeout')}
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      value={tempTimeout}
+                      onChange={(e) => setTempTimeout(parseInt(e.target.value) || 300)}
+                      min={1}
+                      max={2592000}
+                      className="input w-32"
+                    />
+                    <span className="text-dark-400 text-sm">{t('common.seconds')}</span>
+                  </div>
+                  <p className="text-xs text-dark-500 mt-1">{t('blocklist.temp_timeout_desc')}</p>
+                </div>
+                
+                <motion.button
+                  onClick={handleSaveSettings}
+                  disabled={savingSettings}
+                  className="btn btn-primary"
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
+                >
+                  {savingSettings ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Check className="w-4 h-4" />
+                  )}
+                  {t('common.save')}
+                </motion.button>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+      
+      {/* Tabs */}
+      <motion.div variants={itemVariants} className="flex gap-2 border-b border-dark-700 pb-2">
+        {tabs.map((tab) => (
+          <button
+            key={tab.id}
+            onClick={() => setActiveTab(tab.id)}
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+              activeTab === tab.id
+                ? 'bg-accent-500 text-dark-950'
+                : 'text-dark-400 hover:text-dark-200 hover:bg-dark-800'
+            }`}
+          >
+            <tab.icon className="w-4 h-4" />
+            {tab.label}
+          </button>
+        ))}
+      </motion.div>
+      
+      {/* Tab Content */}
+      <AnimatePresence mode="wait">
+        {/* Global Rules Tab */}
+        {activeTab === 'global' && (
+          <motion.div
+            key="global"
+            initial={{ opacity: 0, x: -20 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: 20 }}
+            className="space-y-4"
+          >
+            {/* Add Form */}
+            <div className="card">
+              <h3 className="text-lg font-semibold text-dark-100 mb-4">
+                {t('blocklist.add_global')}
+              </h3>
+              <p className="text-sm text-dark-400 mb-4">{t('blocklist.add_global_desc')}</p>
+              
+              <div className="space-y-3">
+                <textarea
+                  value={newGlobalIps}
+                  onChange={(e) => setNewGlobalIps(e.target.value)}
+                  placeholder={t('blocklist.ip_placeholder')}
+                  rows={4}
+                  className="input w-full resize-none font-mono text-sm"
+                />
+                
+                <motion.button
+                  onClick={handleAddGlobalRules}
+                  disabled={addingGlobal || !newGlobalIps.trim()}
+                  className="btn btn-primary"
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
+                >
+                  {addingGlobal ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Plus className="w-4 h-4" />
+                  )}
+                  {t('blocklist.add')}
+                </motion.button>
+              </div>
+            </div>
+            
+            {/* Rules List */}
+            <div className="card">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-lg font-semibold text-dark-100">
+                  {t('blocklist.current_rules')}
+                </h3>
+                <span className="text-sm text-dark-400">
+                  {globalRules.length} {t('blocklist.rules')}
+                </span>
+              </div>
+              
+              {globalRules.length === 0 ? (
+                <p className="text-dark-400 text-center py-8">{t('blocklist.no_rules')}</p>
+              ) : (
+                <div className="space-y-2 max-h-96 overflow-y-auto">
+                  {globalRules.map((rule) => (
+                    <div
+                      key={rule.id}
+                      className="flex items-center justify-between p-3 bg-dark-800/50 rounded-lg border border-dark-700/50"
+                    >
+                      <div className="flex items-center gap-3">
+                        <code className="text-sm text-dark-200 font-mono">{rule.ip_cidr}</code>
+                        {rule.comment && (
+                          <span className="text-xs text-dark-500">{rule.comment}</span>
+                        )}
+                      </div>
+                      <button
+                        onClick={() => handleDeleteGlobalRule(rule.id)}
+                        className="p-1.5 text-dark-400 hover:text-danger transition-colors"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </motion.div>
+        )}
+        
+        {/* Server Rules Tab */}
+        {activeTab === 'servers' && (
+          <motion.div
+            key="servers"
+            initial={{ opacity: 0, x: -20 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: 20 }}
+            className="space-y-4"
+          >
+            {/* Server Selector */}
+            <div className="card">
+              <label className="block text-sm text-dark-400 mb-2">
+                {t('blocklist.select_server')}
+              </label>
+              <select
+                value={selectedServerId || ''}
+                onChange={(e) => setSelectedServerId(parseInt(e.target.value))}
+                className="input w-full max-w-xs"
+              >
+                {servers.map((server) => (
+                  <option key={server.id} value={server.id}>
+                    {server.name}
+                  </option>
+                ))}
+              </select>
+              
+              {selectedServerId && (
+                <p className="text-xs text-dark-500 mt-2">
+                  {t('blocklist.server_rules_info', { 
+                    local: serverRules.length, 
+                    global: serverGlobalCount 
+                  })}
+                </p>
+              )}
+            </div>
+            
+            {/* Add Form */}
+            {selectedServerId && (
+              <div className="card">
+                <h3 className="text-lg font-semibold text-dark-100 mb-4">
+                  {t('blocklist.add_server_rule')}
+                </h3>
+                
+                <div className="flex gap-3">
+                  <input
+                    type="text"
+                    value={newServerIp}
+                    onChange={(e) => setNewServerIp(e.target.value)}
+                    placeholder="192.168.1.0/24"
+                    className="input flex-1 font-mono"
+                  />
+                  <motion.button
+                    onClick={handleAddServerRule}
+                    disabled={addingServer || !newServerIp.trim()}
+                    className="btn btn-primary"
+                    whileHover={{ scale: 1.02 }}
+                    whileTap={{ scale: 0.98 }}
+                  >
+                    {addingServer ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <Plus className="w-4 h-4" />
+                    )}
+                    {t('blocklist.add')}
+                  </motion.button>
+                </div>
+              </div>
+            )}
+            
+            {/* Rules List */}
+            {selectedServerId && (
+              <div className="card">
+                <h3 className="text-lg font-semibold text-dark-100 mb-4">
+                  {t('blocklist.server_rules_only')}
+                </h3>
+                
+                {serverRules.length === 0 ? (
+                  <p className="text-dark-400 text-center py-8">{t('blocklist.no_server_rules')}</p>
+                ) : (
+                  <div className="space-y-2 max-h-96 overflow-y-auto">
+                    {serverRules.map((rule) => (
+                      <div
+                        key={rule.id}
+                        className="flex items-center justify-between p-3 bg-dark-800/50 rounded-lg border border-dark-700/50"
+                      >
+                        <code className="text-sm text-dark-200 font-mono">{rule.ip_cidr}</code>
+                        <button
+                          onClick={() => handleDeleteServerRule(rule.id)}
+                          className="p-1.5 text-dark-400 hover:text-danger transition-colors"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </motion.div>
+        )}
+        
+        {/* Sources Tab */}
+        {activeTab === 'sources' && (
+          <motion.div
+            key="sources"
+            initial={{ opacity: 0, x: -20 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: 20 }}
+            className="space-y-4"
+          >
+            {/* Refresh All Button */}
+            <div className="flex justify-end">
+              <motion.button
+                onClick={handleRefreshAllSources}
+                disabled={refreshingSource !== null}
+                className="btn btn-secondary"
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
+              >
+                {refreshingSource === -1 ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <RefreshCw className="w-4 h-4" />
+                )}
+                {t('blocklist.refresh_all')}
+              </motion.button>
+            </div>
+            
+            {/* Sources List */}
+            <div className="grid gap-4">
+              {sources.map((source) => (
+                <div
+                  key={source.id}
+                  className={`card ${!source.enabled ? 'opacity-60' : ''}`}
+                >
+                  <div className="flex items-start justify-between">
+                    <div className="flex-1">
+                      <div className="flex items-center gap-3 mb-2">
+                        <h3 className="font-semibold text-dark-100">{source.name}</h3>
+                        {source.is_default && (
+                          <span className="px-2 py-0.5 text-xs bg-accent-500/20 text-accent-400 rounded">
+                            {t('blocklist.default')}
+                          </span>
+                        )}
+                        {source.error_message && (
+                          <span className="flex items-center gap-1 text-xs text-danger">
+                            <AlertCircle className="w-3 h-3" />
+                            {t('common.error')}
+                          </span>
+                        )}
+                      </div>
+                      
+                      <a
+                        href={source.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center gap-1 text-xs text-dark-400 hover:text-accent-400 transition-colors mb-3"
+                      >
+                        <ExternalLink className="w-3 h-3" />
+                        <span className="truncate max-w-md">{source.url}</span>
+                      </a>
+                      
+                      <div className="flex items-center gap-4 text-sm text-dark-400">
+                        <span>{source.ip_count} IPs</span>
+                        {source.last_updated && (
+                          <span>
+                            {t('blocklist.last_updated')}: {new Date(source.last_updated).toLocaleDateString()}
+                          </span>
+                        )}
+                      </div>
+                      
+                      {source.error_message && (
+                        <p className="text-xs text-danger mt-2">{source.error_message}</p>
+                      )}
+                    </div>
+                    
+                    <div className="flex items-center gap-2">
+                      {/* Toggle */}
+                      <button
+                        onClick={() => handleToggleSource(source.id, !source.enabled)}
+                        className={`p-2 rounded-lg transition-colors ${
+                          source.enabled
+                            ? 'bg-success/20 text-success'
+                            : 'bg-dark-700 text-dark-400'
+                        }`}
+                      >
+                        {source.enabled ? <Check className="w-4 h-4" /> : <X className="w-4 h-4" />}
+                      </button>
+                      
+                      {/* Refresh */}
+                      <button
+                        onClick={() => handleRefreshSource(source.id)}
+                        disabled={refreshingSource !== null}
+                        className="p-2 text-dark-400 hover:text-accent-400 transition-colors"
+                      >
+                        {refreshingSource === source.id ? (
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                          <RefreshCw className="w-4 h-4" />
+                        )}
+                      </button>
+                      
+                      {/* Delete */}
+                      {!source.is_default && (
+                        <button
+                          onClick={() => handleDeleteSource(source.id)}
+                          className="p-2 text-dark-400 hover:text-danger transition-colors"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+            
+            {/* Add Source Form */}
+            <div className="card">
+              <h3 className="text-lg font-semibold text-dark-100 mb-4">
+                {t('blocklist.add_source')}
+              </h3>
+              
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-sm text-dark-400 mb-1">{t('common.name')}</label>
+                  <input
+                    type="text"
+                    value={newSourceName}
+                    onChange={(e) => setNewSourceName(e.target.value)}
+                    placeholder="My Blocklist"
+                    className="input w-full"
+                  />
+                </div>
+                
+                <div>
+                  <label className="block text-sm text-dark-400 mb-1">URL</label>
+                  <input
+                    type="text"
+                    value={newSourceUrl}
+                    onChange={(e) => setNewSourceUrl(e.target.value)}
+                    placeholder="https://example.com/blocklist.txt"
+                    className="input w-full font-mono text-sm"
+                  />
+                </div>
+                
+                <motion.button
+                  onClick={handleAddSource}
+                  disabled={addingSource || !newSourceName.trim() || !newSourceUrl.trim()}
+                  className="btn btn-primary"
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
+                >
+                  {addingSource ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Plus className="w-4 h-4" />
+                  )}
+                  {t('blocklist.add_source')}
+                </motion.button>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </motion.div>
+  )
+}
