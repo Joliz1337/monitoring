@@ -509,7 +509,7 @@ async def refresh_source(
 ):
     """Refresh single source from GitHub"""
     manager = get_blocklist_manager()
-    success, message, ip_count = await manager.refresh_source(source_id)
+    success, message, ip_count, changed = await manager.refresh_source(source_id)
     
     if not success:
         raise HTTPException(status_code=400, detail=message)
@@ -517,7 +517,8 @@ async def refresh_source(
     return {
         "success": True,
         "message": message,
-        "ip_count": ip_count
+        "ip_count": ip_count,
+        "changed": changed
     }
 
 
@@ -527,11 +528,12 @@ async def refresh_all_sources(
 ):
     """Refresh all enabled sources"""
     manager = get_blocklist_manager()
-    results = await manager.refresh_all_sources()
+    results, any_changed = await manager.refresh_all_sources()
     
     return {
         "success": True,
-        "results": results
+        "results": results,
+        "any_changed": any_changed
     }
 
 

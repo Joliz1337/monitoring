@@ -10,7 +10,7 @@ import asyncio
 import hashlib
 import ipaddress
 import logging
-import re
+import time
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 300
 UPDATE_INTERVAL = 86400  # 24 hours
+CACHE_TTL = 300  # 5 minutes cache for fetched lists
 
 # Default GitHub lists
 DEFAULT_SOURCES = [
@@ -47,6 +48,7 @@ class BlocklistManager:
     def __init__(self):
         self._running = False
         self._update_task: Optional[asyncio.Task] = None
+        self._cache: dict[str, tuple[float, list[str]]] = {}  # url -> (timestamp, ips)
     
     def _validate_ip_cidr(self, ip: str) -> bool:
         """Validate IP address or CIDR notation"""
@@ -120,11 +122,43 @@ class BlocklistManager:
         
         return ips
     
-    async def fetch_github_list(self, url: str, timeout: float = 30.0) -> tuple[bool, list[str], str]:
+    def _get_cached(self, url: str) -> Optional[list[str]]:
+        """Get cached IPs if not expired"""
+        if url in self._cache:
+            timestamp, ips = self._cache[url]
+            if time.monotonic() - timestamp < CACHE_TTL:
+                return ips
+        return None
+    
+    def _set_cache(self, url: str, ips: list[str]):
+        """Cache fetched IPs"""
+        self._cache[url] = (time.monotonic(), ips)
+    
+    def clear_cache(self):
+        """Clear all cached lists"""
+        self._cache.clear()
+    
+    async def fetch_github_list(
+        self, 
+        url: str, 
+        timeout: float = 30.0, 
+        use_cache: bool = True
+    ) -> tuple[bool, list[str], str]:
         """Fetch and parse GitHub blocklist
+        
+        Args:
+            url: URL to fetch
+            timeout: HTTP timeout
+            use_cache: If True, return cached result if available
         
         Returns: (success, ips, error_message)
         """
+        # Check cache first
+        if use_cache:
+            cached = self._get_cached(url)
+            if cached is not None:
+                return True, cached, ""
+        
         try:
             async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
                 response = await client.get(url)
@@ -134,6 +168,9 @@ class BlocklistManager:
                 
                 content = response.text
                 ips = self.parse_list_content(content)
+                
+                # Cache result
+                self._set_cache(url, ips)
                 
                 return True, ips, ""
                 
@@ -324,10 +361,10 @@ class BlocklistManager:
         
         return results
     
-    async def refresh_source(self, source_id: int) -> tuple[bool, str, int]:
+    async def refresh_source(self, source_id: int) -> tuple[bool, str, int, bool]:
         """Refresh single source from GitHub
         
-        Returns: (success, message, ip_count)
+        Returns: (success, message, ip_count, changed)
         """
         async with async_session() as db:
             result = await db.execute(
@@ -336,27 +373,37 @@ class BlocklistManager:
             source = result.scalar_one_or_none()
             
             if not source:
-                return False, "Source not found", 0
+                return False, "Source not found", 0, False
             
-            success, ips, error = await self.fetch_github_list(source.url)
+            # Force fresh fetch (no cache) to check for updates
+            success, ips, error = await self.fetch_github_list(source.url, use_cache=False)
             
             if success:
                 new_hash = self.calculate_hash(ips)
+                changed = source.last_hash != new_hash
+                
                 source.last_hash = new_hash
                 source.last_updated = datetime.now(timezone.utc)
                 source.ip_count = len(ips)
                 source.error_message = None
                 await db.commit()
                 
-                return True, f"Updated: {len(ips)} IPs", len(ips)
+                if changed:
+                    return True, f"Updated: {len(ips)} IPs (changed)", len(ips), True
+                else:
+                    return True, f"Checked: {len(ips)} IPs (no changes)", len(ips), False
             else:
                 source.error_message = error
                 await db.commit()
-                return False, error, 0
+                return False, error, 0, False
     
-    async def refresh_all_sources(self) -> dict:
-        """Refresh all enabled sources"""
+    async def refresh_all_sources(self) -> tuple[dict, bool]:
+        """Refresh all enabled sources
+        
+        Returns: (results_dict, any_changed)
+        """
         results = {}
+        any_changed = False
         
         async with async_session() as db:
             result = await db.execute(
@@ -365,15 +412,18 @@ class BlocklistManager:
             sources = result.scalars().all()
             
             for source in sources:
-                success, message, ip_count = await self.refresh_source(source.id)
+                success, message, ip_count, changed = await self.refresh_source(source.id)
                 results[source.id] = {
                     "name": source.name,
                     "success": success,
                     "message": message,
-                    "ip_count": ip_count
+                    "ip_count": ip_count,
+                    "changed": changed
                 }
+                if changed:
+                    any_changed = True
         
-        return results
+        return results, any_changed
     
     async def init_default_sources(self):
         """Initialize default blocklist sources if not exist"""
@@ -399,6 +449,9 @@ class BlocklistManager:
     
     async def _update_loop(self):
         """Background loop for auto-updating lists"""
+        # Initial delay to let system stabilize
+        await asyncio.sleep(60)
+        
         while self._running:
             try:
                 async with async_session() as db:
@@ -412,15 +465,25 @@ class BlocklistManager:
                 
                 # Refresh all sources
                 logger.info("Starting auto-update of blocklist sources")
-                results = await self.refresh_all_sources()
+                results, any_changed = await self.refresh_all_sources()
                 
-                # Check if any source was updated
-                any_updated = any(r.get("success") for r in results.values())
+                # Log results
+                for source_id, r in results.items():
+                    if r.get("changed"):
+                        logger.info(f"Source '{r['name']}' changed: {r['ip_count']} IPs")
+                    elif r.get("success"):
+                        logger.debug(f"Source '{r['name']}' unchanged: {r['ip_count']} IPs")
+                    else:
+                        logger.warning(f"Source '{r['name']}' failed: {r['message']}")
                 
-                if any_updated:
-                    # Sync to all nodes
+                # Sync to nodes only if something changed
+                if any_changed:
                     logger.info("Syncing updated blocklists to nodes")
+                    # Clear cache before sync to ensure fresh data
+                    self.clear_cache()
                     await self.sync_all_nodes()
+                else:
+                    logger.info("No changes in blocklist sources, skipping sync")
                 
                 await asyncio.sleep(interval)
                 

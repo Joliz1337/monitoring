@@ -1,4 +1,4 @@
-import { Outlet, NavLink, useParams, useNavigate, useLocation } from 'react-router-dom'
+import { Outlet, NavLink, useParams, useNavigate, useLocation, Link } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { 
   LayoutDashboard, 
@@ -124,29 +124,32 @@ export default function Layout() {
         <div className="flex flex-col h-full">
           {/* Logo */}
           <div className="p-6 border-b border-dark-800/50">
-            <motion.div 
-              className="flex items-center gap-3"
-              initial={{ opacity: 0, y: -10 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.5 }}
-            >
+            <Link to={`/${uid}`}>
               <motion.div 
-                className="w-11 h-11 rounded-xl bg-gradient-to-br from-accent-500/20 to-accent-600/20 
-                           flex items-center justify-center border border-accent-500/20
-                           shadow-lg shadow-accent-500/10"
-                whileHover={{ scale: 1.05, rotate: 5 }}
-                transition={{ type: 'spring', stiffness: 400 }}
+                className="flex items-center gap-3 cursor-pointer"
+                initial={{ opacity: 0, y: -10 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.5 }}
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
               >
-                <Activity className="w-5 h-5 text-accent-400" />
+                <motion.div 
+                  className="w-11 h-11 rounded-xl bg-gradient-to-br from-accent-500/20 to-accent-600/20 
+                             flex items-center justify-center border border-accent-500/20
+                             shadow-lg shadow-accent-500/10"
+                  whileHover={{ scale: 1.05, rotate: 5 }}
+                  transition={{ type: 'spring', stiffness: 400 }}
+                >
+                  <Activity className="w-5 h-5 text-accent-400" />
+                </motion.div>
+                <div>
+                  <h1 className="font-bold text-dark-100 flex items-center gap-2">
+                    {t('common.monitoring')}
+                    <Sparkles className="w-3 h-3 text-accent-400" />
+                  </h1>
+                </div>
               </motion.div>
-              <div>
-                <h1 className="font-bold text-dark-100 flex items-center gap-2">
-                  {t('common.monitoring')}
-                  <Sparkles className="w-3 h-3 text-accent-400" />
-                </h1>
-                <p className="text-xs text-dark-500">{t('common.panel_version')}</p>
-              </div>
-            </motion.div>
+            </Link>
           </div>
           
           {/* Close button for mobile */}

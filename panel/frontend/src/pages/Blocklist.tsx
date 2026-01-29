@@ -319,6 +319,15 @@ export default function Blocklist() {
         </div>
       </motion.div>
       
+      {/* Sync Warning */}
+      <motion.div
+        variants={itemVariants}
+        className="flex items-start gap-3 p-4 bg-amber-500/10 border border-amber-500/30 rounded-lg"
+      >
+        <AlertCircle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+        <p className="text-sm text-amber-200">{t('blocklist.sync_warning')}</p>
+      </motion.div>
+      
       {/* Settings Panel */}
       <AnimatePresence>
         {showSettings && (

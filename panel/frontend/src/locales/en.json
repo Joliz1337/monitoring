@@ -120,7 +120,9 @@
     "failed_update": "Failed to update server",
     "monitoring_enabled": "Monitoring enabled",
     "monitoring_disabled": "Monitoring disabled",
-    "disabled": "Disabled"
+    "disabled": "Disabled",
+    "panel_ip": "Panel IP",
+    "copied": "Copied"
   },
   "server_details": {
     "loading": "Loading server data...",
@@ -228,7 +230,9 @@
   "cpu_chart": {
     "per_core_usage": "Per-Core Usage",
     "avg": "Avg",
-    "core": "Core"
+    "core": "Core",
+    "cores": "cores",
+    "cores_history": "Per-Core History"
   },
   "period": {
     "1h": "1h",
@@ -543,6 +547,7 @@
     "settings": "Blocklist Settings",
     "temp_timeout": "Temporary block timeout",
     "temp_timeout_desc": "Time in seconds for temporary list (default 300)",
-    "sync_all": "Sync All"
+    "sync_all": "Sync All",
+    "sync_warning": "Changes are saved to database but not applied to servers automatically. Click \"Sync All\" to apply changes."
   }
 }

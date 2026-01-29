@@ -32,6 +32,7 @@ import MetricChart from '../components/Charts/MetricChart'
 import MultiLineChart from '../components/Charts/MultiLineChart'
 import ProcessTable from '../components/Processes/ProcessTable'
 import CpuCoresChart from '../components/Charts/CpuCoresChart'
+import CpuCoresHistoryChart from '../components/Charts/CpuCoresHistoryChart'
 import Terminal from '../components/Terminal/Terminal'
 import { formatBytes, formatUptime, formatPercent, createBitsFormatter, formatTimeAgo } from '../utils/format'
 import { useCachedData, createServerCacheKey } from '../hooks/useCachedData'
@@ -55,6 +56,7 @@ interface HistoryData {
   disk_read_bytes_per_sec: number
   disk_write_bytes_per_sec: number
   process_count?: number
+  per_cpu_percent?: number[]
 }
 
 const containerVariants = {
@@ -102,9 +104,12 @@ export default function ServerDetails() {
     if (!serverId) return
     
     try {
+      // Include per_cpu data only for raw data periods (1h, 24h)
+      const includePerCpu = period === '1h' || period === '24h'
+      
       if (historyOnly) {
         setIsHistoryLoading(true)
-        const historyRes = await proxyApi.getHistory(Number(serverId), { period, limit: 1000 })
+        const historyRes = await proxyApi.getHistory(Number(serverId), { period, limit: 1000, include_per_cpu: includePerCpu })
         const historyData = historyRes.data.data || []
         setHistory(historyData)
         setIsHistoryLoading(false)
@@ -118,7 +123,7 @@ export default function ServerDetails() {
           useCached 
             ? proxyApi.getMetrics(Number(serverId)) // Cached data from panel DB
             : proxyApi.getLiveMetrics(Number(serverId)), // Live data directly from node
-          proxyApi.getHistory(Number(serverId), { period, limit: 1000 }),
+          proxyApi.getHistory(Number(serverId), { period, limit: 1000, include_per_cpu: includePerCpu }),
         ])
         
         const metricsData = metricsRes.data
@@ -333,7 +338,7 @@ export default function ServerDetails() {
             >
               {server?.name || t('common.server')}
             </motion.h1>
-            <StatusBadge status={error ? 'offline' : 'online'} />
+            <StatusBadge status={error ? 'offline' : (server?.status || 'online')} />
           </div>
           {metrics && (
             <motion.p 
@@ -541,20 +546,31 @@ export default function ServerDetails() {
               className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6"
               variants={itemVariants}
             >
-              <ChartCard
-                icon={<Cpu className="w-4 h-4 text-accent-500" />}
-                title={t('server_details.cpu_usage')}
-                isLoading={isHistoryLoading}
-              >
-                <MetricChart
-                  data={cpuHistory}
-                  color="#22d3ee"
-                  unit="%"
-                  min={0}
-                  max={100}
-                  period={period}
-                />
-              </ChartCard>
+              <div className="space-y-3">
+                <ChartCard
+                  icon={<Cpu className="w-4 h-4 text-accent-500" />}
+                  title={t('server_details.cpu_usage')}
+                  isLoading={isHistoryLoading}
+                >
+                  <MetricChart
+                    data={cpuHistory}
+                    color="#22d3ee"
+                    unit="%"
+                    min={0}
+                    max={100}
+                    period={period}
+                  />
+                </ChartCard>
+                
+                {/* Per-CPU cores history (collapsible) */}
+                {(period === '1h' || period === '24h') && (
+                  <CpuCoresHistoryChart
+                    history={history}
+                    period={period}
+                    isLoading={isHistoryLoading}
+                  />
+                )}
+              </div>
               
               <ChartCard
                 icon={<MemoryStick className="w-4 h-4 text-accent-500" />}

@@ -190,6 +190,7 @@ async def get_metrics_history(
     from_time: Optional[str] = None,
     to_time: Optional[str] = None,
     limit: int = Query(default=500, le=5000),
+    include_per_cpu: bool = Query(default=False, description="Include per-CPU usage data"),
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
@@ -202,6 +203,7 @@ async def get_metrics_history(
     - 30d, 365d: daily aggregated data
     
     Note: Uses naive UTC datetime for SQLite compatibility (no timezone info stored).
+    Set include_per_cpu=true to include per-CPU usage data (only for raw data periods).
     """
     await get_server_by_id(server_id, db)
     # Use naive UTC datetime for SQLite compatibility
@@ -267,8 +269,8 @@ async def get_metrics_history(
             if step > 1:
                 snapshots = snapshots[::step]
         
-        data = [
-            {
+        def build_snapshot_dict(s: MetricsSnapshot) -> dict:
+            result = {
                 "timestamp": to_iso_utc(s.timestamp),
                 "cpu_usage": s.cpu_usage,
                 "max_cpu": s.cpu_usage,  # Same as avg for raw data
@@ -285,8 +287,14 @@ async def get_metrics_history(
                 "disk_write_bytes_per_sec": s.disk_write_bytes_per_sec or 0,
                 "process_count": s.process_count
             }
-            for s in snapshots
-        ]
+            if include_per_cpu and s.per_cpu_percent:
+                try:
+                    result["per_cpu_percent"] = json.loads(s.per_cpu_percent)
+                except json.JSONDecodeError:
+                    pass
+            return result
+        
+        data = [build_snapshot_dict(s) for s in snapshots]
     else:
         # Query aggregated metrics (hourly or daily) - ascending order for charts
         result = await db.execute(

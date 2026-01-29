@@ -255,6 +255,9 @@ class MetricsCollector:
         connections = system.get("connections", {})
         connections_count = connections.get("established", 0) + connections.get("listen", 0)
         
+        # Get per-CPU percentages
+        per_cpu = cpu.get("per_cpu_percent", [])
+        
         # Create snapshot with naive UTC timestamp (SQLite doesn't preserve timezone)
         snapshot = MetricsSnapshot(
             server_id=server_id,
@@ -277,7 +280,8 @@ class MetricsCollector:
             disk_read_bytes_per_sec=disk_read_speed,
             disk_write_bytes_per_sec=disk_write_speed,
             process_count=processes.get("total", 0),
-            connections_count=connections_count
+            connections_count=connections_count,
+            per_cpu_percent=json.dumps(per_cpu) if per_cpu else None
         )
         
         db.add(snapshot)

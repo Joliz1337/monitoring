@@ -69,6 +69,9 @@ class MetricsSnapshot(Base):
     process_count = Column(Integer)
     connections_count = Column(Integer)
     
+    # Per-CPU usage (JSON array)
+    per_cpu_percent = Column(Text, nullable=True)  # JSON array [12.5, 23.1, ...]
+    
     __table_args__ = (
         Index('idx_metrics_server_time', 'server_id', 'timestamp'),
     )

@@ -342,7 +342,8 @@ export const proxyApi = {
   getLiveMetrics: (serverId: number) => api.get<ServerMetrics>(`/proxy/${serverId}/metrics/live`),
   // History is stored on the panel (collected every 5 seconds)
   // period: '1h', '24h', '7d', '30d', '365d'
-  getHistory: (serverId: number, params?: { period?: string; from_time?: string; to_time?: string; limit?: number }) =>
+  // include_per_cpu: true to include per-CPU usage data (only for raw data periods: 1h, 24h)
+  getHistory: (serverId: number, params?: { period?: string; from_time?: string; to_time?: string; limit?: number; include_per_cpu?: boolean }) =>
     api.get(`/proxy/${serverId}/metrics/history`, { params }),
   
   // Cached HAProxy data (status, rules, certs, firewall) - updated every 30s
