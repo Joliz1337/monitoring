@@ -255,15 +255,6 @@ export default function Remnawave() {
     }
   }
   
-  const handleToggleNodeEnabled = async (serverId: number, enabled: boolean) => {
-    try {
-      await remnawaveApi.updateNode(serverId, enabled)
-      await fetchSettings()
-    } catch (err) {
-      console.error('Failed to toggle node:', err)
-    }
-  }
-  
   const handleForceCollect = async () => {
     setIsCollecting(true)
     try {
@@ -811,7 +802,7 @@ export default function Remnawave() {
                   return (
                     <div
                       key={server.id}
-                      className={`flex items-center gap-4 p-3 rounded-lg border transition-colors cursor-pointer ${
+                      className={`flex items-center gap-3 p-3 rounded-lg border transition-colors cursor-pointer ${
                         isSelected 
                           ? 'bg-accent-500/10 border-accent-500/30' 
                           : 'bg-dark-900/50 border-dark-700/50 hover:border-dark-600'
@@ -823,7 +814,7 @@ export default function Remnawave() {
                         checked={isSelected}
                         onChange={() => handleToggleNodeSelection(server.id)}
                         onClick={(e) => e.stopPropagation()}
-                        className="w-4 h-4 rounded border-dark-600 bg-dark-800 text-accent-500 
+                        className="w-5 h-5 rounded border-dark-600 bg-dark-800 text-accent-500 
                                  focus:ring-accent-500 focus:ring-offset-0 cursor-pointer"
                       />
                       <Server className={`w-4 h-4 ${server.is_active ? 'text-dark-400' : 'text-dark-600'}`} />
@@ -847,24 +838,6 @@ export default function Remnawave() {
                           <div className="text-xs text-danger truncate">{node.last_error}</div>
                         )}
                       </div>
-                      {server.is_node && (
-                        <label 
-                          className="relative inline-flex items-center cursor-pointer"
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          <input
-                            type="checkbox"
-                            checked={server.node_enabled}
-                            onChange={(e) => handleToggleNodeEnabled(server.id, e.target.checked)}
-                            className="sr-only peer"
-                          />
-                          <div className="w-9 h-5 bg-dark-700 peer-focus:outline-none rounded-full peer 
-                                        peer-checked:after:translate-x-full peer-checked:after:border-white 
-                                        after:content-[''] after:absolute after:top-[2px] after:left-[2px] 
-                                        after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all 
-                                        peer-checked:bg-accent-500"></div>
-                        </label>
-                      )}
                     </div>
                   )
                 })}
