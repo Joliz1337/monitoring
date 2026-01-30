@@ -644,6 +644,9 @@
     "devices_used": "Devices Used",
     "click_refresh_for_devices": "Click refresh to load device list",
     "no_devices": "No devices connected",
-    "last_used": "Last Used"
+    "last_used": "Last Used",
+    "added": "Added",
+    "total": "Total",
+    "top_nodes": "Top Nodes"
   }
 }

@@ -903,24 +903,35 @@ export interface RemnawaveUserFullInfo {
     }>
   } | null
   bandwidth_stats?: {
-    totalUsedBytes?: number
-    nodes?: Array<{
-      nodeUuid: string
-      nodeName: string
-      usedBytes: number
+    categories?: string[]  // Date labels (e.g. "2024-01-15")
+    sparklineData?: number[]  // Total bytes per day
+    topNodes?: Array<{
+      uuid: string
+      color: string
+      name: string
+      countryCode: string
+      total: number
     }>
-    daily?: Array<{
-      date: string
-      usedBytes: number
+    series?: Array<{
+      uuid: string
+      name: string
+      color: string
+      countryCode: string
+      total: number
+      data: number[]  // Bytes per day for this node
     }>
   } | null
   hwid_devices?: {
+    total?: number
     devices?: Array<{
-      id: number
       hwid: string
-      deviceName: string | null
+      userUuid: string
+      platform: string | null
+      osVersion: string | null
+      deviceModel: string | null
+      userAgent: string | null
       createdAt: string
-      lastUsedAt: string
+      updatedAt: string
     }>
   } | null
 }

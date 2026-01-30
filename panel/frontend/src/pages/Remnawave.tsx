@@ -1419,26 +1419,64 @@ export default function Remnawave() {
                       </div>
                     </div>
                     
-                    {/* Bandwidth Stats (from live API) */}
-                    {selectedUserFull?.bandwidth_stats?.daily && selectedUserFull.bandwidth_stats.daily.length > 0 && (
+                    {/* Bandwidth Stats Chart (from live API) */}
+                    {selectedUserFull?.bandwidth_stats?.categories && selectedUserFull.bandwidth_stats.sparklineData && selectedUserFull.bandwidth_stats.sparklineData.length > 0 && (
                       <div className="p-4 rounded-lg bg-dark-800">
-                        <h4 className="text-sm font-medium text-dark-300 mb-4">{t('remnawave.daily_traffic')}</h4>
-                        <div className="space-y-2 max-h-[300px] overflow-auto">
-                          {selectedUserFull.bandwidth_stats.daily.map((day) => (
-                            <div key={day.date} className="flex items-center gap-3 p-2 rounded-lg hover:bg-dark-700 transition-colors">
-                              <span className="text-dark-400 text-sm w-24">{formatDate(day.date)}</span>
-                              <div className="flex-1 h-2 bg-dark-600 rounded-full overflow-hidden">
-                                <div 
-                                  className="h-full bg-accent-500 rounded-full"
-                                  style={{ 
-                                    width: `${Math.min((day.usedBytes / Math.max(...selectedUserFull.bandwidth_stats!.daily!.map(d => d.usedBytes))) * 100, 100)}%` 
-                                  }}
-                                />
-                              </div>
-                              <span className="text-dark-200 text-sm w-20 text-right">{formatBytes(day.usedBytes)}</span>
-                            </div>
-                          ))}
+                        <div className="flex items-center justify-between mb-4">
+                          <h4 className="text-sm font-medium text-dark-300">{t('remnawave.daily_traffic')}</h4>
+                          <span className="text-dark-500 text-xs">
+                            {t('remnawave.total')}: {formatBytes(selectedUserFull.bandwidth_stats.sparklineData.reduce((a, b) => a + b, 0))}
+                          </span>
                         </div>
+                        
+                        {/* Traffic Chart */}
+                        <div className="h-32 flex items-end gap-1 mb-2">
+                          {(() => {
+                            const data = selectedUserFull.bandwidth_stats!.sparklineData!
+                            const maxValue = Math.max(...data, 1)
+                            return data.map((value, idx) => (
+                              <div
+                                key={idx}
+                                className="flex-1 bg-accent-500/80 hover:bg-accent-400 rounded-t transition-colors cursor-pointer group relative"
+                                style={{ height: `${Math.max((value / maxValue) * 100, 2)}%` }}
+                                title={`${selectedUserFull.bandwidth_stats!.categories![idx]}: ${formatBytes(value)}`}
+                              >
+                                <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 px-2 py-1 bg-dark-900 
+                                              rounded text-xs text-dark-200 whitespace-nowrap opacity-0 group-hover:opacity-100 
+                                              transition-opacity pointer-events-none z-10">
+                                  {formatBytes(value)}
+                                </div>
+                              </div>
+                            ))
+                          })()}
+                        </div>
+                        
+                        {/* Date Labels */}
+                        <div className="flex justify-between text-xs text-dark-500">
+                          <span>{selectedUserFull.bandwidth_stats.categories[0]}</span>
+                          <span>{selectedUserFull.bandwidth_stats.categories[selectedUserFull.bandwidth_stats.categories.length - 1]}</span>
+                        </div>
+                        
+                        {/* Top Nodes */}
+                        {selectedUserFull.bandwidth_stats.topNodes && selectedUserFull.bandwidth_stats.topNodes.length > 0 && (
+                          <div className="mt-4 pt-4 border-t border-dark-700">
+                            <h5 className="text-xs font-medium text-dark-400 mb-2">{t('remnawave.top_nodes')}</h5>
+                            <div className="space-y-2">
+                              {selectedUserFull.bandwidth_stats.topNodes.slice(0, 5).map((node) => (
+                                <div key={node.uuid} className="flex items-center gap-2">
+                                  <div 
+                                    className="w-3 h-3 rounded-full" 
+                                    style={{ backgroundColor: node.color }}
+                                  />
+                                  <span className="text-dark-300 text-sm flex-1 truncate">
+                                    {node.name} ({node.countryCode})
+                                  </span>
+                                  <span className="text-dark-400 text-sm">{formatBytes(node.total)}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
                       </div>
                     )}
                     
@@ -1594,17 +1632,40 @@ export default function Remnawave() {
                     
                     {/* Device List */}
                     {selectedUserFull?.hwid_devices?.devices && selectedUserFull.hwid_devices.devices.length > 0 ? (
-                      <div className="space-y-2">
+                      <div className="space-y-3">
                         {selectedUserFull.hwid_devices.devices.map((device, idx) => (
-                          <div key={device.id} className="flex items-center gap-3 p-3 rounded-lg bg-dark-800">
-                            <Smartphone className="w-5 h-5 text-dark-500" />
-                            <div className="flex-1 min-w-0">
-                              <div className="text-dark-200">{device.deviceName || `Device ${idx + 1}`}</div>
-                              <div className="text-dark-500 text-xs font-mono truncate">{device.hwid}</div>
-                            </div>
-                            <div className="text-right">
-                              <div className="text-dark-400 text-xs">{t('remnawave.last_used')}</div>
-                              <div className="text-dark-300 text-sm">{formatDateTime(device.lastUsedAt)}</div>
+                          <div key={device.hwid} className="p-4 rounded-lg bg-dark-800">
+                            <div className="flex items-start gap-3">
+                              <Smartphone className="w-5 h-5 text-dark-500 mt-0.5" />
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className="text-dark-200 font-medium">
+                                    {device.deviceModel || device.platform || `Device ${idx + 1}`}
+                                  </span>
+                                  {device.platform && (
+                                    <span className="px-2 py-0.5 rounded text-xs bg-accent-500/20 text-accent-400">
+                                      {device.platform}
+                                    </span>
+                                  )}
+                                  {device.osVersion && (
+                                    <span className="px-2 py-0.5 rounded text-xs bg-dark-700 text-dark-300">
+                                      {device.osVersion}
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="text-dark-500 text-xs font-mono mt-1 truncate" title={device.hwid}>
+                                  HWID: {device.hwid}
+                                </div>
+                                {device.userAgent && (
+                                  <div className="text-dark-600 text-xs mt-1 truncate" title={device.userAgent}>
+                                    {device.userAgent}
+                                  </div>
+                                )}
+                                <div className="flex items-center gap-4 mt-2 text-xs text-dark-500">
+                                  <span>{t('remnawave.added')}: {formatDateTime(device.createdAt)}</span>
+                                  <span>{t('remnawave.last_used')}: {formatDateTime(device.updatedAt)}</span>
+                                </div>
+                              </div>
                             </div>
                           </div>
                         ))}
