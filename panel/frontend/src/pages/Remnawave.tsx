@@ -19,7 +19,6 @@ import {
   Info,
   Network,
   Calendar,
-  HardDrive,
   Link,
   Smartphone,
   ArrowDownUp,
@@ -1479,7 +1478,7 @@ export default function Remnawave() {
                                 </button>
                               </div>
                               <div className="text-dark-500 text-xs flex items-center gap-2 flex-wrap mt-1">
-                                {ip.servers.map((s, i) => (
+                                {ip.servers.map((s) => (
                                   <span key={s.server_id} className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-dark-700">
                                     <Server className="w-3 h-3" />
                                     {s.server_name}: {s.count}
