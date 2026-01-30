@@ -229,6 +229,90 @@ class RemnawaveAPI:
             if e.status_code == 404:
                 return None
             raise
+    
+    async def get_user_by_uuid(self, uuid: str) -> Optional[dict]:
+        """
+        Get user by UUID.
+        
+        Returns full user info including traffic data.
+        """
+        try:
+            result = await self._request("GET", f"/api/users/{uuid}")
+            return result.get("response", {})
+        except RemnawaveAPIError as e:
+            if e.status_code == 404:
+                return None
+            raise
+    
+    async def get_user_subscription_history(self, uuid: str) -> Optional[dict]:
+        """
+        Get user subscription request history (recent 24 records).
+        
+        Contains IP addresses from which subscription was accessed.
+        """
+        try:
+            result = await self._request("GET", f"/api/users/{uuid}/subscription-request-history")
+            return result.get("response", {})
+        except RemnawaveAPIError as e:
+            if e.status_code == 404:
+                return None
+            raise
+    
+    async def get_user_bandwidth_stats(
+        self, 
+        uuid: str, 
+        start_date: str, 
+        end_date: str, 
+        top_nodes_limit: int = 10
+    ) -> Optional[dict]:
+        """
+        Get user bandwidth statistics for date range.
+        
+        Args:
+            uuid: User UUID
+            start_date: Start date (YYYY-MM-DD)
+            end_date: End date (YYYY-MM-DD)
+            top_nodes_limit: Limit of top nodes to return
+            
+        Returns:
+            dict with bandwidth statistics or None if user not found
+        """
+        try:
+            params = {
+                "start": start_date,
+                "end": end_date,
+                "topNodesLimit": top_nodes_limit
+            }
+            result = await self._request("GET", f"/api/bandwidth-stats/users/{uuid}", params=params)
+            return result.get("response", {})
+        except RemnawaveAPIError as e:
+            if e.status_code == 404:
+                return None
+            raise
+    
+    async def get_user_accessible_nodes(self, uuid: str) -> Optional[dict]:
+        """
+        Get nodes accessible by user.
+        """
+        try:
+            result = await self._request("GET", f"/api/users/{uuid}/accessible-nodes")
+            return result.get("response", {})
+        except RemnawaveAPIError as e:
+            if e.status_code == 404:
+                return None
+            raise
+    
+    async def get_user_hwid_devices(self, uuid: str) -> Optional[dict]:
+        """
+        Get HWID devices for user.
+        """
+        try:
+            result = await self._request("GET", f"/api/hwid/devices/{uuid}")
+            return result.get("response", {})
+        except RemnawaveAPIError as e:
+            if e.status_code == 404:
+                return None
+            raise
 
 
 # Singleton for settings-based instance

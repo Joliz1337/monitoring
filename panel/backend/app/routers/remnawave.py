@@ -5,6 +5,7 @@ Optimized version with cumulative counters:
 - XrayHourlyStats: timeline data per (server, hour)
 """
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -838,3 +839,173 @@ async def get_db_info(
             }
         }
     }
+
+
+@router.get("/user/{email}/full")
+async def get_user_full_info(
+    email: int,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Get full user information from cache and optionally from Remnawave API.
+    
+    Returns cached user data with all extended fields.
+    If uuid is available, also fetches subscription history and bandwidth stats.
+    """
+    # Get user from cache
+    result = await db.execute(
+        select(RemnawaveUserCache).where(RemnawaveUserCache.email == email)
+    )
+    user = result.scalar_one_or_none()
+    
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found in cache")
+    
+    # Format response with all cached fields
+    response = {
+        "email": user.email,
+        "uuid": user.uuid,
+        "short_uuid": user.short_uuid,
+        "username": user.username,
+        "telegram_id": user.telegram_id,
+        "status": user.status,
+        # Subscription info
+        "expire_at": user.expire_at.isoformat() if user.expire_at else None,
+        "subscription_url": user.subscription_url,
+        "sub_revoked_at": user.sub_revoked_at.isoformat() if user.sub_revoked_at else None,
+        "sub_last_user_agent": user.sub_last_user_agent,
+        "sub_last_opened_at": user.sub_last_opened_at.isoformat() if user.sub_last_opened_at else None,
+        # Traffic limits
+        "traffic_limit_bytes": user.traffic_limit_bytes,
+        "traffic_limit_strategy": user.traffic_limit_strategy,
+        "last_traffic_reset_at": user.last_traffic_reset_at.isoformat() if user.last_traffic_reset_at else None,
+        # Traffic usage
+        "used_traffic_bytes": user.used_traffic_bytes,
+        "lifetime_used_traffic_bytes": user.lifetime_used_traffic_bytes,
+        "online_at": user.online_at.isoformat() if user.online_at else None,
+        "first_connected_at": user.first_connected_at.isoformat() if user.first_connected_at else None,
+        "last_connected_node_uuid": user.last_connected_node_uuid,
+        # Device limit
+        "hwid_device_limit": user.hwid_device_limit,
+        # Additional info
+        "user_email": user.user_email,
+        "description": user.description,
+        "tag": user.tag,
+        "created_at": user.created_at.isoformat() if user.created_at else None,
+        "updated_at": user.updated_at.isoformat() if user.updated_at else None,
+        # Extra data from Remnawave API
+        "subscription_history": None,
+        "bandwidth_stats": None,
+        "hwid_devices": None
+    }
+    
+    return response
+
+
+@router.get("/user/{email}/live")
+async def get_user_live_info(
+    email: int,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Get live user information directly from Remnawave API.
+    
+    Fetches fresh data including subscription history and bandwidth stats.
+    """
+    # Get user UUID from cache
+    result = await db.execute(
+        select(RemnawaveUserCache).where(RemnawaveUserCache.email == email)
+    )
+    user = result.scalar_one_or_none()
+    
+    if not user or not user.uuid:
+        raise HTTPException(status_code=404, detail="User UUID not found in cache")
+    
+    # Get settings
+    settings_result = await db.execute(select(RemnawaveSettings).limit(1))
+    settings = settings_result.scalar_one_or_none()
+    
+    if not settings or not settings.api_url or not settings.api_token:
+        raise HTTPException(status_code=400, detail="Remnawave API not configured")
+    
+    api = get_remnawave_api(settings.api_url, settings.api_token, settings.cookie_secret)
+    
+    try:
+        # Fetch user data, subscription history, and bandwidth stats in parallel
+        user_data, sub_history, bandwidth_stats, hwid_devices = await asyncio.gather(
+            api.get_user_by_uuid(user.uuid),
+            api.get_user_subscription_history(user.uuid),
+            _get_user_bandwidth_stats(api, user.uuid),
+            api.get_user_hwid_devices(user.uuid),
+            return_exceptions=True
+        )
+        
+        # Handle exceptions
+        if isinstance(user_data, Exception):
+            user_data = None
+        if isinstance(sub_history, Exception):
+            sub_history = None
+        if isinstance(bandwidth_stats, Exception):
+            bandwidth_stats = None
+        if isinstance(hwid_devices, Exception):
+            hwid_devices = None
+        
+        if not user_data:
+            raise HTTPException(status_code=404, detail="User not found in Remnawave")
+        
+        # Parse userTraffic
+        user_traffic = user_data.get("userTraffic") or {}
+        
+        response = {
+            "email": user_data.get("id"),
+            "uuid": user_data.get("uuid"),
+            "short_uuid": user_data.get("shortUuid"),
+            "username": user_data.get("username"),
+            "telegram_id": user_data.get("telegramId"),
+            "status": user_data.get("status"),
+            # Subscription info
+            "expire_at": user_data.get("expireAt"),
+            "subscription_url": user_data.get("subscriptionUrl"),
+            "sub_revoked_at": user_data.get("subRevokedAt"),
+            "sub_last_user_agent": user_data.get("subLastUserAgent"),
+            "sub_last_opened_at": user_data.get("subLastOpenedAt"),
+            # Traffic limits
+            "traffic_limit_bytes": user_data.get("trafficLimitBytes"),
+            "traffic_limit_strategy": user_data.get("trafficLimitStrategy"),
+            "last_traffic_reset_at": user_data.get("lastTrafficResetAt"),
+            # Traffic usage
+            "used_traffic_bytes": user_traffic.get("usedTrafficBytes"),
+            "lifetime_used_traffic_bytes": user_traffic.get("lifetimeUsedTrafficBytes"),
+            "online_at": user_traffic.get("onlineAt"),
+            "first_connected_at": user_traffic.get("firstConnectedAt"),
+            "last_connected_node_uuid": user_traffic.get("lastConnectedNodeUuid"),
+            # Device limit
+            "hwid_device_limit": user_data.get("hwidDeviceLimit"),
+            # Additional info
+            "user_email": user_data.get("email"),
+            "description": user_data.get("description"),
+            "tag": user_data.get("tag"),
+            "created_at": user_data.get("createdAt"),
+            "updated_at": user_data.get("updatedAt"),
+            # Internal squads
+            "active_internal_squads": user_data.get("activeInternalSquads"),
+            # Extra data from Remnawave API
+            "subscription_history": sub_history,
+            "bandwidth_stats": bandwidth_stats,
+            "hwid_devices": hwid_devices
+        }
+        
+        return response
+        
+    finally:
+        await api.close()
+
+
+async def _get_user_bandwidth_stats(api, uuid: str) -> Optional[dict]:
+    """Get user bandwidth stats for last 30 days."""
+    from datetime import datetime, timedelta
+    
+    end_date = datetime.now().strftime("%Y-%m-%d")
+    start_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+    
+    return await api.get_user_bandwidth_stats(uuid, start_date, end_date)

@@ -241,15 +241,46 @@ class XrayHourlyStats(Base):
 
 
 class RemnawaveUserCache(Base):
-    """Кеш пользователей Remnawave для отображения имён"""
+    """Кеш пользователей Remnawave для отображения имён и дополнительной информации"""
     __tablename__ = "remnawave_user_cache"
     
     id = Column(Integer, primary_key=True)
     email = Column(Integer, unique=True, nullable=False, index=True)
     uuid = Column(String(100), nullable=True)
+    short_uuid = Column(String(50), nullable=True)
     username = Column(String(200), nullable=True)
     telegram_id = Column(BigInteger, nullable=True)
     status = Column(String(50), nullable=True)
+    
+    # Subscription info
+    expire_at = Column(DateTime(timezone=True), nullable=True)
+    subscription_url = Column(String(500), nullable=True)
+    sub_revoked_at = Column(DateTime(timezone=True), nullable=True)
+    sub_last_user_agent = Column(String(500), nullable=True)
+    sub_last_opened_at = Column(DateTime(timezone=True), nullable=True)
+    
+    # Traffic limits
+    traffic_limit_bytes = Column(BigInteger, nullable=True)
+    traffic_limit_strategy = Column(String(20), nullable=True)  # NO_RESET, DAY, WEEK, MONTH
+    last_traffic_reset_at = Column(DateTime(timezone=True), nullable=True)
+    
+    # Traffic usage (cached from userTraffic)
+    used_traffic_bytes = Column(BigInteger, nullable=True)
+    lifetime_used_traffic_bytes = Column(BigInteger, nullable=True)
+    online_at = Column(DateTime(timezone=True), nullable=True)
+    first_connected_at = Column(DateTime(timezone=True), nullable=True)
+    last_connected_node_uuid = Column(String(100), nullable=True)
+    
+    # Device limit
+    hwid_device_limit = Column(Integer, nullable=True)
+    
+    # Additional info
+    user_email = Column(String(200), nullable=True)  # email field from Remnawave (can be actual email)
+    description = Column(Text, nullable=True)
+    tag = Column(String(100), nullable=True)
+    
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), nullable=True)
     updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
 

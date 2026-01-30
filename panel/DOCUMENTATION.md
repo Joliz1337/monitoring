@@ -287,6 +287,13 @@ panel/
 | GET | /api/remnawave/stats/db-info | Информация о размере БД |
 | GET | /api/remnawave/users | Кэш пользователей Remnawave |
 
+**Полная информация о пользователе:**
+
+| Метод | Endpoint | Описание |
+|-------|----------|----------|
+| GET | /api/remnawave/user/{email}/full | Полная информация из кэша (expire, traffic, subscription url и т.д.) |
+| GET | /api/remnawave/user/{email}/live | Свежие данные из Remnawave API (subscription history, bandwidth stats, hwid devices) |
+
 Параметры запросов:
 - `period` — 1h, 24h, 7d, 30d, 365d, all (по умолчанию all — за всё время)
 - `limit` — количество записей (1-500)
@@ -306,6 +313,13 @@ panel/
    - Лёгкая таблица без детализации по сайтам/пользователям
    - Только общее число посещений, уникальных пользователей и сайтов за час
    - Хранится 365 дней
+
+3. **remnawave_user_cache** — кэш пользователей с расширенной информацией:
+   - email, uuid, username, status, telegram_id
+   - expire_at, subscription_url, sub_last_opened_at
+   - traffic_limit_bytes, used_traffic_bytes, lifetime_used_traffic_bytes
+   - hwid_device_limit, online_at, first_connected_at
+   - Обновляется каждый час из Remnawave API
 
 **Размер БД (оценка для 5 серверов, 5000 пользователей, 50000 сайтов):**
 - xray_visit_stats: ~250 млн записей max × 50 bytes = ~12 GB (реально меньше)

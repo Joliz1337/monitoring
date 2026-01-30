@@ -48,6 +48,7 @@ class XrayStatsCollector:
         
         self._collection_interval = 60
         self._user_cache_interval = 3600
+        self._time_since_last_collect = 0  # Tracks seconds since last collection
         
         # Retention: hourly stats for timeline (365 days)
         self._hourly_retention_days = 365
@@ -87,22 +88,38 @@ class XrayStatsCollector:
             return result.scalar_one_or_none()
     
     async def _collection_loop(self):
-        """Main collection loop."""
+        """Main collection loop with dynamic interval updates."""
+        self._time_since_last_collect = 0
+        
         while self._running:
             try:
+                # Always fetch settings to get updated interval
                 settings = await self._get_settings()
                 
-                if settings and settings.enabled:
-                    self._collection_interval = settings.collection_interval or 60
-                    await self._collect_from_all_nodes()
+                if settings:
+                    new_interval = settings.collection_interval or 60
+                    if new_interval != self._collection_interval:
+                        logger.info(f"Collection interval changed: {self._collection_interval}s -> {new_interval}s")
+                        self._collection_interval = new_interval
+                        # Reset timer if new interval is shorter than time already waited
+                        if self._time_since_last_collect >= new_interval:
+                            self._time_since_last_collect = new_interval
                 
-                await asyncio.sleep(self._collection_interval)
+                # Check if it's time to collect
+                if settings and settings.enabled and self._time_since_last_collect >= self._collection_interval:
+                    await self._collect_from_all_nodes()
+                    self._time_since_last_collect = 0
+                
+                # Sleep for 1 second and increment counter
+                await asyncio.sleep(1)
+                self._time_since_last_collect += 1
                 
             except asyncio.CancelledError:
                 raise
             except Exception as e:
                 logger.error(f"Collection error: {e}")
-                await asyncio.sleep(60)
+                await asyncio.sleep(5)
+                self._time_since_last_collect += 5
     
     async def _collect_from_all_nodes(self):
         """Collect stats from all enabled Remnawave nodes."""
@@ -157,6 +174,9 @@ class XrayStatsCollector:
         
         await self._collect_from_all_nodes()
         
+        # Reset timer after manual collection
+        self._time_since_last_collect = 0
+        
         return {
             "success": True,
             "collected_at": self._last_collect_time.isoformat() if self._last_collect_time else None,
@@ -165,14 +185,10 @@ class XrayStatsCollector:
     
     def get_status(self) -> dict:
         """Get collector status with timing info."""
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
-        
         next_collect_in = None
-        if self._running and self._last_collect_time:
-            elapsed = (now - self._last_collect_time).total_seconds()
-            next_collect_in = max(0, self._collection_interval - int(elapsed))
-        elif self._running:
-            next_collect_in = self._collection_interval
+        if self._running:
+            # Use tracked time counter for accurate countdown
+            next_collect_in = max(0, self._collection_interval - self._time_since_last_collect)
         
         return {
             "running": self._running,
@@ -386,7 +402,7 @@ class XrayStatsCollector:
                 await asyncio.sleep(300)
     
     async def _update_user_cache(self):
-        """Update cached Remnawave users."""
+        """Update cached Remnawave users with full info."""
         settings = await self._get_settings()
         
         if not settings or not settings.enabled or not settings.api_url or not settings.api_token:
@@ -408,6 +424,18 @@ class XrayStatsCollector:
                     if not user_id:
                         continue
                     
+                    # Parse dates
+                    expire_at = self._parse_datetime(user.get("expireAt"))
+                    sub_revoked_at = self._parse_datetime(user.get("subRevokedAt"))
+                    sub_last_opened_at = self._parse_datetime(user.get("subLastOpenedAt"))
+                    last_traffic_reset_at = self._parse_datetime(user.get("lastTrafficResetAt"))
+                    created_at = self._parse_datetime(user.get("createdAt"))
+                    
+                    # Parse userTraffic
+                    user_traffic = user.get("userTraffic") or {}
+                    online_at = self._parse_datetime(user_traffic.get("onlineAt"))
+                    first_connected_at = self._parse_datetime(user_traffic.get("firstConnectedAt"))
+                    
                     existing = await db.execute(
                         select(RemnawaveUserCache).where(
                             RemnawaveUserCache.email == user_id
@@ -417,17 +445,65 @@ class XrayStatsCollector:
                     
                     if cache_entry:
                         cache_entry.uuid = user.get("uuid")
+                        cache_entry.short_uuid = user.get("shortUuid")
                         cache_entry.username = user.get("username")
                         cache_entry.telegram_id = user.get("telegramId")
                         cache_entry.status = user.get("status")
+                        # Subscription info
+                        cache_entry.expire_at = expire_at
+                        cache_entry.subscription_url = user.get("subscriptionUrl")
+                        cache_entry.sub_revoked_at = sub_revoked_at
+                        cache_entry.sub_last_user_agent = user.get("subLastUserAgent")
+                        cache_entry.sub_last_opened_at = sub_last_opened_at
+                        # Traffic limits
+                        cache_entry.traffic_limit_bytes = user.get("trafficLimitBytes")
+                        cache_entry.traffic_limit_strategy = user.get("trafficLimitStrategy")
+                        cache_entry.last_traffic_reset_at = last_traffic_reset_at
+                        # Traffic usage
+                        cache_entry.used_traffic_bytes = user_traffic.get("usedTrafficBytes")
+                        cache_entry.lifetime_used_traffic_bytes = user_traffic.get("lifetimeUsedTrafficBytes")
+                        cache_entry.online_at = online_at
+                        cache_entry.first_connected_at = first_connected_at
+                        cache_entry.last_connected_node_uuid = user_traffic.get("lastConnectedNodeUuid")
+                        # Device limit
+                        cache_entry.hwid_device_limit = user.get("hwidDeviceLimit")
+                        # Additional info
+                        cache_entry.user_email = user.get("email")
+                        cache_entry.description = user.get("description")
+                        cache_entry.tag = user.get("tag")
+                        cache_entry.created_at = created_at
                         cache_entry.updated_at = now
                     else:
                         db.add(RemnawaveUserCache(
                             email=user_id,
                             uuid=user.get("uuid"),
+                            short_uuid=user.get("shortUuid"),
                             username=user.get("username"),
                             telegram_id=user.get("telegramId"),
                             status=user.get("status"),
+                            # Subscription info
+                            expire_at=expire_at,
+                            subscription_url=user.get("subscriptionUrl"),
+                            sub_revoked_at=sub_revoked_at,
+                            sub_last_user_agent=user.get("subLastUserAgent"),
+                            sub_last_opened_at=sub_last_opened_at,
+                            # Traffic limits
+                            traffic_limit_bytes=user.get("trafficLimitBytes"),
+                            traffic_limit_strategy=user.get("trafficLimitStrategy"),
+                            last_traffic_reset_at=last_traffic_reset_at,
+                            # Traffic usage
+                            used_traffic_bytes=user_traffic.get("usedTrafficBytes"),
+                            lifetime_used_traffic_bytes=user_traffic.get("lifetimeUsedTrafficBytes"),
+                            online_at=online_at,
+                            first_connected_at=first_connected_at,
+                            last_connected_node_uuid=user_traffic.get("lastConnectedNodeUuid"),
+                            # Device limit
+                            hwid_device_limit=user.get("hwidDeviceLimit"),
+                            # Additional info
+                            user_email=user.get("email"),
+                            description=user.get("description"),
+                            tag=user.get("tag"),
+                            created_at=created_at,
                             updated_at=now
                         ))
                 
@@ -439,6 +515,20 @@ class XrayStatsCollector:
             logger.warning(f"Failed to update user cache: {e.message}")
         finally:
             await api.close()
+    
+    def _parse_datetime(self, value: str | None) -> datetime | None:
+        """Parse ISO datetime string to datetime object."""
+        if not value:
+            return None
+        try:
+            # Handle ISO format with timezone
+            if value.endswith('Z'):
+                value = value[:-1] + '+00:00'
+            dt = datetime.fromisoformat(value)
+            # Remove timezone info for SQLite compatibility
+            return dt.replace(tzinfo=None)
+        except (ValueError, TypeError):
+            return None
     
     async def _cleanup_loop(self):
         """Background loop for cleaning old data."""

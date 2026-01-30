@@ -858,6 +858,73 @@ export interface RemnawaveCachedUser {
   status: string | null
 }
 
+// Full user info with all Remnawave Panel data
+export interface RemnawaveUserFullInfo {
+  email: number
+  uuid: string | null
+  short_uuid: string | null
+  username: string | null
+  telegram_id: number | null
+  status: string | null
+  // Subscription info
+  expire_at: string | null
+  subscription_url: string | null
+  sub_revoked_at: string | null
+  sub_last_user_agent: string | null
+  sub_last_opened_at: string | null
+  // Traffic limits
+  traffic_limit_bytes: number | null
+  traffic_limit_strategy: string | null  // NO_RESET, DAY, WEEK, MONTH
+  last_traffic_reset_at: string | null
+  // Traffic usage
+  used_traffic_bytes: number | null
+  lifetime_used_traffic_bytes: number | null
+  online_at: string | null
+  first_connected_at: string | null
+  last_connected_node_uuid: string | null
+  // Device limit
+  hwid_device_limit: number | null
+  // Additional info
+  user_email: string | null
+  description: string | null
+  tag: string | null
+  created_at: string | null
+  updated_at: string | null
+  // Extra data from live API
+  active_internal_squads?: Array<{ uuid: string; name: string }>
+  subscription_history?: {
+    total: number
+    records: Array<{
+      id: number
+      userUuid: string
+      requestAt: string
+      requestIp: string | null
+      userAgent: string | null
+    }>
+  } | null
+  bandwidth_stats?: {
+    totalUsedBytes?: number
+    nodes?: Array<{
+      nodeUuid: string
+      nodeName: string
+      usedBytes: number
+    }>
+    daily?: Array<{
+      date: string
+      usedBytes: number
+    }>
+  } | null
+  hwid_devices?: {
+    devices?: Array<{
+      id: number
+      hwid: string
+      deviceName: string | null
+      createdAt: string
+      lastUsedAt: string
+    }>
+  } | null
+}
+
 export const remnawaveApi = {
   // Settings
   getSettings: () => api.get<RemnawaveSettings>('/remnawave/settings'),
@@ -912,6 +979,14 @@ export const remnawaveApi = {
   // Users cache
   getUsers: (params?: { search?: string; limit?: number }) =>
     api.get<{ count: number; users: RemnawaveCachedUser[] }>('/remnawave/users', { params }),
+  
+  // Full user info (cached)
+  getUserFullInfo: (email: number) =>
+    api.get<RemnawaveUserFullInfo>(`/remnawave/user/${email}/full`),
+  
+  // Live user info (fetches fresh data from Remnawave API)
+  getUserLiveInfo: (email: number) =>
+    api.get<RemnawaveUserFullInfo>(`/remnawave/user/${email}/live`),
 }
 
 export default api

@@ -17,7 +17,15 @@ import {
   Clock,
   Server,
   Info,
-  Network
+  Network,
+  Calendar,
+  HardDrive,
+  Link,
+  Smartphone,
+  ArrowDownUp,
+  Copy,
+  CheckCircle,
+  MessageCircle
 } from 'lucide-react'
 import { 
   remnawaveApi, 
@@ -29,7 +37,8 @@ import {
   RemnawaveUserDetails,
   RemnawaveServerInfo,
   RemnawaveCollectorStatus,
-  RemnawaveDestinationUsers
+  RemnawaveDestinationUsers,
+  RemnawaveUserFullInfo
 } from '../api/client'
 import { useTranslation } from 'react-i18next'
 import PeriodSelector from '../components/ui/PeriodSelector'
@@ -85,6 +94,10 @@ export default function Remnawave() {
   
   // User details modal
   const [selectedUser, setSelectedUser] = useState<RemnawaveUserDetails | null>(null)
+  const [selectedUserFull, setSelectedUserFull] = useState<RemnawaveUserFullInfo | null>(null)
+  const [isLoadingUserFull, setIsLoadingUserFull] = useState(false)
+  const [userModalTab, setUserModalTab] = useState<'overview' | 'traffic' | 'ips' | 'history' | 'devices'>('overview')
+  const [copiedField, setCopiedField] = useState<string | null>(null)
   const [userSearch, setUserSearch] = useState('')
   const [destSearch, setDestSearch] = useState('')
   
@@ -310,12 +323,71 @@ export default function Remnawave() {
     ![...selectedNodeIds].every(id => currentNodeIds.has(id))
   
   const handleUserClick = async (email: number) => {
+    setUserModalTab('overview')
+    setCopiedField(null)
     try {
-      const res = await remnawaveApi.getUserStats(email, period)
-      setSelectedUser(res.data)
+      // Fetch visit stats and full user info in parallel
+      const [statsRes, fullRes] = await Promise.all([
+        remnawaveApi.getUserStats(email, period),
+        remnawaveApi.getUserFullInfo(email)
+      ])
+      setSelectedUser(statsRes.data)
+      setSelectedUserFull(fullRes.data)
     } catch (err) {
       console.error('Failed to fetch user stats:', err)
     }
+  }
+  
+  const handleLoadLiveUserInfo = async () => {
+    if (!selectedUser) return
+    setIsLoadingUserFull(true)
+    try {
+      const res = await remnawaveApi.getUserLiveInfo(selectedUser.email)
+      setSelectedUserFull(res.data)
+    } catch (err) {
+      console.error('Failed to fetch live user info:', err)
+    } finally {
+      setIsLoadingUserFull(false)
+    }
+  }
+  
+  const copyToClipboard = (text: string, field: string) => {
+    navigator.clipboard.writeText(text)
+    setCopiedField(field)
+    setTimeout(() => setCopiedField(null), 2000)
+  }
+  
+  const formatBytes = (bytes: number | null | undefined): string => {
+    if (bytes === null || bytes === undefined) return '-'
+    if (bytes === 0) return '0 B'
+    const k = 1024
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB']
+    const i = Math.floor(Math.log(bytes) / Math.log(k))
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
+  }
+  
+  const formatDate = (dateStr: string | null | undefined): string => {
+    if (!dateStr) return '-'
+    return new Date(dateStr).toLocaleDateString()
+  }
+  
+  const formatDateTime = (dateStr: string | null | undefined): string => {
+    if (!dateStr) return '-'
+    return new Date(dateStr).toLocaleString()
+  }
+  
+  const getDaysRemaining = (expireAt: string | null | undefined): { days: number; isExpired: boolean } | null => {
+    if (!expireAt) return null
+    const expireDate = new Date(expireAt)
+    const now = new Date()
+    const diff = expireDate.getTime() - now.getTime()
+    const days = Math.ceil(diff / (1000 * 60 * 60 * 24))
+    return { days, isExpired: days < 0 }
+  }
+  
+  const getTrafficUsagePercent = (used: number | null | undefined, limit: number | null | undefined): number | null => {
+    if (!used || !limit || limit === 0) return null
+    return Math.round((used / limit) * 100)
   }
   
   const handleDestinationClick = async (destination: string) => {
@@ -1027,7 +1099,7 @@ export default function Remnawave() {
         )}
       </AnimatePresence>
       
-      {/* User Details Modal */}
+      {/* User Details Modal - Extended */}
       <AnimatePresence>
         {selectedUser && (
           <motion.div
@@ -1035,126 +1107,530 @@ export default function Remnawave() {
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
-            onClick={() => setSelectedUser(null)}
+            onClick={() => { setSelectedUser(null); setSelectedUserFull(null); }}
           >
             <motion.div
               initial={{ scale: 0.95, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.95, opacity: 0 }}
-              className="w-full max-w-2xl max-h-[80vh] overflow-auto bg-dark-900 rounded-xl border border-dark-700 p-6"
+              className="w-full max-w-4xl max-h-[90vh] overflow-hidden bg-dark-900 rounded-xl border border-dark-700 flex flex-col"
               onClick={(e) => e.stopPropagation()}
             >
-              <div className="flex items-center justify-between mb-6">
-                <div>
-                  <h3 className="text-xl font-semibold text-dark-100">
-                    {selectedUser.username || `User #${selectedUser.email}`}
-                  </h3>
-                  <div className="flex items-center gap-3 mt-1">
-                    <span className="text-dark-400 text-sm">ID: {selectedUser.email}</span>
-                    {selectedUser.status && (
-                      <span className={`px-2 py-0.5 rounded text-xs font-medium ${
-                        selectedUser.status === 'ACTIVE' ? 'bg-success/20 text-success' :
-                        selectedUser.status === 'DISABLED' ? 'bg-danger/20 text-danger' :
-                        'bg-dark-600 text-dark-300'
-                      }`}>
-                        {selectedUser.status}
-                      </span>
-                    )}
-                  </div>
-                </div>
-                <motion.button
-                  onClick={() => setSelectedUser(null)}
-                  className="p-2 rounded-lg hover:bg-dark-700 text-dark-400 transition-colors"
-                  whileHover={{ scale: 1.1 }}
-                  whileTap={{ scale: 0.9 }}
-                >
-                  <X className="w-5 h-5" />
-                </motion.button>
-              </div>
-              
-              <div className="mb-4 p-4 rounded-lg bg-dark-800 flex items-center gap-6">
-                <div>
-                  <span className="text-dark-400">{t('remnawave.total_visits')}:</span>
-                  <span className="text-dark-100 text-xl font-bold ml-2">
-                    {selectedUser.total_visits.toLocaleString()}
-                  </span>
-                </div>
-                <div>
-                  <span className="text-dark-400">{t('remnawave.unique_ips')}:</span>
-                  <span className={`text-xl font-bold ml-2 ${
-                    selectedUser.unique_ips > 3 ? 'text-warning' : 'text-dark-100'
-                  }`}>
-                    {selectedUser.unique_ips}
-                  </span>
-                </div>
-              </div>
-              
-              {/* IP Addresses Section */}
-              {selectedUser.ips && selectedUser.ips.length > 0 && (
-                <>
-                  <h4 className="text-sm font-medium text-dark-400 mb-3 flex items-center gap-2">
-                    <Network className="w-4 h-4" />
-                    {t('remnawave.ip_addresses')}
-                  </h4>
-                  <div className="space-y-2 max-h-[200px] overflow-auto mb-6">
-                    {selectedUser.ips.map((ip, idx) => (
-                      <div key={ip.source_ip} className="flex items-center gap-3 p-2 rounded-lg hover:bg-dark-800 transition-colors">
-                        <span className="text-dark-500 text-sm w-6">{idx + 1}</span>
-                        <div className="flex-1 min-w-0">
-                          <div className="text-dark-200 text-sm font-mono">
-                            {ip.source_ip}
-                          </div>
-                          <div className="text-dark-500 text-xs flex items-center gap-2 flex-wrap">
-                            {ip.servers.map((s, i) => (
-                              <span key={s.server_id} className="inline-flex items-center gap-1">
-                                <Server className="w-3 h-3" />
-                                {s.server_name}
-                                {i < ip.servers.length - 1 && ','}
-                              </span>
-                            ))}
-                          </div>
-                        </div>
-                        <span className="text-dark-400 text-sm">{ip.total_count.toLocaleString()}</span>
-                        <a
-                          href={`https://check-host.net/ip-info?host=${encodeURIComponent(ip.source_ip)}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="p-1.5 rounded-lg hover:bg-dark-700 text-dark-500 hover:text-accent-400 transition-colors"
-                          title={t('remnawave.ip_info')}
+              {/* Header */}
+              <div className="flex items-center justify-between p-6 border-b border-dark-700">
+                <div className="flex items-center gap-4">
+                  <div>
+                    <h3 className="text-xl font-semibold text-dark-100">
+                      {selectedUser.username || `User #${selectedUser.email}`}
+                    </h3>
+                    <div className="flex items-center gap-3 mt-1 flex-wrap">
+                      <span className="text-dark-400 text-sm">ID: {selectedUser.email}</span>
+                      {selectedUserFull?.uuid && (
+                        <button
+                          onClick={() => copyToClipboard(selectedUserFull.uuid!, 'uuid')}
+                          className="flex items-center gap-1 text-dark-500 text-xs hover:text-accent-400 transition-colors"
+                          title="Copy UUID"
                         >
-                          <Info className="w-4 h-4" />
-                        </a>
-                      </div>
-                    ))}
-                  </div>
-                </>
-              )}
-              
-              <h4 className="text-sm font-medium text-dark-400 mb-3">{t('remnawave.visited_sites')}</h4>
-              <div className="space-y-2 max-h-[300px] overflow-auto">
-                  {selectedUser.destinations.map((dest, idx) => (
-                  <div key={dest.destination} className="flex items-center gap-3 p-2 rounded-lg hover:bg-dark-800 transition-colors">
-                    <span className="text-dark-500 text-sm w-6">{idx + 1}</span>
-                    <div className="flex-1 min-w-0">
-                      <div className="text-dark-200 text-sm truncate font-mono">
-                        {dest.destination}
-                      </div>
-                      {dest.last_seen && (
-                        <div className="text-dark-500 text-xs">{t('remnawave.last_seen')}: {new Date(dest.last_seen).toLocaleDateString()}</div>
+                          UUID: {selectedUserFull.uuid.slice(0, 8)}...
+                          {copiedField === 'uuid' ? <CheckCircle className="w-3 h-3 text-success" /> : <Copy className="w-3 h-3" />}
+                        </button>
+                      )}
+                      {selectedUser.status && (
+                        <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+                          selectedUser.status === 'ACTIVE' ? 'bg-success/20 text-success' :
+                          selectedUser.status === 'DISABLED' ? 'bg-danger/20 text-danger' :
+                          selectedUser.status === 'LIMITED' ? 'bg-warning/20 text-warning' :
+                          selectedUser.status === 'EXPIRED' ? 'bg-orange-500/20 text-orange-400' :
+                          'bg-dark-600 text-dark-300'
+                        }`}>
+                          {selectedUser.status}
+                        </span>
+                      )}
+                      {selectedUserFull?.telegram_id && (
+                        <span className="flex items-center gap-1 text-dark-400 text-xs">
+                          <MessageCircle className="w-3 h-3" />
+                          TG: {selectedUserFull.telegram_id}
+                        </span>
                       )}
                     </div>
-                    <span className="text-dark-400 text-sm">{dest.visits.toLocaleString()}</span>
-                    <a
-                      href={getIpInfoUrl(dest.destination)}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="p-1.5 rounded-lg hover:bg-dark-700 text-dark-500 hover:text-accent-400 transition-colors"
-                      title={t('remnawave.ip_info')}
-                    >
-                      <Info className="w-4 h-4" />
-                    </a>
                   </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <motion.button
+                    onClick={handleLoadLiveUserInfo}
+                    disabled={isLoadingUserFull}
+                    className="p-2 rounded-lg bg-dark-800 hover:bg-dark-700 text-dark-300 
+                             hover:text-dark-100 transition-colors disabled:opacity-50"
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                    title={t('remnawave.refresh_live')}
+                  >
+                    <RefreshCw className={`w-4 h-4 ${isLoadingUserFull ? 'animate-spin' : ''}`} />
+                  </motion.button>
+                  <motion.button
+                    onClick={() => { setSelectedUser(null); setSelectedUserFull(null); }}
+                    className="p-2 rounded-lg hover:bg-dark-700 text-dark-400 transition-colors"
+                    whileHover={{ scale: 1.1 }}
+                    whileTap={{ scale: 0.9 }}
+                  >
+                    <X className="w-5 h-5" />
+                  </motion.button>
+                </div>
+              </div>
+              
+              {/* Modal Tabs */}
+              <div className="flex gap-1 p-2 bg-dark-800/50 border-b border-dark-700">
+                {[
+                  { id: 'overview' as const, label: t('remnawave.overview'), icon: <BarChart3 className="w-4 h-4" /> },
+                  { id: 'traffic' as const, label: t('remnawave.traffic'), icon: <ArrowDownUp className="w-4 h-4" /> },
+                  { id: 'ips' as const, label: `IP (${selectedUser.unique_ips})`, icon: <Network className="w-4 h-4" /> },
+                  { id: 'history' as const, label: t('remnawave.sub_history'), icon: <Clock className="w-4 h-4" /> },
+                  { id: 'devices' as const, label: t('remnawave.devices'), icon: <Smartphone className="w-4 h-4" /> },
+                ].map(tab => (
+                  <button
+                    key={tab.id}
+                    onClick={() => setUserModalTab(tab.id)}
+                    className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-all ${
+                      userModalTab === tab.id
+                        ? 'bg-accent-500/20 text-accent-400'
+                        : 'text-dark-400 hover:text-dark-200 hover:bg-dark-700/50'
+                    }`}
+                  >
+                    {tab.icon}
+                    {tab.label}
+                  </button>
                 ))}
+              </div>
+              
+              {/* Modal Content */}
+              <div className="flex-1 overflow-auto p-6">
+                {/* Overview Tab */}
+                {userModalTab === 'overview' && (
+                  <div className="space-y-6">
+                    {/* Stats Summary */}
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                      <div className="p-4 rounded-lg bg-dark-800">
+                        <div className="text-dark-400 text-sm">{t('remnawave.total_visits')}</div>
+                        <div className="text-2xl font-bold text-dark-100">
+                          {selectedUser.total_visits.toLocaleString()}
+                        </div>
+                      </div>
+                      <div className="p-4 rounded-lg bg-dark-800">
+                        <div className="text-dark-400 text-sm">{t('remnawave.unique_ips')}</div>
+                        <div className={`text-2xl font-bold ${selectedUser.unique_ips > 3 ? 'text-warning' : 'text-dark-100'}`}>
+                          {selectedUser.unique_ips}
+                        </div>
+                      </div>
+                      <div className="p-4 rounded-lg bg-dark-800">
+                        <div className="text-dark-400 text-sm">{t('remnawave.unique_sites')}</div>
+                        <div className="text-2xl font-bold text-dark-100">
+                          {selectedUser.destinations?.length || 0}
+                        </div>
+                      </div>
+                      <div className="p-4 rounded-lg bg-dark-800">
+                        <div className="text-dark-400 text-sm">{t('remnawave.device_limit')}</div>
+                        <div className="text-2xl font-bold text-dark-100">
+                          {selectedUserFull?.hwid_device_limit ?? '-'}
+                        </div>
+                      </div>
+                    </div>
+                    
+                    {/* Subscription Info */}
+                    <div className="p-4 rounded-lg bg-dark-800 space-y-4">
+                      <h4 className="text-sm font-medium text-dark-300 flex items-center gap-2">
+                        <Calendar className="w-4 h-4" />
+                        {t('remnawave.subscription_info')}
+                      </h4>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {/* Expiration */}
+                        <div>
+                          <div className="text-dark-500 text-xs mb-1">{t('remnawave.expires_at')}</div>
+                          {selectedUserFull?.expire_at ? (
+                            <div className="flex items-center gap-2">
+                              <span className="text-dark-200">{formatDateTime(selectedUserFull.expire_at)}</span>
+                              {(() => {
+                                const remaining = getDaysRemaining(selectedUserFull.expire_at)
+                                if (!remaining) return null
+                                return (
+                                  <span className={`text-xs px-2 py-0.5 rounded ${
+                                    remaining.isExpired ? 'bg-danger/20 text-danger' :
+                                    remaining.days <= 7 ? 'bg-warning/20 text-warning' :
+                                    'bg-success/20 text-success'
+                                  }`}>
+                                    {remaining.isExpired ? t('remnawave.expired') : `${remaining.days} ${t('remnawave.days_left')}`}
+                                  </span>
+                                )
+                              })()}
+                            </div>
+                          ) : (
+                            <span className="text-dark-500">-</span>
+                          )}
+                        </div>
+                        
+                        {/* Created */}
+                        <div>
+                          <div className="text-dark-500 text-xs mb-1">{t('remnawave.created_at')}</div>
+                          <span className="text-dark-200">{formatDateTime(selectedUserFull?.created_at)}</span>
+                        </div>
+                        
+                        {/* Last Online */}
+                        <div>
+                          <div className="text-dark-500 text-xs mb-1">{t('remnawave.last_online')}</div>
+                          <span className="text-dark-200">{formatDateTime(selectedUserFull?.online_at)}</span>
+                        </div>
+                        
+                        {/* First Connected */}
+                        <div>
+                          <div className="text-dark-500 text-xs mb-1">{t('remnawave.first_connected')}</div>
+                          <span className="text-dark-200">{formatDateTime(selectedUserFull?.first_connected_at)}</span>
+                        </div>
+                        
+                        {/* Last Sub Opened */}
+                        <div>
+                          <div className="text-dark-500 text-xs mb-1">{t('remnawave.last_sub_opened')}</div>
+                          <span className="text-dark-200">{formatDateTime(selectedUserFull?.sub_last_opened_at)}</span>
+                        </div>
+                        
+                        {/* Tag */}
+                        {selectedUserFull?.tag && (
+                          <div>
+                            <div className="text-dark-500 text-xs mb-1">{t('remnawave.tag')}</div>
+                            <span className="text-dark-200 px-2 py-0.5 rounded bg-dark-700 text-sm">{selectedUserFull.tag}</span>
+                          </div>
+                        )}
+                      </div>
+                      
+                      {/* Subscription URL */}
+                      {selectedUserFull?.subscription_url && (
+                        <div>
+                          <div className="text-dark-500 text-xs mb-1 flex items-center gap-1">
+                            <Link className="w-3 h-3" />
+                            {t('remnawave.subscription_url')}
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <code className="flex-1 text-xs text-dark-300 bg-dark-900 p-2 rounded truncate">
+                              {selectedUserFull.subscription_url}
+                            </code>
+                            <button
+                              onClick={() => copyToClipboard(selectedUserFull.subscription_url!, 'sub_url')}
+                              className="p-2 rounded-lg bg-dark-700 hover:bg-dark-600 text-dark-400 hover:text-accent-400 transition-colors"
+                              title="Copy URL"
+                            >
+                              {copiedField === 'sub_url' ? <CheckCircle className="w-4 h-4 text-success" /> : <Copy className="w-4 h-4" />}
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                      
+                      {/* Description */}
+                      {selectedUserFull?.description && (
+                        <div>
+                          <div className="text-dark-500 text-xs mb-1">{t('remnawave.description')}</div>
+                          <p className="text-dark-300 text-sm">{selectedUserFull.description}</p>
+                        </div>
+                      )}
+                    </div>
+                    
+                    {/* Top Sites */}
+                    <div>
+                      <h4 className="text-sm font-medium text-dark-400 mb-3">{t('remnawave.top_visited_sites')}</h4>
+                      <div className="space-y-2 max-h-[200px] overflow-auto">
+                        {selectedUser.destinations.slice(0, 10).map((dest, idx) => (
+                          <div key={dest.destination} className="flex items-center gap-3 p-2 rounded-lg hover:bg-dark-800 transition-colors">
+                            <span className="text-dark-500 text-sm w-6">{idx + 1}</span>
+                            <div className="flex-1 min-w-0">
+                              <div className="text-dark-200 text-sm truncate font-mono">{dest.destination}</div>
+                            </div>
+                            <span className="text-dark-400 text-sm">{dest.visits.toLocaleString()}</span>
+                            <a
+                              href={getIpInfoUrl(dest.destination)}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="p-1.5 rounded-lg hover:bg-dark-700 text-dark-500 hover:text-accent-400 transition-colors"
+                              title={t('remnawave.ip_info')}
+                            >
+                              <Info className="w-4 h-4" />
+                            </a>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
+                
+                {/* Traffic Tab */}
+                {userModalTab === 'traffic' && (
+                  <div className="space-y-6">
+                    {/* Traffic Usage */}
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                      <div className="p-4 rounded-lg bg-dark-800">
+                        <div className="flex items-center gap-2 text-dark-400 text-sm mb-2">
+                          <ArrowDownUp className="w-4 h-4" />
+                          {t('remnawave.used_traffic')}
+                        </div>
+                        <div className="text-2xl font-bold text-dark-100">
+                          {formatBytes(selectedUserFull?.used_traffic_bytes)}
+                        </div>
+                        {selectedUserFull?.traffic_limit_bytes && selectedUserFull.traffic_limit_bytes > 0 && (
+                          <div className="mt-2">
+                            <div className="flex justify-between text-xs text-dark-500 mb-1">
+                              <span>{t('remnawave.of')} {formatBytes(selectedUserFull.traffic_limit_bytes)}</span>
+                              <span>{getTrafficUsagePercent(selectedUserFull.used_traffic_bytes, selectedUserFull.traffic_limit_bytes)}%</span>
+                            </div>
+                            <div className="h-2 bg-dark-700 rounded-full overflow-hidden">
+                              <div 
+                                className={`h-full rounded-full transition-all ${
+                                  (getTrafficUsagePercent(selectedUserFull.used_traffic_bytes, selectedUserFull.traffic_limit_bytes) || 0) > 90 
+                                    ? 'bg-danger' 
+                                    : (getTrafficUsagePercent(selectedUserFull.used_traffic_bytes, selectedUserFull.traffic_limit_bytes) || 0) > 70 
+                                      ? 'bg-warning' 
+                                      : 'bg-accent-500'
+                                }`}
+                                style={{ width: `${Math.min(getTrafficUsagePercent(selectedUserFull.used_traffic_bytes, selectedUserFull.traffic_limit_bytes) || 0, 100)}%` }}
+                              />
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                      
+                      <div className="p-4 rounded-lg bg-dark-800">
+                        <div className="text-dark-400 text-sm mb-2">{t('remnawave.traffic_limit')}</div>
+                        <div className="text-2xl font-bold text-dark-100">
+                          {selectedUserFull?.traffic_limit_bytes && selectedUserFull.traffic_limit_bytes > 0 
+                            ? formatBytes(selectedUserFull.traffic_limit_bytes)
+                            : t('remnawave.unlimited')}
+                        </div>
+                        {selectedUserFull?.traffic_limit_strategy && selectedUserFull.traffic_limit_strategy !== 'NO_RESET' && (
+                          <div className="mt-1 text-xs text-dark-500">
+                            {t('remnawave.reset_strategy')}: {selectedUserFull.traffic_limit_strategy}
+                          </div>
+                        )}
+                      </div>
+                      
+                      <div className="p-4 rounded-lg bg-dark-800">
+                        <div className="text-dark-400 text-sm mb-2">{t('remnawave.lifetime_traffic')}</div>
+                        <div className="text-2xl font-bold text-dark-100">
+                          {formatBytes(selectedUserFull?.lifetime_used_traffic_bytes)}
+                        </div>
+                        {selectedUserFull?.last_traffic_reset_at && (
+                          <div className="mt-1 text-xs text-dark-500">
+                            {t('remnawave.last_reset')}: {formatDate(selectedUserFull.last_traffic_reset_at)}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                    
+                    {/* Bandwidth Stats (from live API) */}
+                    {selectedUserFull?.bandwidth_stats?.daily && selectedUserFull.bandwidth_stats.daily.length > 0 && (
+                      <div className="p-4 rounded-lg bg-dark-800">
+                        <h4 className="text-sm font-medium text-dark-300 mb-4">{t('remnawave.daily_traffic')}</h4>
+                        <div className="space-y-2 max-h-[300px] overflow-auto">
+                          {selectedUserFull.bandwidth_stats.daily.map((day) => (
+                            <div key={day.date} className="flex items-center gap-3 p-2 rounded-lg hover:bg-dark-700 transition-colors">
+                              <span className="text-dark-400 text-sm w-24">{formatDate(day.date)}</span>
+                              <div className="flex-1 h-2 bg-dark-600 rounded-full overflow-hidden">
+                                <div 
+                                  className="h-full bg-accent-500 rounded-full"
+                                  style={{ 
+                                    width: `${Math.min((day.usedBytes / Math.max(...selectedUserFull.bandwidth_stats!.daily!.map(d => d.usedBytes))) * 100, 100)}%` 
+                                  }}
+                                />
+                              </div>
+                              <span className="text-dark-200 text-sm w-20 text-right">{formatBytes(day.usedBytes)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    
+                    {!selectedUserFull?.bandwidth_stats && (
+                      <div className="p-6 rounded-lg bg-dark-800 text-center">
+                        <ArrowDownUp className="w-8 h-8 text-dark-600 mx-auto mb-2" />
+                        <p className="text-dark-500">{t('remnawave.click_refresh_for_stats')}</p>
+                        <button
+                          onClick={handleLoadLiveUserInfo}
+                          disabled={isLoadingUserFull}
+                          className="mt-3 px-4 py-2 rounded-lg bg-accent-500 hover:bg-accent-600 text-white 
+                                   text-sm transition-colors disabled:opacity-50"
+                        >
+                          {isLoadingUserFull ? t('common.loading') : t('remnawave.load_live_data')}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+                
+                {/* IPs Tab */}
+                {userModalTab === 'ips' && (
+                  <div className="space-y-4">
+                    {selectedUser.ips && selectedUser.ips.length > 0 ? (
+                      <div className="space-y-2">
+                        {selectedUser.ips.map((ip, idx) => (
+                          <div key={ip.source_ip} className="flex items-center gap-3 p-3 rounded-lg bg-dark-800 hover:bg-dark-700 transition-colors">
+                            <span className="text-dark-500 text-sm w-6">{idx + 1}</span>
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2">
+                                <span className="text-dark-200 font-mono">{ip.source_ip}</span>
+                                <button
+                                  onClick={() => copyToClipboard(ip.source_ip, `ip_${idx}`)}
+                                  className="p-1 rounded hover:bg-dark-600 text-dark-500 hover:text-accent-400 transition-colors"
+                                >
+                                  {copiedField === `ip_${idx}` ? <CheckCircle className="w-3 h-3 text-success" /> : <Copy className="w-3 h-3" />}
+                                </button>
+                              </div>
+                              <div className="text-dark-500 text-xs flex items-center gap-2 flex-wrap mt-1">
+                                {ip.servers.map((s, i) => (
+                                  <span key={s.server_id} className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-dark-700">
+                                    <Server className="w-3 h-3" />
+                                    {s.server_name}: {s.count}
+                                  </span>
+                                ))}
+                              </div>
+                              {ip.last_seen && (
+                                <div className="text-dark-600 text-xs mt-1">
+                                  {t('remnawave.last_seen')}: {formatDateTime(ip.last_seen)}
+                                </div>
+                              )}
+                            </div>
+                            <span className="text-dark-300 font-medium">{ip.total_count.toLocaleString()}</span>
+                            <a
+                              href={`https://check-host.net/ip-info?host=${encodeURIComponent(ip.source_ip)}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="p-2 rounded-lg hover:bg-dark-600 text-dark-400 hover:text-accent-400 transition-colors"
+                              title={t('remnawave.ip_info')}
+                            >
+                              <ExternalLink className="w-4 h-4" />
+                            </a>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="p-6 rounded-lg bg-dark-800 text-center">
+                        <Network className="w-8 h-8 text-dark-600 mx-auto mb-2" />
+                        <p className="text-dark-500">{t('remnawave.no_ip_data')}</p>
+                      </div>
+                    )}
+                  </div>
+                )}
+                
+                {/* Subscription History Tab */}
+                {userModalTab === 'history' && (
+                  <div className="space-y-4">
+                    {selectedUserFull?.subscription_history?.records && selectedUserFull.subscription_history.records.length > 0 ? (
+                      <div className="space-y-2">
+                        {selectedUserFull.subscription_history.records.map((record, idx) => (
+                          <div key={record.id} className="flex items-center gap-3 p-3 rounded-lg bg-dark-800">
+                            <span className="text-dark-500 text-sm w-6">{idx + 1}</span>
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2">
+                                <span className="text-dark-200 font-mono">{record.requestIp || 'Unknown IP'}</span>
+                                {record.requestIp && (
+                                  <a
+                                    href={`https://check-host.net/ip-info?host=${encodeURIComponent(record.requestIp)}`}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="p-1 rounded hover:bg-dark-700 text-dark-500 hover:text-accent-400 transition-colors"
+                                  >
+                                    <ExternalLink className="w-3 h-3" />
+                                  </a>
+                                )}
+                              </div>
+                              {record.userAgent && (
+                                <div className="text-dark-500 text-xs mt-1 truncate" title={record.userAgent}>
+                                  {record.userAgent}
+                                </div>
+                              )}
+                            </div>
+                            <span className="text-dark-400 text-sm whitespace-nowrap">
+                              {formatDateTime(record.requestAt)}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    ) : !selectedUserFull?.subscription_history ? (
+                      <div className="p-6 rounded-lg bg-dark-800 text-center">
+                        <Clock className="w-8 h-8 text-dark-600 mx-auto mb-2" />
+                        <p className="text-dark-500">{t('remnawave.click_refresh_for_history')}</p>
+                        <button
+                          onClick={handleLoadLiveUserInfo}
+                          disabled={isLoadingUserFull}
+                          className="mt-3 px-4 py-2 rounded-lg bg-accent-500 hover:bg-accent-600 text-white 
+                                   text-sm transition-colors disabled:opacity-50"
+                        >
+                          {isLoadingUserFull ? t('common.loading') : t('remnawave.load_live_data')}
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="p-6 rounded-lg bg-dark-800 text-center">
+                        <Clock className="w-8 h-8 text-dark-600 mx-auto mb-2" />
+                        <p className="text-dark-500">{t('remnawave.no_history_data')}</p>
+                      </div>
+                    )}
+                  </div>
+                )}
+                
+                {/* Devices Tab */}
+                {userModalTab === 'devices' && (
+                  <div className="space-y-4">
+                    {/* Device Limit Info */}
+                    <div className="p-4 rounded-lg bg-dark-800">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <div className="text-dark-400 text-sm">{t('remnawave.device_limit')}</div>
+                          <div className="text-xl font-bold text-dark-100">
+                            {selectedUserFull?.hwid_device_limit ?? t('remnawave.unlimited')}
+                          </div>
+                        </div>
+                        {selectedUserFull?.hwid_devices?.devices && (
+                          <div className="text-right">
+                            <div className="text-dark-400 text-sm">{t('remnawave.devices_used')}</div>
+                            <div className="text-xl font-bold text-dark-100">
+                              {selectedUserFull.hwid_devices.devices.length}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                    
+                    {/* Device List */}
+                    {selectedUserFull?.hwid_devices?.devices && selectedUserFull.hwid_devices.devices.length > 0 ? (
+                      <div className="space-y-2">
+                        {selectedUserFull.hwid_devices.devices.map((device, idx) => (
+                          <div key={device.id} className="flex items-center gap-3 p-3 rounded-lg bg-dark-800">
+                            <Smartphone className="w-5 h-5 text-dark-500" />
+                            <div className="flex-1 min-w-0">
+                              <div className="text-dark-200">{device.deviceName || `Device ${idx + 1}`}</div>
+                              <div className="text-dark-500 text-xs font-mono truncate">{device.hwid}</div>
+                            </div>
+                            <div className="text-right">
+                              <div className="text-dark-400 text-xs">{t('remnawave.last_used')}</div>
+                              <div className="text-dark-300 text-sm">{formatDateTime(device.lastUsedAt)}</div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : !selectedUserFull?.hwid_devices ? (
+                      <div className="p-6 rounded-lg bg-dark-800 text-center">
+                        <Smartphone className="w-8 h-8 text-dark-600 mx-auto mb-2" />
+                        <p className="text-dark-500">{t('remnawave.click_refresh_for_devices')}</p>
+                        <button
+                          onClick={handleLoadLiveUserInfo}
+                          disabled={isLoadingUserFull}
+                          className="mt-3 px-4 py-2 rounded-lg bg-accent-500 hover:bg-accent-600 text-white 
+                                   text-sm transition-colors disabled:opacity-50"
+                        >
+                          {isLoadingUserFull ? t('common.loading') : t('remnawave.load_live_data')}
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="p-6 rounded-lg bg-dark-800 text-center">
+                        <Smartphone className="w-8 h-8 text-dark-600 mx-auto mb-2" />
+                        <p className="text-dark-500">{t('remnawave.no_devices')}</p>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             </motion.div>
           </motion.div>
