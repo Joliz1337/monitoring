@@ -16,7 +16,8 @@ import {
   Play,
   Clock,
   Server,
-  Info
+  Info,
+  Network
 } from 'lucide-react'
 import { 
   remnawaveApi, 
@@ -644,6 +645,7 @@ export default function Remnawave() {
                     <th className="text-left p-4 text-dark-400 font-medium text-sm">{t('remnawave.status')}</th>
                     <th className="text-right p-4 text-dark-400 font-medium text-sm">{t('remnawave.visits')}</th>
                     <th className="text-right p-4 text-dark-400 font-medium text-sm">{t('remnawave.sites')}</th>
+                    <th className="text-right p-4 text-dark-400 font-medium text-sm">IP</th>
                     <th className="w-10"></th>
                   </tr>
                 </thead>
@@ -668,6 +670,16 @@ export default function Remnawave() {
                       </td>
                       <td className="p-4 text-right text-dark-200">{user.total_visits.toLocaleString()}</td>
                       <td className="p-4 text-right text-dark-400">{user.unique_sites}</td>
+                      <td className="p-4 text-right">
+                        <span className={`inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-medium ${
+                          user.unique_ips > 3 ? 'bg-warning/20 text-warning' :
+                          user.unique_ips > 0 ? 'bg-accent-500/20 text-accent-400' :
+                          'bg-dark-600 text-dark-400'
+                        }`}>
+                          <Network className="w-3 h-3" />
+                          {user.unique_ips}
+                        </span>
+                      </td>
                       <td className="p-4">
                         <ChevronRight className="w-4 h-4 text-dark-500" />
                       </td>
@@ -1060,12 +1072,63 @@ export default function Remnawave() {
                 </motion.button>
               </div>
               
-              <div className="mb-4 p-4 rounded-lg bg-dark-800">
-                <span className="text-dark-400">{t('remnawave.total_visits')}:</span>
-                <span className="text-dark-100 text-xl font-bold ml-2">
-                  {selectedUser.total_visits.toLocaleString()}
-                </span>
+              <div className="mb-4 p-4 rounded-lg bg-dark-800 flex items-center gap-6">
+                <div>
+                  <span className="text-dark-400">{t('remnawave.total_visits')}:</span>
+                  <span className="text-dark-100 text-xl font-bold ml-2">
+                    {selectedUser.total_visits.toLocaleString()}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-dark-400">{t('remnawave.unique_ips')}:</span>
+                  <span className={`text-xl font-bold ml-2 ${
+                    selectedUser.unique_ips > 3 ? 'text-warning' : 'text-dark-100'
+                  }`}>
+                    {selectedUser.unique_ips}
+                  </span>
+                </div>
               </div>
+              
+              {/* IP Addresses Section */}
+              {selectedUser.ips && selectedUser.ips.length > 0 && (
+                <>
+                  <h4 className="text-sm font-medium text-dark-400 mb-3 flex items-center gap-2">
+                    <Network className="w-4 h-4" />
+                    {t('remnawave.ip_addresses')}
+                  </h4>
+                  <div className="space-y-2 max-h-[200px] overflow-auto mb-6">
+                    {selectedUser.ips.map((ip, idx) => (
+                      <div key={ip.source_ip} className="flex items-center gap-3 p-2 rounded-lg hover:bg-dark-800 transition-colors">
+                        <span className="text-dark-500 text-sm w-6">{idx + 1}</span>
+                        <div className="flex-1 min-w-0">
+                          <div className="text-dark-200 text-sm font-mono">
+                            {ip.source_ip}
+                          </div>
+                          <div className="text-dark-500 text-xs flex items-center gap-2 flex-wrap">
+                            {ip.servers.map((s, i) => (
+                              <span key={s.server_id} className="inline-flex items-center gap-1">
+                                <Server className="w-3 h-3" />
+                                {s.server_name}
+                                {i < ip.servers.length - 1 && ','}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                        <span className="text-dark-400 text-sm">{ip.total_count.toLocaleString()}</span>
+                        <a
+                          href={`https://check-host.net/ip-info?host=${encodeURIComponent(ip.source_ip)}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="p-1.5 rounded-lg hover:bg-dark-700 text-dark-500 hover:text-accent-400 transition-colors"
+                          title={t('remnawave.ip_info')}
+                        >
+                          <Info className="w-4 h-4" />
+                        </a>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
               
               <h4 className="text-sm font-medium text-dark-400 mb-3">{t('remnawave.visited_sites')}</h4>
               <div className="space-y-2 max-h-[300px] overflow-auto">

@@ -17,7 +17,7 @@ from app.auth import verify_auth
 from app.database import get_db
 from app.models import (
     Server, RemnawaveSettings, RemnawaveNode, 
-    XrayVisitStats, XrayHourlyStats, RemnawaveUserCache
+    XrayVisitStats, XrayHourlyStats, RemnawaveUserCache, XrayUserIpStats
 )
 from app.services.remnawave_api import get_remnawave_api
 from app.services.xray_stats_collector import get_xray_stats_collector
@@ -489,6 +489,26 @@ async def get_top_users(
                 "status": user.status
             }
     
+    # Get unique IP counts for each user (across all servers, deduplicated)
+    ip_counts = {}
+    if user_ids:
+        ip_conditions = [XrayUserIpStats.email.in_(user_ids)]
+        if period != "all":
+            ip_conditions.append(XrayUserIpStats.last_seen >= start_time)
+        if server_id:
+            ip_conditions.append(XrayUserIpStats.server_id == server_id)
+        
+        ip_result = await db.execute(
+            select(
+                XrayUserIpStats.email,
+                sql_func.count(sql_func.distinct(XrayUserIpStats.source_ip)).label('unique_ips')
+            )
+            .where(and_(*ip_conditions))
+            .group_by(XrayUserIpStats.email)
+        )
+        for ip_row in ip_result.fetchall():
+            ip_counts[ip_row.email] = ip_row.unique_ips
+    
     return {
         "period": period,
         "users": [
@@ -497,7 +517,8 @@ async def get_top_users(
                 "username": user_cache.get(row.email, {}).get("username"),
                 "status": user_cache.get(row.email, {}).get("status"),
                 "total_visits": row.total,
-                "unique_sites": row.unique_sites
+                "unique_sites": row.unique_sites,
+                "unique_ips": ip_counts.get(row.email, 0)
             }
             for row in rows
         ]
@@ -514,10 +535,12 @@ async def get_user_stats(
 ):
     """Get detailed statistics for a specific user"""
     conditions = [XrayVisitStats.email == email]
+    ip_conditions = [XrayUserIpStats.email == email]
     
     if period != "all":
         start_time = _get_time_filter(period)
         conditions.append(XrayVisitStats.last_seen >= start_time)
+        ip_conditions.append(XrayUserIpStats.last_seen >= start_time)
     
     # Get user info
     user_result = await db.execute(
@@ -547,12 +570,61 @@ async def get_user_stats(
     
     destinations = dest_result.fetchall()
     
+    # Get unique IPs count
+    unique_ips_result = await db.execute(
+        select(sql_func.count(sql_func.distinct(XrayUserIpStats.source_ip)))
+        .where(and_(*ip_conditions))
+    )
+    unique_ips = unique_ips_result.scalar() or 0
+    
+    # Get IP details with server info
+    ip_result = await db.execute(
+        select(
+            XrayUserIpStats.source_ip,
+            XrayUserIpStats.server_id,
+            XrayUserIpStats.connection_count,
+            XrayUserIpStats.first_seen,
+            XrayUserIpStats.last_seen,
+            Server.name.label('server_name')
+        )
+        .join(Server, XrayUserIpStats.server_id == Server.id)
+        .where(and_(*ip_conditions))
+        .order_by(XrayUserIpStats.connection_count.desc())
+    )
+    ip_rows = ip_result.fetchall()
+    
+    # Aggregate IPs across servers
+    ip_map: dict[str, dict] = {}
+    for row in ip_rows:
+        if row.source_ip not in ip_map:
+            ip_map[row.source_ip] = {
+                "source_ip": row.source_ip,
+                "servers": [],
+                "total_count": 0,
+                "first_seen": row.first_seen,
+                "last_seen": row.last_seen
+            }
+        ip_map[row.source_ip]["servers"].append({
+            "server_id": row.server_id,
+            "server_name": row.server_name,
+            "count": row.connection_count
+        })
+        ip_map[row.source_ip]["total_count"] += row.connection_count
+        if row.first_seen and (not ip_map[row.source_ip]["first_seen"] or row.first_seen < ip_map[row.source_ip]["first_seen"]):
+            ip_map[row.source_ip]["first_seen"] = row.first_seen
+        if row.last_seen and (not ip_map[row.source_ip]["last_seen"] or row.last_seen > ip_map[row.source_ip]["last_seen"]):
+            ip_map[row.source_ip]["last_seen"] = row.last_seen
+    
+    # Sort IPs by total count
+    ips = sorted(ip_map.values(), key=lambda x: x["total_count"], reverse=True)
+    
     return {
         "email": email,
         "username": user.username if user else None,
         "status": user.status if user else None,
         "period": period,
         "total_visits": total_visits,
+        "unique_ips": unique_ips,
         "destinations": [
             {
                 "destination": row.destination,
@@ -561,6 +633,16 @@ async def get_user_stats(
                 "last_seen": row.last_seen.isoformat() if row.last_seen else None
             }
             for row in destinations
+        ],
+        "ips": [
+            {
+                "source_ip": ip["source_ip"],
+                "servers": ip["servers"],
+                "total_count": ip["total_count"],
+                "first_seen": ip["first_seen"].isoformat() if ip["first_seen"] else None,
+                "last_seen": ip["last_seen"].isoformat() if ip["last_seen"] else None
+            }
+            for ip in ips[:50]  # Limit to 50 IPs
         ]
     }
 

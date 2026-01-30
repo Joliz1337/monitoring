@@ -608,6 +608,8 @@
     "deselect_all": "Deselect all",
     "save_nodes": "Save nodes",
     "no_results": "No results found",
-    "ip_info": "IP/Domain Info"
+    "ip_info": "IP/Domain Info",
+    "unique_ips": "Unique IPs",
+    "ip_addresses": "IP Addresses"
   }
 }

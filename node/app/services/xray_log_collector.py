@@ -34,25 +34,36 @@ class AggregatedStats:
     """In-memory aggregated statistics."""
     # Key: (destination, email) -> count
     visits: dict[tuple[str, int], int] = field(default_factory=lambda: defaultdict(int))
+    # Key: (email, source_ip) -> count
+    ip_visits: dict[tuple[int, str], int] = field(default_factory=lambda: defaultdict(int))
     total_entries: int = 0
     started_at: Optional[datetime] = None
     
-    def add_entry(self, destination: str, email: int):
-        """Add a visit entry."""
+    def add_entry(self, destination: str, email: int, source_ip: str):
+        """Add a visit entry with IP tracking."""
         self.visits[(destination, email)] += 1
+        self.ip_visits[(email, source_ip)] += 1
         self.total_entries += 1
     
     def clear(self):
         """Clear all stats."""
         self.visits.clear()
+        self.ip_visits.clear()
         self.total_entries = 0
         self.started_at = datetime.now(timezone.utc)
     
     def to_list(self) -> list[dict]:
-        """Convert to list format for API response."""
+        """Convert visits to list format for API response."""
         return [
             {"destination": dest, "email": email, "count": count}
             for (dest, email), count in self.visits.items()
+        ]
+    
+    def ip_to_list(self) -> list[dict]:
+        """Convert IP visits to list format for API response."""
+        return [
+            {"email": email, "source_ip": source_ip, "count": count}
+            for (email, source_ip), count in self.ip_visits.items()
         ]
 
 
@@ -169,7 +180,7 @@ class XrayLogCollector:
                         entry = self.parse_log_line(line_str)
                         
                         if entry:
-                            self._stats.add_entry(entry.destination, entry.email)
+                            self._stats.add_entry(entry.destination, entry.email, entry.source_ip)
                             
                     except asyncio.TimeoutError:
                         # No new lines for 60s, check if process still alive
@@ -237,6 +248,7 @@ class XrayLogCollector:
             "container": self.CONTAINER_NAME,
             "entries_collected": self._stats.total_entries,
             "unique_combinations": len(self._stats.visits),
+            "unique_ip_combinations": len(self._stats.ip_visits),
             "started_at": self._stats.started_at.isoformat() if self._stats.started_at else None,
             "last_error": self._last_error
         }
@@ -245,17 +257,21 @@ class XrayLogCollector:
         """Collect current stats and clear memory. Called by panel."""
         collected_at = datetime.now(timezone.utc)
         
+        stats_list = self._stats.to_list()
+        ip_stats_list = self._stats.ip_to_list()
+        
         result = {
             "collected_at": collected_at.isoformat(),
             "period_start": self._stats.started_at.isoformat() if self._stats.started_at else collected_at.isoformat(),
             "entries_count": self._stats.total_entries,
-            "stats": self._stats.to_list()
+            "stats": stats_list,
+            "ip_stats": ip_stats_list
         }
         
         # Clear stats after collection
         self._stats.clear()
         
-        logger.info(f"Collected {result['entries_count']} entries, {len(result['stats'])} unique combinations")
+        logger.info(f"Collected {result['entries_count']} entries, {len(stats_list)} unique combinations, {len(ip_stats_list)} unique IP combinations")
         
         return result
 

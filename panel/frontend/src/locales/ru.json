@@ -609,6 +609,8 @@
     "deselect_all": "Снять все",
     "save_nodes": "Сохранить ноды",
     "no_results": "Ничего не найдено",
-    "ip_info": "Информация об IP/домене"
+    "ip_info": "Информация об IP/домене",
+    "unique_ips": "Уникальных IP",
+    "ip_addresses": "IP адреса"
   }
 }

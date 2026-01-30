@@ -19,7 +19,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from app.database import async_session
 from app.models import (
     Server, RemnawaveSettings, RemnawaveNode,
-    XrayVisitStats, XrayHourlyStats, RemnawaveUserCache
+    XrayVisitStats, XrayHourlyStats, RemnawaveUserCache, XrayUserIpStats
 )
 from app.services.remnawave_api import get_remnawave_api, RemnawaveAPIError
 
@@ -185,9 +185,10 @@ class XrayStatsCollector:
                 
                 data = response.json()
                 stats = data.get("stats", [])
+                ip_stats = data.get("ip_stats", [])
                 
-                if stats:
-                    await self._save_stats(server.id, stats)
+                if stats or ip_stats:
+                    await self._save_stats(server.id, stats, ip_stats)
                 
                 async with async_session() as db:
                     await db.execute(
@@ -200,7 +201,7 @@ class XrayStatsCollector:
                     )
                     await db.commit()
                 
-                logger.debug(f"Collected {len(stats)} stat entries from {server.name}")
+                logger.debug(f"Collected {len(stats)} stat entries, {len(ip_stats)} IP entries from {server.name}")
                 
         except Exception as e:
             error_msg = str(e)[:500]
@@ -214,10 +215,13 @@ class XrayStatsCollector:
                 )
                 await db.commit()
     
-    async def _save_stats(self, server_id: int, stats: list[dict]):
+    async def _save_stats(self, server_id: int, stats: list[dict], ip_stats: list[dict] = None):
         """Save collected stats to DB (increment counters)."""
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         hour_start = now.replace(minute=0, second=0, microsecond=0)
+        
+        if ip_stats is None:
+            ip_stats = []
         
         # Aggregate stats for batch processing
         visit_updates: dict[tuple[str, int], int] = {}  # (destination, email) -> count
@@ -239,7 +243,20 @@ class XrayStatsCollector:
             unique_users.add(email)
             unique_destinations.add(destination)
         
-        if not visit_updates:
+        # Aggregate IP stats
+        ip_updates: dict[tuple[int, str], int] = {}  # (email, source_ip) -> count
+        for ip_stat in ip_stats:
+            email = ip_stat.get("email", 0)
+            source_ip = ip_stat.get("source_ip", "")
+            count = ip_stat.get("count", 0)
+            
+            if not email or not source_ip or not count:
+                continue
+            
+            key = (email, source_ip)
+            ip_updates[key] = ip_updates.get(key, 0) + count
+        
+        if not visit_updates and not ip_updates:
             return
         
         async with async_session() as db:
@@ -263,6 +280,30 @@ class XrayStatsCollector:
                         destination=destination,
                         email=email,
                         visit_count=count,
+                        first_seen=now,
+                        last_seen=now
+                    ))
+            
+            # Update IP stats (upsert)
+            for (email, source_ip), count in ip_updates.items():
+                existing = await db.execute(
+                    select(XrayUserIpStats).where(
+                        XrayUserIpStats.server_id == server_id,
+                        XrayUserIpStats.email == email,
+                        XrayUserIpStats.source_ip == source_ip
+                    )
+                )
+                row = existing.scalar_one_or_none()
+                
+                if row:
+                    row.connection_count += count
+                    row.last_seen = now
+                else:
+                    db.add(XrayUserIpStats(
+                        server_id=server_id,
+                        email=email,
+                        source_ip=source_ip,
+                        connection_count=count,
                         first_seen=now,
                         last_seen=now
                     ))
@@ -292,7 +333,7 @@ class XrayStatsCollector:
             
             await db.commit()
         
-        logger.debug(f"Saved {len(visit_updates)} stat entries, {total_count} total visits")
+        logger.debug(f"Saved {len(visit_updates)} stat entries, {len(ip_updates)} IP entries, {total_count} total visits")
     
     async def _user_cache_loop(self):
         """Background loop for caching Remnawave users."""

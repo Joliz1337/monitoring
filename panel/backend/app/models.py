@@ -251,3 +251,27 @@ class RemnawaveUserCache(Base):
     telegram_id = Column(BigInteger, nullable=True)
     status = Column(String(50), nullable=True)
     updated_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class XrayUserIpStats(Base):
+    """Статистика IP адресов пользователей.
+    
+    Хранит уникальные комбинации (server, email, source_ip) с счётчиком подключений.
+    Используется для отслеживания с каких IP подключается пользователь.
+    """
+    __tablename__ = "xray_user_ip_stats"
+    
+    id = Column(Integer, primary_key=True)
+    server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), nullable=False)
+    email = Column(Integer, nullable=False)  # User ID в Remnawave
+    source_ip = Column(String(45), nullable=False)  # IPv4 или IPv6 адрес
+    connection_count = Column(BigInteger, default=0)  # Количество подключений
+    first_seen = Column(DateTime(timezone=True), server_default=func.now())
+    last_seen = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    
+    __table_args__ = (
+        UniqueConstraint('server_id', 'email', 'source_ip', name='uq_user_ip_stats_unique'),
+        Index('idx_user_ip_server', 'server_id'),
+        Index('idx_user_ip_email', 'email'),
+        Index('idx_user_ip_source', 'source_ip'),
+    )

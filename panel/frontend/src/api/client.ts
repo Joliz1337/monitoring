@@ -791,11 +791,26 @@ export interface RemnawaveUser {
   status: string | null
   total_visits: number
   unique_sites: number
+  unique_ips: number
 }
 
 export interface RemnawaveUserDestination {
   destination: string
   visits: number
+  first_seen: string | null
+  last_seen: string | null
+}
+
+export interface RemnawaveUserIpServer {
+  server_id: number
+  server_name: string
+  count: number
+}
+
+export interface RemnawaveUserIp {
+  source_ip: string
+  servers: RemnawaveUserIpServer[]
+  total_count: number
   first_seen: string | null
   last_seen: string | null
 }
@@ -806,7 +821,9 @@ export interface RemnawaveUserDetails {
   status: string | null
   period: string
   total_visits: number
+  unique_ips: number
   destinations: RemnawaveUserDestination[]
+  ips: RemnawaveUserIp[]
 }
 
 export interface RemnawaveTimelinePoint {
