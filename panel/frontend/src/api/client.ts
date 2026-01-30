@@ -850,6 +850,22 @@ export interface RemnawaveDestinationUsers {
   users: RemnawaveDestinationUser[]
 }
 
+export interface RemnawaveIpDestination {
+  destination: string
+  connections: number
+  percentage: number
+  first_seen: string | null
+  last_seen: string | null
+}
+
+export interface RemnawaveIpDestinations {
+  source_ip: string
+  email: number
+  period: string
+  total_connections: number
+  destinations: RemnawaveIpDestination[]
+}
+
 export interface RemnawaveCachedUser {
   email: number
   uuid: string | null
@@ -981,6 +997,10 @@ export const remnawaveApi = {
     api.get<RemnawaveDestinationUsers>('/remnawave/stats/destination/users', { 
       params: { destination, period, limit } 
     }),
+  getIpDestinations: (sourceIp: string, email: number, period: string, limit?: number) =>
+    api.get<RemnawaveIpDestinations>('/remnawave/stats/ip/destinations', {
+      params: { source_ip: sourceIp, email, period, limit }
+    }),
   getTimeline: (params: { 
     period: string
     email?: number
@@ -1006,6 +1026,7 @@ export const remnawaveApi = {
         xray_visit_stats: { count: number; first_seen: string | null; last_seen: string | null }
         xray_hourly_stats: { count: number; first_hour: string | null; last_hour: string | null }
         xray_user_ip_stats: { count: number }
+        xray_ip_destination_stats: { count: number }
         remnawave_user_cache: { count: number }
       }
     }>('/remnawave/stats/db-info'),
@@ -1014,7 +1035,7 @@ export const remnawaveApi = {
   clearStats: () =>
     api.delete<{
       success: boolean
-      deleted: { visit_stats: number; ip_stats: number; hourly_stats: number }
+      deleted: { visit_stats: number; ip_stats: number; ip_destination_stats: number; hourly_stats: number }
       message: string
     }>('/remnawave/stats/clear'),
 }

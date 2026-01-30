@@ -18,7 +18,8 @@ from app.auth import verify_auth
 from app.database import get_db
 from app.models import (
     Server, RemnawaveSettings, RemnawaveNode, 
-    XrayVisitStats, XrayHourlyStats, RemnawaveUserCache, XrayUserIpStats
+    XrayVisitStats, XrayHourlyStats, RemnawaveUserCache, XrayUserIpStats,
+    XrayIpDestinationStats
 )
 from app.services.remnawave_api import get_remnawave_api
 from app.services.xray_stats_collector import get_xray_stats_collector
@@ -717,6 +718,66 @@ async def get_destination_users(
     }
 
 
+@router.get("/stats/ip/destinations")
+async def get_ip_destinations(
+    source_ip: str = Query(..., description="Source IP address"),
+    email: int = Query(..., description="User email/ID"),
+    period: str = Query("all", pattern="^(1h|24h|7d|30d|365d|all)$"),
+    limit: int = Query(100, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Get destinations visited from a specific source IP by user"""
+    conditions = [
+        XrayIpDestinationStats.source_ip == source_ip,
+        XrayIpDestinationStats.email == email
+    ]
+    
+    if period != "all":
+        start_time = _get_time_filter(period)
+        conditions.append(XrayIpDestinationStats.last_seen >= start_time)
+    
+    # Get total connections from this IP
+    total_result = await db.execute(
+        select(sql_func.sum(XrayIpDestinationStats.connection_count))
+        .where(and_(*conditions))
+    )
+    total_connections = total_result.scalar() or 0
+    
+    # Get destinations with connection counts
+    result = await db.execute(
+        select(
+            XrayIpDestinationStats.destination,
+            sql_func.sum(XrayIpDestinationStats.connection_count).label('total'),
+            sql_func.min(XrayIpDestinationStats.first_seen).label('first_seen'),
+            sql_func.max(XrayIpDestinationStats.last_seen).label('last_seen')
+        )
+        .where(and_(*conditions))
+        .group_by(XrayIpDestinationStats.destination)
+        .order_by(sql_func.sum(XrayIpDestinationStats.connection_count).desc())
+        .limit(limit)
+    )
+    
+    rows = result.fetchall()
+    
+    return {
+        "source_ip": source_ip,
+        "email": email,
+        "period": period,
+        "total_connections": total_connections,
+        "destinations": [
+            {
+                "destination": row.destination,
+                "connections": row.total,
+                "percentage": round((row.total / total_connections * 100), 1) if total_connections > 0 else 0,
+                "first_seen": row.first_seen.isoformat() if row.first_seen else None,
+                "last_seen": row.last_seen.isoformat() if row.last_seen else None
+            }
+            for row in rows
+        ]
+    }
+
+
 @router.get("/stats/timeline")
 async def get_timeline(
     period: str = Query("24h", pattern="^(1h|24h|7d|30d|365d)$"),
@@ -847,6 +908,7 @@ async def get_db_info(
     hourly_count = await db.execute(select(sql_func.count()).select_from(XrayHourlyStats))
     user_count = await db.execute(select(sql_func.count()).select_from(RemnawaveUserCache))
     ip_count = await db.execute(select(sql_func.count()).select_from(XrayUserIpStats))
+    ip_dest_count = await db.execute(select(sql_func.count()).select_from(XrayIpDestinationStats))
     
     # Get date ranges
     visit_range = await db.execute(
@@ -880,6 +942,9 @@ async def get_db_info(
             "xray_user_ip_stats": {
                 "count": ip_count.scalar() or 0
             },
+            "xray_ip_destination_stats": {
+                "count": ip_dest_count.scalar() or 0
+            },
             "remnawave_user_cache": {
                 "count": user_count.scalar() or 0
             }
@@ -892,7 +957,7 @@ async def clear_stats(
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    """Clear all visit statistics (visits, IPs, hourly stats).
+    """Clear all visit statistics (visits, IPs, IP-destinations, hourly stats).
     
     WARNING: This permanently deletes all collected visit data.
     User cache is NOT deleted (can be refreshed from Remnawave API).
@@ -905,6 +970,10 @@ async def clear_stats(
     ip_result = await db.execute(delete(XrayUserIpStats))
     deleted_ips = ip_result.rowcount
     
+    # Delete all IP-destination stats
+    ip_dest_result = await db.execute(delete(XrayIpDestinationStats))
+    deleted_ip_dests = ip_dest_result.rowcount
+    
     # Delete all hourly stats
     hourly_result = await db.execute(delete(XrayHourlyStats))
     deleted_hourly = hourly_result.rowcount
@@ -916,9 +985,10 @@ async def clear_stats(
         "deleted": {
             "visit_stats": deleted_visits,
             "ip_stats": deleted_ips,
+            "ip_destination_stats": deleted_ip_dests,
             "hourly_stats": deleted_hourly
         },
-        "message": f"Deleted {deleted_visits} visit records, {deleted_ips} IP records, {deleted_hourly} hourly records"
+        "message": f"Deleted {deleted_visits} visit records, {deleted_ips} IP records, {deleted_ip_dests} IP-destination records, {deleted_hourly} hourly records"
     }
 
 

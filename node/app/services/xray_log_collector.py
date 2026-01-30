@@ -36,6 +36,8 @@ class AggregatedStats:
     visits: dict[tuple[str, int], int] = field(default_factory=lambda: defaultdict(int))
     # Key: (email, source_ip) -> count
     ip_visits: dict[tuple[int, str], int] = field(default_factory=lambda: defaultdict(int))
+    # Key: (email, source_ip, destination) -> count
+    ip_destination_visits: dict[tuple[int, str, str], int] = field(default_factory=lambda: defaultdict(int))
     total_entries: int = 0
     started_at: Optional[datetime] = None
     
@@ -43,12 +45,14 @@ class AggregatedStats:
         """Add a visit entry with IP tracking."""
         self.visits[(destination, email)] += 1
         self.ip_visits[(email, source_ip)] += 1
+        self.ip_destination_visits[(email, source_ip, destination)] += 1
         self.total_entries += 1
     
     def clear(self):
         """Clear all stats."""
         self.visits.clear()
         self.ip_visits.clear()
+        self.ip_destination_visits.clear()
         self.total_entries = 0
         self.started_at = datetime.now(timezone.utc)
     
@@ -64,6 +68,13 @@ class AggregatedStats:
         return [
             {"email": email, "source_ip": source_ip, "count": count}
             for (email, source_ip), count in self.ip_visits.items()
+        ]
+    
+    def ip_destination_to_list(self) -> list[dict]:
+        """Convert IP-destination visits to list format for API response."""
+        return [
+            {"email": email, "source_ip": source_ip, "destination": destination, "count": count}
+            for (email, source_ip, destination), count in self.ip_destination_visits.items()
         ]
 
 
@@ -249,6 +260,7 @@ class XrayLogCollector:
             "entries_collected": self._stats.total_entries,
             "unique_combinations": len(self._stats.visits),
             "unique_ip_combinations": len(self._stats.ip_visits),
+            "unique_ip_dest_combinations": len(self._stats.ip_destination_visits),
             "started_at": self._stats.started_at.isoformat() if self._stats.started_at else None,
             "last_error": self._last_error
         }
@@ -259,19 +271,21 @@ class XrayLogCollector:
         
         stats_list = self._stats.to_list()
         ip_stats_list = self._stats.ip_to_list()
+        ip_dest_stats_list = self._stats.ip_destination_to_list()
         
         result = {
             "collected_at": collected_at.isoformat(),
             "period_start": self._stats.started_at.isoformat() if self._stats.started_at else collected_at.isoformat(),
             "entries_count": self._stats.total_entries,
             "stats": stats_list,
-            "ip_stats": ip_stats_list
+            "ip_stats": ip_stats_list,
+            "ip_destination_stats": ip_dest_stats_list
         }
         
         # Clear stats after collection
         self._stats.clear()
         
-        logger.info(f"Collected {result['entries_count']} entries, {len(stats_list)} unique combinations, {len(ip_stats_list)} unique IP combinations")
+        logger.info(f"Collected {result['entries_count']} entries, {len(stats_list)} unique combinations, {len(ip_stats_list)} unique IP combinations, {len(ip_dest_stats_list)} unique IP-destination combinations")
         
         return result
 

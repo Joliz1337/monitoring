@@ -21,7 +21,8 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from app.database import async_session
 from app.models import (
     Server, RemnawaveSettings, RemnawaveNode,
-    XrayVisitStats, XrayHourlyStats, RemnawaveUserCache, XrayUserIpStats
+    XrayVisitStats, XrayHourlyStats, RemnawaveUserCache, XrayUserIpStats,
+    XrayIpDestinationStats
 )
 from app.services.remnawave_api import get_remnawave_api, RemnawaveAPIError
 
@@ -213,9 +214,10 @@ class XrayStatsCollector:
                 data = response.json()
                 stats = data.get("stats", [])
                 ip_stats = data.get("ip_stats", [])
+                ip_destination_stats = data.get("ip_destination_stats", [])
                 
-                if stats or ip_stats:
-                    await self._save_stats(server.id, stats, ip_stats)
+                if stats or ip_stats or ip_destination_stats:
+                    await self._save_stats(server.id, stats, ip_stats, ip_destination_stats)
                 
                 async with async_session() as db:
                     await db.execute(
@@ -255,13 +257,15 @@ class XrayStatsCollector:
                         node_ips.add(host)
         return node_ips
     
-    async def _save_stats(self, server_id: int, stats: list[dict], ip_stats: list[dict] = None):
+    async def _save_stats(self, server_id: int, stats: list[dict], ip_stats: list[dict] = None, ip_destination_stats: list[dict] = None):
         """Save collected stats to DB (increment counters)."""
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         hour_start = now.replace(minute=0, second=0, microsecond=0)
         
         if ip_stats is None:
             ip_stats = []
+        if ip_destination_stats is None:
+            ip_destination_stats = []
         
         # Aggregate stats for batch processing
         visit_updates: dict[tuple[str, int], int] = {}  # (destination, email) -> count
@@ -305,10 +309,28 @@ class XrayStatsCollector:
             key = (email, source_ip)
             ip_updates[key] = ip_updates.get(key, 0) + count
         
+        # Aggregate IP-destination stats (excluding node IPs)
+        ip_dest_updates: dict[tuple[int, str, str], int] = {}  # (email, source_ip, destination) -> count
+        for ip_dest_stat in ip_destination_stats:
+            email = ip_dest_stat.get("email", 0)
+            source_ip = ip_dest_stat.get("source_ip", "")
+            destination = ip_dest_stat.get("destination", "")
+            count = ip_dest_stat.get("count", 0)
+            
+            if not email or not source_ip or not destination or not count:
+                continue
+            
+            # Skip if source IP is a node IP (bridge connection)
+            if source_ip in node_ips:
+                continue
+            
+            key = (email, source_ip, destination)
+            ip_dest_updates[key] = ip_dest_updates.get(key, 0) + count
+        
         if filtered_ip_count > 0:
             logger.debug(f"Filtered {filtered_ip_count} connections from node IPs (bridges)")
         
-        if not visit_updates and not ip_updates:
+        if not visit_updates and not ip_updates and not ip_dest_updates:
             return
         
         async with async_session() as db:
@@ -360,6 +382,32 @@ class XrayStatsCollector:
                         last_seen=now
                     ))
             
+            # Update IP-destination stats (upsert)
+            for (email, source_ip, destination), count in ip_dest_updates.items():
+                existing = await db.execute(
+                    select(XrayIpDestinationStats).where(
+                        XrayIpDestinationStats.server_id == server_id,
+                        XrayIpDestinationStats.email == email,
+                        XrayIpDestinationStats.source_ip == source_ip,
+                        XrayIpDestinationStats.destination == destination
+                    )
+                )
+                row = existing.scalar_one_or_none()
+                
+                if row:
+                    row.connection_count += count
+                    row.last_seen = now
+                else:
+                    db.add(XrayIpDestinationStats(
+                        server_id=server_id,
+                        email=email,
+                        source_ip=source_ip,
+                        destination=destination,
+                        connection_count=count,
+                        first_seen=now,
+                        last_seen=now
+                    ))
+            
             # Update hourly stats for timeline
             hourly_existing = await db.execute(
                 select(XrayHourlyStats).where(
@@ -385,7 +433,7 @@ class XrayStatsCollector:
             
             await db.commit()
         
-        logger.debug(f"Saved {len(visit_updates)} stat entries, {len(ip_updates)} IP entries, {total_count} total visits")
+        logger.debug(f"Saved {len(visit_updates)} stat entries, {len(ip_updates)} IP entries, {len(ip_dest_updates)} IP-destination entries, {total_count} total visits")
     
     async def _user_cache_loop(self):
         """Background loop for caching Remnawave users."""
@@ -571,6 +619,14 @@ class XrayStatsCollector:
             )
             deleted_ips = ip_result.rowcount
             
+            # Remove IP-destination stats older than 365 days (based on last_seen)
+            ip_dest_result = await db.execute(
+                delete(XrayIpDestinationStats).where(
+                    XrayIpDestinationStats.last_seen < visit_cutoff
+                )
+            )
+            deleted_ip_dests = ip_dest_result.rowcount
+            
             # Remove stale user cache entries (not updated for 7 days)
             cache_cutoff = now - timedelta(days=7)
             await db.execute(
@@ -581,8 +637,8 @@ class XrayStatsCollector:
             
             await db.commit()
         
-        if deleted_visits > 0 or deleted_ips > 0:
-            logger.info(f"Xray stats cleanup: {deleted_visits} visit records, {deleted_ips} IP records removed (older than 365 days)")
+        if deleted_visits > 0 or deleted_ips > 0 or deleted_ip_dests > 0:
+            logger.info(f"Xray stats cleanup: {deleted_visits} visit records, {deleted_ips} IP records, {deleted_ip_dests} IP-destination records removed (older than 365 days)")
         else:
             logger.info("Xray stats cleanup completed")
 

@@ -306,3 +306,28 @@ class XrayUserIpStats(Base):
         Index('idx_user_ip_email', 'email'),
         Index('idx_user_ip_source', 'source_ip'),
     )
+
+
+class XrayIpDestinationStats(Base):
+    """Статистика destinations по IP клиента.
+    
+    Хранит связь (server, email, source_ip, destination) -> count.
+    Позволяет узнать, к каким сайтам обращался пользователь с конкретного IP.
+    """
+    __tablename__ = "xray_ip_destination_stats"
+    
+    id = Column(Integer, primary_key=True)
+    server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), nullable=False)
+    email = Column(Integer, nullable=False)  # User ID в Remnawave
+    source_ip = Column(String(45), nullable=False)  # IPv4 или IPv6 адрес клиента
+    destination = Column(String(500), nullable=False)  # Хост:port (google.com:443)
+    connection_count = Column(BigInteger, default=0)  # Количество подключений
+    first_seen = Column(DateTime(timezone=True), server_default=func.now())
+    last_seen = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    
+    __table_args__ = (
+        UniqueConstraint('server_id', 'email', 'source_ip', 'destination', name='uq_ip_dest_stats_unique'),
+        Index('idx_ip_dest_server', 'server_id'),
+        Index('idx_ip_dest_email_ip', 'email', 'source_ip'),
+        Index('idx_ip_dest_destination', 'destination'),
+    )
