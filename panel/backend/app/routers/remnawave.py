@@ -708,10 +708,13 @@ async def get_top_users(
                 "status": user.status
             }
     
-    # Get unique IP counts for each user (across all servers, deduplicated)
+    # Get unique client IP counts for each user (excluding infrastructure IPs)
     ip_counts = {}
     if user_ids:
-        ip_conditions = [XrayUserIpStats.email.in_(user_ids)]
+        ip_conditions = [
+            XrayUserIpStats.email.in_(user_ids),
+            XrayUserIpStats.is_infrastructure == False  # Only count client IPs
+        ]
         if period != "all":
             ip_conditions.append(XrayUserIpStats.last_seen >= start_time)
         if server_id:
