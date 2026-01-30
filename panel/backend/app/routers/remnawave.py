@@ -17,12 +17,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import verify_auth
 from app.database import get_db
 from app.models import (
-    Server, RemnawaveSettings, RemnawaveNode, 
+    Server, RemnawaveSettings, RemnawaveNode, RemnawaveInfrastructureAddress,
     XrayVisitStats, XrayHourlyStats, RemnawaveUserCache, XrayUserIpStats,
     XrayIpDestinationStats
 )
 from app.services.remnawave_api import get_remnawave_api
-from app.services.xray_stats_collector import get_xray_stats_collector
+from app.services.xray_stats_collector import get_xray_stats_collector, resolve_infrastructure_address
 
 router = APIRouter(prefix="/remnawave", tags=["remnawave"])
 
@@ -43,6 +43,11 @@ class AddNodeRequest(BaseModel):
 
 class SyncNodesRequest(BaseModel):
     server_ids: list[int]
+
+
+class AddInfrastructureAddressRequest(BaseModel):
+    address: str = Field(..., min_length=1, max_length=255)
+    description: Optional[str] = Field(None, max_length=255)
 
 
 # === Settings Endpoints ===
@@ -130,6 +135,137 @@ async def test_connection(
         }
     finally:
         await api.close()
+
+
+# === Infrastructure Addresses ===
+
+@router.get("/infrastructure-ips")
+async def get_infrastructure_addresses(
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Get list of infrastructure addresses (IPs/domains)"""
+    result = await db.execute(
+        select(RemnawaveInfrastructureAddress).order_by(RemnawaveInfrastructureAddress.address)
+    )
+    addresses = result.scalars().all()
+    
+    return {
+        "addresses": [
+            {
+                "id": addr.id,
+                "address": addr.address,
+                "resolved_ips": addr.resolved_ips,
+                "last_resolved": addr.last_resolved.isoformat() if addr.last_resolved else None,
+                "description": addr.description,
+                "created_at": addr.created_at.isoformat() if addr.created_at else None
+            }
+            for addr in addresses
+        ]
+    }
+
+
+@router.post("/infrastructure-ips")
+async def add_infrastructure_address(
+    request: AddInfrastructureAddressRequest,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Add infrastructure address (IP or domain)"""
+    import json
+    
+    # Check for duplicate
+    existing = await db.execute(
+        select(RemnawaveInfrastructureAddress).where(
+            RemnawaveInfrastructureAddress.address == request.address.strip()
+        )
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="Address already exists")
+    
+    # Resolve address
+    address = request.address.strip()
+    resolved = await resolve_infrastructure_address(address, use_cache=False)
+    resolved_json = json.dumps(sorted(resolved)) if resolved else None
+    
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    
+    new_addr = RemnawaveInfrastructureAddress(
+        address=address,
+        resolved_ips=resolved_json,
+        last_resolved=now if resolved else None,
+        description=request.description
+    )
+    db.add(new_addr)
+    await db.commit()
+    await db.refresh(new_addr)
+    
+    return {
+        "success": True,
+        "address": {
+            "id": new_addr.id,
+            "address": new_addr.address,
+            "resolved_ips": new_addr.resolved_ips,
+            "last_resolved": new_addr.last_resolved.isoformat() if new_addr.last_resolved else None,
+            "description": new_addr.description,
+            "created_at": new_addr.created_at.isoformat() if new_addr.created_at else None
+        }
+    }
+
+
+@router.delete("/infrastructure-ips/{address_id}")
+async def delete_infrastructure_address(
+    address_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Delete infrastructure address"""
+    result = await db.execute(
+        select(RemnawaveInfrastructureAddress).where(
+            RemnawaveInfrastructureAddress.id == address_id
+        )
+    )
+    addr = result.scalar_one_or_none()
+    
+    if not addr:
+        raise HTTPException(status_code=404, detail="Address not found")
+    
+    await db.delete(addr)
+    await db.commit()
+    
+    return {"success": True, "message": "Address deleted"}
+
+
+@router.post("/infrastructure-ips/resolve")
+async def resolve_all_infrastructure_addresses(
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Force re-resolve all infrastructure addresses"""
+    import json
+    
+    result = await db.execute(select(RemnawaveInfrastructureAddress))
+    addresses = result.scalars().all()
+    
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    updated = 0
+    
+    for addr in addresses:
+        resolved = await resolve_infrastructure_address(addr.address, use_cache=False)
+        resolved_json = json.dumps(sorted(resolved)) if resolved else None
+        
+        if resolved_json != addr.resolved_ips:
+            addr.resolved_ips = resolved_json
+            addr.last_resolved = now
+            updated += 1
+    
+    await db.commit()
+    
+    return {
+        "success": True,
+        "total": len(addresses),
+        "updated": updated
+    }
 
 
 # === Collector Status & Control ===
@@ -572,19 +708,27 @@ async def get_user_stats(
     
     destinations = dest_result.fetchall()
     
-    # Get unique IPs count
+    # Get unique client IPs count (excluding infrastructure)
+    unique_client_ips_result = await db.execute(
+        select(sql_func.count(sql_func.distinct(XrayUserIpStats.source_ip)))
+        .where(and_(*ip_conditions, XrayUserIpStats.is_infrastructure == False))
+    )
+    unique_client_ips = unique_client_ips_result.scalar() or 0
+    
+    # Get total unique IPs count (for backwards compatibility)
     unique_ips_result = await db.execute(
         select(sql_func.count(sql_func.distinct(XrayUserIpStats.source_ip)))
         .where(and_(*ip_conditions))
     )
     unique_ips = unique_ips_result.scalar() or 0
     
-    # Get IP details with server info
+    # Get IP details with server info and infrastructure flag
     ip_result = await db.execute(
         select(
             XrayUserIpStats.source_ip,
             XrayUserIpStats.server_id,
             XrayUserIpStats.connection_count,
+            XrayUserIpStats.is_infrastructure,
             XrayUserIpStats.first_seen,
             XrayUserIpStats.last_seen,
             Server.name.label('server_name')
@@ -595,30 +739,47 @@ async def get_user_stats(
     )
     ip_rows = ip_result.fetchall()
     
-    # Aggregate IPs across servers
-    ip_map: dict[str, dict] = {}
+    # Aggregate IPs across servers, separating client and infrastructure
+    client_ip_map: dict[str, dict] = {}
+    infra_ip_map: dict[str, dict] = {}
+    
     for row in ip_rows:
-        if row.source_ip not in ip_map:
-            ip_map[row.source_ip] = {
+        target_map = infra_ip_map if row.is_infrastructure else client_ip_map
+        
+        if row.source_ip not in target_map:
+            target_map[row.source_ip] = {
                 "source_ip": row.source_ip,
                 "servers": [],
                 "total_count": 0,
                 "first_seen": row.first_seen,
                 "last_seen": row.last_seen
             }
-        ip_map[row.source_ip]["servers"].append({
+        target_map[row.source_ip]["servers"].append({
             "server_id": row.server_id,
             "server_name": row.server_name,
             "count": row.connection_count
         })
-        ip_map[row.source_ip]["total_count"] += row.connection_count
-        if row.first_seen and (not ip_map[row.source_ip]["first_seen"] or row.first_seen < ip_map[row.source_ip]["first_seen"]):
-            ip_map[row.source_ip]["first_seen"] = row.first_seen
-        if row.last_seen and (not ip_map[row.source_ip]["last_seen"] or row.last_seen > ip_map[row.source_ip]["last_seen"]):
-            ip_map[row.source_ip]["last_seen"] = row.last_seen
+        target_map[row.source_ip]["total_count"] += row.connection_count
+        if row.first_seen and (not target_map[row.source_ip]["first_seen"] or row.first_seen < target_map[row.source_ip]["first_seen"]):
+            target_map[row.source_ip]["first_seen"] = row.first_seen
+        if row.last_seen and (not target_map[row.source_ip]["last_seen"] or row.last_seen > target_map[row.source_ip]["last_seen"]):
+            target_map[row.source_ip]["last_seen"] = row.last_seen
     
     # Sort IPs by total count
-    ips = sorted(ip_map.values(), key=lambda x: x["total_count"], reverse=True)
+    client_ips = sorted(client_ip_map.values(), key=lambda x: x["total_count"], reverse=True)
+    infra_ips = sorted(infra_ip_map.values(), key=lambda x: x["total_count"], reverse=True)
+    
+    def format_ip_list(ips_list, max_items=50):
+        return [
+            {
+                "source_ip": ip["source_ip"],
+                "servers": ip["servers"],
+                "total_count": ip["total_count"],
+                "first_seen": ip["first_seen"].isoformat() if ip["first_seen"] else None,
+                "last_seen": ip["last_seen"].isoformat() if ip["last_seen"] else None
+            }
+            for ip in ips_list[:max_items]
+        ]
     
     return {
         "email": email,
@@ -627,6 +788,7 @@ async def get_user_stats(
         "period": period,
         "total_visits": total_visits,
         "unique_ips": unique_ips,
+        "unique_client_ips": unique_client_ips,
         "destinations": [
             {
                 "destination": row.destination,
@@ -636,16 +798,11 @@ async def get_user_stats(
             }
             for row in destinations
         ],
-        "ips": [
-            {
-                "source_ip": ip["source_ip"],
-                "servers": ip["servers"],
-                "total_count": ip["total_count"],
-                "first_seen": ip["first_seen"].isoformat() if ip["first_seen"] else None,
-                "last_seen": ip["last_seen"].isoformat() if ip["last_seen"] else None
-            }
-            for ip in ips[:50]  # Limit to 50 IPs
-        ]
+        # For backwards compatibility, "ips" contains only client IPs
+        "ips": format_ip_list(client_ips),
+        # New fields for separated display
+        "client_ips": format_ip_list(client_ips),
+        "infrastructure_ips": format_ip_list(infra_ips)
     }
 
 

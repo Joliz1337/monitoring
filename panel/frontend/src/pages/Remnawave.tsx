@@ -42,7 +42,8 @@ import {
   RemnawaveCollectorStatus,
   RemnawaveDestinationUsers,
   RemnawaveUserFullInfo,
-  RemnawaveIpDestinations
+  RemnawaveIpDestinations,
+  RemnawaveInfrastructureAddress
 } from '../api/client'
 import { useTranslation } from 'react-i18next'
 import PeriodSelector from '../components/ui/PeriodSelector'
@@ -84,6 +85,13 @@ export default function Remnawave() {
   const [allServers, setAllServers] = useState<RemnawaveServerInfo[]>([])
   const [selectedNodeIds, setSelectedNodeIds] = useState<Set<number>>(new Set())
   const [isSyncingNodes, setIsSyncingNodes] = useState(false)
+  
+  // Infrastructure addresses state
+  const [infrastructureAddresses, setInfrastructureAddresses] = useState<RemnawaveInfrastructureAddress[]>([])
+  const [newInfraAddress, setNewInfraAddress] = useState('')
+  const [newInfraDescription, setNewInfraDescription] = useState('')
+  const [isAddingInfraAddress, setIsAddingInfraAddress] = useState(false)
+  const [isResolvingInfra, setIsResolvingInfra] = useState(false)
   
   // Collector status state
   const [collectorStatus, setCollectorStatus] = useState<RemnawaveCollectorStatus | null>(null)
@@ -140,11 +148,12 @@ export default function Remnawave() {
   // Fetch settings
   const fetchSettings = useCallback(async () => {
     try {
-      const [settingsRes, nodesRes, statusRes, dbInfoRes] = await Promise.all([
+      const [settingsRes, nodesRes, statusRes, dbInfoRes, infraRes] = await Promise.all([
         remnawaveApi.getSettings(),
         remnawaveApi.getNodes(),
         remnawaveApi.getCollectorStatus(),
-        remnawaveApi.getDbInfo()
+        remnawaveApi.getDbInfo(),
+        remnawaveApi.getInfrastructureAddresses()
       ])
       setSettings(settingsRes.data)
       setEditSettings({
@@ -164,6 +173,8 @@ export default function Remnawave() {
       setNextCollectIn(statusRes.data.next_collect_in)
       // Update DB info
       setDbInfo(dbInfoRes.data)
+      // Update infrastructure addresses
+      setInfrastructureAddresses(infraRes.data.addresses)
     } catch (err) {
       console.error('Failed to fetch settings:', err)
     }
@@ -297,6 +308,54 @@ export default function Remnawave() {
       setTestResult({ success: false, error: 'Connection failed' })
     } finally {
       setIsTestingConnection(false)
+    }
+  }
+  
+  // Infrastructure address handlers
+  const handleAddInfraAddress = async () => {
+    if (!newInfraAddress.trim()) return
+    
+    setIsAddingInfraAddress(true)
+    try {
+      await remnawaveApi.addInfrastructureAddress(
+        newInfraAddress.trim(), 
+        newInfraDescription.trim() || undefined
+      )
+      setNewInfraAddress('')
+      setNewInfraDescription('')
+      // Refresh infrastructure addresses
+      const res = await remnawaveApi.getInfrastructureAddresses()
+      setInfrastructureAddresses(res.data.addresses)
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { detail?: string } } }
+      console.error('Failed to add infrastructure address:', error.response?.data?.detail || err)
+    } finally {
+      setIsAddingInfraAddress(false)
+    }
+  }
+  
+  const handleDeleteInfraAddress = async (id: number) => {
+    try {
+      await remnawaveApi.deleteInfrastructureAddress(id)
+      // Refresh infrastructure addresses
+      const res = await remnawaveApi.getInfrastructureAddresses()
+      setInfrastructureAddresses(res.data.addresses)
+    } catch (err) {
+      console.error('Failed to delete infrastructure address:', err)
+    }
+  }
+  
+  const handleResolveInfraAddresses = async () => {
+    setIsResolvingInfra(true)
+    try {
+      await remnawaveApi.resolveInfrastructureAddresses()
+      // Refresh infrastructure addresses
+      const res = await remnawaveApi.getInfrastructureAddresses()
+      setInfrastructureAddresses(res.data.addresses)
+    } catch (err) {
+      console.error('Failed to resolve infrastructure addresses:', err)
+    } finally {
+      setIsResolvingInfra(false)
     }
   }
   
@@ -1216,6 +1275,95 @@ export default function Remnawave() {
               )}
             </div>
             
+            {/* Infrastructure Addresses */}
+            <div className="p-6 rounded-xl bg-dark-800/50 border border-dark-700/50">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-lg font-semibold text-dark-100">{t('remnawave.infrastructure_addresses')}</h3>
+                <button
+                  onClick={handleResolveInfraAddresses}
+                  disabled={isResolvingInfra}
+                  className="px-3 py-1 text-sm rounded-lg bg-dark-700 hover:bg-dark-600 text-dark-300 transition-colors flex items-center gap-1"
+                >
+                  {isResolvingInfra ? (
+                    <RefreshCw className="w-3 h-3 animate-spin" />
+                  ) : (
+                    <RefreshCw className="w-3 h-3" />
+                  )}
+                  {t('remnawave.resolve_dns')}
+                </button>
+              </div>
+              
+              <p className="text-dark-500 text-sm mb-4">{t('remnawave.infrastructure_addresses_hint')}</p>
+              
+              {/* Add new address */}
+              <div className="flex gap-2 mb-4">
+                <input
+                  type="text"
+                  value={newInfraAddress}
+                  onChange={(e) => setNewInfraAddress(e.target.value)}
+                  placeholder={t('remnawave.infrastructure_address_placeholder')}
+                  className="flex-1 px-3 py-2 rounded-lg bg-dark-900 border border-dark-700 
+                           text-dark-100 placeholder-dark-500 focus:outline-none focus:border-accent-500"
+                  onKeyDown={(e) => e.key === 'Enter' && handleAddInfraAddress()}
+                />
+                <input
+                  type="text"
+                  value={newInfraDescription}
+                  onChange={(e) => setNewInfraDescription(e.target.value)}
+                  placeholder={t('remnawave.infrastructure_description_placeholder')}
+                  className="w-48 px-3 py-2 rounded-lg bg-dark-900 border border-dark-700 
+                           text-dark-100 placeholder-dark-500 focus:outline-none focus:border-accent-500"
+                />
+                <button
+                  onClick={handleAddInfraAddress}
+                  disabled={isAddingInfraAddress || !newInfraAddress.trim()}
+                  className="px-4 py-2 rounded-lg bg-accent-500 hover:bg-accent-600 text-white 
+                           transition-colors disabled:opacity-50 flex items-center gap-1"
+                >
+                  {isAddingInfraAddress ? (
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Check className="w-4 h-4" />
+                  )}
+                  {t('common.add')}
+                </button>
+              </div>
+              
+              {/* Address list */}
+              <div className="space-y-2 max-h-[300px] overflow-y-auto">
+                {infrastructureAddresses.map(addr => (
+                  <div
+                    key={addr.id}
+                    className="flex items-center gap-3 p-3 rounded-lg bg-dark-900/50 border border-dark-700/50"
+                  >
+                    <Network className="w-4 h-4 text-dark-500 flex-shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-dark-200 font-mono">{addr.address}</span>
+                        {addr.description && (
+                          <span className="text-dark-500 text-sm">({addr.description})</span>
+                        )}
+                      </div>
+                      {addr.resolved_ips && (
+                        <div className="text-dark-500 text-xs mt-1">
+                          {t('remnawave.resolved_ips')}: {JSON.parse(addr.resolved_ips).join(', ')}
+                        </div>
+                      )}
+                    </div>
+                    <button
+                      onClick={() => handleDeleteInfraAddress(addr.id)}
+                      className="p-2 rounded-lg hover:bg-dark-700 text-dark-500 hover:text-danger transition-colors"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                ))}
+                {infrastructureAddresses.length === 0 && (
+                  <div className="text-center text-dark-500 py-4">{t('remnawave.no_infrastructure_addresses')}</div>
+                )}
+              </div>
+            </div>
+            
             {/* Database Management */}
             <div className="p-6 rounded-xl bg-dark-800/50 border border-dark-700/50">
               <h3 className="text-lg font-semibold text-dark-100 mb-4 flex items-center gap-2">
@@ -1378,7 +1526,7 @@ export default function Remnawave() {
                 {[
                   { id: 'overview' as const, label: t('remnawave.overview'), icon: <BarChart3 className="w-4 h-4" /> },
                   { id: 'traffic' as const, label: t('remnawave.traffic'), icon: <ArrowDownUp className="w-4 h-4" /> },
-                  { id: 'ips' as const, label: `IP (${selectedUser.unique_ips})`, icon: <Network className="w-4 h-4" /> },
+                  { id: 'ips' as const, label: `IP (${selectedUser.unique_client_ips ?? selectedUser.unique_ips})`, icon: <Network className="w-4 h-4" /> },
                   { id: 'history' as const, label: t('remnawave.sub_history'), icon: <Clock className="w-4 h-4" /> },
                   { id: 'devices' as const, label: t('remnawave.devices'), icon: <Smartphone className="w-4 h-4" /> },
                 ].map(tab => (
@@ -1411,9 +1559,9 @@ export default function Remnawave() {
                         </div>
                       </div>
                       <div className="p-4 rounded-lg bg-dark-800">
-                        <div className="text-dark-400 text-sm">{t('remnawave.unique_ips')}</div>
-                        <div className={`text-2xl font-bold ${selectedUser.unique_ips > 3 ? 'text-warning' : 'text-dark-100'}`}>
-                          {selectedUser.unique_ips}
+                        <div className="text-dark-400 text-sm">{t('remnawave.unique_client_ips')}</div>
+                        <div className={`text-2xl font-bold ${(selectedUser.unique_client_ips ?? selectedUser.unique_ips) > 3 ? 'text-warning' : 'text-dark-100'}`}>
+                          {selectedUser.unique_client_ips ?? selectedUser.unique_ips}
                         </div>
                       </div>
                       <div className="p-4 rounded-lg bg-dark-800">
@@ -1701,120 +1849,165 @@ export default function Remnawave() {
                 
                 {/* IPs Tab */}
                 {userModalTab === 'ips' && (
-                  <div className="space-y-4">
-                    {selectedUser.ips && selectedUser.ips.length > 0 ? (
-                      <div className="space-y-2">
-                        {selectedUser.ips.map((ip, idx) => (
-                          <div key={ip.source_ip} className="rounded-lg bg-dark-800 overflow-hidden">
-                            {/* IP Header - Clickable */}
-                            <div 
-                              className="flex items-center gap-3 p-3 hover:bg-dark-700 transition-colors cursor-pointer"
-                              onClick={() => handleToggleIpExpand(ip.source_ip, selectedUser.email)}
-                            >
-                              <button className="p-1 text-dark-500 hover:text-dark-300 transition-colors">
-                                {expandedIp === ip.source_ip ? (
-                                  <ChevronDown className="w-4 h-4" />
-                                ) : (
-                                  <ChevronRight className="w-4 h-4" />
-                                )}
-                              </button>
-                              <span className="text-dark-500 text-sm w-6">{idx + 1}</span>
-                              <div className="flex-1 min-w-0">
-                                <div className="flex items-center gap-2">
-                                  <span className="text-dark-200 font-mono">{ip.source_ip}</span>
-                                  <button
-                                    onClick={(e) => { e.stopPropagation(); copyToClipboard(ip.source_ip, `ip_${idx}`); }}
-                                    className="p-1 rounded hover:bg-dark-600 text-dark-500 hover:text-accent-400 transition-colors"
-                                  >
-                                    {copiedField === `ip_${idx}` ? <CheckCircle className="w-3 h-3 text-success" /> : <Copy className="w-3 h-3" />}
-                                  </button>
+                  <div className="space-y-6">
+                    {/* Client IPs Section */}
+                    <div>
+                      <h4 className="text-sm font-medium text-dark-300 mb-3 flex items-center gap-2">
+                        <Users className="w-4 h-4" />
+                        {t('remnawave.client_ips')} ({selectedUser.client_ips?.length || selectedUser.ips?.length || 0})
+                      </h4>
+                      {(selectedUser.client_ips || selectedUser.ips) && (selectedUser.client_ips || selectedUser.ips).length > 0 ? (
+                        <div className="space-y-2">
+                          {(selectedUser.client_ips || selectedUser.ips).map((ip, idx) => (
+                            <div key={ip.source_ip} className="rounded-lg bg-dark-800 overflow-hidden">
+                              {/* IP Header - Clickable */}
+                              <div 
+                                className="flex items-center gap-3 p-3 hover:bg-dark-700 transition-colors cursor-pointer"
+                                onClick={() => handleToggleIpExpand(ip.source_ip, selectedUser.email)}
+                              >
+                                <button className="p-1 text-dark-500 hover:text-dark-300 transition-colors">
+                                  {expandedIp === ip.source_ip ? (
+                                    <ChevronDown className="w-4 h-4" />
+                                  ) : (
+                                    <ChevronRight className="w-4 h-4" />
+                                  )}
+                                </button>
+                                <span className="text-dark-500 text-sm w-6">{idx + 1}</span>
+                                <div className="flex-1 min-w-0">
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-dark-200 font-mono">{ip.source_ip}</span>
+                                    <button
+                                      onClick={(e) => { e.stopPropagation(); copyToClipboard(ip.source_ip, `ip_${idx}`); }}
+                                      className="p-1 rounded hover:bg-dark-600 text-dark-500 hover:text-accent-400 transition-colors"
+                                    >
+                                      {copiedField === `ip_${idx}` ? <CheckCircle className="w-3 h-3 text-success" /> : <Copy className="w-3 h-3" />}
+                                    </button>
+                                  </div>
+                                  <div className="text-dark-500 text-xs flex items-center gap-2 flex-wrap mt-1">
+                                    {ip.servers.map((s) => (
+                                      <span key={s.server_id} className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-dark-700">
+                                        <Server className="w-3 h-3" />
+                                        {s.server_name}: {s.count}
+                                      </span>
+                                    ))}
+                                  </div>
+                                  {ip.last_seen && (
+                                    <div className="text-dark-600 text-xs mt-1">
+                                      {t('remnawave.last_seen')}: {formatDateTime(ip.last_seen)}
+                                    </div>
+                                  )}
                                 </div>
-                                <div className="text-dark-500 text-xs flex items-center gap-2 flex-wrap mt-1">
+                                <span className="text-dark-300 font-medium">{ip.total_count.toLocaleString()}</span>
+                                <a
+                                  href={`https://check-host.net/ip-info?host=${encodeURIComponent(ip.source_ip)}`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="p-2 rounded-lg hover:bg-dark-600 text-dark-400 hover:text-accent-400 transition-colors"
+                                  title={t('remnawave.ip_info')}
+                                >
+                                  <ExternalLink className="w-4 h-4" />
+                                </a>
+                              </div>
+                              
+                              {/* Expanded Destinations */}
+                              {expandedIp === ip.source_ip && (
+                                <div className="border-t border-dark-700 bg-dark-900/50 p-3">
+                                  <div className="flex items-center gap-2 mb-3">
+                                    <Globe className="w-4 h-4 text-dark-500" />
+                                    <span className="text-dark-400 text-sm font-medium">{t('remnawave.destinations_from_ip')}</span>
+                                  </div>
+                                  
+                                  {isLoadingIpDest ? (
+                                    <div className="flex items-center justify-center py-4">
+                                      <div className="w-5 h-5 border-2 border-accent-500 border-t-transparent rounded-full animate-spin" />
+                                    </div>
+                                  ) : ipDestinations && ipDestinations.destinations.length > 0 ? (
+                                    <div className="space-y-1 max-h-[300px] overflow-auto">
+                                      {ipDestinations.destinations.map((dest, destIdx) => (
+                                        <div 
+                                          key={dest.destination} 
+                                          className="flex items-center gap-2 p-2 rounded hover:bg-dark-800 transition-colors"
+                                        >
+                                          <span className="text-dark-600 text-xs w-5">{destIdx + 1}</span>
+                                          <span className="text-dark-300 text-sm font-mono flex-1 truncate">
+                                            {dest.destination}
+                                          </span>
+                                          <span className="text-dark-500 text-xs">
+                                            {dest.percentage}%
+                                          </span>
+                                          <span className="text-dark-400 text-sm w-16 text-right">
+                                            {dest.connections.toLocaleString()}
+                                          </span>
+                                          <a
+                                            href={getIpInfoUrl(dest.destination)}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            className="p-1 rounded hover:bg-dark-700 text-dark-500 hover:text-accent-400 transition-colors"
+                                            title={t('remnawave.ip_info')}
+                                          >
+                                            <Info className="w-3 h-3" />
+                                          </a>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  ) : (
+                                    <div className="text-dark-500 text-sm text-center py-3">
+                                      {t('remnawave.no_data')}
+                                    </div>
+                                  )}
+                                  
+                                  {ipDestinations && ipDestinations.total_connections > 0 && (
+                                    <div className="mt-3 pt-2 border-t border-dark-700 flex justify-between text-xs text-dark-500">
+                                      <span>{t('remnawave.total')}: {ipDestinations.destinations.length} {t('remnawave.sites').toLowerCase()}</span>
+                                      <span>{ipDestinations.total_connections.toLocaleString()} {t('remnawave.connections').toLowerCase()}</span>
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="p-4 rounded-lg bg-dark-800/50 text-center">
+                          <p className="text-dark-500 text-sm">{t('remnawave.no_client_ips')}</p>
+                        </div>
+                      )}
+                    </div>
+                    
+                    {/* Infrastructure IPs Section */}
+                    {selectedUser.infrastructure_ips && selectedUser.infrastructure_ips.length > 0 && (
+                      <div>
+                        <h4 className="text-sm font-medium text-dark-300 mb-3 flex items-center gap-2">
+                          <Server className="w-4 h-4" />
+                          {t('remnawave.infrastructure_ips')} ({selectedUser.infrastructure_ips.length})
+                        </h4>
+                        <div className="p-4 rounded-lg bg-dark-800/50 border border-dark-700/50">
+                          <p className="text-dark-500 text-xs mb-3">{t('remnawave.infrastructure_ips_hint')}</p>
+                          <div className="space-y-2">
+                            {selectedUser.infrastructure_ips.map((ip, idx) => (
+                              <div key={ip.source_ip} className="flex items-center gap-3 p-2 rounded bg-dark-900/50">
+                                <span className="text-dark-600 text-sm w-4">{idx + 1}</span>
+                                <span className="text-dark-400 font-mono text-sm">{ip.source_ip}</span>
+                                <div className="flex-1 flex items-center gap-1 flex-wrap">
                                   {ip.servers.map((s) => (
-                                    <span key={s.server_id} className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-dark-700">
-                                      <Server className="w-3 h-3" />
+                                    <span key={s.server_id} className="text-dark-600 text-xs px-1.5 py-0.5 rounded bg-dark-700">
                                       {s.server_name}: {s.count}
                                     </span>
                                   ))}
                                 </div>
-                                {ip.last_seen && (
-                                  <div className="text-dark-600 text-xs mt-1">
-                                    {t('remnawave.last_seen')}: {formatDateTime(ip.last_seen)}
-                                  </div>
-                                )}
+                                <span className="text-dark-500 text-sm">{ip.total_count.toLocaleString()}</span>
                               </div>
-                              <span className="text-dark-300 font-medium">{ip.total_count.toLocaleString()}</span>
-                              <a
-                                href={`https://check-host.net/ip-info?host=${encodeURIComponent(ip.source_ip)}`}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                onClick={(e) => e.stopPropagation()}
-                                className="p-2 rounded-lg hover:bg-dark-600 text-dark-400 hover:text-accent-400 transition-colors"
-                                title={t('remnawave.ip_info')}
-                              >
-                                <ExternalLink className="w-4 h-4" />
-                              </a>
-                            </div>
-                            
-                            {/* Expanded Destinations */}
-                            {expandedIp === ip.source_ip && (
-                              <div className="border-t border-dark-700 bg-dark-900/50 p-3">
-                                <div className="flex items-center gap-2 mb-3">
-                                  <Globe className="w-4 h-4 text-dark-500" />
-                                  <span className="text-dark-400 text-sm font-medium">{t('remnawave.destinations_from_ip')}</span>
-                                </div>
-                                
-                                {isLoadingIpDest ? (
-                                  <div className="flex items-center justify-center py-4">
-                                    <div className="w-5 h-5 border-2 border-accent-500 border-t-transparent rounded-full animate-spin" />
-                                  </div>
-                                ) : ipDestinations && ipDestinations.destinations.length > 0 ? (
-                                  <div className="space-y-1 max-h-[300px] overflow-auto">
-                                    {ipDestinations.destinations.map((dest, destIdx) => (
-                                      <div 
-                                        key={dest.destination} 
-                                        className="flex items-center gap-2 p-2 rounded hover:bg-dark-800 transition-colors"
-                                      >
-                                        <span className="text-dark-600 text-xs w-5">{destIdx + 1}</span>
-                                        <span className="text-dark-300 text-sm font-mono flex-1 truncate">
-                                          {dest.destination}
-                                        </span>
-                                        <span className="text-dark-500 text-xs">
-                                          {dest.percentage}%
-                                        </span>
-                                        <span className="text-dark-400 text-sm w-16 text-right">
-                                          {dest.connections.toLocaleString()}
-                                        </span>
-                                        <a
-                                          href={getIpInfoUrl(dest.destination)}
-                                          target="_blank"
-                                          rel="noopener noreferrer"
-                                          className="p-1 rounded hover:bg-dark-700 text-dark-500 hover:text-accent-400 transition-colors"
-                                          title={t('remnawave.ip_info')}
-                                        >
-                                          <Info className="w-3 h-3" />
-                                        </a>
-                                      </div>
-                                    ))}
-                                  </div>
-                                ) : (
-                                  <div className="text-dark-500 text-sm text-center py-3">
-                                    {t('remnawave.no_data')}
-                                  </div>
-                                )}
-                                
-                                {ipDestinations && ipDestinations.total_connections > 0 && (
-                                  <div className="mt-3 pt-2 border-t border-dark-700 flex justify-between text-xs text-dark-500">
-                                    <span>{t('remnawave.total')}: {ipDestinations.destinations.length} {t('remnawave.sites').toLowerCase()}</span>
-                                    <span>{ipDestinations.total_connections.toLocaleString()} {t('remnawave.connections').toLowerCase()}</span>
-                                  </div>
-                                )}
-                              </div>
-                            )}
+                            ))}
                           </div>
-                        ))}
+                        </div>
                       </div>
-                    ) : (
+                    )}
+                    
+                    {/* Empty state */}
+                    {(!selectedUser.client_ips || selectedUser.client_ips.length === 0) && 
+                     (!selectedUser.ips || selectedUser.ips.length === 0) &&
+                     (!selectedUser.infrastructure_ips || selectedUser.infrastructure_ips.length === 0) && (
                       <div className="p-6 rounded-lg bg-dark-800 text-center">
                         <Network className="w-8 h-8 text-dark-600 mx-auto mb-2" />
                         <p className="text-dark-500">{t('remnawave.no_ip_data')}</p>

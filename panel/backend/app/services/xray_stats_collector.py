@@ -7,8 +7,10 @@ Optimized version: stores cumulative counters instead of time-series data.
 """
 
 import asyncio
+import json
 import logging
 import re
+import socket
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import urlparse
@@ -20,13 +22,17 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from app.database import async_session
 from app.models import (
-    Server, RemnawaveSettings, RemnawaveNode,
+    Server, RemnawaveSettings, RemnawaveNode, RemnawaveInfrastructureAddress,
     XrayVisitStats, XrayHourlyStats, RemnawaveUserCache, XrayUserIpStats,
     XrayIpDestinationStats
 )
 from app.services.remnawave_api import get_remnawave_api, RemnawaveAPIError
 
 logger = logging.getLogger(__name__)
+
+# DNS cache for infrastructure addresses (address -> (resolved_ips, timestamp))
+_dns_cache: dict[str, tuple[set[str], datetime]] = {}
+_DNS_CACHE_TTL = timedelta(hours=1)
 
 
 def extract_host_from_url(url: str) -> str:
@@ -36,6 +42,67 @@ def extract_host_from_url(url: str) -> str:
         return parsed.hostname or ""
     except Exception:
         return ""
+
+
+def is_valid_ip(address: str) -> bool:
+    """Check if address is a valid IPv4 or IPv6 address."""
+    try:
+        socket.inet_pton(socket.AF_INET, address)
+        return True
+    except socket.error:
+        pass
+    try:
+        socket.inet_pton(socket.AF_INET6, address)
+        return True
+    except socket.error:
+        pass
+    return False
+
+
+def resolve_domain_to_ips(domain: str) -> set[str]:
+    """Resolve domain to all IP addresses (A and AAAA records).
+    
+    Returns set of IP addresses. If domain is already an IP, returns it as-is.
+    """
+    if is_valid_ip(domain):
+        return {domain}
+    
+    ips = set()
+    try:
+        # Get all addresses (both IPv4 and IPv6)
+        results = socket.getaddrinfo(domain, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        for result in results:
+            ip = result[4][0]
+            ips.add(ip)
+    except socket.gaierror as e:
+        logger.debug(f"DNS resolution failed for {domain}: {e}")
+    except Exception as e:
+        logger.debug(f"Error resolving {domain}: {e}")
+    
+    return ips
+
+
+async def resolve_infrastructure_address(address: str, use_cache: bool = True) -> set[str]:
+    """Resolve infrastructure address (IP or domain) to IP addresses with caching."""
+    global _dns_cache
+    
+    now = datetime.now(timezone.utc)
+    
+    # Check cache first
+    if use_cache and address in _dns_cache:
+        cached_ips, cached_time = _dns_cache[address]
+        if now - cached_time < _DNS_CACHE_TTL:
+            return cached_ips
+    
+    # Run DNS resolution in thread pool to avoid blocking
+    loop = asyncio.get_event_loop()
+    ips = await loop.run_in_executor(None, resolve_domain_to_ips, address)
+    
+    # Update cache
+    if ips:
+        _dns_cache[address] = (ips, now)
+    
+    return ips
 
 
 class XrayStatsCollector:
@@ -245,7 +312,7 @@ class XrayStatsCollector:
                 await db.commit()
     
     async def _get_node_ips(self) -> set[str]:
-        """Get set of all server/node IP addresses to exclude from client IPs."""
+        """Get set of all server/node IP addresses (from server URLs)."""
         node_ips = set()
         async with async_session() as db:
             result = await db.execute(select(Server.url))
@@ -256,6 +323,41 @@ class XrayStatsCollector:
                     if host:
                         node_ips.add(host)
         return node_ips
+    
+    async def _get_infrastructure_ips(self) -> set[str]:
+        """Get set of all infrastructure IP addresses.
+        
+        Combines:
+        - Server/node IPs (from server URLs)
+        - Manually configured infrastructure addresses (with DNS resolution)
+        
+        Returns set of IP addresses that should be marked as infrastructure.
+        """
+        infrastructure_ips = set()
+        
+        # Add node IPs from server URLs
+        node_ips = await self._get_node_ips()
+        infrastructure_ips.update(node_ips)
+        
+        # Add manually configured infrastructure addresses
+        async with async_session() as db:
+            result = await db.execute(select(RemnawaveInfrastructureAddress))
+            addresses = result.scalars().all()
+            
+            for addr in addresses:
+                # Resolve address (uses cache)
+                resolved = await resolve_infrastructure_address(addr.address)
+                infrastructure_ips.update(resolved)
+                
+                # Update resolved_ips in DB if changed
+                resolved_json = json.dumps(sorted(resolved)) if resolved else None
+                if resolved_json != addr.resolved_ips:
+                    addr.resolved_ips = resolved_json
+                    addr.last_resolved = datetime.now(timezone.utc).replace(tzinfo=None)
+            
+            await db.commit()
+        
+        return infrastructure_ips
     
     async def _save_stats(self, server_id: int, stats: list[dict], ip_stats: list[dict] = None, ip_destination_stats: list[dict] = None):
         """Save collected stats to DB (increment counters)."""
@@ -287,12 +389,14 @@ class XrayStatsCollector:
             unique_users.add(email)
             unique_destinations.add(destination)
         
-        # Get node IPs to exclude (bridges, VPN server IPs)
-        node_ips = await self._get_node_ips()
+        # Get infrastructure IPs (nodes, HAProxy servers, etc.)
+        infrastructure_ips = await self._get_infrastructure_ips()
         
-        # Aggregate IP stats (excluding node IPs)
-        ip_updates: dict[tuple[int, str], int] = {}  # (email, source_ip) -> count
-        filtered_ip_count = 0
+        # Aggregate IP stats (with infrastructure flag)
+        # Key: (email, source_ip) -> (count, is_infrastructure)
+        ip_updates: dict[tuple[int, str], tuple[int, bool]] = {}
+        infra_ip_count = 0
+        client_ip_count = 0
         for ip_stat in ip_stats:
             email = ip_stat.get("email", 0)
             source_ip = ip_stat.get("source_ip", "")
@@ -301,15 +405,20 @@ class XrayStatsCollector:
             if not email or not source_ip or not count:
                 continue
             
-            # Skip if source IP is a node IP (bridge connection)
-            if source_ip in node_ips:
-                filtered_ip_count += count
-                continue
+            is_infra = source_ip in infrastructure_ips
+            if is_infra:
+                infra_ip_count += count
+            else:
+                client_ip_count += count
             
             key = (email, source_ip)
-            ip_updates[key] = ip_updates.get(key, 0) + count
+            if key in ip_updates:
+                existing_count, existing_infra = ip_updates[key]
+                ip_updates[key] = (existing_count + count, is_infra)
+            else:
+                ip_updates[key] = (count, is_infra)
         
-        # Aggregate IP-destination stats (excluding node IPs)
+        # Aggregate IP-destination stats (skip infrastructure IPs for destinations)
         ip_dest_updates: dict[tuple[int, str, str], int] = {}  # (email, source_ip, destination) -> count
         for ip_dest_stat in ip_destination_stats:
             email = ip_dest_stat.get("email", 0)
@@ -320,15 +429,15 @@ class XrayStatsCollector:
             if not email or not source_ip or not destination or not count:
                 continue
             
-            # Skip if source IP is a node IP (bridge connection)
-            if source_ip in node_ips:
+            # Skip IP-destination stats for infrastructure IPs (not useful for tracking)
+            if source_ip in infrastructure_ips:
                 continue
             
             key = (email, source_ip, destination)
             ip_dest_updates[key] = ip_dest_updates.get(key, 0) + count
         
-        if filtered_ip_count > 0:
-            logger.debug(f"Filtered {filtered_ip_count} connections from node IPs (bridges)")
+        if infra_ip_count > 0:
+            logger.debug(f"Recorded {infra_ip_count} connections from infrastructure IPs, {client_ip_count} from client IPs")
         
         if not visit_updates and not ip_updates and not ip_dest_updates:
             return
@@ -358,8 +467,8 @@ class XrayStatsCollector:
                         last_seen=now
                     ))
             
-            # Update IP stats (upsert)
-            for (email, source_ip), count in ip_updates.items():
+            # Update IP stats (upsert with is_infrastructure flag)
+            for (email, source_ip), (count, is_infra) in ip_updates.items():
                 existing = await db.execute(
                     select(XrayUserIpStats).where(
                         XrayUserIpStats.server_id == server_id,
@@ -372,12 +481,15 @@ class XrayStatsCollector:
                 if row:
                     row.connection_count += count
                     row.last_seen = now
+                    # Update infrastructure flag (may change if address was added/removed)
+                    row.is_infrastructure = is_infra
                 else:
                     db.add(XrayUserIpStats(
                         server_id=server_id,
                         email=email,
                         source_ip=source_ip,
                         connection_count=count,
+                        is_infrastructure=is_infra,
                         first_seen=now,
                         last_seen=now
                     ))

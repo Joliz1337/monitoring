@@ -194,6 +194,22 @@ class RemnawaveNode(Base):
     last_error = Column(String(500), nullable=True)
 
 
+class RemnawaveInfrastructureAddress(Base):
+    """Список IP/доменов инфраструктуры (серверы, HAProxy и т.д.)
+    
+    Адреса из этого списка помечаются как инфраструктурные при сборе статистики.
+    Домены автоматически резолвятся в IP.
+    """
+    __tablename__ = "remnawave_infrastructure_addresses"
+    
+    id = Column(Integer, primary_key=True)
+    address = Column(String(255), nullable=False, unique=True)  # IP или домен
+    resolved_ips = Column(Text, nullable=True)  # JSON список резолвленных IP
+    last_resolved = Column(DateTime(timezone=True), nullable=True)
+    description = Column(String(255), nullable=True)  # Описание (опционально)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
 class XrayVisitStats(Base):
     """Счётчик посещений: (server, destination, email) -> total_count
     
@@ -289,6 +305,8 @@ class XrayUserIpStats(Base):
     
     Хранит уникальные комбинации (server, email, source_ip) с счётчиком подключений.
     Используется для отслеживания с каких IP подключается пользователь.
+    
+    is_infrastructure=True означает, что IP принадлежит инфраструктуре (HAProxy, VPN серверы и т.д.)
     """
     __tablename__ = "xray_user_ip_stats"
     
@@ -297,6 +315,7 @@ class XrayUserIpStats(Base):
     email = Column(Integer, nullable=False)  # User ID в Remnawave
     source_ip = Column(String(45), nullable=False)  # IPv4 или IPv6 адрес
     connection_count = Column(BigInteger, default=0)  # Количество подключений
+    is_infrastructure = Column(Boolean, default=False)  # True если IP принадлежит инфраструктуре
     first_seen = Column(DateTime(timezone=True), server_default=func.now())
     last_seen = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     
@@ -305,6 +324,7 @@ class XrayUserIpStats(Base):
         Index('idx_user_ip_server', 'server_id'),
         Index('idx_user_ip_email', 'email'),
         Index('idx_user_ip_source', 'source_ip'),
+        Index('idx_user_ip_infra', 'is_infrastructure'),
     )
 
 

@@ -663,6 +663,18 @@
     "confirm_clear_title": "Confirm Clear",
     "confirm_clear_desc": "This action cannot be undone. All visit data will be permanently deleted.",
     "will_be_deleted": "Will be deleted",
-    "confirm_clear_btn": "Clear"
+    "confirm_clear_btn": "Clear",
+    "infrastructure_addresses": "Infrastructure Addresses",
+    "infrastructure_addresses_hint": "IP addresses or domains of your servers (HAProxy, VPN servers). Connections from these addresses will be displayed separately from client IPs.",
+    "infrastructure_address_placeholder": "IP or domain (e.g.: 1.2.3.4 or proxy.example.com)",
+    "infrastructure_description_placeholder": "Description (optional)",
+    "resolve_dns": "Refresh DNS",
+    "resolved_ips": "Resolved IPs",
+    "no_infrastructure_addresses": "No infrastructure addresses added",
+    "client_ips": "Client IPs",
+    "infrastructure_ips": "Infrastructure IPs",
+    "infrastructure_ips_hint": "Connections through your servers (HAProxy, VPN, etc.)",
+    "no_client_ips": "No client IP data",
+    "unique_client_ips": "Unique client IPs"
   }
 }

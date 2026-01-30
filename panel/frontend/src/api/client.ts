@@ -822,8 +822,20 @@ export interface RemnawaveUserDetails {
   period: string
   total_visits: number
   unique_ips: number
+  unique_client_ips: number
   destinations: RemnawaveUserDestination[]
   ips: RemnawaveUserIp[]
+  client_ips: RemnawaveUserIp[]
+  infrastructure_ips: RemnawaveUserIp[]
+}
+
+export interface RemnawaveInfrastructureAddress {
+  id: number
+  address: string
+  resolved_ips: string | null  // JSON array of resolved IPs
+  last_resolved: string | null
+  description: string | null
+  created_at: string | null
 }
 
 export interface RemnawaveTimelinePoint {
@@ -959,6 +971,16 @@ export const remnawaveApi = {
     api.put<{ success: boolean; message: string }>('/remnawave/settings', data),
   testConnection: () => 
     api.post<{ success: boolean; api_reachable: boolean; error: string | null }>('/remnawave/settings/test'),
+  
+  // Infrastructure addresses
+  getInfrastructureAddresses: () => 
+    api.get<{ addresses: RemnawaveInfrastructureAddress[] }>('/remnawave/infrastructure-ips'),
+  addInfrastructureAddress: (address: string, description?: string) =>
+    api.post<{ success: boolean; address: RemnawaveInfrastructureAddress }>('/remnawave/infrastructure-ips', { address, description }),
+  deleteInfrastructureAddress: (id: number) =>
+    api.delete<{ success: boolean; message: string }>(`/remnawave/infrastructure-ips/${id}`),
+  resolveInfrastructureAddresses: () =>
+    api.post<{ success: boolean; total: number; updated: number }>('/remnawave/infrastructure-ips/resolve'),
   
   // Collector status & control
   getCollectorStatus: () => api.get<RemnawaveCollectorStatus>('/remnawave/status'),

@@ -664,6 +664,18 @@
     "confirm_clear_title": "Подтверждение очистки",
     "confirm_clear_desc": "Это действие необратимо. Все данные о посещениях будут удалены.",
     "will_be_deleted": "Будет удалено",
-    "confirm_clear_btn": "Очистить"
+    "confirm_clear_btn": "Очистить",
+    "infrastructure_addresses": "Адреса инфраструктуры",
+    "infrastructure_addresses_hint": "IP-адреса или домены ваших серверов (HAProxy, VPN серверы). Подключения с этих адресов будут отображаться отдельно от клиентских IP.",
+    "infrastructure_address_placeholder": "IP или домен (например: 1.2.3.4 или proxy.example.com)",
+    "infrastructure_description_placeholder": "Описание (опционально)",
+    "resolve_dns": "Обновить DNS",
+    "resolved_ips": "Разрешённые IP",
+    "no_infrastructure_addresses": "Адреса инфраструктуры не добавлены",
+    "client_ips": "IP клиентов",
+    "infrastructure_ips": "IP инфраструктуры",
+    "infrastructure_ips_hint": "Подключения через ваши серверы (HAProxy, VPN и т.д.)",
+    "no_client_ips": "Нет данных о клиентских IP",
+    "unique_client_ips": "Уникальных IP клиентов"
   }
 }

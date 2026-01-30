@@ -120,6 +120,14 @@ async def run_migrations(conn):
             if col_name not in user_cache_columns:
                 await conn.execute(text(f"ALTER TABLE remnawave_user_cache ADD COLUMN {col_name} {col_type}"))
                 logger.info(f"Added column: remnawave_user_cache.{col_name}")
+    
+    # Migration: Add is_infrastructure column to xray_user_ip_stats
+    result = await conn.execute(text("PRAGMA table_info(xray_user_ip_stats)"))
+    ip_stats_columns = {row[1] for row in result.fetchall()}
+    
+    if ip_stats_columns and "is_infrastructure" not in ip_stats_columns:
+        await conn.execute(text("ALTER TABLE xray_user_ip_stats ADD COLUMN is_infrastructure BOOLEAN DEFAULT 0"))
+        logger.info("Added column: xray_user_ip_stats.is_infrastructure")
 
 
 async def init_db():
