@@ -8,8 +8,10 @@ Optimized version: stores cumulative counters instead of time-series data.
 
 import asyncio
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from urllib.parse import urlparse
 
 import httpx
 from sqlalchemy import select, delete, update
@@ -24,6 +26,15 @@ from app.models import (
 from app.services.remnawave_api import get_remnawave_api, RemnawaveAPIError
 
 logger = logging.getLogger(__name__)
+
+
+def extract_host_from_url(url: str) -> str:
+    """Extract hostname or IP from URL."""
+    try:
+        parsed = urlparse(url)
+        return parsed.hostname or ""
+    except Exception:
+        return ""
 
 
 class XrayStatsCollector:
@@ -215,6 +226,19 @@ class XrayStatsCollector:
                 )
                 await db.commit()
     
+    async def _get_node_ips(self) -> set[str]:
+        """Get set of all server/node IP addresses to exclude from client IPs."""
+        node_ips = set()
+        async with async_session() as db:
+            result = await db.execute(select(Server.url))
+            for row in result.fetchall():
+                url = row[0]
+                if url:
+                    host = extract_host_from_url(url)
+                    if host:
+                        node_ips.add(host)
+        return node_ips
+    
     async def _save_stats(self, server_id: int, stats: list[dict], ip_stats: list[dict] = None):
         """Save collected stats to DB (increment counters)."""
         now = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -243,8 +267,12 @@ class XrayStatsCollector:
             unique_users.add(email)
             unique_destinations.add(destination)
         
-        # Aggregate IP stats
+        # Get node IPs to exclude (bridges, VPN server IPs)
+        node_ips = await self._get_node_ips()
+        
+        # Aggregate IP stats (excluding node IPs)
         ip_updates: dict[tuple[int, str], int] = {}  # (email, source_ip) -> count
+        filtered_ip_count = 0
         for ip_stat in ip_stats:
             email = ip_stat.get("email", 0)
             source_ip = ip_stat.get("source_ip", "")
@@ -253,8 +281,16 @@ class XrayStatsCollector:
             if not email or not source_ip or not count:
                 continue
             
+            # Skip if source IP is a node IP (bridge connection)
+            if source_ip in node_ips:
+                filtered_ip_count += count
+                continue
+            
             key = (email, source_ip)
             ip_updates[key] = ip_updates.get(key, 0) + count
+        
+        if filtered_ip_count > 0:
+            logger.debug(f"Filtered {filtered_ip_count} connections from node IPs (bridges)")
         
         if not visit_updates and not ip_updates:
             return
