@@ -285,6 +285,7 @@ panel/
 | GET | /api/remnawave/stats/destination/users | Пользователи посещавшие сайт |
 | GET | /api/remnawave/stats/timeline | Временной график посещений |
 | GET | /api/remnawave/stats/db-info | Информация о размере БД |
+| DELETE | /api/remnawave/stats/clear | Очистить всю статистику посещений |
 | GET | /api/remnawave/users | Кэш пользователей Remnawave |
 
 **Полная информация о пользователе:**
@@ -312,7 +313,15 @@ panel/
 2. **xray_hourly_stats** — почасовая статистика для timeline: `(server, hour) → counts`
    - Лёгкая таблица без детализации по сайтам/пользователям
    - Только общее число посещений, уникальных пользователей и сайтов за час
-   - Хранится 365 дней
+   - Автоочистка: записи старше 365 дней удаляются автоматически
+
+**Автоочистка данных:**
+- xray_visit_stats: записи с last_seen > 365 дней удаляются автоматически
+- xray_user_ip_stats: записи с last_seen > 365 дней удаляются автоматически
+- xray_hourly_stats: записи старше 365 дней удаляются автоматически
+- remnawave_user_cache: записи без обновления > 7 дней удаляются автоматически
+
+**Ручная очистка:** DELETE /api/remnawave/stats/clear — удаляет все посещения, IP и почасовую статистику
 
 3. **remnawave_user_cache** — кэш пользователей с расширенной информацией:
    - email, uuid, username, status, telegram_id

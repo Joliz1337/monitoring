@@ -542,17 +542,34 @@ class XrayStatsCollector:
                 logger.error(f"Cleanup error: {e}")
     
     async def _cleanup_old_data(self):
-        """Remove old hourly stats and stale user cache."""
+        """Remove old stats and stale user cache."""
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         
         async with async_session() as db:
-            # Remove hourly data older than retention period
+            # Remove hourly data older than retention period (365 days)
             hourly_cutoff = now - timedelta(days=self._hourly_retention_days)
             await db.execute(
                 delete(XrayHourlyStats).where(
                     XrayHourlyStats.hour < hourly_cutoff
                 )
             )
+            
+            # Remove visit stats older than 365 days (based on last_seen)
+            visit_cutoff = now - timedelta(days=365)
+            result = await db.execute(
+                delete(XrayVisitStats).where(
+                    XrayVisitStats.last_seen < visit_cutoff
+                )
+            )
+            deleted_visits = result.rowcount
+            
+            # Remove IP stats older than 365 days (based on last_seen)
+            ip_result = await db.execute(
+                delete(XrayUserIpStats).where(
+                    XrayUserIpStats.last_seen < visit_cutoff
+                )
+            )
+            deleted_ips = ip_result.rowcount
             
             # Remove stale user cache entries (not updated for 7 days)
             cache_cutoff = now - timedelta(days=7)
@@ -564,7 +581,10 @@ class XrayStatsCollector:
             
             await db.commit()
         
-        logger.info("Xray stats cleanup completed")
+        if deleted_visits > 0 or deleted_ips > 0:
+            logger.info(f"Xray stats cleanup: {deleted_visits} visit records, {deleted_ips} IP records removed (older than 365 days)")
+        else:
+            logger.info("Xray stats cleanup completed")
 
 
 # Singleton instance

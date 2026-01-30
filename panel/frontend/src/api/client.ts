@@ -998,6 +998,25 @@ export const remnawaveApi = {
   // Live user info (fetches fresh data from Remnawave API)
   getUserLiveInfo: (email: number) =>
     api.get<RemnawaveUserFullInfo>(`/remnawave/user/${email}/live`),
+  
+  // DB info
+  getDbInfo: () =>
+    api.get<{
+      tables: {
+        xray_visit_stats: { count: number; first_seen: string | null; last_seen: string | null }
+        xray_hourly_stats: { count: number; first_hour: string | null; last_hour: string | null }
+        xray_user_ip_stats: { count: number }
+        remnawave_user_cache: { count: number }
+      }
+    }>('/remnawave/stats/db-info'),
+  
+  // Clear all stats
+  clearStats: () =>
+    api.delete<{
+      success: boolean
+      deleted: { visit_stats: number; ip_stats: number; hourly_stats: number }
+      message: string
+    }>('/remnawave/stats/clear'),
 }
 
 export default api

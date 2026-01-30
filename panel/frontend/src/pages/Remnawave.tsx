@@ -24,7 +24,9 @@ import {
   ArrowDownUp,
   Copy,
   CheckCircle,
-  MessageCircle
+  MessageCircle,
+  Trash2,
+  Database
 } from 'lucide-react'
 import { 
   remnawaveApi, 
@@ -109,13 +111,26 @@ export default function Remnawave() {
   const autoRefreshRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [nextRefreshIn, setNextRefreshIn] = useState(30)
   
+  // DB info state
+  const [dbInfo, setDbInfo] = useState<{
+    tables: {
+      xray_visit_stats: { count: number; first_seen: string | null; last_seen: string | null }
+      xray_hourly_stats: { count: number; first_hour: string | null; last_hour: string | null }
+      xray_user_ip_stats: { count: number }
+      remnawave_user_cache: { count: number }
+    }
+  } | null>(null)
+  const [isClearingStats, setIsClearingStats] = useState(false)
+  const [showClearConfirm, setShowClearConfirm] = useState(false)
+  
   // Fetch settings
   const fetchSettings = useCallback(async () => {
     try {
-      const [settingsRes, nodesRes, statusRes] = await Promise.all([
+      const [settingsRes, nodesRes, statusRes, dbInfoRes] = await Promise.all([
         remnawaveApi.getSettings(),
         remnawaveApi.getNodes(),
-        remnawaveApi.getCollectorStatus()
+        remnawaveApi.getCollectorStatus(),
+        remnawaveApi.getDbInfo()
       ])
       setSettings(settingsRes.data)
       setEditSettings({
@@ -133,6 +148,8 @@ export default function Remnawave() {
       // Update collector status
       setCollectorStatus(statusRes.data)
       setNextCollectIn(statusRes.data.next_collect_in)
+      // Update DB info
+      setDbInfo(dbInfoRes.data)
     } catch (err) {
       console.error('Failed to fetch settings:', err)
     }
@@ -313,6 +330,20 @@ export default function Remnawave() {
       console.error('Failed to force collect:', err)
     } finally {
       setIsCollecting(false)
+    }
+  }
+  
+  const handleClearStats = async () => {
+    setIsClearingStats(true)
+    try {
+      await remnawaveApi.clearStats()
+      // Refresh all data
+      await Promise.all([fetchStats(), fetchSettings()])
+      setShowClearConfirm(false)
+    } catch (err) {
+      console.error('Failed to clear stats:', err)
+    } finally {
+      setIsClearingStats(false)
     }
   }
   
@@ -1094,6 +1125,75 @@ export default function Remnawave() {
                 </div>
               )}
             </div>
+            
+            {/* Database Management */}
+            <div className="p-6 rounded-xl bg-dark-800/50 border border-dark-700/50">
+              <h3 className="text-lg font-semibold text-dark-100 mb-4 flex items-center gap-2">
+                <Database className="w-5 h-5" />
+                {t('remnawave.db_management')}
+              </h3>
+              
+              {/* DB Stats */}
+              {dbInfo && (
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                  <div className="p-3 rounded-lg bg-dark-900/50">
+                    <div className="text-dark-500 text-xs mb-1">{t('remnawave.db_visits')}</div>
+                    <div className="text-dark-100 text-lg font-semibold">
+                      {dbInfo.tables.xray_visit_stats.count.toLocaleString()}
+                    </div>
+                    {dbInfo.tables.xray_visit_stats.first_seen && (
+                      <div className="text-dark-600 text-xs mt-1">
+                        {formatDate(dbInfo.tables.xray_visit_stats.first_seen)} - {formatDate(dbInfo.tables.xray_visit_stats.last_seen)}
+                      </div>
+                    )}
+                  </div>
+                  <div className="p-3 rounded-lg bg-dark-900/50">
+                    <div className="text-dark-500 text-xs mb-1">{t('remnawave.db_ips')}</div>
+                    <div className="text-dark-100 text-lg font-semibold">
+                      {dbInfo.tables.xray_user_ip_stats.count.toLocaleString()}
+                    </div>
+                  </div>
+                  <div className="p-3 rounded-lg bg-dark-900/50">
+                    <div className="text-dark-500 text-xs mb-1">{t('remnawave.db_hourly')}</div>
+                    <div className="text-dark-100 text-lg font-semibold">
+                      {dbInfo.tables.xray_hourly_stats.count.toLocaleString()}
+                    </div>
+                  </div>
+                  <div className="p-3 rounded-lg bg-dark-900/50">
+                    <div className="text-dark-500 text-xs mb-1">{t('remnawave.db_users_cache')}</div>
+                    <div className="text-dark-100 text-lg font-semibold">
+                      {dbInfo.tables.remnawave_user_cache.count.toLocaleString()}
+                    </div>
+                  </div>
+                </div>
+              )}
+              
+              <div className="p-4 rounded-lg bg-dark-900/50 border border-dark-700/50">
+                <div className="flex items-start gap-4">
+                  <div className="flex-1">
+                    <h4 className="text-dark-200 font-medium mb-1">{t('remnawave.clear_stats')}</h4>
+                    <p className="text-dark-500 text-sm">{t('remnawave.clear_stats_desc')}</p>
+                    <p className="text-dark-600 text-xs mt-1">{t('remnawave.clear_stats_note')}</p>
+                  </div>
+                  <motion.button
+                    onClick={() => setShowClearConfirm(true)}
+                    disabled={isClearingStats}
+                    className="px-4 py-2 rounded-lg bg-danger/20 hover:bg-danger/30 text-danger 
+                             border border-danger/30 transition-colors disabled:opacity-50 
+                             flex items-center gap-2 whitespace-nowrap"
+                    whileHover={{ scale: 1.02 }}
+                    whileTap={{ scale: 0.98 }}
+                  >
+                    {isClearingStats ? (
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <Trash2 className="w-4 h-4" />
+                    )}
+                    {t('remnawave.clear_db')}
+                  </motion.button>
+                </div>
+              </div>
+            </div>
           </motion.div>
         )}
       </AnimatePresence>
@@ -1830,6 +1930,77 @@ export default function Remnawave() {
                   )}
                 </div>
               )}
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+      
+      {/* Clear Stats Confirmation Modal */}
+      <AnimatePresence>
+        {showClearConfirm && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+            onClick={() => setShowClearConfirm(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="w-full max-w-md bg-dark-900 rounded-xl border border-dark-700 p-6"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center gap-3 mb-4">
+                <div className="p-2 rounded-lg bg-danger/20">
+                  <AlertCircle className="w-6 h-6 text-danger" />
+                </div>
+                <h3 className="text-lg font-semibold text-dark-100">
+                  {t('remnawave.confirm_clear_title')}
+                </h3>
+              </div>
+              
+              <p className="text-dark-300 mb-4">
+                {t('remnawave.confirm_clear_desc')}
+              </p>
+              
+              {dbInfo && (
+                <div className="p-3 rounded-lg bg-dark-800 mb-4">
+                  <div className="text-dark-400 text-sm mb-2">{t('remnawave.will_be_deleted')}:</div>
+                  <ul className="text-dark-300 text-sm space-y-1">
+                    <li>• {dbInfo.tables.xray_visit_stats.count.toLocaleString()} {t('remnawave.db_visits').toLowerCase()}</li>
+                    <li>• {dbInfo.tables.xray_user_ip_stats.count.toLocaleString()} {t('remnawave.db_ips').toLowerCase()}</li>
+                    <li>• {dbInfo.tables.xray_hourly_stats.count.toLocaleString()} {t('remnawave.db_hourly').toLowerCase()}</li>
+                  </ul>
+                </div>
+              )}
+              
+              <div className="flex items-center gap-3 justify-end">
+                <motion.button
+                  onClick={() => setShowClearConfirm(false)}
+                  className="px-4 py-2 rounded-lg bg-dark-700 hover:bg-dark-600 text-dark-200 transition-colors"
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
+                >
+                  {t('common.cancel')}
+                </motion.button>
+                <motion.button
+                  onClick={handleClearStats}
+                  disabled={isClearingStats}
+                  className="px-4 py-2 rounded-lg bg-danger hover:bg-danger/80 text-white 
+                           transition-colors disabled:opacity-50 flex items-center gap-2"
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
+                >
+                  {isClearingStats ? (
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Trash2 className="w-4 h-4" />
+                  )}
+                  {t('remnawave.confirm_clear_btn')}
+                </motion.button>
+              </div>
             </motion.div>
           </motion.div>
         )}

@@ -804,6 +804,7 @@ async def get_db_info(
     visit_count = await db.execute(select(sql_func.count()).select_from(XrayVisitStats))
     hourly_count = await db.execute(select(sql_func.count()).select_from(XrayHourlyStats))
     user_count = await db.execute(select(sql_func.count()).select_from(RemnawaveUserCache))
+    ip_count = await db.execute(select(sql_func.count()).select_from(XrayUserIpStats))
     
     # Get date ranges
     visit_range = await db.execute(
@@ -834,10 +835,48 @@ async def get_db_info(
                 "first_hour": h_range[0].isoformat() if h_range[0] else None,
                 "last_hour": h_range[1].isoformat() if h_range[1] else None
             },
+            "xray_user_ip_stats": {
+                "count": ip_count.scalar() or 0
+            },
             "remnawave_user_cache": {
                 "count": user_count.scalar() or 0
             }
         }
+    }
+
+
+@router.delete("/stats/clear")
+async def clear_stats(
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Clear all visit statistics (visits, IPs, hourly stats).
+    
+    WARNING: This permanently deletes all collected visit data.
+    User cache is NOT deleted (can be refreshed from Remnawave API).
+    """
+    # Delete all visit stats
+    visit_result = await db.execute(delete(XrayVisitStats))
+    deleted_visits = visit_result.rowcount
+    
+    # Delete all IP stats
+    ip_result = await db.execute(delete(XrayUserIpStats))
+    deleted_ips = ip_result.rowcount
+    
+    # Delete all hourly stats
+    hourly_result = await db.execute(delete(XrayHourlyStats))
+    deleted_hourly = hourly_result.rowcount
+    
+    await db.commit()
+    
+    return {
+        "success": True,
+        "deleted": {
+            "visit_stats": deleted_visits,
+            "ip_stats": deleted_ips,
+            "hourly_stats": deleted_hourly
+        },
+        "message": f"Deleted {deleted_visits} visit records, {deleted_ips} IP records, {deleted_hourly} hourly records"
     }
 
 

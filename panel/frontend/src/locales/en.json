@@ -647,6 +647,19 @@
     "last_used": "Last Used",
     "added": "Added",
     "total": "Total",
-    "top_nodes": "Top Nodes"
+    "top_nodes": "Top Nodes",
+    "db_management": "Database Management",
+    "db_visits": "Visit Records",
+    "db_ips": "IP Records",
+    "db_hourly": "Hourly Records",
+    "db_users_cache": "Users Cache",
+    "clear_stats": "Clear Statistics",
+    "clear_stats_desc": "Delete all visit records, IP addresses and hourly statistics.",
+    "clear_stats_note": "User cache is not deleted. Records older than 1 year are deleted automatically.",
+    "clear_db": "Clear DB",
+    "confirm_clear_title": "Confirm Clear",
+    "confirm_clear_desc": "This action cannot be undone. All visit data will be permanently deleted.",
+    "will_be_deleted": "Will be deleted",
+    "confirm_clear_btn": "Clear"
   }
 }
