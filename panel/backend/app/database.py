@@ -88,6 +88,38 @@ async def run_migrations(conn):
     ))
     if not result.fetchone():
         logger.info("Table xray_hourly_stats will be created by create_all")
+    
+    # Migration: Add new columns to remnawave_user_cache for extended user info
+    result = await conn.execute(text("PRAGMA table_info(remnawave_user_cache)"))
+    user_cache_columns = {row[1] for row in result.fetchall()}
+    
+    if user_cache_columns:  # Table exists
+        new_columns = [
+            ("short_uuid", "VARCHAR(50)"),
+            ("expire_at", "DATETIME"),
+            ("subscription_url", "VARCHAR(500)"),
+            ("sub_revoked_at", "DATETIME"),
+            ("sub_last_user_agent", "VARCHAR(500)"),
+            ("sub_last_opened_at", "DATETIME"),
+            ("traffic_limit_bytes", "BIGINT"),
+            ("traffic_limit_strategy", "VARCHAR(20)"),
+            ("last_traffic_reset_at", "DATETIME"),
+            ("used_traffic_bytes", "BIGINT"),
+            ("lifetime_used_traffic_bytes", "BIGINT"),
+            ("online_at", "DATETIME"),
+            ("first_connected_at", "DATETIME"),
+            ("last_connected_node_uuid", "VARCHAR(100)"),
+            ("hwid_device_limit", "INTEGER"),
+            ("user_email", "VARCHAR(200)"),
+            ("description", "TEXT"),
+            ("tag", "VARCHAR(100)"),
+            ("created_at", "DATETIME"),
+        ]
+        
+        for col_name, col_type in new_columns:
+            if col_name not in user_cache_columns:
+                await conn.execute(text(f"ALTER TABLE remnawave_user_cache ADD COLUMN {col_name} {col_type}"))
+                logger.info(f"Added column: remnawave_user_cache.{col_name}")
 
 
 async def init_db():
