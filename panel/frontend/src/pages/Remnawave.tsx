@@ -26,7 +26,9 @@ import {
   CheckCircle,
   MessageCircle,
   Trash2,
-  Database
+  Database,
+  ChevronUp,
+  ChevronDown
 } from 'lucide-react'
 import { 
   remnawaveApi, 
@@ -101,6 +103,11 @@ export default function Remnawave() {
   const [copiedField, setCopiedField] = useState<string | null>(null)
   const [userSearch, setUserSearch] = useState('')
   const [destSearch, setDestSearch] = useState('')
+  
+  // Users table sorting
+  type UserSortField = 'email' | 'username' | 'status' | 'total_visits' | 'unique_sites' | 'unique_ips'
+  const [userSortField, setUserSortField] = useState<UserSortField>('total_visits')
+  const [userSortDirection, setUserSortDirection] = useState<'asc' | 'desc'>('desc')
   
   // Destination users modal
   const [selectedDestination, setSelectedDestination] = useState<RemnawaveDestinationUsers | null>(null)
@@ -446,9 +453,60 @@ export default function Remnawave() {
     destSearch ? d.destination.toLowerCase().includes(destSearch.toLowerCase()) : true
   )
   
-  const filteredUsers = topUsers.filter(u =>
-    userSearch ? (u.username?.toLowerCase().includes(userSearch.toLowerCase()) ||
-                  u.email.toString().includes(userSearch)) : true
+  // Filter and sort users
+  const filteredUsers = topUsers
+    .filter(u =>
+      userSearch ? (u.username?.toLowerCase().includes(userSearch.toLowerCase()) ||
+                    u.email.toString().includes(userSearch)) : true
+    )
+    .sort((a, b) => {
+      const direction = userSortDirection === 'asc' ? 1 : -1
+      switch (userSortField) {
+        case 'email':
+          return (a.email - b.email) * direction
+        case 'username':
+          const nameA = a.username || ''
+          const nameB = b.username || ''
+          return nameA.localeCompare(nameB) * direction
+        case 'status':
+          const statusA = a.status || ''
+          const statusB = b.status || ''
+          return statusA.localeCompare(statusB) * direction
+        case 'total_visits':
+          return (a.total_visits - b.total_visits) * direction
+        case 'unique_sites':
+          return (a.unique_sites - b.unique_sites) * direction
+        case 'unique_ips':
+          return (a.unique_ips - b.unique_ips) * direction
+        default:
+          return 0
+      }
+    })
+  
+  // Handle sort click
+  const handleUserSort = (field: UserSortField) => {
+    if (userSortField === field) {
+      setUserSortDirection(prev => prev === 'asc' ? 'desc' : 'asc')
+    } else {
+      setUserSortField(field)
+      setUserSortDirection('desc')
+    }
+  }
+  
+  // Sortable header component
+  const SortableHeader = ({ field, children, align = 'left' }: { field: UserSortField; children: React.ReactNode; align?: 'left' | 'right' }) => (
+    <th
+      className={`${align === 'right' ? 'text-right' : 'text-left'} p-4 text-dark-400 font-medium text-sm cursor-pointer hover:text-dark-200 transition-colors select-none`}
+      onClick={() => handleUserSort(field)}
+    >
+      <div className={`flex items-center gap-1 ${align === 'right' ? 'justify-end' : ''}`}>
+        {children}
+        <span className="flex flex-col">
+          <ChevronUp className={`w-3 h-3 -mb-1 ${userSortField === field && userSortDirection === 'asc' ? 'text-accent-400' : 'text-dark-600'}`} />
+          <ChevronDown className={`w-3 h-3 ${userSortField === field && userSortDirection === 'desc' ? 'text-accent-400' : 'text-dark-600'}`} />
+        </span>
+      </div>
+    </th>
   )
   
   // Bar chart data for top sites
@@ -742,12 +800,12 @@ export default function Remnawave() {
               <table className="w-full">
                 <thead>
                   <tr className="border-b border-dark-700">
-                    <th className="text-left p-4 text-dark-400 font-medium text-sm">ID</th>
-                    <th className="text-left p-4 text-dark-400 font-medium text-sm">{t('remnawave.username')}</th>
-                    <th className="text-left p-4 text-dark-400 font-medium text-sm">{t('remnawave.status')}</th>
-                    <th className="text-right p-4 text-dark-400 font-medium text-sm">{t('remnawave.visits')}</th>
-                    <th className="text-right p-4 text-dark-400 font-medium text-sm">{t('remnawave.sites')}</th>
-                    <th className="text-right p-4 text-dark-400 font-medium text-sm">IP</th>
+                    <SortableHeader field="email">ID</SortableHeader>
+                    <SortableHeader field="username">{t('remnawave.username')}</SortableHeader>
+                    <SortableHeader field="status">{t('remnawave.status')}</SortableHeader>
+                    <SortableHeader field="total_visits" align="right">{t('remnawave.visits')}</SortableHeader>
+                    <SortableHeader field="unique_sites" align="right">{t('remnawave.sites')}</SortableHeader>
+                    <SortableHeader field="unique_ips" align="right">IP</SortableHeader>
                     <th className="w-10"></th>
                   </tr>
                 </thead>
