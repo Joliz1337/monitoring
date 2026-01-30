@@ -1429,32 +1429,38 @@ export default function Remnawave() {
                           </span>
                         </div>
                         
-                        {/* Traffic Chart */}
-                        <div className="h-32 flex items-end gap-1 mb-2">
+                        {/* Traffic Chart with Date Labels */}
+                        <div className="flex gap-1">
                           {(() => {
                             const data = selectedUserFull.bandwidth_stats!.sparklineData!
+                            const categories = selectedUserFull.bandwidth_stats!.categories!
                             const maxValue = Math.max(...data, 1)
-                            return data.map((value, idx) => (
-                              <div
-                                key={idx}
-                                className="flex-1 bg-accent-500/80 hover:bg-accent-400 rounded-t transition-colors cursor-pointer group relative"
-                                style={{ height: `${Math.max((value / maxValue) * 100, 2)}%` }}
-                                title={`${selectedUserFull.bandwidth_stats!.categories![idx]}: ${formatBytes(value)}`}
-                              >
-                                <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 px-2 py-1 bg-dark-900 
-                                              rounded text-xs text-dark-200 whitespace-nowrap opacity-0 group-hover:opacity-100 
-                                              transition-opacity pointer-events-none z-10">
-                                  {formatBytes(value)}
+                            return data.map((value, idx) => {
+                              // Parse date and get day number
+                              const dateStr = categories[idx]
+                              const day = dateStr ? dateStr.split('-')[2]?.replace(/^0/, '') : ''
+                              return (
+                                <div key={idx} className="flex-1 flex flex-col items-center">
+                                  {/* Bar */}
+                                  <div className="w-full h-32 flex items-end">
+                                    <div
+                                      className="w-full bg-accent-500/80 hover:bg-accent-400 rounded-t transition-colors cursor-pointer group relative"
+                                      style={{ height: `${Math.max((value / maxValue) * 100, 2)}%` }}
+                                      title={`${dateStr}: ${formatBytes(value)}`}
+                                    >
+                                      <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 px-2 py-1 bg-dark-900 
+                                                    rounded text-xs text-dark-200 whitespace-nowrap opacity-0 group-hover:opacity-100 
+                                                    transition-opacity pointer-events-none z-10">
+                                        {formatBytes(value)}
+                                      </div>
+                                    </div>
+                                  </div>
+                                  {/* Date Label */}
+                                  <span className="text-[10px] text-dark-500 mt-1">{day}</span>
                                 </div>
-                              </div>
-                            ))
+                              )
+                            })
                           })()}
-                        </div>
-                        
-                        {/* Date Labels */}
-                        <div className="flex justify-between text-xs text-dark-500">
-                          <span>{selectedUserFull.bandwidth_stats.categories[0]}</span>
-                          <span>{selectedUserFull.bandwidth_stats.categories[selectedUserFull.bandwidth_stats.categories.length - 1]}</span>
                         </div>
                         
                         {/* Top Nodes */}
