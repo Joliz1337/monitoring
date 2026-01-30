@@ -767,20 +767,62 @@ async def get_users(
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    """Get cached Remnawave users"""
+    """Get cached Remnawave users.
+    
+    Search works by username or email (ID).
+    If user not in cache but has visit stats, returns basic info from stats.
+    """
+    from sqlalchemy import or_, cast, String
+    
+    cached_users = []
+    
+    # Search in cache
     query = select(RemnawaveUserCache).order_by(RemnawaveUserCache.username)
     
     if search:
-        query = query.where(
-            RemnawaveUserCache.username.ilike(f"%{search}%")
-        )
+        # Search by username or email (ID)
+        if search.isdigit():
+            # Exact match for email ID
+            query = query.where(RemnawaveUserCache.email == int(search))
+        else:
+            query = query.where(
+                RemnawaveUserCache.username.ilike(f"%{search}%")
+            )
     
     query = query.limit(limit)
     result = await db.execute(query)
-    users = result.scalars().all()
+    cached_users = result.scalars().all()
+    
+    # If searching by email ID and not found in cache, check visit stats
+    users_from_stats = []
+    if search and search.isdigit() and not cached_users:
+        email_id = int(search)
+        stats_result = await db.execute(
+            select(
+                XrayVisitStats.email,
+                sql_func.sum(XrayVisitStats.visit_count).label('total_visits'),
+                sql_func.min(XrayVisitStats.first_seen).label('first_seen'),
+                sql_func.max(XrayVisitStats.last_seen).label('last_seen')
+            )
+            .where(XrayVisitStats.email == email_id)
+            .group_by(XrayVisitStats.email)
+        )
+        stats_row = stats_result.one_or_none()
+        if stats_row:
+            users_from_stats.append({
+                "email": stats_row.email,
+                "uuid": None,
+                "username": None,
+                "telegram_id": None,
+                "status": "unknown",
+                "from_stats": True,
+                "total_visits": stats_row.total_visits,
+                "first_seen": stats_row.first_seen.isoformat() if stats_row.first_seen else None,
+                "last_seen": stats_row.last_seen.isoformat() if stats_row.last_seen else None
+            })
     
     return {
-        "count": len(users),
+        "count": len(cached_users) + len(users_from_stats),
         "users": [
             {
                 "email": u.email,
@@ -789,8 +831,8 @@ async def get_users(
                 "telegram_id": u.telegram_id,
                 "status": u.status
             }
-            for u in users
-        ]
+            for u in cached_users
+        ] + users_from_stats
     }
 
 
