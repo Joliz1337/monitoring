@@ -981,6 +981,8 @@ export const remnawaveApi = {
     api.delete<{ success: boolean; message: string }>(`/remnawave/infrastructure-ips/${id}`),
   resolveInfrastructureAddresses: () =>
     api.post<{ success: boolean; total: number; updated: number }>('/remnawave/infrastructure-ips/resolve'),
+  rescanInfrastructureIps: () =>
+    api.post<{ success: boolean; infrastructure_ips_count: number; total_unique_ips_scanned: number; updated_to_infrastructure: number; updated_to_client: number }>('/remnawave/infrastructure-ips/rescan'),
   
   // Collector status & control
   getCollectorStatus: () => api.get<RemnawaveCollectorStatus>('/remnawave/status'),

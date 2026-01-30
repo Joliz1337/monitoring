@@ -676,6 +676,9 @@
     "infrastructure_ips": "IP инфраструктуры",
     "infrastructure_ips_hint": "Подключения через ваши серверы (HAProxy, VPN и т.д.)",
     "no_client_ips": "Нет данных о клиентских IP",
-    "unique_client_ips": "Уникальных IP клиентов"
+    "unique_client_ips": "Уникальных IP клиентов",
+    "rescan_existing": "Пересканировать БД",
+    "rescan_hint": "Обновить флаг инфраструктуры для существующих записей в базе данных",
+    "rescan_result": "Обновлено: {{toInfra}} IP помечено как инфраструктурные, {{toClient}} как клиентские"
   }
 }

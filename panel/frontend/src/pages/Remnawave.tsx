@@ -92,6 +92,8 @@ export default function Remnawave() {
   const [newInfraDescription, setNewInfraDescription] = useState('')
   const [isAddingInfraAddress, setIsAddingInfraAddress] = useState(false)
   const [isResolvingInfra, setIsResolvingInfra] = useState(false)
+  const [isRescanningInfra, setIsRescanningInfra] = useState(false)
+  const [lastRescanResult, setLastRescanResult] = useState<{ updated_to_infrastructure: number; updated_to_client: number } | null>(null)
   
   // Collector status state
   const [collectorStatus, setCollectorStatus] = useState<RemnawaveCollectorStatus | null>(null)
@@ -312,6 +314,22 @@ export default function Remnawave() {
   }
   
   // Infrastructure address handlers
+  const handleRescanInfraIps = async () => {
+    setIsRescanningInfra(true)
+    setLastRescanResult(null)
+    try {
+      const res = await remnawaveApi.rescanInfrastructureIps()
+      setLastRescanResult({
+        updated_to_infrastructure: res.data.updated_to_infrastructure,
+        updated_to_client: res.data.updated_to_client
+      })
+    } catch (err) {
+      console.error('Failed to rescan infrastructure IPs:', err)
+    } finally {
+      setIsRescanningInfra(false)
+    }
+  }
+  
   const handleAddInfraAddress = async () => {
     if (!newInfraAddress.trim()) return
     
@@ -326,6 +344,8 @@ export default function Remnawave() {
       // Refresh infrastructure addresses
       const res = await remnawaveApi.getInfrastructureAddresses()
       setInfrastructureAddresses(res.data.addresses)
+      // Auto-rescan existing data
+      await handleRescanInfraIps()
     } catch (err: unknown) {
       const error = err as { response?: { data?: { detail?: string } } }
       console.error('Failed to add infrastructure address:', error.response?.data?.detail || err)
@@ -340,6 +360,8 @@ export default function Remnawave() {
       // Refresh infrastructure addresses
       const res = await remnawaveApi.getInfrastructureAddresses()
       setInfrastructureAddresses(res.data.addresses)
+      // Auto-rescan existing data
+      await handleRescanInfraIps()
     } catch (err) {
       console.error('Failed to delete infrastructure address:', err)
     }
@@ -352,6 +374,8 @@ export default function Remnawave() {
       // Refresh infrastructure addresses
       const res = await remnawaveApi.getInfrastructureAddresses()
       setInfrastructureAddresses(res.data.addresses)
+      // Auto-rescan existing data after DNS update
+      await handleRescanInfraIps()
     } catch (err) {
       console.error('Failed to resolve infrastructure addresses:', err)
     } finally {
@@ -1279,21 +1303,46 @@ export default function Remnawave() {
             <div className="p-6 rounded-xl bg-dark-800/50 border border-dark-700/50">
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-lg font-semibold text-dark-100">{t('remnawave.infrastructure_addresses')}</h3>
-                <button
-                  onClick={handleResolveInfraAddresses}
-                  disabled={isResolvingInfra}
-                  className="px-3 py-1 text-sm rounded-lg bg-dark-700 hover:bg-dark-600 text-dark-300 transition-colors flex items-center gap-1"
-                >
-                  {isResolvingInfra ? (
-                    <RefreshCw className="w-3 h-3 animate-spin" />
-                  ) : (
-                    <RefreshCw className="w-3 h-3" />
-                  )}
-                  {t('remnawave.resolve_dns')}
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleRescanInfraIps}
+                    disabled={isRescanningInfra || isResolvingInfra}
+                    className="px-3 py-1 text-sm rounded-lg bg-accent-500/20 hover:bg-accent-500/30 text-accent-400 transition-colors flex items-center gap-1"
+                    title={t('remnawave.rescan_hint')}
+                  >
+                    {isRescanningInfra ? (
+                      <RefreshCw className="w-3 h-3 animate-spin" />
+                    ) : (
+                      <Database className="w-3 h-3" />
+                    )}
+                    {t('remnawave.rescan_existing')}
+                  </button>
+                  <button
+                    onClick={handleResolveInfraAddresses}
+                    disabled={isResolvingInfra || isRescanningInfra}
+                    className="px-3 py-1 text-sm rounded-lg bg-dark-700 hover:bg-dark-600 text-dark-300 transition-colors flex items-center gap-1"
+                  >
+                    {isResolvingInfra ? (
+                      <RefreshCw className="w-3 h-3 animate-spin" />
+                    ) : (
+                      <RefreshCw className="w-3 h-3" />
+                    )}
+                    {t('remnawave.resolve_dns')}
+                  </button>
+                </div>
               </div>
               
               <p className="text-dark-500 text-sm mb-4">{t('remnawave.infrastructure_addresses_hint')}</p>
+              
+              {/* Rescan result */}
+              {lastRescanResult && (
+                <div className="mb-4 p-3 rounded-lg bg-success/10 border border-success/20 text-success text-sm">
+                  {t('remnawave.rescan_result', { 
+                    toInfra: lastRescanResult.updated_to_infrastructure,
+                    toClient: lastRescanResult.updated_to_client 
+                  })}
+                </div>
+              )}
               
               {/* Add new address */}
               <div className="flex gap-2 mb-4">

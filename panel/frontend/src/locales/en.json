@@ -675,6 +675,9 @@
     "infrastructure_ips": "Infrastructure IPs",
     "infrastructure_ips_hint": "Connections through your servers (HAProxy, VPN, etc.)",
     "no_client_ips": "No client IP data",
-    "unique_client_ips": "Unique client IPs"
+    "unique_client_ips": "Unique client IPs",
+    "rescan_existing": "Rescan DB",
+    "rescan_hint": "Update infrastructure flag for existing records in the database",
+    "rescan_result": "Updated: {{toInfra}} IPs marked as infrastructure, {{toClient}} as client"
   }
 }

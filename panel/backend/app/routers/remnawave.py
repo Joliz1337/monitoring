@@ -268,6 +268,87 @@ async def resolve_all_infrastructure_addresses(
     }
 
 
+@router.post("/infrastructure-ips/rescan")
+async def rescan_existing_ip_stats(
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Rescan all existing IP stats and update is_infrastructure flag.
+    
+    This should be called after adding/removing infrastructure addresses
+    to update historical data.
+    """
+    import json
+    from urllib.parse import urlparse
+    
+    # Build set of all infrastructure IPs
+    infrastructure_ips = set()
+    
+    # 1. Get IPs from server URLs (node IPs)
+    server_result = await db.execute(select(Server.url))
+    for row in server_result.fetchall():
+        url = row[0]
+        if url:
+            try:
+                parsed = urlparse(url)
+                if parsed.hostname:
+                    infrastructure_ips.add(parsed.hostname)
+            except Exception:
+                pass
+    
+    # 2. Get IPs from infrastructure addresses (with DNS resolution)
+    infra_result = await db.execute(select(RemnawaveInfrastructureAddress))
+    addresses = infra_result.scalars().all()
+    
+    for addr in addresses:
+        # Add the address itself (might be IP)
+        infrastructure_ips.add(addr.address)
+        # Add resolved IPs
+        if addr.resolved_ips:
+            try:
+                resolved = json.loads(addr.resolved_ips)
+                infrastructure_ips.update(resolved)
+            except json.JSONDecodeError:
+                pass
+    
+    # 3. Update all XrayUserIpStats records
+    # Get all unique source_ips first
+    ip_result = await db.execute(
+        select(XrayUserIpStats.source_ip).distinct()
+    )
+    all_ips = [row[0] for row in ip_result.fetchall()]
+    
+    updated_to_infra = 0
+    updated_to_client = 0
+    
+    for source_ip in all_ips:
+        is_infra = source_ip in infrastructure_ips
+        
+        # Update all records with this source_ip
+        result = await db.execute(
+            select(XrayUserIpStats).where(XrayUserIpStats.source_ip == source_ip)
+        )
+        records = result.scalars().all()
+        
+        for record in records:
+            if record.is_infrastructure != is_infra:
+                if is_infra:
+                    updated_to_infra += 1
+                else:
+                    updated_to_client += 1
+                record.is_infrastructure = is_infra
+    
+    await db.commit()
+    
+    return {
+        "success": True,
+        "infrastructure_ips_count": len(infrastructure_ips),
+        "total_unique_ips_scanned": len(all_ips),
+        "updated_to_infrastructure": updated_to_infra,
+        "updated_to_client": updated_to_client
+    }
+
+
 # === Collector Status & Control ===
 
 @router.get("/status")
