@@ -13,9 +13,9 @@ cleanup() {
         echo -e "\033[0;31m[✗] Script interrupted or failed (exit code: $exit_code)\033[0m"
         # Show last lines from build log if exists
         if [ -f "$BUILD_LOG" ] && [ -s "$BUILD_LOG" ]; then
-            echo -e "\033[0;31m[✗] Last 50 lines of build output:\033[0m"
+            echo -e "\033[0;31m[✗] Last 30 lines of build output:\033[0m"
             echo -e "\033[0;31m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
-            tail -50 "$BUILD_LOG"
+            tail -30 "$BUILD_LOG"
             echo -e "\033[0;31m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
         fi
         rm -f "$BUILD_LOG"
@@ -652,20 +652,19 @@ build_and_start() {
         timeout "$build_timeout" docker compose build --parallel --build-arg CACHE_BUST=${CACHE_BUST:-} > "$BUILD_LOG" 2>&1 &
         local build_pid=$!
         
-        # Show progress while building
-        local dots=""
+        # Show progress while building (last 30 lines of log)
         while kill -0 $build_pid 2>/dev/null; do
-            dots="${dots}."
-            if [ ${#dots} -gt 3 ]; then dots="."; fi
-            local current_step=$(grep -oE 'Step [0-9]+/[0-9]+|#[0-9]+ \[[0-9]+/[0-9]+\]' "$BUILD_LOG" 2>/dev/null | tail -1)
-            if [ -n "$current_step" ]; then
-                printf "\r${CYAN}[i]${NC} Building${dots} %-30s" "($current_step)"
-            else
-                printf "\r${CYAN}[i]${NC} Building${dots}   "
+            if [ -f "$BUILD_LOG" ] && [ -s "$BUILD_LOG" ]; then
+                # Clear screen and show last 30 lines
+                clear
+                echo -e "${CYAN}[i]${NC} Building Docker images (attempt $((retry + 1))/$max_retries)... (press Ctrl+C to cancel)"
+                echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+                tail -30 "$BUILD_LOG" 2>/dev/null
+                echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
             fi
-            sleep 2
+            sleep 3
         done
-        printf "\r%-60s\r" " "
+        echo ""
         
         wait $build_pid
         build_exit_code=$?
@@ -683,23 +682,23 @@ build_and_start() {
             echo ""
             print_status "Docker build completed successfully"
             break
-        elif [ $build_exit_code -eq 124 ]; then
+        el        if [ $build_exit_code -eq 124 ]; then
             print_error "Build timeout after ${build_timeout}s"
             echo -e "${YELLOW}Build was taking too long. Possible causes:${NC}"
             echo "  - Very slow internet connection"
             echo "  - Network issues with Docker Hub"
             echo "  - Server ran out of memory (check: free -h)"
             echo ""
-            echo -e "${YELLOW}Last 50 lines of build output:${NC}"
+            echo -e "${YELLOW}Last 30 lines of build output:${NC}"
             echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-            tail -50 "$BUILD_LOG" 2>/dev/null || echo "(no log available)"
+            tail -30 "$BUILD_LOG" 2>/dev/null || echo "(no log available)"
             echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         else
             print_error "Build failed (exit code: $build_exit_code)"
             echo ""
-            echo -e "${YELLOW}Last 50 lines of build output:${NC}"
+            echo -e "${YELLOW}Last 30 lines of build output:${NC}"
             echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-            tail -50 "$BUILD_LOG" 2>/dev/null || echo "(no log available)"
+            tail -30 "$BUILD_LOG" 2>/dev/null || echo "(no log available)"
             echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         fi
         

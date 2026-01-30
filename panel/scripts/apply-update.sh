@@ -19,9 +19,9 @@ cleanup() {
         echo ""
         echo -e "\033[0;31m[ERROR] Script interrupted or failed (exit code: $exit_code)\033[0m"
         if [ -f "$BUILD_LOG" ] && [ -s "$BUILD_LOG" ]; then
-            echo -e "\033[0;31m[ERROR] Last 50 lines of build output:\033[0m"
+            echo -e "\033[0;31m[ERROR] Last 30 lines of build output:\033[0m"
             echo -e "\033[0;31m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
-            tail -50 "$BUILD_LOG"
+            tail -30 "$BUILD_LOG"
             echo -e "\033[0;31m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
         fi
         rm -f "$BUILD_LOG"
@@ -148,20 +148,19 @@ set +e
 timeout "$DOCKER_BUILD_TIMEOUT" docker compose build --parallel --build-arg CACHE_BUST=${CACHE_BUST} > "$BUILD_LOG" 2>&1 &
 BUILD_PID=$!
 
-# Show progress while building
-DOTS=""
+# Show progress while building (last 30 lines of log)
 while kill -0 $BUILD_PID 2>/dev/null; do
-    DOTS="${DOTS}."
-    if [ ${#DOTS} -gt 3 ]; then DOTS="."; fi
-    CURRENT_STEP=$(grep -oE 'Step [0-9]+/[0-9]+|#[0-9]+ \[[0-9]+/[0-9]+\]' "$BUILD_LOG" 2>/dev/null | tail -1)
-    if [ -n "$CURRENT_STEP" ]; then
-        printf "\r${CYAN}[INFO]${NC} Building${DOTS} %-30s" "($CURRENT_STEP)"
-    else
-        printf "\r${CYAN}[INFO]${NC} Building${DOTS}   "
+    if [ -f "$BUILD_LOG" ] && [ -s "$BUILD_LOG" ]; then
+        # Clear screen and show last 30 lines
+        clear
+        echo -e "${CYAN}[INFO]${NC} Building Docker images... (press Ctrl+C to cancel)"
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        tail -30 "$BUILD_LOG" 2>/dev/null
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     fi
-    sleep 2
+    sleep 3
 done
-printf "\r%-60s\r" " "
+echo ""
 
 wait $BUILD_PID
 BUILD_EXIT_CODE=$?
@@ -175,17 +174,17 @@ elif [ $BUILD_EXIT_CODE -eq 124 ]; then
     echo "Try increasing timeout: export DOCKER_BUILD_TIMEOUT=3600"
     echo "Or check server memory: free -h"
     echo ""
-    echo -e "${YELLOW}Last 50 lines of build output:${NC}"
+    echo -e "${YELLOW}Last 30 lines of build output:${NC}"
     echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    tail -50 "$BUILD_LOG" 2>/dev/null || echo "(no log available)"
+    tail -30 "$BUILD_LOG" 2>/dev/null || echo "(no log available)"
     echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     exit 1
 else
     log_error "Build failed (exit code: $BUILD_EXIT_CODE)"
     echo ""
-    echo -e "${YELLOW}Last 50 lines of build output:${NC}"
+    echo -e "${YELLOW}Last 30 lines of build output:${NC}"
     echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    tail -50 "$BUILD_LOG" 2>/dev/null || echo "(no log available)"
+    tail -30 "$BUILD_LOG" 2>/dev/null || echo "(no log available)"
     echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     exit 1
 fi
