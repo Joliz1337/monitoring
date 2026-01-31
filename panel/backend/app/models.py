@@ -180,7 +180,7 @@ class RemnawaveSettings(Base):
     api_token = Column(String(500), nullable=True)
     cookie_secret = Column(String(500), nullable=True)
     enabled = Column(Boolean, default=False)
-    collection_interval = Column(Integer, default=60)
+    collection_interval = Column(Integer, default=300)  # 5 minutes recommended
 
 
 class RemnawaveNode(Base):

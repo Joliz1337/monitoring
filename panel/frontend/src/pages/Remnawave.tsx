@@ -1134,16 +1134,21 @@ export default function Remnawave() {
                 </div>
                 <div>
                   <label className="block text-sm text-dark-400 mb-2">{t('remnawave.collection_interval')}</label>
-                  <input
-                    type="number"
-                    value={editSettings.collection_interval || 60}
-                    onChange={(e) => setEditSettings(s => ({ ...s, collection_interval: parseInt(e.target.value) || 60 }))}
-                    min={10}
-                    max={3600}
-                    className="w-32 px-4 py-2 rounded-lg bg-dark-900 border border-dark-700 
-                             text-dark-100 focus:outline-none focus:border-accent-500"
-                  />
-                  <span className="text-dark-500 ml-2">{t('common.seconds')}</span>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      value={editSettings.collection_interval || 300}
+                      onChange={(e) => setEditSettings(s => ({ ...s, collection_interval: Math.min(900, Math.max(60, parseInt(e.target.value) || 300)) }))}
+                      min={60}
+                      max={900}
+                      step={60}
+                      className="w-32 px-4 py-2 rounded-lg bg-dark-900 border border-dark-700 
+                               text-dark-100 focus:outline-none focus:border-accent-500"
+                    />
+                    <span className="text-dark-500">{t('common.seconds')}</span>
+                    <span className="text-dark-600">({Math.round((editSettings.collection_interval || 300) / 60)} {t('common.minutes')})</span>
+                  </div>
+                  <p className="text-xs text-yellow-500/80 mt-1">{t('remnawave.collection_interval_hint')}</p>
                 </div>
                 <div className="flex items-center gap-3">
                   <label className="relative inline-flex items-center cursor-pointer">

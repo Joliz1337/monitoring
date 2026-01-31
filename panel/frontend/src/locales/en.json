@@ -583,6 +583,7 @@
     "cookie_secret": "Cookie Secret",
     "cookie_secret_hint": "Format: cookie_name:cookie_value (for Nginx auth)",
     "collection_interval": "Collection Interval",
+    "collection_interval_hint": "Recommended: 5 min. Max: 15 min. More frequent collection = less memory usage on node.",
     "enabled": "Enabled",
     "test_connection": "Test Connection",
     "connection_success": "Connection successful",

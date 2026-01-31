@@ -24,6 +24,7 @@ async def collect_stats():
     
     Called by the panel periodically to fetch stats.
     Starts collector on first call if not running.
+    Processes remaining buffer before returning stats.
     After this call, the node's memory is cleared.
     
     Returns:
@@ -38,4 +39,4 @@ async def collect_stats():
     if not collector._running:
         await collector.start()
     
-    return collector.collect_and_clear()
+    return await collector.collect_and_clear()

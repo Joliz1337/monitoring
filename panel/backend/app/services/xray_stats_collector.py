@@ -148,7 +148,7 @@ class XrayStatsCollector:
         self._user_cache_task: Optional[asyncio.Task] = None
         self._cleanup_task: Optional[asyncio.Task] = None
         
-        self._collection_interval = 60
+        self._collection_interval = 300  # 5 minutes default
         self._user_cache_interval = 3600
         self._time_since_last_collect = 0  # Tracks seconds since last collection
         

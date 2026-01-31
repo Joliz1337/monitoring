@@ -34,7 +34,7 @@ class UpdateSettingsRequest(BaseModel):
     api_token: Optional[str] = Field(None, max_length=500)
     cookie_secret: Optional[str] = Field(None, max_length=500)
     enabled: Optional[bool] = None
-    collection_interval: Optional[int] = Field(None, ge=10, le=3600)
+    collection_interval: Optional[int] = Field(None, ge=60, le=900)  # 1-15 minutes
 
 
 class AddNodeRequest(BaseModel):
@@ -67,7 +67,7 @@ async def get_settings(
             "api_token": None,
             "cookie_secret": None,
             "enabled": False,
-            "collection_interval": 60
+            "collection_interval": 300  # 5 minutes default
         }
     
     return {

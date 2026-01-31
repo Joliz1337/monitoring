@@ -584,6 +584,7 @@
     "cookie_secret": "Cookie секрет",
     "cookie_secret_hint": "Формат: имя_куки:значение (для авторизации Nginx)",
     "collection_interval": "Интервал сбора",
+    "collection_interval_hint": "Рекомендуется 5 минут. Макс. 15 минут. Чем чаще сбор — тем меньше памяти использует нода.",
     "enabled": "Включено",
     "test_connection": "Проверить подключение",
     "connection_success": "Подключение успешно",
