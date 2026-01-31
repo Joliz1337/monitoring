@@ -11,6 +11,7 @@ settings = get_settings()
 os.makedirs("data", exist_ok=True)
 
 # SQLite optimizations for concurrent access
+# Note: SQLite with aiosqlite uses NullPool by default, pool_size/max_overflow not supported
 engine = create_async_engine(
     settings.database_url,
     echo=False,
@@ -19,8 +20,6 @@ engine = create_async_engine(
         "check_same_thread": False,
     },
     pool_pre_ping=True,
-    pool_size=5,
-    max_overflow=10,
 )
 
 
