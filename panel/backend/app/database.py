@@ -1,6 +1,6 @@
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
-from sqlalchemy import text
+from sqlalchemy import text, event
 from app.config import get_settings
 import os
 import logging
@@ -10,7 +10,37 @@ settings = get_settings()
 
 os.makedirs("data", exist_ok=True)
 
-engine = create_async_engine(settings.database_url, echo=False)
+# SQLite optimizations for concurrent access
+engine = create_async_engine(
+    settings.database_url,
+    echo=False,
+    connect_args={
+        "timeout": 60,  # Wait up to 60 seconds for lock
+        "check_same_thread": False,
+    },
+    pool_pre_ping=True,
+    pool_size=5,
+    max_overflow=10,
+)
+
+
+@event.listens_for(engine.sync_engine, "connect")
+def set_sqlite_pragma(dbapi_connection, connection_record):
+    """Configure SQLite for better concurrent access."""
+    cursor = dbapi_connection.cursor()
+    # WAL mode for better concurrent read/write
+    cursor.execute("PRAGMA journal_mode=WAL")
+    # Increase busy timeout (30 seconds)
+    cursor.execute("PRAGMA busy_timeout=30000")
+    # Normal synchronous mode (balance between safety and speed)
+    cursor.execute("PRAGMA synchronous=NORMAL")
+    # Cache size (negative = KB, 64MB)
+    cursor.execute("PRAGMA cache_size=-65536")
+    # Memory-mapped I/O (256MB)
+    cursor.execute("PRAGMA mmap_size=268435456")
+    cursor.close()
+
+
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 

@@ -100,15 +100,19 @@ export default function Servers() {
     setError('')
     setIsSubmitting(true)
     
-    const serverData = {
-      name: formData.name,
-      url: buildServerUrl(formData.host, formData.port),
-      api_key: formData.api_key
-    }
-    
     if (editingId) {
+      // При редактировании отправляем только заполненные поля
+      // Если api_key пустой - не отправляем его, чтобы не затереть существующий
+      const updateData: { name: string; url: string; api_key?: string } = {
+        name: formData.name,
+        url: buildServerUrl(formData.host, formData.port),
+      }
+      if (formData.api_key) {
+        updateData.api_key = formData.api_key
+      }
+      
       try {
-        await updateServer(editingId, serverData)
+        await updateServer(editingId, updateData)
         setEditingId(null)
         setFormData({ name: '', host: '', port: '9100', api_key: '' })
         setShowForm(false)
@@ -116,6 +120,12 @@ export default function Servers() {
         setError(t('servers.failed_update'))
       }
     } else {
+      // При создании нового сервера api_key обязателен
+      const serverData = {
+        name: formData.name,
+        url: buildServerUrl(formData.host, formData.port),
+        api_key: formData.api_key
+      }
       const result = await addServer(serverData)
       if (result.success) {
         setShowForm(false)
