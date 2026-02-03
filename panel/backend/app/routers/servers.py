@@ -17,8 +17,7 @@ router = APIRouter(prefix="/servers", tags=["servers"])
 def to_iso_utc(dt: Optional[datetime]) -> Optional[str]:
     """Convert datetime to ISO format with explicit UTC timezone suffix.
     
-    SQLite stores datetime without timezone info. All our timestamps are stored
-    as naive UTC, so we just add 'Z' suffix for frontend consumption.
+    All timestamps are stored as naive UTC, so we add 'Z' suffix for frontend.
     Truncates microseconds to milliseconds for better JS compatibility.
     """
     if dt is None:

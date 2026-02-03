@@ -258,7 +258,7 @@ class MetricsCollector:
         # Get per-CPU percentages
         per_cpu = cpu.get("per_cpu_percent", [])
         
-        # Create snapshot with naive UTC timestamp (SQLite doesn't preserve timezone)
+        # Create snapshot with naive UTC timestamp (stored without timezone)
         snapshot = MetricsSnapshot(
             server_id=server_id,
             timestamp=datetime.now(timezone.utc).replace(tzinfo=None),
@@ -289,8 +289,7 @@ class MetricsCollector:
     async def _cleanup_old_data(self, db: AsyncSession):
         """Remove data older than retention periods.
         
-        Note: SQLite stores datetime without timezone info, so we use naive UTC
-        datetime for comparisons to avoid timezone conversion issues on Windows.
+        Note: We use naive UTC datetime for consistent comparisons across platforms.
         """
         now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
         
@@ -464,7 +463,7 @@ class MetricsCollector:
         result = await db.execute(select(Server.id))
         server_ids = [row[0] for row in result.fetchall()]
         
-        # Aggregate last complete hour (use naive UTC for SQLite compatibility)
+        # Aggregate last complete hour (use naive UTC)
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         hour_end = now.replace(minute=0, second=0, microsecond=0)
         hour_start = hour_end - timedelta(hours=1)
@@ -534,7 +533,7 @@ class MetricsCollector:
         result = await db.execute(select(Server.id))
         server_ids = [row[0] for row in result.fetchall()]
         
-        # Aggregate last complete day (use naive UTC for SQLite compatibility)
+        # Aggregate last complete day (use naive UTC)
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         day_end = now.replace(hour=0, minute=0, second=0, microsecond=0)
         day_start = day_end - timedelta(days=1)

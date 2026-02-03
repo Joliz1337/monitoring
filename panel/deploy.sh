@@ -549,6 +549,20 @@ generate_env() {
             print_info "Domain updated in .env"
         fi
         
+        # Add PostgreSQL settings if missing (migration from SQLite)
+        if ! grep -q "^POSTGRES_PASSWORD=" .env; then
+            print_info "Adding PostgreSQL configuration..."
+            POSTGRES_PASSWORD=$(generate_random 32)
+            cat >> .env << EOF
+
+# PostgreSQL Database (auto-generated)
+POSTGRES_USER=panel
+POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+POSTGRES_DB=panel
+EOF
+            print_status "PostgreSQL configuration added"
+        fi
+        
         if [ -z "$PANEL_UID" ] || [ "$PANEL_UID" = "changeme" ]; then
             print_info "Regenerating credentials..."
         else
@@ -562,6 +576,7 @@ generate_env() {
     PANEL_UID=$(generate_random 16)
     PANEL_PASSWORD=$(generate_random 32)
     JWT_SECRET=$(generate_random 64)
+    POSTGRES_PASSWORD=$(generate_random 32)
     
     cat > .env << EOF
 # Domain (required for SSL)
@@ -578,6 +593,11 @@ JWT_EXPIRE_MINUTES=1440
 # Security
 MAX_FAILED_ATTEMPTS=5
 BAN_DURATION_SECONDS=900
+
+# PostgreSQL Database (auto-generated)
+POSTGRES_USER=panel
+POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+POSTGRES_DB=panel
 
 # Ports
 PANEL_PORT=443
@@ -682,7 +702,7 @@ build_and_start() {
             echo ""
             print_status "Docker build completed successfully"
             break
-        el        if [ $build_exit_code -eq 124 ]; then
+        elif [ $build_exit_code -eq 124 ]; then
             print_error "Build timeout after ${build_timeout}s"
             echo -e "${YELLOW}Build was taking too long. Possible causes:${NC}"
             echo "  - Very slow internet connection"

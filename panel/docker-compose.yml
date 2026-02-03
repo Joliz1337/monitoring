@@ -1,4 +1,35 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: panel-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-panel}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-panel_secret}
+      - POSTGRES_DB=${POSTGRES_DB:-panel}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - panel-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-panel} -d ${POSTGRES_DB:-panel}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+
   nginx:
     image: nginx:alpine
     container_name: panel-nginx
@@ -74,7 +105,12 @@ services:
       - JWT_EXPIRE_MINUTES=${JWT_EXPIRE_MINUTES:-1440}
       - MAX_FAILED_ATTEMPTS=${MAX_FAILED_ATTEMPTS:-5}
       - BAN_DURATION_SECONDS=${BAN_DURATION_SECONDS:-900}
-      - DATABASE_URL=sqlite+aiosqlite:///./data/panel.db
+      # PostgreSQL settings
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=${POSTGRES_USER:-panel}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-panel_secret}
+      - POSTGRES_DB=${POSTGRES_DB:-panel}
       - DOMAIN=${DOMAIN}
       - EXT_KEY=${EXT_KEY:-}
     volumes:
@@ -85,6 +121,9 @@ services:
       - /usr/bin/docker:/usr/bin/docker:ro
       # For reading SSL certificate info (need root for Let's Encrypt files with 0600 perms)
       - /etc/letsencrypt:/etc/letsencrypt:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
     networks:
       - panel-network
     logging:
@@ -96,13 +135,14 @@ services:
       resources:
         limits:
           cpus: '1'
-          memory: 256M
+          memory: 512M
         reservations:
           cpus: '0.25'
-          memory: 64M
+          memory: 128M
 
 volumes:
   panel-data:
+  postgres-data:
 
 networks:
   panel-network:

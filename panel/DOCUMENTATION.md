@@ -44,12 +44,32 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/in
 ```
 panel/
 ├── frontend/          # React + Vite + Tailwind
-├── backend/           # FastAPI + SQLite
+├── backend/           # FastAPI + PostgreSQL
 ├── nginx/             # Reverse proxy с SSL
-├── docker-compose.yml
+├── docker-compose.yml # Включает postgres контейнер
 ├── deploy.sh
 └── VERSION            # Версия панели (единственный источник)
 ```
+
+## База данных
+
+Панель использует **PostgreSQL 16** для хранения данных:
+- Метрики серверов (история 24ч raw + 30 дней hourly + 365 дней daily)
+- Remnawave статистика (xray_visit_stats, xray_hourly_stats)
+- Кэш пользователей, blocklist правила, настройки
+
+**Преимущества PostgreSQL:**
+- Concurrent writes — одновременная запись с множества серверов
+- Connection pooling — эффективное использование соединений
+- Batch upsert (ON CONFLICT) — 10-100x быстрее записи статистики
+- Надёжность и масштабируемость
+
+**Автомиграция с SQLite:**
+При обновлении со старой версии (SQLite) данные переносятся автоматически:
+1. При первом запуске проверяется наличие SQLite базы
+2. Все данные копируются в PostgreSQL
+3. SQLite файл переименовывается в `panel.db.backup`
+4. Создаётся флаг `.postgres_migrated`
 
 ## Конфигурация (.env)
 
@@ -60,6 +80,9 @@ panel/
 | PANEL_PASSWORD | Пароль для входа | auto |
 | JWT_SECRET | Секрет для JWT | auto |
 | JWT_EXPIRE_MINUTES | Время жизни токена | 1440 |
+| POSTGRES_USER | Пользователь PostgreSQL | panel |
+| POSTGRES_PASSWORD | Пароль PostgreSQL | auto |
+| POSTGRES_DB | Имя базы данных | panel |
 
 ## Порты
 

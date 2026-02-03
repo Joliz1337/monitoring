@@ -20,8 +20,7 @@ router = APIRouter(prefix="/proxy", tags=["proxy"])
 def to_iso_utc(dt: Optional[datetime]) -> Optional[str]:
     """Convert datetime to ISO format with explicit UTC timezone suffix.
     
-    SQLite stores datetime without timezone info. All our timestamps are stored
-    as naive UTC, so we just add 'Z' suffix for frontend consumption.
+    All timestamps are stored as naive UTC, so we add 'Z' suffix for frontend.
     Truncates microseconds to milliseconds for better JS compatibility.
     """
     if dt is None:
@@ -202,11 +201,11 @@ async def get_metrics_history(
     - 7d: hourly aggregated data - ~168 points
     - 30d, 365d: daily aggregated data
     
-    Note: Uses naive UTC datetime for SQLite compatibility (no timezone info stored).
+    Note: Uses naive UTC datetime (no timezone info stored in database).
     Set include_per_cpu=true to include per-CPU usage data (only for raw data periods).
     """
     await get_server_by_id(server_id, db)
-    # Use naive UTC datetime for SQLite compatibility
+    # Use naive UTC datetime
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     
     # Parse period to determine time range, data source, and max points for charts
@@ -222,7 +221,7 @@ async def get_metrics_history(
     config = period_config.get(period, period_config["1h"])
     
     # Use explicit time range if provided, otherwise use period
-    # Convert to naive UTC for SQLite compatibility
+    # Convert to naive UTC
     if to_time:
         try:
             parsed = datetime.fromisoformat(to_time.replace('Z', '+00:00'))

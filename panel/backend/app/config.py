@@ -12,12 +12,30 @@ class Settings(BaseSettings):
     max_failed_attempts: int = 5
     ban_duration_seconds: int = 900
     
-    database_url: str = "sqlite+aiosqlite:///./data/panel.db"
+    # PostgreSQL settings (primary database)
+    postgres_host: str = "postgres"
+    postgres_port: int = 5432
+    postgres_user: str = "panel"
+    postgres_password: str = "panel_secret"
+    postgres_db: str = "panel"
+    
+    # Legacy SQLite URL (for migration only)
+    sqlite_path: str = "./data/panel.db"
     
     # Domain for CORS (optional, defaults to same-origin only)
     domain: str = ""
     
     ext_key: str = ""
+    
+    @property
+    def database_url(self) -> str:
+        """PostgreSQL connection URL"""
+        return f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+    
+    @property
+    def sync_database_url(self) -> str:
+        """Sync PostgreSQL URL for migrations"""
+        return f"postgresql://{self.postgres_user}:{self.postgres_password}@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
     
     class Config:
         env_file = ".env"

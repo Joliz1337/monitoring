@@ -109,6 +109,22 @@ fi
 chmod +x "$PANEL_DIR"/*.sh 2>/dev/null || true
 chmod +x "$PANEL_DIR"/scripts/*.sh 2>/dev/null || true
 
+# Add PostgreSQL settings if missing (migration from SQLite)
+if [ -f "$PANEL_DIR/.env" ]; then
+    if ! grep -q "^POSTGRES_PASSWORD=" "$PANEL_DIR/.env"; then
+        log_info "Adding PostgreSQL configuration to .env..."
+        POSTGRES_PASSWORD=$(openssl rand -hex 16 2>/dev/null || cat /dev/urandom | tr -dc 'a-zA-Z0-9' | head -c 32)
+        cat >> "$PANEL_DIR/.env" << EOF
+
+# PostgreSQL Database (auto-generated for migration)
+POSTGRES_USER=panel
+POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+POSTGRES_DB=panel
+EOF
+        log_success "PostgreSQL configuration added"
+    fi
+fi
+
 # Regenerate nginx config
 log_info "Regenerating nginx configuration..."
 if [ -f "$PANEL_DIR/scripts/generate-nginx-config.sh" ]; then
