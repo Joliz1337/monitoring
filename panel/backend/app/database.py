@@ -86,9 +86,9 @@ async def _migrate_table_data(
     db: AsyncSession,
     table: str,
     columns: list[tuple[str, str]],
-    batch_size: int = 500
+    batch_size: int = 100
 ) -> int:
-    """Migrate data from SQLite table to PostgreSQL using SQLAlchemy."""
+    """Migrate data from SQLite table to PostgreSQL using parameterized queries."""
     col_names = [col[0] for col in columns]
     col_list = ", ".join(f'"{c}"' for c in col_names)
     
@@ -103,6 +103,7 @@ async def _migrate_table_data(
     
     # Read and insert in batches
     migrated = 0
+    failed = 0
     cursor = sqlite_conn.execute(f"SELECT {col_list} FROM {table}")
     
     while True:
@@ -110,43 +111,56 @@ async def _migrate_table_data(
         if not rows:
             break
         
-        # Build batch insert
-        values_list = []
+        batch_success = 0
+        
+        # Insert row by row with parameterized queries for safety
         for row in rows:
-            values = []
+            # Build parameter dict
+            params = {}
+            placeholders = []
             for i, val in enumerate(row):
+                param_name = f"p{i}"
+                col_type = columns[i][1].upper()
+                
                 if val is None:
-                    values.append("NULL")
-                elif columns[i][1].upper() == "BOOLEAN":
-                    values.append("TRUE" if val else "FALSE")
-                elif isinstance(val, str):
-                    # Escape single quotes
-                    escaped = val.replace("'", "''")
-                    values.append(f"'{escaped}'")
-                elif isinstance(val, (int, float)):
-                    values.append(str(val))
+                    placeholders.append("NULL")
+                elif col_type == "BOOLEAN":
+                    placeholders.append(f":{param_name}")
+                    params[param_name] = bool(val)
+                elif col_type in ("INTEGER", "BIGINT", "SMALLINT"):
+                    placeholders.append(f":{param_name}")
+                    params[param_name] = int(val) if val is not None else None
+                elif col_type in ("REAL", "FLOAT", "DOUBLE", "NUMERIC"):
+                    placeholders.append(f":{param_name}")
+                    params[param_name] = float(val) if val is not None else None
                 else:
-                    escaped = str(val).replace("'", "''")
-                    values.append(f"'{escaped}'")
-            values_list.append(f"({', '.join(values)})")
-        
-        if values_list:
-            # Use ON CONFLICT DO NOTHING to skip duplicates
-            insert_sql = f'''
-                INSERT INTO "{table}" ({col_list}) 
-                VALUES {', '.join(values_list)}
-                ON CONFLICT DO NOTHING
-            '''
+                    # String/Text/JSON - pass as-is, SQLAlchemy handles escaping
+                    placeholders.append(f":{param_name}")
+                    params[param_name] = str(val) if val is not None else None
+            
+            insert_sql = f'INSERT INTO "{table}" ({col_list}) VALUES ({", ".join(placeholders)}) ON CONFLICT DO NOTHING'
+            
             try:
-                await db.execute(text(insert_sql))
-                await db.commit()
+                await db.execute(text(insert_sql), params)
+                batch_success += 1
             except Exception as e:
-                logger.warning(f"Error inserting batch into {table}: {e}")
-                await db.rollback()
+                failed += 1
+                if failed <= 5:  # Log first 5 errors only
+                    logger.warning(f"Error inserting row into {table}: {e}")
         
-        migrated += len(rows)
-        if migrated % 5000 == 0:
-            logger.info(f"  {table}: {migrated}/{total_rows} rows migrated")
+        # Commit batch
+        try:
+            await db.commit()
+            migrated += batch_success
+        except Exception as e:
+            logger.warning(f"Error committing batch to {table}: {e}")
+            await db.rollback()
+        
+        if (migrated + failed) % 5000 == 0:
+            logger.info(f"  {table}: {migrated}/{total_rows} rows migrated ({failed} failed)")
+    
+    if failed > 0:
+        logger.warning(f"  {table}: {failed} rows failed to migrate")
     
     return migrated
 
