@@ -222,43 +222,54 @@ async def _migrate_from_sqlite():
         migrated_tables = []
         
         async with async_session() as db:
-            # Get existing PostgreSQL tables
-            pg_tables = await _get_postgres_tables(db)
-            logger.info(f"PostgreSQL has {len(pg_tables)} tables: {pg_tables}")
+            # Disable foreign key checks for migration (allows orphaned records)
+            await db.execute(text("SET session_replication_role = 'replica'"))
+            await db.commit()
+            logger.info("Foreign key checks disabled for migration")
             
-            # Build migration order: first ordered tables, then remaining
-            ordered_tables = [t for t in MIGRATION_ORDER if t in sqlite_tables and t in pg_tables]
-            remaining_tables = [t for t in sqlite_tables if t in pg_tables and t not in ordered_tables]
-            tables_to_migrate = ordered_tables + remaining_tables
-            
-            # Skip tables that don't exist in PostgreSQL (e.g., ext_* tables)
-            skipped = sqlite_tables - pg_tables
-            if skipped:
-                logger.info(f"Skipping tables not in PostgreSQL schema: {skipped}")
-            
-            for table in tables_to_migrate:
-                columns = _get_table_columns(sqlite_conn, table)
-                if not columns:
-                    continue
+            try:
+                # Get existing PostgreSQL tables
+                pg_tables = await _get_postgres_tables(db)
+                logger.info(f"PostgreSQL has {len(pg_tables)} tables: {pg_tables}")
                 
-                try:
-                    migrated = await _migrate_table_data(sqlite_conn, db, table, columns)
-                    total_migrated += migrated
-                    migrated_tables.append(table)
-                    logger.info(f"  {table}: {migrated} rows migrated")
-                except Exception as e:
-                    logger.error(f"Error migrating table {table}: {e}")
-            
-            # Reset sequences for auto-increment columns (only for migrated tables)
-            for table in migrated_tables:
-                try:
-                    await db.execute(text(f"""
-                        SELECT setval(pg_get_serial_sequence('"{table}"', 'id'), 
-                               COALESCE((SELECT MAX(id) FROM "{table}"), 0) + 1, false)
-                    """))
-                    await db.commit()
-                except Exception:
-                    pass  # Table might not have id column or sequence
+                # Build migration order: first ordered tables, then remaining
+                ordered_tables = [t for t in MIGRATION_ORDER if t in sqlite_tables and t in pg_tables]
+                remaining_tables = [t for t in sqlite_tables if t in pg_tables and t not in ordered_tables]
+                tables_to_migrate = ordered_tables + remaining_tables
+                
+                # Skip tables that don't exist in PostgreSQL (e.g., ext_* tables)
+                skipped = sqlite_tables - pg_tables
+                if skipped:
+                    logger.info(f"Skipping tables not in PostgreSQL schema: {skipped}")
+                
+                for table in tables_to_migrate:
+                    columns = _get_table_columns(sqlite_conn, table)
+                    if not columns:
+                        continue
+                    
+                    try:
+                        migrated = await _migrate_table_data(sqlite_conn, db, table, columns)
+                        total_migrated += migrated
+                        migrated_tables.append(table)
+                        logger.info(f"  {table}: {migrated} rows migrated")
+                    except Exception as e:
+                        logger.error(f"Error migrating table {table}: {e}")
+                
+                # Reset sequences for auto-increment columns (only for migrated tables)
+                for table in migrated_tables:
+                    try:
+                        await db.execute(text(f"""
+                            SELECT setval(pg_get_serial_sequence('"{table}"', 'id'), 
+                                   COALESCE((SELECT MAX(id) FROM "{table}"), 0) + 1, false)
+                        """))
+                        await db.commit()
+                    except Exception:
+                        pass  # Table might not have id column or sequence
+            finally:
+                # Re-enable foreign key checks
+                await db.execute(text("SET session_replication_role = 'origin'"))
+                await db.commit()
+                logger.info("Foreign key checks re-enabled")
         
         logger.info(f"Migration complete: {total_migrated} total rows migrated from {len(migrated_tables)} tables")
         
