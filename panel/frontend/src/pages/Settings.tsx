@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { Settings as SettingsIcon, RefreshCw, Layout, Languages, Sparkles, Check, Clock, Activity, Shield, AlertTriangle, Loader2, CheckCircle2, XCircle, Terminal } from 'lucide-react'
-import { useSettingsStore, TIMEZONE_OPTIONS, TRAFFIC_PERIOD_OPTIONS } from '../stores/settingsStore'
+import { Settings as SettingsIcon, RefreshCw, Layout, Languages, Sparkles, Check, Clock, Activity, Shield, AlertTriangle, Loader2, CheckCircle2, XCircle, Terminal, Server, Zap } from 'lucide-react'
+import { useSettingsStore, TIMEZONE_OPTIONS, TRAFFIC_PERIOD_OPTIONS, METRICS_INTERVAL_OPTIONS, HAPROXY_INTERVAL_OPTIONS } from '../stores/settingsStore'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence, LayoutGroup } from 'framer-motion'
 import { systemApi, PanelCertificateInfo } from '../api/client'
@@ -16,7 +16,12 @@ interface RenewalResult {
 type RenewalPhase = 'idle' | 'starting' | 'running' | 'nginx_restarting' | 'done'
 
 export default function Settings() {
-  const { refreshInterval, compactView, timezone, trafficPeriod, fetchSettings, setRefreshInterval, setCompactView, setTimezone, setTrafficPeriod } = useSettingsStore()
+  const { 
+    refreshInterval, compactView, timezone, trafficPeriod, 
+    metricsCollectInterval, haproxyCollectInterval,
+    fetchSettings, setRefreshInterval, setCompactView, setTimezone, setTrafficPeriod,
+    setMetricsCollectInterval, setHaproxyCollectInterval
+  } = useSettingsStore()
   const { t, i18n } = useTranslation()
   
   const [certInfo, setCertInfo] = useState<PanelCertificateInfo | null>(null)
@@ -492,6 +497,110 @@ export default function Settings() {
                 {t('settings.list_view')}
               </span>
             </motion.button>
+          </div>
+        </motion.div>
+        
+        {/* Collector Intervals */}
+        <motion.div variants={itemVariants} className="card group hover:border-dark-700 transition-all">
+          <div className="flex items-center gap-3 mb-5">
+            <motion.div 
+              className="w-11 h-11 rounded-xl bg-gradient-to-br from-accent-500/20 to-accent-600/20 
+                         flex items-center justify-center border border-accent-500/20
+                         group-hover:shadow-lg group-hover:shadow-accent-500/10 transition-shadow"
+              whileHover={{ scale: 1.1 }}
+            >
+              <Server className="w-5 h-5 text-accent-500" />
+            </motion.div>
+            <div>
+              <h2 className="font-semibold text-dark-100">{t('settings.collector_intervals')}</h2>
+              <p className="text-sm text-dark-500">{t('settings.collector_intervals_desc')}</p>
+            </div>
+          </div>
+          
+          <div className="space-y-5">
+            {/* Metrics Interval */}
+            <div>
+              <div className="flex items-center gap-2 mb-3">
+                <Activity className="w-4 h-4 text-dark-400" />
+                <span className="text-sm text-dark-300">{t('settings.metrics_interval')}</span>
+              </div>
+              <LayoutGroup id="metrics-interval-selector">
+                <div className="grid grid-cols-5 gap-2">
+                  {METRICS_INTERVAL_OPTIONS.map((option) => (
+                    <motion.button
+                      key={option.value}
+                      onClick={() => setMetricsCollectInterval(option.value)}
+                      className={`relative px-3 py-2.5 rounded-xl text-sm font-medium transition-all ${
+                        metricsCollectInterval === option.value
+                          ? 'text-white'
+                          : 'bg-dark-800/60 text-dark-400 hover:text-dark-200 hover:bg-dark-700 border border-dark-700/50'
+                      }`}
+                      whileHover={{ scale: 1.03 }}
+                      whileTap={{ scale: 0.97 }}
+                    >
+                      {metricsCollectInterval === option.value && (
+                        <motion.div
+                          className="absolute inset-0 bg-gradient-to-r from-accent-500 to-accent-600 rounded-xl shadow-lg shadow-accent-500/20"
+                          layoutId="metricsIntervalIndicator"
+                          initial={false}
+                          transition={{ type: 'spring', stiffness: 400, damping: 30 }}
+                        />
+                      )}
+                      <span className="relative z-10 flex items-center justify-center gap-1">
+                        {option.label}
+                        {option.recommended && (
+                          <Zap className={`w-3 h-3 ${metricsCollectInterval === option.value ? 'text-white/80' : 'text-accent-500'}`} />
+                        )}
+                      </span>
+                    </motion.button>
+                  ))}
+                </div>
+              </LayoutGroup>
+              <p className="text-xs text-dark-500 mt-2 flex items-center gap-1">
+                <Zap className="w-3 h-3 text-accent-500" />
+                {t('settings.recommended_values')}
+              </p>
+            </div>
+            
+            {/* HAProxy Interval */}
+            <div>
+              <div className="flex items-center gap-2 mb-3">
+                <Shield className="w-4 h-4 text-dark-400" />
+                <span className="text-sm text-dark-300">{t('settings.haproxy_interval')}</span>
+              </div>
+              <LayoutGroup id="haproxy-interval-selector">
+                <div className="grid grid-cols-4 gap-2">
+                  {HAPROXY_INTERVAL_OPTIONS.map((option) => (
+                    <motion.button
+                      key={option.value}
+                      onClick={() => setHaproxyCollectInterval(option.value)}
+                      className={`relative px-3 py-2.5 rounded-xl text-sm font-medium transition-all ${
+                        haproxyCollectInterval === option.value
+                          ? 'text-white'
+                          : 'bg-dark-800/60 text-dark-400 hover:text-dark-200 hover:bg-dark-700 border border-dark-700/50'
+                      }`}
+                      whileHover={{ scale: 1.03 }}
+                      whileTap={{ scale: 0.97 }}
+                    >
+                      {haproxyCollectInterval === option.value && (
+                        <motion.div
+                          className="absolute inset-0 bg-gradient-to-r from-accent-500 to-accent-600 rounded-xl shadow-lg shadow-accent-500/20"
+                          layoutId="haproxyIntervalIndicator"
+                          initial={false}
+                          transition={{ type: 'spring', stiffness: 400, damping: 30 }}
+                        />
+                      )}
+                      <span className="relative z-10 flex items-center justify-center gap-1">
+                        {option.label}
+                        {option.recommended && (
+                          <Zap className={`w-3 h-3 ${haproxyCollectInterval === option.value ? 'text-white/80' : 'text-accent-500'}`} />
+                        )}
+                      </span>
+                    </motion.button>
+                  ))}
+                </div>
+              </LayoutGroup>
+            </div>
           </div>
         </motion.div>
         

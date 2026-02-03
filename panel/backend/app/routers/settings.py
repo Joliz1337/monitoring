@@ -16,7 +16,10 @@ DEFAULT_SETTINGS = {
     "compact_view": "false",
     "blocklist_temp_timeout": "300",
     "blocklist_auto_update_enabled": "true",
-    "blocklist_auto_update_interval": "86400"
+    "blocklist_auto_update_interval": "86400",
+    # Collector intervals (in seconds)
+    "metrics_collect_interval": "10",  # Recommended: 10-15s
+    "haproxy_collect_interval": "60",  # Recommended: 60s
 }
 
 

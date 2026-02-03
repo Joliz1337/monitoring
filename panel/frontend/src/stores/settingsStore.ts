@@ -49,6 +49,28 @@ export const TRAFFIC_PERIOD_OPTIONS: TrafficPeriodOption[] = [
   { value: 90, label: '90 days' },
 ]
 
+// Collector interval options with recommended values marked
+export interface CollectorIntervalOption {
+  value: number
+  label: string
+  recommended?: boolean
+}
+
+export const METRICS_INTERVAL_OPTIONS: CollectorIntervalOption[] = [
+  { value: 5, label: '5s' },
+  { value: 10, label: '10s', recommended: true },
+  { value: 15, label: '15s', recommended: true },
+  { value: 30, label: '30s' },
+  { value: 60, label: '1m' },
+]
+
+export const HAPROXY_INTERVAL_OPTIONS: CollectorIntervalOption[] = [
+  { value: 30, label: '30s' },
+  { value: 60, label: '1m', recommended: true },
+  { value: 120, label: '2m' },
+  { value: 300, label: '5m' },
+]
+
 export type DetailLevel = 'minimal' | 'standard' | 'detailed'
 export type CardScale = 'small' | 'medium' | 'large'
 
@@ -59,6 +81,8 @@ interface SettingsState {
   trafficPeriod: number
   detailLevel: DetailLevel
   cardScale: CardScale
+  metricsCollectInterval: number
+  haproxyCollectInterval: number
   isLoading: boolean
   
   fetchSettings: () => Promise<void>
@@ -68,6 +92,8 @@ interface SettingsState {
   setTrafficPeriod: (days: number) => Promise<void>
   setDetailLevel: (level: DetailLevel) => Promise<void>
   setCardScale: (scale: CardScale) => Promise<void>
+  setMetricsCollectInterval: (interval: number) => Promise<void>
+  setHaproxyCollectInterval: (interval: number) => Promise<void>
   getEffectiveTimezone: () => string
   getTimezoneOffset: () => number
 }
@@ -79,6 +105,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   trafficPeriod: 30,
   detailLevel: 'standard',
   cardScale: 'medium',
+  metricsCollectInterval: 10,
+  haproxyCollectInterval: 60,
   isLoading: true,
   
   fetchSettings: async () => {
@@ -91,6 +119,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         trafficPeriod: parseInt(data.settings.traffic_period || '30'),
         detailLevel: (data.settings.detail_level as DetailLevel) || 'standard',
         cardScale: (data.settings.card_scale as CardScale) || 'medium',
+        metricsCollectInterval: parseInt(data.settings.metrics_collect_interval || '10'),
+        haproxyCollectInterval: parseInt(data.settings.haproxy_collect_interval || '60'),
         isLoading: false,
       })
     } catch {
@@ -126,6 +156,16 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   setCardScale: async (scale: CardScale) => {
     set({ cardScale: scale })
     await settingsApi.set('card_scale', scale)
+  },
+  
+  setMetricsCollectInterval: async (interval: number) => {
+    set({ metricsCollectInterval: interval })
+    await settingsApi.set('metrics_collect_interval', interval.toString())
+  },
+  
+  setHaproxyCollectInterval: async (interval: number) => {
+    set({ haproxyCollectInterval: interval })
+    await settingsApi.set('haproxy_collect_interval', interval.toString())
   },
   
   getEffectiveTimezone: () => {

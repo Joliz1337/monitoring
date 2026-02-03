@@ -205,7 +205,12 @@
     "ssl_nginx_restarting": "nginx перезапускается...",
     "ssl_nginx_restarting_desc": "Ожидание восстановления сервера. Это нормально.",
     "ssl_connection_timeout": "Соединение прервано. Проверьте статус сервера и обновите страницу.",
-    "ssl_timeout": "Время ожидания истекло. Проверьте логи сервера."
+    "ssl_timeout": "Время ожидания истекло. Проверьте логи сервера.",
+    "collector_intervals": "Интервалы сбора данных",
+    "collector_intervals_desc": "Как часто бэкенд опрашивает серверы",
+    "metrics_interval": "Сбор метрик (CPU, RAM, диск, сеть)",
+    "haproxy_interval": "Сбор HAProxy/Traffic данных",
+    "recommended_values": "Рекомендуемые значения"
   },
   "server_card": {
     "last_seen": "Был в сети: {{time}}",

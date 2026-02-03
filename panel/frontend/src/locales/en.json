@@ -205,7 +205,12 @@
     "ssl_nginx_restarting": "nginx is restarting...",
     "ssl_nginx_restarting_desc": "Waiting for server to come back online. This is expected.",
     "ssl_connection_timeout": "Connection timed out. Please check server status and refresh the page.",
-    "ssl_timeout": "Renewal timed out. Check server logs."
+    "ssl_timeout": "Renewal timed out. Check server logs.",
+    "collector_intervals": "Data Collection Intervals",
+    "collector_intervals_desc": "How often backend polls servers",
+    "metrics_interval": "Metrics collection (CPU, RAM, disk, network)",
+    "haproxy_interval": "HAProxy/Traffic data collection",
+    "recommended_values": "Recommended values"
   },
   "server_card": {
     "last_seen": "Last online: {{time}}",

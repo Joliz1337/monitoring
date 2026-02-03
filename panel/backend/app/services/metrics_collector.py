@@ -16,10 +16,14 @@ from sqlalchemy import select, delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import async_session
-from app.models import Server, MetricsSnapshot, AggregatedMetrics
+from app.models import Server, MetricsSnapshot, AggregatedMetrics, PanelSettings
 from sqlalchemy import func as sql_func
 
 logger = logging.getLogger(__name__)
+
+# Default intervals (used if settings not in DB)
+DEFAULT_METRICS_INTERVAL = 10  # seconds (recommended: 10-15s)
+DEFAULT_HAPROXY_INTERVAL = 60  # seconds (recommended: 60s)
 
 
 class ErrorTypes:
@@ -51,9 +55,10 @@ class MetricsCollector:
         self._task: Optional[asyncio.Task] = None
         self._aggregation_task: Optional[asyncio.Task] = None
         self._haproxy_task: Optional[asyncio.Task] = None
+        self._settings_task: Optional[asyncio.Task] = None
         self._server_states: dict[int, ServerMetricsState] = {}
-        self._collect_interval = 5  # seconds
-        self._haproxy_interval = 30  # HAProxy/Traffic cache interval
+        self._collect_interval = DEFAULT_METRICS_INTERVAL
+        self._haproxy_interval = DEFAULT_HAPROXY_INTERVAL
         
         # Retention periods
         self._raw_retention_hours = 24  # keep raw data 24 hours
@@ -65,38 +70,69 @@ class MetricsCollector:
         self._last_hourly_aggregation: datetime = now_utc - timedelta(hours=2)
         self._last_daily_aggregation: datetime = now_utc - timedelta(days=2)
     
+    async def _load_settings(self):
+        """Load collector intervals from database settings"""
+        try:
+            async with async_session() as db:
+                result = await db.execute(
+                    select(PanelSettings).where(
+                        PanelSettings.key.in_(['metrics_collect_interval', 'haproxy_collect_interval'])
+                    )
+                )
+                settings = {s.key: s.value for s in result.scalars().all()}
+                
+                # Update metrics interval
+                if 'metrics_collect_interval' in settings:
+                    new_interval = int(settings['metrics_collect_interval'])
+                    if 5 <= new_interval <= 300:  # Valid range: 5s - 5min
+                        if new_interval != self._collect_interval:
+                            logger.info(f"Metrics interval changed: {self._collect_interval}s -> {new_interval}s")
+                            self._collect_interval = new_interval
+                
+                # Update HAProxy interval
+                if 'haproxy_collect_interval' in settings:
+                    new_interval = int(settings['haproxy_collect_interval'])
+                    if 30 <= new_interval <= 600:  # Valid range: 30s - 10min
+                        if new_interval != self._haproxy_interval:
+                            logger.info(f"HAProxy interval changed: {self._haproxy_interval}s -> {new_interval}s")
+                            self._haproxy_interval = new_interval
+        except Exception as e:
+            logger.debug(f"Failed to load collector settings: {e}")
+    
+    async def _settings_loop(self):
+        """Background loop to reload settings periodically"""
+        while self._running:
+            try:
+                await asyncio.sleep(30)  # Check settings every 30 seconds
+                await self._load_settings()
+            except Exception as e:
+                logger.debug(f"Settings reload error: {e}")
+    
     async def start(self):
         """Start background collection"""
         if self._running:
             return
         
+        # Load settings before starting
+        await self._load_settings()
+        
         self._running = True
         self._task = asyncio.create_task(self._collection_loop())
         self._aggregation_task = asyncio.create_task(self._aggregation_loop())
         self._haproxy_task = asyncio.create_task(self._haproxy_cache_loop())
+        self._settings_task = asyncio.create_task(self._settings_loop())
         logger.info(f"Metrics collector started (interval: {self._collect_interval}s, haproxy: {self._haproxy_interval}s)")
     
     async def stop(self):
         """Stop background collection"""
         self._running = False
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-        if self._aggregation_task:
-            self._aggregation_task.cancel()
-            try:
-                await self._aggregation_task
-            except asyncio.CancelledError:
-                pass
-        if self._haproxy_task:
-            self._haproxy_task.cancel()
-            try:
-                await self._haproxy_task
-            except asyncio.CancelledError:
-                pass
+        for task in [self._task, self._aggregation_task, self._haproxy_task, self._settings_task]:
+            if task:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
         logger.info("Metrics collector stopped")
     
     async def _collection_loop(self):
