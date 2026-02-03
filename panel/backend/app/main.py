@@ -5,6 +5,12 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import delete
 
+# Configure logging to show app logs
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+
 from app.database import init_db, async_session
 from app.config import get_settings
 from app.routers import servers, auth_router, proxy, settings as settings_router, system, bulk_actions, blocklist, remnawave

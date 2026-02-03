@@ -153,6 +153,8 @@ async def _migrate_table_data(
 
 async def _migrate_from_sqlite():
     """Migrate all data from SQLite to PostgreSQL."""
+    import shutil
+    
     sqlite_path = _get_sqlite_path()
     if not sqlite_path:
         logger.info("No SQLite database found, skipping migration")
@@ -160,6 +162,21 @@ async def _migrate_from_sqlite():
         return
     
     logger.info(f"Starting migration from SQLite: {sqlite_path}")
+    
+    # Create backup BEFORE migration
+    backup_path = sqlite_path.with_suffix('.db.backup')
+    try:
+        shutil.copy2(str(sqlite_path), str(backup_path))
+        logger.info(f"SQLite backup created: {backup_path}")
+    except Exception as e:
+        logger.error(f"Failed to create SQLite backup: {e}")
+        logger.error("Migration aborted - cannot proceed without backup")
+        return
+    
+    # Verify backup exists and has same size
+    if not backup_path.exists() or backup_path.stat().st_size != sqlite_path.stat().st_size:
+        logger.error("Backup verification failed - sizes don't match")
+        return
     
     # Connect to SQLite
     sqlite_conn = sqlite3.connect(str(sqlite_path))
@@ -201,13 +218,12 @@ async def _migrate_from_sqlite():
         
         logger.info(f"Migration complete: {total_migrated} total rows migrated")
         
-        # Rename SQLite file as backup
-        backup_path = sqlite_path.with_suffix('.db.backup')
+        # Remove original SQLite file (backup exists)
         try:
-            sqlite_path.rename(backup_path)
-            logger.info(f"SQLite database backed up to {backup_path}")
+            sqlite_path.unlink()
+            logger.info(f"Original SQLite file removed, backup at: {backup_path}")
         except Exception as e:
-            logger.warning(f"Could not rename SQLite file: {e}")
+            logger.warning(f"Could not remove original SQLite file: {e}")
         
     finally:
         sqlite_conn.close()
