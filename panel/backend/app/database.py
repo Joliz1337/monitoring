@@ -81,6 +81,34 @@ def _get_table_columns(sqlite_conn: sqlite3.Connection, table: str) -> list[tupl
     return [(row[1], row[2]) for row in cursor.fetchall()]
 
 
+async def _get_pg_columns(db: AsyncSession, table: str) -> set[str]:
+    """Get column names that exist in PostgreSQL table."""
+    result = await db.execute(text(f"""
+        SELECT column_name FROM information_schema.columns 
+        WHERE table_name = '{table}' AND table_schema = 'public'
+    """))
+    return {row[0] for row in result.fetchall()}
+
+
+def _parse_datetime(val: str) -> datetime:
+    """Parse datetime string from SQLite to Python datetime."""
+    if not val:
+        return None
+    # Try common formats
+    for fmt in [
+        '%Y-%m-%d %H:%M:%S.%f',
+        '%Y-%m-%d %H:%M:%S',
+        '%Y-%m-%dT%H:%M:%S.%f',
+        '%Y-%m-%dT%H:%M:%S',
+        '%Y-%m-%d',
+    ]:
+        try:
+            return datetime.strptime(val, fmt)
+        except ValueError:
+            continue
+    return None
+
+
 async def _migrate_table_data(
     sqlite_conn: sqlite3.Connection,
     db: AsyncSession,
@@ -89,8 +117,19 @@ async def _migrate_table_data(
     batch_size: int = 100
 ) -> int:
     """Migrate data from SQLite table to PostgreSQL using parameterized queries."""
-    col_names = [col[0] for col in columns]
+    
+    # Get columns that exist in PostgreSQL (filter out missing ones)
+    pg_columns = await _get_pg_columns(db, table)
+    
+    # Filter columns to only those that exist in both SQLite and PostgreSQL
+    filtered_columns = [(name, type_) for name, type_ in columns if name in pg_columns]
+    if len(filtered_columns) < len(columns):
+        missing = [name for name, _ in columns if name not in pg_columns]
+        logger.info(f"  {table}: Skipping columns not in PostgreSQL: {missing}")
+    
+    col_names = [col[0] for col in filtered_columns]
     col_list = ", ".join(f'"{c}"' for c in col_names)
+    sqlite_col_list = ", ".join(f'"{c}"' for c in col_names)
     
     # Count rows
     cursor = sqlite_conn.execute(f"SELECT COUNT(*) FROM {table}")
@@ -104,7 +143,7 @@ async def _migrate_table_data(
     # Read and insert in batches
     migrated = 0
     failed = 0
-    cursor = sqlite_conn.execute(f"SELECT {col_list} FROM {table}")
+    cursor = sqlite_conn.execute(f"SELECT {sqlite_col_list} FROM {table}")
     
     while True:
         rows = cursor.fetchmany(batch_size)
@@ -120,7 +159,7 @@ async def _migrate_table_data(
             placeholders = []
             for i, val in enumerate(row):
                 param_name = f"p{i}"
-                col_type = columns[i][1].upper()
+                col_type = filtered_columns[i][1].upper()
                 
                 if val is None:
                     placeholders.append("NULL")
@@ -133,6 +172,13 @@ async def _migrate_table_data(
                 elif col_type in ("REAL", "FLOAT", "DOUBLE", "NUMERIC"):
                     placeholders.append(f":{param_name}")
                     params[param_name] = float(val) if val is not None else None
+                elif col_type in ("TIMESTAMP", "DATETIME", "DATE"):
+                    # Parse datetime string to Python datetime
+                    placeholders.append(f":{param_name}")
+                    if isinstance(val, str):
+                        params[param_name] = _parse_datetime(val)
+                    else:
+                        params[param_name] = val
                 else:
                     # String/Text/JSON - pass as-is, SQLAlchemy handles escaping
                     placeholders.append(f":{param_name}")
@@ -147,6 +193,8 @@ async def _migrate_table_data(
                 failed += 1
                 if failed <= 5:  # Log first 5 errors only
                     logger.warning(f"Error inserting row into {table}: {e}")
+                # Rollback failed transaction to continue
+                await db.rollback()
         
         # Commit batch
         try:
