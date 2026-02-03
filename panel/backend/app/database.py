@@ -151,6 +151,34 @@ async def _migrate_table_data(
     return migrated
 
 
+async def _get_postgres_tables(db: AsyncSession) -> set[str]:
+    """Get list of existing tables in PostgreSQL."""
+    result = await db.execute(text("""
+        SELECT table_name FROM information_schema.tables 
+        WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+    """))
+    return {row[0] for row in result.fetchall()}
+
+
+# Tables that must be migrated first (parent tables for foreign keys)
+MIGRATION_ORDER = [
+    'servers',  # Parent for metrics_snapshot, aggregated_metrics
+    'remnawave_settings',
+    'remnawave_nodes',
+    'panel_settings',
+    'blocklist_sources',
+    'blocklist_rules',
+    'failed_logins',
+    'remnawave_user_cache',
+    'xray_visit_stats',
+    'xray_user_ip_stats',
+    'xray_ip_destination_stats',
+    'xray_hourly_stats',
+    'metrics_snapshot',
+    'aggregated_metrics',
+]
+
+
 async def _migrate_from_sqlite():
     """Migrate all data from SQLite to PostgreSQL."""
     import shutil
@@ -182,18 +210,33 @@ async def _migrate_from_sqlite():
     sqlite_conn = sqlite3.connect(str(sqlite_path))
     
     try:
-        tables = _get_sqlite_tables(sqlite_conn)
-        if not tables:
+        sqlite_tables = set(_get_sqlite_tables(sqlite_conn))
+        if not sqlite_tables:
             logger.info("SQLite database is empty, skipping migration")
             _mark_migration_done()
             return
         
-        logger.info(f"Found {len(tables)} tables to migrate: {tables}")
+        logger.info(f"Found {len(sqlite_tables)} tables in SQLite: {sqlite_tables}")
         
         total_migrated = 0
+        migrated_tables = []
         
         async with async_session() as db:
-            for table in tables:
+            # Get existing PostgreSQL tables
+            pg_tables = await _get_postgres_tables(db)
+            logger.info(f"PostgreSQL has {len(pg_tables)} tables: {pg_tables}")
+            
+            # Build migration order: first ordered tables, then remaining
+            ordered_tables = [t for t in MIGRATION_ORDER if t in sqlite_tables and t in pg_tables]
+            remaining_tables = [t for t in sqlite_tables if t in pg_tables and t not in ordered_tables]
+            tables_to_migrate = ordered_tables + remaining_tables
+            
+            # Skip tables that don't exist in PostgreSQL (e.g., ext_* tables)
+            skipped = sqlite_tables - pg_tables
+            if skipped:
+                logger.info(f"Skipping tables not in PostgreSQL schema: {skipped}")
+            
+            for table in tables_to_migrate:
                 columns = _get_table_columns(sqlite_conn, table)
                 if not columns:
                     continue
@@ -201,12 +244,13 @@ async def _migrate_from_sqlite():
                 try:
                     migrated = await _migrate_table_data(sqlite_conn, db, table, columns)
                     total_migrated += migrated
+                    migrated_tables.append(table)
                     logger.info(f"  {table}: {migrated} rows migrated")
                 except Exception as e:
                     logger.error(f"Error migrating table {table}: {e}")
             
-            # Reset sequences for auto-increment columns
-            for table in tables:
+            # Reset sequences for auto-increment columns (only for migrated tables)
+            for table in migrated_tables:
                 try:
                     await db.execute(text(f"""
                         SELECT setval(pg_get_serial_sequence('"{table}"', 'id'), 
@@ -216,7 +260,7 @@ async def _migrate_from_sqlite():
                 except Exception:
                     pass  # Table might not have id column or sequence
         
-        logger.info(f"Migration complete: {total_migrated} total rows migrated")
+        logger.info(f"Migration complete: {total_migrated} total rows migrated from {len(migrated_tables)} tables")
         
         # Remove original SQLite file (backup exists)
         try:
