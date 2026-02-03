@@ -161,7 +161,7 @@ fi
 
 # Run build in background, capture output to log file
 set +e
-timeout "$DOCKER_BUILD_TIMEOUT" docker compose build --parallel --build-arg CACHE_BUST=${CACHE_BUST} > "$BUILD_LOG" 2>&1 &
+timeout "$DOCKER_BUILD_TIMEOUT" docker compose build --build-arg CACHE_BUST=${CACHE_BUST} > "$BUILD_LOG" 2>&1 &
 BUILD_PID=$!
 
 # Show progress while building (last 30 lines of log)

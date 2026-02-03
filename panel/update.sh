@@ -242,7 +242,7 @@ else
         export CACHE_BUST=$(md5sum "$PANEL_DIR/.env" | cut -d' ' -f1)
     fi
     
-    docker compose build --parallel
+    docker compose build
     docker compose up -d
     
     log_success "=== Update Complete ==="
