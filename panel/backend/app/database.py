@@ -238,7 +238,65 @@ MIGRATION_ORDER = [
     'xray_hourly_stats',
     'metrics_snapshot',
     'aggregated_metrics',
+    # Extension tables
+    'ext_accounts',
+    'ext_projects',
+    'ext_caught_ips',
+    'ext_settings',
 ]
+
+# SQL to create ext_* tables in PostgreSQL before migration
+EXT_TABLES_SQL = """
+CREATE TABLE IF NOT EXISTS ext_accounts (
+    id SERIAL PRIMARY KEY,
+    email VARCHAR(255) NOT NULL UNIQUE,
+    password VARCHAR(500),
+    proxy VARCHAR(500),
+    enabled BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS ext_projects (
+    id SERIAL PRIMARY KEY,
+    account_id INTEGER NOT NULL,
+    project_id VARCHAR(100) NOT NULL,
+    project_name VARCHAR(255) NOT NULL,
+    disabled BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (account_id) REFERENCES ext_accounts(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS ext_caught_ips (
+    id SERIAL PRIMARY KEY,
+    account_id INTEGER NOT NULL,
+    project_id INTEGER,
+    ip_address VARCHAR(50) NOT NULL,
+    subnet_name VARCHAR(50),
+    caught_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (account_id) REFERENCES ext_accounts(id) ON DELETE CASCADE,
+    FOREIGN KEY (project_id) REFERENCES ext_projects(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS ext_settings (
+    id INTEGER PRIMARY KEY DEFAULT 1,
+    delay_min INTEGER DEFAULT 60,
+    delay_max INTEGER DEFAULT 90,
+    max_ip_per_project INTEGER DEFAULT 1,
+    stop_on_catch BOOLEAN DEFAULT TRUE,
+    telegram_bot_token VARCHAR(500),
+    telegram_chat_id VARCHAR(100),
+    target_subnets TEXT DEFAULT '[17, 19, 24, 35]',
+    proxy_required BOOLEAN DEFAULT TRUE,
+    proxy_check_interval INTEGER DEFAULT 50,
+    log_level VARCHAR(10) DEFAULT 'info',
+    start_delay_max INTEGER DEFAULT 60,
+    updated_at TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_ext_projects_account ON ext_projects(account_id);
+CREATE INDEX IF NOT EXISTS idx_ext_caught_ips_account ON ext_caught_ips(account_id);
+CREATE INDEX IF NOT EXISTS idx_ext_caught_ips_project ON ext_caught_ips(project_id);
+"""
 
 
 async def _migrate_from_sqlite():
@@ -252,6 +310,19 @@ async def _migrate_from_sqlite():
         return
     
     logger.info(f"Starting migration from SQLite: {sqlite_path}")
+    
+    # Create ext_* tables BEFORE migration so they exist when we check pg_tables
+    logger.info("Creating ext_* tables in PostgreSQL before migration...")
+    async with engine.begin() as conn:
+        for statement in EXT_TABLES_SQL.strip().split(';'):
+            statement = statement.strip()
+            if statement:
+                try:
+                    await conn.execute(text(statement))
+                except Exception as e:
+                    if "already exists" not in str(e).lower():
+                        logger.debug(f"ext table creation note: {e}")
+    logger.info("ext_* tables created")
     
     # Create backup BEFORE migration
     backup_path = sqlite_path.with_suffix('.db.backup')
