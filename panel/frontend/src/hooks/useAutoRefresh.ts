@@ -95,8 +95,12 @@ export function useSmartRefresh(
 }
 
 /**
- * Original auto refresh hook for backward compatibility.
- * Always uses the same callback regardless of page visibility.
+ * Auto refresh hook with visibility awareness.
+ * By default, stops polling when the browser tab is hidden to reduce server load.
+ * 
+ * Options:
+ * - pauseWhenHidden: Stop polling when tab is hidden (default: true)
+ * - refreshOnVisible: Refresh data when tab becomes visible again (default: true)
  */
 export function useAutoRefresh(
   callback: () => void | Promise<void>,
@@ -104,43 +108,83 @@ export function useAutoRefresh(
     enabled?: boolean
     immediate?: boolean
     customInterval?: number
+    pauseWhenHidden?: boolean
+    refreshOnVisible?: boolean
   }
 ) {
   const { refreshInterval } = useSettingsStore()
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const callbackRef = useRef(callback)
+  const [isPageVisible, setIsPageVisible] = useState(!document.hidden)
   
   callbackRef.current = callback
   
   const interval = options?.customInterval ?? refreshInterval * 1000
   const enabled = options?.enabled ?? true
+  const pauseWhenHidden = options?.pauseWhenHidden ?? true
+  const refreshOnVisible = options?.refreshOnVisible ?? true
   
   const refresh = useCallback(async () => {
     await callbackRef.current()
   }, [])
   
+  const clearCurrentInterval = useCallback(() => {
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current)
+      intervalRef.current = null
+    }
+  }, [])
+  
+  // Handle visibility change
+  useEffect(() => {
+    if (!pauseWhenHidden) return
+    
+    const handleVisibilityChange = () => {
+      setIsPageVisible(!document.hidden)
+    }
+    
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange)
+  }, [pauseWhenHidden])
+  
+  // Set up interval based on visibility
   useEffect(() => {
     if (!enabled) {
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current)
-        intervalRef.current = null
-      }
+      clearCurrentInterval()
       return
     }
     
+    // If pauseWhenHidden is enabled and page is not visible, stop polling
+    if (pauseWhenHidden && !isPageVisible) {
+      clearCurrentInterval()
+      return
+    }
+    
+    clearCurrentInterval()
+    
+    // Refresh immediately when becoming visible (if refreshOnVisible is true)
+    // or on initial mount (if immediate is not false)
     if (options?.immediate !== false) {
       refresh()
     }
     
     intervalRef.current = setInterval(refresh, interval)
     
-    return () => {
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current)
-        intervalRef.current = null
-      }
-    }
-  }, [enabled, interval, refresh, options?.immediate])
+    return clearCurrentInterval
+  }, [enabled, interval, refresh, isPageVisible, pauseWhenHidden, clearCurrentInterval, options?.immediate])
   
-  return { refresh }
+  // Refresh when page becomes visible again
+  useEffect(() => {
+    if (pauseWhenHidden && refreshOnVisible && isPageVisible && enabled) {
+      // Small delay to avoid double refresh with the interval setup
+      const timeoutId = setTimeout(() => {
+        if (isPageVisible && enabled) {
+          refresh()
+        }
+      }, 100)
+      return () => clearTimeout(timeoutId)
+    }
+  }, [isPageVisible, pauseWhenHidden, refreshOnVisible, enabled, refresh])
+  
+  return { refresh, isPageVisible }
 }

@@ -47,6 +47,7 @@ import {
 } from '../api/client'
 import { useTranslation } from 'react-i18next'
 import PeriodSelector from '../components/ui/PeriodSelector'
+import { useAutoRefresh } from '../hooks/useAutoRefresh'
 
 const containerVariants = {
   hidden: { opacity: 0 },
@@ -140,9 +141,10 @@ export default function Remnawave() {
   const [ipDestinations, setIpDestinations] = useState<RemnawaveIpDestinations | null>(null)
   const [isLoadingIpDest, setIsLoadingIpDest] = useState(false)
   
-  // Auto-refresh
-  const autoRefreshRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  // Auto-refresh countdown (for UI display)
+  const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [nextRefreshIn, setNextRefreshIn] = useState(30)
+  const [isPageVisible, setIsPageVisible] = useState(!document.hidden)
   
   // DB info state
   const [dbInfo, setDbInfo] = useState<{
@@ -319,20 +321,41 @@ export default function Remnawave() {
     }
   }, [nextCollectIn, isCollecting])
   
-  // Auto-refresh effect (30 seconds)
+  // Track page visibility for countdown timer
   useEffect(() => {
-    if (autoRefreshRef.current) {
-      clearInterval(autoRefreshRef.current)
+    const handleVisibilityChange = () => {
+      setIsPageVisible(!document.hidden)
+    }
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange)
+  }, [])
+  
+  // Auto-refresh with visibility awareness (stops when tab is hidden)
+  useAutoRefresh(fetchStats, {
+    customInterval: 30000,
+    immediate: false,
+    pauseWhenHidden: true,
+    refreshOnVisible: true
+  })
+  
+  // Countdown timer for UI (also pauses when tab is hidden)
+  useEffect(() => {
+    if (countdownRef.current) {
+      clearInterval(countdownRef.current)
+      countdownRef.current = null
     }
     
-    // Reset countdown
+    // Don't run countdown when page is hidden
+    if (!isPageVisible) {
+      return
+    }
+    
+    // Reset countdown when page becomes visible
     setNextRefreshIn(30)
     
-    autoRefreshRef.current = setInterval(() => {
+    countdownRef.current = setInterval(() => {
       setNextRefreshIn(prev => {
         if (prev <= 1) {
-          // Perform refresh
-          fetchStats()
           return 30
         }
         return prev - 1
@@ -340,11 +363,12 @@ export default function Remnawave() {
     }, 1000)
     
     return () => {
-      if (autoRefreshRef.current) {
-        clearInterval(autoRefreshRef.current)
+      if (countdownRef.current) {
+        clearInterval(countdownRef.current)
+        countdownRef.current = null
       }
     }
-  }, [fetchStats])
+  }, [isPageVisible])
   
   const handleRefresh = async () => {
     setIsRefreshing(true)
