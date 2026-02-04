@@ -1700,6 +1700,45 @@ async def get_anomalies(
     }
 
 
+@router.delete("/analyzer/anomalies/all")
+async def delete_all_anomalies(
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Delete all anomalies"""
+    result = await db.execute(delete(TrafficAnomalyLog))
+    deleted = result.rowcount
+    await db.commit()
+    
+    return {
+        "success": True,
+        "deleted": deleted,
+        "message": f"Deleted {deleted} anomalies"
+    }
+
+
+@router.delete("/analyzer/anomalies/clear")
+async def clear_old_anomalies(
+    days: int = Query(30, ge=1, le=365, description="Delete anomalies older than N days"),
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Clear old anomaly logs"""
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days)
+    
+    result = await db.execute(
+        delete(TrafficAnomalyLog).where(TrafficAnomalyLog.created_at < cutoff)
+    )
+    deleted = result.rowcount
+    await db.commit()
+    
+    return {
+        "success": True,
+        "deleted": deleted,
+        "message": f"Deleted {deleted} anomalies older than {days} days"
+    }
+
+
 @router.put("/analyzer/anomalies/{anomaly_id}/resolve")
 async def resolve_anomaly(
     anomaly_id: int,
@@ -1740,45 +1779,6 @@ async def delete_anomaly(
     await db.commit()
     
     return {"success": True, "message": "Anomaly deleted"}
-
-
-@router.delete("/analyzer/anomalies/all")
-async def delete_all_anomalies(
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """Delete all anomalies"""
-    result = await db.execute(delete(TrafficAnomalyLog))
-    deleted = result.rowcount
-    await db.commit()
-    
-    return {
-        "success": True,
-        "deleted": deleted,
-        "message": f"Deleted {deleted} anomalies"
-    }
-
-
-@router.delete("/analyzer/anomalies/clear")
-async def clear_old_anomalies(
-    days: int = Query(30, ge=1, le=365, description="Delete anomalies older than N days"),
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """Clear old anomaly logs"""
-    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days)
-    
-    result = await db.execute(
-        delete(TrafficAnomalyLog).where(TrafficAnomalyLog.created_at < cutoff)
-    )
-    deleted = result.rowcount
-    await db.commit()
-    
-    return {
-        "success": True,
-        "deleted": deleted,
-        "message": f"Deleted {deleted} anomalies older than {days} days"
-    }
 
 
 # === Export Endpoints ===

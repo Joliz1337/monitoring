@@ -163,6 +163,7 @@ class TrafficAnalyzer:
     
     async def _analysis_loop(self):
         """Main analysis loop."""
+        first_run = True
         self._time_since_last_check = 0
         
         while self._running:
@@ -177,9 +178,16 @@ class TrafficAnalyzer:
                         if self._time_since_last_check >= new_interval:
                             self._time_since_last_check = new_interval
                 
-                if settings and settings.enabled and self._time_since_last_check >= self._check_interval:
+                # Run immediately on first start if enabled, then on interval
+                should_run = settings and settings.enabled and (
+                    first_run or self._time_since_last_check >= self._check_interval
+                )
+                
+                if should_run:
+                    logger.info(f"Running analysis (first_run={first_run})")
                     await self._run_analysis(settings)
                     self._time_since_last_check = 0
+                    first_run = False
                 
                 await asyncio.sleep(1)
                 self._time_since_last_check += 1
