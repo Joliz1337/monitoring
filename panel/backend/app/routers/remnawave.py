@@ -1659,8 +1659,8 @@ async def _run_export_task(export_id: int, settings: dict):
                 if settings.get("include_telegram_id", False):
                     tg_id = user_info.telegram_id if user_info else None
                     if tg_id:
-                        # For CSV: format as text to prevent Excel scientific notation
-                        row_data["telegram_id"] = f"'{tg_id}" if file_format == "csv" else tg_id
+                        # For CSV: wrap in formula to prevent Excel scientific notation
+                        row_data["telegram_id"] = f'="{tg_id}"' if file_format == "csv" else tg_id
                     else:
                         row_data["telegram_id"] = ""
                 
@@ -1689,9 +1689,9 @@ async def _run_export_task(export_id: int, settings: dict):
                     used = user_info.used_traffic_bytes if user_info else None
                     limit = user_info.traffic_limit_bytes if user_info else None
                     if file_format == "csv":
-                        # Format as text for CSV to prevent scientific notation
-                        row_data["traffic_used_bytes"] = f"'{used}" if used else ""
-                        row_data["traffic_limit_bytes"] = f"'{limit}" if limit else ""
+                        # Wrap in formula for CSV to prevent scientific notation
+                        row_data["traffic_used_bytes"] = f'="{used}"' if used else ""
+                        row_data["traffic_limit_bytes"] = f'="{limit}"' if limit else ""
                     else:
                         row_data["traffic_used_bytes"] = used
                         row_data["traffic_limit_bytes"] = limit
