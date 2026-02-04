@@ -1105,17 +1105,38 @@ export const remnawaveApi = {
       message: string
     }>('/remnawave/stats/clear'),
   
-  // Export data
-  exportData: (params: {
+  // Export
+  createExport: (settings: {
     format: 'csv' | 'json' | 'xlsx'
     period: string
-    include_destinations?: boolean
-    include_ips?: boolean
-    include_traffic?: boolean
-  }) => api.post('/remnawave/export', null, { 
-    params,
-    responseType: 'blob'
-  }),
+    include_user_id: boolean
+    include_username: boolean
+    include_status: boolean
+    include_telegram_id: boolean
+    include_destinations: boolean
+    include_visits_count: boolean
+    include_first_seen: boolean
+    include_last_seen: boolean
+    include_client_ips: boolean
+    include_infra_ips: boolean
+    include_traffic: boolean
+  }) => api.post<{ success: boolean; export_id: number; filename: string; status: string }>('/remnawave/export/create', settings),
+  
+  listExports: () => api.get<{ exports: Array<{
+    id: number
+    filename: string
+    format: string
+    status: string
+    file_size: number | null
+    rows_count: number | null
+    error_message: string | null
+    created_at: string | null
+    completed_at: string | null
+  }> }>('/remnawave/export/list'),
+  
+  downloadExport: (exportId: number) => api.get(`/remnawave/export/${exportId}/download`, { responseType: 'blob' }),
+  
+  deleteExport: (exportId: number) => api.delete<{ success: boolean; message: string }>(`/remnawave/export/${exportId}`),
 }
 
 export default api

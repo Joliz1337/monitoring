@@ -351,3 +351,24 @@ class XrayIpDestinationStats(Base):
         Index('idx_ip_dest_email_ip', 'email', 'source_ip'),
         Index('idx_ip_dest_destination', 'destination'),
     )
+
+
+class RemnawaveExport(Base):
+    """Хранит информацию о задачах экспорта данных Remnawave"""
+    __tablename__ = "remnawave_exports"
+    
+    id = Column(Integer, primary_key=True)
+    filename = Column(String(255), nullable=False)
+    format = Column(String(10), nullable=False)  # csv, json, xlsx
+    status = Column(String(20), default="pending")  # pending, processing, completed, failed
+    
+    # Export settings (stored as JSON)
+    settings = Column(Text, nullable=True)  # JSON with all export options
+    
+    # Result info
+    file_size = Column(BigInteger, nullable=True)
+    rows_count = Column(Integer, nullable=True)
+    error_message = Column(Text, nullable=True)
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    completed_at = Column(DateTime(timezone=True), nullable=True)

@@ -19,7 +19,7 @@ from app.database import get_db
 from app.models import (
     Server, RemnawaveSettings, RemnawaveNode, RemnawaveInfrastructureAddress,
     XrayVisitStats, XrayHourlyStats, RemnawaveUserCache, XrayUserIpStats,
-    XrayIpDestinationStats
+    XrayIpDestinationStats, RemnawaveExport
 )
 from app.services.remnawave_api import get_remnawave_api
 from app.services.xray_stats_collector import get_xray_stats_collector, resolve_infrastructure_address
@@ -1516,280 +1516,394 @@ async def _get_user_bandwidth_stats(api, uuid: str) -> Optional[dict]:
 
 # === Export Endpoints ===
 
-@router.post("/export")
-async def export_data(
-    format: str = Query("csv", pattern="^(csv|json|xlsx)$"),
-    period: str = Query("all", pattern="^(1h|24h|7d|30d|365d|all)$"),
-    include_destinations: bool = Query(True),
-    include_ips: bool = Query(False),
-    include_traffic: bool = Query(False),
+class ExportSettingsRequest(BaseModel):
+    format: str = Field("csv", pattern="^(csv|json|xlsx)$")
+    period: str = Field("all", pattern="^(1h|24h|7d|30d|365d|all)$")
+    include_user_id: bool = True
+    include_username: bool = True
+    include_status: bool = True
+    include_telegram_id: bool = False
+    include_destinations: bool = True
+    include_visits_count: bool = True
+    include_first_seen: bool = True
+    include_last_seen: bool = True
+    include_client_ips: bool = False
+    include_infra_ips: bool = False
+    include_traffic: bool = False
+
+
+# Background export task storage
+_export_tasks = {}
+
+
+async def _run_export_task(export_id: int, settings: dict):
+    """Background task to generate export file."""
+    import csv
+    import json
+    import os
+    from app.database import async_session_maker
+    
+    async with async_session_maker() as db:
+        try:
+            # Update status to processing
+            export_record = await db.get(RemnawaveExport, export_id)
+            if not export_record:
+                return
+            
+            export_record.status = "processing"
+            await db.commit()
+            
+            start_time = _get_time_filter(settings["period"])
+            
+            # Get user cache
+            cache_result = await db.execute(select(RemnawaveUserCache))
+            user_cache = {u.email: u for u in cache_result.scalars().all()}
+            
+            # Build main query based on settings
+            include_destinations = settings.get("include_destinations", True)
+            
+            if include_destinations:
+                if settings["period"] == "all":
+                    main_query = select(
+                        XrayVisitStats.email,
+                        XrayVisitStats.destination,
+                        sql_func.sum(XrayVisitStats.visit_count).label('visits'),
+                        sql_func.min(XrayVisitStats.first_seen).label('first_seen'),
+                        sql_func.max(XrayVisitStats.last_seen).label('last_seen')
+                    ).group_by(
+                        XrayVisitStats.email, 
+                        XrayVisitStats.destination
+                    ).order_by(XrayVisitStats.email)
+                else:
+                    main_query = select(
+                        XrayVisitStats.email,
+                        XrayVisitStats.destination,
+                        sql_func.sum(XrayVisitStats.visit_count).label('visits'),
+                        sql_func.min(XrayVisitStats.first_seen).label('first_seen'),
+                        sql_func.max(XrayVisitStats.last_seen).label('last_seen')
+                    ).where(
+                        XrayVisitStats.last_seen >= start_time
+                    ).group_by(
+                        XrayVisitStats.email,
+                        XrayVisitStats.destination
+                    ).order_by(XrayVisitStats.email)
+            else:
+                if settings["period"] == "all":
+                    main_query = select(
+                        XrayVisitStats.email,
+                        sql_func.sum(XrayVisitStats.visit_count).label('total_visits'),
+                        sql_func.count(sql_func.distinct(XrayVisitStats.destination)).label('unique_sites')
+                    ).group_by(XrayVisitStats.email)
+                else:
+                    main_query = select(
+                        XrayVisitStats.email,
+                        sql_func.sum(XrayVisitStats.visit_count).label('total_visits'),
+                        sql_func.count(sql_func.distinct(XrayVisitStats.destination)).label('unique_sites')
+                    ).where(
+                        XrayVisitStats.last_seen >= start_time
+                    ).group_by(XrayVisitStats.email)
+            
+            main_result = await db.execute(main_query)
+            main_data = main_result.all()
+            
+            # Get IPs if needed
+            user_ips = {}
+            if settings.get("include_client_ips") or settings.get("include_infra_ips"):
+                ip_query = select(
+                    XrayUserIpStats.email,
+                    XrayUserIpStats.source_ip,
+                    XrayUserIpStats.is_infrastructure
+                ).group_by(
+                    XrayUserIpStats.email,
+                    XrayUserIpStats.source_ip,
+                    XrayUserIpStats.is_infrastructure
+                )
+                ip_result = await db.execute(ip_query)
+                
+                for ip_row in ip_result.all():
+                    if ip_row.email not in user_ips:
+                        user_ips[ip_row.email] = {"client": [], "infra": []}
+                    if ip_row.is_infrastructure:
+                        user_ips[ip_row.email]["infra"].append(ip_row.source_ip)
+                    else:
+                        user_ips[ip_row.email]["client"].append(ip_row.source_ip)
+            
+            # Calculate user totals
+            user_totals = {}
+            if include_destinations:
+                for row in main_data:
+                    if row.email not in user_totals:
+                        user_totals[row.email] = {"total_visits": 0, "unique_sites": 0}
+                    user_totals[row.email]["total_visits"] += row.visits
+                    user_totals[row.email]["unique_sites"] += 1
+            
+            # Build export rows based on settings
+            export_rows = []
+            
+            for row in main_data:
+                user_info = user_cache.get(row.email)
+                ips = user_ips.get(row.email, {"client": [], "infra": []})
+                
+                if include_destinations:
+                    totals = user_totals.get(row.email, {"total_visits": 0, "unique_sites": 0})
+                
+                row_data = {}
+                
+                # User fields
+                if settings.get("include_user_id", True):
+                    row_data["user_id"] = row.email
+                if settings.get("include_username", True):
+                    row_data["username"] = (user_info.username if user_info else None) or f"User #{row.email}"
+                if settings.get("include_status", True):
+                    row_data["status"] = (user_info.status if user_info else None) or "UNKNOWN"
+                if settings.get("include_telegram_id", False) and user_info:
+                    row_data["telegram_id"] = user_info.telegram_id
+                
+                # Destination fields
+                if include_destinations:
+                    row_data["destination"] = row.destination
+                    if settings.get("include_visits_count", True):
+                        row_data["visits"] = row.visits
+                    if settings.get("include_first_seen", True):
+                        row_data["first_seen"] = row.first_seen.isoformat() if row.first_seen else None
+                    if settings.get("include_last_seen", True):
+                        row_data["last_seen"] = row.last_seen.isoformat() if row.last_seen else None
+                else:
+                    if settings.get("include_visits_count", True):
+                        row_data["total_visits"] = row.total_visits
+                        row_data["unique_sites"] = row.unique_sites
+                
+                # IP fields
+                if settings.get("include_client_ips", False):
+                    row_data["client_ips"] = ips["client"]
+                if settings.get("include_infra_ips", False):
+                    row_data["infrastructure_ips"] = ips["infra"]
+                
+                # Traffic fields
+                if settings.get("include_traffic", False) and user_info:
+                    row_data["traffic_used_bytes"] = user_info.used_traffic_bytes
+                    row_data["traffic_limit_bytes"] = user_info.traffic_limit_bytes
+                
+                export_rows.append(row_data)
+            
+            # Ensure exports directory exists
+            exports_dir = os.path.join(os.path.dirname(__file__), "..", "exports")
+            os.makedirs(exports_dir, exist_ok=True)
+            
+            file_path = os.path.join(exports_dir, export_record.filename)
+            file_format = settings["format"]
+            
+            # Generate file
+            if file_format == "json":
+                if include_destinations:
+                    users_grouped = {}
+                    for row in export_rows:
+                        uid = row.get("user_id", 0)
+                        if uid not in users_grouped:
+                            users_grouped[uid] = {k: v for k, v in row.items() if k not in ["destination", "visits", "first_seen", "last_seen"]}
+                            users_grouped[uid]["destinations"] = []
+                        dest_data = {}
+                        if "destination" in row:
+                            dest_data["destination"] = row["destination"]
+                        if "visits" in row:
+                            dest_data["visits"] = row["visits"]
+                        if "first_seen" in row:
+                            dest_data["first_seen"] = row["first_seen"]
+                        if "last_seen" in row:
+                            dest_data["last_seen"] = row["last_seen"]
+                        users_grouped[uid]["destinations"].append(dest_data)
+                    
+                    output_data = {
+                        "export_date": datetime.now(timezone.utc).isoformat(),
+                        "period": settings["period"],
+                        "total_users": len(users_grouped),
+                        "users": list(users_grouped.values())
+                    }
+                else:
+                    output_data = {
+                        "export_date": datetime.now(timezone.utc).isoformat(),
+                        "period": settings["period"],
+                        "total_users": len(export_rows),
+                        "users": export_rows
+                    }
+                
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    json.dump(output_data, f, ensure_ascii=False, indent=2)
+            
+            elif file_format == "csv":
+                if export_rows:
+                    # Handle list fields
+                    for row in export_rows:
+                        for key in ["client_ips", "infrastructure_ips"]:
+                            if key in row and isinstance(row[key], list):
+                                row[key] = ";".join(row[key]) if row[key] else ""
+                    
+                    with open(file_path, 'w', encoding='utf-8-sig', newline='') as f:
+                        writer = csv.DictWriter(f, fieldnames=list(export_rows[0].keys()))
+                        writer.writeheader()
+                        writer.writerows(export_rows)
+                else:
+                    with open(file_path, 'w', encoding='utf-8-sig') as f:
+                        f.write("")
+            
+            elif file_format == "xlsx":
+                from openpyxl import Workbook
+                
+                wb = Workbook(write_only=True)
+                ws = wb.create_sheet("Export")
+                
+                if export_rows:
+                    headers = list(export_rows[0].keys())
+                    ws.append(headers)
+                    
+                    for row_data in export_rows:
+                        row_values = []
+                        for header in headers:
+                            value = row_data.get(header)
+                            if isinstance(value, list):
+                                value = "; ".join(str(v) for v in value)
+                            row_values.append(value)
+                        ws.append(row_values)
+                
+                wb.save(file_path)
+            
+            # Update export record
+            file_size = os.path.getsize(file_path)
+            export_record.status = "completed"
+            export_record.file_size = file_size
+            export_record.rows_count = len(export_rows)
+            export_record.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            await db.commit()
+            
+        except Exception as e:
+            export_record = await db.get(RemnawaveExport, export_id)
+            if export_record:
+                export_record.status = "failed"
+                export_record.error_message = str(e)
+                await db.commit()
+
+
+@router.post("/export/create")
+async def create_export(
+    request: ExportSettingsRequest,
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    """Export user visit data in various formats.
-    
-    Optimized version: uses single query instead of N queries.
-    Supported formats: csv, json, xlsx
-    """
-    import csv
+    """Create a new export task."""
     import json
-    import io
-    from fastapi.responses import StreamingResponse
     
-    start_time = _get_time_filter(period)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"remnawave_export_{timestamp}.{request.format}"
     
-    # Get user cache for usernames/status/traffic (single query)
-    cache_result = await db.execute(select(RemnawaveUserCache))
-    user_cache = {u.email: u for u in cache_result.scalars().all()}
+    settings_dict = request.model_dump()
     
-    # Get all data in ONE query - grouped by user and destination
-    if include_destinations:
-        if period == "all":
-            main_query = select(
-                XrayVisitStats.email,
-                XrayVisitStats.destination,
-                sql_func.sum(XrayVisitStats.visit_count).label('visits'),
-                sql_func.min(XrayVisitStats.first_seen).label('first_seen'),
-                sql_func.max(XrayVisitStats.last_seen).label('last_seen')
-            ).group_by(
-                XrayVisitStats.email, 
-                XrayVisitStats.destination
-            ).order_by(
-                XrayVisitStats.email,
-                sql_func.sum(XrayVisitStats.visit_count).desc()
-            )
-        else:
-            main_query = select(
-                XrayVisitStats.email,
-                XrayVisitStats.destination,
-                sql_func.sum(XrayVisitStats.visit_count).label('visits'),
-                sql_func.min(XrayVisitStats.first_seen).label('first_seen'),
-                sql_func.max(XrayVisitStats.last_seen).label('last_seen')
-            ).where(
-                XrayVisitStats.last_seen >= start_time
-            ).group_by(
-                XrayVisitStats.email,
-                XrayVisitStats.destination
-            ).order_by(
-                XrayVisitStats.email,
-                sql_func.sum(XrayVisitStats.visit_count).desc()
-            )
-    else:
-        # Just users without destinations
-        if period == "all":
-            main_query = select(
-                XrayVisitStats.email,
-                sql_func.sum(XrayVisitStats.visit_count).label('total_visits'),
-                sql_func.count(sql_func.distinct(XrayVisitStats.destination)).label('unique_sites')
-            ).group_by(XrayVisitStats.email).order_by(sql_func.sum(XrayVisitStats.visit_count).desc())
-        else:
-            main_query = select(
-                XrayVisitStats.email,
-                sql_func.sum(XrayVisitStats.visit_count).label('total_visits'),
-                sql_func.count(sql_func.distinct(XrayVisitStats.destination)).label('unique_sites')
-            ).where(
-                XrayVisitStats.last_seen >= start_time
-            ).group_by(XrayVisitStats.email).order_by(sql_func.sum(XrayVisitStats.visit_count).desc())
+    export_record = RemnawaveExport(
+        filename=filename,
+        format=request.format,
+        status="pending",
+        settings=json.dumps(settings_dict)
+    )
+    db.add(export_record)
+    await db.commit()
+    await db.refresh(export_record)
     
-    main_result = await db.execute(main_query)
-    main_data = main_result.all()
+    # Start background task
+    asyncio.create_task(_run_export_task(export_record.id, settings_dict))
     
-    # Get IPs if needed (single query for all users)
-    user_ips = {}
-    if include_ips:
-        ip_query = select(
-            XrayUserIpStats.email,
-            XrayUserIpStats.source_ip,
-            XrayUserIpStats.is_infrastructure,
-            sql_func.sum(XrayUserIpStats.connection_count).label('connections')
-        ).group_by(
-            XrayUserIpStats.email,
-            XrayUserIpStats.source_ip,
-            XrayUserIpStats.is_infrastructure
-        )
-        ip_result = await db.execute(ip_query)
-        
-        for ip_row in ip_result.all():
-            if ip_row.email not in user_ips:
-                user_ips[ip_row.email] = {"client": [], "infra": []}
-            if ip_row.is_infrastructure:
-                user_ips[ip_row.email]["infra"].append(ip_row.source_ip)
-            else:
-                user_ips[ip_row.email]["client"].append(ip_row.source_ip)
+    return {
+        "success": True,
+        "export_id": export_record.id,
+        "filename": filename,
+        "status": "pending"
+    }
+
+
+@router.get("/export/list")
+async def list_exports(
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Get list of exports."""
+    result = await db.execute(
+        select(RemnawaveExport).order_by(RemnawaveExport.created_at.desc()).limit(20)
+    )
+    exports = result.scalars().all()
     
-    # Calculate user totals if including destinations
-    user_totals = {}
-    if include_destinations:
-        for row in main_data:
-            if row.email not in user_totals:
-                user_totals[row.email] = {"total_visits": 0, "unique_sites": 0}
-            user_totals[row.email]["total_visits"] += row.visits
-            user_totals[row.email]["unique_sites"] += 1
-    
-    # Build export rows
-    export_rows = []
-    
-    if include_destinations:
-        for row in main_data:
-            user_info = user_cache.get(row.email)
-            totals = user_totals.get(row.email, {"total_visits": 0, "unique_sites": 0})
-            
-            row_data = {
-                "user_id": row.email,
-                "username": (user_info.username if user_info else None) or f"User #{row.email}",
-                "status": (user_info.status if user_info else None) or "UNKNOWN",
-                "total_visits": totals["total_visits"],
-                "unique_sites": totals["unique_sites"],
-                "destination": row.destination,
-                "visits": row.visits,
-                "first_seen": row.first_seen.isoformat() if row.first_seen else None,
-                "last_seen": row.last_seen.isoformat() if row.last_seen else None
+    return {
+        "exports": [
+            {
+                "id": e.id,
+                "filename": e.filename,
+                "format": e.format,
+                "status": e.status,
+                "file_size": e.file_size,
+                "rows_count": e.rows_count,
+                "error_message": e.error_message,
+                "created_at": e.created_at.isoformat() if e.created_at else None,
+                "completed_at": e.completed_at.isoformat() if e.completed_at else None
             }
-            
-            if include_traffic and user_info:
-                row_data["traffic_used_bytes"] = user_info.used_traffic_bytes
-                row_data["traffic_limit_bytes"] = user_info.traffic_limit_bytes
-                row_data["lifetime_traffic_bytes"] = user_info.lifetime_used_traffic_bytes
-            
-            export_rows.append(row_data)
-    else:
-        for row in main_data:
-            user_info = user_cache.get(row.email)
-            
-            row_data = {
-                "user_id": row.email,
-                "username": (user_info.username if user_info else None) or f"User #{row.email}",
-                "status": (user_info.status if user_info else None) or "UNKNOWN",
-                "total_visits": row.total_visits,
-                "unique_sites": row.unique_sites
-            }
-            
-            if include_traffic and user_info:
-                row_data["traffic_used_bytes"] = user_info.used_traffic_bytes
-                row_data["traffic_limit_bytes"] = user_info.traffic_limit_bytes
-                row_data["lifetime_traffic_bytes"] = user_info.lifetime_used_traffic_bytes
-            
-            if include_ips:
-                ips = user_ips.get(row.email, {"client": [], "infra": []})
-                row_data["client_ips"] = ips["client"]
-                row_data["infrastructure_ips"] = ips["infra"]
-            
-            export_rows.append(row_data)
+            for e in exports
+        ]
+    }
+
+
+@router.get("/export/{export_id}/download")
+async def download_export(
+    export_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Download export file."""
+    import os
+    from fastapi.responses import FileResponse
     
-    # Generate output based on format
-    if format == "json":
-        if include_destinations:
-            # Group by user for JSON
-            users_grouped = {}
-            for row in export_rows:
-                uid = row["user_id"]
-                if uid not in users_grouped:
-                    users_grouped[uid] = {
-                        "user_id": row["user_id"],
-                        "username": row["username"],
-                        "status": row["status"],
-                        "total_visits": row["total_visits"],
-                        "unique_sites": row["unique_sites"],
-                        "destinations": []
-                    }
-                    if include_traffic and "traffic_used_bytes" in row:
-                        users_grouped[uid]["traffic_used_bytes"] = row.get("traffic_used_bytes")
-                        users_grouped[uid]["traffic_limit_bytes"] = row.get("traffic_limit_bytes")
-                        users_grouped[uid]["lifetime_traffic_bytes"] = row.get("lifetime_traffic_bytes")
-                    if include_ips:
-                        ips = user_ips.get(uid, {"client": [], "infra": []})
-                        users_grouped[uid]["client_ips"] = ips["client"]
-                        users_grouped[uid]["infrastructure_ips"] = ips["infra"]
-                
-                users_grouped[uid]["destinations"].append({
-                    "destination": row["destination"],
-                    "visits": row["visits"],
-                    "first_seen": row["first_seen"],
-                    "last_seen": row["last_seen"]
-                })
-            
-            output_data = {
-                "export_date": datetime.now().isoformat(),
-                "period": period,
-                "total_users": len(users_grouped),
-                "total_rows": len(export_rows),
-                "users": list(users_grouped.values())
-            }
-        else:
-            output_data = {
-                "export_date": datetime.now().isoformat(),
-                "period": period,
-                "total_users": len(export_rows),
-                "users": export_rows
-            }
-        
-        content = json.dumps(output_data, ensure_ascii=False, indent=2)
-        return StreamingResponse(
-            io.BytesIO(content.encode('utf-8')),
-            media_type="application/json",
-            headers={"Content-Disposition": f"attachment; filename=remnawave_export_{timestamp}.json"}
-        )
+    export_record = await db.get(RemnawaveExport, export_id)
+    if not export_record:
+        raise HTTPException(status_code=404, detail="Export not found")
     
-    elif format == "csv":
-        output = io.StringIO()
-        
-        if export_rows:
-            fieldnames = list(export_rows[0].keys())
-            
-            # Handle list fields for CSV
-            if include_ips and not include_destinations:
-                for row in export_rows:
-                    if "client_ips" in row:
-                        row["client_ips"] = ";".join(row["client_ips"]) if row["client_ips"] else ""
-                    if "infrastructure_ips" in row:
-                        row["infrastructure_ips"] = ";".join(row["infrastructure_ips"]) if row["infrastructure_ips"] else ""
-            
-            writer = csv.DictWriter(output, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(export_rows)
-        
-        content = output.getvalue()
-        return StreamingResponse(
-            io.BytesIO(content.encode('utf-8-sig')),
-            media_type="text/csv",
-            headers={"Content-Disposition": f"attachment; filename=remnawave_export_{timestamp}.csv"}
-        )
+    if export_record.status != "completed":
+        raise HTTPException(status_code=400, detail=f"Export is {export_record.status}")
     
-    elif format == "xlsx":
-        try:
-            from openpyxl import Workbook
-            from openpyxl.styles import Font, PatternFill, Alignment
-            from openpyxl.utils import get_column_letter
-        except ImportError:
-            raise HTTPException(status_code=500, detail="openpyxl not installed")
-        
-        # Use write_only mode for better performance with large datasets
-        wb = Workbook(write_only=True)
-        ws = wb.create_sheet("Users & Visits")
-        
-        if export_rows:
-            headers = list(export_rows[0].keys())
-            
-            # Write header row
-            ws.append(headers)
-            
-            # Write data rows
-            for row_data in export_rows:
-                row_values = []
-                for header in headers:
-                    value = row_data.get(header)
-                    if isinstance(value, list):
-                        value = "; ".join(str(v) for v in value)
-                    row_values.append(value)
-                ws.append(row_values)
-        
-        output = io.BytesIO()
-        wb.save(output)
-        output.seek(0)
-        
-        return StreamingResponse(
-            output,
-            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": f"attachment; filename=remnawave_export_{timestamp}.xlsx"}
-        )
+    exports_dir = os.path.join(os.path.dirname(__file__), "..", "exports")
+    file_path = os.path.join(exports_dir, export_record.filename)
+    
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    media_types = {
+        "csv": "text/csv",
+        "json": "application/json",
+        "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    }
+    
+    return FileResponse(
+        file_path,
+        media_type=media_types.get(export_record.format, "application/octet-stream"),
+        filename=export_record.filename
+    )
+
+
+@router.delete("/export/{export_id}")
+async def delete_export(
+    export_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Delete export and its file."""
+    import os
+    
+    export_record = await db.get(RemnawaveExport, export_id)
+    if not export_record:
+        raise HTTPException(status_code=404, detail="Export not found")
+    
+    # Delete file if exists
+    exports_dir = os.path.join(os.path.dirname(__file__), "..", "exports")
+    file_path = os.path.join(exports_dir, export_record.filename)
+    
+    if os.path.exists(file_path):
+        os.remove(file_path)
+    
+    await db.delete(export_record)
+    await db.commit()
+    
+    return {"success": True, "message": "Export deleted"}
