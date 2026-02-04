@@ -41,6 +41,8 @@ _DNS_CACHE_TTL = timedelta(hours=1)
 
 # Batch size for upserts
 UPSERT_BATCH_SIZE = 5000
+# User cache has 25 fields, PostgreSQL limit is ~32767 params, so max 1300 users per batch
+USER_CACHE_BATCH_SIZE = 500
 
 
 def extract_host_from_url(url: str) -> str:
@@ -666,8 +668,8 @@ class XrayStatsCollector:
         if not values:
             return
         
-        for i in range(0, len(values), UPSERT_BATCH_SIZE):
-            batch = values[i:i + UPSERT_BATCH_SIZE]
+        for i in range(0, len(values), USER_CACHE_BATCH_SIZE):
+            batch = values[i:i + USER_CACHE_BATCH_SIZE]
             
             stmt = pg_insert(RemnawaveUserCache).values(batch)
             stmt = stmt.on_conflict_do_update(
