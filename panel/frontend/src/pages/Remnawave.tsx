@@ -1058,22 +1058,24 @@ export default function Remnawave() {
                       <td className="p-4 text-right text-dark-200">{user.total_visits.toLocaleString()}</td>
                       <td className="p-4 text-right text-dark-400">{user.unique_sites}</td>
                       <td className="p-4 text-right">
-                        <span className={`inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-medium ${
-                          user.unique_ips > 3 ? 'bg-warning/20 text-warning' :
-                          user.unique_ips > 0 ? 'bg-accent-500/20 text-accent-400' :
-                          user.infrastructure_ips > 0 ? 'bg-purple-500/20 text-purple-400' :
-                          'bg-dark-600 text-dark-400'
-                        }`} title={user.unique_ips === 0 && user.infrastructure_ips > 0 ? t('remnawave.only_infra_ips') : undefined}>
-                          <Network className="w-3 h-3" />
-                          {user.unique_ips === 0 && user.infrastructure_ips > 0 ? (
-                            <span className="flex items-center gap-1">
-                              <Server className="w-3 h-3" />
-                              {user.infrastructure_ips}
-                            </span>
-                          ) : (
-                            user.unique_ips
-                          )}
-                        </span>
+                        {user.unique_ips === 0 && user.infrastructure_ips > 0 ? (
+                          <span 
+                            className="inline-flex items-center gap-1.5 px-2 py-1 rounded text-xs font-medium bg-purple-500/20 text-purple-400"
+                            title={t('remnawave.only_infra_ips')}
+                          >
+                            <Server className="w-3 h-3" />
+                            <span>{user.infrastructure_ips}</span>
+                          </span>
+                        ) : (
+                          <span className={`inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-medium ${
+                            user.unique_ips > 3 ? 'bg-warning/20 text-warning' :
+                            user.unique_ips > 0 ? 'bg-accent-500/20 text-accent-400' :
+                            'bg-dark-600 text-dark-400'
+                          }`}>
+                            <Network className="w-3 h-3" />
+                            {user.unique_ips}
+                          </span>
+                        )}
                       </td>
                       <td className="p-4">
                         <ChevronRight className="w-4 h-4 text-dark-500" />
