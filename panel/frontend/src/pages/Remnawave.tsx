@@ -31,7 +31,6 @@ import {
   ChevronDown,
   Download,
   Shield,
-  Bell,
   Eye,
   EyeOff,
   Send
@@ -219,7 +218,7 @@ export default function Remnawave() {
   const [isSavingAnalyzer, setIsSavingAnalyzer] = useState(false)
   const [isTestingTelegram, setIsTestingTelegram] = useState(false)
   const [telegramTestResult, setTelegramTestResult] = useState<{ success: boolean; error?: string } | null>(null)
-  const [analyzerStatus, setAnalyzerStatus] = useState<{
+  const [, setAnalyzerStatus] = useState<{
     running: boolean
     analyzing: boolean
     check_interval: number
@@ -240,7 +239,7 @@ export default function Remnawave() {
     created_at: string | null
   }>>([])
   const [anomaliesTotal, setAnomaliesTotal] = useState(0)
-  const [anomaliesOffset, setAnomaliesOffset] = useState(0)
+  const [, setAnomaliesOffset] = useState(0)
   const [isLoadingAnomalies, setIsLoadingAnomalies] = useState(false)
   const [anomalyFilter, setAnomalyFilter] = useState<'all' | 'active' | 'resolved'>('active')
   const [anomalyTypeFilter, setAnomalyTypeFilter] = useState<string>('')
@@ -306,6 +305,7 @@ export default function Remnawave() {
   
   // Fetch analyzer settings and anomalies
   const fetchAnalyzerData = useCallback(async () => {
+    setIsLoadingAnomalies(true)
     try {
       const [settingsRes, statusRes, anomaliesRes] = await Promise.all([
         remnawaveApi.getAnalyzerSettings(),
@@ -333,6 +333,8 @@ export default function Remnawave() {
       setAnomaliesOffset(anomaliesRes.data.anomalies.length)
     } catch (err) {
       console.error('Failed to fetch analyzer data:', err)
+    } finally {
+      setIsLoadingAnomalies(false)
     }
   }, [anomalyFilter, anomalyTypeFilter])
   
