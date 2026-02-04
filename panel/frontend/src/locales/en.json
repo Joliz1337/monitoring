@@ -687,6 +687,8 @@
     "unique_client_ips": "Unique client IPs",
     "rescan_existing": "Rescan DB",
     "rescan_hint": "Update infrastructure flag for existing records in the database",
-    "rescan_result": "Updated: {{toInfra}} IPs marked as infrastructure, {{toClient}} as client"
+    "rescan_result": "Updated: {{toInfra}} IPs marked as infrastructure, {{toClient}} as client",
+    "load_more": "Load more",
+    "remaining": "remaining"
   }
 }

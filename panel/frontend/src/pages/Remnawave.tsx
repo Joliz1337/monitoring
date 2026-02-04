@@ -105,6 +105,12 @@ export default function Remnawave() {
   const [summary, setSummary] = useState<RemnawaveSummary | null>(null)
   const [topDestinations, setTopDestinations] = useState<RemnawaveDestination[]>([])
   const [topUsers, setTopUsers] = useState<RemnawaveUser[]>([])
+  const [totalUsers, setTotalUsers] = useState(0)
+  const [usersOffset, setUsersOffset] = useState(0)
+  const [isLoadingMoreUsers, setIsLoadingMoreUsers] = useState(false)
+  const [isSearchingUsers, setIsSearchingUsers] = useState(false)
+  const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const USERS_PAGE_SIZE = 100
   
   // User cache state
   const [userCacheStatus, setUserCacheStatus] = useState<{ last_update: string | null; updating: boolean } | null>(null)
@@ -194,18 +200,77 @@ export default function Remnawave() {
     try {
       const [summaryRes, destRes, usersRes] = await Promise.all([
         remnawaveApi.getSummary(period),
-        remnawaveApi.getTopDestinations({ period, limit: 20 }),
-        remnawaveApi.getTopUsers({ period, limit: 20 })
+        remnawaveApi.getTopDestinations({ period, limit: 100 }),
+        remnawaveApi.getTopUsers({ period, limit: USERS_PAGE_SIZE, offset: 0 })
       ])
       setSummary(summaryRes.data)
       setTopDestinations(destRes.data.destinations)
       setTopUsers(usersRes.data.users)
+      setTotalUsers(usersRes.data.total)
+      setUsersOffset(usersRes.data.users.length)
       setError(null)
     } catch (err) {
       console.error('Failed to fetch stats:', err)
       setError(t('remnawave.failed_fetch'))
     }
   }, [period, t])
+  
+  // Load more users (pagination)
+  const loadMoreUsers = useCallback(async () => {
+    if (isLoadingMoreUsers || usersOffset >= totalUsers) return
+    
+    setIsLoadingMoreUsers(true)
+    try {
+      const res = await remnawaveApi.getTopUsers({ 
+        period, 
+        limit: USERS_PAGE_SIZE, 
+        offset: usersOffset,
+        search: userSearch || undefined
+      })
+      setTopUsers(prev => [...prev, ...res.data.users])
+      setUsersOffset(prev => prev + res.data.users.length)
+      setTotalUsers(res.data.total)
+    } catch (err) {
+      console.error('Failed to load more users:', err)
+    } finally {
+      setIsLoadingMoreUsers(false)
+    }
+  }, [isLoadingMoreUsers, usersOffset, totalUsers, period, userSearch])
+  
+  // Search users with debounce
+  const searchUsers = useCallback(async (searchTerm: string) => {
+    setIsSearchingUsers(true)
+    try {
+      const res = await remnawaveApi.getTopUsers({ 
+        period, 
+        limit: USERS_PAGE_SIZE, 
+        offset: 0,
+        search: searchTerm || undefined
+      })
+      setTopUsers(res.data.users)
+      setTotalUsers(res.data.total)
+      setUsersOffset(res.data.users.length)
+    } catch (err) {
+      console.error('Failed to search users:', err)
+    } finally {
+      setIsSearchingUsers(false)
+    }
+  }, [period])
+  
+  // Handle user search input with debounce
+  const handleUserSearchChange = useCallback((value: string) => {
+    setUserSearch(value)
+    
+    // Clear previous timeout
+    if (searchTimeoutRef.current) {
+      clearTimeout(searchTimeoutRef.current)
+    }
+    
+    // Debounce search - wait 300ms after user stops typing
+    searchTimeoutRef.current = setTimeout(() => {
+      searchUsers(value)
+    }, 300)
+  }, [searchUsers])
   
   // Initial load
   useEffect(() => {
@@ -926,15 +991,21 @@ export default function Remnawave() {
                 <input
                   type="text"
                   value={userSearch}
-                  onChange={(e) => setUserSearch(e.target.value)}
+                  onChange={(e) => handleUserSearchChange(e.target.value)}
                   placeholder={t('remnawave.search_users')}
                   className="w-full pl-10 pr-4 py-2 rounded-lg bg-dark-800 border border-dark-700 
                            text-dark-100 placeholder-dark-500 focus:outline-none focus:border-accent-500"
                 />
+                {isSearchingUsers && (
+                  <RefreshCw className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-dark-500 animate-spin" />
+                )}
               </div>
               <div className="flex items-center gap-3">
+                <span className="text-sm text-dark-400">
+                  {topUsers.length} / {totalUsers}
+                </span>
                 {userCacheStatus?.last_update && (
-                  <span className="text-xs text-dark-500">
+                  <span className="text-xs text-dark-500 hidden lg:inline">
                     {t('remnawave.cache_updated')}: {new Date(userCacheStatus.last_update).toLocaleTimeString()}
                   </span>
                 )}
@@ -1003,10 +1074,40 @@ export default function Remnawave() {
                   ))}
                 </tbody>
               </table>
-              {filteredUsers.length === 0 && (
+              {filteredUsers.length === 0 && !isSearchingUsers && (
                 <div className="p-8 text-center text-dark-500">{t('remnawave.no_data')}</div>
               )}
+              {isSearchingUsers && (
+                <div className="p-8 text-center text-dark-500">
+                  <RefreshCw className="w-5 h-5 animate-spin mx-auto mb-2" />
+                  {t('common.loading')}...
+                </div>
+              )}
             </div>
+            
+            {/* Load More Button */}
+            {topUsers.length < totalUsers && !isSearchingUsers && (
+              <div className="flex justify-center">
+                <button
+                  onClick={loadMoreUsers}
+                  disabled={isLoadingMoreUsers}
+                  className="flex items-center gap-2 px-6 py-2 rounded-lg bg-dark-700 hover:bg-dark-600 
+                           text-dark-200 text-sm transition-colors disabled:opacity-50"
+                >
+                  {isLoadingMoreUsers ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      {t('common.loading')}...
+                    </>
+                  ) : (
+                    <>
+                      <ChevronDown className="w-4 h-4" />
+                      {t('remnawave.load_more')} ({totalUsers - topUsers.length} {t('remnawave.remaining')})
+                    </>
+                  )}
+                </button>
+              </div>
+            )}
           </motion.div>
         )}
         

@@ -664,13 +664,16 @@ async def get_top_destinations(
 @router.get("/stats/top-users")
 async def get_top_users(
     period: str = Query("all", pattern="^(1h|24h|7d|30d|365d|all)$"),
-    limit: int = Query(50, ge=1, le=500),
+    limit: int = Query(50, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
     server_id: Optional[int] = Query(None, description="Filter by server"),
+    search: Optional[str] = Query(None, min_length=1, description="Search by email ID or username"),
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    """Get top active users"""
+    """Get top active users with search and pagination"""
     conditions = []
+    start_time = None
     
     if period != "all":
         start_time = _get_time_filter(period)
@@ -679,6 +682,35 @@ async def get_top_users(
     if server_id:
         conditions.append(XrayVisitStats.server_id == server_id)
     
+    # If searching, first find matching user IDs
+    search_user_ids = None
+    if search:
+        search = search.strip()
+        if search.isdigit():
+            # Search by email ID (exact or partial)
+            search_user_ids = [int(search)]
+        else:
+            # Search by username in cache
+            cache_search = await db.execute(
+                select(RemnawaveUserCache.email)
+                .where(RemnawaveUserCache.username.ilike(f"%{search}%"))
+                .limit(1000)
+            )
+            search_user_ids = [row[0] for row in cache_search.fetchall()]
+            if not search_user_ids:
+                # No matches found
+                return {"period": period, "users": [], "total": 0, "offset": offset, "limit": limit}
+        
+        conditions.append(XrayVisitStats.email.in_(search_user_ids))
+    
+    # Count total users matching criteria
+    count_query = select(sql_func.count(sql_func.distinct(XrayVisitStats.email)))
+    if conditions:
+        count_query = count_query.where(and_(*conditions))
+    total_result = await db.execute(count_query)
+    total_count = total_result.scalar() or 0
+    
+    # Get users with stats
     query = select(
         XrayVisitStats.email,
         sql_func.sum(XrayVisitStats.visit_count).label('total'),
@@ -690,6 +722,7 @@ async def get_top_users(
     
     query = query.group_by(XrayVisitStats.email) \
                  .order_by(sql_func.sum(XrayVisitStats.visit_count).desc()) \
+                 .offset(offset) \
                  .limit(limit)
     
     result = await db.execute(query)
@@ -715,7 +748,7 @@ async def get_top_users(
             XrayUserIpStats.email.in_(user_ids),
             XrayUserIpStats.is_infrastructure == False  # Only count client IPs
         ]
-        if period != "all":
+        if period != "all" and start_time:
             ip_conditions.append(XrayUserIpStats.last_seen >= start_time)
         if server_id:
             ip_conditions.append(XrayUserIpStats.server_id == server_id)
@@ -733,6 +766,9 @@ async def get_top_users(
     
     return {
         "period": period,
+        "total": total_count,
+        "offset": offset,
+        "limit": limit,
         "users": [
             {
                 "email": row.email,

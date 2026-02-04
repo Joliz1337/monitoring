@@ -1013,8 +1013,10 @@ export const remnawaveApi = {
   getTopUsers: (params: { 
     period: string
     limit?: number
-    server_id?: number 
-  }) => api.get<{ period: string; users: RemnawaveUser[] }>('/remnawave/stats/top-users', { params }),
+    offset?: number
+    server_id?: number
+    search?: string
+  }) => api.get<{ period: string; users: RemnawaveUser[]; total: number; offset: number; limit: number }>('/remnawave/stats/top-users', { params }),
   getUserStats: (email: number, period: string) =>
     api.get<RemnawaveUserDetails>(`/remnawave/stats/user/${email}`, { params: { period } }),
   getDestinationUsers: (destination: string, period: string, limit?: number) =>
