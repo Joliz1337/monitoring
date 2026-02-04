@@ -591,11 +591,14 @@ export default function Remnawave() {
   }
   
   const fetchExports = useCallback(async () => {
+    setIsLoadingExports(true)
     try {
       const res = await remnawaveApi.listExports()
       setExports(res.data.exports)
     } catch (err) {
       console.error('Failed to fetch exports:', err)
+    } finally {
+      setIsLoadingExports(false)
     }
   }, [])
   
