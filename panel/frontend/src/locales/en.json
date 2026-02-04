@@ -778,6 +778,11 @@
     "limit": "limit",
     "suspicious_devices": "suspicious devices",
     "no_anomalies": "No anomalies detected",
-    "disabled": "Disabled"
+    "disabled": "Disabled",
+    "delete": "Delete",
+    "clear_all": "Clear All",
+    "confirm_delete_all_anomalies": "Are you sure you want to delete all anomalies?",
+    "minutes": "min",
+    "refresh": "Refresh"
   }
 }

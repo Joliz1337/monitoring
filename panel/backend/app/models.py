@@ -418,3 +418,17 @@ class TrafficAnomalyLog(Base):
         Index('idx_anomaly_created', 'created_at'),
         Index('idx_anomaly_resolved', 'resolved'),
     )
+
+
+class UserTrafficSnapshot(Base):
+    """Снимки трафика пользователей для расчёта потребления за период.
+    
+    Хранит трафик на момент проверки анализатором.
+    При следующей проверке вычисляется разница для определения аномалий.
+    """
+    __tablename__ = "user_traffic_snapshots"
+    
+    id = Column(Integer, primary_key=True)
+    user_email = Column(Integer, nullable=False, unique=True, index=True)  # User ID в Remnawave
+    traffic_bytes = Column(BigInteger, default=0)  # Трафик на момент снимка
+    snapshot_at = Column(DateTime(timezone=True), server_default=func.now())  # Время снимка

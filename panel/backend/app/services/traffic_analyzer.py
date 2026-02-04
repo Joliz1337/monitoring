@@ -21,7 +21,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import async_session
 from app.models import (
     TrafficAnalyzerSettings, TrafficAnomalyLog,
-    RemnawaveUserCache, XrayUserIpStats, RemnawaveSettings
+    RemnawaveUserCache, XrayUserIpStats, RemnawaveSettings,
+    UserTrafficSnapshot
 )
 from app.services.remnawave_api import get_remnawave_api, RemnawaveAPIError
 
@@ -350,23 +351,68 @@ class TrafficAnalyzer:
         user: RemnawaveUserCache,
         settings: TrafficAnalyzerSettings
     ) -> Optional[dict]:
-        """Check if user exceeds traffic limit."""
-        used_bytes = user.used_traffic_bytes or 0
-        limit_bytes = settings.traffic_limit_gb * (1024 ** 3)
+        """Check if user exceeds traffic limit within check interval.
         
-        if used_bytes <= limit_bytes:
+        Compares current traffic with previous snapshot to calculate
+        traffic consumed during the check interval (e.g., 30 minutes).
+        """
+        current_bytes = user.used_traffic_bytes or 0
+        limit_bytes = settings.traffic_limit_gb * (1024 ** 3)
+        check_interval_minutes = settings.check_interval_minutes or 30
+        
+        async with async_session() as db:
+            # Get previous snapshot
+            result = await db.execute(
+                select(UserTrafficSnapshot).where(
+                    UserTrafficSnapshot.user_email == user.email
+                )
+            )
+            snapshot = result.scalar_one_or_none()
+            
+            previous_bytes = 0
+            if snapshot:
+                previous_bytes = snapshot.traffic_bytes or 0
+                # Update existing snapshot
+                snapshot.traffic_bytes = current_bytes
+                snapshot.snapshot_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            else:
+                # Create new snapshot (first check for this user)
+                new_snapshot = UserTrafficSnapshot(
+                    user_email=user.email,
+                    traffic_bytes=current_bytes
+                )
+                db.add(new_snapshot)
+            
+            await db.commit()
+        
+        # Calculate traffic consumed during period
+        # Handle case when traffic counter was reset (new billing period)
+        if current_bytes < previous_bytes:
+            # Traffic was reset, use current value as consumed
+            consumed_bytes = current_bytes
+        else:
+            consumed_bytes = current_bytes - previous_bytes
+        
+        # Skip if no previous snapshot (first run, need baseline)
+        if not snapshot:
+            logger.debug(f"First snapshot for user {user.email}, skipping anomaly check")
             return None
         
-        used_gb = used_bytes / (1024 ** 3)
-        severity = "critical" if used_bytes > limit_bytes * 2 else "warning"
+        if consumed_bytes <= limit_bytes:
+            return None
+        
+        consumed_gb = consumed_bytes / (1024 ** 3)
+        limit_gb = settings.traffic_limit_gb
+        severity = "critical" if consumed_bytes > limit_bytes * 2 else "warning"
         
         return {
             "type": "traffic",
             "severity": severity,
             "details": {
-                "used_gb": round(used_gb, 2),
-                "limit_gb": settings.traffic_limit_gb,
-                "exceeded_by_gb": round(used_gb - settings.traffic_limit_gb, 2)
+                "consumed_gb": round(consumed_gb, 2),
+                "period_minutes": check_interval_minutes,
+                "limit_gb": limit_gb,
+                "exceeded_by_gb": round(consumed_gb - limit_gb, 2)
             }
         }
     
@@ -549,8 +595,9 @@ class TrafficAnalyzer:
             details = anomaly['details']
             
             if anomaly['type'] == 'traffic':
-                message += f"\n📊 <b>Использовано:</b> {details['used_gb']} ГБ\n"
-                message += f"📊 <b>Лимит:</b> {details['limit_gb']} ГБ\n"
+                period = details.get('period_minutes', 30)
+                message += f"\n📊 <b>Потрачено за {period} мин:</b> {details['consumed_gb']} ГБ\n"
+                message += f"📊 <b>Лимит на период:</b> {details['limit_gb']} ГБ\n"
                 message += f"⚠️ <b>Превышение:</b> +{details['exceeded_by_gb']} ГБ"
             
             elif anomaly['type'] == 'ip_count':

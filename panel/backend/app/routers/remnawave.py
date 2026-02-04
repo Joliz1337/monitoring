@@ -1721,6 +1721,44 @@ async def resolve_anomaly(
     return {"success": True, "message": "Anomaly marked as resolved"}
 
 
+@router.delete("/analyzer/anomalies/{anomaly_id}")
+async def delete_anomaly(
+    anomaly_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Delete single anomaly by ID"""
+    result = await db.execute(
+        select(TrafficAnomalyLog).where(TrafficAnomalyLog.id == anomaly_id)
+    )
+    anomaly = result.scalar_one_or_none()
+    
+    if not anomaly:
+        raise HTTPException(status_code=404, detail="Anomaly not found")
+    
+    await db.delete(anomaly)
+    await db.commit()
+    
+    return {"success": True, "message": "Anomaly deleted"}
+
+
+@router.delete("/analyzer/anomalies/all")
+async def delete_all_anomalies(
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Delete all anomalies"""
+    result = await db.execute(delete(TrafficAnomalyLog))
+    deleted = result.rowcount
+    await db.commit()
+    
+    return {
+        "success": True,
+        "deleted": deleted,
+        "message": f"Deleted {deleted} anomalies"
+    }
+
+
 @router.delete("/analyzer/anomalies/clear")
 async def clear_old_anomalies(
     days: int = Query(30, ge=1, le=365, description="Delete anomalies older than N days"),

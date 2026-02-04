@@ -779,6 +779,11 @@
     "limit": "лимит",
     "suspicious_devices": "подозрительных устройств",
     "no_anomalies": "Аномалий не обнаружено",
-    "disabled": "Отключён"
+    "disabled": "Отключён",
+    "delete": "Удалить",
+    "clear_all": "Очистить всё",
+    "confirm_delete_all_anomalies": "Вы уверены, что хотите удалить все аномалии?",
+    "minutes": "мин",
+    "refresh": "Обновить"
   }
 }

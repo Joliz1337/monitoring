@@ -405,6 +405,29 @@ export default function Remnawave() {
     }
   }
   
+  // Delete single anomaly
+  const handleDeleteAnomaly = async (anomalyId: number) => {
+    try {
+      await remnawaveApi.deleteAnomaly(anomalyId)
+      setAnomalies(prev => prev.filter(a => a.id !== anomalyId))
+      setAnomaliesTotal(prev => Math.max(0, prev - 1))
+    } catch (err) {
+      console.error('Failed to delete anomaly:', err)
+    }
+  }
+  
+  // Delete all anomalies
+  const handleDeleteAllAnomalies = async () => {
+    if (!window.confirm(t('remnawave.confirm_delete_all_anomalies'))) return
+    try {
+      await remnawaveApi.deleteAllAnomalies()
+      setAnomalies([])
+      setAnomaliesTotal(0)
+    } catch (err) {
+      console.error('Failed to delete all anomalies:', err)
+    }
+  }
+  
   // Load more users (pagination)
   const loadMoreUsers = useCallback(async () => {
     if (isLoadingMoreUsers || usersOffset >= totalUsers) return
@@ -1755,9 +1778,22 @@ export default function Remnawave() {
                     className="p-2 rounded-lg bg-dark-700 text-dark-300 hover:text-dark-100 transition-colors"
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
+                    title={t('remnawave.refresh')}
                   >
                     <RefreshCw className={`w-4 h-4 ${isLoadingAnomalies ? 'animate-spin' : ''}`} />
                   </motion.button>
+                  {anomalies.length > 0 && (
+                    <motion.button
+                      onClick={handleDeleteAllAnomalies}
+                      className="flex items-center gap-1 px-3 py-2 rounded-lg bg-danger-500/20 text-danger-400 
+                               hover:bg-danger-500/30 transition-colors text-sm"
+                      whileHover={{ scale: 1.05 }}
+                      whileTap={{ scale: 0.95 }}
+                    >
+                      <Trash2 className="w-4 h-4" />
+                      {t('remnawave.clear_all')}
+                    </motion.button>
+                  )}
                 </div>
               </div>
               
@@ -1808,7 +1844,12 @@ export default function Remnawave() {
                           {anomaly.details && (
                             <div className="text-dark-400">
                               {anomaly.anomaly_type === 'traffic' && (
-                                <span>{(anomaly.details as { used_gb?: number }).used_gb} GB / {(anomaly.details as { limit_gb?: number }).limit_gb} GB</span>
+                                <span>
+                                  {(anomaly.details as { consumed_gb?: number }).consumed_gb} GB / {(anomaly.details as { limit_gb?: number }).limit_gb} GB 
+                                  <span className="text-dark-500 ml-1">
+                                    ({(anomaly.details as { period_minutes?: number }).period_minutes || 30} {t('remnawave.minutes')})
+                                  </span>
+                                </span>
                               )}
                               {anomaly.anomaly_type === 'ip_count' && (
                                 <span>{(anomaly.details as { unique_ips?: number }).unique_ips} IP / {(anomaly.details as { ip_limit?: number }).ip_limit} {t('remnawave.limit')}</span>
@@ -1820,21 +1861,33 @@ export default function Remnawave() {
                           )}
                         </td>
                         <td className="py-3">
-                          {!anomaly.resolved && (
+                          <div className="flex items-center gap-2">
+                            {!anomaly.resolved && (
+                              <motion.button
+                                onClick={() => handleResolveAnomaly(anomaly.id)}
+                                className="flex items-center gap-1 px-2 py-1 rounded text-xs bg-dark-700 text-dark-300 
+                                         hover:bg-dark-600 hover:text-dark-100 transition-colors"
+                                whileHover={{ scale: 1.05 }}
+                                whileTap={{ scale: 0.95 }}
+                              >
+                                <Check className="w-3 h-3" />
+                                {t('remnawave.resolve')}
+                              </motion.button>
+                            )}
+                            {anomaly.resolved && (
+                              <span className="text-xs text-dark-500">{t('remnawave.resolved')}</span>
+                            )}
                             <motion.button
-                              onClick={() => handleResolveAnomaly(anomaly.id)}
-                              className="flex items-center gap-1 px-2 py-1 rounded text-xs bg-dark-700 text-dark-300 
-                                       hover:bg-dark-600 hover:text-dark-100 transition-colors"
+                              onClick={() => handleDeleteAnomaly(anomaly.id)}
+                              className="flex items-center gap-1 px-2 py-1 rounded text-xs bg-danger-500/20 text-danger-400 
+                                       hover:bg-danger-500/30 transition-colors"
                               whileHover={{ scale: 1.05 }}
                               whileTap={{ scale: 0.95 }}
+                              title={t('remnawave.delete')}
                             >
-                              <Check className="w-3 h-3" />
-                              {t('remnawave.resolve')}
+                              <Trash2 className="w-3 h-3" />
                             </motion.button>
-                          )}
-                          {anomaly.resolved && (
-                            <span className="text-xs text-dark-500">{t('remnawave.resolved')}</span>
-                          )}
+                          </div>
                         </td>
                       </tr>
                     ))}

@@ -24,7 +24,7 @@ from app.models import (  # noqa: F401
     Server, MetricsSnapshot, AggregatedMetrics, PanelSettings, FailedLogin, 
     BlocklistRule, BlocklistSource, RemnawaveSettings, RemnawaveNode, 
     XrayVisitStats, XrayHourlyStats, RemnawaveUserCache, TrafficAnalyzerSettings,
-    TrafficAnomalyLog
+    TrafficAnomalyLog, UserTrafficSnapshot
 )
 
 settings = get_settings()

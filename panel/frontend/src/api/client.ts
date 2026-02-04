@@ -1194,7 +1194,8 @@ export const remnawaveApi = {
         anomaly_type: string
         severity: string
         details: {
-          used_gb?: number
+          consumed_gb?: number
+          period_minutes?: number
           limit_gb?: number
           exceeded_by_gb?: number
           unique_ips?: number
@@ -1216,6 +1217,14 @@ export const remnawaveApi = {
     }>('/remnawave/analyzer/anomalies', { params }),
   
   resolveAnomaly: (anomalyId: number) => api.put<{ success: boolean; message: string }>(`/remnawave/analyzer/anomalies/${anomalyId}/resolve`),
+  
+  deleteAnomaly: (anomalyId: number) => api.delete<{ success: boolean; message: string }>(`/remnawave/analyzer/anomalies/${anomalyId}`),
+  
+  deleteAllAnomalies: () => api.delete<{
+    success: boolean
+    deleted: number
+    message: string
+  }>('/remnawave/analyzer/anomalies/all'),
   
   clearOldAnomalies: (days: number) => api.delete<{
     success: boolean
