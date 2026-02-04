@@ -8,33 +8,84 @@
 # After installation, run: monitoring
 #
 
-set -e
+# ==================== Safety Settings ====================
+
+# Don't exit on error - we handle errors manually
+set +e
+
+# Prevent running multiple instances
+LOCKFILE="/tmp/monitoring-installer.lock"
+LOCK_FD=200
 
 # Build log file for error reporting
 BUILD_LOG="/tmp/docker_build_$$.log"
 
-# Trap для обработки прерываний
+# ==================== Timeouts Configuration ====================
+
+TIMEOUT_USER_INPUT=300          # 5 min for user input
+TIMEOUT_GIT_CLONE=180           # 3 min for git clone
+TIMEOUT_APT_UPDATE=120          # 2 min for apt update
+TIMEOUT_APT_INSTALL=300         # 5 min for apt install
+TIMEOUT_CURL=60                 # 1 min for curl requests
+TIMEOUT_DOCKER_COMPOSE_DOWN=120 # 2 min for docker compose down
+TIMEOUT_DOCKER_BUILD=1200       # 20 min for docker build
+TIMEOUT_SYSTEMCTL=60            # 1 min for systemctl operations
+TIMEOUT_CONNECTIVITY_CHECK=15   # 15 sec for connectivity check
+
+# Retry configuration
+MAX_RETRIES=3
+RETRY_DELAY=5
+
+# ==================== Trap and Cleanup ====================
+
+acquire_lock() {
+    eval "exec $LOCK_FD>$LOCKFILE"
+    if ! flock -n $LOCK_FD 2>/dev/null; then
+        echo -e "\033[0;31m[ERROR] Another instance of the installer is already running\033[0m"
+        echo "If you're sure no other instance is running, remove: $LOCKFILE"
+        exit 1
+    fi
+    echo $$ > "$LOCKFILE"
+}
+
+release_lock() {
+    flock -u $LOCK_FD 2>/dev/null || true
+    rm -f "$LOCKFILE" 2>/dev/null || true
+}
+
 cleanup() {
     local exit_code=$?
     
-    if [ $exit_code -ne 0 ]; then
+    # Disable trap to prevent recursion
+    trap - EXIT INT TERM
+    
+    # Release lock
+    release_lock
+    
+    if [ $exit_code -ne 0 ] && [ $exit_code -ne 130 ] && [ $exit_code -ne 143 ]; then
         echo ""
-        echo -e "\033[0;31m[ERROR] Script interrupted or failed (exit code: $exit_code)\033[0m"
+        echo -e "\033[0;31m[ERROR] Script failed (exit code: $exit_code)\033[0m"
         if [ -f "$BUILD_LOG" ] && [ -s "$BUILD_LOG" ]; then
             echo -e "\033[0;31m[ERROR] Last 50 lines of build output:\033[0m"
             echo -e "\033[0;31m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
-            tail -50 "$BUILD_LOG"
+            tail -50 "$BUILD_LOG" 2>/dev/null || true
             echo -e "\033[0;31m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
         fi
-        rm -f "$BUILD_LOG"
     fi
+    
+    # Cleanup temp files
+    rm -f "$BUILD_LOG" 2>/dev/null || true
+    rm -rf "$TMP_DIR" 2>/dev/null || true
+    
     exit $exit_code
 }
+
 trap cleanup EXIT
 trap 'echo ""; echo -e "\033[0;31m[ERROR] Interrupted by user (Ctrl+C)\033[0m"; exit 130' INT
 trap 'echo ""; echo -e "\033[0;31m[ERROR] Terminated by signal\033[0m"; exit 143' TERM
 
-# Colors
+# ==================== Colors ====================
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -42,20 +93,16 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-# GitHub repo
+# ==================== Paths ====================
+
 REPO_URL="https://github.com/Joliz1337/monitoring.git"
 TMP_DIR="/tmp/monitoring-installer-$$"
 
-# Install paths
 PANEL_DIR="/opt/monitoring-panel"
 NODE_DIR="/opt/monitoring-node"
 BIN_PATH="/usr/local/bin/monitoring"
 
-# Language (default: auto-detect or English)
 LANG_CODE="en"
-
-# Default timeouts (in seconds)
-DOCKER_BUILD_TIMEOUT=1000  # ~17 minutes
 
 # ==================== Translations ====================
 
@@ -110,15 +157,11 @@ MSG_EN[optimizations_applied]="System optimizations applied!"
 MSG_EN[optimizations_status]="Optimizations"
 MSG_EN[applied]="applied"
 MSG_EN[not_applied]="not applied"
-
-# GitHub mirror messages - English
 MSG_EN[testing_mirrors]="Testing GitHub access..."
 MSG_EN[mirror_selected]="Selected"
 MSG_EN[mirror_failed]="unavailable"
 MSG_EN[all_mirrors_failed]="All sources failed, will try direct GitHub anyway"
 MSG_EN[download_slow]="Download failed, trying alternative..."
-
-# Network/Docker messages - English
 MSG_EN[checking_docker_network]="Checking Docker Hub availability..."
 MSG_EN[docker_network_ok]="Docker Hub is accessible"
 MSG_EN[docker_network_error]="Docker Hub is not accessible"
@@ -140,6 +183,13 @@ MSG_EN[checking_connectivity]="Checking network connectivity..."
 MSG_EN[connectivity_ok]="Network connectivity OK"
 MSG_EN[connectivity_failed]="Network connectivity failed"
 MSG_EN[applying_fix]="Applying fix"
+MSG_EN[retry_attempt]="Retry attempt"
+MSG_EN[timeout_error]="Operation timed out"
+MSG_EN[checking_requirements]="Checking system requirements..."
+MSG_EN[requirements_ok]="System requirements OK"
+MSG_EN[disk_space_low]="Low disk space"
+MSG_EN[memory_low]="Low memory"
+MSG_EN[input_timeout]="Input timeout, using default"
 
 # Russian messages
 MSG_RU[select_language]="Select language / Выберите язык:"
@@ -189,15 +239,11 @@ MSG_RU[optimizations_applied]="Системные оптимизации при�
 MSG_RU[optimizations_status]="Оптимизации"
 MSG_RU[applied]="применены"
 MSG_RU[not_applied]="не применены"
-
-# GitHub mirror messages - Russian
 MSG_RU[testing_mirrors]="Проверка доступа к GitHub..."
 MSG_RU[mirror_selected]="Выбрано"
 MSG_RU[mirror_failed]="недоступно"
 MSG_RU[all_mirrors_failed]="Все источники недоступны, пробуем прямой GitHub"
 MSG_RU[download_slow]="Загрузка не удалась, пробуем альтернативу..."
-
-# Network/Docker messages - Russian
 MSG_RU[checking_docker_network]="Проверка доступности Docker Hub..."
 MSG_RU[docker_network_ok]="Docker Hub доступен"
 MSG_RU[docker_network_error]="Docker Hub недоступен"
@@ -219,14 +265,20 @@ MSG_RU[checking_connectivity]="Проверка сетевого подключ�
 MSG_RU[connectivity_ok]="Сетевое подключение в порядке"
 MSG_RU[connectivity_failed]="Сетевое подключение не работает"
 MSG_RU[applying_fix]="Применяется исправление"
+MSG_RU[retry_attempt]="Попытка повтора"
+MSG_RU[timeout_error]="Превышено время ожидания"
+MSG_RU[checking_requirements]="Проверка системных требований..."
+MSG_RU[requirements_ok]="Системные требования выполнены"
+MSG_RU[disk_space_low]="Мало места на диске"
+MSG_RU[memory_low]="Мало оперативной памяти"
+MSG_RU[input_timeout]="Тайм-аут ввода, используется значение по умолчанию"
 
-# Get message in current language
 msg() {
     local key="$1"
     if [ "$LANG_CODE" = "ru" ]; then
-        echo "${MSG_RU[$key]}"
+        echo "${MSG_RU[$key]:-${MSG_EN[$key]:-$key}}"
     else
-        echo "${MSG_EN[$key]}"
+        echo "${MSG_EN[$key]:-$key}"
     fi
 }
 
@@ -237,8 +289,108 @@ log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+# ==================== Safe Execution Helpers ====================
+
+# Read with timeout and default value
+# Usage: safe_read "prompt" "default_value" timeout_sec result_var
+safe_read() {
+    local prompt="$1"
+    local default="$2"
+    local timeout="${3:-$TIMEOUT_USER_INPUT}"
+    local result_var="$4"
+    local input=""
+    
+    if read -t "$timeout" -p "$prompt" input 2>/dev/null; then
+        if [ -n "$input" ]; then
+            eval "$result_var='$input'"
+        else
+            eval "$result_var='$default'"
+        fi
+        return 0
+    else
+        log_warn "$(msg input_timeout): $default"
+        eval "$result_var='$default'"
+        return 0
+    fi
+}
+
+# Run command with retry logic
+# Usage: run_with_retry max_retries delay_sec "description" command args...
+run_with_retry() {
+    local max_retries="$1"
+    local delay="$2"
+    local desc="$3"
+    shift 3
+    
+    local attempt=1
+    local output
+    local exit_code
+    
+    while [ $attempt -le $max_retries ]; do
+        output=$("$@" 2>&1)
+        exit_code=$?
+        
+        if [ $exit_code -eq 0 ]; then
+            return 0
+        fi
+        
+        if [ $attempt -lt $max_retries ]; then
+            log_warn "$desc - failed (attempt $attempt/$max_retries), retrying in ${delay}s..."
+            sleep "$delay"
+        fi
+        
+        attempt=$((attempt + 1))
+    done
+    
+    log_error "$desc - failed after $max_retries attempts"
+    echo "$output"
+    return $exit_code
+}
+
+# Run command with timeout and retry
+# Usage: run_timeout_retry timeout_sec max_retries delay_sec "description" command args...
+run_timeout_retry() {
+    local timeout_sec="$1"
+    local max_retries="$2"
+    local delay="$3"
+    local desc="$4"
+    shift 4
+    
+    local attempt=1
+    local output
+    local exit_code
+    
+    while [ $attempt -le $max_retries ]; do
+        output=$(timeout "$timeout_sec" "$@" 2>&1)
+        exit_code=$?
+        
+        if [ $exit_code -eq 0 ]; then
+            return 0
+        fi
+        
+        if [ $exit_code -eq 124 ]; then
+            log_warn "$desc - $(msg timeout_error) (${timeout_sec}s, attempt $attempt/$max_retries)"
+        else
+            log_warn "$desc - failed (exit $exit_code, attempt $attempt/$max_retries)"
+        fi
+        
+        if [ $attempt -lt $max_retries ]; then
+            sleep "$delay"
+        fi
+        
+        attempt=$((attempt + 1))
+    done
+    
+    log_error "$desc - failed after $max_retries attempts"
+    if [ -n "$output" ]; then
+        echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo "$output" | tail -30
+        echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    fi
+    return 1
+}
+
 # Run command quietly, show full output only on error
-# Usage: run_quiet "description" command arg1 arg2 ...
 run_quiet() {
     local desc="$1"
     shift
@@ -261,8 +413,7 @@ run_quiet() {
     return 0
 }
 
-# Run command quietly with timeout, show full output only on error
-# Usage: run_quiet_timeout timeout_sec "description" command arg1 arg2 ...
+# Run command quietly with timeout
 run_quiet_timeout() {
     local timeout_sec="$1"
     local desc="$2"
@@ -275,7 +426,7 @@ run_quiet_timeout() {
     
     if [ $exit_code -ne 0 ]; then
         if [ $exit_code -eq 124 ]; then
-            log_warn "$desc - timeout (${timeout_sec}s)"
+            log_warn "$desc - $(msg timeout_error) (${timeout_sec}s)"
         else
             echo ""
             log_error "$desc - failed (exit code: $exit_code)"
@@ -290,44 +441,96 @@ run_quiet_timeout() {
     return 0
 }
 
-# ==================== GitHub Clone Functions ====================
-
-# Clone repository from GitHub
-clone_repo_with_fallback() {
-    local target_dir="$1"
-    local branch="${2:-main}"
-    local repo_url="https://github.com/Joliz1337/monitoring.git"
+# Safe file operation with backup
+safe_write_file() {
+    local file="$1"
+    local content="$2"
+    local backup="${file}.bak.$(date +%Y%m%d_%H%M%S)"
     
-    rm -rf "$target_dir"
-    
-    log_info "$(msg downloading_repo)..."
-    if run_quiet_timeout 120 "git clone" git clone --depth 1 --branch "$branch" "$repo_url" "$target_dir"; then
-        log_success "$(msg repo_downloaded)"
-        return 0
+    # Create backup if file exists
+    if [ -f "$file" ]; then
+        cp "$file" "$backup" 2>/dev/null || true
     fi
     
-    log_error "Failed to download repository"
+    # Ensure directory exists
+    mkdir -p "$(dirname "$file")" 2>/dev/null || true
+    
+    # Write content
+    if echo "$content" > "$file" 2>/dev/null; then
+        return 0
+    else
+        # Restore backup on failure
+        if [ -f "$backup" ]; then
+            mv "$backup" "$file" 2>/dev/null || true
+        fi
+        return 1
+    fi
+}
+
+# ==================== System Requirements Check ====================
+
+check_disk_space() {
+    local required_mb="${1:-2000}"  # 2GB default
+    local available_mb
+    
+    available_mb=$(df -m /opt 2>/dev/null | awk 'NR==2 {print $4}' || echo "0")
+    
+    if [ "$available_mb" -lt "$required_mb" ]; then
+        log_warn "$(msg disk_space_low): ${available_mb}MB available, ${required_mb}MB required"
+        return 1
+    fi
+    return 0
+}
+
+check_memory() {
+    local required_mb="${1:-512}"  # 512MB default
+    local available_mb
+    
+    available_mb=$(free -m 2>/dev/null | awk '/^Mem:/ {print $7}' || echo "0")
+    
+    if [ "$available_mb" -lt "$required_mb" ]; then
+        log_warn "$(msg memory_low): ${available_mb}MB available, ${required_mb}MB recommended"
+        return 1
+    fi
+    return 0
+}
+
+check_requirements() {
+    log_info "$(msg checking_requirements)"
+    local warnings=0
+    
+    check_disk_space 2000 || warnings=$((warnings + 1))
+    check_memory 512 || warnings=$((warnings + 1))
+    
+    if [ $warnings -eq 0 ]; then
+        log_success "$(msg requirements_ok)"
+    fi
+    return 0  # Don't fail, just warn
+}
+
+# ==================== Network Functions ====================
+
+# Check if Docker Hub is accessible (quiet)
+check_docker_hub_quiet() {
+    local urls=(
+        "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/alpine:pull"
+        "https://registry-1.docker.io/v2/"
+    )
+    
+    for url in "${urls[@]}"; do
+        if timeout "$TIMEOUT_CONNECTIVITY_CHECK" curl -fsSL --connect-timeout 10 --max-time 15 "$url" >/dev/null 2>&1; then
+            return 0
+        fi
+    done
+    
     return 1
 }
 
-# ==================== Network Fix Functions ====================
-
-# Check if Docker Hub is accessible (with logs)
+# Check Docker Hub with logs
 check_docker_hub() {
     log_info "$(msg checking_docker_network)"
     
-    # Try to reach Docker Hub auth endpoint
-    if curl -fsSL --connect-timeout 10 --max-time 15 \
-        "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/alpine:pull" \
-        >/dev/null 2>&1; then
-        log_success "$(msg docker_network_ok)"
-        return 0
-    fi
-    
-    # Try alternative check - ping registry
-    if curl -fsSL --connect-timeout 10 --max-time 15 \
-        "https://registry-1.docker.io/v2/" \
-        >/dev/null 2>&1; then
+    if check_docker_hub_quiet; then
         log_success "$(msg docker_network_ok)"
         return 0
     fi
@@ -336,26 +539,7 @@ check_docker_hub() {
     return 1
 }
 
-# Check if Docker Hub is accessible (quiet, no logs)
-check_docker_hub_quiet() {
-    # Try to reach Docker Hub auth endpoint
-    if curl -fsSL --connect-timeout 10 --max-time 15 \
-        "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/alpine:pull" \
-        >/dev/null 2>&1; then
-        return 0
-    fi
-    
-    # Try alternative check - ping registry
-    if curl -fsSL --connect-timeout 10 --max-time 15 \
-        "https://registry-1.docker.io/v2/" \
-        >/dev/null 2>&1; then
-        return 0
-    fi
-    
-    return 1
-}
-
-# Check general internet connectivity (quiet version for internal use)
+# Check general internet connectivity (quiet)
 check_connectivity_quiet() {
     local test_urls=(
         "https://1.1.1.1"
@@ -364,7 +548,7 @@ check_connectivity_quiet() {
     )
     
     for url in "${test_urls[@]}"; do
-        if curl -fsSL --connect-timeout 5 --max-time 10 "$url" >/dev/null 2>&1; then
+        if timeout "$TIMEOUT_CONNECTIVITY_CHECK" curl -fsSL --connect-timeout 5 --max-time 10 "$url" >/dev/null 2>&1; then
             return 0
         fi
     done
@@ -372,7 +556,7 @@ check_connectivity_quiet() {
     return 1
 }
 
-# Check general internet connectivity (with logs)
+# Check connectivity with logs
 check_connectivity() {
     log_info "$(msg checking_connectivity)"
     
@@ -389,27 +573,22 @@ check_connectivity() {
 disable_ipv6() {
     log_info "$(msg disabling_ipv6)"
     
-    # Check if IPv6 is already disabled in optimization config
-    if [ -f /etc/sysctl.d/99-vless-tuning.conf ] && grep -q "disable_ipv6 = 1" /etc/sysctl.d/99-vless-tuning.conf; then
+    # Check if IPv6 is already disabled
+    if [ -f /etc/sysctl.d/99-vless-tuning.conf ] && grep -q "disable_ipv6 = 1" /etc/sysctl.d/99-vless-tuning.conf 2>/dev/null; then
         log_success "IPv6 already disabled"
-        # Just apply the existing settings quietly
         sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null 2>&1 || true
         sysctl -w net.ipv6.conf.default.disable_ipv6=1 >/dev/null 2>&1 || true
         sysctl -w net.ipv6.conf.lo.disable_ipv6=1 >/dev/null 2>&1 || true
         return 0
     fi
     
-    # sysctl settings (separate file if optimizations not applied)
-    cat > /etc/sysctl.d/99-disable-ipv6.conf << 'EOF'
-net.ipv6.conf.all.disable_ipv6 = 1
+    local content='net.ipv6.conf.all.disable_ipv6 = 1
 net.ipv6.conf.default.disable_ipv6 = 1
-net.ipv6.conf.lo.disable_ipv6 = 1
-EOF
+net.ipv6.conf.lo.disable_ipv6 = 1'
     
-    # Apply immediately (quietly)
+    safe_write_file "/etc/sysctl.d/99-disable-ipv6.conf" "$content"
+    
     sysctl -p /etc/sysctl.d/99-disable-ipv6.conf >/dev/null 2>&1 || true
-    
-    # Also apply directly in case sysctl.d is not read
     sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null 2>&1 || true
     sysctl -w net.ipv6.conf.default.disable_ipv6=1 >/dev/null 2>&1 || true
     sysctl -w net.ipv6.conf.lo.disable_ipv6=1 >/dev/null 2>&1 || true
@@ -417,36 +596,29 @@ EOF
     log_success "$(msg ipv6_disabled)"
 }
 
-# Configure DNS to use Cloudflare and Google
+# Configure DNS
 configure_dns() {
     log_info "$(msg configuring_dns)"
     
-    # Backup existing resolv.conf
+    # Backup
     if [ -f /etc/resolv.conf ] && [ ! -f /etc/resolv.conf.backup ]; then
         cp /etc/resolv.conf /etc/resolv.conf.backup 2>/dev/null || true
     fi
     
-    # Check if resolv.conf is managed by systemd-resolved
-    if [ -L /etc/resolv.conf ] && readlink /etc/resolv.conf | grep -q systemd; then
-        # Configure systemd-resolved
-        mkdir -p /etc/systemd/resolved.conf.d
-        cat > /etc/systemd/resolved.conf.d/dns.conf << 'EOF'
-[Resolve]
+    if [ -L /etc/resolv.conf ] && readlink /etc/resolv.conf 2>/dev/null | grep -q systemd; then
+        mkdir -p /etc/systemd/resolved.conf.d 2>/dev/null || true
+        local content='[Resolve]
 DNS=1.1.1.1 8.8.8.8 1.0.0.1 8.8.4.4
-FallbackDNS=9.9.9.9 149.112.112.112
-EOF
-        systemctl restart systemd-resolved >/dev/null 2>&1 || true
+FallbackDNS=9.9.9.9 149.112.112.112'
+        safe_write_file "/etc/systemd/resolved.conf.d/dns.conf" "$content"
+        timeout "$TIMEOUT_SYSTEMCTL" systemctl restart systemd-resolved >/dev/null 2>&1 || true
     else
-        # Direct modification of resolv.conf
-        # Remove immutable attribute if set
         chattr -i /etc/resolv.conf >/dev/null 2>&1 || true
-        
-        cat > /etc/resolv.conf << 'EOF'
-nameserver 1.1.1.1
+        local content='nameserver 1.1.1.1
 nameserver 8.8.8.8
 nameserver 1.0.0.1
-nameserver 8.8.4.4
-EOF
+nameserver 8.8.4.4'
+        safe_write_file "/etc/resolv.conf" "$content"
     fi
     
     log_success "$(msg dns_configured)"
@@ -459,27 +631,20 @@ configure_docker_dns() {
     local docker_config_dir="/etc/docker"
     local daemon_json="$docker_config_dir/daemon.json"
     
-    mkdir -p "$docker_config_dir"
+    mkdir -p "$docker_config_dir" 2>/dev/null || true
     
-    # Create or update daemon.json with DNS only
     if [ -f "$daemon_json" ]; then
-        cp "$daemon_json" "${daemon_json}.backup.$(date +%Y%m%d_%H%M%S)"
+        cp "$daemon_json" "${daemon_json}.backup.$(date +%Y%m%d_%H%M%S)" 2>/dev/null || true
         if command -v jq &>/dev/null; then
-            jq '. + {"dns": ["1.1.1.1", "8.8.8.8"]}' "$daemon_json" > "${daemon_json}.tmp" && \
+            jq '. + {"dns": ["1.1.1.1", "8.8.8.8"]}' "$daemon_json" > "${daemon_json}.tmp" 2>/dev/null && \
                 mv "${daemon_json}.tmp" "$daemon_json"
         else
-            cat > "$daemon_json" << 'EOF'
-{
-    "dns": ["1.1.1.1", "8.8.8.8"]
-}
-EOF
+            local content='{"dns": ["1.1.1.1", "8.8.8.8"]}'
+            safe_write_file "$daemon_json" "$content"
         fi
     else
-        cat > "$daemon_json" << 'EOF'
-{
-    "dns": ["1.1.1.1", "8.8.8.8"]
-}
-EOF
+        local content='{"dns": ["1.1.1.1", "8.8.8.8"]}'
+        safe_write_file "$daemon_json" "$content"
     fi
     
     log_success "$(msg dns_configured)"
@@ -489,14 +654,14 @@ EOF
 restart_docker() {
     log_info "$(msg restarting_docker)"
     
-    systemctl daemon-reload >/dev/null 2>&1 || true
-    systemctl restart docker >/dev/null 2>&1 || service docker restart >/dev/null 2>&1 || true
+    timeout "$TIMEOUT_SYSTEMCTL" systemctl daemon-reload >/dev/null 2>&1 || true
+    timeout "$TIMEOUT_SYSTEMCTL" systemctl restart docker >/dev/null 2>&1 || \
+        timeout "$TIMEOUT_SYSTEMCTL" service docker restart >/dev/null 2>&1 || true
     
-    # Wait for Docker to be ready
     local max_wait=30
     local count=0
     while [ $count -lt $max_wait ]; do
-        if docker info >/dev/null 2>&1; then
+        if timeout 5 docker info >/dev/null 2>&1; then
             log_success "$(msg docker_restarted)"
             return 0
         fi
@@ -512,35 +677,48 @@ restart_docker() {
 fix_docker_network() {
     log_info "$(msg fixing_docker_network)"
     
-    # Fix 1: Disable IPv6
     disable_ipv6
-    
-    # Fix 2: Configure DNS
     configure_dns
-    
-    # Fix 3: Configure Docker DNS
     configure_docker_dns
-    
-    # Restart Docker to apply changes
     restart_docker
     
-    # Wait a bit for network to stabilize
     sleep 3
-    
     return 0
 }
 
-# Build with retry and network fix
+# ==================== Git Clone with Retry ====================
+
+clone_repo_with_fallback() {
+    local target_dir="$1"
+    local branch="${2:-main}"
+    local repo_url="https://github.com/Joliz1337/monitoring.git"
+    
+    rm -rf "$target_dir" 2>/dev/null || true
+    
+    log_info "$(msg downloading_repo)..."
+    
+    if run_timeout_retry "$TIMEOUT_GIT_CLONE" "$MAX_RETRIES" "$RETRY_DELAY" "git clone" \
+        git clone --depth 1 --branch "$branch" "$repo_url" "$target_dir"; then
+        log_success "$(msg repo_downloaded)"
+        return 0
+    fi
+    
+    log_error "Failed to download repository"
+    return 1
+}
+
+# ==================== Docker Build with Retry ====================
+
 docker_build_with_retry() {
     local build_dir="$1"
-    local max_retries=3
+    local max_retries=$MAX_RETRIES
     local retry=0
-    local build_timeout="${DOCKER_BUILD_TIMEOUT:-1000}"  # ~17 min default
+    local build_timeout="$TIMEOUT_DOCKER_BUILD"
     
-    cd "$build_dir"
+    cd "$build_dir" || return 1
     
     while [ $retry -lt $max_retries ]; do
-        # First check if Docker Hub is accessible (quietly)
+        # Pre-check network
         if ! check_docker_hub_quiet; then
             log_warn "$(msg docker_network_error)"
             
@@ -550,22 +728,21 @@ docker_build_with_retry() {
             fi
         fi
         
-        # Try to build with timeout
-        log_info "Building containers (attempt $((retry + 1))/$max_retries, timeout: ${build_timeout}s)..."
+        log_info "Building containers ($(msg retry_attempt) $((retry + 1))/$max_retries, timeout: ${build_timeout}s)..."
         
         local build_exit_code
         
-        # Run build in background, capture output to log file
-        set +e
+        # Run build with timeout
         timeout "$build_timeout" docker compose build --no-cache > "$BUILD_LOG" 2>&1 &
         local build_pid=$!
         
-        # Show progress while building
+        # Progress display
         local dots=""
         while kill -0 $build_pid 2>/dev/null; do
             dots="${dots}."
             if [ ${#dots} -gt 3 ]; then dots="."; fi
-            local current_step=$(grep -oE 'Step [0-9]+/[0-9]+|#[0-9]+ \[[0-9]+/[0-9]+\]' "$BUILD_LOG" 2>/dev/null | tail -1)
+            local current_step
+            current_step=$(grep -oE 'Step [0-9]+/[0-9]+|#[0-9]+ \[[0-9]+/[0-9]+\]' "$BUILD_LOG" 2>/dev/null | tail -1 || true)
             if [ -n "$current_step" ]; then
                 printf "\r${BLUE}[INFO]${NC} Building${dots} %-30s" "($current_step)"
             else
@@ -575,13 +752,11 @@ docker_build_with_retry() {
         done
         printf "\r%-60s\r" " "
         
-        wait $build_pid
+        wait $build_pid 2>/dev/null
         build_exit_code=$?
-        set -e
         
         if [ $build_exit_code -eq 0 ]; then
-            rm -f "$BUILD_LOG"
-            # Clear screen after successful build to show only important info
+            rm -f "$BUILD_LOG" 2>/dev/null || true
             clear
             echo ""
             echo -e "${CYAN}╔════════════════════════════════════════════╗${NC}"
@@ -591,22 +766,20 @@ docker_build_with_retry() {
             log_success "$(msg build_success)"
             return 0
         elif [ $build_exit_code -eq 124 ]; then
-            log_error "Build timeout after ${build_timeout}s"
-            echo -e "${YELLOW}Build was taking too long. This usually means:${NC}"
-            echo "  - Very slow internet connection"
+            log_error "Build $(msg timeout_error) (${build_timeout}s)"
+            echo -e "${YELLOW}Build was taking too long. Possible causes:${NC}"
+            echo "  - Slow internet connection"
             echo "  - Network issues with Docker Hub"
             echo "  - Server ran out of memory (check: free -h)"
-            echo ""
-            echo -e "${YELLOW}Last 50 lines of build output:${NC}"
-            echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-            tail -50 "$BUILD_LOG" 2>/dev/null || echo "(no log available)"
-            echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         else
             log_error "Build failed (exit code: $build_exit_code)"
+        fi
+        
+        if [ -f "$BUILD_LOG" ] && [ -s "$BUILD_LOG" ]; then
             echo ""
-            echo -e "${YELLOW}Last 50 lines of build output:${NC}"
+            echo -e "${YELLOW}Last 30 lines of build output:${NC}"
             echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-            tail -50 "$BUILD_LOG" 2>/dev/null || echo "(no log available)"
+            tail -30 "$BUILD_LOG" 2>/dev/null || echo "(no log available)"
             echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         fi
         
@@ -616,16 +789,14 @@ docker_build_with_retry() {
             log_warn "$(msg build_failed)"
             log_info "$(msg retrying_build)"
             
-            # Apply additional fixes on subsequent retries
             if [ $retry -eq 1 ]; then
                 fix_docker_network
             fi
             
-            sleep 5
+            sleep "$RETRY_DELAY"
         fi
     done
     
-    # All retries failed
     log_error "$(msg build_failed)"
     log_error "$(msg network_fix_failed)"
     log_info "$(msg manual_fix_hint)"
@@ -634,10 +805,23 @@ docker_build_with_retry() {
     echo "  1. Check if server has internet access"
     echo "  2. Try using a VPN"
     echo "  3. Check firewall settings"
-    echo "  4. Try again later (Docker Hub may be temporarily unavailable)"
-    echo "  5. Increase timeout: export DOCKER_BUILD_TIMEOUT=3600"
+    echo "  4. Try again later"
+    echo "  5. Increase timeout: export TIMEOUT_DOCKER_BUILD=3600"
     echo ""
     return 1
+}
+
+# ==================== APT Operations with Retry ====================
+
+apt_update_safe() {
+    run_timeout_retry "$TIMEOUT_APT_UPDATE" "$MAX_RETRIES" "$RETRY_DELAY" "apt-get update" \
+        apt-get update -qq
+}
+
+apt_install_safe() {
+    local packages="$*"
+    run_timeout_retry "$TIMEOUT_APT_INSTALL" "$MAX_RETRIES" "$RETRY_DELAY" "apt-get install $packages" \
+        env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq -o Dpkg::Options::="--force-confold" $packages
 }
 
 # ==================== Core Functions ====================
@@ -652,8 +836,11 @@ check_root() {
 check_git() {
     if ! command -v git &> /dev/null; then
         log_info "$(msg installing_git)"
-        run_quiet "apt-get update" apt-get update -qq
-        run_quiet "apt-get install git" apt-get install -y -qq git
+        apt_update_safe || log_warn "apt update had issues"
+        apt_install_safe git || {
+            log_error "Failed to install git"
+            return 1
+        }
     fi
 }
 
@@ -663,39 +850,38 @@ clone_repo() {
 }
 
 cleanup_temp() {
-    rm -rf "$TMP_DIR"
+    rm -rf "$TMP_DIR" 2>/dev/null || true
 }
 
-# Install CLI command
 install_cli() {
-    cat > "$BIN_PATH" << 'SCRIPT'
-#!/bin/bash
+    local script_content='#!/bin/bash
 # Monitoring System Manager
-# Run this command to manage your monitoring installation
 
 GITHUB_URL="https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh"
+TIMEOUT=120
 
-# Check if we have a local copy
 if [ -f "/opt/monitoring-panel/install.sh" ]; then
     exec bash "/opt/monitoring-panel/install.sh" "$@"
 elif [ -f "/opt/monitoring-node/install.sh" ]; then
     exec bash "/opt/monitoring-node/install.sh" "$@"
 else
-    # Download and run from GitHub
-    SCRIPT_CONTENT=$(curl -fsSL --connect-timeout 30 --max-time 120 "$GITHUB_URL" 2>/dev/null)
+    SCRIPT_CONTENT=$(timeout "$TIMEOUT" curl -fsSL --connect-timeout 30 --max-time "$TIMEOUT" "$GITHUB_URL" 2>/dev/null)
     if [ -n "$SCRIPT_CONTENT" ]; then
         exec bash -c "$SCRIPT_CONTENT" -- "$@"
     else
         echo "Failed to download installer from GitHub"
         exit 1
     fi
-fi
-SCRIPT
-    chmod +x "$BIN_PATH"
-    log_success "$(msg cli_installed)"
+fi'
+    
+    if safe_write_file "$BIN_PATH" "$script_content"; then
+        chmod +x "$BIN_PATH" 2>/dev/null || true
+        log_success "$(msg cli_installed)"
+    else
+        log_warn "Could not install CLI command"
+    fi
 }
 
-# Copy install.sh to installation directories
 copy_installer() {
     local target="$1"
     if [ -d "$target" ]; then
@@ -710,13 +896,9 @@ copy_installer() {
 apply_system_optimizations() {
     log_info "$(msg optimizing_system)"
     
-    # Remove old separate IPv6 config if exists (now integrated into main config)
     rm -f /etc/sysctl.d/99-disable-ipv6.conf >/dev/null 2>&1 || true
-    
-    # Remove old config if exists
     rm -f /etc/sysctl.d/99-haproxy.conf >/dev/null 2>&1 || true
     
-    # Determine config source directory (from cloned repo or local configs/)
     local CONFIG_SRC=""
     if [ -d "$TMP_DIR/configs" ]; then
         CONFIG_SRC="$TMP_DIR/configs"
@@ -725,148 +907,127 @@ apply_system_optimizations() {
     fi
     
     if [ -n "$CONFIG_SRC" ] && [ -f "$CONFIG_SRC/sysctl.conf" ]; then
-        # Use configs from repository
         log_info "Installing optimization configs..."
         
-        # Copy sysctl config
-        cp "$CONFIG_SRC/sysctl.conf" /etc/sysctl.d/99-vless-tuning.conf
-        chmod 644 /etc/sysctl.d/99-vless-tuning.conf
+        cp "$CONFIG_SRC/sysctl.conf" /etc/sysctl.d/99-vless-tuning.conf 2>/dev/null || true
+        chmod 644 /etc/sysctl.d/99-vless-tuning.conf 2>/dev/null || true
         log_success "sysctl config installed"
         
-        # Copy limits config
         if [ -f "$CONFIG_SRC/limits.conf" ]; then
-            cp "$CONFIG_SRC/limits.conf" /etc/security/limits.d/99-nofile.conf
-            chmod 644 /etc/security/limits.d/99-nofile.conf
+            cp "$CONFIG_SRC/limits.conf" /etc/security/limits.d/99-nofile.conf 2>/dev/null || true
+            chmod 644 /etc/security/limits.d/99-nofile.conf 2>/dev/null || true
             log_success "limits.conf installed"
         fi
         
-        # Copy systemd limits config
         if [ -f "$CONFIG_SRC/systemd-limits.conf" ]; then
-            mkdir -p /etc/systemd/system.conf.d
-            cp "$CONFIG_SRC/systemd-limits.conf" /etc/systemd/system.conf.d/limits.conf
-            chmod 644 /etc/systemd/system.conf.d/limits.conf
+            mkdir -p /etc/systemd/system.conf.d 2>/dev/null || true
+            cp "$CONFIG_SRC/systemd-limits.conf" /etc/systemd/system.conf.d/limits.conf 2>/dev/null || true
+            chmod 644 /etc/systemd/system.conf.d/limits.conf 2>/dev/null || true
             
-            # Create user slice limits (replace [Manager] with [Slice])
-            mkdir -p /etc/systemd/system/user-.slice.d
-            sed 's/\[Manager\]/[Slice]/' "$CONFIG_SRC/systemd-limits.conf" > /etc/systemd/system/user-.slice.d/limits.conf
-            chmod 644 /etc/systemd/system/user-.slice.d/limits.conf
+            mkdir -p /etc/systemd/system/user-.slice.d 2>/dev/null || true
+            sed 's/\[Manager\]/[Slice]/' "$CONFIG_SRC/systemd-limits.conf" > /etc/systemd/system/user-.slice.d/limits.conf 2>/dev/null || true
+            chmod 644 /etc/systemd/system/user-.slice.d/limits.conf 2>/dev/null || true
             
-            systemctl daemon-reload >/dev/null 2>&1 || true
+            timeout "$TIMEOUT_SYSTEMCTL" systemctl daemon-reload >/dev/null 2>&1 || true
             log_success "systemd limits installed"
         fi
         
-        # Copy network-tune.sh
         if [ -f "$CONFIG_SRC/network-tune.sh" ]; then
-            mkdir -p /opt/monitoring-node/scripts
-            cp "$CONFIG_SRC/network-tune.sh" /opt/monitoring-node/scripts/network-tune.sh
-            chmod +x /opt/monitoring-node/scripts/network-tune.sh
+            mkdir -p /opt/monitoring-node/scripts 2>/dev/null || true
+            cp "$CONFIG_SRC/network-tune.sh" /opt/monitoring-node/scripts/network-tune.sh 2>/dev/null || true
+            chmod +x /opt/monitoring-node/scripts/network-tune.sh 2>/dev/null || true
             log_success "network-tune.sh installed"
         fi
         
-        # Copy network-tune.service
         if [ -f "$CONFIG_SRC/network-tune.service" ]; then
-            cp "$CONFIG_SRC/network-tune.service" /etc/systemd/system/network-tune.service
-            chmod 644 /etc/systemd/system/network-tune.service
+            cp "$CONFIG_SRC/network-tune.service" /etc/systemd/system/network-tune.service 2>/dev/null || true
+            chmod 644 /etc/systemd/system/network-tune.service 2>/dev/null || true
             log_success "network-tune.service installed"
         fi
         
-        # Copy configs VERSION file for version tracking
         if [ -f "$CONFIG_SRC/VERSION" ]; then
-            mkdir -p /opt/monitoring-node/configs
-            cp "$CONFIG_SRC/VERSION" /opt/monitoring-node/configs/VERSION
-            chmod 644 /opt/monitoring-node/configs/VERSION
+            mkdir -p /opt/monitoring-node/configs 2>/dev/null || true
+            cp "$CONFIG_SRC/VERSION" /opt/monitoring-node/configs/VERSION 2>/dev/null || true
+            chmod 644 /opt/monitoring-node/configs/VERSION 2>/dev/null || true
             log_success "configs VERSION installed"
         fi
     else
-        # Fallback: download configs from GitHub
         log_info "Downloading optimization configs..."
         
         local GITHUB_RAW="https://raw.githubusercontent.com/Joliz1337/monitoring/main/configs"
         
-        # Helper function: download from GitHub
         download_config() {
             local filename="$1"
             local dest="$2"
             
-            if curl -fsSL --connect-timeout 30 --max-time 120 "$GITHUB_RAW/$filename" -o "$dest" 2>/dev/null; then
+            if timeout "$TIMEOUT_CURL" curl -fsSL --connect-timeout 30 --max-time "$TIMEOUT_CURL" \
+                "$GITHUB_RAW/$filename" -o "$dest" 2>/dev/null; then
                 return 0
             fi
             return 1
         }
         
-        # Download sysctl config
         if download_config "sysctl.conf" "/etc/sysctl.d/99-vless-tuning.conf"; then
-            chmod 644 /etc/sysctl.d/99-vless-tuning.conf
+            chmod 644 /etc/sysctl.d/99-vless-tuning.conf 2>/dev/null || true
             log_success "sysctl config downloaded"
         else
             log_error "Failed to download sysctl.conf"
             return 1
         fi
         
-        # Download limits config
         if download_config "limits.conf" "/etc/security/limits.d/99-nofile.conf"; then
-            chmod 644 /etc/security/limits.d/99-nofile.conf
+            chmod 644 /etc/security/limits.d/99-nofile.conf 2>/dev/null || true
             log_success "limits.conf downloaded"
         fi
         
-        # Download systemd limits config
-        mkdir -p /etc/systemd/system.conf.d
+        mkdir -p /etc/systemd/system.conf.d 2>/dev/null || true
         if download_config "systemd-limits.conf" "/etc/systemd/system.conf.d/limits.conf"; then
-            chmod 644 /etc/systemd/system.conf.d/limits.conf
+            chmod 644 /etc/systemd/system.conf.d/limits.conf 2>/dev/null || true
             
-            # Create user slice limits
-            mkdir -p /etc/systemd/system/user-.slice.d
-            sed 's/\[Manager\]/[Slice]/' /etc/systemd/system.conf.d/limits.conf > /etc/systemd/system/user-.slice.d/limits.conf
-            chmod 644 /etc/systemd/system/user-.slice.d/limits.conf
+            mkdir -p /etc/systemd/system/user-.slice.d 2>/dev/null || true
+            sed 's/\[Manager\]/[Slice]/' /etc/systemd/system.conf.d/limits.conf > /etc/systemd/system/user-.slice.d/limits.conf 2>/dev/null || true
+            chmod 644 /etc/systemd/system/user-.slice.d/limits.conf 2>/dev/null || true
             
-            systemctl daemon-reload >/dev/null 2>&1 || true
+            timeout "$TIMEOUT_SYSTEMCTL" systemctl daemon-reload >/dev/null 2>&1 || true
             log_success "systemd limits downloaded"
         fi
         
-        # Download network-tune.sh
-        mkdir -p /opt/monitoring-node/scripts
+        mkdir -p /opt/monitoring-node/scripts 2>/dev/null || true
         if download_config "network-tune.sh" "/opt/monitoring-node/scripts/network-tune.sh"; then
-            chmod +x /opt/monitoring-node/scripts/network-tune.sh
+            chmod +x /opt/monitoring-node/scripts/network-tune.sh 2>/dev/null || true
             log_success "network-tune.sh downloaded"
         fi
         
-        # Download network-tune.service
         if download_config "network-tune.service" "/etc/systemd/system/network-tune.service"; then
-            chmod 644 /etc/systemd/system/network-tune.service
+            chmod 644 /etc/systemd/system/network-tune.service 2>/dev/null || true
             log_success "network-tune.service downloaded"
         fi
         
-        # Download configs VERSION file for version tracking
-        mkdir -p /opt/monitoring-node/configs
+        mkdir -p /opt/monitoring-node/configs 2>/dev/null || true
         if download_config "VERSION" "/opt/monitoring-node/configs/VERSION"; then
-            chmod 644 /opt/monitoring-node/configs/VERSION
+            chmod 644 /opt/monitoring-node/configs/VERSION 2>/dev/null || true
             log_success "configs VERSION downloaded"
         fi
     fi
     
-    # Apply sysctl settings (quietly, show warning only if needed)
     log_info "Applying sysctl settings..."
     if ! sysctl -p /etc/sysctl.d/99-vless-tuning.conf >/dev/null 2>&1; then
         log_warn "Some sysctl settings may require kernel support"
     fi
     log_success "sysctl settings applied"
     
-    # PAM limits (for SSH sessions)
     if [ -f /etc/pam.d/common-session ]; then
-        if ! grep -q "pam_limits.so" /etc/pam.d/common-session; then
+        if ! grep -q "pam_limits.so" /etc/pam.d/common-session 2>/dev/null; then
             echo "session required pam_limits.so" >> /etc/pam.d/common-session
         fi
     fi
     
-    # Load conntrack module if not loaded
     modprobe nf_conntrack >/dev/null 2>&1 || true
     
-    # Enable and restart network-tune service (restart ensures new settings are applied)
     log_info "Enabling network-tune service..."
-    systemctl daemon-reload >/dev/null 2>&1
-    systemctl enable network-tune.service >/dev/null 2>&1 || true
-    if ! systemctl restart network-tune.service >/dev/null 2>&1; then
-        # Try running script directly if service fails
+    timeout "$TIMEOUT_SYSTEMCTL" systemctl daemon-reload >/dev/null 2>&1 || true
+    timeout "$TIMEOUT_SYSTEMCTL" systemctl enable network-tune.service >/dev/null 2>&1 || true
+    if ! timeout "$TIMEOUT_SYSTEMCTL" systemctl restart network-tune.service >/dev/null 2>&1; then
         log_warn "Service restart failed, trying direct execution..."
         if /opt/monitoring-node/scripts/network-tune.sh >/dev/null 2>&1; then
             log_success "Network tuning applied (direct execution)"
@@ -877,26 +1038,18 @@ apply_system_optimizations() {
         log_success "Network tuning service enabled and applied"
     fi
     
-    # Verify critical settings
     log_info "Verifying optimizations..."
     local verify_ok=true
     
-    # Check BBR
     if [ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)" != "bbr" ]; then
         log_warn "BBR not active (kernel may not support it)"
         verify_ok=false
     fi
     
-    # Check conntrack hashsize
-    local hashsize=$(cat /sys/module/nf_conntrack/parameters/hashsize 2>/dev/null || echo "0")
-    if [ "$hashsize" -lt 524288 ]; then
+    local hashsize
+    hashsize=$(cat /sys/module/nf_conntrack/parameters/hashsize 2>/dev/null || echo "0")
+    if [ "$hashsize" -lt 524288 ] 2>/dev/null; then
         log_warn "Conntrack hashsize is $hashsize (expected >=524288)"
-        verify_ok=false
-    fi
-    
-    # Check key sysctl values
-    if [ "$(sysctl -n net.netfilter.nf_conntrack_tcp_timeout_syn_sent 2>/dev/null)" != "10" ]; then
-        log_warn "SYN_SENT timeout not set correctly"
         verify_ok=false
     fi
     
@@ -915,36 +1068,40 @@ check_optimizations_status() {
     fi
 }
 
-check_network_tune_status() {
-    if systemctl is-enabled network-tune.service &>/dev/null; then
-        echo "$(msg applied)"
-    else
-        echo "$(msg not_applied)"
-    fi
-}
-
 # ==================== Panel Functions ====================
 
 install_panel() {
     log_info "$(msg installing_panel) $PANEL_DIR..."
     
+    check_requirements
+    
     if [ -d "$PANEL_DIR" ]; then
         log_warn "$(msg panel_already_installed) $PANEL_DIR"
-        read -p "$(msg reinstall_confirm) " confirm
+        local confirm=""
+        safe_read "$(msg reinstall_confirm) " "n" "$TIMEOUT_USER_INPUT" confirm
         if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
             log_info "$(msg installation_cancelled)"
             return 1
         fi
+        
+        # Stop containers with timeout
+        cd "$PANEL_DIR" 2>/dev/null && \
+            timeout "$TIMEOUT_DOCKER_COMPOSE_DOWN" docker compose down -v >/dev/null 2>&1 || true
         rm -rf "$PANEL_DIR"
     fi
     
-    cp -r "$TMP_DIR/panel" "$PANEL_DIR"
+    cp -r "$TMP_DIR/panel" "$PANEL_DIR" || {
+        log_error "Failed to copy panel files"
+        return 1
+    }
     copy_installer "$PANEL_DIR"
-    cd "$PANEL_DIR"
+    cd "$PANEL_DIR" || return 1
     chmod +x deploy.sh update.sh >/dev/null 2>&1 || true
     
-    # Run deploy with network-aware build
-    ./deploy.sh
+    ./deploy.sh || {
+        log_error "Panel deploy failed"
+        return 1
+    }
     
     install_cli
     log_success "$(msg panel_installed)"
@@ -958,16 +1115,21 @@ update_panel() {
     fi
     
     log_info "$(msg updating_panel)"
-    cd "$PANEL_DIR"
+    cd "$PANEL_DIR" || return 1
     
     if [ -f "update.sh" ]; then
-        ./update.sh
+        ./update.sh || {
+            log_error "Panel update failed"
+            return 1
+        }
     else
-        # Fallback: manual update
-        clone_repo
-        cp "$TMP_DIR/panel/update.sh" "$PANEL_DIR/update.sh"
-        chmod +x "$PANEL_DIR/update.sh"
-        ./update.sh
+        clone_repo || return 1
+        cp "$TMP_DIR/panel/update.sh" "$PANEL_DIR/update.sh" 2>/dev/null || true
+        chmod +x "$PANEL_DIR/update.sh" 2>/dev/null || true
+        ./update.sh || {
+            log_error "Panel update failed"
+            return 1
+        }
     fi
     
     copy_installer "$PANEL_DIR"
@@ -980,19 +1142,20 @@ remove_panel() {
         return 1
     fi
     
-    read -p "$(msg remove_confirm) " confirm
+    local confirm=""
+    safe_read "$(msg remove_confirm) " "n" "$TIMEOUT_USER_INPUT" confirm
     if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
         log_info "$(msg removal_cancelled)"
         return 1
     fi
     
     log_info "$(msg stopping_containers)"
-    cd "$PANEL_DIR" && docker compose down -v >/dev/null 2>&1 || true
+    cd "$PANEL_DIR" 2>/dev/null && \
+        timeout "$TIMEOUT_DOCKER_COMPOSE_DOWN" docker compose down -v >/dev/null 2>&1 || true
     
     log_info "$(msg removing_files)"
     rm -rf "$PANEL_DIR"
     
-    # Remove CLI if both panel and node are uninstalled
     if { [ ! -d "$NODE_DIR" ] || [ ! -f "$NODE_DIR/docker-compose.yml" ]; } && [ -f "$BIN_PATH" ]; then
         rm -f "$BIN_PATH"
     fi
@@ -1005,54 +1168,65 @@ remove_panel() {
 install_node() {
     log_info "$(msg installing_node) $NODE_DIR..."
     
+    check_requirements
+    
     if [ -d "$NODE_DIR" ]; then
         log_warn "$(msg node_already_installed) $NODE_DIR"
-        read -p "$(msg reinstall_confirm) " confirm
+        local confirm=""
+        safe_read "$(msg reinstall_confirm) " "n" "$TIMEOUT_USER_INPUT" confirm
         if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
             log_info "$(msg installation_cancelled)"
             return 1
         fi
+        
+        cd "$NODE_DIR" 2>/dev/null && \
+            timeout "$TIMEOUT_DOCKER_COMPOSE_DOWN" docker compose down -v >/dev/null 2>&1 || true
         rm -rf "$NODE_DIR"
     fi
     
-    # Install HAProxy if not already installed (native systemd service)
+    # Install HAProxy
     if ! command -v haproxy &>/dev/null; then
         log_info "Installing HAProxy..."
-        run_quiet "apt-get update" apt-get update -qq
-        # Use DEBIAN_FRONTEND=noninteractive to avoid config prompts during reinstall
-        run_quiet "apt-get install haproxy" env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq -o Dpkg::Options::="--force-confold" haproxy
-        systemctl enable haproxy >/dev/null 2>&1
+        apt_update_safe || log_warn "apt update had issues"
+        apt_install_safe haproxy || {
+            log_error "Failed to install HAProxy"
+            return 1
+        }
+        timeout "$TIMEOUT_SYSTEMCTL" systemctl enable haproxy >/dev/null 2>&1 || true
         log_success "HAProxy installed"
     else
         log_success "HAProxy already installed"
     fi
     
-    # Install ipset for IP blocklist management (required on host for nsenter)
+    # Install ipset
     if ! command -v ipset &>/dev/null; then
         log_info "Installing ipset..."
-        run_quiet "apt-get install ipset" apt-get install -y -qq ipset
+        apt_install_safe ipset || log_warn "ipset installation had issues"
         log_success "ipset installed"
     else
         log_success "ipset already installed"
     fi
     
-    # Create HAProxy config directory if not exists
-    mkdir -p /etc/haproxy
+    mkdir -p /etc/haproxy 2>/dev/null || true
     
-    # Check if HAProxy is already running - don't interfere
-    if systemctl is-active --quiet haproxy; then
+    if timeout 5 systemctl is-active --quiet haproxy 2>/dev/null; then
         log_info "HAProxy is already running"
     else
         log_info "HAProxy is not running (will start when rules are configured)"
     fi
     
-    cp -r "$TMP_DIR/node" "$NODE_DIR"
+    cp -r "$TMP_DIR/node" "$NODE_DIR" || {
+        log_error "Failed to copy node files"
+        return 1
+    }
     copy_installer "$NODE_DIR"
-    cd "$NODE_DIR"
+    cd "$NODE_DIR" || return 1
     chmod +x deploy.sh update.sh generate-ssl.sh >/dev/null 2>&1 || true
     
-    # Run deploy with network-aware build
-    ./deploy.sh
+    ./deploy.sh || {
+        log_error "Node deploy failed"
+        return 1
+    }
     
     install_cli
     log_success "$(msg node_installed)"
@@ -1066,16 +1240,21 @@ update_node() {
     fi
     
     log_info "$(msg updating_node)"
-    cd "$NODE_DIR"
+    cd "$NODE_DIR" || return 1
     
     if [ -f "update.sh" ]; then
-        ./update.sh
+        ./update.sh || {
+            log_error "Node update failed"
+            return 1
+        }
     else
-        # Fallback: manual update
-        clone_repo
-        cp "$TMP_DIR/node/update.sh" "$NODE_DIR/update.sh"
-        chmod +x "$NODE_DIR/update.sh"
-        ./update.sh
+        clone_repo || return 1
+        cp "$TMP_DIR/node/update.sh" "$NODE_DIR/update.sh" 2>/dev/null || true
+        chmod +x "$NODE_DIR/update.sh" 2>/dev/null || true
+        ./update.sh || {
+            log_error "Node update failed"
+            return 1
+        }
     fi
     
     copy_installer "$NODE_DIR"
@@ -1088,24 +1267,25 @@ remove_node() {
         return 1
     fi
     
-    read -p "$(msg remove_confirm) " confirm
+    local confirm=""
+    safe_read "$(msg remove_confirm) " "n" "$TIMEOUT_USER_INPUT" confirm
     if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
         log_info "$(msg removal_cancelled)"
         return 1
     fi
     
     log_info "$(msg stopping_containers)"
-    cd "$NODE_DIR" && docker compose down -v >/dev/null 2>&1 || true
+    cd "$NODE_DIR" 2>/dev/null && \
+        timeout "$TIMEOUT_DOCKER_COMPOSE_DOWN" docker compose down -v >/dev/null 2>&1 || true
     
     log_info "$(msg removing_files)"
     rm -rf "$NODE_DIR"
     
-    # Remove CLI if both panel and node are uninstalled
     if [ ! -d "$PANEL_DIR" ] && [ -f "$BIN_PATH" ]; then
         rm -f "$BIN_PATH"
     fi
     
-    # Clean up orphan directories from optimizations
+    # Clean up orphan directories
     if [ -d "$NODE_DIR" ] && [ ! -f "$NODE_DIR/docker-compose.yml" ]; then
         rm -rf "$NODE_DIR"
     fi
@@ -1126,7 +1306,8 @@ select_language() {
     echo -e "  ${GREEN}2)${NC} Русский"
     echo ""
     
-    read -p "Select / Выберите [1-2]: " lang_choice
+    local lang_choice=""
+    safe_read "Select / Выберите [1-2]: " "1" 30 lang_choice
     
     case $lang_choice in
         1) LANG_CODE="en" ;;
@@ -1134,14 +1315,13 @@ select_language() {
         *) LANG_CODE="en" ;;
     esac
     
-    # Save language preference
     mkdir -p /etc/monitoring 2>/dev/null || true
     echo "$LANG_CODE" > /etc/monitoring/language 2>/dev/null || true
 }
 
 load_language() {
     if [ -f /etc/monitoring/language ]; then
-        LANG_CODE=$(cat /etc/monitoring/language)
+        LANG_CODE=$(cat /etc/monitoring/language 2>/dev/null || echo "en")
     fi
 }
 
@@ -1155,12 +1335,10 @@ show_menu() {
     echo -e "${CYAN}╚════════════════════════════════════════════╝${NC}"
     echo ""
     
-    # Installation options
     echo -e "  ${GREEN}1)${NC} $(msg menu_install_panel)"
     echo -e "  ${GREEN}2)${NC} $(msg menu_install_node)"
     echo ""
     
-    # Update options (only if installed)
     if [ -d "$PANEL_DIR" ]; then
         echo -e "  ${BLUE}3)${NC} $(msg menu_update_panel)"
     fi
@@ -1168,7 +1346,6 @@ show_menu() {
         echo -e "  ${BLUE}4)${NC} $(msg menu_update_node)"
     fi
     
-    # Remove options
     if [ -d "$PANEL_DIR" ] || { [ -d "$NODE_DIR" ] && [ -f "$NODE_DIR/docker-compose.yml" ]; }; then
         echo ""
     fi
@@ -1186,32 +1363,29 @@ show_menu() {
     echo -e "  ${YELLOW}0)${NC} $(msg menu_exit)"
     echo ""
     
-    # Show current status
     echo -e "${BLUE}$(msg status):${NC}"
     if [ -d "$PANEL_DIR" ]; then
         local panel_version="?"
-        [ -f "$PANEL_DIR/VERSION" ] && panel_version=$(cat "$PANEL_DIR/VERSION")
+        [ -f "$PANEL_DIR/VERSION" ] && panel_version=$(cat "$PANEL_DIR/VERSION" 2>/dev/null || echo "?")
         echo -e "  Panel: ${GREEN}$(msg installed)${NC} v$panel_version ($PANEL_DIR)"
     else
         echo -e "  Panel: ${YELLOW}$(msg not_installed)${NC}"
     fi
     if [ -d "$NODE_DIR" ] && [ -f "$NODE_DIR/docker-compose.yml" ]; then
         local node_version="?"
-        [ -f "$NODE_DIR/VERSION" ] && node_version=$(cat "$NODE_DIR/VERSION")
+        [ -f "$NODE_DIR/VERSION" ] && node_version=$(cat "$NODE_DIR/VERSION" 2>/dev/null || echo "?")
         echo -e "  Node:  ${GREEN}$(msg installed)${NC} v$node_version ($NODE_DIR)"
     else
         echo -e "  Node:  ${YELLOW}$(msg not_installed)${NC}"
     fi
     
-    # Optimizations status
     if [ -f /etc/sysctl.d/99-vless-tuning.conf ]; then
         echo -e "  $(msg optimizations_status): ${GREEN}$(msg applied)${NC}"
     else
         echo -e "  $(msg optimizations_status): ${YELLOW}$(msg not_applied)${NC}"
     fi
     
-    # RPS/RFS status
-    if systemctl is-enabled network-tune.service &>/dev/null 2>&1; then
+    if timeout 5 systemctl is-enabled network-tune.service &>/dev/null 2>&1; then
         echo -e "  RPS/RFS: ${GREEN}$(msg applied)${NC}"
     else
         echo -e "  RPS/RFS: ${YELLOW}$(msg not_applied)${NC}"
@@ -1222,6 +1396,9 @@ show_menu() {
 # ==================== Main ====================
 
 main() {
+    # Acquire lock to prevent parallel execution
+    acquire_lock
+    
     check_root
     load_language
     
@@ -1232,44 +1409,50 @@ main() {
     
     while true; do
         show_menu
-        read -p "$(msg select_action): " choice
+        
+        local choice=""
+        safe_read "$(msg select_action): " "0" "$TIMEOUT_USER_INPUT" choice
         
         case $choice in
             1)
-                check_git
-                clone_repo
+                check_git || continue
+                clone_repo || continue
                 install_panel
                 cleanup_temp
-                read -p "$(msg press_enter)"
+                local dummy=""
+                safe_read "$(msg press_enter)" "" 60 dummy
                 ;;
             2)
-                check_git
-                clone_repo
+                check_git || continue
+                clone_repo || continue
                 install_node
                 cleanup_temp
-                read -p "$(msg press_enter)"
+                local dummy=""
+                safe_read "$(msg press_enter)" "" 60 dummy
                 ;;
             3)
                 if [ -d "$PANEL_DIR" ]; then
-                    check_git
+                    check_git || continue
                     update_panel
                     cleanup_temp
                 else
                     log_error "$(msg invalid_option)"
                     sleep 1
                 fi
-                read -p "$(msg press_enter)"
+                local dummy=""
+                safe_read "$(msg press_enter)" "" 60 dummy
                 ;;
             4)
                 if [ -d "$NODE_DIR" ] && [ -f "$NODE_DIR/docker-compose.yml" ]; then
-                    check_git
+                    check_git || continue
                     update_node
                     cleanup_temp
                 else
                     log_error "$(msg invalid_option)"
                     sleep 1
                 fi
-                read -p "$(msg press_enter)"
+                local dummy=""
+                safe_read "$(msg press_enter)" "" 60 dummy
                 ;;
             5)
                 if [ -d "$PANEL_DIR" ]; then
@@ -1278,7 +1461,8 @@ main() {
                     log_error "$(msg invalid_option)"
                     sleep 1
                 fi
-                read -p "$(msg press_enter)"
+                local dummy=""
+                safe_read "$(msg press_enter)" "" 60 dummy
                 ;;
             6)
                 if [ -d "$NODE_DIR" ] && [ -f "$NODE_DIR/docker-compose.yml" ]; then
@@ -1287,11 +1471,13 @@ main() {
                     log_error "$(msg invalid_option)"
                     sleep 1
                 fi
-                read -p "$(msg press_enter)"
+                local dummy=""
+                safe_read "$(msg press_enter)" "" 60 dummy
                 ;;
             7)
                 apply_system_optimizations
-                read -p "$(msg press_enter)"
+                local dummy=""
+                safe_read "$(msg press_enter)" "" 60 dummy
                 ;;
             0)
                 echo ""

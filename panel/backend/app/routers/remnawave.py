@@ -20,10 +20,11 @@ from app.database import get_db
 from app.models import (
     Server, RemnawaveSettings, RemnawaveNode, RemnawaveInfrastructureAddress,
     XrayVisitStats, XrayHourlyStats, RemnawaveUserCache, XrayUserIpStats,
-    XrayIpDestinationStats, RemnawaveExport
+    XrayIpDestinationStats, RemnawaveExport, TrafficAnalyzerSettings, TrafficAnomalyLog
 )
 from app.services.remnawave_api import get_remnawave_api
 from app.services.xray_stats_collector import get_xray_stats_collector, resolve_infrastructure_address
+from app.services.traffic_analyzer import get_traffic_analyzer
 
 router = APIRouter(prefix="/remnawave", tags=["remnawave"])
 
@@ -49,6 +50,21 @@ class SyncNodesRequest(BaseModel):
 class AddInfrastructureAddressRequest(BaseModel):
     address: str = Field(..., min_length=1, max_length=255)
     description: Optional[str] = Field(None, max_length=255)
+
+
+class UpdateAnalyzerSettingsRequest(BaseModel):
+    enabled: Optional[bool] = None
+    check_interval_minutes: Optional[int] = Field(None, ge=15, le=120)
+    traffic_limit_gb: Optional[float] = Field(None, ge=1, le=10000)
+    ip_limit_multiplier: Optional[float] = Field(None, ge=1, le=10)
+    check_hwid_anomalies: Optional[bool] = None
+    telegram_bot_token: Optional[str] = Field(None, max_length=200)
+    telegram_chat_id: Optional[str] = Field(None, max_length=100)
+
+
+class TestTelegramRequest(BaseModel):
+    bot_token: str = Field(..., min_length=10, max_length=200)
+    chat_id: str = Field(..., min_length=1, max_length=100)
 
 
 # === Settings Endpoints ===
@@ -1513,6 +1529,218 @@ async def _get_user_bandwidth_stats(api, uuid: str) -> Optional[dict]:
     start_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
     
     return await api.get_user_bandwidth_stats(uuid, start_date, end_date)
+
+
+# === Traffic Analyzer Endpoints ===
+
+@router.get("/analyzer/settings")
+async def get_analyzer_settings(
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Get traffic analyzer settings"""
+    result = await db.execute(select(TrafficAnalyzerSettings).limit(1))
+    settings = result.scalar_one_or_none()
+    
+    if not settings:
+        return {
+            "enabled": False,
+            "check_interval_minutes": 30,
+            "traffic_limit_gb": 100.0,
+            "ip_limit_multiplier": 2.0,
+            "check_hwid_anomalies": True,
+            "telegram_bot_token": None,
+            "telegram_chat_id": None,
+            "last_check_at": None,
+            "last_error": None
+        }
+    
+    return {
+        "enabled": settings.enabled,
+        "check_interval_minutes": settings.check_interval_minutes,
+        "traffic_limit_gb": settings.traffic_limit_gb,
+        "ip_limit_multiplier": settings.ip_limit_multiplier,
+        "check_hwid_anomalies": settings.check_hwid_anomalies,
+        "telegram_bot_token": "***" if settings.telegram_bot_token else None,
+        "telegram_chat_id": settings.telegram_chat_id,
+        "last_check_at": settings.last_check_at.isoformat() if settings.last_check_at else None,
+        "last_error": settings.last_error
+    }
+
+
+@router.put("/analyzer/settings")
+async def update_analyzer_settings(
+    request: UpdateAnalyzerSettingsRequest,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Update traffic analyzer settings"""
+    result = await db.execute(select(TrafficAnalyzerSettings).limit(1))
+    settings = result.scalar_one_or_none()
+    
+    if not settings:
+        settings = TrafficAnalyzerSettings()
+        db.add(settings)
+    
+    if request.enabled is not None:
+        settings.enabled = request.enabled
+    if request.check_interval_minutes is not None:
+        settings.check_interval_minutes = request.check_interval_minutes
+    if request.traffic_limit_gb is not None:
+        settings.traffic_limit_gb = request.traffic_limit_gb
+    if request.ip_limit_multiplier is not None:
+        settings.ip_limit_multiplier = request.ip_limit_multiplier
+    if request.check_hwid_anomalies is not None:
+        settings.check_hwid_anomalies = request.check_hwid_anomalies
+    if request.telegram_bot_token is not None:
+        settings.telegram_bot_token = request.telegram_bot_token if request.telegram_bot_token != "***" else settings.telegram_bot_token
+    if request.telegram_chat_id is not None:
+        settings.telegram_chat_id = request.telegram_chat_id
+    
+    await db.commit()
+    
+    return {"success": True, "message": "Analyzer settings updated"}
+
+
+@router.get("/analyzer/status")
+async def get_analyzer_status(
+    _: dict = Depends(verify_auth)
+):
+    """Get traffic analyzer status"""
+    analyzer = get_traffic_analyzer()
+    return analyzer.get_status()
+
+
+@router.post("/analyzer/check")
+async def force_analyzer_check(
+    _: dict = Depends(verify_auth)
+):
+    """Force immediate analyzer check"""
+    analyzer = get_traffic_analyzer()
+    return await analyzer.analyze_now()
+
+
+@router.post("/analyzer/test-telegram")
+async def test_telegram_notification(
+    request: TestTelegramRequest,
+    _: dict = Depends(verify_auth)
+):
+    """Test Telegram notification"""
+    analyzer = get_traffic_analyzer()
+    return await analyzer.test_telegram(request.bot_token, request.chat_id)
+
+
+@router.get("/analyzer/anomalies")
+async def get_anomalies(
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    anomaly_type: Optional[str] = Query(None, pattern="^(traffic|ip_count|hwid)$"),
+    resolved: Optional[bool] = Query(None),
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Get list of anomaly logs with pagination and filters"""
+    import json as json_module
+    
+    conditions = []
+    
+    if anomaly_type:
+        conditions.append(TrafficAnomalyLog.anomaly_type == anomaly_type)
+    if resolved is not None:
+        conditions.append(TrafficAnomalyLog.resolved == resolved)
+    
+    # Count total
+    count_query = select(sql_func.count()).select_from(TrafficAnomalyLog)
+    if conditions:
+        count_query = count_query.where(and_(*conditions))
+    total_result = await db.execute(count_query)
+    total_count = total_result.scalar() or 0
+    
+    # Get anomalies
+    query = select(TrafficAnomalyLog).order_by(TrafficAnomalyLog.created_at.desc())
+    if conditions:
+        query = query.where(and_(*conditions))
+    query = query.offset(offset).limit(limit)
+    
+    result = await db.execute(query)
+    anomalies = result.scalars().all()
+    
+    # Get user info from cache
+    user_ids = [a.user_email for a in anomalies]
+    user_cache = {}
+    if user_ids:
+        cache_result = await db.execute(
+            select(RemnawaveUserCache).where(RemnawaveUserCache.email.in_(user_ids))
+        )
+        for user in cache_result.scalars().all():
+            user_cache[user.email] = {
+                "username": user.username,
+                "telegram_id": user.telegram_id
+            }
+    
+    return {
+        "total": total_count,
+        "offset": offset,
+        "limit": limit,
+        "anomalies": [
+            {
+                "id": a.id,
+                "user_email": a.user_email,
+                "username": a.username or user_cache.get(a.user_email, {}).get("username"),
+                "telegram_id": user_cache.get(a.user_email, {}).get("telegram_id"),
+                "anomaly_type": a.anomaly_type,
+                "severity": a.severity,
+                "details": json_module.loads(a.details) if a.details else None,
+                "notified": a.notified,
+                "resolved": a.resolved,
+                "created_at": a.created_at.isoformat() if a.created_at else None
+            }
+            for a in anomalies
+        ]
+    }
+
+
+@router.put("/analyzer/anomalies/{anomaly_id}/resolve")
+async def resolve_anomaly(
+    anomaly_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Mark anomaly as resolved"""
+    result = await db.execute(
+        select(TrafficAnomalyLog).where(TrafficAnomalyLog.id == anomaly_id)
+    )
+    anomaly = result.scalar_one_or_none()
+    
+    if not anomaly:
+        raise HTTPException(status_code=404, detail="Anomaly not found")
+    
+    anomaly.resolved = True
+    await db.commit()
+    
+    return {"success": True, "message": "Anomaly marked as resolved"}
+
+
+@router.delete("/analyzer/anomalies/clear")
+async def clear_old_anomalies(
+    days: int = Query(30, ge=1, le=365, description="Delete anomalies older than N days"),
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Clear old anomaly logs"""
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days)
+    
+    result = await db.execute(
+        delete(TrafficAnomalyLog).where(TrafficAnomalyLog.created_at < cutoff)
+    )
+    deleted = result.rowcount
+    await db.commit()
+    
+    return {
+        "success": True,
+        "deleted": deleted,
+        "message": f"Deleted {deleted} anomalies older than {days} days"
+    }
 
 
 # === Export Endpoints ===

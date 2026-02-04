@@ -372,3 +372,49 @@ class RemnawaveExport(Base):
     
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     completed_at = Column(DateTime(timezone=True), nullable=True)
+
+
+# ==================== Traffic Anomaly Analyzer ====================
+
+class TrafficAnalyzerSettings(Base):
+    """Настройки анализатора аномального трафика"""
+    __tablename__ = "traffic_analyzer_settings"
+    
+    id = Column(Integer, primary_key=True)
+    enabled = Column(Boolean, default=False)
+    check_interval_minutes = Column(Integer, default=30)
+    
+    # Критерии аномалий
+    traffic_limit_gb = Column(Float, default=100.0)  # Лимит трафика в ГБ
+    ip_limit_multiplier = Column(Float, default=2.0)  # Множитель от hwidDeviceLimit
+    check_hwid_anomalies = Column(Boolean, default=True)
+    
+    # Telegram настройки
+    telegram_bot_token = Column(String(200), nullable=True)
+    telegram_chat_id = Column(String(100), nullable=True)
+    
+    # Статус
+    last_check_at = Column(DateTime(timezone=True), nullable=True)
+    last_error = Column(String(500), nullable=True)
+
+
+class TrafficAnomalyLog(Base):
+    """Лог обнаруженных аномалий трафика"""
+    __tablename__ = "traffic_anomaly_logs"
+    
+    id = Column(Integer, primary_key=True)
+    user_email = Column(Integer, nullable=False, index=True)  # User ID в Remnawave
+    username = Column(String(200), nullable=True)
+    anomaly_type = Column(String(50), nullable=False)  # traffic, ip_count, hwid
+    severity = Column(String(20), default="warning")  # warning, critical
+    details = Column(Text, nullable=True)  # JSON с деталями аномалии
+    notified = Column(Boolean, default=False)  # Было ли отправлено уведомление
+    resolved = Column(Boolean, default=False)  # Помечено как решённое
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    __table_args__ = (
+        Index('idx_anomaly_user', 'user_email'),
+        Index('idx_anomaly_type', 'anomaly_type'),
+        Index('idx_anomaly_created', 'created_at'),
+        Index('idx_anomaly_resolved', 'resolved'),
+    )

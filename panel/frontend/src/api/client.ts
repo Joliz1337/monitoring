@@ -1136,6 +1136,92 @@ export const remnawaveApi = {
   downloadExport: (exportId: number) => api.get(`/remnawave/export/${exportId}/download`, { responseType: 'blob' }),
   
   deleteExport: (exportId: number) => api.delete<{ success: boolean; message: string }>(`/remnawave/export/${exportId}`),
+  
+  // Traffic Analyzer
+  getAnalyzerSettings: () => api.get<{
+    enabled: boolean
+    check_interval_minutes: number
+    traffic_limit_gb: number
+    ip_limit_multiplier: number
+    check_hwid_anomalies: boolean
+    telegram_bot_token: string | null
+    telegram_chat_id: string | null
+    last_check_at: string | null
+    last_error: string | null
+  }>('/remnawave/analyzer/settings'),
+  
+  updateAnalyzerSettings: (data: {
+    enabled?: boolean
+    check_interval_minutes?: number
+    traffic_limit_gb?: number
+    ip_limit_multiplier?: number
+    check_hwid_anomalies?: boolean
+    telegram_bot_token?: string
+    telegram_chat_id?: string
+  }) => api.put<{ success: boolean; message: string }>('/remnawave/analyzer/settings', data),
+  
+  getAnalyzerStatus: () => api.get<{
+    running: boolean
+    analyzing: boolean
+    check_interval: number
+    last_check_time: string | null
+    next_check_in: number | null
+  }>('/remnawave/analyzer/status'),
+  
+  runAnalyzerCheck: () => api.post<{
+    success: boolean
+    error?: string
+    analyzed_users: number
+    anomalies_found: number
+  }>('/remnawave/analyzer/check'),
+  
+  testTelegram: (botToken: string, chatId: string) => api.post<{
+    success: boolean
+    message?: string
+    error?: string
+  }>('/remnawave/analyzer/test-telegram', { bot_token: botToken, chat_id: chatId }),
+  
+  getAnomalies: (params?: { limit?: number; offset?: number; anomaly_type?: string; resolved?: boolean }) =>
+    api.get<{
+      total: number
+      offset: number
+      limit: number
+      anomalies: Array<{
+        id: number
+        user_email: number
+        username: string | null
+        telegram_id: number | null
+        anomaly_type: string
+        severity: string
+        details: {
+          used_gb?: number
+          limit_gb?: number
+          exceeded_by_gb?: number
+          unique_ips?: number
+          device_limit?: number
+          ip_limit?: number
+          exceeded_by?: number
+          total_devices?: number
+          suspicious_count?: number
+          suspicious_devices?: Array<{
+            hwid: string
+            user_agent: string
+            issues: string[]
+          }>
+        } | null
+        notified: boolean
+        resolved: boolean
+        created_at: string | null
+      }>
+    }>('/remnawave/analyzer/anomalies', { params }),
+  
+  resolveAnomaly: (anomalyId: number) => api.put<{ success: boolean; message: string }>(`/remnawave/analyzer/anomalies/${anomalyId}/resolve`),
+  
+  clearOldAnomalies: (days: number) => api.delete<{
+    success: boolean
+    deleted: number
+    message: string
+  }>('/remnawave/analyzer/anomalies/clear', { params: { days } }),
 }
 
 export default api

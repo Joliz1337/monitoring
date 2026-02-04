@@ -1,30 +1,76 @@
 #!/bin/bash
+#
+# Monitoring Panel - Auto Deploy Script
+#
 
-set -e
+# ==================== Safety Settings ====================
 
-# Build log file for error reporting
+set +e  # Handle errors manually
+
+LOCKFILE="/tmp/monitoring-panel-deploy.lock"
+LOCK_FD=200
 BUILD_LOG="/tmp/docker_build_$$.log"
 
-# Trap для обработки прерываний
+# ==================== Timeouts Configuration ====================
+
+TIMEOUT_USER_INPUT=300
+TIMEOUT_APT_UPDATE=120
+TIMEOUT_APT_INSTALL=300
+TIMEOUT_CURL=60
+TIMEOUT_DOCKER_BUILD="${DOCKER_BUILD_TIMEOUT:-1200}"
+TIMEOUT_DOCKER_COMPOSE_DOWN=120
+TIMEOUT_SYSTEMCTL=60
+TIMEOUT_CONNECTIVITY_CHECK=15
+TIMEOUT_HEALTH_CHECK=5
+TIMEOUT_CERTBOT=300
+
+MAX_RETRIES=3
+RETRY_DELAY=5
+
+# ==================== Lock Management ====================
+
+acquire_lock() {
+    eval "exec $LOCK_FD>$LOCKFILE"
+    if ! flock -n $LOCK_FD 2>/dev/null; then
+        echo -e "\033[0;31m[ERROR] Another deploy is already running\033[0m"
+        exit 1
+    fi
+    echo $$ > "$LOCKFILE"
+}
+
+release_lock() {
+    flock -u $LOCK_FD 2>/dev/null || true
+    rm -f "$LOCKFILE" 2>/dev/null || true
+}
+
+# ==================== Cleanup ====================
+
 cleanup() {
     local exit_code=$?
-    if [ $exit_code -ne 0 ]; then
+    trap - EXIT INT TERM
+    
+    release_lock
+    
+    if [ $exit_code -ne 0 ] && [ $exit_code -ne 130 ] && [ $exit_code -ne 143 ]; then
         echo ""
-        echo -e "\033[0;31m[✗] Script interrupted or failed (exit code: $exit_code)\033[0m"
-        # Show last lines from build log if exists
+        echo -e "\033[0;31m[ERROR] Script failed (exit code: $exit_code)\033[0m"
         if [ -f "$BUILD_LOG" ] && [ -s "$BUILD_LOG" ]; then
-            echo -e "\033[0;31m[✗] Last 30 lines of build output:\033[0m"
+            echo -e "\033[0;31m[ERROR] Last 30 lines of build output:\033[0m"
             echo -e "\033[0;31m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
-            tail -30 "$BUILD_LOG"
+            tail -30 "$BUILD_LOG" 2>/dev/null || true
             echo -e "\033[0;31m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
         fi
-        rm -f "$BUILD_LOG"
     fi
+    
+    rm -f "$BUILD_LOG" 2>/dev/null || true
     exit $exit_code
 }
+
 trap cleanup EXIT
-trap 'echo ""; echo -e "\033[0;31m[✗] Interrupted by user (Ctrl+C)\033[0m"; exit 130' INT
-trap 'echo ""; echo -e "\033[0;31m[✗] Terminated by signal\033[0m"; exit 143' TERM
+trap 'echo ""; echo -e "\033[0;31m[ERROR] Interrupted by user (Ctrl+C)\033[0m"; exit 130' INT
+trap 'echo ""; echo -e "\033[0;31m[ERROR] Terminated by signal\033[0m"; exit 143' TERM
+
+# ==================== Colors ====================
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -38,10 +84,65 @@ print_warning() { echo -e "${YELLOW}[!]${NC} $1"; }
 print_error() { echo -e "${RED}[✗]${NC} $1"; }
 print_info() { echo -e "${CYAN}[i]${NC} $1"; }
 
-# Timeouts (in seconds)
-DOCKER_BUILD_TIMEOUT="${DOCKER_BUILD_TIMEOUT:-1000}"  # ~17 min default
+# ==================== Safe Execution Helpers ====================
 
-# Run command quietly, show full output only on error
+safe_read() {
+    local prompt="$1"
+    local default="$2"
+    local timeout="${3:-$TIMEOUT_USER_INPUT}"
+    local result_var="$4"
+    local input=""
+    
+    if read -t "$timeout" -p "$prompt" input 2>/dev/null; then
+        if [ -n "$input" ]; then
+            eval "$result_var='$input'"
+        else
+            eval "$result_var='$default'"
+        fi
+        return 0
+    else
+        print_warning "Input timeout, using default: $default"
+        eval "$result_var='$default'"
+        return 0
+    fi
+}
+
+run_timeout_retry() {
+    local timeout_sec="$1"
+    local max_retries="$2"
+    local delay="$3"
+    local desc="$4"
+    shift 4
+    
+    local attempt=1
+    local output
+    local exit_code
+    
+    while [ $attempt -le $max_retries ]; do
+        output=$(timeout "$timeout_sec" "$@" 2>&1)
+        exit_code=$?
+        
+        if [ $exit_code -eq 0 ]; then
+            return 0
+        fi
+        
+        if [ $exit_code -eq 124 ]; then
+            print_warning "$desc - timeout (${timeout_sec}s, attempt $attempt/$max_retries)"
+        else
+            print_warning "$desc - failed (exit $exit_code, attempt $attempt/$max_retries)"
+        fi
+        
+        if [ $attempt -lt $max_retries ]; then
+            sleep "$delay"
+        fi
+        
+        attempt=$((attempt + 1))
+    done
+    
+    print_error "$desc - failed after $max_retries attempts"
+    return 1
+}
+
 run_quiet() {
     local desc="$1"
     shift
@@ -64,10 +165,32 @@ run_quiet() {
     return 0
 }
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+safe_write_file() {
+    local file="$1"
+    local content="$2"
+    local backup="${file}.bak.$(date +%Y%m%d_%H%M%S)"
+    
+    if [ -f "$file" ]; then
+        cp "$file" "$backup" 2>/dev/null || true
+    fi
+    
+    mkdir -p "$(dirname "$file")" 2>/dev/null || true
+    
+    if echo "$content" > "$file" 2>/dev/null; then
+        return 0
+    else
+        if [ -f "$backup" ]; then
+            mv "$backup" "$file" 2>/dev/null || true
+        fi
+        return 1
+    fi
+}
 
-# Minimum days before certificate expiration to trigger renewal
+# ==================== Configuration ====================
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR" || exit 1
+
 CERT_RENEWAL_DAYS=30
 
 echo ""
@@ -78,19 +201,17 @@ echo ""
 
 # ==================== Network Fix Functions ====================
 
-# Check Docker Hub (quiet, no logs)
 check_docker_hub_quiet() {
-    if curl -fsSL --connect-timeout 10 --max-time 15 \
-        "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/alpine:pull" \
-        >/dev/null 2>&1; then
-        return 0
-    fi
+    local urls=(
+        "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/alpine:pull"
+        "https://registry-1.docker.io/v2/"
+    )
     
-    if curl -fsSL --connect-timeout 10 --max-time 15 \
-        "https://registry-1.docker.io/v2/" \
-        >/dev/null 2>&1; then
-        return 0
-    fi
+    for url in "${urls[@]}"; do
+        if timeout "$TIMEOUT_CONNECTIVITY_CHECK" curl -fsSL --connect-timeout 10 --max-time 15 "$url" >/dev/null 2>&1; then
+            return 0
+        fi
+    done
     
     return 1
 }
@@ -110,8 +231,7 @@ check_docker_hub() {
 disable_ipv6() {
     print_info "Disabling IPv6..."
     
-    # Check if IPv6 is already disabled in optimization config
-    if [ -f /etc/sysctl.d/99-vless-tuning.conf ] && grep -q "disable_ipv6 = 1" /etc/sysctl.d/99-vless-tuning.conf; then
+    if [ -f /etc/sysctl.d/99-vless-tuning.conf ] && grep -q "disable_ipv6 = 1" /etc/sysctl.d/99-vless-tuning.conf 2>/dev/null; then
         print_status "IPv6 already disabled"
         sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null 2>&1 || true
         sysctl -w net.ipv6.conf.default.disable_ipv6=1 >/dev/null 2>&1 || true
@@ -119,11 +239,11 @@ disable_ipv6() {
         return 0
     fi
     
-    cat > /etc/sysctl.d/99-disable-ipv6.conf << 'EOF'
-net.ipv6.conf.all.disable_ipv6 = 1
+    local content='net.ipv6.conf.all.disable_ipv6 = 1
 net.ipv6.conf.default.disable_ipv6 = 1
-net.ipv6.conf.lo.disable_ipv6 = 1
-EOF
+net.ipv6.conf.lo.disable_ipv6 = 1'
+    
+    safe_write_file "/etc/sysctl.d/99-disable-ipv6.conf" "$content"
     
     sysctl -p /etc/sysctl.d/99-disable-ipv6.conf >/dev/null 2>&1 || true
     sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null 2>&1 || true
@@ -140,22 +260,20 @@ configure_dns() {
         cp /etc/resolv.conf /etc/resolv.conf.backup 2>/dev/null || true
     fi
     
-    if [ -L /etc/resolv.conf ] && readlink /etc/resolv.conf | grep -q systemd; then
-        mkdir -p /etc/systemd/resolved.conf.d
-        cat > /etc/systemd/resolved.conf.d/dns.conf << 'EOF'
-[Resolve]
+    if [ -L /etc/resolv.conf ] && readlink /etc/resolv.conf 2>/dev/null | grep -q systemd; then
+        mkdir -p /etc/systemd/resolved.conf.d 2>/dev/null || true
+        local content='[Resolve]
 DNS=1.1.1.1 8.8.8.8 1.0.0.1 8.8.4.4
-FallbackDNS=9.9.9.9 149.112.112.112
-EOF
-        systemctl restart systemd-resolved >/dev/null 2>&1 || true
+FallbackDNS=9.9.9.9 149.112.112.112'
+        safe_write_file "/etc/systemd/resolved.conf.d/dns.conf" "$content"
+        timeout "$TIMEOUT_SYSTEMCTL" systemctl restart systemd-resolved >/dev/null 2>&1 || true
     else
         chattr -i /etc/resolv.conf >/dev/null 2>&1 || true
-        cat > /etc/resolv.conf << 'EOF'
-nameserver 1.1.1.1
+        local content='nameserver 1.1.1.1
 nameserver 8.8.8.8
 nameserver 1.0.0.1
-nameserver 8.8.4.4
-EOF
+nameserver 8.8.4.4'
+        safe_write_file "/etc/resolv.conf" "$content"
     fi
     
     print_status "DNS configured"
@@ -167,26 +285,20 @@ configure_docker_dns() {
     local docker_config_dir="/etc/docker"
     local daemon_json="$docker_config_dir/daemon.json"
     
-    mkdir -p "$docker_config_dir"
+    mkdir -p "$docker_config_dir" 2>/dev/null || true
     
     if [ -f "$daemon_json" ]; then
-        cp "$daemon_json" "${daemon_json}.backup.$(date +%Y%m%d_%H%M%S)"
+        cp "$daemon_json" "${daemon_json}.backup.$(date +%Y%m%d_%H%M%S)" 2>/dev/null || true
         if command -v jq &>/dev/null; then
-            jq '. + {"dns": ["1.1.1.1", "8.8.8.8"]}' "$daemon_json" > "${daemon_json}.tmp" && \
+            jq '. + {"dns": ["1.1.1.1", "8.8.8.8"]}' "$daemon_json" > "${daemon_json}.tmp" 2>/dev/null && \
                 mv "${daemon_json}.tmp" "$daemon_json"
         else
-            cat > "$daemon_json" << 'EOF'
-{
-    "dns": ["1.1.1.1", "8.8.8.8"]
-}
-EOF
+            local content='{"dns": ["1.1.1.1", "8.8.8.8"]}'
+            safe_write_file "$daemon_json" "$content"
         fi
     else
-        cat > "$daemon_json" << 'EOF'
-{
-    "dns": ["1.1.1.1", "8.8.8.8"]
-}
-EOF
+        local content='{"dns": ["1.1.1.1", "8.8.8.8"]}'
+        safe_write_file "$daemon_json" "$content"
     fi
     
     print_status "Docker DNS configured"
@@ -195,13 +307,14 @@ EOF
 restart_docker() {
     print_info "Restarting Docker service..."
     
-    systemctl daemon-reload >/dev/null 2>&1 || true
-    systemctl restart docker >/dev/null 2>&1 || service docker restart >/dev/null 2>&1 || true
+    timeout "$TIMEOUT_SYSTEMCTL" systemctl daemon-reload >/dev/null 2>&1 || true
+    timeout "$TIMEOUT_SYSTEMCTL" systemctl restart docker >/dev/null 2>&1 || \
+        timeout "$TIMEOUT_SYSTEMCTL" service docker restart >/dev/null 2>&1 || true
     
     local max_wait=30
     local count=0
     while [ $count -lt $max_wait ]; do
-        if docker info >/dev/null 2>&1; then
+        if timeout 5 docker info >/dev/null 2>&1; then
             print_status "Docker service restarted"
             return 0
         fi
@@ -237,25 +350,42 @@ install_docker() {
     print_info "Installing Docker..."
     
     if [ -f /etc/debian_version ]; then
-        run_quiet "apt-get update" apt-get update -qq
-        run_quiet "installing dependencies" apt-get install -y -qq ca-certificates curl gnupg
-        install -m 0755 -d /etc/apt/keyrings
-        curl -fsSL https://download.docker.com/linux/$(. /etc/os-release && echo "$ID")/gpg 2>/dev/null | gpg --dearmor -o /etc/apt/keyrings/docker.gpg 2>/dev/null
-        chmod a+r /etc/apt/keyrings/docker.gpg
+        run_timeout_retry "$TIMEOUT_APT_UPDATE" "$MAX_RETRIES" "$RETRY_DELAY" "apt-get update" \
+            apt-get update -qq || print_warning "apt update had issues"
+        run_timeout_retry "$TIMEOUT_APT_INSTALL" "$MAX_RETRIES" "$RETRY_DELAY" "installing dependencies" \
+            apt-get install -y -qq ca-certificates curl gnupg || {
+            print_error "Failed to install dependencies"
+            return 1
+        }
+        install -m 0755 -d /etc/apt/keyrings 2>/dev/null || true
+        
+        if ! timeout "$TIMEOUT_CURL" curl -fsSL https://download.docker.com/linux/$(. /etc/os-release && echo "$ID")/gpg 2>/dev/null | \
+            gpg --dearmor -o /etc/apt/keyrings/docker.gpg 2>/dev/null; then
+            print_error "Failed to download Docker GPG key"
+            return 1
+        fi
+        chmod a+r /etc/apt/keyrings/docker.gpg 2>/dev/null || true
+        
         echo \
           "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$(. /etc/os-release && echo "$ID") \
           $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
-        run_quiet "apt-get update" apt-get update -qq
-        run_quiet "installing docker" apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-compose-plugin
+        
+        run_timeout_retry "$TIMEOUT_APT_UPDATE" "$MAX_RETRIES" "$RETRY_DELAY" "apt-get update" \
+            apt-get update -qq || print_warning "apt update had issues"
+        run_timeout_retry "$TIMEOUT_APT_INSTALL" "$MAX_RETRIES" "$RETRY_DELAY" "installing docker" \
+            apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-compose-plugin || {
+            print_error "Failed to install Docker"
+            return 1
+        }
     elif [ -f /etc/redhat-release ]; then
-        run_quiet "installing yum-utils" yum install -y -q yum-utils
+        run_quiet "installing yum-utils" yum install -y -q yum-utils || return 1
         yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo >/dev/null 2>&1
-        run_quiet "installing docker" yum install -y -q docker-ce docker-ce-cli containerd.io docker-compose-plugin
-        systemctl start docker >/dev/null 2>&1
-        systemctl enable docker >/dev/null 2>&1
+        run_quiet "installing docker" yum install -y -q docker-ce docker-ce-cli containerd.io docker-compose-plugin || return 1
+        timeout "$TIMEOUT_SYSTEMCTL" systemctl start docker >/dev/null 2>&1 || true
+        timeout "$TIMEOUT_SYSTEMCTL" systemctl enable docker >/dev/null 2>&1 || true
     else
         print_error "Unsupported OS. Please install Docker manually."
-        exit 1
+        return 1
     fi
     
     print_status "Docker installed successfully"
@@ -280,20 +410,31 @@ prompt_domain() {
     echo -e "Make sure DNS is already pointing to this server!"
     echo ""
     
-    read -p "Domain (e.g., panel.example.com): " DOMAIN
+    local max_attempts=5
+    local attempt=0
     
-    if [ -z "$DOMAIN" ]; then
-        print_error "Domain is required"
-        exit 1
-    fi
+    while [ $attempt -lt $max_attempts ]; do
+        local input=""
+        safe_read "Domain (e.g., panel.example.com): " "" "$TIMEOUT_USER_INPUT" input
+        DOMAIN="$input"
+        
+        if [ -z "$DOMAIN" ]; then
+            print_error "Domain is required"
+            attempt=$((attempt + 1))
+            continue
+        fi
+        
+        if echo "$DOMAIN" | grep -qE '^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*$'; then
+            print_status "Domain set: ${DOMAIN}"
+            return 0
+        else
+            print_error "Invalid domain format: ${DOMAIN}"
+            attempt=$((attempt + 1))
+        fi
+    done
     
-    # Validate domain format
-    if ! echo "$DOMAIN" | grep -qE '^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*$'; then
-        print_error "Invalid domain format: ${DOMAIN}"
-        exit 1
-    fi
-    
-    print_status "Domain set: ${DOMAIN}"
+    print_error "Too many invalid attempts"
+    exit 1
 }
 
 setup_firewall() {
@@ -301,7 +442,6 @@ setup_firewall() {
     
     local firewall_configured=false
     
-    # Try UFW first
     if command -v ufw &> /dev/null; then
         local ufw_was_active=false
         if ufw status 2>/dev/null | grep -q "Status: active"; then
@@ -321,7 +461,6 @@ setup_firewall() {
         firewall_configured=true
     fi
     
-    # Also configure iptables directly as fallback
     if command -v iptables &> /dev/null; then
         iptables -I INPUT -p tcp --dport 80 -j ACCEPT >/dev/null 2>&1 || true
         iptables -I INPUT -p tcp --dport 443 -j ACCEPT >/dev/null 2>&1 || true
@@ -338,7 +477,6 @@ setup_firewall() {
         print_status "iptables: ports 80, 443 opened"
     fi
     
-    # Try firewalld (CentOS/RHEL)
     if command -v firewall-cmd &> /dev/null; then
         firewall-cmd --permanent --add-port=80/tcp >/dev/null 2>&1 || true
         firewall-cmd --permanent --add-port=443/tcp >/dev/null 2>&1 || true
@@ -366,23 +504,27 @@ install_certbot() {
     print_info "Installing Certbot..."
     
     if [ -f /etc/debian_version ]; then
-        run_quiet "apt-get update" apt-get update -qq
-        run_quiet "installing certbot" apt-get install -y -qq certbot
+        run_timeout_retry "$TIMEOUT_APT_UPDATE" "$MAX_RETRIES" "$RETRY_DELAY" "apt-get update" \
+            apt-get update -qq || true
+        run_timeout_retry "$TIMEOUT_APT_INSTALL" "$MAX_RETRIES" "$RETRY_DELAY" "installing certbot" \
+            apt-get install -y -qq certbot || {
+            print_error "Failed to install certbot"
+            return 1
+        }
     elif [ -f /etc/redhat-release ]; then
         if command -v dnf &> /dev/null; then
-            run_quiet "installing certbot" dnf install -y -q certbot
+            run_quiet "installing certbot" dnf install -y -q certbot || return 1
         else
-            run_quiet "installing certbot" yum install -y -q certbot
+            run_quiet "installing certbot" yum install -y -q certbot || return 1
         fi
     else
         print_error "Unsupported OS for automatic Certbot installation"
-        exit 1
+        return 1
     fi
     
     print_status "Certbot installed successfully"
 }
 
-# Get certificate expiration days
 get_cert_days_remaining() {
     local cert_path="/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
     
@@ -413,33 +555,28 @@ get_cert_days_remaining() {
     echo "$days_remaining"
 }
 
-# Stop services that might use port 80
 stop_port_80_services() {
-    docker compose down >/dev/null 2>&1 || true
-    systemctl stop nginx >/dev/null 2>&1 || true
-    systemctl stop apache2 >/dev/null 2>&1 || true
-    systemctl stop httpd >/dev/null 2>&1 || true
+    timeout "$TIMEOUT_DOCKER_COMPOSE_DOWN" docker compose down >/dev/null 2>&1 || true
+    timeout "$TIMEOUT_SYSTEMCTL" systemctl stop nginx >/dev/null 2>&1 || true
+    timeout "$TIMEOUT_SYSTEMCTL" systemctl stop apache2 >/dev/null 2>&1 || true
+    timeout "$TIMEOUT_SYSTEMCTL" systemctl stop httpd >/dev/null 2>&1 || true
     sleep 2
 }
 
-# Obtain SSL certificate
 obtain_certificate() {
     local cert_path="/etc/letsencrypt/live/${DOMAIN}"
     
     print_info "Obtaining Let's Encrypt certificate for ${DOMAIN}..."
     
-    # Stop services using port 80
     stop_port_80_services
     
-    # Check if port 80 is available
     if netstat -tuln 2>/dev/null | grep -q ':80 ' || ss -tuln 2>/dev/null | grep -q ':80 '; then
         print_error "Port 80 is still in use. Please stop the service using it."
-        print_info "Run: netstat -tuln | grep :80  or  ss -tuln | grep :80"
-        exit 1
+        print_info "Run: ss -tuln | grep :80"
+        return 1
     fi
     
-    # Request certificate
-    if certbot certonly --standalone --non-interactive --agree-tos \
+    if timeout "$TIMEOUT_CERTBOT" certbot certonly --standalone --non-interactive --agree-tos \
         --register-unsafely-without-email \
         -d "$DOMAIN" 2>&1; then
         print_status "Certificate obtained successfully!"
@@ -450,17 +587,16 @@ obtain_certificate() {
         echo "  1. Domain ${DOMAIN} points to this server's IP"
         echo "  2. Port 80 is open and accessible from the internet"
         echo "  3. No other service is using port 80"
-        exit 1
+        return 1
     fi
 }
 
-# Renew certificate
 renew_certificate() {
     print_info "Renewing certificate for ${DOMAIN}..."
     
     stop_port_80_services
     
-    if certbot renew --cert-name "$DOMAIN" --standalone --non-interactive 2>&1; then
+    if timeout "$TIMEOUT_CERTBOT" certbot renew --cert-name "$DOMAIN" --standalone --non-interactive 2>&1; then
         print_status "Certificate renewed successfully!"
         return 0
     else
@@ -469,14 +605,11 @@ renew_certificate() {
     fi
 }
 
-# Main SSL certificate management
 setup_ssl_certificate() {
     local cert_path="/etc/letsencrypt/live/${DOMAIN}"
     
-    # Install certbot if needed
-    install_certbot
+    install_certbot || return 1
     
-    # Check if certificate exists
     if [ -f "${cert_path}/fullchain.pem" ] && [ -f "${cert_path}/privkey.pem" ]; then
         local days_remaining
         days_remaining=$(get_cert_days_remaining)
@@ -484,17 +617,18 @@ setup_ssl_certificate() {
         if [ "$days_remaining" -lt 0 ]; then
             print_warning "Certificate exists but cannot read expiration date"
             print_info "Attempting to renew..."
-            renew_certificate
+            renew_certificate || return 1
         elif [ "$days_remaining" -le 0 ]; then
             print_error "Certificate has EXPIRED!"
             print_info "Renewing certificate..."
-            renew_certificate
+            renew_certificate || return 1
         elif [ "$days_remaining" -le "$CERT_RENEWAL_DAYS" ]; then
             print_warning "Certificate expires in ${days_remaining} days"
             echo ""
-            read -p "Renew certificate now? (Y/n): " renew_choice
+            local renew_choice=""
+            safe_read "Renew certificate now? (Y/n): " "Y" 30 renew_choice
             if [ "$renew_choice" != "n" ] && [ "$renew_choice" != "N" ]; then
-                renew_certificate
+                renew_certificate || return 1
             else
                 print_info "Skipping renewal. Certificate valid for ${days_remaining} days."
             fi
@@ -503,16 +637,14 @@ setup_ssl_certificate() {
         fi
     else
         print_info "No certificate found for ${DOMAIN}"
-        obtain_certificate
+        obtain_certificate || return 1
     fi
     
-    # Final verification
     if [ ! -f "${cert_path}/fullchain.pem" ] || [ ! -f "${cert_path}/privkey.pem" ]; then
         print_error "SSL certificate not found after setup!"
-        exit 1
+        return 1
     fi
     
-    # Show certificate info
     local final_days
     final_days=$(get_cert_days_remaining)
     if [ "$final_days" -gt 0 ]; then
@@ -520,11 +652,9 @@ setup_ssl_certificate() {
     fi
 }
 
-# Setup automatic renewal cron job
 setup_cert_renewal_cron() {
     local cron_job="0 3 * * * certbot renew --quiet --deploy-hook 'docker compose -f ${SCRIPT_DIR}/docker-compose.yml restart nginx'"
     
-    # Check if cron job already exists
     if crontab -l 2>/dev/null | grep -q "certbot renew"; then
         print_status "Certificate auto-renewal cron job already exists"
         return 0
@@ -532,8 +662,10 @@ setup_cert_renewal_cron() {
     
     print_info "Setting up automatic certificate renewal..."
     
-    # Add cron job
-    (crontab -l 2>/dev/null; echo "$cron_job") | crontab -
+    (crontab -l 2>/dev/null; echo "$cron_job") | crontab - 2>/dev/null || {
+        print_warning "Could not add cron job"
+        return 1
+    }
     
     print_status "Auto-renewal cron job added (daily at 3 AM)"
 }
@@ -541,23 +673,22 @@ setup_cert_renewal_cron() {
 generate_env() {
     if [ -f .env ]; then
         print_warning ".env file exists. Checking configuration..."
-        source .env
+        source .env 2>/dev/null || true
         
-        # Update domain if changed
-        if [ -n "$DOMAIN" ] && [ "$DOMAIN" != "$(grep '^DOMAIN=' .env | cut -d= -f2)" ]; then
+        if [ -n "$DOMAIN" ] && [ "$DOMAIN" != "$(grep '^DOMAIN=' .env 2>/dev/null | cut -d= -f2)" ]; then
             sed -i "s/^DOMAIN=.*/DOMAIN=${DOMAIN}/" .env
             print_info "Domain updated in .env"
         fi
         
-        # Add PostgreSQL settings if missing (migration from SQLite)
-        if ! grep -q "^POSTGRES_PASSWORD=" .env; then
+        if ! grep -q "^POSTGRES_PASSWORD=" .env 2>/dev/null; then
             print_info "Adding PostgreSQL configuration..."
-            POSTGRES_PASSWORD=$(generate_random 32)
+            local postgres_password
+            postgres_password=$(generate_random 32)
             cat >> .env << EOF
 
 # PostgreSQL Database (auto-generated)
 POSTGRES_USER=panel
-POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+POSTGRES_PASSWORD=${postgres_password}
 POSTGRES_DB=panel
 EOF
             print_status "PostgreSQL configuration added"
@@ -573,21 +704,22 @@ EOF
     
     print_info "Generating .env configuration..."
     
-    PANEL_UID=$(generate_random 16)
-    PANEL_PASSWORD=$(generate_random 32)
-    JWT_SECRET=$(generate_random 64)
-    POSTGRES_PASSWORD=$(generate_random 32)
+    local panel_uid panel_password jwt_secret postgres_password
+    panel_uid=$(generate_random 16)
+    panel_password=$(generate_random 32)
+    jwt_secret=$(generate_random 64)
+    postgres_password=$(generate_random 32)
     
     cat > .env << EOF
 # Domain (required for SSL)
 DOMAIN=${DOMAIN}
 
 # Panel Authentication (auto-generated)
-PANEL_UID=${PANEL_UID}
-PANEL_PASSWORD=${PANEL_PASSWORD}
+PANEL_UID=${panel_uid}
+PANEL_PASSWORD=${panel_password}
 
 # JWT Settings
-JWT_SECRET=${JWT_SECRET}
+JWT_SECRET=${jwt_secret}
 JWT_EXPIRE_MINUTES=1440
 
 # Security
@@ -596,7 +728,7 @@ BAN_DURATION_SECONDS=900
 
 # PostgreSQL Database (auto-generated)
 POSTGRES_USER=panel
-POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+POSTGRES_PASSWORD=${postgres_password}
 POSTGRES_DB=panel
 
 # Ports
@@ -604,29 +736,27 @@ PANEL_PORT=443
 PANEL_HTTP_PORT=80
 EOF
     
-    chmod 600 .env
+    chmod 600 .env 2>/dev/null || true
     print_status ".env file generated"
 }
 
 generate_nginx_config() {
     print_info "Generating nginx configuration..."
     
-    # Use separate script if available
     if [ -f "$SCRIPT_DIR/scripts/generate-nginx-config.sh" ]; then
-        chmod +x "$SCRIPT_DIR/scripts/generate-nginx-config.sh"
+        chmod +x "$SCRIPT_DIR/scripts/generate-nginx-config.sh" 2>/dev/null || true
         bash "$SCRIPT_DIR/scripts/generate-nginx-config.sh" "$SCRIPT_DIR"
         return
     fi
     
-    # Fallback inline generation
     if [ -z "$DOMAIN" ]; then
         print_error "DOMAIN variable is empty!"
-        exit 1
+        return 1
     fi
     
     if [ -z "$PANEL_UID" ]; then
         print_error "PANEL_UID variable is empty!"
-        exit 1
+        return 1
     fi
     
     export DOMAIN PANEL_UID
@@ -638,16 +768,15 @@ generate_nginx_config() {
 build_and_start() {
     print_info "Building and starting containers..."
     
-    docker compose down --remove-orphans >/dev/null 2>&1 || true
+    timeout "$TIMEOUT_DOCKER_COMPOSE_DOWN" docker compose down --remove-orphans >/dev/null 2>&1 || true
     
-    # Enable BuildKit for faster builds with cache
     export DOCKER_BUILDKIT=1
     export COMPOSE_DOCKER_CLI_BUILD=1
     
-    local max_retries=3
+    local max_retries=$MAX_RETRIES
     local retry=0
     local build_success=false
-    local build_timeout="$DOCKER_BUILD_TIMEOUT"
+    local build_timeout="$TIMEOUT_DOCKER_BUILD"
     
     while [ $retry -lt $max_retries ]; do
         if ! check_docker_hub_quiet; then
@@ -657,9 +786,8 @@ build_and_start() {
             fi
         fi
         
-        # Generate cache bust hash from .env (forces rebuild when any config changes)
         if [ -f .env ]; then
-            export CACHE_BUST=$(md5sum .env | cut -d' ' -f1)
+            export CACHE_BUST=$(md5sum .env 2>/dev/null | cut -d' ' -f1 || echo "nocache")
             print_info "Config hash: ${CACHE_BUST:0:8}... (rebuild on .env changes)"
         fi
         
@@ -667,33 +795,27 @@ build_and_start() {
         
         local build_exit_code
         
-        # Run build in background, capture output to log file
-        set +e
         timeout "$build_timeout" docker compose build --build-arg CACHE_BUST=${CACHE_BUST:-} > "$BUILD_LOG" 2>&1 &
         local build_pid=$!
         
-        # Show progress while building (last 30 lines of log)
         while kill -0 $build_pid 2>/dev/null; do
             if [ -f "$BUILD_LOG" ] && [ -s "$BUILD_LOG" ]; then
-                # Clear screen and show last 30 lines
                 clear
                 echo -e "${CYAN}[i]${NC} Building Docker images (attempt $((retry + 1))/$max_retries)... (press Ctrl+C to cancel)"
                 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-                tail -30 "$BUILD_LOG" 2>/dev/null
+                tail -30 "$BUILD_LOG" 2>/dev/null || true
                 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
             fi
             sleep 3
         done
         echo ""
         
-        wait $build_pid
+        wait $build_pid 2>/dev/null
         build_exit_code=$?
-        set -e
         
         if [ $build_exit_code -eq 0 ]; then
             build_success=true
-            rm -f "$BUILD_LOG"
-            # Clear screen after successful build to show only important info
+            rm -f "$BUILD_LOG" 2>/dev/null || true
             clear
             echo ""
             echo -e "${CYAN}╔════════════════════════════════════════════╗${NC}"
@@ -704,17 +826,11 @@ build_and_start() {
             break
         elif [ $build_exit_code -eq 124 ]; then
             print_error "Build timeout after ${build_timeout}s"
-            echo -e "${YELLOW}Build was taking too long. Possible causes:${NC}"
-            echo "  - Very slow internet connection"
-            echo "  - Network issues with Docker Hub"
-            echo "  - Server ran out of memory (check: free -h)"
-            echo ""
-            echo -e "${YELLOW}Last 30 lines of build output:${NC}"
-            echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-            tail -30 "$BUILD_LOG" 2>/dev/null || echo "(no log available)"
-            echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         else
             print_error "Build failed (exit code: $build_exit_code)"
+        fi
+        
+        if [ -f "$BUILD_LOG" ] && [ -s "$BUILD_LOG" ]; then
             echo ""
             echo -e "${YELLOW}Last 30 lines of build output:${NC}"
             echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -727,7 +843,7 @@ build_and_start() {
         if [ $retry -lt $max_retries ]; then
             print_warning "Build failed, retrying after network fix..."
             fix_docker_network
-            sleep 5
+            sleep "$RETRY_DELAY"
         fi
     done
     
@@ -738,19 +854,16 @@ build_and_start() {
         echo "  1. Check if server has internet access"
         echo "  2. Try using a VPN"
         echo "  3. Check firewall settings"
-        echo "  4. Try again later (Docker Hub may be temporarily unavailable)"
+        echo "  4. Try again later"
         echo "  5. Increase timeout: export DOCKER_BUILD_TIMEOUT=3600"
-        echo "  6. Check server memory: free -h (need at least 2GB free)"
         echo ""
         exit 1
     fi
     
     print_info "Starting containers..."
-    set +e
     local up_output
     up_output=$(docker compose up -d 2>&1)
     local up_exit_code=$?
-    set -e
     
     if [ $up_exit_code -ne 0 ]; then
         print_error "Failed to start containers (exit code: $up_exit_code)"
@@ -766,16 +879,16 @@ build_and_start() {
 wait_for_health() {
     print_info "Waiting for services to be ready..."
     
-    source .env
+    source .env 2>/dev/null || true
     local max_attempts=30
     local attempt=0
     
     while [ $attempt -lt $max_attempts ]; do
-        if curl -sk "https://${DOMAIN}/health" > /dev/null 2>&1; then
+        if timeout "$TIMEOUT_HEALTH_CHECK" curl -sk "https://${DOMAIN}/health" > /dev/null 2>&1; then
             print_status "Services are healthy"
             return 0
         fi
-        if curl -sk "https://localhost/health" > /dev/null 2>&1; then
+        if timeout "$TIMEOUT_HEALTH_CHECK" curl -sk "https://localhost/health" > /dev/null 2>&1; then
             print_status "Services are healthy"
             return 0
         fi
@@ -787,7 +900,7 @@ wait_for_health() {
 }
 
 print_credentials() {
-    source .env
+    source .env 2>/dev/null || true
     
     local days_remaining
     days_remaining=$(get_cert_days_remaining)
@@ -812,7 +925,6 @@ print_credentials() {
     echo -e "  Auto-renewal: Enabled (cron daily at 3 AM)"
     echo ""
     
-    # Final credentials block with pause
     echo ""
     echo -e "${GREEN}╔══════════════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${GREEN}║                       ДАННЫЕ ДЛЯ ВХОДА В ПАНЕЛЬ                      ║${NC}"
@@ -828,45 +940,43 @@ print_credentials() {
     echo ""
     echo -e "${RED}ВАЖНО: Сохраните эти данные! После закрытия они не будут показаны снова.${NC}"
     echo ""
-    read -p "Нажмите Enter для завершения..."
+    
+    local dummy=""
+    safe_read "Press Enter to finish..." "" 60 dummy
 }
 
+# ==================== Main ====================
+
 main() {
-    if [ "$EUID" -ne 0 ] && ! groups | grep -q docker; then
+    acquire_lock
+    
+    if [ "$EUID" -ne 0 ] && ! groups 2>/dev/null | grep -q docker; then
         print_error "Please run as root or add user to docker group"
         exit 1
     fi
     
-    # Check/install Docker
     if ! check_docker; then
         if [ "$EUID" -eq 0 ]; then
-            install_docker
+            install_docker || exit 1
         else
             print_error "Docker not found. Please install Docker or run as root."
             exit 1
         fi
     fi
     
-    # Ask for domain first
     prompt_domain
     
-    # Setup firewall (need port 80 for Let's Encrypt)
     if [ "$EUID" -eq 0 ]; then
         setup_firewall
     fi
     
-    # Setup SSL certificate (auto-install certbot, obtain/renew cert)
-    setup_ssl_certificate
-    
-    # Setup auto-renewal cron
+    setup_ssl_certificate || exit 1
     setup_cert_renewal_cron
     
-    # Generate configs
     generate_env
-    source .env
-    generate_nginx_config
+    source .env 2>/dev/null || true
+    generate_nginx_config || exit 1
     
-    # Build and start
     build_and_start
     wait_for_health
     print_credentials

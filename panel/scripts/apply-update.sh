@@ -3,9 +3,6 @@
 # Apply Update Script - called by update.sh after downloading new version
 # This ensures all update logic uses the LATEST code
 #
-# Environment variables:
-#   UPDATE_PROXY - HTTP proxy (passed from update.sh, used for logging)
-#
 
 set -e
 
@@ -62,11 +59,6 @@ if [ -f "$TMP_DIR/panel/VERSION" ]; then
     NEW_VERSION=$(cat "$TMP_DIR/panel/VERSION")
 fi
 log_info "Applying update: ${CURRENT_VERSION:-unknown} → $NEW_VERSION"
-
-# Log proxy if used
-if [ -n "$UPDATE_PROXY" ]; then
-    log_info "Using proxy: $UPDATE_PROXY"
-fi
 
 # Stop containers
 log_info "Stopping containers..."

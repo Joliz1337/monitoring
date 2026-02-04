@@ -29,7 +29,12 @@ import {
   Database,
   ChevronUp,
   ChevronDown,
-  Download
+  Download,
+  Shield,
+  Bell,
+  Eye,
+  EyeOff,
+  Send
 } from 'lucide-react'
 import { 
   remnawaveApi, 
@@ -63,7 +68,7 @@ const itemVariants = {
   visible: { opacity: 1, y: 0, transition: { duration: 0.4 } }
 }
 
-type TabType = 'overview' | 'users' | 'destinations' | 'export' | 'settings'
+type TabType = 'overview' | 'users' | 'destinations' | 'analyzer' | 'export' | 'settings'
 
 export default function Remnawave() {
   const { t } = useTranslation()
@@ -190,6 +195,57 @@ export default function Remnawave() {
   }>>([])
   const [isLoadingExports, setIsLoadingExports] = useState(false)
   
+  // Analyzer state
+  const [analyzerSettings, setAnalyzerSettings] = useState<{
+    enabled: boolean
+    check_interval_minutes: number
+    traffic_limit_gb: number
+    ip_limit_multiplier: number
+    check_hwid_anomalies: boolean
+    telegram_bot_token: string | null
+    telegram_chat_id: string | null
+    last_check_at: string | null
+    last_error: string | null
+  } | null>(null)
+  const [editAnalyzerSettings, setEditAnalyzerSettings] = useState<{
+    enabled?: boolean
+    check_interval_minutes?: number
+    traffic_limit_gb?: number
+    ip_limit_multiplier?: number
+    check_hwid_anomalies?: boolean
+    telegram_bot_token?: string
+    telegram_chat_id?: string
+  }>({})
+  const [isSavingAnalyzer, setIsSavingAnalyzer] = useState(false)
+  const [isTestingTelegram, setIsTestingTelegram] = useState(false)
+  const [telegramTestResult, setTelegramTestResult] = useState<{ success: boolean; error?: string } | null>(null)
+  const [analyzerStatus, setAnalyzerStatus] = useState<{
+    running: boolean
+    analyzing: boolean
+    check_interval: number
+    last_check_time: string | null
+    next_check_in: number | null
+  } | null>(null)
+  const [isRunningCheck, setIsRunningCheck] = useState(false)
+  const [anomalies, setAnomalies] = useState<Array<{
+    id: number
+    user_email: number
+    username: string | null
+    telegram_id: number | null
+    anomaly_type: string
+    severity: string
+    details: Record<string, unknown> | null
+    notified: boolean
+    resolved: boolean
+    created_at: string | null
+  }>>([])
+  const [anomaliesTotal, setAnomaliesTotal] = useState(0)
+  const [anomaliesOffset, setAnomaliesOffset] = useState(0)
+  const [isLoadingAnomalies, setIsLoadingAnomalies] = useState(false)
+  const [anomalyFilter, setAnomalyFilter] = useState<'all' | 'active' | 'resolved'>('active')
+  const [anomalyTypeFilter, setAnomalyTypeFilter] = useState<string>('')
+  const [showTelegramToken, setShowTelegramToken] = useState(false)
+  
   // Fetch settings
   const fetchSettings = useCallback(async () => {
     try {
@@ -247,6 +303,105 @@ export default function Remnawave() {
       setError(t('remnawave.failed_fetch'))
     }
   }, [period, t])
+  
+  // Fetch analyzer settings and anomalies
+  const fetchAnalyzerData = useCallback(async () => {
+    try {
+      const [settingsRes, statusRes, anomaliesRes] = await Promise.all([
+        remnawaveApi.getAnalyzerSettings(),
+        remnawaveApi.getAnalyzerStatus(),
+        remnawaveApi.getAnomalies({ 
+          limit: 50, 
+          offset: 0,
+          resolved: anomalyFilter === 'resolved' ? true : anomalyFilter === 'active' ? false : undefined,
+          anomaly_type: anomalyTypeFilter || undefined
+        })
+      ])
+      setAnalyzerSettings(settingsRes.data)
+      setEditAnalyzerSettings({
+        enabled: settingsRes.data.enabled,
+        check_interval_minutes: settingsRes.data.check_interval_minutes,
+        traffic_limit_gb: settingsRes.data.traffic_limit_gb,
+        ip_limit_multiplier: settingsRes.data.ip_limit_multiplier,
+        check_hwid_anomalies: settingsRes.data.check_hwid_anomalies,
+        telegram_bot_token: '',
+        telegram_chat_id: settingsRes.data.telegram_chat_id || ''
+      })
+      setAnalyzerStatus(statusRes.data)
+      setAnomalies(anomaliesRes.data.anomalies)
+      setAnomaliesTotal(anomaliesRes.data.total)
+      setAnomaliesOffset(anomaliesRes.data.anomalies.length)
+    } catch (err) {
+      console.error('Failed to fetch analyzer data:', err)
+    }
+  }, [anomalyFilter, anomalyTypeFilter])
+  
+  // Save analyzer settings
+  const handleSaveAnalyzerSettings = async () => {
+    setIsSavingAnalyzer(true)
+    try {
+      const dataToSave: Record<string, unknown> = {}
+      if (editAnalyzerSettings.enabled !== undefined) dataToSave.enabled = editAnalyzerSettings.enabled
+      if (editAnalyzerSettings.check_interval_minutes !== undefined) dataToSave.check_interval_minutes = editAnalyzerSettings.check_interval_minutes
+      if (editAnalyzerSettings.traffic_limit_gb !== undefined) dataToSave.traffic_limit_gb = editAnalyzerSettings.traffic_limit_gb
+      if (editAnalyzerSettings.ip_limit_multiplier !== undefined) dataToSave.ip_limit_multiplier = editAnalyzerSettings.ip_limit_multiplier
+      if (editAnalyzerSettings.check_hwid_anomalies !== undefined) dataToSave.check_hwid_anomalies = editAnalyzerSettings.check_hwid_anomalies
+      if (editAnalyzerSettings.telegram_bot_token) dataToSave.telegram_bot_token = editAnalyzerSettings.telegram_bot_token
+      if (editAnalyzerSettings.telegram_chat_id !== undefined) dataToSave.telegram_chat_id = editAnalyzerSettings.telegram_chat_id
+      
+      await remnawaveApi.updateAnalyzerSettings(dataToSave)
+      await fetchAnalyzerData()
+    } catch (err) {
+      console.error('Failed to save analyzer settings:', err)
+    } finally {
+      setIsSavingAnalyzer(false)
+    }
+  }
+  
+  // Test Telegram notification
+  const handleTestTelegram = async () => {
+    const token = editAnalyzerSettings.telegram_bot_token || (analyzerSettings?.telegram_bot_token === '***' ? '' : analyzerSettings?.telegram_bot_token)
+    const chatId = editAnalyzerSettings.telegram_chat_id || analyzerSettings?.telegram_chat_id
+    
+    if (!token || !chatId) {
+      setTelegramTestResult({ success: false, error: 'Bot token and chat ID required' })
+      return
+    }
+    
+    setIsTestingTelegram(true)
+    setTelegramTestResult(null)
+    try {
+      const res = await remnawaveApi.testTelegram(token, chatId)
+      setTelegramTestResult(res.data)
+    } catch (err) {
+      setTelegramTestResult({ success: false, error: 'Failed to test' })
+    } finally {
+      setIsTestingTelegram(false)
+    }
+  }
+  
+  // Run manual analyzer check
+  const handleRunAnalyzerCheck = async () => {
+    setIsRunningCheck(true)
+    try {
+      await remnawaveApi.runAnalyzerCheck()
+      await fetchAnalyzerData()
+    } catch (err) {
+      console.error('Failed to run analyzer check:', err)
+    } finally {
+      setIsRunningCheck(false)
+    }
+  }
+  
+  // Resolve anomaly
+  const handleResolveAnomaly = async (anomalyId: number) => {
+    try {
+      await remnawaveApi.resolveAnomaly(anomalyId)
+      setAnomalies(prev => prev.map(a => a.id === anomalyId ? { ...a, resolved: true } : a))
+    } catch (err) {
+      console.error('Failed to resolve anomaly:', err)
+    }
+  }
   
   // Load more users (pagination)
   const loadMoreUsers = useCallback(async () => {
@@ -321,6 +476,13 @@ export default function Remnawave() {
       fetchStats()
     }
   }, [period, fetchStats, isLoading])
+  
+  // Fetch analyzer data when tab is selected
+  useEffect(() => {
+    if (activeTab === 'analyzer') {
+      fetchAnalyzerData()
+    }
+  }, [activeTab, fetchAnalyzerData])
   
   // Timer countdown effect
   useEffect(() => {
@@ -854,6 +1016,7 @@ export default function Remnawave() {
     { id: 'overview', label: t('remnawave.overview'), icon: <BarChart3 className="w-4 h-4" /> },
     { id: 'users', label: t('remnawave.users'), icon: <Users className="w-4 h-4" /> },
     { id: 'destinations', label: t('remnawave.destinations'), icon: <Globe className="w-4 h-4" /> },
+    { id: 'analyzer', label: t('remnawave.analyzer'), icon: <Shield className="w-4 h-4" /> },
     { id: 'export', label: t('remnawave.export'), icon: <Download className="w-4 h-4" /> },
     { id: 'settings', label: t('remnawave.settings'), icon: <Settings className="w-4 h-4" /> },
   ]
@@ -1313,6 +1476,372 @@ export default function Remnawave() {
               {filteredDestinations.length === 0 && (
                 <div className="p-8 text-center text-dark-500">{t('remnawave.no_data')}</div>
               )}
+            </div>
+          </motion.div>
+        )}
+        
+        {activeTab === 'analyzer' && (
+          <motion.div
+            key="analyzer"
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -20 }}
+            className="space-y-6"
+          >
+            {/* Analyzer Status */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="p-4 rounded-xl bg-dark-800/50 border border-dark-700/50">
+                <div className="flex items-center gap-3 mb-2">
+                  <div className={`w-3 h-3 rounded-full ${analyzerSettings?.enabled ? 'bg-success-500 animate-pulse' : 'bg-dark-500'}`} />
+                  <span className="text-dark-400 text-sm">{t('remnawave.analyzer_status')}</span>
+                </div>
+                <div className="text-xl font-semibold text-dark-100">
+                  {analyzerSettings?.enabled ? t('remnawave.enabled') : t('remnawave.disabled')}
+                </div>
+              </div>
+              <div className="p-4 rounded-xl bg-dark-800/50 border border-dark-700/50">
+                <div className="text-dark-400 text-sm mb-2">{t('remnawave.last_check')}</div>
+                <div className="text-xl font-semibold text-dark-100">
+                  {analyzerSettings?.last_check_at 
+                    ? new Date(analyzerSettings.last_check_at).toLocaleString() 
+                    : t('remnawave.never')}
+                </div>
+              </div>
+              <div className="p-4 rounded-xl bg-dark-800/50 border border-dark-700/50">
+                <div className="text-dark-400 text-sm mb-2">{t('remnawave.anomalies_found')}</div>
+                <div className="text-xl font-semibold text-dark-100">
+                  {anomaliesTotal}
+                </div>
+              </div>
+            </div>
+            
+            {/* Analyzer Settings */}
+            <div className="p-6 rounded-xl bg-dark-800/50 border border-dark-700/50">
+              <div className="flex items-center justify-between mb-6">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 rounded-lg bg-accent-500/10">
+                    <Settings className="w-5 h-5 text-accent-400" />
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-semibold text-dark-100">{t('remnawave.analyzer_settings')}</h3>
+                    <p className="text-dark-400 text-sm">{t('remnawave.analyzer_description')}</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <motion.button
+                    onClick={handleRunAnalyzerCheck}
+                    disabled={isRunningCheck || !analyzerSettings?.enabled}
+                    className="flex items-center gap-2 px-4 py-2 rounded-lg bg-accent-500/20 text-accent-400 
+                             hover:bg-accent-500/30 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    whileHover={{ scale: 1.02 }}
+                    whileTap={{ scale: 0.98 }}
+                  >
+                    <Play className={`w-4 h-4 ${isRunningCheck ? 'animate-spin' : ''}`} />
+                    {t('remnawave.run_check')}
+                  </motion.button>
+                </div>
+              </div>
+              
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                {/* Left column - Analysis settings */}
+                <div className="space-y-4">
+                  <h4 className="text-sm font-medium text-dark-300 mb-3">{t('remnawave.analysis_criteria')}</h4>
+                  
+                  {/* Enable/Disable */}
+                  <label className="flex items-center justify-between p-3 rounded-lg bg-dark-700/30 cursor-pointer hover:bg-dark-700/50 transition-colors">
+                    <div>
+                      <span className="text-dark-200">{t('remnawave.enable_analyzer')}</span>
+                      <p className="text-dark-500 text-xs mt-1">{t('remnawave.enable_analyzer_desc')}</p>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={editAnalyzerSettings.enabled ?? analyzerSettings?.enabled ?? false}
+                      onChange={(e) => setEditAnalyzerSettings(prev => ({ ...prev, enabled: e.target.checked }))}
+                      className="w-5 h-5 rounded border-dark-600 text-accent-500 focus:ring-accent-500"
+                    />
+                  </label>
+                  
+                  {/* Check interval */}
+                  <div className="p-3 rounded-lg bg-dark-700/30">
+                    <label className="text-dark-200 text-sm">{t('remnawave.check_interval')}</label>
+                    <select
+                      value={editAnalyzerSettings.check_interval_minutes ?? analyzerSettings?.check_interval_minutes ?? 30}
+                      onChange={(e) => setEditAnalyzerSettings(prev => ({ ...prev, check_interval_minutes: Number(e.target.value) }))}
+                      className="w-full mt-2 px-3 py-2 rounded-lg bg-dark-800 border border-dark-600 text-dark-200 
+                               focus:border-accent-500 focus:ring-1 focus:ring-accent-500 focus:outline-none"
+                    >
+                      <option value={15}>15 {t('remnawave.minutes')}</option>
+                      <option value={30}>30 {t('remnawave.minutes')}</option>
+                      <option value={60}>60 {t('remnawave.minutes')}</option>
+                      <option value={120}>120 {t('remnawave.minutes')}</option>
+                    </select>
+                  </div>
+                  
+                  {/* Traffic limit */}
+                  <div className="p-3 rounded-lg bg-dark-700/30">
+                    <label className="text-dark-200 text-sm">{t('remnawave.traffic_limit_gb')}</label>
+                    <input
+                      type="number"
+                      value={editAnalyzerSettings.traffic_limit_gb ?? analyzerSettings?.traffic_limit_gb ?? 100}
+                      onChange={(e) => setEditAnalyzerSettings(prev => ({ ...prev, traffic_limit_gb: Number(e.target.value) }))}
+                      min={1}
+                      max={10000}
+                      className="w-full mt-2 px-3 py-2 rounded-lg bg-dark-800 border border-dark-600 text-dark-200 
+                               focus:border-accent-500 focus:ring-1 focus:ring-accent-500 focus:outline-none"
+                    />
+                    <p className="text-dark-500 text-xs mt-1">{t('remnawave.traffic_limit_desc')}</p>
+                  </div>
+                  
+                  {/* IP multiplier */}
+                  <div className="p-3 rounded-lg bg-dark-700/30">
+                    <label className="text-dark-200 text-sm">{t('remnawave.ip_limit_multiplier')}</label>
+                    <select
+                      value={editAnalyzerSettings.ip_limit_multiplier ?? analyzerSettings?.ip_limit_multiplier ?? 2}
+                      onChange={(e) => setEditAnalyzerSettings(prev => ({ ...prev, ip_limit_multiplier: Number(e.target.value) }))}
+                      className="w-full mt-2 px-3 py-2 rounded-lg bg-dark-800 border border-dark-600 text-dark-200 
+                               focus:border-accent-500 focus:ring-1 focus:ring-accent-500 focus:outline-none"
+                    >
+                      <option value={1.5}>1.5x</option>
+                      <option value={2}>2x</option>
+                      <option value={3}>3x</option>
+                      <option value={5}>5x</option>
+                    </select>
+                    <p className="text-dark-500 text-xs mt-1">{t('remnawave.ip_limit_desc')}</p>
+                  </div>
+                  
+                  {/* HWID check */}
+                  <label className="flex items-center justify-between p-3 rounded-lg bg-dark-700/30 cursor-pointer hover:bg-dark-700/50 transition-colors">
+                    <div>
+                      <span className="text-dark-200">{t('remnawave.check_hwid')}</span>
+                      <p className="text-dark-500 text-xs mt-1">{t('remnawave.check_hwid_desc')}</p>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={editAnalyzerSettings.check_hwid_anomalies ?? analyzerSettings?.check_hwid_anomalies ?? true}
+                      onChange={(e) => setEditAnalyzerSettings(prev => ({ ...prev, check_hwid_anomalies: e.target.checked }))}
+                      className="w-5 h-5 rounded border-dark-600 text-accent-500 focus:ring-accent-500"
+                    />
+                  </label>
+                </div>
+                
+                {/* Right column - Telegram settings */}
+                <div className="space-y-4">
+                  <h4 className="text-sm font-medium text-dark-300 mb-3">{t('remnawave.telegram_notifications')}</h4>
+                  
+                  {/* Bot token */}
+                  <div className="p-3 rounded-lg bg-dark-700/30">
+                    <label className="text-dark-200 text-sm">{t('remnawave.telegram_bot_token')}</label>
+                    <div className="relative mt-2">
+                      <input
+                        type={showTelegramToken ? 'text' : 'password'}
+                        value={editAnalyzerSettings.telegram_bot_token ?? ''}
+                        onChange={(e) => setEditAnalyzerSettings(prev => ({ ...prev, telegram_bot_token: e.target.value }))}
+                        placeholder={analyzerSettings?.telegram_bot_token ? '***' : 'Enter bot token'}
+                        className="w-full px-3 py-2 pr-10 rounded-lg bg-dark-800 border border-dark-600 text-dark-200 
+                                 focus:border-accent-500 focus:ring-1 focus:ring-accent-500 focus:outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowTelegramToken(!showTelegramToken)}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-dark-400 hover:text-dark-200"
+                      >
+                        {showTelegramToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      </button>
+                    </div>
+                  </div>
+                  
+                  {/* Chat ID */}
+                  <div className="p-3 rounded-lg bg-dark-700/30">
+                    <label className="text-dark-200 text-sm">{t('remnawave.telegram_chat_id')}</label>
+                    <input
+                      type="text"
+                      value={editAnalyzerSettings.telegram_chat_id ?? analyzerSettings?.telegram_chat_id ?? ''}
+                      onChange={(e) => setEditAnalyzerSettings(prev => ({ ...prev, telegram_chat_id: e.target.value }))}
+                      placeholder="Enter chat ID"
+                      className="w-full mt-2 px-3 py-2 rounded-lg bg-dark-800 border border-dark-600 text-dark-200 
+                               focus:border-accent-500 focus:ring-1 focus:ring-accent-500 focus:outline-none"
+                    />
+                  </div>
+                  
+                  {/* Test Telegram button */}
+                  <motion.button
+                    onClick={handleTestTelegram}
+                    disabled={isTestingTelegram}
+                    className="flex items-center gap-2 px-4 py-2 rounded-lg bg-dark-700 text-dark-200 
+                             hover:bg-dark-600 disabled:opacity-50 transition-colors"
+                    whileHover={{ scale: 1.02 }}
+                    whileTap={{ scale: 0.98 }}
+                  >
+                    <Send className={`w-4 h-4 ${isTestingTelegram ? 'animate-pulse' : ''}`} />
+                    {t('remnawave.test_telegram')}
+                  </motion.button>
+                  
+                  {telegramTestResult && (
+                    <div className={`p-3 rounded-lg ${telegramTestResult.success ? 'bg-success-500/10 text-success-400' : 'bg-danger-500/10 text-danger-400'}`}>
+                      {telegramTestResult.success ? t('remnawave.telegram_test_success') : telegramTestResult.error || t('remnawave.telegram_test_failed')}
+                    </div>
+                  )}
+                  
+                  {analyzerSettings?.last_error && (
+                    <div className="p-3 rounded-lg bg-danger-500/10 border border-danger-500/20">
+                      <div className="flex items-center gap-2 text-danger-400 text-sm">
+                        <AlertCircle className="w-4 h-4" />
+                        {analyzerSettings.last_error}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+              
+              {/* Save button */}
+              <div className="flex justify-end mt-6 pt-4 border-t border-dark-700">
+                <motion.button
+                  onClick={handleSaveAnalyzerSettings}
+                  disabled={isSavingAnalyzer}
+                  className="flex items-center gap-2 px-6 py-2 rounded-lg bg-accent-500 text-dark-900 font-medium
+                           hover:bg-accent-400 disabled:opacity-50 transition-colors"
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
+                >
+                  {isSavingAnalyzer ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
+                  {t('remnawave.save_settings')}
+                </motion.button>
+              </div>
+            </div>
+            
+            {/* Anomalies List */}
+            <div className="p-6 rounded-xl bg-dark-800/50 border border-dark-700/50">
+              <div className="flex items-center justify-between mb-6">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 rounded-lg bg-warning-500/10">
+                    <AlertCircle className="w-5 h-5 text-warning-400" />
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-semibold text-dark-100">{t('remnawave.anomalies')}</h3>
+                    <p className="text-dark-400 text-sm">{t('remnawave.anomalies_description')}</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <select
+                    value={anomalyFilter}
+                    onChange={(e) => {
+                      setAnomalyFilter(e.target.value as 'all' | 'active' | 'resolved')
+                      setAnomaliesOffset(0)
+                    }}
+                    className="px-3 py-2 rounded-lg bg-dark-700 border border-dark-600 text-dark-200 text-sm"
+                  >
+                    <option value="all">{t('remnawave.all')}</option>
+                    <option value="active">{t('remnawave.active')}</option>
+                    <option value="resolved">{t('remnawave.resolved')}</option>
+                  </select>
+                  <select
+                    value={anomalyTypeFilter}
+                    onChange={(e) => {
+                      setAnomalyTypeFilter(e.target.value)
+                      setAnomaliesOffset(0)
+                    }}
+                    className="px-3 py-2 rounded-lg bg-dark-700 border border-dark-600 text-dark-200 text-sm"
+                  >
+                    <option value="">{t('remnawave.all_types')}</option>
+                    <option value="traffic">{t('remnawave.type_traffic')}</option>
+                    <option value="ip_count">{t('remnawave.type_ip')}</option>
+                    <option value="hwid">{t('remnawave.type_hwid')}</option>
+                  </select>
+                  <motion.button
+                    onClick={fetchAnalyzerData}
+                    disabled={isLoadingAnomalies}
+                    className="p-2 rounded-lg bg-dark-700 text-dark-300 hover:text-dark-100 transition-colors"
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                  >
+                    <RefreshCw className={`w-4 h-4 ${isLoadingAnomalies ? 'animate-spin' : ''}`} />
+                  </motion.button>
+                </div>
+              </div>
+              
+              {/* Anomalies table */}
+              <div className="overflow-x-auto">
+                <table className="w-full">
+                  <thead>
+                    <tr className="text-left text-dark-400 text-sm border-b border-dark-700">
+                      <th className="pb-3 font-medium">{t('remnawave.date')}</th>
+                      <th className="pb-3 font-medium">{t('remnawave.user')}</th>
+                      <th className="pb-3 font-medium">{t('remnawave.type')}</th>
+                      <th className="pb-3 font-medium">{t('remnawave.severity')}</th>
+                      <th className="pb-3 font-medium">{t('remnawave.details')}</th>
+                      <th className="pb-3 font-medium">{t('remnawave.actions')}</th>
+                    </tr>
+                  </thead>
+                  <tbody className="text-dark-200">
+                    {anomalies.map((anomaly) => (
+                      <tr key={anomaly.id} className={`border-b border-dark-700/50 ${anomaly.resolved ? 'opacity-50' : ''}`}>
+                        <td className="py-3 text-sm">
+                          {anomaly.created_at ? new Date(anomaly.created_at).toLocaleString() : '-'}
+                        </td>
+                        <td className="py-3">
+                          <div className="text-sm">{anomaly.username || `ID: ${anomaly.user_email}`}</div>
+                          {anomaly.telegram_id && (
+                            <div className="text-xs text-dark-500">TG: {anomaly.telegram_id}</div>
+                          )}
+                        </td>
+                        <td className="py-3">
+                          <span className={`px-2 py-1 rounded text-xs font-medium ${
+                            anomaly.anomaly_type === 'traffic' ? 'bg-blue-500/20 text-blue-400' :
+                            anomaly.anomaly_type === 'ip_count' ? 'bg-purple-500/20 text-purple-400' :
+                            'bg-orange-500/20 text-orange-400'
+                          }`}>
+                            {anomaly.anomaly_type === 'traffic' ? t('remnawave.type_traffic') :
+                             anomaly.anomaly_type === 'ip_count' ? t('remnawave.type_ip') :
+                             t('remnawave.type_hwid')}
+                          </span>
+                        </td>
+                        <td className="py-3">
+                          <span className={`px-2 py-1 rounded text-xs font-medium ${
+                            anomaly.severity === 'critical' ? 'bg-danger-500/20 text-danger-400' : 'bg-warning-500/20 text-warning-400'
+                          }`}>
+                            {anomaly.severity}
+                          </span>
+                        </td>
+                        <td className="py-3 text-sm max-w-xs">
+                          {anomaly.details && (
+                            <div className="text-dark-400">
+                              {anomaly.anomaly_type === 'traffic' && (
+                                <span>{(anomaly.details as { used_gb?: number }).used_gb} GB / {(anomaly.details as { limit_gb?: number }).limit_gb} GB</span>
+                              )}
+                              {anomaly.anomaly_type === 'ip_count' && (
+                                <span>{(anomaly.details as { unique_ips?: number }).unique_ips} IP / {(anomaly.details as { ip_limit?: number }).ip_limit} {t('remnawave.limit')}</span>
+                              )}
+                              {anomaly.anomaly_type === 'hwid' && (
+                                <span>{(anomaly.details as { suspicious_count?: number }).suspicious_count} {t('remnawave.suspicious_devices')}</span>
+                              )}
+                            </div>
+                          )}
+                        </td>
+                        <td className="py-3">
+                          {!anomaly.resolved && (
+                            <motion.button
+                              onClick={() => handleResolveAnomaly(anomaly.id)}
+                              className="flex items-center gap-1 px-2 py-1 rounded text-xs bg-dark-700 text-dark-300 
+                                       hover:bg-dark-600 hover:text-dark-100 transition-colors"
+                              whileHover={{ scale: 1.05 }}
+                              whileTap={{ scale: 0.95 }}
+                            >
+                              <Check className="w-3 h-3" />
+                              {t('remnawave.resolve')}
+                            </motion.button>
+                          )}
+                          {anomaly.resolved && (
+                            <span className="text-xs text-dark-500">{t('remnawave.resolved')}</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {anomalies.length === 0 && (
+                  <div className="p-8 text-center text-dark-500">{t('remnawave.no_anomalies')}</div>
+                )}
+              </div>
             </div>
           </motion.div>
         )}

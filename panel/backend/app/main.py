@@ -17,12 +17,14 @@ from app.routers import servers, auth_router, proxy, settings as settings_router
 from app.services.metrics_collector import start_collector, stop_collector
 from app.services.blocklist_manager import get_blocklist_manager
 from app.services.xray_stats_collector import start_xray_stats_collector, stop_xray_stats_collector
+from app.services.traffic_analyzer import start_traffic_analyzer, stop_traffic_analyzer
 from app.security import SecurityMiddleware
 # Import all models to register them with Base.metadata
 from app.models import (  # noqa: F401
     Server, MetricsSnapshot, AggregatedMetrics, PanelSettings, FailedLogin, 
     BlocklistRule, BlocklistSource, RemnawaveSettings, RemnawaveNode, 
-    XrayVisitStats, XrayHourlyStats, RemnawaveUserCache
+    XrayVisitStats, XrayHourlyStats, RemnawaveUserCache, TrafficAnalyzerSettings,
+    TrafficAnomalyLog
 )
 
 settings = get_settings()
@@ -65,8 +67,12 @@ async def lifespan(app: FastAPI):
     # Start Xray stats collector for Remnawave integration
     await start_xray_stats_collector()
     
+    # Start traffic analyzer
+    await start_traffic_analyzer()
+    
     yield
     
+    await stop_traffic_analyzer()
     await stop_xray_stats_collector()
     await blocklist_manager.stop()
     await stop_collector()
