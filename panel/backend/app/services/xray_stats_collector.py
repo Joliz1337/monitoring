@@ -128,6 +128,26 @@ class XrayStatsCollector:
         
         self._last_user_cache_update: Optional[datetime] = None
         self._user_cache_updating = False
+        
+        # Cache for ignored users (refreshed on each collection)
+        self._ignored_user_ids: set[int] = set()
+    
+    async def _get_ignored_user_ids(self) -> set[int]:
+        """Get set of ignored user IDs from settings."""
+        async with async_session() as db:
+            result = await db.execute(select(RemnawaveSettings).limit(1))
+            settings = result.scalar_one_or_none()
+            
+            if not settings or not settings.ignored_user_ids:
+                return set()
+            
+            try:
+                data = json.loads(settings.ignored_user_ids)
+                if isinstance(data, list):
+                    return {int(x) for x in data if isinstance(x, (int, str)) and str(x).isdigit()}
+                return set()
+            except (json.JSONDecodeError, ValueError):
+                return set()
     
     async def start(self):
         """Start background collection."""
@@ -363,6 +383,11 @@ class XrayStatsCollector:
         if ip_destination_stats is None:
             ip_destination_stats = []
         
+        # Get ignored user IDs (users excluded from all stats)
+        ignored_user_ids = await self._get_ignored_user_ids()
+        if ignored_user_ids:
+            logger.debug(f"Filtering out {len(ignored_user_ids)} ignored users from stats")
+        
         # Aggregate stats for batch processing
         visit_updates: dict[tuple[str, int], int] = {}
         total_count = 0
@@ -375,6 +400,10 @@ class XrayStatsCollector:
             count = stat.get("count", 0)
             
             if not destination or not email or not count:
+                continue
+            
+            # Skip ignored users
+            if email in ignored_user_ids:
                 continue
             
             key = (destination, email)
@@ -396,6 +425,10 @@ class XrayStatsCollector:
             if not email or not source_ip or not count:
                 continue
             
+            # Skip ignored users
+            if email in ignored_user_ids:
+                continue
+            
             is_infra = source_ip in infrastructure_ips
             key = (email, source_ip)
             if key in ip_updates:
@@ -404,7 +437,7 @@ class XrayStatsCollector:
             else:
                 ip_updates[key] = (count, is_infra)
         
-        # Aggregate IP-destination stats (skip infrastructure IPs)
+        # Aggregate IP-destination stats (skip infrastructure IPs and ignored users)
         ip_dest_updates: dict[tuple[int, str, str], int] = {}
         for ip_dest_stat in ip_destination_stats:
             email = ip_dest_stat.get("email", 0)
@@ -413,6 +446,10 @@ class XrayStatsCollector:
             count = ip_dest_stat.get("count", 0)
             
             if not email or not source_ip or not destination or not count:
+                continue
+            
+            # Skip ignored users
+            if email in ignored_user_ids:
                 continue
             
             if source_ip in infrastructure_ips:

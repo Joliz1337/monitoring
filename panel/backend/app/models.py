@@ -181,6 +181,9 @@ class RemnawaveSettings(Base):
     cookie_secret = Column(String(500), nullable=True)
     enabled = Column(Boolean, default=False)
     collection_interval = Column(Integer, default=300)  # 5 minutes recommended
+    # Список ID пользователей для игнорирования (JSON массив)
+    # Игнорируемые пользователи исключаются из: сбора логов, уведомлений анализатора, всех проверок
+    ignored_user_ids = Column(Text, nullable=True)  # JSON array of user IDs (integers)
 
 
 class RemnawaveNode(Base):

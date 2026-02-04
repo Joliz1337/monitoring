@@ -39,6 +39,14 @@ class UpdateSettingsRequest(BaseModel):
     collection_interval: Optional[int] = Field(None, ge=60, le=900)  # 1-15 minutes
 
 
+class AddIgnoredUserRequest(BaseModel):
+    user_id: int = Field(..., description="User ID (email) to ignore")
+
+
+class RemoveIgnoredUserRequest(BaseModel):
+    user_id: int = Field(..., description="User ID (email) to remove from ignore list")
+
+
 class AddNodeRequest(BaseModel):
     server_id: int
 
@@ -69,6 +77,20 @@ class TestTelegramRequest(BaseModel):
 
 # === Settings Endpoints ===
 
+def _parse_ignored_user_ids(json_str: Optional[str]) -> list[int]:
+    """Parse ignored_user_ids JSON string to list of integers."""
+    if not json_str:
+        return []
+    try:
+        import json
+        data = json.loads(json_str)
+        if isinstance(data, list):
+            return [int(x) for x in data if isinstance(x, (int, str)) and str(x).isdigit()]
+        return []
+    except (json.JSONDecodeError, ValueError):
+        return []
+
+
 @router.get("/settings")
 async def get_settings(
     db: AsyncSession = Depends(get_db),
@@ -84,7 +106,8 @@ async def get_settings(
             "api_token": None,
             "cookie_secret": None,
             "enabled": False,
-            "collection_interval": 300  # 5 minutes default
+            "collection_interval": 300,  # 5 minutes default
+            "ignored_user_ids": []
         }
     
     return {
@@ -92,7 +115,8 @@ async def get_settings(
         "api_token": "***" if settings.api_token else None,
         "cookie_secret": "***" if settings.cookie_secret else None,
         "enabled": settings.enabled,
-        "collection_interval": settings.collection_interval
+        "collection_interval": settings.collection_interval,
+        "ignored_user_ids": _parse_ignored_user_ids(settings.ignored_user_ids)
     }
 
 
@@ -152,6 +176,126 @@ async def test_connection(
         }
     finally:
         await api.close()
+
+
+# === Ignored Users ===
+
+@router.get("/ignored-users")
+async def get_ignored_users(
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Get list of ignored user IDs.
+    
+    Ignored users are excluded from:
+    - Log collection
+    - Anomaly analyzer notifications
+    - All checks and statistics
+    """
+    result = await db.execute(select(RemnawaveSettings).limit(1))
+    settings = result.scalar_one_or_none()
+    
+    ignored_ids = _parse_ignored_user_ids(settings.ignored_user_ids if settings else None)
+    
+    # Get user info from cache for display
+    user_info = []
+    if ignored_ids:
+        cache_result = await db.execute(
+            select(RemnawaveUserCache).where(RemnawaveUserCache.email.in_(ignored_ids))
+        )
+        user_cache = {u.email: u for u in cache_result.scalars().all()}
+        
+        for user_id in ignored_ids:
+            cached = user_cache.get(user_id)
+            user_info.append({
+                "user_id": user_id,
+                "username": cached.username if cached else None,
+                "status": cached.status if cached else None,
+                "telegram_id": cached.telegram_id if cached else None
+            })
+    
+    return {
+        "ignored_users": user_info,
+        "count": len(ignored_ids)
+    }
+
+
+@router.post("/ignored-users")
+async def add_ignored_user(
+    request: AddIgnoredUserRequest,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Add user to ignored list.
+    
+    Ignored users will be excluded from log collection, anomaly notifications,
+    and all statistics processing.
+    """
+    import json
+    
+    result = await db.execute(select(RemnawaveSettings).limit(1))
+    settings = result.scalar_one_or_none()
+    
+    if not settings:
+        settings = RemnawaveSettings()
+        db.add(settings)
+    
+    current_ids = _parse_ignored_user_ids(settings.ignored_user_ids)
+    
+    if request.user_id in current_ids:
+        return {"success": False, "error": "User already in ignore list"}
+    
+    current_ids.append(request.user_id)
+    settings.ignored_user_ids = json.dumps(current_ids)
+    
+    await db.commit()
+    
+    # Get user info for response
+    cache_result = await db.execute(
+        select(RemnawaveUserCache).where(RemnawaveUserCache.email == request.user_id)
+    )
+    cached = cache_result.scalar_one_or_none()
+    
+    return {
+        "success": True,
+        "message": "User added to ignore list",
+        "user": {
+            "user_id": request.user_id,
+            "username": cached.username if cached else None,
+            "status": cached.status if cached else None
+        }
+    }
+
+
+@router.delete("/ignored-users/{user_id}")
+async def remove_ignored_user(
+    user_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Remove user from ignored list."""
+    import json
+    
+    result = await db.execute(select(RemnawaveSettings).limit(1))
+    settings = result.scalar_one_or_none()
+    
+    if not settings:
+        return {"success": False, "error": "Settings not found"}
+    
+    current_ids = _parse_ignored_user_ids(settings.ignored_user_ids)
+    
+    if user_id not in current_ids:
+        return {"success": False, "error": "User not in ignore list"}
+    
+    current_ids.remove(user_id)
+    settings.ignored_user_ids = json.dumps(current_ids) if current_ids else None
+    
+    await db.commit()
+    
+    return {
+        "success": True,
+        "message": "User removed from ignore list"
+    }
 
 
 # === Infrastructure Addresses ===

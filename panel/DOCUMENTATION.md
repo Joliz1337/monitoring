@@ -292,6 +292,19 @@ panel/
 | PUT | /api/remnawave/settings | Обновить настройки (api_url, api_token, cookie_secret, enabled, collection_interval) |
 | POST | /api/remnawave/settings/test | Проверить подключение к Remnawave API |
 
+**Игнорируемые пользователи:**
+
+| Метод | Endpoint | Описание |
+|-------|----------|----------|
+| GET | /api/remnawave/ignored-users | Список игнорируемых пользователей |
+| POST | /api/remnawave/ignored-users | Добавить пользователя в список (user_id) |
+| DELETE | /api/remnawave/ignored-users/{user_id} | Удалить пользователя из списка |
+
+Игнорируемые пользователи исключаются из:
+- Сбора логов Xray (xray_stats_collector)
+- Уведомлений анализатора аномалий (traffic_analyzer)
+- Всех статистических проверок
+
 **Статус коллектора:**
 
 | Метод | Endpoint | Описание |

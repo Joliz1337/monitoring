@@ -247,6 +247,24 @@ class TrafficAnalyzer:
             "next_check_in": next_check_in
         }
     
+    async def _get_ignored_user_ids(self) -> set[int]:
+        """Get set of ignored user IDs from Remnawave settings."""
+        import json
+        async with async_session() as db:
+            result = await db.execute(select(RemnawaveSettings).limit(1))
+            settings = result.scalar_one_or_none()
+            
+            if not settings or not settings.ignored_user_ids:
+                return set()
+            
+            try:
+                data = json.loads(settings.ignored_user_ids)
+                if isinstance(data, list):
+                    return {int(x) for x in data if isinstance(x, (int, str)) and str(x).isdigit()}
+                return set()
+            except (json.JSONDecodeError, ValueError):
+                return set()
+    
     async def _run_analysis(self, settings: TrafficAnalyzerSettings) -> dict:
         """Run full analysis on all users."""
         self._analyzing = True
@@ -257,17 +275,26 @@ class TrafficAnalyzer:
             # Get Remnawave API settings for HWID fetching
             remnawave_settings = await self._get_remnawave_settings()
             
+            # Get ignored user IDs (excluded from analysis and notifications)
+            ignored_user_ids = await self._get_ignored_user_ids()
+            if ignored_user_ids:
+                logger.debug(f"Excluding {len(ignored_user_ids)} ignored users from analysis")
+            
             # Get all users from cache
             async with async_session() as db:
                 result = await db.execute(select(RemnawaveUserCache))
-                users = result.scalars().all()
+                all_users = result.scalars().all()
+            
+            # Filter out ignored users
+            users = [u for u in all_users if u.email not in ignored_user_ids]
             
             if not users:
-                logger.info("No users in cache to analyze")
+                logger.info("No users in cache to analyze (after filtering)")
                 return {
                     "success": True,
                     "analyzed_users": 0,
-                    "anomalies_found": 0
+                    "anomalies_found": 0,
+                    "ignored_users": len(ignored_user_ids)
                 }
             
             # Pre-fetch all HWID devices in one batch (instead of per-user requests)

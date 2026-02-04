@@ -48,7 +48,8 @@ import {
   RemnawaveDestinationUsers,
   RemnawaveUserFullInfo,
   RemnawaveIpDestinations,
-  RemnawaveInfrastructureAddress
+  RemnawaveInfrastructureAddress,
+  IgnoredUser
 } from '../api/client'
 import { useTranslation } from 'react-i18next'
 import PeriodSelector from '../components/ui/PeriodSelector'
@@ -99,6 +100,12 @@ export default function Remnawave() {
   const [isAddingInfraAddress, setIsAddingInfraAddress] = useState(false)
   const [isResolvingInfra, setIsResolvingInfra] = useState(false)
   const [isRescanningInfra, setIsRescanningInfra] = useState(false)
+  
+  // Ignored users state
+  const [ignoredUsers, setIgnoredUsers] = useState<IgnoredUser[]>([])
+  const [newIgnoredUserId, setNewIgnoredUserId] = useState('')
+  const [isAddingIgnoredUser, setIsAddingIgnoredUser] = useState(false)
+  const [isLoadingIgnoredUsers, setIsLoadingIgnoredUsers] = useState(false)
   const [lastRescanResult, setLastRescanResult] = useState<{ updated_to_infrastructure: number; updated_to_client: number } | null>(null)
   
   // Collector status state
@@ -248,13 +255,14 @@ export default function Remnawave() {
   // Fetch settings
   const fetchSettings = useCallback(async () => {
     try {
-      const [settingsRes, nodesRes, statusRes, dbInfoRes, infraRes, cacheStatusRes] = await Promise.all([
+      const [settingsRes, nodesRes, statusRes, dbInfoRes, infraRes, cacheStatusRes, ignoredRes] = await Promise.all([
         remnawaveApi.getSettings(),
         remnawaveApi.getNodes(),
         remnawaveApi.getCollectorStatus(),
         remnawaveApi.getDbInfo(),
         remnawaveApi.getInfrastructureAddresses(),
-        remnawaveApi.getUserCacheStatus()
+        remnawaveApi.getUserCacheStatus(),
+        remnawaveApi.getIgnoredUsers()
       ])
       setSettings(settingsRes.data)
       setEditSettings({
@@ -278,6 +286,8 @@ export default function Remnawave() {
       setInfrastructureAddresses(infraRes.data.addresses)
       // Update user cache status
       setUserCacheStatus(cacheStatusRes.data)
+      // Update ignored users
+      setIgnoredUsers(ignoredRes.data.ignored_users)
     } catch (err) {
       console.error('Failed to fetch settings:', err)
     }
@@ -709,6 +719,41 @@ export default function Remnawave() {
       console.error('Failed to resolve infrastructure addresses:', err)
     } finally {
       setIsResolvingInfra(false)
+    }
+  }
+  
+  // Ignored users handlers
+  const handleAddIgnoredUser = async () => {
+    const userId = parseInt(newIgnoredUserId.trim())
+    if (isNaN(userId) || userId <= 0) return
+    
+    setIsAddingIgnoredUser(true)
+    try {
+      const res = await remnawaveApi.addIgnoredUser(userId)
+      if (res.data.success) {
+        setNewIgnoredUserId('')
+        // Refresh ignored users
+        const ignoredRes = await remnawaveApi.getIgnoredUsers()
+        setIgnoredUsers(ignoredRes.data.ignored_users)
+      } else {
+        console.error('Failed to add ignored user:', res.data.error)
+      }
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { detail?: string } } }
+      console.error('Failed to add ignored user:', error.response?.data?.detail || err)
+    } finally {
+      setIsAddingIgnoredUser(false)
+    }
+  }
+  
+  const handleRemoveIgnoredUser = async (userId: number) => {
+    try {
+      await remnawaveApi.removeIgnoredUser(userId)
+      // Refresh ignored users
+      const ignoredRes = await remnawaveApi.getIgnoredUsers()
+      setIgnoredUsers(ignoredRes.data.ignored_users)
+    } catch (err) {
+      console.error('Failed to remove ignored user:', err)
     }
   }
   
@@ -2497,6 +2542,85 @@ export default function Remnawave() {
                 ))}
                 {infrastructureAddresses.length === 0 && (
                   <div className="text-center text-dark-500 py-4">{t('remnawave.no_infrastructure_addresses')}</div>
+                )}
+              </div>
+            </div>
+            
+            {/* Ignored Users */}
+            <div className="p-6 rounded-xl bg-dark-800/50 border border-dark-700/50">
+              <h3 className="text-lg font-semibold text-dark-100 mb-2 flex items-center gap-2">
+                <EyeOff className="w-5 h-5" />
+                {t('remnawave.ignored_users_title')}
+              </h3>
+              <p className="text-dark-500 text-sm mb-4">{t('remnawave.ignored_users_description')}</p>
+              
+              {/* Add new ignored user */}
+              <div className="flex gap-2 mb-4">
+                <input
+                  type="text"
+                  value={newIgnoredUserId}
+                  onChange={(e) => setNewIgnoredUserId(e.target.value.replace(/\D/g, ''))}
+                  placeholder={t('remnawave.ignored_user_id_placeholder')}
+                  className="flex-1 px-3 py-2 rounded-lg bg-dark-900 border border-dark-700 
+                           text-dark-100 placeholder-dark-500 focus:outline-none focus:border-accent-500"
+                  onKeyDown={(e) => e.key === 'Enter' && handleAddIgnoredUser()}
+                />
+                <button
+                  onClick={handleAddIgnoredUser}
+                  disabled={isAddingIgnoredUser || !newIgnoredUserId.trim()}
+                  className="px-4 py-2 rounded-lg bg-accent-500 hover:bg-accent-600 text-white 
+                           transition-colors disabled:opacity-50 flex items-center gap-1"
+                >
+                  {isAddingIgnoredUser ? (
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Check className="w-4 h-4" />
+                  )}
+                  {t('common.add')}
+                </button>
+              </div>
+              
+              {/* Ignored users list */}
+              <div className="space-y-2 max-h-[300px] overflow-y-auto">
+                {ignoredUsers.map(user => (
+                  <div
+                    key={user.user_id}
+                    className="flex items-center gap-3 p-3 rounded-lg bg-dark-900/50 border border-dark-700/50"
+                  >
+                    <Users className="w-4 h-4 text-dark-500 flex-shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-dark-200 font-mono">{user.user_id}</span>
+                        {user.username && (
+                          <span className="text-dark-400 text-sm">{user.username}</span>
+                        )}
+                        {user.status && (
+                          <span className={`text-xs px-1.5 py-0.5 rounded ${
+                            user.status === 'ACTIVE' ? 'bg-success/20 text-success' : 
+                            user.status === 'DISABLED' ? 'bg-danger/20 text-danger' : 
+                            'bg-dark-600 text-dark-400'
+                          }`}>
+                            {user.status}
+                          </span>
+                        )}
+                      </div>
+                      {user.telegram_id && (
+                        <div className="text-dark-500 text-xs mt-1">
+                          Telegram: {user.telegram_id}
+                        </div>
+                      )}
+                    </div>
+                    <button
+                      onClick={() => handleRemoveIgnoredUser(user.user_id)}
+                      className="p-2 rounded-lg hover:bg-dark-700 text-dark-500 hover:text-danger transition-colors"
+                      title={t('common.delete')}
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                ))}
+                {ignoredUsers.length === 0 && (
+                  <div className="text-center text-dark-500 py-4">{t('remnawave.no_ignored_users')}</div>
                 )}
               </div>
             </div>

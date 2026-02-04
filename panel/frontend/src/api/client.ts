@@ -761,6 +761,19 @@ export interface RemnawaveSettings {
   cookie_secret: string | null
   enabled: boolean
   collection_interval: number
+  ignored_user_ids: number[]
+}
+
+export interface IgnoredUser {
+  user_id: number
+  username: string | null
+  status: string | null
+  telegram_id: number | null
+}
+
+export interface IgnoredUsersResponse {
+  ignored_users: IgnoredUser[]
+  count: number
 }
 
 export interface RemnawaveNode {
@@ -1006,6 +1019,14 @@ export const remnawaveApi = {
     api.put<{ success: boolean; message: string }>('/remnawave/settings', data),
   testConnection: () => 
     api.post<{ success: boolean; api_reachable: boolean; error: string | null }>('/remnawave/settings/test'),
+  
+  // Ignored users
+  getIgnoredUsers: () =>
+    api.get<IgnoredUsersResponse>('/remnawave/ignored-users'),
+  addIgnoredUser: (userId: number) =>
+    api.post<{ success: boolean; message?: string; error?: string; user?: IgnoredUser }>('/remnawave/ignored-users', { user_id: userId }),
+  removeIgnoredUser: (userId: number) =>
+    api.delete<{ success: boolean; message?: string; error?: string }>(`/remnawave/ignored-users/${userId}`),
   
   // Infrastructure addresses
   getInfrastructureAddresses: () => 
