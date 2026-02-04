@@ -1517,7 +1517,6 @@ async def _get_user_bandwidth_stats(api, uuid: str) -> Optional[dict]:
 # === Export Endpoints ===
 
 class ExportSettingsRequest(BaseModel):
-    format: str = Field("csv", pattern="^(csv|json|xlsx)$")
     period: str = Field("all", pattern="^(1h|24h|7d|30d|365d|all)$")
     include_user_id: bool = True
     include_username: bool = True
@@ -1532,14 +1531,35 @@ class ExportSettingsRequest(BaseModel):
     include_traffic: bool = False
 
 
-# Background export task storage
-_export_tasks = {}
+def _generate_xlsx_file(file_path: str, export_rows: list):
+    """Synchronous function to generate XLSX file (runs in thread pool)."""
+    from openpyxl import Workbook
+    
+    text_fields = {"telegram_id", "traffic_used_bytes", "traffic_limit_bytes"}
+    
+    wb = Workbook(write_only=True)
+    ws = wb.create_sheet("Export")
+    
+    if export_rows:
+        headers = list(export_rows[0].keys())
+        ws.append(headers)
+        
+        for row_data in export_rows:
+            row_values = []
+            for header in headers:
+                value = row_data.get(header)
+                if isinstance(value, list):
+                    value = "; ".join(str(v) for v in value)
+                elif header in text_fields and value is not None:
+                    value = str(value)
+                row_values.append(value)
+            ws.append(row_values)
+    
+    wb.save(file_path)
 
 
 async def _run_export_task(export_id: int, settings: dict):
     """Background task to generate export file."""
-    import csv
-    import json
     import os
     from app.database import async_session_maker
     
@@ -1691,87 +1711,9 @@ async def _run_export_task(export_id: int, settings: dict):
             os.makedirs(exports_dir, exist_ok=True)
             
             file_path = os.path.join(exports_dir, export_record.filename)
-            file_format = settings["format"]
             
-            # Generate file
-            if file_format == "json":
-                if include_destinations:
-                    users_grouped = {}
-                    for row in export_rows:
-                        uid = row.get("user_id", 0)
-                        if uid not in users_grouped:
-                            users_grouped[uid] = {k: v for k, v in row.items() if k not in ["destination", "visits", "first_seen", "last_seen"]}
-                            users_grouped[uid]["destinations"] = []
-                        dest_data = {}
-                        if "destination" in row:
-                            dest_data["destination"] = row["destination"]
-                        if "visits" in row:
-                            dest_data["visits"] = row["visits"]
-                        if "first_seen" in row:
-                            dest_data["first_seen"] = row["first_seen"]
-                        if "last_seen" in row:
-                            dest_data["last_seen"] = row["last_seen"]
-                        users_grouped[uid]["destinations"].append(dest_data)
-                    
-                    output_data = {
-                        "export_date": datetime.now(timezone.utc).isoformat(),
-                        "period": settings["period"],
-                        "total_users": len(users_grouped),
-                        "users": list(users_grouped.values())
-                    }
-                else:
-                    output_data = {
-                        "export_date": datetime.now(timezone.utc).isoformat(),
-                        "period": settings["period"],
-                        "total_users": len(export_rows),
-                        "users": export_rows
-                    }
-                
-                with open(file_path, 'w', encoding='utf-8') as f:
-                    json.dump(output_data, f, ensure_ascii=False, indent=2)
-            
-            elif file_format == "csv":
-                if export_rows:
-                    # Handle list fields
-                    for row in export_rows:
-                        for key in ["client_ips", "infrastructure_ips"]:
-                            if key in row and isinstance(row[key], list):
-                                row[key] = ";".join(row[key]) if row[key] else ""
-                    
-                    with open(file_path, 'w', encoding='utf-8-sig', newline='') as f:
-                        writer = csv.DictWriter(f, fieldnames=list(export_rows[0].keys()))
-                        writer.writeheader()
-                        writer.writerows(export_rows)
-                else:
-                    with open(file_path, 'w', encoding='utf-8-sig') as f:
-                        f.write("")
-            
-            elif file_format == "xlsx":
-                from openpyxl import Workbook
-                
-                # Fields that should be stored as text to avoid scientific notation
-                text_fields = {"telegram_id", "traffic_used_bytes", "traffic_limit_bytes"}
-                
-                wb = Workbook(write_only=True)
-                ws = wb.create_sheet("Export")
-                
-                if export_rows:
-                    headers = list(export_rows[0].keys())
-                    ws.append(headers)
-                    
-                    for row_data in export_rows:
-                        row_values = []
-                        for header in headers:
-                            value = row_data.get(header)
-                            if isinstance(value, list):
-                                value = "; ".join(str(v) for v in value)
-                            # Convert large numbers to strings to prevent scientific notation
-                            elif header in text_fields and value is not None:
-                                value = str(value)
-                            row_values.append(value)
-                        ws.append(row_values)
-                
-                wb.save(file_path)
+            # Generate XLSX in thread pool to avoid blocking event loop
+            await asyncio.to_thread(_generate_xlsx_file, file_path, export_rows)
             
             # Update export record
             file_size = os.path.getsize(file_path)
@@ -1799,13 +1741,13 @@ async def create_export(
     import json
     
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"remnawave_export_{timestamp}.{request.format}"
+    filename = f"remnawave_export_{timestamp}.xlsx"
     
     settings_dict = request.model_dump()
     
     export_record = RemnawaveExport(
         filename=filename,
-        format=request.format,
+        format="xlsx",
         status="pending",
         settings=json.dumps(settings_dict)
     )

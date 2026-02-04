@@ -1107,7 +1107,6 @@ export const remnawaveApi = {
   
   // Export
   createExport: (settings: {
-    format: 'csv' | 'json' | 'xlsx'
     period: string
     include_user_id: boolean
     include_username: boolean

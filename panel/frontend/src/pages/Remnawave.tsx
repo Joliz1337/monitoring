@@ -29,10 +29,7 @@ import {
   Database,
   ChevronUp,
   ChevronDown,
-  Download,
-  FileText,
-  FileJson,
-  FileSpreadsheet
+  Download
 } from 'lucide-react'
 import { 
   remnawaveApi, 
@@ -165,7 +162,6 @@ export default function Remnawave() {
   const [showClearConfirm, setShowClearConfirm] = useState(false)
   
   // Export state
-  const [exportFormat, setExportFormat] = useState<'csv' | 'json' | 'xlsx'>('csv')
   const [exportPeriod, setExportPeriod] = useState('all')
   const [exportSettings, setExportSettings] = useState({
     include_user_id: true,
@@ -606,7 +602,6 @@ export default function Remnawave() {
     setIsExporting(true)
     try {
       await remnawaveApi.createExport({
-        format: exportFormat,
         period: exportPeriod,
         ...exportSettings
       })
@@ -1343,33 +1338,8 @@ export default function Remnawave() {
               </div>
               
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                {/* Left Column - Format & Period */}
+                {/* Left Column - Period & Button */}
                 <div className="space-y-6">
-                  {/* Format Selection */}
-                  <div>
-                    <label className="block text-sm font-medium text-dark-300 mb-3">
-                      {t('remnawave.export_format')}
-                    </label>
-                    <div className="flex flex-wrap gap-2">
-                      {(['csv', 'json', 'xlsx'] as const).map(fmt => (
-                        <button
-                          key={fmt}
-                          onClick={() => setExportFormat(fmt)}
-                          className={`flex items-center gap-2 px-4 py-2 rounded-lg border transition-all ${
-                            exportFormat === fmt
-                              ? 'border-accent-500 bg-accent-500/10 text-accent-400'
-                              : 'border-dark-600 bg-dark-700/50 text-dark-300 hover:border-dark-500'
-                          }`}
-                        >
-                          {fmt === 'csv' && <FileText className="w-4 h-4" />}
-                          {fmt === 'json' && <FileJson className="w-4 h-4" />}
-                          {fmt === 'xlsx' && <FileSpreadsheet className="w-4 h-4" />}
-                          {t(`remnawave.export_${fmt}`)}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  
                   {/* Period Selection */}
                   <div>
                     <label className="block text-sm font-medium text-dark-300 mb-3">
