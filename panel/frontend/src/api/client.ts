@@ -692,6 +692,37 @@ export interface PanelIpInfo {
   domain: string
 }
 
+export interface PanelServerStats {
+  cpu: {
+    percent: number
+    cores: number
+    load_avg_1: number
+    load_avg_5: number
+    load_avg_15: number
+  }
+  memory: {
+    total: number
+    used: number
+    available: number
+    percent: number
+    swap_total: number
+    swap_used: number
+    swap_percent: number
+  }
+  disk: {
+    total: number
+    used: number
+    free: number
+    percent: number
+  }
+  disk_var?: {
+    total: number
+    used: number
+    free: number
+    percent: number
+  } | null
+}
+
 export const systemApi = {
   getPanelIp: () => api.get<PanelIpInfo>('/system/panel-ip'),
   getVersion: () => api.get<VersionInfo>('/system/version'),
@@ -718,6 +749,9 @@ export const systemApi = {
   getOptimizationsVersion: () => api.get<OptimizationsVersionInfo>('/system/optimizations/version'),
   applyNodeOptimizations: (serverId: number) => 
     api.post<ApplyOptimizationsResponse>(`/proxy/${serverId}/system/optimizations/apply`),
+  
+  // Panel server statistics (CPU, RAM, Disk)
+  getServerStats: () => api.get<PanelServerStats>('/system/stats'),
 }
 
 // Remnawave types
@@ -1054,12 +1088,13 @@ export const remnawaveApi = {
   getDbInfo: () =>
     api.get<{
       tables: {
-        xray_visit_stats: { count: number; first_seen: string | null; last_seen: string | null }
-        xray_hourly_stats: { count: number; first_hour: string | null; last_hour: string | null }
-        xray_user_ip_stats: { count: number }
-        xray_ip_destination_stats: { count: number }
-        remnawave_user_cache: { count: number }
+        xray_visit_stats: { count: number; first_seen: string | null; last_seen: string | null; size_bytes?: number | null }
+        xray_hourly_stats: { count: number; first_hour: string | null; last_hour: string | null; size_bytes?: number | null }
+        xray_user_ip_stats: { count: number; size_bytes?: number | null }
+        xray_ip_destination_stats: { count: number; size_bytes?: number | null }
+        remnawave_user_cache: { count: number; size_bytes?: number | null }
       }
+      total_size_bytes?: number | null
     }>('/remnawave/stats/db-info'),
   
   // Clear all stats

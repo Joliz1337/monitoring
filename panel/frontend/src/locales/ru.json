@@ -210,7 +210,17 @@
     "collector_intervals_desc": "Как часто бэкенд опрашивает серверы",
     "metrics_interval": "Сбор метрик (CPU, RAM, диск, сеть)",
     "haproxy_interval": "Сбор HAProxy/Traffic данных",
-    "recommended_values": "Рекомендуемые значения"
+    "recommended_values": "Рекомендуемые значения",
+    "server_stats": "Статистика сервера",
+    "server_stats_desc": "Ресурсы сервера панели",
+    "cores": "ядер",
+    "usage": "Использование",
+    "load_avg": "Нагрузка",
+    "used": "Использовано",
+    "available": "Доступно",
+    "free": "Свободно",
+    "disk": "Диск",
+    "stats_unavailable": "Статистика недоступна"
   },
   "server_card": {
     "last_seen": "Был в сети: {{time}}",
@@ -659,6 +669,9 @@
     "total": "Всего",
     "top_nodes": "Топ серверов",
     "db_management": "Управление базой данных",
+    "db_total_size": "Общий размер БД логов",
+    "db_tables_count": "Количество таблиц",
+    "tables": "таблиц",
     "db_visits": "Записей посещений",
     "db_ips": "Записей IP",
     "db_ip_destinations": "Записей IP-сайтов",

@@ -10,6 +10,7 @@ from typing import Optional
 
 import docker
 import httpx
+import psutil
 from docker.errors import DockerException, ImageNotFound
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy import select
@@ -855,3 +856,68 @@ async def get_optimizations_configs(_: dict = Depends(verify_auth)):
         "network_tune_content": github_data.get("network_tune_content"),
         "network_tune_service_content": github_data.get("network_tune_service_content")
     }
+
+
+# ==================== Panel Server Statistics ====================
+
+@router.get("/stats")
+async def get_panel_server_stats(_: dict = Depends(verify_auth)):
+    """
+    Get panel server statistics:
+    - CPU usage and load
+    - Memory (RAM) usage
+    - Disk usage for main partition
+    """
+    try:
+        # CPU
+        cpu_percent = psutil.cpu_percent(interval=0.5)
+        cpu_count = psutil.cpu_count()
+        load_avg = psutil.getloadavg()
+        
+        # Memory
+        memory = psutil.virtual_memory()
+        swap = psutil.swap_memory()
+        
+        # Disk - get root partition (/)
+        disk = psutil.disk_usage('/')
+        
+        # Additional disk info for /var (where PostgreSQL data usually is)
+        var_disk = None
+        try:
+            var_disk = psutil.disk_usage('/var')
+        except Exception:
+            pass
+        
+        return {
+            "cpu": {
+                "percent": cpu_percent,
+                "cores": cpu_count,
+                "load_avg_1": load_avg[0],
+                "load_avg_5": load_avg[1],
+                "load_avg_15": load_avg[2]
+            },
+            "memory": {
+                "total": memory.total,
+                "used": memory.used,
+                "available": memory.available,
+                "percent": memory.percent,
+                "swap_total": swap.total,
+                "swap_used": swap.used,
+                "swap_percent": swap.percent
+            },
+            "disk": {
+                "total": disk.total,
+                "used": disk.used,
+                "free": disk.free,
+                "percent": disk.percent
+            },
+            "disk_var": {
+                "total": var_disk.total if var_disk else None,
+                "used": var_disk.used if var_disk else None,
+                "free": var_disk.free if var_disk else None,
+                "percent": var_disk.percent if var_disk else None
+            } if var_disk else None
+        }
+    except Exception as e:
+        logger.error(f"Error getting server stats: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get server stats: {str(e)}")

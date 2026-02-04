@@ -210,7 +210,17 @@
     "collector_intervals_desc": "How often backend polls servers",
     "metrics_interval": "Metrics collection (CPU, RAM, disk, network)",
     "haproxy_interval": "HAProxy/Traffic data collection",
-    "recommended_values": "Recommended values"
+    "recommended_values": "Recommended values",
+    "server_stats": "Server Statistics",
+    "server_stats_desc": "Panel server resources",
+    "cores": "cores",
+    "usage": "Usage",
+    "load_avg": "Load avg",
+    "used": "Used",
+    "available": "Available",
+    "free": "Free",
+    "disk": "Disk",
+    "stats_unavailable": "Statistics unavailable"
   },
   "server_card": {
     "last_seen": "Last online: {{time}}",
@@ -658,6 +668,9 @@
     "total": "Total",
     "top_nodes": "Top Nodes",
     "db_management": "Database Management",
+    "db_total_size": "Total Logs DB Size",
+    "db_tables_count": "Number of tables",
+    "tables": "tables",
     "db_visits": "Visit Records",
     "db_ips": "IP Records",
     "db_ip_destinations": "IP-Destination Records",

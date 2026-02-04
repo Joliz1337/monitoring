@@ -121,6 +121,7 @@ panel/
 |-------|----------|----------|
 | GET | /api/system/panel-ip | IP-адрес панели (резолвится из домена) |
 | GET | /api/system/version | Версии панели, нод и оптимизаций (всё в одном запросе, параллельные запросы к нодам) |
+| GET | /api/system/stats | Статистика сервера панели (CPU, RAM, диск) |
 | POST | /api/system/update | Обновление панели (target_ref: branch/tag/commit, по умолчанию main) |
 | GET | /api/system/update/status | Статус обновления |
 | GET | /api/system/certificate | Информация о SSL сертификате панели |
@@ -318,7 +319,7 @@ panel/
 | GET | /api/remnawave/stats/user/{email} | Детальная статистика пользователя |
 | GET | /api/remnawave/stats/destination/users | Пользователи посещавшие сайт |
 | GET | /api/remnawave/stats/timeline | Временной график посещений |
-| GET | /api/remnawave/stats/db-info | Информация о размере БД |
+| GET | /api/remnawave/stats/db-info | Информация о БД (количество записей и размер в байтах) |
 | DELETE | /api/remnawave/stats/clear | Очистить всю статистику посещений |
 | GET | /api/remnawave/users | Кэш пользователей Remnawave |
 

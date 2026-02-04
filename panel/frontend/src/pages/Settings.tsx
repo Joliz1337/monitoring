@@ -1,9 +1,9 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { Settings as SettingsIcon, RefreshCw, Layout, Languages, Sparkles, Check, Clock, Activity, Shield, AlertTriangle, Loader2, CheckCircle2, XCircle, Terminal, Server, Zap } from 'lucide-react'
+import { Settings as SettingsIcon, RefreshCw, Layout, Languages, Sparkles, Check, Clock, Activity, Shield, AlertTriangle, Loader2, CheckCircle2, XCircle, Terminal, Server, Zap, Cpu, HardDrive, MemoryStick } from 'lucide-react'
 import { useSettingsStore, TIMEZONE_OPTIONS, TRAFFIC_PERIOD_OPTIONS, METRICS_INTERVAL_OPTIONS, HAPROXY_INTERVAL_OPTIONS } from '../stores/settingsStore'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence, LayoutGroup } from 'framer-motion'
-import { systemApi, PanelCertificateInfo } from '../api/client'
+import { systemApi, PanelCertificateInfo, PanelServerStats } from '../api/client'
 
 interface RenewalResult {
   success: boolean
@@ -35,6 +35,10 @@ export default function Settings() {
   const certRenewingRef = useRef(false)
   const maxConnectionErrors = 60 // ~3 minutes with 3s interval during errors
   
+  // Server stats state
+  const [serverStats, setServerStats] = useState<PanelServerStats | null>(null)
+  const [serverStatsLoading, setServerStatsLoading] = useState(true)
+  
   const fetchCertInfo = useCallback(async () => {
     try {
       const response = await systemApi.getCertificate()
@@ -43,6 +47,17 @@ export default function Settings() {
       console.error('Failed to fetch certificate info:', err)
     } finally {
       setCertLoading(false)
+    }
+  }, [])
+  
+  const fetchServerStats = useCallback(async () => {
+    try {
+      const response = await systemApi.getServerStats()
+      setServerStats(response.data)
+    } catch (err) {
+      console.error('Failed to fetch server stats:', err)
+    } finally {
+      setServerStatsLoading(false)
     }
   }, [])
   
@@ -166,7 +181,21 @@ export default function Settings() {
   useEffect(() => {
     fetchSettings()
     fetchCertInfo()
-  }, [fetchSettings, fetchCertInfo])
+    fetchServerStats()
+    
+    // Refresh server stats every 30 seconds
+    const statsInterval = setInterval(fetchServerStats, 30000)
+    return () => clearInterval(statsInterval)
+  }, [fetchSettings, fetchCertInfo, fetchServerStats])
+  
+  // Helper function to format bytes
+  const formatBytes = (bytes: number): string => {
+    if (bytes === 0) return '0 B'
+    const k = 1024
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB']
+    const i = Math.floor(Math.log(bytes) / Math.log(k))
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
+  }
   
   const changeLanguage = (lng: string) => {
     i18n.changeLanguage(lng)
@@ -225,6 +254,135 @@ export default function Settings() {
       </motion.div>
       
       <div className="space-y-6">
+        {/* Server Statistics */}
+        <motion.div variants={itemVariants} className="card group hover:border-dark-700 transition-all">
+          <div className="flex items-center gap-3 mb-5">
+            <motion.div 
+              className="w-11 h-11 rounded-xl bg-gradient-to-br from-accent-500/20 to-accent-600/20 
+                         flex items-center justify-center border border-accent-500/20
+                         group-hover:shadow-lg group-hover:shadow-accent-500/10 transition-shadow"
+              whileHover={{ rotate: 10, scale: 1.05 }}
+            >
+              <Server className="w-5 h-5 text-accent-500" />
+            </motion.div>
+            <div>
+              <h2 className="font-semibold text-dark-100">{t('settings.server_stats')}</h2>
+              <p className="text-sm text-dark-500">{t('settings.server_stats_desc')}</p>
+            </div>
+          </div>
+          
+          {serverStatsLoading ? (
+            <div className="flex items-center justify-center py-4">
+              <Loader2 className="w-5 h-5 text-accent-500 animate-spin" />
+            </div>
+          ) : serverStats ? (
+            <div className="space-y-4">
+              {/* CPU */}
+              <div className="p-4 bg-dark-800/50 rounded-xl border border-dark-700/50">
+                <div className="flex items-center gap-2 mb-3">
+                  <Cpu className="w-4 h-4 text-dark-400" />
+                  <span className="text-sm text-dark-300">CPU</span>
+                  <span className="text-xs text-dark-500 ml-auto">{serverStats.cpu.cores} {t('settings.cores')}</span>
+                </div>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-dark-400">{t('settings.usage')}</span>
+                    <span className={`font-medium ${
+                      serverStats.cpu.percent > 80 ? 'text-danger' : 
+                      serverStats.cpu.percent > 50 ? 'text-warning' : 'text-success'
+                    }`}>{serverStats.cpu.percent.toFixed(1)}%</span>
+                  </div>
+                  <div className="h-2 bg-dark-700 rounded-full overflow-hidden">
+                    <motion.div 
+                      className={`h-full rounded-full ${
+                        serverStats.cpu.percent > 80 ? 'bg-danger' : 
+                        serverStats.cpu.percent > 50 ? 'bg-warning' : 'bg-success'
+                      }`}
+                      initial={{ width: 0 }}
+                      animate={{ width: `${serverStats.cpu.percent}%` }}
+                      transition={{ duration: 0.5 }}
+                    />
+                  </div>
+                  <div className="flex items-center justify-between text-xs text-dark-500">
+                    <span>{t('settings.load_avg')}: {serverStats.cpu.load_avg_1.toFixed(2)} / {serverStats.cpu.load_avg_5.toFixed(2)} / {serverStats.cpu.load_avg_15.toFixed(2)}</span>
+                  </div>
+                </div>
+              </div>
+              
+              {/* Memory */}
+              <div className="p-4 bg-dark-800/50 rounded-xl border border-dark-700/50">
+                <div className="flex items-center gap-2 mb-3">
+                  <MemoryStick className="w-4 h-4 text-dark-400" />
+                  <span className="text-sm text-dark-300">RAM</span>
+                  <span className="text-xs text-dark-500 ml-auto">{formatBytes(serverStats.memory.total)}</span>
+                </div>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-dark-400">{t('settings.used')}</span>
+                    <span className={`font-medium ${
+                      serverStats.memory.percent > 90 ? 'text-danger' : 
+                      serverStats.memory.percent > 70 ? 'text-warning' : 'text-success'
+                    }`}>{formatBytes(serverStats.memory.used)} ({serverStats.memory.percent.toFixed(1)}%)</span>
+                  </div>
+                  <div className="h-2 bg-dark-700 rounded-full overflow-hidden">
+                    <motion.div 
+                      className={`h-full rounded-full ${
+                        serverStats.memory.percent > 90 ? 'bg-danger' : 
+                        serverStats.memory.percent > 70 ? 'bg-warning' : 'bg-success'
+                      }`}
+                      initial={{ width: 0 }}
+                      animate={{ width: `${serverStats.memory.percent}%` }}
+                      transition={{ duration: 0.5 }}
+                    />
+                  </div>
+                  <div className="flex items-center justify-between text-xs text-dark-500">
+                    <span>{t('settings.available')}: {formatBytes(serverStats.memory.available)}</span>
+                    {serverStats.memory.swap_total > 0 && (
+                      <span>Swap: {formatBytes(serverStats.memory.swap_used)} / {formatBytes(serverStats.memory.swap_total)}</span>
+                    )}
+                  </div>
+                </div>
+              </div>
+              
+              {/* Disk */}
+              <div className="p-4 bg-dark-800/50 rounded-xl border border-dark-700/50">
+                <div className="flex items-center gap-2 mb-3">
+                  <HardDrive className="w-4 h-4 text-dark-400" />
+                  <span className="text-sm text-dark-300">{t('settings.disk')}</span>
+                  <span className="text-xs text-dark-500 ml-auto">{formatBytes(serverStats.disk.total)}</span>
+                </div>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-dark-400">{t('settings.used')}</span>
+                    <span className={`font-medium ${
+                      serverStats.disk.percent > 90 ? 'text-danger' : 
+                      serverStats.disk.percent > 75 ? 'text-warning' : 'text-success'
+                    }`}>{formatBytes(serverStats.disk.used)} ({serverStats.disk.percent.toFixed(1)}%)</span>
+                  </div>
+                  <div className="h-2 bg-dark-700 rounded-full overflow-hidden">
+                    <motion.div 
+                      className={`h-full rounded-full ${
+                        serverStats.disk.percent > 90 ? 'bg-danger' : 
+                        serverStats.disk.percent > 75 ? 'bg-warning' : 'bg-success'
+                      }`}
+                      initial={{ width: 0 }}
+                      animate={{ width: `${serverStats.disk.percent}%` }}
+                      transition={{ duration: 0.5 }}
+                    />
+                  </div>
+                  <div className="flex items-center justify-between text-xs text-dark-500">
+                    <span>{t('settings.free')}: {formatBytes(serverStats.disk.free)}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="text-sm text-dark-400 text-center py-4">
+              {t('settings.stats_unavailable')}
+            </div>
+          )}
+        </motion.div>
+
         {/* Language */}
         <motion.div variants={itemVariants} className="card group hover:border-dark-700 transition-all">
           <div className="flex items-center gap-3 mb-5">

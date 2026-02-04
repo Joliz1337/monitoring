@@ -1220,7 +1220,9 @@ async def get_db_info(
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    """Get database statistics for monitoring"""
+    """Get database statistics for monitoring including table sizes"""
+    from sqlalchemy import text
+    
     # Count records in each table
     visit_count = await db.execute(select(sql_func.count()).select_from(XrayVisitStats))
     hourly_count = await db.execute(select(sql_func.count()).select_from(XrayHourlyStats))
@@ -1245,28 +1247,60 @@ async def get_db_info(
     v_range = visit_range.one()
     h_range = hourly_range.one()
     
+    # Get table sizes from PostgreSQL
+    table_sizes = {}
+    total_size = 0
+    try:
+        # Query to get table sizes including indexes
+        size_query = text("""
+            SELECT 
+                relname as table_name,
+                pg_total_relation_size(relid) as total_size
+            FROM pg_catalog.pg_statio_user_tables
+            WHERE relname IN (
+                'xray_visit_stats', 
+                'xray_hourly_stats', 
+                'xray_user_ip_stats',
+                'xray_ip_destination_stats',
+                'remnawave_user_cache'
+            )
+        """)
+        size_result = await db.execute(size_query)
+        for row in size_result.fetchall():
+            table_sizes[row[0]] = row[1]
+            total_size += row[1]
+    except Exception:
+        # Fallback if query fails
+        pass
+    
     return {
         "tables": {
             "xray_visit_stats": {
                 "count": visit_count.scalar() or 0,
                 "first_seen": v_range[0].isoformat() if v_range[0] else None,
-                "last_seen": v_range[1].isoformat() if v_range[1] else None
+                "last_seen": v_range[1].isoformat() if v_range[1] else None,
+                "size_bytes": table_sizes.get("xray_visit_stats")
             },
             "xray_hourly_stats": {
                 "count": hourly_count.scalar() or 0,
                 "first_hour": h_range[0].isoformat() if h_range[0] else None,
-                "last_hour": h_range[1].isoformat() if h_range[1] else None
+                "last_hour": h_range[1].isoformat() if h_range[1] else None,
+                "size_bytes": table_sizes.get("xray_hourly_stats")
             },
             "xray_user_ip_stats": {
-                "count": ip_count.scalar() or 0
+                "count": ip_count.scalar() or 0,
+                "size_bytes": table_sizes.get("xray_user_ip_stats")
             },
             "xray_ip_destination_stats": {
-                "count": ip_dest_count.scalar() or 0
+                "count": ip_dest_count.scalar() or 0,
+                "size_bytes": table_sizes.get("xray_ip_destination_stats")
             },
             "remnawave_user_cache": {
-                "count": user_count.scalar() or 0
+                "count": user_count.scalar() or 0,
+                "size_bytes": table_sizes.get("remnawave_user_cache")
             }
-        }
+        },
+        "total_size_bytes": total_size if total_size > 0 else None
     }
 
 
