@@ -517,6 +517,20 @@ async def run_migrations(conn):
             logger.info("Added column: xray_user_ip_stats.is_infrastructure")
         except Exception:
             pass
+    
+    # Check remnawave_settings columns
+    result = await conn.execute(text("""
+        SELECT column_name FROM information_schema.columns 
+        WHERE table_name = 'remnawave_settings'
+    """))
+    remnawave_settings_columns = {row[0] for row in result.fetchall()}
+    
+    if remnawave_settings_columns and "ignored_user_ids" not in remnawave_settings_columns:
+        try:
+            await conn.execute(text('ALTER TABLE remnawave_settings ADD COLUMN "ignored_user_ids" TEXT'))
+            logger.info("Added column: remnawave_settings.ignored_user_ids")
+        except Exception:
+            pass
 
 
 async def init_db():
