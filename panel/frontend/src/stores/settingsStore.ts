@@ -65,10 +65,10 @@ export const METRICS_INTERVAL_OPTIONS: CollectorIntervalOption[] = [
 ]
 
 export const HAPROXY_INTERVAL_OPTIONS: CollectorIntervalOption[] = [
-  { value: 30, label: '30s' },
-  { value: 60, label: '1m', recommended: true },
+  { value: 60, label: '1m' },
   { value: 120, label: '2m' },
-  { value: 300, label: '5m' },
+  { value: 300, label: '5m', recommended: true },
+  { value: 600, label: '10m' },
 ]
 
 export type DetailLevel = 'minimal' | 'standard' | 'detailed'
@@ -106,7 +106,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   detailLevel: 'standard',
   cardScale: 'medium',
   metricsCollectInterval: 10,
-  haproxyCollectInterval: 60,
+  haproxyCollectInterval: 300,
   isLoading: true,
   
   fetchSettings: async () => {
@@ -120,7 +120,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         detailLevel: (data.settings.detail_level as DetailLevel) || 'standard',
         cardScale: (data.settings.card_scale as CardScale) || 'medium',
         metricsCollectInterval: parseInt(data.settings.metrics_collect_interval || '10'),
-        haproxyCollectInterval: parseInt(data.settings.haproxy_collect_interval || '60'),
+        haproxyCollectInterval: parseInt(data.settings.haproxy_collect_interval || '300'),
         isLoading: false,
       })
     } catch {

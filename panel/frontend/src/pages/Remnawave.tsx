@@ -28,7 +28,11 @@ import {
   Trash2,
   Database,
   ChevronUp,
-  ChevronDown
+  ChevronDown,
+  Download,
+  FileText,
+  FileJson,
+  FileSpreadsheet
 } from 'lucide-react'
 import { 
   remnawaveApi, 
@@ -62,7 +66,7 @@ const itemVariants = {
   visible: { opacity: 1, y: 0, transition: { duration: 0.4 } }
 }
 
-type TabType = 'overview' | 'users' | 'destinations' | 'settings'
+type TabType = 'overview' | 'users' | 'destinations' | 'export' | 'settings'
 
 export default function Remnawave() {
   const { t } = useTranslation()
@@ -159,6 +163,14 @@ export default function Remnawave() {
   } | null>(null)
   const [isClearingStats, setIsClearingStats] = useState(false)
   const [showClearConfirm, setShowClearConfirm] = useState(false)
+  
+  // Export state
+  const [exportFormat, setExportFormat] = useState<'csv' | 'json' | 'xlsx'>('csv')
+  const [exportPeriod, setExportPeriod] = useState('all')
+  const [exportIncludeDestinations, setExportIncludeDestinations] = useState(true)
+  const [exportIncludeIps, setExportIncludeIps] = useState(false)
+  const [exportIncludeTraffic, setExportIncludeTraffic] = useState(false)
+  const [isExporting, setIsExporting] = useState(false)
   
   // Fetch settings
   const fetchSettings = useCallback(async () => {
@@ -556,6 +568,41 @@ export default function Remnawave() {
     }
   }
   
+  const handleExport = async () => {
+    setIsExporting(true)
+    try {
+      const response = await remnawaveApi.exportData({
+        format: exportFormat,
+        period: exportPeriod,
+        include_destinations: exportIncludeDestinations,
+        include_ips: exportIncludeIps,
+        include_traffic: exportIncludeTraffic
+      })
+      
+      // Create blob and download
+      const blob = new Blob([response.data], { 
+        type: exportFormat === 'json' 
+          ? 'application/json' 
+          : exportFormat === 'xlsx'
+            ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            : 'text/csv'
+      })
+      
+      const url = window.URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `remnawave_export_${new Date().toISOString().slice(0, 10)}.${exportFormat}`
+      document.body.appendChild(a)
+      a.click()
+      window.URL.revokeObjectURL(url)
+      document.body.removeChild(a)
+    } catch (err) {
+      console.error('Failed to export:', err)
+    } finally {
+      setIsExporting(false)
+    }
+  }
+  
   // Check if selected nodes differ from current nodes
   const currentNodeIds = new Set(allServers.filter(s => s.is_node).map(s => s.id))
   const hasNodeChanges = selectedNodeIds.size !== currentNodeIds.size || 
@@ -752,6 +799,7 @@ export default function Remnawave() {
     { id: 'overview', label: t('remnawave.overview'), icon: <BarChart3 className="w-4 h-4" /> },
     { id: 'users', label: t('remnawave.users'), icon: <Users className="w-4 h-4" /> },
     { id: 'destinations', label: t('remnawave.destinations'), icon: <Globe className="w-4 h-4" /> },
+    { id: 'export', label: t('remnawave.export'), icon: <Download className="w-4 h-4" /> },
     { id: 'settings', label: t('remnawave.settings'), icon: <Settings className="w-4 h-4" /> },
   ]
   
@@ -785,7 +833,7 @@ export default function Remnawave() {
           </div>
         </div>
         
-        {activeTab !== 'settings' && (
+        {activeTab !== 'settings' && activeTab !== 'export' && (
           <div className="flex items-center gap-3">
             <div className="flex items-center gap-2 text-dark-500 text-sm">
               <RefreshCw className="w-4 h-4" />
@@ -1210,6 +1258,168 @@ export default function Remnawave() {
               {filteredDestinations.length === 0 && (
                 <div className="p-8 text-center text-dark-500">{t('remnawave.no_data')}</div>
               )}
+            </div>
+          </motion.div>
+        )}
+        
+        {activeTab === 'export' && (
+          <motion.div
+            key="export"
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -20 }}
+            className="space-y-6"
+          >
+            <div className="p-6 rounded-xl bg-dark-800/50 border border-dark-700/50">
+              <div className="flex items-center gap-3 mb-6">
+                <div className="p-2 rounded-lg bg-accent-500/10">
+                  <Download className="w-5 h-5 text-accent-400" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-semibold text-dark-100">{t('remnawave.export')}</h3>
+                  <p className="text-dark-400 text-sm">{t('remnawave.export_description')}</p>
+                </div>
+              </div>
+              
+              <div className="space-y-6">
+                {/* Format Selection */}
+                <div>
+                  <label className="block text-sm font-medium text-dark-300 mb-3">
+                    {t('remnawave.export_format')}
+                  </label>
+                  <div className="flex flex-wrap gap-3">
+                    <button
+                      onClick={() => setExportFormat('csv')}
+                      className={`flex items-center gap-2 px-4 py-3 rounded-lg border transition-all ${
+                        exportFormat === 'csv'
+                          ? 'border-accent-500 bg-accent-500/10 text-accent-400'
+                          : 'border-dark-600 bg-dark-700/50 text-dark-300 hover:border-dark-500'
+                      }`}
+                    >
+                      <FileText className="w-5 h-5" />
+                      <div className="text-left">
+                        <div className="font-medium">{t('remnawave.export_csv')}</div>
+                      </div>
+                    </button>
+                    <button
+                      onClick={() => setExportFormat('json')}
+                      className={`flex items-center gap-2 px-4 py-3 rounded-lg border transition-all ${
+                        exportFormat === 'json'
+                          ? 'border-accent-500 bg-accent-500/10 text-accent-400'
+                          : 'border-dark-600 bg-dark-700/50 text-dark-300 hover:border-dark-500'
+                      }`}
+                    >
+                      <FileJson className="w-5 h-5" />
+                      <div className="text-left">
+                        <div className="font-medium">{t('remnawave.export_json')}</div>
+                      </div>
+                    </button>
+                    <button
+                      onClick={() => setExportFormat('xlsx')}
+                      className={`flex items-center gap-2 px-4 py-3 rounded-lg border transition-all ${
+                        exportFormat === 'xlsx'
+                          ? 'border-accent-500 bg-accent-500/10 text-accent-400'
+                          : 'border-dark-600 bg-dark-700/50 text-dark-300 hover:border-dark-500'
+                      }`}
+                    >
+                      <FileSpreadsheet className="w-5 h-5" />
+                      <div className="text-left">
+                        <div className="font-medium">{t('remnawave.export_xlsx')}</div>
+                      </div>
+                    </button>
+                  </div>
+                </div>
+                
+                {/* Period Selection */}
+                <div>
+                  <label className="block text-sm font-medium text-dark-300 mb-3">
+                    {t('remnawave.export_period')}
+                  </label>
+                  <PeriodSelector 
+                    value={exportPeriod} 
+                    onChange={setExportPeriod}
+                    options={[
+                      { value: 'all', label: t('period.all') },
+                      { value: '24h', label: t('period.24h') },
+                      { value: '7d', label: t('period.7d') },
+                      { value: '30d', label: t('period.30d') },
+                      { value: '365d', label: t('period.365d') },
+                    ]}
+                  />
+                </div>
+                
+                {/* Data Options */}
+                <div>
+                  <label className="block text-sm font-medium text-dark-300 mb-3">
+                    {t('remnawave.export_data_options')}
+                  </label>
+                  <div className="space-y-3">
+                    <label className="flex items-start gap-3 p-3 rounded-lg bg-dark-700/50 cursor-pointer hover:bg-dark-700 transition-colors">
+                      <input
+                        type="checkbox"
+                        checked={exportIncludeDestinations}
+                        onChange={(e) => setExportIncludeDestinations(e.target.checked)}
+                        className="mt-0.5 w-4 h-4 rounded border-dark-500 bg-dark-600 text-accent-500 
+                                 focus:ring-accent-500 focus:ring-offset-0"
+                      />
+                      <div>
+                        <div className="text-dark-200 font-medium">{t('remnawave.export_include_destinations')}</div>
+                        <div className="text-dark-500 text-sm">{t('remnawave.export_include_destinations_hint')}</div>
+                      </div>
+                    </label>
+                    <label className="flex items-start gap-3 p-3 rounded-lg bg-dark-700/50 cursor-pointer hover:bg-dark-700 transition-colors">
+                      <input
+                        type="checkbox"
+                        checked={exportIncludeIps}
+                        onChange={(e) => setExportIncludeIps(e.target.checked)}
+                        className="mt-0.5 w-4 h-4 rounded border-dark-500 bg-dark-600 text-accent-500 
+                                 focus:ring-accent-500 focus:ring-offset-0"
+                      />
+                      <div>
+                        <div className="text-dark-200 font-medium">{t('remnawave.export_include_ips')}</div>
+                        <div className="text-dark-500 text-sm">{t('remnawave.export_include_ips_hint')}</div>
+                      </div>
+                    </label>
+                    <label className="flex items-start gap-3 p-3 rounded-lg bg-dark-700/50 cursor-pointer hover:bg-dark-700 transition-colors">
+                      <input
+                        type="checkbox"
+                        checked={exportIncludeTraffic}
+                        onChange={(e) => setExportIncludeTraffic(e.target.checked)}
+                        className="mt-0.5 w-4 h-4 rounded border-dark-500 bg-dark-600 text-accent-500 
+                                 focus:ring-accent-500 focus:ring-offset-0"
+                      />
+                      <div>
+                        <div className="text-dark-200 font-medium">{t('remnawave.export_include_traffic')}</div>
+                        <div className="text-dark-500 text-sm">{t('remnawave.export_include_traffic_hint')}</div>
+                      </div>
+                    </label>
+                  </div>
+                </div>
+                
+                {/* Export Button */}
+                <div className="pt-4 border-t border-dark-700">
+                  <motion.button
+                    onClick={handleExport}
+                    disabled={isExporting}
+                    className="flex items-center gap-2 px-6 py-3 rounded-lg bg-accent-500 hover:bg-accent-600 
+                             text-white font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    whileHover={{ scale: 1.02 }}
+                    whileTap={{ scale: 0.98 }}
+                  >
+                    {isExporting ? (
+                      <>
+                        <RefreshCw className="w-5 h-5 animate-spin" />
+                        {t('remnawave.export_generating')}
+                      </>
+                    ) : (
+                      <>
+                        <Download className="w-5 h-5" />
+                        {t('remnawave.export_download')}
+                      </>
+                    )}
+                  </motion.button>
+                </div>
+              </div>
             </div>
           </motion.div>
         )}

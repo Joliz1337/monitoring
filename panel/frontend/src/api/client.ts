@@ -1104,6 +1104,18 @@ export const remnawaveApi = {
       deleted: { visit_stats: number; ip_stats: number; ip_destination_stats: number; hourly_stats: number }
       message: string
     }>('/remnawave/stats/clear'),
+  
+  // Export data
+  exportData: (params: {
+    format: 'csv' | 'json' | 'xlsx'
+    period: string
+    include_destinations?: boolean
+    include_ips?: boolean
+    include_traffic?: boolean
+  }) => api.post('/remnawave/export', null, { 
+    params,
+    responseType: 'blob'
+  }),
 }
 
 export default api

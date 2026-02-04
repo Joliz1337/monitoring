@@ -1512,3 +1512,277 @@ async def _get_user_bandwidth_stats(api, uuid: str) -> Optional[dict]:
     start_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
     
     return await api.get_user_bandwidth_stats(uuid, start_date, end_date)
+
+
+# === Export Endpoints ===
+
+@router.post("/export")
+async def export_data(
+    format: str = Query("csv", pattern="^(csv|json|xlsx)$"),
+    period: str = Query("all", pattern="^(1h|24h|7d|30d|365d|all)$"),
+    include_destinations: bool = Query(True),
+    include_ips: bool = Query(False),
+    include_traffic: bool = Query(False),
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Export user visit data in various formats.
+    
+    Returns a file with users and their visited destinations.
+    Supported formats: csv, json, xlsx
+    """
+    import csv
+    import json
+    import io
+    from fastapi.responses import StreamingResponse
+    
+    start_time = _get_time_filter(period)
+    
+    # Get all users with their stats
+    if period == "all":
+        # Use cumulative stats
+        users_query = select(
+            XrayVisitStats.email,
+            sql_func.sum(XrayVisitStats.visit_count).label('total_visits'),
+            sql_func.count(sql_func.distinct(XrayVisitStats.destination)).label('unique_sites')
+        ).group_by(XrayVisitStats.email).order_by(sql_func.sum(XrayVisitStats.visit_count).desc())
+    else:
+        # Filter by time - need to use XrayVisitStats with last_seen filter
+        users_query = select(
+            XrayVisitStats.email,
+            sql_func.sum(XrayVisitStats.visit_count).label('total_visits'),
+            sql_func.count(sql_func.distinct(XrayVisitStats.destination)).label('unique_sites')
+        ).where(
+            XrayVisitStats.last_seen >= start_time
+        ).group_by(XrayVisitStats.email).order_by(sql_func.sum(XrayVisitStats.visit_count).desc())
+    
+    users_result = await db.execute(users_query)
+    users_data = users_result.all()
+    
+    # Get user cache for usernames/status
+    cache_result = await db.execute(select(RemnawaveUserCache))
+    user_cache = {u.email: u for u in cache_result.scalars().all()}
+    
+    # Build export data
+    export_rows = []
+    
+    for user in users_data:
+        user_info = user_cache.get(user.email)
+        username = user_info.username if user_info else None
+        status = user_info.status if user_info else None
+        
+        base_user_data = {
+            "user_id": user.email,
+            "username": username or f"User #{user.email}",
+            "status": status or "UNKNOWN",
+            "total_visits": user.total_visits,
+            "unique_sites": user.unique_sites
+        }
+        
+        # Add traffic info if requested
+        if include_traffic and user_info:
+            base_user_data["traffic_used_bytes"] = user_info.used_traffic_bytes
+            base_user_data["traffic_limit_bytes"] = user_info.traffic_limit_bytes
+            base_user_data["lifetime_traffic_bytes"] = user_info.lifetime_used_traffic_bytes
+        
+        if include_destinations:
+            # Get destinations for this user
+            if period == "all":
+                dest_query = select(
+                    XrayVisitStats.destination,
+                    sql_func.sum(XrayVisitStats.visit_count).label('visits'),
+                    sql_func.min(XrayVisitStats.first_seen).label('first_seen'),
+                    sql_func.max(XrayVisitStats.last_seen).label('last_seen')
+                ).where(
+                    XrayVisitStats.email == user.email
+                ).group_by(XrayVisitStats.destination).order_by(sql_func.sum(XrayVisitStats.visit_count).desc())
+            else:
+                dest_query = select(
+                    XrayVisitStats.destination,
+                    sql_func.sum(XrayVisitStats.visit_count).label('visits'),
+                    sql_func.min(XrayVisitStats.first_seen).label('first_seen'),
+                    sql_func.max(XrayVisitStats.last_seen).label('last_seen')
+                ).where(
+                    XrayVisitStats.email == user.email,
+                    XrayVisitStats.last_seen >= start_time
+                ).group_by(XrayVisitStats.destination).order_by(sql_func.sum(XrayVisitStats.visit_count).desc())
+            
+            dest_result = await db.execute(dest_query)
+            destinations = dest_result.all()
+            
+            for dest in destinations:
+                row = base_user_data.copy()
+                row["destination"] = dest.destination
+                row["visits"] = dest.visits
+                row["first_seen"] = dest.first_seen.isoformat() if dest.first_seen else None
+                row["last_seen"] = dest.last_seen.isoformat() if dest.last_seen else None
+                export_rows.append(row)
+        else:
+            export_rows.append(base_user_data)
+        
+        # Add IP data if requested
+        if include_ips:
+            ip_query = select(
+                XrayUserIpStats.source_ip,
+                sql_func.sum(XrayUserIpStats.connection_count).label('connections'),
+                XrayUserIpStats.is_infrastructure
+            ).where(
+                XrayUserIpStats.email == user.email
+            ).group_by(XrayUserIpStats.source_ip, XrayUserIpStats.is_infrastructure)
+            
+            ip_result = await db.execute(ip_query)
+            ips = ip_result.all()
+            
+            # Add IPs to last row or create separate rows
+            if export_rows and not include_destinations:
+                export_rows[-1]["client_ips"] = [ip.source_ip for ip in ips if not ip.is_infrastructure]
+                export_rows[-1]["infrastructure_ips"] = [ip.source_ip for ip in ips if ip.is_infrastructure]
+    
+    # Generate output based on format
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    if format == "json":
+        # JSON format - structured output
+        if include_destinations:
+            # Group by user
+            users_grouped = {}
+            for row in export_rows:
+                uid = row["user_id"]
+                if uid not in users_grouped:
+                    users_grouped[uid] = {
+                        "user_id": row["user_id"],
+                        "username": row["username"],
+                        "status": row["status"],
+                        "total_visits": row["total_visits"],
+                        "unique_sites": row["unique_sites"],
+                        "destinations": []
+                    }
+                    if include_traffic:
+                        users_grouped[uid]["traffic_used_bytes"] = row.get("traffic_used_bytes")
+                        users_grouped[uid]["traffic_limit_bytes"] = row.get("traffic_limit_bytes")
+                        users_grouped[uid]["lifetime_traffic_bytes"] = row.get("lifetime_traffic_bytes")
+                    if include_ips:
+                        users_grouped[uid]["client_ips"] = row.get("client_ips", [])
+                        users_grouped[uid]["infrastructure_ips"] = row.get("infrastructure_ips", [])
+                
+                users_grouped[uid]["destinations"].append({
+                    "destination": row["destination"],
+                    "visits": row["visits"],
+                    "first_seen": row["first_seen"],
+                    "last_seen": row["last_seen"]
+                })
+            
+            output_data = {
+                "export_date": datetime.now().isoformat(),
+                "period": period,
+                "total_users": len(users_grouped),
+                "users": list(users_grouped.values())
+            }
+        else:
+            output_data = {
+                "export_date": datetime.now().isoformat(),
+                "period": period,
+                "total_users": len(export_rows),
+                "users": export_rows
+            }
+        
+        content = json.dumps(output_data, ensure_ascii=False, indent=2)
+        return StreamingResponse(
+            io.BytesIO(content.encode('utf-8')),
+            media_type="application/json",
+            headers={"Content-Disposition": f"attachment; filename=remnawave_export_{timestamp}.json"}
+        )
+    
+    elif format == "csv":
+        # CSV format
+        output = io.StringIO()
+        
+        if export_rows:
+            fieldnames = list(export_rows[0].keys())
+            # Handle list fields for CSV
+            if include_ips and not include_destinations:
+                for row in export_rows:
+                    if "client_ips" in row:
+                        row["client_ips"] = ";".join(row["client_ips"]) if row["client_ips"] else ""
+                    if "infrastructure_ips" in row:
+                        row["infrastructure_ips"] = ";".join(row["infrastructure_ips"]) if row["infrastructure_ips"] else ""
+            
+            writer = csv.DictWriter(output, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(export_rows)
+        
+        content = output.getvalue()
+        return StreamingResponse(
+            io.BytesIO(content.encode('utf-8-sig')),  # UTF-8 with BOM for Excel
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename=remnawave_export_{timestamp}.csv"}
+        )
+    
+    elif format == "xlsx":
+        # Excel format
+        try:
+            from openpyxl import Workbook
+            from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+            from openpyxl.utils import get_column_letter
+        except ImportError:
+            raise HTTPException(status_code=500, detail="openpyxl not installed")
+        
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Users & Visits"
+        
+        # Styles
+        header_font = Font(bold=True, color="FFFFFF")
+        header_fill = PatternFill(start_color="4F46E5", end_color="4F46E5", fill_type="solid")
+        header_alignment = Alignment(horizontal="center", vertical="center")
+        thin_border = Border(
+            left=Side(style='thin'),
+            right=Side(style='thin'),
+            top=Side(style='thin'),
+            bottom=Side(style='thin')
+        )
+        
+        if export_rows:
+            # Write headers
+            headers = list(export_rows[0].keys())
+            for col, header in enumerate(headers, 1):
+                cell = ws.cell(row=1, column=col, value=header)
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = header_alignment
+                cell.border = thin_border
+            
+            # Write data
+            for row_idx, row_data in enumerate(export_rows, 2):
+                for col_idx, header in enumerate(headers, 1):
+                    value = row_data.get(header)
+                    # Handle lists
+                    if isinstance(value, list):
+                        value = "; ".join(str(v) for v in value)
+                    cell = ws.cell(row=row_idx, column=col_idx, value=value)
+                    cell.border = thin_border
+            
+            # Auto-adjust column widths
+            for col in range(1, len(headers) + 1):
+                max_length = 0
+                column = get_column_letter(col)
+                for row in range(1, len(export_rows) + 2):
+                    try:
+                        cell_value = str(ws.cell(row=row, column=col).value or "")
+                        if len(cell_value) > max_length:
+                            max_length = len(cell_value)
+                    except:
+                        pass
+                adjusted_width = min(max_length + 2, 50)
+                ws.column_dimensions[column].width = adjusted_width
+        
+        # Save to bytes
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+        
+        return StreamingResponse(
+            output,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename=remnawave_export_{timestamp}.xlsx"}
+        )

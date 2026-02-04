@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 # Default intervals (used if settings not in DB)
 DEFAULT_METRICS_INTERVAL = 10  # seconds (recommended: 10-15s)
-DEFAULT_HAPROXY_INTERVAL = 60  # seconds (recommended: 60s)
+DEFAULT_HAPROXY_INTERVAL = 300  # seconds (5 minutes - HAProxy/Traffic data changes rarely)
 
 
 class ErrorTypes:
