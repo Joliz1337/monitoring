@@ -123,6 +123,9 @@ class XrayStatsCollector:
         
         self._last_collect_time: Optional[datetime] = None
         self._collecting = False
+        
+        self._last_user_cache_update: Optional[datetime] = None
+        self._user_cache_updating = False
     
     async def start(self):
         """Start background collection."""
@@ -554,7 +557,10 @@ class XrayStatsCollector:
         
         while self._running:
             try:
-                await self._update_user_cache()
+                settings = await self._get_settings()
+                # Only auto-update if collection is enabled
+                if settings and settings.enabled:
+                    await self._update_user_cache()
                 await asyncio.sleep(self._user_cache_interval)
             except asyncio.CancelledError:
                 raise
@@ -562,20 +568,28 @@ class XrayStatsCollector:
                 logger.error(f"User cache error: {e}")
                 await asyncio.sleep(300)
     
-    async def _update_user_cache(self):
-        """Update cached Remnawave users with full info."""
+    async def _update_user_cache(self) -> dict:
+        """Update cached Remnawave users with full info.
+        
+        Returns:
+            dict with update result (success, count, error)
+        """
         settings = await self._get_settings()
         
-        if not settings or not settings.enabled or not settings.api_url or not settings.api_token:
-            return
+        if not settings or not settings.api_url or not settings.api_token:
+            return {"success": False, "error": "API not configured", "count": 0}
         
+        if self._user_cache_updating:
+            return {"success": False, "error": "Update already in progress", "count": 0}
+        
+        self._user_cache_updating = True
         api = get_remnawave_api(settings.api_url, settings.api_token, settings.cookie_secret)
         
         try:
             users = await api.get_all_users_paginated(size=50)
             
             if not users:
-                return
+                return {"success": True, "count": 0, "error": None}
             
             now = datetime.now(timezone.utc).replace(tzinfo=None)
             
@@ -583,12 +597,32 @@ class XrayStatsCollector:
                 await self._batch_upsert_user_cache(db, users, now)
                 await db.commit()
             
+            self._last_user_cache_update = now
             logger.info(f"Updated user cache: {len(users)} users")
+            return {"success": True, "count": len(users), "error": None}
             
         except RemnawaveAPIError as e:
             logger.warning(f"Failed to update user cache: {e.message}")
+            return {"success": False, "error": e.message, "count": 0}
         finally:
+            self._user_cache_updating = False
             await api.close()
+    
+    async def refresh_user_cache_now(self) -> dict:
+        """Force immediate user cache refresh.
+        
+        Returns:
+            dict with refresh result
+        """
+        return await self._update_user_cache()
+    
+    def get_user_cache_status(self) -> dict:
+        """Get user cache status."""
+        return {
+            "last_update": self._last_user_cache_update.isoformat() if self._last_user_cache_update else None,
+            "updating": self._user_cache_updating,
+            "update_interval": self._user_cache_interval
+        }
     
     async def _batch_upsert_user_cache(self, db: AsyncSession, users: list[dict], now: datetime):
         """Batch upsert user cache using PostgreSQL ON CONFLICT."""

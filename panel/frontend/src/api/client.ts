@@ -1034,6 +1034,10 @@ export const remnawaveApi = {
   // Users cache
   getUsers: (params?: { search?: string; limit?: number }) =>
     api.get<{ count: number; users: RemnawaveCachedUser[] }>('/remnawave/users', { params }),
+  refreshUserCache: () =>
+    api.post<{ success: boolean; count: number; error: string | null }>('/remnawave/users/refresh'),
+  getUserCacheStatus: () =>
+    api.get<{ last_update: string | null; updating: boolean; update_interval: number }>('/remnawave/users/cache-status'),
   
   // Full user info (cached)
   getUserFullInfo: (email: number) =>

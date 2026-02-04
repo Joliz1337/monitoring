@@ -106,6 +106,10 @@ export default function Remnawave() {
   const [topDestinations, setTopDestinations] = useState<RemnawaveDestination[]>([])
   const [topUsers, setTopUsers] = useState<RemnawaveUser[]>([])
   
+  // User cache state
+  const [userCacheStatus, setUserCacheStatus] = useState<{ last_update: string | null; updating: boolean } | null>(null)
+  const [isRefreshingUserCache, setIsRefreshingUserCache] = useState(false)
+  
   // User details modal
   const [selectedUser, setSelectedUser] = useState<RemnawaveUserDetails | null>(null)
   const [selectedUserFull, setSelectedUserFull] = useState<RemnawaveUserFullInfo | null>(null)
@@ -150,12 +154,13 @@ export default function Remnawave() {
   // Fetch settings
   const fetchSettings = useCallback(async () => {
     try {
-      const [settingsRes, nodesRes, statusRes, dbInfoRes, infraRes] = await Promise.all([
+      const [settingsRes, nodesRes, statusRes, dbInfoRes, infraRes, cacheStatusRes] = await Promise.all([
         remnawaveApi.getSettings(),
         remnawaveApi.getNodes(),
         remnawaveApi.getCollectorStatus(),
         remnawaveApi.getDbInfo(),
-        remnawaveApi.getInfrastructureAddresses()
+        remnawaveApi.getInfrastructureAddresses(),
+        remnawaveApi.getUserCacheStatus()
       ])
       setSettings(settingsRes.data)
       setEditSettings({
@@ -177,6 +182,8 @@ export default function Remnawave() {
       setDbInfo(dbInfoRes.data)
       // Update infrastructure addresses
       setInfrastructureAddresses(infraRes.data.addresses)
+      // Update user cache status
+      setUserCacheStatus(cacheStatusRes.data)
     } catch (err) {
       console.error('Failed to fetch settings:', err)
     }
@@ -277,6 +284,21 @@ export default function Remnawave() {
     setIsRefreshing(true)
     await fetchStats()
     setIsRefreshing(false)
+  }
+  
+  const handleRefreshUserCache = async () => {
+    setIsRefreshingUserCache(true)
+    try {
+      const res = await remnawaveApi.refreshUserCache()
+      if (res.data.success) {
+        // Refresh stats to show updated statuses
+        await Promise.all([fetchStats(), remnawaveApi.getUserCacheStatus().then(r => setUserCacheStatus(r.data))])
+      }
+    } catch (err) {
+      console.error('Failed to refresh user cache:', err)
+    } finally {
+      setIsRefreshingUserCache(false)
+    }
   }
   
   const handleSaveSettings = async () => {
@@ -897,17 +919,36 @@ export default function Remnawave() {
             exit={{ opacity: 0, y: -20 }}
             className="space-y-4"
           >
-            {/* Search */}
-            <div className="relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-dark-500" />
-              <input
-                type="text"
-                value={userSearch}
-                onChange={(e) => setUserSearch(e.target.value)}
-                placeholder={t('remnawave.search_users')}
-                className="w-full pl-10 pr-4 py-2 rounded-lg bg-dark-800 border border-dark-700 
-                         text-dark-100 placeholder-dark-500 focus:outline-none focus:border-accent-500"
-              />
+            {/* Search and Cache Refresh */}
+            <div className="flex items-center gap-4">
+              <div className="relative flex-1">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-dark-500" />
+                <input
+                  type="text"
+                  value={userSearch}
+                  onChange={(e) => setUserSearch(e.target.value)}
+                  placeholder={t('remnawave.search_users')}
+                  className="w-full pl-10 pr-4 py-2 rounded-lg bg-dark-800 border border-dark-700 
+                           text-dark-100 placeholder-dark-500 focus:outline-none focus:border-accent-500"
+                />
+              </div>
+              <div className="flex items-center gap-3">
+                {userCacheStatus?.last_update && (
+                  <span className="text-xs text-dark-500">
+                    {t('remnawave.cache_updated')}: {new Date(userCacheStatus.last_update).toLocaleTimeString()}
+                  </span>
+                )}
+                <button
+                  onClick={handleRefreshUserCache}
+                  disabled={isRefreshingUserCache || userCacheStatus?.updating}
+                  className="flex items-center gap-2 px-3 py-2 rounded-lg bg-dark-700 hover:bg-dark-600 
+                           text-dark-200 text-sm transition-colors disabled:opacity-50"
+                  title={t('remnawave.refresh_user_cache')}
+                >
+                  <RefreshCw className={`w-4 h-4 ${isRefreshingUserCache || userCacheStatus?.updating ? 'animate-spin' : ''}`} />
+                  <span className="hidden sm:inline">{t('remnawave.sync_cache')}</span>
+                </button>
+              </div>
             </div>
             
             {/* Users Table */}

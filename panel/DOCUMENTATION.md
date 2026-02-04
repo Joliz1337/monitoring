@@ -329,6 +329,15 @@ panel/
 | GET | /api/remnawave/user/{email}/full | Полная информация из кэша (expire, traffic, subscription url и т.д.) |
 | GET | /api/remnawave/user/{email}/live | Свежие данные из Remnawave API (subscription history, bandwidth stats, hwid devices) |
 
+**Кэш пользователей:**
+
+| Метод | Endpoint | Описание |
+|-------|----------|----------|
+| POST | /api/remnawave/users/refresh | Принудительное обновление кэша пользователей из Remnawave API |
+| GET | /api/remnawave/users/cache-status | Статус кэша (last_update, updating, update_interval) |
+
+Кэш пользователей автоматически обновляется каждый час. Используйте `/users/refresh` для немедленной синхронизации после добавления/удаления пользователей в Remnawave.
+
 Параметры запросов:
 - `period` — 1h, 24h, 7d, 30d, 365d, all (по умолчанию all — за всё время)
 - `limit` — количество записей (1-500)

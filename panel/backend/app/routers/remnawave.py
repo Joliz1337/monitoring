@@ -1062,6 +1062,30 @@ async def get_timeline(
     }
 
 
+@router.post("/users/refresh")
+async def refresh_user_cache(
+    _: dict = Depends(verify_auth)
+):
+    """Force immediate refresh of Remnawave user cache.
+    
+    This fetches all users from Remnawave API and updates the local cache.
+    Useful when users are added/removed in Remnawave and you want to see
+    updated statuses immediately without waiting for the hourly sync.
+    """
+    collector = get_xray_stats_collector()
+    result = await collector.refresh_user_cache_now()
+    return result
+
+
+@router.get("/users/cache-status")
+async def get_user_cache_status(
+    _: dict = Depends(verify_auth)
+):
+    """Get user cache status (last update time, update in progress)."""
+    collector = get_xray_stats_collector()
+    return collector.get_user_cache_status()
+
+
 @router.get("/users")
 async def get_users(
     search: Optional[str] = Query(None, min_length=1),
