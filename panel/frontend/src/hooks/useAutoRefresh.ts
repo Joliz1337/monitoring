@@ -1,7 +1,7 @@
 import { useEffect, useRef, useCallback, useState } from 'react'
 import { useSettingsStore } from '../stores/settingsStore'
 
-const BACKGROUND_INTERVAL = 5000 // 5 seconds for background refresh
+const BACKGROUND_INTERVAL = 60000 // 60 seconds for background refresh (reduced load)
 
 interface UseSmartRefreshOptions {
   enabled?: boolean
@@ -22,7 +22,7 @@ interface UseSmartRefreshResult {
  * - Calls the liveCallback for direct node requests
  * 
  * When page is HIDDEN (user switched tabs/minimized):
- * - Uses fixed 5-second interval
+ * - Uses fixed 60-second interval (reduced load)
  * - Calls the cachedCallback for database cached data
  */
 export function useSmartRefresh(

@@ -38,7 +38,7 @@ import {
 import { useNavigate, useParams } from 'react-router-dom'
 import { useServersStore } from '../stores/serversStore'
 import { useSettingsStore } from '../stores/settingsStore'
-import { useSmartRefresh } from '../hooks/useAutoRefresh'
+import { useAutoRefresh } from '../hooks/useAutoRefresh'
 import ServerCard from '../components/Dashboard/ServerCard'
 import { useTranslation } from 'react-i18next'
 
@@ -100,16 +100,11 @@ export default function Dashboard() {
   }, [fetchServersWithMetrics, fetchAllTraffic, fetchSettings, trafficPeriod])
   
   
-  // Smart refresh: always use cached metrics from panel DB (no direct node requests)
+  // Auto refresh with visibility awareness - stops polling when tab is hidden
   // Traffic is fetched separately with longer interval
-  const { isPageVisible } = useSmartRefresh(
-    async () => {
-      await fetchServersWithMetrics() // Cached data - ONE request for all servers
-    },
-    async () => {
-      await fetchServersWithMetrics() // Same for background
-    },
-    { immediate: false }
+  const { isPageVisible } = useAutoRefresh(
+    fetchServersWithMetrics,
+    { immediate: false, pauseWhenHidden: true, refreshOnVisible: true }
   )
   
   // Memoize server counts and filter out disabled servers
