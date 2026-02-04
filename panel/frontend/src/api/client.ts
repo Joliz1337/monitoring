@@ -792,6 +792,7 @@ export interface RemnawaveUser {
   total_visits: number
   unique_sites: number
   unique_ips: number
+  infrastructure_ips: number
 }
 
 export interface RemnawaveUserDestination {

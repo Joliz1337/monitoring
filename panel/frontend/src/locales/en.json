@@ -689,6 +689,7 @@
     "rescan_hint": "Update infrastructure flag for existing records in the database",
     "rescan_result": "Updated: {{toInfra}} IPs marked as infrastructure, {{toClient}} as client",
     "load_more": "Load more",
-    "remaining": "remaining"
+    "remaining": "remaining",
+    "only_infra_ips": "Only infrastructure IPs (HAProxy, VPN, etc.)"
   }
 }

@@ -682,26 +682,29 @@ async def get_top_users(
     if server_id:
         conditions.append(XrayVisitStats.server_id == server_id)
     
-    # If searching, first find matching user IDs
-    search_user_ids = None
+    # If searching, find matching user IDs by email or username
+    search_user_ids = set()
     if search:
         search = search.strip()
-        if search.isdigit():
-            # Search by email ID (exact or partial)
-            search_user_ids = [int(search)]
-        else:
-            # Search by username in cache
-            cache_search = await db.execute(
-                select(RemnawaveUserCache.email)
-                .where(RemnawaveUserCache.username.ilike(f"%{search}%"))
-                .limit(1000)
-            )
-            search_user_ids = [row[0] for row in cache_search.fetchall()]
-            if not search_user_ids:
-                # No matches found
-                return {"period": period, "users": [], "total": 0, "offset": offset, "limit": limit}
         
-        conditions.append(XrayVisitStats.email.in_(search_user_ids))
+        # Always search by username (works for both text and numbers like "772199094" in "tg_1772199094_...")
+        cache_search = await db.execute(
+            select(RemnawaveUserCache.email)
+            .where(RemnawaveUserCache.username.ilike(f"%{search}%"))
+            .limit(1000)
+        )
+        for row in cache_search.fetchall():
+            search_user_ids.add(row[0])
+        
+        # If search is a number, also search by exact email ID
+        if search.isdigit():
+            search_user_ids.add(int(search))
+        
+        if not search_user_ids:
+            # No matches found
+            return {"period": period, "users": [], "total": 0, "offset": offset, "limit": limit}
+        
+        conditions.append(XrayVisitStats.email.in_(list(search_user_ids)))
     
     # Count total users matching criteria
     count_query = select(sql_func.count(sql_func.distinct(XrayVisitStats.email)))
@@ -741,28 +744,41 @@ async def get_top_users(
                 "status": user.status
             }
     
-    # Get unique client IP counts for each user (excluding infrastructure IPs)
+    # Get unique client IP counts and infrastructure IP counts for each user
     ip_counts = {}
+    infra_ip_counts = {}
     if user_ids:
-        ip_conditions = [
-            XrayUserIpStats.email.in_(user_ids),
-            XrayUserIpStats.is_infrastructure == False  # Only count client IPs
-        ]
+        base_conditions = [XrayUserIpStats.email.in_(user_ids)]
         if period != "all" and start_time:
-            ip_conditions.append(XrayUserIpStats.last_seen >= start_time)
+            base_conditions.append(XrayUserIpStats.last_seen >= start_time)
         if server_id:
-            ip_conditions.append(XrayUserIpStats.server_id == server_id)
+            base_conditions.append(XrayUserIpStats.server_id == server_id)
         
+        # Client IPs (excluding infrastructure)
+        client_ip_conditions = base_conditions + [XrayUserIpStats.is_infrastructure == False]
         ip_result = await db.execute(
             select(
                 XrayUserIpStats.email,
                 sql_func.count(sql_func.distinct(XrayUserIpStats.source_ip)).label('unique_ips')
             )
-            .where(and_(*ip_conditions))
+            .where(and_(*client_ip_conditions))
             .group_by(XrayUserIpStats.email)
         )
         for ip_row in ip_result.fetchall():
             ip_counts[ip_row.email] = ip_row.unique_ips
+        
+        # Infrastructure IPs only
+        infra_ip_conditions = base_conditions + [XrayUserIpStats.is_infrastructure == True]
+        infra_result = await db.execute(
+            select(
+                XrayUserIpStats.email,
+                sql_func.count(sql_func.distinct(XrayUserIpStats.source_ip)).label('infra_ips')
+            )
+            .where(and_(*infra_ip_conditions))
+            .group_by(XrayUserIpStats.email)
+        )
+        for infra_row in infra_result.fetchall():
+            infra_ip_counts[infra_row.email] = infra_row.infra_ips
     
     return {
         "period": period,
@@ -776,7 +792,8 @@ async def get_top_users(
                 "status": user_cache.get(row.email, {}).get("status"),
                 "total_visits": row.total,
                 "unique_sites": row.unique_sites,
-                "unique_ips": ip_counts.get(row.email, 0)
+                "unique_ips": ip_counts.get(row.email, 0),
+                "infrastructure_ips": infra_ip_counts.get(row.email, 0)
             }
             for row in rows
         ]
