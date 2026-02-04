@@ -31,7 +31,7 @@ try:
     from app.models import (
         XrayVisitStats, RemnawaveUserCache, XrayUserIpStats, RemnawaveExport
     )
-    from app.config import settings as app_settings
+    from app.config import get_settings
     logger.info("Imports successful")
 except Exception as e:
     logger.error(f"Import error: {e}")
@@ -86,17 +86,10 @@ def run_export(export_id: int, settings: dict):
     """Run export task synchronously."""
     logger.info(f"Starting export {export_id} with settings: {settings}")
     
-    # Create sync engine and session
-    db_url = app_settings.DATABASE_URL
-    logger.info(f"Original DATABASE_URL: {db_url}")
-    
-    # Convert async URL to sync
-    if "+asyncpg" in db_url:
-        db_url = db_url.replace("+asyncpg", "+psycopg2")
-    elif "postgresql://" in db_url and "+psycopg2" not in db_url:
-        db_url = db_url.replace("postgresql://", "postgresql+psycopg2://")
-    
-    logger.info(f"Sync DATABASE_URL: {db_url}")
+    # Create sync engine and session using sync URL
+    app_settings = get_settings()
+    db_url = app_settings.sync_database_url
+    logger.info(f"Using sync DATABASE_URL: {db_url}")
     
     engine = create_engine(db_url)
     Session = sessionmaker(bind=engine)
