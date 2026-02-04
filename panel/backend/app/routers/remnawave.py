@@ -1639,7 +1639,6 @@ async def _run_export_task(export_id: int, settings: dict):
             
             # Build export rows based on settings
             export_rows = []
-            file_format = settings["format"]
             
             for row in main_data:
                 user_info = user_cache.get(row.email)
@@ -1658,11 +1657,7 @@ async def _run_export_task(export_id: int, settings: dict):
                 # Telegram ID
                 if settings.get("include_telegram_id", False):
                     tg_id = user_info.telegram_id if user_info else None
-                    if tg_id:
-                        # For CSV: wrap in formula to prevent Excel scientific notation
-                        row_data["telegram_id"] = f'="{tg_id}"' if file_format == "csv" else tg_id
-                    else:
-                        row_data["telegram_id"] = ""
+                    row_data["telegram_id"] = tg_id if tg_id else ""
                 
                 # Destination fields
                 if include_destinations:
@@ -1686,15 +1681,8 @@ async def _run_export_task(export_id: int, settings: dict):
                 
                 # Traffic fields
                 if settings.get("include_traffic", False):
-                    used = user_info.used_traffic_bytes if user_info else None
-                    limit = user_info.traffic_limit_bytes if user_info else None
-                    if file_format == "csv":
-                        # Wrap in formula for CSV to prevent scientific notation
-                        row_data["traffic_used_bytes"] = f'="{used}"' if used else ""
-                        row_data["traffic_limit_bytes"] = f'="{limit}"' if limit else ""
-                    else:
-                        row_data["traffic_used_bytes"] = used
-                        row_data["traffic_limit_bytes"] = limit
+                    row_data["traffic_used_bytes"] = user_info.used_traffic_bytes if user_info else None
+                    row_data["traffic_limit_bytes"] = user_info.traffic_limit_bytes if user_info else None
                 
                 export_rows.append(row_data)
             
