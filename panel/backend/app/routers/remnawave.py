@@ -1639,16 +1639,15 @@ async def _run_export_task(export_id: int, settings: dict):
             
             # Build export rows based on settings
             export_rows = []
-            processed_users = set()  # Track which users we've already added full data for
+            file_format = settings["format"]
             
             for row in main_data:
                 user_info = user_cache.get(row.email)
                 ips = user_ips.get(row.email, {"client": [], "infra": []})
-                is_first_row_for_user = row.email not in processed_users
                 
                 row_data = {}
                 
-                # User fields - always include
+                # User fields
                 if settings.get("include_user_id", True):
                     row_data["user_id"] = row.email
                 if settings.get("include_username", True):
@@ -1656,14 +1655,14 @@ async def _run_export_task(export_id: int, settings: dict):
                 if settings.get("include_status", True):
                     row_data["status"] = (user_info.status if user_info else None) or "UNKNOWN"
                 
-                # Telegram ID - only on first row for user (or always if no destinations)
+                # Telegram ID
                 if settings.get("include_telegram_id", False):
-                    if not include_destinations or is_first_row_for_user:
-                        # Format as string to prevent Excel scientific notation
-                        tg_id = user_info.telegram_id if user_info else None
-                        row_data["telegram_id"] = str(tg_id) if tg_id else ""
+                    tg_id = user_info.telegram_id if user_info else None
+                    if tg_id:
+                        # For CSV: format as text to prevent Excel scientific notation
+                        row_data["telegram_id"] = f"'{tg_id}" if file_format == "csv" else tg_id
                     else:
-                        row_data["telegram_id"] = ""  # Empty for subsequent rows
+                        row_data["telegram_id"] = ""
                 
                 # Destination fields
                 if include_destinations:
@@ -1679,28 +1678,24 @@ async def _run_export_task(export_id: int, settings: dict):
                         row_data["total_visits"] = row.total_visits
                         row_data["unique_sites"] = row.unique_sites
                 
-                # IP fields - only on first row for user (or always if no destinations)
+                # IP fields
                 if settings.get("include_client_ips", False):
-                    if not include_destinations or is_first_row_for_user:
-                        row_data["client_ips"] = ips["client"]
-                    else:
-                        row_data["client_ips"] = []
+                    row_data["client_ips"] = ips["client"]
                 if settings.get("include_infra_ips", False):
-                    if not include_destinations or is_first_row_for_user:
-                        row_data["infrastructure_ips"] = ips["infra"]
-                    else:
-                        row_data["infrastructure_ips"] = []
+                    row_data["infrastructure_ips"] = ips["infra"]
                 
-                # Traffic fields - only on first row for user (or always if no destinations)
+                # Traffic fields
                 if settings.get("include_traffic", False):
-                    if not include_destinations or is_first_row_for_user:
-                        row_data["traffic_used_bytes"] = user_info.used_traffic_bytes if user_info else None
-                        row_data["traffic_limit_bytes"] = user_info.traffic_limit_bytes if user_info else None
+                    used = user_info.used_traffic_bytes if user_info else None
+                    limit = user_info.traffic_limit_bytes if user_info else None
+                    if file_format == "csv":
+                        # Format as text for CSV to prevent scientific notation
+                        row_data["traffic_used_bytes"] = f"'{used}" if used else ""
+                        row_data["traffic_limit_bytes"] = f"'{limit}" if limit else ""
                     else:
-                        row_data["traffic_used_bytes"] = ""
-                        row_data["traffic_limit_bytes"] = ""
+                        row_data["traffic_used_bytes"] = used
+                        row_data["traffic_limit_bytes"] = limit
                 
-                processed_users.add(row.email)
                 export_rows.append(row_data)
             
             # Ensure exports directory exists
