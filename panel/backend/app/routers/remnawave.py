@@ -1560,10 +1560,10 @@ async def create_export(
     
     # Start export in separate process to avoid blocking event loop
     worker_path = os.path.join(os.path.dirname(__file__), "..", "export_worker.py")
+    
+    # Worker has its own logging, just spawn it
     subprocess.Popen(
         [sys.executable, worker_path, str(export_record.id), json.dumps(settings_dict)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
         start_new_session=True
     )
     

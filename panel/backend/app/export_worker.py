@@ -6,18 +6,36 @@ Runs as a separate process to avoid blocking the main FastAPI event loop.
 import sys
 import os
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from sqlalchemy import create_engine, select, func as sql_func
-from sqlalchemy.orm import sessionmaker
-
-from app.models import (
-    XrayVisitStats, RemnawaveUserCache, XrayUserIpStats, RemnawaveExport
+# Setup logging to file
+log_dir = os.path.join(os.path.dirname(__file__), "exports")
+os.makedirs(log_dir, exist_ok=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(os.path.join(log_dir, "export_worker.log")),
+        logging.StreamHandler()
+    ]
 )
-from app.config import settings as app_settings
+logger = logging.getLogger(__name__)
+
+try:
+    from sqlalchemy import create_engine, select, func as sql_func
+    from sqlalchemy.orm import sessionmaker
+    from app.models import (
+        XrayVisitStats, RemnawaveUserCache, XrayUserIpStats, RemnawaveExport
+    )
+    from app.config import settings as app_settings
+    logger.info("Imports successful")
+except Exception as e:
+    logger.error(f"Import error: {e}")
+    raise
 
 
 def get_time_filter(period: str):
@@ -66,10 +84,21 @@ def generate_xlsx(file_path: str, export_rows: list):
 
 def run_export(export_id: int, settings: dict):
     """Run export task synchronously."""
+    logger.info(f"Starting export {export_id} with settings: {settings}")
+    
     # Create sync engine and session
-    engine = create_engine(
-        app_settings.DATABASE_URL.replace("+asyncpg", "").replace("postgresql://", "postgresql+psycopg2://")
-    )
+    db_url = app_settings.DATABASE_URL
+    logger.info(f"Original DATABASE_URL: {db_url}")
+    
+    # Convert async URL to sync
+    if "+asyncpg" in db_url:
+        db_url = db_url.replace("+asyncpg", "+psycopg2")
+    elif "postgresql://" in db_url and "+psycopg2" not in db_url:
+        db_url = db_url.replace("postgresql://", "postgresql+psycopg2://")
+    
+    logger.info(f"Sync DATABASE_URL: {db_url}")
+    
+    engine = create_engine(db_url)
     Session = sessionmaker(bind=engine)
     
     with Session() as db:
@@ -77,7 +106,7 @@ def run_export(export_id: int, settings: dict):
             # Update status to processing
             export_record = db.get(RemnawaveExport, export_id)
             if not export_record:
-                print(f"Export record {export_id} not found")
+                logger.error(f"Export record {export_id} not found")
                 return
             
             export_record.status = "processing"
@@ -222,10 +251,10 @@ def run_export(export_id: int, settings: dict):
             export_record.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
             db.commit()
             
-            print(f"Export {export_id} completed: {len(export_rows)} rows, {file_size} bytes")
+            logger.info(f"Export {export_id} completed: {len(export_rows)} rows, {file_size} bytes")
             
         except Exception as e:
-            print(f"Export {export_id} failed: {e}")
+            logger.exception(f"Export {export_id} failed: {e}")
             export_record = db.get(RemnawaveExport, export_id)
             if export_record:
                 export_record.status = "failed"
@@ -236,11 +265,17 @@ def run_export(export_id: int, settings: dict):
 
 
 if __name__ == "__main__":
+    logger.info(f"Export worker started with args: {sys.argv}")
+    
     if len(sys.argv) != 3:
-        print("Usage: python export_worker.py <export_id> <settings_json>")
+        logger.error("Usage: python export_worker.py <export_id> <settings_json>")
         sys.exit(1)
     
-    export_id = int(sys.argv[1])
-    settings = json.loads(sys.argv[2])
-    
-    run_export(export_id, settings)
+    try:
+        export_id = int(sys.argv[1])
+        settings = json.loads(sys.argv[2])
+        logger.info(f"Parsed export_id={export_id}")
+        run_export(export_id, settings)
+    except Exception as e:
+        logger.exception(f"Export worker failed: {e}")
+        sys.exit(1)
