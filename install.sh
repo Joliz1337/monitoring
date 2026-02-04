@@ -292,25 +292,27 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 # ==================== Safe Execution Helpers ====================
 
 # Read with timeout and default value
-# Usage: safe_read "prompt" "default_value" timeout_sec result_var
+# Usage: result=$(safe_read "prompt" "default_value" timeout_sec)
 safe_read() {
     local prompt="$1"
     local default="$2"
-    local timeout="${3:-$TIMEOUT_USER_INPUT}"
-    local result_var="$4"
+    local timeout="${3:-30}"
     local input=""
     
-    if read -t "$timeout" -p "$prompt" input 2>/dev/null; then
-        if [ -n "$input" ]; then
-            eval "$result_var='$input'"
+    # Ensure we're reading from terminal
+    if [ -t 0 ]; then
+        if read -t "$timeout" -r -p "$prompt" input </dev/tty 2>/dev/null; then
+            if [ -n "$input" ]; then
+                echo "$input"
+            else
+                echo "$default"
+            fi
         else
-            eval "$result_var='$default'"
+            echo "$default"
         fi
-        return 0
     else
-        log_warn "$(msg input_timeout): $default"
-        eval "$result_var='$default'"
-        return 0
+        # Non-interactive mode - use default
+        echo "$default"
     fi
 }
 
@@ -1077,16 +1079,17 @@ install_panel() {
     
     if [ -d "$PANEL_DIR" ]; then
         log_warn "$(msg panel_already_installed) $PANEL_DIR"
-        local confirm=""
-        safe_read "$(msg reinstall_confirm) " "n" "$TIMEOUT_USER_INPUT" confirm
+        local confirm
+        confirm=$(safe_read "$(msg reinstall_confirm) " "n" 30)
         if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
             log_info "$(msg installation_cancelled)"
             return 1
         fi
         
-        # Stop containers with timeout
-        cd "$PANEL_DIR" 2>/dev/null && \
-            timeout "$TIMEOUT_DOCKER_COMPOSE_DOWN" docker compose down -v >/dev/null 2>&1 || true
+        # Stop containers with timeout (exit dir first)
+        if [ -f "$PANEL_DIR/docker-compose.yml" ]; then
+            (cd "$PANEL_DIR" && timeout "$TIMEOUT_DOCKER_COMPOSE_DOWN" docker compose down -v >/dev/null 2>&1) || true
+        fi
         rm -rf "$PANEL_DIR"
     fi
     
@@ -1142,21 +1145,22 @@ remove_panel() {
         return 1
     fi
     
-    local confirm=""
-    safe_read "$(msg remove_confirm) " "n" "$TIMEOUT_USER_INPUT" confirm
+    local confirm
+    confirm=$(safe_read "$(msg remove_confirm) " "n" 30)
     if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
         log_info "$(msg removal_cancelled)"
         return 1
     fi
     
     log_info "$(msg stopping_containers)"
-    cd "$PANEL_DIR" 2>/dev/null && \
-        timeout "$TIMEOUT_DOCKER_COMPOSE_DOWN" docker compose down -v >/dev/null 2>&1 || true
+    if [ -f "$PANEL_DIR/docker-compose.yml" ]; then
+        (cd "$PANEL_DIR" && timeout "$TIMEOUT_DOCKER_COMPOSE_DOWN" docker compose down -v >/dev/null 2>&1) || true
+    fi
     
     log_info "$(msg removing_files)"
     rm -rf "$PANEL_DIR"
     
-    if { [ ! -d "$NODE_DIR" ] || [ ! -f "$NODE_DIR/docker-compose.yml" ]; } && [ -f "$BIN_PATH" ]; then
+    if [ ! -d "$NODE_DIR" ] && [ -f "$BIN_PATH" ]; then
         rm -f "$BIN_PATH"
     fi
     
@@ -1172,15 +1176,17 @@ install_node() {
     
     if [ -d "$NODE_DIR" ]; then
         log_warn "$(msg node_already_installed) $NODE_DIR"
-        local confirm=""
-        safe_read "$(msg reinstall_confirm) " "n" "$TIMEOUT_USER_INPUT" confirm
+        local confirm
+        confirm=$(safe_read "$(msg reinstall_confirm) " "n" 30)
         if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
             log_info "$(msg installation_cancelled)"
             return 1
         fi
         
-        cd "$NODE_DIR" 2>/dev/null && \
-            timeout "$TIMEOUT_DOCKER_COMPOSE_DOWN" docker compose down -v >/dev/null 2>&1 || true
+        # Stop containers with timeout (in subshell to not change cwd)
+        if [ -f "$NODE_DIR/docker-compose.yml" ]; then
+            (cd "$NODE_DIR" && timeout "$TIMEOUT_DOCKER_COMPOSE_DOWN" docker compose down -v >/dev/null 2>&1) || true
+        fi
         rm -rf "$NODE_DIR"
     fi
     
@@ -1267,27 +1273,24 @@ remove_node() {
         return 1
     fi
     
-    local confirm=""
-    safe_read "$(msg remove_confirm) " "n" "$TIMEOUT_USER_INPUT" confirm
+    local confirm
+    confirm=$(safe_read "$(msg remove_confirm) " "n" 30)
     if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
         log_info "$(msg removal_cancelled)"
         return 1
     fi
     
     log_info "$(msg stopping_containers)"
-    cd "$NODE_DIR" 2>/dev/null && \
-        timeout "$TIMEOUT_DOCKER_COMPOSE_DOWN" docker compose down -v >/dev/null 2>&1 || true
+    # Run docker compose down in subshell to not change cwd
+    if [ -f "$NODE_DIR/docker-compose.yml" ]; then
+        (cd "$NODE_DIR" && timeout "$TIMEOUT_DOCKER_COMPOSE_DOWN" docker compose down -v >/dev/null 2>&1) || true
+    fi
     
     log_info "$(msg removing_files)"
     rm -rf "$NODE_DIR"
     
     if [ ! -d "$PANEL_DIR" ] && [ -f "$BIN_PATH" ]; then
         rm -f "$BIN_PATH"
-    fi
-    
-    # Clean up orphan directories
-    if [ -d "$NODE_DIR" ] && [ ! -f "$NODE_DIR/docker-compose.yml" ]; then
-        rm -rf "$NODE_DIR"
     fi
     
     log_success "$(msg node_removed)"
@@ -1306,8 +1309,8 @@ select_language() {
     echo -e "  ${GREEN}2)${NC} Русский"
     echo ""
     
-    local lang_choice=""
-    safe_read "Select / Выберите [1-2]: " "1" 30 lang_choice
+    local lang_choice
+    lang_choice=$(safe_read "Select / Выберите [1-2]: " "1" 30)
     
     case $lang_choice in
         1) LANG_CODE="en" ;;
@@ -1339,20 +1342,20 @@ show_menu() {
     echo -e "  ${GREEN}2)${NC} $(msg menu_install_node)"
     echo ""
     
-    if [ -d "$PANEL_DIR" ]; then
+    if [ -d "$PANEL_DIR" ] && [ -f "$PANEL_DIR/docker-compose.yml" ]; then
         echo -e "  ${BLUE}3)${NC} $(msg menu_update_panel)"
     fi
     if [ -d "$NODE_DIR" ] && [ -f "$NODE_DIR/docker-compose.yml" ]; then
         echo -e "  ${BLUE}4)${NC} $(msg menu_update_node)"
     fi
     
-    if [ -d "$PANEL_DIR" ] || { [ -d "$NODE_DIR" ] && [ -f "$NODE_DIR/docker-compose.yml" ]; }; then
+    if [ -d "$PANEL_DIR" ] || [ -d "$NODE_DIR" ]; then
         echo ""
     fi
     if [ -d "$PANEL_DIR" ]; then
         echo -e "  ${RED}5)${NC} $(msg menu_remove_panel)"
     fi
-    if [ -d "$NODE_DIR" ] && [ -f "$NODE_DIR/docker-compose.yml" ]; then
+    if [ -d "$NODE_DIR" ]; then
         echo -e "  ${RED}6)${NC} $(msg menu_remove_node)"
     fi
     
@@ -1364,10 +1367,12 @@ show_menu() {
     echo ""
     
     echo -e "${BLUE}$(msg status):${NC}"
-    if [ -d "$PANEL_DIR" ]; then
+    if [ -d "$PANEL_DIR" ] && [ -f "$PANEL_DIR/docker-compose.yml" ]; then
         local panel_version="?"
         [ -f "$PANEL_DIR/VERSION" ] && panel_version=$(cat "$PANEL_DIR/VERSION" 2>/dev/null || echo "?")
         echo -e "  Panel: ${GREEN}$(msg installed)${NC} v$panel_version ($PANEL_DIR)"
+    elif [ -d "$PANEL_DIR" ]; then
+        echo -e "  Panel: ${YELLOW}incomplete${NC} ($PANEL_DIR exists but not configured)"
     else
         echo -e "  Panel: ${YELLOW}$(msg not_installed)${NC}"
     fi
@@ -1375,6 +1380,8 @@ show_menu() {
         local node_version="?"
         [ -f "$NODE_DIR/VERSION" ] && node_version=$(cat "$NODE_DIR/VERSION" 2>/dev/null || echo "?")
         echo -e "  Node:  ${GREEN}$(msg installed)${NC} v$node_version ($NODE_DIR)"
+    elif [ -d "$NODE_DIR" ]; then
+        echo -e "  Node:  ${YELLOW}incomplete${NC} ($NODE_DIR exists but not configured)"
     else
         echo -e "  Node:  ${YELLOW}$(msg not_installed)${NC}"
     fi
@@ -1410,8 +1417,8 @@ main() {
     while true; do
         show_menu
         
-        local choice=""
-        safe_read "$(msg select_action): " "0" "$TIMEOUT_USER_INPUT" choice
+        local choice
+        choice=$(safe_read "$(msg select_action): " "0" 60)
         
         case $choice in
             1)
@@ -1419,19 +1426,17 @@ main() {
                 clone_repo || continue
                 install_panel
                 cleanup_temp
-                local dummy=""
-                safe_read "$(msg press_enter)" "" 60 dummy
+                safe_read "$(msg press_enter)" "" 30 >/dev/null
                 ;;
             2)
                 check_git || continue
                 clone_repo || continue
                 install_node
                 cleanup_temp
-                local dummy=""
-                safe_read "$(msg press_enter)" "" 60 dummy
+                safe_read "$(msg press_enter)" "" 30 >/dev/null
                 ;;
             3)
-                if [ -d "$PANEL_DIR" ]; then
+                if [ -d "$PANEL_DIR" ] && [ -f "$PANEL_DIR/docker-compose.yml" ]; then
                     check_git || continue
                     update_panel
                     cleanup_temp
@@ -1439,8 +1444,7 @@ main() {
                     log_error "$(msg invalid_option)"
                     sleep 1
                 fi
-                local dummy=""
-                safe_read "$(msg press_enter)" "" 60 dummy
+                safe_read "$(msg press_enter)" "" 30 >/dev/null
                 ;;
             4)
                 if [ -d "$NODE_DIR" ] && [ -f "$NODE_DIR/docker-compose.yml" ]; then
@@ -1451,8 +1455,7 @@ main() {
                     log_error "$(msg invalid_option)"
                     sleep 1
                 fi
-                local dummy=""
-                safe_read "$(msg press_enter)" "" 60 dummy
+                safe_read "$(msg press_enter)" "" 30 >/dev/null
                 ;;
             5)
                 if [ -d "$PANEL_DIR" ]; then
@@ -1461,23 +1464,20 @@ main() {
                     log_error "$(msg invalid_option)"
                     sleep 1
                 fi
-                local dummy=""
-                safe_read "$(msg press_enter)" "" 60 dummy
+                safe_read "$(msg press_enter)" "" 30 >/dev/null
                 ;;
             6)
-                if [ -d "$NODE_DIR" ] && [ -f "$NODE_DIR/docker-compose.yml" ]; then
+                if [ -d "$NODE_DIR" ]; then
                     remove_node
                 else
                     log_error "$(msg invalid_option)"
                     sleep 1
                 fi
-                local dummy=""
-                safe_read "$(msg press_enter)" "" 60 dummy
+                safe_read "$(msg press_enter)" "" 30 >/dev/null
                 ;;
             7)
                 apply_system_optimizations
-                local dummy=""
-                safe_read "$(msg press_enter)" "" 60 dummy
+                safe_read "$(msg press_enter)" "" 30 >/dev/null
                 ;;
             0)
                 echo ""

@@ -89,21 +89,23 @@ print_info() { echo -e "${CYAN}[i]${NC} $1"; }
 safe_read() {
     local prompt="$1"
     local default="$2"
-    local timeout="${3:-$TIMEOUT_USER_INPUT}"
-    local result_var="$4"
+    local timeout="${3:-30}"
     local input=""
     
-    if read -t "$timeout" -p "$prompt" input 2>/dev/null; then
-        if [ -n "$input" ]; then
-            eval "$result_var='$input'"
+    # Ensure we're reading from terminal
+    if [ -t 0 ]; then
+        if read -t "$timeout" -r -p "$prompt" input </dev/tty 2>/dev/null; then
+            if [ -n "$input" ]; then
+                echo "$input"
+            else
+                echo "$default"
+            fi
         else
-            eval "$result_var='$default'"
+            echo "$default"
         fi
-        return 0
     else
-        print_warning "Input timeout, using default: $default"
-        eval "$result_var='$default'"
-        return 0
+        # Non-interactive mode - use default
+        echo "$default"
     fi
 }
 
@@ -414,9 +416,7 @@ prompt_domain() {
     local attempt=0
     
     while [ $attempt -lt $max_attempts ]; do
-        local input=""
-        safe_read "Domain (e.g., panel.example.com): " "" "$TIMEOUT_USER_INPUT" input
-        DOMAIN="$input"
+        DOMAIN=$(safe_read "Domain (e.g., panel.example.com): " "" 60)
         
         if [ -z "$DOMAIN" ]; then
             print_error "Domain is required"
@@ -625,8 +625,8 @@ setup_ssl_certificate() {
         elif [ "$days_remaining" -le "$CERT_RENEWAL_DAYS" ]; then
             print_warning "Certificate expires in ${days_remaining} days"
             echo ""
-            local renew_choice=""
-            safe_read "Renew certificate now? (Y/n): " "Y" 30 renew_choice
+            local renew_choice
+            renew_choice=$(safe_read "Renew certificate now? (Y/n): " "Y" 30)
             if [ "$renew_choice" != "n" ] && [ "$renew_choice" != "N" ]; then
                 renew_certificate || return 1
             else
@@ -941,8 +941,7 @@ print_credentials() {
     echo -e "${RED}ВАЖНО: Сохраните эти данные! После закрытия они не будут показаны снова.${NC}"
     echo ""
     
-    local dummy=""
-    safe_read "Press Enter to finish..." "" 60 dummy
+    safe_read "Press Enter to finish..." "" 30 >/dev/null
 }
 
 # ==================== Main ====================

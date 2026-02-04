@@ -89,21 +89,23 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 safe_read() {
     local prompt="$1"
     local default="$2"
-    local timeout="${3:-$TIMEOUT_USER_INPUT}"
-    local result_var="$4"
+    local timeout="${3:-30}"
     local input=""
     
-    if read -t "$timeout" -p "$prompt" input 2>/dev/null; then
-        if [ -n "$input" ]; then
-            eval "$result_var='$input'"
+    # Ensure we're reading from terminal
+    if [ -t 0 ]; then
+        if read -t "$timeout" -r -p "$prompt" input </dev/tty 2>/dev/null; then
+            if [ -n "$input" ]; then
+                echo "$input"
+            else
+                echo "$default"
+            fi
         else
-            eval "$result_var='$default'"
+            echo "$default"
         fi
-        return 0
     else
-        log_warn "Input timeout, using default: $default"
-        eval "$result_var='$default'"
-        return 0
+        # Non-interactive mode - use default
+        echo "$default"
     fi
 }
 
@@ -608,9 +610,7 @@ ask_panel_ip() {
     local attempt=0
     
     while [ $attempt -lt $max_attempts ]; do
-        local input=""
-        safe_read "Panel IP address: " "" "$TIMEOUT_USER_INPUT" input
-        PANEL_IP="$input"
+        PANEL_IP=$(safe_read "Panel IP address: " "" 60)
         
         if [ -z "$PANEL_IP" ]; then
             log_error "IP address cannot be empty"
@@ -905,8 +905,7 @@ show_status() {
     echo -e "${GREEN}╚════════════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
     
-    local dummy=""
-    safe_read "Press Enter to finish..." "" 60 dummy
+    safe_read "Press Enter to finish..." "" 30 >/dev/null
 }
 
 # ==================== Main ====================
