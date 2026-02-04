@@ -105,7 +105,6 @@ export default function Remnawave() {
   const [ignoredUsers, setIgnoredUsers] = useState<IgnoredUser[]>([])
   const [newIgnoredUserId, setNewIgnoredUserId] = useState('')
   const [isAddingIgnoredUser, setIsAddingIgnoredUser] = useState(false)
-  const [isLoadingIgnoredUsers, setIsLoadingIgnoredUsers] = useState(false)
   const [lastRescanResult, setLastRescanResult] = useState<{ updated_to_infrastructure: number; updated_to_client: number } | null>(null)
   
   // Collector status state
