@@ -1528,7 +1528,7 @@ async def export_data(
 ):
     """Export user visit data in various formats.
     
-    Returns a file with users and their visited destinations.
+    Optimized version: uses single query instead of N queries.
     Supported formats: csv, json, xlsx
     """
     import csv
@@ -1537,114 +1537,150 @@ async def export_data(
     from fastapi.responses import StreamingResponse
     
     start_time = _get_time_filter(period)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
-    # Get all users with their stats
-    if period == "all":
-        # Use cumulative stats
-        users_query = select(
-            XrayVisitStats.email,
-            sql_func.sum(XrayVisitStats.visit_count).label('total_visits'),
-            sql_func.count(sql_func.distinct(XrayVisitStats.destination)).label('unique_sites')
-        ).group_by(XrayVisitStats.email).order_by(sql_func.sum(XrayVisitStats.visit_count).desc())
-    else:
-        # Filter by time - need to use XrayVisitStats with last_seen filter
-        users_query = select(
-            XrayVisitStats.email,
-            sql_func.sum(XrayVisitStats.visit_count).label('total_visits'),
-            sql_func.count(sql_func.distinct(XrayVisitStats.destination)).label('unique_sites')
-        ).where(
-            XrayVisitStats.last_seen >= start_time
-        ).group_by(XrayVisitStats.email).order_by(sql_func.sum(XrayVisitStats.visit_count).desc())
-    
-    users_result = await db.execute(users_query)
-    users_data = users_result.all()
-    
-    # Get user cache for usernames/status
+    # Get user cache for usernames/status/traffic (single query)
     cache_result = await db.execute(select(RemnawaveUserCache))
     user_cache = {u.email: u for u in cache_result.scalars().all()}
     
-    # Build export data
+    # Get all data in ONE query - grouped by user and destination
+    if include_destinations:
+        if period == "all":
+            main_query = select(
+                XrayVisitStats.email,
+                XrayVisitStats.destination,
+                sql_func.sum(XrayVisitStats.visit_count).label('visits'),
+                sql_func.min(XrayVisitStats.first_seen).label('first_seen'),
+                sql_func.max(XrayVisitStats.last_seen).label('last_seen')
+            ).group_by(
+                XrayVisitStats.email, 
+                XrayVisitStats.destination
+            ).order_by(
+                XrayVisitStats.email,
+                sql_func.sum(XrayVisitStats.visit_count).desc()
+            )
+        else:
+            main_query = select(
+                XrayVisitStats.email,
+                XrayVisitStats.destination,
+                sql_func.sum(XrayVisitStats.visit_count).label('visits'),
+                sql_func.min(XrayVisitStats.first_seen).label('first_seen'),
+                sql_func.max(XrayVisitStats.last_seen).label('last_seen')
+            ).where(
+                XrayVisitStats.last_seen >= start_time
+            ).group_by(
+                XrayVisitStats.email,
+                XrayVisitStats.destination
+            ).order_by(
+                XrayVisitStats.email,
+                sql_func.sum(XrayVisitStats.visit_count).desc()
+            )
+    else:
+        # Just users without destinations
+        if period == "all":
+            main_query = select(
+                XrayVisitStats.email,
+                sql_func.sum(XrayVisitStats.visit_count).label('total_visits'),
+                sql_func.count(sql_func.distinct(XrayVisitStats.destination)).label('unique_sites')
+            ).group_by(XrayVisitStats.email).order_by(sql_func.sum(XrayVisitStats.visit_count).desc())
+        else:
+            main_query = select(
+                XrayVisitStats.email,
+                sql_func.sum(XrayVisitStats.visit_count).label('total_visits'),
+                sql_func.count(sql_func.distinct(XrayVisitStats.destination)).label('unique_sites')
+            ).where(
+                XrayVisitStats.last_seen >= start_time
+            ).group_by(XrayVisitStats.email).order_by(sql_func.sum(XrayVisitStats.visit_count).desc())
+    
+    main_result = await db.execute(main_query)
+    main_data = main_result.all()
+    
+    # Get IPs if needed (single query for all users)
+    user_ips = {}
+    if include_ips:
+        ip_query = select(
+            XrayUserIpStats.email,
+            XrayUserIpStats.source_ip,
+            XrayUserIpStats.is_infrastructure,
+            sql_func.sum(XrayUserIpStats.connection_count).label('connections')
+        ).group_by(
+            XrayUserIpStats.email,
+            XrayUserIpStats.source_ip,
+            XrayUserIpStats.is_infrastructure
+        )
+        ip_result = await db.execute(ip_query)
+        
+        for ip_row in ip_result.all():
+            if ip_row.email not in user_ips:
+                user_ips[ip_row.email] = {"client": [], "infra": []}
+            if ip_row.is_infrastructure:
+                user_ips[ip_row.email]["infra"].append(ip_row.source_ip)
+            else:
+                user_ips[ip_row.email]["client"].append(ip_row.source_ip)
+    
+    # Calculate user totals if including destinations
+    user_totals = {}
+    if include_destinations:
+        for row in main_data:
+            if row.email not in user_totals:
+                user_totals[row.email] = {"total_visits": 0, "unique_sites": 0}
+            user_totals[row.email]["total_visits"] += row.visits
+            user_totals[row.email]["unique_sites"] += 1
+    
+    # Build export rows
     export_rows = []
     
-    for user in users_data:
-        user_info = user_cache.get(user.email)
-        username = user_info.username if user_info else None
-        status = user_info.status if user_info else None
-        
-        base_user_data = {
-            "user_id": user.email,
-            "username": username or f"User #{user.email}",
-            "status": status or "UNKNOWN",
-            "total_visits": user.total_visits,
-            "unique_sites": user.unique_sites
-        }
-        
-        # Add traffic info if requested
-        if include_traffic and user_info:
-            base_user_data["traffic_used_bytes"] = user_info.used_traffic_bytes
-            base_user_data["traffic_limit_bytes"] = user_info.traffic_limit_bytes
-            base_user_data["lifetime_traffic_bytes"] = user_info.lifetime_used_traffic_bytes
-        
-        if include_destinations:
-            # Get destinations for this user
-            if period == "all":
-                dest_query = select(
-                    XrayVisitStats.destination,
-                    sql_func.sum(XrayVisitStats.visit_count).label('visits'),
-                    sql_func.min(XrayVisitStats.first_seen).label('first_seen'),
-                    sql_func.max(XrayVisitStats.last_seen).label('last_seen')
-                ).where(
-                    XrayVisitStats.email == user.email
-                ).group_by(XrayVisitStats.destination).order_by(sql_func.sum(XrayVisitStats.visit_count).desc())
-            else:
-                dest_query = select(
-                    XrayVisitStats.destination,
-                    sql_func.sum(XrayVisitStats.visit_count).label('visits'),
-                    sql_func.min(XrayVisitStats.first_seen).label('first_seen'),
-                    sql_func.max(XrayVisitStats.last_seen).label('last_seen')
-                ).where(
-                    XrayVisitStats.email == user.email,
-                    XrayVisitStats.last_seen >= start_time
-                ).group_by(XrayVisitStats.destination).order_by(sql_func.sum(XrayVisitStats.visit_count).desc())
+    if include_destinations:
+        for row in main_data:
+            user_info = user_cache.get(row.email)
+            totals = user_totals.get(row.email, {"total_visits": 0, "unique_sites": 0})
             
-            dest_result = await db.execute(dest_query)
-            destinations = dest_result.all()
+            row_data = {
+                "user_id": row.email,
+                "username": (user_info.username if user_info else None) or f"User #{row.email}",
+                "status": (user_info.status if user_info else None) or "UNKNOWN",
+                "total_visits": totals["total_visits"],
+                "unique_sites": totals["unique_sites"],
+                "destination": row.destination,
+                "visits": row.visits,
+                "first_seen": row.first_seen.isoformat() if row.first_seen else None,
+                "last_seen": row.last_seen.isoformat() if row.last_seen else None
+            }
             
-            for dest in destinations:
-                row = base_user_data.copy()
-                row["destination"] = dest.destination
-                row["visits"] = dest.visits
-                row["first_seen"] = dest.first_seen.isoformat() if dest.first_seen else None
-                row["last_seen"] = dest.last_seen.isoformat() if dest.last_seen else None
-                export_rows.append(row)
-        else:
-            export_rows.append(base_user_data)
-        
-        # Add IP data if requested
-        if include_ips:
-            ip_query = select(
-                XrayUserIpStats.source_ip,
-                sql_func.sum(XrayUserIpStats.connection_count).label('connections'),
-                XrayUserIpStats.is_infrastructure
-            ).where(
-                XrayUserIpStats.email == user.email
-            ).group_by(XrayUserIpStats.source_ip, XrayUserIpStats.is_infrastructure)
+            if include_traffic and user_info:
+                row_data["traffic_used_bytes"] = user_info.used_traffic_bytes
+                row_data["traffic_limit_bytes"] = user_info.traffic_limit_bytes
+                row_data["lifetime_traffic_bytes"] = user_info.lifetime_used_traffic_bytes
             
-            ip_result = await db.execute(ip_query)
-            ips = ip_result.all()
+            export_rows.append(row_data)
+    else:
+        for row in main_data:
+            user_info = user_cache.get(row.email)
             
-            # Add IPs to last row or create separate rows
-            if export_rows and not include_destinations:
-                export_rows[-1]["client_ips"] = [ip.source_ip for ip in ips if not ip.is_infrastructure]
-                export_rows[-1]["infrastructure_ips"] = [ip.source_ip for ip in ips if ip.is_infrastructure]
+            row_data = {
+                "user_id": row.email,
+                "username": (user_info.username if user_info else None) or f"User #{row.email}",
+                "status": (user_info.status if user_info else None) or "UNKNOWN",
+                "total_visits": row.total_visits,
+                "unique_sites": row.unique_sites
+            }
+            
+            if include_traffic and user_info:
+                row_data["traffic_used_bytes"] = user_info.used_traffic_bytes
+                row_data["traffic_limit_bytes"] = user_info.traffic_limit_bytes
+                row_data["lifetime_traffic_bytes"] = user_info.lifetime_used_traffic_bytes
+            
+            if include_ips:
+                ips = user_ips.get(row.email, {"client": [], "infra": []})
+                row_data["client_ips"] = ips["client"]
+                row_data["infrastructure_ips"] = ips["infra"]
+            
+            export_rows.append(row_data)
     
     # Generate output based on format
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
     if format == "json":
-        # JSON format - structured output
         if include_destinations:
-            # Group by user
+            # Group by user for JSON
             users_grouped = {}
             for row in export_rows:
                 uid = row["user_id"]
@@ -1657,13 +1693,14 @@ async def export_data(
                         "unique_sites": row["unique_sites"],
                         "destinations": []
                     }
-                    if include_traffic:
+                    if include_traffic and "traffic_used_bytes" in row:
                         users_grouped[uid]["traffic_used_bytes"] = row.get("traffic_used_bytes")
                         users_grouped[uid]["traffic_limit_bytes"] = row.get("traffic_limit_bytes")
                         users_grouped[uid]["lifetime_traffic_bytes"] = row.get("lifetime_traffic_bytes")
                     if include_ips:
-                        users_grouped[uid]["client_ips"] = row.get("client_ips", [])
-                        users_grouped[uid]["infrastructure_ips"] = row.get("infrastructure_ips", [])
+                        ips = user_ips.get(uid, {"client": [], "infra": []})
+                        users_grouped[uid]["client_ips"] = ips["client"]
+                        users_grouped[uid]["infrastructure_ips"] = ips["infra"]
                 
                 users_grouped[uid]["destinations"].append({
                     "destination": row["destination"],
@@ -1676,6 +1713,7 @@ async def export_data(
                 "export_date": datetime.now().isoformat(),
                 "period": period,
                 "total_users": len(users_grouped),
+                "total_rows": len(export_rows),
                 "users": list(users_grouped.values())
             }
         else:
@@ -1694,11 +1732,11 @@ async def export_data(
         )
     
     elif format == "csv":
-        # CSV format
         output = io.StringIO()
         
         if export_rows:
             fieldnames = list(export_rows[0].keys())
+            
             # Handle list fields for CSV
             if include_ips and not include_destinations:
                 for row in export_rows:
@@ -1713,70 +1751,39 @@ async def export_data(
         
         content = output.getvalue()
         return StreamingResponse(
-            io.BytesIO(content.encode('utf-8-sig')),  # UTF-8 with BOM for Excel
+            io.BytesIO(content.encode('utf-8-sig')),
             media_type="text/csv",
             headers={"Content-Disposition": f"attachment; filename=remnawave_export_{timestamp}.csv"}
         )
     
     elif format == "xlsx":
-        # Excel format
         try:
             from openpyxl import Workbook
-            from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+            from openpyxl.styles import Font, PatternFill, Alignment
             from openpyxl.utils import get_column_letter
         except ImportError:
             raise HTTPException(status_code=500, detail="openpyxl not installed")
         
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "Users & Visits"
-        
-        # Styles
-        header_font = Font(bold=True, color="FFFFFF")
-        header_fill = PatternFill(start_color="4F46E5", end_color="4F46E5", fill_type="solid")
-        header_alignment = Alignment(horizontal="center", vertical="center")
-        thin_border = Border(
-            left=Side(style='thin'),
-            right=Side(style='thin'),
-            top=Side(style='thin'),
-            bottom=Side(style='thin')
-        )
+        # Use write_only mode for better performance with large datasets
+        wb = Workbook(write_only=True)
+        ws = wb.create_sheet("Users & Visits")
         
         if export_rows:
-            # Write headers
             headers = list(export_rows[0].keys())
-            for col, header in enumerate(headers, 1):
-                cell = ws.cell(row=1, column=col, value=header)
-                cell.font = header_font
-                cell.fill = header_fill
-                cell.alignment = header_alignment
-                cell.border = thin_border
             
-            # Write data
-            for row_idx, row_data in enumerate(export_rows, 2):
-                for col_idx, header in enumerate(headers, 1):
+            # Write header row
+            ws.append(headers)
+            
+            # Write data rows
+            for row_data in export_rows:
+                row_values = []
+                for header in headers:
                     value = row_data.get(header)
-                    # Handle lists
                     if isinstance(value, list):
                         value = "; ".join(str(v) for v in value)
-                    cell = ws.cell(row=row_idx, column=col_idx, value=value)
-                    cell.border = thin_border
-            
-            # Auto-adjust column widths
-            for col in range(1, len(headers) + 1):
-                max_length = 0
-                column = get_column_letter(col)
-                for row in range(1, len(export_rows) + 2):
-                    try:
-                        cell_value = str(ws.cell(row=row, column=col).value or "")
-                        if len(cell_value) > max_length:
-                            max_length = len(cell_value)
-                    except:
-                        pass
-                adjusted_width = min(max_length + 2, 50)
-                ws.column_dimensions[column].width = adjusted_width
+                    row_values.append(value)
+                ws.append(row_values)
         
-        # Save to bytes
         output = io.BytesIO()
         wb.save(output)
         output.seek(0)
