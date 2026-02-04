@@ -1749,6 +1749,9 @@ async def _run_export_task(export_id: int, settings: dict):
             elif file_format == "xlsx":
                 from openpyxl import Workbook
                 
+                # Fields that should be stored as text to avoid scientific notation
+                text_fields = {"telegram_id", "traffic_used_bytes", "traffic_limit_bytes"}
+                
                 wb = Workbook(write_only=True)
                 ws = wb.create_sheet("Export")
                 
@@ -1762,6 +1765,9 @@ async def _run_export_task(export_id: int, settings: dict):
                             value = row_data.get(header)
                             if isinstance(value, list):
                                 value = "; ".join(str(v) for v in value)
+                            # Convert large numbers to strings to prevent scientific notation
+                            elif header in text_fields and value is not None:
+                                value = str(value)
                             row_values.append(value)
                         ws.append(row_values)
                 
