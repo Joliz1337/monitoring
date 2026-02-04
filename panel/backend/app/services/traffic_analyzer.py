@@ -30,23 +30,34 @@ logger = logging.getLogger(__name__)
 # Known valid platforms for HWID validation
 VALID_PLATFORMS = {'android', 'ios', 'windows', 'macos', 'linux', 'mac'}
 
-# Known valid app patterns
+# Known valid app patterns (case-insensitive, with optional version and platform)
 VALID_APP_PATTERNS = [
-    r'^Happ/\d+\.\d+\.\d+/',
-    r'^v2raytun/',
-    r'^V2rayNG/',
-    r'^Shadowrocket/',
-    r'^Quantumult/',
-    r'^Clash/',
-    r'^Surge/',
-    r'^FoXray/',
-    r'^Streisand/',
-    r'^OneClick/',
-    r'^V2Box/',
-    r'^Matsuri/',
-    r'^NekoBox/',
-    r'^SagerNet/',
-    r'^V2RayU/',
+    r'^Happ(/[\d.]+)?(/\w+)?$',           # Happ, Happ/3.9.1, Happ/3.9.1/Windows
+    r'^v2raytun(/[\w.]+)?$',              # v2raytun, v2raytun/android
+    r'^V2rayNG(/[\d.]+)?$',               # V2rayNG, V2rayNG/1.8.5
+    r'^Shadowrocket(/[\d.]+)?$',          # Shadowrocket
+    r'^Quantumult',                        # Quantumult X, Quantumult
+    r'^Clash',                             # Clash, ClashX, ClashForAndroid
+    r'^Surge(/[\d.]+)?$',                 # Surge
+    r'^FoXray(/[\d.]+)?$',                # FoXray
+    r'^Streisand(/[\d.]+)?$',             # Streisand
+    r'^OneClick(/[\d.]+)?$',              # OneClick
+    r'^V2Box(/[\d.]+)?$',                 # V2Box
+    r'^Matsuri(/[\d.]+)?$',               # Matsuri
+    r'^NekoBox(/[\d.]+)?$',               # NekoBox, NekoBoxForAndroid
+    r'^SagerNet(/[\d.]+)?$',              # SagerNet
+    r'^V2RayU(/[\d.]+)?$',                # V2RayU
+    r'^sing-box(/[\d.]+)?$',              # sing-box
+    r'^hiddify(/[\d.]+)?$',               # Hiddify
+    r'^nekoray(/[\d.]+)?$',               # Nekoray
+    r'^v2rayA(/[\d.]+)?$',                # v2rayA
+    r'^Qv2ray(/[\d.]+)?$',                # Qv2ray
+    r'^WingsX(/[\d.]+)?$',                # WingsX
+    r'^Loon(/[\d.]+)?$',                  # Loon
+    r'^Stash(/[\d.]+)?$',                 # Stash
+    r'^Pharos(/[\d.]+)?$',                # Pharos
+    r'^Spectre(/[\d.]+)?$',               # Spectre
+    r'^karing(/[\d.]+)?$',                # Karing
 ]
 
 # Suspicious patterns in User-Agent
