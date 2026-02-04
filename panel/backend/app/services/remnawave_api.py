@@ -313,6 +313,46 @@ class RemnawaveAPI:
             if e.status_code == 404:
                 return None
             raise
+    
+    async def get_all_hwid_devices(self, start: int = 0, size: int = 100) -> dict:
+        """
+        Get all HWID devices with pagination.
+        
+        Args:
+            start: Offset
+            size: Page size
+            
+        Returns:
+            dict with 'devices' list and pagination info
+        """
+        params = {"start": start, "size": size}
+        result = await self._request("GET", "/api/hwid/devices", params=params)
+        return result.get("response", {})
+    
+    async def get_all_hwid_devices_paginated(self, size: int = 100) -> list[dict]:
+        """
+        Get ALL HWID devices through pagination.
+        
+        Args:
+            size: Page size per request
+            
+        Returns:
+            List of all HWID devices
+        """
+        all_devices = []
+        start = 0
+        
+        while True:
+            result = await self.get_all_hwid_devices(start=start, size=size)
+            devices = result.get('devices', [])
+            all_devices.extend(devices)
+            
+            if len(devices) < size:
+                break
+            start += size
+        
+        logger.debug(f"Fetched {len(all_devices)} HWID devices from Remnawave")
+        return all_devices
 
 
 # Singleton for settings-based instance

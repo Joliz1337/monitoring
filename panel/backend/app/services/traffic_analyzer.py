@@ -126,6 +126,8 @@ class TrafficAnalyzer:
         self._time_since_last_check = 0
         self._check_interval = 1800  # 30 minutes default
         self._last_check_time: Optional[datetime] = None
+        self._hwid_cache: dict[str, list[dict]] = {}  # uuid -> devices list
+        self._hwid_cache_updated: Optional[datetime] = None
     
     async def start(self):
         """Start background analyzer."""
@@ -268,14 +270,16 @@ class TrafficAnalyzer:
                     "anomalies_found": 0
                 }
             
+            # Pre-fetch all HWID devices in one batch (instead of per-user requests)
+            if settings.check_hwid_anomalies and remnawave_settings and remnawave_settings.api_url:
+                await self._refresh_hwid_cache(remnawave_settings)
+            
             # 24h cutoff for IP stats
             cutoff_time = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=24)
             
             for user in users:
                 try:
-                    user_anomalies = await self._analyze_user(
-                        user, settings, remnawave_settings, cutoff_time
-                    )
+                    user_anomalies = await self._analyze_user(user, settings, cutoff_time)
                     analyzed_users += 1
                     anomalies_found += len(user_anomalies)
                 except Exception as e:
@@ -326,7 +330,6 @@ class TrafficAnalyzer:
         self,
         user: RemnawaveUserCache,
         settings: TrafficAnalyzerSettings,
-        remnawave_settings: Optional[RemnawaveSettings],
         cutoff_time: datetime
     ) -> list[dict]:
         """Analyze single user for anomalies."""
@@ -342,9 +345,9 @@ class TrafficAnalyzer:
         if ip_anomaly:
             anomalies.append(ip_anomaly)
         
-        # 3. Check HWID (if enabled and API configured)
-        if settings.check_hwid_anomalies and remnawave_settings and remnawave_settings.api_url:
-            hwid_anomaly = await self._check_hwid_anomaly(user, remnawave_settings)
+        # 3. Check HWID (uses pre-fetched cache)
+        if settings.check_hwid_anomalies and self._hwid_cache:
+            hwid_anomaly = await self._check_hwid_anomaly(user)
             if hwid_anomaly:
                 anomalies.append(hwid_anomaly)
         
@@ -464,15 +467,12 @@ class TrafficAnalyzer:
             }
         }
     
-    async def _check_hwid_anomaly(
-        self,
-        user: RemnawaveUserCache,
-        remnawave_settings: RemnawaveSettings
-    ) -> Optional[dict]:
-        """Check HWID devices for suspicious User-Agent patterns."""
-        if not user.uuid:
-            return None
+    async def _refresh_hwid_cache(self, remnawave_settings: RemnawaveSettings):
+        """
+        Fetch all HWID devices in one batch and cache by user UUID.
         
+        This is much more efficient than fetching per-user (N requests -> 1-2 requests).
+        """
         api = get_remnawave_api(
             remnawave_settings.api_url,
             remnawave_settings.api_token,
@@ -480,47 +480,62 @@ class TrafficAnalyzer:
         )
         
         try:
-            hwid_data = await api.get_user_hwid_devices(user.uuid)
-            if not hwid_data:
-                return None
+            all_devices = await api.get_all_hwid_devices_paginated(size=100)
             
-            devices = hwid_data.get("devices", [])
-            if not devices:
-                return None
+            # Group devices by user UUID
+            self._hwid_cache.clear()
+            for device in all_devices:
+                user_uuid = device.get("userUuid")
+                if user_uuid:
+                    if user_uuid not in self._hwid_cache:
+                        self._hwid_cache[user_uuid] = []
+                    self._hwid_cache[user_uuid].append(device)
             
-            suspicious_devices = []
-            
-            for device in devices:
-                user_agent = device.get("userAgent", "")
-                validation = validate_user_agent(user_agent)
-                
-                if not validation['valid']:
-                    suspicious_devices.append({
-                        "hwid": device.get("hwid", "")[:20] + "...",
-                        "user_agent": user_agent[:100] if user_agent else "(empty)",
-                        "issues": validation['issues']
-                    })
-            
-            if not suspicious_devices:
-                return None
-            
-            severity = "critical" if len(suspicious_devices) > 1 else "warning"
-            
-            return {
-                "type": "hwid",
-                "severity": severity,
-                "details": {
-                    "total_devices": len(devices),
-                    "suspicious_count": len(suspicious_devices),
-                    "suspicious_devices": suspicious_devices[:5]  # Limit to 5
-                }
-            }
+            self._hwid_cache_updated = datetime.now(timezone.utc).replace(tzinfo=None)
+            logger.debug(f"HWID cache refreshed: {len(all_devices)} devices for {len(self._hwid_cache)} users")
             
         except RemnawaveAPIError as e:
-            logger.debug(f"Failed to fetch HWID for user {user.uuid}: {e.message}")
-            return None
+            logger.warning(f"Failed to refresh HWID cache: {e.message}")
         finally:
             await api.close()
+    
+    async def _check_hwid_anomaly(self, user: RemnawaveUserCache) -> Optional[dict]:
+        """Check HWID devices for suspicious User-Agent patterns using cached data."""
+        if not user.uuid:
+            return None
+        
+        # Use cached HWID data instead of making API request per user
+        devices = self._hwid_cache.get(user.uuid, [])
+        if not devices:
+            return None
+        
+        suspicious_devices = []
+        
+        for device in devices:
+            user_agent = device.get("userAgent", "")
+            validation = validate_user_agent(user_agent)
+            
+            if not validation['valid']:
+                suspicious_devices.append({
+                    "hwid": device.get("hwid", "")[:20] + "...",
+                    "user_agent": user_agent[:100] if user_agent else "(empty)",
+                    "issues": validation['issues']
+                })
+        
+        if not suspicious_devices:
+            return None
+        
+        severity = "critical" if len(suspicious_devices) > 1 else "warning"
+        
+        return {
+            "type": "hwid",
+            "severity": severity,
+            "details": {
+                "total_devices": len(devices),
+                "suspicious_count": len(suspicious_devices),
+                "suspicious_devices": suspicious_devices[:5]  # Limit to 5
+            }
+        }
     
     async def _save_and_notify_anomaly(
         self,
