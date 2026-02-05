@@ -50,14 +50,11 @@ import {
   RemnawaveIpDestinations,
   RemnawaveInfrastructureAddress,
   RemnawaveExcludedDestination,
-  IgnoredUser,
-  RemnawaveTimelineResponse,
-  RemnawaveUserServerStats
+  IgnoredUser
 } from '../api/client'
 import { useTranslation } from 'react-i18next'
 import PeriodSelector from '../components/ui/PeriodSelector'
 import { useAutoRefresh } from '../hooks/useAutoRefresh'
-import MultiLineChart from '../components/Charts/MultiLineChart'
 
 const containerVariants = {
   hidden: { opacity: 0 },
@@ -133,10 +130,6 @@ export default function Remnawave() {
   const [isSearchingUsers, setIsSearchingUsers] = useState(false)
   const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const USERS_PAGE_SIZE = 100
-  
-  // Timeline state (visits by server)
-  const [timeline, setTimeline] = useState<RemnawaveTimelineResponse | null>(null)
-  const [userServerStats, setUserServerStats] = useState<RemnawaveUserServerStats | null>(null)
   
   // User cache state
   const [userCacheStatus, setUserCacheStatus] = useState<{ last_update: string | null; updating: boolean } | null>(null)
@@ -336,21 +329,16 @@ export default function Remnawave() {
   // Fetch stats
   const fetchStats = useCallback(async () => {
     try {
-      // Determine timeline period (convert 'all' to '365d' for timeline)
-      const timelinePeriod = period === 'all' ? '365d' : period
-      
-      const [summaryRes, destRes, usersRes, timelineRes] = await Promise.all([
+      const [summaryRes, destRes, usersRes] = await Promise.all([
         remnawaveApi.getSummary(period),
         remnawaveApi.getTopDestinations({ period, limit: 100 }),
-        remnawaveApi.getTopUsers({ period, limit: USERS_PAGE_SIZE, offset: 0 }),
-        remnawaveApi.getTimeline({ period: timelinePeriod, by_server: true })
+        remnawaveApi.getTopUsers({ period, limit: USERS_PAGE_SIZE, offset: 0 })
       ])
       setSummary(summaryRes.data)
       setTopDestinations(destRes.data.destinations)
       setTopUsers(usersRes.data.users)
       setTotalUsers(usersRes.data.total)
       setUsersOffset(usersRes.data.users.length)
-      setTimeline(timelineRes.data)
       setError(null)
     } catch (err) {
       console.error('Failed to fetch stats:', err)
@@ -1009,17 +997,14 @@ export default function Remnawave() {
     setCopiedField(null)
     setExpandedIp(null)
     setIpDestinations(null)
-    setUserServerStats(null)
     try {
-      // Fetch visit stats, full user info and server stats in parallel
-      const [statsRes, fullRes, serverStatsRes] = await Promise.all([
+      // Fetch visit stats and full user info in parallel
+      const [statsRes, fullRes] = await Promise.all([
         remnawaveApi.getUserStats(email, period),
-        remnawaveApi.getUserFullInfo(email),
-        remnawaveApi.getUserServerStats(email, period)
+        remnawaveApi.getUserFullInfo(email)
       ])
       setSelectedUser(statsRes.data)
       setSelectedUserFull(fullRes.data)
-      setUserServerStats(serverStatsRes.data)
     } catch (err) {
       console.error('Failed to fetch user stats:', err)
     }
@@ -1382,33 +1367,6 @@ export default function Remnawave() {
                     )
                   })}
                 </div>
-              </div>
-            )}
-            
-            {/* Visits Timeline by Server */}
-            {timeline?.by_server && timeline.servers && timeline.servers.length > 0 && (
-              <div className="p-6 rounded-xl bg-dark-800/50 border border-dark-700/50">
-                <div className="flex items-center justify-between mb-4">
-                  <h3 className="text-lg font-semibold text-dark-100">{t('remnawave.visits_timeline')}</h3>
-                  <div className="flex items-center gap-2 text-dark-400 text-sm">
-                    <Server className="w-4 h-4" />
-                    <span>{timeline.servers.length} {t('remnawave.servers').toLowerCase()}</span>
-                  </div>
-                </div>
-                <MultiLineChart
-                  series={timeline.servers.map((server, idx) => ({
-                    name: server.server_name,
-                    data: server.data.map(d => ({
-                      timestamp: d.timestamp,
-                      value: d.visits
-                    })),
-                    color: ['#22d3ee', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'][idx % 6]
-                  }))}
-                  height={300}
-                  period={period === 'all' ? '365d' : period}
-                  formatValue={(val) => val.toLocaleString()}
-                  smoothing={0.2}
-                />
               </div>
             )}
             
@@ -3032,7 +2990,7 @@ export default function Remnawave() {
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
-            onClick={() => { setSelectedUser(null); setSelectedUserFull(null); setUserServerStats(null); setExpandedIp(null); setIpDestinations(null); }}
+            onClick={() => { setSelectedUser(null); setSelectedUserFull(null); setExpandedIp(null); setIpDestinations(null); }}
           >
             <motion.div
               initial={{ scale: 0.95, opacity: 0 }}
@@ -3093,7 +3051,7 @@ export default function Remnawave() {
                     <RefreshCw className={`w-4 h-4 ${isLoadingUserFull ? 'animate-spin' : ''}`} />
                   </motion.button>
                   <motion.button
-                    onClick={() => { setSelectedUser(null); setSelectedUserFull(null); setUserServerStats(null); setExpandedIp(null); setIpDestinations(null); }}
+                    onClick={() => { setSelectedUser(null); setSelectedUserFull(null); setExpandedIp(null); setIpDestinations(null); }}
                     className="p-2 rounded-lg hover:bg-dark-700 text-dark-400 transition-colors"
                     whileHover={{ scale: 1.1 }}
                     whileTap={{ scale: 0.9 }}
@@ -3345,72 +3303,7 @@ export default function Remnawave() {
                       </div>
                     </div>
                     
-                    {/* Visits by Server Chart */}
-                    {userServerStats && userServerStats.servers.length > 0 && (
-                      <div className="p-4 rounded-lg bg-dark-800">
-                        <div className="flex items-center justify-between mb-4">
-                          <h4 className="text-sm font-medium text-dark-300">{t('remnawave.visits_by_server')}</h4>
-                          <span className="text-dark-500 text-xs">
-                            {t('remnawave.total')}: {userServerStats.total_visits.toLocaleString()} {t('remnawave.visits').toLowerCase()}
-                          </span>
-                        </div>
-                        
-                        {/* Bar chart showing visits per server */}
-                        <div className="space-y-3">
-                          {userServerStats.servers.map((server, idx) => {
-                            const maxVisits = Math.max(...userServerStats.servers.map(s => s.visits), 1)
-                            const percentage = (server.visits / maxVisits) * 100
-                            const colors = ['#22d3ee', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899']
-                            const color = colors[idx % colors.length]
-                            
-                            return (
-                              <div key={server.server_id}>
-                                <div className="flex items-center justify-between mb-1">
-                                  <div className="flex items-center gap-2">
-                                    <Server className="w-4 h-4 text-dark-500" />
-                                    <span className="text-dark-200 text-sm">{server.server_name}</span>
-                                  </div>
-                                  <div className="flex items-center gap-3">
-                                    <span className="text-dark-500 text-xs">{server.percentage}%</span>
-                                    <span className="text-dark-300 text-sm font-medium w-20 text-right">
-                                      {server.visits.toLocaleString()}
-                                    </span>
-                                  </div>
-                                </div>
-                                <div className="h-2 bg-dark-700 rounded-full overflow-hidden">
-                                  <motion.div
-                                    initial={{ width: 0 }}
-                                    animate={{ width: `${percentage}%` }}
-                                    transition={{ duration: 0.5, delay: idx * 0.1 }}
-                                    className="h-full rounded-full"
-                                    style={{ backgroundColor: color }}
-                                  />
-                                </div>
-                              </div>
-                            )
-                          })}
-                        </div>
-                        
-                        {/* Server details */}
-                        <div className="mt-4 pt-4 border-t border-dark-700">
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                            {userServerStats.servers.map((server) => (
-                              <div key={server.server_id} className="flex items-center justify-between p-2 rounded bg-dark-900/50">
-                                <div className="flex items-center gap-2">
-                                  <Server className="w-3.5 h-3.5 text-dark-500" />
-                                  <span className="text-dark-300 text-sm">{server.server_name}</span>
-                                </div>
-                                <div className="text-right">
-                                  <div className="text-dark-400 text-xs">{server.unique_destinations} {t('remnawave.sites').toLowerCase()}</div>
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      </div>
-                    )}
-                    
-                    {/* Bandwidth Stats Chart (from live API) */}
+                    {/* Bandwidth Stats Chart (from live API) - Stacked by Server */}
                     {selectedUserFull?.bandwidth_stats?.categories && selectedUserFull.bandwidth_stats.sparklineData && selectedUserFull.bandwidth_stats.sparklineData.length > 0 && (
                       <div className="p-4 rounded-lg bg-dark-800">
                         <div className="flex items-center justify-between mb-4">
@@ -3420,41 +3313,104 @@ export default function Remnawave() {
                           </span>
                         </div>
                         
-                        {/* Traffic Chart with Date Labels */}
+                        {/* Stacked Traffic Chart with Date Labels - by Server */}
                         <div className="flex gap-1">
                           {(() => {
-                            const data = selectedUserFull.bandwidth_stats!.sparklineData!
                             const categories = selectedUserFull.bandwidth_stats!.categories!
-                            const maxValue = Math.max(...data, 1)
-                            return data.map((value, idx) => {
-                              // Parse date and get day number
-                              const dateStr = categories[idx]
-                              const day = dateStr ? dateStr.split('-')[2]?.replace(/^0/, '') : ''
-                              return (
-                                <div key={idx} className="flex-1 flex flex-col items-center">
-                                  {/* Bar */}
-                                  <div className="w-full h-32 flex items-end">
-                                    <div
-                                      className="w-full bg-accent-500/80 hover:bg-accent-400 rounded-t transition-colors cursor-pointer group relative"
-                                      style={{ height: `${Math.max((value / maxValue) * 100, 2)}%` }}
-                                      title={`${dateStr}: ${formatBytes(value)}`}
-                                    >
-                                      <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 px-2 py-1 bg-dark-900 
+                            const series = selectedUserFull.bandwidth_stats!.series
+                            const sparklineData = selectedUserFull.bandwidth_stats!.sparklineData!
+                            
+                            // If we have series data, use it for stacked chart
+                            if (series && series.length > 0) {
+                              // Calculate max total for any single day
+                              const maxValue = Math.max(...sparklineData, 1)
+                              
+                              return categories.map((dateStr, dayIdx) => {
+                                const day = dateStr ? dateStr.split('-')[2]?.replace(/^0/, '') : ''
+                                const dayTotal = sparklineData[dayIdx] || 0
+                                
+                                // Get data for each server for this day
+                                const serverData = series
+                                  .map(s => ({
+                                    name: s.name,
+                                    countryCode: s.countryCode,
+                                    color: s.color,
+                                    value: s.data[dayIdx] || 0
+                                  }))
+                                  .filter(s => s.value > 0)
+                                  .sort((a, b) => b.value - a.value)
+                                
+                                return (
+                                  <div key={dayIdx} className="flex-1 flex flex-col items-center group">
+                                    {/* Stacked Bar */}
+                                    <div className="w-full h-32 flex flex-col-reverse items-stretch relative">
+                                      {serverData.map((server, sIdx) => {
+                                        const heightPercent = (server.value / maxValue) * 100
+                                        return (
+                                          <div
+                                            key={server.name}
+                                            className="w-full transition-opacity hover:opacity-80"
+                                            style={{ 
+                                              height: `${heightPercent}%`,
+                                              backgroundColor: server.color,
+                                              borderTopLeftRadius: sIdx === serverData.length - 1 ? '4px' : '0',
+                                              borderTopRightRadius: sIdx === serverData.length - 1 ? '4px' : '0'
+                                            }}
+                                          />
+                                        )
+                                      })}
+                                      {/* Tooltip on hover */}
+                                      <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 px-2 py-1.5 bg-dark-900 
                                                     rounded text-xs text-dark-200 whitespace-nowrap opacity-0 group-hover:opacity-100 
-                                                    transition-opacity pointer-events-none z-10">
-                                        {formatBytes(value)}
+                                                    transition-opacity pointer-events-none z-10 min-w-[120px]">
+                                        <div className="font-medium mb-1">{dateStr}: {formatBytes(dayTotal)}</div>
+                                        {serverData.slice(0, 5).map(s => (
+                                          <div key={s.name} className="flex items-center gap-1.5 text-[10px]">
+                                            <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: s.color }} />
+                                            <span className="truncate">{s.name}</span>
+                                            <span className="text-dark-400 ml-auto">{formatBytes(s.value)}</span>
+                                          </div>
+                                        ))}
+                                        {serverData.length > 5 && (
+                                          <div className="text-dark-500 text-[10px] mt-0.5">+{serverData.length - 5} more</div>
+                                        )}
                                       </div>
                                     </div>
+                                    {/* Date Label */}
+                                    <span className="text-[10px] text-dark-500 mt-1">{day}</span>
                                   </div>
-                                  {/* Date Label */}
-                                  <span className="text-[10px] text-dark-500 mt-1">{day}</span>
-                                </div>
-                              )
-                            })
+                                )
+                              })
+                            } else {
+                              // Fallback to simple chart if no series data
+                              const maxValue = Math.max(...sparklineData, 1)
+                              return sparklineData.map((value, idx) => {
+                                const dateStr = categories[idx]
+                                const day = dateStr ? dateStr.split('-')[2]?.replace(/^0/, '') : ''
+                                return (
+                                  <div key={idx} className="flex-1 flex flex-col items-center">
+                                    <div className="w-full h-32 flex items-end">
+                                      <div
+                                        className="w-full bg-accent-500/80 hover:bg-accent-400 rounded-t transition-colors cursor-pointer group relative"
+                                        style={{ height: `${Math.max((value / maxValue) * 100, 2)}%` }}
+                                        title={`${dateStr}: ${formatBytes(value)}`}
+                                      >
+                                        <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 px-2 py-1 bg-dark-900 
+                                                      rounded text-xs text-dark-200 whitespace-nowrap opacity-0 group-hover:opacity-100 
+                                                      transition-opacity pointer-events-none z-10">
+                                          {formatBytes(value)}
+                                        </div>
+                                      </div>
+                                    </div>
+                                    <span className="text-[10px] text-dark-500 mt-1">{day}</span>
+                                  </div>
+                                )
+                              })
+                            }
                           })()}
                         </div>
                         
-                        {/* Top Nodes */}
+                        {/* Server Legend */}
                         {selectedUserFull.bandwidth_stats.topNodes && selectedUserFull.bandwidth_stats.topNodes.length > 0 && (
                           <div className="mt-4 pt-4 border-t border-dark-700">
                             <h5 className="text-xs font-medium text-dark-400 mb-2">{t('remnawave.top_nodes')}</h5>

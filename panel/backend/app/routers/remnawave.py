@@ -1148,64 +1148,6 @@ async def get_top_users(
     return response
 
 
-@router.get("/stats/user/{email}/servers")
-async def get_user_server_stats(
-    email: int,
-    period: str = Query("all", pattern="^(1h|24h|7d|30d|365d|all)$"),
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """Get user visits breakdown by server.
-    
-    Returns aggregated visit counts for each server the user has used.
-    Useful for displaying per-server usage in charts.
-    """
-    start_time = _get_time_filter(period) if period != "all" else None
-    
-    conditions = [XrayVisitStats.email == email]
-    if start_time:
-        conditions.append(XrayVisitStats.last_seen >= start_time)
-    
-    # Get visits grouped by server
-    result = await db.execute(
-        select(
-            XrayVisitStats.server_id,
-            Server.name.label('server_name'),
-            sql_func.sum(XrayVisitStats.visit_count).label('total_visits'),
-            sql_func.count(sql_func.distinct(XrayVisitStats.destination_id)).label('unique_destinations'),
-            sql_func.min(XrayVisitStats.first_seen).label('first_seen'),
-            sql_func.max(XrayVisitStats.last_seen).label('last_seen')
-        )
-        .join(Server, XrayVisitStats.server_id == Server.id)
-        .where(and_(*conditions))
-        .group_by(XrayVisitStats.server_id, Server.name)
-        .order_by(sql_func.sum(XrayVisitStats.visit_count).desc())
-    )
-    
-    rows = result.fetchall()
-    
-    # Calculate total for percentage
-    total_visits = sum(row.total_visits for row in rows)
-    
-    return {
-        "email": email,
-        "period": period,
-        "total_visits": total_visits,
-        "servers": [
-            {
-                "server_id": row.server_id,
-                "server_name": row.server_name,
-                "visits": row.total_visits,
-                "unique_destinations": row.unique_destinations,
-                "percentage": round((row.total_visits / total_visits * 100), 1) if total_visits > 0 else 0,
-                "first_seen": row.first_seen.isoformat() if row.first_seen else None,
-                "last_seen": row.last_seen.isoformat() if row.last_seen else None
-            }
-            for row in rows
-        ]
-    }
-
-
 @router.get("/stats/user/{email}")
 async def get_user_stats(
     email: int,
@@ -1499,14 +1441,10 @@ async def get_ip_destinations(
 async def get_timeline(
     period: str = Query("24h", pattern="^(1h|24h|7d|30d|365d)$"),
     server_id: Optional[int] = Query(None),
-    by_server: bool = Query(False, description="Return data split by server"),
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    """Get timeline of visits for charting (from XrayHourlyStats)
-    
-    If by_server=True, returns data grouped by server for multi-line chart.
-    """
+    """Get timeline of visits for charting (from XrayHourlyStats)"""
     start_time = _get_time_filter(period)
     
     conditions = [XrayHourlyStats.hour >= start_time]
@@ -1514,52 +1452,6 @@ async def get_timeline(
     if server_id:
         conditions.append(XrayHourlyStats.server_id == server_id)
     
-    if by_server and not server_id:
-        # Return data split by server for multi-line chart
-        result = await db.execute(
-            select(
-                XrayHourlyStats.server_id,
-                XrayHourlyStats.hour,
-                XrayHourlyStats.visit_count,
-                XrayHourlyStats.unique_users,
-                XrayHourlyStats.unique_destinations
-            )
-            .where(and_(*conditions))
-            .order_by(XrayHourlyStats.server_id, XrayHourlyStats.hour)
-        )
-        
-        rows = result.fetchall()
-        
-        # Get server names
-        servers_result = await db.execute(select(Server.id, Server.name))
-        server_names = {s.id: s.name for s in servers_result.fetchall()}
-        
-        # Group data by server
-        servers_data: dict[int, list] = {}
-        for row in rows:
-            if row.server_id not in servers_data:
-                servers_data[row.server_id] = []
-            servers_data[row.server_id].append({
-                "timestamp": row.hour.isoformat() if row.hour else None,
-                "visits": row.visit_count,
-                "unique_users": row.unique_users,
-                "unique_destinations": row.unique_destinations
-            })
-        
-        return {
-            "period": period,
-            "by_server": True,
-            "servers": [
-                {
-                    "server_id": sid,
-                    "server_name": server_names.get(sid, f"Server {sid}"),
-                    "data": data
-                }
-                for sid, data in servers_data.items()
-            ]
-        }
-    
-    # Standard aggregated response
     result = await db.execute(
         select(
             XrayHourlyStats.hour,
@@ -1576,7 +1468,6 @@ async def get_timeline(
     
     return {
         "period": period,
-        "by_server": False,
         "data": [
             {
                 "timestamp": row.hour.isoformat() if row.hour else None,

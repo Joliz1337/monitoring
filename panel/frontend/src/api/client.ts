@@ -905,34 +905,6 @@ export interface RemnawaveTimelinePoint {
   unique_destinations: number
 }
 
-export interface RemnawaveServerTimelineData {
-  server_id: number
-  server_name: string
-  data: RemnawaveTimelinePoint[]
-}
-
-export interface RemnawaveTimelineResponse {
-  period: string
-  by_server: boolean
-  data?: RemnawaveTimelinePoint[]
-  servers?: RemnawaveServerTimelineData[]
-}
-
-export interface RemnawaveUserServerStats {
-  email: number
-  period: string
-  total_visits: number
-  servers: Array<{
-    server_id: number
-    server_name: string
-    visits: number
-    unique_destinations: number
-    percentage: number
-    first_seen: string | null
-    last_seen: string | null
-  }>
-}
-
 export interface RemnawaveDestinationUser {
   email: number
   username: string | null
@@ -1133,11 +1105,9 @@ export const remnawaveApi = {
     }),
   getTimeline: (params: { 
     period: string
-    server_id?: number
-    by_server?: boolean
-  }) => api.get<RemnawaveTimelineResponse>('/remnawave/stats/timeline', { params }),
-  getUserServerStats: (email: number, period: string) =>
-    api.get<RemnawaveUserServerStats>(`/remnawave/stats/user/${email}/servers`, { params: { period } }),
+    email?: number
+    server_id?: number 
+  }) => api.get<{ period: string; data: RemnawaveTimelinePoint[] }>('/remnawave/stats/timeline', { params }),
   
   // Users cache
   getUsers: (params?: { search?: string; limit?: number }) =>
