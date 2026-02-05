@@ -1146,6 +1146,26 @@ export const remnawaveApi = {
       message: string
     }>('/remnawave/stats/clear'),
   
+  // Clear user IPs
+  clearUserIp: (email: number, sourceIp: string) =>
+    api.delete<{
+      success: boolean
+      email: number
+      source_ip: string
+      deleted_ip_records: number
+      deleted_destination_records: number
+      message: string
+    }>(`/remnawave/stats/user/${email}/ips/${encodeURIComponent(sourceIp)}`),
+  
+  clearUserAllIps: (email: number) =>
+    api.delete<{
+      success: boolean
+      email: number
+      deleted_ip_records: number
+      deleted_destination_records: number
+      message: string
+    }>(`/remnawave/stats/user/${email}/ips`),
+  
   // Export
   createExport: (settings: {
     period: string

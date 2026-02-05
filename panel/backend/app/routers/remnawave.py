@@ -1292,6 +1292,95 @@ async def get_user_stats(
     }
 
 
+@router.delete("/stats/user/{email}/ips/{source_ip}")
+async def delete_user_ip(
+    email: int,
+    source_ip: str,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Delete a specific IP address from user's statistics.
+    
+    Removes the IP from XrayUserIpStats and related XrayIpDestinationStats records.
+    """
+    from urllib.parse import unquote
+    
+    # URL decode the source_ip (it may contain special characters)
+    source_ip = unquote(source_ip)
+    
+    # Delete from XrayUserIpStats
+    ip_result = await db.execute(
+        delete(XrayUserIpStats).where(
+            and_(
+                XrayUserIpStats.email == email,
+                XrayUserIpStats.source_ip == source_ip
+            )
+        )
+    )
+    deleted_ip_count = ip_result.rowcount
+    
+    # Delete related records from XrayIpDestinationStats
+    dest_result = await db.execute(
+        delete(XrayIpDestinationStats).where(
+            and_(
+                XrayIpDestinationStats.email == email,
+                XrayIpDestinationStats.source_ip == source_ip
+            )
+        )
+    )
+    deleted_dest_count = dest_result.rowcount
+    
+    await db.commit()
+    
+    # Invalidate cache
+    _invalidate_cache()
+    
+    return {
+        "success": True,
+        "email": email,
+        "source_ip": source_ip,
+        "deleted_ip_records": deleted_ip_count,
+        "deleted_destination_records": deleted_dest_count,
+        "message": f"Deleted IP {source_ip} from user {email}"
+    }
+
+
+@router.delete("/stats/user/{email}/ips")
+async def delete_user_all_ips(
+    email: int,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Delete all IP addresses from user's statistics.
+    
+    Removes all IPs from XrayUserIpStats and related XrayIpDestinationStats records.
+    """
+    # Delete all from XrayUserIpStats for this user
+    ip_result = await db.execute(
+        delete(XrayUserIpStats).where(XrayUserIpStats.email == email)
+    )
+    deleted_ip_count = ip_result.rowcount
+    
+    # Delete all related records from XrayIpDestinationStats
+    dest_result = await db.execute(
+        delete(XrayIpDestinationStats).where(XrayIpDestinationStats.email == email)
+    )
+    deleted_dest_count = dest_result.rowcount
+    
+    await db.commit()
+    
+    # Invalidate cache
+    _invalidate_cache()
+    
+    return {
+        "success": True,
+        "email": email,
+        "deleted_ip_records": deleted_ip_count,
+        "deleted_destination_records": deleted_dest_count,
+        "message": f"Deleted all IPs for user {email}"
+    }
+
+
 @router.get("/stats/destination/users")
 async def get_destination_users(
     destination: str = Query(..., description="Destination to get users for"),

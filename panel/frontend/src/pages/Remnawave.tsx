@@ -159,6 +159,10 @@ export default function Remnawave() {
   const [ipDestinations, setIpDestinations] = useState<RemnawaveIpDestinations | null>(null)
   const [isLoadingIpDest, setIsLoadingIpDest] = useState(false)
   
+  // IP clearing state
+  const [isClearingIp, setIsClearingIp] = useState(false)
+  const [clearIpConfirm, setClearIpConfirm] = useState<{ type: 'single' | 'all'; sourceIp?: string } | null>(null)
+  
   // Auto-refresh countdown (for UI display)
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [nextRefreshIn, setNextRefreshIn] = useState(30)
@@ -332,7 +336,7 @@ export default function Remnawave() {
       const [summaryRes, destRes, usersRes] = await Promise.all([
         remnawaveApi.getSummary(period),
         remnawaveApi.getTopDestinations({ period, limit: 100 }),
-        remnawaveApi.getTopUsers({ period, limit: USERS_PAGE_SIZE, offset: 0 })
+        remnawaveApi.getTopUsers({ period, limit: USERS_PAGE_SIZE, offset: 0, search: userSearch || undefined })
       ])
       setSummary(summaryRes.data)
       setTopDestinations(destRes.data.destinations)
@@ -344,7 +348,7 @@ export default function Remnawave() {
       console.error('Failed to fetch stats:', err)
       setError(t('remnawave.failed_fetch'))
     }
-  }, [period, t])
+  }, [period, t, userSearch])
   
   // Fetch analyzer settings and anomalies
   const fetchAnalyzerData = useCallback(async () => {
@@ -1095,6 +1099,46 @@ export default function Remnawave() {
       console.error('Failed to fetch IP destinations:', err)
     } finally {
       setIsLoadingIpDest(false)
+    }
+  }
+  
+  // Clear single user IP
+  const handleClearUserIp = async (email: number, sourceIp: string) => {
+    setIsClearingIp(true)
+    try {
+      await remnawaveApi.clearUserIp(email, sourceIp)
+      // Refresh user stats to update the IPs list
+      const res = await remnawaveApi.getUserStats(email, period)
+      setSelectedUser(res.data)
+      // Close expanded IP if it was the deleted one
+      if (expandedIp === sourceIp) {
+        setExpandedIp(null)
+        setIpDestinations(null)
+      }
+    } catch (err) {
+      console.error('Failed to clear user IP:', err)
+    } finally {
+      setIsClearingIp(false)
+      setClearIpConfirm(null)
+    }
+  }
+  
+  // Clear all user IPs
+  const handleClearUserAllIps = async (email: number) => {
+    setIsClearingIp(true)
+    try {
+      await remnawaveApi.clearUserAllIps(email)
+      // Refresh user stats to update the IPs list
+      const res = await remnawaveApi.getUserStats(email, period)
+      setSelectedUser(res.data)
+      // Close any expanded IP
+      setExpandedIp(null)
+      setIpDestinations(null)
+    } catch (err) {
+      console.error('Failed to clear all user IPs:', err)
+    } finally {
+      setIsClearingIp(false)
+      setClearIpConfirm(null)
     }
   }
   
@@ -3455,10 +3499,22 @@ export default function Remnawave() {
                   <div className="space-y-6">
                     {/* Client IPs Section */}
                     <div>
-                      <h4 className="text-sm font-medium text-dark-300 mb-3 flex items-center gap-2">
-                        <Users className="w-4 h-4" />
-                        {t('remnawave.client_ips')} ({selectedUser.client_ips?.length || selectedUser.ips?.length || 0})
-                      </h4>
+                      <div className="flex items-center justify-between mb-3">
+                        <h4 className="text-sm font-medium text-dark-300 flex items-center gap-2">
+                          <Users className="w-4 h-4" />
+                          {t('remnawave.client_ips')} ({selectedUser.client_ips?.length || selectedUser.ips?.length || 0})
+                        </h4>
+                        {((selectedUser.client_ips || selectedUser.ips)?.length || 0) > 0 && (
+                          <button
+                            onClick={() => setClearIpConfirm({ type: 'all' })}
+                            disabled={isClearingIp}
+                            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors text-xs disabled:opacity-50"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            {t('remnawave.clear_all_ips')}
+                          </button>
+                        )}
+                      </div>
                       {(selectedUser.client_ips || selectedUser.ips) && (selectedUser.client_ips || selectedUser.ips).length > 0 ? (
                         <div className="space-y-2">
                           {(selectedUser.client_ips || selectedUser.ips).map((ip, idx) => (
@@ -3511,6 +3567,14 @@ export default function Remnawave() {
                                 >
                                   <ExternalLink className="w-4 h-4" />
                                 </a>
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); setClearIpConfirm({ type: 'single', sourceIp: ip.source_ip }); }}
+                                  disabled={isClearingIp}
+                                  className="p-2 rounded-lg hover:bg-red-500/20 text-dark-500 hover:text-red-400 transition-colors disabled:opacity-50"
+                                  title={t('remnawave.clear_ip')}
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
                               </div>
                               
                               {/* Expanded Destinations */}
@@ -3614,6 +3678,45 @@ export default function Remnawave() {
                       <div className="p-6 rounded-lg bg-dark-800 text-center">
                         <Network className="w-8 h-8 text-dark-600 mx-auto mb-2" />
                         <p className="text-dark-500">{t('remnawave.no_ip_data')}</p>
+                      </div>
+                    )}
+                    
+                    {/* Clear IP Confirmation Dialog */}
+                    {clearIpConfirm && (
+                      <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setClearIpConfirm(null)}>
+                        <div className="bg-dark-800 rounded-xl p-6 max-w-md w-full mx-4 shadow-xl" onClick={(e) => e.stopPropagation()}>
+                          <h3 className="text-lg font-semibold text-dark-100 mb-2">
+                            {clearIpConfirm.type === 'all' ? t('remnawave.confirm_clear_all_ips_title') : t('remnawave.confirm_clear_ip_title')}
+                          </h3>
+                          <p className="text-dark-400 text-sm mb-4">
+                            {clearIpConfirm.type === 'all' 
+                              ? t('remnawave.confirm_clear_all_ips', { count: (selectedUser.client_ips || selectedUser.ips)?.length || 0 })
+                              : t('remnawave.confirm_clear_ip', { ip: clearIpConfirm.sourceIp })}
+                          </p>
+                          <div className="flex justify-end gap-3">
+                            <button
+                              onClick={() => setClearIpConfirm(null)}
+                              disabled={isClearingIp}
+                              className="px-4 py-2 rounded-lg bg-dark-700 text-dark-200 hover:bg-dark-600 transition-colors text-sm disabled:opacity-50"
+                            >
+                              {t('common.cancel')}
+                            </button>
+                            <button
+                              onClick={() => {
+                                if (clearIpConfirm.type === 'all') {
+                                  handleClearUserAllIps(selectedUser.email)
+                                } else if (clearIpConfirm.sourceIp) {
+                                  handleClearUserIp(selectedUser.email, clearIpConfirm.sourceIp)
+                                }
+                              }}
+                              disabled={isClearingIp}
+                              className="px-4 py-2 rounded-lg bg-red-500 text-white hover:bg-red-600 transition-colors text-sm flex items-center gap-2 disabled:opacity-50"
+                            >
+                              {isClearingIp && <RefreshCw className="w-4 h-4 animate-spin" />}
+                              {t('common.delete')}
+                            </button>
+                          </div>
+                        </div>
                       </div>
                     )}
                   </div>
