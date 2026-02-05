@@ -94,13 +94,17 @@ safe_read() {
     
     # Ensure we're reading from terminal
     if [ -t 0 ]; then
-        if read -t "$timeout" -r -p "$prompt" input </dev/tty 2>/dev/null; then
+        # Explicitly print prompt to /dev/tty to ensure visibility
+        printf "%s" "$prompt" >/dev/tty 2>/dev/null || printf "%s" "$prompt"
+        if read -t "$timeout" -r input </dev/tty 2>/dev/null; then
             if [ -n "$input" ]; then
                 echo "$input"
             else
                 echo "$default"
             fi
         else
+            # Print newline after timeout
+            echo "" >/dev/tty 2>/dev/null || true
             echo "$default"
         fi
     else
