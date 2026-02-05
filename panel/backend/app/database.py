@@ -580,7 +580,7 @@ async def _migrate_destinations_normalization(conn):
         logger.info("Populating xray_destinations table...")
         await conn.execute(text("""
             INSERT INTO xray_destinations (destination, first_seen, hit_count)
-            SELECT DISTINCT destination, MIN(created_at), SUM(visit_count)
+            SELECT DISTINCT destination, MIN(first_seen), SUM(visit_count)
             FROM xray_visit_stats
             WHERE destination IS NOT NULL
             GROUP BY destination
@@ -597,7 +597,7 @@ async def _migrate_destinations_normalization(conn):
         if ip_dest_columns and "destination" in ip_dest_columns:
             await conn.execute(text("""
                 INSERT INTO xray_destinations (destination, first_seen, hit_count)
-                SELECT DISTINCT destination, MIN(created_at), SUM(connection_count)
+                SELECT DISTINCT destination, MIN(first_seen), SUM(connection_count)
                 FROM xray_ip_destination_stats
                 WHERE destination IS NOT NULL
                 GROUP BY destination
