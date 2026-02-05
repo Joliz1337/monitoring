@@ -531,6 +531,233 @@ async def run_migrations(conn):
             logger.info("Added column: remnawave_settings.ignored_user_ids")
         except Exception:
             pass
+    
+    # Add retention settings columns to remnawave_settings
+    retention_columns = [
+        ("visit_stats_retention_days", "INTEGER DEFAULT 365"),
+        ("ip_stats_retention_days", "INTEGER DEFAULT 90"),
+        ("ip_destination_retention_days", "INTEGER DEFAULT 90"),
+        ("hourly_stats_retention_days", "INTEGER DEFAULT 365"),
+    ]
+    
+    for col_name, col_type in retention_columns:
+        if remnawave_settings_columns and col_name not in remnawave_settings_columns:
+            try:
+                await conn.execute(text(f'ALTER TABLE remnawave_settings ADD COLUMN "{col_name}" {col_type}'))
+                logger.info(f"Added column: remnawave_settings.{col_name}")
+            except Exception:
+                pass
+    
+    # Migrate xray_visit_stats and xray_ip_destination_stats to use normalized destinations
+    await _migrate_destinations_normalization(conn)
+
+
+async def _migrate_destinations_normalization(conn):
+    """Migrate destination columns to use normalized xray_destinations table."""
+    
+    # Check if xray_visit_stats has old destination column (varchar) instead of destination_id
+    result = await conn.execute(text("""
+        SELECT column_name, data_type FROM information_schema.columns 
+        WHERE table_name = 'xray_visit_stats'
+    """))
+    visit_stats_columns = {row[0]: row[1] for row in result.fetchall()}
+    
+    if not visit_stats_columns:
+        return  # Table doesn't exist yet, will be created fresh
+    
+    # If destination_id already exists, migration is done
+    if "destination_id" in visit_stats_columns:
+        return
+    
+    # If old destination column doesn't exist, nothing to migrate
+    if "destination" not in visit_stats_columns:
+        return
+    
+    logger.info("Starting destination normalization migration...")
+    
+    try:
+        # Step 1: Populate xray_destinations from existing data
+        logger.info("Populating xray_destinations table...")
+        await conn.execute(text("""
+            INSERT INTO xray_destinations (destination, first_seen, hit_count)
+            SELECT DISTINCT destination, MIN(created_at), SUM(visit_count)
+            FROM xray_visit_stats
+            WHERE destination IS NOT NULL
+            GROUP BY destination
+            ON CONFLICT (destination) DO UPDATE SET hit_count = xray_destinations.hit_count + EXCLUDED.hit_count
+        """))
+        
+        # Also from xray_ip_destination_stats if exists
+        result = await conn.execute(text("""
+            SELECT column_name FROM information_schema.columns 
+            WHERE table_name = 'xray_ip_destination_stats'
+        """))
+        ip_dest_columns = {row[0] for row in result.fetchall()}
+        
+        if ip_dest_columns and "destination" in ip_dest_columns:
+            await conn.execute(text("""
+                INSERT INTO xray_destinations (destination, first_seen, hit_count)
+                SELECT DISTINCT destination, MIN(created_at), SUM(connection_count)
+                FROM xray_ip_destination_stats
+                WHERE destination IS NOT NULL
+                GROUP BY destination
+                ON CONFLICT (destination) DO UPDATE SET hit_count = xray_destinations.hit_count + EXCLUDED.hit_count
+            """))
+        
+        # Step 2: Add destination_id column to xray_visit_stats
+        logger.info("Adding destination_id column to xray_visit_stats...")
+        await conn.execute(text("""
+            ALTER TABLE xray_visit_stats ADD COLUMN destination_id INTEGER
+        """))
+        
+        # Step 3: Populate destination_id
+        logger.info("Populating destination_id in xray_visit_stats...")
+        await conn.execute(text("""
+            UPDATE xray_visit_stats vs
+            SET destination_id = d.id
+            FROM xray_destinations d
+            WHERE vs.destination = d.destination
+        """))
+        
+        # Step 4: Delete rows where destination_id is null (orphaned data)
+        await conn.execute(text("""
+            DELETE FROM xray_visit_stats WHERE destination_id IS NULL
+        """))
+        
+        # Step 5: Make destination_id NOT NULL and add FK
+        await conn.execute(text("""
+            ALTER TABLE xray_visit_stats 
+            ALTER COLUMN destination_id SET NOT NULL
+        """))
+        
+        # Step 6: Drop old unique constraint if exists
+        try:
+            await conn.execute(text("""
+                ALTER TABLE xray_visit_stats DROP CONSTRAINT IF EXISTS uq_xray_stats_unique
+            """))
+        except Exception:
+            pass
+        
+        # Step 7: Add new unique constraint
+        try:
+            await conn.execute(text("""
+                ALTER TABLE xray_visit_stats 
+                ADD CONSTRAINT uq_xray_stats_unique_v2 UNIQUE (server_id, destination_id, email, created_at)
+            """))
+        except Exception:
+            pass
+        
+        # Step 8: Add FK constraint
+        try:
+            await conn.execute(text("""
+                ALTER TABLE xray_visit_stats 
+                ADD CONSTRAINT fk_visit_stats_destination 
+                FOREIGN KEY (destination_id) REFERENCES xray_destinations(id) ON DELETE CASCADE
+            """))
+        except Exception:
+            pass
+        
+        # Step 9: Drop old destination column
+        logger.info("Dropping old destination column from xray_visit_stats...")
+        await conn.execute(text("""
+            ALTER TABLE xray_visit_stats DROP COLUMN destination
+        """))
+        
+        # Now migrate xray_ip_destination_stats
+        if ip_dest_columns and "destination" in ip_dest_columns and "destination_id" not in ip_dest_columns:
+            logger.info("Migrating xray_ip_destination_stats...")
+            
+            # Add destination_id column
+            await conn.execute(text("""
+                ALTER TABLE xray_ip_destination_stats ADD COLUMN destination_id INTEGER
+            """))
+            
+            # Populate destination_id
+            await conn.execute(text("""
+                UPDATE xray_ip_destination_stats ips
+                SET destination_id = d.id
+                FROM xray_destinations d
+                WHERE ips.destination = d.destination
+            """))
+            
+            # Delete orphaned rows
+            await conn.execute(text("""
+                DELETE FROM xray_ip_destination_stats WHERE destination_id IS NULL
+            """))
+            
+            # Make NOT NULL
+            await conn.execute(text("""
+                ALTER TABLE xray_ip_destination_stats 
+                ALTER COLUMN destination_id SET NOT NULL
+            """))
+            
+            # Drop old constraint
+            try:
+                await conn.execute(text("""
+                    ALTER TABLE xray_ip_destination_stats DROP CONSTRAINT IF EXISTS uq_ip_dest_stats_unique
+                """))
+            except Exception:
+                pass
+            
+            # Add new constraint
+            try:
+                await conn.execute(text("""
+                    ALTER TABLE xray_ip_destination_stats 
+                    ADD CONSTRAINT uq_ip_dest_stats_unique_v2 UNIQUE (server_id, email, source_ip, destination_id, created_at)
+                """))
+            except Exception:
+                pass
+            
+            # Add FK
+            try:
+                await conn.execute(text("""
+                    ALTER TABLE xray_ip_destination_stats 
+                    ADD CONSTRAINT fk_ip_dest_stats_destination 
+                    FOREIGN KEY (destination_id) REFERENCES xray_destinations(id) ON DELETE CASCADE
+                """))
+            except Exception:
+                pass
+            
+            # Drop old column
+            await conn.execute(text("""
+                ALTER TABLE xray_ip_destination_stats DROP COLUMN destination
+            """))
+        
+        logger.info("Destination normalization migration completed successfully")
+        
+    except Exception as e:
+        logger.error(f"Destination normalization migration failed: {e}")
+        raise
+
+
+async def _seed_default_excluded_destinations():
+    """Seed default excluded destinations if table is empty."""
+    from app.models import RemnawaveExcludedDestination
+    
+    default_destinations = [
+        ("www.google.com:443", "Google (test destination)"),
+        ("1.1.1.1:53", "Cloudflare DNS"),
+    ]
+    
+    async with async_session() as db:
+        # Check if there are any excluded destinations
+        result = await db.execute(text("SELECT COUNT(*) FROM remnawave_excluded_destinations"))
+        count = result.scalar()
+        
+        if count == 0:
+            logger.info("Seeding default excluded destinations...")
+            for dest, desc in default_destinations:
+                try:
+                    await db.execute(text("""
+                        INSERT INTO remnawave_excluded_destinations (destination, description)
+                        VALUES (:dest, :desc)
+                        ON CONFLICT (destination) DO NOTHING
+                    """), {"dest": dest, "desc": desc})
+                except Exception as e:
+                    logger.debug(f"Could not seed excluded destination {dest}: {e}")
+            
+            await db.commit()
+            logger.info(f"Seeded {len(default_destinations)} default excluded destinations")
 
 
 async def init_db():
@@ -550,6 +777,12 @@ async def init_db():
             logger.error(f"SQLite migration failed: {e}")
             # Mark as done anyway to prevent repeated attempts
             _mark_migration_done()
+    
+    # Seed default excluded destinations
+    try:
+        await _seed_default_excluded_destinations()
+    except Exception as e:
+        logger.debug(f"Could not seed excluded destinations: {e}")
 
 
 async def get_db():

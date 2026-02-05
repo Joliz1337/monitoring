@@ -49,6 +49,7 @@ import {
   RemnawaveUserFullInfo,
   RemnawaveIpDestinations,
   RemnawaveInfrastructureAddress,
+  RemnawaveExcludedDestination,
   IgnoredUser
 } from '../api/client'
 import { useTranslation } from 'react-i18next'
@@ -100,6 +101,12 @@ export default function Remnawave() {
   const [isAddingInfraAddress, setIsAddingInfraAddress] = useState(false)
   const [isResolvingInfra, setIsResolvingInfra] = useState(false)
   const [isRescanningInfra, setIsRescanningInfra] = useState(false)
+  
+  // Excluded destinations state
+  const [excludedDestinations, setExcludedDestinations] = useState<RemnawaveExcludedDestination[]>([])
+  const [newExcludedDest, setNewExcludedDest] = useState('')
+  const [newExcludedDestDescription, setNewExcludedDestDescription] = useState('')
+  const [isAddingExcludedDest, setIsAddingExcludedDest] = useState(false)
   
   // Ignored users state
   const [ignoredUsers, setIgnoredUsers] = useState<IgnoredUser[]>([])
@@ -269,7 +276,11 @@ export default function Remnawave() {
         api_token: '',
         cookie_secret: '',
         enabled: settingsRes.data.enabled,
-        collection_interval: settingsRes.data.collection_interval
+        collection_interval: settingsRes.data.collection_interval,
+        visit_stats_retention_days: settingsRes.data.visit_stats_retention_days,
+        ip_stats_retention_days: settingsRes.data.ip_stats_retention_days,
+        ip_destination_retention_days: settingsRes.data.ip_destination_retention_days,
+        hourly_stats_retention_days: settingsRes.data.hourly_stats_retention_days
       })
       setNodes(nodesRes.data.nodes)
       setAllServers(nodesRes.data.all_servers)
@@ -288,14 +299,16 @@ export default function Remnawave() {
   const fetchSettingsTabData = useCallback(async () => {
     if (settingsDataLoaded) return
     try {
-      const [dbInfoRes, infraRes, cacheStatusRes, ignoredRes] = await Promise.all([
+      const [dbInfoRes, infraRes, excludedRes, cacheStatusRes, ignoredRes] = await Promise.all([
         remnawaveApi.getDbInfo(),
         remnawaveApi.getInfrastructureAddresses(),
+        remnawaveApi.getExcludedDestinations(),
         remnawaveApi.getUserCacheStatus(),
         remnawaveApi.getIgnoredUsers()
       ])
       setDbInfo(dbInfoRes.data)
       setInfrastructureAddresses(infraRes.data.addresses)
+      setExcludedDestinations(excludedRes.data.destinations)
       setUserCacheStatus(cacheStatusRes.data)
       setIgnoredUsers(ignoredRes.data.ignored_users)
       setSettingsDataLoaded(true)
@@ -669,7 +682,11 @@ export default function Remnawave() {
     try {
       const dataToSave: Partial<RemnawaveSettings> = {
         enabled: editSettings.enabled,
-        collection_interval: editSettings.collection_interval
+        collection_interval: editSettings.collection_interval,
+        visit_stats_retention_days: editSettings.visit_stats_retention_days,
+        ip_stats_retention_days: editSettings.ip_stats_retention_days,
+        ip_destination_retention_days: editSettings.ip_destination_retention_days,
+        hourly_stats_retention_days: editSettings.hourly_stats_retention_days
       }
       if (editSettings.api_url) dataToSave.api_url = editSettings.api_url
       if (editSettings.api_token) dataToSave.api_token = editSettings.api_token
@@ -765,6 +782,40 @@ export default function Remnawave() {
       console.error('Failed to resolve infrastructure addresses:', err)
     } finally {
       setIsResolvingInfra(false)
+    }
+  }
+  
+  // Excluded destinations handlers
+  const handleAddExcludedDest = async () => {
+    if (!newExcludedDest.trim()) return
+    
+    setIsAddingExcludedDest(true)
+    try {
+      await remnawaveApi.addExcludedDestination(
+        newExcludedDest.trim(),
+        newExcludedDestDescription.trim() || undefined
+      )
+      setNewExcludedDest('')
+      setNewExcludedDestDescription('')
+      // Refresh excluded destinations
+      const res = await remnawaveApi.getExcludedDestinations()
+      setExcludedDestinations(res.data.destinations)
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { detail?: string } } }
+      console.error('Failed to add excluded destination:', error.response?.data?.detail || err)
+    } finally {
+      setIsAddingExcludedDest(false)
+    }
+  }
+  
+  const handleDeleteExcludedDest = async (id: number) => {
+    try {
+      await remnawaveApi.deleteExcludedDestination(id)
+      // Refresh excluded destinations
+      const res = await remnawaveApi.getExcludedDestinations()
+      setExcludedDestinations(res.data.destinations)
+    } catch (err) {
+      console.error('Failed to delete excluded destination:', err)
     }
   }
   
@@ -2324,6 +2375,75 @@ export default function Remnawave() {
                   </div>
                   <p className="text-xs text-yellow-500/80 mt-1">{t('remnawave.collection_interval_hint')}</p>
                 </div>
+                
+                {/* Retention Settings */}
+                <div className="pt-4 border-t border-dark-700">
+                  <h4 className="text-sm font-medium text-dark-300 mb-3">{t('remnawave.retention_settings')}</h4>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-xs text-dark-400 mb-1">{t('remnawave.visit_stats_retention')}</label>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="number"
+                          value={editSettings.visit_stats_retention_days || 365}
+                          onChange={(e) => setEditSettings(s => ({ ...s, visit_stats_retention_days: Math.min(365, Math.max(7, parseInt(e.target.value) || 365)) }))}
+                          min={7}
+                          max={365}
+                          className="w-20 px-3 py-1.5 rounded-lg bg-dark-900 border border-dark-700 
+                                   text-dark-100 text-sm focus:outline-none focus:border-accent-500"
+                        />
+                        <span className="text-xs text-dark-500">{t('common.days')}</span>
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-xs text-dark-400 mb-1">{t('remnawave.hourly_stats_retention')}</label>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="number"
+                          value={editSettings.hourly_stats_retention_days || 365}
+                          onChange={(e) => setEditSettings(s => ({ ...s, hourly_stats_retention_days: Math.min(365, Math.max(7, parseInt(e.target.value) || 365)) }))}
+                          min={7}
+                          max={365}
+                          className="w-20 px-3 py-1.5 rounded-lg bg-dark-900 border border-dark-700 
+                                   text-dark-100 text-sm focus:outline-none focus:border-accent-500"
+                        />
+                        <span className="text-xs text-dark-500">{t('common.days')}</span>
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-xs text-dark-400 mb-1">{t('remnawave.ip_stats_retention')}</label>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="number"
+                          value={editSettings.ip_stats_retention_days || 90}
+                          onChange={(e) => setEditSettings(s => ({ ...s, ip_stats_retention_days: Math.min(365, Math.max(7, parseInt(e.target.value) || 90)) }))}
+                          min={7}
+                          max={365}
+                          className="w-20 px-3 py-1.5 rounded-lg bg-dark-900 border border-dark-700 
+                                   text-dark-100 text-sm focus:outline-none focus:border-accent-500"
+                        />
+                        <span className="text-xs text-dark-500">{t('common.days')}</span>
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-xs text-dark-400 mb-1">{t('remnawave.ip_destination_retention')}</label>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="number"
+                          value={editSettings.ip_destination_retention_days || 90}
+                          onChange={(e) => setEditSettings(s => ({ ...s, ip_destination_retention_days: Math.min(365, Math.max(7, parseInt(e.target.value) || 90)) }))}
+                          min={7}
+                          max={365}
+                          className="w-20 px-3 py-1.5 rounded-lg bg-dark-900 border border-dark-700 
+                                   text-dark-100 text-sm focus:outline-none focus:border-accent-500"
+                        />
+                        <span className="text-xs text-dark-500">{t('common.days')}</span>
+                      </div>
+                    </div>
+                  </div>
+                  <p className="text-xs text-dark-500 mt-2">{t('remnawave.retention_hint')}</p>
+                </div>
+                
                 <div className="flex items-center gap-3">
                   <label className="relative inline-flex items-center cursor-pointer">
                     <input
@@ -2588,6 +2708,75 @@ export default function Remnawave() {
                 ))}
                 {infrastructureAddresses.length === 0 && (
                   <div className="text-center text-dark-500 py-4">{t('remnawave.no_infrastructure_addresses')}</div>
+                )}
+              </div>
+            </div>
+            
+            {/* Excluded Destinations */}
+            <div className="p-6 rounded-xl bg-dark-800/50 border border-dark-700/50">
+              <h3 className="text-lg font-semibold text-dark-100 mb-2">{t('remnawave.excluded_destinations')}</h3>
+              <p className="text-dark-500 text-sm mb-4">{t('remnawave.excluded_destinations_hint')}</p>
+              
+              {/* Add new excluded destination */}
+              <div className="flex gap-2 mb-4">
+                <input
+                  type="text"
+                  value={newExcludedDest}
+                  onChange={(e) => setNewExcludedDest(e.target.value)}
+                  placeholder={t('remnawave.excluded_destination_placeholder')}
+                  className="flex-1 px-3 py-2 rounded-lg bg-dark-900 border border-dark-700 
+                           text-dark-100 placeholder-dark-500 focus:outline-none focus:border-accent-500"
+                  onKeyDown={(e) => e.key === 'Enter' && handleAddExcludedDest()}
+                />
+                <input
+                  type="text"
+                  value={newExcludedDestDescription}
+                  onChange={(e) => setNewExcludedDestDescription(e.target.value)}
+                  placeholder={t('remnawave.excluded_destination_description_placeholder')}
+                  className="w-48 px-3 py-2 rounded-lg bg-dark-900 border border-dark-700 
+                           text-dark-100 placeholder-dark-500 focus:outline-none focus:border-accent-500"
+                />
+                <button
+                  onClick={handleAddExcludedDest}
+                  disabled={isAddingExcludedDest || !newExcludedDest.trim()}
+                  className="px-4 py-2 rounded-lg bg-accent-500 hover:bg-accent-600 text-white 
+                           transition-colors disabled:opacity-50 flex items-center gap-1"
+                >
+                  {isAddingExcludedDest ? (
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Check className="w-4 h-4" />
+                  )}
+                  {t('common.add')}
+                </button>
+              </div>
+              
+              {/* Excluded destinations list */}
+              <div className="space-y-2 max-h-[300px] overflow-y-auto">
+                {excludedDestinations.map(dest => (
+                  <div
+                    key={dest.id}
+                    className="flex items-center gap-3 p-3 rounded-lg bg-dark-900/50 border border-dark-700/50"
+                  >
+                    <Globe className="w-4 h-4 text-dark-500 flex-shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-dark-200 font-mono">{dest.destination}</span>
+                        {dest.description && (
+                          <span className="text-dark-500 text-sm">({dest.description})</span>
+                        )}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => handleDeleteExcludedDest(dest.id)}
+                      className="p-2 rounded-lg hover:bg-dark-700 text-dark-500 hover:text-danger transition-colors"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                ))}
+                {excludedDestinations.length === 0 && (
+                  <div className="text-center text-dark-500 py-4">{t('remnawave.no_excluded_destinations')}</div>
                 )}
               </div>
             </div>

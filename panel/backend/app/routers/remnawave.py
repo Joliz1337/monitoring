@@ -20,8 +20,9 @@ from app.auth import verify_auth
 from app.database import get_db
 from app.models import (
     Server, RemnawaveSettings, RemnawaveNode, RemnawaveInfrastructureAddress,
-    XrayVisitStats, XrayHourlyStats, RemnawaveUserCache, XrayUserIpStats,
-    XrayIpDestinationStats, RemnawaveExport, TrafficAnalyzerSettings, TrafficAnomalyLog
+    RemnawaveExcludedDestination, XrayVisitStats, XrayHourlyStats, RemnawaveUserCache,
+    XrayUserIpStats, XrayIpDestinationStats, RemnawaveExport, TrafficAnalyzerSettings,
+    TrafficAnomalyLog, XrayDestination
 )
 from app.services.remnawave_api import get_remnawave_api
 from app.services.xray_stats_collector import get_xray_stats_collector, resolve_infrastructure_address
@@ -71,6 +72,11 @@ class UpdateSettingsRequest(BaseModel):
     cookie_secret: Optional[str] = Field(None, max_length=500)
     enabled: Optional[bool] = None
     collection_interval: Optional[int] = Field(None, ge=60, le=900)  # 1-15 minutes
+    # Retention settings (days)
+    visit_stats_retention_days: Optional[int] = Field(None, ge=7, le=365)
+    ip_stats_retention_days: Optional[int] = Field(None, ge=7, le=365)
+    ip_destination_retention_days: Optional[int] = Field(None, ge=7, le=365)
+    hourly_stats_retention_days: Optional[int] = Field(None, ge=7, le=365)
 
 
 class AddIgnoredUserRequest(BaseModel):
@@ -91,6 +97,11 @@ class SyncNodesRequest(BaseModel):
 
 class AddInfrastructureAddressRequest(BaseModel):
     address: str = Field(..., min_length=1, max_length=255)
+    description: Optional[str] = Field(None, max_length=255)
+
+
+class AddExcludedDestinationRequest(BaseModel):
+    destination: str = Field(..., min_length=1, max_length=500)
     description: Optional[str] = Field(None, max_length=255)
 
 
@@ -141,7 +152,11 @@ async def get_settings(
             "cookie_secret": None,
             "enabled": False,
             "collection_interval": 300,  # 5 minutes default
-            "ignored_user_ids": []
+            "ignored_user_ids": [],
+            "visit_stats_retention_days": 365,
+            "ip_stats_retention_days": 90,
+            "ip_destination_retention_days": 90,
+            "hourly_stats_retention_days": 365
         }
     
     return {
@@ -150,7 +165,11 @@ async def get_settings(
         "cookie_secret": "***" if settings.cookie_secret else None,
         "enabled": settings.enabled,
         "collection_interval": settings.collection_interval,
-        "ignored_user_ids": _parse_ignored_user_ids(settings.ignored_user_ids)
+        "ignored_user_ids": _parse_ignored_user_ids(settings.ignored_user_ids),
+        "visit_stats_retention_days": settings.visit_stats_retention_days or 365,
+        "ip_stats_retention_days": settings.ip_stats_retention_days or 90,
+        "ip_destination_retention_days": settings.ip_destination_retention_days or 90,
+        "hourly_stats_retention_days": settings.hourly_stats_retention_days or 365
     }
 
 
@@ -178,6 +197,15 @@ async def update_settings(
         settings.enabled = request.enabled
     if request.collection_interval is not None:
         settings.collection_interval = request.collection_interval
+    # Retention settings
+    if request.visit_stats_retention_days is not None:
+        settings.visit_stats_retention_days = request.visit_stats_retention_days
+    if request.ip_stats_retention_days is not None:
+        settings.ip_stats_retention_days = request.ip_stats_retention_days
+    if request.ip_destination_retention_days is not None:
+        settings.ip_destination_retention_days = request.ip_destination_retention_days
+    if request.hourly_stats_retention_days is not None:
+        settings.hourly_stats_retention_days = request.hourly_stats_retention_days
     
     await db.commit()
     
@@ -544,6 +572,106 @@ async def rescan_existing_ip_stats(
     }
 
 
+# === Excluded Destinations ===
+
+@router.get("/excluded-destinations")
+async def get_excluded_destinations(
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Get list of excluded destinations (sites excluded from statistics)"""
+    result = await db.execute(
+        select(RemnawaveExcludedDestination).order_by(RemnawaveExcludedDestination.destination)
+    )
+    destinations = result.scalars().all()
+    
+    return {
+        "destinations": [
+            {
+                "id": dest.id,
+                "destination": dest.destination,
+                "description": dest.description,
+                "created_at": dest.created_at.isoformat() if dest.created_at else None
+            }
+            for dest in destinations
+        ]
+    }
+
+
+@router.get("/excluded-destinations/list")
+async def get_excluded_destinations_list(
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Get simple list of excluded destinations (for node filtering)"""
+    result = await db.execute(
+        select(RemnawaveExcludedDestination.destination)
+    )
+    destinations = [row[0] for row in result.fetchall()]
+    
+    return {"destinations": destinations}
+
+
+@router.post("/excluded-destinations")
+async def add_excluded_destination(
+    request: AddExcludedDestinationRequest,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Add destination to exclusion list"""
+    destination = request.destination.strip()
+    
+    # Check for duplicate
+    existing = await db.execute(
+        select(RemnawaveExcludedDestination).where(
+            RemnawaveExcludedDestination.destination == destination
+        )
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="Destination already exists")
+    
+    new_dest = RemnawaveExcludedDestination(
+        destination=destination,
+        description=request.description
+    )
+    db.add(new_dest)
+    await db.commit()
+    await db.refresh(new_dest)
+    
+    return {
+        "success": True,
+        "destination": {
+            "id": new_dest.id,
+            "destination": new_dest.destination,
+            "description": new_dest.description,
+            "created_at": new_dest.created_at.isoformat() if new_dest.created_at else None
+        }
+    }
+
+
+@router.delete("/excluded-destinations/{destination_id}")
+async def delete_excluded_destination(
+    destination_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Delete destination from exclusion list"""
+    result = await db.execute(
+        select(RemnawaveExcludedDestination).where(
+            RemnawaveExcludedDestination.id == destination_id
+        )
+    )
+    dest = result.scalar_one_or_none()
+    
+    if not dest:
+        raise HTTPException(status_code=404, detail="Destination not found")
+    
+    await db.delete(dest)
+    await db.commit()
+    
+    return {"success": True, "message": "Destination deleted"}
+
+
 # === Collector Status & Control ===
 
 @router.get("/status")
@@ -778,8 +906,8 @@ async def get_stats_summary(
         users_result = await db.execute(users_query)
         unique_users = users_result.scalar() or 0
         
-        # Unique destinations
-        dest_query = select(sql_func.count(sql_func.distinct(XrayVisitStats.destination)))
+        # Unique destinations (now using destination_id)
+        dest_query = select(sql_func.count(sql_func.distinct(XrayVisitStats.destination_id)))
         if conditions:
             dest_query = dest_query.where(and_(*conditions))
         dest_result = await db.execute(dest_query)
@@ -845,15 +973,16 @@ async def get_top_destinations(
     if server_id:
         conditions.append(XrayVisitStats.server_id == server_id)
     
+    # JOIN with XrayDestination to get destination string
     query = select(
-        XrayVisitStats.destination,
+        XrayDestination.destination,
         sql_func.sum(XrayVisitStats.visit_count).label('total')
-    )
+    ).join(XrayDestination, XrayVisitStats.destination_id == XrayDestination.id)
     
     if conditions:
         query = query.where(and_(*conditions))
     
-    query = query.group_by(XrayVisitStats.destination) \
+    query = query.group_by(XrayDestination.destination) \
                  .order_by(sql_func.sum(XrayVisitStats.visit_count).desc()) \
                  .limit(limit)
     
@@ -936,11 +1065,11 @@ async def get_top_users(
     total_result = await db.execute(count_query)
     total_count = total_result.scalar() or 0
     
-    # Get users with stats
+    # Get users with stats (unique_sites now via destination_id)
     query = select(
         XrayVisitStats.email,
         sql_func.sum(XrayVisitStats.visit_count).label('total'),
-        sql_func.count(sql_func.distinct(XrayVisitStats.destination)).label('unique_sites')
+        sql_func.count(sql_func.distinct(XrayVisitStats.destination_id)).label('unique_sites')
     )
     
     if conditions:
@@ -1049,14 +1178,15 @@ async def get_user_stats(
     )
     total_visits = total_result.scalar() or 0
     
-    # Top destinations for this user
+    # Top destinations for this user (JOIN with XrayDestination)
     dest_result = await db.execute(
         select(
-            XrayVisitStats.destination,
+            XrayDestination.destination,
             XrayVisitStats.visit_count,
             XrayVisitStats.first_seen,
             XrayVisitStats.last_seen
         )
+        .join(XrayDestination, XrayVisitStats.destination_id == XrayDestination.id)
         .where(and_(*conditions))
         .order_by(XrayVisitStats.visit_count.desc())
         .limit(limit)
@@ -1171,7 +1301,22 @@ async def get_destination_users(
     _: dict = Depends(verify_auth)
 ):
     """Get users who visited a specific destination"""
-    conditions = [XrayVisitStats.destination == destination]
+    # First find the destination_id
+    dest_result = await db.execute(
+        select(XrayDestination.id).where(XrayDestination.destination == destination)
+    )
+    dest_row = dest_result.scalar_one_or_none()
+    
+    if not dest_row:
+        return {
+            "destination": destination,
+            "period": period,
+            "total_visits": 0,
+            "users": []
+        }
+    
+    dest_id = dest_row
+    conditions = [XrayVisitStats.destination_id == dest_id]
     
     if period != "all":
         start_time = _get_time_filter(period)
@@ -1257,16 +1402,17 @@ async def get_ip_destinations(
     )
     total_connections = total_result.scalar() or 0
     
-    # Get destinations with connection counts
+    # Get destinations with connection counts (JOIN with XrayDestination)
     result = await db.execute(
         select(
-            XrayIpDestinationStats.destination,
+            XrayDestination.destination,
             sql_func.sum(XrayIpDestinationStats.connection_count).label('total'),
             sql_func.min(XrayIpDestinationStats.first_seen).label('first_seen'),
             sql_func.max(XrayIpDestinationStats.last_seen).label('last_seen')
         )
+        .join(XrayDestination, XrayIpDestinationStats.destination_id == XrayDestination.id)
         .where(and_(*conditions))
-        .group_by(XrayIpDestinationStats.destination)
+        .group_by(XrayDestination.destination)
         .order_by(sql_func.sum(XrayIpDestinationStats.connection_count).desc())
         .limit(limit)
     )
@@ -1454,6 +1600,7 @@ async def get_db_info(
     user_count = await db.execute(select(sql_func.count()).select_from(RemnawaveUserCache))
     ip_count = await db.execute(select(sql_func.count()).select_from(XrayUserIpStats))
     ip_dest_count = await db.execute(select(sql_func.count()).select_from(XrayIpDestinationStats))
+    dest_count = await db.execute(select(sql_func.count()).select_from(XrayDestination))
     
     # Get date ranges
     visit_range = await db.execute(
@@ -1487,6 +1634,7 @@ async def get_db_info(
                 'xray_hourly_stats', 
                 'xray_user_ip_stats',
                 'xray_ip_destination_stats',
+                'xray_destinations',
                 'remnawave_user_cache'
             )
         """)
@@ -1520,6 +1668,10 @@ async def get_db_info(
                 "count": ip_dest_count.scalar() or 0,
                 "size_bytes": table_sizes.get("xray_ip_destination_stats")
             },
+            "xray_destinations": {
+                "count": dest_count.scalar() or 0,
+                "size_bytes": table_sizes.get("xray_destinations")
+            },
             "remnawave_user_cache": {
                 "count": user_count.scalar() or 0,
                 "size_bytes": table_sizes.get("remnawave_user_cache")
@@ -1536,26 +1688,30 @@ async def clear_stats(
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    """Clear all visit statistics (visits, IPs, IP-destinations, hourly stats).
+    """Clear all visit statistics (visits, IPs, IP-destinations, hourly stats, destinations).
     
     WARNING: This permanently deletes all collected visit data.
     User cache is NOT deleted (can be refreshed from Remnawave API).
     """
-    # Delete all visit stats
+    # Delete all visit stats (must be first due to FK)
     visit_result = await db.execute(delete(XrayVisitStats))
     deleted_visits = visit_result.rowcount
+    
+    # Delete all IP-destination stats (must be before destinations due to FK)
+    ip_dest_result = await db.execute(delete(XrayIpDestinationStats))
+    deleted_ip_dests = ip_dest_result.rowcount
     
     # Delete all IP stats
     ip_result = await db.execute(delete(XrayUserIpStats))
     deleted_ips = ip_result.rowcount
     
-    # Delete all IP-destination stats
-    ip_dest_result = await db.execute(delete(XrayIpDestinationStats))
-    deleted_ip_dests = ip_dest_result.rowcount
-    
     # Delete all hourly stats
     hourly_result = await db.execute(delete(XrayHourlyStats))
     deleted_hourly = hourly_result.rowcount
+    
+    # Delete all destinations (after stats that reference them)
+    dest_result = await db.execute(delete(XrayDestination))
+    deleted_dests = dest_result.rowcount
     
     await db.commit()
     
@@ -1565,9 +1721,10 @@ async def clear_stats(
             "visit_stats": deleted_visits,
             "ip_stats": deleted_ips,
             "ip_destination_stats": deleted_ip_dests,
-            "hourly_stats": deleted_hourly
+            "hourly_stats": deleted_hourly,
+            "destinations": deleted_dests
         },
-        "message": f"Deleted {deleted_visits} visit records, {deleted_ips} IP records, {deleted_ip_dests} IP-destination records, {deleted_hourly} hourly records"
+        "message": f"Deleted {deleted_visits} visit records, {deleted_ips} IP records, {deleted_ip_dests} IP-destination records, {deleted_hourly} hourly records, {deleted_dests} destinations"
     }
 
 

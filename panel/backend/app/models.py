@@ -184,6 +184,12 @@ class RemnawaveSettings(Base):
     # Список ID пользователей для игнорирования (JSON массив)
     # Игнорируемые пользователи исключаются из: сбора логов, уведомлений анализатора, всех проверок
     ignored_user_ids = Column(Text, nullable=True)  # JSON array of user IDs (integers)
+    
+    # Retention settings (days)
+    visit_stats_retention_days = Column(Integer, default=365)  # xray_visit_stats
+    ip_stats_retention_days = Column(Integer, default=90)  # xray_user_ip_stats
+    ip_destination_retention_days = Column(Integer, default=90)  # xray_ip_destination_stats
+    hourly_stats_retention_days = Column(Integer, default=365)  # xray_hourly_stats
 
 
 class RemnawaveNode(Base):
@@ -213,27 +219,59 @@ class RemnawaveInfrastructureAddress(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
+class RemnawaveExcludedDestination(Base):
+    """Исключаемые destinations (сайты) из статистики.
+    
+    Домены и IP из этого списка полностью исключаются из сбора статистики.
+    Используется для фильтрации тестовых сайтов (google.com) и служебных адресов (DNS).
+    """
+    __tablename__ = "remnawave_excluded_destinations"
+    
+    id = Column(Integer, primary_key=True)
+    destination = Column(String(500), nullable=False, unique=True)  # www.google.com:443, 1.1.1.1:53
+    description = Column(String(255), nullable=True)  # Описание (опционально)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class XrayDestination(Base):
+    """Нормализованная таблица доменов для экономии места.
+    
+    Вместо хранения varchar(500) в каждой записи visit_stats,
+    храним уникальные домены один раз и ссылаемся по id.
+    """
+    __tablename__ = "xray_destinations"
+    
+    id = Column(Integer, primary_key=True)
+    destination = Column(String(500), nullable=False, unique=True)  # Полный адрес (google.com:443)
+    first_seen = Column(DateTime(timezone=True), server_default=func.now())
+    hit_count = Column(BigInteger, default=0)  # Общее число обращений (для статистики)
+    
+    __table_args__ = (
+        Index('idx_xray_dest_destination', 'destination'),
+    )
+
+
 class XrayVisitStats(Base):
-    """Счётчик посещений: (server, destination, email) -> total_count
+    """Счётчик посещений: (server, destination_id, email) -> total_count
     
     Оптимизированная схема — одна запись на комбинацию, счётчик инкрементируется.
-    Без временных периодов — хранит общую статистику за всё время.
+    destination_id ссылается на XrayDestination для экономии места.
     """
     __tablename__ = "xray_visit_stats"
     
     id = Column(Integer, primary_key=True)
     server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), nullable=False)
-    destination = Column(String(500), nullable=False)  # Хост:port (google.com:443)
+    destination_id = Column(Integer, ForeignKey("xray_destinations.id", ondelete="CASCADE"), nullable=False)
     email = Column(Integer, nullable=False)  # User ID в Remnawave
     visit_count = Column(BigInteger, default=0)  # Общий счётчик посещений
     first_seen = Column(DateTime(timezone=True), server_default=func.now())
     last_seen = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     
     __table_args__ = (
-        UniqueConstraint('server_id', 'destination', 'email', name='uq_xray_stats_unique'),
+        UniqueConstraint('server_id', 'destination_id', 'email', name='uq_xray_stats_unique_v2'),
         Index('idx_xray_stats_server', 'server_id'),
         Index('idx_xray_stats_email', 'email'),
-        Index('idx_xray_stats_destination', 'destination'),
+        Index('idx_xray_stats_destination_id', 'destination_id'),
         Index('idx_xray_stats_visits', 'visit_count'),
     )
 
@@ -334,8 +372,9 @@ class XrayUserIpStats(Base):
 class XrayIpDestinationStats(Base):
     """Статистика destinations по IP клиента.
     
-    Хранит связь (server, email, source_ip, destination) -> count.
+    Хранит связь (server, email, source_ip, destination_id) -> count.
     Позволяет узнать, к каким сайтам обращался пользователь с конкретного IP.
+    destination_id ссылается на XrayDestination для экономии места.
     """
     __tablename__ = "xray_ip_destination_stats"
     
@@ -343,16 +382,16 @@ class XrayIpDestinationStats(Base):
     server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), nullable=False)
     email = Column(Integer, nullable=False)  # User ID в Remnawave
     source_ip = Column(String(45), nullable=False)  # IPv4 или IPv6 адрес клиента
-    destination = Column(String(500), nullable=False)  # Хост:port (google.com:443)
+    destination_id = Column(Integer, ForeignKey("xray_destinations.id", ondelete="CASCADE"), nullable=False)
     connection_count = Column(BigInteger, default=0)  # Количество подключений
     first_seen = Column(DateTime(timezone=True), server_default=func.now())
     last_seen = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     
     __table_args__ = (
-        UniqueConstraint('server_id', 'email', 'source_ip', 'destination', name='uq_ip_dest_stats_unique'),
+        UniqueConstraint('server_id', 'email', 'source_ip', 'destination_id', name='uq_ip_dest_stats_unique_v2'),
         Index('idx_ip_dest_server', 'server_id'),
         Index('idx_ip_dest_email_ip', 'email', 'source_ip'),
-        Index('idx_ip_dest_destination', 'destination'),
+        Index('idx_ip_dest_destination_id', 'destination_id'),
     )
 
 

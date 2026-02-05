@@ -762,6 +762,11 @@ export interface RemnawaveSettings {
   enabled: boolean
   collection_interval: number
   ignored_user_ids: number[]
+  // Retention settings (days)
+  visit_stats_retention_days: number
+  ip_stats_retention_days: number
+  ip_destination_retention_days: number
+  hourly_stats_retention_days: number
 }
 
 export interface IgnoredUser {
@@ -882,6 +887,13 @@ export interface RemnawaveInfrastructureAddress {
   address: string
   resolved_ips: string | null  // JSON array of resolved IPs
   last_resolved: string | null
+  description: string | null
+  created_at: string | null
+}
+
+export interface RemnawaveExcludedDestination {
+  id: number
+  destination: string
   description: string | null
   created_at: string | null
 }
@@ -1039,6 +1051,14 @@ export const remnawaveApi = {
     api.post<{ success: boolean; total: number; updated: number }>('/remnawave/infrastructure-ips/resolve'),
   rescanInfrastructureIps: () =>
     api.post<{ success: boolean; infrastructure_ips_count: number; total_unique_ips_scanned: number; updated_to_infrastructure: number; updated_to_client: number }>('/remnawave/infrastructure-ips/rescan'),
+  
+  // Excluded destinations
+  getExcludedDestinations: () =>
+    api.get<{ destinations: RemnawaveExcludedDestination[] }>('/remnawave/excluded-destinations'),
+  addExcludedDestination: (destination: string, description?: string) =>
+    api.post<{ success: boolean; destination: RemnawaveExcludedDestination }>('/remnawave/excluded-destinations', { destination, description }),
+  deleteExcludedDestination: (id: number) =>
+    api.delete<{ success: boolean; message: string }>(`/remnawave/excluded-destinations/${id}`),
   
   // Collector status & control
   getCollectorStatus: () => api.get<RemnawaveCollectorStatus>('/remnawave/status'),

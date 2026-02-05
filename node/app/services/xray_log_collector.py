@@ -26,11 +26,11 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# Memory protection limits (sized for 50k connections, 15 min retention)
-MAX_MEMORY_MB = 512  # Maximum memory for stats (MB)
-MAX_ENTRIES_VISITS = 1_000_000  # Max unique (destination, email) pairs
-MAX_ENTRIES_IP_VISITS = 2_000_000  # Max unique (email, source_ip) pairs
-MAX_ENTRIES_IP_DEST = 5_000_000  # Max unique (email, source_ip, destination) tuples
+# Memory protection limits (optimized for reduced storage)
+MAX_MEMORY_MB = 256  # Maximum memory for stats (MB)
+MAX_ENTRIES_VISITS = 500_000  # Max unique (destination, email) pairs
+MAX_ENTRIES_IP_VISITS = 1_000_000  # Max unique (email, source_ip) pairs
+MAX_ENTRIES_IP_DEST = 1_000_000  # Max unique (email, source_ip, destination) tuples
 
 # Batch processing settings
 BATCH_INTERVAL_SEC = 5  # Process buffered lines every N seconds

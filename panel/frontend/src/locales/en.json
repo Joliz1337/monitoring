@@ -51,7 +51,8 @@
     "optional": "optional",
     "blocklist": "IP Blocklist",
     "remnawave": "Remnawave",
-    "add": "Add"
+    "add": "Add",
+    "days": "days"
   },
   "units": {
     "bps": "bit/s",
@@ -693,6 +694,11 @@
     "resolve_dns": "Refresh DNS",
     "resolved_ips": "Resolved IPs",
     "no_infrastructure_addresses": "No infrastructure addresses added",
+    "excluded_destinations": "Excluded Destinations",
+    "excluded_destinations_hint": "Domains and IPs excluded from statistics collection (test sites, DNS servers)",
+    "excluded_destination_placeholder": "Domain:port or IP:port (e.g.: www.google.com:443)",
+    "excluded_destination_description_placeholder": "Description (optional)",
+    "no_excluded_destinations": "No excluded destinations added",
     "ignored_users_title": "Ignored Users",
     "ignored_users_description": "Users in this list are excluded from log collection, analyzer notifications, and all checks",
     "ignored_user_id_placeholder": "User ID (number)",
@@ -787,6 +793,12 @@
     "clear_all": "Clear All",
     "confirm_delete_all_anomalies": "Are you sure you want to delete all anomalies?",
     "minutes": "min",
-    "refresh": "Refresh"
+    "refresh": "Refresh",
+    "retention_settings": "Data Retention Settings",
+    "visit_stats_retention": "Visit Statistics",
+    "hourly_stats_retention": "Hourly Statistics",
+    "ip_stats_retention": "User IPs",
+    "ip_destination_retention": "IP-Destinations",
+    "retention_hint": "Data older than specified period is deleted automatically. IP details can be stored shorter to save space."
   }
 }

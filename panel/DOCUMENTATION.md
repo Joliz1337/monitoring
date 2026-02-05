@@ -305,6 +305,17 @@ panel/
 - Уведомлений анализатора аномалий (traffic_analyzer)
 - Всех статистических проверок
 
+**Исключаемые сайты:**
+
+| Метод | Endpoint | Описание |
+|-------|----------|----------|
+| GET | /api/remnawave/excluded-destinations | Список исключаемых сайтов |
+| POST | /api/remnawave/excluded-destinations | Добавить сайт в список (destination, description) |
+| DELETE | /api/remnawave/excluded-destinations/{id} | Удалить сайт из списка |
+
+Сайты из этого списка полностью исключаются из сбора статистики.
+По умолчанию добавлены: `www.google.com:443`, `1.1.1.1:53`
+
 **Статус коллектора:**
 
 | Метод | Endpoint | Описание |
@@ -360,23 +371,34 @@ panel/
 
 **Оптимизированная схема БД:**
 
-Данные хранятся компактно с использованием счётчиков:
+Данные хранятся компактно с использованием счётчиков и нормализации:
 
-1. **xray_visit_stats** — кумулятивные счётчики: `(server, destination, email) → total_count`
+1. **xray_destinations** — справочник уникальных доменов
+   - Хранит все уникальные домены/IP один раз
+   - Ссылка по integer FK вместо varchar(500) — экономия 10-100x места
+   - hit_count — общее количество обращений к домену
+
+2. **xray_visit_stats** — кумулятивные счётчики: `(server, destination_id, email) → total_count`
    - Одна запись на комбинацию сайт+пользователь
-   - Счётчик инкрементируется при каждом сборе
+   - Ссылается на xray_destinations по destination_id
    - Поля: first_seen, last_seen для фильтрации по периоду
 
-2. **xray_hourly_stats** — почасовая статистика для timeline: `(server, hour) → counts`
+3. **xray_hourly_stats** — почасовая статистика для timeline: `(server, hour) → counts`
    - Лёгкая таблица без детализации по сайтам/пользователям
    - Только общее число посещений, уникальных пользователей и сайтов за час
-   - Автоочистка: записи старше 365 дней удаляются автоматически
 
-**Автоочистка данных:**
-- xray_visit_stats: записи с last_seen > 365 дней удаляются автоматически
-- xray_user_ip_stats: записи с last_seen > 365 дней удаляются автоматически
-- xray_hourly_stats: записи старше 365 дней удаляются автоматически
+4. **xray_user_ip_stats** — IP-адреса пользователей
+5. **xray_ip_destination_stats** — связь IP → destination (по destination_id)
+
+**Автоочистка данных (настраиваемая):**
+- xray_visit_stats: записи с last_seen > visit_stats_retention_days (default 365)
+- xray_hourly_stats: записи старше hourly_stats_retention_days (default 365)
+- xray_user_ip_stats: записи с last_seen > ip_stats_retention_days (default 90)
+- xray_ip_destination_stats: записи с last_seen > ip_destination_retention_days (default 90)
 - remnawave_user_cache: записи без обновления > 7 дней удаляются автоматически
+- xray_destinations: orphaned записи (без ссылок) удаляются автоматически
+
+Сроки хранения настраиваются через UI в Settings → Remnawave → Сроки хранения данных.
 
 **Ручная очистка:** DELETE /api/remnawave/stats/clear — удаляет все посещения, IP и почасовую статистику
 
@@ -388,9 +410,11 @@ panel/
    - Обновляется каждый час из Remnawave API
 
 **Размер БД (оценка для 5 серверов, 5000 пользователей, 50000 сайтов):**
-- xray_visit_stats: ~250 млн записей max × 50 bytes = ~12 GB (реально меньше)
+- xray_destinations: ~50,000 уникальных доменов × 500 bytes = ~25 MB
+- xray_visit_stats: ~250 млн записей max × 30 bytes (int FK вместо varchar) = ~7.5 GB
 - xray_hourly_stats: 5 × 24 × 365 = 43,800 записей × 30 bytes = ~1.3 MB
-- Итого: значительно меньше чем при хранении по периодам
+- xray_ip_destination_stats: при 90 дней retention — значительно меньше данных
+- Итого: нормализация снижает размер на 30-50% за счёт integer FK
 
 **Оптимизация производительности:**
 

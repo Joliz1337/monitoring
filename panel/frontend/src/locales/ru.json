@@ -51,7 +51,8 @@
     "optional": "необязательно",
     "blocklist": "Блокировка IP",
     "remnawave": "Remnawave",
-    "add": "Добавить"
+    "add": "Добавить",
+    "days": "дней"
   },
   "units": {
     "bps": "бит/с",
@@ -694,6 +695,11 @@
     "resolve_dns": "Обновить DNS",
     "resolved_ips": "Разрешённые IP",
     "no_infrastructure_addresses": "Адреса инфраструктуры не добавлены",
+    "excluded_destinations": "Исключаемые сайты",
+    "excluded_destinations_hint": "Домены и IP которые исключаются из сбора статистики (тестовые сайты, DNS серверы)",
+    "excluded_destination_placeholder": "Домен:порт или IP:порт (например: www.google.com:443)",
+    "excluded_destination_description_placeholder": "Описание (опционально)",
+    "no_excluded_destinations": "Исключаемые сайты не добавлены",
     "ignored_users_title": "Игнорируемые пользователи",
     "ignored_users_description": "Пользователи из этого списка исключаются из сбора логов, уведомлений анализатора и всех проверок",
     "ignored_user_id_placeholder": "ID пользователя (число)",
@@ -788,6 +794,12 @@
     "clear_all": "Очистить всё",
     "confirm_delete_all_anomalies": "Вы уверены, что хотите удалить все аномалии?",
     "minutes": "мин",
-    "refresh": "Обновить"
+    "refresh": "Обновить",
+    "retention_settings": "Сроки хранения данных",
+    "visit_stats_retention": "Статистика посещений",
+    "hourly_stats_retention": "Почасовая статистика",
+    "ip_stats_retention": "IP пользователей",
+    "ip_destination_retention": "IP-сайты",
+    "retention_hint": "Данные старше указанного срока удаляются автоматически. IP-детализацию можно хранить меньше для экономии места."
   }
 }
