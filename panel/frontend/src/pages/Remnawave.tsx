@@ -50,11 +50,14 @@ import {
   RemnawaveIpDestinations,
   RemnawaveInfrastructureAddress,
   RemnawaveExcludedDestination,
-  IgnoredUser
+  IgnoredUser,
+  RemnawaveTimelineResponse,
+  RemnawaveUserServerStats
 } from '../api/client'
 import { useTranslation } from 'react-i18next'
 import PeriodSelector from '../components/ui/PeriodSelector'
 import { useAutoRefresh } from '../hooks/useAutoRefresh'
+import MultiLineChart from '../components/Charts/MultiLineChart'
 
 const containerVariants = {
   hidden: { opacity: 0 },
@@ -130,6 +133,10 @@ export default function Remnawave() {
   const [isSearchingUsers, setIsSearchingUsers] = useState(false)
   const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const USERS_PAGE_SIZE = 100
+  
+  // Timeline state (visits by server)
+  const [timeline, setTimeline] = useState<RemnawaveTimelineResponse | null>(null)
+  const [userServerStats, setUserServerStats] = useState<RemnawaveUserServerStats | null>(null)
   
   // User cache state
   const [userCacheStatus, setUserCacheStatus] = useState<{ last_update: string | null; updating: boolean } | null>(null)
@@ -329,16 +336,21 @@ export default function Remnawave() {
   // Fetch stats
   const fetchStats = useCallback(async () => {
     try {
-      const [summaryRes, destRes, usersRes] = await Promise.all([
+      // Determine timeline period (convert 'all' to '365d' for timeline)
+      const timelinePeriod = period === 'all' ? '365d' : period
+      
+      const [summaryRes, destRes, usersRes, timelineRes] = await Promise.all([
         remnawaveApi.getSummary(period),
         remnawaveApi.getTopDestinations({ period, limit: 100 }),
-        remnawaveApi.getTopUsers({ period, limit: USERS_PAGE_SIZE, offset: 0 })
+        remnawaveApi.getTopUsers({ period, limit: USERS_PAGE_SIZE, offset: 0 }),
+        remnawaveApi.getTimeline({ period: timelinePeriod, by_server: true })
       ])
       setSummary(summaryRes.data)
       setTopDestinations(destRes.data.destinations)
       setTopUsers(usersRes.data.users)
       setTotalUsers(usersRes.data.total)
       setUsersOffset(usersRes.data.users.length)
+      setTimeline(timelineRes.data)
       setError(null)
     } catch (err) {
       console.error('Failed to fetch stats:', err)
@@ -997,14 +1009,17 @@ export default function Remnawave() {
     setCopiedField(null)
     setExpandedIp(null)
     setIpDestinations(null)
+    setUserServerStats(null)
     try {
-      // Fetch visit stats and full user info in parallel
-      const [statsRes, fullRes] = await Promise.all([
+      // Fetch visit stats, full user info and server stats in parallel
+      const [statsRes, fullRes, serverStatsRes] = await Promise.all([
         remnawaveApi.getUserStats(email, period),
-        remnawaveApi.getUserFullInfo(email)
+        remnawaveApi.getUserFullInfo(email),
+        remnawaveApi.getUserServerStats(email, period)
       ])
       setSelectedUser(statsRes.data)
       setSelectedUserFull(fullRes.data)
+      setUserServerStats(serverStatsRes.data)
     } catch (err) {
       console.error('Failed to fetch user stats:', err)
     }
@@ -1367,6 +1382,33 @@ export default function Remnawave() {
                     )
                   })}
                 </div>
+              </div>
+            )}
+            
+            {/* Visits Timeline by Server */}
+            {timeline?.by_server && timeline.servers && timeline.servers.length > 0 && (
+              <div className="p-6 rounded-xl bg-dark-800/50 border border-dark-700/50">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-lg font-semibold text-dark-100">{t('remnawave.visits_timeline')}</h3>
+                  <div className="flex items-center gap-2 text-dark-400 text-sm">
+                    <Server className="w-4 h-4" />
+                    <span>{timeline.servers.length} {t('remnawave.servers').toLowerCase()}</span>
+                  </div>
+                </div>
+                <MultiLineChart
+                  series={timeline.servers.map((server, idx) => ({
+                    name: server.server_name,
+                    data: server.data.map(d => ({
+                      timestamp: d.timestamp,
+                      value: d.visits
+                    })),
+                    color: ['#22d3ee', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'][idx % 6]
+                  }))}
+                  height={300}
+                  period={period === 'all' ? '365d' : period}
+                  formatValue={(val) => val.toLocaleString()}
+                  smoothing={0.2}
+                />
               </div>
             )}
             
@@ -2990,7 +3032,7 @@ export default function Remnawave() {
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
-            onClick={() => { setSelectedUser(null); setSelectedUserFull(null); setExpandedIp(null); setIpDestinations(null); }}
+            onClick={() => { setSelectedUser(null); setSelectedUserFull(null); setUserServerStats(null); setExpandedIp(null); setIpDestinations(null); }}
           >
             <motion.div
               initial={{ scale: 0.95, opacity: 0 }}
@@ -3051,7 +3093,7 @@ export default function Remnawave() {
                     <RefreshCw className={`w-4 h-4 ${isLoadingUserFull ? 'animate-spin' : ''}`} />
                   </motion.button>
                   <motion.button
-                    onClick={() => { setSelectedUser(null); setSelectedUserFull(null); setExpandedIp(null); setIpDestinations(null); }}
+                    onClick={() => { setSelectedUser(null); setSelectedUserFull(null); setUserServerStats(null); setExpandedIp(null); setIpDestinations(null); }}
                     className="p-2 rounded-lg hover:bg-dark-700 text-dark-400 transition-colors"
                     whileHover={{ scale: 1.1 }}
                     whileTap={{ scale: 0.9 }}
@@ -3302,6 +3344,71 @@ export default function Remnawave() {
                         )}
                       </div>
                     </div>
+                    
+                    {/* Visits by Server Chart */}
+                    {userServerStats && userServerStats.servers.length > 0 && (
+                      <div className="p-4 rounded-lg bg-dark-800">
+                        <div className="flex items-center justify-between mb-4">
+                          <h4 className="text-sm font-medium text-dark-300">{t('remnawave.visits_by_server')}</h4>
+                          <span className="text-dark-500 text-xs">
+                            {t('remnawave.total')}: {userServerStats.total_visits.toLocaleString()} {t('remnawave.visits').toLowerCase()}
+                          </span>
+                        </div>
+                        
+                        {/* Bar chart showing visits per server */}
+                        <div className="space-y-3">
+                          {userServerStats.servers.map((server, idx) => {
+                            const maxVisits = Math.max(...userServerStats.servers.map(s => s.visits), 1)
+                            const percentage = (server.visits / maxVisits) * 100
+                            const colors = ['#22d3ee', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899']
+                            const color = colors[idx % colors.length]
+                            
+                            return (
+                              <div key={server.server_id}>
+                                <div className="flex items-center justify-between mb-1">
+                                  <div className="flex items-center gap-2">
+                                    <Server className="w-4 h-4 text-dark-500" />
+                                    <span className="text-dark-200 text-sm">{server.server_name}</span>
+                                  </div>
+                                  <div className="flex items-center gap-3">
+                                    <span className="text-dark-500 text-xs">{server.percentage}%</span>
+                                    <span className="text-dark-300 text-sm font-medium w-20 text-right">
+                                      {server.visits.toLocaleString()}
+                                    </span>
+                                  </div>
+                                </div>
+                                <div className="h-2 bg-dark-700 rounded-full overflow-hidden">
+                                  <motion.div
+                                    initial={{ width: 0 }}
+                                    animate={{ width: `${percentage}%` }}
+                                    transition={{ duration: 0.5, delay: idx * 0.1 }}
+                                    className="h-full rounded-full"
+                                    style={{ backgroundColor: color }}
+                                  />
+                                </div>
+                              </div>
+                            )
+                          })}
+                        </div>
+                        
+                        {/* Server details */}
+                        <div className="mt-4 pt-4 border-t border-dark-700">
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            {userServerStats.servers.map((server) => (
+                              <div key={server.server_id} className="flex items-center justify-between p-2 rounded bg-dark-900/50">
+                                <div className="flex items-center gap-2">
+                                  <Server className="w-3.5 h-3.5 text-dark-500" />
+                                  <span className="text-dark-300 text-sm">{server.server_name}</span>
+                                </div>
+                                <div className="text-right">
+                                  <div className="text-dark-400 text-xs">{server.unique_destinations} {t('remnawave.sites').toLowerCase()}</div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    )}
                     
                     {/* Bandwidth Stats Chart (from live API) */}
                     {selectedUserFull?.bandwidth_stats?.categories && selectedUserFull.bandwidth_stats.sparklineData && selectedUserFull.bandwidth_stats.sparklineData.length > 0 && (
