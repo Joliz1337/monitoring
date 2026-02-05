@@ -17,7 +17,7 @@ LOCK_FD=200
 
 TIMEOUT_GIT_CLONE=180
 TIMEOUT_DOCKER_COMPOSE_DOWN=120
-TIMEOUT_DOCKER_BUILD="${DOCKER_BUILD_TIMEOUT:-1200}"
+export DOCKER_BUILD_TIMEOUT="${DOCKER_BUILD_TIMEOUT:-1800}"
 TIMEOUT_CONNECTIVITY_CHECK=15
 
 MAX_RETRIES=3
@@ -248,7 +248,7 @@ fallback_update() {
     fi
     
     log_info "Building containers..."
-    if ! timeout "$TIMEOUT_DOCKER_BUILD" docker build --network=host --build-arg CACHE_BUST=${CACHE_BUST:-} -t monitoring-node-api . 2>&1; then
+    if ! timeout "$DOCKER_BUILD_TIMEOUT" docker build --network=host --build-arg CACHE_BUST=${CACHE_BUST:-} -t monitoring-node-api . 2>&1; then
         log_error "Docker build failed"
         return 1
     fi
