@@ -7,12 +7,13 @@ Optimized version with cumulative counters:
 
 import asyncio
 import os
+import time
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Optional, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import select, func as sql_func, and_, delete
+from sqlalchemy import select, func as sql_func, and_, delete, case
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import verify_auth
@@ -27,6 +28,39 @@ from app.services.xray_stats_collector import get_xray_stats_collector, resolve_
 from app.services.traffic_analyzer import get_traffic_analyzer
 
 router = APIRouter(prefix="/remnawave", tags=["remnawave"])
+
+
+# === In-memory cache with TTL for heavy queries ===
+
+_stats_cache: dict[str, tuple[Any, float]] = {}
+_CACHE_TTL_SHORT = 30  # seconds for stats
+_CACHE_TTL_LONG = 300  # seconds for db-info
+
+
+def _get_cached(key: str) -> Optional[Any]:
+    """Get value from cache if not expired."""
+    if key in _stats_cache:
+        value, timestamp = _stats_cache[key]
+        if time.time() - timestamp < (_CACHE_TTL_LONG if key.startswith("db_") else _CACHE_TTL_SHORT):
+            return value
+        # Expired, remove from cache
+        del _stats_cache[key]
+    return None
+
+
+def _set_cached(key: str, value: Any) -> None:
+    """Store value in cache with current timestamp."""
+    _stats_cache[key] = (value, time.time())
+
+
+def _invalidate_cache(prefix: str = "") -> None:
+    """Invalidate cache entries matching prefix."""
+    if not prefix:
+        _stats_cache.clear()
+    else:
+        keys_to_delete = [k for k in _stats_cache if k.startswith(prefix)]
+        for k in keys_to_delete:
+            del _stats_cache[k]
 
 
 # === Request/Response Models ===
@@ -715,6 +749,12 @@ async def get_stats_summary(
     For period="all": uses cumulative counters (XrayVisitStats)
     For time-limited: uses hourly stats (XrayHourlyStats)
     """
+    # Check cache first
+    cache_key = f"summary_{period}_{server_ids or 'all'}"
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        return cached
+    
     if period == "all":
         # Use cumulative counters
         conditions = []
@@ -766,12 +806,14 @@ async def get_stats_summary(
         unique_users = row[1] or 0
         unique_destinations = row[2] or 0
     
-    return {
+    response = {
         "period": period,
         "total_visits": total_visits,
         "unique_users": unique_users,
         "unique_destinations": unique_destinations
     }
+    _set_cached(cache_key, response)
+    return response
 
 
 @router.get("/stats/top-destinations")
@@ -784,6 +826,14 @@ async def get_top_destinations(
     _: dict = Depends(verify_auth)
 ):
     """Get top visited destinations (all time or filtered by last_seen)"""
+    # Cache only for unfiltered requests (most common case)
+    cache_key = None
+    if not email and not server_id:
+        cache_key = f"top_dest_{period}_{limit}"
+        cached = _get_cached(cache_key)
+        if cached is not None:
+            return cached
+    
     conditions = []
     
     if period != "all":
@@ -810,7 +860,7 @@ async def get_top_destinations(
     result = await db.execute(query)
     rows = result.fetchall()
     
-    return {
+    response = {
         "period": period,
         "destinations": [
             {
@@ -820,6 +870,10 @@ async def get_top_destinations(
             for row in rows
         ]
     }
+    
+    if cache_key:
+        _set_cached(cache_key, response)
+    return response
 
 
 @router.get("/stats/top-users")
@@ -833,6 +887,14 @@ async def get_top_users(
     _: dict = Depends(verify_auth)
 ):
     """Get top active users with search and pagination"""
+    # Cache only for standard requests (first page, no search, no server filter)
+    cache_key = None
+    if not search and not server_id and offset == 0:
+        cache_key = f"top_users_{period}_{limit}"
+        cached = _get_cached(cache_key)
+        if cached is not None:
+            return cached
+    
     conditions = []
     start_time = None
     
@@ -905,43 +967,35 @@ async def get_top_users(
                 "status": user.status
             }
     
-    # Get unique client IP counts and infrastructure IP counts for each user
+    # Get unique client IP counts and infrastructure IP counts in a SINGLE query
     ip_counts = {}
     infra_ip_counts = {}
     if user_ids:
-        base_conditions = [XrayUserIpStats.email.in_(user_ids)]
+        ip_conditions = [XrayUserIpStats.email.in_(user_ids)]
         if period != "all" and start_time:
-            base_conditions.append(XrayUserIpStats.last_seen >= start_time)
+            ip_conditions.append(XrayUserIpStats.last_seen >= start_time)
         if server_id:
-            base_conditions.append(XrayUserIpStats.server_id == server_id)
+            ip_conditions.append(XrayUserIpStats.server_id == server_id)
         
-        # Client IPs (excluding infrastructure)
-        client_ip_conditions = base_conditions + [XrayUserIpStats.is_infrastructure == False]
+        # Combined query with conditional aggregation - single DB round-trip
         ip_result = await db.execute(
             select(
                 XrayUserIpStats.email,
-                sql_func.count(sql_func.distinct(XrayUserIpStats.source_ip)).label('unique_ips')
+                sql_func.count(sql_func.distinct(
+                    case((XrayUserIpStats.is_infrastructure == False, XrayUserIpStats.source_ip), else_=None)
+                )).label('client_ips'),
+                sql_func.count(sql_func.distinct(
+                    case((XrayUserIpStats.is_infrastructure == True, XrayUserIpStats.source_ip), else_=None)
+                )).label('infra_ips')
             )
-            .where(and_(*client_ip_conditions))
+            .where(and_(*ip_conditions))
             .group_by(XrayUserIpStats.email)
         )
         for ip_row in ip_result.fetchall():
-            ip_counts[ip_row.email] = ip_row.unique_ips
-        
-        # Infrastructure IPs only
-        infra_ip_conditions = base_conditions + [XrayUserIpStats.is_infrastructure == True]
-        infra_result = await db.execute(
-            select(
-                XrayUserIpStats.email,
-                sql_func.count(sql_func.distinct(XrayUserIpStats.source_ip)).label('infra_ips')
-            )
-            .where(and_(*infra_ip_conditions))
-            .group_by(XrayUserIpStats.email)
-        )
-        for infra_row in infra_result.fetchall():
-            infra_ip_counts[infra_row.email] = infra_row.infra_ips
+            ip_counts[ip_row.email] = ip_row.client_ips
+            infra_ip_counts[ip_row.email] = ip_row.infra_ips
     
-    return {
+    response = {
         "period": period,
         "total": total_count,
         "offset": offset,
@@ -959,6 +1013,10 @@ async def get_top_users(
             for row in rows
         ]
     }
+    
+    if cache_key:
+        _set_cached(cache_key, response)
+    return response
 
 
 @router.get("/stats/user/{email}")
@@ -1382,6 +1440,12 @@ async def get_db_info(
     _: dict = Depends(verify_auth)
 ):
     """Get database statistics for monitoring including table sizes"""
+    # Cache db-info for longer (5 minutes) as it changes rarely
+    cache_key = "db_info"
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        return cached
+    
     from sqlalchemy import text
     
     # Count records in each table
@@ -1434,7 +1498,7 @@ async def get_db_info(
         # Fallback if query fails
         pass
     
-    return {
+    response = {
         "tables": {
             "xray_visit_stats": {
                 "count": visit_count.scalar() or 0,
@@ -1463,6 +1527,8 @@ async def get_db_info(
         },
         "total_size_bytes": total_size if total_size > 0 else None
     }
+    _set_cached(cache_key, response)
+    return response
 
 
 @router.delete("/stats/clear")

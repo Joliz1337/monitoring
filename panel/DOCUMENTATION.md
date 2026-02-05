@@ -392,6 +392,20 @@ panel/
 - xray_hourly_stats: 5 × 24 × 365 = 43,800 записей × 30 bytes = ~1.3 MB
 - Итого: значительно меньше чем при хранении по периодам
 
+**Оптимизация производительности:**
+
+Backend-кеширование (panel/backend/app/routers/remnawave.py):
+- In-memory кеш с TTL для тяжёлых endpoints
+- `/stats/summary`, `/stats/top-destinations`, `/stats/top-users` — TTL 30 сек
+- `/stats/db-info` — TTL 5 минут
+- IP counts в `get_top_users` объединены в один SQL запрос с conditional aggregation
+
+Frontend lazy loading (panel/frontend/src/pages/Remnawave.tsx):
+- При открытии загружаются только базовые настройки (settings, nodes, collectorStatus)
+- Статистика загружается при переходе на вкладки overview/users/destinations
+- Данные settings tab (db-info, infrastructure, cache status) загружаются при переходе на settings
+- Analyzer данные загружаются при переходе на analyzer
+
 **Принцип работы:**
 1. Панель опрашивает только **активные** Remnawave ноды (сервер включен + нода включена)
 2. При первом запросе `/api/remnawave/stats/collect` нода **лениво запускает** `XrayLogCollector`

@@ -251,17 +251,17 @@ export default function Remnawave() {
   const [anomalyTypeFilter, setAnomalyTypeFilter] = useState<string>('')
   const [showTelegramToken, setShowTelegramToken] = useState(false)
   
-  // Fetch settings
-  const fetchSettings = useCallback(async () => {
+  // Track which data has been loaded
+  const [statsLoaded, setStatsLoaded] = useState(false)
+  const [settingsDataLoaded, setSettingsDataLoaded] = useState(false)
+  
+  // Fetch basic settings (always needed on page load)
+  const fetchBasicSettings = useCallback(async () => {
     try {
-      const [settingsRes, nodesRes, statusRes, dbInfoRes, infraRes, cacheStatusRes, ignoredRes] = await Promise.all([
+      const [settingsRes, nodesRes, statusRes] = await Promise.all([
         remnawaveApi.getSettings(),
         remnawaveApi.getNodes(),
-        remnawaveApi.getCollectorStatus(),
-        remnawaveApi.getDbInfo(),
-        remnawaveApi.getInfrastructureAddresses(),
-        remnawaveApi.getUserCacheStatus(),
-        remnawaveApi.getIgnoredUsers()
+        remnawaveApi.getCollectorStatus()
       ])
       setSettings(settingsRes.data)
       setEditSettings({
@@ -279,18 +279,39 @@ export default function Remnawave() {
       // Update collector status
       setCollectorStatus(statusRes.data)
       setNextCollectIn(statusRes.data.next_collect_in)
-      // Update DB info
-      setDbInfo(dbInfoRes.data)
-      // Update infrastructure addresses
-      setInfrastructureAddresses(infraRes.data.addresses)
-      // Update user cache status
-      setUserCacheStatus(cacheStatusRes.data)
-      // Update ignored users
-      setIgnoredUsers(ignoredRes.data.ignored_users)
     } catch (err) {
-      console.error('Failed to fetch settings:', err)
+      console.error('Failed to fetch basic settings:', err)
     }
   }, [])
+  
+  // Fetch settings tab data (lazy loaded when settings tab is opened)
+  const fetchSettingsTabData = useCallback(async () => {
+    if (settingsDataLoaded) return
+    try {
+      const [dbInfoRes, infraRes, cacheStatusRes, ignoredRes] = await Promise.all([
+        remnawaveApi.getDbInfo(),
+        remnawaveApi.getInfrastructureAddresses(),
+        remnawaveApi.getUserCacheStatus(),
+        remnawaveApi.getIgnoredUsers()
+      ])
+      setDbInfo(dbInfoRes.data)
+      setInfrastructureAddresses(infraRes.data.addresses)
+      setUserCacheStatus(cacheStatusRes.data)
+      setIgnoredUsers(ignoredRes.data.ignored_users)
+      setSettingsDataLoaded(true)
+    } catch (err) {
+      console.error('Failed to fetch settings tab data:', err)
+    }
+  }, [settingsDataLoaded])
+  
+  // Legacy fetchSettings for refresh button compatibility  
+  const fetchSettings = useCallback(async () => {
+    await fetchBasicSettings()
+    if (activeTab === 'settings') {
+      setSettingsDataLoaded(false) // Force reload
+      await fetchSettingsTabData()
+    }
+  }, [fetchBasicSettings, fetchSettingsTabData, activeTab])
   
   // Fetch stats
   const fetchStats = useCallback(async () => {
@@ -494,22 +515,40 @@ export default function Remnawave() {
     }, 300)
   }, [searchUsers])
   
-  // Initial load
+  // Initial load - only basic settings (fast)
   useEffect(() => {
     const loadData = async () => {
       setIsLoading(true)
-      await Promise.all([fetchSettings(), fetchStats()])
+      await fetchBasicSettings()
       setIsLoading(false)
     }
     loadData()
-  }, [fetchSettings, fetchStats])
+  }, [fetchBasicSettings])
   
-  // Reload stats when period changes
+  // Lazy load stats when needed (overview, users, destinations tabs)
   useEffect(() => {
-    if (!isLoading) {
+    const statsNeeded = activeTab === 'overview' || activeTab === 'users' || activeTab === 'destinations'
+    if (statsNeeded && !isLoading) {
+      if (!statsLoaded) {
+        fetchStats().then(() => setStatsLoaded(true))
+      }
+    }
+  }, [activeTab, isLoading, statsLoaded, fetchStats])
+  
+  // Reload stats when period changes (only if stats tab is active)
+  useEffect(() => {
+    const statsNeeded = activeTab === 'overview' || activeTab === 'users' || activeTab === 'destinations'
+    if (!isLoading && statsLoaded && statsNeeded) {
       fetchStats()
     }
-  }, [period, fetchStats, isLoading])
+  }, [period]) // eslint-disable-line react-hooks/exhaustive-deps
+  
+  // Fetch settings tab data when settings tab is selected
+  useEffect(() => {
+    if (activeTab === 'settings') {
+      fetchSettingsTabData()
+    }
+  }, [activeTab, fetchSettingsTabData])
   
   // Fetch analyzer data when tab is selected
   useEffect(() => {
@@ -598,7 +637,15 @@ export default function Remnawave() {
   
   const handleRefresh = async () => {
     setIsRefreshing(true)
-    await fetchStats()
+    // Refresh data based on active tab
+    if (activeTab === 'overview' || activeTab === 'users' || activeTab === 'destinations') {
+      await fetchStats()
+    } else if (activeTab === 'settings') {
+      setSettingsDataLoaded(false)
+      await fetchSettingsTabData()
+    } else if (activeTab === 'analyzer') {
+      await fetchAnalyzerData()
+    }
     setIsRefreshing(false)
   }
   
