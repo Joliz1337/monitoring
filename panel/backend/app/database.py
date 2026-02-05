@@ -553,181 +553,237 @@ async def run_migrations(conn):
 
 
 async def _migrate_destinations_normalization(conn):
-    """Migrate destination columns to use normalized xray_destinations table."""
+    """Migrate destination columns to use normalized xray_destinations table.
     
-    # Check if xray_visit_stats has old destination column (varchar) instead of destination_id
+    This migration is idempotent - safe to run multiple times.
+    Handles partially completed migrations gracefully.
+    """
+    
+    # Get current state of xray_visit_stats
     result = await conn.execute(text("""
-        SELECT column_name, data_type FROM information_schema.columns 
+        SELECT column_name FROM information_schema.columns 
         WHERE table_name = 'xray_visit_stats'
     """))
-    visit_stats_columns = {row[0]: row[1] for row in result.fetchall()}
+    visit_stats_columns = {row[0] for row in result.fetchall()}
     
     if not visit_stats_columns:
         return  # Table doesn't exist yet, will be created fresh
     
-    # If destination_id already exists, migration is done
-    if "destination_id" in visit_stats_columns:
+    has_destination = "destination" in visit_stats_columns
+    has_destination_id = "destination_id" in visit_stats_columns
+    
+    # Migration complete: destination_id exists, old destination column is gone
+    if has_destination_id and not has_destination:
+        logger.info("Destination normalization already complete")
         return
     
-    # If old destination column doesn't exist, nothing to migrate
-    if "destination" not in visit_stats_columns:
+    # Nothing to migrate: no old destination column
+    if not has_destination and not has_destination_id:
         return
     
     logger.info("Starting destination normalization migration...")
     
-    try:
-        # Step 1: Populate xray_destinations from existing data
+    # Get xray_ip_destination_stats columns
+    result = await conn.execute(text("""
+        SELECT column_name FROM information_schema.columns 
+        WHERE table_name = 'xray_ip_destination_stats'
+    """))
+    ip_dest_columns = {row[0] for row in result.fetchall()}
+    
+    # Step 1: Populate xray_destinations from existing data (if destination column exists)
+    if has_destination:
         logger.info("Populating xray_destinations table...")
-        await conn.execute(text("""
-            INSERT INTO xray_destinations (destination, first_seen, hit_count)
-            SELECT DISTINCT destination, MIN(first_seen), SUM(visit_count)
-            FROM xray_visit_stats
-            WHERE destination IS NOT NULL
-            GROUP BY destination
-            ON CONFLICT (destination) DO UPDATE SET hit_count = xray_destinations.hit_count + EXCLUDED.hit_count
-        """))
-        
-        # Also from xray_ip_destination_stats if exists
-        result = await conn.execute(text("""
-            SELECT column_name FROM information_schema.columns 
-            WHERE table_name = 'xray_ip_destination_stats'
-        """))
-        ip_dest_columns = {row[0] for row in result.fetchall()}
-        
-        if ip_dest_columns and "destination" in ip_dest_columns:
+        try:
             await conn.execute(text("""
                 INSERT INTO xray_destinations (destination, first_seen, hit_count)
-                SELECT DISTINCT destination, MIN(first_seen), SUM(connection_count)
-                FROM xray_ip_destination_stats
+                SELECT DISTINCT destination, MIN(first_seen), SUM(visit_count)
+                FROM xray_visit_stats
                 WHERE destination IS NOT NULL
                 GROUP BY destination
                 ON CONFLICT (destination) DO UPDATE SET hit_count = xray_destinations.hit_count + EXCLUDED.hit_count
             """))
+        except Exception as e:
+            logger.warning(f"Populating xray_destinations from visit_stats: {e}")
         
-        # Step 2: Add destination_id column to xray_visit_stats
+        # Also from xray_ip_destination_stats if it has old destination column
+        if ip_dest_columns and "destination" in ip_dest_columns:
+            try:
+                await conn.execute(text("""
+                    INSERT INTO xray_destinations (destination, first_seen, hit_count)
+                    SELECT DISTINCT destination, MIN(first_seen), SUM(connection_count)
+                    FROM xray_ip_destination_stats
+                    WHERE destination IS NOT NULL
+                    GROUP BY destination
+                    ON CONFLICT (destination) DO UPDATE SET hit_count = xray_destinations.hit_count + EXCLUDED.hit_count
+                """))
+            except Exception as e:
+                logger.warning(f"Populating xray_destinations from ip_dest_stats: {e}")
+    
+    # Step 2: Add destination_id column if not exists
+    if not has_destination_id:
         logger.info("Adding destination_id column to xray_visit_stats...")
-        await conn.execute(text("""
-            ALTER TABLE xray_visit_stats ADD COLUMN destination_id INTEGER
-        """))
-        
-        # Step 3: Populate destination_id
+        try:
+            await conn.execute(text("""
+                ALTER TABLE xray_visit_stats ADD COLUMN destination_id INTEGER
+            """))
+        except Exception as e:
+            if "already exists" not in str(e).lower():
+                logger.warning(f"Adding destination_id column: {e}")
+    
+    # Step 3: Populate destination_id where it's NULL (handles partial migration)
+    if has_destination:
         logger.info("Populating destination_id in xray_visit_stats...")
-        await conn.execute(text("""
-            UPDATE xray_visit_stats vs
-            SET destination_id = d.id
-            FROM xray_destinations d
-            WHERE vs.destination = d.destination
-        """))
-        
-        # Step 4: Delete rows where destination_id is null (orphaned data)
+        try:
+            await conn.execute(text("""
+                UPDATE xray_visit_stats vs
+                SET destination_id = d.id
+                FROM xray_destinations d
+                WHERE vs.destination = d.destination AND vs.destination_id IS NULL
+            """))
+        except Exception as e:
+            logger.warning(f"Populating destination_id: {e}")
+    
+    # Step 4: Delete rows where destination_id is still null
+    try:
         await conn.execute(text("""
             DELETE FROM xray_visit_stats WHERE destination_id IS NULL
         """))
-        
-        # Step 5: Make destination_id NOT NULL and add FK
+    except Exception as e:
+        logger.warning(f"Deleting orphaned rows: {e}")
+    
+    # Step 5: Make destination_id NOT NULL (if not already)
+    try:
         await conn.execute(text("""
             ALTER TABLE xray_visit_stats 
             ALTER COLUMN destination_id SET NOT NULL
         """))
-        
-        # Step 6: Drop old unique constraint if exists
-        try:
-            await conn.execute(text("""
-                ALTER TABLE xray_visit_stats DROP CONSTRAINT IF EXISTS uq_xray_stats_unique
-            """))
-        except Exception:
-            pass
-        
-        # Step 7: Add new unique constraint
-        try:
-            await conn.execute(text("""
-                ALTER TABLE xray_visit_stats 
-                ADD CONSTRAINT uq_xray_stats_unique_v2 UNIQUE (server_id, destination_id, email, created_at)
-            """))
-        except Exception:
-            pass
-        
-        # Step 8: Add FK constraint
-        try:
-            await conn.execute(text("""
-                ALTER TABLE xray_visit_stats 
-                ADD CONSTRAINT fk_visit_stats_destination 
-                FOREIGN KEY (destination_id) REFERENCES xray_destinations(id) ON DELETE CASCADE
-            """))
-        except Exception:
-            pass
-        
-        # Step 9: Drop old destination column
-        logger.info("Dropping old destination column from xray_visit_stats...")
+    except Exception as e:
+        if "already" not in str(e).lower():
+            logger.warning(f"Setting NOT NULL: {e}")
+    
+    # Step 6: Drop old unique constraint if exists
+    try:
         await conn.execute(text("""
-            ALTER TABLE xray_visit_stats DROP COLUMN destination
+            ALTER TABLE xray_visit_stats DROP CONSTRAINT IF EXISTS uq_xray_stats_unique
         """))
-        
-        # Now migrate xray_ip_destination_stats
-        if ip_dest_columns and "destination" in ip_dest_columns and "destination_id" not in ip_dest_columns:
-            logger.info("Migrating xray_ip_destination_stats...")
-            
-            # Add destination_id column
+    except Exception:
+        pass
+    
+    # Step 7: Add new unique constraint (server_id, destination_id, email) - NO created_at
+    try:
+        await conn.execute(text("""
+            ALTER TABLE xray_visit_stats 
+            ADD CONSTRAINT uq_xray_stats_unique_v2 UNIQUE (server_id, destination_id, email)
+        """))
+    except Exception as e:
+        if "already exists" not in str(e).lower():
+            logger.debug(f"Adding unique constraint: {e}")
+    
+    # Step 8: Add FK constraint
+    try:
+        await conn.execute(text("""
+            ALTER TABLE xray_visit_stats 
+            ADD CONSTRAINT fk_visit_stats_destination 
+            FOREIGN KEY (destination_id) REFERENCES xray_destinations(id) ON DELETE CASCADE
+        """))
+    except Exception as e:
+        if "already exists" not in str(e).lower():
+            logger.debug(f"Adding FK constraint: {e}")
+    
+    # Step 9: Drop old destination column
+    if has_destination:
+        logger.info("Dropping old destination column from xray_visit_stats...")
+        try:
             await conn.execute(text("""
-                ALTER TABLE xray_ip_destination_stats ADD COLUMN destination_id INTEGER
+                ALTER TABLE xray_visit_stats DROP COLUMN IF EXISTS destination
             """))
-            
-            # Populate destination_id
+        except Exception as e:
+            logger.warning(f"Dropping destination column: {e}")
+    
+    # Now migrate xray_ip_destination_stats
+    ip_has_destination = "destination" in ip_dest_columns
+    ip_has_destination_id = "destination_id" in ip_dest_columns
+    
+    if ip_dest_columns and ip_has_destination:
+        logger.info("Migrating xray_ip_destination_stats...")
+        
+        # Add destination_id column if not exists
+        if not ip_has_destination_id:
+            try:
+                await conn.execute(text("""
+                    ALTER TABLE xray_ip_destination_stats ADD COLUMN destination_id INTEGER
+                """))
+            except Exception as e:
+                if "already exists" not in str(e).lower():
+                    logger.warning(f"Adding destination_id to ip_dest_stats: {e}")
+        
+        # Populate destination_id
+        try:
             await conn.execute(text("""
                 UPDATE xray_ip_destination_stats ips
                 SET destination_id = d.id
                 FROM xray_destinations d
-                WHERE ips.destination = d.destination
+                WHERE ips.destination = d.destination AND ips.destination_id IS NULL
             """))
-            
-            # Delete orphaned rows
+        except Exception as e:
+            logger.warning(f"Populating destination_id in ip_dest_stats: {e}")
+        
+        # Delete orphaned rows
+        try:
             await conn.execute(text("""
                 DELETE FROM xray_ip_destination_stats WHERE destination_id IS NULL
             """))
-            
-            # Make NOT NULL
+        except Exception as e:
+            logger.warning(f"Deleting orphaned ip_dest_stats rows: {e}")
+        
+        # Make NOT NULL
+        try:
             await conn.execute(text("""
                 ALTER TABLE xray_ip_destination_stats 
                 ALTER COLUMN destination_id SET NOT NULL
             """))
-            
-            # Drop old constraint
-            try:
-                await conn.execute(text("""
-                    ALTER TABLE xray_ip_destination_stats DROP CONSTRAINT IF EXISTS uq_ip_dest_stats_unique
-                """))
-            except Exception:
-                pass
-            
-            # Add new constraint
-            try:
-                await conn.execute(text("""
-                    ALTER TABLE xray_ip_destination_stats 
-                    ADD CONSTRAINT uq_ip_dest_stats_unique_v2 UNIQUE (server_id, email, source_ip, destination_id, created_at)
-                """))
-            except Exception:
-                pass
-            
-            # Add FK
-            try:
-                await conn.execute(text("""
-                    ALTER TABLE xray_ip_destination_stats 
-                    ADD CONSTRAINT fk_ip_dest_stats_destination 
-                    FOREIGN KEY (destination_id) REFERENCES xray_destinations(id) ON DELETE CASCADE
-                """))
-            except Exception:
-                pass
-            
-            # Drop old column
+        except Exception as e:
+            if "already" not in str(e).lower():
+                logger.warning(f"Setting NOT NULL on ip_dest_stats: {e}")
+        
+        # Drop old constraint
+        try:
             await conn.execute(text("""
-                ALTER TABLE xray_ip_destination_stats DROP COLUMN destination
+                ALTER TABLE xray_ip_destination_stats DROP CONSTRAINT IF EXISTS uq_ip_dest_stats_unique
             """))
+        except Exception:
+            pass
         
-        logger.info("Destination normalization migration completed successfully")
+        # Add new constraint (server_id, email, source_ip, destination_id) - NO created_at
+        try:
+            await conn.execute(text("""
+                ALTER TABLE xray_ip_destination_stats 
+                ADD CONSTRAINT uq_ip_dest_stats_unique_v2 UNIQUE (server_id, email, source_ip, destination_id)
+            """))
+        except Exception as e:
+            if "already exists" not in str(e).lower():
+                logger.debug(f"Adding unique constraint to ip_dest_stats: {e}")
         
-    except Exception as e:
-        logger.error(f"Destination normalization migration failed: {e}")
-        raise
+        # Add FK
+        try:
+            await conn.execute(text("""
+                ALTER TABLE xray_ip_destination_stats 
+                ADD CONSTRAINT fk_ip_dest_stats_destination 
+                FOREIGN KEY (destination_id) REFERENCES xray_destinations(id) ON DELETE CASCADE
+            """))
+        except Exception as e:
+            if "already exists" not in str(e).lower():
+                logger.debug(f"Adding FK to ip_dest_stats: {e}")
+        
+        # Drop old column
+        try:
+            await conn.execute(text("""
+                ALTER TABLE xray_ip_destination_stats DROP COLUMN IF EXISTS destination
+            """))
+        except Exception as e:
+            logger.warning(f"Dropping destination column from ip_dest_stats: {e}")
+    
+    logger.info("Destination normalization migration completed")
 
 
 async def _seed_default_excluded_destinations():
