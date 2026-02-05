@@ -1692,28 +1692,44 @@ async def clear_stats(
     
     WARNING: This permanently deletes all collected visit data.
     User cache is NOT deleted (can be refreshed from Remnawave API).
+    
+    Uses TRUNCATE CASCADE for fast deletion of large tables.
     """
-    # Delete all visit stats (must be first due to FK)
-    visit_result = await db.execute(delete(XrayVisitStats))
-    deleted_visits = visit_result.rowcount
+    from sqlalchemy import text
     
-    # Delete all IP-destination stats (must be before destinations due to FK)
-    ip_dest_result = await db.execute(delete(XrayIpDestinationStats))
-    deleted_ip_dests = ip_dest_result.rowcount
+    # Get counts before truncate for response
+    visit_count = await db.execute(select(sql_func.count()).select_from(XrayVisitStats))
+    deleted_visits = visit_count.scalar() or 0
     
-    # Delete all IP stats
-    ip_result = await db.execute(delete(XrayUserIpStats))
-    deleted_ips = ip_result.rowcount
+    ip_dest_count = await db.execute(select(sql_func.count()).select_from(XrayIpDestinationStats))
+    deleted_ip_dests = ip_dest_count.scalar() or 0
     
-    # Delete all hourly stats
-    hourly_result = await db.execute(delete(XrayHourlyStats))
-    deleted_hourly = hourly_result.rowcount
+    ip_count = await db.execute(select(sql_func.count()).select_from(XrayUserIpStats))
+    deleted_ips = ip_count.scalar() or 0
     
-    # Delete all destinations (after stats that reference them)
-    dest_result = await db.execute(delete(XrayDestination))
-    deleted_dests = dest_result.rowcount
+    hourly_count = await db.execute(select(sql_func.count()).select_from(XrayHourlyStats))
+    deleted_hourly = hourly_count.scalar() or 0
+    
+    dest_count = await db.execute(select(sql_func.count()).select_from(XrayDestination))
+    deleted_dests = dest_count.scalar() or 0
+    
+    # Use TRUNCATE CASCADE - much faster than DELETE for large tables
+    # TRUNCATE resets the table without scanning rows (instant for millions of records)
+    # CASCADE handles foreign key dependencies automatically
+    await db.execute(text("""
+        TRUNCATE TABLE 
+            xray_visit_stats, 
+            xray_ip_destination_stats, 
+            xray_user_ip_stats, 
+            xray_hourly_stats, 
+            xray_destinations 
+        CASCADE
+    """))
     
     await db.commit()
+    
+    # Invalidate all stats cache
+    _invalidate_cache()
     
     return {
         "success": True,
