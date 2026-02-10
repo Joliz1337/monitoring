@@ -13,6 +13,13 @@
 # Don't exit on error - we handle errors manually
 set +e
 
+# Prevent interactive prompts during package installation
+# needrestart on Ubuntu 22.04+ shows ncurses dialog that hangs scripts
+# and can restart sshd, killing the SSH session
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=l
+export NEEDRESTART_SUSPEND=1
+
 # Prevent running multiple instances
 LOCKFILE="/tmp/monitoring-installer.lock"
 LOCK_FD=200
@@ -827,7 +834,8 @@ apt_update_safe() {
 apt_install_safe() {
     local packages="$*"
     run_timeout_retry "$TIMEOUT_APT_INSTALL" "$MAX_RETRIES" "$RETRY_DELAY" "apt-get install $packages" \
-        env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq -o Dpkg::Options::="--force-confold" $packages
+        env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l NEEDRESTART_SUSPEND=1 \
+        apt-get install -y -qq -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef" $packages
 }
 
 # ==================== Core Functions ====================

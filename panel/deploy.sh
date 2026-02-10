@@ -7,6 +7,13 @@
 
 set +e  # Handle errors manually
 
+# Prevent interactive prompts during package installation
+# needrestart on Ubuntu 22.04+ shows ncurses dialog that hangs scripts
+# and can restart sshd, killing the SSH session
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=l
+export NEEDRESTART_SUSPEND=1
+
 LOCKFILE="/tmp/monitoring-panel-deploy.lock"
 LOCK_FD=200
 BUILD_LOG="/tmp/docker_build_$$.log"
@@ -359,7 +366,8 @@ install_docker() {
         run_timeout_retry "$TIMEOUT_APT_UPDATE" "$MAX_RETRIES" "$RETRY_DELAY" "apt-get update" \
             apt-get update -qq || print_warning "apt update had issues"
         run_timeout_retry "$TIMEOUT_APT_INSTALL" "$MAX_RETRIES" "$RETRY_DELAY" "installing dependencies" \
-            apt-get install -y -qq ca-certificates curl gnupg || {
+            apt-get install -y -qq -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef" \
+            ca-certificates curl gnupg || {
             print_error "Failed to install dependencies"
             return 1
         }
@@ -379,7 +387,8 @@ install_docker() {
         run_timeout_retry "$TIMEOUT_APT_UPDATE" "$MAX_RETRIES" "$RETRY_DELAY" "apt-get update" \
             apt-get update -qq || print_warning "apt update had issues"
         run_timeout_retry "$TIMEOUT_APT_INSTALL" "$MAX_RETRIES" "$RETRY_DELAY" "installing docker" \
-            apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-compose-plugin || {
+            apt-get install -y -qq -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef" \
+            docker-ce docker-ce-cli containerd.io docker-compose-plugin || {
             print_error "Failed to install Docker"
             return 1
         }
@@ -511,7 +520,8 @@ install_certbot() {
         run_timeout_retry "$TIMEOUT_APT_UPDATE" "$MAX_RETRIES" "$RETRY_DELAY" "apt-get update" \
             apt-get update -qq || true
         run_timeout_retry "$TIMEOUT_APT_INSTALL" "$MAX_RETRIES" "$RETRY_DELAY" "installing certbot" \
-            apt-get install -y -qq certbot || {
+            apt-get install -y -qq -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef" \
+            certbot || {
             print_error "Failed to install certbot"
             return 1
         }

@@ -8,6 +8,13 @@
 
 set +e  # Handle errors manually
 
+# Prevent interactive prompts during package installation
+# needrestart on Ubuntu 22.04+ shows ncurses dialog that hangs scripts
+# and can restart sshd, killing the SSH session
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=l
+export NEEDRESTART_SUSPEND=1
+
 LOCKFILE="/tmp/monitoring-node-deploy.lock"
 LOCK_FD=200
 BUILD_LOG="/tmp/docker_build_$$.log"
@@ -424,7 +431,8 @@ install_docker() {
         apt-get update -qq || log_warn "apt update had issues"
     
     run_timeout_retry "$TIMEOUT_APT_INSTALL" "$MAX_RETRIES" "$RETRY_DELAY" "installing dependencies" \
-        apt-get install -y -qq ca-certificates curl gnupg lsb-release || {
+        apt-get install -y -qq -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef" \
+        ca-certificates curl gnupg lsb-release || {
         log_error "Failed to install dependencies"
         return 1
     }
@@ -446,7 +454,8 @@ install_docker() {
         apt-get update -qq || log_warn "apt update had issues"
     
     run_timeout_retry "$TIMEOUT_APT_INSTALL" "$MAX_RETRIES" "$RETRY_DELAY" "installing docker" \
-        apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || {
+        apt-get install -y -qq -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef" \
+        docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || {
         log_error "Failed to install Docker"
         return 1
     }
@@ -643,13 +652,15 @@ setup_firewall() {
         run_timeout_retry "$TIMEOUT_APT_UPDATE" "$MAX_RETRIES" "$RETRY_DELAY" "apt-get update" \
             apt-get update -qq || true
         run_timeout_retry "$TIMEOUT_APT_INSTALL" "$MAX_RETRIES" "$RETRY_DELAY" "installing ufw" \
-            apt-get install -y -qq ufw || log_warn "UFW installation had issues"
+            apt-get install -y -qq -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef" \
+            ufw || log_warn "UFW installation had issues"
     fi
     
     if ! command -v ipset &> /dev/null; then
         log_info "Installing ipset..."
         run_timeout_retry "$TIMEOUT_APT_INSTALL" "$MAX_RETRIES" "$RETRY_DELAY" "installing ipset" \
-            apt-get install -y -qq ipset || log_warn "ipset installation had issues"
+            apt-get install -y -qq -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef" \
+            ipset || log_warn "ipset installation had issues"
         log_success "ipset installed"
     fi
     

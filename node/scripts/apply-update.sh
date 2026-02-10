@@ -6,6 +6,11 @@
 
 set -e
 
+# Prevent interactive prompts during package installation
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=l
+export NEEDRESTART_SUSPEND=1
+
 # Build log file for error reporting
 BUILD_LOG="/tmp/docker_build_$$.log"
 
@@ -111,7 +116,7 @@ install_native_haproxy() {
     
     # Install with timeout (3 minutes max)
     log_info "Installing haproxy package (timeout: 180s)..."
-    if timeout 180 apt-get install -y haproxy 2>&1 | tail -10; then
+    if timeout 180 apt-get install -y -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef" haproxy 2>&1 | tail -10; then
         log_success "HAProxy installed"
         return 0
     else
@@ -134,7 +139,7 @@ install_ipset() {
         return 1
     fi
     
-    if timeout 60 apt-get install -y -qq ipset 2>&1 | tail -5; then
+    if timeout 60 apt-get install -y -qq -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef" ipset 2>&1 | tail -5; then
         log_success "ipset installed"
         return 0
     else
