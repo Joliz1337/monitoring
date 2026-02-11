@@ -31,34 +31,50 @@ logger = logging.getLogger(__name__)
 # Known valid platforms for HWID validation
 VALID_PLATFORMS = {'android', 'ios', 'windows', 'macos', 'linux', 'mac'}
 
-# Known valid app patterns (case-insensitive, with optional version and platform)
+# Known valid app patterns (case-insensitive)
+# No $ anchor — real user-agents often contain OS/framework info after app name
+# e.g. "Shadowrocket/1882 CFNetwork/1568.200.51 Darwin/24.1.0"
 VALID_APP_PATTERNS = [
-    r'^Happ(/[\d.]+)?(/\w+)?$',           # Happ, Happ/3.9.1, Happ/3.9.1/Windows
-    r'^v2raytun(/[\w.]+)?$',              # v2raytun, v2raytun/android
-    r'^V2rayNG(/[\d.]+)?$',               # V2rayNG, V2rayNG/1.8.5
-    r'^Shadowrocket(/[\d.]+)?$',          # Shadowrocket
-    r'^Quantumult',                        # Quantumult X, Quantumult
-    r'^Clash',                             # Clash, ClashX, ClashForAndroid
-    r'^Surge(/[\d.]+)?$',                 # Surge
-    r'^FoXray(/[\d.]+)?$',                # FoXray
-    r'^Streisand(/[\d.]+)?$',             # Streisand
-    r'^OneClick(/[\d.]+)?$',              # OneClick
-    r'^V2Box(/[\d.]+)?$',                 # V2Box
-    r'^Matsuri(/[\d.]+)?$',               # Matsuri
-    r'^NekoBox(/[\d.]+)?$',               # NekoBox, NekoBoxForAndroid
-    r'^SagerNet(/[\d.]+)?$',              # SagerNet
-    r'^V2RayU(/[\d.]+)?$',                # V2RayU
-    r'^sing-box(/[\d.]+)?$',              # sing-box
-    r'^hiddify(/[\d.]+)?$',               # Hiddify
-    r'^nekoray(/[\d.]+)?$',               # Nekoray
-    r'^v2rayA(/[\d.]+)?$',                # v2rayA
-    r'^Qv2ray(/[\d.]+)?$',                # Qv2ray
-    r'^WingsX(/[\d.]+)?$',                # WingsX
-    r'^Loon(/[\d.]+)?$',                  # Loon
-    r'^Stash(/[\d.]+)?$',                 # Stash
-    r'^Pharos(/[\d.]+)?$',                # Pharos
-    r'^Spectre(/[\d.]+)?$',               # Spectre
-    r'^karing(/[\d.]+)?$',                # Karing
+    # V2Ray family
+    r'^V2rayNG',                           # V2rayNG, V2rayNG/1.8.5
+    r'^v2raytun',                          # v2rayTUN/2.0.5(Build 207) CFNetwork/...
+    r'^v2rayA',                            # v2rayA
+    r'^V2RayU',                            # V2RayU (macOS)
+    r'^V2Box',                             # V2Box
+    r'^Qv2ray',                            # Qv2ray
+    r'^Happ',                              # Happ/3.9.1/Windows
+    # Shadowrocket / Quantumult / Surge / Loon / Stash (iOS/macOS)
+    r'^Shadowrocket',                      # Shadowrocket/1882 CFNetwork/...
+    r'^Quantumult',                        # Quantumult X, Quantumult%20X/1.4.1
+    r'^Surge',                             # Surge/2922 CFNetwork/...
+    r'^Loon',                              # Loon/622 CFNetwork/...
+    r'^Stash',                             # Stash/2.5.0 CFNetwork/...
+    r'^Pharos',                            # Pharos
+    r'^Spectre',                           # Spectre VPN
+    r'^FoXray',                            # FoXray
+    # Clash / Mihomo family
+    r'^Clash',                             # Clash, ClashX, ClashForAndroid, clash-verge, clash-nyanpasu, clash.meta
+    r'^FlClash',                           # FlClash, FlClashX
+    r'^Flowvy',                            # Flowvy (Mihomo client)
+    r'^mihomo',                            # Mihomo core
+    r'^koala[\-_]?clash',                  # koala-clash, KoalaClash
+    r'^murge',                             # Murge (Mihomo GUI)
+    r'^prizrak[\-_]?box',                  # prizrak-box
+    # sing-box family
+    r'^sing[\-]?box',                      # sing-box, singbox
+    r'^sf[aimt]([/ \d]|$)',                # SFA, SFI, SFM, SFT (sing-box platform clients)
+    r'^karing',                            # Karing (sing-box GUI)
+    r'^rabbithole',                        # RabbitHole
+    # NekoBox / Nekoray / SagerNet / Matsuri
+    r'^NekoBox',                           # NekoBox, NekoBoxForAndroid
+    r'^nekoray',                           # Nekoray
+    r'^SagerNet',                          # SagerNet
+    r'^Matsuri',                           # Matsuri
+    # Other clients
+    r'^Streisand',                         # Streisand (iOS)
+    r'^OneClick',                          # OneClick
+    r'^hiddify',                           # Hiddify, HiddifyNext
+    r'^WingsX',                            # WingsX
 ]
 
 # Suspicious patterns in User-Agent

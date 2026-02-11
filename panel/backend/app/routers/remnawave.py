@@ -15,7 +15,7 @@ from typing import Optional, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import select, func as sql_func, and_, delete, case
+from sqlalchemy import select, func as sql_func, and_, delete, case, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import verify_auth
@@ -652,6 +652,13 @@ async def _cleanup_excluded_destination_data(host: str):
             
             _stats_cache.clear()
             logger.info(f"Cleaned up stats for excluded host '{host}': {len(dest_ids)} destinations removed")
+            
+            # VACUUM to reclaim disk space after mass deletion
+            try:
+                await db.execute(text("VACUUM xray_visit_stats, xray_ip_destination_stats, xray_destinations"))
+                logger.info(f"VACUUM completed after excluded host cleanup '{host}'")
+            except Exception as ve:
+                logger.debug(f"VACUUM after excluded cleanup failed (non-critical): {ve}")
             
             # Rebuild summary tables to reflect removed data
             try:
@@ -1366,65 +1373,106 @@ async def get_user_stats(
     unique_ips = ip_counts_row.total_ips or 0
     unique_client_ips = ip_counts_row.client_ips or 0
     
-    # Get IP details with server info
-    ip_details_result = await db.execute(
+    # Get top IPs pre-aggregated in SQL (avoids fetching thousands of raw rows)
+    max_ips = 50
+    
+    # Subquery: aggregate by (source_ip_id, is_infrastructure) across servers
+    ip_agg_subq = (
+        select(
+            XrayUserIpStats.source_ip_id,
+            XrayUserIpStats.is_infrastructure,
+            sql_func.sum(XrayUserIpStats.connection_count).label('total_count'),
+            sql_func.min(XrayUserIpStats.first_seen).label('first_seen'),
+            sql_func.max(XrayUserIpStats.last_seen).label('last_seen')
+        )
+        .where(and_(*ip_conditions))
+        .group_by(XrayUserIpStats.source_ip_id, XrayUserIpStats.is_infrastructure)
+        .order_by(sql_func.sum(XrayUserIpStats.connection_count).desc())
+        .limit(max_ips * 2)  # fetch enough for both client + infra
+        .subquery()
+    )
+    
+    ip_agg_result = await db.execute(
         select(
             XraySourceIp.ip.label('source_ip'),
-            XrayUserIpStats.server_id,
-            XrayUserIpStats.connection_count,
-            XrayUserIpStats.is_infrastructure,
-            XrayUserIpStats.first_seen,
-            XrayUserIpStats.last_seen,
-            Server.name.label('server_name')
+            ip_agg_subq.c.is_infrastructure,
+            ip_agg_subq.c.total_count,
+            ip_agg_subq.c.first_seen,
+            ip_agg_subq.c.last_seen
         )
-        .join(XraySourceIp, XrayUserIpStats.source_ip_id == XraySourceIp.id)
-        .join(Server, XrayUserIpStats.server_id == Server.id)
-        .where(and_(*ip_conditions))
-        .order_by(XrayUserIpStats.connection_count.desc())
+        .join(XraySourceIp, ip_agg_subq.c.source_ip_id == XraySourceIp.id)
     )
-    ip_rows = ip_details_result.fetchall()
+    ip_agg_rows = ip_agg_result.fetchall()
     
-    # Aggregate IPs across servers, separating client and infrastructure
-    client_ip_map: dict[str, dict] = {}
-    infra_ip_map: dict[str, dict] = {}
+    # Split into client and infrastructure, already sorted by total_count
+    client_ips_raw = []
+    infra_ips_raw = []
+    for row in ip_agg_rows:
+        entry = {
+            "source_ip": row.source_ip,
+            "total_count": row.total_count,
+            "first_seen": row.first_seen,
+            "last_seen": row.last_seen
+        }
+        if row.is_infrastructure:
+            infra_ips_raw.append(entry)
+        else:
+            client_ips_raw.append(entry)
     
-    for row in ip_rows:
-        target_map = infra_ip_map if row.is_infrastructure else client_ip_map
+    client_ips_raw.sort(key=lambda x: x["total_count"], reverse=True)
+    infra_ips_raw.sort(key=lambda x: x["total_count"], reverse=True)
+    
+    # For top IPs, fetch per-server breakdown only for the IPs we'll return
+    top_ip_addresses = set()
+    for ip in client_ips_raw[:max_ips]:
+        top_ip_addresses.add(ip["source_ip"])
+    for ip in infra_ips_raw[:max_ips]:
+        top_ip_addresses.add(ip["source_ip"])
+    
+    server_breakdown: dict[str, list[dict]] = {}
+    if top_ip_addresses:
+        ip_id_lookup = await db.execute(
+            select(XraySourceIp.id, XraySourceIp.ip)
+            .where(XraySourceIp.ip.in_(list(top_ip_addresses)))
+        )
+        ip_to_id = {row.ip: row.id for row in ip_id_lookup.fetchall()}
         
-        if row.source_ip not in target_map:
-            target_map[row.source_ip] = {
-                "source_ip": row.source_ip,
-                "servers": [],
-                "total_count": 0,
-                "first_seen": row.first_seen,
-                "last_seen": row.last_seen
-            }
-        target_map[row.source_ip]["servers"].append({
-            "server_id": row.server_id,
-            "server_name": row.server_name,
-            "count": row.connection_count
-        })
-        target_map[row.source_ip]["total_count"] += row.connection_count
-        if row.first_seen and (not target_map[row.source_ip]["first_seen"] or row.first_seen < target_map[row.source_ip]["first_seen"]):
-            target_map[row.source_ip]["first_seen"] = row.first_seen
-        if row.last_seen and (not target_map[row.source_ip]["last_seen"] or row.last_seen > target_map[row.source_ip]["last_seen"]):
-            target_map[row.source_ip]["last_seen"] = row.last_seen
-    
-    # Sort IPs by total count
-    client_ips = sorted(client_ip_map.values(), key=lambda x: x["total_count"], reverse=True)
-    infra_ips = sorted(infra_ip_map.values(), key=lambda x: x["total_count"], reverse=True)
+        if ip_to_id:
+            detail_result = await db.execute(
+                select(
+                    XraySourceIp.ip.label('source_ip'),
+                    XrayUserIpStats.server_id,
+                    XrayUserIpStats.connection_count,
+                    Server.name.label('server_name')
+                )
+                .join(XraySourceIp, XrayUserIpStats.source_ip_id == XraySourceIp.id)
+                .join(Server, XrayUserIpStats.server_id == Server.id)
+                .where(and_(
+                    XrayUserIpStats.email == email,
+                    XrayUserIpStats.source_ip_id.in_(list(ip_to_id.values()))
+                ))
+            )
+            for row in detail_result.fetchall():
+                server_breakdown.setdefault(row.source_ip, []).append({
+                    "server_id": row.server_id,
+                    "server_name": row.server_name,
+                    "count": row.connection_count
+                })
     
     def format_ip_list(ips_list, max_items=50):
         return [
             {
                 "source_ip": ip["source_ip"],
-                "servers": ip["servers"],
+                "servers": server_breakdown.get(ip["source_ip"], []),
                 "total_count": ip["total_count"],
                 "first_seen": ip["first_seen"].isoformat() if ip["first_seen"] else None,
                 "last_seen": ip["last_seen"].isoformat() if ip["last_seen"] else None
             }
             for ip in ips_list[:max_items]
         ]
+    
+    client_ips = client_ips_raw
+    infra_ips = infra_ips_raw
     
     return {
         "email": email,
