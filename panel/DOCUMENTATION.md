@@ -407,17 +407,20 @@ panel/
 
 Backend:
 - **Batch endpoint** `/stats/batch` — summary + destinations + users в 1 HTTP-запросе (вместо 3)
-- **Параллельные SQL-запросы** через `asyncio.gather` внутри каждого endpoint
+- Все SQL-запросы выполняются **последовательно на одной сессии** (1 соединение, без перегрузки пула)
 - summary: 1 SQL вместо 3 (SUM + COUNT DISTINCT × 2 в одном запросе)
-- top-users: count + users параллельно, затем cache + IP counts параллельно
-- user-stats: 5 запросов (user + visits + destinations + IP counts + IP details) параллельно
-- In-memory кеш с TTL: batch/summary/top-destinations/top-users — 30 сек, db-info — 5 мин
+- Users count для period=all без поиска берётся из summary (без дополнительного full scan)
+- In-memory кеш с TTL: batch/summary/top-destinations/top-users — **120 сек**, db-info — 5 мин
+- **Pre-warm кеша** при старте приложения и после каждого цикла сбора данных (`warm_batch_cache()`)
 - IP counts объединены в один SQL запрос с conditional aggregation
 - GROUP BY по кешированному host вместо regexp_replace на каждой строке
+- **Покрывающие индексы** на xray_visit_stats и xray_user_ip_stats для тяжёлых GROUP BY
+- nginx timeout для `/api/remnawave/stats/` увеличен до **120 сек**
 
 Frontend lazy loading (panel/frontend/src/pages/Remnawave.tsx):
 - При открытии загружаются только базовые настройки (settings, nodes, collectorStatus)
 - Статистика загружается через batch endpoint при переходе на overview/users/destinations
+- Auto-refresh интервал: **60 сек** (попадает в кеш 120 сек — 1 из 2 рефрешей из кеша)
 - Данные settings tab (db-info, infrastructure, cache status) загружаются при переходе на settings
 - Analyzer данные загружаются при переходе на analyzer
 

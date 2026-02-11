@@ -228,6 +228,12 @@ class XrayStatsCollector:
                 if _cached_enabled and self._time_since_last_collect >= self._collection_interval:
                     await self._collect_from_all_nodes()
                     self._time_since_last_collect = 0
+                    # Pre-warm batch cache so users always hit warm cache
+                    try:
+                        from app.routers.remnawave import warm_batch_cache
+                        await warm_batch_cache()
+                    except Exception as e:
+                        logger.warning(f"Cache warm after collection failed: {e}")
                 
                 await asyncio.sleep(1)
                 self._time_since_last_collect += 1
@@ -1025,6 +1031,12 @@ async def start_xray_stats_collector():
     """Start the Xray stats collector."""
     collector = get_xray_stats_collector()
     await collector.start()
+    # Pre-warm batch cache on startup so first page load is instant
+    try:
+        from app.routers.remnawave import warm_batch_cache
+        await warm_batch_cache()
+    except Exception as e:
+        logger.warning(f"Initial cache warm failed: {e}")
 
 
 async def stop_xray_stats_collector():

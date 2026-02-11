@@ -35,7 +35,7 @@ router = APIRouter(prefix="/remnawave", tags=["remnawave"])
 # === In-memory cache with TTL for heavy queries ===
 
 _stats_cache: dict[str, tuple[Any, float]] = {}
-_CACHE_TTL_SHORT = 30  # seconds for stats
+_CACHE_TTL_SHORT = 120  # seconds for stats (covers 2 auto-refresh cycles)
 _CACHE_TTL_LONG = 300  # seconds for db-info
 
 
@@ -1616,26 +1616,17 @@ async def get_timeline(
     }
 
 
-@router.get("/stats/batch")
-async def get_stats_batch(
-    period: str = Query("all", pattern="^(1h|24h|7d|30d|365d|all)$"),
-    dest_limit: int = Query(100, ge=1, le=500),
-    users_limit: int = Query(100, ge=1, le=1000),
-    search: Optional[str] = Query(None, min_length=1, description="Search users"),
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """Batch endpoint: summary + top-destinations + top-users in one request.
+async def _compute_batch_data(
+    db: AsyncSession,
+    period: str = "all",
+    dest_limit: int = 100,
+    users_limit: int = 100,
+    search: Optional[str] = None
+) -> dict:
+    """Core batch computation: summary + top-destinations + top-users.
     
-    Replaces 3 separate HTTP calls with 1, reducing latency and connection pool usage.
-    All queries run sequentially on a single DB session (1 connection instead of 3).
+    Extracted so both the API endpoint and cache-warmer can call the same logic.
     """
-    cache_key = f"batch_{period}_{dest_limit}_{users_limit}_{search or ''}"
-    if not search:
-        cached = _get_cached(cache_key)
-        if cached is not None:
-            return cached
-    
     start_time = None if period == "all" else _get_time_filter(period)
     
     # === 1. Summary (single combined query) ===
@@ -1689,7 +1680,7 @@ async def get_stats_batch(
             search_user_ids.add(int(search))
         
         if not search_user_ids:
-            response = {
+            return {
                 "summary": {
                     "period": period,
                     "total_visits": s_row[0] or 0,
@@ -1702,18 +1693,18 @@ async def get_stats_batch(
                 ],
                 "users": {"period": period, "total": 0, "offset": 0, "limit": users_limit, "users": []}
             }
-            if not search:
-                _set_cached(cache_key, response)
-            return response
         
         user_conditions.append(XrayVisitStats.email.in_(list(search_user_ids)))
     
-    # Users count
-    users_count_query = select(sql_func.count(sql_func.distinct(XrayVisitStats.email)))
-    if user_conditions:
-        users_count_query = users_count_query.where(and_(*user_conditions))
-    total_users_result = await db.execute(users_count_query)
-    total_users_count = total_users_result.scalar() or 0
+    # Users count: reuse summary's unique_users for unfiltered "all" (avoids duplicate full scan)
+    if not search and not user_conditions:
+        total_users_count = s_row[1] or 0
+    else:
+        users_count_query = select(sql_func.count(sql_func.distinct(XrayVisitStats.email)))
+        if user_conditions:
+            users_count_query = users_count_query.where(and_(*user_conditions))
+        total_users_result = await db.execute(users_count_query)
+        total_users_count = total_users_result.scalar() or 0
     
     # Users data
     users_data_query = select(
@@ -1763,7 +1754,7 @@ async def get_stats_batch(
             ip_counts[ip_row.email] = ip_row.client_ips
             infra_ip_counts[ip_row.email] = ip_row.infra_ips
     
-    response = {
+    return {
         "summary": {
             "period": period,
             "total_visits": s_row[0] or 0,
@@ -1793,6 +1784,47 @@ async def get_stats_batch(
             ]
         }
     }
+
+
+async def warm_batch_cache():
+    """Pre-warm cache for default batch params (period=all, limits=100).
+    
+    Called after each data collection cycle to ensure users always hit warm cache.
+    """
+    from app.database import async_session_maker
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    try:
+        async with async_session_maker() as db:
+            result = await _compute_batch_data(db, period="all", dest_limit=100, users_limit=100)
+            _set_cached("batch_all_100_100_", result)
+            logger.info("Batch cache warmed (period=all)")
+    except Exception as e:
+        logger.error(f"Cache warm failed: {e}")
+
+
+@router.get("/stats/batch")
+async def get_stats_batch(
+    period: str = Query("all", pattern="^(1h|24h|7d|30d|365d|all)$"),
+    dest_limit: int = Query(100, ge=1, le=500),
+    users_limit: int = Query(100, ge=1, le=1000),
+    search: Optional[str] = Query(None, min_length=1, description="Search users"),
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Batch endpoint: summary + top-destinations + top-users in one request.
+    
+    Replaces 3 separate HTTP calls with 1, reducing latency and connection pool usage.
+    All queries run sequentially on a single DB session (1 connection instead of 3).
+    """
+    cache_key = f"batch_{period}_{dest_limit}_{users_limit}_{search or ''}"
+    if not search:
+        cached = _get_cached(cache_key)
+        if cached is not None:
+            return cached
+    
+    response = await _compute_batch_data(db, period, dest_limit, users_limit, search)
     
     if not search:
         _set_cached(cache_key, response)

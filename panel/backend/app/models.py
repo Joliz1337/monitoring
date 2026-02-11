@@ -287,6 +287,9 @@ class XrayVisitStats(Base):
         Index('idx_xray_stats_email', 'email'),
         Index('idx_xray_stats_destination_id', 'destination_id'),
         Index('idx_xray_stats_last_seen', 'last_seen'),
+        # Covering indexes for heavy batch aggregations
+        Index('idx_xray_stats_email_visits', 'email', 'visit_count'),
+        Index('idx_xray_stats_lastseen_dest_visits', 'last_seen', 'destination_id', 'visit_count'),
     )
 
 
@@ -367,6 +370,8 @@ class XrayUserIpStats(Base):
     __table_args__ = (
         Index('idx_user_ip_email', 'email'),
         Index('idx_user_ip_source_ip_id', 'source_ip_id'),
+        # Covering index for IP counts grouped by email with infrastructure flag
+        Index('idx_user_ip_email_infra_srcip', 'email', 'is_infrastructure', 'source_ip_id'),
     )
 
 

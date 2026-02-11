@@ -165,7 +165,7 @@ export default function Remnawave() {
   
   // Auto-refresh countdown (for UI display)
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const [nextRefreshIn, setNextRefreshIn] = useState(30)
+  const [nextRefreshIn, setNextRefreshIn] = useState(60)
   const [isPageVisible, setIsPageVisible] = useState(!document.hidden)
   
   // DB info state
@@ -664,7 +664,7 @@ export default function Remnawave() {
   
   // Auto-refresh with visibility awareness (stops when tab is hidden)
   useAutoRefresh(() => { fetchStats() }, {
-    customInterval: 30000,
+    customInterval: 60000,
     immediate: false,
     pauseWhenHidden: true,
     refreshOnVisible: true
@@ -688,7 +688,7 @@ export default function Remnawave() {
     countdownRef.current = setInterval(() => {
       setNextRefreshIn(prev => {
         if (prev <= 1) {
-          return 30
+          return 60
         }
         return prev - 1
       })

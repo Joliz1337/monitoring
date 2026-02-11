@@ -227,6 +227,20 @@ async def run_migrations(conn):
     
     # Remove surrogate id columns and convert to composite PKs
     await _migrate_remove_surrogate_ids(conn)
+    
+    # Add covering indexes for heavy batch aggregations (idempotent)
+    covering_indexes = [
+        ("idx_xray_stats_email_visits", "xray_visit_stats", "(email, visit_count)"),
+        ("idx_xray_stats_lastseen_dest_visits", "xray_visit_stats", "(last_seen, destination_id, visit_count)"),
+        ("idx_user_ip_email_infra_srcip", "xray_user_ip_stats", "(email, is_infrastructure, source_ip_id)"),
+    ]
+    for idx_name, table, columns in covering_indexes:
+        try:
+            await conn.execute(text(
+                f'CREATE INDEX IF NOT EXISTS "{idx_name}" ON {table} {columns}'
+            ))
+        except Exception:
+            pass
 
 
 async def _migrate_destinations_normalization(conn):
