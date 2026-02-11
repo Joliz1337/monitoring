@@ -171,10 +171,8 @@ export default function Remnawave() {
   // DB info state
   const [dbInfo, setDbInfo] = useState<{
     tables: {
-      xray_visit_stats: { count: number; first_seen: string | null; last_seen: string | null; size_bytes?: number | null }
+      xray_stats: { count: number; first_seen: string | null; last_seen: string | null; size_bytes?: number | null }
       xray_hourly_stats: { count: number; first_hour: string | null; last_hour: string | null; size_bytes?: number | null }
-      xray_user_ip_stats: { count: number; size_bytes?: number | null }
-      xray_ip_destination_stats: { count: number; size_bytes?: number | null }
       remnawave_user_cache: { count: number; size_bytes?: number | null }
     }
     total_size_bytes?: number | null
@@ -2974,7 +2972,7 @@ export default function Remnawave() {
                     </div>
                     <div className="text-right">
                       <div className="text-dark-500 text-xs">{t('remnawave.db_tables_count')}</div>
-                      <div className="text-dark-300 text-sm">5 {t('remnawave.tables')}</div>
+                      <div className="text-dark-300 text-sm">3 {t('remnawave.tables')}</div>
                     </div>
                   </div>
                 </div>
@@ -2982,42 +2980,20 @@ export default function Remnawave() {
               
               {/* DB Stats */}
               {dbInfo && (
-                <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
+                <div className="grid grid-cols-3 gap-4 mb-6">
                   <div className="p-3 rounded-lg bg-dark-900/50">
                     <div className="text-dark-500 text-xs mb-1">{t('remnawave.db_visits')}</div>
                     <div className="text-dark-100 text-lg font-semibold">
-                      {dbInfo.tables.xray_visit_stats.count.toLocaleString()}
+                      {dbInfo.tables.xray_stats.count.toLocaleString()}
                     </div>
-                    {dbInfo.tables.xray_visit_stats.size_bytes && (
+                    {dbInfo.tables.xray_stats.size_bytes && (
                       <div className="text-accent-400 text-xs mt-1">
-                        {formatBytes(dbInfo.tables.xray_visit_stats.size_bytes)}
+                        {formatBytes(dbInfo.tables.xray_stats.size_bytes)}
                       </div>
                     )}
-                    {dbInfo.tables.xray_visit_stats.first_seen && (
+                    {dbInfo.tables.xray_stats.first_seen && (
                       <div className="text-dark-600 text-xs mt-1">
-                        {formatDate(dbInfo.tables.xray_visit_stats.first_seen)} - {formatDate(dbInfo.tables.xray_visit_stats.last_seen)}
-                      </div>
-                    )}
-                  </div>
-                  <div className="p-3 rounded-lg bg-dark-900/50">
-                    <div className="text-dark-500 text-xs mb-1">{t('remnawave.db_ips')}</div>
-                    <div className="text-dark-100 text-lg font-semibold">
-                      {dbInfo.tables.xray_user_ip_stats.count.toLocaleString()}
-                    </div>
-                    {dbInfo.tables.xray_user_ip_stats.size_bytes && (
-                      <div className="text-accent-400 text-xs mt-1">
-                        {formatBytes(dbInfo.tables.xray_user_ip_stats.size_bytes)}
-                      </div>
-                    )}
-                  </div>
-                  <div className="p-3 rounded-lg bg-dark-900/50">
-                    <div className="text-dark-500 text-xs mb-1">{t('remnawave.db_ip_destinations')}</div>
-                    <div className="text-dark-100 text-lg font-semibold">
-                      {dbInfo.tables.xray_ip_destination_stats.count.toLocaleString()}
-                    </div>
-                    {dbInfo.tables.xray_ip_destination_stats.size_bytes && (
-                      <div className="text-accent-400 text-xs mt-1">
-                        {formatBytes(dbInfo.tables.xray_ip_destination_stats.size_bytes)}
+                        {formatDate(dbInfo.tables.xray_stats.first_seen)} - {formatDate(dbInfo.tables.xray_stats.last_seen)}
                       </div>
                     )}
                   </div>
@@ -4084,9 +4060,7 @@ export default function Remnawave() {
                 <div className="p-3 rounded-lg bg-dark-800 mb-4">
                   <div className="text-dark-400 text-sm mb-2">{t('remnawave.will_be_deleted')}:</div>
                   <ul className="text-dark-300 text-sm space-y-1">
-                    <li>• {dbInfo.tables.xray_visit_stats.count.toLocaleString()} {t('remnawave.db_visits').toLowerCase()}</li>
-                    <li>• {dbInfo.tables.xray_user_ip_stats.count.toLocaleString()} {t('remnawave.db_ips').toLowerCase()}</li>
-                    <li>• {dbInfo.tables.xray_ip_destination_stats.count.toLocaleString()} {t('remnawave.db_ip_destinations').toLowerCase()}</li>
+                    <li>• {dbInfo.tables.xray_stats.count.toLocaleString()} {t('remnawave.db_visits').toLowerCase()}</li>
                     <li>• {dbInfo.tables.xray_hourly_stats.count.toLocaleString()} {t('remnawave.db_hourly').toLowerCase()}</li>
                   </ul>
                 </div>

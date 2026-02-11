@@ -1147,10 +1147,8 @@ export const remnawaveApi = {
   getDbInfo: () =>
     api.get<{
       tables: {
-        xray_visit_stats: { count: number; first_seen: string | null; last_seen: string | null; size_bytes?: number | null }
+        xray_stats: { count: number; first_seen: string | null; last_seen: string | null; size_bytes?: number | null }
         xray_hourly_stats: { count: number; first_hour: string | null; last_hour: string | null; size_bytes?: number | null }
-        xray_user_ip_stats: { count: number; size_bytes?: number | null }
-        xray_ip_destination_stats: { count: number; size_bytes?: number | null }
         remnawave_user_cache: { count: number; size_bytes?: number | null }
       }
       total_size_bytes?: number | null
@@ -1160,7 +1158,7 @@ export const remnawaveApi = {
   clearStats: () =>
     api.delete<{
       success: boolean
-      deleted: { visit_stats: number; ip_stats: number; ip_destination_stats: number; hourly_stats: number }
+      deleted: { xray_stats: number; hourly_stats: number }
       message: string
     }>('/remnawave/stats/clear'),
   
