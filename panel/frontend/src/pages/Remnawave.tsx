@@ -267,58 +267,62 @@ export default function Remnawave() {
   const [settingsDataLoaded, setSettingsDataLoaded] = useState(false)
   
   // Fetch basic settings (always needed on page load)
+  // Uses Promise.allSettled to handle partial failures gracefully
   const fetchBasicSettings = useCallback(async () => {
-    try {
-      const [settingsRes, nodesRes, statusRes] = await Promise.all([
-        remnawaveApi.getSettings(),
-        remnawaveApi.getNodes(),
-        remnawaveApi.getCollectorStatus()
-      ])
-      setSettings(settingsRes.data)
+    const [settingsRes, nodesRes, statusRes] = await Promise.allSettled([
+      remnawaveApi.getSettings(),
+      remnawaveApi.getNodes(),
+      remnawaveApi.getCollectorStatus()
+    ])
+    
+    if (settingsRes.status === 'fulfilled') {
+      const data = settingsRes.value.data
+      setSettings(data)
       setEditSettings({
-        api_url: settingsRes.data.api_url || '',
+        api_url: data.api_url || '',
         api_token: '',
         cookie_secret: '',
-        enabled: settingsRes.data.enabled,
-        collection_interval: settingsRes.data.collection_interval,
-        visit_stats_retention_days: settingsRes.data.visit_stats_retention_days,
-        ip_stats_retention_days: settingsRes.data.ip_stats_retention_days,
-        ip_destination_retention_days: settingsRes.data.ip_destination_retention_days,
-        hourly_stats_retention_days: settingsRes.data.hourly_stats_retention_days
+        enabled: data.enabled,
+        collection_interval: data.collection_interval,
+        visit_stats_retention_days: data.visit_stats_retention_days,
+        ip_stats_retention_days: data.ip_stats_retention_days,
+        ip_destination_retention_days: data.ip_destination_retention_days,
+        hourly_stats_retention_days: data.hourly_stats_retention_days
       })
-      setNodes(nodesRes.data.nodes)
-      setAllServers(nodesRes.data.all_servers)
-      // Initialize selected nodes from current nodes
-      const nodeIds = new Set(nodesRes.data.all_servers.filter(s => s.is_node).map(s => s.id))
+    }
+    
+    if (nodesRes.status === 'fulfilled') {
+      setNodes(nodesRes.value.data.nodes)
+      setAllServers(nodesRes.value.data.all_servers)
+      const nodeIds = new Set(nodesRes.value.data.all_servers.filter(s => s.is_node).map(s => s.id))
       setSelectedNodeIds(nodeIds)
-      // Update collector status
-      setCollectorStatus(statusRes.data)
-      setNextCollectIn(statusRes.data.next_collect_in)
-    } catch (err) {
-      console.error('Failed to fetch basic settings:', err)
+    }
+    
+    if (statusRes.status === 'fulfilled') {
+      setCollectorStatus(statusRes.value.data)
+      setNextCollectIn(statusRes.value.data.next_collect_in)
     }
   }, [])
   
   // Fetch settings tab data (lazy loaded when settings tab is opened)
   const fetchSettingsTabData = useCallback(async () => {
     if (settingsDataLoaded) return
-    try {
-      const [dbInfoRes, infraRes, excludedRes, cacheStatusRes, ignoredRes] = await Promise.all([
-        remnawaveApi.getDbInfo(),
-        remnawaveApi.getInfrastructureAddresses(),
-        remnawaveApi.getExcludedDestinations(),
-        remnawaveApi.getUserCacheStatus(),
-        remnawaveApi.getIgnoredUsers()
-      ])
-      setDbInfo(dbInfoRes.data)
-      setInfrastructureAddresses(infraRes.data.addresses)
-      setExcludedDestinations(excludedRes.data.destinations)
-      setUserCacheStatus(cacheStatusRes.data)
-      setIgnoredUsers(ignoredRes.data.ignored_users)
-      setSettingsDataLoaded(true)
-    } catch (err) {
-      console.error('Failed to fetch settings tab data:', err)
-    }
+    
+    const [dbInfoRes, infraRes, excludedRes, cacheStatusRes, ignoredRes] = await Promise.allSettled([
+      remnawaveApi.getDbInfo(),
+      remnawaveApi.getInfrastructureAddresses(),
+      remnawaveApi.getExcludedDestinations(),
+      remnawaveApi.getUserCacheStatus(),
+      remnawaveApi.getIgnoredUsers()
+    ])
+    
+    if (dbInfoRes.status === 'fulfilled') setDbInfo(dbInfoRes.value.data)
+    if (infraRes.status === 'fulfilled') setInfrastructureAddresses(infraRes.value.data.addresses)
+    if (excludedRes.status === 'fulfilled') setExcludedDestinations(excludedRes.value.data.destinations)
+    if (cacheStatusRes.status === 'fulfilled') setUserCacheStatus(cacheStatusRes.value.data)
+    if (ignoredRes.status === 'fulfilled') setIgnoredUsers(ignoredRes.value.data.ignored_users)
+    
+    setSettingsDataLoaded(true)
   }, [settingsDataLoaded])
   
   // Legacy fetchSettings for refresh button compatibility  
@@ -330,59 +334,77 @@ export default function Remnawave() {
     }
   }, [fetchBasicSettings, fetchSettingsTabData, activeTab])
   
-  // Fetch stats
+  // Fetch stats using Promise.allSettled to handle partial failures
   const fetchStats = useCallback(async () => {
-    try {
-      const [summaryRes, destRes, usersRes] = await Promise.all([
-        remnawaveApi.getSummary(period),
-        remnawaveApi.getTopDestinations({ period, limit: 100 }),
-        remnawaveApi.getTopUsers({ period, limit: USERS_PAGE_SIZE, offset: 0, search: userSearch || undefined })
-      ])
-      setSummary(summaryRes.data)
-      setTopDestinations(destRes.data.destinations)
-      setTopUsers(usersRes.data.users)
-      setTotalUsers(usersRes.data.total)
-      setUsersOffset(usersRes.data.users.length)
-      setError(null)
-    } catch (err) {
-      console.error('Failed to fetch stats:', err)
-      setError(t('remnawave.failed_fetch'))
+    const [summaryRes, destRes, usersRes] = await Promise.allSettled([
+      remnawaveApi.getSummary(period),
+      remnawaveApi.getTopDestinations({ period, limit: 100 }),
+      remnawaveApi.getTopUsers({ period, limit: USERS_PAGE_SIZE, offset: 0, search: userSearch || undefined })
+    ])
+    
+    let hasError = false
+    
+    if (summaryRes.status === 'fulfilled') {
+      setSummary(summaryRes.value.data)
+    } else {
+      hasError = true
     }
+    
+    if (destRes.status === 'fulfilled') {
+      setTopDestinations(destRes.value.data.destinations)
+    } else {
+      hasError = true
+    }
+    
+    if (usersRes.status === 'fulfilled') {
+      setTopUsers(usersRes.value.data.users)
+      setTotalUsers(usersRes.value.data.total)
+      setUsersOffset(usersRes.value.data.users.length)
+    } else {
+      hasError = true
+    }
+    
+    setError(hasError ? t('remnawave.failed_fetch') : null)
+    return !hasError
   }, [period, t, userSearch])
   
   // Fetch analyzer settings and anomalies
   const fetchAnalyzerData = useCallback(async () => {
     setIsLoadingAnomalies(true)
-    try {
-      const [settingsRes, statusRes, anomaliesRes] = await Promise.all([
-        remnawaveApi.getAnalyzerSettings(),
-        remnawaveApi.getAnalyzerStatus(),
-        remnawaveApi.getAnomalies({ 
-          limit: 50, 
-          offset: 0,
-          resolved: anomalyFilter === 'resolved' ? true : anomalyFilter === 'active' ? false : undefined,
-          anomaly_type: anomalyTypeFilter || undefined
-        })
-      ])
-      setAnalyzerSettings(settingsRes.data)
-      setEditAnalyzerSettings({
-        enabled: settingsRes.data.enabled,
-        check_interval_minutes: settingsRes.data.check_interval_minutes,
-        traffic_limit_gb: settingsRes.data.traffic_limit_gb,
-        ip_limit_multiplier: settingsRes.data.ip_limit_multiplier,
-        check_hwid_anomalies: settingsRes.data.check_hwid_anomalies,
-        telegram_bot_token: '',
-        telegram_chat_id: settingsRes.data.telegram_chat_id || ''
+    
+    const [settingsRes, statusRes, anomaliesRes] = await Promise.allSettled([
+      remnawaveApi.getAnalyzerSettings(),
+      remnawaveApi.getAnalyzerStatus(),
+      remnawaveApi.getAnomalies({ 
+        limit: 50, 
+        offset: 0,
+        resolved: anomalyFilter === 'resolved' ? true : anomalyFilter === 'active' ? false : undefined,
+        anomaly_type: anomalyTypeFilter || undefined
       })
-      setAnalyzerStatus(statusRes.data)
-      setAnomalies(anomaliesRes.data.anomalies)
-      setAnomaliesTotal(anomaliesRes.data.total)
-      setAnomaliesOffset(anomaliesRes.data.anomalies.length)
-    } catch (err) {
-      console.error('Failed to fetch analyzer data:', err)
-    } finally {
-      setIsLoadingAnomalies(false)
+    ])
+    
+    if (settingsRes.status === 'fulfilled') {
+      setAnalyzerSettings(settingsRes.value.data)
+      setEditAnalyzerSettings({
+        enabled: settingsRes.value.data.enabled,
+        check_interval_minutes: settingsRes.value.data.check_interval_minutes,
+        traffic_limit_gb: settingsRes.value.data.traffic_limit_gb,
+        ip_limit_multiplier: settingsRes.value.data.ip_limit_multiplier,
+        check_hwid_anomalies: settingsRes.value.data.check_hwid_anomalies,
+        telegram_bot_token: '',
+        telegram_chat_id: settingsRes.value.data.telegram_chat_id || ''
+      })
     }
+    
+    if (statusRes.status === 'fulfilled') setAnalyzerStatus(statusRes.value.data)
+    
+    if (anomaliesRes.status === 'fulfilled') {
+      setAnomalies(anomaliesRes.value.data.anomalies)
+      setAnomaliesTotal(anomaliesRes.value.data.total)
+      setAnomaliesOffset(anomaliesRes.value.data.anomalies.length)
+    }
+    
+    setIsLoadingAnomalies(false)
   }, [anomalyFilter, anomalyTypeFilter])
   
   // Save analyzer settings
@@ -532,23 +554,62 @@ export default function Remnawave() {
     }, 300)
   }, [searchUsers])
   
-  // Initial load - only basic settings (fast)
+  // Initial load - basic settings with retry on failure
   useEffect(() => {
+    let retryTimer: ReturnType<typeof setTimeout> | null = null
     const loadData = async () => {
       setIsLoading(true)
       await fetchBasicSettings()
       setIsLoading(false)
+      
+      // Retry once after 2s if settings failed to load (settings will be null)
+      if (!settings) {
+        retryTimer = setTimeout(async () => {
+          await fetchBasicSettings()
+        }, 2000)
+      }
     }
     loadData()
-  }, [fetchBasicSettings])
+    return () => { if (retryTimer) clearTimeout(retryTimer) }
+  }, [fetchBasicSettings]) // eslint-disable-line react-hooks/exhaustive-deps
   
   // Lazy load stats when needed (overview, users, destinations tabs)
+  // Auto-retries up to 2 times with 2s delay if initial load has errors
+  const statsRetryRef = useRef(0)
+  const statsRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
     const statsNeeded = activeTab === 'overview' || activeTab === 'users' || activeTab === 'destinations'
-    if (statsNeeded && !isLoading) {
-      if (!statsLoaded) {
-        fetchStats().then(() => setStatsLoaded(true))
+    if (statsNeeded && !isLoading && !statsLoaded) {
+      const attemptLoad = async () => {
+        const success = await fetchStats()
+        if (success) {
+          setStatsLoaded(true)
+          statsRetryRef.current = 0
+        } else if (statsRetryRef.current < 2) {
+          statsRetryRef.current++
+          statsRetryTimerRef.current = setTimeout(async () => {
+            const retrySuccess = await fetchStats()
+            if (retrySuccess || statsRetryRef.current >= 2) {
+              setStatsLoaded(true)
+              statsRetryRef.current = 0
+            } else {
+              statsRetryRef.current++
+              statsRetryTimerRef.current = setTimeout(async () => {
+                await fetchStats()
+                setStatsLoaded(true)
+                statsRetryRef.current = 0
+              }, 3000)
+            }
+          }, 2000)
+        } else {
+          setStatsLoaded(true)
+          statsRetryRef.current = 0
+        }
       }
+      attemptLoad()
+    }
+    return () => {
+      if (statsRetryTimerRef.current) clearTimeout(statsRetryTimerRef.current)
     }
   }, [activeTab, isLoading, statsLoaded, fetchStats])
   

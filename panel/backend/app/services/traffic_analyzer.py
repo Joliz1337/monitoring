@@ -464,10 +464,10 @@ class TrafficAnalyzer:
         device_limit = user.hwid_device_limit or 2
         ip_limit = int(device_limit * settings.ip_limit_multiplier)
         
-        # Count unique non-infrastructure IPs in last 24h
+        # Count unique non-infrastructure IPs in last 24h (source_ip_id = normalized)
         async with async_session() as db:
             result = await db.execute(
-                select(func.count(func.distinct(XrayUserIpStats.source_ip)))
+                select(func.count(func.distinct(XrayUserIpStats.source_ip_id)))
                 .where(
                     and_(
                         XrayUserIpStats.email == user.email,

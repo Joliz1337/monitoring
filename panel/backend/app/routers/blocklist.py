@@ -1,11 +1,11 @@
-"""Blocklist management router for IP/CIDR blocking"""
+"""Blocklist management router for IP/CIDR blocking (incoming + outgoing)"""
 
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import select, and_, delete
+from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import verify_auth
@@ -20,17 +20,20 @@ router = APIRouter(prefix="/blocklist", tags=["blocklist"])
 class AddRuleRequest(BaseModel):
     ip_cidr: str = Field(..., description="IP address or CIDR notation")
     is_permanent: bool = Field(True, description="Permanent (True) or temporary (False)")
+    direction: str = Field("in", pattern="^(in|out)$", description="Traffic direction: in or out")
     comment: Optional[str] = Field(None, max_length=200)
 
 
 class BulkAddRequest(BaseModel):
     ips: list[str] = Field(..., description="List of IP addresses or CIDR notations")
     is_permanent: bool = Field(True)
+    direction: str = Field("in", pattern="^(in|out)$")
 
 
 class AddSourceRequest(BaseModel):
     name: str = Field(..., max_length=100)
     url: str = Field(..., max_length=500)
+    direction: str = Field("in", pattern="^(in|out)$")
 
 
 class UpdateSourceRequest(BaseModel):
@@ -49,6 +52,7 @@ class RuleResponse(BaseModel):
     ip_cidr: str
     server_id: Optional[int]
     is_permanent: bool
+    direction: str
     comment: Optional[str]
     source: str
     created_at: datetime
@@ -60,6 +64,7 @@ class SourceResponse(BaseModel):
     url: str
     enabled: bool
     is_default: bool
+    direction: str
     last_updated: Optional[datetime]
     ip_count: int
     error_message: Optional[str]
@@ -69,22 +74,30 @@ class SourceResponse(BaseModel):
 
 @router.get("/global")
 async def get_global_rules(
+    direction: str = Query("in", pattern="^(in|out)$"),
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    """Get all global blocklist rules"""
+    """Get all global blocklist rules filtered by direction"""
     result = await db.execute(
-        select(BlocklistRule).where(BlocklistRule.server_id.is_(None)).order_by(BlocklistRule.created_at.desc())
+        select(BlocklistRule).where(
+            and_(
+                BlocklistRule.server_id.is_(None),
+                BlocklistRule.direction == direction
+            )
+        ).order_by(BlocklistRule.created_at.desc())
     )
     rules = result.scalars().all()
     
     return {
         "count": len(rules),
+        "direction": direction,
         "rules": [
             {
                 "id": r.id,
                 "ip_cidr": r.ip_cidr,
                 "is_permanent": r.is_permanent,
+                "direction": r.direction or "in",
                 "comment": r.comment,
                 "source": r.source,
                 "created_at": r.created_at.isoformat() if r.created_at else None
@@ -103,18 +116,17 @@ async def add_global_rule(
     """Add global blocklist rule (applies to all servers)"""
     manager = get_blocklist_manager()
     
-    # Validate IP
     if not manager._validate_ip_cidr(request.ip_cidr):
         raise HTTPException(status_code=400, detail="Invalid IP/CIDR format")
     
     normalized = manager._normalize_ip(request.ip_cidr)
     
-    # Check for duplicate
     result = await db.execute(
         select(BlocklistRule).where(
             and_(
                 BlocklistRule.ip_cidr == normalized,
-                BlocklistRule.server_id.is_(None)
+                BlocklistRule.server_id.is_(None),
+                BlocklistRule.direction == request.direction
             )
         )
     )
@@ -125,6 +137,7 @@ async def add_global_rule(
         ip_cidr=normalized,
         server_id=None,
         is_permanent=request.is_permanent,
+        direction=request.direction,
         comment=request.comment,
         source="manual"
     )
@@ -138,6 +151,7 @@ async def add_global_rule(
             "id": rule.id,
             "ip_cidr": rule.ip_cidr,
             "is_permanent": rule.is_permanent,
+            "direction": rule.direction,
             "comment": rule.comment
         }
     }
@@ -163,12 +177,12 @@ async def add_global_rules_bulk(
         
         normalized = manager._normalize_ip(ip)
         
-        # Check duplicate
         result = await db.execute(
             select(BlocklistRule).where(
                 and_(
                     BlocklistRule.ip_cidr == normalized,
-                    BlocklistRule.server_id.is_(None)
+                    BlocklistRule.server_id.is_(None),
+                    BlocklistRule.direction == request.direction
                 )
             )
         )
@@ -180,6 +194,7 @@ async def add_global_rules_bulk(
             ip_cidr=normalized,
             server_id=None,
             is_permanent=request.is_permanent,
+            direction=request.direction,
             source="manual"
         )
         db.add(rule)
@@ -191,7 +206,8 @@ async def add_global_rules_bulk(
         "success": True,
         "added": added,
         "skipped": skipped,
-        "invalid": invalid[:10]
+        "invalid": invalid[:10],
+        "direction": request.direction
     }
 
 
@@ -226,29 +242,38 @@ async def delete_global_rule(
 @router.get("/server/{server_id}")
 async def get_server_rules(
     server_id: int,
+    direction: str = Query("in", pattern="^(in|out)$"),
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
     """Get blocklist rules for specific server"""
-    # Verify server exists
     result = await db.execute(select(Server).where(Server.id == server_id))
     if not result.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="Server not found")
     
-    # Get server-specific rules
     result = await db.execute(
-        select(BlocklistRule).where(BlocklistRule.server_id == server_id).order_by(BlocklistRule.created_at.desc())
+        select(BlocklistRule).where(
+            and_(
+                BlocklistRule.server_id == server_id,
+                BlocklistRule.direction == direction
+            )
+        ).order_by(BlocklistRule.created_at.desc())
     )
     rules = result.scalars().all()
     
-    # Also get global rules count
     global_result = await db.execute(
-        select(BlocklistRule).where(BlocklistRule.server_id.is_(None))
+        select(BlocklistRule).where(
+            and_(
+                BlocklistRule.server_id.is_(None),
+                BlocklistRule.direction == direction
+            )
+        )
     )
     global_count = len(global_result.scalars().all())
     
     return {
         "server_id": server_id,
+        "direction": direction,
         "count": len(rules),
         "global_count": global_count,
         "rules": [
@@ -256,6 +281,7 @@ async def get_server_rules(
                 "id": r.id,
                 "ip_cidr": r.ip_cidr,
                 "is_permanent": r.is_permanent,
+                "direction": r.direction or "in",
                 "comment": r.comment,
                 "source": r.source,
                 "created_at": r.created_at.isoformat() if r.created_at else None
@@ -273,7 +299,6 @@ async def add_server_rule(
     _: dict = Depends(verify_auth)
 ):
     """Add blocklist rule for specific server"""
-    # Verify server exists
     result = await db.execute(select(Server).where(Server.id == server_id))
     if not result.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="Server not found")
@@ -285,12 +310,12 @@ async def add_server_rule(
     
     normalized = manager._normalize_ip(request.ip_cidr)
     
-    # Check for duplicate
     result = await db.execute(
         select(BlocklistRule).where(
             and_(
                 BlocklistRule.ip_cidr == normalized,
-                BlocklistRule.server_id == server_id
+                BlocklistRule.server_id == server_id,
+                BlocklistRule.direction == request.direction
             )
         )
     )
@@ -301,6 +326,7 @@ async def add_server_rule(
         ip_cidr=normalized,
         server_id=server_id,
         is_permanent=request.is_permanent,
+        direction=request.direction,
         comment=request.comment,
         source="manual"
     )
@@ -315,6 +341,7 @@ async def add_server_rule(
             "ip_cidr": rule.ip_cidr,
             "server_id": server_id,
             "is_permanent": rule.is_permanent,
+            "direction": rule.direction,
             "comment": rule.comment
         }
     }
@@ -368,12 +395,10 @@ async def get_server_blocklist_status(
                 f"{server.url}/api/ipset/status",
                 headers={"X-API-Key": server.api_key}
             )
-            
             if response.status_code == 200:
                 return response.json()
             else:
                 raise HTTPException(status_code=response.status_code, detail="Failed to get status from node")
-                
     except httpx.RequestError as e:
         raise HTTPException(status_code=503, detail=f"Node unreachable: {str(e)}")
 
@@ -382,13 +407,16 @@ async def get_server_blocklist_status(
 
 @router.get("/sources")
 async def get_sources(
+    direction: Optional[str] = Query(None, pattern="^(in|out)$"),
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    """Get all blocklist sources"""
-    result = await db.execute(
-        select(BlocklistSource).order_by(BlocklistSource.is_default.desc(), BlocklistSource.name)
-    )
+    """Get all blocklist sources, optionally filtered by direction"""
+    query = select(BlocklistSource).order_by(BlocklistSource.is_default.desc(), BlocklistSource.name)
+    if direction:
+        query = query.where(BlocklistSource.direction == direction)
+    
+    result = await db.execute(query)
     sources = result.scalars().all()
     
     return {
@@ -400,6 +428,7 @@ async def get_sources(
                 "url": s.url,
                 "enabled": s.enabled,
                 "is_default": s.is_default,
+                "direction": s.direction or "in",
                 "last_updated": s.last_updated.isoformat() if s.last_updated else None,
                 "ip_count": s.ip_count,
                 "error_message": s.error_message
@@ -416,7 +445,6 @@ async def add_source(
     _: dict = Depends(verify_auth)
 ):
     """Add new blocklist source"""
-    # Check duplicate URL
     result = await db.execute(
         select(BlocklistSource).where(BlocklistSource.url == request.url)
     )
@@ -427,7 +455,8 @@ async def add_source(
         name=request.name,
         url=request.url,
         enabled=True,
-        is_default=False
+        is_default=False,
+        direction=request.direction,
     )
     db.add(source)
     await db.commit()
@@ -439,7 +468,8 @@ async def add_source(
             "id": source.id,
             "name": source.name,
             "url": source.url,
-            "enabled": source.enabled
+            "enabled": source.enabled,
+            "direction": source.direction
         }
     }
 
@@ -472,7 +502,8 @@ async def update_source(
         "source": {
             "id": source.id,
             "name": source.name,
-            "enabled": source.enabled
+            "enabled": source.enabled,
+            "direction": source.direction or "in"
         }
     }
 
@@ -547,7 +578,6 @@ async def get_blocklist_settings(
     """Get blocklist settings"""
     manager = get_blocklist_manager()
     settings = await manager.get_blocklist_settings(db)
-    
     return {"settings": settings}
 
 
@@ -608,10 +638,9 @@ async def update_blocklist_settings(
 async def sync_all_nodes(
     _: dict = Depends(verify_auth)
 ):
-    """Sync blocklists to all active nodes"""
+    """Sync blocklists to all active nodes (both directions)"""
     manager = get_blocklist_manager()
     results = await manager.sync_all_nodes()
-    
     return {
         "success": True,
         "results": results
@@ -624,7 +653,7 @@ async def sync_single_node(
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    """Sync blocklist to single node"""
+    """Sync blocklist to single node (both directions)"""
     result = await db.execute(select(Server).where(Server.id == server_id))
     server = result.scalar_one_or_none()
     
@@ -632,17 +661,21 @@ async def sync_single_node(
         raise HTTPException(status_code=404, detail="Server not found")
     
     manager = get_blocklist_manager()
-    ips = await manager.get_combined_ips_for_server(server_id, db)
-    success, message, data = await manager.sync_to_node(server, ips)
     
-    if not success:
-        raise HTTPException(status_code=400, detail=message)
+    sync_result = {"server_id": server_id, "success": True}
     
-    return {
-        "success": True,
-        "message": message,
-        "server_id": server_id,
-        "ip_count": len(ips),
-        "added": data.get("added", 0),
-        "removed": data.get("removed", 0)
-    }
+    for direction in ("in", "out"):
+        ips = await manager.get_combined_ips_for_server(server_id, db, direction)
+        success, message, data = await manager.sync_to_node(server, ips, direction=direction)
+        
+        sync_result[direction] = {
+            "success": success,
+            "message": message,
+            "ip_count": len(ips),
+            "added": data.get("added", 0),
+            "removed": data.get("removed", 0),
+        }
+        if not success:
+            sync_result["success"] = False
+    
+    return sync_result

@@ -7,6 +7,7 @@ Optimized version with cumulative counters:
 
 import asyncio
 import os
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Any
@@ -22,7 +23,7 @@ from app.models import (
     Server, RemnawaveSettings, RemnawaveNode, RemnawaveInfrastructureAddress,
     RemnawaveExcludedDestination, XrayVisitStats, XrayHourlyStats, RemnawaveUserCache,
     XrayUserIpStats, XrayIpDestinationStats, RemnawaveExport, TrafficAnalyzerSettings,
-    TrafficAnomalyLog, XrayDestination
+    TrafficAnomalyLog, XrayDestination, XraySourceIp
 )
 from app.services.remnawave_api import get_remnawave_api
 from app.services.xray_stats_collector import get_xray_stats_collector, resolve_infrastructure_address
@@ -498,16 +499,15 @@ async def rescan_existing_ip_stats(
 ):
     """Rescan all existing IP stats and update is_infrastructure flag.
     
-    This should be called after adding/removing infrastructure addresses
-    to update historical data.
+    Uses JOIN with xray_source_ips for bulk UPDATE.
     """
     import json
     from urllib.parse import urlparse
+    from sqlalchemy import update, text
     
     # Build set of all infrastructure IPs
     infrastructure_ips = set()
     
-    # 1. Get IPs from server URLs (node IPs)
     server_result = await db.execute(select(Server.url))
     for row in server_result.fetchall():
         url = row[0]
@@ -519,14 +519,11 @@ async def rescan_existing_ip_stats(
             except Exception:
                 pass
     
-    # 2. Get IPs from infrastructure addresses (with DNS resolution)
     infra_result = await db.execute(select(RemnawaveInfrastructureAddress))
     addresses = infra_result.scalars().all()
     
     for addr in addresses:
-        # Add the address itself (might be IP)
         infrastructure_ips.add(addr.address)
-        # Add resolved IPs
         if addr.resolved_ips:
             try:
                 resolved = json.loads(addr.resolved_ips)
@@ -534,39 +531,46 @@ async def rescan_existing_ip_stats(
             except json.JSONDecodeError:
                 pass
     
-    # 3. Update all XrayUserIpStats records
-    # Get all unique source_ips first
-    ip_result = await db.execute(
-        select(XrayUserIpStats.source_ip).distinct()
+    infra_list = list(infrastructure_ips)
+    
+    # Get source_ip_ids that match infrastructure IPs
+    infra_ip_ids_result = await db.execute(
+        select(XraySourceIp.id).where(XraySourceIp.ip.in_(infra_list))
     )
-    all_ips = [row[0] for row in ip_result.fetchall()]
+    infra_ip_ids = [row[0] for row in infra_ip_ids_result.fetchall()]
     
     updated_to_infra = 0
     updated_to_client = 0
     
-    for source_ip in all_ips:
-        is_infra = source_ip in infrastructure_ips
-        
-        # Update all records with this source_ip
-        result = await db.execute(
-            select(XrayUserIpStats).where(XrayUserIpStats.source_ip == source_ip)
+    if infra_ip_ids:
+        result_infra = await db.execute(
+            update(XrayUserIpStats)
+            .where(XrayUserIpStats.source_ip_id.in_(infra_ip_ids))
+            .where(XrayUserIpStats.is_infrastructure == False)
+            .values(is_infrastructure=True)
         )
-        records = result.scalars().all()
-        
-        for record in records:
-            if record.is_infrastructure != is_infra:
-                if is_infra:
-                    updated_to_infra += 1
-                else:
-                    updated_to_client += 1
-                record.is_infrastructure = is_infra
+        updated_to_infra = result_infra.rowcount
+    
+    # Mark non-matching as client
+    non_infra_result = await db.execute(
+        select(XraySourceIp.id).where(XraySourceIp.ip.notin_(infra_list)) if infra_list else select(XraySourceIp.id)
+    )
+    non_infra_ip_ids = [row[0] for row in non_infra_result.fetchall()]
+    
+    if non_infra_ip_ids:
+        result_client = await db.execute(
+            update(XrayUserIpStats)
+            .where(XrayUserIpStats.source_ip_id.in_(non_infra_ip_ids))
+            .where(XrayUserIpStats.is_infrastructure == True)
+            .values(is_infrastructure=False)
+        )
+        updated_to_client = result_client.rowcount
     
     await db.commit()
     
     return {
         "success": True,
         "infrastructure_ips_count": len(infrastructure_ips),
-        "total_unique_ips_scanned": len(all_ips),
         "updated_to_infrastructure": updated_to_infra,
         "updated_to_client": updated_to_client
     }
@@ -618,7 +622,7 @@ async def add_excluded_destination(
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    """Add destination to exclusion list"""
+    """Add destination to exclusion list and delete all existing data for that host"""
     destination = request.destination.strip()
     
     # Check for duplicate
@@ -635,8 +639,40 @@ async def add_excluded_destination(
         description=request.description
     )
     db.add(new_dest)
+    
+    # Extract host (strip port) for matching all related destinations
+    host = re.sub(r':\d+$', '', destination)
+    
+    # Find all destination_ids matching this host (any port)
+    dest_result = await db.execute(
+        select(XrayDestination.id).where(XrayDestination.host == host)
+    )
+    dest_ids = [row[0] for row in dest_result.fetchall()]
+    
+    deleted_count = 0
+    if dest_ids:
+        # Delete visit stats for these destinations
+        r1 = await db.execute(
+            delete(XrayVisitStats).where(XrayVisitStats.destination_id.in_(dest_ids))
+        )
+        deleted_count += r1.rowcount
+        
+        # Delete IP-destination stats
+        r2 = await db.execute(
+            delete(XrayIpDestinationStats).where(XrayIpDestinationStats.destination_id.in_(dest_ids))
+        )
+        deleted_count += r2.rowcount
+        
+        # Delete the destination entries themselves
+        await db.execute(
+            delete(XrayDestination).where(XrayDestination.id.in_(dest_ids))
+        )
+    
     await db.commit()
     await db.refresh(new_dest)
+    
+    # Invalidate stats cache so changes reflect immediately
+    _stats_cache.clear()
     
     return {
         "success": True,
@@ -645,7 +681,8 @@ async def add_excluded_destination(
             "destination": new_dest.destination,
             "description": new_dest.description,
             "created_at": new_dest.created_at.isoformat() if new_dest.created_at else None
-        }
+        },
+        "deleted_records": deleted_count
     }
 
 
@@ -973,16 +1010,16 @@ async def get_top_destinations(
     if server_id:
         conditions.append(XrayVisitStats.server_id == server_id)
     
-    # JOIN with XrayDestination to get destination string
+    # JOIN with XrayDestination, aggregate by host (pre-computed, no regexp)
     query = select(
-        XrayDestination.destination,
+        XrayDestination.host.label('destination'),
         sql_func.sum(XrayVisitStats.visit_count).label('total')
     ).join(XrayDestination, XrayVisitStats.destination_id == XrayDestination.id)
     
     if conditions:
         query = query.where(and_(*conditions))
     
-    query = query.group_by(XrayDestination.destination) \
+    query = query.group_by(XrayDestination.host) \
                  .order_by(sql_func.sum(XrayVisitStats.visit_count).desc()) \
                  .limit(limit)
     
@@ -1065,12 +1102,12 @@ async def get_top_users(
     total_result = await db.execute(count_query)
     total_count = total_result.scalar() or 0
     
-    # Get users with stats (unique_sites now via destination_id)
+    # Get users with stats (unique_sites counted by host, no regexp)
     query = select(
         XrayVisitStats.email,
         sql_func.sum(XrayVisitStats.visit_count).label('total'),
-        sql_func.count(sql_func.distinct(XrayVisitStats.destination_id)).label('unique_sites')
-    )
+        sql_func.count(sql_func.distinct(XrayDestination.host)).label('unique_sites')
+    ).join(XrayDestination, XrayVisitStats.destination_id == XrayDestination.id)
     
     if conditions:
         query = query.where(and_(*conditions))
@@ -1106,15 +1143,14 @@ async def get_top_users(
         if server_id:
             ip_conditions.append(XrayUserIpStats.server_id == server_id)
         
-        # Combined query with conditional aggregation - single DB round-trip
         ip_result = await db.execute(
             select(
                 XrayUserIpStats.email,
                 sql_func.count(sql_func.distinct(
-                    case((XrayUserIpStats.is_infrastructure == False, XrayUserIpStats.source_ip), else_=None)
+                    case((XrayUserIpStats.is_infrastructure == False, XrayUserIpStats.source_ip_id), else_=None)
                 )).label('client_ips'),
                 sql_func.count(sql_func.distinct(
-                    case((XrayUserIpStats.is_infrastructure == True, XrayUserIpStats.source_ip), else_=None)
+                    case((XrayUserIpStats.is_infrastructure == True, XrayUserIpStats.source_ip_id), else_=None)
                 )).label('infra_ips')
             )
             .where(and_(*ip_conditions))
@@ -1178,17 +1214,18 @@ async def get_user_stats(
     )
     total_visits = total_result.scalar() or 0
     
-    # Top destinations for this user (JOIN with XrayDestination)
+    # Top destinations for this user (aggregated by host, across servers)
     dest_result = await db.execute(
         select(
-            XrayDestination.destination,
-            XrayVisitStats.visit_count,
-            XrayVisitStats.first_seen,
-            XrayVisitStats.last_seen
+            XrayDestination.host.label('destination'),
+            sql_func.sum(XrayVisitStats.visit_count).label('visit_count'),
+            sql_func.min(XrayVisitStats.first_seen).label('first_seen'),
+            sql_func.max(XrayVisitStats.last_seen).label('last_seen')
         )
         .join(XrayDestination, XrayVisitStats.destination_id == XrayDestination.id)
         .where(and_(*conditions))
-        .order_by(XrayVisitStats.visit_count.desc())
+        .group_by(XrayDestination.host)
+        .order_by(sql_func.sum(XrayVisitStats.visit_count).desc())
         .limit(limit)
     )
     
@@ -1196,22 +1233,22 @@ async def get_user_stats(
     
     # Get unique client IPs count (excluding infrastructure)
     unique_client_ips_result = await db.execute(
-        select(sql_func.count(sql_func.distinct(XrayUserIpStats.source_ip)))
+        select(sql_func.count(sql_func.distinct(XrayUserIpStats.source_ip_id)))
         .where(and_(*ip_conditions, XrayUserIpStats.is_infrastructure == False))
     )
     unique_client_ips = unique_client_ips_result.scalar() or 0
     
-    # Get total unique IPs count (for backwards compatibility)
+    # Get total unique IPs count
     unique_ips_result = await db.execute(
-        select(sql_func.count(sql_func.distinct(XrayUserIpStats.source_ip)))
+        select(sql_func.count(sql_func.distinct(XrayUserIpStats.source_ip_id)))
         .where(and_(*ip_conditions))
     )
     unique_ips = unique_ips_result.scalar() or 0
     
-    # Get IP details with server info and infrastructure flag
+    # Get IP details with server info and infrastructure flag (JOIN with XraySourceIp)
     ip_result = await db.execute(
         select(
-            XrayUserIpStats.source_ip,
+            XraySourceIp.ip.label('source_ip'),
             XrayUserIpStats.server_id,
             XrayUserIpStats.connection_count,
             XrayUserIpStats.is_infrastructure,
@@ -1219,6 +1256,7 @@ async def get_user_stats(
             XrayUserIpStats.last_seen,
             Server.name.label('server_name')
         )
+        .join(XraySourceIp, XrayUserIpStats.source_ip_id == XraySourceIp.id)
         .join(Server, XrayUserIpStats.server_id == Server.id)
         .where(and_(*ip_conditions))
         .order_by(XrayUserIpStats.connection_count.desc())
@@ -1299,40 +1337,50 @@ async def delete_user_ip(
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    """Delete a specific IP address from user's statistics.
-    
-    Removes the IP from XrayUserIpStats and related XrayIpDestinationStats records.
-    """
+    """Delete a specific IP address from user's statistics."""
     from urllib.parse import unquote
     
-    # URL decode the source_ip (it may contain special characters)
     source_ip = unquote(source_ip)
     
-    # Delete from XrayUserIpStats
+    # Find source_ip_id
+    ip_lookup = await db.execute(
+        select(XraySourceIp.id).where(XraySourceIp.ip == source_ip)
+    )
+    ip_row = ip_lookup.scalar_one_or_none()
+    
+    if not ip_row:
+        return {
+            "success": True,
+            "email": email,
+            "source_ip": source_ip,
+            "deleted_ip_records": 0,
+            "deleted_destination_records": 0,
+            "message": "IP not found"
+        }
+    
+    source_ip_id = ip_row
+    
     ip_result = await db.execute(
         delete(XrayUserIpStats).where(
             and_(
                 XrayUserIpStats.email == email,
-                XrayUserIpStats.source_ip == source_ip
+                XrayUserIpStats.source_ip_id == source_ip_id
             )
         )
     )
     deleted_ip_count = ip_result.rowcount
     
-    # Delete related records from XrayIpDestinationStats
     dest_result = await db.execute(
         delete(XrayIpDestinationStats).where(
             and_(
                 XrayIpDestinationStats.email == email,
-                XrayIpDestinationStats.source_ip == source_ip
+                XrayIpDestinationStats.source_ip_id == source_ip_id
             )
         )
     )
     deleted_dest_count = dest_result.rowcount
     
     await db.commit()
-    
-    # Invalidate cache
     _invalidate_cache()
     
     return {
@@ -1351,25 +1399,18 @@ async def delete_user_all_ips(
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    """Delete all IP addresses from user's statistics.
-    
-    Removes all IPs from XrayUserIpStats and related XrayIpDestinationStats records.
-    """
-    # Delete all from XrayUserIpStats for this user
+    """Delete all IP addresses from user's statistics."""
     ip_result = await db.execute(
         delete(XrayUserIpStats).where(XrayUserIpStats.email == email)
     )
     deleted_ip_count = ip_result.rowcount
     
-    # Delete all related records from XrayIpDestinationStats
     dest_result = await db.execute(
         delete(XrayIpDestinationStats).where(XrayIpDestinationStats.email == email)
     )
     deleted_dest_count = dest_result.rowcount
     
     await db.commit()
-    
-    # Invalidate cache
     _invalidate_cache()
     
     return {
@@ -1389,14 +1430,15 @@ async def get_destination_users(
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    """Get users who visited a specific destination"""
-    # First find the destination_id
-    dest_result = await db.execute(
-        select(XrayDestination.id).where(XrayDestination.destination == destination)
-    )
-    dest_row = dest_result.scalar_one_or_none()
+    """Get users who visited a specific destination (matches by host, ignoring port)"""
+    host = re.sub(r':\d+$', '', destination)
     
-    if not dest_row:
+    dest_result = await db.execute(
+        select(XrayDestination.id).where(XrayDestination.host == host)
+    )
+    dest_ids = [row[0] for row in dest_result.fetchall()]
+    
+    if not dest_ids:
         return {
             "destination": destination,
             "period": period,
@@ -1404,8 +1446,7 @@ async def get_destination_users(
             "users": []
         }
     
-    dest_id = dest_row
-    conditions = [XrayVisitStats.destination_id == dest_id]
+    conditions = [XrayVisitStats.destination_id.in_(dest_ids)]
     
     if period != "all":
         start_time = _get_time_filter(period)
@@ -1418,16 +1459,17 @@ async def get_destination_users(
     )
     total_visits = total_result.scalar() or 0
     
-    # Get users with their visit counts
+    # Get users with their visit counts (aggregated across destination ports and servers)
     result = await db.execute(
         select(
             XrayVisitStats.email,
-            XrayVisitStats.visit_count,
-            XrayVisitStats.first_seen,
-            XrayVisitStats.last_seen
+            sql_func.sum(XrayVisitStats.visit_count).label('visit_count'),
+            sql_func.min(XrayVisitStats.first_seen).label('first_seen'),
+            sql_func.max(XrayVisitStats.last_seen).label('last_seen')
         )
         .where(and_(*conditions))
-        .order_by(XrayVisitStats.visit_count.desc())
+        .group_by(XrayVisitStats.email)
+        .order_by(sql_func.sum(XrayVisitStats.visit_count).desc())
         .limit(limit)
     )
     
@@ -1447,7 +1489,7 @@ async def get_destination_users(
             }
     
     return {
-        "destination": destination,
+        "destination": host,
         "period": period,
         "total_visits": total_visits,
         "users": [
@@ -1475,8 +1517,23 @@ async def get_ip_destinations(
     _: dict = Depends(verify_auth)
 ):
     """Get destinations visited from a specific source IP by user"""
+    # Find source_ip_id
+    ip_lookup = await db.execute(
+        select(XraySourceIp.id).where(XraySourceIp.ip == source_ip)
+    )
+    ip_id = ip_lookup.scalar_one_or_none()
+    
+    if not ip_id:
+        return {
+            "source_ip": source_ip,
+            "email": email,
+            "period": period,
+            "total_connections": 0,
+            "destinations": []
+        }
+    
     conditions = [
-        XrayIpDestinationStats.source_ip == source_ip,
+        XrayIpDestinationStats.source_ip_id == ip_id,
         XrayIpDestinationStats.email == email
     ]
     
@@ -1496,7 +1553,6 @@ async def get_ip_destinations(
         select(
             XrayDestination.destination,
             sql_func.sum(XrayIpDestinationStats.connection_count).label('total'),
-            sql_func.min(XrayIpDestinationStats.first_seen).label('first_seen'),
             sql_func.max(XrayIpDestinationStats.last_seen).label('last_seen')
         )
         .join(XrayDestination, XrayIpDestinationStats.destination_id == XrayDestination.id)
@@ -1518,7 +1574,6 @@ async def get_ip_destinations(
                 "destination": row.destination,
                 "connections": row.total,
                 "percentage": round((row.total / total_connections * 100), 1) if total_connections > 0 else 0,
-                "first_seen": row.first_seen.isoformat() if row.first_seen else None,
                 "last_seen": row.last_seen.isoformat() if row.last_seen else None
             }
             for row in rows
@@ -1690,6 +1745,7 @@ async def get_db_info(
     ip_count = await db.execute(select(sql_func.count()).select_from(XrayUserIpStats))
     ip_dest_count = await db.execute(select(sql_func.count()).select_from(XrayIpDestinationStats))
     dest_count = await db.execute(select(sql_func.count()).select_from(XrayDestination))
+    source_ip_count = await db.execute(select(sql_func.count()).select_from(XraySourceIp))
     
     # Get date ranges
     visit_range = await db.execute(
@@ -1724,6 +1780,7 @@ async def get_db_info(
                 'xray_user_ip_stats',
                 'xray_ip_destination_stats',
                 'xray_destinations',
+                'xray_source_ips',
                 'remnawave_user_cache'
             )
         """)
@@ -1760,6 +1817,10 @@ async def get_db_info(
             "xray_destinations": {
                 "count": dest_count.scalar() or 0,
                 "size_bytes": table_sizes.get("xray_destinations")
+            },
+            "xray_source_ips": {
+                "count": source_ip_count.scalar() or 0,
+                "size_bytes": table_sizes.get("xray_source_ips")
             },
             "remnawave_user_cache": {
                 "count": user_count.scalar() or 0,
@@ -1802,16 +1863,18 @@ async def clear_stats(
     dest_count = await db.execute(select(sql_func.count()).select_from(XrayDestination))
     deleted_dests = dest_count.scalar() or 0
     
-    # Use TRUNCATE CASCADE - much faster than DELETE for large tables
-    # TRUNCATE resets the table without scanning rows (instant for millions of records)
-    # CASCADE handles foreign key dependencies automatically
+    source_ips_count = await db.execute(select(sql_func.count()).select_from(XraySourceIp))
+    deleted_source_ips = source_ips_count.scalar() or 0
+    
+    # TRUNCATE — instant for millions of rows, CASCADE handles FK dependencies
     await db.execute(text("""
         TRUNCATE TABLE 
             xray_visit_stats, 
             xray_ip_destination_stats, 
             xray_user_ip_stats, 
             xray_hourly_stats, 
-            xray_destinations 
+            xray_destinations,
+            xray_source_ips 
         CASCADE
     """))
     
@@ -1827,9 +1890,10 @@ async def clear_stats(
             "ip_stats": deleted_ips,
             "ip_destination_stats": deleted_ip_dests,
             "hourly_stats": deleted_hourly,
-            "destinations": deleted_dests
+            "destinations": deleted_dests,
+            "source_ips": deleted_source_ips
         },
-        "message": f"Deleted {deleted_visits} visit records, {deleted_ips} IP records, {deleted_ip_dests} IP-destination records, {deleted_hourly} hourly records, {deleted_dests} destinations"
+        "message": f"Deleted {deleted_visits} visit records, {deleted_ips} IP records, {deleted_ip_dests} IP-destination records, {deleted_hourly} hourly records, {deleted_dests} destinations, {deleted_source_ips} source IPs"
     }
 
 

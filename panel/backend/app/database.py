@@ -1,20 +1,6 @@
-"""
-Database module with PostgreSQL support and automatic SQLite migration.
+"""Database module with PostgreSQL support."""
 
-On first startup:
-1. Creates PostgreSQL tables
-2. Checks if SQLite database exists with data
-3. Migrates all data from SQLite to PostgreSQL
-4. Marks migration as complete
-"""
-
-import asyncio
-import os
 import logging
-import sqlite3
-from datetime import datetime
-from pathlib import Path
-from typing import Optional
 
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
@@ -25,20 +11,16 @@ from app.config import get_settings
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-# Ensure data directory exists (for migration flag file)
-os.makedirs("data", exist_ok=True)
-
-# Migration flag file
-MIGRATION_FLAG_FILE = "data/.postgres_migrated"
-
 # PostgreSQL engine with connection pool
+pool_size = 10
 engine = create_async_engine(
     settings.database_url,
     echo=False,
-    pool_size=10,
+    pool_size=pool_size,
     max_overflow=20,
     pool_pre_ping=True,
     pool_recycle=3600,
+    pool_timeout=30,
 )
 
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -49,377 +31,6 @@ async_session_maker = async_session
 
 class Base(DeclarativeBase):
     pass
-
-
-def _is_migration_done() -> bool:
-    """Check if migration from SQLite has been completed."""
-    return Path(MIGRATION_FLAG_FILE).exists()
-
-
-def _mark_migration_done():
-    """Mark migration as completed."""
-    Path(MIGRATION_FLAG_FILE).write_text(datetime.utcnow().isoformat())
-    logger.info("Migration marked as complete")
-
-
-def _get_sqlite_path() -> Optional[Path]:
-    """Get SQLite database path if it exists."""
-    sqlite_path = Path(settings.sqlite_path)
-    if sqlite_path.exists() and sqlite_path.stat().st_size > 0:
-        return sqlite_path
-    return None
-
-
-def _get_sqlite_tables(sqlite_conn: sqlite3.Connection) -> list[str]:
-    """Get list of tables in SQLite database."""
-    cursor = sqlite_conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-    )
-    return [row[0] for row in cursor.fetchall()]
-
-
-def _get_table_columns(sqlite_conn: sqlite3.Connection, table: str) -> list[tuple[str, str]]:
-    """Get column names and types for a table."""
-    cursor = sqlite_conn.execute(f"PRAGMA table_info({table})")
-    return [(row[1], row[2]) for row in cursor.fetchall()]
-
-
-async def _get_pg_columns(db: AsyncSession, table: str) -> set[str]:
-    """Get column names that exist in PostgreSQL table."""
-    result = await db.execute(text(f"""
-        SELECT column_name FROM information_schema.columns 
-        WHERE table_name = '{table}' AND table_schema = 'public'
-    """))
-    return {row[0] for row in result.fetchall()}
-
-
-def _parse_datetime(val: str) -> datetime:
-    """Parse datetime string from SQLite to Python datetime."""
-    if not val:
-        return None
-    # Try common formats
-    for fmt in [
-        '%Y-%m-%d %H:%M:%S.%f',
-        '%Y-%m-%d %H:%M:%S',
-        '%Y-%m-%dT%H:%M:%S.%f',
-        '%Y-%m-%dT%H:%M:%S',
-        '%Y-%m-%d',
-    ]:
-        try:
-            return datetime.strptime(val, fmt)
-        except ValueError:
-            continue
-    return None
-
-
-async def _migrate_table_data(
-    sqlite_conn: sqlite3.Connection,
-    db: AsyncSession,
-    table: str,
-    columns: list[tuple[str, str]],
-    batch_size: int = 100
-) -> int:
-    """Migrate data from SQLite table to PostgreSQL using parameterized queries."""
-    
-    # Get columns that exist in PostgreSQL (filter out missing ones)
-    pg_columns = await _get_pg_columns(db, table)
-    
-    # Filter columns to only those that exist in both SQLite and PostgreSQL
-    filtered_columns = [(name, type_) for name, type_ in columns if name in pg_columns]
-    if len(filtered_columns) < len(columns):
-        missing = [name for name, _ in columns if name not in pg_columns]
-        logger.info(f"  {table}: Skipping columns not in PostgreSQL: {missing}")
-    
-    col_names = [col[0] for col in filtered_columns]
-    col_list = ", ".join(f'"{c}"' for c in col_names)
-    sqlite_col_list = ", ".join(f'"{c}"' for c in col_names)
-    
-    # Count rows
-    cursor = sqlite_conn.execute(f"SELECT COUNT(*) FROM {table}")
-    total_rows = cursor.fetchone()[0]
-    
-    if total_rows == 0:
-        return 0
-    
-    logger.info(f"Migrating {total_rows} rows from {table}...")
-    
-    # Read and insert in batches
-    migrated = 0
-    failed = 0
-    cursor = sqlite_conn.execute(f"SELECT {sqlite_col_list} FROM {table}")
-    
-    while True:
-        rows = cursor.fetchmany(batch_size)
-        if not rows:
-            break
-        
-        batch_success = 0
-        
-        # Insert row by row with parameterized queries for safety
-        for row in rows:
-            # Build parameter dict
-            params = {}
-            placeholders = []
-            for i, val in enumerate(row):
-                param_name = f"p{i}"
-                col_type = filtered_columns[i][1].upper()
-                
-                if val is None:
-                    placeholders.append("NULL")
-                elif col_type == "BOOLEAN":
-                    placeholders.append(f":{param_name}")
-                    params[param_name] = bool(val)
-                elif col_type in ("INTEGER", "BIGINT", "SMALLINT"):
-                    placeholders.append(f":{param_name}")
-                    params[param_name] = int(val) if val is not None else None
-                elif col_type in ("REAL", "FLOAT", "DOUBLE", "NUMERIC"):
-                    placeholders.append(f":{param_name}")
-                    params[param_name] = float(val) if val is not None else None
-                elif col_type in ("TIMESTAMP", "DATETIME", "DATE"):
-                    # Parse datetime string to Python datetime
-                    placeholders.append(f":{param_name}")
-                    if isinstance(val, str):
-                        params[param_name] = _parse_datetime(val)
-                    else:
-                        params[param_name] = val
-                else:
-                    # String/Text/JSON - pass as-is, SQLAlchemy handles escaping
-                    placeholders.append(f":{param_name}")
-                    params[param_name] = str(val) if val is not None else None
-            
-            insert_sql = f'INSERT INTO "{table}" ({col_list}) VALUES ({", ".join(placeholders)}) ON CONFLICT DO NOTHING'
-            
-            try:
-                await db.execute(text(insert_sql), params)
-                batch_success += 1
-            except Exception as e:
-                failed += 1
-                if failed <= 5:  # Log first 5 errors only
-                    logger.warning(f"Error inserting row into {table}: {e}")
-                # Rollback failed transaction to continue
-                await db.rollback()
-        
-        # Commit batch
-        try:
-            await db.commit()
-            migrated += batch_success
-        except Exception as e:
-            logger.warning(f"Error committing batch to {table}: {e}")
-            await db.rollback()
-        
-        if (migrated + failed) % 5000 == 0:
-            logger.info(f"  {table}: {migrated}/{total_rows} rows migrated ({failed} failed)")
-    
-    if failed > 0:
-        logger.warning(f"  {table}: {failed} rows failed to migrate")
-    
-    return migrated
-
-
-async def _get_postgres_tables(db: AsyncSession) -> set[str]:
-    """Get list of existing tables in PostgreSQL."""
-    result = await db.execute(text("""
-        SELECT table_name FROM information_schema.tables 
-        WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
-    """))
-    return {row[0] for row in result.fetchall()}
-
-
-# Tables that must be migrated first (parent tables for foreign keys)
-MIGRATION_ORDER = [
-    'servers',  # Parent for metrics_snapshot, aggregated_metrics
-    'remnawave_settings',
-    'remnawave_nodes',
-    'panel_settings',
-    'blocklist_sources',
-    'blocklist_rules',
-    'failed_logins',
-    'remnawave_user_cache',
-    'xray_visit_stats',
-    'xray_user_ip_stats',
-    'xray_ip_destination_stats',
-    'xray_hourly_stats',
-    'metrics_snapshot',
-    'aggregated_metrics',
-    # Extension tables
-    'ext_accounts',
-    'ext_projects',
-    'ext_caught_ips',
-    'ext_settings',
-]
-
-# SQL to create ext_* tables in PostgreSQL before migration
-EXT_TABLES_SQL = """
-CREATE TABLE IF NOT EXISTS ext_accounts (
-    id SERIAL PRIMARY KEY,
-    email VARCHAR(255) NOT NULL UNIQUE,
-    password VARCHAR(500),
-    proxy VARCHAR(500),
-    enabled BOOLEAN DEFAULT TRUE,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS ext_projects (
-    id SERIAL PRIMARY KEY,
-    account_id INTEGER NOT NULL,
-    project_id VARCHAR(100) NOT NULL,
-    project_name VARCHAR(255) NOT NULL,
-    disabled BOOLEAN DEFAULT FALSE,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (account_id) REFERENCES ext_accounts(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS ext_caught_ips (
-    id SERIAL PRIMARY KEY,
-    account_id INTEGER NOT NULL,
-    project_id INTEGER,
-    ip_address VARCHAR(50) NOT NULL,
-    subnet_name VARCHAR(50),
-    caught_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (account_id) REFERENCES ext_accounts(id) ON DELETE CASCADE,
-    FOREIGN KEY (project_id) REFERENCES ext_projects(id) ON DELETE SET NULL
-);
-
-CREATE TABLE IF NOT EXISTS ext_settings (
-    id INTEGER PRIMARY KEY DEFAULT 1,
-    delay_min INTEGER DEFAULT 60,
-    delay_max INTEGER DEFAULT 90,
-    max_ip_per_project INTEGER DEFAULT 1,
-    stop_on_catch BOOLEAN DEFAULT TRUE,
-    telegram_bot_token VARCHAR(500),
-    telegram_chat_id VARCHAR(100),
-    target_subnets TEXT DEFAULT '[17, 19, 24, 35]',
-    proxy_required BOOLEAN DEFAULT TRUE,
-    proxy_check_interval INTEGER DEFAULT 50,
-    log_level VARCHAR(10) DEFAULT 'info',
-    start_delay_max INTEGER DEFAULT 60,
-    updated_at TIMESTAMP
-);
-
-CREATE INDEX IF NOT EXISTS idx_ext_projects_account ON ext_projects(account_id);
-CREATE INDEX IF NOT EXISTS idx_ext_caught_ips_account ON ext_caught_ips(account_id);
-CREATE INDEX IF NOT EXISTS idx_ext_caught_ips_project ON ext_caught_ips(project_id);
-"""
-
-
-async def _migrate_from_sqlite():
-    """Migrate all data from SQLite to PostgreSQL."""
-    import shutil
-    
-    sqlite_path = _get_sqlite_path()
-    if not sqlite_path:
-        logger.info("No SQLite database found, skipping migration")
-        _mark_migration_done()
-        return
-    
-    logger.info(f"Starting migration from SQLite: {sqlite_path}")
-    
-    # Create ext_* tables BEFORE migration so they exist when we check pg_tables
-    logger.info("Creating ext_* tables in PostgreSQL before migration...")
-    async with engine.begin() as conn:
-        for statement in EXT_TABLES_SQL.strip().split(';'):
-            statement = statement.strip()
-            if statement:
-                try:
-                    await conn.execute(text(statement))
-                except Exception as e:
-                    if "already exists" not in str(e).lower():
-                        logger.debug(f"ext table creation note: {e}")
-    logger.info("ext_* tables created")
-    
-    # Create backup BEFORE migration
-    backup_path = sqlite_path.with_suffix('.db.backup')
-    try:
-        shutil.copy2(str(sqlite_path), str(backup_path))
-        logger.info(f"SQLite backup created: {backup_path}")
-    except Exception as e:
-        logger.error(f"Failed to create SQLite backup: {e}")
-        logger.error("Migration aborted - cannot proceed without backup")
-        return
-    
-    # Verify backup exists and has same size
-    if not backup_path.exists() or backup_path.stat().st_size != sqlite_path.stat().st_size:
-        logger.error("Backup verification failed - sizes don't match")
-        return
-    
-    # Connect to SQLite
-    sqlite_conn = sqlite3.connect(str(sqlite_path))
-    
-    try:
-        sqlite_tables = set(_get_sqlite_tables(sqlite_conn))
-        if not sqlite_tables:
-            logger.info("SQLite database is empty, skipping migration")
-            _mark_migration_done()
-            return
-        
-        logger.info(f"Found {len(sqlite_tables)} tables in SQLite: {sqlite_tables}")
-        
-        total_migrated = 0
-        migrated_tables = []
-        
-        async with async_session() as db:
-            # Disable foreign key checks for migration (allows orphaned records)
-            await db.execute(text("SET session_replication_role = 'replica'"))
-            await db.commit()
-            logger.info("Foreign key checks disabled for migration")
-            
-            try:
-                # Get existing PostgreSQL tables
-                pg_tables = await _get_postgres_tables(db)
-                logger.info(f"PostgreSQL has {len(pg_tables)} tables: {pg_tables}")
-                
-                # Build migration order: first ordered tables, then remaining
-                ordered_tables = [t for t in MIGRATION_ORDER if t in sqlite_tables and t in pg_tables]
-                remaining_tables = [t for t in sqlite_tables if t in pg_tables and t not in ordered_tables]
-                tables_to_migrate = ordered_tables + remaining_tables
-                
-                # Skip tables that don't exist in PostgreSQL (e.g., ext_* tables)
-                skipped = sqlite_tables - pg_tables
-                if skipped:
-                    logger.info(f"Skipping tables not in PostgreSQL schema: {skipped}")
-                
-                for table in tables_to_migrate:
-                    columns = _get_table_columns(sqlite_conn, table)
-                    if not columns:
-                        continue
-                    
-                    try:
-                        migrated = await _migrate_table_data(sqlite_conn, db, table, columns)
-                        total_migrated += migrated
-                        migrated_tables.append(table)
-                        logger.info(f"  {table}: {migrated} rows migrated")
-                    except Exception as e:
-                        logger.error(f"Error migrating table {table}: {e}")
-                
-                # Reset sequences for auto-increment columns (only for migrated tables)
-                for table in migrated_tables:
-                    try:
-                        await db.execute(text(f"""
-                            SELECT setval(pg_get_serial_sequence('"{table}"', 'id'), 
-                                   COALESCE((SELECT MAX(id) FROM "{table}"), 0) + 1, false)
-                        """))
-                        await db.commit()
-                    except Exception:
-                        pass  # Table might not have id column or sequence
-            finally:
-                # Re-enable foreign key checks
-                await db.execute(text("SET session_replication_role = 'origin'"))
-                await db.commit()
-                logger.info("Foreign key checks re-enabled")
-        
-        logger.info(f"Migration complete: {total_migrated} total rows migrated from {len(migrated_tables)} tables")
-        
-        # Remove original SQLite file (backup exists)
-        try:
-            sqlite_path.unlink()
-            logger.info(f"Original SQLite file removed, backup at: {backup_path}")
-        except Exception as e:
-            logger.warning(f"Could not remove original SQLite file: {e}")
-        
-    finally:
-        sqlite_conn.close()
-    
-    _mark_migration_done()
 
 
 async def run_migrations(conn):
@@ -548,8 +159,74 @@ async def run_migrations(conn):
             except Exception:
                 pass
     
+    # Add direction column to blocklist_rules
+    result = await conn.execute(text("""
+        SELECT column_name FROM information_schema.columns 
+        WHERE table_name = 'blocklist_rules'
+    """))
+    blocklist_rules_columns = {row[0] for row in result.fetchall()}
+    
+    if blocklist_rules_columns and "direction" not in blocklist_rules_columns:
+        try:
+            await conn.execute(text("ALTER TABLE blocklist_rules ADD COLUMN direction VARCHAR(3) DEFAULT 'in'"))
+            logger.info("Added column: blocklist_rules.direction")
+        except Exception:
+            pass
+    
+    # Add direction column to blocklist_sources
+    result = await conn.execute(text("""
+        SELECT column_name FROM information_schema.columns 
+        WHERE table_name = 'blocklist_sources'
+    """))
+    blocklist_sources_columns = {row[0] for row in result.fetchall()}
+    
+    if blocklist_sources_columns and "direction" not in blocklist_sources_columns:
+        try:
+            await conn.execute(text("ALTER TABLE blocklist_sources ADD COLUMN direction VARCHAR(3) DEFAULT 'in'"))
+            logger.info("Added column: blocklist_sources.direction")
+        except Exception:
+            pass
+    
+    # Drop redundant indexes (covered by unique constraints or low-cardinality)
+    redundant_indexes = [
+        "idx_xray_stats_server",      # covered by PK (server_id, ...)
+        "idx_xray_stats_visits",       # visit_count never filtered directly
+        "idx_user_ip_server",          # covered by PK (server_id, ...)
+        "idx_user_ip_infra",           # boolean low-cardinality, seq scan is faster
+        "idx_ip_dest_server",          # covered by PK (server_id, ...)
+        "idx_user_ip_source",          # replaced by idx_user_ip_source_ip_id
+    ]
+    for idx_name in redundant_indexes:
+        try:
+            await conn.execute(text(f'DROP INDEX IF EXISTS "{idx_name}"'))
+        except Exception:
+            pass
+    
+    # Drop unused hit_count column from xray_destinations
+    result = await conn.execute(text("""
+        SELECT column_name FROM information_schema.columns 
+        WHERE table_name = 'xray_destinations'
+    """))
+    xray_dest_columns = {row[0] for row in result.fetchall()}
+    
+    if xray_dest_columns and "hit_count" in xray_dest_columns:
+        try:
+            await conn.execute(text('ALTER TABLE xray_destinations DROP COLUMN "hit_count"'))
+            logger.info("Dropped column: xray_destinations.hit_count")
+        except Exception:
+            pass
+    
     # Migrate xray_visit_stats and xray_ip_destination_stats to use normalized destinations
     await _migrate_destinations_normalization(conn)
+    
+    # Add host column to xray_destinations
+    await _migrate_destination_host(conn)
+    
+    # Normalize source_ip into xray_source_ips table
+    await _migrate_source_ip_normalization(conn)
+    
+    # Remove surrogate id columns and convert to composite PKs
+    await _migrate_remove_surrogate_ids(conn)
 
 
 async def _migrate_destinations_normalization(conn):
@@ -786,6 +463,372 @@ async def _migrate_destinations_normalization(conn):
     logger.info("Destination normalization migration completed")
 
 
+async def _migrate_destination_host(conn):
+    """Add host column to xray_destinations and populate from existing destinations.
+    
+    host = destination without :port suffix, used for fast GROUP BY.
+    """
+    result = await conn.execute(text("""
+        SELECT column_name FROM information_schema.columns 
+        WHERE table_name = 'xray_destinations'
+    """))
+    columns = {row[0] for row in result.fetchall()}
+    
+    if not columns or "host" in columns:
+        return  # Table doesn't exist or already has host column
+    
+    logger.info("Adding host column to xray_destinations...")
+    
+    try:
+        await conn.execute(text('ALTER TABLE xray_destinations ADD COLUMN "host" VARCHAR(500)'))
+    except Exception as e:
+        if "already exists" not in str(e).lower():
+            logger.warning(f"Adding host column: {e}")
+        return
+    
+    # Populate host from destination (strip :port suffix)
+    await conn.execute(text("""
+        UPDATE xray_destinations 
+        SET host = regexp_replace(destination, ':\\d+$', '')
+        WHERE host IS NULL
+    """))
+    
+    # Create index
+    try:
+        await conn.execute(text('CREATE INDEX IF NOT EXISTS "idx_xray_dest_host" ON xray_destinations ("host")'))
+    except Exception:
+        pass
+    
+    logger.info("Host column added and populated in xray_destinations")
+
+
+async def _migrate_source_ip_normalization(conn):
+    """Normalize source_ip into xray_source_ips table.
+    
+    Replaces VARCHAR(45) source_ip with INTEGER source_ip_id FK
+    in xray_user_ip_stats and xray_ip_destination_stats.
+    """
+    # Check if migration is needed
+    result = await conn.execute(text("""
+        SELECT column_name FROM information_schema.columns 
+        WHERE table_name = 'xray_user_ip_stats'
+    """))
+    ip_stats_columns = {row[0] for row in result.fetchall()}
+    
+    if not ip_stats_columns:
+        return  # Table doesn't exist yet
+    
+    has_source_ip = "source_ip" in ip_stats_columns
+    has_source_ip_id = "source_ip_id" in ip_stats_columns
+    
+    # Already migrated
+    if has_source_ip_id and not has_source_ip:
+        return
+    
+    # Nothing to migrate
+    if not has_source_ip and not has_source_ip_id:
+        return
+    
+    logger.info("Starting source_ip normalization migration...")
+    
+    # Step 1: Ensure xray_source_ips table exists (create_all should handle it,
+    # but populate from existing data)
+    try:
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS xray_source_ips (
+                id SERIAL PRIMARY KEY,
+                ip VARCHAR(45) NOT NULL UNIQUE,
+                first_seen TIMESTAMP DEFAULT NOW()
+            )
+        """))
+    except Exception as e:
+        logger.warning(f"Creating xray_source_ips: {e}")
+    
+    # Step 2: Populate xray_source_ips from existing data
+    if has_source_ip:
+        logger.info("Populating xray_source_ips from existing data...")
+        try:
+            await conn.execute(text("""
+                INSERT INTO xray_source_ips (ip, first_seen)
+                SELECT DISTINCT source_ip, MIN(first_seen)
+                FROM xray_user_ip_stats
+                WHERE source_ip IS NOT NULL
+                GROUP BY source_ip
+                ON CONFLICT (ip) DO NOTHING
+            """))
+        except Exception as e:
+            logger.warning(f"Populating from user_ip_stats: {e}")
+        
+        # Also from xray_ip_destination_stats
+        result2 = await conn.execute(text("""
+            SELECT column_name FROM information_schema.columns 
+            WHERE table_name = 'xray_ip_destination_stats'
+        """))
+        ip_dest_columns = {row[0] for row in result2.fetchall()}
+        
+        if ip_dest_columns and "source_ip" in ip_dest_columns:
+            try:
+                await conn.execute(text("""
+                    INSERT INTO xray_source_ips (ip, first_seen)
+                    SELECT DISTINCT source_ip, MIN(first_seen)
+                    FROM xray_ip_destination_stats
+                    WHERE source_ip IS NOT NULL
+                    GROUP BY source_ip
+                    ON CONFLICT (ip) DO NOTHING
+                """))
+            except Exception as e:
+                logger.warning(f"Populating from ip_dest_stats: {e}")
+    
+    # Step 3: Add source_ip_id column if not exists
+    if not has_source_ip_id:
+        try:
+            await conn.execute(text("""
+                ALTER TABLE xray_user_ip_stats ADD COLUMN source_ip_id INTEGER
+            """))
+        except Exception as e:
+            if "already exists" not in str(e).lower():
+                logger.warning(f"Adding source_ip_id to user_ip_stats: {e}")
+    
+    # Step 4: Populate source_ip_id
+    if has_source_ip:
+        logger.info("Populating source_ip_id in xray_user_ip_stats...")
+        try:
+            await conn.execute(text("""
+                UPDATE xray_user_ip_stats uis
+                SET source_ip_id = sip.id
+                FROM xray_source_ips sip
+                WHERE uis.source_ip = sip.ip AND uis.source_ip_id IS NULL
+            """))
+        except Exception as e:
+            logger.warning(f"Populating source_ip_id: {e}")
+    
+    # Delete orphaned rows
+    try:
+        await conn.execute(text("DELETE FROM xray_user_ip_stats WHERE source_ip_id IS NULL"))
+    except Exception:
+        pass
+    
+    # Make NOT NULL
+    try:
+        await conn.execute(text("ALTER TABLE xray_user_ip_stats ALTER COLUMN source_ip_id SET NOT NULL"))
+    except Exception:
+        pass
+    
+    # Drop old unique constraint
+    try:
+        await conn.execute(text("ALTER TABLE xray_user_ip_stats DROP CONSTRAINT IF EXISTS uq_user_ip_stats_unique"))
+    except Exception:
+        pass
+    
+    # Add FK
+    try:
+        await conn.execute(text("""
+            ALTER TABLE xray_user_ip_stats 
+            ADD CONSTRAINT fk_user_ip_stats_source_ip 
+            FOREIGN KEY (source_ip_id) REFERENCES xray_source_ips(id) ON DELETE CASCADE
+        """))
+    except Exception as e:
+        if "already exists" not in str(e).lower():
+            logger.debug(f"Adding FK: {e}")
+    
+    # Drop old source_ip column
+    if has_source_ip:
+        try:
+            await conn.execute(text("ALTER TABLE xray_user_ip_stats DROP COLUMN IF EXISTS source_ip"))
+            logger.info("Dropped source_ip column from xray_user_ip_stats")
+        except Exception as e:
+            logger.warning(f"Dropping source_ip: {e}")
+    
+    # Create index on source_ip_id
+    try:
+        await conn.execute(text('CREATE INDEX IF NOT EXISTS "idx_user_ip_source_ip_id" ON xray_user_ip_stats ("source_ip_id")'))
+    except Exception:
+        pass
+    
+    # === Now migrate xray_ip_destination_stats ===
+    result3 = await conn.execute(text("""
+        SELECT column_name FROM information_schema.columns 
+        WHERE table_name = 'xray_ip_destination_stats'
+    """))
+    ip_dest_cols = {row[0] for row in result3.fetchall()}
+    
+    if not ip_dest_cols:
+        logger.info("Source IP normalization completed (no ip_dest_stats table)")
+        return
+    
+    ip_dest_has_source_ip = "source_ip" in ip_dest_cols
+    ip_dest_has_source_ip_id = "source_ip_id" in ip_dest_cols
+    
+    if ip_dest_has_source_ip:
+        logger.info("Migrating xray_ip_destination_stats source_ip...")
+        
+        if not ip_dest_has_source_ip_id:
+            try:
+                await conn.execute(text("ALTER TABLE xray_ip_destination_stats ADD COLUMN source_ip_id INTEGER"))
+            except Exception as e:
+                if "already exists" not in str(e).lower():
+                    logger.warning(f"Adding source_ip_id to ip_dest_stats: {e}")
+        
+        # Populate source_ip_id
+        try:
+            await conn.execute(text("""
+                UPDATE xray_ip_destination_stats ids
+                SET source_ip_id = sip.id
+                FROM xray_source_ips sip
+                WHERE ids.source_ip = sip.ip AND ids.source_ip_id IS NULL
+            """))
+        except Exception as e:
+            logger.warning(f"Populating source_ip_id in ip_dest_stats: {e}")
+        
+        # Delete orphaned rows
+        try:
+            await conn.execute(text("DELETE FROM xray_ip_destination_stats WHERE source_ip_id IS NULL"))
+        except Exception:
+            pass
+        
+        # Make NOT NULL
+        try:
+            await conn.execute(text("ALTER TABLE xray_ip_destination_stats ALTER COLUMN source_ip_id SET NOT NULL"))
+        except Exception:
+            pass
+        
+        # Drop old constraint
+        try:
+            await conn.execute(text("ALTER TABLE xray_ip_destination_stats DROP CONSTRAINT IF EXISTS uq_ip_dest_stats_unique_v2"))
+        except Exception:
+            pass
+        
+        # Add FK
+        try:
+            await conn.execute(text("""
+                ALTER TABLE xray_ip_destination_stats 
+                ADD CONSTRAINT fk_ip_dest_stats_source_ip 
+                FOREIGN KEY (source_ip_id) REFERENCES xray_source_ips(id) ON DELETE CASCADE
+            """))
+        except Exception as e:
+            if "already exists" not in str(e).lower():
+                logger.debug(f"Adding FK to ip_dest_stats: {e}")
+        
+        # Drop old source_ip column
+        try:
+            await conn.execute(text("ALTER TABLE xray_ip_destination_stats DROP COLUMN IF EXISTS source_ip"))
+            logger.info("Dropped source_ip column from xray_ip_destination_stats")
+        except Exception as e:
+            logger.warning(f"Dropping source_ip from ip_dest_stats: {e}")
+    
+    # Drop first_seen from xray_ip_destination_stats (not used in queries)
+    if "first_seen" in ip_dest_cols or "first_seen" in (ip_dest_cols - {"source_ip"}):
+        result_check = await conn.execute(text("""
+            SELECT column_name FROM information_schema.columns 
+            WHERE table_name = 'xray_ip_destination_stats' AND column_name = 'first_seen'
+        """))
+        if result_check.fetchone():
+            try:
+                await conn.execute(text("ALTER TABLE xray_ip_destination_stats DROP COLUMN IF EXISTS first_seen"))
+                logger.info("Dropped first_seen from xray_ip_destination_stats")
+            except Exception as e:
+                logger.warning(f"Dropping first_seen: {e}")
+    
+    # Create index on (email, source_ip_id)
+    try:
+        await conn.execute(text('CREATE INDEX IF NOT EXISTS "idx_ip_dest_email_ip" ON xray_ip_destination_stats ("email", "source_ip_id")'))
+    except Exception:
+        pass
+    
+    logger.info("Source IP normalization completed")
+
+
+async def _migrate_remove_surrogate_ids(conn):
+    """Remove surrogate id columns from stats tables and convert to composite PKs.
+    
+    Saves ~4 bytes per row + eliminates one index per table.
+    Safe because no other table references these ids via FK.
+    """
+    
+    # === xray_visit_stats: id -> PK(server_id, destination_id, email) ===
+    result = await conn.execute(text("""
+        SELECT column_name FROM information_schema.columns 
+        WHERE table_name = 'xray_visit_stats'
+    """))
+    vs_columns = {row[0] for row in result.fetchall()}
+    
+    if vs_columns and "id" in vs_columns and "destination_id" in vs_columns:
+        logger.info("Removing surrogate id from xray_visit_stats...")
+        try:
+            await conn.execute(text("ALTER TABLE xray_visit_stats DROP CONSTRAINT IF EXISTS xray_visit_stats_pkey"))
+            await conn.execute(text("ALTER TABLE xray_visit_stats DROP CONSTRAINT IF EXISTS uq_xray_stats_unique_v2"))
+            await conn.execute(text("ALTER TABLE xray_visit_stats DROP COLUMN id"))
+            await conn.execute(text("ALTER TABLE xray_visit_stats ADD PRIMARY KEY (server_id, destination_id, email)"))
+            logger.info("xray_visit_stats: converted to composite PK")
+        except Exception as e:
+            if "does not exist" in str(e).lower() or "already" in str(e).lower():
+                pass
+            else:
+                logger.warning(f"Removing id from xray_visit_stats: {e}")
+    
+    # === xray_hourly_stats: id -> PK(server_id, hour) ===
+    result = await conn.execute(text("""
+        SELECT column_name FROM information_schema.columns 
+        WHERE table_name = 'xray_hourly_stats'
+    """))
+    hs_columns = {row[0] for row in result.fetchall()}
+    
+    if hs_columns and "id" in hs_columns:
+        logger.info("Removing surrogate id from xray_hourly_stats...")
+        try:
+            await conn.execute(text("ALTER TABLE xray_hourly_stats DROP CONSTRAINT IF EXISTS xray_hourly_stats_pkey"))
+            await conn.execute(text("ALTER TABLE xray_hourly_stats DROP CONSTRAINT IF EXISTS uq_xray_hourly_unique"))
+            await conn.execute(text("DROP INDEX IF EXISTS idx_xray_hourly_server_hour"))
+            await conn.execute(text("ALTER TABLE xray_hourly_stats DROP COLUMN id"))
+            await conn.execute(text("ALTER TABLE xray_hourly_stats ADD PRIMARY KEY (server_id, hour)"))
+            logger.info("xray_hourly_stats: converted to composite PK")
+        except Exception as e:
+            if "does not exist" in str(e).lower() or "already" in str(e).lower():
+                pass
+            else:
+                logger.warning(f"Removing id from xray_hourly_stats: {e}")
+    
+    # === xray_user_ip_stats: id -> PK(server_id, email, source_ip_id) ===
+    result = await conn.execute(text("""
+        SELECT column_name FROM information_schema.columns 
+        WHERE table_name = 'xray_user_ip_stats'
+    """))
+    uis_columns = {row[0] for row in result.fetchall()}
+    
+    if uis_columns and "id" in uis_columns and "source_ip_id" in uis_columns:
+        logger.info("Removing surrogate id from xray_user_ip_stats...")
+        try:
+            await conn.execute(text("ALTER TABLE xray_user_ip_stats DROP CONSTRAINT IF EXISTS xray_user_ip_stats_pkey"))
+            await conn.execute(text("ALTER TABLE xray_user_ip_stats DROP COLUMN id"))
+            await conn.execute(text("ALTER TABLE xray_user_ip_stats ADD PRIMARY KEY (server_id, email, source_ip_id)"))
+            logger.info("xray_user_ip_stats: converted to composite PK")
+        except Exception as e:
+            if "does not exist" in str(e).lower() or "already" in str(e).lower():
+                pass
+            else:
+                logger.warning(f"Removing id from xray_user_ip_stats: {e}")
+    
+    # === xray_ip_destination_stats: id -> PK(server_id, email, source_ip_id, destination_id) ===
+    result = await conn.execute(text("""
+        SELECT column_name FROM information_schema.columns 
+        WHERE table_name = 'xray_ip_destination_stats'
+    """))
+    ids_columns = {row[0] for row in result.fetchall()}
+    
+    if ids_columns and "id" in ids_columns and "source_ip_id" in ids_columns:
+        logger.info("Removing surrogate id from xray_ip_destination_stats...")
+        try:
+            await conn.execute(text("ALTER TABLE xray_ip_destination_stats DROP CONSTRAINT IF EXISTS xray_ip_destination_stats_pkey"))
+            await conn.execute(text("ALTER TABLE xray_ip_destination_stats DROP COLUMN id"))
+            await conn.execute(text("ALTER TABLE xray_ip_destination_stats ADD PRIMARY KEY (server_id, email, source_ip_id, destination_id)"))
+            logger.info("xray_ip_destination_stats: converted to composite PK")
+        except Exception as e:
+            if "does not exist" in str(e).lower() or "already" in str(e).lower():
+                pass
+            else:
+                logger.warning(f"Removing id from xray_ip_destination_stats: {e}")
+
+
 async def _seed_default_excluded_destinations():
     """Seed default excluded destinations if table is empty."""
     from app.models import RemnawaveExcludedDestination
@@ -816,29 +859,33 @@ async def _seed_default_excluded_destinations():
             logger.info(f"Seeded {len(default_destinations)} default excluded destinations")
 
 
+async def _warmup_pool():
+    """Pre-create database connections to avoid cold-start delays on first requests."""
+    try:
+        warmup_count = min(pool_size, 5)
+        connections = []
+        for _ in range(warmup_count):
+            conn = await engine.connect()
+            connections.append(conn)
+        for conn in connections:
+            await conn.close()
+        logger.info(f"Database pool warmed up with {warmup_count} connections")
+    except Exception as e:
+        logger.warning(f"Pool warmup failed (non-critical): {e}")
+
+
 async def init_db():
-    """Initialize database: create tables, run migrations, migrate from SQLite if needed."""
+    """Initialize database: create tables, run migrations."""
     async with engine.begin() as conn:
-        # Create all tables
         await conn.run_sync(Base.metadata.create_all)
-        
-        # Run PostgreSQL migrations
         await run_migrations(conn)
     
-    # Migrate from SQLite if not done yet
-    if not _is_migration_done():
-        try:
-            await _migrate_from_sqlite()
-        except Exception as e:
-            logger.error(f"SQLite migration failed: {e}")
-            # Mark as done anyway to prevent repeated attempts
-            _mark_migration_done()
-    
-    # Seed default excluded destinations
     try:
         await _seed_default_excluded_destinations()
     except Exception as e:
         logger.debug(f"Could not seed excluded destinations: {e}")
+    
+    await _warmup_pool()
 
 
 async def get_db():

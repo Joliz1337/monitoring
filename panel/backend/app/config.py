@@ -19,9 +19,6 @@ class Settings(BaseSettings):
     postgres_password: str = "panel_secret"
     postgres_db: str = "panel"
     
-    # Legacy SQLite URL (for migration only)
-    sqlite_path: str = "./data/panel.db"
-    
     # Domain for CORS (optional, defaults to same-origin only)
     domain: str = ""
     
@@ -34,7 +31,7 @@ class Settings(BaseSettings):
     
     @property
     def sync_database_url(self) -> str:
-        """Sync PostgreSQL URL for migrations"""
+        """Sync PostgreSQL URL for background workers (export, etc.)"""
         return f"postgresql://{self.postgres_user}:{self.postgres_password}@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
     
     class Config:

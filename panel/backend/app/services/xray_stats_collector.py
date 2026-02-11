@@ -7,7 +7,6 @@ Optimized version with PostgreSQL batch upsert (ON CONFLICT):
 
 Performance:
 - Batch INSERT ... ON CONFLICT instead of per-row SELECT + UPDATE
-- 10-100x faster writes compared to SQLite version
 - Concurrent writes supported (PostgreSQL)
 """
 
@@ -29,11 +28,20 @@ from app.database import async_session
 from app.models import (
     Server, RemnawaveSettings, RemnawaveNode, RemnawaveInfrastructureAddress,
     RemnawaveExcludedDestination, XrayVisitStats, XrayHourlyStats, RemnawaveUserCache,
-    XrayUserIpStats, XrayIpDestinationStats, XrayDestination
+    XrayUserIpStats, XrayIpDestinationStats, XrayDestination, XraySourceIp
 )
 from app.services.remnawave_api import get_remnawave_api, RemnawaveAPIError
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_host(destination: str) -> str:
+    """Extract host from destination, stripping :port suffix."""
+    parts = destination.rsplit(':', 1)
+    if len(parts) == 2 and parts[1].isdigit():
+        return parts[0]
+    return destination
+
 
 # DNS cache for infrastructure addresses (address -> (resolved_ips, timestamp))
 _dns_cache: dict[str, tuple[set[str], datetime]] = {}
@@ -118,7 +126,7 @@ class XrayStatsCollector:
         self._cleanup_task: Optional[asyncio.Task] = None
         
         self._collection_interval = 300  # 5 minutes default
-        self._user_cache_interval = 3600
+        self._user_cache_interval = 1800
         self._time_since_last_collect = 0
         
         self._last_collect_time: Optional[datetime] = None
@@ -148,10 +156,18 @@ class XrayStatsCollector:
                 return set()
     
     async def _get_excluded_destinations(self) -> set[str]:
-        """Get set of excluded destinations from database."""
+        """Get set of excluded destination hosts (without ports) from database.
+        
+        Strips port suffix so that excluding '1.1.1.1:53' also blocks
+        '1.1.1.1:443', '1.1.1.1:80' etc.
+        """
         async with async_session() as db:
             result = await db.execute(select(RemnawaveExcludedDestination.destination))
-            return {row[0] for row in result.fetchall()}
+            excluded_hosts = set()
+            for row in result.fetchall():
+                dest = row[0]
+                excluded_hosts.add(_extract_host(dest))
+            return excluded_hosts
     
     async def start(self):
         """Start background collection."""
@@ -187,25 +203,35 @@ class XrayStatsCollector:
     async def _collection_loop(self):
         """Main collection loop with dynamic interval updates."""
         self._time_since_last_collect = 0
+        _SETTINGS_CHECK_INTERVAL = 15  # Check DB settings every 15 seconds, not every 1s
+        _settings_check_counter = 0
+        _cached_enabled = False
         
         while self._running:
             try:
-                settings = await self._get_settings()
+                # Re-read settings from DB every 15 seconds instead of every tick
+                if _settings_check_counter >= _SETTINGS_CHECK_INTERVAL:
+                    settings = await self._get_settings()
+                    _settings_check_counter = 0
+                    
+                    if settings:
+                        new_interval = settings.collection_interval or 60
+                        if new_interval != self._collection_interval:
+                            logger.info(f"Collection interval changed: {self._collection_interval}s -> {new_interval}s")
+                            self._collection_interval = new_interval
+                            if self._time_since_last_collect >= new_interval:
+                                self._time_since_last_collect = new_interval
+                        _cached_enabled = settings.enabled
+                    else:
+                        _cached_enabled = False
                 
-                if settings:
-                    new_interval = settings.collection_interval or 60
-                    if new_interval != self._collection_interval:
-                        logger.info(f"Collection interval changed: {self._collection_interval}s -> {new_interval}s")
-                        self._collection_interval = new_interval
-                        if self._time_since_last_collect >= new_interval:
-                            self._time_since_last_collect = new_interval
-                
-                if settings and settings.enabled and self._time_since_last_collect >= self._collection_interval:
+                if _cached_enabled and self._time_since_last_collect >= self._collection_interval:
                     await self._collect_from_all_nodes()
                     self._time_since_last_collect = 0
                 
                 await asyncio.sleep(1)
                 self._time_since_last_collect += 1
+                _settings_check_counter += 1
                 
             except asyncio.CancelledError:
                 raise
@@ -213,6 +239,7 @@ class XrayStatsCollector:
                 logger.error(f"Collection error: {e}")
                 await asyncio.sleep(5)
                 self._time_since_last_collect += 5
+                _settings_check_counter += 5
     
     async def _collect_from_all_nodes(self):
         """Collect stats from all enabled Remnawave nodes."""
@@ -381,7 +408,7 @@ class XrayStatsCollector:
         """Get or create destination IDs for a set of destinations.
         
         Returns a mapping from destination string to destination_id.
-        Uses batch upsert for efficiency.
+        Also populates host column (destination without :port).
         """
         if not destinations:
             return {}
@@ -389,27 +416,22 @@ class XrayStatsCollector:
         dest_list = list(destinations)
         dest_to_id: dict[str, int] = {}
         
-        # Batch upsert destinations
         for i in range(0, len(dest_list), UPSERT_BATCH_SIZE):
             batch = dest_list[i:i + UPSERT_BATCH_SIZE]
             
             values = [
                 {
                     "destination": dest,
+                    "host": _extract_host(dest),
                     "first_seen": now,
-                    "hit_count": 0
                 }
                 for dest in batch
             ]
             
             stmt = pg_insert(XrayDestination).values(values)
-            stmt = stmt.on_conflict_do_update(
-                index_elements=['destination'],
-                set_={'hit_count': XrayDestination.hit_count + 1}
-            )
+            stmt = stmt.on_conflict_do_nothing(index_elements=['destination'])
             await db.execute(stmt)
         
-        # Fetch all destination IDs
         result = await db.execute(
             select(XrayDestination.id, XrayDestination.destination)
             .where(XrayDestination.destination.in_(dest_list))
@@ -418,6 +440,35 @@ class XrayStatsCollector:
             dest_to_id[row[1]] = row[0]
         
         return dest_to_id
+
+    async def _get_or_create_source_ip_ids(self, db: AsyncSession, ips: set[str], now: datetime) -> dict[str, int]:
+        """Get or create source IP IDs for a set of IPs.
+        
+        Returns a mapping from IP string to source_ip_id.
+        """
+        if not ips:
+            return {}
+        
+        ip_list = list(ips)
+        ip_to_id: dict[str, int] = {}
+        
+        for i in range(0, len(ip_list), UPSERT_BATCH_SIZE):
+            batch = ip_list[i:i + UPSERT_BATCH_SIZE]
+            
+            values = [{"ip": ip, "first_seen": now} for ip in batch]
+            
+            stmt = pg_insert(XraySourceIp).values(values)
+            stmt = stmt.on_conflict_do_nothing(index_elements=['ip'])
+            await db.execute(stmt)
+        
+        result = await db.execute(
+            select(XraySourceIp.id, XraySourceIp.ip)
+            .where(XraySourceIp.ip.in_(ip_list))
+        )
+        for row in result.fetchall():
+            ip_to_id[row[1]] = row[0]
+        
+        return ip_to_id
 
     async def _save_stats(self, server_id: int, stats: list[dict], ip_stats: list[dict] = None, ip_destination_stats: list[dict] = None):
         """Save collected stats to DB using PostgreSQL batch upsert."""
@@ -460,8 +511,8 @@ class XrayStatsCollector:
             if email in ignored_user_ids:
                 continue
             
-            # Skip excluded destinations
-            if destination in excluded_destinations:
+            # Skip excluded destinations (match by host, ignoring port)
+            if _extract_host(destination) in excluded_destinations:
                 continue
             
             key = (destination, email)
@@ -511,8 +562,8 @@ class XrayStatsCollector:
             if email in ignored_user_ids:
                 continue
             
-            # Skip excluded destinations
-            if destination in excluded_destinations:
+            # Skip excluded destinations (match by host, ignoring port)
+            if _extract_host(destination) in excluded_destinations:
                 continue
             
             if source_ip in infrastructure_ips:
@@ -525,23 +576,27 @@ class XrayStatsCollector:
         if not visit_updates and not ip_updates and not ip_dest_updates:
             return
         
+        # Collect all unique source IPs
+        all_source_ips: set[str] = set()
+        for (email, source_ip), _ in ip_updates.items():
+            all_source_ips.add(source_ip)
+        for (email, source_ip, destination), _ in ip_dest_updates.items():
+            all_source_ips.add(source_ip)
+        
         async with async_session() as db:
-            # Get or create destination IDs for all destinations
+            # Get or create destination IDs and source IP IDs
             dest_to_id = await self._get_or_create_destination_ids(db, all_destinations, now)
+            ip_to_id = await self._get_or_create_source_ip_ids(db, all_source_ips, now)
             
-            # Batch upsert visit stats
             if visit_updates:
                 await self._batch_upsert_visits(db, server_id, visit_updates, dest_to_id, now)
             
-            # Batch upsert IP stats
             if ip_updates:
-                await self._batch_upsert_ip_stats(db, server_id, ip_updates, now)
+                await self._batch_upsert_ip_stats(db, server_id, ip_updates, ip_to_id, now)
             
-            # Batch upsert IP-destination stats
             if ip_dest_updates:
-                await self._batch_upsert_ip_dest_stats(db, server_id, ip_dest_updates, dest_to_id, now)
+                await self._batch_upsert_ip_dest_stats(db, server_id, ip_dest_updates, dest_to_id, ip_to_id, now)
             
-            # Upsert hourly stats
             await self._upsert_hourly_stats(db, server_id, hour_start, total_count, len(unique_users), len(unique_destinations))
             
             await db.commit()
@@ -574,7 +629,7 @@ class XrayStatsCollector:
             
             stmt = pg_insert(XrayVisitStats).values(values)
             stmt = stmt.on_conflict_do_update(
-                constraint='uq_xray_stats_unique_v2',
+                index_elements=['server_id', 'destination_id', 'email'],
                 set_={
                     'visit_count': XrayVisitStats.visit_count + stmt.excluded.visit_count,
                     'last_seen': stmt.excluded.last_seen
@@ -582,29 +637,34 @@ class XrayStatsCollector:
             )
             await db.execute(stmt)
     
-    async def _batch_upsert_ip_stats(self, db: AsyncSession, server_id: int, updates: dict, now: datetime):
+    async def _batch_upsert_ip_stats(self, db: AsyncSession, server_id: int, updates: dict, ip_to_id: dict[str, int], now: datetime):
         """Batch upsert IP stats using PostgreSQL ON CONFLICT."""
         items = list(updates.items())
         
         for i in range(0, len(items), UPSERT_BATCH_SIZE):
             batch = items[i:i + UPSERT_BATCH_SIZE]
             
-            values = [
-                {
+            values = []
+            for (email, source_ip), (count, is_infra) in batch:
+                ip_id = ip_to_id.get(source_ip)
+                if ip_id is None:
+                    continue
+                values.append({
                     "server_id": server_id,
                     "email": email,
-                    "source_ip": source_ip,
+                    "source_ip_id": ip_id,
                     "connection_count": count,
                     "is_infrastructure": is_infra,
                     "first_seen": now,
                     "last_seen": now
-                }
-                for (email, source_ip), (count, is_infra) in batch
-            ]
+                })
+            
+            if not values:
+                continue
             
             stmt = pg_insert(XrayUserIpStats).values(values)
             stmt = stmt.on_conflict_do_update(
-                constraint='uq_user_ip_stats_unique',
+                index_elements=['server_id', 'email', 'source_ip_id'],
                 set_={
                     'connection_count': XrayUserIpStats.connection_count + stmt.excluded.connection_count,
                     'is_infrastructure': stmt.excluded.is_infrastructure,
@@ -613,7 +673,7 @@ class XrayStatsCollector:
             )
             await db.execute(stmt)
     
-    async def _batch_upsert_ip_dest_stats(self, db: AsyncSession, server_id: int, updates: dict, dest_to_id: dict[str, int], now: datetime):
+    async def _batch_upsert_ip_dest_stats(self, db: AsyncSession, server_id: int, updates: dict, dest_to_id: dict[str, int], ip_to_id: dict[str, int], now: datetime):
         """Batch upsert IP-destination stats using PostgreSQL ON CONFLICT."""
         items = list(updates.items())
         
@@ -623,15 +683,15 @@ class XrayStatsCollector:
             values = []
             for (email, source_ip, destination), count in batch:
                 dest_id = dest_to_id.get(destination)
-                if dest_id is None:
+                ip_id = ip_to_id.get(source_ip)
+                if dest_id is None or ip_id is None:
                     continue
                 values.append({
                     "server_id": server_id,
                     "email": email,
-                    "source_ip": source_ip,
+                    "source_ip_id": ip_id,
                     "destination_id": dest_id,
                     "connection_count": count,
-                    "first_seen": now,
                     "last_seen": now
                 })
             
@@ -640,7 +700,7 @@ class XrayStatsCollector:
             
             stmt = pg_insert(XrayIpDestinationStats).values(values)
             stmt = stmt.on_conflict_do_update(
-                constraint='uq_ip_dest_stats_unique_v2',
+                index_elements=['server_id', 'email', 'source_ip_id', 'destination_id'],
                 set_={
                     'connection_count': XrayIpDestinationStats.connection_count + stmt.excluded.connection_count,
                     'last_seen': stmt.excluded.last_seen
@@ -658,7 +718,7 @@ class XrayStatsCollector:
             unique_destinations=unique_destinations
         )
         stmt = stmt.on_conflict_do_update(
-            constraint='uq_xray_hourly_unique',
+            index_elements=['server_id', 'hour'],
             set_={
                 'visit_count': XrayHourlyStats.visit_count + stmt.excluded.visit_count,
                 'unique_users': stmt.excluded.unique_users,
@@ -897,22 +957,53 @@ class XrayStatsCollector:
                 )
                 
                 # Clean up orphaned destinations (not referenced by any stats)
-                # This is done periodically to free space from old destinations
-                orphan_result = await db.execute(
+                orphan_dest_result = await db.execute(
                     text("""
-                        DELETE FROM xray_destinations 
-                        WHERE id NOT IN (SELECT DISTINCT destination_id FROM xray_visit_stats)
-                        AND id NOT IN (SELECT DISTINCT destination_id FROM xray_ip_destination_stats)
+                        DELETE FROM xray_destinations d
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM xray_visit_stats vs WHERE vs.destination_id = d.id
+                        )
+                        AND NOT EXISTS (
+                            SELECT 1 FROM xray_ip_destination_stats ids WHERE ids.destination_id = d.id
+                        )
                     """)
                 )
-                deleted_orphans = orphan_result.rowcount
+                deleted_orphan_dests = orphan_dest_result.rowcount
+                
+                # Clean up orphaned source IPs (not referenced by any stats)
+                orphan_ip_result = await db.execute(
+                    text("""
+                        DELETE FROM xray_source_ips sip
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM xray_user_ip_stats uis WHERE uis.source_ip_id = sip.id
+                        )
+                        AND NOT EXISTS (
+                            SELECT 1 FROM xray_ip_destination_stats ids WHERE ids.source_ip_id = sip.id
+                        )
+                    """)
+                )
+                deleted_orphan_ips = orphan_ip_result.rowcount
                 
                 await db.commit()
             
-            if deleted_visits > 0 or deleted_ips > 0 or deleted_ip_dests > 0 or deleted_orphans > 0:
-                logger.info(f"Xray stats cleanup: {deleted_visits} visit records, {deleted_ips} IP records, {deleted_ip_dests} IP-dest records, {deleted_orphans} orphan destinations removed")
+            total_deleted = deleted_visits + deleted_ips + deleted_ip_dests + deleted_orphan_dests + deleted_orphan_ips
+            
+            if total_deleted > 0:
+                logger.info(
+                    f"Xray stats cleanup: {deleted_visits} visits, {deleted_ips} IPs, "
+                    f"{deleted_ip_dests} IP-dests, {deleted_orphan_dests} orphan dests, "
+                    f"{deleted_orphan_ips} orphan IPs removed"
+                )
+                
+                # Run VACUUM on affected tables to reclaim disk space
+                try:
+                    async with async_session() as vacuum_db:
+                        await vacuum_db.execute(text("VACUUM xray_visit_stats, xray_user_ip_stats, xray_ip_destination_stats, xray_hourly_stats, xray_destinations, xray_source_ips"))
+                    logger.info("VACUUM completed on stats tables")
+                except Exception as ve:
+                    logger.debug(f"VACUUM failed (non-critical): {ve}")
             else:
-                logger.info("Xray stats cleanup completed")
+                logger.info("Xray stats cleanup completed (nothing to delete)")
                 
         except Exception as e:
             logger.error(f"Database error in cleanup: {e}")

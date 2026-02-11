@@ -75,13 +75,6 @@ panel/
 - Batch upsert (ON CONFLICT) — 10-100x быстрее записи статистики
 - Надёжность и масштабируемость
 
-**Автомиграция с SQLite:**
-При обновлении со старой версии (SQLite) данные переносятся автоматически:
-1. При первом запуске проверяется наличие SQLite базы
-2. Все данные копируются в PostgreSQL
-3. SQLite файл переименовывается в `panel.db.backup`
-4. Создаётся флаг `.postgres_migrated`
-
 ## Конфигурация (.env)
 
 | Параметр | Описание | Default |
@@ -234,32 +227,38 @@ panel/
 
 ### IP Blocklist
 
-Блокировка IP/CIDR через ipset. Поддержка глобальных правил (для всех серверов), правил по серверам и автоматических списков из GitHub.
+Блокировка IP/CIDR через ipset с поддержкой двух направлений:
+- **Входящие (in)** — блокировка входящего трафика (iptables INPUT chain, match src)
+- **Исходящие (out)** — блокировка исходящего трафика (iptables OUTPUT chain, match dst)
+
+Поддержка глобальных правил (для всех серверов), правил по серверам и автоматических списков из GitHub. Каждое правило и источник привязаны к направлению.
+
+На ноде создаются 4 ipset-списка: `blocklist_permanent`, `blocklist_temp` (входящие), `blocklist_out_permanent`, `blocklist_out_temp` (исходящие).
 
 **Глобальные правила:**
 
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
-| GET | /api/blocklist/global | Все глобальные правила |
-| POST | /api/blocklist/global | Добавить глобальное правило |
-| POST | /api/blocklist/global/bulk | Массовое добавление |
+| GET | /api/blocklist/global?direction=in\|out | Все глобальные правила (фильтр по направлению) |
+| POST | /api/blocklist/global | Добавить глобальное правило (direction в теле) |
+| POST | /api/blocklist/global/bulk | Массовое добавление (direction в теле) |
 | DELETE | /api/blocklist/global/{id} | Удалить правило |
 
 **Правила по серверам:**
 
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
-| GET | /api/blocklist/server/{id} | Правила сервера |
-| POST | /api/blocklist/server/{id} | Добавить правило для сервера |
+| GET | /api/blocklist/server/{id}?direction=in\|out | Правила сервера (фильтр по направлению) |
+| POST | /api/blocklist/server/{id} | Добавить правило для сервера (direction в теле) |
 | DELETE | /api/blocklist/server/{id}/{rule_id} | Удалить правило |
-| GET | /api/blocklist/server/{id}/status | Статус ipset на ноде |
+| GET | /api/blocklist/server/{id}/status | Статус ipset на ноде (оба направления) |
 
 **Автоматические списки:**
 
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
-| GET | /api/blocklist/sources | Все источники |
-| POST | /api/blocklist/sources | Добавить источник |
+| GET | /api/blocklist/sources?direction=in\|out | Источники (опциональный фильтр по направлению) |
+| POST | /api/blocklist/sources | Добавить источник (direction в теле) |
 | PUT | /api/blocklist/sources/{id} | Обновить (вкл/выкл) |
 | DELETE | /api/blocklist/sources/{id} | Удалить источник |
 | POST | /api/blocklist/sources/{id}/refresh | Обновить источник |
@@ -271,14 +270,14 @@ panel/
 |-------|----------|----------|
 | GET | /api/blocklist/settings | Текущие настройки |
 | PUT | /api/blocklist/settings | Обновить настройки |
-| POST | /api/blocklist/sync | Синхронизировать все ноды |
-| POST | /api/blocklist/sync/{id} | Синхронизировать одну ноду |
+| POST | /api/blocklist/sync | Синхронизировать все ноды (оба направления) |
+| POST | /api/blocklist/sync/{id} | Синхронизировать одну ноду (оба направления) |
 
-**Дефолтные списки (включены по умолчанию):**
+**Дефолтные списки (включены по умолчанию, направление: входящие):**
 - AntiScanner: `https://raw.githubusercontent.com/shadow-netlab/traffic-guard-lists/refs/heads/main/public/antiscanner.list`
 - Government Networks: `https://raw.githubusercontent.com/shadow-netlab/traffic-guard-lists/refs/heads/main/public/government_networks.list`
 
-Списки автоматически обновляются каждые 24 часа. При обнаружении изменений блоклисты синхронизируются со всеми активными нодами.
+Списки автоматически обновляются каждые 24 часа. При обнаружении изменений блоклисты синхронизируются со всеми активными нодами. Синхронизация отправляет оба направления (in + out) отдельными запросами.
 
 ### Remnawave Integration
 
@@ -361,7 +360,7 @@ panel/
 | POST | /api/remnawave/users/refresh | Принудительное обновление кэша пользователей из Remnawave API |
 | GET | /api/remnawave/users/cache-status | Статус кэша (last_update, updating, update_interval) |
 
-Кэш пользователей автоматически обновляется каждый час. Используйте `/users/refresh` для немедленной синхронизации после добавления/удаления пользователей в Remnawave.
+Кэш пользователей автоматически обновляется каждые 30 минут. Используйте `/users/refresh` для немедленной синхронизации после добавления/удаления пользователей в Remnawave.
 
 Параметры запросов:
 - `period` — 1h, 24h, 7d, 30d, 365d, all (по умолчанию all — за всё время)
@@ -371,58 +370,44 @@ panel/
 
 **Оптимизированная схема БД:**
 
-Данные хранятся компактно с использованием счётчиков и нормализации:
+Данные хранятся компактно с двойной нормализацией (домены + IP) и составными первичными ключами:
 
 1. **xray_destinations** — справочник уникальных доменов
-   - Хранит все уникальные домены/IP один раз
-   - Ссылка по integer FK вместо varchar(500) — экономия 10-100x места
-   - hit_count — общее количество обращений к домену
+   - destination (полный адрес: google.com:443), host (хост без порта: google.com)
+   - host кеширован для быстрого GROUP BY без regexp_replace
 
-2. **xray_visit_stats** — кумулятивные счётчики: `(server, destination_id, email) → total_count`
-   - Одна запись на комбинацию сайт+пользователь
-   - Ссылается на xray_destinations по destination_id
-   - Поля: first_seen, last_seen для фильтрации по периоду
+2. **xray_source_ips** — справочник уникальных IP-адресов клиентов
+   - Нормализация: VARCHAR(45) → INTEGER FK, экономия ~30 байт на строку
 
-3. **xray_hourly_stats** — почасовая статистика для timeline: `(server, hour) → counts`
-   - Лёгкая таблица без детализации по сайтам/пользователям
-   - Только общее число посещений, уникальных пользователей и сайтов за час
+3. **xray_visit_stats** — счётчики: `PK(server_id, destination_id, email) → visit_count`
+   - Составной PK вместо суррогатного id (экономия 4 байта + 1 индекс на строку)
 
-4. **xray_user_ip_stats** — IP-адреса пользователей
-5. **xray_ip_destination_stats** — связь IP → destination (по destination_id)
+4. **xray_hourly_stats** — timeline: `PK(server_id, hour) → counts`
+
+5. **xray_user_ip_stats** — IP пользователей: `PK(server_id, email, source_ip_id)`
+
+6. **xray_ip_destination_stats** — IP → destination: `PK(server_id, email, source_ip_id, destination_id)`
+   - first_seen убран (не используется в запросах)
 
 **Автоочистка данных (настраиваемая):**
 - xray_visit_stats: записи с last_seen > visit_stats_retention_days (default 365)
 - xray_hourly_stats: записи старше hourly_stats_retention_days (default 365)
 - xray_user_ip_stats: записи с last_seen > ip_stats_retention_days (default 90)
 - xray_ip_destination_stats: записи с last_seen > ip_destination_retention_days (default 90)
-- remnawave_user_cache: записи без обновления > 7 дней удаляются автоматически
-- xray_destinations: orphaned записи (без ссылок) удаляются автоматически
+- remnawave_user_cache: записи без обновления > 7 дней
+- xray_destinations, xray_source_ips: orphaned записи удаляются автоматически
+- После массовых удалений выполняется VACUUM для возврата дискового пространства
 
-Сроки хранения настраиваются через UI в Settings → Remnawave → Сроки хранения данных.
+**Ручная очистка:** DELETE /api/remnawave/stats/clear — удаляет всю статистику
 
-**Ручная очистка:** DELETE /api/remnawave/stats/clear — удаляет все посещения, IP и почасовую статистику
-
-3. **remnawave_user_cache** — кэш пользователей с расширенной информацией:
-   - email, uuid, username, status, telegram_id
-   - expire_at, subscription_url, sub_last_opened_at
-   - traffic_limit_bytes, used_traffic_bytes, lifetime_used_traffic_bytes
-   - hwid_device_limit, online_at, first_connected_at
-   - Обновляется каждый час из Remnawave API
-
-**Размер БД (оценка для 5 серверов, 5000 пользователей, 50000 сайтов):**
-- xray_destinations: ~50,000 уникальных доменов × 500 bytes = ~25 MB
-- xray_visit_stats: ~250 млн записей max × 30 bytes (int FK вместо varchar) = ~7.5 GB
-- xray_hourly_stats: 5 × 24 × 365 = 43,800 записей × 30 bytes = ~1.3 MB
-- xray_ip_destination_stats: при 90 дней retention — значительно меньше данных
-- Итого: нормализация снижает размер на 30-50% за счёт integer FK
+7. **remnawave_user_cache** — кэш пользователей (обновляется каждые 30 минут из API)
 
 **Оптимизация производительности:**
 
-Backend-кеширование (panel/backend/app/routers/remnawave.py):
-- In-memory кеш с TTL для тяжёлых endpoints
-- `/stats/summary`, `/stats/top-destinations`, `/stats/top-users` — TTL 30 сек
-- `/stats/db-info` — TTL 5 минут
-- IP counts в `get_top_users` объединены в один SQL запрос с conditional aggregation
+Backend-кеширование:
+- In-memory кеш с TTL: summary/top-destinations/top-users — 30 сек, db-info — 5 мин
+- IP counts объединены в один SQL запрос с conditional aggregation
+- GROUP BY по кешированному host вместо regexp_replace на каждой строке
 
 Frontend lazy loading (panel/frontend/src/pages/Remnawave.tsx):
 - При открытии загружаются только базовые настройки (settings, nodes, collectorStatus)
@@ -437,7 +422,7 @@ Frontend lazy loading (panel/frontend/src/pages/Remnawave.tsx):
 4. Панель каждые 60 сек вызывает `/api/remnawave/stats/collect` на активных нодах
 5. Нода отдаёт данные и очищает память
 6. Панель инкрементирует счётчики в xray_visit_stats и добавляет запись в xray_hourly_stats
-7. Раз в час обновляется кэш пользователей через Remnawave API
+7. Раз в 30 минут обновляется кэш пользователей через Remnawave API
 
 **Ленивый запуск коллектора:**
 - Коллектор НЕ запускается автоматически при старте ноды

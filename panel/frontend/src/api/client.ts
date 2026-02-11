@@ -493,11 +493,14 @@ export const settingsApi = {
 }
 
 // Blocklist types
+export type BlocklistDirection = 'in' | 'out'
+
 export interface BlocklistRule {
   id: number
   ip_cidr: string
   server_id: number | null
   is_permanent: boolean
+  direction: BlocklistDirection
   comment: string | null
   source: string
   created_at: string
@@ -509,6 +512,7 @@ export interface BlocklistSource {
   url: string
   enabled: boolean
   is_default: boolean
+  direction: BlocklistDirection
   last_updated: string | null
   ip_count: number
   error_message: string | null
@@ -522,17 +526,20 @@ export interface BlocklistSettings {
 
 export const blocklistApi = {
   // Global rules
-  getGlobal: () => api.get<{ count: number; rules: BlocklistRule[] }>('/blocklist/global'),
-  addGlobal: (data: { ip_cidr: string; is_permanent?: boolean; comment?: string }) =>
+  getGlobal: (direction: BlocklistDirection = 'in') =>
+    api.get<{ count: number; direction: string; rules: BlocklistRule[] }>('/blocklist/global', { params: { direction } }),
+  addGlobal: (data: { ip_cidr: string; is_permanent?: boolean; direction?: BlocklistDirection; comment?: string }) =>
     api.post('/blocklist/global', data),
-  addGlobalBulk: (ips: string[], is_permanent: boolean = true) =>
-    api.post('/blocklist/global/bulk', { ips, is_permanent }),
+  addGlobalBulk: (ips: string[], is_permanent: boolean = true, direction: BlocklistDirection = 'in') =>
+    api.post('/blocklist/global/bulk', { ips, is_permanent, direction }),
   deleteGlobal: (id: number) => api.delete(`/blocklist/global/${id}`),
   
   // Server rules
-  getServer: (serverId: number) => 
-    api.get<{ server_id: number; count: number; global_count: number; rules: BlocklistRule[] }>(`/blocklist/server/${serverId}`),
-  addServer: (serverId: number, data: { ip_cidr: string; is_permanent?: boolean; comment?: string }) =>
+  getServer: (serverId: number, direction: BlocklistDirection = 'in') => 
+    api.get<{ server_id: number; count: number; global_count: number; direction: string; rules: BlocklistRule[] }>(
+      `/blocklist/server/${serverId}`, { params: { direction } }
+    ),
+  addServer: (serverId: number, data: { ip_cidr: string; is_permanent?: boolean; direction?: BlocklistDirection; comment?: string }) =>
     api.post(`/blocklist/server/${serverId}`, data),
   deleteServer: (serverId: number, ruleId: number) =>
     api.delete(`/blocklist/server/${serverId}/${ruleId}`),
@@ -540,8 +547,9 @@ export const blocklistApi = {
     api.get(`/blocklist/server/${serverId}/status`),
   
   // Sources
-  getSources: () => api.get<{ count: number; sources: BlocklistSource[] }>('/blocklist/sources'),
-  addSource: (data: { name: string; url: string }) =>
+  getSources: (direction?: BlocklistDirection) =>
+    api.get<{ count: number; sources: BlocklistSource[] }>('/blocklist/sources', { params: direction ? { direction } : {} }),
+  addSource: (data: { name: string; url: string; direction?: BlocklistDirection }) =>
     api.post('/blocklist/sources', data),
   updateSource: (id: number, data: { enabled?: boolean; name?: string }) =>
     api.put(`/blocklist/sources/${id}`, data),

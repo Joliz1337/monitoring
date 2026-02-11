@@ -29,7 +29,8 @@ try:
     from sqlalchemy import create_engine, select, func as sql_func
     from sqlalchemy.orm import sessionmaker
     from app.models import (
-        XrayVisitStats, RemnawaveUserCache, XrayUserIpStats, RemnawaveExport
+        XrayVisitStats, RemnawaveUserCache, XrayUserIpStats, RemnawaveExport,
+        XrayDestination, XraySourceIp
     )
     from app.config import get_settings
     logger.info("Imports successful")
@@ -115,59 +116,48 @@ def run_export(export_id: int, settings: dict):
             include_destinations = settings.get("include_destinations", True)
             
             if include_destinations:
-                if settings["period"] == "all":
-                    main_query = select(
-                        XrayVisitStats.email,
-                        XrayVisitStats.destination,
-                        sql_func.sum(XrayVisitStats.visit_count).label('visits'),
-                        sql_func.min(XrayVisitStats.first_seen).label('first_seen'),
-                        sql_func.max(XrayVisitStats.last_seen).label('last_seen')
-                    ).group_by(
-                        XrayVisitStats.email, 
-                        XrayVisitStats.destination
-                    ).order_by(XrayVisitStats.email)
-                else:
-                    main_query = select(
-                        XrayVisitStats.email,
-                        XrayVisitStats.destination,
-                        sql_func.sum(XrayVisitStats.visit_count).label('visits'),
-                        sql_func.min(XrayVisitStats.first_seen).label('first_seen'),
-                        sql_func.max(XrayVisitStats.last_seen).label('last_seen')
-                    ).where(
-                        XrayVisitStats.last_seen >= start_time
-                    ).group_by(
-                        XrayVisitStats.email,
-                        XrayVisitStats.destination
-                    ).order_by(XrayVisitStats.email)
+                base_query = select(
+                    XrayVisitStats.email,
+                    XrayDestination.host.label('destination'),
+                    sql_func.sum(XrayVisitStats.visit_count).label('visits'),
+                    sql_func.min(XrayVisitStats.first_seen).label('first_seen'),
+                    sql_func.max(XrayVisitStats.last_seen).label('last_seen')
+                ).join(XrayDestination, XrayVisitStats.destination_id == XrayDestination.id)
+                
+                if settings["period"] != "all" and start_time:
+                    base_query = base_query.where(XrayVisitStats.last_seen >= start_time)
+                
+                main_query = base_query.group_by(
+                    XrayVisitStats.email,
+                    XrayDestination.host
+                ).order_by(XrayVisitStats.email)
             else:
-                if settings["period"] == "all":
-                    main_query = select(
-                        XrayVisitStats.email,
-                        sql_func.sum(XrayVisitStats.visit_count).label('total_visits'),
-                        sql_func.count(sql_func.distinct(XrayVisitStats.destination)).label('unique_sites')
-                    ).group_by(XrayVisitStats.email)
-                else:
-                    main_query = select(
-                        XrayVisitStats.email,
-                        sql_func.sum(XrayVisitStats.visit_count).label('total_visits'),
-                        sql_func.count(sql_func.distinct(XrayVisitStats.destination)).label('unique_sites')
-                    ).where(
-                        XrayVisitStats.last_seen >= start_time
-                    ).group_by(XrayVisitStats.email)
+                base_query = select(
+                    XrayVisitStats.email,
+                    sql_func.sum(XrayVisitStats.visit_count).label('total_visits'),
+                    sql_func.count(sql_func.distinct(XrayVisitStats.destination_id)).label('unique_sites')
+                )
+                
+                if settings["period"] != "all" and start_time:
+                    base_query = base_query.where(XrayVisitStats.last_seen >= start_time)
+                
+                main_query = base_query.group_by(XrayVisitStats.email)
             
             main_result = db.execute(main_query)
             main_data = main_result.all()
             
-            # Get IPs if needed
+            # Get IPs if needed (JOIN with XraySourceIp for actual IP strings)
             user_ips = {}
             if settings.get("include_client_ips") or settings.get("include_infra_ips"):
                 ip_query = select(
                     XrayUserIpStats.email,
-                    XrayUserIpStats.source_ip,
+                    XraySourceIp.ip.label('source_ip'),
                     XrayUserIpStats.is_infrastructure
+                ).join(
+                    XraySourceIp, XrayUserIpStats.source_ip_id == XraySourceIp.id
                 ).group_by(
                     XrayUserIpStats.email,
-                    XrayUserIpStats.source_ip,
+                    XraySourceIp.ip,
                     XrayUserIpStats.is_infrastructure
                 )
                 ip_result = db.execute(ip_query)

@@ -1,13 +1,16 @@
 import { useEffect, useState, useCallback } from 'react'
-import { Shield, Plus, Trash2, RefreshCw, Server, Globe, List, Settings2, Loader2, ExternalLink, AlertCircle, Check, X } from 'lucide-react'
+import { Shield, Plus, Trash2, RefreshCw, Server, Globe, List, Settings2, Loader2, ExternalLink, AlertCircle, Check, X, ArrowDownToLine, ArrowUpFromLine } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence } from 'framer-motion'
-import { blocklistApi, serversApi, Server as ServerType, BlocklistRule, BlocklistSource } from '../api/client'
+import { blocklistApi, serversApi, Server as ServerType, BlocklistRule, BlocklistSource, BlocklistDirection } from '../api/client'
 
 type TabType = 'global' | 'servers' | 'sources'
 
 export default function Blocklist() {
   const { t } = useTranslation()
+  
+  // Direction state
+  const [direction, setDirection] = useState<BlocklistDirection>('in')
   
   // State
   const [activeTab, setActiveTab] = useState<TabType>('global')
@@ -42,12 +45,12 @@ export default function Blocklist() {
   // Fetch data
   const fetchGlobalRules = useCallback(async () => {
     try {
-      const response = await blocklistApi.getGlobal()
+      const response = await blocklistApi.getGlobal(direction)
       setGlobalRules(response.data.rules)
     } catch (err) {
       console.error('Failed to fetch global rules:', err)
     }
-  }, [])
+  }, [direction])
   
   const fetchServers = useCallback(async () => {
     try {
@@ -64,22 +67,22 @@ export default function Blocklist() {
   const fetchServerRules = useCallback(async () => {
     if (!selectedServerId) return
     try {
-      const response = await blocklistApi.getServer(selectedServerId)
+      const response = await blocklistApi.getServer(selectedServerId, direction)
       setServerRules(response.data.rules)
       setServerGlobalCount(response.data.global_count)
     } catch (err) {
       console.error('Failed to fetch server rules:', err)
     }
-  }, [selectedServerId])
+  }, [selectedServerId, direction])
   
   const fetchSources = useCallback(async () => {
     try {
-      const response = await blocklistApi.getSources()
+      const response = await blocklistApi.getSources(direction)
       setSources(response.data.sources)
     } catch (err) {
       console.error('Failed to fetch sources:', err)
     }
-  }, [])
+  }, [direction])
   
   const fetchSettings = useCallback(async () => {
     try {
@@ -110,6 +113,15 @@ export default function Blocklist() {
     }
   }, [selectedServerId, fetchServerRules])
   
+  // Re-fetch data when direction changes
+  useEffect(() => {
+    fetchGlobalRules()
+    fetchSources()
+    if (selectedServerId) {
+      fetchServerRules()
+    }
+  }, [direction])
+  
   // Handlers
   const handleAddGlobalRules = async () => {
     if (!newGlobalIps.trim()) return
@@ -117,7 +129,7 @@ export default function Blocklist() {
     setAddingGlobal(true)
     try {
       const ips = newGlobalIps.split('\n').map(ip => ip.trim()).filter(ip => ip)
-      await blocklistApi.addGlobalBulk(ips)
+      await blocklistApi.addGlobalBulk(ips, true, direction)
       setNewGlobalIps('')
       await fetchGlobalRules()
     } catch (err: any) {
@@ -142,7 +154,7 @@ export default function Blocklist() {
     
     setAddingServer(true)
     try {
-      await blocklistApi.addServer(selectedServerId, { ip_cidr: newServerIp.trim() })
+      await blocklistApi.addServer(selectedServerId, { ip_cidr: newServerIp.trim(), direction })
       setNewServerIp('')
       await fetchServerRules()
     } catch (err: any) {
@@ -168,7 +180,7 @@ export default function Blocklist() {
     
     setAddingSource(true)
     try {
-      await blocklistApi.addSource({ name: newSourceName.trim(), url: newSourceUrl.trim() })
+      await blocklistApi.addSource({ name: newSourceName.trim(), url: newSourceUrl.trim(), direction })
       setNewSourceName('')
       setNewSourceUrl('')
       await fetchSources()
@@ -246,6 +258,11 @@ export default function Blocklist() {
       setSavingSettings(false)
     }
   }
+  
+  const directionButtons = [
+    { id: 'in' as BlocklistDirection, icon: ArrowDownToLine, label: t('blocklist.direction_incoming') },
+    { id: 'out' as BlocklistDirection, icon: ArrowUpFromLine, label: t('blocklist.direction_outgoing') }
+  ]
   
   const tabs = [
     { id: 'global' as TabType, icon: Globe, label: t('blocklist.global_rules') },
@@ -379,6 +396,26 @@ export default function Blocklist() {
         )}
       </AnimatePresence>
       
+      {/* Direction Toggle */}
+      <motion.div variants={itemVariants} className="flex gap-2">
+        {directionButtons.map((btn) => (
+          <button
+            key={btn.id}
+            onClick={() => setDirection(btn.id)}
+            className={`flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-medium transition-all ${
+              direction === btn.id
+                ? btn.id === 'in'
+                  ? 'bg-blue-500 text-white'
+                  : 'bg-orange-500 text-white'
+                : 'text-dark-400 hover:text-dark-200 hover:bg-dark-800 border border-dark-700'
+            }`}
+          >
+            <btn.icon className="w-4 h-4" />
+            {btn.label}
+          </button>
+        ))}
+      </motion.div>
+      
       {/* Tabs */}
       <motion.div variants={itemVariants} className="flex gap-2 border-b border-dark-700 pb-2">
         {tabs.map((tab) => (
@@ -402,7 +439,7 @@ export default function Blocklist() {
         {/* Global Rules Tab */}
         {activeTab === 'global' && (
           <motion.div
-            key="global"
+            key={`global-${direction}`}
             initial={{ opacity: 0, x: -20 }}
             animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: 20 }}
@@ -413,7 +450,9 @@ export default function Blocklist() {
               <h3 className="text-lg font-semibold text-dark-100 mb-4">
                 {t('blocklist.add_global')}
               </h3>
-              <p className="text-sm text-dark-400 mb-4">{t('blocklist.add_global_desc')}</p>
+              <p className="text-sm text-dark-400 mb-4">
+                {direction === 'in' ? t('blocklist.add_global_desc_in') : t('blocklist.add_global_desc_out')}
+              </p>
               
               <div className="space-y-3">
                 <textarea
@@ -484,7 +523,7 @@ export default function Blocklist() {
         {/* Server Rules Tab */}
         {activeTab === 'servers' && (
           <motion.div
-            key="servers"
+            key={`servers-${direction}`}
             initial={{ opacity: 0, x: -20 }}
             animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: 20 }}
@@ -585,7 +624,7 @@ export default function Blocklist() {
         {/* Sources Tab */}
         {activeTab === 'sources' && (
           <motion.div
-            key="sources"
+            key={`sources-${direction}`}
             initial={{ opacity: 0, x: -20 }}
             animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: 20 }}
