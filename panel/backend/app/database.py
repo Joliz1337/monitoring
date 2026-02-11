@@ -230,6 +230,14 @@ async def run_migrations(conn):
     
     # Migrate to single xray_stats table (replaces 5 old tables)
     await _migrate_to_single_stats_table(conn)
+    
+    # Drop FK constraint from xray_hourly_stats (server_id=0 used for aggregated data)
+    try:
+        await conn.execute(text(
+            "ALTER TABLE xray_hourly_stats DROP CONSTRAINT IF EXISTS xray_hourly_stats_server_id_fkey"
+        ))
+    except Exception:
+        pass
 
 
 async def _migrate_destinations_normalization(conn):

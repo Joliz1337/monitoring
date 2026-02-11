@@ -265,7 +265,7 @@ class XrayHourlyStats(Base):
     """
     __tablename__ = "xray_hourly_stats"
     
-    server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), primary_key=True)
+    server_id = Column(Integer, primary_key=True)  # 0 = aggregated across all servers
     hour = Column(DateTime(timezone=True), primary_key=True, nullable=False)  # Начало часа (округлено)
     visit_count = Column(BigInteger, default=0)
     unique_users = Column(Integer, default=0)
