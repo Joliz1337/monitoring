@@ -279,6 +279,24 @@ panel/
 
 Списки автоматически обновляются каждые 24 часа. При обнаружении изменений блоклисты синхронизируются со всеми активными нодами. Синхронизация отправляет оба направления (in + out) отдельными запросами.
 
+**Торрент-блокер:**
+
+Автоматическая блокировка IP пользователей, использующих торренты через VPN. Мониторит логи Xray на строки `-> torrent` и блокирует source IP через ipset temp ban.
+
+| Метод | Endpoint | Описание |
+|-------|----------|----------|
+| GET | /api/blocklist/torrent-blocker | Статус торрент-блокера на всех серверах |
+| POST | /api/blocklist/torrent-blocker/{id}/enable | Включить на сервере |
+| POST | /api/blocklist/torrent-blocker/{id}/disable | Выключить на сервере |
+
+По умолчанию выключен. Включается через вкладку "Торрент-блокер" в разделе Blocklist. Состояние сохраняется на ноде в `/var/lib/monitoring/torrent_blocker.json` и переживает перезагрузки.
+
+Требуется настройка Xray на ноде:
+- Routing rules: порты 6881-6999 и протокол bittorrent → outbound tag `torrent`
+- Outbound: tag `torrent` с протоколом `blackhole`
+
+Временный бан по умолчанию: 600 секунд (10 минут). Настраивается во вкладке торрент-блокера.
+
 ### Remnawave Integration
 
 Интеграция с Remnawave Panel для сбора статистики посещений из Xray логов.
@@ -344,6 +362,7 @@ panel/
 | GET | /api/remnawave/stats/destination/users | Пользователи посещавшие сайт |
 | GET | /api/remnawave/stats/timeline | Временной график посещений |
 | GET | /api/remnawave/stats/db-info | Информация о БД (количество записей и размер в байтах) |
+| DELETE | /api/remnawave/stats/client-ips/clear | Очистить IP клиентов всех пользователей (hourly сохраняются) |
 | DELETE | /api/remnawave/stats/clear | Очистить всю статистику посещений |
 | GET | /api/remnawave/users | Кэш пользователей Remnawave |
 

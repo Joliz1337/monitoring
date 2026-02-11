@@ -524,6 +524,19 @@ export interface BlocklistSettings {
   auto_update_interval: number
 }
 
+export interface TorrentBlockerStatus {
+  server_id: number
+  server_name: string
+  enabled: boolean
+  running: boolean
+  started_at: string | null
+  total_blocked: number
+  unique_ips_blocked: number
+  last_block_time: string | null
+  recent_blocks: Array<{ ip: string; time: string }>
+  error?: string
+}
+
 export const blocklistApi = {
   // Global rules
   getGlobal: (direction: BlocklistDirection = 'in') =>
@@ -563,6 +576,14 @@ export const blocklistApi = {
     api.put('/blocklist/settings', data),
   sync: () => api.post('/blocklist/sync'),
   syncServer: (serverId: number) => api.post(`/blocklist/sync/${serverId}`),
+  
+  // Torrent blocker
+  getTorrentBlockerStatus: () =>
+    api.get<{ servers: TorrentBlockerStatus[] }>('/blocklist/torrent-blocker'),
+  enableTorrentBlocker: (serverId: number) =>
+    api.post<{ success: boolean; message: string }>(`/blocklist/torrent-blocker/${serverId}/enable`),
+  disableTorrentBlocker: (serverId: number) =>
+    api.post<{ success: boolean; message: string }>(`/blocklist/torrent-blocker/${serverId}/disable`),
 }
 
 export interface NodeOptimizationsInfo {
@@ -1181,6 +1202,14 @@ export const remnawaveApi = {
       deleted_destination_records: number
       message: string
     }>(`/remnawave/stats/user/${email}/ips`),
+  
+  // Clear all client IPs globally
+  clearAllClientIps: () =>
+    api.delete<{
+      success: boolean
+      deleted_records: number
+      message: string
+    }>('/remnawave/stats/client-ips/clear'),
   
   // Export
   createExport: (settings: {

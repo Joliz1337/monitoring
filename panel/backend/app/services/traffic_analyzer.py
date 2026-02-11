@@ -28,6 +28,9 @@ from app.services.remnawave_api import get_remnawave_api, RemnawaveAPIError
 
 logger = logging.getLogger(__name__)
 
+# Minimum visit count for an IP to be considered active (used in IP anomaly check)
+MIN_IP_VISIT_COUNT = 100
+
 # Known valid platforms for HWID validation
 VALID_PLATFORMS = {'android', 'ios', 'windows', 'macos', 'linux', 'mac'}
 
@@ -476,22 +479,32 @@ class TrafficAnalyzer:
         settings: TrafficAnalyzerSettings,
         cutoff_time: datetime
     ) -> Optional[dict]:
-        """Check if user has too many unique IPs."""
+        """Check if user has too many unique IPs.
+        
+        Only counts IPs with >= MIN_IP_VISIT_COUNT visits to filter out
+        noise from rarely-used IPs.
+        """
         device_limit = user.hwid_device_limit or 2
         ip_limit = int(device_limit * settings.ip_limit_multiplier)
         
-        # Count unique IPs in last 24h (infrastructure excluded at query time)
         async with async_session() as db:
-            # Get infrastructure IPs for filtering
             from app.services.xray_stats_collector import _get_infrastructure_ips_sql
             infra_ips = await _get_infrastructure_ips_sql(db)
             
-            query = select(func.count(func.distinct(XrayStats.source_ip)))
             conditions = [XrayStats.email == user.email, XrayStats.last_seen >= cutoff_time]
             if infra_ips:
                 conditions.append(XrayStats.source_ip.notin_(list(infra_ips)))
             
-            result = await db.execute(query.where(and_(*conditions)))
+            # Subquery: group by source_ip, sum visits, keep only IPs with >= MIN_IP_VISIT_COUNT
+            active_ips_sq = (
+                select(XrayStats.source_ip)
+                .where(and_(*conditions))
+                .group_by(XrayStats.source_ip)
+                .having(func.sum(XrayStats.count) >= MIN_IP_VISIT_COUNT)
+                .subquery()
+            )
+            
+            result = await db.execute(select(func.count()).select_from(active_ips_sq))
             unique_ips = result.scalar() or 0
         
         if unique_ips <= ip_limit:
@@ -506,7 +519,8 @@ class TrafficAnalyzer:
                 "unique_ips": unique_ips,
                 "device_limit": device_limit,
                 "ip_limit": ip_limit,
-                "exceeded_by": unique_ips - ip_limit
+                "exceeded_by": unique_ips - ip_limit,
+                "min_visit_threshold": MIN_IP_VISIT_COUNT
             }
         }
     

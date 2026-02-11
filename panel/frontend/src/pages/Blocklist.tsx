@@ -1,10 +1,10 @@
 import { useEffect, useState, useCallback } from 'react'
-import { Shield, Plus, Trash2, RefreshCw, Server, Globe, List, Settings2, Loader2, ExternalLink, AlertCircle, Check, X, ArrowDownToLine, ArrowUpFromLine } from 'lucide-react'
+import { Shield, Plus, Trash2, RefreshCw, Server, Globe, List, Loader2, ExternalLink, AlertCircle, Check, X, ArrowDownToLine, ArrowUpFromLine, ShieldBan, Power, PowerOff, Info } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence } from 'framer-motion'
-import { blocklistApi, serversApi, Server as ServerType, BlocklistRule, BlocklistSource, BlocklistDirection } from '../api/client'
+import { blocklistApi, serversApi, Server as ServerType, BlocklistRule, BlocklistSource, BlocklistDirection, TorrentBlockerStatus } from '../api/client'
 
-type TabType = 'global' | 'servers' | 'sources'
+type TabType = 'global' | 'servers' | 'sources' | 'torrent'
 
 export default function Blocklist() {
   const { t } = useTranslation()
@@ -38,9 +38,13 @@ export default function Blocklist() {
   const [refreshingSource, setRefreshingSource] = useState<number | null>(null)
   
   // Settings
-  const [showSettings, setShowSettings] = useState(false)
-  const [tempTimeout, setTempTimeout] = useState(300)
+  const [tempTimeout, setTempTimeout] = useState(600)
   const [savingSettings, setSavingSettings] = useState(false)
+  
+  // Torrent blocker
+  const [torrentStatuses, setTorrentStatuses] = useState<TorrentBlockerStatus[]>([])
+  const [torrentLoading, setTorrentLoading] = useState(false)
+  const [togglingServer, setTogglingServer] = useState<number | null>(null)
   
   // Fetch data
   const fetchGlobalRules = useCallback(async () => {
@@ -87,9 +91,21 @@ export default function Blocklist() {
   const fetchSettings = useCallback(async () => {
     try {
       const response = await blocklistApi.getSettings()
-      setTempTimeout(response.data.settings.temp_timeout || 300)
+      setTempTimeout(response.data.settings.temp_timeout || 600)
     } catch (err) {
       console.error('Failed to fetch settings:', err)
+    }
+  }, [])
+  
+  const fetchTorrentStatus = useCallback(async () => {
+    setTorrentLoading(true)
+    try {
+      const response = await blocklistApi.getTorrentBlockerStatus()
+      setTorrentStatuses(response.data.servers)
+    } catch (err) {
+      console.error('Failed to fetch torrent blocker status:', err)
+    } finally {
+      setTorrentLoading(false)
     }
   }, [])
   
@@ -127,6 +143,14 @@ export default function Blocklist() {
       fetchServerRules()
     }
   }, [direction]) // eslint-disable-line react-hooks/exhaustive-deps
+  
+  // Load torrent blocker data when tab is selected
+  const [torrentLoaded, setTorrentLoaded] = useState(false)
+  useEffect(() => {
+    if (activeTab === 'torrent' && !torrentLoaded) {
+      fetchTorrentStatus().then(() => setTorrentLoaded(true))
+    }
+  }, [activeTab]) // eslint-disable-line react-hooks/exhaustive-deps
   
   // Handlers
   const handleAddGlobalRules = async () => {
@@ -265,6 +289,23 @@ export default function Blocklist() {
     }
   }
   
+  const handleToggleTorrentBlocker = async (serverId: number, enable: boolean) => {
+    setTogglingServer(serverId)
+    try {
+      if (enable) {
+        await blocklistApi.enableTorrentBlocker(serverId)
+      } else {
+        await blocklistApi.disableTorrentBlocker(serverId)
+      }
+      await fetchTorrentStatus()
+    } catch (err: any) {
+      console.error('Failed to toggle torrent blocker:', err)
+      alert(err.response?.data?.detail || 'Failed to toggle torrent blocker')
+    } finally {
+      setTogglingServer(null)
+    }
+  }
+  
   const directionButtons = [
     { id: 'in' as BlocklistDirection, icon: ArrowDownToLine, label: t('blocklist.direction_incoming') },
     { id: 'out' as BlocklistDirection, icon: ArrowUpFromLine, label: t('blocklist.direction_outgoing') }
@@ -273,7 +314,8 @@ export default function Blocklist() {
   const tabs = [
     { id: 'global' as TabType, icon: Globe, label: t('blocklist.global_rules') },
     { id: 'servers' as TabType, icon: Server, label: t('blocklist.server_rules') },
-    { id: 'sources' as TabType, icon: List, label: t('blocklist.auto_lists') }
+    { id: 'sources' as TabType, icon: List, label: t('blocklist.auto_lists') },
+    { id: 'torrent' as TabType, icon: ShieldBan, label: t('blocklist.torrent_blocker') }
   ]
   
   const containerVariants = {
@@ -316,16 +358,6 @@ export default function Blocklist() {
         
         <div className="flex items-center gap-3">
           <motion.button
-            onClick={() => setShowSettings(!showSettings)}
-            className="btn btn-secondary"
-            whileHover={{ scale: 1.02 }}
-            whileTap={{ scale: 0.98 }}
-          >
-            <Settings2 className="w-4 h-4" />
-            {t('common.settings')}
-          </motion.button>
-          
-          <motion.button
             onClick={handleSyncAll}
             disabled={syncing}
             className="btn btn-primary"
@@ -350,57 +382,6 @@ export default function Blocklist() {
         <AlertCircle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
         <p className="text-sm text-amber-200">{t('blocklist.sync_warning')}</p>
       </motion.div>
-      
-      {/* Settings Panel */}
-      <AnimatePresence>
-        {showSettings && (
-          <motion.div
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: 'auto' }}
-            exit={{ opacity: 0, height: 0 }}
-            className="overflow-hidden"
-          >
-            <div className="card">
-              <h3 className="text-lg font-semibold text-dark-100 mb-4">{t('blocklist.settings')}</h3>
-              
-              <div className="flex items-end gap-4">
-                <div className="flex-1 max-w-xs">
-                  <label className="block text-sm text-dark-400 mb-2">
-                    {t('blocklist.temp_timeout')}
-                  </label>
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="number"
-                      value={tempTimeout}
-                      onChange={(e) => setTempTimeout(parseInt(e.target.value) || 300)}
-                      min={1}
-                      max={2592000}
-                      className="input w-32"
-                    />
-                    <span className="text-dark-400 text-sm">{t('common.seconds')}</span>
-                  </div>
-                  <p className="text-xs text-dark-500 mt-1">{t('blocklist.temp_timeout_desc')}</p>
-                </div>
-                
-                <motion.button
-                  onClick={handleSaveSettings}
-                  disabled={savingSettings}
-                  className="btn btn-primary"
-                  whileHover={{ scale: 1.02 }}
-                  whileTap={{ scale: 0.98 }}
-                >
-                  {savingSettings ? (
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                  ) : (
-                    <Check className="w-4 h-4" />
-                  )}
-                  {t('common.save')}
-                </motion.button>
-              </div>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
       
       {/* Direction Toggle */}
       <motion.div variants={itemVariants} className="flex gap-2">
@@ -787,6 +768,224 @@ export default function Blocklist() {
                   {t('blocklist.add_source')}
                 </motion.button>
               </div>
+            </div>
+          </motion.div>
+        )}
+        
+        {/* Torrent Blocker Tab */}
+        {activeTab === 'torrent' && (
+          <motion.div
+            key="torrent"
+            initial={{ opacity: 0, x: -20 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: 20 }}
+            className="space-y-4"
+          >
+            {/* Description */}
+            <div className="card">
+              <div className="flex items-start gap-3">
+                <ShieldBan className="w-5 h-5 text-accent-400 shrink-0 mt-0.5" />
+                <div>
+                  <h3 className="text-lg font-semibold text-dark-100 mb-1">{t('blocklist.torrent_blocker')}</h3>
+                  <p className="text-sm text-dark-400">{t('blocklist.torrent_desc')}</p>
+                </div>
+              </div>
+            </div>
+            
+            {/* Xray Config Instructions */}
+            <div className="card border border-amber-500/30 bg-amber-500/5">
+              <div className="flex items-start gap-3 mb-4">
+                <Info className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+                <div>
+                  <h3 className="font-semibold text-amber-200">{t('blocklist.torrent_config_title')}</h3>
+                  <p className="text-sm text-dark-400 mt-1">{t('blocklist.torrent_config_desc')}</p>
+                </div>
+              </div>
+              
+              <div className="space-y-3">
+                <div>
+                  <p className="text-xs text-dark-400 mb-1.5">{t('blocklist.torrent_config_routing')}</p>
+                  <pre className="bg-dark-900 rounded-lg p-3 text-xs font-mono text-dark-200 overflow-x-auto">{`{
+  "port": "6881-6999",
+  "type": "field",
+  "outboundTag": "torrent"
+},
+{
+  "type": "field",
+  "protocol": ["bittorrent"],
+  "outboundTag": "torrent"
+}`}</pre>
+                </div>
+                
+                <div>
+                  <p className="text-xs text-dark-400 mb-1.5">{t('blocklist.torrent_config_outbound')}</p>
+                  <pre className="bg-dark-900 rounded-lg p-3 text-xs font-mono text-dark-200 overflow-x-auto">{`{
+  "tag": "torrent",
+  "protocol": "blackhole"
+}`}</pre>
+                </div>
+              </div>
+            </div>
+            
+            {/* Temp Timeout Settings */}
+            <div className="card">
+              <h3 className="text-lg font-semibold text-dark-100 mb-4">{t('blocklist.settings')}</h3>
+              
+              <div className="flex items-end gap-4">
+                <div className="flex-1 max-w-xs">
+                  <label className="block text-sm text-dark-400 mb-2">
+                    {t('blocklist.temp_timeout')}
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      value={tempTimeout}
+                      onChange={(e) => setTempTimeout(parseInt(e.target.value) || 600)}
+                      min={1}
+                      max={2592000}
+                      className="input w-32"
+                    />
+                    <span className="text-dark-400 text-sm">{t('common.seconds')}</span>
+                  </div>
+                  <p className="text-xs text-dark-500 mt-1">{t('blocklist.temp_timeout_desc')}</p>
+                </div>
+                
+                <motion.button
+                  onClick={handleSaveSettings}
+                  disabled={savingSettings}
+                  className="btn btn-primary"
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
+                >
+                  {savingSettings ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Check className="w-4 h-4" />
+                  )}
+                  {t('common.save')}
+                </motion.button>
+              </div>
+            </div>
+            
+            {/* Servers List */}
+            <div className="card">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-lg font-semibold text-dark-100">{t('blocklist.torrent_servers')}</h3>
+                <motion.button
+                  onClick={() => { setTorrentLoaded(false); fetchTorrentStatus().then(() => setTorrentLoaded(true)) }}
+                  disabled={torrentLoading}
+                  className="btn btn-secondary text-sm"
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
+                >
+                  {torrentLoading ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <RefreshCw className="w-4 h-4" />
+                  )}
+                  {t('common.refresh')}
+                </motion.button>
+              </div>
+              
+              {torrentLoading && torrentStatuses.length === 0 ? (
+                <div className="flex items-center justify-center py-8">
+                  <Loader2 className="w-6 h-6 text-accent-500 animate-spin" />
+                </div>
+              ) : torrentStatuses.length === 0 ? (
+                <p className="text-dark-400 text-center py-8">{t('bulk_actions.no_servers')}</p>
+              ) : (
+                <div className="space-y-3">
+                  {torrentStatuses.map((srv) => (
+                    <div
+                      key={srv.server_id}
+                      className={`p-4 rounded-lg border transition-all ${
+                        srv.enabled
+                          ? 'bg-dark-800/50 border-accent-500/30'
+                          : 'bg-dark-800/30 border-dark-700/50'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center gap-3">
+                          <div className={`w-2.5 h-2.5 rounded-full ${
+                            srv.error ? 'bg-danger' : srv.running ? 'bg-success animate-pulse' : 'bg-dark-500'
+                          }`} />
+                          <span className="font-medium text-dark-100">{srv.server_name}</span>
+                          {srv.error ? (
+                            <span className="text-xs text-danger">{t('blocklist.torrent_error')}</span>
+                          ) : srv.running ? (
+                            <span className="text-xs text-success">{t('blocklist.torrent_running')}</span>
+                          ) : (
+                            <span className="text-xs text-dark-500">{t('blocklist.torrent_not_running')}</span>
+                          )}
+                        </div>
+                        
+                        <motion.button
+                          onClick={() => handleToggleTorrentBlocker(srv.server_id, !srv.enabled)}
+                          disabled={togglingServer === srv.server_id}
+                          className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${
+                            srv.enabled
+                              ? 'bg-danger/20 text-danger hover:bg-danger/30'
+                              : 'bg-success/20 text-success hover:bg-success/30'
+                          }`}
+                          whileHover={{ scale: 1.02 }}
+                          whileTap={{ scale: 0.98 }}
+                        >
+                          {togglingServer === srv.server_id ? (
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                          ) : srv.enabled ? (
+                            <PowerOff className="w-4 h-4" />
+                          ) : (
+                            <Power className="w-4 h-4" />
+                          )}
+                          {srv.enabled ? t('blocklist.torrent_disable') : t('blocklist.torrent_enable')}
+                        </motion.button>
+                      </div>
+                      
+                      {srv.enabled && !srv.error && (
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-3">
+                          <div className="bg-dark-900/50 rounded-lg p-2.5">
+                            <p className="text-xs text-dark-500">{t('blocklist.torrent_blocked_count')}</p>
+                            <p className="text-lg font-bold text-dark-100">{srv.total_blocked}</p>
+                          </div>
+                          <div className="bg-dark-900/50 rounded-lg p-2.5">
+                            <p className="text-xs text-dark-500">{t('blocklist.torrent_unique_ips')}</p>
+                            <p className="text-lg font-bold text-dark-100">{srv.unique_ips_blocked}</p>
+                          </div>
+                          <div className="bg-dark-900/50 rounded-lg p-2.5 col-span-2">
+                            <p className="text-xs text-dark-500">{t('blocklist.torrent_last_block')}</p>
+                            <p className="text-sm font-medium text-dark-200">
+                              {srv.last_block_time
+                                ? new Date(srv.last_block_time).toLocaleString()
+                                : '—'}
+                            </p>
+                          </div>
+                        </div>
+                      )}
+                      
+                      {srv.enabled && !srv.error && srv.recent_blocks && srv.recent_blocks.length > 0 && (
+                        <div className="mt-3">
+                          <p className="text-xs text-dark-500 mb-2">{t('blocklist.torrent_recent_blocks')}</p>
+                          <div className="flex flex-wrap gap-1.5">
+                            {srv.recent_blocks.slice(-10).reverse().map((block, idx) => (
+                              <span
+                                key={idx}
+                                className="px-2 py-0.5 text-xs font-mono bg-dark-900 text-dark-300 rounded border border-dark-700/50"
+                                title={new Date(block.time).toLocaleString()}
+                              >
+                                {block.ip}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      
+                      {srv.enabled && !srv.error && (!srv.recent_blocks || srv.recent_blocks.length === 0) && (
+                        <p className="text-xs text-dark-500 mt-2">{t('blocklist.torrent_no_blocks')}</p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </motion.div>
         )}

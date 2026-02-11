@@ -13,7 +13,7 @@ from fastapi import Depends, FastAPI
 
 from app.auth import verify_api_key
 from app.config import get_settings
-from app.routers import haproxy, metrics, traffic, system, ipset, remnawave
+from app.routers import haproxy, metrics, traffic, system, ipset, remnawave, torrent_blocker
 from app.security import get_security_manager, SecurityMiddleware
 from app.services.traffic_collector import get_traffic_collector
 from app.services.ipset_manager import get_ipset_manager
@@ -55,8 +55,27 @@ async def lifespan(app: FastAPI):
     
     # Xray log collector starts lazily on first request (not all nodes need it)
     
+    # Torrent blocker: auto-start if previously enabled
+    from app.services.torrent_blocker import get_torrent_blocker
+    try:
+        tb = get_torrent_blocker()
+        await tb.auto_start_if_enabled()
+        if tb.is_enabled:
+            logger.info("Torrent blocker auto-started (was enabled)")
+    except Exception as e:
+        logger.warning(f"Torrent blocker auto-start failed: {e}")
+    
     logger.info("Server ready")
     yield
+    
+    # Stop torrent blocker if running
+    from app.services.torrent_blocker import get_torrent_blocker
+    try:
+        tb = get_torrent_blocker()
+        if tb._running:
+            await tb.stop()
+    except Exception:
+        pass
     
     # Stop Xray collector if it was started
     from app.services.xray_log_collector import get_xray_log_collector
@@ -95,6 +114,7 @@ app.include_router(traffic.router, dependencies=[Depends(verify_api_key)])
 app.include_router(system.router, dependencies=[Depends(verify_api_key)])
 app.include_router(ipset.router, dependencies=[Depends(verify_api_key)])
 app.include_router(remnawave.router, dependencies=[Depends(verify_api_key)])
+app.include_router(torrent_blocker.router, dependencies=[Depends(verify_api_key)])
 
 @app.get("/health")
 async def health_check():

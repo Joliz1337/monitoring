@@ -1718,6 +1718,31 @@ async def get_db_info(
     return response
 
 
+@router.delete("/stats/client-ips/clear")
+async def clear_all_client_ips(
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Clear all client IP data from xray_stats.
+    
+    Removes all visit records (which contain source_ip info).
+    Hourly timeline stats (xray_hourly_stats) are preserved.
+    Summary tables are rebuilt after cleanup.
+    """
+    stats_count = (await db.execute(select(sql_func.count()).select_from(XrayStats))).scalar() or 0
+    
+    await db.execute(text("TRUNCATE TABLE xray_stats CASCADE"))
+    await db.execute(text("TRUNCATE TABLE xray_global_summary, xray_destination_summary, xray_user_summary CASCADE"))
+    await db.commit()
+    _invalidate_cache()
+    
+    return {
+        "success": True,
+        "deleted_records": stats_count,
+        "message": f"Cleared {stats_count} client IP records"
+    }
+
+
 @router.delete("/stats/clear")
 async def clear_stats(
     db: AsyncSession = Depends(get_db),

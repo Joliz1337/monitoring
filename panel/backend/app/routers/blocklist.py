@@ -1,8 +1,10 @@
 """Blocklist management router for IP/CIDR blocking (incoming + outgoing)"""
 
+import asyncio
 from datetime import datetime, timezone
 from typing import Optional
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import select, and_
@@ -679,3 +681,111 @@ async def sync_single_node(
             sync_result["success"] = False
     
     return sync_result
+
+
+# === Torrent Blocker ===
+
+async def _fetch_torrent_status(server: Server) -> dict:
+    """Fetch torrent blocker status from a single node."""
+    try:
+        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+            response = await client.get(
+                f"{server.url}/api/torrent-blocker/status",
+                headers={"X-API-Key": server.api_key}
+            )
+            if response.status_code == 200:
+                data = response.json()
+                data["server_id"] = server.id
+                data["server_name"] = server.name
+                return data
+            return {
+                "server_id": server.id,
+                "server_name": server.name,
+                "enabled": False,
+                "running": False,
+                "error": f"HTTP {response.status_code}"
+            }
+    except Exception as e:
+        return {
+            "server_id": server.id,
+            "server_name": server.name,
+            "enabled": False,
+            "running": False,
+            "error": str(e)
+        }
+
+
+@router.get("/torrent-blocker")
+async def get_torrent_blocker_status(
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Get torrent blocker status from all active servers (parallel)."""
+    result = await db.execute(
+        select(Server).where(Server.is_active == True)
+    )
+    servers = result.scalars().all()
+
+    if not servers:
+        return {"servers": []}
+
+    tasks = [_fetch_torrent_status(s) for s in servers]
+    statuses = await asyncio.gather(*tasks)
+
+    return {"servers": list(statuses)}
+
+
+@router.post("/torrent-blocker/{server_id}/enable")
+async def enable_torrent_blocker(
+    server_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Enable torrent blocker on a specific server."""
+    result = await db.execute(select(Server).where(Server.id == server_id))
+    server = result.scalar_one_or_none()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+
+    try:
+        async with httpx.AsyncClient(verify=False, timeout=15.0) as client:
+            response = await client.post(
+                f"{server.url}/api/torrent-blocker/enable",
+                headers={"X-API-Key": server.api_key}
+            )
+            if response.status_code == 200:
+                return response.json()
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Node returned {response.status_code}"
+            )
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=503, detail=f"Node unreachable: {str(e)}")
+
+
+@router.post("/torrent-blocker/{server_id}/disable")
+async def disable_torrent_blocker(
+    server_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Disable torrent blocker on a specific server."""
+    result = await db.execute(select(Server).where(Server.id == server_id))
+    server = result.scalar_one_or_none()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+
+    try:
+        async with httpx.AsyncClient(verify=False, timeout=15.0) as client:
+            response = await client.post(
+                f"{server.url}/api/torrent-blocker/disable",
+                headers={"X-API-Key": server.api_key}
+            )
+            if response.status_code == 200:
+                return response.json()
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Node returned {response.status_code}"
+            )
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=503, detail=f"Node unreachable: {str(e)}")

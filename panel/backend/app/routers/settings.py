@@ -14,7 +14,7 @@ DEFAULT_SETTINGS = {
     "refresh_interval": "5",
     "theme": "dark",
     "compact_view": "false",
-    "blocklist_temp_timeout": "300",
+    "blocklist_temp_timeout": "600",
     "blocklist_auto_update_enabled": "true",
     "blocklist_auto_update_interval": "86400",
     # Collector intervals (in seconds)

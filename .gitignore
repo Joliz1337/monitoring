@@ -61,3 +61,4 @@ panel/frontend/src/api/_ext.dec.*
 # Local configs
 profiles.conf
 *.local.conf
+doc_remnaweve.yaml

@@ -23,7 +23,7 @@ from app.models import Server, BlocklistRule, BlocklistSource, PanelSettings
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TIMEOUT = 300
+DEFAULT_TIMEOUT = 600
 UPDATE_INTERVAL = 86400  # 24 hours
 CACHE_TTL = 300  # 5 minutes cache for fetched lists
 

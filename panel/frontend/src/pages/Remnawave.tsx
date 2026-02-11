@@ -163,6 +163,10 @@ export default function Remnawave() {
   const [isClearingIp, setIsClearingIp] = useState(false)
   const [clearIpConfirm, setClearIpConfirm] = useState<{ type: 'single' | 'all'; sourceIp?: string } | null>(null)
   
+  // Global client IPs clearing
+  const [isClearingAllClientIps, setIsClearingAllClientIps] = useState(false)
+  const [showClearAllClientIpsConfirm, setShowClearAllClientIpsConfirm] = useState(false)
+  
   // Auto-refresh countdown (for UI display)
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [nextRefreshIn, setNextRefreshIn] = useState(60)
@@ -716,6 +720,21 @@ export default function Remnawave() {
       console.error('Failed to refresh user cache:', err)
     } finally {
       setIsRefreshingUserCache(false)
+    }
+  }
+  
+  const handleClearAllClientIps = async () => {
+    setIsClearingAllClientIps(true)
+    try {
+      const res = await remnawaveApi.clearAllClientIps()
+      if (res.data.success) {
+        await fetchStats()
+      }
+    } catch (err) {
+      console.error('Failed to clear all client IPs:', err)
+    } finally {
+      setIsClearingAllClientIps(false)
+      setShowClearAllClientIpsConfirm(false)
     }
   }
   
@@ -1571,6 +1590,19 @@ export default function Remnawave() {
                   <RefreshCw className={`w-4 h-4 ${isRefreshingUserCache || userCacheStatus?.updating ? 'animate-spin' : ''}`} />
                   <span className="hidden sm:inline">{t('remnawave.sync_cache')}</span>
                 </button>
+                <button
+                  onClick={() => setShowClearAllClientIpsConfirm(true)}
+                  disabled={isClearingAllClientIps}
+                  className="flex items-center gap-2 px-3 py-2 rounded-lg bg-danger/10 hover:bg-danger/20
+                           text-danger text-sm transition-colors disabled:opacity-50"
+                  title={t('remnawave.clear_all_client_ips')}
+                >
+                  {isClearingAllClientIps 
+                    ? <RefreshCw className="w-4 h-4 animate-spin" />
+                    : <Trash2 className="w-4 h-4" />
+                  }
+                  <span className="hidden sm:inline">{t('remnawave.clear_all_client_ips')}</span>
+                </button>
               </div>
             </div>
             
@@ -1668,6 +1700,33 @@ export default function Remnawave() {
                     </>
                   )}
                 </button>
+              </div>
+            )}
+            
+            {/* Clear All Client IPs Confirmation Dialog */}
+            {showClearAllClientIpsConfirm && (
+              <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setShowClearAllClientIpsConfirm(false)}>
+                <div className="bg-dark-800 border border-dark-700 rounded-xl p-6 max-w-md mx-4" onClick={e => e.stopPropagation()}>
+                  <h3 className="text-lg font-semibold text-dark-100 mb-2">{t('remnawave.confirm_clear_all_client_ips_title')}</h3>
+                  <p className="text-dark-400 text-sm mb-4">{t('remnawave.confirm_clear_all_client_ips')}</p>
+                  <div className="flex justify-end gap-3">
+                    <button
+                      onClick={() => setShowClearAllClientIpsConfirm(false)}
+                      disabled={isClearingAllClientIps}
+                      className="px-4 py-2 rounded-lg bg-dark-700 hover:bg-dark-600 text-dark-200 text-sm transition-colors"
+                    >
+                      {t('common.cancel')}
+                    </button>
+                    <button
+                      onClick={handleClearAllClientIps}
+                      disabled={isClearingAllClientIps}
+                      className="flex items-center gap-2 px-4 py-2 rounded-lg bg-danger hover:bg-danger/80 text-white text-sm transition-colors disabled:opacity-50"
+                    >
+                      {isClearingAllClientIps && <RefreshCw className="w-4 h-4 animate-spin" />}
+                      {t('remnawave.clear_all_client_ips')}
+                    </button>
+                  </div>
+                </div>
               </div>
             )}
           </motion.div>

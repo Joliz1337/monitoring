@@ -166,7 +166,7 @@ class XrayLogCollector:
             if not line:
                 continue
             
-            if "-> BLOCK" in line or ">> BLOCK" in line:
+            if "-> BLOCK" in line or ">> BLOCK" in line or "-> torrent" in line:
                 continue
             
             match = pattern.match(line)

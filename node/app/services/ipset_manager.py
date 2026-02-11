@@ -32,7 +32,7 @@ SET_TEMP = "blocklist_temp"
 SET_OUT_PERMANENT = "blocklist_out_permanent"
 SET_OUT_TEMP = "blocklist_out_temp"
 
-DEFAULT_TIMEOUT = 300  # 5 minutes
+DEFAULT_TIMEOUT = 600  # 10 minutes
 
 # Direction config: chain + match flag
 _DIR_CONFIG = {
