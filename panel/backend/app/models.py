@@ -231,7 +231,7 @@ class RemnawaveExcludedDestination(Base):
     __tablename__ = "remnawave_excluded_destinations"
     
     id = Column(Integer, primary_key=True)
-    destination = Column(String(500), nullable=False, unique=True)  # www.google.com:443, 1.1.1.1:53
+    destination = Column(String(500), nullable=False, unique=True)  # www.google.com, 1.1.1.1 (host only, no port)
     description = Column(String(255), nullable=True)  # Описание (опционально)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
@@ -395,6 +395,52 @@ class XrayIpDestinationStats(Base):
         Index('idx_ip_dest_email_ip', 'email', 'source_ip_id'),
         Index('idx_ip_dest_destination_id', 'destination_id'),
     )
+
+
+class XrayGlobalSummary(Base):
+    """Pre-computed global totals for period=all queries.
+    
+    Single row (id=1), rebuilt after each collection cycle.
+    Eliminates full table scan on xray_visit_stats for summary queries.
+    """
+    __tablename__ = "xray_global_summary"
+    
+    id = Column(Integer, primary_key=True, default=1)
+    total_visits = Column(BigInteger, default=0)
+    unique_users = Column(Integer, default=0)
+    unique_destinations = Column(Integer, default=0)
+    last_updated = Column(DateTime(timezone=True))
+
+
+class XrayDestinationSummary(Base):
+    """Pre-computed per-host stats for top-destinations (period=all).
+    
+    Rebuilt after each collection cycle.
+    Replaces GROUP BY on millions of rows with ORDER BY on small table.
+    """
+    __tablename__ = "xray_destination_summary"
+    
+    host = Column(String(500), primary_key=True)
+    total_visits = Column(BigInteger, default=0)
+    unique_users = Column(Integer, default=0)
+    last_seen = Column(DateTime(timezone=True))
+
+
+class XrayUserSummary(Base):
+    """Pre-computed per-user stats for top-users (period=all).
+    
+    Rebuilt after each collection cycle.
+    Includes IP counts to eliminate additional joins.
+    """
+    __tablename__ = "xray_user_summary"
+    
+    email = Column(Integer, primary_key=True)
+    total_visits = Column(BigInteger, default=0)
+    unique_sites = Column(Integer, default=0)
+    unique_client_ips = Column(Integer, default=0)
+    infrastructure_ips = Column(Integer, default=0)
+    first_seen = Column(DateTime(timezone=True))
+    last_seen = Column(DateTime(timezone=True))
 
 
 class RemnawaveExport(Base):

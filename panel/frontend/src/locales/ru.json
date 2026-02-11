@@ -700,7 +700,7 @@
     "no_infrastructure_addresses": "Адреса инфраструктуры не добавлены",
     "excluded_destinations": "Исключаемые сайты",
     "excluded_destinations_hint": "Домены и IP которые исключаются из сбора статистики (тестовые сайты, DNS серверы)",
-    "excluded_destination_placeholder": "Домен:порт или IP:порт (например: www.google.com:443)",
+    "excluded_destination_placeholder": "Домен или IP (например: www.google.com)",
     "excluded_destination_description_placeholder": "Описание (опционально)",
     "no_excluded_destinations": "Исключаемые сайты не добавлены",
     "ignored_users_title": "Игнорируемые пользователи",

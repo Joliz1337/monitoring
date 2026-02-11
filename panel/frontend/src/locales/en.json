@@ -699,7 +699,7 @@
     "no_infrastructure_addresses": "No infrastructure addresses added",
     "excluded_destinations": "Excluded Destinations",
     "excluded_destinations_hint": "Domains and IPs excluded from statistics collection (test sites, DNS servers)",
-    "excluded_destination_placeholder": "Domain:port or IP:port (e.g.: www.google.com:443)",
+    "excluded_destination_placeholder": "Domain or IP (e.g.: www.google.com)",
     "excluded_destination_description_placeholder": "Description (optional)",
     "no_excluded_destinations": "No excluded destinations added",
     "ignored_users_title": "Ignored Users",

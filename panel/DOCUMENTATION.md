@@ -312,8 +312,8 @@ panel/
 | POST | /api/remnawave/excluded-destinations | Добавить сайт в список (destination, description) |
 | DELETE | /api/remnawave/excluded-destinations/{id} | Удалить сайт из списка |
 
-Сайты из этого списка полностью исключаются из сбора статистики.
-По умолчанию добавлены: `www.google.com:443`, `1.1.1.1:53`
+Сайты из этого списка полностью исключаются из сбора статистики. Хранятся только хосты (без порта) — ввод `www.google.com:443` автоматически нормализуется до `www.google.com`. Удаление существующих данных выполняется в фоне.
+По умолчанию добавлены: `www.google.com`, `1.1.1.1`
 
 **Статус коллектора:**
 
@@ -390,6 +390,14 @@ panel/
 6. **xray_ip_destination_stats** — IP → destination: `PK(server_id, email, source_ip_id, destination_id)`
    - first_seen убран (не используется в запросах)
 
+**Summary-таблицы (pre-computed, мгновенные запросы):**
+
+Пересчитываются в фоне после каждого цикла сбора данных. Страница /remnawave читает из них вместо full table scan по миллионам строк:
+
+- **xray_global_summary** — 1 строка: total_visits, unique_users, unique_destinations
+- **xray_destination_summary** — PK(host): total_visits, unique_users (для top-destinations)
+- **xray_user_summary** — PK(email): total_visits, unique_sites, unique_client_ips, infrastructure_ips (для top-users)
+
 **Автоочистка данных (настраиваемая):**
 - xray_visit_stats: записи с last_seen > visit_stats_retention_days (default 365)
 - xray_hourly_stats: записи старше hourly_stats_retention_days (default 365)
@@ -406,13 +414,14 @@ panel/
 **Оптимизация производительности:**
 
 Backend:
+- **Summary-таблицы**: pre-computed агрегаты (global, per-destination, per-user), пересчитываются после каждого сбора
+- **period=all**: все запросы читают из summary-таблиц (SELECT из маленькой таблицы вместо full scan по миллионам строк)
 - **Batch endpoint** `/stats/batch` — summary + destinations + users в 1 HTTP-запросе (вместо 3)
 - Все SQL-запросы выполняются **последовательно на одной сессии** (1 соединение, без перегрузки пула)
-- summary: 1 SQL вместо 3 (SUM + COUNT DISTINCT × 2 в одном запросе)
-- Users count для period=all без поиска берётся из summary (без дополнительного full scan)
 - In-memory кеш с TTL: batch/summary/top-destinations/top-users — **120 сек**, db-info — 5 мин
-- **Pre-warm кеша** при старте приложения и после каждого цикла сбора данных (`warm_batch_cache()`)
-- IP counts объединены в один SQL запрос с conditional aggregation
+- **Pre-warm кеша** при старте приложения и после каждого цикла сбора данных
+- **rebuild_summaries()** — пересчёт summary-таблиц после сбора, при старте, после очистки данных
+- IP counts включены в user summary (без дополнительных JOIN)
 - GROUP BY по кешированному host вместо regexp_replace на каждой строке
 - **Покрывающие индексы** на xray_visit_stats и xray_user_ip_stats для тяжёлых GROUP BY
 - nginx timeout для `/api/remnawave/stats/` увеличен до **120 сек**

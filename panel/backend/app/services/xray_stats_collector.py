@@ -116,6 +116,73 @@ async def resolve_infrastructure_address(address: str, use_cache: bool = True) -
     return ips
 
 
+async def rebuild_summaries():
+    """Rebuild pre-computed summary tables for instant page loads.
+    
+    Called after each collection cycle, on startup, and after data modifications.
+    Uses DELETE + INSERT in transaction (MVCC-safe: readers see old data until commit).
+    Summary tables are small, so rebuild is fast even with large base tables.
+    """
+    try:
+        async with async_session() as db:
+            # 1. Global summary (upsert single row)
+            await db.execute(text("""
+                INSERT INTO xray_global_summary (id, total_visits, unique_users, unique_destinations, last_updated)
+                SELECT 1,
+                    COALESCE(SUM(visit_count), 0),
+                    COUNT(DISTINCT email),
+                    COUNT(DISTINCT destination_id),
+                    NOW()
+                FROM xray_visit_stats
+                ON CONFLICT (id) DO UPDATE SET
+                    total_visits = EXCLUDED.total_visits,
+                    unique_users = EXCLUDED.unique_users,
+                    unique_destinations = EXCLUDED.unique_destinations,
+                    last_updated = EXCLUDED.last_updated
+            """))
+            
+            # 2. Destination summary (DELETE + INSERT is MVCC-safe in one transaction)
+            await db.execute(text("DELETE FROM xray_destination_summary"))
+            await db.execute(text("""
+                INSERT INTO xray_destination_summary (host, total_visits, unique_users, last_seen)
+                SELECT d.host, SUM(vs.visit_count), COUNT(DISTINCT vs.email), MAX(vs.last_seen)
+                FROM xray_visit_stats vs
+                JOIN xray_destinations d ON vs.destination_id = d.id
+                GROUP BY d.host
+            """))
+            
+            # 3. User summary (visits + unique sites)
+            await db.execute(text("DELETE FROM xray_user_summary"))
+            await db.execute(text("""
+                INSERT INTO xray_user_summary (email, total_visits, unique_sites, unique_client_ips, infrastructure_ips, first_seen, last_seen)
+                SELECT vs.email, SUM(vs.visit_count), COUNT(DISTINCT d.host), 0, 0,
+                       MIN(vs.first_seen), MAX(vs.last_seen)
+                FROM xray_visit_stats vs
+                JOIN xray_destinations d ON vs.destination_id = d.id
+                GROUP BY vs.email
+            """))
+            
+            # 4. Update IP counts in user summary (separate query for clean aggregation)
+            await db.execute(text("""
+                UPDATE xray_user_summary us SET
+                    unique_client_ips = COALESCE(sub.client_ips, 0),
+                    infrastructure_ips = COALESCE(sub.infra_ips, 0)
+                FROM (
+                    SELECT email,
+                        COUNT(DISTINCT CASE WHEN NOT is_infrastructure THEN source_ip_id END) as client_ips,
+                        COUNT(DISTINCT CASE WHEN is_infrastructure THEN source_ip_id END) as infra_ips
+                    FROM xray_user_ip_stats
+                    GROUP BY email
+                ) sub
+                WHERE us.email = sub.email
+            """))
+            
+            await db.commit()
+            logger.debug("Summary tables rebuilt")
+    except Exception as e:
+        logger.error(f"Failed to rebuild summary tables: {e}")
+
+
 class XrayStatsCollector:
     """Collects Xray visit stats from Remnawave nodes."""
     
@@ -156,18 +223,14 @@ class XrayStatsCollector:
                 return set()
     
     async def _get_excluded_destinations(self) -> set[str]:
-        """Get set of excluded destination hosts (without ports) from database.
+        """Get set of excluded destination hosts from database.
         
-        Strips port suffix so that excluding '1.1.1.1:53' also blocks
-        '1.1.1.1:443', '1.1.1.1:80' etc.
+        Values are stored without port, so 'www.google.com' blocks
+        'www.google.com:443', 'www.google.com:80' etc.
         """
         async with async_session() as db:
             result = await db.execute(select(RemnawaveExcludedDestination.destination))
-            excluded_hosts = set()
-            for row in result.fetchall():
-                dest = row[0]
-                excluded_hosts.add(_extract_host(dest))
-            return excluded_hosts
+            return {row[0] for row in result.fetchall()}
     
     async def start(self):
         """Start background collection."""
@@ -228,12 +291,13 @@ class XrayStatsCollector:
                 if _cached_enabled and self._time_since_last_collect >= self._collection_interval:
                     await self._collect_from_all_nodes()
                     self._time_since_last_collect = 0
-                    # Pre-warm batch cache so users always hit warm cache
+                    # Rebuild summary tables then warm in-memory cache
                     try:
+                        await rebuild_summaries()
                         from app.routers.remnawave import warm_batch_cache
                         await warm_batch_cache()
                     except Exception as e:
-                        logger.warning(f"Cache warm after collection failed: {e}")
+                        logger.warning(f"Post-collection tasks failed: {e}")
                 
                 await asyncio.sleep(1)
                 self._time_since_last_collect += 1
@@ -1031,12 +1095,13 @@ async def start_xray_stats_collector():
     """Start the Xray stats collector."""
     collector = get_xray_stats_collector()
     await collector.start()
-    # Pre-warm batch cache on startup so first page load is instant
+    # Rebuild summaries and warm cache on startup
     try:
+        await rebuild_summaries()
         from app.routers.remnawave import warm_batch_cache
         await warm_batch_cache()
     except Exception as e:
-        logger.warning(f"Initial cache warm failed: {e}")
+        logger.warning(f"Initial startup tasks failed: {e}")
 
 
 async def stop_xray_stats_collector():
