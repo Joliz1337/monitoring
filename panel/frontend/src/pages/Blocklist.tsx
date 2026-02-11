@@ -93,6 +93,8 @@ export default function Blocklist() {
     }
   }, [])
   
+  const [initialLoaded, setInitialLoaded] = useState(false)
+  
   useEffect(() => {
     const loadData = async () => {
       setLoading(true)
@@ -103,9 +105,12 @@ export default function Blocklist() {
         fetchSettings()
       ])
       setLoading(false)
+      setInitialLoaded(true)
     }
-    loadData()
-  }, [fetchGlobalRules, fetchServers, fetchSources, fetchSettings])
+    if (!initialLoaded) {
+      loadData()
+    }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
   
   useEffect(() => {
     if (selectedServerId) {
@@ -113,14 +118,15 @@ export default function Blocklist() {
     }
   }, [selectedServerId, fetchServerRules])
   
-  // Re-fetch data when direction changes
+  // Re-fetch data when direction changes (without full loading state)
   useEffect(() => {
+    if (!initialLoaded) return
     fetchGlobalRules()
     fetchSources()
     if (selectedServerId) {
       fetchServerRules()
     }
-  }, [direction])
+  }, [direction]) // eslint-disable-line react-hooks/exhaustive-deps
   
   // Handlers
   const handleAddGlobalRules = async () => {
@@ -439,7 +445,7 @@ export default function Blocklist() {
         {/* Global Rules Tab */}
         {activeTab === 'global' && (
           <motion.div
-            key={`global-${direction}`}
+            key="global"
             initial={{ opacity: 0, x: -20 }}
             animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: 20 }}
@@ -523,7 +529,7 @@ export default function Blocklist() {
         {/* Server Rules Tab */}
         {activeTab === 'servers' && (
           <motion.div
-            key={`servers-${direction}`}
+            key="servers"
             initial={{ opacity: 0, x: -20 }}
             animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: 20 }}
@@ -624,7 +630,7 @@ export default function Blocklist() {
         {/* Sources Tab */}
         {activeTab === 'sources' && (
           <motion.div
-            key={`sources-${direction}`}
+            key="sources"
             initial={{ opacity: 0, x: -20 }}
             animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: 20 }}

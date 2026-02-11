@@ -733,7 +733,7 @@ export interface PanelServerStats {
 
 export const systemApi = {
   getPanelIp: () => api.get<PanelIpInfo>('/system/panel-ip'),
-  getVersion: () => api.get<VersionInfo>('/system/version'),
+  getVersion: () => api.get<VersionInfo>('/system/version', { timeout: 3000 }),
   updatePanel: (targetVersion?: string) => 
     api.post<UpdateResponse>('/system/update', targetVersion ? { target_version: targetVersion } : {}),
   getUpdateStatus: () => api.get<UpdateStatus>('/system/update/status'),

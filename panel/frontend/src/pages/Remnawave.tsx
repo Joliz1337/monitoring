@@ -451,16 +451,6 @@ export default function Remnawave() {
     }
   }
   
-  // Resolve anomaly
-  const handleResolveAnomaly = async (anomalyId: number) => {
-    try {
-      await remnawaveApi.resolveAnomaly(anomalyId)
-      setAnomalies(prev => prev.map(a => a.id === anomalyId ? { ...a, resolved: true } : a))
-    } catch (err) {
-      console.error('Failed to resolve anomaly:', err)
-    }
-  }
-  
   // Delete single anomaly
   const handleDeleteAnomaly = async (anomalyId: number) => {
     try {
@@ -1488,7 +1478,13 @@ export default function Remnawave() {
                       </a>
                     </div>
                   ))}
-                  {topDestinations.length === 0 && (
+                  {topDestinations.length === 0 && !statsLoaded && (
+                    <div className="flex flex-col items-center py-4">
+                      <RefreshCw className="w-5 h-5 animate-spin text-dark-500 mb-2" />
+                      <span className="text-dark-500 text-sm">{t('common.loading')}...</span>
+                    </div>
+                  )}
+                  {topDestinations.length === 0 && statsLoaded && (
                     <div className="text-dark-500 text-sm text-center py-4">{t('remnawave.no_data')}</div>
                   )}
                 </div>
@@ -1517,7 +1513,13 @@ export default function Remnawave() {
                       <ChevronRight className="w-4 h-4 text-dark-500" />
                     </div>
                   ))}
-                  {topUsers.length === 0 && (
+                  {topUsers.length === 0 && !statsLoaded && (
+                    <div className="flex flex-col items-center py-4">
+                      <RefreshCw className="w-5 h-5 animate-spin text-dark-500 mb-2" />
+                      <span className="text-dark-500 text-sm">{t('common.loading')}...</span>
+                    </div>
+                  )}
+                  {topUsers.length === 0 && statsLoaded && (
                     <div className="text-dark-500 text-sm text-center py-4">{t('remnawave.no_data')}</div>
                   )}
                 </div>
@@ -1634,10 +1636,10 @@ export default function Remnawave() {
                   ))}
                 </tbody>
               </table>
-              {filteredUsers.length === 0 && !isSearchingUsers && (
+              {filteredUsers.length === 0 && !isSearchingUsers && statsLoaded && (
                 <div className="p-8 text-center text-dark-500">{t('remnawave.no_data')}</div>
               )}
-              {isSearchingUsers && (
+              {(isSearchingUsers || (filteredUsers.length === 0 && !statsLoaded)) && (
                 <div className="p-8 text-center text-dark-500">
                   <RefreshCw className="w-5 h-5 animate-spin mx-auto mb-2" />
                   {t('common.loading')}...
@@ -1732,8 +1734,14 @@ export default function Remnawave() {
                   ))}
                 </tbody>
               </table>
-              {filteredDestinations.length === 0 && (
+              {filteredDestinations.length === 0 && statsLoaded && (
                 <div className="p-8 text-center text-dark-500">{t('remnawave.no_data')}</div>
+              )}
+              {filteredDestinations.length === 0 && !statsLoaded && (
+                <div className="p-8 text-center text-dark-500">
+                  <RefreshCw className="w-5 h-5 animate-spin mx-auto mb-2" />
+                  {t('common.loading')}...
+                </div>
               )}
             </div>
           </motion.div>
@@ -2041,12 +2049,16 @@ export default function Remnawave() {
                       <th className="pb-3 font-medium">{t('remnawave.type')}</th>
                       <th className="pb-3 font-medium">{t('remnawave.severity')}</th>
                       <th className="pb-3 font-medium">{t('remnawave.details')}</th>
-                      <th className="pb-3 font-medium">{t('remnawave.actions')}</th>
+                      <th className="pb-3 font-medium w-10"></th>
                     </tr>
                   </thead>
                   <tbody className="text-dark-200">
                     {anomalies.map((anomaly) => (
-                      <tr key={anomaly.id} className={`border-b border-dark-700/50 ${anomaly.resolved ? 'opacity-50' : ''}`}>
+                      <tr 
+                        key={anomaly.id} 
+                        className={`border-b border-dark-700/50 hover:bg-dark-700/30 cursor-pointer transition-colors ${anomaly.resolved ? 'opacity-50' : ''}`}
+                        onClick={() => handleUserClick(anomaly.user_email)}
+                      >
                         <td className="py-3 text-sm">
                           {anomaly.created_at ? new Date(anomaly.created_at).toLocaleString() : '-'}
                         </td>
@@ -2095,40 +2107,29 @@ export default function Remnawave() {
                           )}
                         </td>
                         <td className="py-3">
-                          <div className="flex items-center gap-2">
-                            {!anomaly.resolved && (
-                              <motion.button
-                                onClick={() => handleResolveAnomaly(anomaly.id)}
-                                className="flex items-center gap-1 px-2 py-1 rounded text-xs bg-dark-700 text-dark-300 
-                                         hover:bg-dark-600 hover:text-dark-100 transition-colors"
-                                whileHover={{ scale: 1.05 }}
-                                whileTap={{ scale: 0.95 }}
-                              >
-                                <Check className="w-3 h-3" />
-                                {t('remnawave.resolve')}
-                              </motion.button>
-                            )}
-                            {anomaly.resolved && (
-                              <span className="text-xs text-dark-500">{t('remnawave.resolved')}</span>
-                            )}
-                            <motion.button
-                              onClick={() => handleDeleteAnomaly(anomaly.id)}
-                              className="flex items-center gap-1 px-2 py-1 rounded text-xs bg-danger-500/20 text-danger-400 
-                                       hover:bg-danger-500/30 transition-colors"
-                              whileHover={{ scale: 1.05 }}
-                              whileTap={{ scale: 0.95 }}
-                              title={t('remnawave.delete')}
-                            >
-                              <Trash2 className="w-3 h-3" />
-                            </motion.button>
-                          </div>
+                          <motion.button
+                            onClick={(e) => { e.stopPropagation(); handleDeleteAnomaly(anomaly.id) }}
+                            className="flex items-center gap-1 px-2 py-1 rounded text-xs bg-danger-500/20 text-danger-400 
+                                     hover:bg-danger-500/30 transition-colors"
+                            whileHover={{ scale: 1.05 }}
+                            whileTap={{ scale: 0.95 }}
+                            title={t('remnawave.delete')}
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </motion.button>
                         </td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
-                {anomalies.length === 0 && (
+                {anomalies.length === 0 && !isLoadingAnomalies && (
                   <div className="p-8 text-center text-dark-500">{t('remnawave.no_anomalies')}</div>
+                )}
+                {anomalies.length === 0 && isLoadingAnomalies && (
+                  <div className="p-8 text-center text-dark-500">
+                    <RefreshCw className="w-5 h-5 animate-spin mx-auto mb-2" />
+                    {t('common.loading')}...
+                  </div>
                 )}
               </div>
             </div>
