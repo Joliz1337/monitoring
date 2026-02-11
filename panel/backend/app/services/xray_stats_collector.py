@@ -617,31 +617,29 @@ class XrayStatsCollector:
             else:
                 ip_updates[key] = (count, is_infra)
         
-        # Aggregate IP-destination stats (skip infrastructure IPs, ignored users, and excluded destinations)
+        # Aggregate IP-host stats (skip infrastructure IPs, ignored users, excluded destinations)
+        # Node sends "host" (without port), fallback to "destination" for backward compat
         ip_dest_updates: dict[tuple[int, str, str], int] = {}
         for ip_dest_stat in ip_destination_stats:
             email = ip_dest_stat.get("email", 0)
             source_ip = ip_dest_stat.get("source_ip", "")
-            destination = ip_dest_stat.get("destination", "")
+            host = ip_dest_stat.get("host") or _extract_host(ip_dest_stat.get("destination", ""))
             count = ip_dest_stat.get("count", 0)
             
-            if not email or not source_ip or not destination or not count:
+            if not email or not source_ip or not host or not count:
                 continue
             
-            # Skip ignored users
             if email in ignored_user_ids:
                 continue
             
-            # Skip excluded destinations (match by host, ignoring port)
-            if _extract_host(destination) in excluded_destinations:
+            if host in excluded_destinations:
                 continue
             
             if source_ip in infrastructure_ips:
                 continue
             
-            key = (email, source_ip, destination)
+            key = (email, source_ip, host)
             ip_dest_updates[key] = ip_dest_updates.get(key, 0) + count
-            all_destinations.add(destination)
         
         if not visit_updates and not ip_updates and not ip_dest_updates:
             return
@@ -650,7 +648,7 @@ class XrayStatsCollector:
         all_source_ips: set[str] = set()
         for (email, source_ip), _ in ip_updates.items():
             all_source_ips.add(source_ip)
-        for (email, source_ip, destination), _ in ip_dest_updates.items():
+        for (email, source_ip, host), _ in ip_dest_updates.items():
             all_source_ips.add(source_ip)
         
         async with async_session() as db:
@@ -665,7 +663,7 @@ class XrayStatsCollector:
                 await self._batch_upsert_ip_stats(db, server_id, ip_updates, ip_to_id, now)
             
             if ip_dest_updates:
-                await self._batch_upsert_ip_dest_stats(db, server_id, ip_dest_updates, dest_to_id, ip_to_id, now)
+                await self._batch_upsert_ip_dest_stats(db, ip_dest_updates, ip_to_id, now)
             
             await self._upsert_hourly_stats(db, server_id, hour_start, total_count, len(unique_users), len(unique_destinations))
             
@@ -743,24 +741,25 @@ class XrayStatsCollector:
             )
             await db.execute(stmt)
     
-    async def _batch_upsert_ip_dest_stats(self, db: AsyncSession, server_id: int, updates: dict, dest_to_id: dict[str, int], ip_to_id: dict[str, int], now: datetime):
-        """Batch upsert IP-destination stats using PostgreSQL ON CONFLICT."""
+    async def _batch_upsert_ip_dest_stats(self, db: AsyncSession, updates: dict, ip_to_id: dict[str, int], now: datetime):
+        """Batch upsert IP-host stats using PostgreSQL ON CONFLICT.
+        
+        New schema: PK (email, source_ip_id, host) — no server_id, no destination_id.
+        """
         items = list(updates.items())
         
         for i in range(0, len(items), UPSERT_BATCH_SIZE):
             batch = items[i:i + UPSERT_BATCH_SIZE]
             
             values = []
-            for (email, source_ip, destination), count in batch:
-                dest_id = dest_to_id.get(destination)
+            for (email, source_ip, host), count in batch:
                 ip_id = ip_to_id.get(source_ip)
-                if dest_id is None or ip_id is None:
+                if ip_id is None:
                     continue
                 values.append({
-                    "server_id": server_id,
                     "email": email,
                     "source_ip_id": ip_id,
-                    "destination_id": dest_id,
+                    "host": host,
                     "connection_count": count,
                     "last_seen": now
                 })
@@ -770,7 +769,7 @@ class XrayStatsCollector:
             
             stmt = pg_insert(XrayIpDestinationStats).values(values)
             stmt = stmt.on_conflict_do_update(
-                index_elements=['server_id', 'email', 'source_ip_id', 'destination_id'],
+                index_elements=['email', 'source_ip_id', 'host'],
                 set_={
                     'connection_count': XrayIpDestinationStats.connection_count + stmt.excluded.connection_count,
                     'last_seen': stmt.excluded.last_seen
@@ -1026,21 +1025,18 @@ class XrayStatsCollector:
                     )
                 )
                 
-                # Clean up orphaned destinations (not referenced by any stats)
+                # Clean up orphaned destinations (not referenced by visit_stats)
                 orphan_dest_result = await db.execute(
                     text("""
                         DELETE FROM xray_destinations d
                         WHERE NOT EXISTS (
                             SELECT 1 FROM xray_visit_stats vs WHERE vs.destination_id = d.id
                         )
-                        AND NOT EXISTS (
-                            SELECT 1 FROM xray_ip_destination_stats ids WHERE ids.destination_id = d.id
-                        )
                     """)
                 )
                 deleted_orphan_dests = orphan_dest_result.rowcount
                 
-                # Clean up orphaned source IPs (not referenced by any stats)
+                # Clean up orphaned source IPs (not referenced by ip_stats or ip_dest_stats)
                 orphan_ip_result = await db.execute(
                     text("""
                         DELETE FROM xray_source_ips sip

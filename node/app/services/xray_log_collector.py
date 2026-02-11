@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 MAX_MEMORY_MB = 256  # Maximum memory for stats (MB)
 MAX_ENTRIES_VISITS = 500_000  # Max unique (destination, email) pairs
 MAX_ENTRIES_IP_VISITS = 1_000_000  # Max unique (email, source_ip) pairs
-MAX_ENTRIES_IP_DEST = 1_000_000  # Max unique (email, source_ip, destination) tuples
+MAX_ENTRIES_IP_DEST = 1_000_000  # Max unique (email, source_ip, host) tuples
 
 # Batch processing settings
 BATCH_INTERVAL_SEC = 5  # Process buffered lines every N seconds
@@ -51,6 +51,14 @@ class XrayLogEntry:
     blocked: bool = False
 
 
+def _extract_host(destination: str) -> str:
+    """Extract host from destination, stripping :port suffix."""
+    parts = destination.rsplit(':', 1)
+    if len(parts) == 2 and parts[1].isdigit():
+        return parts[0]
+    return destination
+
+
 @dataclass
 class AggregatedStats:
     """In-memory aggregated statistics with memory protection."""
@@ -58,7 +66,7 @@ class AggregatedStats:
     visits: dict[tuple[str, int], int] = field(default_factory=lambda: defaultdict(int))
     # Key: (email, source_ip) -> count
     ip_visits: dict[tuple[int, str], int] = field(default_factory=lambda: defaultdict(int))
-    # Key: (email, source_ip, destination) -> count
+    # Key: (email, source_ip, host) -> count (host = destination without port)
     ip_destination_visits: dict[tuple[int, str, str], int] = field(default_factory=lambda: defaultdict(int))
     total_entries: int = 0
     started_at: Optional[datetime] = None
@@ -102,10 +110,10 @@ class AggregatedStats:
         return False
     
     def add_entry(self, destination: str, email: int, source_ip: str):
-        """Add a visit entry with IP tracking."""
+        """Add a visit entry with IP tracking (ip_dest aggregated by host)."""
         self.visits[(destination, email)] += 1
         self.ip_visits[(email, source_ip)] += 1
-        self.ip_destination_visits[(email, source_ip, destination)] += 1
+        self.ip_destination_visits[(email, source_ip, _extract_host(destination))] += 1
         self.total_entries += 1
     
     def clear(self):
@@ -132,10 +140,10 @@ class AggregatedStats:
         ]
     
     def ip_destination_to_list(self) -> list[dict]:
-        """Convert IP-destination visits to list format for API response."""
+        """Convert IP-host visits to list format for API response."""
         return [
-            {"email": email, "source_ip": source_ip, "destination": destination, "count": count}
-            for (email, source_ip, destination), count in self.ip_destination_visits.items()
+            {"email": email, "source_ip": source_ip, "host": host, "count": count}
+            for (email, source_ip, host), count in self.ip_destination_visits.items()
         ]
 
 

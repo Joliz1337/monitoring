@@ -631,29 +631,29 @@ async def _cleanup_excluded_destination_data(host: str):
             )
             dest_ids = [row[0] for row in dest_result.fetchall()]
             
-            if not dest_ids:
-                return
+            # Delete ip_destination_stats by host (no FK, stored as varchar)
+            await db.execute(
+                delete(XrayIpDestinationStats).where(XrayIpDestinationStats.host == host)
+            )
             
-            # Delete in batches to avoid long locks
-            batch_size = 5000
-            for i in range(0, len(dest_ids), batch_size):
-                batch = dest_ids[i:i + batch_size]
+            if dest_ids:
+                # Delete visit_stats and destinations in batches
+                batch_size = 5000
+                for i in range(0, len(dest_ids), batch_size):
+                    batch = dest_ids[i:i + batch_size]
+                    await db.execute(
+                        delete(XrayVisitStats).where(XrayVisitStats.destination_id.in_(batch))
+                    )
+                    await db.execute(
+                        delete(XrayDestination).where(XrayDestination.id.in_(batch))
+                    )
                 
-                await db.execute(
-                    delete(XrayVisitStats).where(XrayVisitStats.destination_id.in_(batch))
-                )
-                await db.execute(
-                    delete(XrayIpDestinationStats).where(XrayIpDestinationStats.destination_id.in_(batch))
-                )
-                await db.execute(
-                    delete(XrayDestination).where(XrayDestination.id.in_(batch))
-                )
-                await db.commit()
+            await db.commit()
             
             _stats_cache.clear()
-            logger.info(f"Cleaned up stats for excluded host '{host}': {len(dest_ids)} destinations removed")
+            total = len(dest_ids)
+            logger.info(f"Cleaned up stats for excluded host '{host}': {total} destinations removed")
             
-            # VACUUM to reclaim disk space after mass deletion
             try:
                 await db.execute(text("VACUUM xray_visit_stats, xray_ip_destination_stats, xray_destinations"))
                 logger.info(f"VACUUM completed after excluded host cleanup '{host}'")
@@ -1568,7 +1568,7 @@ async def delete_user_all_ips(
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    """Delete all IP addresses from user's statistics."""
+    """Delete all IP addresses and IP-host stats from user's statistics."""
     ip_result = await db.execute(
         delete(XrayUserIpStats).where(XrayUserIpStats.email == email)
     )
@@ -1685,8 +1685,7 @@ async def get_ip_destinations(
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    """Get destinations visited from a specific source IP by user"""
-    # Find source_ip_id
+    """Get hosts visited from a specific source IP by user"""
     ip_lookup = await db.execute(
         select(XraySourceIp.id).where(XraySourceIp.ip == source_ip)
     )
@@ -1710,23 +1709,21 @@ async def get_ip_destinations(
         start_time = _get_time_filter(period)
         conditions.append(XrayIpDestinationStats.last_seen >= start_time)
     
-    # Get total connections from this IP
     total_result = await db.execute(
         select(sql_func.sum(XrayIpDestinationStats.connection_count))
         .where(and_(*conditions))
     )
     total_connections = total_result.scalar() or 0
     
-    # Get destinations with connection counts (JOIN with XrayDestination)
+    # Query directly from ip_destination_stats (host stored inline, no JOIN needed)
     result = await db.execute(
         select(
-            XrayDestination.destination,
+            XrayIpDestinationStats.host,
             sql_func.sum(XrayIpDestinationStats.connection_count).label('total'),
             sql_func.max(XrayIpDestinationStats.last_seen).label('last_seen')
         )
-        .join(XrayDestination, XrayIpDestinationStats.destination_id == XrayDestination.id)
         .where(and_(*conditions))
-        .group_by(XrayDestination.destination)
+        .group_by(XrayIpDestinationStats.host)
         .order_by(sql_func.sum(XrayIpDestinationStats.connection_count).desc())
         .limit(limit)
     )
@@ -1740,7 +1737,7 @@ async def get_ip_destinations(
         "total_connections": total_connections,
         "destinations": [
             {
-                "destination": row.destination,
+                "destination": row.host,
                 "connections": row.total,
                 "percentage": round((row.total / total_connections * 100), 1) if total_connections > 0 else 0,
                 "last_seen": row.last_seen.isoformat() if row.last_seen else None

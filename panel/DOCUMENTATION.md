@@ -387,8 +387,10 @@ panel/
 
 5. **xray_user_ip_stats** — IP пользователей: `PK(server_id, email, source_ip_id)`
 
-6. **xray_ip_destination_stats** — IP → destination: `PK(server_id, email, source_ip_id, destination_id)`
-   - first_seen убран (не используется в запросах)
+6. **xray_ip_destination_stats** — IP → host: `PK(email, source_ip_id, host)`
+   - server_id убран (агрегация через все серверы)
+   - destination_id заменён на host (varchar, без порта) — google.com:443/:80 → одна строка
+   - Даёт 3-10x меньше строк по сравнению со старой 4D-схемой
 
 **Summary-таблицы (pre-computed, мгновенные запросы):**
 

@@ -376,24 +376,24 @@ class XrayUserIpStats(Base):
 
 
 class XrayIpDestinationStats(Base):
-    """Статистика destinations по IP клиента.
+    """Статистика destinations по IP клиента (агрегация по host без порта).
     
-    Составной PK (server_id, email, source_ip_id, destination_id).
-    source_ip_id и destination_id нормализованы для экономии места.
-    first_seen убран (не используется в запросах).
+    Составной PK (email, source_ip_id, host).
+    server_id убран — при просмотре неважно через какой сервер шёл трафик.
+    destination_id заменён на host (varchar) — google.com:443 и :80 → одна строка.
+    Это даёт 3-10x меньше строк по сравнению со старой 4D-схемой.
     """
     __tablename__ = "xray_ip_destination_stats"
     
-    server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), primary_key=True)
     email = Column(Integer, primary_key=True, nullable=False)  # User ID в Remnawave
     source_ip_id = Column(Integer, ForeignKey("xray_source_ips.id", ondelete="CASCADE"), primary_key=True)
-    destination_id = Column(Integer, ForeignKey("xray_destinations.id", ondelete="CASCADE"), primary_key=True)
+    host = Column(String(500), primary_key=True, nullable=False)  # Хост без порта (google.com)
     connection_count = Column(BigInteger, default=0)
     last_seen = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     
     __table_args__ = (
         Index('idx_ip_dest_email_ip', 'email', 'source_ip_id'),
-        Index('idx_ip_dest_destination_id', 'destination_id'),
+        Index('idx_ip_dest_host', 'host'),
     )
 
 

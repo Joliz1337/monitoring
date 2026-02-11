@@ -228,6 +228,9 @@ async def run_migrations(conn):
     # Remove surrogate id columns and convert to composite PKs
     await _migrate_remove_surrogate_ids(conn)
     
+    # Migrate xray_ip_destination_stats to host-based schema (drop server_id, destination_id → host)
+    await _migrate_ip_dest_to_host_schema(conn)
+    
     # Add covering indexes for heavy batch aggregations (idempotent)
     covering_indexes = [
         ("idx_xray_stats_email_visits", "xray_visit_stats", "(email, visit_count)"),
@@ -841,6 +844,91 @@ async def _migrate_remove_surrogate_ids(conn):
                 pass
             else:
                 logger.warning(f"Removing id from xray_ip_destination_stats: {e}")
+
+
+async def _migrate_ip_dest_to_host_schema(conn):
+    """Migrate xray_ip_destination_stats from 4D (server_id, email, source_ip_id, destination_id)
+    to 3D (email, source_ip_id, host) schema.
+    
+    Aggregates by host (strips port), removes server_id dimension.
+    Idempotent: skips if already migrated (host column exists, destination_id gone).
+    """
+    result = await conn.execute(text("""
+        SELECT column_name FROM information_schema.columns 
+        WHERE table_name = 'xray_ip_destination_stats'
+    """))
+    columns = {row[0] for row in result.fetchall()}
+    
+    if not columns:
+        return  # Table doesn't exist yet, will be created fresh by create_all
+    
+    has_destination_id = "destination_id" in columns
+    has_server_id = "server_id" in columns
+    has_host = "host" in columns
+    
+    # Already migrated
+    if has_host and not has_destination_id and not has_server_id:
+        return
+    
+    # Fresh table with new schema (no old columns)
+    if not has_destination_id and not has_server_id:
+        return
+    
+    logger.info("Migrating xray_ip_destination_stats to host-based schema...")
+    
+    try:
+        # Create temporary table with new schema
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS xray_ip_destination_stats_new (
+                email INTEGER NOT NULL,
+                source_ip_id INTEGER NOT NULL REFERENCES xray_source_ips(id) ON DELETE CASCADE,
+                host VARCHAR(500) NOT NULL,
+                connection_count BIGINT DEFAULT 0,
+                last_seen TIMESTAMP DEFAULT NOW(),
+                PRIMARY KEY (email, source_ip_id, host)
+            )
+        """))
+        
+        # Migrate data: aggregate by (email, source_ip_id, host), summing counts across servers
+        if has_destination_id and has_server_id:
+            await conn.execute(text("""
+                INSERT INTO xray_ip_destination_stats_new (email, source_ip_id, host, connection_count, last_seen)
+                SELECT 
+                    ids.email,
+                    ids.source_ip_id,
+                    COALESCE(d.host, regexp_replace(d.destination, ':\\d+$', '')),
+                    SUM(ids.connection_count),
+                    MAX(ids.last_seen)
+                FROM xray_ip_destination_stats ids
+                JOIN xray_destinations d ON ids.destination_id = d.id
+                GROUP BY ids.email, ids.source_ip_id, COALESCE(d.host, regexp_replace(d.destination, ':\\d+$', ''))
+                ON CONFLICT (email, source_ip_id, host) DO UPDATE SET
+                    connection_count = xray_ip_destination_stats_new.connection_count + EXCLUDED.connection_count,
+                    last_seen = GREATEST(xray_ip_destination_stats_new.last_seen, EXCLUDED.last_seen)
+            """))
+            logger.info("Data migrated to new schema")
+        
+        # Drop old table and rename new one
+        await conn.execute(text("DROP TABLE xray_ip_destination_stats"))
+        await conn.execute(text("ALTER TABLE xray_ip_destination_stats_new RENAME TO xray_ip_destination_stats"))
+        
+        # Create indexes
+        await conn.execute(text(
+            'CREATE INDEX IF NOT EXISTS "idx_ip_dest_email_ip" ON xray_ip_destination_stats (email, source_ip_id)'
+        ))
+        await conn.execute(text(
+            'CREATE INDEX IF NOT EXISTS "idx_ip_dest_host" ON xray_ip_destination_stats (host)'
+        ))
+        
+        logger.info("xray_ip_destination_stats migration to host-based schema completed")
+        
+    except Exception as e:
+        logger.error(f"Failed to migrate xray_ip_destination_stats: {e}")
+        # Cleanup temp table on failure
+        try:
+            await conn.execute(text("DROP TABLE IF EXISTS xray_ip_destination_stats_new"))
+        except Exception:
+            pass
 
 
 async def _seed_default_excluded_destinations():
