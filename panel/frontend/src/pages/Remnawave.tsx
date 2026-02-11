@@ -674,7 +674,7 @@ export default function Remnawave() {
   }, [])
   
   // Auto-refresh with visibility awareness (stops when tab is hidden)
-  useAutoRefresh(fetchStats, {
+  useAutoRefresh(() => { fetchStats() }, {
     customInterval: 30000,
     immediate: false,
     pauseWhenHidden: true,
