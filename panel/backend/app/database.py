@@ -900,13 +900,6 @@ async def init_db():
         logger.debug(f"Could not seed excluded destinations: {e}")
     
     await _warmup_pool()
-    
-    # Populate summary tables from existing data (fast reads for /remnawave page)
-    try:
-        from app.services.xray_stats_collector import rebuild_summaries
-        await rebuild_summaries()
-    except Exception as e:
-        logger.debug(f"Initial summary rebuild: {e}")
 
 
 async def get_db():

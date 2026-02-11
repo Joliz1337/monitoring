@@ -1095,13 +1095,6 @@ async def start_xray_stats_collector():
     """Start the Xray stats collector."""
     collector = get_xray_stats_collector()
     await collector.start()
-    # Rebuild summaries and warm cache on startup
-    try:
-        await rebuild_summaries()
-        from app.routers.remnawave import warm_batch_cache
-        await warm_batch_cache()
-    except Exception as e:
-        logger.warning(f"Initial startup tasks failed: {e}")
 
 
 async def stop_xray_stats_collector():

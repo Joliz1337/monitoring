@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -46,6 +47,18 @@ async def cleanup_expired_bans():
         logger.error(f"Error cleaning up expired bans: {e}")
 
 
+async def _deferred_startup():
+    """Heavy non-critical tasks that run after server is ready to accept requests."""
+    try:
+        from app.services.xray_stats_collector import rebuild_summaries
+        await rebuild_summaries()
+        from app.routers.remnawave import warm_batch_cache
+        await warm_batch_cache()
+        logger.info("Deferred startup tasks completed")
+    except Exception as e:
+        logger.warning(f"Deferred startup tasks failed: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
@@ -60,18 +73,18 @@ async def lifespan(app: FastAPI):
     
     await start_collector()
     
-    # Start blocklist manager for auto-updates
     blocklist_manager = get_blocklist_manager()
     await blocklist_manager.start()
     
-    # Start Xray stats collector for Remnawave integration
     await start_xray_stats_collector()
-    
-    # Start traffic analyzer
     await start_traffic_analyzer()
+    
+    # Cache warming runs in background — doesn't block /health
+    warmup_task = asyncio.create_task(_deferred_startup())
     
     yield
     
+    warmup_task.cancel()
     await stop_traffic_analyzer()
     await stop_xray_stats_collector()
     await blocklist_manager.stop()
