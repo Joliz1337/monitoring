@@ -228,22 +228,8 @@ async def run_migrations(conn):
     # Remove surrogate id columns and convert to composite PKs
     await _migrate_remove_surrogate_ids(conn)
     
-    # Migrate xray_ip_destination_stats to host-based schema (drop server_id, destination_id → host)
-    await _migrate_ip_dest_to_host_schema(conn)
-    
-    # Add covering indexes for heavy batch aggregations (idempotent)
-    covering_indexes = [
-        ("idx_xray_stats_email_visits", "xray_visit_stats", "(email, visit_count)"),
-        ("idx_xray_stats_lastseen_dest_visits", "xray_visit_stats", "(last_seen, destination_id, visit_count)"),
-        ("idx_user_ip_email_infra_srcip", "xray_user_ip_stats", "(email, is_infrastructure, source_ip_id)"),
-    ]
-    for idx_name, table, columns in covering_indexes:
-        try:
-            await conn.execute(text(
-                f'CREATE INDEX IF NOT EXISTS "{idx_name}" ON {table} {columns}'
-            ))
-        except Exception:
-            pass
+    # Migrate to single xray_stats table (replaces 5 old tables)
+    await _migrate_to_single_stats_table(conn)
 
 
 async def _migrate_destinations_normalization(conn):
@@ -974,6 +960,133 @@ async def _warmup_pool():
         logger.info(f"Database pool warmed up with {warmup_count} connections")
     except Exception as e:
         logger.warning(f"Pool warmup failed (non-critical): {e}")
+
+
+async def _migrate_to_single_stats_table(conn):
+    """Migrate from multi-table schema to single xray_stats table.
+    
+    Old tables: xray_visit_stats, xray_user_ip_stats, xray_ip_destination_stats,
+                xray_destinations, xray_source_ips
+    New table: xray_stats (email, source_ip, host) -> count, first_seen, last_seen
+    
+    Idempotent: skips if xray_stats already exists AND old tables are gone.
+    """
+    # Check if new table already exists
+    new_exists = await conn.execute(text("""
+        SELECT 1 FROM information_schema.tables WHERE table_name = 'xray_stats'
+    """))
+    has_new = new_exists.fetchone() is not None
+    
+    # Check if old tables exist
+    old_tables = ['xray_visit_stats', 'xray_user_ip_stats', 'xray_ip_destination_stats',
+                  'xray_destinations', 'xray_source_ips']
+    existing_old = set()
+    for table in old_tables:
+        result = await conn.execute(text(f"""
+            SELECT 1 FROM information_schema.tables WHERE table_name = '{table}'
+        """))
+        if result.fetchone():
+            existing_old.add(table)
+    
+    if has_new and not existing_old:
+        logger.info("xray_stats migration already completed (new table exists, old tables gone)")
+        return
+    
+    if not has_new:
+        logger.info("Creating xray_stats table...")
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS xray_stats (
+                email INTEGER NOT NULL,
+                source_ip VARCHAR(45) NOT NULL,
+                host VARCHAR(500) NOT NULL,
+                count BIGINT DEFAULT 0,
+                first_seen TIMESTAMP DEFAULT NOW(),
+                last_seen TIMESTAMP DEFAULT NOW(),
+                PRIMARY KEY (email, source_ip, host)
+            )
+        """))
+        await conn.execute(text('CREATE INDEX IF NOT EXISTS idx_xray_stats_host ON xray_stats (host)'))
+        await conn.execute(text('CREATE INDEX IF NOT EXISTS idx_xray_stats_last_seen ON xray_stats (last_seen)'))
+        logger.info("xray_stats table created")
+    
+    # Migrate data from old tables (best effort)
+    if 'xray_ip_destination_stats' in existing_old:
+        # Check which schema: new (host column) or old (destination_id column)
+        cols_result = await conn.execute(text("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name = 'xray_ip_destination_stats'
+        """))
+        ip_dest_cols = {row[0] for row in cols_result.fetchall()}
+        
+        try:
+            if 'host' in ip_dest_cols and 'source_ip_id' in ip_dest_cols and 'xray_source_ips' in existing_old:
+                # Previous migration state: host-based but still normalized source_ip
+                logger.info("Migrating from ip_destination_stats (host + source_ip_id)...")
+                await conn.execute(text("""
+                    INSERT INTO xray_stats (email, source_ip, host, count, first_seen, last_seen)
+                    SELECT ids.email, sip.ip, ids.host,
+                           SUM(ids.connection_count), NOW(), MAX(ids.last_seen)
+                    FROM xray_ip_destination_stats ids
+                    JOIN xray_source_ips sip ON ids.source_ip_id = sip.id
+                    GROUP BY ids.email, sip.ip, ids.host
+                    ON CONFLICT (email, source_ip, host) DO UPDATE SET
+                        count = xray_stats.count + EXCLUDED.count,
+                        last_seen = GREATEST(xray_stats.last_seen, EXCLUDED.last_seen)
+                """))
+                logger.info("Data migrated from ip_destination_stats")
+            elif 'destination_id' in ip_dest_cols and 'source_ip_id' in ip_dest_cols:
+                # Original old schema: destination_id + source_ip_id + server_id
+                if 'xray_destinations' in existing_old and 'xray_source_ips' in existing_old:
+                    logger.info("Migrating from ip_destination_stats (old 4D schema)...")
+                    await conn.execute(text("""
+                        INSERT INTO xray_stats (email, source_ip, host, count, first_seen, last_seen)
+                        SELECT ids.email, sip.ip,
+                               COALESCE(d.host, regexp_replace(d.destination, ':\\d+$', '')),
+                               SUM(ids.connection_count), NOW(), MAX(ids.last_seen)
+                        FROM xray_ip_destination_stats ids
+                        JOIN xray_source_ips sip ON ids.source_ip_id = sip.id
+                        JOIN xray_destinations d ON ids.destination_id = d.id
+                        GROUP BY ids.email, sip.ip, COALESCE(d.host, regexp_replace(d.destination, ':\\d+$', ''))
+                        ON CONFLICT (email, source_ip, host) DO UPDATE SET
+                            count = xray_stats.count + EXCLUDED.count,
+                            last_seen = GREATEST(xray_stats.last_seen, EXCLUDED.last_seen)
+                    """))
+                    logger.info("Data migrated from ip_destination_stats (old schema)")
+        except Exception as e:
+            logger.warning(f"Could not migrate ip_destination_stats data: {e}")
+    
+    # If ip_dest was empty/missing, try visit_stats as fallback
+    stats_count = await conn.execute(text("SELECT COUNT(*) FROM xray_stats"))
+    if (stats_count.scalar() or 0) == 0 and 'xray_visit_stats' in existing_old:
+        try:
+            if 'xray_destinations' in existing_old:
+                logger.info("Migrating from xray_visit_stats as fallback...")
+                await conn.execute(text("""
+                    INSERT INTO xray_stats (email, source_ip, host, count, first_seen, last_seen)
+                    SELECT vs.email, '0.0.0.0',
+                           COALESCE(d.host, regexp_replace(d.destination, ':\\d+$', '')),
+                           SUM(vs.visit_count), MIN(vs.first_seen), MAX(vs.last_seen)
+                    FROM xray_visit_stats vs
+                    JOIN xray_destinations d ON vs.destination_id = d.id
+                    GROUP BY vs.email, COALESCE(d.host, regexp_replace(d.destination, ':\\d+$', ''))
+                    ON CONFLICT (email, source_ip, host) DO UPDATE SET
+                        count = xray_stats.count + EXCLUDED.count,
+                        last_seen = GREATEST(xray_stats.last_seen, EXCLUDED.last_seen)
+                """))
+                logger.info("Data migrated from xray_visit_stats")
+        except Exception as e:
+            logger.warning(f"Could not migrate visit_stats data: {e}")
+    
+    # Drop old tables
+    for table in old_tables:
+        if table in existing_old:
+            try:
+                await conn.execute(text(f"DROP TABLE IF EXISTS {table} CASCADE"))
+                logger.info(f"Dropped old table: {table}")
+            except Exception as e:
+                logger.warning(f"Could not drop {table}: {e}")
+    
+    logger.info("Migration to single xray_stats table completed")
 
 
 async def init_db():

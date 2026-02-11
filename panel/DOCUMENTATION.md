@@ -66,7 +66,7 @@ panel/
 
 Панель использует **PostgreSQL 16** для хранения данных:
 - Метрики серверов (история 24ч raw + 30 дней hourly + 365 дней daily)
-- Remnawave статистика (xray_visit_stats, xray_hourly_stats)
+- Remnawave статистика (xray_stats — единая таблица)
 - Кэш пользователей, blocklist правила, настройки
 
 **Преимущества PostgreSQL:**
@@ -369,63 +369,45 @@ panel/
 - `server_id` — фильтр по серверу
 - `email` — фильтр по пользователю (ID в Remnawave)
 
-**Оптимизированная схема БД:**
+**Схема БД (единая таблица):**
 
-Данные хранятся компактно с двойной нормализацией (домены + IP) и составными первичными ключами:
+Вся статистика хранится в ОДНОЙ таблице — без нормализации, без JOIN:
 
-1. **xray_destinations** — справочник уникальных доменов
-   - destination (полный адрес: google.com:443), host (хост без порта: google.com)
-   - host кеширован для быстрого GROUP BY без regexp_replace
+1. **xray_stats** — `PK(email, source_ip, host)` → count, first_seen, last_seen
+   - email: ID пользователя, source_ip: IP клиента (VARCHAR(45)), host: домен без порта
+   - Заменяет 5 старых таблиц (xray_visit_stats, xray_user_ip_stats, xray_ip_destination_stats, xray_destinations, xray_source_ips)
+   - Индексы: `(host)` для top-destinations, `(last_seen)` для автоочистки
 
-2. **xray_source_ips** — справочник уникальных IP-адресов клиентов
-   - Нормализация: VARCHAR(45) → INTEGER FK, экономия ~30 байт на строку
+2. **xray_hourly_stats** — timeline: `PK(server_id, hour) → counts`
 
-3. **xray_visit_stats** — счётчики: `PK(server_id, destination_id, email) → visit_count`
-   - Составной PK вместо суррогатного id (экономия 4 байта + 1 индекс на строку)
+**Summary-таблицы (pre-computed):**
 
-4. **xray_hourly_stats** — timeline: `PK(server_id, hour) → counts`
-
-5. **xray_user_ip_stats** — IP пользователей: `PK(server_id, email, source_ip_id)`
-
-6. **xray_ip_destination_stats** — IP → host: `PK(email, source_ip_id, host)`
-   - server_id убран (агрегация через все серверы)
-   - destination_id заменён на host (varchar, без порта) — google.com:443/:80 → одна строка
-   - Даёт 3-10x меньше строк по сравнению со старой 4D-схемой
-
-**Summary-таблицы (pre-computed, мгновенные запросы):**
-
-Пересчитываются в фоне после каждого цикла сбора данных. Страница /remnawave читает из них вместо full table scan по миллионам строк:
+Пересчитываются после каждого цикла сбора. period=all читает из них (мгновенно):
 
 - **xray_global_summary** — 1 строка: total_visits, unique_users, unique_destinations
-- **xray_destination_summary** — PK(host): total_visits, unique_users (для top-destinations)
-- **xray_user_summary** — PK(email): total_visits, unique_sites, unique_client_ips, infrastructure_ips (для top-users)
+- **xray_destination_summary** — PK(host): total_visits, unique_users
+- **xray_user_summary** — PK(email): total_visits, unique_sites, unique_client_ips, infrastructure_ips
 
-**Автоочистка данных (настраиваемая):**
-- xray_visit_stats: записи с last_seen > visit_stats_retention_days (default 365)
-- xray_hourly_stats: записи старше hourly_stats_retention_days (default 365)
-- xray_user_ip_stats: записи с last_seen > ip_stats_retention_days (default 90)
-- xray_ip_destination_stats: записи с last_seen > ip_destination_retention_days (default 90)
+**Автоочистка данных:**
+- xray_stats: записи с last_seen > retention_days (default 365)
+- xray_hourly_stats: записи старше hourly_retention (default 365)
 - remnawave_user_cache: записи без обновления > 7 дней
-- xray_destinations, xray_source_ips: orphaned записи удаляются автоматически
-- После массовых удалений выполняется VACUUM для возврата дискового пространства
+- VACUUM после массовых удалений
 
-**Ручная очистка:** DELETE /api/remnawave/stats/clear — удаляет всю статистику
+**Ручная очистка:** DELETE /api/remnawave/stats/clear — TRUNCATE всех таблиц
 
-7. **remnawave_user_cache** — кэш пользователей (обновляется каждые 30 минут из API)
+3. **remnawave_user_cache** — кэш пользователей (обновляется каждые 30 минут из API)
+
+**Инфраструктурные IP:** определяются динамически при запросе (не хранятся в БД)
 
 **Оптимизация производительности:**
 
 Backend:
-- **Summary-таблицы**: pre-computed агрегаты (global, per-destination, per-user), пересчитываются после каждого сбора
-- **period=all**: все запросы читают из summary-таблиц (SELECT из маленькой таблицы вместо full scan по миллионам строк)
-- **Batch endpoint** `/stats/batch` — summary + destinations + users в 1 HTTP-запросе (вместо 3)
-- Все SQL-запросы выполняются **последовательно на одной сессии** (1 соединение, без перегрузки пула)
-- In-memory кеш с TTL: batch/summary/top-destinations/top-users — **120 сек**, db-info — 5 мин
-- **Pre-warm кеша** при старте приложения и после каждого цикла сбора данных
-- **rebuild_summaries()** — пересчёт summary-таблиц после сбора, при старте, после очистки данных
-- IP counts включены в user summary (без дополнительных JOIN)
-- GROUP BY по кешированному host вместо regexp_replace на каждой строке
-- **Покрывающие индексы** на xray_visit_stats и xray_user_ip_stats для тяжёлых GROUP BY
+- **Одна таблица** — без JOIN, без нормализации, простые SELECT с GROUP BY
+- **Summary-таблицы**: period=all читает из них без full scan
+- **Batch endpoint** `/stats/batch` — summary + destinations + users в 1 HTTP-запросе
+- In-memory кеш с TTL: batch/summary — **120 сек**, db-info — 5 мин
+- **Pre-warm кеша** при старте и после каждого сбора
 - nginx timeout для `/api/remnawave/stats/` увеличен до **120 сек**
 
 Frontend lazy loading (panel/frontend/src/pages/Remnawave.tsx):
@@ -441,7 +423,7 @@ Frontend lazy loading (panel/frontend/src/pages/Remnawave.tsx):
 3. Коллектор читает логи через `docker exec remnanode tail -f` и агрегирует в памяти
 4. Панель каждые 60 сек вызывает `/api/remnawave/stats/collect` на активных нодах
 5. Нода отдаёт данные и очищает память
-6. Панель инкрементирует счётчики в xray_visit_stats и добавляет запись в xray_hourly_stats
+6. Панель делает batch upsert в xray_stats (единая таблица) + обновляет xray_hourly_stats
 7. Раз в 30 минут обновляется кэш пользователей через Remnawave API
 
 **Ленивый запуск коллектора:**

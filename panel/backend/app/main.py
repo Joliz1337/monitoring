@@ -24,7 +24,7 @@ from app.security import SecurityMiddleware
 from app.models import (  # noqa: F401
     Server, MetricsSnapshot, AggregatedMetrics, PanelSettings, FailedLogin, 
     BlocklistRule, BlocklistSource, RemnawaveSettings, RemnawaveNode, 
-    XrayVisitStats, XrayHourlyStats, RemnawaveUserCache, TrafficAnalyzerSettings,
+    XrayStats, XrayHourlyStats, RemnawaveUserCache, TrafficAnalyzerSettings,
     TrafficAnomalyLog, UserTrafficSnapshot
 )
 

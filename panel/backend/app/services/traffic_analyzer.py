@@ -3,7 +3,7 @@ Traffic Anomaly Analyzer for Remnawave integration.
 
 Analyzes users for suspicious activity:
 - High traffic usage (exceeding configurable limit)
-- IP count exceeding device limit (from XrayUserIpStats)
+- IP count exceeding device limit (from XrayStats)
 - Suspicious HWID/User-Agent patterns
 """
 
@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import async_session
 from app.models import (
     TrafficAnalyzerSettings, TrafficAnomalyLog,
-    RemnawaveUserCache, XrayUserIpStats, RemnawaveSettings,
+    RemnawaveUserCache, XrayStats, RemnawaveSettings,
     UserTrafficSnapshot
 )
 from app.services.remnawave_api import get_remnawave_api, RemnawaveAPIError
@@ -480,18 +480,18 @@ class TrafficAnalyzer:
         device_limit = user.hwid_device_limit or 2
         ip_limit = int(device_limit * settings.ip_limit_multiplier)
         
-        # Count unique non-infrastructure IPs in last 24h (source_ip_id = normalized)
+        # Count unique IPs in last 24h (infrastructure excluded at query time)
         async with async_session() as db:
-            result = await db.execute(
-                select(func.count(func.distinct(XrayUserIpStats.source_ip_id)))
-                .where(
-                    and_(
-                        XrayUserIpStats.email == user.email,
-                        XrayUserIpStats.is_infrastructure == False,
-                        XrayUserIpStats.last_seen >= cutoff_time
-                    )
-                )
-            )
+            # Get infrastructure IPs for filtering
+            from app.services.xray_stats_collector import _get_infrastructure_ips_sql
+            infra_ips = await _get_infrastructure_ips_sql(db)
+            
+            query = select(func.count(func.distinct(XrayStats.source_ip)))
+            conditions = [XrayStats.email == user.email, XrayStats.last_seen >= cutoff_time]
+            if infra_ips:
+                conditions.append(XrayStats.source_ip.notin_(list(infra_ips)))
+            
+            result = await db.execute(query.where(and_(*conditions)))
             unique_ips = result.scalar() or 0
         
         if unique_ips <= ip_limit:

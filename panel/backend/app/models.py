@@ -236,60 +236,25 @@ class RemnawaveExcludedDestination(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
-class XrayDestination(Base):
-    """Нормализованная таблица доменов для экономии места.
+class XrayStats(Base):
+    """Единая таблица статистики: пользователь → IP → сайт → счётчик.
     
-    Вместо хранения varchar(500) в каждой записи visit_stats,
-    храним уникальные домены один раз и ссылаемся по id.
-    host — кешированный хост без порта для быстрого GROUP BY.
+    Заменяет 5 таблиц (xray_visit_stats, xray_user_ip_stats,
+    xray_ip_destination_stats, xray_destinations, xray_source_ips).
+    Все данные в одной таблице — без JOIN, без нормализации.
     """
-    __tablename__ = "xray_destinations"
+    __tablename__ = "xray_stats"
     
-    id = Column(Integer, primary_key=True)
-    destination = Column(String(500), nullable=False, unique=True)  # Полный адрес (google.com:443)
-    host = Column(String(500), nullable=True)  # Хост без порта (google.com) — для быстрого GROUP BY
-    first_seen = Column(DateTime(timezone=True), server_default=func.now())
-    
-    __table_args__ = (
-        Index('idx_xray_dest_destination', 'destination'),
-        Index('idx_xray_dest_host', 'host'),
-    )
-
-
-class XraySourceIp(Base):
-    """Нормализованная таблица IP-адресов клиентов.
-    
-    Аналогично XrayDestination — вместо VARCHAR(45) в каждой строке
-    храним уникальные IP один раз и ссылаемся по id.
-    """
-    __tablename__ = "xray_source_ips"
-    
-    id = Column(Integer, primary_key=True)
-    ip = Column(String(45), nullable=False, unique=True)  # IPv4 или IPv6
-    first_seen = Column(DateTime(timezone=True), server_default=func.now())
-
-
-class XrayVisitStats(Base):
-    """Счётчик посещений: (server, destination_id, email) -> total_count
-    
-    Составной PK вместо суррогатного id для экономии места.
-    """
-    __tablename__ = "xray_visit_stats"
-    
-    server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), primary_key=True)
-    destination_id = Column(Integer, ForeignKey("xray_destinations.id", ondelete="CASCADE"), primary_key=True)
     email = Column(Integer, primary_key=True, nullable=False)  # User ID в Remnawave
-    visit_count = Column(BigInteger, default=0)
+    source_ip = Column(String(45), primary_key=True, nullable=False)  # IPv4/IPv6
+    host = Column(String(500), primary_key=True, nullable=False)  # Хост без порта (google.com)
+    count = Column(BigInteger, default=0)
     first_seen = Column(DateTime(timezone=True), server_default=func.now())
     last_seen = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     
     __table_args__ = (
-        Index('idx_xray_stats_email', 'email'),
-        Index('idx_xray_stats_destination_id', 'destination_id'),
+        Index('idx_xray_stats_host', 'host'),
         Index('idx_xray_stats_last_seen', 'last_seen'),
-        # Covering indexes for heavy batch aggregations
-        Index('idx_xray_stats_email_visits', 'email', 'visit_count'),
-        Index('idx_xray_stats_lastseen_dest_visits', 'last_seen', 'destination_id', 'visit_count'),
     )
 
 
@@ -351,50 +316,6 @@ class RemnawaveUserCache(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
-class XrayUserIpStats(Base):
-    """Статистика IP адресов пользователей.
-    
-    Составной PK (server_id, email, source_ip_id).
-    source_ip_id ссылается на XraySourceIp для экономии места.
-    """
-    __tablename__ = "xray_user_ip_stats"
-    
-    server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), primary_key=True)
-    email = Column(Integer, primary_key=True, nullable=False)  # User ID в Remnawave
-    source_ip_id = Column(Integer, ForeignKey("xray_source_ips.id", ondelete="CASCADE"), primary_key=True)
-    connection_count = Column(BigInteger, default=0)
-    is_infrastructure = Column(Boolean, default=False)
-    first_seen = Column(DateTime(timezone=True), server_default=func.now())
-    last_seen = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
-    
-    __table_args__ = (
-        Index('idx_user_ip_email', 'email'),
-        Index('idx_user_ip_source_ip_id', 'source_ip_id'),
-        # Covering index for IP counts grouped by email with infrastructure flag
-        Index('idx_user_ip_email_infra_srcip', 'email', 'is_infrastructure', 'source_ip_id'),
-    )
-
-
-class XrayIpDestinationStats(Base):
-    """Статистика destinations по IP клиента (агрегация по host без порта).
-    
-    Составной PK (email, source_ip_id, host).
-    server_id убран — при просмотре неважно через какой сервер шёл трафик.
-    destination_id заменён на host (varchar) — google.com:443 и :80 → одна строка.
-    Это даёт 3-10x меньше строк по сравнению со старой 4D-схемой.
-    """
-    __tablename__ = "xray_ip_destination_stats"
-    
-    email = Column(Integer, primary_key=True, nullable=False)  # User ID в Remnawave
-    source_ip_id = Column(Integer, ForeignKey("xray_source_ips.id", ondelete="CASCADE"), primary_key=True)
-    host = Column(String(500), primary_key=True, nullable=False)  # Хост без порта (google.com)
-    connection_count = Column(BigInteger, default=0)
-    last_seen = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
-    
-    __table_args__ = (
-        Index('idx_ip_dest_email_ip', 'email', 'source_ip_id'),
-        Index('idx_ip_dest_host', 'host'),
-    )
 
 
 class XrayGlobalSummary(Base):

@@ -29,8 +29,7 @@ try:
     from sqlalchemy import create_engine, select, func as sql_func
     from sqlalchemy.orm import sessionmaker
     from app.models import (
-        XrayVisitStats, RemnawaveUserCache, XrayUserIpStats, RemnawaveExport,
-        XrayDestination, XraySourceIp
+        XrayStats, RemnawaveUserCache, RemnawaveExport
     )
     from app.config import get_settings
     logger.info("Imports successful")
@@ -117,58 +116,39 @@ def run_export(export_id: int, settings: dict):
             
             if include_destinations:
                 base_query = select(
-                    XrayVisitStats.email,
-                    XrayDestination.host.label('destination'),
-                    sql_func.sum(XrayVisitStats.visit_count).label('visits'),
-                    sql_func.min(XrayVisitStats.first_seen).label('first_seen'),
-                    sql_func.max(XrayVisitStats.last_seen).label('last_seen')
-                ).join(XrayDestination, XrayVisitStats.destination_id == XrayDestination.id)
-                
+                    XrayStats.email,
+                    XrayStats.host.label('destination'),
+                    sql_func.sum(XrayStats.count).label('visits'),
+                    sql_func.min(XrayStats.first_seen).label('first_seen'),
+                    sql_func.max(XrayStats.last_seen).label('last_seen')
+                )
                 if settings["period"] != "all" and start_time:
-                    base_query = base_query.where(XrayVisitStats.last_seen >= start_time)
-                
-                main_query = base_query.group_by(
-                    XrayVisitStats.email,
-                    XrayDestination.host
-                ).order_by(XrayVisitStats.email)
+                    base_query = base_query.where(XrayStats.last_seen >= start_time)
+                main_query = base_query.group_by(XrayStats.email, XrayStats.host).order_by(XrayStats.email)
             else:
                 base_query = select(
-                    XrayVisitStats.email,
-                    sql_func.sum(XrayVisitStats.visit_count).label('total_visits'),
-                    sql_func.count(sql_func.distinct(XrayVisitStats.destination_id)).label('unique_sites')
+                    XrayStats.email,
+                    sql_func.sum(XrayStats.count).label('total_visits'),
+                    sql_func.count(sql_func.distinct(XrayStats.host)).label('unique_sites')
                 )
-                
                 if settings["period"] != "all" and start_time:
-                    base_query = base_query.where(XrayVisitStats.last_seen >= start_time)
-                
-                main_query = base_query.group_by(XrayVisitStats.email)
+                    base_query = base_query.where(XrayStats.last_seen >= start_time)
+                main_query = base_query.group_by(XrayStats.email)
             
             main_result = db.execute(main_query)
             main_data = main_result.all()
             
-            # Get IPs if needed (JOIN with XraySourceIp for actual IP strings)
+            # Get IPs if needed (directly from xray_stats, no JOIN needed)
             user_ips = {}
             if settings.get("include_client_ips") or settings.get("include_infra_ips"):
-                ip_query = select(
-                    XrayUserIpStats.email,
-                    XraySourceIp.ip.label('source_ip'),
-                    XrayUserIpStats.is_infrastructure
-                ).join(
-                    XraySourceIp, XrayUserIpStats.source_ip_id == XraySourceIp.id
-                ).group_by(
-                    XrayUserIpStats.email,
-                    XraySourceIp.ip,
-                    XrayUserIpStats.is_infrastructure
-                )
+                ip_query = select(XrayStats.email, XrayStats.source_ip).group_by(XrayStats.email, XrayStats.source_ip)
                 ip_result = db.execute(ip_query)
                 
                 for ip_row in ip_result.all():
                     if ip_row.email not in user_ips:
                         user_ips[ip_row.email] = {"client": [], "infra": []}
-                    if ip_row.is_infrastructure:
-                        user_ips[ip_row.email]["infra"].append(ip_row.source_ip)
-                    else:
-                        user_ips[ip_row.email]["client"].append(ip_row.source_ip)
+                    # All IPs go to client (infrastructure detection not stored in DB anymore)
+                    user_ips[ip_row.email]["client"].append(ip_row.source_ip)
             
             # Build export rows
             export_rows = []
