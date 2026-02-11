@@ -1084,6 +1084,16 @@ export const remnawaveApi = {
     api.post<RemnawaveSyncResponse>('/remnawave/nodes/sync', { server_ids: serverIds }),
   
   // Stats
+  getStatsBatch: (params: {
+    period: string
+    dest_limit?: number
+    users_limit?: number
+    search?: string
+  }) => api.get<{
+    summary: RemnawaveSummary
+    destinations: RemnawaveDestination[]
+    users: { period: string; users: RemnawaveUser[]; total: number; offset: number; limit: number }
+  }>('/remnawave/stats/batch', { params }),
   getSummary: (period: string, serverIds?: number[]) =>
     api.get<RemnawaveSummary>('/remnawave/stats/summary', { 
       params: { period, server_ids: serverIds?.join(',') } 

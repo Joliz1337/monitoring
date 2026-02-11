@@ -921,7 +921,7 @@ async def get_stats_summary(
         return cached
     
     if period == "all":
-        # Use cumulative counters
+        # Single query for all three metrics instead of 3 separate queries
         conditions = []
         
         if server_ids:
@@ -929,26 +929,19 @@ async def get_stats_summary(
             if ids:
                 conditions.append(XrayVisitStats.server_id.in_(ids))
         
-        # Total visits
-        total_query = select(sql_func.sum(XrayVisitStats.visit_count))
+        combined_query = select(
+            sql_func.sum(XrayVisitStats.visit_count),
+            sql_func.count(sql_func.distinct(XrayVisitStats.email)),
+            sql_func.count(sql_func.distinct(XrayVisitStats.destination_id))
+        )
         if conditions:
-            total_query = total_query.where(and_(*conditions))
-        total_result = await db.execute(total_query)
-        total_visits = total_result.scalar() or 0
+            combined_query = combined_query.where(and_(*conditions))
         
-        # Unique users
-        users_query = select(sql_func.count(sql_func.distinct(XrayVisitStats.email)))
-        if conditions:
-            users_query = users_query.where(and_(*conditions))
-        users_result = await db.execute(users_query)
-        unique_users = users_result.scalar() or 0
-        
-        # Unique destinations (now using destination_id)
-        dest_query = select(sql_func.count(sql_func.distinct(XrayVisitStats.destination_id)))
-        if conditions:
-            dest_query = dest_query.where(and_(*conditions))
-        dest_result = await db.execute(dest_query)
-        unique_destinations = dest_result.scalar() or 0
+        result = await db.execute(combined_query)
+        row = result.one()
+        total_visits = row[0] or 0
+        unique_users = row[1] or 0
+        unique_destinations = row[2] or 0
     else:
         # Use hourly stats
         start_time = _get_time_filter(period)
@@ -1095,45 +1088,35 @@ async def get_top_users(
         
         conditions.append(XrayVisitStats.email.in_(list(search_user_ids)))
     
-    # Count total users matching criteria
+    # Run count + main query in parallel (independent DB queries)
     count_query = select(sql_func.count(sql_func.distinct(XrayVisitStats.email)))
     if conditions:
         count_query = count_query.where(and_(*conditions))
-    total_result = await db.execute(count_query)
-    total_count = total_result.scalar() or 0
     
-    # Get users with stats (unique_sites counted by host, no regexp)
-    query = select(
+    users_query = select(
         XrayVisitStats.email,
         sql_func.sum(XrayVisitStats.visit_count).label('total'),
         sql_func.count(sql_func.distinct(XrayDestination.host)).label('unique_sites')
     ).join(XrayDestination, XrayVisitStats.destination_id == XrayDestination.id)
     
     if conditions:
-        query = query.where(and_(*conditions))
+        users_query = users_query.where(and_(*conditions))
     
-    query = query.group_by(XrayVisitStats.email) \
+    users_query = users_query.group_by(XrayVisitStats.email) \
                  .order_by(sql_func.sum(XrayVisitStats.visit_count).desc()) \
                  .offset(offset) \
                  .limit(limit)
     
-    result = await db.execute(query)
-    rows = result.fetchall()
+    total_result, users_result = await asyncio.gather(
+        db.execute(count_query),
+        db.execute(users_query)
+    )
+    total_count = total_result.scalar() or 0
+    rows = users_result.fetchall()
     user_ids = [row.email for row in rows]
     
-    # Get user info from cache
+    # Run cache lookup + IP counts in parallel (both depend only on user_ids)
     user_cache = {}
-    if user_ids:
-        cache_result = await db.execute(
-            select(RemnawaveUserCache).where(RemnawaveUserCache.email.in_(user_ids))
-        )
-        for user in cache_result.scalars().all():
-            user_cache[user.email] = {
-                "username": user.username,
-                "status": user.status
-            }
-    
-    # Get unique client IP counts and infrastructure IP counts in a SINGLE query
     ip_counts = {}
     infra_ip_counts = {}
     if user_ids:
@@ -1143,19 +1126,30 @@ async def get_top_users(
         if server_id:
             ip_conditions.append(XrayUserIpStats.server_id == server_id)
         
-        ip_result = await db.execute(
-            select(
-                XrayUserIpStats.email,
-                sql_func.count(sql_func.distinct(
-                    case((XrayUserIpStats.is_infrastructure == False, XrayUserIpStats.source_ip_id), else_=None)
-                )).label('client_ips'),
-                sql_func.count(sql_func.distinct(
-                    case((XrayUserIpStats.is_infrastructure == True, XrayUserIpStats.source_ip_id), else_=None)
-                )).label('infra_ips')
+        cache_result, ip_result = await asyncio.gather(
+            db.execute(
+                select(RemnawaveUserCache).where(RemnawaveUserCache.email.in_(user_ids))
+            ),
+            db.execute(
+                select(
+                    XrayUserIpStats.email,
+                    sql_func.count(sql_func.distinct(
+                        case((XrayUserIpStats.is_infrastructure == False, XrayUserIpStats.source_ip_id), else_=None)
+                    )).label('client_ips'),
+                    sql_func.count(sql_func.distinct(
+                        case((XrayUserIpStats.is_infrastructure == True, XrayUserIpStats.source_ip_id), else_=None)
+                    )).label('infra_ips')
+                )
+                .where(and_(*ip_conditions))
+                .group_by(XrayUserIpStats.email)
             )
-            .where(and_(*ip_conditions))
-            .group_by(XrayUserIpStats.email)
         )
+        
+        for user in cache_result.scalars().all():
+            user_cache[user.email] = {
+                "username": user.username,
+                "status": user.status
+            }
         for ip_row in ip_result.fetchall():
             ip_counts[ip_row.email] = ip_row.client_ips
             infra_ip_counts[ip_row.email] = ip_row.infra_ips
@@ -1201,21 +1195,15 @@ async def get_user_stats(
         conditions.append(XrayVisitStats.last_seen >= start_time)
         ip_conditions.append(XrayUserIpStats.last_seen >= start_time)
     
-    # Get user info
-    user_result = await db.execute(
+    # Run all independent queries in parallel
+    user_task = db.execute(
         select(RemnawaveUserCache).where(RemnawaveUserCache.email == email)
     )
-    user = user_result.scalar_one_or_none()
-    
-    # Total visits
-    total_result = await db.execute(
+    total_task = db.execute(
         select(sql_func.sum(XrayVisitStats.visit_count))
         .where(and_(*conditions))
     )
-    total_visits = total_result.scalar() or 0
-    
-    # Top destinations for this user (aggregated by host, across servers)
-    dest_result = await db.execute(
+    dest_task = db.execute(
         select(
             XrayDestination.host.label('destination'),
             sql_func.sum(XrayVisitStats.visit_count).label('visit_count'),
@@ -1228,25 +1216,17 @@ async def get_user_stats(
         .order_by(sql_func.sum(XrayVisitStats.visit_count).desc())
         .limit(limit)
     )
-    
-    destinations = dest_result.fetchall()
-    
-    # Get unique client IPs count (excluding infrastructure)
-    unique_client_ips_result = await db.execute(
-        select(sql_func.count(sql_func.distinct(XrayUserIpStats.source_ip_id)))
-        .where(and_(*ip_conditions, XrayUserIpStats.is_infrastructure == False))
-    )
-    unique_client_ips = unique_client_ips_result.scalar() or 0
-    
-    # Get total unique IPs count
-    unique_ips_result = await db.execute(
-        select(sql_func.count(sql_func.distinct(XrayUserIpStats.source_ip_id)))
+    # Combined IP counts query (unique_ips + unique_client_ips in one scan)
+    ip_counts_task = db.execute(
+        select(
+            sql_func.count(sql_func.distinct(XrayUserIpStats.source_ip_id)).label('total_ips'),
+            sql_func.count(sql_func.distinct(
+                case((XrayUserIpStats.is_infrastructure == False, XrayUserIpStats.source_ip_id), else_=None)
+            )).label('client_ips')
+        )
         .where(and_(*ip_conditions))
     )
-    unique_ips = unique_ips_result.scalar() or 0
-    
-    # Get IP details with server info and infrastructure flag (JOIN with XraySourceIp)
-    ip_result = await db.execute(
+    ip_details_task = db.execute(
         select(
             XraySourceIp.ip.label('source_ip'),
             XrayUserIpStats.server_id,
@@ -1261,7 +1241,18 @@ async def get_user_stats(
         .where(and_(*ip_conditions))
         .order_by(XrayUserIpStats.connection_count.desc())
     )
-    ip_rows = ip_result.fetchall()
+    
+    user_result, total_result, dest_result, ip_counts_result, ip_details_result = await asyncio.gather(
+        user_task, total_task, dest_task, ip_counts_task, ip_details_task
+    )
+    
+    user = user_result.scalar_one_or_none()
+    total_visits = total_result.scalar() or 0
+    destinations = dest_result.fetchall()
+    ip_counts_row = ip_counts_result.one()
+    unique_ips = ip_counts_row.total_ips or 0
+    unique_client_ips = ip_counts_row.client_ips or 0
+    ip_rows = ip_details_result.fetchall()
     
     # Aggregate IPs across servers, separating client and infrastructure
     client_ip_map: dict[str, dict] = {}
@@ -1622,6 +1613,203 @@ async def get_timeline(
             for row in rows
         ]
     }
+
+
+@router.get("/stats/batch")
+async def get_stats_batch(
+    period: str = Query("all", pattern="^(1h|24h|7d|30d|365d|all)$"),
+    dest_limit: int = Query(100, ge=1, le=500),
+    users_limit: int = Query(100, ge=1, le=1000),
+    search: Optional[str] = Query(None, min_length=1, description="Search users"),
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Batch endpoint: summary + top-destinations + top-users in one request.
+    
+    Replaces 3 separate HTTP calls with 1, reducing latency significantly.
+    All queries run in parallel within a single DB session.
+    """
+    cache_key = f"batch_{period}_{dest_limit}_{users_limit}_{search or ''}"
+    if not search:
+        cached = _get_cached(cache_key)
+        if cached is not None:
+            return cached
+    
+    start_time = None if period == "all" else _get_time_filter(period)
+    
+    # === Build all queries ===
+    
+    # 1. Summary query
+    if period == "all":
+        summary_query = select(
+            sql_func.sum(XrayVisitStats.visit_count),
+            sql_func.count(sql_func.distinct(XrayVisitStats.email)),
+            sql_func.count(sql_func.distinct(XrayVisitStats.destination_id))
+        )
+    else:
+        summary_query = select(
+            sql_func.sum(XrayHourlyStats.visit_count),
+            sql_func.max(XrayHourlyStats.unique_users),
+            sql_func.max(XrayHourlyStats.unique_destinations)
+        ).where(XrayHourlyStats.hour >= start_time)
+    
+    # 2. Top destinations query
+    dest_conditions = []
+    if period != "all":
+        dest_conditions.append(XrayVisitStats.last_seen >= start_time)
+    
+    dest_query = select(
+        XrayDestination.host.label('destination'),
+        sql_func.sum(XrayVisitStats.visit_count).label('total')
+    ).join(XrayDestination, XrayVisitStats.destination_id == XrayDestination.id)
+    if dest_conditions:
+        dest_query = dest_query.where(and_(*dest_conditions))
+    dest_query = dest_query.group_by(XrayDestination.host) \
+                           .order_by(sql_func.sum(XrayVisitStats.visit_count).desc()) \
+                           .limit(dest_limit)
+    
+    # 3. Top users — conditions
+    user_conditions = []
+    if period != "all":
+        user_conditions.append(XrayVisitStats.last_seen >= start_time)
+    
+    # Handle search
+    search_user_ids = set()
+    if search:
+        search = search.strip()
+        cache_search = await db.execute(
+            select(RemnawaveUserCache.email)
+            .where(RemnawaveUserCache.username.ilike(f"%{search}%"))
+            .limit(1000)
+        )
+        for row in cache_search.fetchall():
+            search_user_ids.add(row[0])
+        if search.isdigit():
+            search_user_ids.add(int(search))
+        
+        if not search_user_ids:
+            # No user matches — return summary + destinations but empty users
+            summary_result, dest_result = await asyncio.gather(
+                db.execute(summary_query),
+                db.execute(dest_query)
+            )
+            s_row = summary_result.one()
+            return {
+                "summary": {
+                    "period": period,
+                    "total_visits": s_row[0] or 0,
+                    "unique_users": s_row[1] or 0,
+                    "unique_destinations": s_row[2] or 0
+                },
+                "destinations": [
+                    {"destination": r.destination, "visits": r.total}
+                    for r in dest_result.fetchall()
+                ],
+                "users": {"period": period, "total": 0, "offset": 0, "limit": users_limit, "users": []}
+            }
+        
+        user_conditions.append(XrayVisitStats.email.in_(list(search_user_ids)))
+    
+    # Users count query
+    users_count_query = select(sql_func.count(sql_func.distinct(XrayVisitStats.email)))
+    if user_conditions:
+        users_count_query = users_count_query.where(and_(*user_conditions))
+    
+    # Users data query
+    users_data_query = select(
+        XrayVisitStats.email,
+        sql_func.sum(XrayVisitStats.visit_count).label('total'),
+        sql_func.count(sql_func.distinct(XrayDestination.host)).label('unique_sites')
+    ).join(XrayDestination, XrayVisitStats.destination_id == XrayDestination.id)
+    if user_conditions:
+        users_data_query = users_data_query.where(and_(*user_conditions))
+    users_data_query = users_data_query.group_by(XrayVisitStats.email) \
+                                       .order_by(sql_func.sum(XrayVisitStats.visit_count).desc()) \
+                                       .limit(users_limit)
+    
+    # === Run all 4 queries in parallel ===
+    summary_result, dest_result, users_count_result, users_data_result = await asyncio.gather(
+        db.execute(summary_query),
+        db.execute(dest_query),
+        db.execute(users_count_query),
+        db.execute(users_data_query)
+    )
+    
+    s_row = summary_result.one()
+    dest_rows = dest_result.fetchall()
+    total_users_count = users_count_result.scalar() or 0
+    user_rows = users_data_result.fetchall()
+    user_ids = [row.email for row in user_rows]
+    
+    # === Fetch user cache + IP counts in parallel ===
+    user_cache = {}
+    ip_counts = {}
+    infra_ip_counts = {}
+    
+    if user_ids:
+        ip_conditions = [XrayUserIpStats.email.in_(user_ids)]
+        if period != "all" and start_time:
+            ip_conditions.append(XrayUserIpStats.last_seen >= start_time)
+        
+        cache_result, ip_result = await asyncio.gather(
+            db.execute(
+                select(RemnawaveUserCache).where(RemnawaveUserCache.email.in_(user_ids))
+            ),
+            db.execute(
+                select(
+                    XrayUserIpStats.email,
+                    sql_func.count(sql_func.distinct(
+                        case((XrayUserIpStats.is_infrastructure == False, XrayUserIpStats.source_ip_id), else_=None)
+                    )).label('client_ips'),
+                    sql_func.count(sql_func.distinct(
+                        case((XrayUserIpStats.is_infrastructure == True, XrayUserIpStats.source_ip_id), else_=None)
+                    )).label('infra_ips')
+                )
+                .where(and_(*ip_conditions))
+                .group_by(XrayUserIpStats.email)
+            )
+        )
+        
+        for user in cache_result.scalars().all():
+            user_cache[user.email] = {"username": user.username, "status": user.status}
+        for ip_row in ip_result.fetchall():
+            ip_counts[ip_row.email] = ip_row.client_ips
+            infra_ip_counts[ip_row.email] = ip_row.infra_ips
+    
+    response = {
+        "summary": {
+            "period": period,
+            "total_visits": s_row[0] or 0,
+            "unique_users": s_row[1] or 0,
+            "unique_destinations": s_row[2] or 0
+        },
+        "destinations": [
+            {"destination": r.destination, "visits": r.total}
+            for r in dest_rows
+        ],
+        "users": {
+            "period": period,
+            "total": total_users_count,
+            "offset": 0,
+            "limit": users_limit,
+            "users": [
+                {
+                    "email": row.email,
+                    "username": user_cache.get(row.email, {}).get("username"),
+                    "status": user_cache.get(row.email, {}).get("status"),
+                    "total_visits": row.total,
+                    "unique_sites": row.unique_sites,
+                    "unique_ips": ip_counts.get(row.email, 0),
+                    "infrastructure_ips": infra_ip_counts.get(row.email, 0)
+                }
+                for row in user_rows
+            ]
+        }
+    }
+    
+    if not search:
+        _set_cached(cache_key, response)
+    return response
 
 
 @router.post("/users/refresh")

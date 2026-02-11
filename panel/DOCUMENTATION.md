@@ -336,6 +336,7 @@ panel/
 
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
+| GET | /api/remnawave/stats/batch | Batch: summary + destinations + users в 1 запросе (используется фронтендом) |
 | GET | /api/remnawave/stats/summary | Общая сводка (total_visits, unique_users, unique_destinations) |
 | GET | /api/remnawave/stats/top-destinations | Топ посещаемых сайтов |
 | GET | /api/remnawave/stats/top-users | Топ активных пользователей |
@@ -404,14 +405,19 @@ panel/
 
 **Оптимизация производительности:**
 
-Backend-кеширование:
-- In-memory кеш с TTL: summary/top-destinations/top-users — 30 сек, db-info — 5 мин
+Backend:
+- **Batch endpoint** `/stats/batch` — summary + destinations + users в 1 HTTP-запросе (вместо 3)
+- **Параллельные SQL-запросы** через `asyncio.gather` внутри каждого endpoint
+- summary: 1 SQL вместо 3 (SUM + COUNT DISTINCT × 2 в одном запросе)
+- top-users: count + users параллельно, затем cache + IP counts параллельно
+- user-stats: 5 запросов (user + visits + destinations + IP counts + IP details) параллельно
+- In-memory кеш с TTL: batch/summary/top-destinations/top-users — 30 сек, db-info — 5 мин
 - IP counts объединены в один SQL запрос с conditional aggregation
 - GROUP BY по кешированному host вместо regexp_replace на каждой строке
 
 Frontend lazy loading (panel/frontend/src/pages/Remnawave.tsx):
 - При открытии загружаются только базовые настройки (settings, nodes, collectorStatus)
-- Статистика загружается при переходе на вкладки overview/users/destinations
+- Статистика загружается через batch endpoint при переходе на overview/users/destinations
 - Данные settings tab (db-info, infrastructure, cache status) загружаются при переходе на settings
 - Analyzer данные загружаются при переходе на analyzer
 

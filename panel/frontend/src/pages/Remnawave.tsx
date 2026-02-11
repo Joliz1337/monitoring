@@ -334,38 +334,27 @@ export default function Remnawave() {
     }
   }, [fetchBasicSettings, fetchSettingsTabData, activeTab])
   
-  // Fetch stats using Promise.allSettled to handle partial failures
+  // Fetch stats via single batch endpoint (1 HTTP request instead of 3)
   const fetchStats = useCallback(async () => {
-    const [summaryRes, destRes, usersRes] = await Promise.allSettled([
-      remnawaveApi.getSummary(period),
-      remnawaveApi.getTopDestinations({ period, limit: 100 }),
-      remnawaveApi.getTopUsers({ period, limit: USERS_PAGE_SIZE, offset: 0, search: userSearch || undefined })
-    ])
-    
-    let hasError = false
-    
-    if (summaryRes.status === 'fulfilled') {
-      setSummary(summaryRes.value.data)
-    } else {
-      hasError = true
+    try {
+      const res = await remnawaveApi.getStatsBatch({
+        period,
+        dest_limit: 100,
+        users_limit: USERS_PAGE_SIZE,
+        search: userSearch || undefined
+      })
+      const data = res.data
+      setSummary(data.summary)
+      setTopDestinations(data.destinations)
+      setTopUsers(data.users.users)
+      setTotalUsers(data.users.total)
+      setUsersOffset(data.users.users.length)
+      setError(null)
+      return true
+    } catch {
+      setError(t('remnawave.failed_fetch'))
+      return false
     }
-    
-    if (destRes.status === 'fulfilled') {
-      setTopDestinations(destRes.value.data.destinations)
-    } else {
-      hasError = true
-    }
-    
-    if (usersRes.status === 'fulfilled') {
-      setTopUsers(usersRes.value.data.users)
-      setTotalUsers(usersRes.value.data.total)
-      setUsersOffset(usersRes.value.data.users.length)
-    } else {
-      hasError = true
-    }
-    
-    setError(hasError ? t('remnawave.failed_fetch') : null)
-    return !hasError
   }, [period, t, userSearch])
   
   // Fetch analyzer settings and anomalies
