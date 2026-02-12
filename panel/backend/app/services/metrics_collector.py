@@ -520,7 +520,8 @@ class MetricsCollector:
         
         async def _probe(server: Server) -> tuple[int, bool]:
             try:
-                async with httpx.AsyncClient(verify=False, timeout=5.0) as client:
+                # Timeout 12s: node may run docker inspect (~5s) before responding
+                async with httpx.AsyncClient(verify=False, timeout=12.0) as client:
                     resp = await client.get(
                         f"{server.url}/api/remnawave/status",
                         headers={"X-API-Key": server.api_key}

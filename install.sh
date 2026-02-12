@@ -1024,6 +1024,10 @@ apply_system_optimizations() {
         fi
     fi
     
+    # Load conntrack module BEFORE sysctl (required for nf_conntrack_* params)
+    modprobe nf_conntrack >/dev/null 2>&1 || true
+    sleep 0.5
+    
     log_info "Applying sysctl settings..."
     if ! sysctl -p /etc/sysctl.d/99-vless-tuning.conf >/dev/null 2>&1; then
         log_warn "Some sysctl settings may require kernel support"
@@ -1035,8 +1039,6 @@ apply_system_optimizations() {
             echo "session required pam_limits.so" >> /etc/pam.d/common-session
         fi
     fi
-    
-    modprobe nf_conntrack >/dev/null 2>&1 || true
     
     log_info "Enabling network-tune service..."
     timeout "$TIMEOUT_SYSTEMCTL" systemctl daemon-reload >/dev/null 2>&1 || true

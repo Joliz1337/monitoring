@@ -12,9 +12,20 @@ router = APIRouter(prefix="/api/remnawave", tags=["remnawave"])
 
 @router.get("/status")
 async def get_status():
-    """Get Xray log collector status."""
+    """Get Xray log collector status.
+    
+    Always does a live container check so the panel gets accurate
+    xray availability even when the collector hasn't been started yet.
+    """
     collector = get_xray_log_collector()
-    return collector.get_status()
+    status = collector.get_status()
+
+    # Live check: don't rely on the lazy-started collector's _available flag
+    if not status["available"] and not collector._running:
+        container_up = await collector._check_container_available()
+        status["available"] = container_up
+
+    return status
 
 
 @router.post("/stats/collect")

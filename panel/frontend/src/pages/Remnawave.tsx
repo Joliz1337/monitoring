@@ -928,7 +928,7 @@ export default function Remnawave() {
   }
   
   const handleSelectAllNodes = () => {
-    setSelectedNodeIds(new Set(allServers.map(s => s.id)))
+    setSelectedNodeIds(new Set(allServers.filter(s => s.has_xray_node).map(s => s.id)))
   }
   
   const handleDeselectAllNodes = () => {
@@ -2675,9 +2675,9 @@ export default function Remnawave() {
                 </div>
               </div>
               
-              {/* Server List with Checkboxes */}
+              {/* Server List with Checkboxes — only servers with xray */}
               <div className="space-y-2 max-h-[400px] overflow-y-auto">
-                {allServers.map(server => {
+                {allServers.filter(s => s.has_xray_node).map(server => {
                   const node = nodes.find(n => n.server_id === server.id)
                   const isSelected = selectedNodeIds.has(server.id)
                   
@@ -2710,15 +2710,9 @@ export default function Remnawave() {
                           }`}>
                             {server.is_active ? 'online' : 'offline'}
                           </span>
-                          {server.has_xray_node ? (
-                            <span className="text-xs px-1.5 py-0.5 rounded bg-accent-500/20 text-accent-400">
-                              xray
-                            </span>
-                          ) : (
-                            <span className="text-xs px-1.5 py-0.5 rounded bg-dark-600 text-dark-500">
-                              no xray
-                            </span>
-                          )}
+                          <span className="text-xs px-1.5 py-0.5 rounded bg-accent-500/20 text-accent-400">
+                            xray
+                          </span>
                         </div>
                         {node?.last_collected && (
                           <div className="text-xs text-dark-500">
@@ -2732,7 +2726,7 @@ export default function Remnawave() {
                     </div>
                   )
                 })}
-                {allServers.length === 0 && (
+                {allServers.filter(s => s.has_xray_node).length === 0 && (
                   <div className="text-center text-dark-500 py-4">{t('remnawave.no_servers')}</div>
                 )}
               </div>

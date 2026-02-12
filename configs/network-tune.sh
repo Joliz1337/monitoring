@@ -38,6 +38,11 @@ configure_conntrack() {
         local current=$(cat "$hashsize_file" 2>/dev/null || echo 0)
         [ "$current" -lt "$ideal_hashsize" ] && echo "$ideal_hashsize" > "$hashsize_file" 2>/dev/null || true
     fi
+    
+    # Re-apply sysctl conntrack params after module load (critical for boot-time)
+    if [ -f /etc/sysctl.d/99-vless-tuning.conf ]; then
+        sysctl -p /etc/sysctl.d/99-vless-tuning.conf >/dev/null 2>&1 || true
+    fi
 }
 
 configure_ring_buffer() {
