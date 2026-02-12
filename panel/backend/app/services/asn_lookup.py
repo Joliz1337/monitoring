@@ -179,12 +179,35 @@ async def lookup_ips(ip_list: list[str]) -> dict[str, ASNInfo]:
 
 
 def group_ips_by_asn(asn_map: dict[str, ASNInfo]) -> list[dict]:
-    """Group IPs by ASN and return structured list.
+    """Group IPs by ASN and return structured list (without visit filtering).
 
     Returns list of ASN groups:
     [
-        {"asn": "8359", "prefix": "91.76.0.0/14", "ips": [...], "count": 45},
-        {"asn": null, "ips": ["1.2.3.4"], "count": 1},
+        {"asn": "8359", "prefix": "91.76.0.0/14", "ips": [...], "count": 45, "visits": 0},
+        {"asn": null, "ips": ["1.2.3.4"], "count": 1, "visits": 0},
+    ]
+    """
+    return group_ips_by_asn_with_visits(asn_map, {}, min_visits=0)
+
+
+def group_ips_by_asn_with_visits(
+    asn_map: dict[str, ASNInfo],
+    ip_visits: dict[str, int],
+    min_visits: int = 0
+) -> list[dict]:
+    """Group IPs by ASN, aggregate visit counts, and filter by min_visits.
+
+    Args:
+        asn_map: IP -> ASNInfo mapping
+        ip_visits: IP -> visit count mapping
+        min_visits: minimum total visits for an ASN group to be included.
+            For ASN groups: sum of visits across all IPs in the ASN.
+            For IPs without ASN: individual visit count.
+
+    Returns list of active ASN groups:
+    [
+        {"asn": "8359", "prefix": "91.76.0.0/14", "ips": [...], "count": 45, "visits": 12500},
+        {"asn": null, "ips": ["1.2.3.4"], "count": 1, "visits": 1500},
     ]
     """
     groups: dict[Optional[str], dict] = {}
@@ -196,19 +219,35 @@ def group_ips_by_asn(asn_map: dict[str, ASNInfo]) -> list[dict]:
                 "asn": info.asn,
                 "prefix": info.prefix,
                 "ips": [],
+                "visits": 0,
             }
         groups[key]["ips"].append(ip)
-        # Keep the most specific prefix if multiple exist for same ASN
+        groups[key]["visits"] += ip_visits.get(ip, 0)
         if info.prefix and not groups[key]["prefix"]:
             groups[key]["prefix"] = info.prefix
 
     result = []
     for group in groups.values():
         group["count"] = len(group["ips"])
-        result.append(group)
 
-    # Sort: ASN groups first (by IP count desc), then no-ASN IPs
-    result.sort(key=lambda g: (g["asn"] is None, -g["count"]))
+        if group["asn"] is not None:
+            # ASN group: check total visits across all IPs
+            if group["visits"] >= min_visits:
+                result.append(group)
+        else:
+            # No ASN: filter each IP individually by its visits
+            if min_visits > 0:
+                active_ips = [ip for ip in group["ips"] if ip_visits.get(ip, 0) >= min_visits]
+                if active_ips:
+                    group["ips"] = active_ips
+                    group["count"] = len(active_ips)
+                    group["visits"] = sum(ip_visits.get(ip, 0) for ip in active_ips)
+                    result.append(group)
+            else:
+                result.append(group)
+
+    # Sort: ASN groups first (by visits desc), then no-ASN IPs
+    result.sort(key=lambda g: (g["asn"] is None, -g["visits"]))
     return result
 
 

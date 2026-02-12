@@ -30,7 +30,7 @@ from app.models import (
 )
 from app.services.remnawave_api import get_remnawave_api
 from app.services.xray_stats_collector import get_xray_stats_collector, resolve_infrastructure_address
-from app.services.traffic_analyzer import get_traffic_analyzer, MIN_IP_VISIT_COUNT
+from app.services.traffic_analyzer import get_traffic_analyzer, MIN_ASN_VISIT_COUNT
 
 router = APIRouter(prefix="/remnawave", tags=["remnawave"])
 logger = logging.getLogger(__name__)
@@ -1081,7 +1081,7 @@ async def get_top_users(
     active_ip_counts = {}
     infra_counts = {}
     if user_ids:
-        # Активные клиентские IP (>= MIN_IP_VISIT_COUNT посещений, без инфраструктурных)
+        # Активные клиентские IP (>= MIN_ASN_VISIT_COUNT посещений, без инфраструктурных)
         active_conditions = [XrayStats.email.in_(user_ids), XrayStats.last_seen >= start_time]
         if infrastructure_ips:
             active_conditions.append(XrayStats.source_ip.notin_(list(infrastructure_ips)))
@@ -1090,7 +1090,7 @@ async def get_top_users(
             select(XrayStats.email, XrayStats.source_ip)
             .where(and_(*active_conditions))
             .group_by(XrayStats.email, XrayStats.source_ip)
-            .having(sql_func.sum(XrayStats.count) >= MIN_IP_VISIT_COUNT)
+            .having(sql_func.sum(XrayStats.count) >= MIN_ASN_VISIT_COUNT)
         ).subquery()
         
         active_result = await db.execute(
@@ -1215,7 +1215,7 @@ async def get_user_stats(
             infra_ips.append(entry)
         else:
             client_ips.append(entry)
-            if row.total_count >= MIN_IP_VISIT_COUNT:
+            if row.total_count >= MIN_ASN_VISIT_COUNT:
                 active_client_count += 1
     
     # Enrich client IPs with ASN info from cache

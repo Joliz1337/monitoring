@@ -2160,7 +2160,7 @@ export default function Remnawave() {
                                 </span>
                               )}
                               {anomaly.anomaly_type === 'ip_count' && (() => {
-                                const d = anomaly.details as { unique_ips?: number; effective_count?: number; ip_limit?: number; asn_groups?: Array<{ asn: string | null; prefix: string | null; count: number }> }
+                                const d = anomaly.details as { unique_ips?: number; effective_count?: number; ip_limit?: number; asn_groups?: Array<{ asn: string | null; prefix: string | null; count: number; visits: number }> }
                                 const eff = d.effective_count ?? d.unique_ips ?? 0
                                 return (
                                   <div>
@@ -2170,7 +2170,7 @@ export default function Remnawave() {
                                       <div className="mt-1 space-y-0.5">
                                         {d.asn_groups.slice(0, 3).map((g, gi) => (
                                           <div key={gi} className="text-dark-500 text-xs">
-                                            {g.asn ? `ASN ${g.asn}` : '???'}{g.prefix ? ` (${g.prefix})` : ''}: {g.count} IP
+                                            {g.asn ? `ASN ${g.asn}` : '???'}{g.prefix ? ` (${g.prefix})` : ''}: {g.count} IP, {g.visits?.toLocaleString()} vis
                                           </div>
                                         ))}
                                         {d.asn_groups.length > 3 && (

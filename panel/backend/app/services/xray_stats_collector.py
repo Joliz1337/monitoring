@@ -125,7 +125,7 @@ async def rebuild_summaries():
             """))
             
             # 3. User summary (infrastructure IPs computed here)
-            # MIN_IP_VISIT_COUNT = 100 — only IPs with >= 100 visits count as active client IPs
+            # MIN_ASN_VISIT_COUNT = 1000 — only IPs with >= 1000 visits count as active client IPs
             await db.execute(text("DELETE FROM xray_user_summary"))
             await db.execute(text("""
                 INSERT INTO xray_user_summary (email, total_visits, unique_sites, unique_client_ips, infrastructure_ips, first_seen, last_seen)
@@ -135,7 +135,7 @@ async def rebuild_summaries():
                 GROUP BY email
             """))
             
-            # Update active IP counts (only IPs with >= 100 total visits count as active client IPs)
+            # Update active IP counts (only IPs with >= 1000 total visits count as active client IPs)
             infra_ips = await _get_infrastructure_ips_sql(db)
             if infra_ips:
                 placeholders = ",".join(f"'{ip}'" for ip in infra_ips)
@@ -145,7 +145,7 @@ async def rebuild_summaries():
                         infrastructure_ips = COALESCE(sub.infra_ips, 0)
                     FROM (
                         SELECT email,
-                            COUNT(CASE WHEN source_ip NOT IN ({placeholders}) AND ip_total >= 100 THEN 1 END) as client_ips,
+                            COUNT(CASE WHEN source_ip NOT IN ({placeholders}) AND ip_total >= 1000 THEN 1 END) as client_ips,
                             COUNT(CASE WHEN source_ip IN ({placeholders}) THEN 1 END) as infra_ips
                         FROM (
                             SELECT email, source_ip, SUM(count) as ip_total
@@ -162,7 +162,7 @@ async def rebuild_summaries():
                         unique_client_ips = COALESCE(sub.active_ips, 0)
                     FROM (
                         SELECT email,
-                            COUNT(CASE WHEN ip_total >= 100 THEN 1 END) as active_ips
+                            COUNT(CASE WHEN ip_total >= 1000 THEN 1 END) as active_ips
                         FROM (
                             SELECT email, source_ip, SUM(count) as ip_total
                             FROM xray_stats

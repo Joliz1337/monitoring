@@ -1350,6 +1350,7 @@ export const remnawaveApi = {
             prefix: string | null
             ips: string[]
             count: number
+            visits: number
           }>
           total_devices?: number
           suspicious_count?: number

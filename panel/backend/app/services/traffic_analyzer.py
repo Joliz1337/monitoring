@@ -28,8 +28,8 @@ from app.services.remnawave_api import get_remnawave_api, RemnawaveAPIError
 
 logger = logging.getLogger(__name__)
 
-# Minimum visit count for an IP to be considered active (used in IP anomaly check)
-MIN_IP_VISIT_COUNT = 100
+# Minimum total visit count for an ASN group to be considered active
+MIN_ASN_VISIT_COUNT = 1000
 
 # Known valid platforms for HWID validation
 VALID_PLATFORMS = {'android', 'ios', 'windows', 'macos', 'linux', 'mac'}
@@ -479,12 +479,15 @@ class TrafficAnalyzer:
         settings: TrafficAnalyzerSettings,
         cutoff_time: datetime
     ) -> Optional[dict]:
-        """Check if user has too many unique IP groups (by ASN).
+        """Check if user has too many unique IP groups (by ASN) in last 24h.
         
-        IPs from the same ASN are grouped together and count as 1.
-        Only counts IPs with >= MIN_IP_VISIT_COUNT visits to filter out noise.
+        1. Get all IPs with visit counts for user (last 24h, excluding infra)
+        2. Resolve ASN for each IP
+        3. Group by ASN, sum visits per group
+        4. Filter: only ASN-groups with >= MIN_ASN_VISIT_COUNT total visits are "active"
+        5. Compare active group count with device limit
         """
-        from app.services.asn_lookup import lookup_ips, group_ips_by_asn, effective_ip_count
+        from app.services.asn_lookup import lookup_ips, group_ips_by_asn_with_visits, effective_ip_count
         
         device_limit = user.hwid_device_limit or 2
         ip_limit = int(device_limit * settings.ip_limit_multiplier)
@@ -497,29 +500,30 @@ class TrafficAnalyzer:
             if infra_ips:
                 conditions.append(XrayStats.source_ip.notin_(list(infra_ips)))
             
-            # Get actual active IP addresses (not just count)
-            active_ips_query = (
-                select(XrayStats.source_ip)
+            # Get all IPs with their visit counts (no per-IP threshold)
+            ip_visits_query = (
+                select(XrayStats.source_ip, func.sum(XrayStats.count).label('visits'))
                 .where(and_(*conditions))
                 .group_by(XrayStats.source_ip)
-                .having(func.sum(XrayStats.count) >= MIN_IP_VISIT_COUNT)
             )
             
-            result = await db.execute(active_ips_query)
-            active_ip_list = [row[0] for row in result.fetchall()]
+            result = await db.execute(ip_visits_query)
+            ip_visits = {row[0]: int(row[1]) for row in result.fetchall()}
         
-        unique_ips = len(active_ip_list)
-        if unique_ips <= ip_limit:
+        if not ip_visits:
             return None
         
-        # Resolve ASN for each IP and group
-        asn_map = await lookup_ips(active_ip_list)
-        asn_groups = group_ips_by_asn(asn_map)
+        # Resolve ASN for each IP
+        asn_map = await lookup_ips(list(ip_visits.keys()))
+        
+        # Group by ASN with visit counts, filter by MIN_ASN_VISIT_COUNT
+        asn_groups = group_ips_by_asn_with_visits(asn_map, ip_visits, MIN_ASN_VISIT_COUNT)
         eff_count = effective_ip_count(asn_groups)
         
         if eff_count <= ip_limit:
             return None
         
+        unique_ips = sum(g["count"] for g in asn_groups)
         severity = "critical" if eff_count > ip_limit * 1.5 else "warning"
         
         # Limit IPs in each group to 10 for notification compactness
@@ -529,7 +533,8 @@ class TrafficAnalyzer:
                 "asn": g["asn"],
                 "prefix": g["prefix"],
                 "ips": g["ips"][:10],
-                "count": g["count"]
+                "count": g["count"],
+                "visits": g["visits"]
             })
         
         return {
@@ -542,7 +547,7 @@ class TrafficAnalyzer:
                 "device_limit": device_limit,
                 "ip_limit": ip_limit,
                 "exceeded_by": eff_count - ip_limit,
-                "min_visit_threshold": MIN_IP_VISIT_COUNT,
+                "min_visit_threshold": MIN_ASN_VISIT_COUNT,
                 "asn_groups": compact_groups
             }
         }
@@ -714,8 +719,9 @@ class TrafficAnalyzer:
                     asn = group.get('asn') or '???'
                     prefix = group.get('prefix') or ''
                     count = group.get('count', 0)
+                    visits = group.get('visits', 0)
                     prefix_str = f" ({prefix})" if prefix else ""
-                    message += f"\n• ASN {asn}{prefix_str}: {count} IP"
+                    message += f"\n• ASN {asn}{prefix_str}: {count} IP, {visits} визитов"
             
             elif anomaly['type'] == 'hwid':
                 message += f"\n📱 <b>Всего устройств:</b> {details['total_devices']}\n"
