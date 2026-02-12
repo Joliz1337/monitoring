@@ -27,7 +27,7 @@ from app.services.remnawave_api import get_remnawave_api, RemnawaveAPIError
 
 logger = logging.getLogger(__name__)
 
-UPSERT_BATCH_SIZE = 5000
+UPSERT_BATCH_SIZE = 500
 USER_CACHE_BATCH_SIZE = 500
 
 # DNS cache for infrastructure addresses
