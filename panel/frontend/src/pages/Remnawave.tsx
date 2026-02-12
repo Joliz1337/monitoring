@@ -2710,6 +2710,15 @@ export default function Remnawave() {
                           }`}>
                             {server.is_active ? 'online' : 'offline'}
                           </span>
+                          {server.has_xray_node ? (
+                            <span className="text-xs px-1.5 py-0.5 rounded bg-accent-500/20 text-accent-400">
+                              xray
+                            </span>
+                          ) : (
+                            <span className="text-xs px-1.5 py-0.5 rounded bg-dark-600 text-dark-500">
+                              no xray
+                            </span>
+                          )}
                         </div>
                         {node?.last_collected && (
                           <div className="text-xs text-dark-500">

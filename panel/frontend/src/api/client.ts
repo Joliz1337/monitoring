@@ -553,6 +553,7 @@ export interface TorrentBlockerStatus {
   running: boolean
   started_at: string | null
   total_blocked: number
+  tag_blocks: number
   behavior_blocks: number
   active_blocks: number
   active_ips: string[]
@@ -854,6 +855,7 @@ export interface RemnawaveServerInfo {
   id: number
   name: string
   is_active: boolean
+  has_xray_node: boolean
   is_node: boolean
   node_enabled: boolean
 }

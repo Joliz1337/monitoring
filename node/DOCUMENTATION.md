@@ -331,16 +331,18 @@ data: {"message": "error description"}
 Мониторит логи Xray (`remnanode`) и блокирует торрент-пользователей через ipset temp ban.
 
 **Два режима детекции:**
-1. **По тегу** — строки с `[... -> torrent]` блокируются мгновенно
-2. **По поведению** — если source IP подключается к >= N уникальных destination IP за минуту (только к голым IP, не доменам) — блокируется автоматически. Порог настраиваемый (default: 50)
+1. **По тегу Xray** — строки с `[... -> torrent]` блокируются мгновенно (требуется routing rule в Xray)
+2. **По превышению IP** — если source IP подключается к >= N уникальных destination IP за минуту (только к голым IP, не доменам) — блокируется автоматически. Порог настраиваемый (default: 50)
 
 **При блокировке:** IP добавляется в `blocklist_temp` + `conntrack -D -s <ip>` для мгновенного разрыва существующих соединений.
+
+**Сохранение состояния при перезапуске:** При shutdown ноды процесс мониторинга останавливается, но флаг `enabled` **не сбрасывается**. При следующем запуске, если блокер был включён — он запустится автоматически. Пользовательский `disable` сохраняет `enabled: false`.
 
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
 | GET | /api/torrent-blocker/status | Статус, активные блокировки из ipset, настройки |
 | POST | /api/torrent-blocker/enable | Включить мониторинг |
-| POST | /api/torrent-blocker/disable | Выключить мониторинг |
+| POST | /api/torrent-blocker/disable | Выключить мониторинг (сохраняет enabled=false) |
 | POST | /api/torrent-blocker/settings | Обновить порог детекции (behavior_threshold: 5-1000) |
 
 **Конфиг:** `/var/lib/monitoring/torrent_blocker.json` (enabled, behavior_threshold)
@@ -348,7 +350,8 @@ data: {"message": "error description"}
 **Статус включает:**
 - `active_blocks` / `active_ips` — текущие IP в temp-списке ipset
 - `total_blocked` — кумулятивный счётчик
-- `behavior_blocks` — заблокировано по анализу поведения
+- `tag_blocks` — заблокировано по тегу Xray
+- `behavior_blocks` — заблокировано по превышению IP соединений
 - `behavior_threshold` — текущий порог
 
 ## Системные оптимизации

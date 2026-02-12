@@ -290,7 +290,7 @@ panel/
 
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
-| GET | /api/blocklist/torrent-blocker | Статус торрент-блокера на всех серверах |
+| GET | /api/blocklist/torrent-blocker | Статус торрент-блокера на серверах с xray |
 | POST | /api/blocklist/torrent-blocker/{id}/enable | Включить на сервере |
 | POST | /api/blocklist/torrent-blocker/{id}/disable | Выключить на сервере |
 | POST | /api/blocklist/torrent-blocker/{id}/settings | Установить порог для конкретного сервера |
@@ -298,7 +298,15 @@ panel/
 
 **Глобальный порог детекции**: сохраняется в PanelSettings (`torrent_behavior_threshold`), при сохранении рассылается на все активные серверы параллельно. Результат применения показывается в UI по каждому серверу.
 
-По умолчанию выключен. Включается через вкладку "Торрент-блокер" в разделе Blocklist. Состояние сохраняется на ноде в `/var/lib/monitoring/torrent_blocker.json` и переживает перезагрузки.
+По умолчанию выключен. Включается через вкладку "Торрент-блокер" в разделе Blocklist. Состояние сохраняется на ноде в `/var/lib/monitoring/torrent_blocker.json` и переживает перезагрузки (при shutdown ноды `enabled` не сбрасывается). Отображаются только серверы с `has_xray_node == true`.
+
+**Два режима блокировки:**
+- "По тегу Xray" (`tag_blocks`) — блокировка по routing-тегу torrent в Xray
+- "По превышению IP" (`behavior_blocks`) — блокировка по порогу уникальных IP-подключений
+
+### Автоопределение xray-нод
+
+Поле `has_xray_node` в таблице `servers` — обновляется каждые 2 минуты фоновой задачей `MetricsCollector._xray_check_loop()`. Проверка делается через `GET /api/remnawave/status` на каждой ноде — если `available: true`, значит контейнер `remnanode` запущен. Используется для фильтрации серверов в торрент-блокере и отображения бейджа "xray" / "no xray" в настройках Remnawave.
 
 Требуется настройка Xray на ноде:
 - Routing rules: порты 6881-6999 и протокол bittorrent → outbound tag `torrent`

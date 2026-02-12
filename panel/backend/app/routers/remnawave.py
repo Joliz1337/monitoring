@@ -748,6 +748,7 @@ async def get_nodes(
                 "id": s.id,
                 "name": s.name,
                 "is_active": s.is_active,
+                "has_xray_node": s.has_xray_node,
                 "is_node": s.id in node_map,
                 "node_enabled": node_map[s.id].enabled if s.id in node_map else False
             }

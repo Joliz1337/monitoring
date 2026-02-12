@@ -68,12 +68,12 @@ async def lifespan(app: FastAPI):
     logger.info("Server ready")
     yield
     
-    # Stop torrent blocker if running
+    # Stop torrent blocker process (preserve enabled state for next startup)
     from app.services.torrent_blocker import get_torrent_blocker
     try:
         tb = get_torrent_blocker()
         if tb._running:
-            await tb.stop()
+            await tb._graceful_stop()
     except Exception:
         pass
     

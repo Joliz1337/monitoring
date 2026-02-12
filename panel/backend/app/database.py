@@ -52,6 +52,7 @@ async def run_migrations(conn):
             ("last_metrics", "TEXT"),
             ("last_haproxy_data", "TEXT"),
             ("last_traffic_data", "TEXT"),
+            ("has_xray_node", "BOOLEAN DEFAULT FALSE"),
         ]
         
         for col_name, col_type in migrations:

@@ -34,11 +34,11 @@ async def enable():
 
 @router.post("/disable")
 async def disable():
-    """Disable torrent blocker — stops log monitoring."""
+    """Disable torrent blocker — stops log monitoring and saves disabled state."""
     blocker = get_torrent_blocker()
-    if not blocker._running:
+    if not blocker._running and not blocker._enabled:
         return {"success": True, "message": "Already stopped"}
-    await blocker.stop()
+    await blocker.disable()
     return {"success": True, "message": "Torrent blocker disabled"}
 
 

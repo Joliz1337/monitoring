@@ -28,6 +28,9 @@ class Server(Base):
     
     # Cached Traffic data (updated every 60 seconds)
     last_traffic_data = Column(Text, nullable=True)
+    
+    # Xray node detection (updated periodically)
+    has_xray_node = Column(Boolean, default=False, server_default="false")
 
 
 class MetricsSnapshot(Base):

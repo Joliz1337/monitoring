@@ -50,12 +50,15 @@ class ServerMetricsState:
 class MetricsCollector:
     """Collects metrics from all servers and stores in panel DB"""
     
+    XRAY_CHECK_INTERVAL = 120  # Check xray availability every 2 minutes
+    
     def __init__(self):
         self._running = False
         self._task: Optional[asyncio.Task] = None
         self._aggregation_task: Optional[asyncio.Task] = None
         self._haproxy_task: Optional[asyncio.Task] = None
         self._settings_task: Optional[asyncio.Task] = None
+        self._xray_check_task: Optional[asyncio.Task] = None
         self._server_states: dict[int, ServerMetricsState] = {}
         self._collect_interval = DEFAULT_METRICS_INTERVAL
         self._haproxy_interval = DEFAULT_HAPROXY_INTERVAL
@@ -121,12 +124,13 @@ class MetricsCollector:
         self._aggregation_task = asyncio.create_task(self._aggregation_loop())
         self._haproxy_task = asyncio.create_task(self._haproxy_cache_loop())
         self._settings_task = asyncio.create_task(self._settings_loop())
+        self._xray_check_task = asyncio.create_task(self._xray_check_loop())
         logger.info(f"Metrics collector started (interval: {self._collect_interval}s, haproxy: {self._haproxy_interval}s)")
     
     async def stop(self):
         """Stop background collection"""
         self._running = False
-        for task in [self._task, self._aggregation_task, self._haproxy_task, self._settings_task]:
+        for task in [self._task, self._aggregation_task, self._haproxy_task, self._settings_task, self._xray_check_task]:
             if task:
                 task.cancel()
                 try:
@@ -492,6 +496,64 @@ class MetricsCollector:
                     
         except Exception as e:
             logger.debug(f"Failed to cache HAProxy/Traffic for {server.name}: {e}")
+    
+    async def _xray_check_loop(self):
+        """Periodically check which servers have a running remnanode container."""
+        await asyncio.sleep(10)  # Initial delay to let servers come online
+        while self._running:
+            try:
+                await self._check_xray_on_all_servers()
+            except Exception as e:
+                logger.error(f"Xray check error: {e}")
+            await asyncio.sleep(self.XRAY_CHECK_INTERVAL)
+    
+    async def _check_xray_on_all_servers(self):
+        """Check xray availability on every active server, update has_xray_node."""
+        async with async_session() as db:
+            result = await db.execute(
+                select(Server).where(Server.is_active == True)
+            )
+            servers = result.scalars().all()
+        
+        if not servers:
+            return
+        
+        async def _probe(server: Server) -> tuple[int, bool]:
+            try:
+                async with httpx.AsyncClient(verify=False, timeout=5.0) as client:
+                    resp = await client.get(
+                        f"{server.url}/api/remnawave/status",
+                        headers={"X-API-Key": server.api_key}
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        return server.id, bool(data.get("available", False))
+            except Exception:
+                pass
+            return server.id, False
+        
+        results = await asyncio.gather(*[_probe(s) for s in servers], return_exceptions=True)
+        
+        updates: dict[int, bool] = {}
+        for r in results:
+            if isinstance(r, tuple):
+                sid, available = r
+                updates[sid] = available
+        
+        if not updates:
+            return
+        
+        async with async_session() as db:
+            for server in servers:
+                new_val = updates.get(server.id)
+                if new_val is not None and new_val != server.has_xray_node:
+                    await db.execute(
+                        update(Server).where(Server.id == server.id).values(
+                            has_xray_node=new_val
+                        )
+                    )
+                    logger.info(f"Server {server.name}: has_xray_node = {new_val}")
+            await db.commit()
     
     async def _aggregate_hourly(self, db: AsyncSession):
         """Aggregate raw metrics to hourly summaries"""

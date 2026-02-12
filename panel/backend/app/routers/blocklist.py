@@ -749,9 +749,12 @@ async def get_torrent_blocker_status(
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    """Get torrent blocker status from all active servers (parallel)."""
+    """Get torrent blocker status from active servers with xray node (parallel)."""
     result = await db.execute(
-        select(Server).where(Server.is_active == True)
+        select(Server).where(
+            Server.is_active == True,
+            Server.has_xray_node == True
+        )
     )
     servers = result.scalars().all()
 

@@ -1092,7 +1092,7 @@ export default function Blocklist() {
                       </div>
 
                       {srv.enabled && !srv.error && (
-                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-3">
+                        <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 mt-3">
                           <div className="bg-dark-900/50 rounded-lg p-2.5">
                             <p className="text-xs text-dark-500">{t('blocklist.torrent_active_blocks')}</p>
                             <p className="text-lg font-bold text-dark-100">{srv.active_blocks ?? 0}</p>
@@ -1100,6 +1100,10 @@ export default function Blocklist() {
                           <div className="bg-dark-900/50 rounded-lg p-2.5">
                             <p className="text-xs text-dark-500">{t('blocklist.torrent_blocked_count')}</p>
                             <p className="text-lg font-bold text-dark-100">{srv.total_blocked}</p>
+                          </div>
+                          <div className="bg-dark-900/50 rounded-lg p-2.5">
+                            <p className="text-xs text-dark-500">{t('blocklist.torrent_tag_blocks')}</p>
+                            <p className="text-lg font-bold text-dark-100">{srv.tag_blocks ?? 0}</p>
                           </div>
                           <div className="bg-dark-900/50 rounded-lg p-2.5">
                             <p className="text-xs text-dark-500">{t('blocklist.torrent_behavior_blocks')}</p>

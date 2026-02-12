@@ -98,6 +98,7 @@ class TorrentBlocker:
 
         # Stats
         self._total_blocked = 0
+        self._tag_blocks = 0
         self._behavior_blocks = 0
         self._last_block_time: Optional[datetime] = None
 
@@ -194,7 +195,9 @@ class TorrentBlocker:
         success, msg = manager.add_ip(ip, permanent=False, direction="in")
         if success:
             self._total_blocked += 1
-            if reason == "behavior":
+            if reason == "torrent_tag":
+                self._tag_blocks += 1
+            elif reason == "behavior":
                 self._behavior_blocks += 1
             self._last_block_time = datetime.now(timezone.utc)
             await self._kill_connections(ip)
@@ -295,10 +298,13 @@ class TorrentBlocker:
         self._task = asyncio.create_task(self._read_loop())
         logger.info("Torrent blocker started")
 
-    async def stop(self):
+    async def _graceful_stop(self):
+        """Stop the monitoring process without changing enabled state.
+        
+        Used during node shutdown — preserves config so blocker
+        auto-starts on next boot if it was enabled.
+        """
         self._running = False
-        self._enabled = False
-        self._save_config()
 
         if self._process:
             try:
@@ -317,7 +323,14 @@ class TorrentBlocker:
                 pass
             self._task = None
 
-        logger.info("Torrent blocker stopped")
+        logger.info("Torrent blocker gracefully stopped (state preserved)")
+
+    async def disable(self):
+        """User-initiated disable — sets enabled=false, saves config, stops process."""
+        self._enabled = False
+        self._save_config()
+        await self._graceful_stop()
+        logger.info("Torrent blocker disabled")
 
     async def auto_start_if_enabled(self):
         """Called on node startup — starts if previously enabled."""
@@ -334,6 +347,7 @@ class TorrentBlocker:
             "running": self._running,
             "started_at": self._started_at.isoformat() if self._started_at else None,
             "total_blocked": self._total_blocked,
+            "tag_blocks": self._tag_blocks,
             "behavior_blocks": self._behavior_blocks,
             "active_blocks": len(active_ips),
             "active_ips": active_ips,
