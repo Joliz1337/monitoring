@@ -479,11 +479,13 @@ class TrafficAnalyzer:
         settings: TrafficAnalyzerSettings,
         cutoff_time: datetime
     ) -> Optional[dict]:
-        """Check if user has too many unique IPs.
+        """Check if user has too many unique IP groups (by ASN).
         
-        Only counts IPs with >= MIN_IP_VISIT_COUNT visits to filter out
-        noise from rarely-used IPs.
+        IPs from the same ASN are grouped together and count as 1.
+        Only counts IPs with >= MIN_IP_VISIT_COUNT visits to filter out noise.
         """
+        from app.services.asn_lookup import lookup_ips, group_ips_by_asn, effective_ip_count
+        
         device_limit = user.hwid_device_limit or 2
         ip_limit = int(device_limit * settings.ip_limit_multiplier)
         
@@ -495,32 +497,53 @@ class TrafficAnalyzer:
             if infra_ips:
                 conditions.append(XrayStats.source_ip.notin_(list(infra_ips)))
             
-            # Subquery: group by source_ip, sum visits, keep only IPs with >= MIN_IP_VISIT_COUNT
-            active_ips_sq = (
+            # Get actual active IP addresses (not just count)
+            active_ips_query = (
                 select(XrayStats.source_ip)
                 .where(and_(*conditions))
                 .group_by(XrayStats.source_ip)
                 .having(func.sum(XrayStats.count) >= MIN_IP_VISIT_COUNT)
-                .subquery()
             )
             
-            result = await db.execute(select(func.count()).select_from(active_ips_sq))
-            unique_ips = result.scalar() or 0
+            result = await db.execute(active_ips_query)
+            active_ip_list = [row[0] for row in result.fetchall()]
         
+        unique_ips = len(active_ip_list)
         if unique_ips <= ip_limit:
             return None
         
-        severity = "critical" if unique_ips > ip_limit * 1.5 else "warning"
+        # Resolve ASN for each IP and group
+        asn_map = await lookup_ips(active_ip_list)
+        asn_groups = group_ips_by_asn(asn_map)
+        eff_count = effective_ip_count(asn_groups)
+        
+        if eff_count <= ip_limit:
+            return None
+        
+        severity = "critical" if eff_count > ip_limit * 1.5 else "warning"
+        
+        # Limit IPs in each group to 10 for notification compactness
+        compact_groups = []
+        for g in asn_groups:
+            compact_groups.append({
+                "asn": g["asn"],
+                "prefix": g["prefix"],
+                "ips": g["ips"][:10],
+                "count": g["count"]
+            })
         
         return {
             "type": "ip_count",
             "severity": severity,
             "details": {
                 "unique_ips": unique_ips,
+                "unique_asns": sum(1 for g in asn_groups if g["asn"] is not None),
+                "effective_count": eff_count,
                 "device_limit": device_limit,
                 "ip_limit": ip_limit,
-                "exceeded_by": unique_ips - ip_limit,
-                "min_visit_threshold": MIN_IP_VISIT_COUNT
+                "exceeded_by": eff_count - ip_limit,
+                "min_visit_threshold": MIN_IP_VISIT_COUNT,
+                "asn_groups": compact_groups
             }
         }
     
@@ -681,9 +704,18 @@ class TrafficAnalyzer:
                 message += f"⚠️ <b>Превышение:</b> +{details['exceeded_by_gb']} ГБ"
             
             elif anomaly['type'] == 'ip_count':
+                eff = details.get('effective_count', details['unique_ips'])
                 message += f"\n🌐 <b>Уникальных IP:</b> {details['unique_ips']}\n"
+                message += f"🏢 <b>ASN-групп:</b> {eff} (лимит: {details['ip_limit']})\n"
                 message += f"📱 <b>Лимит устройств:</b> {details['device_limit']}\n"
-                message += f"⚠️ <b>Превышение IP:</b> +{details['exceeded_by']}"
+                message += f"⚠️ <b>Превышение:</b> +{details['exceeded_by']}\n"
+                
+                for group in details.get('asn_groups', [])[:5]:
+                    asn = group.get('asn') or '???'
+                    prefix = group.get('prefix') or ''
+                    count = group.get('count', 0)
+                    prefix_str = f" ({prefix})" if prefix else ""
+                    message += f"\n• ASN {asn}{prefix_str}: {count} IP"
             
             elif anomaly['type'] == 'hwid':
                 message += f"\n📱 <b>Всего устройств:</b> {details['total_devices']}\n"

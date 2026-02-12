@@ -928,6 +928,8 @@ export interface RemnawaveUserIp {
   total_count: number
   first_seen: string | null
   last_seen: string | null
+  asn?: string | null
+  prefix?: string | null
 }
 
 export interface RemnawaveUserDetails {
@@ -1338,9 +1340,17 @@ export const remnawaveApi = {
           limit_gb?: number
           exceeded_by_gb?: number
           unique_ips?: number
+          unique_asns?: number
+          effective_count?: number
           device_limit?: number
           ip_limit?: number
           exceeded_by?: number
+          asn_groups?: Array<{
+            asn: string | null
+            prefix: string | null
+            ips: string[]
+            count: number
+          }>
           total_devices?: number
           suspicious_count?: number
           suspicious_devices?: Array<{

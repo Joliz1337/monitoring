@@ -68,6 +68,7 @@ panel/
 - Метрики серверов (история 24ч raw + 30 дней hourly + 365 дней daily)
 - Remnawave статистика (xray_stats — единая таблица)
 - Кэш пользователей, blocklist правила, настройки
+- ASN-кэш (asn_cache — IP → ASN/prefix, TTL 7 дней)
 
 **Преимущества PostgreSQL:**
 - Concurrent writes — одновременная запись с множества серверов
@@ -424,10 +425,17 @@ panel/
 - **xray_destination_summary** — PK(host): total_visits, unique_users
 - **xray_user_summary** — PK(email): total_visits, unique_sites, unique_client_ips (только IP с ≥100 посещениями), infrastructure_ips
 
+4. **asn_cache** — кэш ASN-информации: `PK(ip) → asn, prefix, cached_at`
+   - Данные из RIPE Stat API (`stat.ripe.net/data/network-info`)
+   - TTL 7 дней, просроченные записи удаляются автоматически
+   - CIDR-matching: новые IP проверяются по известным prefix перед запросом к API
+   - Используется анализатором аномалий и endpoint `/stats/user/{email}`
+
 **Автоочистка данных:**
 - xray_stats: записи с last_seen > retention_days (default 365)
 - xray_hourly_stats: записи старше hourly_retention (default 365)
 - remnawave_user_cache: записи без обновления > 7 дней
+- asn_cache: записи старше 7 дней
 - VACUUM после массовых удалений
 
 **Ручная очистка:** DELETE /api/remnawave/stats/clear — TRUNCATE всех таблиц
@@ -466,6 +474,14 @@ Frontend lazy loading (panel/frontend/src/pages/Remnawave.tsx):
 - Коллектор НЕ запускается автоматически при старте ноды
 - Запускается только при первом обращении панели за статистикой
 - Ноды без Remnawave не тратят ресурсы на проверку контейнера
+
+**Анализатор аномалий (traffic_analyzer.py + asn_lookup.py):**
+- Проверки: трафик, количество IP (с ASN-группировкой), подозрительные HWID
+- IP-группировка по ASN: IP из одного ASN считаются как 1 группа (не спамит при 50 IP мобильного оператора)
+- ASN-данные: RIPE Stat API → кэш в PostgreSQL (asn_cache, TTL 7 дней)
+- CIDR-match: новые IP проверяются по уже известным prefix без обращения к API
+- Rate limiting: батчи по 5 запросов, пауза 1 сек между батчами
+- На фронтенде: вкладка IPs в модалке пользователя группирует IP по ASN
 
 ### Выполнение команд на нодах
 

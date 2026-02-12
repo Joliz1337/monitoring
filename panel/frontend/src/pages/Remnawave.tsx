@@ -159,6 +159,9 @@ export default function Remnawave() {
   const [ipDestinations, setIpDestinations] = useState<RemnawaveIpDestinations | null>(null)
   const [isLoadingIpDest, setIsLoadingIpDest] = useState(false)
   
+  // ASN group expansion
+  const [expandedAsns, setExpandedAsns] = useState<Set<string>>(new Set())
+  
   // IP clearing state
   const [isClearingIp, setIsClearingIp] = useState(false)
   const [clearIpConfirm, setClearIpConfirm] = useState<{ type: 'single' | 'all'; sourceIp?: string } | null>(null)
@@ -2156,9 +2159,28 @@ export default function Remnawave() {
                                   </span>
                                 </span>
                               )}
-                              {anomaly.anomaly_type === 'ip_count' && (
-                                <span>{(anomaly.details as { unique_ips?: number }).unique_ips} IP / {(anomaly.details as { ip_limit?: number }).ip_limit} {t('remnawave.limit')}</span>
-                              )}
+                              {anomaly.anomaly_type === 'ip_count' && (() => {
+                                const d = anomaly.details as { unique_ips?: number; effective_count?: number; ip_limit?: number; asn_groups?: Array<{ asn: string | null; prefix: string | null; count: number }> }
+                                const eff = d.effective_count ?? d.unique_ips ?? 0
+                                return (
+                                  <div>
+                                    <span>{eff} {t('remnawave.asn_groups')} / {d.ip_limit} {t('remnawave.limit')}</span>
+                                    <span className="text-dark-500 ml-1">({d.unique_ips} IP)</span>
+                                    {d.asn_groups && d.asn_groups.length > 0 && (
+                                      <div className="mt-1 space-y-0.5">
+                                        {d.asn_groups.slice(0, 3).map((g, gi) => (
+                                          <div key={gi} className="text-dark-500 text-xs">
+                                            {g.asn ? `ASN ${g.asn}` : '???'}{g.prefix ? ` (${g.prefix})` : ''}: {g.count} IP
+                                          </div>
+                                        ))}
+                                        {d.asn_groups.length > 3 && (
+                                          <div className="text-dark-600 text-xs">+{d.asn_groups.length - 3} ...</div>
+                                        )}
+                                      </div>
+                                    )}
+                                  </div>
+                                )
+                              })()}
                               {anomaly.anomaly_type === 'hwid' && (
                                 <span>{(anomaly.details as { suspicious_count?: number }).suspicious_count} {t('remnawave.suspicious_devices')}</span>
                               )}
@@ -3604,127 +3626,210 @@ export default function Remnawave() {
                           </button>
                         )}
                       </div>
-                      {(selectedUser.client_ips || selectedUser.ips) && (selectedUser.client_ips || selectedUser.ips).length > 0 ? (
-                        <div className="space-y-2">
-                          {(selectedUser.client_ips || selectedUser.ips).map((ip, idx) => (
-                            <div key={ip.source_ip} className="rounded-lg bg-dark-800 overflow-hidden">
-                              {/* IP Header - Clickable */}
-                              <div 
-                                className="flex items-center gap-3 p-3 hover:bg-dark-700 transition-colors cursor-pointer"
-                                onClick={() => handleToggleIpExpand(ip.source_ip, selectedUser.email)}
-                              >
-                                <button className="p-1 text-dark-500 hover:text-dark-300 transition-colors">
-                                  {expandedIp === ip.source_ip ? (
-                                    <ChevronDown className="w-4 h-4" />
-                                  ) : (
-                                    <ChevronRight className="w-4 h-4" />
-                                  )}
-                                </button>
-                                <span className="text-dark-500 text-sm w-6">{idx + 1}</span>
-                                <div className="flex-1 min-w-0">
-                                  <div className="flex items-center gap-2">
-                                    <span className="text-dark-200 font-mono">{ip.source_ip}</span>
-                                    <button
-                                      onClick={(e) => { e.stopPropagation(); copyToClipboard(ip.source_ip, `ip_${idx}`); }}
-                                      className="p-1 rounded hover:bg-dark-600 text-dark-500 hover:text-accent-400 transition-colors"
-                                    >
-                                      {copiedField === `ip_${idx}` ? <CheckCircle className="w-3 h-3 text-success" /> : <Copy className="w-3 h-3" />}
-                                    </button>
+                      {(selectedUser.client_ips || selectedUser.ips) && (selectedUser.client_ips || selectedUser.ips).length > 0 ? (() => {
+                        const allIps = selectedUser.client_ips || selectedUser.ips
+                        // Group IPs by ASN
+                        const asnGroupsMap: Record<string, typeof allIps> = {}
+                        const ungroupedIps: typeof allIps = []
+                        
+                        for (const ip of allIps) {
+                          if (ip.asn) {
+                            const key = ip.asn
+                            if (!asnGroupsMap[key]) asnGroupsMap[key] = []
+                            asnGroupsMap[key].push(ip)
+                          } else {
+                            ungroupedIps.push(ip)
+                          }
+                        }
+                        
+                        const hasAsnGroups = Object.keys(asnGroupsMap).length > 0
+                        const toggleAsn = (asn: string) => {
+                          setExpandedAsns(prev => {
+                            const next = new Set(prev)
+                            if (next.has(asn)) next.delete(asn)
+                            else next.add(asn)
+                            return next
+                          })
+                        }
+                        
+                        // Render a single IP row (reused in both grouped and ungrouped)
+                        const renderIpRow = (ip: typeof allIps[0], idx: number) => (
+                          <div key={ip.source_ip} className="rounded-lg bg-dark-800 overflow-hidden">
+                            <div 
+                              className="flex items-center gap-3 p-3 hover:bg-dark-700 transition-colors cursor-pointer"
+                              onClick={() => handleToggleIpExpand(ip.source_ip, selectedUser.email)}
+                            >
+                              <button className="p-1 text-dark-500 hover:text-dark-300 transition-colors">
+                                {expandedIp === ip.source_ip ? (
+                                  <ChevronDown className="w-4 h-4" />
+                                ) : (
+                                  <ChevronRight className="w-4 h-4" />
+                                )}
+                              </button>
+                              <span className="text-dark-500 text-sm w-6">{idx + 1}</span>
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2">
+                                  <span className="text-dark-200 font-mono">{ip.source_ip}</span>
+                                  <button
+                                    onClick={(e) => { e.stopPropagation(); copyToClipboard(ip.source_ip, `ip_${idx}`); }}
+                                    className="p-1 rounded hover:bg-dark-600 text-dark-500 hover:text-accent-400 transition-colors"
+                                  >
+                                    {copiedField === `ip_${idx}` ? <CheckCircle className="w-3 h-3 text-success" /> : <Copy className="w-3 h-3" />}
+                                  </button>
+                                </div>
+                                <div className="text-dark-500 text-xs flex items-center gap-2 flex-wrap mt-1">
+                                  {ip.servers.map((s) => (
+                                    <span key={s.server_id} className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-dark-700">
+                                      <Server className="w-3 h-3" />
+                                      {s.server_name}: {s.count}
+                                    </span>
+                                  ))}
+                                </div>
+                                {ip.last_seen && (
+                                  <div className="text-dark-600 text-xs mt-1">
+                                    {t('remnawave.last_seen')}: {formatDateTime(ip.last_seen)}
                                   </div>
-                                  <div className="text-dark-500 text-xs flex items-center gap-2 flex-wrap mt-1">
-                                    {ip.servers.map((s) => (
-                                      <span key={s.server_id} className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-dark-700">
-                                        <Server className="w-3 h-3" />
-                                        {s.server_name}: {s.count}
-                                      </span>
+                                )}
+                              </div>
+                              <span className="text-dark-300 font-medium">{ip.total_count.toLocaleString()}</span>
+                              <a
+                                href={`https://check-host.net/ip-info?host=${encodeURIComponent(ip.source_ip)}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                onClick={(e) => e.stopPropagation()}
+                                className="p-2 rounded-lg hover:bg-dark-600 text-dark-400 hover:text-accent-400 transition-colors"
+                                title={t('remnawave.ip_info')}
+                              >
+                                <ExternalLink className="w-4 h-4" />
+                              </a>
+                              <button
+                                onClick={(e) => { e.stopPropagation(); setClearIpConfirm({ type: 'single', sourceIp: ip.source_ip }); }}
+                                disabled={isClearingIp}
+                                className="p-2 rounded-lg hover:bg-red-500/20 text-dark-500 hover:text-red-400 transition-colors disabled:opacity-50"
+                                title={t('remnawave.clear_ip')}
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
+                            
+                            {/* Expanded Destinations */}
+                            {expandedIp === ip.source_ip && (
+                              <div className="border-t border-dark-700 bg-dark-900/50 p-3">
+                                <div className="flex items-center gap-2 mb-3">
+                                  <Globe className="w-4 h-4 text-dark-500" />
+                                  <span className="text-dark-400 text-sm font-medium">{t('remnawave.destinations_from_ip')}</span>
+                                </div>
+                                
+                                {isLoadingIpDest ? (
+                                  <div className="flex items-center justify-center py-4">
+                                    <div className="w-5 h-5 border-2 border-accent-500 border-t-transparent rounded-full animate-spin" />
+                                  </div>
+                                ) : ipDestinations && ipDestinations.destinations.length > 0 ? (
+                                  <div className="space-y-1 max-h-[300px] overflow-auto">
+                                    {ipDestinations.destinations.map((dest, destIdx) => (
+                                      <div 
+                                        key={dest.destination} 
+                                        className="flex items-center gap-2 p-2 rounded hover:bg-dark-800 transition-colors"
+                                      >
+                                        <span className="text-dark-600 text-xs w-5">{destIdx + 1}</span>
+                                        <span className="text-dark-300 text-sm font-mono flex-1 truncate">
+                                          {dest.destination}
+                                        </span>
+                                        <span className="text-dark-500 text-xs">
+                                          {dest.percentage}%
+                                        </span>
+                                        <span className="text-dark-400 text-sm w-16 text-right">
+                                          {dest.connections.toLocaleString()}
+                                        </span>
+                                        <a
+                                          href={getIpInfoUrl(dest.destination)}
+                                          target="_blank"
+                                          rel="noopener noreferrer"
+                                          className="p-1 rounded hover:bg-dark-700 text-dark-500 hover:text-accent-400 transition-colors"
+                                          title={t('remnawave.ip_info')}
+                                        >
+                                          <Info className="w-3 h-3" />
+                                        </a>
+                                      </div>
                                     ))}
                                   </div>
-                                  {ip.last_seen && (
-                                    <div className="text-dark-600 text-xs mt-1">
-                                      {t('remnawave.last_seen')}: {formatDateTime(ip.last_seen)}
-                                    </div>
-                                  )}
-                                </div>
-                                <span className="text-dark-300 font-medium">{ip.total_count.toLocaleString()}</span>
-                                <a
-                                  href={`https://check-host.net/ip-info?host=${encodeURIComponent(ip.source_ip)}`}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  onClick={(e) => e.stopPropagation()}
-                                  className="p-2 rounded-lg hover:bg-dark-600 text-dark-400 hover:text-accent-400 transition-colors"
-                                  title={t('remnawave.ip_info')}
-                                >
-                                  <ExternalLink className="w-4 h-4" />
-                                </a>
-                                <button
-                                  onClick={(e) => { e.stopPropagation(); setClearIpConfirm({ type: 'single', sourceIp: ip.source_ip }); }}
-                                  disabled={isClearingIp}
-                                  className="p-2 rounded-lg hover:bg-red-500/20 text-dark-500 hover:text-red-400 transition-colors disabled:opacity-50"
-                                  title={t('remnawave.clear_ip')}
-                                >
-                                  <Trash2 className="w-4 h-4" />
-                                </button>
-                              </div>
-                              
-                              {/* Expanded Destinations */}
-                              {expandedIp === ip.source_ip && (
-                                <div className="border-t border-dark-700 bg-dark-900/50 p-3">
-                                  <div className="flex items-center gap-2 mb-3">
-                                    <Globe className="w-4 h-4 text-dark-500" />
-                                    <span className="text-dark-400 text-sm font-medium">{t('remnawave.destinations_from_ip')}</span>
+                                ) : (
+                                  <div className="text-dark-500 text-sm text-center py-3">
+                                    {t('remnawave.no_data')}
                                   </div>
-                                  
-                                  {isLoadingIpDest ? (
-                                    <div className="flex items-center justify-center py-4">
-                                      <div className="w-5 h-5 border-2 border-accent-500 border-t-transparent rounded-full animate-spin" />
+                                )}
+                                
+                                {ipDestinations && ipDestinations.total_connections > 0 && (
+                                  <div className="mt-3 pt-2 border-t border-dark-700 flex justify-between text-xs text-dark-500">
+                                    <span>{t('remnawave.total')}: {ipDestinations.destinations.length} {t('remnawave.sites').toLowerCase()}</span>
+                                    <span>{ipDestinations.total_connections.toLocaleString()} {t('remnawave.connections').toLowerCase()}</span>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        )
+                        
+                        return (
+                          <div className="space-y-3">
+                            {/* ASN Groups */}
+                            {hasAsnGroups && Object.entries(asnGroupsMap)
+                              .sort(([, a], [, b]) => b.length - a.length)
+                              .map(([asn, ips]) => {
+                                const isExpanded = expandedAsns.has(asn)
+                                const prefix = ips[0]?.prefix || ''
+                                const totalCount = ips.reduce((sum, ip) => sum + ip.total_count, 0)
+                                return (
+                                  <div key={asn} className="rounded-xl border border-dark-700/50 overflow-hidden">
+                                    {/* ASN Header */}
+                                    <div
+                                      className="flex items-center gap-3 p-3 bg-dark-800/80 hover:bg-dark-700/80 transition-colors cursor-pointer"
+                                      onClick={() => toggleAsn(asn)}
+                                    >
+                                      <button className="p-1 text-dark-500 hover:text-dark-300 transition-colors">
+                                        {isExpanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+                                      </button>
+                                      <div className="flex items-center gap-2 flex-1 min-w-0">
+                                        <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-accent-500/15 text-accent-400 text-xs font-medium">
+                                          ASN {asn}
+                                        </span>
+                                        {prefix && (
+                                          <span className="text-dark-500 text-xs font-mono">{prefix}</span>
+                                        )}
+                                      </div>
+                                      <span className="text-dark-400 text-xs">{ips.length} IP</span>
+                                      <span className="text-dark-300 font-medium text-sm">{totalCount.toLocaleString()}</span>
                                     </div>
-                                  ) : ipDestinations && ipDestinations.destinations.length > 0 ? (
-                                    <div className="space-y-1 max-h-[300px] overflow-auto">
-                                      {ipDestinations.destinations.map((dest, destIdx) => (
-                                        <div 
-                                          key={dest.destination} 
-                                          className="flex items-center gap-2 p-2 rounded hover:bg-dark-800 transition-colors"
-                                        >
-                                          <span className="text-dark-600 text-xs w-5">{destIdx + 1}</span>
-                                          <span className="text-dark-300 text-sm font-mono flex-1 truncate">
-                                            {dest.destination}
-                                          </span>
-                                          <span className="text-dark-500 text-xs">
-                                            {dest.percentage}%
-                                          </span>
-                                          <span className="text-dark-400 text-sm w-16 text-right">
-                                            {dest.connections.toLocaleString()}
-                                          </span>
-                                          <a
-                                            href={getIpInfoUrl(dest.destination)}
-                                            target="_blank"
-                                            rel="noopener noreferrer"
-                                            className="p-1 rounded hover:bg-dark-700 text-dark-500 hover:text-accent-400 transition-colors"
-                                            title={t('remnawave.ip_info')}
-                                          >
-                                            <Info className="w-3 h-3" />
-                                          </a>
-                                        </div>
-                                      ))}
-                                    </div>
-                                  ) : (
-                                    <div className="text-dark-500 text-sm text-center py-3">
-                                      {t('remnawave.no_data')}
-                                    </div>
-                                  )}
-                                  
-                                  {ipDestinations && ipDestinations.total_connections > 0 && (
-                                    <div className="mt-3 pt-2 border-t border-dark-700 flex justify-between text-xs text-dark-500">
-                                      <span>{t('remnawave.total')}: {ipDestinations.destinations.length} {t('remnawave.sites').toLowerCase()}</span>
-                                      <span>{ipDestinations.total_connections.toLocaleString()} {t('remnawave.connections').toLowerCase()}</span>
-                                    </div>
-                                  )}
+                                    {/* Expanded IPs */}
+                                    {isExpanded && (
+                                      <div className="border-t border-dark-700/50 p-2 space-y-1">
+                                        {ips.map((ip, idx) => renderIpRow(ip, idx))}
+                                      </div>
+                                    )}
+                                  </div>
+                                )
+                              })}
+                            
+                            {/* Ungrouped IPs (no ASN) */}
+                            {ungroupedIps.length > 0 && (
+                              hasAsnGroups ? (
+                                <div className="rounded-xl border border-dark-700/50 overflow-hidden">
+                                  <div className="p-3 bg-dark-800/50">
+                                    <span className="text-dark-400 text-xs font-medium">{t('remnawave.other_ips')} ({ungroupedIps.length})</span>
+                                  </div>
+                                  <div className="border-t border-dark-700/50 p-2 space-y-1">
+                                    {ungroupedIps.map((ip, idx) => renderIpRow(ip, idx))}
+                                  </div>
                                 </div>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      ) : (
+                              ) : (
+                                <div className="space-y-2">
+                                  {ungroupedIps.map((ip, idx) => renderIpRow(ip, idx))}
+                                </div>
+                              )
+                            )}
+                          </div>
+                        )
+                      })() : (
                         <div className="p-4 rounded-lg bg-dark-800/50 text-center">
                           <p className="text-dark-500 text-sm">{t('remnawave.no_client_ips')}</p>
                         </div>

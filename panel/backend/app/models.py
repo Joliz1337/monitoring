@@ -446,3 +446,17 @@ class UserTrafficSnapshot(Base):
     user_email = Column(Integer, nullable=False, unique=True, index=True)  # User ID в Remnawave
     traffic_bytes = Column(BigInteger, default=0)  # Трафик на момент снимка
     snapshot_at = Column(DateTime(timezone=True), server_default=func.now())  # Время снимка
+
+
+class ASNCache(Base):
+    """Кэш ASN-информации для IP-адресов (TTL 7 дней).
+    
+    Используется анализатором для группировки IP по ASN.
+    Данные получаются из RIPE Stat API.
+    """
+    __tablename__ = "asn_cache"
+    
+    ip = Column(String(45), primary_key=True)  # IPv4/IPv6
+    asn = Column(String(20), nullable=True)  # "8359" или null
+    prefix = Column(String(50), nullable=True)  # "91.76.0.0/14"
+    cached_at = Column(DateTime(timezone=True), server_default=func.now())

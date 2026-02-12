@@ -1218,6 +1218,20 @@ async def get_user_stats(
             if row.total_count >= MIN_IP_VISIT_COUNT:
                 active_client_count += 1
     
+    # Enrich client IPs with ASN info from cache
+    from app.services.asn_lookup import lookup_ips as asn_lookup_ips
+    client_ip_addrs = [ip["source_ip"] for ip in client_ips]
+    if client_ip_addrs:
+        asn_map = await asn_lookup_ips(client_ip_addrs)
+        for entry in client_ips:
+            info = asn_map.get(entry["source_ip"])
+            if info:
+                entry["asn"] = info.asn
+                entry["prefix"] = info.prefix
+            else:
+                entry["asn"] = None
+                entry["prefix"] = None
+    
     unique_ips = len(ip_rows)
     unique_client_ips = active_client_count
     
