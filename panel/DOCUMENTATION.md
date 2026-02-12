@@ -422,7 +422,7 @@ panel/
 
 - **xray_global_summary** — 1 строка: total_visits, unique_users, unique_destinations
 - **xray_destination_summary** — PK(host): total_visits, unique_users
-- **xray_user_summary** — PK(email): total_visits, unique_sites, unique_client_ips, infrastructure_ips
+- **xray_user_summary** — PK(email): total_visits, unique_sites, unique_client_ips (только IP с ≥100 посещениями), infrastructure_ips
 
 **Автоочистка данных:**
 - xray_stats: записи с last_seen > retention_days (default 365)

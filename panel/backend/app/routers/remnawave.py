@@ -30,7 +30,7 @@ from app.models import (
 )
 from app.services.remnawave_api import get_remnawave_api
 from app.services.xray_stats_collector import get_xray_stats_collector, resolve_infrastructure_address
-from app.services.traffic_analyzer import get_traffic_analyzer
+from app.services.traffic_analyzer import get_traffic_analyzer, MIN_IP_VISIT_COUNT
 
 router = APIRouter(prefix="/remnawave", tags=["remnawave"])
 logger = logging.getLogger(__name__)
@@ -1070,7 +1070,6 @@ async def get_top_users(
         XrayStats.email,
         sql_func.sum(XrayStats.count).label('total'),
         sql_func.count(sql_func.distinct(XrayStats.host)).label('unique_sites'),
-        sql_func.count(sql_func.distinct(XrayStats.source_ip)).label('unique_ips')
     ).where(and_(*conditions)).group_by(XrayStats.email) \
      .order_by(sql_func.sum(XrayStats.count).desc()).offset(offset).limit(limit)
     
@@ -1078,17 +1077,35 @@ async def get_top_users(
     user_cache = await _get_user_cache(db, [r.email for r in rows])
     infrastructure_ips = await _get_infrastructure_ips(db)
     
-    # Compute infra IP counts per user from xray_stats
     user_ids = [r.email for r in rows]
+    active_ip_counts = {}
     infra_counts = {}
-    if user_ids and infrastructure_ips:
-        infra_result = await db.execute(
-            select(XrayStats.email, sql_func.count(sql_func.distinct(XrayStats.source_ip)))
-            .where(and_(XrayStats.email.in_(user_ids), XrayStats.source_ip.in_(list(infrastructure_ips)), XrayStats.last_seen >= start_time))
-            .group_by(XrayStats.email)
+    if user_ids:
+        # Активные клиентские IP (>= MIN_IP_VISIT_COUNT посещений, без инфраструктурных)
+        active_conditions = [XrayStats.email.in_(user_ids), XrayStats.last_seen >= start_time]
+        if infrastructure_ips:
+            active_conditions.append(XrayStats.source_ip.notin_(list(infrastructure_ips)))
+        
+        active_ips_subq = (
+            select(XrayStats.email, XrayStats.source_ip)
+            .where(and_(*active_conditions))
+            .group_by(XrayStats.email, XrayStats.source_ip)
+            .having(sql_func.sum(XrayStats.count) >= MIN_IP_VISIT_COUNT)
+        ).subquery()
+        
+        active_result = await db.execute(
+            select(active_ips_subq.c.email, sql_func.count()).group_by(active_ips_subq.c.email)
         )
-        for r in infra_result.fetchall():
-            infra_counts[r[0]] = r[1]
+        active_ip_counts = {r[0]: r[1] for r in active_result.fetchall()}
+        
+        if infrastructure_ips:
+            infra_result = await db.execute(
+                select(XrayStats.email, sql_func.count(sql_func.distinct(XrayStats.source_ip)))
+                .where(and_(XrayStats.email.in_(user_ids), XrayStats.source_ip.in_(list(infrastructure_ips)), XrayStats.last_seen >= start_time))
+                .group_by(XrayStats.email)
+            )
+            for r in infra_result.fetchall():
+                infra_counts[r[0]] = r[1]
     
     response = {
         "period": period, "total": total_count, "offset": offset, "limit": limit,
@@ -1098,7 +1115,7 @@ async def get_top_users(
                 "username": user_cache.get(row.email, {}).get("username"),
                 "status": user_cache.get(row.email, {}).get("status"),
                 "total_visits": row.total, "unique_sites": row.unique_sites,
-                "unique_ips": (row.unique_ips or 0) - infra_counts.get(row.email, 0),
+                "unique_ips": active_ip_counts.get(row.email, 0),
                 "infrastructure_ips": infra_counts.get(row.email, 0)
             }
             for row in rows
@@ -1185,6 +1202,7 @@ async def get_user_stats(
     
     client_ips = []
     infra_ips = []
+    active_client_count = 0
     for row in ip_rows:
         entry = {
             "source_ip": row.source_ip,
@@ -1197,9 +1215,11 @@ async def get_user_stats(
             infra_ips.append(entry)
         else:
             client_ips.append(entry)
+            if row.total_count >= MIN_IP_VISIT_COUNT:
+                active_client_count += 1
     
     unique_ips = len(ip_rows)
-    unique_client_ips = len(client_ips)
+    unique_client_ips = active_client_count
     
     return {
         "email": email,
