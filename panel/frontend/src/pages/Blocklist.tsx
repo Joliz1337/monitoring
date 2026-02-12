@@ -306,6 +306,21 @@ export default function Blocklist() {
     }
   }
   
+  const [savingThreshold, setSavingThreshold] = useState<number | null>(null)
+  
+  const handleSaveBehaviorThreshold = async (serverId: number, threshold: number) => {
+    setSavingThreshold(serverId)
+    try {
+      await blocklistApi.updateTorrentBlockerSettings(serverId, { behavior_threshold: threshold })
+      await fetchTorrentStatus()
+    } catch (err: any) {
+      console.error('Failed to save behavior threshold:', err)
+      alert(err.response?.data?.detail || 'Failed to save threshold')
+    } finally {
+      setSavingThreshold(null)
+    }
+  }
+  
   const directionButtons = [
     { id: 'in' as BlocklistDirection, icon: ArrowDownToLine, label: t('blocklist.direction_incoming') },
     { id: 'out' as BlocklistDirection, icon: ArrowUpFromLine, label: t('blocklist.direction_outgoing') }
@@ -944,14 +959,18 @@ export default function Blocklist() {
                       {srv.enabled && !srv.error && (
                         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-3">
                           <div className="bg-dark-900/50 rounded-lg p-2.5">
+                            <p className="text-xs text-dark-500">{t('blocklist.torrent_active_blocks')}</p>
+                            <p className="text-lg font-bold text-dark-100">{srv.active_blocks ?? 0}</p>
+                          </div>
+                          <div className="bg-dark-900/50 rounded-lg p-2.5">
                             <p className="text-xs text-dark-500">{t('blocklist.torrent_blocked_count')}</p>
                             <p className="text-lg font-bold text-dark-100">{srv.total_blocked}</p>
                           </div>
                           <div className="bg-dark-900/50 rounded-lg p-2.5">
-                            <p className="text-xs text-dark-500">{t('blocklist.torrent_unique_ips')}</p>
-                            <p className="text-lg font-bold text-dark-100">{srv.unique_ips_blocked}</p>
+                            <p className="text-xs text-dark-500">{t('blocklist.torrent_behavior_blocks')}</p>
+                            <p className="text-lg font-bold text-dark-100">{srv.behavior_blocks ?? 0}</p>
                           </div>
-                          <div className="bg-dark-900/50 rounded-lg p-2.5 col-span-2">
+                          <div className="bg-dark-900/50 rounded-lg p-2.5">
                             <p className="text-xs text-dark-500">{t('blocklist.torrent_last_block')}</p>
                             <p className="text-sm font-medium text-dark-200">
                               {srv.last_block_time
@@ -962,25 +981,63 @@ export default function Blocklist() {
                         </div>
                       )}
                       
-                      {srv.enabled && !srv.error && srv.recent_blocks && srv.recent_blocks.length > 0 && (
+                      {srv.enabled && !srv.error && srv.active_ips && srv.active_ips.length > 0 && (
                         <div className="mt-3">
-                          <p className="text-xs text-dark-500 mb-2">{t('blocklist.torrent_recent_blocks')}</p>
+                          <p className="text-xs text-dark-500 mb-2">{t('blocklist.torrent_active_ips')}</p>
                           <div className="flex flex-wrap gap-1.5">
-                            {srv.recent_blocks.slice(-10).reverse().map((block, idx) => (
+                            {srv.active_ips.map((ip, idx) => (
                               <span
                                 key={idx}
                                 className="px-2 py-0.5 text-xs font-mono bg-dark-900 text-dark-300 rounded border border-dark-700/50"
-                                title={new Date(block.time).toLocaleString()}
                               >
-                                {block.ip}
+                                {ip}
                               </span>
                             ))}
                           </div>
                         </div>
                       )}
                       
-                      {srv.enabled && !srv.error && (!srv.recent_blocks || srv.recent_blocks.length === 0) && (
-                        <p className="text-xs text-dark-500 mt-2">{t('blocklist.torrent_no_blocks')}</p>
+                      {srv.enabled && !srv.error && (!srv.active_ips || srv.active_ips.length === 0) && (
+                        <p className="text-xs text-dark-500 mt-2">{t('blocklist.torrent_no_active_blocks')}</p>
+                      )}
+                      
+                      {srv.enabled && !srv.error && (
+                        <div className="mt-3 pt-3 border-t border-dark-700/50">
+                          <div className="flex items-end gap-3">
+                            <div className="flex-1 max-w-xs">
+                              <label className="block text-xs text-dark-500 mb-1">
+                                {t('blocklist.torrent_behavior_threshold')}
+                              </label>
+                              <input
+                                type="number"
+                                defaultValue={srv.behavior_threshold ?? 50}
+                                min={5}
+                                max={1000}
+                                className="input w-24 text-sm"
+                                id={`threshold-${srv.server_id}`}
+                              />
+                              <p className="text-xs text-dark-600 mt-0.5">{t('blocklist.torrent_behavior_threshold_desc')}</p>
+                            </div>
+                            <motion.button
+                              onClick={() => {
+                                const input = document.getElementById(`threshold-${srv.server_id}`) as HTMLInputElement
+                                const val = parseInt(input?.value) || 50
+                                handleSaveBehaviorThreshold(srv.server_id, val)
+                              }}
+                              disabled={savingThreshold === srv.server_id}
+                              className="btn btn-secondary text-sm"
+                              whileHover={{ scale: 1.02 }}
+                              whileTap={{ scale: 0.98 }}
+                            >
+                              {savingThreshold === srv.server_id ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              ) : (
+                                <Check className="w-3.5 h-3.5" />
+                              )}
+                              {t('common.save')}
+                            </motion.button>
+                          </div>
+                        </div>
                       )}
                     </div>
                   ))}

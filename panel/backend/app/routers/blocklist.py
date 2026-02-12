@@ -789,3 +789,37 @@ async def disable_torrent_blocker(
             )
     except httpx.RequestError as e:
         raise HTTPException(status_code=503, detail=f"Node unreachable: {str(e)}")
+
+
+class TorrentBlockerSettingsRequest(BaseModel):
+    behavior_threshold: int = Field(..., ge=5, le=1000)
+
+
+@router.post("/torrent-blocker/{server_id}/settings")
+async def update_torrent_blocker_settings(
+    server_id: int,
+    request: TorrentBlockerSettingsRequest,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Update torrent blocker settings on a specific server."""
+    result = await db.execute(select(Server).where(Server.id == server_id))
+    server = result.scalar_one_or_none()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+
+    try:
+        async with httpx.AsyncClient(verify=False, timeout=15.0) as client:
+            response = await client.post(
+                f"{server.url}/api/torrent-blocker/settings",
+                headers={"X-API-Key": server.api_key},
+                json={"behavior_threshold": request.behavior_threshold}
+            )
+            if response.status_code == 200:
+                return response.json()
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Node returned {response.status_code}"
+            )
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=503, detail=f"Node unreachable: {str(e)}")

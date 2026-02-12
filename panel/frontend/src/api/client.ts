@@ -531,9 +531,11 @@ export interface TorrentBlockerStatus {
   running: boolean
   started_at: string | null
   total_blocked: number
-  unique_ips_blocked: number
+  behavior_blocks: number
+  active_blocks: number
+  active_ips: string[]
   last_block_time: string | null
-  recent_blocks: Array<{ ip: string; time: string }>
+  behavior_threshold: number
   error?: string
 }
 
@@ -584,6 +586,8 @@ export const blocklistApi = {
     api.post<{ success: boolean; message: string }>(`/blocklist/torrent-blocker/${serverId}/enable`),
   disableTorrentBlocker: (serverId: number) =>
     api.post<{ success: boolean; message: string }>(`/blocklist/torrent-blocker/${serverId}/disable`),
+  updateTorrentBlockerSettings: (serverId: number, data: { behavior_threshold: number }) =>
+    api.post<{ success: boolean; behavior_threshold: number }>(`/blocklist/torrent-blocker/${serverId}/settings`, data),
 }
 
 export interface NodeOptimizationsInfo {

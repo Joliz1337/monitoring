@@ -1,16 +1,19 @@
 """Torrent blocker service for Xray nodes.
 
-Monitors Xray access logs for torrent-routed connections (-> torrent),
-extracts source IPs, and blocks them via ipset temporary ban.
+Two detection modes:
+1. Tag-based: lines with [... -> torrent] are blocked immediately.
+2. Behavior-based: if a source IP connects to >= threshold unique raw-IP
+   destinations per minute, it is flagged as torrent and blocked.
 
-Persists enabled state across restarts in /var/lib/monitoring/torrent_blocker.json.
+Blocks via ipset temporary ban + conntrack flush to kill existing connections.
+Persists enabled state and threshold in /var/lib/monitoring/torrent_blocker.json.
 """
 
 import asyncio
 import json
 import logging
 import re
-from collections import deque
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -23,14 +26,64 @@ PERSISTENT_FILE = "/var/lib/monitoring/torrent_blocker.json"
 CONTAINER_NAME = "remnanode"
 LOG_PATH = "/var/log/supervisor/xray.out.log"
 
-# Regex: extract source IP from torrent-routed lines
-# Example: "2026/02/11 18:37:38.637506 from tcp:92.39.216.40:53396 accepted udp:65.108.224.72:6881 [dom3 -> torrent] email: 4065"
+# Regex: torrent-tagged lines — immediate block
 TORRENT_LINE_PATTERN = re.compile(
     r'from (?:tcp:)?(\d+\.\d+\.\d+\.\d+):\d+\s+accepted\s+.+?\[.+?->\s*torrent\]'
 )
 
-MAX_RECENT_BLOCKS = 50
+# Regex: any accepted connection — extract source IP, dest host, email
+# Matches both "from tcp:1.2.3.4:port" and "from 1.2.3.4:port"
+# Dest can be ip or domain: "tcp:5.34.60.150:25402" or "tcp:panel.example.com:443"
+ANY_CONNECTION_PATTERN = re.compile(
+    r'from (?:tcp:)?(\d+\.\d+\.\d+\.\d+):\d+\s+accepted\s+(?:tcp|udp):([^:\s]+):\d+'
+)
+
+# Check if destination is a raw IP (not a domain)
+RAW_IP_PATTERN = re.compile(r'^\d+\.\d+\.\d+\.\d+$')
+
+DEFAULT_BEHAVIOR_THRESHOLD = 50
 DEDUP_WINDOW_SEC = 60
+TRACKER_CLEANUP_INTERVAL = 500
+
+
+class ConnectionTracker:
+    """Tracks unique destination IPs per source IP per minute for behavior detection."""
+
+    def __init__(self):
+        # source_ip -> {minute_bucket -> set(dest_ips)}
+        self._connections: dict[str, dict[int, set[str]]] = {}
+
+    def add_and_check(self, source_ip: str, dest_ip: str, threshold: int) -> bool:
+        """Add connection, return True if source_ip exceeds threshold."""
+        current_minute = int(time.time()) // 60
+
+        if source_ip not in self._connections:
+            self._connections[source_ip] = {}
+
+        ip_data = self._connections[source_ip]
+
+        if current_minute not in ip_data:
+            ip_data[current_minute] = set()
+
+        ip_data[current_minute].add(dest_ip)
+        return len(ip_data[current_minute]) >= threshold
+
+    def cleanup(self):
+        """Remove buckets older than 2 minutes."""
+        cutoff = int(time.time()) // 60 - 2
+        stale_ips = []
+        for ip, minutes in self._connections.items():
+            stale_keys = [m for m in minutes if m < cutoff]
+            for m in stale_keys:
+                del minutes[m]
+            if not minutes:
+                stale_ips.append(ip)
+        for ip in stale_ips:
+            del self._connections[ip]
+
+    def remove_ip(self, ip: str):
+        """Remove tracked data for a blocked IP (no need to track further)."""
+        self._connections.pop(ip, None)
 
 
 class TorrentBlocker:
@@ -45,12 +98,15 @@ class TorrentBlocker:
 
         # Stats
         self._total_blocked = 0
-        self._unique_ips: set[str] = set()
-        self._recent_blocks: deque[dict] = deque(maxlen=MAX_RECENT_BLOCKS)
+        self._behavior_blocks = 0
         self._last_block_time: Optional[datetime] = None
 
         # Dedup: ip -> last_block_timestamp to avoid hammering ipset
         self._block_cache: dict[str, float] = {}
+
+        # Behavior detection
+        self._tracker = ConnectionTracker()
+        self._behavior_threshold = DEFAULT_BEHAVIOR_THRESHOLD
 
         self._load_config()
 
@@ -60,6 +116,9 @@ class TorrentBlocker:
             if path.exists():
                 data = json.loads(path.read_text())
                 self._enabled = data.get("enabled", False)
+                self._behavior_threshold = data.get(
+                    "behavior_threshold", DEFAULT_BEHAVIOR_THRESHOLD
+                )
         except Exception as e:
             logger.warning(f"Failed to load torrent blocker config: {e}")
 
@@ -67,13 +126,24 @@ class TorrentBlocker:
         try:
             path = Path(PERSISTENT_FILE)
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps({"enabled": self._enabled}, indent=2))
+            path.write_text(json.dumps({
+                "enabled": self._enabled,
+                "behavior_threshold": self._behavior_threshold,
+            }, indent=2))
         except Exception as e:
             logger.error(f"Failed to save torrent blocker config: {e}")
 
     @property
     def is_enabled(self) -> bool:
         return self._enabled
+
+    @property
+    def behavior_threshold(self) -> int:
+        return self._behavior_threshold
+
+    def set_behavior_threshold(self, value: int):
+        self._behavior_threshold = max(5, min(value, 1000))
+        self._save_config()
 
     async def _check_container(self) -> bool:
         try:
@@ -99,27 +169,41 @@ class TorrentBlocker:
     def _cleanup_cache(self):
         """Remove stale entries from dedup cache."""
         now = asyncio.get_event_loop().time()
-        stale = [ip for ip, ts in self._block_cache.items() if (now - ts) > DEDUP_WINDOW_SEC * 2]
+        stale = [
+            ip for ip, ts in self._block_cache.items()
+            if (now - ts) > DEDUP_WINDOW_SEC * 2
+        ]
         for ip in stale:
             del self._block_cache[ip]
 
-    def _block_ip(self, ip: str):
+    async def _kill_connections(self, ip: str):
+        """Delete conntrack entries to kill existing connections from blocked IP."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "nsenter", "-t", "1", "-m", "-u", "-n", "-i", "--",
+                "conntrack", "-D", "-s", ip,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await asyncio.wait_for(proc.communicate(), timeout=5.0)
+        except Exception:
+            pass
+
+    async def _block_ip(self, ip: str, reason: str = "torrent_tag"):
         manager = get_ipset_manager()
         success, msg = manager.add_ip(ip, permanent=False, direction="in")
         if success:
             self._total_blocked += 1
-            self._unique_ips.add(ip)
+            if reason == "behavior":
+                self._behavior_blocks += 1
             self._last_block_time = datetime.now(timezone.utc)
-            self._recent_blocks.append({
-                "ip": ip,
-                "time": self._last_block_time.isoformat()
-            })
-            logger.info(f"Torrent blocker: blocked {ip}")
+            await self._kill_connections(ip)
+            logger.info(f"Torrent blocker: blocked {ip} (reason: {reason})")
         else:
             logger.warning(f"Torrent blocker: failed to block {ip}: {msg}")
 
     async def _read_loop(self):
-        cleanup_counter = 0
+        line_counter = 0
 
         while self._running:
             try:
@@ -149,22 +233,38 @@ class TorrentBlocker:
                         if not line:
                             continue
 
-                        match = TORRENT_LINE_PATTERN.search(line)
-                        if not match:
-                            continue
+                        # 1) Tag-based detection: -> torrent
+                        torrent_match = TORRENT_LINE_PATTERN.search(line)
+                        if torrent_match:
+                            source_ip = torrent_match.group(1)
+                            if self._should_block(source_ip):
+                                await self._block_ip(source_ip, reason="torrent_tag")
+                                self._tracker.remove_ip(source_ip)
 
-                        source_ip = match.group(1)
-                        if self._should_block(source_ip):
-                            self._block_ip(source_ip)
+                        # 2) Behavior-based detection: many unique dest IPs per minute
+                        conn_match = ANY_CONNECTION_PATTERN.search(line)
+                        if conn_match and not torrent_match:
+                            source_ip = conn_match.group(1)
+                            dest_host = conn_match.group(2)
 
-                        cleanup_counter += 1
-                        if cleanup_counter >= 1000:
+                            if RAW_IP_PATTERN.match(dest_host):
+                                exceeded = self._tracker.add_and_check(
+                                    source_ip, dest_host, self._behavior_threshold
+                                )
+                                if exceeded and self._should_block(source_ip):
+                                    await self._block_ip(source_ip, reason="behavior")
+                                    self._tracker.remove_ip(source_ip)
+
+                        line_counter += 1
+                        if line_counter >= TRACKER_CLEANUP_INTERVAL:
                             self._cleanup_cache()
-                            cleanup_counter = 0
+                            self._tracker.cleanup()
+                            line_counter = 0
 
                     except asyncio.TimeoutError:
                         if self._process.returncode is not None:
                             break
+                        self._tracker.cleanup()
                         continue
 
                 if self._process:
@@ -225,15 +325,20 @@ class TorrentBlocker:
             await self.start()
 
     def get_status(self) -> dict:
+        # Query actual active IPs from ipset temp list
+        manager = get_ipset_manager()
+        active_ips = manager.list_ips(permanent=False, direction="in")
+
         return {
             "enabled": self._enabled,
             "running": self._running,
             "started_at": self._started_at.isoformat() if self._started_at else None,
             "total_blocked": self._total_blocked,
-            "unique_ips_blocked": len(self._unique_ips),
+            "behavior_blocks": self._behavior_blocks,
+            "active_blocks": len(active_ips),
+            "active_ips": active_ips,
             "last_block_time": self._last_block_time.isoformat() if self._last_block_time else None,
-            "recent_blocks": list(self._recent_blocks),
-            "cache_size": len(self._block_cache),
+            "behavior_threshold": self._behavior_threshold,
         }
 
 

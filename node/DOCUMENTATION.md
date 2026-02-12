@@ -326,6 +326,31 @@ data: {"message": "error description"}
 - Постоянные правила сохраняются в `/var/lib/monitoring/blocklist.json`
 - При старте ноды: постоянные правила восстанавливаются, временный список пустой
 
+### Torrent Blocker
+
+Мониторит логи Xray (`remnanode`) и блокирует торрент-пользователей через ipset temp ban.
+
+**Два режима детекции:**
+1. **По тегу** — строки с `[... -> torrent]` блокируются мгновенно
+2. **По поведению** — если source IP подключается к >= N уникальных destination IP за минуту (только к голым IP, не доменам) — блокируется автоматически. Порог настраиваемый (default: 50)
+
+**При блокировке:** IP добавляется в `blocklist_temp` + `conntrack -D -s <ip>` для мгновенного разрыва существующих соединений.
+
+| Метод | Endpoint | Описание |
+|-------|----------|----------|
+| GET | /api/torrent-blocker/status | Статус, активные блокировки из ipset, настройки |
+| POST | /api/torrent-blocker/enable | Включить мониторинг |
+| POST | /api/torrent-blocker/disable | Выключить мониторинг |
+| POST | /api/torrent-blocker/settings | Обновить порог детекции (behavior_threshold: 5-1000) |
+
+**Конфиг:** `/var/lib/monitoring/torrent_blocker.json` (enabled, behavior_threshold)
+
+**Статус включает:**
+- `active_blocks` / `active_ips` — текущие IP в temp-списке ipset
+- `total_blocked` — кумулятивный счётчик
+- `behavior_blocks` — заблокировано по анализу поведения
+- `behavior_threshold` — текущий порог
+
 ## Системные оптимизации
 
 Оптимизации **не применяются автоматически** при обновлении ноды. Применяются только:
