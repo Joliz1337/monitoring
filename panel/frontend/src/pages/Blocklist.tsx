@@ -1,27 +1,31 @@
 import { useEffect, useState, useCallback } from 'react'
-import { Shield, Plus, Trash2, RefreshCw, Server, Globe, List, Loader2, ExternalLink, AlertCircle, Check, X, ArrowDownToLine, ArrowUpFromLine, ShieldBan, Power, PowerOff, Info } from 'lucide-react'
+import { Shield, Plus, Trash2, RefreshCw, Server, Globe, List, Loader2, ExternalLink, AlertCircle, Check, X, ArrowDownToLine, ArrowUpFromLine, ShieldBan, Power, PowerOff, Info, CheckCircle2, XCircle } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence } from 'framer-motion'
-import { blocklistApi, serversApi, Server as ServerType, BlocklistRule, BlocklistSource, BlocklistDirection, TorrentBlockerStatus } from '../api/client'
+import { blocklistApi, serversApi, Server as ServerType, BlocklistRule, BlocklistSource, BlocklistDirection, TorrentBlockerStatus, SyncServerResult } from '../api/client'
 
 type TabType = 'global' | 'servers' | 'sources' | 'torrent'
 
+interface SyncToast {
+  id: number
+  status: 'syncing' | 'done'
+  results: Record<string, SyncServerResult>
+}
+
+let toastIdCounter = 0
+
 export default function Blocklist() {
   const { t } = useTranslation()
-  
-  // Direction state
+
   const [direction, setDirection] = useState<BlocklistDirection>('in')
-  
-  // State
   const [activeTab, setActiveTab] = useState<TabType>('global')
   const [loading, setLoading] = useState(true)
-  const [syncing, setSyncing] = useState(false)
-  
+
   // Global rules
   const [globalRules, setGlobalRules] = useState<BlocklistRule[]>([])
   const [newGlobalIps, setNewGlobalIps] = useState('')
   const [addingGlobal, setAddingGlobal] = useState(false)
-  
+
   // Server rules
   const [servers, setServers] = useState<ServerType[]>([])
   const [selectedServerId, setSelectedServerId] = useState<number | null>(null)
@@ -29,23 +33,29 @@ export default function Blocklist() {
   const [newServerIp, setNewServerIp] = useState('')
   const [addingServer, setAddingServer] = useState(false)
   const [serverGlobalCount, setServerGlobalCount] = useState(0)
-  
+
   // Sources
   const [sources, setSources] = useState<BlocklistSource[]>([])
   const [newSourceName, setNewSourceName] = useState('')
   const [newSourceUrl, setNewSourceUrl] = useState('')
   const [addingSource, setAddingSource] = useState(false)
   const [refreshingSource, setRefreshingSource] = useState<number | null>(null)
-  
+
   // Settings
   const [tempTimeout, setTempTimeout] = useState(600)
   const [savingSettings, setSavingSettings] = useState(false)
-  
+
   // Torrent blocker
   const [torrentStatuses, setTorrentStatuses] = useState<TorrentBlockerStatus[]>([])
   const [torrentLoading, setTorrentLoading] = useState(false)
   const [togglingServer, setTogglingServer] = useState<number | null>(null)
-  
+  const [globalThreshold, setGlobalThreshold] = useState(50)
+  const [savingGlobalThreshold, setSavingGlobalThreshold] = useState(false)
+  const [thresholdResults, setThresholdResults] = useState<Array<{ server_id: number; server_name: string; success: boolean; error?: string }> | null>(null)
+
+  // Sync toasts
+  const [syncToasts, setSyncToasts] = useState<SyncToast[]>([])
+
   // Fetch data
   const fetchGlobalRules = useCallback(async () => {
     try {
@@ -55,7 +65,7 @@ export default function Blocklist() {
       console.error('Failed to fetch global rules:', err)
     }
   }, [direction])
-  
+
   const fetchServers = useCallback(async () => {
     try {
       const response = await serversApi.list()
@@ -67,7 +77,7 @@ export default function Blocklist() {
       console.error('Failed to fetch servers:', err)
     }
   }, [selectedServerId])
-  
+
   const fetchServerRules = useCallback(async () => {
     if (!selectedServerId) return
     try {
@@ -78,7 +88,7 @@ export default function Blocklist() {
       console.error('Failed to fetch server rules:', err)
     }
   }, [selectedServerId, direction])
-  
+
   const fetchSources = useCallback(async () => {
     try {
       const response = await blocklistApi.getSources(direction)
@@ -87,16 +97,17 @@ export default function Blocklist() {
       console.error('Failed to fetch sources:', err)
     }
   }, [direction])
-  
+
   const fetchSettings = useCallback(async () => {
     try {
       const response = await blocklistApi.getSettings()
       setTempTimeout(response.data.settings.temp_timeout || 600)
+      setGlobalThreshold(response.data.settings.torrent_behavior_threshold || 50)
     } catch (err) {
       console.error('Failed to fetch settings:', err)
     }
   }, [])
-  
+
   const fetchTorrentStatus = useCallback(async () => {
     setTorrentLoading(true)
     try {
@@ -108,9 +119,48 @@ export default function Blocklist() {
       setTorrentLoading(false)
     }
   }, [])
-  
+
+  // Sync toast helpers
+  const startSyncToast = useCallback(() => {
+    const id = ++toastIdCounter
+    const toast: SyncToast = { id, status: 'syncing', results: {} }
+    setSyncToasts(prev => [toast, ...prev].slice(0, 3))
+
+    // Poll for sync status
+    let attempts = 0
+    const poll = setInterval(async () => {
+      attempts++
+      try {
+        const resp = await blocklistApi.getSyncStatus()
+        const data = resp.data
+        if (!data.in_progress && data.servers && Object.keys(data.servers).length > 0) {
+          clearInterval(poll)
+          setSyncToasts(prev =>
+            prev.map(t => t.id === id ? { ...t, status: 'done', results: data.servers } : t)
+          )
+          // Auto-dismiss after 8s
+          setTimeout(() => {
+            setSyncToasts(prev => prev.filter(t => t.id !== id))
+          }, 8000)
+        }
+      } catch {
+        // ignore polling errors
+      }
+      if (attempts > 30) {
+        clearInterval(poll)
+        setSyncToasts(prev => prev.filter(t => t.id !== id))
+      }
+    }, 1500)
+
+    return () => clearInterval(poll)
+  }, [])
+
+  const dismissToast = useCallback((id: number) => {
+    setSyncToasts(prev => prev.filter(t => t.id !== id))
+  }, [])
+
   const [initialLoaded, setInitialLoaded] = useState(false)
-  
+
   useEffect(() => {
     const loadData = async () => {
       setLoading(true)
@@ -127,14 +177,13 @@ export default function Blocklist() {
       loadData()
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
-  
+
   useEffect(() => {
     if (selectedServerId) {
       fetchServerRules()
     }
   }, [selectedServerId, fetchServerRules])
-  
-  // Re-fetch data when direction changes (without full loading state)
+
   useEffect(() => {
     if (!initialLoaded) return
     fetchGlobalRules()
@@ -143,25 +192,25 @@ export default function Blocklist() {
       fetchServerRules()
     }
   }, [direction]) // eslint-disable-line react-hooks/exhaustive-deps
-  
-  // Load torrent blocker data when tab is selected
+
   const [torrentLoaded, setTorrentLoaded] = useState(false)
   useEffect(() => {
     if (activeTab === 'torrent' && !torrentLoaded) {
       fetchTorrentStatus().then(() => setTorrentLoaded(true))
     }
   }, [activeTab]) // eslint-disable-line react-hooks/exhaustive-deps
-  
+
+
   // Handlers
   const handleAddGlobalRules = async () => {
     if (!newGlobalIps.trim()) return
-    
     setAddingGlobal(true)
     try {
       const ips = newGlobalIps.split('\n').map(ip => ip.trim()).filter(ip => ip)
       await blocklistApi.addGlobalBulk(ips, true, direction)
       setNewGlobalIps('')
       await fetchGlobalRules()
+      startSyncToast()
     } catch (err: any) {
       console.error('Failed to add rules:', err)
       alert(err.response?.data?.detail || 'Failed to add rules')
@@ -169,24 +218,25 @@ export default function Blocklist() {
       setAddingGlobal(false)
     }
   }
-  
+
   const handleDeleteGlobalRule = async (ruleId: number) => {
     try {
       await blocklistApi.deleteGlobal(ruleId)
       await fetchGlobalRules()
+      startSyncToast()
     } catch (err) {
       console.error('Failed to delete rule:', err)
     }
   }
-  
+
   const handleAddServerRule = async () => {
     if (!newServerIp.trim() || !selectedServerId) return
-    
     setAddingServer(true)
     try {
       await blocklistApi.addServer(selectedServerId, { ip_cidr: newServerIp.trim(), direction })
       setNewServerIp('')
       await fetchServerRules()
+      startSyncToast()
     } catch (err: any) {
       console.error('Failed to add rule:', err)
       alert(err.response?.data?.detail || 'Failed to add rule')
@@ -194,26 +244,27 @@ export default function Blocklist() {
       setAddingServer(false)
     }
   }
-  
+
   const handleDeleteServerRule = async (ruleId: number) => {
     if (!selectedServerId) return
     try {
       await blocklistApi.deleteServer(selectedServerId, ruleId)
       await fetchServerRules()
+      startSyncToast()
     } catch (err) {
       console.error('Failed to delete rule:', err)
     }
   }
-  
+
   const handleAddSource = async () => {
     if (!newSourceName.trim() || !newSourceUrl.trim()) return
-    
     setAddingSource(true)
     try {
       await blocklistApi.addSource({ name: newSourceName.trim(), url: newSourceUrl.trim(), direction })
       setNewSourceName('')
       setNewSourceUrl('')
       await fetchSources()
+      startSyncToast()
     } catch (err: any) {
       console.error('Failed to add source:', err)
       alert(err.response?.data?.detail || 'Failed to add source')
@@ -221,21 +272,25 @@ export default function Blocklist() {
       setAddingSource(false)
     }
   }
-  
+
   const handleToggleSource = async (sourceId: number, enabled: boolean) => {
     try {
       await blocklistApi.updateSource(sourceId, { enabled })
       await fetchSources()
+      startSyncToast()
     } catch (err) {
       console.error('Failed to update source:', err)
     }
   }
-  
+
   const handleRefreshSource = async (sourceId: number) => {
     setRefreshingSource(sourceId)
     try {
-      await blocklistApi.refreshSource(sourceId)
+      const resp = await blocklistApi.refreshSource(sourceId)
       await fetchSources()
+      if (resp.data.changed) {
+        startSyncToast()
+      }
     } catch (err: any) {
       console.error('Failed to refresh source:', err)
       alert(err.response?.data?.detail || 'Failed to refresh')
@@ -243,41 +298,34 @@ export default function Blocklist() {
       setRefreshingSource(null)
     }
   }
-  
+
   const handleRefreshAllSources = async () => {
     setRefreshingSource(-1)
     try {
-      await blocklistApi.refreshAll()
+      const resp = await blocklistApi.refreshAll()
       await fetchSources()
+      if (resp.data.any_changed) {
+        startSyncToast()
+      }
     } catch (err) {
       console.error('Failed to refresh sources:', err)
     } finally {
       setRefreshingSource(null)
     }
   }
-  
+
   const handleDeleteSource = async (sourceId: number) => {
     if (!confirm(t('blocklist.confirm_delete_source'))) return
     try {
       await blocklistApi.deleteSource(sourceId)
       await fetchSources()
+      startSyncToast()
     } catch (err: any) {
       console.error('Failed to delete source:', err)
       alert(err.response?.data?.detail || 'Cannot delete default source')
     }
   }
-  
-  const handleSyncAll = async () => {
-    setSyncing(true)
-    try {
-      await blocklistApi.sync()
-    } catch (err) {
-      console.error('Failed to sync:', err)
-    } finally {
-      setSyncing(false)
-    }
-  }
-  
+
   const handleSaveSettings = async () => {
     setSavingSettings(true)
     try {
@@ -288,7 +336,7 @@ export default function Blocklist() {
       setSavingSettings(false)
     }
   }
-  
+
   const handleToggleTorrentBlocker = async (serverId: number, enable: boolean) => {
     setTogglingServer(serverId)
     try {
@@ -305,47 +353,48 @@ export default function Blocklist() {
       setTogglingServer(null)
     }
   }
-  
-  const [savingThreshold, setSavingThreshold] = useState<number | null>(null)
-  
-  const handleSaveBehaviorThreshold = async (serverId: number, threshold: number) => {
-    setSavingThreshold(serverId)
+
+  const handleSaveGlobalThreshold = async () => {
+    setSavingGlobalThreshold(true)
+    setThresholdResults(null)
     try {
-      await blocklistApi.updateTorrentBlockerSettings(serverId, { behavior_threshold: threshold })
+      const resp = await blocklistApi.updateGlobalTorrentSettings({ behavior_threshold: globalThreshold })
+      setThresholdResults(resp.data.servers)
       await fetchTorrentStatus()
+      setTimeout(() => setThresholdResults(null), 6000)
     } catch (err: any) {
-      console.error('Failed to save behavior threshold:', err)
-      alert(err.response?.data?.detail || 'Failed to save threshold')
+      console.error('Failed to save global threshold:', err)
+      alert(err.response?.data?.detail || 'Failed to save')
     } finally {
-      setSavingThreshold(null)
+      setSavingGlobalThreshold(false)
     }
   }
-  
+
   const directionButtons = [
     { id: 'in' as BlocklistDirection, icon: ArrowDownToLine, label: t('blocklist.direction_incoming') },
     { id: 'out' as BlocklistDirection, icon: ArrowUpFromLine, label: t('blocklist.direction_outgoing') }
   ]
-  
+
   const tabs = [
     { id: 'global' as TabType, icon: Globe, label: t('blocklist.global_rules') },
     { id: 'servers' as TabType, icon: Server, label: t('blocklist.server_rules') },
     { id: 'sources' as TabType, icon: List, label: t('blocklist.auto_lists') },
     { id: 'torrent' as TabType, icon: ShieldBan, label: t('blocklist.torrent_blocker') }
   ]
-  
+
   const containerVariants = {
     hidden: { opacity: 0 },
-    visible: { 
+    visible: {
       opacity: 1,
       transition: { staggerChildren: 0.1 }
     }
   }
-  
+
   const itemVariants = {
     hidden: { opacity: 0, y: 20 },
     visible: { opacity: 1, y: 0 }
   }
-  
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -353,7 +402,7 @@ export default function Blocklist() {
       </div>
     )
   }
-  
+
   return (
     <motion.div
       initial="hidden"
@@ -370,54 +419,89 @@ export default function Blocklist() {
             <p className="text-dark-400 text-sm">{t('blocklist.subtitle')}</p>
           </div>
         </div>
-        
-        <div className="flex items-center gap-3">
-          <motion.button
-            onClick={handleSyncAll}
-            disabled={syncing}
-            className="btn btn-primary"
-            whileHover={{ scale: 1.02 }}
-            whileTap={{ scale: 0.98 }}
-          >
-            {syncing ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : (
-              <RefreshCw className="w-4 h-4" />
-            )}
-            {t('blocklist.sync_all')}
-          </motion.button>
-        </div>
       </motion.div>
-      
-      {/* Sync Warning */}
-      <motion.div
-        variants={itemVariants}
-        className="flex items-start gap-3 p-4 bg-amber-500/10 border border-amber-500/30 rounded-lg"
-      >
-        <AlertCircle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
-        <p className="text-sm text-amber-200">{t('blocklist.sync_warning')}</p>
-      </motion.div>
-      
-      {/* Direction Toggle */}
-      <motion.div variants={itemVariants} className="flex gap-2">
-        {directionButtons.map((btn) => (
-          <button
-            key={btn.id}
-            onClick={() => setDirection(btn.id)}
-            className={`flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-medium transition-all ${
-              direction === btn.id
-                ? btn.id === 'in'
-                  ? 'bg-blue-500 text-white'
-                  : 'bg-orange-500 text-white'
-                : 'text-dark-400 hover:text-dark-200 hover:bg-dark-800 border border-dark-700'
+
+      {/* Sync Toasts */}
+      <AnimatePresence>
+        {syncToasts.map((toast) => (
+          <motion.div
+            key={toast.id}
+            initial={{ opacity: 0, y: -10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -10 }}
+            className={`p-4 rounded-lg border ${
+              toast.status === 'syncing'
+                ? 'bg-blue-500/10 border-blue-500/30'
+                : 'bg-dark-800/80 border-dark-700'
             }`}
           >
-            <btn.icon className="w-4 h-4" />
-            {btn.label}
-          </button>
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2">
+                {toast.status === 'syncing' ? (
+                  <Loader2 className="w-4 h-4 text-blue-400 animate-spin" />
+                ) : (
+                  <CheckCircle2 className="w-4 h-4 text-success" />
+                )}
+                <span className="text-sm font-medium text-dark-100">
+                  {toast.status === 'syncing' ? t('blocklist.sync_applying') : t('blocklist.sync_applied')}
+                </span>
+              </div>
+              {toast.status === 'done' && (
+                <button onClick={() => dismissToast(toast.id)} className="text-dark-500 hover:text-dark-300">
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+            {toast.status === 'done' && Object.keys(toast.results).length > 0 && (
+              <div className="space-y-1 mt-1">
+                {Object.values(toast.results).map((sr) => (
+                  <div key={sr.server_id} className="flex items-center gap-2 text-xs">
+                    {sr.success ? (
+                      <CheckCircle2 className="w-3.5 h-3.5 text-success shrink-0" />
+                    ) : (
+                      <XCircle className="w-3.5 h-3.5 text-danger shrink-0" />
+                    )}
+                    <span className="text-dark-300 font-medium">{sr.server_name}</span>
+                    {sr.success ? (
+                      <span className="text-dark-500">
+                        in: +{sr.in?.added ?? 0} -{sr.in?.removed ?? 0} |
+                        out: +{sr.out?.added ?? 0} -{sr.out?.removed ?? 0}
+                      </span>
+                    ) : (
+                      <span className="text-danger">
+                        {sr.in?.message || 'Error'}
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </motion.div>
         ))}
-      </motion.div>
-      
+      </AnimatePresence>
+
+      {/* Direction Toggle */}
+      {activeTab !== 'torrent' && (
+        <motion.div variants={itemVariants} className="flex gap-2">
+          {directionButtons.map((btn) => (
+            <button
+              key={btn.id}
+              onClick={() => setDirection(btn.id)}
+              className={`flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-medium transition-all ${
+                direction === btn.id
+                  ? btn.id === 'in'
+                    ? 'bg-blue-500 text-white'
+                    : 'bg-orange-500 text-white'
+                  : 'text-dark-400 hover:text-dark-200 hover:bg-dark-800 border border-dark-700'
+              }`}
+            >
+              <btn.icon className="w-4 h-4" />
+              {btn.label}
+            </button>
+          ))}
+        </motion.div>
+      )}
+
       {/* Tabs */}
       <motion.div variants={itemVariants} className="flex gap-2 border-b border-dark-700 pb-2">
         {tabs.map((tab) => (
@@ -435,7 +519,7 @@ export default function Blocklist() {
           </button>
         ))}
       </motion.div>
-      
+
       {/* Tab Content */}
       <AnimatePresence mode="wait">
         {/* Global Rules Tab */}
@@ -455,7 +539,7 @@ export default function Blocklist() {
               <p className="text-sm text-dark-400 mb-4">
                 {direction === 'in' ? t('blocklist.add_global_desc_in') : t('blocklist.add_global_desc_out')}
               </p>
-              
+
               <div className="space-y-3">
                 <textarea
                   value={newGlobalIps}
@@ -464,7 +548,7 @@ export default function Blocklist() {
                   rows={4}
                   className="input w-full resize-none font-mono text-sm"
                 />
-                
+
                 <motion.button
                   onClick={handleAddGlobalRules}
                   disabled={addingGlobal || !newGlobalIps.trim()}
@@ -481,7 +565,7 @@ export default function Blocklist() {
                 </motion.button>
               </div>
             </div>
-            
+
             {/* Rules List */}
             <div className="card">
               <div className="flex items-center justify-between mb-4">
@@ -492,7 +576,7 @@ export default function Blocklist() {
                   {globalRules.length} {t('blocklist.rules')}
                 </span>
               </div>
-              
+
               {globalRules.length === 0 ? (
                 <p className="text-dark-400 text-center py-8">{t('blocklist.no_rules')}</p>
               ) : (
@@ -521,7 +605,7 @@ export default function Blocklist() {
             </div>
           </motion.div>
         )}
-        
+
         {/* Server Rules Tab */}
         {activeTab === 'servers' && (
           <motion.div
@@ -547,24 +631,24 @@ export default function Blocklist() {
                   </option>
                 ))}
               </select>
-              
+
               {selectedServerId && (
                 <p className="text-xs text-dark-500 mt-2">
-                  {t('blocklist.server_rules_info', { 
-                    local: serverRules.length, 
-                    global: serverGlobalCount 
+                  {t('blocklist.server_rules_info', {
+                    local: serverRules.length,
+                    global: serverGlobalCount
                   })}
                 </p>
               )}
             </div>
-            
+
             {/* Add Form */}
             {selectedServerId && (
               <div className="card">
                 <h3 className="text-lg font-semibold text-dark-100 mb-4">
                   {t('blocklist.add_server_rule')}
                 </h3>
-                
+
                 <div className="flex gap-3">
                   <input
                     type="text"
@@ -572,6 +656,7 @@ export default function Blocklist() {
                     onChange={(e) => setNewServerIp(e.target.value)}
                     placeholder="192.168.1.0/24"
                     className="input flex-1 font-mono"
+                    onKeyDown={(e) => e.key === 'Enter' && handleAddServerRule()}
                   />
                   <motion.button
                     onClick={handleAddServerRule}
@@ -590,14 +675,14 @@ export default function Blocklist() {
                 </div>
               </div>
             )}
-            
+
             {/* Rules List */}
             {selectedServerId && (
               <div className="card">
                 <h3 className="text-lg font-semibold text-dark-100 mb-4">
                   {t('blocklist.server_rules_only')}
                 </h3>
-                
+
                 {serverRules.length === 0 ? (
                   <p className="text-dark-400 text-center py-8">{t('blocklist.no_server_rules')}</p>
                 ) : (
@@ -622,7 +707,7 @@ export default function Blocklist() {
             )}
           </motion.div>
         )}
-        
+
         {/* Sources Tab */}
         {activeTab === 'sources' && (
           <motion.div
@@ -649,7 +734,7 @@ export default function Blocklist() {
                 {t('blocklist.refresh_all')}
               </motion.button>
             </div>
-            
+
             {/* Sources List */}
             <div className="grid gap-4">
               {sources.map((source) => (
@@ -673,7 +758,7 @@ export default function Blocklist() {
                           </span>
                         )}
                       </div>
-                      
+
                       <a
                         href={source.url}
                         target="_blank"
@@ -683,7 +768,7 @@ export default function Blocklist() {
                         <ExternalLink className="w-3 h-3" />
                         <span className="truncate max-w-md">{source.url}</span>
                       </a>
-                      
+
                       <div className="flex items-center gap-4 text-sm text-dark-400">
                         <span>{source.ip_count} IPs</span>
                         {source.last_updated && (
@@ -692,14 +777,13 @@ export default function Blocklist() {
                           </span>
                         )}
                       </div>
-                      
+
                       {source.error_message && (
                         <p className="text-xs text-danger mt-2">{source.error_message}</p>
                       )}
                     </div>
-                    
+
                     <div className="flex items-center gap-2">
-                      {/* Toggle */}
                       <button
                         onClick={() => handleToggleSource(source.id, !source.enabled)}
                         className={`p-2 rounded-lg transition-colors ${
@@ -710,8 +794,7 @@ export default function Blocklist() {
                       >
                         {source.enabled ? <Check className="w-4 h-4" /> : <X className="w-4 h-4" />}
                       </button>
-                      
-                      {/* Refresh */}
+
                       <button
                         onClick={() => handleRefreshSource(source.id)}
                         disabled={refreshingSource !== null}
@@ -723,8 +806,7 @@ export default function Blocklist() {
                           <RefreshCw className="w-4 h-4" />
                         )}
                       </button>
-                      
-                      {/* Delete */}
+
                       {!source.is_default && (
                         <button
                           onClick={() => handleDeleteSource(source.id)}
@@ -738,13 +820,13 @@ export default function Blocklist() {
                 </div>
               ))}
             </div>
-            
+
             {/* Add Source Form */}
             <div className="card">
               <h3 className="text-lg font-semibold text-dark-100 mb-4">
                 {t('blocklist.add_source')}
               </h3>
-              
+
               <div className="space-y-3">
                 <div>
                   <label className="block text-sm text-dark-400 mb-1">{t('common.name')}</label>
@@ -756,7 +838,7 @@ export default function Blocklist() {
                     className="input w-full"
                   />
                 </div>
-                
+
                 <div>
                   <label className="block text-sm text-dark-400 mb-1">URL</label>
                   <input
@@ -767,7 +849,7 @@ export default function Blocklist() {
                     className="input w-full font-mono text-sm"
                   />
                 </div>
-                
+
                 <motion.button
                   onClick={handleAddSource}
                   disabled={addingSource || !newSourceName.trim() || !newSourceUrl.trim()}
@@ -786,7 +868,7 @@ export default function Blocklist() {
             </div>
           </motion.div>
         )}
-        
+
         {/* Torrent Blocker Tab */}
         {activeTab === 'torrent' && (
           <motion.div
@@ -806,7 +888,7 @@ export default function Blocklist() {
                 </div>
               </div>
             </div>
-            
+
             {/* Xray Config Instructions */}
             <div className="card border border-amber-500/30 bg-amber-500/5">
               <div className="flex items-start gap-3 mb-4">
@@ -816,7 +898,7 @@ export default function Blocklist() {
                   <p className="text-sm text-dark-400 mt-1">{t('blocklist.torrent_config_desc')}</p>
                 </div>
               </div>
-              
+
               <div className="space-y-3">
                 <div>
                   <p className="text-xs text-dark-400 mb-1.5">{t('blocklist.torrent_config_routing')}</p>
@@ -831,7 +913,7 @@ export default function Blocklist() {
   "outboundTag": "torrent"
 }`}</pre>
                 </div>
-                
+
                 <div>
                   <p className="text-xs text-dark-400 mb-1.5">{t('blocklist.torrent_config_outbound')}</p>
                   <pre className="bg-dark-900 rounded-lg p-3 text-xs font-mono text-dark-200 overflow-x-auto">{`{
@@ -841,13 +923,14 @@ export default function Blocklist() {
                 </div>
               </div>
             </div>
-            
-            {/* Temp Timeout Settings */}
+
+            {/* Global Settings */}
             <div className="card">
               <h3 className="text-lg font-semibold text-dark-100 mb-4">{t('blocklist.settings')}</h3>
-              
-              <div className="flex items-end gap-4">
-                <div className="flex-1 max-w-xs">
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                {/* Temp Timeout */}
+                <div>
                   <label className="block text-sm text-dark-400 mb-2">
                     {t('blocklist.temp_timeout')}
                   </label>
@@ -861,27 +944,74 @@ export default function Blocklist() {
                       className="input w-32"
                     />
                     <span className="text-dark-400 text-sm">{t('common.seconds')}</span>
+                    <motion.button
+                      onClick={handleSaveSettings}
+                      disabled={savingSettings}
+                      className="btn btn-secondary text-sm ml-2"
+                      whileHover={{ scale: 1.02 }}
+                      whileTap={{ scale: 0.98 }}
+                    >
+                      {savingSettings ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                      {t('common.save')}
+                    </motion.button>
                   </div>
                   <p className="text-xs text-dark-500 mt-1">{t('blocklist.temp_timeout_desc')}</p>
                 </div>
-                
-                <motion.button
-                  onClick={handleSaveSettings}
-                  disabled={savingSettings}
-                  className="btn btn-primary"
-                  whileHover={{ scale: 1.02 }}
-                  whileTap={{ scale: 0.98 }}
-                >
-                  {savingSettings ? (
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                  ) : (
-                    <Check className="w-4 h-4" />
-                  )}
-                  {t('common.save')}
-                </motion.button>
+
+                {/* Global Threshold */}
+                <div>
+                  <label className="block text-sm text-dark-400 mb-2">
+                    {t('blocklist.torrent_behavior_threshold')}
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      value={globalThreshold}
+                      onChange={(e) => setGlobalThreshold(parseInt(e.target.value) || 50)}
+                      min={5}
+                      max={1000}
+                      className="input w-32"
+                    />
+                    <motion.button
+                      onClick={handleSaveGlobalThreshold}
+                      disabled={savingGlobalThreshold}
+                      className="btn btn-primary text-sm ml-2"
+                      whileHover={{ scale: 1.02 }}
+                      whileTap={{ scale: 0.98 }}
+                    >
+                      {savingGlobalThreshold ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                      {t('blocklist.apply_all_servers')}
+                    </motion.button>
+                  </div>
+                  <p className="text-xs text-dark-500 mt-1">{t('blocklist.torrent_behavior_threshold_desc')}</p>
+                </div>
               </div>
+
+              {/* Threshold push results */}
+              <AnimatePresence>
+                {thresholdResults && (
+                  <motion.div
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: 'auto' }}
+                    exit={{ opacity: 0, height: 0 }}
+                    className="mt-4 space-y-1"
+                  >
+                    {thresholdResults.map(r => (
+                      <div key={r.server_id} className="flex items-center gap-2 text-xs">
+                        {r.success ? (
+                          <CheckCircle2 className="w-3.5 h-3.5 text-success shrink-0" />
+                        ) : (
+                          <XCircle className="w-3.5 h-3.5 text-danger shrink-0" />
+                        )}
+                        <span className="text-dark-300">{r.server_name}</span>
+                        {!r.success && <span className="text-danger">{r.error}</span>}
+                      </div>
+                    ))}
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </div>
-            
+
             {/* Servers List */}
             <div className="card">
               <div className="flex items-center justify-between mb-4">
@@ -901,7 +1031,7 @@ export default function Blocklist() {
                   {t('common.refresh')}
                 </motion.button>
               </div>
-              
+
               {torrentLoading && torrentStatuses.length === 0 ? (
                 <div className="flex items-center justify-center py-8">
                   <Loader2 className="w-6 h-6 text-accent-500 animate-spin" />
@@ -932,8 +1062,13 @@ export default function Blocklist() {
                           ) : (
                             <span className="text-xs text-dark-500">{t('blocklist.torrent_not_running')}</span>
                           )}
+                          {srv.enabled && !srv.error && (
+                            <span className="text-xs text-dark-600">
+                              {t('blocklist.torrent_behavior_threshold')}: {srv.behavior_threshold ?? '—'}
+                            </span>
+                          )}
                         </div>
-                        
+
                         <motion.button
                           onClick={() => handleToggleTorrentBlocker(srv.server_id, !srv.enabled)}
                           disabled={togglingServer === srv.server_id}
@@ -955,7 +1090,7 @@ export default function Blocklist() {
                           {srv.enabled ? t('blocklist.torrent_disable') : t('blocklist.torrent_enable')}
                         </motion.button>
                       </div>
-                      
+
                       {srv.enabled && !srv.error && (
                         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-3">
                           <div className="bg-dark-900/50 rounded-lg p-2.5">
@@ -980,7 +1115,7 @@ export default function Blocklist() {
                           </div>
                         </div>
                       )}
-                      
+
                       {srv.enabled && !srv.error && srv.active_ips && srv.active_ips.length > 0 && (
                         <div className="mt-3">
                           <p className="text-xs text-dark-500 mb-2">{t('blocklist.torrent_active_ips')}</p>
@@ -996,48 +1131,9 @@ export default function Blocklist() {
                           </div>
                         </div>
                       )}
-                      
+
                       {srv.enabled && !srv.error && (!srv.active_ips || srv.active_ips.length === 0) && (
                         <p className="text-xs text-dark-500 mt-2">{t('blocklist.torrent_no_active_blocks')}</p>
-                      )}
-                      
-                      {srv.enabled && !srv.error && (
-                        <div className="mt-3 pt-3 border-t border-dark-700/50">
-                          <div className="flex items-end gap-3">
-                            <div className="flex-1 max-w-xs">
-                              <label className="block text-xs text-dark-500 mb-1">
-                                {t('blocklist.torrent_behavior_threshold')}
-                              </label>
-                              <input
-                                type="number"
-                                defaultValue={srv.behavior_threshold ?? 50}
-                                min={5}
-                                max={1000}
-                                className="input w-24 text-sm"
-                                id={`threshold-${srv.server_id}`}
-                              />
-                              <p className="text-xs text-dark-600 mt-0.5">{t('blocklist.torrent_behavior_threshold_desc')}</p>
-                            </div>
-                            <motion.button
-                              onClick={() => {
-                                const input = document.getElementById(`threshold-${srv.server_id}`) as HTMLInputElement
-                                const val = parseInt(input?.value) || 50
-                                handleSaveBehaviorThreshold(srv.server_id, val)
-                              }}
-                              disabled={savingThreshold === srv.server_id}
-                              className="btn btn-secondary text-sm"
-                              whileHover={{ scale: 1.02 }}
-                              whileTap={{ scale: 0.98 }}
-                            >
-                              {savingThreshold === srv.server_id ? (
-                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                              ) : (
-                                <Check className="w-3.5 h-3.5" />
-                              )}
-                              {t('common.save')}
-                            </motion.button>
-                          </div>
-                        </div>
                       )}
                     </div>
                   ))}

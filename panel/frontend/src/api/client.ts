@@ -522,6 +522,28 @@ export interface BlocklistSettings {
   temp_timeout: number
   auto_update_enabled: boolean
   auto_update_interval: number
+  torrent_behavior_threshold: number
+}
+
+export interface SyncServerResult {
+  server_id: number
+  server_name: string
+  success: boolean
+  in: { success: boolean; message: string; ip_count: number; added?: number; removed?: number }
+  out: { success: boolean; message: string; ip_count: number; added?: number; removed?: number }
+}
+
+export interface SyncStatus {
+  in_progress: boolean
+  timestamp: string | null
+  servers: Record<string, SyncServerResult>
+}
+
+export interface GlobalThresholdServerResult {
+  server_id: number
+  server_name: string
+  success: boolean
+  error?: string
 }
 
 export interface TorrentBlockerStatus {
@@ -576,8 +598,9 @@ export const blocklistApi = {
   getSettings: () => api.get<{ settings: BlocklistSettings }>('/blocklist/settings'),
   updateSettings: (data: { temp_timeout?: number; auto_update_enabled?: boolean; auto_update_interval?: number }) =>
     api.put('/blocklist/settings', data),
-  sync: () => api.post('/blocklist/sync'),
-  syncServer: (serverId: number) => api.post(`/blocklist/sync/${serverId}`),
+  sync: () => api.post<{ success: boolean; results: Record<string, SyncServerResult> }>('/blocklist/sync'),
+  syncServer: (serverId: number) => api.post<SyncServerResult>(`/blocklist/sync/${serverId}`),
+  getSyncStatus: () => api.get<SyncStatus>('/blocklist/sync/status'),
   
   // Torrent blocker
   getTorrentBlockerStatus: () =>
@@ -588,6 +611,10 @@ export const blocklistApi = {
     api.post<{ success: boolean; message: string }>(`/blocklist/torrent-blocker/${serverId}/disable`),
   updateTorrentBlockerSettings: (serverId: number, data: { behavior_threshold: number }) =>
     api.post<{ success: boolean; behavior_threshold: number }>(`/blocklist/torrent-blocker/${serverId}/settings`, data),
+  updateGlobalTorrentSettings: (data: { behavior_threshold: number }) =>
+    api.post<{ success: boolean; behavior_threshold: number; servers: GlobalThresholdServerResult[] }>(
+      '/blocklist/torrent-blocker/global-settings', data
+    ),
 }
 
 export interface NodeOptimizationsInfo {

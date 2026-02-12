@@ -48,6 +48,8 @@ class BlocklistManager:
         self._running = False
         self._update_task: Optional[asyncio.Task] = None
         self._cache: dict[str, tuple[float, list[str]]] = {}
+        self._last_sync: Optional[dict] = None
+        self._sync_in_progress = False
     
     def _validate_ip_cidr(self, ip: str) -> bool:
         ip = ip.strip()
@@ -226,7 +228,7 @@ class BlocklistManager:
         ips: list[str],
         permanent: bool = True,
         direction: str = "in",
-        timeout: float = 60.0
+        timeout: float = 20.0
     ) -> tuple[bool, str, dict]:
         try:
             async with httpx.AsyncClient(verify=False, timeout=timeout) as client:
@@ -247,56 +249,129 @@ class BlocklistManager:
         except Exception as e:
             logger.error(f"Failed to sync to {server.name}: {e}")
             return False, str(e), {}
-    
-    async def sync_all_nodes(self) -> dict:
-        """Sync blocklists to all active nodes (both directions)"""
-        results = {}
-        
+
+    async def _sync_one_server(self, server: Server) -> dict:
+        """Sync both directions for a single server (own DB session)."""
+        server_result = {
+            "server_id": server.id,
+            "server_name": server.name,
+            "success": True,
+            "in": {},
+            "out": {},
+        }
         async with async_session() as db:
-            result = await db.execute(
-                select(Server).where(Server.is_active == True)
+            for direction in ("in", "out"):
+                try:
+                    ips = await self.get_combined_ips_for_server(server.id, db, direction)
+                    success, message, data = await self.sync_to_node(
+                        server, ips, direction=direction
+                    )
+                    server_result[direction] = {
+                        "success": success,
+                        "message": message,
+                        "ip_count": len(ips),
+                        "added": data.get("added", 0),
+                        "removed": data.get("removed", 0),
+                    }
+                    if not success:
+                        server_result["success"] = False
+                except Exception as e:
+                    logger.error(f"Failed to sync {direction} to {server.name}: {e}")
+                    server_result[direction] = {
+                        "success": False,
+                        "message": str(e),
+                        "ip_count": 0,
+                    }
+                    server_result["success"] = False
+        return server_result
+
+    async def _sync_one_server_safe(self, server: Server) -> dict:
+        """Sync one server with a global timeout wrapper — never raises."""
+        try:
+            return await asyncio.wait_for(
+                self._sync_one_server(server), timeout=30.0
             )
-            servers = result.scalars().all()
-            
-            for server in servers:
-                server_result = {
-                    "server_name": server.name,
-                    "in": {},
-                    "out": {},
-                }
-                
-                for direction in ("in", "out"):
-                    try:
-                        ips = await self.get_combined_ips_for_server(server.id, db, direction)
-                        success, message, data = await self.sync_to_node(
-                            server, ips, direction=direction
-                        )
-                        server_result[direction] = {
-                            "success": success,
-                            "message": message,
-                            "ip_count": len(ips),
-                            "added": data.get("added", 0),
-                            "removed": data.get("removed", 0),
-                        }
-                    except Exception as e:
-                        logger.error(f"Failed to sync {direction} to {server.name}: {e}")
-                        server_result[direction] = {
-                            "success": False,
-                            "message": str(e),
-                            "ip_count": 0,
-                        }
-                
-                # Backward compat: top-level success/message from incoming
-                server_result["success"] = server_result["in"].get("success", False)
-                server_result["message"] = server_result["in"].get("message", "")
-                server_result["ip_count"] = (
-                    server_result["in"].get("ip_count", 0) +
-                    server_result["out"].get("ip_count", 0)
+        except asyncio.TimeoutError:
+            return {
+                "server_id": server.id,
+                "server_name": server.name,
+                "success": False,
+                "in": {"success": False, "message": "Timeout", "ip_count": 0},
+                "out": {"success": False, "message": "Timeout", "ip_count": 0},
+            }
+        except Exception as e:
+            return {
+                "server_id": server.id,
+                "server_name": server.name,
+                "success": False,
+                "in": {"success": False, "message": str(e), "ip_count": 0},
+                "out": {"success": False, "message": str(e), "ip_count": 0},
+            }
+
+    def _store_sync_result(self, results: dict):
+        self._last_sync = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "servers": results,
+            "in_progress": False,
+        }
+        self._sync_in_progress = False
+
+    def get_sync_status(self) -> dict:
+        if self._sync_in_progress:
+            return {"in_progress": True, "timestamp": None, "servers": {}}
+        if self._last_sync:
+            return self._last_sync
+        return {"in_progress": False, "timestamp": None, "servers": {}}
+
+    async def sync_all_nodes(self) -> dict:
+        """Sync blocklists to all active nodes in parallel (both directions)."""
+        self._sync_in_progress = True
+        results = {}
+        try:
+            async with async_session() as db:
+                result = await db.execute(
+                    select(Server).where(Server.is_active == True)
                 )
-                
-                results[server.id] = server_result
-        
+                servers = result.scalars().all()
+
+            if not servers:
+                self._store_sync_result({})
+                return {}
+
+            tasks = [self._sync_one_server_safe(s) for s in servers]
+            done = await asyncio.gather(*tasks)
+
+            for sr in done:
+                results[sr["server_id"]] = sr
+        except Exception as e:
+            logger.error(f"sync_all_nodes failed: {e}")
+        finally:
+            self._store_sync_result(results)
         return results
+
+    async def sync_single_node_by_id(self, server_id: int) -> dict:
+        """Sync one server by ID (both directions). Returns per-server result."""
+        self._sync_in_progress = True
+        try:
+            async with async_session() as db:
+                result = await db.execute(
+                    select(Server).where(Server.id == server_id)
+                )
+                server = result.scalar_one_or_none()
+
+            if not server:
+                self._sync_in_progress = False
+                return {}
+
+            sr = await self._sync_one_server_safe(server)
+            prev = self._last_sync.get("servers", {}) if self._last_sync else {}
+            prev[sr["server_id"]] = sr
+            self._store_sync_result(prev)
+            return sr
+        except Exception as e:
+            logger.error(f"sync_single_node_by_id failed: {e}")
+            self._sync_in_progress = False
+            return {}
     
     async def refresh_source(self, source_id: int) -> tuple[bool, str, int, bool]:
         async with async_session() as db:

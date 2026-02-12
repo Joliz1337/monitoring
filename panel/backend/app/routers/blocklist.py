@@ -1,11 +1,14 @@
-"""Blocklist management router for IP/CIDR blocking (incoming + outgoing)"""
+"""Blocklist management router for IP/CIDR blocking (incoming + outgoing)
+
+All rule mutations (add/delete global, server, source toggle) trigger
+background sync so changes are applied to nodes automatically.
+"""
 
 import asyncio
-from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -49,27 +52,12 @@ class UpdateSettingsRequest(BaseModel):
     auto_update_interval: Optional[int] = Field(None, ge=3600, le=604800)
 
 
-class RuleResponse(BaseModel):
-    id: int
-    ip_cidr: str
-    server_id: Optional[int]
-    is_permanent: bool
-    direction: str
-    comment: Optional[str]
-    source: str
-    created_at: datetime
+class TorrentBlockerSettingsRequest(BaseModel):
+    behavior_threshold: int = Field(..., ge=5, le=1000)
 
 
-class SourceResponse(BaseModel):
-    id: int
-    name: str
-    url: str
-    enabled: bool
-    is_default: bool
-    direction: str
-    last_updated: Optional[datetime]
-    ip_count: int
-    error_message: Optional[str]
+class GlobalTorrentSettingsRequest(BaseModel):
+    behavior_threshold: int = Field(..., ge=5, le=1000)
 
 
 # === Global Rules ===
@@ -90,7 +78,7 @@ async def get_global_rules(
         ).order_by(BlocklistRule.created_at.desc())
     )
     rules = result.scalars().all()
-    
+
     return {
         "count": len(rules),
         "direction": direction,
@@ -112,17 +100,18 @@ async def get_global_rules(
 @router.post("/global")
 async def add_global_rule(
     request: AddRuleRequest,
+    bg: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    """Add global blocklist rule (applies to all servers)"""
+    """Add global blocklist rule (applies to all servers). Auto-syncs."""
     manager = get_blocklist_manager()
-    
+
     if not manager._validate_ip_cidr(request.ip_cidr):
         raise HTTPException(status_code=400, detail="Invalid IP/CIDR format")
-    
+
     normalized = manager._normalize_ip(request.ip_cidr)
-    
+
     result = await db.execute(
         select(BlocklistRule).where(
             and_(
@@ -134,7 +123,7 @@ async def add_global_rule(
     )
     if result.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="Rule already exists")
-    
+
     rule = BlocklistRule(
         ip_cidr=normalized,
         server_id=None,
@@ -146,7 +135,9 @@ async def add_global_rule(
     db.add(rule)
     await db.commit()
     await db.refresh(rule)
-    
+
+    bg.add_task(manager.sync_all_nodes)
+
     return {
         "success": True,
         "rule": {
@@ -162,23 +153,24 @@ async def add_global_rule(
 @router.post("/global/bulk")
 async def add_global_rules_bulk(
     request: BulkAddRequest,
+    bg: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    """Add multiple global blocklist rules"""
+    """Add multiple global blocklist rules. Auto-syncs."""
     manager = get_blocklist_manager()
-    
+
     added = 0
     skipped = 0
     invalid = []
-    
+
     for ip in request.ips:
         if not manager._validate_ip_cidr(ip):
             invalid.append(ip)
             continue
-        
+
         normalized = manager._normalize_ip(ip)
-        
+
         result = await db.execute(
             select(BlocklistRule).where(
                 and_(
@@ -191,7 +183,7 @@ async def add_global_rules_bulk(
         if result.scalar_one_or_none():
             skipped += 1
             continue
-        
+
         rule = BlocklistRule(
             ip_cidr=normalized,
             server_id=None,
@@ -201,9 +193,12 @@ async def add_global_rules_bulk(
         )
         db.add(rule)
         added += 1
-    
+
     await db.commit()
-    
+
+    if added > 0:
+        bg.add_task(manager.sync_all_nodes)
+
     return {
         "success": True,
         "added": added,
@@ -216,10 +211,11 @@ async def add_global_rules_bulk(
 @router.delete("/global/{rule_id}")
 async def delete_global_rule(
     rule_id: int,
+    bg: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    """Delete global blocklist rule"""
+    """Delete global blocklist rule. Auto-syncs."""
     result = await db.execute(
         select(BlocklistRule).where(
             and_(
@@ -229,14 +225,26 @@ async def delete_global_rule(
         )
     )
     rule = result.scalar_one_or_none()
-    
+
     if not rule:
         raise HTTPException(status_code=404, detail="Rule not found")
-    
+
     await db.delete(rule)
     await db.commit()
-    
+
+    bg.add_task(manager_sync_all)
+
     return {"success": True, "message": "Rule deleted"}
+
+
+async def manager_sync_all():
+    manager = get_blocklist_manager()
+    await manager.sync_all_nodes()
+
+
+async def manager_sync_single(server_id: int):
+    manager = get_blocklist_manager()
+    await manager.sync_single_node_by_id(server_id)
 
 
 # === Server-specific Rules ===
@@ -252,7 +260,7 @@ async def get_server_rules(
     result = await db.execute(select(Server).where(Server.id == server_id))
     if not result.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="Server not found")
-    
+
     result = await db.execute(
         select(BlocklistRule).where(
             and_(
@@ -262,7 +270,7 @@ async def get_server_rules(
         ).order_by(BlocklistRule.created_at.desc())
     )
     rules = result.scalars().all()
-    
+
     global_result = await db.execute(
         select(BlocklistRule).where(
             and_(
@@ -272,7 +280,7 @@ async def get_server_rules(
         )
     )
     global_count = len(global_result.scalars().all())
-    
+
     return {
         "server_id": server_id,
         "direction": direction,
@@ -297,21 +305,22 @@ async def get_server_rules(
 async def add_server_rule(
     server_id: int,
     request: AddRuleRequest,
+    bg: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    """Add blocklist rule for specific server"""
+    """Add blocklist rule for specific server. Auto-syncs that server."""
     result = await db.execute(select(Server).where(Server.id == server_id))
     if not result.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="Server not found")
-    
+
     manager = get_blocklist_manager()
-    
+
     if not manager._validate_ip_cidr(request.ip_cidr):
         raise HTTPException(status_code=400, detail="Invalid IP/CIDR format")
-    
+
     normalized = manager._normalize_ip(request.ip_cidr)
-    
+
     result = await db.execute(
         select(BlocklistRule).where(
             and_(
@@ -323,7 +332,7 @@ async def add_server_rule(
     )
     if result.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="Rule already exists for this server")
-    
+
     rule = BlocklistRule(
         ip_cidr=normalized,
         server_id=server_id,
@@ -335,7 +344,9 @@ async def add_server_rule(
     db.add(rule)
     await db.commit()
     await db.refresh(rule)
-    
+
+    bg.add_task(manager_sync_single, server_id)
+
     return {
         "success": True,
         "rule": {
@@ -353,10 +364,11 @@ async def add_server_rule(
 async def delete_server_rule(
     server_id: int,
     rule_id: int,
+    bg: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    """Delete server-specific blocklist rule"""
+    """Delete server-specific blocklist rule. Auto-syncs that server."""
     result = await db.execute(
         select(BlocklistRule).where(
             and_(
@@ -366,13 +378,15 @@ async def delete_server_rule(
         )
     )
     rule = result.scalar_one_or_none()
-    
+
     if not rule:
         raise HTTPException(status_code=404, detail="Rule not found")
-    
+
     await db.delete(rule)
     await db.commit()
-    
+
+    bg.add_task(manager_sync_single, server_id)
+
     return {"success": True, "message": "Rule deleted"}
 
 
@@ -383,14 +397,12 @@ async def get_server_blocklist_status(
     _: dict = Depends(verify_auth)
 ):
     """Get ipset status from node"""
-    import httpx
-    
     result = await db.execute(select(Server).where(Server.id == server_id))
     server = result.scalar_one_or_none()
-    
+
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
-    
+
     try:
         async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
             response = await client.get(
@@ -417,10 +429,10 @@ async def get_sources(
     query = select(BlocklistSource).order_by(BlocklistSource.is_default.desc(), BlocklistSource.name)
     if direction:
         query = query.where(BlocklistSource.direction == direction)
-    
+
     result = await db.execute(query)
     sources = result.scalars().all()
-    
+
     return {
         "count": len(sources),
         "sources": [
@@ -443,16 +455,17 @@ async def get_sources(
 @router.post("/sources")
 async def add_source(
     request: AddSourceRequest,
+    bg: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    """Add new blocklist source"""
+    """Add new blocklist source. Auto-syncs."""
     result = await db.execute(
         select(BlocklistSource).where(BlocklistSource.url == request.url)
     )
     if result.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="Source with this URL already exists")
-    
+
     source = BlocklistSource(
         name=request.name,
         url=request.url,
@@ -463,7 +476,9 @@ async def add_source(
     db.add(source)
     await db.commit()
     await db.refresh(source)
-    
+
+    bg.add_task(manager_sync_all)
+
     return {
         "success": True,
         "source": {
@@ -480,25 +495,31 @@ async def add_source(
 async def update_source(
     source_id: int,
     request: UpdateSourceRequest,
+    bg: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    """Update blocklist source"""
+    """Update blocklist source. Auto-syncs on enable/disable toggle."""
     result = await db.execute(
         select(BlocklistSource).where(BlocklistSource.id == source_id)
     )
     source = result.scalar_one_or_none()
-    
+
     if not source:
         raise HTTPException(status_code=404, detail="Source not found")
-    
+
+    toggled = request.enabled is not None and request.enabled != source.enabled
+
     if request.enabled is not None:
         source.enabled = request.enabled
     if request.name is not None:
         source.name = request.name
-    
+
     await db.commit()
-    
+
+    if toggled:
+        bg.add_task(manager_sync_all)
+
     return {
         "success": True,
         "source": {
@@ -513,40 +534,49 @@ async def update_source(
 @router.delete("/sources/{source_id}")
 async def delete_source(
     source_id: int,
+    bg: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    """Delete blocklist source"""
+    """Delete blocklist source. Auto-syncs."""
     result = await db.execute(
         select(BlocklistSource).where(BlocklistSource.id == source_id)
     )
     source = result.scalar_one_or_none()
-    
+
     if not source:
         raise HTTPException(status_code=404, detail="Source not found")
-    
+
     if source.is_default:
         raise HTTPException(status_code=400, detail="Cannot delete default source")
-    
+
+    was_enabled = source.enabled
     await db.delete(source)
     await db.commit()
-    
+
+    if was_enabled:
+        bg.add_task(manager_sync_all)
+
     return {"success": True, "message": "Source deleted"}
 
 
 @router.post("/sources/{source_id}/refresh")
 async def refresh_source(
     source_id: int,
+    bg: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    """Refresh single source from GitHub"""
+    """Refresh single source from GitHub. Auto-syncs if changed."""
     manager = get_blocklist_manager()
     success, message, ip_count, changed = await manager.refresh_source(source_id)
-    
+
     if not success:
         raise HTTPException(status_code=400, detail=message)
-    
+
+    if changed:
+        bg.add_task(manager_sync_all)
+
     return {
         "success": True,
         "message": message,
@@ -557,12 +587,16 @@ async def refresh_source(
 
 @router.post("/sources/refresh-all")
 async def refresh_all_sources(
+    bg: BackgroundTasks,
     _: dict = Depends(verify_auth)
 ):
-    """Refresh all enabled sources"""
+    """Refresh all enabled sources. Auto-syncs if any changed."""
     manager = get_blocklist_manager()
     results, any_changed = await manager.refresh_all_sources()
-    
+
+    if any_changed:
+        bg.add_task(manager_sync_all)
+
     return {
         "success": True,
         "results": results,
@@ -577,9 +611,13 @@ async def get_blocklist_settings(
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    """Get blocklist settings"""
+    """Get blocklist settings including global torrent threshold"""
     manager = get_blocklist_manager()
     settings = await manager.get_blocklist_settings(db)
+
+    threshold = await manager.get_setting("torrent_behavior_threshold", db)
+    settings["torrent_behavior_threshold"] = int(threshold) if threshold else 50
+
     return {"settings": settings}
 
 
@@ -591,7 +629,7 @@ async def update_blocklist_settings(
 ):
     """Update blocklist settings"""
     updates = {}
-    
+
     if request.temp_timeout is not None:
         result = await db.execute(
             select(PanelSettings).where(PanelSettings.key == "blocklist_temp_timeout")
@@ -602,7 +640,7 @@ async def update_blocklist_settings(
         else:
             db.add(PanelSettings(key="blocklist_temp_timeout", value=str(request.temp_timeout)))
         updates["temp_timeout"] = request.temp_timeout
-    
+
     if request.auto_update_enabled is not None:
         result = await db.execute(
             select(PanelSettings).where(PanelSettings.key == "blocklist_auto_update_enabled")
@@ -614,7 +652,7 @@ async def update_blocklist_settings(
         else:
             db.add(PanelSettings(key="blocklist_auto_update_enabled", value=value))
         updates["auto_update_enabled"] = request.auto_update_enabled
-    
+
     if request.auto_update_interval is not None:
         result = await db.execute(
             select(PanelSettings).where(PanelSettings.key == "blocklist_auto_update_interval")
@@ -625,9 +663,9 @@ async def update_blocklist_settings(
         else:
             db.add(PanelSettings(key="blocklist_auto_update_interval", value=str(request.auto_update_interval)))
         updates["auto_update_interval"] = request.auto_update_interval
-    
+
     await db.commit()
-    
+
     return {
         "success": True,
         "updated": updates
@@ -640,7 +678,7 @@ async def update_blocklist_settings(
 async def sync_all_nodes(
     _: dict = Depends(verify_auth)
 ):
-    """Sync blocklists to all active nodes (both directions)"""
+    """Sync blocklists to all active nodes (parallel, both directions)"""
     manager = get_blocklist_manager()
     results = await manager.sync_all_nodes()
     return {
@@ -657,30 +695,21 @@ async def sync_single_node(
 ):
     """Sync blocklist to single node (both directions)"""
     result = await db.execute(select(Server).where(Server.id == server_id))
-    server = result.scalar_one_or_none()
-    
-    if not server:
+    if not result.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="Server not found")
-    
+
     manager = get_blocklist_manager()
-    
-    sync_result = {"server_id": server_id, "success": True}
-    
-    for direction in ("in", "out"):
-        ips = await manager.get_combined_ips_for_server(server_id, db, direction)
-        success, message, data = await manager.sync_to_node(server, ips, direction=direction)
-        
-        sync_result[direction] = {
-            "success": success,
-            "message": message,
-            "ip_count": len(ips),
-            "added": data.get("added", 0),
-            "removed": data.get("removed", 0),
-        }
-        if not success:
-            sync_result["success"] = False
-    
-    return sync_result
+    sync_result = await manager.sync_single_node_by_id(server_id)
+    return sync_result or {"success": False, "message": "Server not found"}
+
+
+@router.get("/sync/status")
+async def get_sync_status(
+    _: dict = Depends(verify_auth)
+):
+    """Get status of last sync operation (per-server results)."""
+    manager = get_blocklist_manager()
+    return manager.get_sync_status()
 
 
 # === Torrent Blocker ===
@@ -791,10 +820,6 @@ async def disable_torrent_blocker(
         raise HTTPException(status_code=503, detail=f"Node unreachable: {str(e)}")
 
 
-class TorrentBlockerSettingsRequest(BaseModel):
-    behavior_threshold: int = Field(..., ge=5, le=1000)
-
-
 @router.post("/torrent-blocker/{server_id}/settings")
 async def update_torrent_blocker_settings(
     server_id: int,
@@ -823,3 +848,53 @@ async def update_torrent_blocker_settings(
             )
     except httpx.RequestError as e:
         raise HTTPException(status_code=503, detail=f"Node unreachable: {str(e)}")
+
+
+async def _push_threshold_to_server(server: Server, threshold: int) -> dict:
+    """Push behavior_threshold to one node, return result dict."""
+    try:
+        async with httpx.AsyncClient(verify=False, timeout=15.0) as client:
+            response = await client.post(
+                f"{server.url}/api/torrent-blocker/settings",
+                headers={"X-API-Key": server.api_key},
+                json={"behavior_threshold": threshold}
+            )
+            if response.status_code == 200:
+                return {"server_id": server.id, "server_name": server.name, "success": True}
+            return {"server_id": server.id, "server_name": server.name, "success": False, "error": f"HTTP {response.status_code}"}
+    except Exception as e:
+        return {"server_id": server.id, "server_name": server.name, "success": False, "error": str(e)}
+
+
+@router.post("/torrent-blocker/global-settings")
+async def update_global_torrent_settings(
+    request: GlobalTorrentSettingsRequest,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Set global behavior_threshold, save to PanelSettings, push to ALL active servers."""
+    # Save to panel DB
+    result = await db.execute(
+        select(PanelSettings).where(PanelSettings.key == "torrent_behavior_threshold")
+    )
+    setting = result.scalar_one_or_none()
+    if setting:
+        setting.value = str(request.behavior_threshold)
+    else:
+        db.add(PanelSettings(key="torrent_behavior_threshold", value=str(request.behavior_threshold)))
+    await db.commit()
+
+    # Push to all active servers in parallel
+    srv_result = await db.execute(select(Server).where(Server.is_active == True))
+    servers = srv_result.scalars().all()
+
+    results = []
+    if servers:
+        tasks = [_push_threshold_to_server(s, request.behavior_threshold) for s in servers]
+        results = list(await asyncio.gather(*tasks))
+
+    return {
+        "success": True,
+        "behavior_threshold": request.behavior_threshold,
+        "servers": results
+    }
