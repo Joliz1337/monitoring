@@ -523,25 +523,113 @@ async def verify_sysctl_values(executor) -> dict:
     return verification
 
 
+SYSTEM_SYSCTL_PATTERNS = {"10-", "99-sysctl.conf", "99-cloudimg-", "README"}
+OUR_SYSCTL_CONFIG = "99-vless-tuning.conf"
+THIRD_PARTY_SERVICES = [
+    "3x-ui-tuning", "xray-tuning", "marzban-tuning",
+    "network-optimize", "sysctl-tuning", "tcp-tuning", "tcp-bbr",
+]
+THIRD_PARTY_SCRIPTS = [
+    "/usr/local/bin/network-tuning.sh", "/usr/local/bin/tcp-tuning.sh",
+    "/usr/local/bin/sysctl-tuning.sh", "/opt/3x-ui/tuning.sh", "/opt/marzban/tuning.sh",
+]
+
+
+def _is_system_sysctl(filename: str) -> bool:
+    return any(filename.startswith(p) for p in SYSTEM_SYSCTL_PATTERNS) or filename == OUR_SYSCTL_CONFIG
+
+
+async def cleanup_conflicting_configs(executor) -> list[str]:
+    """Remove ALL non-system sysctl/limits configs and third-party tuning services"""
+    cleaned = []
+    
+    # ---- sysctl.d: remove all non-system configs ----
+    ls_result = await executor.execute("ls /etc/sysctl.d/ 2>/dev/null", timeout=5)
+    if ls_result.success and ls_result.stdout:
+        for fname in ls_result.stdout.strip().split("\n"):
+            fname = fname.strip()
+            if not fname.endswith(".conf"):
+                continue
+            if _is_system_sysctl(fname):
+                continue
+            await executor.execute(f"rm -f /etc/sysctl.d/{fname}", timeout=5)
+            cleaned.append(f"sysctl.d/{fname}")
+    
+    # ---- /etc/sysctl.conf: remove all active parameter lines ----
+    result = await executor.execute(
+        r"sed -i '/^net\./d; /^fs\./d; /^vm\./d; /^kernel\./d; /^precedence/d' /etc/sysctl.conf",
+        timeout=5,
+    )
+    if result.success and result.exit_code == 0:
+        cleaned.append("sysctl.conf (cleaned)")
+    
+    # ---- limits.d: remove all non-system configs ----
+    ls_result = await executor.execute("ls /etc/security/limits.d/ 2>/dev/null", timeout=5)
+    if ls_result.success and ls_result.stdout:
+        for fname in ls_result.stdout.strip().split("\n"):
+            fname = fname.strip()
+            if not fname.endswith(".conf") or fname == "99-nofile.conf":
+                continue
+            await executor.execute(f"rm -f /etc/security/limits.d/{fname}", timeout=5)
+            cleaned.append(f"limits.d/{fname}")
+    
+    # ---- /etc/security/limits.conf: clean custom nofile/nproc/memlock lines ----
+    await executor.execute(
+        r"sed -i '/^\*.*nofile/d; /^root.*nofile/d; /^\*.*nproc/d; /^root.*nproc/d; "
+        r"/^\*.*memlock/d; /^root.*memlock/d' /etc/security/limits.conf",
+        timeout=5,
+    )
+    
+    # ---- Stop/disable third-party tuning services ----
+    for svc in THIRD_PARTY_SERVICES:
+        check = await executor.execute(f"systemctl is-enabled {svc}.service 2>/dev/null", timeout=5)
+        if check.exit_code == 0:
+            await executor.execute(f"systemctl stop {svc}.service", timeout=10)
+            await executor.execute(f"systemctl disable {svc}.service", timeout=10)
+            cleaned.append(f"service:{svc}")
+    
+    # ---- Remove third-party tuning scripts ----
+    for script in THIRD_PARTY_SCRIPTS:
+        check = await executor.execute(f"test -f {script}", timeout=3)
+        if check.exit_code == 0:
+            await executor.execute(f"rm -f {script}", timeout=5)
+            cleaned.append(f"script:{script}")
+    
+    # ---- Clean crontab entries that apply sysctl ----
+    cron_check = await executor.execute(
+        "crontab -l 2>/dev/null | grep -qE 'sysctl|network-tun|tcp-tun'", timeout=5
+    )
+    if cron_check.exit_code == 0:
+        await executor.execute(
+            "crontab -l 2>/dev/null | grep -vE 'sysctl|network-tun|tcp-tun' | crontab -",
+            timeout=5,
+        )
+        cleaned.append("crontab (cleaned)")
+    
+    return cleaned
+
+
 @router.post("/optimizations/apply")
 async def apply_optimizations(request: ApplyOptimizationsRequest):
     """
     Apply system optimizations to the node.
     
-    1. Writes ALL config files (sysctl, limits, systemd, network-tune.sh, network-tune.service)
-    2. Configures PAM limits
-    3. Applies sysctl settings
-    4. Restarts network-tune service (for hashsize, RPS/RFS)
-    5. Verifies all values are applied correctly
+    1. Cleans up conflicting configs from other software
+    2. Writes ALL config files (sysctl, limits, systemd, network-tune.sh, network-tune.service)
+    3. Configures PAM limits
+    4. Applies sysctl settings
+    5. Restarts network-tune service (for hashsize, RPS/RFS)
+    6. Verifies all values are applied correctly
     """
     executor = get_host_executor()
     errors = []
     warnings = []
     applied_files = []
     
-    # Remove old separate config files (now integrated into main config)
-    await executor.execute("rm -f /etc/sysctl.d/99-disable-ipv6.conf", timeout=5)
-    await executor.execute("rm -f /etc/sysctl.d/99-haproxy.conf", timeout=5)
+    # Clean up conflicting configs from other software (3X-UI, Marzban, etc.)
+    cleaned = await cleanup_conflicting_configs(executor)
+    if cleaned:
+        applied_files.append(f"cleanup ({len(cleaned)} items)")
     
     # 1. Write sysctl config
     if await write_host_file(SYSCTL_CONFIG_PATH, request.sysctl_content):

@@ -907,11 +907,100 @@ copy_installer() {
 
 # ==================== System Optimizations ====================
 
+cleanup_conflicting_configs() {
+    log_info "Cleaning up conflicting system configs..."
+    
+    # ---- sysctl.d: remove ALL non-system configs except ours ----
+    # System files: 10-* (Ubuntu), 99-sysctl.conf (symlink), 99-cloudimg-* (cloud-init), README.*
+    for f in /etc/sysctl.d/*.conf; do
+        [ -f "$f" ] || continue
+        local bname=$(basename "$f")
+        case "$bname" in
+            10-*)            continue ;;  # Ubuntu system defaults
+            99-sysctl.conf)  continue ;;  # Symlink to /etc/sysctl.conf
+            99-cloudimg-*)   continue ;;  # Cloud provider config
+            99-vless-tuning.conf) continue ;;  # Our config (will be overwritten)
+            *)
+                rm -f "$f" 2>/dev/null || true
+                log_success "Removed conflicting sysctl config: $bname"
+                ;;
+        esac
+    done
+    
+    # ---- /etc/sysctl.conf: clean all non-comment active lines ----
+    # Remove any uncommented parameter lines (net.*, fs.*, vm.*, kernel.*, precedence)
+    if [ -f /etc/sysctl.conf ]; then
+        local before_lines=$(grep -cE '^[^#[:space:]]' /etc/sysctl.conf 2>/dev/null || echo 0)
+        sed -i '/^net\./d; /^fs\./d; /^vm\./d; /^kernel\./d; /^precedence/d' /etc/sysctl.conf 2>/dev/null || true
+        sed -i -e :a -e '/^\n*$/{$d;N;ba' -e '}' /etc/sysctl.conf 2>/dev/null || true
+        local after_lines=$(grep -cE '^[^#[:space:]]' /etc/sysctl.conf 2>/dev/null || echo 0)
+        [ "$before_lines" != "$after_lines" ] && log_success "Cleaned $((before_lines - after_lines)) entries from /etc/sysctl.conf"
+    fi
+    
+    # ---- limits.d: remove all non-system configs except ours ----
+    for f in /etc/security/limits.d/*.conf; do
+        [ -f "$f" ] || continue
+        local bname=$(basename "$f")
+        [ "$bname" = "99-nofile.conf" ] && continue  # Our config
+        rm -f "$f" 2>/dev/null || true
+        log_success "Removed conflicting limits config: $bname"
+    done
+    
+    # ---- /etc/security/limits.conf: clean custom lines at the end ----
+    if [ -f /etc/security/limits.conf ]; then
+        if grep -qE '^\*.*nofile|^root.*nofile' /etc/security/limits.conf 2>/dev/null; then
+            sed -i '/^\*.*nofile/d; /^root.*nofile/d; /^\*.*nproc/d; /^root.*nproc/d; /^\*.*memlock/d; /^root.*memlock/d' /etc/security/limits.conf 2>/dev/null || true
+            log_success "Cleaned custom entries from /etc/security/limits.conf"
+        fi
+    fi
+    
+    # ---- Stop and disable third-party tuning services ----
+    local third_party_services="
+        3x-ui-tuning
+        xray-tuning
+        marzban-tuning
+        network-optimize
+        sysctl-tuning
+        tcp-tuning
+        tcp-bbr
+    "
+    for svc in $third_party_services; do
+        if systemctl list-unit-files "${svc}.service" &>/dev/null 2>&1 && \
+           systemctl is-enabled "${svc}.service" &>/dev/null 2>&1; then
+            systemctl stop "${svc}.service" >/dev/null 2>&1 || true
+            systemctl disable "${svc}.service" >/dev/null 2>&1 || true
+            log_success "Disabled third-party service: ${svc}"
+        fi
+    done
+    
+    # ---- Remove third-party tuning scripts from common locations ----
+    local tuning_scripts="
+        /usr/local/bin/network-tuning.sh
+        /usr/local/bin/tcp-tuning.sh
+        /usr/local/bin/sysctl-tuning.sh
+        /opt/3x-ui/tuning.sh
+        /opt/marzban/tuning.sh
+    "
+    for script in $tuning_scripts; do
+        if [ -f "$script" ]; then
+            rm -f "$script" 2>/dev/null || true
+            log_success "Removed third-party tuning script: $script"
+        fi
+    done
+    
+    # ---- Clean crontab entries that apply sysctl ----
+    if crontab -l 2>/dev/null | grep -qE 'sysctl|network-tun|tcp-tun'; then
+        crontab -l 2>/dev/null | grep -vE 'sysctl|network-tun|tcp-tun' | crontab - 2>/dev/null || true
+        log_success "Cleaned sysctl-related crontab entries"
+    fi
+    
+    log_success "Conflicting configs cleanup done"
+}
+
 apply_system_optimizations() {
     log_info "$(msg optimizing_system)"
     
-    rm -f /etc/sysctl.d/99-disable-ipv6.conf >/dev/null 2>&1 || true
-    rm -f /etc/sysctl.d/99-haproxy.conf >/dev/null 2>&1 || true
+    cleanup_conflicting_configs
     
     local CONFIG_SRC=""
     if [ -d "$TMP_DIR/configs" ]; then
