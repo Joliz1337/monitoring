@@ -144,11 +144,11 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '1'
-          memory: 512M
+          cpus: '2'
+          memory: 1536M
         reservations:
           cpus: '0.25'
-          memory: 128M
+          memory: 256M
 
 volumes:
   panel-data:
