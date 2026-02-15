@@ -6,6 +6,11 @@
 
 set -e
 
+# Prevent interactive prompts during package installation
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=l
+export NEEDRESTART_SUSPEND=1
+
 # Trap для обработки прерываний
 cleanup() {
     local exit_code=$?
@@ -29,6 +34,78 @@ log_info() { echo -e "${CYAN}[INFO]${NC} $1"; }
 log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+
+# ==================== Progress Spinner ====================
+
+spin() {
+    local desc="$1"; shift
+    local logf
+    logf=$(mktemp /tmp/.spin-XXXXXX 2>/dev/null || echo "/tmp/.spin-$$")
+    local chars='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+    local t0
+    t0=$(date +%s)
+
+    "$@" >"$logf" 2>&1 &
+    local pid=$!
+    local i=0
+
+    while kill -0 "$pid" 2>/dev/null; do
+        local e=$(( $(date +%s) - t0 ))
+        local m=$((e / 60)) s=$((e % 60))
+        if [ $m -gt 0 ]; then
+            printf "\r  \033[0;36m%s\033[0m %s \033[1;33m[%dm %02ds]\033[0m  " \
+                "${chars:$((i % 10)):1}" "$desc" "$m" "$s"
+        else
+            printf "\r  \033[0;36m%s\033[0m %s \033[1;33m[%ds]\033[0m  " \
+                "${chars:$((i % 10)):1}" "$desc" "$s"
+        fi
+        i=$((i + 1))
+        sleep 0.12 2>/dev/null || sleep 1
+    done
+
+    wait "$pid" 2>/dev/null
+    local rc=$?
+    local e=$(( $(date +%s) - t0 ))
+    printf "\r\033[2K"
+
+    if [ $rc -eq 0 ]; then
+        echo -e "  ${GREEN}✓${NC} ${desc} ${CYAN}(${e}s)${NC}"
+    else
+        echo -e "  ${RED}✗${NC} ${desc} ${RED}— failed after ${e}s${NC}"
+        if [ -s "$logf" ]; then
+            echo -e "    ${RED}┌── last output ──────────────────────────${NC}"
+            tail -15 "$logf" | while IFS= read -r line; do
+                echo -e "    ${RED}│${NC} $line"
+            done
+            echo -e "    ${RED}└─────────────────────────────────────────${NC}"
+        fi
+    fi
+
+    rm -f "$logf" 2>/dev/null
+    return $rc
+}
+
+spin_retry() {
+    local tmo="$1" retries="$2" delay="$3" desc="$4"
+    shift 4
+
+    local attempt=1
+    while [ $attempt -le $retries ]; do
+        local label="$desc"
+        [ "$retries" -gt 1 ] && label="$desc ($attempt/$retries)"
+
+        if spin "$label" timeout "$tmo" "$@"; then
+            return 0
+        fi
+
+        [ $attempt -lt $retries ] && sleep "$delay"
+        attempt=$((attempt + 1))
+    done
+
+    return 1
+}
+
+# ==================== Configuration ====================
 
 # Timeouts (in seconds)
 DOCKER_PULL_TIMEOUT="${DOCKER_PULL_TIMEOUT:-300}"
@@ -126,23 +203,22 @@ fi
 log_success "Files updated"
 
 # Pull new Docker images
-log_info "Pulling new Docker images..."
 cd "$PANEL_DIR"
 
 set +e
-if ! timeout "$DOCKER_PULL_TIMEOUT" docker compose pull 2>&1; then
+spin_retry "$DOCKER_PULL_TIMEOUT" 3 5 "Pulling Docker images" \
+    docker compose pull || {
     log_error "Failed to pull images"
     echo "Check internet access and image availability in the registry"
     exit 1
-fi
+}
 set -e
 
-log_success "Images pulled"
-
 # Start containers
-log_info "Starting containers..."
-docker compose up -d
-log_success "Containers started"
+spin "Starting containers" docker compose up -d || {
+    log_error "Failed to start containers"
+    exit 1
+}
 
 # Wait for panel to be healthy
 log_info "Waiting for panel..."

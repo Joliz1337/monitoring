@@ -111,62 +111,81 @@ safe_read() {
     fi
 }
 
-run_timeout_retry() {
-    local timeout_sec="$1"
-    local max_retries="$2"
-    local delay="$3"
-    local desc="$4"
+# Run command with animated spinner showing elapsed time
+spin() {
+    local desc="$1"; shift
+    local logf
+    logf=$(mktemp /tmp/.spin-XXXXXX 2>/dev/null || echo "/tmp/.spin-$$")
+    local chars='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+    local t0
+    t0=$(date +%s)
+
+    "$@" >"$logf" 2>&1 &
+    local pid=$!
+    local i=0
+
+    while kill -0 "$pid" 2>/dev/null; do
+        local e=$(( $(date +%s) - t0 ))
+        local m=$((e / 60)) s=$((e % 60))
+        if [ $m -gt 0 ]; then
+            printf "\r  \033[0;36m%s\033[0m %s \033[1;33m[%dm %02ds]\033[0m  " \
+                "${chars:$((i % 10)):1}" "$desc" "$m" "$s"
+        else
+            printf "\r  \033[0;36m%s\033[0m %s \033[1;33m[%ds]\033[0m  " \
+                "${chars:$((i % 10)):1}" "$desc" "$s"
+        fi
+        i=$((i + 1))
+        sleep 0.12 2>/dev/null || sleep 1
+    done
+
+    wait "$pid" 2>/dev/null
+    local rc=$?
+    local e=$(( $(date +%s) - t0 ))
+    printf "\r\033[2K"
+
+    if [ $rc -eq 0 ]; then
+        echo -e "  ${GREEN}✓${NC} ${desc} ${CYAN}(${e}s)${NC}"
+    else
+        echo -e "  ${RED}✗${NC} ${desc} ${RED}— failed after ${e}s${NC}"
+        if [ -s "$logf" ]; then
+            echo -e "    ${RED}┌── last output ──────────────────────────${NC}"
+            tail -15 "$logf" | while IFS= read -r line; do
+                echo -e "    ${RED}│${NC} $line"
+            done
+            echo -e "    ${RED}└─────────────────────────────────────────${NC}"
+        fi
+    fi
+
+    rm -f "$logf" 2>/dev/null
+    return $rc
+}
+
+spin_retry() {
+    local tmo="$1" retries="$2" delay="$3" desc="$4"
     shift 4
-    
+
     local attempt=1
-    local output
-    local exit_code
-    
-    while [ $attempt -le $max_retries ]; do
-        output=$(timeout "$timeout_sec" "$@" 2>&1)
-        exit_code=$?
-        
-        if [ $exit_code -eq 0 ]; then
+    while [ $attempt -le $retries ]; do
+        local label="$desc"
+        [ "$retries" -gt 1 ] && label="$desc ($attempt/$retries)"
+
+        if spin "$label" timeout "$tmo" "$@"; then
             return 0
         fi
-        
-        if [ $exit_code -eq 124 ]; then
-            print_warning "$desc - timeout (${timeout_sec}s, attempt $attempt/$max_retries)"
-        else
-            print_warning "$desc - failed (exit $exit_code, attempt $attempt/$max_retries)"
-        fi
-        
-        if [ $attempt -lt $max_retries ]; then
-            sleep "$delay"
-        fi
-        
+
+        [ $attempt -lt $retries ] && sleep "$delay"
         attempt=$((attempt + 1))
     done
-    
-    print_error "$desc - failed after $max_retries attempts"
+
     return 1
 }
 
-run_quiet() {
-    local desc="$1"
-    shift
-    local output
-    local exit_code
-    
-    output=$("$@" 2>&1)
-    exit_code=$?
-    
-    if [ $exit_code -ne 0 ]; then
-        echo ""
-        print_error "$desc - failed (exit code: $exit_code)"
-        echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo "$output"
-        echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo ""
-        return $exit_code
+suppress_needrestart() {
+    if [ -d /etc/needrestart ] || dpkg -l needrestart &>/dev/null 2>&1; then
+        mkdir -p /etc/needrestart/conf.d 2>/dev/null || true
+        echo '$nrconf{restart} = "l";' > /etc/needrestart/conf.d/no-prompt.conf 2>/dev/null || true
     fi
-    
-    return 0
+    pkill -9 needrestart 2>/dev/null || true
 }
 
 # ==================== Configuration ====================
@@ -177,9 +196,7 @@ cd "$SCRIPT_DIR" || exit 1
 CERT_RENEWAL_DAYS=30
 
 echo ""
-echo -e "${CYAN}╔════════════════════════════════════════════╗${NC}"
-echo -e "${CYAN}║       Monitoring Panel Deployment          ║${NC}"
-echo -e "${CYAN}╚════════════════════════════════════════════╝${NC}"
+echo -e "${CYAN}══ Monitoring Panel Deployment ══${NC}"
 echo ""
 
 # ==================== Core Functions ====================
@@ -194,48 +211,65 @@ check_docker() {
 
 install_docker() {
     print_info "Installing Docker..."
-    
+    suppress_needrestart
+
     if [ -f /etc/debian_version ]; then
-        run_timeout_retry "$TIMEOUT_APT_UPDATE" "$MAX_RETRIES" "$RETRY_DELAY" "apt-get update" \
+        local os_id os_codename
+        os_id=$(. /etc/os-release && echo "$ID")
+        os_codename=$(. /etc/os-release && echo "$VERSION_CODENAME")
+
+        spin_retry "$TIMEOUT_APT_UPDATE" "$MAX_RETRIES" "$RETRY_DELAY" "Updating package lists" \
+            env DEBIAN_FRONTEND=noninteractive \
             apt-get update -qq || print_warning "apt update had issues"
-        run_timeout_retry "$TIMEOUT_APT_INSTALL" "$MAX_RETRIES" "$RETRY_DELAY" "installing dependencies" \
-            apt-get install -y -qq -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef" \
+
+        spin_retry "$TIMEOUT_APT_INSTALL" "$MAX_RETRIES" "$RETRY_DELAY" "Installing Docker dependencies" \
+            env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l NEEDRESTART_SUSPEND=1 \
+            apt-get install -y -qq \
+            -o Dpkg::Options::="--force-confold" \
+            -o Dpkg::Options::="--force-confdef" \
             ca-certificates curl gnupg || {
             print_error "Failed to install dependencies"
             return 1
         }
+
         install -m 0755 -d /etc/apt/keyrings 2>/dev/null || true
-        
-        if ! timeout "$TIMEOUT_CURL" curl -fsSL https://download.docker.com/linux/$(. /etc/os-release && echo "$ID")/gpg 2>/dev/null | \
-            gpg --dearmor -o /etc/apt/keyrings/docker.gpg 2>/dev/null; then
+
+        if ! spin "Downloading Docker GPG key" bash -c \
+            "curl -fsSL 'https://download.docker.com/linux/${os_id}/gpg' | gpg --dearmor -o /etc/apt/keyrings/docker.gpg 2>/dev/null"; then
             print_error "Failed to download Docker GPG key"
             return 1
         fi
         chmod a+r /etc/apt/keyrings/docker.gpg 2>/dev/null || true
-        
+
         echo \
-          "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$(. /etc/os-release && echo "$ID") \
-          $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
-        
-        run_timeout_retry "$TIMEOUT_APT_UPDATE" "$MAX_RETRIES" "$RETRY_DELAY" "apt-get update" \
+          "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/${os_id} \
+          ${os_codename} stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+        spin_retry "$TIMEOUT_APT_UPDATE" "$MAX_RETRIES" "$RETRY_DELAY" "Updating package lists (Docker repo)" \
+            env DEBIAN_FRONTEND=noninteractive \
             apt-get update -qq || print_warning "apt update had issues"
-        run_timeout_retry "$TIMEOUT_APT_INSTALL" "$MAX_RETRIES" "$RETRY_DELAY" "installing docker" \
-            apt-get install -y -qq -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef" \
+
+        suppress_needrestart
+        spin_retry "$TIMEOUT_APT_INSTALL" "$MAX_RETRIES" "$RETRY_DELAY" "Installing Docker Engine" \
+            env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l NEEDRESTART_SUSPEND=1 \
+            apt-get install -y -qq \
+            -o Dpkg::Options::="--force-confold" \
+            -o Dpkg::Options::="--force-confdef" \
             docker-ce docker-ce-cli containerd.io docker-compose-plugin || {
             print_error "Failed to install Docker"
             return 1
         }
     elif [ -f /etc/redhat-release ]; then
-        run_quiet "installing yum-utils" yum install -y -q yum-utils || return 1
+        spin "Installing yum-utils" yum install -y -q yum-utils || return 1
         yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo >/dev/null 2>&1
-        run_quiet "installing docker" yum install -y -q docker-ce docker-ce-cli containerd.io docker-compose-plugin || return 1
+        spin "Installing Docker (yum)" yum install -y -q docker-ce docker-ce-cli containerd.io docker-compose-plugin || return 1
         timeout "$TIMEOUT_SYSTEMCTL" systemctl start docker >/dev/null 2>&1 || true
         timeout "$TIMEOUT_SYSTEMCTL" systemctl enable docker >/dev/null 2>&1 || true
     else
         print_error "Unsupported OS. Please install Docker manually."
         return 1
     fi
-    
+
     print_status "Docker installed successfully"
 }
 
@@ -346,29 +380,34 @@ install_certbot() {
         print_status "Certbot is already installed"
         return 0
     fi
-    
+
     print_info "Installing Certbot..."
-    
+    suppress_needrestart
+
     if [ -f /etc/debian_version ]; then
-        run_timeout_retry "$TIMEOUT_APT_UPDATE" "$MAX_RETRIES" "$RETRY_DELAY" "apt-get update" \
+        spin_retry "$TIMEOUT_APT_UPDATE" "$MAX_RETRIES" "$RETRY_DELAY" "Updating package lists" \
+            env DEBIAN_FRONTEND=noninteractive \
             apt-get update -qq || true
-        run_timeout_retry "$TIMEOUT_APT_INSTALL" "$MAX_RETRIES" "$RETRY_DELAY" "installing certbot" \
-            apt-get install -y -qq -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef" \
+        spin_retry "$TIMEOUT_APT_INSTALL" "$MAX_RETRIES" "$RETRY_DELAY" "Installing Certbot" \
+            env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l NEEDRESTART_SUSPEND=1 \
+            apt-get install -y -qq \
+            -o Dpkg::Options::="--force-confold" \
+            -o Dpkg::Options::="--force-confdef" \
             certbot || {
             print_error "Failed to install certbot"
             return 1
         }
     elif [ -f /etc/redhat-release ]; then
         if command -v dnf &> /dev/null; then
-            run_quiet "installing certbot" dnf install -y -q certbot || return 1
+            spin "Installing Certbot (dnf)" dnf install -y -q certbot || return 1
         else
-            run_quiet "installing certbot" yum install -y -q certbot || return 1
+            spin "Installing Certbot (yum)" yum install -y -q certbot || return 1
         fi
     else
         print_error "Unsupported OS for automatic Certbot installation"
         return 1
     fi
-    
+
     print_status "Certbot installed successfully"
 }
 
@@ -614,30 +653,12 @@ generate_nginx_config() {
 
 pull_and_start() {
     print_info "Pulling and starting containers..."
-    
-    timeout "$TIMEOUT_DOCKER_COMPOSE_DOWN" docker compose down --remove-orphans >/dev/null 2>&1 || true
-    
-    local attempt=1
-    local pull_success=false
-    
-    while [ $attempt -le $MAX_RETRIES ]; do
-        print_info "Pulling images (attempt $attempt/$MAX_RETRIES)..."
-        
-        if timeout "$TIMEOUT_DOCKER_PULL" docker compose pull 2>&1; then
-            pull_success=true
-            print_status "Images pulled successfully"
-            break
-        fi
-        
-        print_warning "Pull failed (attempt $attempt/$MAX_RETRIES)"
-        attempt=$((attempt + 1))
-        
-        if [ $attempt -le $MAX_RETRIES ]; then
-            sleep "$RETRY_DELAY"
-        fi
-    done
-    
-    if [ "$pull_success" = false ]; then
+
+    spin "Stopping old containers" \
+        timeout "$TIMEOUT_DOCKER_COMPOSE_DOWN" docker compose down --remove-orphans 2>/dev/null || true
+
+    spin_retry "$TIMEOUT_DOCKER_PULL" "$MAX_RETRIES" "$RETRY_DELAY" "Pulling Docker images" \
+        docker compose pull || {
         print_error "Failed to pull images after $MAX_RETRIES attempts"
         echo ""
         echo "Possible solutions:"
@@ -646,22 +667,12 @@ pull_and_start() {
         echo "  3. Try: docker compose pull --no-parallel"
         echo ""
         exit 1
-    fi
-    
-    print_info "Starting containers..."
-    local up_output
-    up_output=$(docker compose up -d 2>&1)
-    local up_exit_code=$?
-    
-    if [ $up_exit_code -ne 0 ]; then
-        print_error "Failed to start containers (exit code: $up_exit_code)"
-        echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo "$up_output"
-        echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    }
+
+    spin "Starting containers" docker compose up -d || {
+        print_error "Failed to start containers"
         exit 1
-    fi
-    
-    print_status "Containers started"
+    }
 }
 
 wait_for_health() {
@@ -714,19 +725,16 @@ print_credentials() {
     echo ""
     
     echo ""
-    echo -e "${GREEN}╔══════════════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}║                       ДАННЫЕ ДЛЯ ВХОДА В ПАНЕЛЬ                      ║${NC}"
-    echo -e "${GREEN}╠══════════════════════════════════════════════════════════════════════╣${NC}"
-    echo -e "${GREEN}║${NC}                                                                      ${GREEN}║${NC}"
-    echo -e "${GREEN}║${NC}  ${YELLOW}URL панели:${NC}                                                        ${GREEN}║${NC}"
-    echo -e "${GREEN}║${NC}  ${CYAN}https://${DOMAIN}/${PANEL_UID}${NC}"
-    echo -e "${GREEN}║${NC}                                                                      ${GREEN}║${NC}"
-    echo -e "${GREEN}║${NC}  ${YELLOW}Пароль:${NC}                                                             ${GREEN}║${NC}"
-    echo -e "${GREEN}║${NC}  ${CYAN}${PANEL_PASSWORD}${NC}"
-    echo -e "${GREEN}║${NC}                                                                      ${GREEN}║${NC}"
-    echo -e "${GREEN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
+    echo -e "  ${GREEN}══ ДАННЫЕ ДЛЯ ВХОДА В ПАНЕЛЬ ══${NC}"
     echo ""
-    echo -e "${RED}ВАЖНО: Сохраните эти данные! После закрытия они не будут показаны снова.${NC}"
+    echo -e "    ${YELLOW}URL панели:${NC}"
+    echo -e "    ${CYAN}https://${DOMAIN}/${PANEL_UID}${NC}"
+    echo ""
+    echo -e "    ${YELLOW}Пароль:${NC}"
+    echo -e "    ${CYAN}${PANEL_PASSWORD}${NC}"
+    echo ""
+    echo -e "  ${RED}ВАЖНО: Сохраните эти данные!${NC}"
+    echo -e "  ${RED}После закрытия они не будут показаны снова.${NC}"
     echo ""
     
     safe_read "Press Enter to finish..." "" 30 >/dev/null

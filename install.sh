@@ -259,131 +259,85 @@ safe_read() {
     fi
 }
 
-# Run command with retry logic
-# Usage: run_with_retry max_retries delay_sec "description" command args...
-run_with_retry() {
-    local max_retries="$1"
-    local delay="$2"
-    local desc="$3"
-    shift 3
-    
-    local attempt=1
-    local output
-    local exit_code
-    
-    while [ $attempt -le $max_retries ]; do
-        output=$("$@" 2>&1)
-        exit_code=$?
-        
-        if [ $exit_code -eq 0 ]; then
-            return 0
+# Run command with animated spinner showing elapsed time
+# Usage: spin "Installing HAProxy" apt-get install -y haproxy
+spin() {
+    local desc="$1"; shift
+    local logf
+    logf=$(mktemp /tmp/.spin-XXXXXX 2>/dev/null || echo "/tmp/.spin-$$")
+    local chars='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+    local t0
+    t0=$(date +%s)
+
+    "$@" >"$logf" 2>&1 &
+    local pid=$!
+    local i=0
+
+    while kill -0 "$pid" 2>/dev/null; do
+        local e=$(( $(date +%s) - t0 ))
+        local m=$((e / 60)) s=$((e % 60))
+        if [ $m -gt 0 ]; then
+            printf "\r  \033[0;36m%s\033[0m %s \033[1;33m[%dm %02ds]\033[0m  " \
+                "${chars:$((i % 10)):1}" "$desc" "$m" "$s"
+        else
+            printf "\r  \033[0;36m%s\033[0m %s \033[1;33m[%ds]\033[0m  " \
+                "${chars:$((i % 10)):1}" "$desc" "$s"
         fi
-        
-        if [ $attempt -lt $max_retries ]; then
-            log_warn "$desc - failed (attempt $attempt/$max_retries), retrying in ${delay}s..."
-            sleep "$delay"
-        fi
-        
-        attempt=$((attempt + 1))
+        i=$((i + 1))
+        sleep 0.12 2>/dev/null || sleep 1
     done
-    
-    log_error "$desc - failed after $max_retries attempts"
-    echo "$output"
-    return $exit_code
+
+    wait "$pid" 2>/dev/null
+    local rc=$?
+    local e=$(( $(date +%s) - t0 ))
+    printf "\r\033[2K"
+
+    if [ $rc -eq 0 ]; then
+        echo -e "  ${GREEN}✓${NC} ${desc} ${CYAN}(${e}s)${NC}"
+    else
+        echo -e "  ${RED}✗${NC} ${desc} ${RED}— failed after ${e}s${NC}"
+        if [ -s "$logf" ]; then
+            echo -e "    ${RED}┌── last output ──────────────────────────${NC}"
+            tail -15 "$logf" | while IFS= read -r line; do
+                echo -e "    ${RED}│${NC} $line"
+            done
+            echo -e "    ${RED}└─────────────────────────────────────────${NC}"
+        fi
+    fi
+
+    rm -f "$logf" 2>/dev/null
+    return $rc
 }
 
-# Run command with timeout and retry
-# Usage: run_timeout_retry timeout_sec max_retries delay_sec "description" command args...
-run_timeout_retry() {
-    local timeout_sec="$1"
-    local max_retries="$2"
-    local delay="$3"
-    local desc="$4"
+# Run with spinner + timeout + automatic retry
+# Usage: spin_retry 300 3 5 "Installing packages" apt-get install -y pkg
+spin_retry() {
+    local tmo="$1" retries="$2" delay="$3" desc="$4"
     shift 4
-    
+
     local attempt=1
-    local output
-    local exit_code
-    
-    while [ $attempt -le $max_retries ]; do
-        output=$(timeout "$timeout_sec" "$@" 2>&1)
-        exit_code=$?
-        
-        if [ $exit_code -eq 0 ]; then
+    while [ $attempt -le $retries ]; do
+        local label="$desc"
+        [ "$retries" -gt 1 ] && label="$desc ($attempt/$retries)"
+
+        if spin "$label" timeout "$tmo" "$@"; then
             return 0
         fi
-        
-        if [ $exit_code -eq 124 ]; then
-            log_warn "$desc - $(msg timeout_error) (${timeout_sec}s, attempt $attempt/$max_retries)"
-        else
-            log_warn "$desc - failed (exit $exit_code, attempt $attempt/$max_retries)"
-        fi
-        
-        if [ $attempt -lt $max_retries ]; then
-            sleep "$delay"
-        fi
-        
+
+        [ $attempt -lt $retries ] && sleep "$delay"
         attempt=$((attempt + 1))
     done
-    
-    log_error "$desc - failed after $max_retries attempts"
-    if [ -n "$output" ]; then
-        echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo "$output" | tail -30
-        echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    fi
+
     return 1
 }
 
-# Run command quietly, show full output only on error
-run_quiet() {
-    local desc="$1"
-    shift
-    local output
-    local exit_code
-    
-    output=$("$@" 2>&1)
-    exit_code=$?
-    
-    if [ $exit_code -ne 0 ]; then
-        echo ""
-        log_error "$desc - failed (exit code: $exit_code)"
-        echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo "$output"
-        echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo ""
-        return $exit_code
+# Disable needrestart interactive prompts permanently (Ubuntu 22.04+)
+suppress_needrestart() {
+    if [ -d /etc/needrestart ] || dpkg -l needrestart &>/dev/null 2>&1; then
+        mkdir -p /etc/needrestart/conf.d 2>/dev/null || true
+        echo '$nrconf{restart} = "l";' > /etc/needrestart/conf.d/no-prompt.conf 2>/dev/null || true
     fi
-    
-    return 0
-}
-
-# Run command quietly with timeout
-run_quiet_timeout() {
-    local timeout_sec="$1"
-    local desc="$2"
-    shift 2
-    local output
-    local exit_code
-    
-    output=$(timeout "$timeout_sec" "$@" 2>&1)
-    exit_code=$?
-    
-    if [ $exit_code -ne 0 ]; then
-        if [ $exit_code -eq 124 ]; then
-            log_warn "$desc - $(msg timeout_error) (${timeout_sec}s)"
-        else
-            echo ""
-            log_error "$desc - failed (exit code: $exit_code)"
-            echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-            echo "$output"
-            echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-            echo ""
-        fi
-        return $exit_code
-    fi
-    
-    return 0
+    pkill -9 needrestart 2>/dev/null || true
 }
 
 # Safe file operation with backup
@@ -459,33 +413,36 @@ clone_repo_with_fallback() {
     local target_dir="$1"
     local branch="${2:-main}"
     local repo_url="https://github.com/Joliz1337/monitoring.git"
-    
+
     rm -rf "$target_dir" 2>/dev/null || true
-    
-    log_info "$(msg downloading_repo)..."
-    
-    if run_timeout_retry "$TIMEOUT_GIT_CLONE" "$MAX_RETRIES" "$RETRY_DELAY" "git clone" \
+
+    if spin_retry "$TIMEOUT_GIT_CLONE" "$MAX_RETRIES" "$RETRY_DELAY" "$(msg downloading_repo)" \
         git clone --depth 1 --branch "$branch" "$repo_url" "$target_dir"; then
-        log_success "$(msg repo_downloaded)"
         return 0
     fi
-    
+
     log_error "Failed to download repository"
     return 1
 }
 
-# ==================== APT Operations with Retry ====================
+# ==================== APT Operations ====================
 
 apt_update_safe() {
-    run_timeout_retry "$TIMEOUT_APT_UPDATE" "$MAX_RETRIES" "$RETRY_DELAY" "apt-get update" \
+    suppress_needrestart
+    spin_retry "$TIMEOUT_APT_UPDATE" "$MAX_RETRIES" "$RETRY_DELAY" "Updating package lists" \
+        env DEBIAN_FRONTEND=noninteractive \
         apt-get update -qq
 }
 
 apt_install_safe() {
     local packages="$*"
-    run_timeout_retry "$TIMEOUT_APT_INSTALL" "$MAX_RETRIES" "$RETRY_DELAY" "apt-get install $packages" \
+    suppress_needrestart
+    spin_retry "$TIMEOUT_APT_INSTALL" "$MAX_RETRIES" "$RETRY_DELAY" "Installing: $packages" \
         env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l NEEDRESTART_SUSPEND=1 \
-        apt-get install -y -qq -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef" $packages
+        apt-get install -y -qq \
+        -o Dpkg::Options::="--force-confold" \
+        -o Dpkg::Options::="--force-confdef" \
+        $packages
 }
 
 # ==================== Core Functions ====================
@@ -499,7 +456,6 @@ check_root() {
 
 check_git() {
     if ! command -v git &> /dev/null; then
-        log_info "$(msg installing_git)"
         apt_update_safe || log_warn "apt update had issues"
         apt_install_safe git || {
             log_error "Failed to install git"
@@ -945,23 +901,19 @@ install_node() {
     
     # Install HAProxy
     if ! command -v haproxy &>/dev/null; then
-        log_info "Installing HAProxy..."
         apt_update_safe || log_warn "apt update had issues"
         apt_install_safe haproxy || {
             log_error "Failed to install HAProxy"
             return 1
         }
         timeout "$TIMEOUT_SYSTEMCTL" systemctl enable haproxy >/dev/null 2>&1 || true
-        log_success "HAProxy installed"
     else
         log_success "HAProxy already installed"
     fi
-    
+
     # Install ipset
     if ! command -v ipset &>/dev/null; then
-        log_info "Installing ipset..."
         apt_install_safe ipset || log_warn "ipset installation had issues"
-        log_success "ipset installed"
     else
         log_success "ipset already installed"
     fi
@@ -1052,25 +1004,36 @@ remove_node() {
 # ==================== Language Selection ====================
 
 select_language() {
-    clear
+    printf "\033[0m" 2>/dev/null
+    clear 2>/dev/null || printf "\033[2J\033[H" 2>/dev/null
+
+    local title="Language / Язык"
+    local tlen=${#title}
+    local box_w=$(( tlen + 6 ))
+    [ $box_w -lt 30 ] && box_w=30
+    local border=""
+    local j; for ((j=0; j<box_w; j++)); do border+="═"; done
+    local pl=$(( (box_w - tlen) / 2 ))
+    local pr=$(( box_w - tlen - pl ))
+
     echo ""
-    echo -e "${CYAN}╔════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║         Language / Язык                    ║${NC}"
-    echo -e "${CYAN}╚════════════════════════════════════════════╝${NC}"
+    echo -e "  ${CYAN}╔${border}╗${NC}"
+    printf "  ${CYAN}║${NC}%*s%s%*s${CYAN}║${NC}\n" "$pl" "" "$title" "$pr" ""
+    echo -e "  ${CYAN}╚${border}╝${NC}"
     echo ""
     echo -e "  ${GREEN}1)${NC} English"
     echo -e "  ${GREEN}2)${NC} Русский"
     echo ""
-    
+
     local lang_choice
-    lang_choice=$(safe_read "Select / Выберите [1-2]: " "1" 30)
-    
+    lang_choice=$(safe_read "  Select / Выберите [1-2]: " "1" 30)
+
     case $lang_choice in
         1) LANG_CODE="en" ;;
         2) LANG_CODE="ru" ;;
         *) LANG_CODE="en" ;;
     esac
-    
+
     mkdir -p /etc/monitoring 2>/dev/null || true
     echo "$LANG_CODE" > /etc/monitoring/language 2>/dev/null || true
 }
@@ -1084,24 +1047,38 @@ load_language() {
 # ==================== Menu ====================
 
 show_menu() {
-    clear
+    # Reset terminal state after spinner or other operations
+    printf "\033[0m" 2>/dev/null
+    clear 2>/dev/null || printf "\033[2J\033[H" 2>/dev/null
+
+    # Dynamic title box — adapts to any language
+    local title
+    title="$(msg menu_title)"
+    local tlen=${#title}
+    local box_w=$(( tlen + 6 ))
+    [ $box_w -lt 40 ] && box_w=40
+    local border=""
+    local j; for ((j=0; j<box_w; j++)); do border+="═"; done
+    local pl=$(( (box_w - tlen) / 2 ))
+    local pr=$(( box_w - tlen - pl ))
+
     echo ""
-    echo -e "${CYAN}╔════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║       $(msg menu_title)          ║${NC}"
-    echo -e "${CYAN}╚════════════════════════════════════════════╝${NC}"
+    echo -e "  ${CYAN}╔${border}╗${NC}"
+    printf "  ${CYAN}║${NC}%*s%s%*s${CYAN}║${NC}\n" "$pl" "" "$title" "$pr" ""
+    echo -e "  ${CYAN}╚${border}╝${NC}"
     echo ""
-    
+
     echo -e "  ${GREEN}1)${NC} $(msg menu_install_panel)"
     echo -e "  ${GREEN}2)${NC} $(msg menu_install_node)"
     echo ""
-    
+
     if [ -d "$PANEL_DIR" ] && [ -f "$PANEL_DIR/docker-compose.yml" ]; then
         echo -e "  ${BLUE}3)${NC} $(msg menu_update_panel)"
     fi
     if [ -d "$NODE_DIR" ] && [ -f "$NODE_DIR/docker-compose.yml" ]; then
         echo -e "  ${BLUE}4)${NC} $(msg menu_update_node)"
     fi
-    
+
     if [ -d "$PANEL_DIR" ] || [ -d "$NODE_DIR" ]; then
         echo ""
     fi
@@ -1111,44 +1088,46 @@ show_menu() {
     if [ -d "$NODE_DIR" ]; then
         echo -e "  ${RED}6)${NC} $(msg menu_remove_node)"
     fi
-    
+
     echo ""
     echo -e "  ${CYAN}7)${NC} $(msg menu_optimize_system)"
-    
     echo ""
     echo -e "  ${YELLOW}0)${NC} $(msg menu_exit)"
     echo ""
-    
-    echo -e "${BLUE}$(msg status):${NC}"
+
+    # Status section — short lines, no paths
+    echo -e "  ${BLUE}$(msg status):${NC}"
+
     if [ -d "$PANEL_DIR" ] && [ -f "$PANEL_DIR/docker-compose.yml" ]; then
         local panel_version="?"
         [ -f "$PANEL_DIR/VERSION" ] && panel_version=$(cat "$PANEL_DIR/VERSION" 2>/dev/null || echo "?")
-        echo -e "  Panel: ${GREEN}$(msg installed)${NC} v$panel_version ($PANEL_DIR)"
+        echo -e "    Panel:  ${GREEN}$(msg installed)${NC} v${panel_version}"
     elif [ -d "$PANEL_DIR" ]; then
-        echo -e "  Panel: ${YELLOW}incomplete${NC} ($PANEL_DIR exists but not configured)"
+        echo -e "    Panel:  ${YELLOW}incomplete${NC}"
     else
-        echo -e "  Panel: ${YELLOW}$(msg not_installed)${NC}"
+        echo -e "    Panel:  ${YELLOW}$(msg not_installed)${NC}"
     fi
+
     if [ -d "$NODE_DIR" ] && [ -f "$NODE_DIR/docker-compose.yml" ]; then
         local node_version="?"
         [ -f "$NODE_DIR/VERSION" ] && node_version=$(cat "$NODE_DIR/VERSION" 2>/dev/null || echo "?")
-        echo -e "  Node:  ${GREEN}$(msg installed)${NC} v$node_version ($NODE_DIR)"
+        echo -e "    Node:   ${GREEN}$(msg installed)${NC} v${node_version}"
     elif [ -d "$NODE_DIR" ]; then
-        echo -e "  Node:  ${YELLOW}incomplete${NC} ($NODE_DIR exists but not configured)"
+        echo -e "    Node:   ${YELLOW}incomplete${NC}"
     else
-        echo -e "  Node:  ${YELLOW}$(msg not_installed)${NC}"
+        echo -e "    Node:   ${YELLOW}$(msg not_installed)${NC}"
     fi
-    
+
     if [ -f /etc/sysctl.d/99-vless-tuning.conf ]; then
-        echo -e "  $(msg optimizations_status): ${GREEN}$(msg applied)${NC}"
+        echo -e "    Sysctl: ${GREEN}$(msg applied)${NC}"
     else
-        echo -e "  $(msg optimizations_status): ${YELLOW}$(msg not_applied)${NC}"
+        echo -e "    Sysctl: ${YELLOW}$(msg not_applied)${NC}"
     fi
-    
+
     if timeout 5 systemctl is-enabled network-tune.service &>/dev/null 2>&1; then
-        echo -e "  RPS/RFS: ${GREEN}$(msg applied)${NC}"
+        echo -e "    RPS:    ${GREEN}$(msg applied)${NC}"
     else
-        echo -e "  RPS/RFS: ${YELLOW}$(msg not_applied)${NC}"
+        echo -e "    RPS:    ${YELLOW}$(msg not_applied)${NC}"
     fi
     echo ""
 }

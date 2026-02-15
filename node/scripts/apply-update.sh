@@ -35,6 +35,87 @@ log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+# ==================== Progress Spinner ====================
+
+# Run command with animated spinner showing elapsed time
+spin() {
+    local desc="$1"; shift
+    local logf
+    logf=$(mktemp /tmp/.spin-XXXXXX 2>/dev/null || echo "/tmp/.spin-$$")
+    local chars='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+    local t0
+    t0=$(date +%s)
+
+    "$@" >"$logf" 2>&1 &
+    local pid=$!
+    local i=0
+
+    while kill -0 "$pid" 2>/dev/null; do
+        local e=$(( $(date +%s) - t0 ))
+        local m=$((e / 60)) s=$((e % 60))
+        if [ $m -gt 0 ]; then
+            printf "\r  \033[0;36m%s\033[0m %s \033[1;33m[%dm %02ds]\033[0m  " \
+                "${chars:$((i % 10)):1}" "$desc" "$m" "$s"
+        else
+            printf "\r  \033[0;36m%s\033[0m %s \033[1;33m[%ds]\033[0m  " \
+                "${chars:$((i % 10)):1}" "$desc" "$s"
+        fi
+        i=$((i + 1))
+        sleep 0.12 2>/dev/null || sleep 1
+    done
+
+    wait "$pid" 2>/dev/null
+    local rc=$?
+    local e=$(( $(date +%s) - t0 ))
+    printf "\r\033[2K"
+
+    if [ $rc -eq 0 ]; then
+        echo -e "  ${GREEN}✓${NC} ${desc} ${CYAN}(${e}s)${NC}"
+    else
+        echo -e "  ${RED}✗${NC} ${desc} ${RED}— failed after ${e}s${NC}"
+        if [ -s "$logf" ]; then
+            echo -e "    ${RED}┌── last output ──────────────────────────${NC}"
+            tail -15 "$logf" | while IFS= read -r line; do
+                echo -e "    ${RED}│${NC} $line"
+            done
+            echo -e "    ${RED}└─────────────────────────────────────────${NC}"
+        fi
+    fi
+
+    rm -f "$logf" 2>/dev/null
+    return $rc
+}
+
+spin_retry() {
+    local tmo="$1" retries="$2" delay="$3" desc="$4"
+    shift 4
+
+    local attempt=1
+    while [ $attempt -le $retries ]; do
+        local label="$desc"
+        [ "$retries" -gt 1 ] && label="$desc ($attempt/$retries)"
+
+        if spin "$label" timeout "$tmo" "$@"; then
+            return 0
+        fi
+
+        [ $attempt -lt $retries ] && sleep "$delay"
+        attempt=$((attempt + 1))
+    done
+
+    return 1
+}
+
+suppress_needrestart() {
+    if [ -d /etc/needrestart ] || dpkg -l needrestart &>/dev/null 2>&1; then
+        mkdir -p /etc/needrestart/conf.d 2>/dev/null || true
+        echo '$nrconf{restart} = "l";' > /etc/needrestart/conf.d/no-prompt.conf 2>/dev/null || true
+    fi
+    pkill -9 needrestart 2>/dev/null || true
+}
+
+# ==================== Configuration ====================
+
 # Timeouts (in seconds)
 DOCKER_PULL_TIMEOUT="${DOCKER_PULL_TIMEOUT:-300}"
 
@@ -91,26 +172,27 @@ wait_for_apt_lock() {
 
 install_native_haproxy() {
     log_info "Installing native HAProxy..."
-    
-    # Wait for apt lock if needed
+    suppress_needrestart
+
     if ! wait_for_apt_lock; then
         log_error "Cannot acquire apt lock"
         return 1
     fi
-    
-    # Update with timeout (2 minutes max)
-    log_info "Updating package lists (timeout: 120s)..."
-    if ! timeout 120 apt-get update -qq 2>&1 | tail -5; then
-        log_warn "apt-get update had issues, continuing anyway..."
-    fi
-    
-    # Install with timeout (3 minutes max)
-    log_info "Installing haproxy package (timeout: 180s)..."
-    if timeout 180 apt-get install -y -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef" haproxy 2>&1 | tail -10; then
-        log_success "HAProxy installed"
+
+    spin_retry 120 3 5 "Updating package lists" \
+        env DEBIAN_FRONTEND=noninteractive \
+        apt-get update -qq || log_warn "apt-get update had issues, continuing anyway..."
+
+    suppress_needrestart
+    if spin_retry 180 3 5 "Installing HAProxy" \
+        env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l NEEDRESTART_SUSPEND=1 \
+        apt-get install -y -qq \
+        -o Dpkg::Options::="--force-confold" \
+        -o Dpkg::Options::="--force-confdef" \
+        haproxy; then
         return 0
     else
-        log_error "Failed to install HAProxy (timeout or error)"
+        log_error "Failed to install HAProxy"
         return 1
     fi
 }
@@ -120,20 +202,23 @@ install_ipset() {
         log_success "ipset already installed"
         return 0
     fi
-    
-    log_info "Installing ipset (required for IP blocklist)..."
-    
-    # Wait for apt lock if needed
+
+    suppress_needrestart
+
     if ! wait_for_apt_lock; then
         log_error "Cannot acquire apt lock"
         return 1
     fi
-    
-    if timeout 60 apt-get install -y -qq -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef" ipset 2>&1 | tail -5; then
-        log_success "ipset installed"
+
+    if spin_retry 120 3 5 "Installing ipset" \
+        env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l NEEDRESTART_SUSPEND=1 \
+        apt-get install -y -qq \
+        -o Dpkg::Options::="--force-confold" \
+        -o Dpkg::Options::="--force-confdef" \
+        ipset; then
         return 0
     else
-        log_warn "Failed to install ipset - IP blocklist may not work"
+        log_warn "Failed to install ipset — IP blocklist may not work"
         return 1
     fi
 }
@@ -298,26 +383,25 @@ chmod +x "$NODE_DIR"/scripts/*.sh 2>/dev/null || true
 log_success "Files updated"
 
 # Pull new Docker images
-log_info "Pulling new Docker images..."
 cd "$NODE_DIR"
 
 set +e
-if ! timeout "$DOCKER_PULL_TIMEOUT" docker compose pull 2>&1; then
+spin_retry "$DOCKER_PULL_TIMEOUT" 3 5 "Pulling Docker images" \
+    docker compose pull || {
     log_error "Failed to pull images"
     echo "Check internet access and image availability in the registry"
     exit 1
-fi
+}
 set -e
-
-log_success "Images pulled"
 
 # Ensure /etc/haproxy directory exists
 ensure_haproxy_dir
 
 # Start containers
-log_info "Starting containers..."
-docker compose up -d
-log_success "Containers started"
+spin "Starting containers" docker compose up -d || {
+    log_error "Failed to start containers"
+    exit 1
+}
 
 # Wait for API to be healthy
 log_info "Waiting for API..."

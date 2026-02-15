@@ -80,41 +80,73 @@ TMP_DIR="/tmp/node-update-$$"
 TARGET_REF="${1:-main}"
 REPO_URL="https://github.com/Joliz1337/monitoring.git"
 
-# ==================== Safe Execution Helpers ====================
+# ==================== Progress Spinner ====================
 
-run_timeout_retry() {
-    local timeout_sec="$1"
-    local max_retries="$2"
-    local delay="$3"
-    local desc="$4"
+spin() {
+    local desc="$1"; shift
+    local logf
+    logf=$(mktemp /tmp/.spin-XXXXXX 2>/dev/null || echo "/tmp/.spin-$$")
+    local chars='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+    local t0
+    t0=$(date +%s)
+
+    "$@" >"$logf" 2>&1 &
+    local pid=$!
+    local i=0
+
+    while kill -0 "$pid" 2>/dev/null; do
+        local e=$(( $(date +%s) - t0 ))
+        local m=$((e / 60)) s=$((e % 60))
+        if [ $m -gt 0 ]; then
+            printf "\r  \033[0;36m%s\033[0m %s \033[1;33m[%dm %02ds]\033[0m  " \
+                "${chars:$((i % 10)):1}" "$desc" "$m" "$s"
+        else
+            printf "\r  \033[0;36m%s\033[0m %s \033[1;33m[%ds]\033[0m  " \
+                "${chars:$((i % 10)):1}" "$desc" "$s"
+        fi
+        i=$((i + 1))
+        sleep 0.12 2>/dev/null || sleep 1
+    done
+
+    wait "$pid" 2>/dev/null
+    local rc=$?
+    local e=$(( $(date +%s) - t0 ))
+    printf "\r\033[2K"
+
+    if [ $rc -eq 0 ]; then
+        echo -e "  ${GREEN}✓${NC} ${desc} ${CYAN}(${e}s)${NC}"
+    else
+        echo -e "  ${RED}✗${NC} ${desc} ${RED}— failed after ${e}s${NC}"
+        if [ -s "$logf" ]; then
+            echo -e "    ${RED}┌── last output ──────────────────────────${NC}"
+            tail -15 "$logf" | while IFS= read -r line; do
+                echo -e "    ${RED}│${NC} $line"
+            done
+            echo -e "    ${RED}└─────────────────────────────────────────${NC}"
+        fi
+    fi
+
+    rm -f "$logf" 2>/dev/null
+    return $rc
+}
+
+spin_retry() {
+    local tmo="$1" retries="$2" delay="$3" desc="$4"
     shift 4
-    
+
     local attempt=1
-    local output
-    local exit_code
-    
-    while [ $attempt -le $max_retries ]; do
-        output=$(timeout "$timeout_sec" "$@" 2>&1)
-        exit_code=$?
-        
-        if [ $exit_code -eq 0 ]; then
+    while [ $attempt -le $retries ]; do
+        local label="$desc"
+        [ "$retries" -gt 1 ] && label="$desc ($attempt/$retries)"
+
+        if spin "$label" timeout "$tmo" "$@"; then
             return 0
         fi
-        
-        if [ $exit_code -eq 124 ]; then
-            log_warn "$desc - timeout (${timeout_sec}s, attempt $attempt/$max_retries)"
-        else
-            log_warn "$desc - failed (exit $exit_code, attempt $attempt/$max_retries)"
-        fi
-        
-        if [ $attempt -lt $max_retries ]; then
-            sleep "$delay"
-        fi
-        
+
+        [ $attempt -lt $retries ] && sleep "$delay"
         attempt=$((attempt + 1))
     done
-    
-    log_error "$desc - failed after $max_retries attempts"
+
     return 1
 }
 
@@ -141,31 +173,19 @@ check_connectivity_quiet() {
 clone_repo() {
     local target_dir="$1"
     local branch="$2"
-    local max_retries=$MAX_RETRIES
-    local retry=0
-    
-    while [ $retry -lt $max_retries ]; do
-        rm -rf "$target_dir" 2>/dev/null || true
-        
-        log_info "Downloading from GitHub (attempt $((retry + 1))/$max_retries)..."
-        
-        if timeout "$TIMEOUT_GIT_CLONE" git clone --depth 1 --branch "$branch" "$REPO_URL" "$target_dir" 2>&1; then
-            log_success "Download complete"
-            return 0
-        fi
-        
-        retry=$((retry + 1))
-        if [ $retry -lt $max_retries ]; then
-            log_warn "Download failed, retrying in ${RETRY_DELAY}s..."
-            sleep "$RETRY_DELAY"
-            
-            if ! check_connectivity_quiet; then
-                log_warn "Network connectivity issue detected"
-            fi
-        fi
-    done
-    
-    log_error "Failed to download after $max_retries attempts"
+
+    rm -rf "$target_dir" 2>/dev/null || true
+
+    if spin_retry "$TIMEOUT_GIT_CLONE" "$MAX_RETRIES" "$RETRY_DELAY" "Downloading from GitHub" \
+        git clone --depth 1 --branch "$branch" "$REPO_URL" "$target_dir"; then
+        return 0
+    fi
+
+    if ! check_connectivity_quiet; then
+        log_warn "Network connectivity issue detected"
+    fi
+
+    log_error "Failed to download after $MAX_RETRIES attempts"
     return 1
 }
 
@@ -222,11 +242,10 @@ fallback_update() {
     fi
     log_info "New version: $new_version"
     
-    log_info "Stopping containers..."
     cd "$NODE_DIR" || return 1
-    timeout "$TIMEOUT_DOCKER_COMPOSE_DOWN" docker compose down --timeout 30 2>/dev/null || true
-    log_success "Containers stopped"
-    
+    spin "Stopping containers" \
+        timeout "$TIMEOUT_DOCKER_COMPOSE_DOWN" docker compose down --timeout 30 2>/dev/null || true
+
     log_info "Copying new files..."
     if ! rsync -av --delete \
         --exclude='.env' \
@@ -237,23 +256,21 @@ fallback_update() {
         restore_config
         return 1
     fi
-    
+
     restore_config
-    
     chmod +x "$NODE_DIR"/*.sh 2>/dev/null || true
-    
-    log_info "Pulling images..."
-    if ! timeout "$TIMEOUT_DOCKER_PULL" docker compose pull 2>&1; then
+
+    spin_retry "$TIMEOUT_DOCKER_PULL" 3 5 "Pulling Docker images" \
+        docker compose pull || {
         log_error "Failed to pull images"
         return 1
-    fi
-    
-    log_info "Starting containers..."
-    if ! docker compose up -d 2>&1; then
+    }
+
+    spin "Starting containers" docker compose up -d || {
         log_error "Failed to start containers"
         return 1
-    fi
-    
+    }
+
     log_success "=== Update Complete ==="
     log_info "Version: $CURRENT_VERSION → $new_version"
 }

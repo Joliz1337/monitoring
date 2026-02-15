@@ -111,92 +111,81 @@ safe_read() {
     fi
 }
 
-run_with_retry() {
-    local max_retries="$1"
-    local delay="$2"
-    local desc="$3"
-    shift 3
-    
-    local attempt=1
-    local output
-    local exit_code
-    
-    while [ $attempt -le $max_retries ]; do
-        output=$("$@" 2>&1)
-        exit_code=$?
-        
-        if [ $exit_code -eq 0 ]; then
-            return 0
+# Run command with animated spinner showing elapsed time
+spin() {
+    local desc="$1"; shift
+    local logf
+    logf=$(mktemp /tmp/.spin-XXXXXX 2>/dev/null || echo "/tmp/.spin-$$")
+    local chars='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+    local t0
+    t0=$(date +%s)
+
+    "$@" >"$logf" 2>&1 &
+    local pid=$!
+    local i=0
+
+    while kill -0 "$pid" 2>/dev/null; do
+        local e=$(( $(date +%s) - t0 ))
+        local m=$((e / 60)) s=$((e % 60))
+        if [ $m -gt 0 ]; then
+            printf "\r  \033[0;36m%s\033[0m %s \033[1;33m[%dm %02ds]\033[0m  " \
+                "${chars:$((i % 10)):1}" "$desc" "$m" "$s"
+        else
+            printf "\r  \033[0;36m%s\033[0m %s \033[1;33m[%ds]\033[0m  " \
+                "${chars:$((i % 10)):1}" "$desc" "$s"
         fi
-        
-        if [ $attempt -lt $max_retries ]; then
-            log_warn "$desc - failed (attempt $attempt/$max_retries), retrying in ${delay}s..."
-            sleep "$delay"
-        fi
-        
-        attempt=$((attempt + 1))
+        i=$((i + 1))
+        sleep 0.12 2>/dev/null || sleep 1
     done
-    
-    log_error "$desc - failed after $max_retries attempts"
-    return $exit_code
+
+    wait "$pid" 2>/dev/null
+    local rc=$?
+    local e=$(( $(date +%s) - t0 ))
+    printf "\r\033[2K"
+
+    if [ $rc -eq 0 ]; then
+        echo -e "  ${GREEN}✓${NC} ${desc} ${CYAN}(${e}s)${NC}"
+    else
+        echo -e "  ${RED}✗${NC} ${desc} ${RED}— failed after ${e}s${NC}"
+        if [ -s "$logf" ]; then
+            echo -e "    ${RED}┌── last output ──────────────────────────${NC}"
+            tail -15 "$logf" | while IFS= read -r line; do
+                echo -e "    ${RED}│${NC} $line"
+            done
+            echo -e "    ${RED}└─────────────────────────────────────────${NC}"
+        fi
+    fi
+
+    rm -f "$logf" 2>/dev/null
+    return $rc
 }
 
-run_timeout_retry() {
-    local timeout_sec="$1"
-    local max_retries="$2"
-    local delay="$3"
-    local desc="$4"
+spin_retry() {
+    local tmo="$1" retries="$2" delay="$3" desc="$4"
     shift 4
-    
+
     local attempt=1
-    local output
-    local exit_code
-    
-    while [ $attempt -le $max_retries ]; do
-        output=$(timeout "$timeout_sec" "$@" 2>&1)
-        exit_code=$?
-        
-        if [ $exit_code -eq 0 ]; then
+    while [ $attempt -le $retries ]; do
+        local label="$desc"
+        [ "$retries" -gt 1 ] && label="$desc ($attempt/$retries)"
+
+        if spin "$label" timeout "$tmo" "$@"; then
             return 0
         fi
-        
-        if [ $exit_code -eq 124 ]; then
-            log_warn "$desc - timeout (${timeout_sec}s, attempt $attempt/$max_retries)"
-        else
-            log_warn "$desc - failed (exit $exit_code, attempt $attempt/$max_retries)"
-        fi
-        
-        if [ $attempt -lt $max_retries ]; then
-            sleep "$delay"
-        fi
-        
+
+        [ $attempt -lt $retries ] && sleep "$delay"
         attempt=$((attempt + 1))
     done
-    
-    log_error "$desc - failed after $max_retries attempts"
+
     return 1
 }
 
-run_quiet() {
-    local desc="$1"
-    shift
-    local output
-    local exit_code
-    
-    output=$("$@" 2>&1)
-    exit_code=$?
-    
-    if [ $exit_code -ne 0 ]; then
-        echo ""
-        log_error "$desc - failed (exit code: $exit_code)"
-        echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo "$output"
-        echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo ""
-        return $exit_code
+suppress_needrestart() {
+    if [ -d /etc/needrestart ] || dpkg -l needrestart &>/dev/null 2>&1; then
+        mkdir -p /etc/needrestart/conf.d 2>/dev/null || true
+        echo '$nrconf{restart} = "l";' > /etc/needrestart/conf.d/no-prompt.conf 2>/dev/null || true
     fi
-    
-    return 0
+    pkill -9 needrestart 2>/dev/null || true
 }
 
 safe_write_file() {
@@ -278,23 +267,30 @@ install_docker() {
     fi
 
     log_info "Installing Docker..."
+    suppress_needrestart
 
-    apt-get remove -y docker docker-engine docker.io containerd runc >/dev/null 2>&1 || true
+    spin "Removing old Docker packages" \
+        env DEBIAN_FRONTEND=noninteractive \
+        apt-get remove -y docker docker-engine docker.io containerd runc 2>/dev/null || true
 
-    run_timeout_retry "$TIMEOUT_APT_UPDATE" "$MAX_RETRIES" "$RETRY_DELAY" "apt-get update" \
+    spin_retry "$TIMEOUT_APT_UPDATE" "$MAX_RETRIES" "$RETRY_DELAY" "Updating package lists" \
+        env DEBIAN_FRONTEND=noninteractive \
         apt-get update -qq || log_warn "apt update had issues"
-    
-    run_timeout_retry "$TIMEOUT_APT_INSTALL" "$MAX_RETRIES" "$RETRY_DELAY" "installing dependencies" \
-        apt-get install -y -qq -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef" \
+
+    spin_retry "$TIMEOUT_APT_INSTALL" "$MAX_RETRIES" "$RETRY_DELAY" "Installing Docker dependencies" \
+        env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l NEEDRESTART_SUSPEND=1 \
+        apt-get install -y -qq \
+        -o Dpkg::Options::="--force-confold" \
+        -o Dpkg::Options::="--force-confdef" \
         ca-certificates curl gnupg lsb-release || {
         log_error "Failed to install dependencies"
         return 1
     }
 
     install -m 0755 -d /etc/apt/keyrings 2>/dev/null || true
-    
-    if ! timeout "$TIMEOUT_CURL" curl -fsSL "https://download.docker.com/linux/$OS/gpg" 2>/dev/null | \
-        gpg --dearmor -o /etc/apt/keyrings/docker.gpg 2>/dev/null; then
+
+    if ! spin "Downloading Docker GPG key" bash -c \
+        "curl -fsSL 'https://download.docker.com/linux/$OS/gpg' | gpg --dearmor -o /etc/apt/keyrings/docker.gpg 2>/dev/null"; then
         log_error "Failed to download Docker GPG key"
         return 1
     fi
@@ -304,11 +300,16 @@ install_docker() {
         "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$OS \
         $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
 
-    run_timeout_retry "$TIMEOUT_APT_UPDATE" "$MAX_RETRIES" "$RETRY_DELAY" "apt-get update" \
+    spin_retry "$TIMEOUT_APT_UPDATE" "$MAX_RETRIES" "$RETRY_DELAY" "Updating package lists (Docker repo)" \
+        env DEBIAN_FRONTEND=noninteractive \
         apt-get update -qq || log_warn "apt update had issues"
-    
-    run_timeout_retry "$TIMEOUT_APT_INSTALL" "$MAX_RETRIES" "$RETRY_DELAY" "installing docker" \
-        apt-get install -y -qq -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef" \
+
+    suppress_needrestart
+    spin_retry "$TIMEOUT_APT_INSTALL" "$MAX_RETRIES" "$RETRY_DELAY" "Installing Docker Engine" \
+        env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l NEEDRESTART_SUSPEND=1 \
+        apt-get install -y -qq \
+        -o Dpkg::Options::="--force-confold" \
+        -o Dpkg::Options::="--force-confdef" \
         docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || {
         log_error "Failed to install Docker"
         return 1
@@ -500,22 +501,30 @@ ask_panel_ip() {
 
 setup_firewall() {
     log_info "Configuring firewall..."
-    
+
     if ! command -v ufw &> /dev/null; then
-        log_info "Installing UFW..."
-        run_timeout_retry "$TIMEOUT_APT_UPDATE" "$MAX_RETRIES" "$RETRY_DELAY" "apt-get update" \
+        suppress_needrestart
+        spin_retry "$TIMEOUT_APT_UPDATE" "$MAX_RETRIES" "$RETRY_DELAY" "Updating package lists" \
+            env DEBIAN_FRONTEND=noninteractive \
             apt-get update -qq || true
-        run_timeout_retry "$TIMEOUT_APT_INSTALL" "$MAX_RETRIES" "$RETRY_DELAY" "installing ufw" \
-            apt-get install -y -qq -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef" \
+        spin_retry "$TIMEOUT_APT_INSTALL" "$MAX_RETRIES" "$RETRY_DELAY" "Installing UFW" \
+            env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l NEEDRESTART_SUSPEND=1 \
+            apt-get install -y -qq \
+            -o Dpkg::Options::="--force-confold" \
+            -o Dpkg::Options::="--force-confdef" \
             ufw || log_warn "UFW installation had issues"
     fi
-    
+
     if ! command -v ipset &> /dev/null; then
-        log_info "Installing ipset..."
-        run_timeout_retry "$TIMEOUT_APT_INSTALL" "$MAX_RETRIES" "$RETRY_DELAY" "installing ipset" \
-            apt-get install -y -qq -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef" \
+        suppress_needrestart
+        spin_retry "$TIMEOUT_APT_INSTALL" "$MAX_RETRIES" "$RETRY_DELAY" "Installing ipset" \
+            env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l NEEDRESTART_SUSPEND=1 \
+            apt-get install -y -qq \
+            -o Dpkg::Options::="--force-confold" \
+            -o Dpkg::Options::="--force-confdef" \
             ipset || log_warn "ipset installation had issues"
-        log_success "ipset installed"
+    else
+        log_success "ipset already installed"
     fi
     
     local ufw_was_active=false
@@ -545,30 +554,12 @@ setup_firewall() {
 
 pull_and_start() {
     log_info "Pulling and starting containers..."
-    
-    timeout "$TIMEOUT_DOCKER_COMPOSE_DOWN" docker compose down >/dev/null 2>&1 || true
-    
-    local attempt=1
-    local pull_success=false
-    
-    while [ $attempt -le $MAX_RETRIES ]; do
-        log_info "Pulling images (attempt $attempt/$MAX_RETRIES)..."
-        
-        if timeout "$TIMEOUT_DOCKER_PULL" docker compose pull 2>&1; then
-            pull_success=true
-            log_success "Images pulled successfully"
-            break
-        fi
-        
-        log_warn "Pull failed (attempt $attempt/$MAX_RETRIES)"
-        attempt=$((attempt + 1))
-        
-        if [ $attempt -le $MAX_RETRIES ]; then
-            sleep "$RETRY_DELAY"
-        fi
-    done
-    
-    if [ "$pull_success" = false ]; then
+
+    spin "Stopping old containers" \
+        timeout "$TIMEOUT_DOCKER_COMPOSE_DOWN" docker compose down 2>/dev/null || true
+
+    spin_retry "$TIMEOUT_DOCKER_PULL" "$MAX_RETRIES" "$RETRY_DELAY" "Pulling Docker images" \
+        docker compose pull || {
         log_error "Failed to pull images after $MAX_RETRIES attempts"
         echo ""
         echo "Possible solutions:"
@@ -577,24 +568,14 @@ pull_and_start() {
         echo "  3. Try: docker compose pull --no-parallel"
         echo ""
         exit 1
-    fi
-    
+    }
+
     ensure_haproxy_dir
-    
-    log_info "Starting containers..."
-    local up_output
-    up_output=$(docker compose up -d 2>&1)
-    local up_exit_code=$?
-    
-    if [ $up_exit_code -ne 0 ]; then
-        log_error "Failed to start containers (exit code: $up_exit_code)"
-        echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo "$up_output"
-        echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+
+    spin "Starting containers" docker compose up -d || {
+        log_error "Failed to start containers"
         exit 1
-    fi
-    
-    log_success "Containers started"
+    }
 }
 
 wait_for_services() {
@@ -703,17 +684,13 @@ show_status() {
     echo ""
     
     echo ""
-    echo -e "${GREEN}╔════════════════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}║                       CONNECTION DETAILS FOR PANEL                     ║${NC}"
-    echo -e "${GREEN}╠════════════════════════════════════════════════════════════════════════╣${NC}"
-    echo -e "${GREEN}║${NC}                                                                        ${GREEN}║${NC}"
-    echo -e "${GREEN}║${NC}  ${YELLOW}Server IP:${NC}  ${CYAN}${server_ip}${NC}"
-    echo -e "${GREEN}║${NC}  ${YELLOW}Port:${NC}       ${CYAN}9100${NC}"
-    echo -e "${GREEN}║${NC}                                                                        ${GREEN}║${NC}"
-    echo -e "${GREEN}║${NC}  ${YELLOW}API Key:${NC}"
-    echo -e "${GREEN}║${NC}  ${BLUE}${final_api_key}${NC}"
-    echo -e "${GREEN}║${NC}                                                                        ${GREEN}║${NC}"
-    echo -e "${GREEN}╚════════════════════════════════════════════════════════════════════════╝${NC}"
+    echo -e "  ${GREEN}══ CONNECTION DETAILS FOR PANEL ══${NC}"
+    echo ""
+    echo -e "    ${YELLOW}Server IP:${NC}  ${CYAN}${server_ip}${NC}"
+    echo -e "    ${YELLOW}Port:${NC}       ${CYAN}9100${NC}"
+    echo ""
+    echo -e "    ${YELLOW}API Key:${NC}"
+    echo -e "    ${BLUE}${final_api_key}${NC}"
     echo ""
     
     safe_read "Press Enter to finish..." "" 30 >/dev/null
