@@ -1147,6 +1147,8 @@ main() {
     fi
     
     while true; do
+        # Reset cwd — previous install/remove may have deleted current directory
+        cd / 2>/dev/null || true
         show_menu
         
         local choice

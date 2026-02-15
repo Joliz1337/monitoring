@@ -282,28 +282,26 @@ prompt_domain() {
     if [ -n "$DOMAIN" ]; then
         return
     fi
-    
+
     echo ""
-    echo -e "${YELLOW}========================================${NC}"
-    echo -e "${YELLOW}         Domain Configuration          ${NC}"
-    echo -e "${YELLOW}========================================${NC}"
+    echo -e "${YELLOW}══ Domain Configuration ══${NC}"
     echo ""
     echo -e "Enter the domain for your monitoring panel."
     echo -e "Make sure DNS is already pointing to this server!"
     echo ""
-    
+
     local max_attempts=5
     local attempt=0
-    
+
     while [ $attempt -lt $max_attempts ]; do
         DOMAIN=$(safe_read "Domain (e.g., panel.example.com): " "" 60)
-        
+
         if [ -z "$DOMAIN" ]; then
             print_error "Domain is required"
             attempt=$((attempt + 1))
             continue
         fi
-        
+
         if echo "$DOMAIN" | grep -qE '^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*$'; then
             print_status "Domain set: ${DOMAIN}"
             return 0
@@ -312,9 +310,90 @@ prompt_domain() {
             attempt=$((attempt + 1))
         fi
     done
-    
+
     print_error "Too many invalid attempts"
     exit 1
+}
+
+get_server_ip() {
+    local ip=""
+    ip=$(timeout 10 curl -s --connect-timeout 5 ifconfig.me 2>/dev/null) && [ -n "$ip" ] && echo "$ip" && return
+    ip=$(timeout 10 curl -s --connect-timeout 5 api.ipify.org 2>/dev/null) && [ -n "$ip" ] && echo "$ip" && return
+    ip=$(timeout 10 curl -s --connect-timeout 5 icanhazip.com 2>/dev/null) && [ -n "$ip" ] && echo "$ip" && return
+    ip=$(timeout 10 curl -s --connect-timeout 5 ifconfig.co 2>/dev/null) && [ -n "$ip" ] && echo "$ip" && return
+    echo ""
+}
+
+resolve_domain_ip() {
+    local domain="$1"
+    local ip=""
+
+    if command -v dig &>/dev/null; then
+        ip=$(dig +short "$domain" A 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+    fi
+    if [ -z "$ip" ] && command -v host &>/dev/null; then
+        ip=$(host "$domain" 2>/dev/null | awk '/has address/ {print $4}' | head -1)
+    fi
+    if [ -z "$ip" ] && command -v nslookup &>/dev/null; then
+        ip=$(nslookup "$domain" 2>/dev/null | awk '/^Address:/ && !/127\.0\.0/ {print $2}' | tail -1)
+    fi
+    if [ -z "$ip" ] && command -v getent &>/dev/null; then
+        ip=$(getent ahosts "$domain" 2>/dev/null | awk '/STREAM/ {print $1}' | head -1)
+    fi
+
+    echo "$ip"
+}
+
+verify_domain_dns() {
+    print_info "Verifying DNS for ${DOMAIN}..."
+
+    local server_ip domain_ip
+
+    server_ip=$(get_server_ip)
+    if [ -z "$server_ip" ]; then
+        print_warning "Could not detect server public IP — skipping DNS check"
+        return 0
+    fi
+    print_info "Server IP: ${server_ip}"
+
+    domain_ip=$(resolve_domain_ip "$DOMAIN")
+    if [ -z "$domain_ip" ]; then
+        echo ""
+        print_error "Domain ${DOMAIN} does not resolve to any IP address"
+        print_info "Create DNS A-record: ${DOMAIN} → ${server_ip}"
+        echo ""
+        local choice
+        choice=$(safe_read "Continue anyway? / Продолжить? (y/N): " "n" 30)
+        if [ "$choice" = "y" ] || [ "$choice" = "Y" ]; then
+            print_warning "Continuing without DNS verification"
+            return 0
+        fi
+        print_info "Installation cancelled. Fix DNS and try again."
+        return 1
+    fi
+
+    print_info "Domain IP: ${domain_ip}"
+
+    if [ "$domain_ip" = "$server_ip" ]; then
+        print_status "DNS OK: ${DOMAIN} → ${server_ip}"
+        return 0
+    fi
+
+    echo ""
+    print_error "DNS mismatch!"
+    echo -e "    ${YELLOW}Domain ${DOMAIN}${NC} resolves to: ${RED}${domain_ip}${NC}"
+    echo -e "    ${YELLOW}This server IP:${NC}             ${GREEN}${server_ip}${NC}"
+    echo ""
+    print_info "Fix DNS A-record: ${DOMAIN} → ${server_ip}"
+    echo ""
+    local choice
+    choice=$(safe_read "Continue anyway? / Продолжить? (y/N): " "n" 30)
+    if [ "$choice" = "y" ] || [ "$choice" = "Y" ]; then
+        print_warning "Continuing with DNS mismatch — SSL may fail!"
+        return 0
+    fi
+    print_info "Installation cancelled. Fix DNS and try again."
+    return 1
 }
 
 setup_firewall() {
@@ -760,11 +839,12 @@ main() {
     fi
     
     prompt_domain
-    
+    verify_domain_dns || exit 1
+
     if [ "$EUID" -eq 0 ]; then
         setup_firewall
     fi
-    
+
     setup_ssl_certificate || exit 1
     setup_cert_renewal_cron
     
