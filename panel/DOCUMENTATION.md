@@ -67,12 +67,14 @@ panel/
 
 ## Деплой и образы
 
-Все Docker-образы хранятся в **GHCR** (GitHub Container Registry):
+Docker-образы автоматически билдятся **GitHub Actions** при пуше в main и публикуются в **GHCR**:
 - `ghcr.io/joliz1337/monitoring-panel-frontend:latest`
 - `ghcr.io/joliz1337/monitoring-panel-backend:latest`
 - `ghcr.io/joliz1337/monitoring-node-api:latest`
 
-Установка и обновление используют `docker compose pull` вместо сборки на сервере.
+CI/CD: `.github/workflows/docker-publish.yml` — 3 параллельных job (node-api, panel-frontend, panel-backend) с GHA кешем.
+
+Установка и обновление: `docker compose pull` → `docker compose up -d`. Если GHCR недоступен — fallback на локальный `docker compose build` из Dockerfile.
 
 **EXT_KEY (зашифрованный функционал):**
 - Бэкенд: `.enc` файлы расшифровываются `_loader.py` при старте
@@ -614,5 +616,5 @@ monitoring
 
 При обновлении:
 - Сохраняется конфигурация (.env)
-- Пересобираются Docker контейнеры
+- Скачиваются новые Docker образы из GHCR (fallback: локальная сборка)
 - Сервисы перезапускаются автоматически

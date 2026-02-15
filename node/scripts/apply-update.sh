@@ -386,12 +386,16 @@ log_success "Files updated"
 cd "$NODE_DIR"
 
 set +e
-spin_retry "$DOCKER_PULL_TIMEOUT" 3 5 "Pulling Docker images" \
-    docker compose pull || {
-    log_error "Failed to pull images"
-    echo "Check internet access and image availability in the registry"
-    exit 1
-}
+# Pull ready images from GHCR (normal flow)
+if ! spin_retry 120 2 10 "Pulling Docker images" docker compose pull 2>/dev/null; then
+    log_warn "Failed to pull from registry, building locally..."
+    spin "Pulling base images" bash -c \
+        'docker compose pull --ignore-buildable 2>/dev/null || true'
+    spin_retry 600 2 10 "Building images from source" docker compose build || {
+        log_error "Failed to build images"
+        exit 1
+    }
+fi
 set -e
 
 # Ensure /etc/haproxy directory exists

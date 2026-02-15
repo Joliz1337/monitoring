@@ -284,11 +284,16 @@ fallback_update() {
 
     chmod +x "$PANEL_DIR"/*.sh 2>/dev/null || true
 
-    spin_retry "$TIMEOUT_DOCKER_PULL" 3 5 "Pulling Docker images" \
-        docker compose pull || {
-        log_error "Failed to pull images"
-        return 1
-    }
+    # Pull ready images from GHCR (normal flow)
+    if ! spin_retry 120 2 10 "Pulling Docker images" docker compose pull 2>/dev/null; then
+        log_warn "Failed to pull from registry, building locally..."
+        spin "Pulling base images" bash -c \
+            'docker compose pull --ignore-buildable 2>/dev/null || true'
+        spin_retry 600 2 10 "Building images from source" docker compose build || {
+            log_error "Failed to build images"
+            return 1
+        }
+    fi
 
     spin "Starting containers" docker compose up -d || {
         log_error "Failed to start containers"

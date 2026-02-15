@@ -736,17 +736,16 @@ pull_and_start() {
     spin "Stopping old containers" \
         timeout "$TIMEOUT_DOCKER_COMPOSE_DOWN" docker compose down --remove-orphans 2>/dev/null || true
 
-    spin_retry "$TIMEOUT_DOCKER_PULL" "$MAX_RETRIES" "$RETRY_DELAY" "Pulling Docker images" \
-        docker compose pull || {
-        print_error "Failed to pull images after $MAX_RETRIES attempts"
-        echo ""
-        echo "Possible solutions:"
-        echo "  1. Check if server has internet access"
-        echo "  2. Check if images exist in the registry"
-        echo "  3. Try: docker compose pull --no-parallel"
-        echo ""
-        exit 1
-    }
+    # Pull ready images from GHCR (normal flow)
+    if ! spin_retry 120 2 10 "Pulling Docker images" docker compose pull 2>/dev/null; then
+        print_warning "Failed to pull from registry, building locally..."
+        spin "Pulling base images" bash -c \
+            'docker compose pull --ignore-buildable 2>/dev/null || true'
+        spin_retry 600 2 10 "Building images from source" docker compose build || {
+            print_error "Failed to build images"
+            exit 1
+        }
+    fi
 
     spin "Starting containers" docker compose up -d || {
         print_error "Failed to start containers"
