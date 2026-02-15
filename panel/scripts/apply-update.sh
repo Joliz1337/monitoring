@@ -6,22 +6,12 @@
 
 set -e
 
-# Build log file for error reporting
-BUILD_LOG="/tmp/docker_build_$$.log"
-
 # Trap для обработки прерываний
 cleanup() {
     local exit_code=$?
     if [ $exit_code -ne 0 ]; then
         echo ""
         echo -e "\033[0;31m[ERROR] Script interrupted or failed (exit code: $exit_code)\033[0m"
-        if [ -f "$BUILD_LOG" ] && [ -s "$BUILD_LOG" ]; then
-            echo -e "\033[0;31m[ERROR] Last 30 lines of build output:\033[0m"
-            echo -e "\033[0;31m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
-            tail -30 "$BUILD_LOG"
-            echo -e "\033[0;31m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
-        fi
-        rm -f "$BUILD_LOG"
     fi
     exit $exit_code
 }
@@ -41,7 +31,7 @@ log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
 # Timeouts (in seconds)
-DOCKER_BUILD_TIMEOUT="${DOCKER_BUILD_TIMEOUT:-1800}"  # 30 min default
+DOCKER_PULL_TIMEOUT="${DOCKER_PULL_TIMEOUT:-300}"
 
 # Arguments
 TMP_DIR="$1"
@@ -135,67 +125,19 @@ fi
 
 log_success "Files updated"
 
-# Enable BuildKit for faster builds with cache
-export DOCKER_BUILDKIT=1
-export COMPOSE_DOCKER_CLI_BUILD=1
-
-# Rebuild Docker images with timeout
-log_info "Building new Docker images (timeout: ${DOCKER_BUILD_TIMEOUT}s)..."
+# Pull new Docker images
+log_info "Pulling new Docker images..."
 cd "$PANEL_DIR"
 
-# Generate cache bust hash from .env (forces rebuild when any config changes)
-CACHE_BUST=""
-if [ -f "$PANEL_DIR/.env" ]; then
-    CACHE_BUST=$(md5sum "$PANEL_DIR/.env" | cut -d' ' -f1)
-    export CACHE_BUST
-    log_info "Config hash: ${CACHE_BUST:0:8}... (rebuild on .env changes)"
-fi
-
-# Run build in background, capture output to log file
 set +e
-timeout "$DOCKER_BUILD_TIMEOUT" docker compose build --build-arg CACHE_BUST=${CACHE_BUST} > "$BUILD_LOG" 2>&1 &
-BUILD_PID=$!
-
-# Show progress while building (last 30 lines of log)
-while kill -0 $BUILD_PID 2>/dev/null; do
-    if [ -f "$BUILD_LOG" ] && [ -s "$BUILD_LOG" ]; then
-        # Clear screen and show last 30 lines
-        clear
-        echo -e "${CYAN}[INFO]${NC} Building Docker images... (press Ctrl+C to cancel)"
-        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        tail -30 "$BUILD_LOG" 2>/dev/null
-        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    fi
-    sleep 3
-done
-echo ""
-
-wait $BUILD_PID
-BUILD_EXIT_CODE=$?
+if ! timeout "$DOCKER_PULL_TIMEOUT" docker compose pull 2>&1; then
+    log_error "Failed to pull images"
+    echo "Check internet access and image availability in the registry"
+    exit 1
+fi
 set -e
 
-if [ $BUILD_EXIT_CODE -eq 0 ]; then
-    log_success "Images built"
-    rm -f "$BUILD_LOG"
-elif [ $BUILD_EXIT_CODE -eq 124 ]; then
-    log_error "Build timeout after ${DOCKER_BUILD_TIMEOUT}s"
-    echo "Try increasing timeout: export DOCKER_BUILD_TIMEOUT=3600"
-    echo "Or check server memory: free -h"
-    echo ""
-    echo -e "${YELLOW}Last 30 lines of build output:${NC}"
-    echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    tail -30 "$BUILD_LOG" 2>/dev/null || echo "(no log available)"
-    echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    exit 1
-else
-    log_error "Build failed (exit code: $BUILD_EXIT_CODE)"
-    echo ""
-    echo -e "${YELLOW}Last 30 lines of build output:${NC}"
-    echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    tail -30 "$BUILD_LOG" 2>/dev/null || echo "(no log available)"
-    echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    exit 1
-fi
+log_success "Images pulled"
 
 # Start containers
 log_info "Starting containers..."

@@ -17,7 +17,7 @@ LOCK_FD=200
 
 TIMEOUT_GIT_CLONE=180
 TIMEOUT_DOCKER_COMPOSE_DOWN=120
-export DOCKER_BUILD_TIMEOUT="${DOCKER_BUILD_TIMEOUT:-1800}"
+TIMEOUT_DOCKER_PULL=300
 TIMEOUT_CONNECTIVITY_CHECK=15
 
 MAX_RETRIES=3
@@ -241,15 +241,10 @@ fallback_update() {
     restore_config
     
     chmod +x "$NODE_DIR"/*.sh 2>/dev/null || true
-    export DOCKER_BUILDKIT=1
     
-    if [ -f "$NODE_DIR/.env" ]; then
-        export CACHE_BUST=$(md5sum "$NODE_DIR/.env" 2>/dev/null | cut -d' ' -f1 || echo "nocache")
-    fi
-    
-    log_info "Building containers..."
-    if ! timeout "$DOCKER_BUILD_TIMEOUT" docker build --network=host --build-arg CACHE_BUST=${CACHE_BUST:-} -t monitoring-node-api . 2>&1; then
-        log_error "Docker build failed"
+    log_info "Pulling images..."
+    if ! timeout "$TIMEOUT_DOCKER_PULL" docker compose pull 2>&1; then
+        log_error "Failed to pull images"
         return 1
     fi
     

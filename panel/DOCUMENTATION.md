@@ -55,12 +55,31 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/in
 ```
 panel/
 ├── frontend/          # React + Vite + Tailwind
+│   ├── entrypoint.sh  # Рантайм-расшифровка EXT модулей
+│   ├── decrypt_dist.py # AES-256-GCM расшифровка
+│   └── ext-dist.enc   # Зашифрованный EXT-бандл (если есть)
 ├── backend/           # FastAPI + PostgreSQL
 ├── nginx/             # Reverse proxy с SSL
-├── docker-compose.yml # Включает postgres контейнер
-├── deploy.sh
+├── docker-compose.yml # Образы из GHCR + fallback build
+├── deploy.sh          # Установка: docker compose pull + up
 └── VERSION            # Версия панели (единственный источник)
 ```
+
+## Деплой и образы
+
+Все Docker-образы хранятся в **GHCR** (GitHub Container Registry):
+- `ghcr.io/joliz1337/monitoring-panel-frontend:latest`
+- `ghcr.io/joliz1337/monitoring-panel-backend:latest`
+- `ghcr.io/joliz1337/monitoring-node-api:latest`
+
+Установка и обновление используют `docker compose pull` вместо сборки на сервере.
+
+**EXT_KEY (зашифрованный функционал):**
+- Бэкенд: `.enc` файлы расшифровываются `_loader.py` при старте
+- Фронтенд: `ext-dist.enc` расшифровывается `entrypoint.sh` при запуске контейнера
+- Если `EXT_KEY` не указан — работает базовый билд
+
+**Сборка образов** (для разработчика): `_tools/build_all.sh <EXT_KEY>`
 
 ## База данных
 
@@ -128,7 +147,7 @@ panel/
 1. API создаёт временный контейнер `panel-updater` (образ `docker:cli`)
 2. Контейнер клонирует свежий код из GitHub (main или указанная ветка)
 3. Запускает `update.sh` из склонированной папки
-4. `update.sh` останавливает контейнеры, копирует файлы, пересобирает образы, запускает
+4. `update.sh` останавливает контейнеры, копирует файлы, скачивает новые образы (docker compose pull), запускает
 5. Контейнер удаляется после завершения
 
 Проверка версий: панель скачивает `panel/VERSION`, `node/VERSION` и `configs/VERSION` файлы с GitHub и сравнивает с локальными. Все запросы к нодам выполняются параллельно через `asyncio.gather` для быстрой загрузки.

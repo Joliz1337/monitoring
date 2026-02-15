@@ -17,7 +17,7 @@ LOCK_FD=200
 
 TIMEOUT_GIT_CLONE=180
 TIMEOUT_DOCKER_COMPOSE_DOWN=120
-TIMEOUT_DOCKER_BUILD="${DOCKER_BUILD_TIMEOUT:-1200}"
+TIMEOUT_DOCKER_PULL=300
 TIMEOUT_CONNECTIVITY_CHECK=15
 
 MAX_RETRIES=3
@@ -264,16 +264,10 @@ fallback_update() {
     fi
     
     chmod +x "$PANEL_DIR"/*.sh 2>/dev/null || true
-    export DOCKER_BUILDKIT=1
-    export COMPOSE_DOCKER_CLI_BUILD=1
     
-    if [ -f "$PANEL_DIR/.env" ]; then
-        export CACHE_BUST=$(md5sum "$PANEL_DIR/.env" 2>/dev/null | cut -d' ' -f1 || echo "nocache")
-    fi
-    
-    log_info "Building containers..."
-    if ! timeout "$TIMEOUT_DOCKER_BUILD" docker compose build 2>&1; then
-        log_error "Docker build failed"
+    log_info "Pulling images..."
+    if ! timeout "$TIMEOUT_DOCKER_PULL" docker compose pull 2>&1; then
+        log_error "Failed to pull images"
         return 1
     fi
     

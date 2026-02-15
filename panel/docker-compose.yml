@@ -65,14 +65,16 @@ services:
           memory: 32M
 
   frontend:
+    image: ghcr.io/joliz1337/monitoring-panel-frontend:latest
     build:
       context: ./frontend
       dockerfile: Dockerfile
       args:
-        - EXT_KEY=${EXT_KEY:-}
         - CACHE_BUST=${CACHE_BUST:-}
     container_name: panel-frontend
     restart: unless-stopped
+    environment:
+      - EXT_KEY=${EXT_KEY:-}
     depends_on:
       backend:
         condition: service_healthy
@@ -93,6 +95,7 @@ services:
           memory: 32M
 
   backend:
+    image: ghcr.io/joliz1337/monitoring-panel-backend:latest
     build:
       context: .
       dockerfile: backend/Dockerfile

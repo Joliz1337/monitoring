@@ -21,6 +21,7 @@ services:
         max-file: "3"
 
   api:
+    image: ghcr.io/joliz1337/monitoring-node-api:latest
     build:
       context: .
       args:

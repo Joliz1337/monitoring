@@ -24,9 +24,6 @@ export NEEDRESTART_SUSPEND=1
 LOCKFILE="/tmp/monitoring-installer.lock"
 LOCK_FD=200
 
-# Build log file for error reporting
-BUILD_LOG="/tmp/docker_build_$$.log"
-
 # ==================== Timeouts Configuration ====================
 
 TIMEOUT_USER_INPUT=300          # 5 min for user input
@@ -35,9 +32,7 @@ TIMEOUT_APT_UPDATE=120          # 2 min for apt update
 TIMEOUT_APT_INSTALL=300         # 5 min for apt install
 TIMEOUT_CURL=60                 # 1 min for curl requests
 TIMEOUT_DOCKER_COMPOSE_DOWN=120 # 2 min for docker compose down
-TIMEOUT_DOCKER_BUILD=1200       # 20 min for docker build
 TIMEOUT_SYSTEMCTL=60            # 1 min for systemctl operations
-TIMEOUT_CONNECTIVITY_CHECK=15   # 15 sec for connectivity check
 
 # Retry configuration
 MAX_RETRIES=3
@@ -72,16 +67,9 @@ cleanup() {
     if [ $exit_code -ne 0 ] && [ $exit_code -ne 130 ] && [ $exit_code -ne 143 ]; then
         echo ""
         echo -e "\033[0;31m[ERROR] Script failed (exit code: $exit_code)\033[0m"
-        if [ -f "$BUILD_LOG" ] && [ -s "$BUILD_LOG" ]; then
-            echo -e "\033[0;31m[ERROR] Last 50 lines of build output:\033[0m"
-            echo -e "\033[0;31m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
-            tail -50 "$BUILD_LOG" 2>/dev/null || true
-            echo -e "\033[0;31m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
-        fi
     fi
     
     # Cleanup temp files
-    rm -f "$BUILD_LOG" 2>/dev/null || true
     rm -rf "$TMP_DIR" 2>/dev/null || true
     
     exit $exit_code
@@ -164,34 +152,6 @@ MSG_EN[optimizations_applied]="System optimizations applied!"
 MSG_EN[optimizations_status]="Optimizations"
 MSG_EN[applied]="applied"
 MSG_EN[not_applied]="not applied"
-MSG_EN[testing_mirrors]="Testing GitHub access..."
-MSG_EN[mirror_selected]="Selected"
-MSG_EN[mirror_failed]="unavailable"
-MSG_EN[all_mirrors_failed]="All sources failed, will try direct GitHub anyway"
-MSG_EN[download_slow]="Download failed, trying alternative..."
-MSG_EN[checking_docker_network]="Checking Docker Hub availability..."
-MSG_EN[docker_network_ok]="Docker Hub is accessible"
-MSG_EN[docker_network_error]="Docker Hub is not accessible"
-MSG_EN[fixing_docker_network]="Attempting to fix network issues..."
-MSG_EN[disabling_ipv6]="Disabling IPv6..."
-MSG_EN[ipv6_disabled]="IPv6 disabled"
-MSG_EN[configuring_dns]="Configuring DNS (1.1.1.1, 8.8.8.8)..."
-MSG_EN[dns_configured]="DNS configured"
-MSG_EN[configuring_mirrors]="Configuring Docker registry mirrors..."
-MSG_EN[mirrors_configured]="Docker mirrors configured"
-MSG_EN[restarting_docker]="Restarting Docker service..."
-MSG_EN[docker_restarted]="Docker service restarted"
-MSG_EN[build_failed]="Docker build failed"
-MSG_EN[retrying_build]="Retrying build after network fix..."
-MSG_EN[build_success]="Docker build completed successfully"
-MSG_EN[network_fix_failed]="Could not fix network issues automatically"
-MSG_EN[manual_fix_hint]="Try manually: check firewall, DNS settings, or use VPN"
-MSG_EN[checking_connectivity]="Checking network connectivity..."
-MSG_EN[connectivity_ok]="Network connectivity OK"
-MSG_EN[connectivity_failed]="Network connectivity failed"
-MSG_EN[applying_fix]="Applying fix"
-MSG_EN[retry_attempt]="Retry attempt"
-MSG_EN[timeout_error]="Operation timed out"
 MSG_EN[checking_requirements]="Checking system requirements..."
 MSG_EN[requirements_ok]="System requirements OK"
 MSG_EN[disk_space_low]="Low disk space"
@@ -246,34 +206,6 @@ MSG_RU[optimizations_applied]="Системные оптимизации при�
 MSG_RU[optimizations_status]="Оптимизации"
 MSG_RU[applied]="применены"
 MSG_RU[not_applied]="не применены"
-MSG_RU[testing_mirrors]="Проверка доступа к GitHub..."
-MSG_RU[mirror_selected]="Выбрано"
-MSG_RU[mirror_failed]="недоступно"
-MSG_RU[all_mirrors_failed]="Все источники недоступны, пробуем прямой GitHub"
-MSG_RU[download_slow]="Загрузка не удалась, пробуем альтернативу..."
-MSG_RU[checking_docker_network]="Проверка доступности Docker Hub..."
-MSG_RU[docker_network_ok]="Docker Hub доступен"
-MSG_RU[docker_network_error]="Docker Hub недоступен"
-MSG_RU[fixing_docker_network]="Попытка исправить сетевые проблемы..."
-MSG_RU[disabling_ipv6]="Отключение IPv6..."
-MSG_RU[ipv6_disabled]="IPv6 отключён"
-MSG_RU[configuring_dns]="Настройка DNS (1.1.1.1, 8.8.8.8)..."
-MSG_RU[dns_configured]="DNS настроен"
-MSG_RU[configuring_mirrors]="Настройка зеркал Docker registry..."
-MSG_RU[mirrors_configured]="Зеркала Docker настроены"
-MSG_RU[restarting_docker]="Перезапуск Docker..."
-MSG_RU[docker_restarted]="Docker перезапущен"
-MSG_RU[build_failed]="Сборка Docker образов не удалась"
-MSG_RU[retrying_build]="Повторная попытка сборки после исправления сети..."
-MSG_RU[build_success]="Сборка Docker образов завершена успешно"
-MSG_RU[network_fix_failed]="Не удалось автоматически исправить сетевые проблемы"
-MSG_RU[manual_fix_hint]="Попробуйте вручную: проверьте firewall, DNS или используйте VPN"
-MSG_RU[checking_connectivity]="Проверка сетевого подключения..."
-MSG_RU[connectivity_ok]="Сетевое подключение в порядке"
-MSG_RU[connectivity_failed]="Сетевое подключение не работает"
-MSG_RU[applying_fix]="Применяется исправление"
-MSG_RU[retry_attempt]="Попытка повтора"
-MSG_RU[timeout_error]="Превышено время ожидания"
 MSG_RU[checking_requirements]="Проверка системных требований..."
 MSG_RU[requirements_ok]="Системные требования выполнены"
 MSG_RU[disk_space_low]="Мало места на диске"
@@ -521,184 +453,6 @@ check_requirements() {
     return 0  # Don't fail, just warn
 }
 
-# ==================== Network Functions ====================
-
-# Check if Docker Hub is accessible (quiet)
-check_docker_hub_quiet() {
-    local urls=(
-        "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/alpine:pull"
-        "https://registry-1.docker.io/v2/"
-    )
-    
-    for url in "${urls[@]}"; do
-        if timeout "$TIMEOUT_CONNECTIVITY_CHECK" curl -fsSL --connect-timeout 10 --max-time 15 "$url" >/dev/null 2>&1; then
-            return 0
-        fi
-    done
-    
-    return 1
-}
-
-# Check Docker Hub with logs
-check_docker_hub() {
-    log_info "$(msg checking_docker_network)"
-    
-    if check_docker_hub_quiet; then
-        log_success "$(msg docker_network_ok)"
-        return 0
-    fi
-    
-    log_warn "$(msg docker_network_error)"
-    return 1
-}
-
-# Check general internet connectivity (quiet)
-check_connectivity_quiet() {
-    local test_urls=(
-        "https://1.1.1.1"
-        "https://8.8.8.8"
-        "https://google.com"
-    )
-    
-    for url in "${test_urls[@]}"; do
-        if timeout "$TIMEOUT_CONNECTIVITY_CHECK" curl -fsSL --connect-timeout 5 --max-time 10 "$url" >/dev/null 2>&1; then
-            return 0
-        fi
-    done
-    
-    return 1
-}
-
-# Check connectivity with logs
-check_connectivity() {
-    log_info "$(msg checking_connectivity)"
-    
-    if check_connectivity_quiet; then
-        log_success "$(msg connectivity_ok)"
-        return 0
-    fi
-    
-    log_error "$(msg connectivity_failed)"
-    return 1
-}
-
-# Disable IPv6
-disable_ipv6() {
-    log_info "$(msg disabling_ipv6)"
-    
-    # Check if IPv6 is already disabled
-    if [ -f /etc/sysctl.d/99-vless-tuning.conf ] && grep -q "disable_ipv6 = 1" /etc/sysctl.d/99-vless-tuning.conf 2>/dev/null; then
-        log_success "IPv6 already disabled"
-        sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null 2>&1 || true
-        sysctl -w net.ipv6.conf.default.disable_ipv6=1 >/dev/null 2>&1 || true
-        sysctl -w net.ipv6.conf.lo.disable_ipv6=1 >/dev/null 2>&1 || true
-        return 0
-    fi
-    
-    local content='net.ipv6.conf.all.disable_ipv6 = 1
-net.ipv6.conf.default.disable_ipv6 = 1
-net.ipv6.conf.lo.disable_ipv6 = 1'
-    
-    safe_write_file "/etc/sysctl.d/99-disable-ipv6.conf" "$content"
-    
-    sysctl -p /etc/sysctl.d/99-disable-ipv6.conf >/dev/null 2>&1 || true
-    sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null 2>&1 || true
-    sysctl -w net.ipv6.conf.default.disable_ipv6=1 >/dev/null 2>&1 || true
-    sysctl -w net.ipv6.conf.lo.disable_ipv6=1 >/dev/null 2>&1 || true
-    
-    log_success "$(msg ipv6_disabled)"
-}
-
-# Configure DNS
-configure_dns() {
-    log_info "$(msg configuring_dns)"
-    
-    # Backup
-    if [ -f /etc/resolv.conf ] && [ ! -f /etc/resolv.conf.backup ]; then
-        cp /etc/resolv.conf /etc/resolv.conf.backup 2>/dev/null || true
-    fi
-    
-    if [ -L /etc/resolv.conf ] && readlink /etc/resolv.conf 2>/dev/null | grep -q systemd; then
-        mkdir -p /etc/systemd/resolved.conf.d 2>/dev/null || true
-        local content='[Resolve]
-DNS=1.1.1.1 8.8.8.8 1.0.0.1 8.8.4.4
-FallbackDNS=9.9.9.9 149.112.112.112'
-        safe_write_file "/etc/systemd/resolved.conf.d/dns.conf" "$content"
-        timeout "$TIMEOUT_SYSTEMCTL" systemctl restart systemd-resolved >/dev/null 2>&1 || true
-    else
-        chattr -i /etc/resolv.conf >/dev/null 2>&1 || true
-        local content='nameserver 1.1.1.1
-nameserver 8.8.8.8
-nameserver 1.0.0.1
-nameserver 8.8.4.4'
-        safe_write_file "/etc/resolv.conf" "$content"
-    fi
-    
-    log_success "$(msg dns_configured)"
-}
-
-# Configure Docker DNS
-configure_docker_dns() {
-    log_info "$(msg configuring_dns)"
-    
-    local docker_config_dir="/etc/docker"
-    local daemon_json="$docker_config_dir/daemon.json"
-    
-    mkdir -p "$docker_config_dir" 2>/dev/null || true
-    
-    if [ -f "$daemon_json" ]; then
-        cp "$daemon_json" "${daemon_json}.backup.$(date +%Y%m%d_%H%M%S)" 2>/dev/null || true
-        if command -v jq &>/dev/null; then
-            jq '. + {"dns": ["1.1.1.1", "8.8.8.8"]}' "$daemon_json" > "${daemon_json}.tmp" 2>/dev/null && \
-                mv "${daemon_json}.tmp" "$daemon_json"
-        else
-            local content='{"dns": ["1.1.1.1", "8.8.8.8"]}'
-            safe_write_file "$daemon_json" "$content"
-        fi
-    else
-        local content='{"dns": ["1.1.1.1", "8.8.8.8"]}'
-        safe_write_file "$daemon_json" "$content"
-    fi
-    
-    log_success "$(msg dns_configured)"
-}
-
-# Restart Docker service
-restart_docker() {
-    log_info "$(msg restarting_docker)"
-    
-    timeout "$TIMEOUT_SYSTEMCTL" systemctl daemon-reload >/dev/null 2>&1 || true
-    timeout "$TIMEOUT_SYSTEMCTL" systemctl restart docker >/dev/null 2>&1 || \
-        timeout "$TIMEOUT_SYSTEMCTL" service docker restart >/dev/null 2>&1 || true
-    
-    local max_wait=30
-    local count=0
-    while [ $count -lt $max_wait ]; do
-        if timeout 5 docker info >/dev/null 2>&1; then
-            log_success "$(msg docker_restarted)"
-            return 0
-        fi
-        sleep 1
-        count=$((count + 1))
-    done
-    
-    log_warn "Docker may need manual restart"
-    return 1
-}
-
-# Main network fix function
-fix_docker_network() {
-    log_info "$(msg fixing_docker_network)"
-    
-    disable_ipv6
-    configure_dns
-    configure_docker_dns
-    restart_docker
-    
-    sleep 3
-    return 0
-}
-
 # ==================== Git Clone with Retry ====================
 
 clone_repo_with_fallback() {
@@ -717,110 +471,6 @@ clone_repo_with_fallback() {
     fi
     
     log_error "Failed to download repository"
-    return 1
-}
-
-# ==================== Docker Build with Retry ====================
-
-docker_build_with_retry() {
-    local build_dir="$1"
-    local max_retries=$MAX_RETRIES
-    local retry=0
-    local build_timeout="$TIMEOUT_DOCKER_BUILD"
-    
-    cd "$build_dir" || return 1
-    
-    while [ $retry -lt $max_retries ]; do
-        # Pre-check network
-        if ! check_docker_hub_quiet; then
-            log_warn "$(msg docker_network_error)"
-            
-            if [ $retry -eq 0 ]; then
-                log_info "$(msg fixing_docker_network)"
-                fix_docker_network
-            fi
-        fi
-        
-        log_info "Building containers ($(msg retry_attempt) $((retry + 1))/$max_retries, timeout: ${build_timeout}s)..."
-        
-        local build_exit_code
-        
-        # Run build with timeout
-        timeout "$build_timeout" docker compose build --no-cache > "$BUILD_LOG" 2>&1 &
-        local build_pid=$!
-        
-        # Progress display
-        local dots=""
-        while kill -0 $build_pid 2>/dev/null; do
-            dots="${dots}."
-            if [ ${#dots} -gt 3 ]; then dots="."; fi
-            local current_step
-            current_step=$(grep -oE 'Step [0-9]+/[0-9]+|#[0-9]+ \[[0-9]+/[0-9]+\]' "$BUILD_LOG" 2>/dev/null | tail -1 || true)
-            if [ -n "$current_step" ]; then
-                printf "\r${BLUE}[INFO]${NC} Building${dots} %-30s" "($current_step)"
-            else
-                printf "\r${BLUE}[INFO]${NC} Building${dots}   "
-            fi
-            sleep 2
-        done
-        printf "\r%-60s\r" " "
-        
-        wait $build_pid 2>/dev/null
-        build_exit_code=$?
-        
-        if [ $build_exit_code -eq 0 ]; then
-            rm -f "$BUILD_LOG" 2>/dev/null || true
-            clear
-            echo ""
-            echo -e "${CYAN}╔════════════════════════════════════════════╗${NC}"
-            echo -e "${CYAN}║       $(msg menu_title)          ║${NC}"
-            echo -e "${CYAN}╚════════════════════════════════════════════╝${NC}"
-            echo ""
-            log_success "$(msg build_success)"
-            return 0
-        elif [ $build_exit_code -eq 124 ]; then
-            log_error "Build $(msg timeout_error) (${build_timeout}s)"
-            echo -e "${YELLOW}Build was taking too long. Possible causes:${NC}"
-            echo "  - Slow internet connection"
-            echo "  - Network issues with Docker Hub"
-            echo "  - Server ran out of memory (check: free -h)"
-        else
-            log_error "Build failed (exit code: $build_exit_code)"
-        fi
-        
-        if [ -f "$BUILD_LOG" ] && [ -s "$BUILD_LOG" ]; then
-            echo ""
-            echo -e "${YELLOW}Last 30 lines of build output:${NC}"
-            echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-            tail -30 "$BUILD_LOG" 2>/dev/null || echo "(no log available)"
-            echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        fi
-        
-        retry=$((retry + 1))
-        
-        if [ $retry -lt $max_retries ]; then
-            log_warn "$(msg build_failed)"
-            log_info "$(msg retrying_build)"
-            
-            if [ $retry -eq 1 ]; then
-                fix_docker_network
-            fi
-            
-            sleep "$RETRY_DELAY"
-        fi
-    done
-    
-    log_error "$(msg build_failed)"
-    log_error "$(msg network_fix_failed)"
-    log_info "$(msg manual_fix_hint)"
-    echo ""
-    echo "Possible solutions:"
-    echo "  1. Check if server has internet access"
-    echo "  2. Try using a VPN"
-    echo "  3. Check firewall settings"
-    echo "  4. Try again later"
-    echo "  5. Increase timeout: export TIMEOUT_DOCKER_BUILD=3600"
-    echo ""
     return 1
 }
 

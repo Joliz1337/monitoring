@@ -16,7 +16,6 @@ export NEEDRESTART_SUSPEND=1
 
 LOCKFILE="/tmp/monitoring-panel-deploy.lock"
 LOCK_FD=200
-BUILD_LOG="/tmp/docker_build_$$.log"
 
 # ==================== Timeouts Configuration ====================
 
@@ -24,10 +23,9 @@ TIMEOUT_USER_INPUT=300
 TIMEOUT_APT_UPDATE=120
 TIMEOUT_APT_INSTALL=300
 TIMEOUT_CURL=60
-TIMEOUT_DOCKER_BUILD="${DOCKER_BUILD_TIMEOUT:-1200}"
 TIMEOUT_DOCKER_COMPOSE_DOWN=120
+TIMEOUT_DOCKER_PULL=300
 TIMEOUT_SYSTEMCTL=60
-TIMEOUT_CONNECTIVITY_CHECK=15
 TIMEOUT_HEALTH_CHECK=5
 TIMEOUT_CERTBOT=300
 
@@ -61,15 +59,8 @@ cleanup() {
     if [ $exit_code -ne 0 ] && [ $exit_code -ne 130 ] && [ $exit_code -ne 143 ]; then
         echo ""
         echo -e "\033[0;31m[ERROR] Script failed (exit code: $exit_code)\033[0m"
-        if [ -f "$BUILD_LOG" ] && [ -s "$BUILD_LOG" ]; then
-            echo -e "\033[0;31m[ERROR] Last 30 lines of build output:\033[0m"
-            echo -e "\033[0;31m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
-            tail -30 "$BUILD_LOG" 2>/dev/null || true
-            echo -e "\033[0;31m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
-        fi
     fi
     
-    rm -f "$BUILD_LOG" 2>/dev/null || true
     exit $exit_code
 }
 
@@ -178,27 +169,6 @@ run_quiet() {
     return 0
 }
 
-safe_write_file() {
-    local file="$1"
-    local content="$2"
-    local backup="${file}.bak.$(date +%Y%m%d_%H%M%S)"
-    
-    if [ -f "$file" ]; then
-        cp "$file" "$backup" 2>/dev/null || true
-    fi
-    
-    mkdir -p "$(dirname "$file")" 2>/dev/null || true
-    
-    if echo "$content" > "$file" 2>/dev/null; then
-        return 0
-    else
-        if [ -f "$backup" ]; then
-            mv "$backup" "$file" 2>/dev/null || true
-        fi
-        return 1
-    fi
-}
-
 # ==================== Configuration ====================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -211,143 +181,6 @@ echo -e "${CYAN}╔════════════════════�
 echo -e "${CYAN}║       Monitoring Panel Deployment          ║${NC}"
 echo -e "${CYAN}╚════════════════════════════════════════════╝${NC}"
 echo ""
-
-# ==================== Network Fix Functions ====================
-
-check_docker_hub_quiet() {
-    local urls=(
-        "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/alpine:pull"
-        "https://registry-1.docker.io/v2/"
-    )
-    
-    for url in "${urls[@]}"; do
-        if timeout "$TIMEOUT_CONNECTIVITY_CHECK" curl -fsSL --connect-timeout 10 --max-time 15 "$url" >/dev/null 2>&1; then
-            return 0
-        fi
-    done
-    
-    return 1
-}
-
-check_docker_hub() {
-    print_info "Checking Docker Hub availability..."
-    
-    if check_docker_hub_quiet; then
-        print_status "Docker Hub is accessible"
-        return 0
-    fi
-    
-    print_warning "Docker Hub is not accessible"
-    return 1
-}
-
-disable_ipv6() {
-    print_info "Disabling IPv6..."
-    
-    if [ -f /etc/sysctl.d/99-vless-tuning.conf ] && grep -q "disable_ipv6 = 1" /etc/sysctl.d/99-vless-tuning.conf 2>/dev/null; then
-        print_status "IPv6 already disabled"
-        sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null 2>&1 || true
-        sysctl -w net.ipv6.conf.default.disable_ipv6=1 >/dev/null 2>&1 || true
-        sysctl -w net.ipv6.conf.lo.disable_ipv6=1 >/dev/null 2>&1 || true
-        return 0
-    fi
-    
-    local content='net.ipv6.conf.all.disable_ipv6 = 1
-net.ipv6.conf.default.disable_ipv6 = 1
-net.ipv6.conf.lo.disable_ipv6 = 1'
-    
-    safe_write_file "/etc/sysctl.d/99-disable-ipv6.conf" "$content"
-    
-    sysctl -p /etc/sysctl.d/99-disable-ipv6.conf >/dev/null 2>&1 || true
-    sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null 2>&1 || true
-    sysctl -w net.ipv6.conf.default.disable_ipv6=1 >/dev/null 2>&1 || true
-    sysctl -w net.ipv6.conf.lo.disable_ipv6=1 >/dev/null 2>&1 || true
-    
-    print_status "IPv6 disabled"
-}
-
-configure_dns() {
-    print_info "Configuring DNS..."
-    
-    if [ -f /etc/resolv.conf ] && [ ! -f /etc/resolv.conf.backup ]; then
-        cp /etc/resolv.conf /etc/resolv.conf.backup 2>/dev/null || true
-    fi
-    
-    if [ -L /etc/resolv.conf ] && readlink /etc/resolv.conf 2>/dev/null | grep -q systemd; then
-        mkdir -p /etc/systemd/resolved.conf.d 2>/dev/null || true
-        local content='[Resolve]
-DNS=1.1.1.1 8.8.8.8 1.0.0.1 8.8.4.4
-FallbackDNS=9.9.9.9 149.112.112.112'
-        safe_write_file "/etc/systemd/resolved.conf.d/dns.conf" "$content"
-        timeout "$TIMEOUT_SYSTEMCTL" systemctl restart systemd-resolved >/dev/null 2>&1 || true
-    else
-        chattr -i /etc/resolv.conf >/dev/null 2>&1 || true
-        local content='nameserver 1.1.1.1
-nameserver 8.8.8.8
-nameserver 1.0.0.1
-nameserver 8.8.4.4'
-        safe_write_file "/etc/resolv.conf" "$content"
-    fi
-    
-    print_status "DNS configured"
-}
-
-configure_docker_dns() {
-    print_info "Configuring Docker DNS..."
-    
-    local docker_config_dir="/etc/docker"
-    local daemon_json="$docker_config_dir/daemon.json"
-    
-    mkdir -p "$docker_config_dir" 2>/dev/null || true
-    
-    if [ -f "$daemon_json" ]; then
-        cp "$daemon_json" "${daemon_json}.backup.$(date +%Y%m%d_%H%M%S)" 2>/dev/null || true
-        if command -v jq &>/dev/null; then
-            jq '. + {"dns": ["1.1.1.1", "8.8.8.8"]}' "$daemon_json" > "${daemon_json}.tmp" 2>/dev/null && \
-                mv "${daemon_json}.tmp" "$daemon_json"
-        else
-            local content='{"dns": ["1.1.1.1", "8.8.8.8"]}'
-            safe_write_file "$daemon_json" "$content"
-        fi
-    else
-        local content='{"dns": ["1.1.1.1", "8.8.8.8"]}'
-        safe_write_file "$daemon_json" "$content"
-    fi
-    
-    print_status "Docker DNS configured"
-}
-
-restart_docker() {
-    print_info "Restarting Docker service..."
-    
-    timeout "$TIMEOUT_SYSTEMCTL" systemctl daemon-reload >/dev/null 2>&1 || true
-    timeout "$TIMEOUT_SYSTEMCTL" systemctl restart docker >/dev/null 2>&1 || \
-        timeout "$TIMEOUT_SYSTEMCTL" service docker restart >/dev/null 2>&1 || true
-    
-    local max_wait=30
-    local count=0
-    while [ $count -lt $max_wait ]; do
-        if timeout 5 docker info >/dev/null 2>&1; then
-            print_status "Docker service restarted"
-            return 0
-        fi
-        sleep 1
-        count=$((count + 1))
-    done
-    
-    print_warning "Docker may need manual restart"
-    return 1
-}
-
-fix_docker_network() {
-    print_info "Fixing network issues..."
-    disable_ipv6
-    configure_dns
-    configure_docker_dns
-    restart_docker
-    sleep 3
-    return 0
-}
 
 # ==================== Core Functions ====================
 
@@ -779,97 +612,38 @@ generate_nginx_config() {
     print_status "nginx.conf generated for ${DOMAIN} with UID protection"
 }
 
-build_and_start() {
-    print_info "Building and starting containers..."
+pull_and_start() {
+    print_info "Pulling and starting containers..."
     
     timeout "$TIMEOUT_DOCKER_COMPOSE_DOWN" docker compose down --remove-orphans >/dev/null 2>&1 || true
     
-    export DOCKER_BUILDKIT=1
-    export COMPOSE_DOCKER_CLI_BUILD=1
+    local attempt=1
+    local pull_success=false
     
-    local max_retries=$MAX_RETRIES
-    local retry=0
-    local build_success=false
-    local build_timeout="$TIMEOUT_DOCKER_BUILD"
-    
-    while [ $retry -lt $max_retries ]; do
-        if ! check_docker_hub_quiet; then
-            print_warning "Docker Hub is not accessible"
-            if [ $retry -eq 0 ]; then
-                fix_docker_network
-            fi
-        fi
+    while [ $attempt -le $MAX_RETRIES ]; do
+        print_info "Pulling images (attempt $attempt/$MAX_RETRIES)..."
         
-        if [ -f .env ]; then
-            export CACHE_BUST=$(md5sum .env 2>/dev/null | cut -d' ' -f1 || echo "nocache")
-            print_info "Config hash: ${CACHE_BUST:0:8}... (rebuild on .env changes)"
-        fi
-        
-        print_info "Building containers (attempt $((retry + 1))/$max_retries, timeout: ${build_timeout}s)..."
-        
-        local build_exit_code
-        
-        timeout "$build_timeout" docker compose build --build-arg CACHE_BUST=${CACHE_BUST:-} > "$BUILD_LOG" 2>&1 &
-        local build_pid=$!
-        
-        while kill -0 $build_pid 2>/dev/null; do
-            if [ -f "$BUILD_LOG" ] && [ -s "$BUILD_LOG" ]; then
-                clear
-                echo -e "${CYAN}[i]${NC} Building Docker images (attempt $((retry + 1))/$max_retries)... (press Ctrl+C to cancel)"
-                echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-                tail -30 "$BUILD_LOG" 2>/dev/null || true
-                echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-            fi
-            sleep 3
-        done
-        echo ""
-        
-        wait $build_pid 2>/dev/null
-        build_exit_code=$?
-        
-        if [ $build_exit_code -eq 0 ]; then
-            build_success=true
-            rm -f "$BUILD_LOG" 2>/dev/null || true
-            clear
-            echo ""
-            echo -e "${CYAN}╔════════════════════════════════════════════╗${NC}"
-            echo -e "${CYAN}║       Monitoring Panel Deployment          ║${NC}"
-            echo -e "${CYAN}╚════════════════════════════════════════════╝${NC}"
-            echo ""
-            print_status "Docker build completed successfully"
+        if timeout "$TIMEOUT_DOCKER_PULL" docker compose pull 2>&1; then
+            pull_success=true
+            print_status "Images pulled successfully"
             break
-        elif [ $build_exit_code -eq 124 ]; then
-            print_error "Build timeout after ${build_timeout}s"
-        else
-            print_error "Build failed (exit code: $build_exit_code)"
         fi
         
-        if [ -f "$BUILD_LOG" ] && [ -s "$BUILD_LOG" ]; then
-            echo ""
-            echo -e "${YELLOW}Last 30 lines of build output:${NC}"
-            echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-            tail -30 "$BUILD_LOG" 2>/dev/null || echo "(no log available)"
-            echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        fi
+        print_warning "Pull failed (attempt $attempt/$MAX_RETRIES)"
+        attempt=$((attempt + 1))
         
-        retry=$((retry + 1))
-        
-        if [ $retry -lt $max_retries ]; then
-            print_warning "Build failed, retrying after network fix..."
-            fix_docker_network
+        if [ $attempt -le $MAX_RETRIES ]; then
             sleep "$RETRY_DELAY"
         fi
     done
     
-    if [ "$build_success" = false ]; then
-        print_error "Docker build failed after $max_retries attempts"
+    if [ "$pull_success" = false ]; then
+        print_error "Failed to pull images after $MAX_RETRIES attempts"
         echo ""
         echo "Possible solutions:"
         echo "  1. Check if server has internet access"
-        echo "  2. Try using a VPN"
-        echo "  3. Check firewall settings"
-        echo "  4. Try again later"
-        echo "  5. Increase timeout: export DOCKER_BUILD_TIMEOUT=3600"
+        echo "  2. Check if images exist in the registry"
+        echo "  3. Try: docker compose pull --no-parallel"
         echo ""
         exit 1
     fi
@@ -990,7 +764,7 @@ main() {
     source .env 2>/dev/null || true
     generate_nginx_config || exit 1
     
-    build_and_start
+    pull_and_start
     wait_for_health
     print_credentials
 }
