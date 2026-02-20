@@ -415,10 +415,12 @@ SYSCTL_CONFIG_PATH = "/etc/sysctl.d/99-vless-tuning.conf"
 LIMITS_CONFIG_PATH = "/etc/security/limits.d/99-nofile.conf"
 SYSTEMD_LIMITS_PATH = "/etc/systemd/system.conf.d/limits.conf"
 SYSTEMD_USER_LIMITS_PATH = "/etc/systemd/system/user-.slice.d/limits.conf"
-NETWORK_TUNE_SCRIPT_PATH = "/opt/monitoring-node/scripts/network-tune.sh"
+NETWORK_TUNE_SCRIPT_PATH = "/opt/monitoring/scripts/network-tune.sh"
+NETWORK_TUNE_SCRIPT_PATH_OLD = "/opt/monitoring-node/scripts/network-tune.sh"
 NETWORK_TUNE_SERVICE_PATH = "/etc/systemd/system/network-tune.service"
 PAM_SESSION_PATH = "/etc/pam.d/common-session"
-OPTIMIZATIONS_VERSION_PATH = "/opt/monitoring-node/configs/VERSION"
+OPTIMIZATIONS_VERSION_PATH = "/opt/monitoring/configs/VERSION"
+OPTIMIZATIONS_VERSION_PATH_OLD = "/opt/monitoring-node/configs/VERSION"
 
 # Expected values for verification
 EXPECTED_SYSCTL_VALUES = {
@@ -457,6 +459,14 @@ async def write_host_file(path: str, content: str) -> bool:
     return result.success and result.exit_code == 0
 
 
+async def read_optimizations_version() -> Optional[str]:
+    """Read optimizations VERSION, checking new path first, then legacy."""
+    version = await read_host_file(OPTIMIZATIONS_VERSION_PATH)
+    if not version:
+        version = await read_host_file(OPTIMIZATIONS_VERSION_PATH_OLD)
+    return version.strip() if version else None
+
+
 @router.get("/versions")
 async def get_all_versions():
     """
@@ -464,18 +474,15 @@ async def get_all_versions():
     
     This reduces the number of API calls from panel (1 instead of 2 per node).
     """
-    # Get node version
     node_version = get_current_version()
     
-    # Get optimizations info (parallel reads)
-    opt_version_task = read_host_file(OPTIMIZATIONS_VERSION_PATH)
+    opt_version_task = read_optimizations_version()
     sysctl_task = read_host_file(SYSCTL_CONFIG_PATH)
     
-    opt_version_raw, sysctl_content = await asyncio.gather(
+    opt_version, sysctl_content = await asyncio.gather(
         opt_version_task, sysctl_task
     )
     
-    opt_version = opt_version_raw.strip() if opt_version_raw else None
     opt_installed = sysctl_content is not None
     
     return {
@@ -492,23 +499,19 @@ async def get_optimizations_version():
     """
     Get current system optimizations version from the node.
     
-    Reads version from /opt/monitoring-node/configs/VERSION file.
-    Falls back to checking if sysctl config exists for installed status.
+    Reads version from /opt/monitoring/configs/VERSION (new path)
+    with fallback to /opt/monitoring-node/configs/VERSION (legacy).
     
     Note: Prefer using /api/system/versions which combines node + optimizations.
     """
-    # Read version from dedicated VERSION file
-    version = await read_host_file(OPTIMIZATIONS_VERSION_PATH)
-    if version:
-        version = version.strip()
+    version = await read_optimizations_version()
     
-    # Check if optimizations are installed (sysctl config exists)
     sysctl_content = await read_host_file(SYSCTL_CONFIG_PATH)
     installed = sysctl_content is not None
     
     return {
         "installed": installed,
-        "version": version if version else None
+        "version": version
     }
 
 
@@ -687,12 +690,14 @@ async def apply_optimizations(request: ApplyOptimizationsRequest):
     
     # 5. Write network-tune.sh script
     if request.network_tune_content:
-        await executor.execute("mkdir -p /opt/monitoring-node/scripts", timeout=5)
+        await executor.execute("mkdir -p /opt/monitoring/scripts", timeout=5)
         if await write_host_file(NETWORK_TUNE_SCRIPT_PATH, request.network_tune_content):
             await executor.execute(f"chmod +x {NETWORK_TUNE_SCRIPT_PATH}", timeout=5)
             applied_files.append("network-tune.sh")
         else:
             errors.append("Failed to write network-tune.sh")
+        # Clean up old path
+        await executor.execute(f"rm -f {NETWORK_TUNE_SCRIPT_PATH_OLD}", timeout=5)
     
     # 6. Write network-tune.service
     if request.network_tune_service_content:
@@ -716,11 +721,13 @@ async def apply_optimizations(request: ApplyOptimizationsRequest):
     
     # 8. Save optimizations version to file
     if request.version:
-        await executor.execute("mkdir -p /opt/monitoring-node/configs", timeout=5)
+        await executor.execute("mkdir -p /opt/monitoring/configs", timeout=5)
         if await write_host_file(OPTIMIZATIONS_VERSION_PATH, request.version + "\n"):
             applied_files.append("VERSION")
         else:
             errors.append("Failed to write version file")
+        # Clean up old path
+        await executor.execute(f"rm -f {OPTIMIZATIONS_VERSION_PATH_OLD}", timeout=5)
     
     # 9. Load conntrack module BEFORE sysctl (required for nf_conntrack_* params)
     await executor.execute("modprobe nf_conntrack", timeout=5)

@@ -7,7 +7,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/opt/monitoring-node/scripts/network-tune.sh
+ExecStart=/opt/monitoring/scripts/network-tune.sh
 RemainAfterExit=yes
 
 # Logging

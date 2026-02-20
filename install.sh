@@ -616,6 +616,34 @@ apply_system_optimizations() {
         CONFIG_SRC="$(dirname "$0")/configs"
     fi
     
+    # Neutral path for optimization files — does NOT interfere with panel/node detection
+    local OPT_DIR="/opt/monitoring"
+    
+    # Migrate from old /opt/monitoring-node/ paths if they exist
+    if [ -f "/opt/monitoring-node/scripts/network-tune.sh" ] && [ ! -f "$OPT_DIR/scripts/network-tune.sh" ]; then
+        mkdir -p "$OPT_DIR/scripts" 2>/dev/null || true
+        mv "/opt/monitoring-node/scripts/network-tune.sh" "$OPT_DIR/scripts/network-tune.sh" 2>/dev/null || true
+        rmdir "/opt/monitoring-node/scripts" 2>/dev/null || true
+    fi
+    if [ -f "/opt/monitoring-node/configs/VERSION" ] && [ ! -f "$OPT_DIR/configs/VERSION" ]; then
+        mkdir -p "$OPT_DIR/configs" 2>/dev/null || true
+        mv "/opt/monitoring-node/configs/VERSION" "$OPT_DIR/configs/VERSION" 2>/dev/null || true
+        rmdir "/opt/monitoring-node/configs" 2>/dev/null || true
+    fi
+    # Update service file if it still references old path
+    if [ -f "/etc/systemd/system/network-tune.service" ]; then
+        if grep -q "/opt/monitoring-node/scripts/" /etc/systemd/system/network-tune.service 2>/dev/null; then
+            sed -i 's|/opt/monitoring-node/scripts/|/opt/monitoring/scripts/|g' /etc/systemd/system/network-tune.service 2>/dev/null || true
+            timeout "$TIMEOUT_SYSTEMCTL" systemctl daemon-reload >/dev/null 2>&1 || true
+        fi
+    fi
+    # Clean up orphan /opt/monitoring-node/ if it has no real installation
+    if [ -d "/opt/monitoring-node" ] && [ ! -f "/opt/monitoring-node/docker-compose.yml" ]; then
+        rmdir "/opt/monitoring-node/scripts" 2>/dev/null || true
+        rmdir "/opt/monitoring-node/configs" 2>/dev/null || true
+        rmdir "/opt/monitoring-node" 2>/dev/null || true
+    fi
+    
     if [ -n "$CONFIG_SRC" ] && [ -f "$CONFIG_SRC/sysctl.conf" ]; then
         log_info "Installing optimization configs..."
         
@@ -643,9 +671,9 @@ apply_system_optimizations() {
         fi
         
         if [ -f "$CONFIG_SRC/network-tune.sh" ]; then
-            mkdir -p /opt/monitoring-node/scripts 2>/dev/null || true
-            cp "$CONFIG_SRC/network-tune.sh" /opt/monitoring-node/scripts/network-tune.sh 2>/dev/null || true
-            chmod +x /opt/monitoring-node/scripts/network-tune.sh 2>/dev/null || true
+            mkdir -p "$OPT_DIR/scripts" 2>/dev/null || true
+            cp "$CONFIG_SRC/network-tune.sh" "$OPT_DIR/scripts/network-tune.sh" 2>/dev/null || true
+            chmod +x "$OPT_DIR/scripts/network-tune.sh" 2>/dev/null || true
             log_success "network-tune.sh installed"
         fi
         
@@ -656,9 +684,9 @@ apply_system_optimizations() {
         fi
         
         if [ -f "$CONFIG_SRC/VERSION" ]; then
-            mkdir -p /opt/monitoring-node/configs 2>/dev/null || true
-            cp "$CONFIG_SRC/VERSION" /opt/monitoring-node/configs/VERSION 2>/dev/null || true
-            chmod 644 /opt/monitoring-node/configs/VERSION 2>/dev/null || true
+            mkdir -p "$OPT_DIR/configs" 2>/dev/null || true
+            cp "$CONFIG_SRC/VERSION" "$OPT_DIR/configs/VERSION" 2>/dev/null || true
+            chmod 644 "$OPT_DIR/configs/VERSION" 2>/dev/null || true
             log_success "configs VERSION installed"
         fi
     else
@@ -702,9 +730,9 @@ apply_system_optimizations() {
             log_success "systemd limits downloaded"
         fi
         
-        mkdir -p /opt/monitoring-node/scripts 2>/dev/null || true
-        if download_config "network-tune.sh" "/opt/monitoring-node/scripts/network-tune.sh"; then
-            chmod +x /opt/monitoring-node/scripts/network-tune.sh 2>/dev/null || true
+        mkdir -p "$OPT_DIR/scripts" 2>/dev/null || true
+        if download_config "network-tune.sh" "$OPT_DIR/scripts/network-tune.sh"; then
+            chmod +x "$OPT_DIR/scripts/network-tune.sh" 2>/dev/null || true
             log_success "network-tune.sh downloaded"
         fi
         
@@ -713,9 +741,9 @@ apply_system_optimizations() {
             log_success "network-tune.service downloaded"
         fi
         
-        mkdir -p /opt/monitoring-node/configs 2>/dev/null || true
-        if download_config "VERSION" "/opt/monitoring-node/configs/VERSION"; then
-            chmod 644 /opt/monitoring-node/configs/VERSION 2>/dev/null || true
+        mkdir -p "$OPT_DIR/configs" 2>/dev/null || true
+        if download_config "VERSION" "$OPT_DIR/configs/VERSION"; then
+            chmod 644 "$OPT_DIR/configs/VERSION" 2>/dev/null || true
             log_success "configs VERSION downloaded"
         fi
     fi
@@ -741,7 +769,7 @@ apply_system_optimizations() {
     timeout "$TIMEOUT_SYSTEMCTL" systemctl enable network-tune.service >/dev/null 2>&1 || true
     if ! timeout "$TIMEOUT_SYSTEMCTL" systemctl restart network-tune.service >/dev/null 2>&1; then
         log_warn "Service restart failed, trying direct execution..."
-        if /opt/monitoring-node/scripts/network-tune.sh >/dev/null 2>&1; then
+        if "$OPT_DIR/scripts/network-tune.sh" >/dev/null 2>&1; then
             log_success "Network tuning applied (direct execution)"
         else
             log_warn "Could not apply network tuning (may need reboot)"
@@ -1077,13 +1105,17 @@ show_menu() {
         echo -e "  ${BLUE}4)${NC} $(msg menu_update_node)"
     fi
 
-    if [ -d "$PANEL_DIR" ] || [ -d "$NODE_DIR" ]; then
+    local panel_installed=false node_installed=false
+    [ -d "$PANEL_DIR" ] && [ -f "$PANEL_DIR/docker-compose.yml" ] && panel_installed=true
+    [ -d "$NODE_DIR" ] && [ -f "$NODE_DIR/docker-compose.yml" ] && node_installed=true
+
+    if [ "$panel_installed" = true ] || [ "$node_installed" = true ]; then
         echo ""
     fi
-    if [ -d "$PANEL_DIR" ]; then
+    if [ "$panel_installed" = true ]; then
         echo -e "  ${RED}5)${NC} $(msg menu_remove_panel)"
     fi
-    if [ -d "$NODE_DIR" ]; then
+    if [ "$node_installed" = true ]; then
         echo -e "  ${RED}6)${NC} $(msg menu_remove_node)"
     fi
 
@@ -1100,8 +1132,6 @@ show_menu() {
         local panel_version="?"
         [ -f "$PANEL_DIR/VERSION" ] && panel_version=$(cat "$PANEL_DIR/VERSION" 2>/dev/null || echo "?")
         echo -e "    Panel:  ${GREEN}$(msg installed)${NC} v${panel_version}"
-    elif [ -d "$PANEL_DIR" ]; then
-        echo -e "    Panel:  ${YELLOW}incomplete${NC}"
     else
         echo -e "    Panel:  ${YELLOW}$(msg not_installed)${NC}"
     fi
@@ -1110,14 +1140,20 @@ show_menu() {
         local node_version="?"
         [ -f "$NODE_DIR/VERSION" ] && node_version=$(cat "$NODE_DIR/VERSION" 2>/dev/null || echo "?")
         echo -e "    Node:   ${GREEN}$(msg installed)${NC} v${node_version}"
-    elif [ -d "$NODE_DIR" ]; then
-        echo -e "    Node:   ${YELLOW}incomplete${NC}"
     else
         echo -e "    Node:   ${YELLOW}$(msg not_installed)${NC}"
     fi
 
+    local opt_version=""
+    [ -f /opt/monitoring/configs/VERSION ] && opt_version=$(cat /opt/monitoring/configs/VERSION 2>/dev/null || echo "")
+    [ -z "$opt_version" ] && [ -f /opt/monitoring-node/configs/VERSION ] && opt_version=$(cat /opt/monitoring-node/configs/VERSION 2>/dev/null || echo "")
+    
     if [ -f /etc/sysctl.d/99-vless-tuning.conf ]; then
-        echo -e "    Sysctl: ${GREEN}$(msg applied)${NC}"
+        if [ -n "$opt_version" ]; then
+            echo -e "    Sysctl: ${GREEN}$(msg applied)${NC} v${opt_version}"
+        else
+            echo -e "    Sysctl: ${GREEN}$(msg applied)${NC}"
+        fi
     else
         echo -e "    Sysctl: ${YELLOW}$(msg not_applied)${NC}"
     fi
@@ -1195,7 +1231,7 @@ main() {
                 safe_read "$(msg press_enter)" "" 30 >/dev/null
                 ;;
             5)
-                if [ -d "$PANEL_DIR" ]; then
+                if [ -d "$PANEL_DIR" ] && [ -f "$PANEL_DIR/docker-compose.yml" ]; then
                     remove_panel
                 else
                     log_error "$(msg invalid_option)"
@@ -1204,7 +1240,7 @@ main() {
                 safe_read "$(msg press_enter)" "" 30 >/dev/null
                 ;;
             6)
-                if [ -d "$NODE_DIR" ]; then
+                if [ -d "$NODE_DIR" ] && [ -f "$NODE_DIR/docker-compose.yml" ]; then
                     remove_node
                 else
                     log_error "$(msg invalid_option)"

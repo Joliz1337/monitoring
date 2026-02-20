@@ -155,12 +155,19 @@ class TorrentBlocker:
     def _rebuild_whitelist_networks(self):
         """Parse whitelist entries into network objects for fast matching."""
         networks = []
+        invalid = []
         for entry in self._whitelist:
             try:
-                networks.append(ipaddress.ip_network(entry, strict=False))
+                networks.append(ipaddress.ip_network(entry.strip(), strict=False))
             except ValueError:
-                logger.warning(f"Invalid whitelist entry: {entry}")
+                invalid.append(entry)
         self._whitelist_networks = networks
+        if invalid:
+            logger.warning(
+                f"Whitelist: {len(networks)} valid, {len(invalid)} invalid entries: {invalid}"
+            )
+        else:
+            logger.info(f"Whitelist rebuilt: {len(networks)} network entries")
 
     def _is_whitelisted(self, ip: str) -> bool:
         """Check if IP is in the whitelist (supports single IPs and CIDRs)."""
@@ -168,7 +175,10 @@ class TorrentBlocker:
             addr = ipaddress.ip_address(ip)
         except ValueError:
             return False
-        return any(addr in net for net in self._whitelist_networks)
+        matched = any(addr in net for net in self._whitelist_networks)
+        if matched:
+            logger.debug(f"Whitelist match: {ip} — skipping block")
+        return matched
 
     @property
     def is_enabled(self) -> bool:
@@ -190,7 +200,28 @@ class TorrentBlocker:
         self._whitelist = ips
         self._rebuild_whitelist_networks()
         self._save_config()
+        self._unban_whitelisted()
         logger.info(f"Torrent blocker whitelist updated: {len(ips)} entries")
+
+    def _unban_whitelisted(self):
+        """Remove existing temp bans for IPs that are now whitelisted."""
+        if not self._whitelist_networks:
+            return
+        manager = get_ipset_manager()
+        active_ips = manager.list_ips(permanent=False, direction="in")
+        removed = 0
+        for ip_str in active_ips:
+            try:
+                addr = ipaddress.ip_address(ip_str.split("/")[0])
+            except ValueError:
+                continue
+            if any(addr in net for net in self._whitelist_networks):
+                success, _ = manager.remove_ip(ip_str, permanent=False, direction="in")
+                if success:
+                    removed += 1
+                    logger.info(f"Unbanned whitelisted IP from temp blocklist: {ip_str}")
+        if removed:
+            logger.info(f"Removed {removed} whitelisted IPs from temp blocklist")
 
     async def _check_container(self) -> bool:
         try:
@@ -286,7 +317,9 @@ class TorrentBlocker:
                         torrent_match = TORRENT_LINE_PATTERN.search(line)
                         if torrent_match:
                             source_ip = torrent_match.group(1)
-                            if not self._is_whitelisted(source_ip) and self._should_block(source_ip):
+                            if self._is_whitelisted(source_ip):
+                                logger.info(f"Whitelist prevented tag-block for {source_ip}")
+                            elif self._should_block(source_ip):
                                 await self._block_ip(source_ip, reason="torrent_tag")
                                 self._tracker.remove_ip(source_ip)
 
@@ -300,9 +333,13 @@ class TorrentBlocker:
                                 exceeded = self._tracker.add_and_check(
                                     source_ip, dest_host, self._behavior_threshold
                                 )
-                                if exceeded and not self._is_whitelisted(source_ip) and self._should_block(source_ip):
-                                    await self._block_ip(source_ip, reason="behavior")
-                                    self._tracker.remove_ip(source_ip)
+                                if exceeded:
+                                    if self._is_whitelisted(source_ip):
+                                        logger.info(f"Whitelist prevented behavior-block for {source_ip}")
+                                        self._tracker.remove_ip(source_ip)
+                                    elif self._should_block(source_ip):
+                                        await self._block_ip(source_ip, reason="behavior")
+                                        self._tracker.remove_ip(source_ip)
 
                         line_counter += 1
                         if line_counter >= TRACKER_CLEANUP_INTERVAL:
@@ -400,6 +437,7 @@ class TorrentBlocker:
             "last_block_time": self._last_block_time.isoformat() if self._last_block_time else None,
             "behavior_threshold": self._behavior_threshold,
             "whitelist": self._whitelist,
+            "whitelist_parsed": len(self._whitelist_networks),
         }
 
 

@@ -146,7 +146,6 @@ CI/CD: `.github/workflows/docker-publish.yml` — 3 параллельных job
 | GET | /api/system/certificate | Информация о SSL сертификате панели |
 | POST | /api/system/certificate/renew?force=bool | Продление SSL сертификата (force=true для принудительного) |
 | GET | /api/system/certificate/renew/status | Статус продления сертификата |
-| GET | /api/system/optimizations/version | Версии системных оптимизаций (устаревший, данные уже в /version) |
 | POST | /api/proxy/{id}/system/optimizations/apply | Применить системные оптимизации на ноду |
 
 **Механизм обновления**:

@@ -202,6 +202,30 @@ fi
 
 log_success "Files updated"
 
+# Migrate optimization files from old /opt/monitoring-node/ to /opt/monitoring/
+if [ -f "/opt/monitoring-node/scripts/network-tune.sh" ] && [ ! -f "/opt/monitoring/scripts/network-tune.sh" ]; then
+    mkdir -p /opt/monitoring/scripts 2>/dev/null || true
+    mv "/opt/monitoring-node/scripts/network-tune.sh" "/opt/monitoring/scripts/network-tune.sh" 2>/dev/null || true
+    rmdir "/opt/monitoring-node/scripts" 2>/dev/null || true
+fi
+if [ -f "/opt/monitoring-node/configs/VERSION" ] && [ ! -f "/opt/monitoring/configs/VERSION" ]; then
+    mkdir -p /opt/monitoring/configs 2>/dev/null || true
+    mv "/opt/monitoring-node/configs/VERSION" "/opt/monitoring/configs/VERSION" 2>/dev/null || true
+    rmdir "/opt/monitoring-node/configs" 2>/dev/null || true
+fi
+if [ -f "/etc/systemd/system/network-tune.service" ]; then
+    if grep -q "/opt/monitoring-node/scripts/" /etc/systemd/system/network-tune.service 2>/dev/null; then
+        sed -i 's|/opt/monitoring-node/scripts/|/opt/monitoring/scripts/|g' /etc/systemd/system/network-tune.service 2>/dev/null || true
+        systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
+fi
+# Clean up orphan node dir if it has no real installation
+if [ -d "/opt/monitoring-node" ] && [ ! -f "/opt/monitoring-node/docker-compose.yml" ]; then
+    rmdir "/opt/monitoring-node/scripts" 2>/dev/null || true
+    rmdir "/opt/monitoring-node/configs" 2>/dev/null || true
+    rmdir "/opt/monitoring-node" 2>/dev/null || true
+fi
+
 # Pull new Docker images
 cd "$PANEL_DIR"
 

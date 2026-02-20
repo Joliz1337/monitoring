@@ -400,6 +400,28 @@ chmod +x "$NODE_DIR"/scripts/*.sh 2>/dev/null || true
 
 log_success "Files updated"
 
+# Migrate optimization files from old /opt/monitoring-node/ to /opt/monitoring/
+if [ -f "/opt/monitoring-node/scripts/network-tune.sh" ] && [ ! -f "/opt/monitoring/scripts/network-tune.sh" ]; then
+    mkdir -p /opt/monitoring/scripts 2>/dev/null || true
+    mv "/opt/monitoring-node/scripts/network-tune.sh" "/opt/monitoring/scripts/network-tune.sh" 2>/dev/null || true
+    rmdir "/opt/monitoring-node/scripts" 2>/dev/null || true
+    log_success "Migrated network-tune.sh to /opt/monitoring/scripts/"
+fi
+if [ -f "/opt/monitoring-node/configs/VERSION" ] && [ ! -f "/opt/monitoring/configs/VERSION" ]; then
+    mkdir -p /opt/monitoring/configs 2>/dev/null || true
+    mv "/opt/monitoring-node/configs/VERSION" "/opt/monitoring/configs/VERSION" 2>/dev/null || true
+    rmdir "/opt/monitoring-node/configs" 2>/dev/null || true
+    log_success "Migrated configs/VERSION to /opt/monitoring/configs/"
+fi
+# Update network-tune.service if it references old path
+if [ -f "/etc/systemd/system/network-tune.service" ]; then
+    if grep -q "/opt/monitoring-node/scripts/" /etc/systemd/system/network-tune.service 2>/dev/null; then
+        sed -i 's|/opt/monitoring-node/scripts/|/opt/monitoring/scripts/|g' /etc/systemd/system/network-tune.service 2>/dev/null || true
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        log_success "Updated network-tune.service path"
+    fi
+fi
+
 # Pull new Docker images
 cd "$NODE_DIR"
 
