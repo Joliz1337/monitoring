@@ -261,6 +261,7 @@ class XrayLogCollector:
                     )
                     self._stats.auto_flushes += 1
                     self._stats.clear()
+                    self._last_collection = datetime.now(timezone.utc)
                 
             except asyncio.CancelledError:
                 raise
