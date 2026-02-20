@@ -1,0 +1,160 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: panel-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-panel}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-panel_secret}
+      - POSTGRES_DB=${POSTGRES_DB:-panel}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - panel-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-panel} -d ${POSTGRES_DB:-panel}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+
+  nginx:
+    image: nginx:alpine
+    container_name: panel-nginx
+    restart: unless-stopped
+    ports:
+      - "${PANEL_PORT:-443}:443"
+      - "${PANEL_HTTP_PORT:-80}:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+    environment:
+      - DOMAIN=${DOMAIN}
+      - PANEL_UID=${PANEL_UID}
+    depends_on:
+      frontend:
+        condition: service_started
+      backend:
+        condition: service_healthy
+    networks:
+      - panel-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 128M
+        reservations:
+          cpus: '0.1'
+          memory: 32M
+
+  frontend:
+    image: ghcr.io/joliz1337/monitoring-panel-frontend:latest
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        - CACHE_BUST=${CACHE_BUST:-}
+    container_name: panel-frontend
+    restart: unless-stopped
+    environment:
+      - EXT_KEY=${EXT_KEY:-}
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - panel-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 128M
+        reservations:
+          cpus: '0.1'
+          memory: 32M
+
+  backend:
+    image: ghcr.io/joliz1337/monitoring-panel-backend:latest
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      args:
+        - CACHE_BUST=${CACHE_BUST:-}
+    container_name: panel-backend
+    restart: unless-stopped
+    # Root access for docker.sock and Let's Encrypt certificate reading (0600 perms)
+    user: root
+    environment:
+      - PANEL_UID=${PANEL_UID}
+      - PANEL_PASSWORD=${PANEL_PASSWORD}
+      - JWT_SECRET=${JWT_SECRET}
+      - JWT_EXPIRE_MINUTES=${JWT_EXPIRE_MINUTES:-1440}
+      - MAX_FAILED_ATTEMPTS=${MAX_FAILED_ATTEMPTS:-5}
+      - BAN_DURATION_SECONDS=${BAN_DURATION_SECONDS:-900}
+      # PostgreSQL settings
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=${POSTGRES_USER:-panel}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-panel_secret}
+      - POSTGRES_DB=${POSTGRES_DB:-panel}
+      - DOMAIN=${DOMAIN}
+      - EXT_KEY=${EXT_KEY:-}
+    volumes:
+      - panel-data:/app/data
+      # For update/renew scripts: access to project directory and docker
+      - /opt/monitoring-panel:/opt/monitoring-panel
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /usr/bin/docker:/usr/bin/docker:ro
+      # For reading SSL certificate info (need root for Let's Encrypt files with 0600 perms)
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - panel-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 120s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+    deploy:
+      resources:
+        limits:
+          memory: 1536M
+        reservations:
+          memory: 256M
+
+volumes:
+  panel-data:
+  postgres-data:
+
+networks:
+  panel-network:
+    driver: bridge

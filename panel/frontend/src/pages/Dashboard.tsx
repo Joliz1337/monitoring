@@ -1,0 +1,440 @@
+import { useEffect, useMemo, useRef, useState } from 'react'
+import {
+  DndContext,
+  closestCenter,
+  KeyboardSensor,
+  PointerSensor,
+  TouchSensor,
+  useSensor,
+  useSensors,
+  DragEndEvent,
+  DragStartEvent,
+  DragOverlay,
+} from '@dnd-kit/core'
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  rectSortingStrategy,
+} from '@dnd-kit/sortable'
+import { motion, AnimatePresence } from 'framer-motion'
+import { 
+  Server as ServerIcon, 
+  LayoutGrid, 
+  List,
+  Plus,
+  Activity,
+  Wifi,
+  WifiOff,
+  Zap,
+  Database,
+  Minus,
+  Equal,
+  AlignJustify,
+  Grid3x3,
+  Square,
+  PowerOff
+} from 'lucide-react'
+import { useNavigate, useParams } from 'react-router-dom'
+import { useServersStore } from '../stores/serversStore'
+import { useSettingsStore } from '../stores/settingsStore'
+import { useAutoRefresh } from '../hooks/useAutoRefresh'
+import ServerCard from '../components/Dashboard/ServerCard'
+import { ServerCardSkeleton } from '../components/ui/Skeleton'
+import { useTranslation } from 'react-i18next'
+
+export default function Dashboard() {
+  const { uid } = useParams()
+  const navigate = useNavigate()
+  const { servers, fetchServersWithMetrics, fetchAllTraffic, reorderServers, isLoading } = useServersStore()
+  const { refreshInterval, compactView, trafficPeriod, setCompactView, fetchSettings, detailLevel, cardScale, setDetailLevel, setCardScale } = useSettingsStore()
+  const { t } = useTranslation()
+  
+  const initialLoadDone = useRef(false)
+  const [activeId, setActiveId] = useState<number | null>(null)
+  
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: {
+        distance: 8,
+      },
+    }),
+    useSensor(TouchSensor, {
+      activationConstraint: {
+        delay: 200,
+        tolerance: 8,
+      },
+    }),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    })
+  )
+  
+  // Initial load - fetch servers with cached metrics (fast), then traffic in background
+  useEffect(() => {
+    fetchSettings()
+    fetchServersWithMetrics().then(() => {
+      initialLoadDone.current = true
+    })
+    // Load traffic separately (longer cache, less frequent)
+    fetchAllTraffic(trafficPeriod)
+  }, [fetchServersWithMetrics, fetchAllTraffic, fetchSettings, trafficPeriod])
+  
+  
+  // Auto refresh with visibility awareness - stops polling when tab is hidden
+  // Traffic is fetched separately with longer interval
+  const { isPageVisible } = useAutoRefresh(
+    fetchServersWithMetrics,
+    { immediate: false, pauseWhenHidden: true, refreshOnVisible: true }
+  )
+  
+  // Memoize server counts and filter out disabled servers
+  const { activeServers, onlineCount, offlineCount, disabledCount, serverIds } = useMemo(() => {
+    const active = servers.filter(s => s.is_active)
+    return {
+      activeServers: active,
+      onlineCount: active.filter(s => s.status === 'online').length,
+      offlineCount: active.filter(s => s.status === 'offline').length,
+      disabledCount: servers.filter(s => !s.is_active).length,
+      serverIds: active.map(s => s.id)
+    }
+  }, [servers])
+  
+  const handleDragStart = (event: DragStartEvent) => {
+    setActiveId(event.active.id as number)
+  }
+  
+  const handleDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event
+    
+    if (over && active.id !== over.id) {
+      const oldIndex = activeServers.findIndex(s => s.id === active.id)
+      const newIndex = activeServers.findIndex(s => s.id === over.id)
+      const newOrder = arrayMove(activeServers, oldIndex, newIndex)
+      reorderServers(newOrder.map(s => s.id))
+    }
+    
+    setActiveId(null)
+  }
+  
+  const activeServer = activeId ? activeServers.find(s => s.id === activeId) : null
+  
+  const subtitle = activeServers.length === 1 
+    ? t('dashboard.subtitle_one', { count: activeServers.length })
+    : t('dashboard.subtitle_other', { count: activeServers.length })
+
+  return (
+    <motion.div 
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+    >
+      {/* Header */}
+      <motion.div 
+        className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-8"
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.4 }}
+      >
+        <div>
+          <motion.h1 
+            className="text-2xl font-bold text-dark-50 flex items-center gap-3"
+            initial={{ opacity: 0, x: -20 }}
+            animate={{ opacity: 1, x: 0 }}
+            transition={{ duration: 0.5 }}
+          >
+            <Activity className="w-7 h-7 text-accent-400" />
+            {t('dashboard.title')}
+          </motion.h1>
+          <motion.p 
+            className="text-dark-400 mt-1 flex items-center gap-3"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ delay: 0.2 }}
+          >
+            <span>{subtitle}</span>
+            <span className="flex items-center gap-1.5">
+              <Wifi className="w-3.5 h-3.5 text-success" />
+              <span className="text-success">{onlineCount}</span>
+            </span>
+            {offlineCount > 0 && (
+              <span className="flex items-center gap-1.5">
+                <WifiOff className="w-3.5 h-3.5 text-danger" />
+                <span className="text-danger">{offlineCount}</span>
+              </span>
+            )}
+            {disabledCount > 0 && (
+              <span className="flex items-center gap-1.5">
+                <PowerOff className="w-3.5 h-3.5 text-dark-500" />
+                <span className="text-dark-500">{disabledCount}</span>
+              </span>
+            )}
+          </motion.p>
+        </div>
+        
+        <motion.div 
+          className="flex items-center gap-3"
+          initial={{ opacity: 0, x: 20 }}
+          animate={{ opacity: 1, x: 0 }}
+          transition={{ delay: 0.3 }}
+        >
+          {/* View toggle */}
+          <div className="flex items-center bg-dark-800/60 backdrop-blur-sm rounded-xl p-1 border border-dark-700/50">
+            <motion.button
+              onClick={() => setCompactView(false)}
+              className={`p-2.5 rounded-lg transition-all ${
+                !compactView 
+                  ? 'bg-accent-500/20 text-accent-400 shadow-lg shadow-accent-500/10' 
+                  : 'text-dark-400 hover:text-dark-200'
+              }`}
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+              title={t('dashboard.grid_view')}
+            >
+              <LayoutGrid className="w-4 h-4" />
+            </motion.button>
+            <motion.button
+              onClick={() => setCompactView(true)}
+              className={`p-2.5 rounded-lg transition-all ${
+                compactView 
+                  ? 'bg-accent-500/20 text-accent-400 shadow-lg shadow-accent-500/10' 
+                  : 'text-dark-400 hover:text-dark-200'
+              }`}
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+              title={t('dashboard.list_view')}
+            >
+              <List className="w-4 h-4" />
+            </motion.button>
+          </div>
+          
+          {/* Detail level toggle - only visible in grid view */}
+          {!compactView && (
+            <div className="hidden md:flex items-center bg-dark-800/60 backdrop-blur-sm rounded-xl p-1 border border-dark-700/50">
+              <motion.button
+                onClick={() => setDetailLevel('minimal')}
+                className={`p-2.5 rounded-lg transition-all ${
+                  detailLevel === 'minimal'
+                    ? 'bg-accent-500/20 text-accent-400 shadow-lg shadow-accent-500/10' 
+                    : 'text-dark-400 hover:text-dark-200'
+                }`}
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                title={t('dashboard.detail_minimal')}
+              >
+                <Minus className="w-4 h-4" />
+              </motion.button>
+              <motion.button
+                onClick={() => setDetailLevel('standard')}
+                className={`p-2.5 rounded-lg transition-all ${
+                  detailLevel === 'standard'
+                    ? 'bg-accent-500/20 text-accent-400 shadow-lg shadow-accent-500/10' 
+                    : 'text-dark-400 hover:text-dark-200'
+                }`}
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                title={t('dashboard.detail_standard')}
+              >
+                <Equal className="w-4 h-4" />
+              </motion.button>
+              <motion.button
+                onClick={() => setDetailLevel('detailed')}
+                className={`p-2.5 rounded-lg transition-all ${
+                  detailLevel === 'detailed'
+                    ? 'bg-accent-500/20 text-accent-400 shadow-lg shadow-accent-500/10' 
+                    : 'text-dark-400 hover:text-dark-200'
+                }`}
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                title={t('dashboard.detail_detailed')}
+              >
+                <AlignJustify className="w-4 h-4" />
+              </motion.button>
+            </div>
+          )}
+          
+          {/* Card scale toggle - only visible in grid view */}
+          {!compactView && (
+            <div className="hidden lg:flex items-center bg-dark-800/60 backdrop-blur-sm rounded-xl p-1 border border-dark-700/50">
+              <motion.button
+                onClick={() => setCardScale('small')}
+                className={`p-2.5 rounded-lg transition-all ${
+                  cardScale === 'small'
+                    ? 'bg-accent-500/20 text-accent-400 shadow-lg shadow-accent-500/10' 
+                    : 'text-dark-400 hover:text-dark-200'
+                }`}
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                title={t('dashboard.scale_small')}
+              >
+                <Grid3x3 className="w-4 h-4" />
+              </motion.button>
+              <motion.button
+                onClick={() => setCardScale('medium')}
+                className={`p-2.5 rounded-lg transition-all ${
+                  cardScale === 'medium'
+                    ? 'bg-accent-500/20 text-accent-400 shadow-lg shadow-accent-500/10' 
+                    : 'text-dark-400 hover:text-dark-200'
+                }`}
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                title={t('dashboard.scale_medium')}
+              >
+                <LayoutGrid className="w-4 h-4" />
+              </motion.button>
+              <motion.button
+                onClick={() => setCardScale('large')}
+                className={`p-2.5 rounded-lg transition-all ${
+                  cardScale === 'large'
+                    ? 'bg-accent-500/20 text-accent-400 shadow-lg shadow-accent-500/10' 
+                    : 'text-dark-400 hover:text-dark-200'
+                }`}
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                title={t('dashboard.scale_large')}
+              >
+                <Square className="w-4 h-4" />
+              </motion.button>
+            </div>
+          )}
+          
+          <motion.div 
+            className="text-xs text-dark-500 hidden sm:flex items-center gap-1.5 bg-dark-800/40 px-3 py-2 rounded-lg"
+            animate={{ opacity: [0.5, 1, 0.5] }}
+            transition={{ duration: 2, repeat: Infinity }}
+          >
+            {isPageVisible ? (
+              <>
+                <Zap className="w-3.5 h-3.5 text-accent-500" />
+                <span className="text-accent-400">{t('dashboard.live_mode')}</span>
+                <span className="text-dark-600">•</span>
+                <span>{refreshInterval}s</span>
+              </>
+            ) : (
+              <>
+                <Database className="w-3.5 h-3.5 text-dark-500" />
+                <span>{t('dashboard.background_mode')}</span>
+              </>
+            )}
+          </motion.div>
+          
+          <motion.button
+            onClick={() => navigate(`/${uid}/servers`)}
+            className="btn btn-primary"
+            whileHover={{ scale: 1.02 }}
+            whileTap={{ scale: 0.98 }}
+          >
+            <Plus className="w-4 h-4" />
+            <span className="hidden sm:inline">{t('common.add_server')}</span>
+          </motion.button>
+        </motion.div>
+      </motion.div>
+      
+      {/* Content */}
+      <AnimatePresence mode="wait">
+        {isLoading && activeServers.length === 0 ? (
+          <motion.div 
+            className={
+              compactView 
+                ? 'space-y-3' 
+                : cardScale === 'small'
+                  ? 'grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4'
+                  : cardScale === 'large'
+                    ? 'grid grid-cols-1 lg:grid-cols-2 gap-6'
+                    : 'grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5'
+            }
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            key="loading"
+          >
+            {Array.from({ length: 6 }).map((_, i) => (
+              <ServerCardSkeleton key={i} compact={compactView} />
+            ))}
+          </motion.div>
+        ) : activeServers.length === 0 ? (
+          <motion.div 
+            className="card text-center py-20"
+            initial={{ opacity: 0, scale: 0.9 }}
+            animate={{ opacity: 1, scale: 1 }}
+            transition={{ duration: 0.5 }}
+            key="empty"
+          >
+            <motion.div
+              initial={{ y: 20, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              transition={{ delay: 0.2 }}
+            >
+              <motion.div
+                animate={{ y: [0, -10, 0] }}
+                transition={{ duration: 3, repeat: Infinity, ease: 'easeInOut' }}
+              >
+                <ServerIcon className="w-20 h-20 text-dark-600 mx-auto mb-6" />
+              </motion.div>
+              <h2 className="text-xl font-semibold text-dark-200 mb-2">{t('dashboard.no_servers')}</h2>
+              <p className="text-dark-400 mb-8">{t('dashboard.add_first')}</p>
+              <motion.button
+                onClick={() => navigate(`/${uid}/servers`)}
+                className="btn btn-primary mx-auto"
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+              >
+                <Plus className="w-4 h-4" />
+                {t('common.add_server')}
+              </motion.button>
+            </motion.div>
+          </motion.div>
+        ) : (
+          <DndContext
+            sensors={sensors}
+            collisionDetection={closestCenter}
+            onDragStart={handleDragStart}
+            onDragEnd={handleDragEnd}
+          >
+            <SortableContext
+              items={serverIds}
+              strategy={rectSortingStrategy}
+            >
+              <motion.div 
+                className={
+                  compactView 
+                    ? 'space-y-3' 
+                    : cardScale === 'small'
+                      ? 'grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4'
+                      : cardScale === 'large'
+                        ? 'grid grid-cols-1 lg:grid-cols-2 gap-6'
+                        : 'grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5'
+                }
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                key="servers"
+              >
+                {activeServers.map((server, index) => (
+                  <ServerCard
+                    key={server.id}
+                    server={server}
+                    compact={compactView}
+                    detailLevel={detailLevel}
+                    index={index}
+                  />
+                ))}
+              </motion.div>
+            </SortableContext>
+            
+            <DragOverlay>
+              {activeServer && (
+                <div className="opacity-90">
+                  <ServerCard
+                    server={activeServer}
+                    compact={compactView}
+                    detailLevel={detailLevel}
+                    index={0}
+                  />
+                </div>
+              )}
+            </DragOverlay>
+          </DndContext>
+        )}
+      </AnimatePresence>
+    </motion.div>
+  )
+}
