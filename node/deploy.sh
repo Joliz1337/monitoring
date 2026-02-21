@@ -224,6 +224,29 @@ load_proxy() {
     git config --global https.proxy "$PROXY_URL" 2>/dev/null || true
 }
 
+configure_apt_proxy() {
+    if [ -f /etc/apt/apt.conf ]; then
+        sed -i '/Acquire::.*::Proxy/d' /etc/apt/apt.conf 2>/dev/null || true
+    fi
+    for f in /etc/apt/apt.conf.d/*; do
+        [ -f "$f" ] || continue
+        [ "$(basename "$f")" = "99monitoring-proxy" ] && continue
+        if grep -q 'Acquire::.*::Proxy' "$f" 2>/dev/null; then
+            sed -i '/Acquire::.*::Proxy/d' "$f" 2>/dev/null || true
+        fi
+    done
+
+    [ -f /etc/monitoring/proxy.conf ] || return 0
+    . /etc/monitoring/proxy.conf 2>/dev/null || return 0
+    [ "$PROXY_ENABLED" = "1" ] && [ -n "$PROXY_URL" ] || { rm -f /etc/apt/apt.conf.d/99monitoring-proxy 2>/dev/null; return 0; }
+
+    mkdir -p /etc/apt/apt.conf.d 2>/dev/null || true
+    cat > /etc/apt/apt.conf.d/99monitoring-proxy << PROXYEOF
+Acquire::http::Proxy "$PROXY_URL";
+Acquire::https::Proxy "$PROXY_URL";
+PROXYEOF
+}
+
 configure_docker_proxy() {
     [ -f /etc/monitoring/proxy.conf ] || return 0
     . /etc/monitoring/proxy.conf 2>/dev/null || return 0
@@ -801,6 +824,7 @@ main() {
     check_root
     check_os
     load_proxy
+    configure_apt_proxy
     check_disk_space 2000 || true
     check_memory 512 || true
     check_haproxy_status

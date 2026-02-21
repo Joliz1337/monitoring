@@ -898,11 +898,23 @@ get_proxy_display() {
 }
 
 configure_apt_proxy() {
+    if [ -f /etc/apt/apt.conf ]; then
+        sed -i '/Acquire::.*::Proxy/d' /etc/apt/apt.conf 2>/dev/null || true
+    fi
+    for f in /etc/apt/apt.conf.d/*; do
+        [ -f "$f" ] || continue
+        [ "$(basename "$f")" = "99monitoring-proxy" ] && continue
+        if grep -q 'Acquire::.*::Proxy' "$f" 2>/dev/null; then
+            sed -i '/Acquire::.*::Proxy/d' "$f" 2>/dev/null || true
+        fi
+    done
+
     [ -f /etc/monitoring/proxy.conf ] || return 0
     . /etc/monitoring/proxy.conf 2>/dev/null || return 0
-    [ "$PROXY_ENABLED" = "1" ] && [ -n "$PROXY_URL" ] || return 0
+    [ "$PROXY_ENABLED" = "1" ] && [ -n "$PROXY_URL" ] || { rm -f /etc/apt/apt.conf.d/99monitoring-proxy 2>/dev/null; return 0; }
+
     mkdir -p /etc/apt/apt.conf.d 2>/dev/null || true
-    cat > /etc/apt/apt.conf.d/99proxy << PROXYEOF
+    cat > /etc/apt/apt.conf.d/99monitoring-proxy << PROXYEOF
 Acquire::http::Proxy "$PROXY_URL";
 Acquire::https::Proxy "$PROXY_URL";
 PROXYEOF
@@ -926,6 +938,7 @@ PROXYEOF
 }
 
 remove_proxy_configs() {
+    rm -f /etc/apt/apt.conf.d/99monitoring-proxy 2>/dev/null || true
     rm -f /etc/apt/apt.conf.d/99proxy 2>/dev/null || true
     rm -f /etc/systemd/system/docker.service.d/proxy.conf 2>/dev/null || true
     git config --global --unset http.proxy 2>/dev/null || true
