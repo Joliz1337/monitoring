@@ -209,6 +209,50 @@ safe_write_file() {
     fi
 }
 
+# ==================== Proxy Support ====================
+
+load_proxy() {
+    local conf="/etc/monitoring/proxy.conf"
+    [ -f "$conf" ] || return 0
+    . "$conf" 2>/dev/null || return 0
+    [ "$PROXY_ENABLED" = "1" ] && [ -n "$PROXY_URL" ] || return 0
+    export http_proxy="$PROXY_URL" https_proxy="$PROXY_URL"
+    export HTTP_PROXY="$PROXY_URL" HTTPS_PROXY="$PROXY_URL"
+    export no_proxy="localhost,127.0.0.1,::1" NO_PROXY="localhost,127.0.0.1,::1"
+}
+
+configure_docker_proxy() {
+    [ -f /etc/monitoring/proxy.conf ] || return 0
+    . /etc/monitoring/proxy.conf 2>/dev/null || return 0
+    [ "$PROXY_ENABLED" = "1" ] && [ -n "$PROXY_URL" ] || return 0
+    command -v docker &>/dev/null || return 0
+
+    mkdir -p /etc/systemd/system/docker.service.d 2>/dev/null || true
+    cat > /etc/systemd/system/docker.service.d/proxy.conf << PROXYEOF
+[Service]
+Environment="HTTP_PROXY=$PROXY_URL"
+Environment="HTTPS_PROXY=$PROXY_URL"
+Environment="NO_PROXY=localhost,127.0.0.1,::1"
+PROXYEOF
+    timeout 60 systemctl daemon-reload >/dev/null 2>&1 || true
+    timeout 60 systemctl restart docker >/dev/null 2>&1 || true
+
+    mkdir -p /root/.docker 2>/dev/null || true
+    if [ ! -f /root/.docker/config.json ]; then
+        cat > /root/.docker/config.json << PROXYEOF
+{
+  "proxies": {
+    "default": {
+      "httpProxy": "$PROXY_URL",
+      "httpsProxy": "$PROXY_URL",
+      "noProxy": "localhost,127.0.0.1,::1"
+    }
+  }
+}
+PROXYEOF
+    fi
+}
+
 # ==================== System Checks ====================
 
 check_disk_space() {
@@ -714,10 +758,12 @@ main() {
 
     check_root
     check_os
+    load_proxy
     check_disk_space 2000 || true
     check_memory 512 || true
     check_haproxy_status
     install_docker || exit 1
+    configure_docker_proxy
     setup_firewall
     setup_env || exit 1
     setup_ssl || exit 1

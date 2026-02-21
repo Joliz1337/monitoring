@@ -188,6 +188,50 @@ suppress_needrestart() {
     pkill -9 needrestart 2>/dev/null || true
 }
 
+# ==================== Proxy Support ====================
+
+load_proxy() {
+    local conf="/etc/monitoring/proxy.conf"
+    [ -f "$conf" ] || return 0
+    . "$conf" 2>/dev/null || return 0
+    [ "$PROXY_ENABLED" = "1" ] && [ -n "$PROXY_URL" ] || return 0
+    export http_proxy="$PROXY_URL" https_proxy="$PROXY_URL"
+    export HTTP_PROXY="$PROXY_URL" HTTPS_PROXY="$PROXY_URL"
+    export no_proxy="localhost,127.0.0.1,::1" NO_PROXY="localhost,127.0.0.1,::1"
+}
+
+configure_docker_proxy() {
+    [ -f /etc/monitoring/proxy.conf ] || return 0
+    . /etc/monitoring/proxy.conf 2>/dev/null || return 0
+    [ "$PROXY_ENABLED" = "1" ] && [ -n "$PROXY_URL" ] || return 0
+    command -v docker &>/dev/null || return 0
+
+    mkdir -p /etc/systemd/system/docker.service.d 2>/dev/null || true
+    cat > /etc/systemd/system/docker.service.d/proxy.conf << PROXYEOF
+[Service]
+Environment="HTTP_PROXY=$PROXY_URL"
+Environment="HTTPS_PROXY=$PROXY_URL"
+Environment="NO_PROXY=localhost,127.0.0.1,::1"
+PROXYEOF
+    timeout 60 systemctl daemon-reload >/dev/null 2>&1 || true
+    timeout 60 systemctl restart docker >/dev/null 2>&1 || true
+
+    mkdir -p /root/.docker 2>/dev/null || true
+    if [ ! -f /root/.docker/config.json ]; then
+        cat > /root/.docker/config.json << PROXYEOF
+{
+  "proxies": {
+    "default": {
+      "httpProxy": "$PROXY_URL",
+      "httpsProxy": "$PROXY_URL",
+      "noProxy": "localhost,127.0.0.1,::1"
+    }
+  }
+}
+PROXYEOF
+    fi
+}
+
 # ==================== Configuration ====================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -822,6 +866,7 @@ print_credentials() {
 
 main() {
     acquire_lock
+    load_proxy
     
     if [ "$EUID" -ne 0 ] && ! groups 2>/dev/null | grep -q docker; then
         print_error "Please run as root or add user to docker group"
@@ -836,6 +881,7 @@ main() {
             exit 1
         fi
     fi
+    configure_docker_proxy
     
     prompt_domain
     verify_domain_dns || exit 1

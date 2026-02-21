@@ -105,6 +105,19 @@ spin_retry() {
     return 1
 }
 
+# ==================== Proxy Support ====================
+
+load_proxy() {
+    local conf="/etc/monitoring/proxy.conf"
+    [ -f "$conf" ] || return 0
+    . "$conf" 2>/dev/null || return 0
+    [ "$PROXY_ENABLED" = "1" ] && [ -n "$PROXY_URL" ] || return 0
+    export http_proxy="$PROXY_URL" https_proxy="$PROXY_URL"
+    export HTTP_PROXY="$PROXY_URL" HTTPS_PROXY="$PROXY_URL"
+    export no_proxy="localhost,127.0.0.1,::1" NO_PROXY="localhost,127.0.0.1,::1"
+}
+load_proxy
+
 # ==================== Configuration ====================
 
 # Timeouts (in seconds)

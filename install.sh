@@ -99,6 +99,18 @@ BIN_PATH="/usr/local/bin/mon"
 
 LANG_CODE="en"
 
+# ==================== Proxy Support ====================
+
+load_proxy() {
+    local conf="/etc/monitoring/proxy.conf"
+    [ -f "$conf" ] || return 0
+    . "$conf" 2>/dev/null || return 0
+    [ "$PROXY_ENABLED" = "1" ] && [ -n "$PROXY_URL" ] || return 0
+    export http_proxy="$PROXY_URL" https_proxy="$PROXY_URL"
+    export HTTP_PROXY="$PROXY_URL" HTTPS_PROXY="$PROXY_URL"
+    export no_proxy="localhost,127.0.0.1,::1" NO_PROXY="localhost,127.0.0.1,::1"
+}
+
 # ==================== Translations ====================
 
 declare -A MSG_EN
@@ -157,6 +169,21 @@ MSG_EN[requirements_ok]="System requirements OK"
 MSG_EN[disk_space_low]="Low disk space"
 MSG_EN[memory_low]="Low memory"
 MSG_EN[input_timeout]="Input timeout, using default"
+MSG_EN[menu_configure_proxy]="Configure proxy"
+MSG_EN[proxy_status]="Proxy"
+MSG_EN[proxy_enabled]="enabled"
+MSG_EN[proxy_disabled]="not configured"
+MSG_EN[proxy_current]="Current proxy"
+MSG_EN[proxy_enter_address]="Proxy address (host:port)"
+MSG_EN[proxy_auth_prompt]="Authentication required? (y/N)"
+MSG_EN[proxy_enter_user]="Username"
+MSG_EN[proxy_enter_pass]="Password"
+MSG_EN[proxy_configured]="Proxy configured!"
+MSG_EN[proxy_removed]="Proxy disabled"
+MSG_EN[proxy_empty_disable]="Empty = disable proxy"
+MSG_EN[proxy_testing]="Testing proxy connection..."
+MSG_EN[proxy_test_ok]="Proxy connection OK"
+MSG_EN[proxy_test_fail]="Proxy connection failed (check address)"
 
 # Russian messages
 MSG_RU[select_language]="Select language / Выберите язык:"
@@ -211,6 +238,21 @@ MSG_RU[requirements_ok]="Системные требования выполне�
 MSG_RU[disk_space_low]="Мало места на диске"
 MSG_RU[memory_low]="Мало оперативной памяти"
 MSG_RU[input_timeout]="Тайм-аут ввода, используется значение по умолчанию"
+MSG_RU[menu_configure_proxy]="Настроить прокси"
+MSG_RU[proxy_status]="Прокси"
+MSG_RU[proxy_enabled]="настроен"
+MSG_RU[proxy_disabled]="не настроен"
+MSG_RU[proxy_current]="Текущий прокси"
+MSG_RU[proxy_enter_address]="Адрес прокси (host:port)"
+MSG_RU[proxy_auth_prompt]="Требуется авторизация? (y/N)"
+MSG_RU[proxy_enter_user]="Имя пользователя"
+MSG_RU[proxy_enter_pass]="Пароль"
+MSG_RU[proxy_configured]="Прокси настроен!"
+MSG_RU[proxy_removed]="Прокси отключен"
+MSG_RU[proxy_empty_disable]="Пусто = отключить прокси"
+MSG_RU[proxy_testing]="Проверка соединения через прокси..."
+MSG_RU[proxy_test_ok]="Прокси работает"
+MSG_RU[proxy_test_fail]="Прокси не отвечает (проверьте адрес)"
 
 msg() {
     local key="$1"
@@ -476,6 +518,15 @@ cleanup_temp() {
 install_cli() {
     local script_content='#!/bin/bash
 # Monitoring System Manager — auto-update via GitHub
+
+if [ -f /etc/monitoring/proxy.conf ]; then
+    . /etc/monitoring/proxy.conf 2>/dev/null
+    if [ "$PROXY_ENABLED" = "1" ] && [ -n "$PROXY_URL" ]; then
+        export http_proxy="$PROXY_URL" https_proxy="$PROXY_URL"
+        export HTTP_PROXY="$PROXY_URL" HTTPS_PROXY="$PROXY_URL"
+        export no_proxy="localhost,127.0.0.1,::1"
+    fi
+fi
 
 GITHUB_URL="https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh"
 TIMEOUT=120
@@ -808,6 +859,158 @@ check_optimizations_status() {
     fi
 }
 
+# ==================== Proxy Functions ====================
+
+get_proxy_display() {
+    local conf="/etc/monitoring/proxy.conf"
+    [ -f "$conf" ] || return 0
+    . "$conf" 2>/dev/null || return 0
+    [ "$PROXY_ENABLED" = "1" ] && [ -n "$PROXY_URL" ] || return 0
+    echo "$PROXY_URL" | sed -E 's|(://[^:]+):[^@]+@|\1:***@|'
+}
+
+configure_apt_proxy() {
+    [ -f /etc/monitoring/proxy.conf ] || return 0
+    . /etc/monitoring/proxy.conf 2>/dev/null || return 0
+    [ "$PROXY_ENABLED" = "1" ] && [ -n "$PROXY_URL" ] || return 0
+    mkdir -p /etc/apt/apt.conf.d 2>/dev/null || true
+    cat > /etc/apt/apt.conf.d/99proxy << PROXYEOF
+Acquire::http::Proxy "$PROXY_URL";
+Acquire::https::Proxy "$PROXY_URL";
+PROXYEOF
+}
+
+configure_docker_proxy() {
+    [ -f /etc/monitoring/proxy.conf ] || return 0
+    . /etc/monitoring/proxy.conf 2>/dev/null || return 0
+    [ "$PROXY_ENABLED" = "1" ] && [ -n "$PROXY_URL" ] || return 0
+
+    if command -v docker &>/dev/null; then
+        mkdir -p /etc/systemd/system/docker.service.d 2>/dev/null || true
+        cat > /etc/systemd/system/docker.service.d/proxy.conf << PROXYEOF
+[Service]
+Environment="HTTP_PROXY=$PROXY_URL"
+Environment="HTTPS_PROXY=$PROXY_URL"
+Environment="NO_PROXY=localhost,127.0.0.1,::1"
+PROXYEOF
+        timeout 60 systemctl daemon-reload >/dev/null 2>&1 || true
+        timeout 60 systemctl restart docker >/dev/null 2>&1 || true
+    fi
+
+    mkdir -p /root/.docker 2>/dev/null || true
+    if [ -f /root/.docker/config.json ] && command -v python3 &>/dev/null; then
+        python3 -c "
+import json
+try:
+    with open('/root/.docker/config.json') as f: cfg = json.load(f)
+except: cfg = {}
+cfg['proxies'] = {'default': {'httpProxy': '$PROXY_URL', 'httpsProxy': '$PROXY_URL', 'noProxy': 'localhost,127.0.0.1,::1'}}
+with open('/root/.docker/config.json', 'w') as f: json.dump(cfg, f, indent=2)
+" 2>/dev/null || true
+    elif [ ! -f /root/.docker/config.json ]; then
+        cat > /root/.docker/config.json << PROXYEOF
+{
+  "proxies": {
+    "default": {
+      "httpProxy": "$PROXY_URL",
+      "httpsProxy": "$PROXY_URL",
+      "noProxy": "localhost,127.0.0.1,::1"
+    }
+  }
+}
+PROXYEOF
+    fi
+}
+
+remove_proxy_configs() {
+    rm -f /etc/apt/apt.conf.d/99proxy 2>/dev/null || true
+    rm -f /etc/systemd/system/docker.service.d/proxy.conf 2>/dev/null || true
+    if command -v docker &>/dev/null; then
+        timeout 60 systemctl daemon-reload >/dev/null 2>&1 || true
+        timeout 60 systemctl restart docker >/dev/null 2>&1 || true
+    fi
+    local docker_cfg="/root/.docker/config.json"
+    if [ -f "$docker_cfg" ] && command -v python3 &>/dev/null; then
+        python3 -c "
+import json
+try:
+    with open('$docker_cfg') as f: cfg = json.load(f)
+    cfg.pop('proxies', None)
+    with open('$docker_cfg', 'w') as f: json.dump(cfg, f, indent=2)
+except: pass
+" 2>/dev/null || true
+    fi
+}
+
+setup_proxy() {
+    echo ""
+    echo -e "  ${CYAN}══ $(msg menu_configure_proxy) ══${NC}"
+    echo ""
+
+    local current_display
+    current_display=$(get_proxy_display)
+    if [ -n "$current_display" ]; then
+        echo -e "  $(msg proxy_current): ${GREEN}${current_display}${NC}"
+        echo ""
+    fi
+    echo -e "  ${YELLOW}$(msg proxy_empty_disable)${NC}"
+    echo ""
+
+    local proxy_addr
+    proxy_addr=$(safe_read "  $(msg proxy_enter_address): " "" "$TIMEOUT_USER_INPUT")
+
+    if [ -z "$proxy_addr" ]; then
+        mkdir -p /etc/monitoring 2>/dev/null || true
+        cat > /etc/monitoring/proxy.conf << 'PROXYEOF'
+PROXY_ENABLED=0
+PROXY_URL=
+PROXYEOF
+        remove_proxy_configs
+        unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY no_proxy NO_PROXY
+        log_info "$(msg proxy_removed)"
+        return 0
+    fi
+
+    local proxy_url
+    if echo "$proxy_addr" | grep -qE '^https?://'; then
+        proxy_url="$proxy_addr"
+    else
+        proxy_url="http://${proxy_addr}"
+    fi
+
+    local needs_auth
+    needs_auth=$(safe_read "  $(msg proxy_auth_prompt): " "n" 30)
+
+    if [ "$needs_auth" = "y" ] || [ "$needs_auth" = "Y" ]; then
+        local proxy_user proxy_pass
+        proxy_user=$(safe_read "  $(msg proxy_enter_user): " "" 60)
+        proxy_pass=$(safe_read "  $(msg proxy_enter_pass): " "" 60)
+        if [ -n "$proxy_user" ] && [ -n "$proxy_pass" ]; then
+            proxy_url=$(echo "$proxy_url" | sed -E "s|^(https?://)(.*)|\1${proxy_user}:${proxy_pass}@\2|")
+        fi
+    fi
+
+    mkdir -p /etc/monitoring 2>/dev/null || true
+    cat > /etc/monitoring/proxy.conf << PROXYEOF
+PROXY_ENABLED=1
+PROXY_URL=${proxy_url}
+PROXYEOF
+    chmod 600 /etc/monitoring/proxy.conf 2>/dev/null || true
+
+    load_proxy
+    configure_apt_proxy
+    configure_docker_proxy
+
+    log_info "$(msg proxy_testing)"
+    if timeout 15 curl -fsSL --connect-timeout 10 --max-time 15 "https://github.com" >/dev/null 2>&1; then
+        log_success "$(msg proxy_test_ok)"
+    else
+        log_warn "$(msg proxy_test_fail)"
+    fi
+
+    log_success "$(msg proxy_configured)"
+}
+
 # ==================== Panel Functions ====================
 
 install_panel() {
@@ -1121,6 +1324,7 @@ show_menu() {
 
     echo ""
     echo -e "  ${CYAN}7)${NC} $(msg menu_optimize_system)"
+    echo -e "  ${CYAN}8)${NC} $(msg menu_configure_proxy)"
     echo ""
     echo -e "  ${YELLOW}0)${NC} $(msg menu_exit)"
     echo ""
@@ -1163,6 +1367,14 @@ show_menu() {
     else
         echo -e "    RPS:    ${YELLOW}$(msg not_applied)${NC}"
     fi
+
+    local proxy_display
+    proxy_display=$(get_proxy_display)
+    if [ -n "$proxy_display" ]; then
+        echo -e "    $(msg proxy_status): ${GREEN}$(msg proxy_enabled)${NC} — ${proxy_display}"
+    else
+        echo -e "    $(msg proxy_status): ${YELLOW}$(msg proxy_disabled)${NC}"
+    fi
     echo ""
 }
 
@@ -1174,6 +1386,7 @@ main() {
     
     check_root
     load_language
+    load_proxy
     
     # First run - select language
     if [ ! -f /etc/monitoring/language ]; then
@@ -1250,6 +1463,10 @@ main() {
                 ;;
             7)
                 apply_system_optimizations
+                safe_read "$(msg press_enter)" "" 30 >/dev/null
+                ;;
+            8)
+                setup_proxy
                 safe_read "$(msg press_enter)" "" 30 >/dev/null
                 ;;
             0)

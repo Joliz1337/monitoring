@@ -13,6 +13,15 @@ fi
 script_content='#!/bin/bash
 # Monitoring System Manager — auto-update via GitHub
 
+if [ -f /etc/monitoring/proxy.conf ]; then
+    . /etc/monitoring/proxy.conf 2>/dev/null
+    if [ "$PROXY_ENABLED" = "1" ] && [ -n "$PROXY_URL" ]; then
+        export http_proxy="$PROXY_URL" https_proxy="$PROXY_URL"
+        export HTTP_PROXY="$PROXY_URL" HTTPS_PROXY="$PROXY_URL"
+        export no_proxy="localhost,127.0.0.1,::1"
+    fi
+fi
+
 GITHUB_URL="https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh"
 TIMEOUT=120
 
