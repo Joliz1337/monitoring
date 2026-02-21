@@ -4,6 +4,7 @@ import time
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from sqlalchemy import delete
 
 # Configure logging to show app logs
@@ -127,6 +128,8 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["Content-Type", "Authorization"],
 )
+
+app.add_middleware(GZipMiddleware, minimum_size=500)
 
 app.include_router(auth_router.router)
 app.include_router(servers.router)

@@ -1,9 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional, Any, AsyncGenerator
 from datetime import datetime, timedelta, timezone
+import asyncio
 import httpx
 import json
 import logging
@@ -177,8 +178,10 @@ async def get_live_metrics(
     Enriches metrics with calculated network/disk speeds from latest snapshot.
     """
     server = await get_server_by_id(server_id, db)
-    metrics = await proxy_request(server, "/api/metrics")
-    snapshot = await get_latest_snapshot(server_id, db)
+    metrics, snapshot = await asyncio.gather(
+        proxy_request(server, "/api/metrics"),
+        get_latest_snapshot(server_id, db),
+    )
     return enrich_metrics_with_speeds(metrics, snapshot)
 
 
@@ -250,23 +253,44 @@ async def get_metrics_history(
     max_points = config.get("max_points", limit)
     
     if data_source == "raw":
-        # Query all raw metrics for the period (max ~17k for 24h)
-        result = await db.execute(
-            select(MetricsSnapshot)
+        count_result = await db.execute(
+            select(func.count(MetricsSnapshot.id))
             .where(MetricsSnapshot.server_id == server_id)
             .where(MetricsSnapshot.timestamp >= start_time)
             .where(MetricsSnapshot.timestamp <= end_time)
-            .order_by(MetricsSnapshot.timestamp)  # Ascending order
         )
-        snapshots = result.scalars().all()
-        
-        # Apply dynamic downsampling to fit max_points
-        total_count = len(snapshots)
-        if total_count > max_points:
-            # Calculate step to get approximately max_points
+        total_count = count_result.scalar() or 0
+
+        if total_count <= max_points:
+            result = await db.execute(
+                select(MetricsSnapshot)
+                .where(MetricsSnapshot.server_id == server_id)
+                .where(MetricsSnapshot.timestamp >= start_time)
+                .where(MetricsSnapshot.timestamp <= end_time)
+                .order_by(MetricsSnapshot.timestamp)
+            )
+            snapshots = result.scalars().all()
+        else:
             step = total_count // max_points
-            if step > 1:
-                snapshots = snapshots[::step]
+            numbered = (
+                select(
+                    MetricsSnapshot.id.label("ms_id"),
+                    func.row_number().over(
+                        order_by=MetricsSnapshot.timestamp
+                    ).label("rn")
+                )
+                .where(MetricsSnapshot.server_id == server_id)
+                .where(MetricsSnapshot.timestamp >= start_time)
+                .where(MetricsSnapshot.timestamp <= end_time)
+                .subquery()
+            )
+            result = await db.execute(
+                select(MetricsSnapshot)
+                .join(numbered, MetricsSnapshot.id == numbered.c.ms_id)
+                .where(numbered.c.rn % step == 1)
+                .order_by(MetricsSnapshot.timestamp)
+            )
+            snapshots = result.scalars().all()
         
         def build_snapshot_dict(s: MetricsSnapshot) -> dict:
             result = {

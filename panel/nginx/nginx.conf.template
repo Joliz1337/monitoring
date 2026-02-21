@@ -6,6 +6,26 @@ http {
     # Hide nginx version
     server_tokens off;
 
+    # Gzip compression
+    gzip on;
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_comp_level 6;
+    gzip_min_length 500;
+    gzip_types
+        text/plain
+        text/css
+        text/javascript
+        text/xml
+        application/json
+        application/javascript
+        application/xml
+        application/xml+rss
+        image/svg+xml
+        font/truetype
+        font/opentype
+        application/vnd.ms-fontobject;
+
     # Map to check if path starts with valid UID
     map $uri $valid_uid_path {
         ~^/${PANEL_UID}(/.*)?$  1;
@@ -169,11 +189,12 @@ http {
             proxy_read_timeout 60s;
         }
 
-        # Static assets (required for frontend to load)
+        # Static assets — Vite hashed filenames, safe to cache long-term
         location /assets/ {
             proxy_pass http://panel/assets/;
             proxy_http_version 1.1;
             proxy_set_header Host $host;
+            add_header Cache-Control "public, max-age=31536000, immutable" always;
         }
 
         # Favicon
@@ -181,6 +202,7 @@ http {
             proxy_pass http://panel/favicon.svg;
             proxy_http_version 1.1;
             proxy_set_header Host $host;
+            add_header Cache-Control "public, max-age=86400" always;
         }
 
         # ===== MAIN CATCH-ALL =====

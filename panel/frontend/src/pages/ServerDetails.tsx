@@ -98,7 +98,7 @@ export default function ServerDetails() {
       
       if (historyOnly) {
         setIsHistoryLoading(true)
-        const historyRes = await proxyApi.getHistory(Number(serverId), { period, limit: 1000, include_per_cpu: includePerCpu })
+        const historyRes = await proxyApi.getHistory(Number(serverId), { period, include_per_cpu: includePerCpu })
         const historyData = historyRes.data.data || []
         setHistory(historyData)
         setIsHistoryLoading(false)
@@ -112,7 +112,7 @@ export default function ServerDetails() {
           useCached 
             ? proxyApi.getMetrics(Number(serverId)) // Cached data from panel DB
             : proxyApi.getLiveMetrics(Number(serverId)), // Live data directly from node
-          proxyApi.getHistory(Number(serverId), { period, limit: 1000, include_per_cpu: includePerCpu }),
+          proxyApi.getHistory(Number(serverId), { period, include_per_cpu: includePerCpu }),
         ])
         
         const metricsData = metricsRes.data

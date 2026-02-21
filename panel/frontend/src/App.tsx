@@ -9,17 +9,18 @@ import { useTranslation } from 'react-i18next'
 import Layout from './components/Layout/Layout'
 import Login from './pages/Login'
 import Dashboard from './pages/Dashboard'
-import ServerDetails from './pages/ServerDetails'
-import HAProxy from './pages/HAProxy'
-import Traffic from './pages/Traffic'
-import Settings from './pages/Settings'
 import Servers from './pages/Servers'
-import Updates from './pages/Updates'
-import BulkActions from './pages/BulkActions'
-import Blocklist from './pages/Blocklist'
-import Remnawave from './pages/Remnawave'
-import Alerts from './pages/Alerts'
 import { isExtEnabled } from './pages/_internal'
+
+const ServerDetails = lazy(() => import('./pages/ServerDetails'))
+const HAProxy = lazy(() => import('./pages/HAProxy'))
+const Traffic = lazy(() => import('./pages/Traffic'))
+const Settings = lazy(() => import('./pages/Settings'))
+const Updates = lazy(() => import('./pages/Updates'))
+const BulkActions = lazy(() => import('./pages/BulkActions'))
+const Blocklist = lazy(() => import('./pages/Blocklist'))
+const Remnawave = lazy(() => import('./pages/Remnawave'))
+const Alerts = lazy(() => import('./pages/Alerts'))
 
 const ExtPageLazy = isExtEnabled 
   ? lazy(() => import('./pages/_internal/ExtPage'))
@@ -162,15 +163,15 @@ export default function App() {
       >
         <Route index element={<Dashboard />} />
         <Route path="servers" element={<Servers />} />
-        <Route path="bulk-actions" element={<BulkActions />} />
-        <Route path="alerts" element={<Alerts />} />
-        <Route path="blocklist" element={<Blocklist />} />
-        <Route path="remnawave" element={<Remnawave />} />
-        <Route path="server/:serverId" element={<ServerDetails />} />
-        <Route path="server/:serverId/haproxy" element={<HAProxy />} />
-        <Route path="server/:serverId/traffic" element={<Traffic />} />
-        <Route path="settings" element={<Settings />} />
-        <Route path="updates" element={<Updates />} />
+        <Route path="bulk-actions" element={<Suspense fallback={<LoadingScreen />}><BulkActions /></Suspense>} />
+        <Route path="alerts" element={<Suspense fallback={<LoadingScreen />}><Alerts /></Suspense>} />
+        <Route path="blocklist" element={<Suspense fallback={<LoadingScreen />}><Blocklist /></Suspense>} />
+        <Route path="remnawave" element={<Suspense fallback={<LoadingScreen />}><Remnawave /></Suspense>} />
+        <Route path="server/:serverId" element={<Suspense fallback={<LoadingScreen />}><ServerDetails /></Suspense>} />
+        <Route path="server/:serverId/haproxy" element={<Suspense fallback={<LoadingScreen />}><HAProxy /></Suspense>} />
+        <Route path="server/:serverId/traffic" element={<Suspense fallback={<LoadingScreen />}><Traffic /></Suspense>} />
+        <Route path="settings" element={<Suspense fallback={<LoadingScreen />}><Settings /></Suspense>} />
+        <Route path="updates" element={<Suspense fallback={<LoadingScreen />}><Updates /></Suspense>} />
         {ExtPageLazy && (
           <Route 
             path={extPath}
