@@ -46,8 +46,8 @@ import { useTranslation } from 'react-i18next'
 export default function Dashboard() {
   const { uid } = useParams()
   const navigate = useNavigate()
-  const { servers, fetchServersWithMetrics, fetchAllTraffic, reorderServers, isLoading } = useServersStore()
-  const { refreshInterval, compactView, trafficPeriod, setCompactView, fetchSettings, detailLevel, cardScale, setDetailLevel, setCardScale } = useSettingsStore()
+  const { servers, fetchServersWithMetrics, reorderServers, isLoading } = useServersStore()
+  const { refreshInterval, compactView, setCompactView, fetchSettings, detailLevel, cardScale, setDetailLevel, setCardScale } = useSettingsStore()
   const { t } = useTranslation()
   
   const initialLoadDone = useRef(false)
@@ -70,15 +70,12 @@ export default function Dashboard() {
     })
   )
   
-  // Initial load - fetch servers with cached metrics (fast), then traffic in background
   useEffect(() => {
     fetchSettings()
     fetchServersWithMetrics().then(() => {
       initialLoadDone.current = true
     })
-    // Load traffic separately (longer cache, less frequent)
-    fetchAllTraffic(trafficPeriod)
-  }, [fetchServersWithMetrics, fetchAllTraffic, fetchSettings, trafficPeriod])
+  }, [fetchServersWithMetrics, fetchSettings])
   
   
   // Auto refresh with visibility awareness - stops polling when tab is hidden

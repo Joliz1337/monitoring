@@ -1,4 +1,4 @@
-import axios, { AxiosError } from 'axios'
+import axios, { AxiosError, AxiosRequestConfig, AxiosResponse } from 'axios'
 
 const api = axios.create({
   baseURL: '/api',
@@ -21,6 +21,21 @@ api.interceptors.response.use(
     return Promise.reject(error)
   }
 )
+
+// GET request deduplication: if the same GET is already in-flight, reuse its promise
+const inflightGets = new Map<string, Promise<AxiosResponse>>()
+const originalGet = api.get.bind(api)
+api.get = function <T = unknown>(url: string, config?: AxiosRequestConfig): Promise<AxiosResponse<T>> {
+  const key = url + (config?.params ? ':' + JSON.stringify(config.params) : '')
+  const existing = inflightGets.get(key)
+  if (existing) return existing as Promise<AxiosResponse<T>>
+
+  const promise = originalGet<T>(url, config).finally(() => {
+    inflightGets.delete(key)
+  })
+  inflightGets.set(key, promise as Promise<AxiosResponse>)
+  return promise
+} as typeof api.get
 
 export interface Server {
   id: number

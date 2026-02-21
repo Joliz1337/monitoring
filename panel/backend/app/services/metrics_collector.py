@@ -62,6 +62,7 @@ class MetricsCollector:
         self._server_states: dict[int, ServerMetricsState] = {}
         self._collect_interval = DEFAULT_METRICS_INTERVAL
         self._haproxy_interval = DEFAULT_HAPROXY_INTERVAL
+        self._traffic_period_days = 30
         
         # Retention periods
         self._raw_retention_hours = 24  # keep raw data 24 hours
@@ -79,26 +80,31 @@ class MetricsCollector:
             async with async_session() as db:
                 result = await db.execute(
                     select(PanelSettings).where(
-                        PanelSettings.key.in_(['metrics_collect_interval', 'haproxy_collect_interval'])
+                        PanelSettings.key.in_([
+                            'metrics_collect_interval', 'haproxy_collect_interval', 'traffic_period'
+                        ])
                     )
                 )
                 settings = {s.key: s.value for s in result.scalars().all()}
                 
-                # Update metrics interval
                 if 'metrics_collect_interval' in settings:
                     new_interval = int(settings['metrics_collect_interval'])
-                    if 5 <= new_interval <= 300:  # Valid range: 5s - 5min
+                    if 5 <= new_interval <= 300:
                         if new_interval != self._collect_interval:
                             logger.info(f"Metrics interval changed: {self._collect_interval}s -> {new_interval}s")
                             self._collect_interval = new_interval
                 
-                # Update HAProxy interval
                 if 'haproxy_collect_interval' in settings:
                     new_interval = int(settings['haproxy_collect_interval'])
-                    if 30 <= new_interval <= 600:  # Valid range: 30s - 10min
+                    if 30 <= new_interval <= 600:
                         if new_interval != self._haproxy_interval:
                             logger.info(f"HAProxy interval changed: {self._haproxy_interval}s -> {new_interval}s")
                             self._haproxy_interval = new_interval
+                
+                if 'traffic_period' in settings:
+                    new_period = int(settings['traffic_period'])
+                    if 1 <= new_period <= 365:
+                        self._traffic_period_days = new_period
         except Exception as e:
             logger.debug(f"Failed to load collector settings: {e}")
     
@@ -480,7 +486,7 @@ class MetricsCollector:
                     traffic_res = await client.get(
                         f"{server.url}/api/traffic/summary",
                         headers=headers,
-                        params={"days": 30}
+                        params={"days": self._traffic_period_days}
                     )
                     if traffic_res.status_code == 200:
                         traffic_data["summary"] = traffic_res.json()
