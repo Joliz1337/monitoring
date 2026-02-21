@@ -691,13 +691,43 @@ check_endpoints() {
     echo ""
 }
 
+get_server_ip() {
+    local ip=""
+    local services=(
+        "https://api.ipify.org"
+        "https://icanhazip.com"
+        "https://ifconfig.me"
+        "https://2ip.me/api/ip"
+        "https://checkip.amazonaws.com"
+        "https://ipinfo.io/ip"
+        "https://ident.me"
+        "https://ifconfig.co"
+        "https://ipecho.net/plain"
+        "https://ip.sb"
+    )
+
+    for svc in "${services[@]}"; do
+        ip=$(timeout 5 curl -4 -fsSL --connect-timeout 3 --max-time 5 "$svc" 2>/dev/null | tr -d '[:space:]')
+        if [[ "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+            echo "$ip"
+            return 0
+        fi
+    done
+
+    ip=$(ip -4 route get 1.1.1.1 2>/dev/null | grep -oE 'src [0-9.]+' | awk '{print $2}')
+    [ -n "$ip" ] && echo "$ip" && return 0
+
+    ip=$(hostname -I 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    [ -n "$ip" ] && echo "$ip" && return 0
+
+    echo "unknown"
+}
+
 show_status() {
     local final_api_key
     final_api_key=$(grep "^API_KEY=" .env 2>/dev/null | cut -d '=' -f2 || echo "unknown")
     local server_ip
-    server_ip=$(timeout 10 curl -4 -s ifconfig.me 2>/dev/null) || \
-    server_ip=$(hostname -I 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1) || \
-    server_ip="unknown"
+    server_ip=$(get_server_ip)
     
     echo ""
     echo "=========================================="
