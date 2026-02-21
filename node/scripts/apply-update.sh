@@ -131,7 +131,10 @@ load_proxy() {
     [ "$PROXY_ENABLED" = "1" ] && [ -n "$PROXY_URL" ] || return 0
     export http_proxy="$PROXY_URL" https_proxy="$PROXY_URL"
     export HTTP_PROXY="$PROXY_URL" HTTPS_PROXY="$PROXY_URL"
+    export all_proxy="$PROXY_URL" ALL_PROXY="$PROXY_URL"
     export no_proxy="localhost,127.0.0.1,::1" NO_PROXY="localhost,127.0.0.1,::1"
+    git config --global http.proxy "$PROXY_URL" 2>/dev/null || true
+    git config --global https.proxy "$PROXY_URL" 2>/dev/null || true
 }
 load_proxy
 
