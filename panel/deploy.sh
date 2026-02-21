@@ -241,9 +241,29 @@ check_docker() {
     return 1
 }
 
+wait_for_apt_lock() {
+    local max_wait=120
+    local waited=0
+    while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || \
+          fuser /var/lib/apt/lists/lock >/dev/null 2>&1 || \
+          fuser /var/lib/dpkg/lock >/dev/null 2>&1; do
+        if [ $waited -eq 0 ]; then
+            print_warning "Waiting for apt lock..."
+        fi
+        sleep 3
+        waited=$((waited + 3))
+        if [ $waited -ge $max_wait ]; then
+            print_warning "apt lock wait timeout (${max_wait}s), trying anyway..."
+            return 0
+        fi
+    done
+    return 0
+}
+
 install_docker() {
     print_info "Installing Docker..."
     suppress_needrestart
+    wait_for_apt_lock
 
     if [ -f /etc/debian_version ]; then
         local os_id os_codename
@@ -517,6 +537,7 @@ install_certbot() {
 
     print_info "Installing Certbot..."
     suppress_needrestart
+    wait_for_apt_lock
 
     if [ -f /etc/debian_version ]; then
         spin_retry "$TIMEOUT_APT_UPDATE" "$MAX_RETRIES" "$RETRY_DELAY" "Updating package lists" \
@@ -870,7 +891,7 @@ print_credentials() {
     echo -e "  ${RED}После закрытия они не будут показаны снова.${NC}"
     echo ""
     
-    safe_read "Press Enter to finish..." "" 30 >/dev/null
+    safe_read "Press Enter to finish..." "" 7200 >/dev/null
 }
 
 # ==================== Main ====================

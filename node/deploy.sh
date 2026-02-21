@@ -241,6 +241,27 @@ PROXYEOF
     timeout 60 systemctl restart docker >/dev/null 2>&1 || true
 }
 
+# ==================== APT Lock Wait ====================
+
+wait_for_apt_lock() {
+    local max_wait=120
+    local waited=0
+    while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || \
+          fuser /var/lib/apt/lists/lock >/dev/null 2>&1 || \
+          fuser /var/lib/dpkg/lock >/dev/null 2>&1; do
+        if [ $waited -eq 0 ]; then
+            log_warn "Waiting for apt lock..."
+        fi
+        sleep 3
+        waited=$((waited + 3))
+        if [ $waited -ge $max_wait ]; then
+            log_warn "apt lock wait timeout (${max_wait}s), trying anyway..."
+            return 0
+        fi
+    done
+    return 0
+}
+
 # ==================== System Checks ====================
 
 check_disk_space() {
@@ -300,6 +321,7 @@ install_docker() {
 
     log_info "Installing Docker..."
     suppress_needrestart
+    wait_for_apt_lock
 
     spin "Removing old Docker packages" \
         env DEBIAN_FRONTEND=noninteractive \
@@ -536,6 +558,7 @@ setup_firewall() {
 
     if ! command -v ufw &> /dev/null; then
         suppress_needrestart
+        wait_for_apt_lock
         spin_retry "$TIMEOUT_APT_UPDATE" "$MAX_RETRIES" "$RETRY_DELAY" "Updating package lists" \
             env DEBIAN_FRONTEND=noninteractive \
             apt-get update -qq || true
@@ -549,6 +572,7 @@ setup_firewall() {
 
     if ! command -v ipset &> /dev/null; then
         suppress_needrestart
+        wait_for_apt_lock
         spin_retry "$TIMEOUT_APT_INSTALL" "$MAX_RETRIES" "$RETRY_DELAY" "Installing ipset" \
             env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l NEEDRESTART_SUSPEND=1 \
             apt-get install -y -qq \
@@ -760,7 +784,7 @@ show_status() {
     echo -e "    ${BLUE}${final_api_key}${NC}"
     echo ""
     
-    safe_read "Press Enter to finish..." "" 30 >/dev/null
+    safe_read "Press Enter to finish..." "" 7200 >/dev/null
 }
 
 # ==================== Main ====================
