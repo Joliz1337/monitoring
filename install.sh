@@ -183,7 +183,9 @@ MSG_EN[proxy_removed]="Proxy disabled"
 MSG_EN[proxy_empty_disable]="Empty = disable proxy"
 MSG_EN[proxy_testing]="Testing proxy connection..."
 MSG_EN[proxy_test_ok]="Proxy connection OK"
-MSG_EN[proxy_test_fail]="Proxy connection failed (check address)"
+MSG_EN[proxy_test_fail]="Proxy connection failed"
+MSG_EN[proxy_save_anyway]="Save anyway? (y/N)"
+MSG_EN[proxy_not_saved]="Proxy not saved"
 
 # Russian messages
 MSG_RU[select_language]="Select language / Выберите язык:"
@@ -252,7 +254,9 @@ MSG_RU[proxy_removed]="Прокси отключен"
 MSG_RU[proxy_empty_disable]="Пусто = отключить прокси"
 MSG_RU[proxy_testing]="Проверка соединения через прокси..."
 MSG_RU[proxy_test_ok]="Прокси работает"
-MSG_RU[proxy_test_fail]="Прокси не отвечает (проверьте адрес)"
+MSG_RU[proxy_test_fail]="Прокси не отвечает"
+MSG_RU[proxy_save_anyway]="Сохранить всё равно? (y/N)"
+MSG_RU[proxy_not_saved]="Прокси не сохранён"
 
 msg() {
     local key="$1"
@@ -968,11 +972,23 @@ PROXYEOF
     log_info "$(msg proxy_testing)"
     if timeout 15 curl -fsSL --connect-timeout 10 --max-time 15 "https://github.com" >/dev/null 2>&1; then
         log_success "$(msg proxy_test_ok)"
+        log_success "$(msg proxy_configured)"
     else
-        log_warn "$(msg proxy_test_fail)"
+        log_error "$(msg proxy_test_fail)"
+        local save_anyway
+        save_anyway=$(safe_read "  $(msg proxy_save_anyway): " "n" 30)
+        if [ "$save_anyway" = "y" ] || [ "$save_anyway" = "Y" ]; then
+            log_warn "$(msg proxy_configured)"
+        else
+            cat > /etc/monitoring/proxy.conf << 'PROXYEOF'
+PROXY_ENABLED=0
+PROXY_URL=
+PROXYEOF
+            remove_proxy_configs
+            unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY no_proxy NO_PROXY
+            log_info "$(msg proxy_not_saved)"
+        fi
     fi
-
-    log_success "$(msg proxy_configured)"
 }
 
 # ==================== Panel Functions ====================
