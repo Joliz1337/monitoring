@@ -884,42 +884,17 @@ configure_docker_proxy() {
     [ -f /etc/monitoring/proxy.conf ] || return 0
     . /etc/monitoring/proxy.conf 2>/dev/null || return 0
     [ "$PROXY_ENABLED" = "1" ] && [ -n "$PROXY_URL" ] || return 0
+    command -v docker &>/dev/null || return 0
 
-    if command -v docker &>/dev/null; then
-        mkdir -p /etc/systemd/system/docker.service.d 2>/dev/null || true
-        cat > /etc/systemd/system/docker.service.d/proxy.conf << PROXYEOF
+    mkdir -p /etc/systemd/system/docker.service.d 2>/dev/null || true
+    cat > /etc/systemd/system/docker.service.d/proxy.conf << PROXYEOF
 [Service]
 Environment="HTTP_PROXY=$PROXY_URL"
 Environment="HTTPS_PROXY=$PROXY_URL"
 Environment="NO_PROXY=localhost,127.0.0.1,::1"
 PROXYEOF
-        timeout 60 systemctl daemon-reload >/dev/null 2>&1 || true
-        timeout 60 systemctl restart docker >/dev/null 2>&1 || true
-    fi
-
-    mkdir -p /root/.docker 2>/dev/null || true
-    if [ -f /root/.docker/config.json ] && command -v python3 &>/dev/null; then
-        python3 -c "
-import json
-try:
-    with open('/root/.docker/config.json') as f: cfg = json.load(f)
-except: cfg = {}
-cfg['proxies'] = {'default': {'httpProxy': '$PROXY_URL', 'httpsProxy': '$PROXY_URL', 'noProxy': 'localhost,127.0.0.1,::1'}}
-with open('/root/.docker/config.json', 'w') as f: json.dump(cfg, f, indent=2)
-" 2>/dev/null || true
-    elif [ ! -f /root/.docker/config.json ]; then
-        cat > /root/.docker/config.json << PROXYEOF
-{
-  "proxies": {
-    "default": {
-      "httpProxy": "$PROXY_URL",
-      "httpsProxy": "$PROXY_URL",
-      "noProxy": "localhost,127.0.0.1,::1"
-    }
-  }
-}
-PROXYEOF
-    fi
+    timeout 60 systemctl daemon-reload >/dev/null 2>&1 || true
+    timeout 60 systemctl restart docker >/dev/null 2>&1 || true
 }
 
 remove_proxy_configs() {
@@ -928,17 +903,6 @@ remove_proxy_configs() {
     if command -v docker &>/dev/null; then
         timeout 60 systemctl daemon-reload >/dev/null 2>&1 || true
         timeout 60 systemctl restart docker >/dev/null 2>&1 || true
-    fi
-    local docker_cfg="/root/.docker/config.json"
-    if [ -f "$docker_cfg" ] && command -v python3 &>/dev/null; then
-        python3 -c "
-import json
-try:
-    with open('$docker_cfg') as f: cfg = json.load(f)
-    cfg.pop('proxies', None)
-    with open('$docker_cfg', 'w') as f: json.dump(cfg, f, indent=2)
-except: pass
-" 2>/dev/null || true
     fi
 }
 

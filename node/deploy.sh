@@ -236,21 +236,6 @@ Environment="NO_PROXY=localhost,127.0.0.1,::1"
 PROXYEOF
     timeout 60 systemctl daemon-reload >/dev/null 2>&1 || true
     timeout 60 systemctl restart docker >/dev/null 2>&1 || true
-
-    mkdir -p /root/.docker 2>/dev/null || true
-    if [ ! -f /root/.docker/config.json ]; then
-        cat > /root/.docker/config.json << PROXYEOF
-{
-  "proxies": {
-    "default": {
-      "httpProxy": "$PROXY_URL",
-      "httpsProxy": "$PROXY_URL",
-      "noProxy": "localhost,127.0.0.1,::1"
-    }
-  }
-}
-PROXYEOF
-    fi
 }
 
 # ==================== System Checks ====================
@@ -707,7 +692,7 @@ get_server_ip() {
     )
 
     for svc in "${services[@]}"; do
-        ip=$(timeout 5 curl -4 -fsSL --connect-timeout 3 --max-time 5 "$svc" 2>/dev/null | tr -d '[:space:]')
+        ip=$(timeout 5 curl -4 -fsSL --noproxy '*' --connect-timeout 3 --max-time 5 "$svc" 2>/dev/null | tr -d '[:space:]')
         if [[ "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
             echo "$ip"
             return 0
