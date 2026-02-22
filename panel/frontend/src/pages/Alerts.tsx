@@ -207,6 +207,18 @@ export default function Alerts() {
             placeholder="-1001234567890"
             onSave={v => save({ telegram_chat_id: v })}
           />
+          <div className="space-y-1">
+            <label className="text-sm text-dark-300">{t('alerts.notification_language')}</label>
+            <select
+              value={settings.language || 'en'}
+              onChange={e => save({ language: e.target.value })}
+              className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200
+                         focus:border-accent-500/50 focus:outline-none transition"
+            >
+              <option value="en">English</option>
+              <option value="ru">Русский</option>
+            </select>
+          </div>
           <div className="flex items-center gap-3">
             <button
               onClick={handleTest}

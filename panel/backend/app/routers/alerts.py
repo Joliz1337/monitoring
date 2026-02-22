@@ -16,6 +16,7 @@ class AlertSettingsUpdate(BaseModel):
     enabled: Optional[bool] = None
     telegram_bot_token: Optional[str] = None
     telegram_chat_id: Optional[str] = None
+    language: Optional[str] = None
     check_interval: Optional[int] = None
     alert_cooldown: Optional[int] = None
 
@@ -78,6 +79,7 @@ def _settings_to_dict(s: AlertSettings) -> dict:
         "enabled": s.enabled,
         "telegram_bot_token": s.telegram_bot_token or "",
         "telegram_chat_id": s.telegram_chat_id or "",
+        "language": s.language or "en",
         "check_interval": s.check_interval,
         "alert_cooldown": s.alert_cooldown,
         "offline_enabled": s.offline_enabled,

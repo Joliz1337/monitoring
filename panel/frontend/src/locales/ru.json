@@ -901,6 +901,7 @@
     "enable_alerts": "Включить уведомления",
     "bot_token": "Токен бота",
     "chat_id": "Chat ID",
+    "notification_language": "Язык уведомлений",
     "test_send": "Тест",
     "test_ok": "Сообщение отправлено",
     "general_settings": "Общие настройки",

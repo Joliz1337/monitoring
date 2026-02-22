@@ -40,6 +40,11 @@ class ServerAlertState:
         self.ema_tcp_synrecv: float = 0.0
         self.ema_tcp_finwait: float = 0.0
 
+        self.prev_net_rx: float = 0.0
+        self.prev_net_tx: float = 0.0
+        self.prev_time: float = 0.0
+        self.net_initialized: bool = False
+
         self.alert_start: dict[str, float] = {}
         self.last_alert: dict[str, float] = {}
 
@@ -182,13 +187,15 @@ class ServerAlerter:
 
         cpu_val = self._extract_cpu(metrics)
         ram_val = self._extract_ram(metrics)
-        net_rx, net_tx = self._extract_network(metrics)
+        raw_rx, raw_tx = self._extract_network(metrics)
         tcp = self._extract_tcp(metrics)
+
+        net_rx_speed, net_tx_speed = self._calc_net_speed(state, raw_rx, raw_tx)
 
         state.update_ema("ema_cpu", cpu_val)
         state.update_ema("ema_ram", ram_val)
-        state.update_ema("ema_net_rx", net_rx)
-        state.update_ema("ema_net_tx", net_tx)
+        state.update_ema("ema_net_rx", net_rx_speed)
+        state.update_ema("ema_net_tx", net_tx_speed)
         state.update_ema("ema_tcp_established", tcp.get("established", 0))
         state.update_ema("ema_tcp_listen", tcp.get("listen", 0))
         state.update_ema("ema_tcp_timewait", tcp.get("time_wait", 0))
@@ -237,7 +244,7 @@ class ServerAlerter:
         if settings.network_enabled:
             await self._check_deviation_both(
                 srv, state, settings, now, cooldown,
-                current_val=net_rx + net_tx,
+                current_val=net_rx_speed + net_tx_speed,
                 ema_val=state.ema_net_rx + state.ema_net_tx,
                 spike_pct=settings.network_spike_percent,
                 drop_pct=settings.network_drop_percent,
@@ -335,6 +342,43 @@ class ServerAlerter:
             )
 
     # ------------------------------------------------------------------
+    # Localized message builders
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _lang(settings: AlertSettings) -> str:
+        return (settings.language or "en").lower()
+
+    def _msg_offline(self, srv: Server, settings: AlertSettings, fail_count: int) -> str:
+        if self._lang(settings) == "ru":
+            return f"Сервер {srv.name} недоступен (нет ответа {fail_count} проверок подряд)"
+        return f"Server {srv.name} is offline (no response for {fail_count} consecutive checks)"
+
+    def _msg_recovery(self, srv: Server, settings: AlertSettings) -> str:
+        if self._lang(settings) == "ru":
+            return f"Сервер {srv.name} снова онлайн"
+        return f"Server {srv.name} is back online"
+
+    def _msg_critical(self, srv: Server, settings: AlertSettings, label: str, current: float, threshold: float, unit: str) -> str:
+        if self._lang(settings) == "ru":
+            return f"{label} критический на {srv.name}: {current:.1f}{unit} (порог {threshold:.0f}{unit})"
+        return f"{label} critical on {srv.name}: {current:.1f}{unit} (threshold {threshold:.0f}{unit})"
+
+    def _msg_spike(self, srv: Server, settings: AlertSettings, label: str, current_str: str, ema_str: str, pct: float) -> str:
+        if self._lang(settings) == "ru":
+            return f"Скачок {label} на {srv.name}: {current_str} (базовое {ema_str}, +{pct:.0f}%)"
+        return f"{label} spike on {srv.name}: {current_str} (baseline {ema_str}, +{pct:.0f}%)"
+
+    def _msg_drop(self, srv: Server, settings: AlertSettings, label: str, current_str: str, ema_str: str, pct: float) -> str:
+        if self._lang(settings) == "ru":
+            return f"Падение {label} на {srv.name}: {current_str} (базовое {ema_str}, -{pct:.0f}%)"
+        return f"{label} drop on {srv.name}: {current_str} (baseline {ema_str}, -{pct:.0f}%)"
+
+    def _msg_header(self, settings: AlertSettings) -> str:
+        if self._lang(settings) == "ru":
+            return "Уведомление сервера"
+        return "Server Alert"
+
+    # ------------------------------------------------------------------
     # Offline / Recovery
     # ------------------------------------------------------------------
     async def _check_offline(
@@ -356,7 +400,7 @@ class ServerAlerter:
                     state.last_alert["offline"] = now
                     await self._send_and_save(
                         srv, settings, "offline", "critical",
-                        f"Server {srv.name} is offline (no response for {state.fail_count} consecutive checks)",
+                        self._msg_offline(srv, settings, state.fail_count),
                         {"fail_count": state.fail_count, "threshold": threshold},
                     )
         else:
@@ -365,7 +409,7 @@ class ServerAlerter:
                     state.last_alert["recovery"] = now
                     await self._send_and_save(
                         srv, settings, "recovery", "info",
-                        f"Server {srv.name} is back online",
+                        self._msg_recovery(srv, settings),
                         {"was_offline_checks": state.fail_count},
                     )
             state.fail_count = 0
@@ -393,7 +437,6 @@ class ServerAlerter:
         label: str,
         unit: str = "%",
     ):
-        # Critical absolute threshold
         if current >= critical_threshold:
             self._track_condition(state, critical_type, now)
             if self._sustained_met(state, critical_type, now, sustained):
@@ -401,13 +444,12 @@ class ServerAlerter:
                     state.last_alert[critical_type] = now
                     await self._send_and_save(
                         srv, settings, critical_type, "critical",
-                        f"{label} critical on {srv.name}: {current:.1f}{unit} (threshold {critical_threshold:.0f}{unit})",
+                        self._msg_critical(srv, settings, label, current, critical_threshold, unit),
                         {"current": round(current, 1), "threshold": critical_threshold, "ema": round(ema, 1)},
                     )
         else:
             self._clear_condition(state, critical_type)
 
-        # Spike relative to EMA
         if ema > 0:
             deviation_pct = ((current - ema) / ema) * 100
         else:
@@ -420,7 +462,7 @@ class ServerAlerter:
                     state.last_alert[spike_type] = now
                     await self._send_and_save(
                         srv, settings, spike_type, "warning",
-                        f"{label} spike on {srv.name}: {current:.1f}{unit} (baseline {ema:.1f}{unit}, +{deviation_pct:.0f}%)",
+                        self._msg_spike(srv, settings, label, f"{current:.1f}{unit}", f"{ema:.1f}{unit}", deviation_pct),
                         {"current": round(current, 1), "ema": round(ema, 1), "deviation_pct": round(deviation_pct, 1)},
                     )
         else:
@@ -454,7 +496,6 @@ class ServerAlerter:
         else:
             increase_pct = 0 if current_val == 0 else 100
 
-        # Spike
         if increase_pct > spike_pct:
             self._track_condition(state, spike_type, now)
             if self._sustained_met(state, spike_type, now, sustained):
@@ -462,13 +503,12 @@ class ServerAlerter:
                     state.last_alert[spike_type] = now
                     await self._send_and_save(
                         srv, settings, spike_type, "warning",
-                        f"{label} spike on {srv.name}: {fmt(current_val)} (baseline {fmt(ema_val)}, +{increase_pct:.0f}%)",
+                        self._msg_spike(srv, settings, label, fmt(current_val), fmt(ema_val), increase_pct),
                         {"current": current_val, "ema": ema_val, "deviation_pct": round(increase_pct, 1)},
                     )
         else:
             self._clear_condition(state, spike_type)
 
-        # Drop (only when baseline is meaningful)
         if ema_val > 0:
             decrease_pct = ((ema_val - current_val) / ema_val) * 100
             if decrease_pct > drop_pct:
@@ -478,7 +518,7 @@ class ServerAlerter:
                         state.last_alert[drop_type] = now
                         await self._send_and_save(
                             srv, settings, drop_type, "warning",
-                            f"{label} drop on {srv.name}: {fmt(current_val)} (baseline {fmt(ema_val)}, -{decrease_pct:.0f}%)",
+                            self._msg_drop(srv, settings, label, fmt(current_val), fmt(ema_val), decrease_pct),
                             {"current": current_val, "ema": ema_val, "deviation_pct": round(decrease_pct, 1)},
                         )
             else:
@@ -513,7 +553,7 @@ class ServerAlerter:
                     state.last_alert[spike_type] = now
                     await self._send_and_save(
                         srv, settings, spike_type, "warning",
-                        f"{label} spike on {srv.name}: {current_val:.0f} (baseline {ema_val:.0f}, +{increase_pct:.0f}%)",
+                        self._msg_spike(srv, settings, label, f"{current_val:.0f}", f"{ema_val:.0f}", increase_pct),
                         {"current": current_val, "ema": ema_val, "deviation_pct": round(increase_pct, 1)},
                     )
         else:
@@ -577,9 +617,34 @@ class ServerAlerter:
 
     @staticmethod
     def _extract_network(metrics: dict) -> tuple[float, float]:
+        """Extract raw cumulative byte counters (NOT speed)."""
         net = metrics.get("network", {})
         total = net.get("total", {})
         return total.get("rx_bytes", 0) or 0, total.get("tx_bytes", 0) or 0
+
+    @staticmethod
+    def _calc_net_speed(state: "ServerAlertState", raw_rx: float, raw_tx: float) -> tuple[float, float]:
+        """Calculate bytes/sec from consecutive cumulative counter readings."""
+        current_time = time.time()
+        rx_speed = 0.0
+        tx_speed = 0.0
+
+        if state.net_initialized and state.prev_time > 0:
+            dt = current_time - state.prev_time
+            if dt > 0.5:
+                rx_diff = raw_rx - state.prev_net_rx
+                tx_diff = raw_tx - state.prev_net_tx
+                if rx_diff >= 0:
+                    rx_speed = rx_diff / dt
+                if tx_diff >= 0:
+                    tx_speed = tx_diff / dt
+
+        state.prev_net_rx = raw_rx
+        state.prev_net_tx = raw_tx
+        state.prev_time = current_time
+        state.net_initialized = True
+
+        return rx_speed, tx_speed
 
     @staticmethod
     def _extract_tcp(metrics: dict) -> dict:
@@ -642,7 +707,8 @@ class ServerAlerter:
     async def _send_telegram(self, settings: AlertSettings, severity: str, message: str) -> bool:
         severity_map = {"critical": "\U0001f534", "warning": "\U0001f7e1", "info": "\U0001f7e2"}
         emoji = severity_map.get(severity, "\u2139\ufe0f")
-        text = f"{emoji} <b>Server Alert</b>\n\n{message}"
+        header = self._msg_header(settings)
+        text = f"{emoji} <b>{header}</b>\n\n{message}"
 
         try:
             url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"

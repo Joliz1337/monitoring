@@ -492,6 +492,7 @@ class AlertSettings(Base):
     
     telegram_bot_token = Column(String(200), nullable=True)
     telegram_chat_id = Column(String(100), nullable=True)
+    language = Column(String(5), default="en")
     
     check_interval = Column(Integer, default=60)
     alert_cooldown = Column(Integer, default=1800)

@@ -357,8 +357,10 @@ class MetricsCollector:
                                 tcp_stats['time_wait'] += 1
                             elif state_name == 'close_wait':
                                 tcp_stats['close_wait'] += 1
-                            elif state_name in ('syn_sent', 'syn_recv'):
+                            elif state_name == 'syn_sent':
                                 tcp_stats['syn_sent'] += 1
+                            elif state_name == 'syn_recv':
+                                tcp_stats['syn_recv'] += 1
                             elif state_name in ('fin_wait1', 'fin_wait2'):
                                 tcp_stats['fin_wait'] += 1
                             else:

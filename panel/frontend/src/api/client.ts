@@ -1413,6 +1413,7 @@ export interface AlertSettingsData {
   enabled: boolean
   telegram_bot_token: string
   telegram_chat_id: string
+  language: string
   check_interval: number
   alert_cooldown: number
   offline_enabled: boolean

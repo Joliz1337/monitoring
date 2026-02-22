@@ -238,6 +238,13 @@ async def run_migrations(conn):
     alert_columns = {row[0] for row in result.fetchall()}
     
     if alert_columns:
+        if "language" not in alert_columns:
+            try:
+                await conn.execute(text("ALTER TABLE alert_settings ADD COLUMN language VARCHAR(5) DEFAULT 'en'"))
+                logger.info("Added column: alert_settings.language")
+            except Exception:
+                pass
+
         tcp_alert_columns = [
             ("tcp_synsent_enabled", "BOOLEAN DEFAULT FALSE"),
             ("tcp_synsent_spike_percent", "FLOAT DEFAULT 200.0"),

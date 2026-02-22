@@ -900,6 +900,7 @@
     "enable_alerts": "Enable alerts",
     "bot_token": "Bot Token",
     "chat_id": "Chat ID",
+    "notification_language": "Notification language",
     "test_send": "Send Test",
     "test_ok": "Message sent",
     "general_settings": "General Settings",
