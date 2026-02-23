@@ -1,0 +1,65 @@
+# Environment
+.env
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+ENV/
+
+# Node
+node_modules/
+dist/
+.cache/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.cursor
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# SSL certificates
+*.pem
+
+# Docker
+docker-compose.override.yml
+
+# Development tools
+_tools/
+
+# Runtime generated
+panel/backend/ext/*.py
+panel/backend/ext/logs/
+
+# Build artifacts
+*.dec.tsx
+*.dec.ts
+*.dec.py
+panel/frontend/src/pages/_internal/ExtPage.tsx
+panel/frontend/src/stores/_extStore.dec.*
+panel/frontend/src/api/_ext.dec.*
+
+# Local configs
+profiles.conf
+*.local.conf
+doc_remnaweve.yaml
+CHANGELOG.md

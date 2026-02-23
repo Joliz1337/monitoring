@@ -1,0 +1,36 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Documentation
+*.md
+!requirements.txt
+
+# Docker
+Dockerfile
+docker-compose*.yml
+.dockerignore
+
+# SSL (mounted separately)
+nginx/
+
+# Environment (passed via docker-compose)
+.env*
+
+# Tests
+tests/
+pytest.ini

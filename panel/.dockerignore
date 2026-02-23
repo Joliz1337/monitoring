@@ -1,0 +1,11 @@
+.git
+.gitignore
+.env
+*.md
+*.log
+__pycache__
+*.pyc
+node_modules
+dist
+.vscode
+.idea

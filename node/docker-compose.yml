@@ -1,0 +1,68 @@
+services:
+  nginx:
+    image: nginx:alpine
+    container_name: monitoring-nginx
+    network_mode: host
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  api:
+    image: ghcr.io/joliz1337/monitoring-node-api:latest
+    build:
+      context: .
+      args:
+        - CACHE_BUST=${CACHE_BUST:-}
+    container_name: monitoring-api
+    env_file:
+      - .env
+    privileged: true
+    pid: host
+    network_mode: host
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+    volumes:
+      # Host system access for metrics
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /etc/os-release:/host/etc/os-release:ro
+      # HAProxy config (native systemd service on host)
+      - /etc/haproxy:/etc/haproxy
+      # Let's Encrypt certificates - bind mount to host directory
+      - /etc/letsencrypt:/etc/letsencrypt
+      # Docker socket for self-update mechanism
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Traffic statistics storage
+      - traffic_data:/var/lib/monitoring
+      # For update script: access to project directory
+      - /opt/monitoring-node:/opt/monitoring-node
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7500/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+volumes:
+  traffic_data:
