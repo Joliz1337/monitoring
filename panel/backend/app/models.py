@@ -508,24 +508,28 @@ class AlertSettings(Base):
     cpu_critical_threshold = Column(Float, default=90.0)
     cpu_spike_percent = Column(Float, default=40.0)
     cpu_sustained_seconds = Column(Integer, default=300)
-    
+    cpu_min_value = Column(Float, default=10.0)
+
     # RAM
     ram_enabled = Column(Boolean, default=True)
     ram_critical_threshold = Column(Float, default=90.0)
     ram_spike_percent = Column(Float, default=30.0)
     ram_sustained_seconds = Column(Integer, default=300)
-    
-    # Network
+    ram_min_value = Column(Float, default=10.0)
+
+    # Network (min_bytes — порог в байтах/сек, по умолчанию 100 KB/s)
     network_enabled = Column(Boolean, default=True)
     network_spike_percent = Column(Float, default=200.0)
     network_drop_percent = Column(Float, default=80.0)
     network_sustained_seconds = Column(Integer, default=300)
-    
+    network_min_bytes = Column(Float, default=102400.0)
+
     # TCP Established
     tcp_established_enabled = Column(Boolean, default=True)
     tcp_established_spike_percent = Column(Float, default=200.0)
     tcp_established_drop_percent = Column(Float, default=80.0)
     tcp_established_sustained_seconds = Column(Integer, default=300)
+    tcp_min_connections = Column(Integer, default=10)
     
     # TCP Listen
     tcp_listen_enabled = Column(Boolean, default=False)

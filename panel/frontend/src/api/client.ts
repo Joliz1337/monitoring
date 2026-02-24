@@ -1447,18 +1447,22 @@ export interface AlertSettingsData {
   cpu_critical_threshold: number
   cpu_spike_percent: number
   cpu_sustained_seconds: number
+  cpu_min_value: number
   ram_enabled: boolean
   ram_critical_threshold: number
   ram_spike_percent: number
   ram_sustained_seconds: number
+  ram_min_value: number
   network_enabled: boolean
   network_spike_percent: number
   network_drop_percent: number
   network_sustained_seconds: number
+  network_min_bytes: number
   tcp_established_enabled: boolean
   tcp_established_spike_percent: number
   tcp_established_drop_percent: number
   tcp_established_sustained_seconds: number
+  tcp_min_connections: number
   tcp_listen_enabled: boolean
   tcp_listen_spike_percent: number
   tcp_listen_sustained_seconds: number

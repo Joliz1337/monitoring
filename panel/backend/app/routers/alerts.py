@@ -28,21 +28,25 @@ class AlertSettingsUpdate(BaseModel):
     cpu_critical_threshold: Optional[float] = None
     cpu_spike_percent: Optional[float] = None
     cpu_sustained_seconds: Optional[int] = None
+    cpu_min_value: Optional[float] = None
 
     ram_enabled: Optional[bool] = None
     ram_critical_threshold: Optional[float] = None
     ram_spike_percent: Optional[float] = None
     ram_sustained_seconds: Optional[int] = None
+    ram_min_value: Optional[float] = None
 
     network_enabled: Optional[bool] = None
     network_spike_percent: Optional[float] = None
     network_drop_percent: Optional[float] = None
     network_sustained_seconds: Optional[int] = None
+    network_min_bytes: Optional[float] = None
 
     tcp_established_enabled: Optional[bool] = None
     tcp_established_spike_percent: Optional[float] = None
     tcp_established_drop_percent: Optional[float] = None
     tcp_established_sustained_seconds: Optional[int] = None
+    tcp_min_connections: Optional[int] = None
 
     tcp_listen_enabled: Optional[bool] = None
     tcp_listen_spike_percent: Optional[float] = None
@@ -89,18 +93,22 @@ def _settings_to_dict(s: AlertSettings) -> dict:
         "cpu_critical_threshold": s.cpu_critical_threshold,
         "cpu_spike_percent": s.cpu_spike_percent,
         "cpu_sustained_seconds": s.cpu_sustained_seconds,
+        "cpu_min_value": s.cpu_min_value,
         "ram_enabled": s.ram_enabled,
         "ram_critical_threshold": s.ram_critical_threshold,
         "ram_spike_percent": s.ram_spike_percent,
         "ram_sustained_seconds": s.ram_sustained_seconds,
+        "ram_min_value": s.ram_min_value,
         "network_enabled": s.network_enabled,
         "network_spike_percent": s.network_spike_percent,
         "network_drop_percent": s.network_drop_percent,
         "network_sustained_seconds": s.network_sustained_seconds,
+        "network_min_bytes": s.network_min_bytes,
         "tcp_established_enabled": s.tcp_established_enabled,
         "tcp_established_spike_percent": s.tcp_established_spike_percent,
         "tcp_established_drop_percent": s.tcp_established_drop_percent,
         "tcp_established_sustained_seconds": s.tcp_established_sustained_seconds,
+        "tcp_min_connections": s.tcp_min_connections,
         "tcp_listen_enabled": s.tcp_listen_enabled,
         "tcp_listen_spike_percent": s.tcp_listen_spike_percent,
         "tcp_listen_sustained_seconds": s.tcp_listen_sustained_seconds,

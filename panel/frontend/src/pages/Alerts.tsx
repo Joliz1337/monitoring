@@ -295,6 +295,7 @@ export default function Alerts() {
         >
           <SliderRow label={t('alerts.critical_threshold')} value={settings.cpu_critical_threshold} min={50} max={100} step={1} format={v => `${v}%`} onSave={v => save({ cpu_critical_threshold: v })} />
           <SliderRow label={t('alerts.spike_percent')} value={settings.cpu_spike_percent} min={10} max={200} step={5} format={v => `${v}%`} onSave={v => save({ cpu_spike_percent: v })} />
+          <SliderRow label={t('alerts.min_value')} value={settings.cpu_min_value} min={0} max={50} step={1} format={v => `${v}%`} onSave={v => save({ cpu_min_value: v })} />
           <SliderRow label={t('alerts.sustained')} value={settings.cpu_sustained_seconds} min={60} max={900} step={30} format={v => `${v}s`} onSave={v => save({ cpu_sustained_seconds: v })} />
         </TriggerBlock>
 
@@ -309,6 +310,7 @@ export default function Alerts() {
         >
           <SliderRow label={t('alerts.critical_threshold')} value={settings.ram_critical_threshold} min={50} max={100} step={1} format={v => `${v}%`} onSave={v => save({ ram_critical_threshold: v })} />
           <SliderRow label={t('alerts.spike_percent')} value={settings.ram_spike_percent} min={10} max={200} step={5} format={v => `${v}%`} onSave={v => save({ ram_spike_percent: v })} />
+          <SliderRow label={t('alerts.min_value')} value={settings.ram_min_value} min={0} max={50} step={1} format={v => `${v}%`} onSave={v => save({ ram_min_value: v })} />
           <SliderRow label={t('alerts.sustained')} value={settings.ram_sustained_seconds} min={60} max={900} step={30} format={v => `${v}s`} onSave={v => save({ ram_sustained_seconds: v })} />
         </TriggerBlock>
 
@@ -323,6 +325,13 @@ export default function Alerts() {
         >
           <SliderRow label={t('alerts.spike_percent')} value={settings.network_spike_percent} min={50} max={1000} step={25} format={v => `${v}%`} onSave={v => save({ network_spike_percent: v })} />
           <SliderRow label={t('alerts.drop_percent')} value={settings.network_drop_percent} min={30} max={100} step={5} format={v => `${v}%`} onSave={v => save({ network_drop_percent: v })} />
+          <SliderRow
+            label={t('alerts.network_min_bytes')}
+            value={settings.network_min_bytes / 1024}
+            min={0} max={10240} step={10}
+            format={v => v >= 1024 ? `${(v / 1024).toFixed(1)} MB/s` : `${v} KB/s`}
+            onSave={v => save({ network_min_bytes: v * 1024 })}
+          />
           <SliderRow label={t('alerts.sustained')} value={settings.network_sustained_seconds} min={60} max={900} step={30} format={v => `${v}s`} onSave={v => save({ network_sustained_seconds: v })} />
         </TriggerBlock>
 
@@ -336,6 +345,13 @@ export default function Alerts() {
           onExpand={() => toggle('tcp')}
           hideMainToggle
         >
+          <SliderRow
+            label={t('alerts.tcp_min_connections')}
+            value={settings.tcp_min_connections}
+            min={0} max={100} step={1}
+            format={v => `${v}`}
+            onSave={v => save({ tcp_min_connections: v })}
+          />
           {/* Established */}
           <div className="border-t border-dark-700/50 pt-3">
             <ToggleRow label="TCP Established" checked={settings.tcp_established_enabled} onChange={v => save({ tcp_established_enabled: v })} />

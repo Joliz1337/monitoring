@@ -223,6 +223,7 @@ class ServerAlerter:
                 spike_type="cpu_spike",
                 label="CPU",
                 unit="%",
+                min_value=settings.cpu_min_value or 0,
             )
 
         # --- RAM ---
@@ -238,6 +239,7 @@ class ServerAlerter:
                 spike_type="ram_spike",
                 label="RAM",
                 unit="%",
+                min_value=settings.ram_min_value or 0,
             )
 
         # --- Network ---
@@ -253,7 +255,10 @@ class ServerAlerter:
                 drop_type="network_drop",
                 label="Network",
                 format_fn=self._fmt_bytes_speed,
+                min_value=settings.network_min_bytes or 0,
             )
+
+        tcp_min = settings.tcp_min_connections or 0
 
         # --- TCP Established ---
         if settings.tcp_established_enabled:
@@ -267,6 +272,7 @@ class ServerAlerter:
                 spike_type="tcp_established_spike",
                 drop_type="tcp_established_drop",
                 label="TCP Established",
+                min_value=tcp_min,
             )
 
         # --- TCP Listen ---
@@ -279,6 +285,7 @@ class ServerAlerter:
                 sustained=settings.tcp_listen_sustained_seconds,
                 spike_type="tcp_listen_spike",
                 label="TCP Listen",
+                min_value=tcp_min,
             )
 
         # --- TCP Time Wait ---
@@ -291,6 +298,7 @@ class ServerAlerter:
                 sustained=settings.tcp_timewait_sustained_seconds,
                 spike_type="tcp_timewait_spike",
                 label="TCP Time Wait",
+                min_value=tcp_min,
             )
 
         # --- TCP Close Wait ---
@@ -303,6 +311,7 @@ class ServerAlerter:
                 sustained=settings.tcp_closewait_sustained_seconds,
                 spike_type="tcp_closewait_spike",
                 label="TCP Close Wait",
+                min_value=tcp_min,
             )
 
         # --- TCP SYN Sent ---
@@ -315,6 +324,7 @@ class ServerAlerter:
                 sustained=settings.tcp_synsent_sustained_seconds,
                 spike_type="tcp_synsent_spike",
                 label="TCP SYN Sent",
+                min_value=tcp_min,
             )
 
         # --- TCP SYN Recv ---
@@ -327,6 +337,7 @@ class ServerAlerter:
                 sustained=settings.tcp_synrecv_sustained_seconds,
                 spike_type="tcp_synrecv_spike",
                 label="TCP SYN Recv",
+                min_value=tcp_min,
             )
 
         # --- TCP FIN Wait ---
@@ -339,6 +350,7 @@ class ServerAlerter:
                 sustained=settings.tcp_finwait_sustained_seconds,
                 spike_type="tcp_finwait_spike",
                 label="TCP FIN Wait",
+                min_value=tcp_min,
             )
 
     # ------------------------------------------------------------------
@@ -436,6 +448,7 @@ class ServerAlerter:
         spike_type: str,
         label: str,
         unit: str = "%",
+        min_value: float = 0,
     ):
         if current >= critical_threshold:
             self._track_condition(state, critical_type, now)
@@ -449,6 +462,10 @@ class ServerAlerter:
                     )
         else:
             self._clear_condition(state, critical_type)
+
+        if current < min_value:
+            self._clear_condition(state, spike_type)
+            return
 
         if ema > 0:
             deviation_pct = ((current - ema) / ema) * 100
@@ -488,7 +505,13 @@ class ServerAlerter:
         drop_type: str,
         label: str,
         format_fn=None,
+        min_value: float = 0,
     ):
+        if ema_val < min_value and current_val < min_value:
+            self._clear_condition(state, spike_type)
+            self._clear_condition(state, drop_type)
+            return
+
         fmt = format_fn or (lambda v: f"{v:.0f}")
 
         if ema_val > 0:
@@ -540,7 +563,12 @@ class ServerAlerter:
         sustained: int,
         spike_type: str,
         label: str,
+        min_value: float = 0,
     ):
+        if ema_val < min_value and current_val < min_value:
+            self._clear_condition(state, spike_type)
+            return
+
         if ema_val > 0:
             increase_pct = ((current_val - ema_val) / ema_val) * 100
         else:

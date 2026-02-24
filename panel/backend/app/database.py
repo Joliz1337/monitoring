@@ -263,6 +263,20 @@ async def run_migrations(conn):
                     logger.info(f"Added column: alert_settings.{col_name}")
                 except Exception:
                     pass
+
+        min_value_columns = [
+            ("cpu_min_value", "FLOAT DEFAULT 10.0"),
+            ("ram_min_value", "FLOAT DEFAULT 10.0"),
+            ("network_min_bytes", "FLOAT DEFAULT 102400.0"),
+            ("tcp_min_connections", "INTEGER DEFAULT 10"),
+        ]
+        for col_name, col_type in min_value_columns:
+            if col_name not in alert_columns:
+                try:
+                    await conn.execute(text(f'ALTER TABLE alert_settings ADD COLUMN "{col_name}" {col_type}'))
+                    logger.info(f"Added column: alert_settings.{col_name}")
+                except Exception:
+                    pass
     
     # Drop redundant indexes (covered by unique constraints or low-cardinality)
     redundant_indexes = [
