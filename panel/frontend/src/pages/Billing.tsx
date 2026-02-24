@@ -48,6 +48,7 @@ type ModalState =
 
 const COLLAPSED_KEY = 'billing_collapsed_folders'
 const FOLDER_ORDER_KEY = 'billing_folder_order'
+const SERVER_ORDER_KEY = 'billing_server_order'
 
 function loadCollapsed(): Set<string> {
   try {
@@ -68,6 +69,16 @@ function loadFolderOrder(): string[] {
 
 function saveFolderOrder(order: string[]) {
   localStorage.setItem(FOLDER_ORDER_KEY, JSON.stringify(order))
+}
+
+function loadServerOrder(): number[] {
+  try {
+    return JSON.parse(localStorage.getItem(SERVER_ORDER_KEY) || '[]')
+  } catch { return [] }
+}
+
+function saveServerOrder(order: number[]) {
+  localStorage.setItem(SERVER_ORDER_KEY, JSON.stringify(order))
 }
 
 function useBillingDateFormat() {
@@ -109,6 +120,7 @@ export default function Billing() {
   const [collapsed, setCollapsed] = useState<Set<string>>(loadCollapsed)
   const [emptyFolders, setEmptyFolders] = useState<string[]>([])
   const [folderOrder, setFolderOrder] = useState<string[]>(loadFolderOrder)
+  const [serverOrder, setServerOrder] = useState<number[]>(loadServerOrder)
   const [dragType, setDragType] = useState<'server' | 'folder' | null>(null)
   const [activeId, setActiveId] = useState<string | number | null>(null)
   const [overFolderId, setOverFolderId] = useState<string | null>(null)
@@ -140,9 +152,17 @@ export default function Billing() {
       if (!map.has(key)) map.set(key, [])
       map.get(key)!.push(s)
     }
-    for (const arr of map.values()) arr.sort(sortServers)
+    const orderSet = new Set(serverOrder)
+    for (const arr of map.values()) {
+      arr.sort((a, b) => {
+        const ai = orderSet.has(a.id) ? serverOrder.indexOf(a.id) : Infinity
+        const bi = orderSet.has(b.id) ? serverOrder.indexOf(b.id) : Infinity
+        if (ai !== Infinity || bi !== Infinity) return ai - bi
+        return sortServers(a, b)
+      })
+    }
     return map
-  }, [servers])
+  }, [servers, serverOrder])
 
   const serverFolderMap = useMemo(() => {
     const map = new Map<number, string | null>()
@@ -277,6 +297,24 @@ export default function Billing() {
           } catch { toast.error(t('common.action_failed')) }
         }
         return
+      }
+
+      if (typeof over.id === 'number' && active.id !== over.id) {
+        const draggedFolder = serverFolderMap.get(draggedId) ?? null
+        const overFolder = serverFolderMap.get(over.id as number) ?? null
+        if (draggedFolder === overFolder) {
+          const folderServers = grouped.get(draggedFolder) || []
+          const ids = folderServers.map(s => s.id)
+          const oldIdx = ids.indexOf(draggedId)
+          const newIdx = ids.indexOf(over.id as number)
+          if (oldIdx !== -1 && newIdx !== -1) {
+            const reordered = arrayMove(ids, oldIdx, newIdx)
+            const otherIds = serverOrder.filter(id => !reordered.includes(id))
+            const newOrder = [...reordered, ...otherIds]
+            setServerOrder(newOrder)
+            saveServerOrder(newOrder)
+          }
+        }
       }
     }
   }
