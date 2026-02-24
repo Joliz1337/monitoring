@@ -63,7 +63,7 @@ function useBillingDateFormat() {
 
 export default function Billing() {
   const { t } = useTranslation()
-  const { formatDate: formatBillingDate, formatDateTime: formatBillingDateTime } = useBillingDateFormat()
+  const { formatDateTime: formatBillingDateTime } = useBillingDateFormat()
 
   const [servers, setServers] = useState<BillingServerData[]>([])
   const [settings, setSettings] = useState<BillingSettingsData | null>(null)
@@ -193,7 +193,6 @@ export default function Billing() {
           server={srv}
           index={indexOffset + idx}
           t={t}
-          formatDate={formatBillingDate}
           formatDateTime={formatBillingDateTime}
           onExtend={() => setModal({ kind: 'extend', server: srv })}
           onTopup={() => setModal({ kind: 'topup', server: srv })}
@@ -560,11 +559,10 @@ function formatDays(days: number | null, t: (k: string) => string): string {
 /*  Project Card                                                       */
 /* ------------------------------------------------------------------ */
 
-function ProjectCard({ server, index, t, formatDate, formatDateTime, onExtend, onTopup, onEdit, onDelete, onMoveToFolder }: {
+function ProjectCard({ server, index, t, formatDateTime, onExtend, onTopup, onEdit, onDelete, onMoveToFolder }: {
   server: BillingServerData
   index: number
   t: (k: string, opts?: Record<string, unknown>) => string
-  formatDate: (iso: string) => string
   formatDateTime: (iso: string) => string
   onExtend: () => void
   onTopup: () => void
