@@ -57,11 +57,44 @@ def _compute_paid_until_resource(monthly_cost: float, balance: float, from_time:
     return from_time + timedelta(days=days_left)
 
 
+def _compute_live_balance(s: BillingServer, now: datetime) -> tuple[float | None, datetime | None, float | None]:
+    if (
+        s.billing_type != "resource"
+        or not s.monthly_cost
+        or s.monthly_cost <= 0
+        or s.account_balance is None
+        or not s.balance_updated_at
+    ):
+        return s.account_balance, s.paid_until, None
+
+    updated = s.balance_updated_at
+    if updated.tzinfo is None:
+        updated = updated.replace(tzinfo=timezone.utc)
+
+    elapsed_days = (now - updated).total_seconds() / 86400
+    daily_cost = s.monthly_cost / 30
+    consumed = elapsed_days * daily_cost
+    live_balance = max(0.0, s.account_balance - consumed)
+
+    if live_balance > 0:
+        remaining = live_balance / daily_cost
+        paid_until = now + timedelta(days=remaining)
+    else:
+        remaining = 0.0
+        paid_until = now
+
+    return live_balance, paid_until, remaining
+
+
 def _server_to_dict(s: BillingServer) -> dict:
     now = datetime.now(timezone.utc)
-    paid_until = s.paid_until
+
+    live_balance, paid_until, resource_days = _compute_live_balance(s, now)
+
     days_left = None
-    if paid_until:
+    if resource_days is not None:
+        days_left = resource_days
+    elif paid_until:
         if paid_until.tzinfo is None:
             paid_until = paid_until.replace(tzinfo=timezone.utc)
         days_left = max(0, (paid_until - now).total_seconds() / 86400)
@@ -73,7 +106,7 @@ def _server_to_dict(s: BillingServer) -> dict:
         "paid_until": paid_until.isoformat() if paid_until else None,
         "days_left": round(days_left, 1) if days_left is not None else None,
         "monthly_cost": s.monthly_cost,
-        "account_balance": s.account_balance,
+        "account_balance": round(live_balance, 2) if live_balance is not None else s.account_balance,
         "balance_updated_at": s.balance_updated_at.isoformat() if s.balance_updated_at else None,
         "currency": s.currency or "USD",
         "notes": s.notes,

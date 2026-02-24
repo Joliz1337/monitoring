@@ -8,7 +8,7 @@ import aiohttp
 from sqlalchemy import select
 
 from app.database import async_session
-from app.models import BillingServer, BillingSettings, AlertSettings
+from app.models import BillingServer, BillingSettings, AlertSettings, PanelSettings
 
 logger = logging.getLogger(__name__)
 
@@ -63,11 +63,16 @@ class BillingChecker:
             if not alert_row or not alert_row.telegram_bot_token or not alert_row.telegram_chat_id:
                 return
 
+            tz_setting = (await db.execute(
+                select(PanelSettings).where(PanelSettings.key == "timezone")
+            )).scalar_one_or_none()
+            tz_name = tz_setting.value if tz_setting and tz_setting.value and tz_setting.value != "auto" else None
+
             servers = (await db.execute(select(BillingServer))).scalars().all()
             now = datetime.now(timezone.utc)
 
             for srv in servers:
-                await self._check_server(db, srv, now, notify_days, alert_row)
+                await self._check_server(db, srv, now, notify_days, alert_row, tz_name)
 
     async def _check_server(
         self,
@@ -76,6 +81,7 @@ class BillingChecker:
         now: datetime,
         notify_days: list[int],
         alert: AlertSettings,
+        tz_name: Optional[str] = None,
     ):
         if srv.billing_type == "resource" and srv.monthly_cost and srv.monthly_cost > 0:
             if srv.balance_updated_at and srv.account_balance is not None:
@@ -110,12 +116,23 @@ class BillingChecker:
 
         for threshold in notify_days:
             if days_left <= threshold and threshold not in already_notified:
-                sent = await self._send_notification(alert, srv, days_left, threshold)
+                sent = await self._send_notification(alert, srv, days_left, threshold, tz_name)
                 if sent:
                     already_notified.append(threshold)
                     srv.last_notified_days = json.dumps(already_notified)
 
         await db.commit()
+
+    def _format_dt_in_tz(self, dt: datetime, tz_name: Optional[str]) -> str:
+        try:
+            if tz_name:
+                import zoneinfo
+                tz_obj = zoneinfo.ZoneInfo(tz_name)
+                local = dt.astimezone(tz_obj)
+                return f"{local.strftime('%Y-%m-%d %H:%M')} ({tz_name})"
+        except Exception:
+            pass
+        return f"{dt.strftime('%Y-%m-%d %H:%M')} UTC"
 
     async def _send_notification(
         self,
@@ -123,6 +140,7 @@ class BillingChecker:
         srv: BillingServer,
         days_left: float,
         threshold: int,
+        tz_name: Optional[str] = None,
     ) -> bool:
         if days_left <= 0:
             emoji = "\U0001f534"
@@ -154,7 +172,7 @@ class BillingChecker:
             pu = srv.paid_until
             if pu.tzinfo is None:
                 pu = pu.replace(tzinfo=timezone.utc)
-            lines.append(f"\U0001f4c5 Expires: {pu.strftime('%Y-%m-%d %H:%M')} UTC")
+            lines.append(f"\U0001f4c5 Expires: {self._format_dt_in_tz(pu, tz_name)}")
 
         text = "\n".join(lines)
 

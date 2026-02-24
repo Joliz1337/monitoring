@@ -8,6 +8,7 @@ import {
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { billingApi, BillingServerData, BillingSettingsData } from '../api/client'
+import { useSettingsStore } from '../stores/settingsStore'
 
 type ModalState =
   | { kind: 'none' }
@@ -32,8 +33,25 @@ function saveCollapsed(set: Set<string>) {
   localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...set]))
 }
 
+function useBillingDateFormat() {
+  const tz = useSettingsStore(s => s.getEffectiveTimezone)()
+  return useCallback((isoDate: string) => {
+    try {
+      return new Date(isoDate).toLocaleDateString(undefined, {
+        timeZone: tz,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      })
+    } catch {
+      return new Date(isoDate).toLocaleDateString()
+    }
+  }, [tz])
+}
+
 export default function Billing() {
   const { t } = useTranslation()
+  const formatBillingDate = useBillingDateFormat()
 
   const [servers, setServers] = useState<BillingServerData[]>([])
   const [settings, setSettings] = useState<BillingSettingsData | null>(null)
@@ -163,6 +181,7 @@ export default function Billing() {
           server={srv}
           index={indexOffset + idx}
           t={t}
+          formatDate={formatBillingDate}
           onExtend={() => setModal({ kind: 'extend', server: srv })}
           onTopup={() => setModal({ kind: 'topup', server: srv })}
           onEdit={() => setModal({ kind: 'edit', server: srv })}
@@ -528,10 +547,11 @@ function formatDays(days: number | null, t: (k: string) => string): string {
 /*  Server Card                                                        */
 /* ------------------------------------------------------------------ */
 
-function ServerCard({ server, index, t, onExtend, onTopup, onEdit, onDelete, onMoveToFolder }: {
+function ServerCard({ server, index, t, formatDate, onExtend, onTopup, onEdit, onDelete, onMoveToFolder }: {
   server: BillingServerData
   index: number
   t: (k: string, opts?: Record<string, unknown>) => string
+  formatDate: (iso: string) => string
   onExtend: () => void
   onTopup: () => void
   onEdit: () => void
@@ -576,7 +596,7 @@ function ServerCard({ server, index, t, onExtend, onTopup, onEdit, onDelete, onM
               {server.paid_until && (
                 <span className="flex items-center gap-1">
                   <Clock className="w-3 h-3" />
-                  {new Date(server.paid_until).toLocaleDateString()}
+                  {formatDate(server.paid_until)}
                 </span>
               )}
               {server.billing_type === 'resource' && server.account_balance !== null && (
