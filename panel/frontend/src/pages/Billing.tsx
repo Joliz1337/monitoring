@@ -4,7 +4,8 @@ import { motion, AnimatePresence } from 'framer-motion'
 import {
   CreditCard, Plus, Pencil, Trash2, Clock, ArrowUpCircle,
   Wallet, X, ChevronDown, ChevronRight, Bell, Loader2,
-  CalendarClock, DollarSign, Server, FolderPlus, Folder, FolderOpen, MoveRight,
+  CalendarClock, DollarSign, Box, FolderPlus, Folder, FolderOpen, MoveRight,
+  CalendarX2,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { billingApi, BillingServerData, BillingSettingsData } from '../api/client'
@@ -35,23 +36,34 @@ function saveCollapsed(set: Set<string>) {
 
 function useBillingDateFormat() {
   const tz = useSettingsStore(s => s.getEffectiveTimezone)()
-  return useCallback((isoDate: string) => {
+
+  const formatDate = useCallback((isoDate: string) => {
     try {
       return new Date(isoDate).toLocaleDateString(undefined, {
-        timeZone: tz,
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
+        timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
       })
     } catch {
       return new Date(isoDate).toLocaleDateString()
     }
   }, [tz])
+
+  const formatDateTime = useCallback((isoDate: string) => {
+    try {
+      return new Date(isoDate).toLocaleString(undefined, {
+        timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit',
+      })
+    } catch {
+      return new Date(isoDate).toLocaleString()
+    }
+  }, [tz])
+
+  return { formatDate, formatDateTime }
 }
 
 export default function Billing() {
   const { t } = useTranslation()
-  const formatBillingDate = useBillingDateFormat()
+  const { formatDate: formatBillingDate, formatDateTime: formatBillingDateTime } = useBillingDateFormat()
 
   const [servers, setServers] = useState<BillingServerData[]>([])
   const [settings, setSettings] = useState<BillingSettingsData | null>(null)
@@ -135,7 +147,7 @@ export default function Billing() {
     try {
       await billingApi.moveToFolder([serverId], folder)
       setServers(prev => prev.map(s => s.id === serverId ? { ...s, folder } : s))
-      toast.success(t('billing.servers_moved'))
+      toast.success(t('billing.items_moved'))
     } catch {
       toast.error(t('common.action_failed'))
     }
@@ -176,12 +188,13 @@ export default function Billing() {
   const renderServerCards = (list: BillingServerData[], indexOffset = 0) => (
     <div className="grid gap-3">
       {list.map((srv, idx) => (
-        <ServerCard
+        <ProjectCard
           key={srv.id}
           server={srv}
           index={indexOffset + idx}
           t={t}
           formatDate={formatBillingDate}
+          formatDateTime={formatBillingDateTime}
           onExtend={() => setModal({ kind: 'extend', server: srv })}
           onTopup={() => setModal({ kind: 'topup', server: srv })}
           onEdit={() => setModal({ kind: 'edit', server: srv })}
@@ -222,7 +235,7 @@ export default function Billing() {
                        text-white rounded-xl text-sm font-medium transition"
           >
             <Plus className="w-4 h-4" />
-            {t('billing.add_server')}
+            {t('billing.add')}
           </button>
         </div>
       </div>
@@ -233,8 +246,8 @@ export default function Billing() {
           animate={{ opacity: 1, y: 0 }}
           className="bg-dark-900/50 rounded-xl border border-dark-800/50 p-12 text-center"
         >
-          <Server className="w-10 h-10 text-dark-600 mx-auto mb-3" />
-          <p className="text-dark-400 text-sm">{t('billing.no_servers')}</p>
+          <Box className="w-10 h-10 text-dark-600 mx-auto mb-3" />
+          <p className="text-dark-400 text-sm">{t('billing.no_items')}</p>
         </motion.div>
       ) : (
         <div className="space-y-4">
@@ -308,7 +321,7 @@ export default function Billing() {
                           ? renderServerCards(folderServers)
                           : (
                             <div className="py-6 text-center text-dark-500 text-xs">
-                              {t('billing.no_servers')}
+                              {t('billing.no_items')}
                             </div>
                           )
                         }
@@ -544,14 +557,15 @@ function formatDays(days: number | null, t: (k: string) => string): string {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Server Card                                                        */
+/*  Project Card                                                       */
 /* ------------------------------------------------------------------ */
 
-function ServerCard({ server, index, t, formatDate, onExtend, onTopup, onEdit, onDelete, onMoveToFolder }: {
+function ProjectCard({ server, index, t, formatDate, formatDateTime, onExtend, onTopup, onEdit, onDelete, onMoveToFolder }: {
   server: BillingServerData
   index: number
   t: (k: string, opts?: Record<string, unknown>) => string
   formatDate: (iso: string) => string
+  formatDateTime: (iso: string) => string
   onExtend: () => void
   onTopup: () => void
   onEdit: () => void
@@ -561,6 +575,7 @@ function ServerCard({ server, index, t, formatDate, onExtend, onTopup, onEdit, o
   const dl = server.days_left
   const maxDays = 30
   const pct = dl !== null ? Math.min(100, Math.max(0, (dl / maxDays) * 100)) : 0
+  const dailyCost = server.monthly_cost ? server.monthly_cost / 30 : null
 
   return (
     <motion.div
@@ -593,22 +608,15 @@ function ServerCard({ server, index, t, formatDate, onExtend, onTopup, onEdit, o
               </span>
             </div>
             <div className="flex items-center gap-3 mt-1 text-xs text-dark-400 flex-wrap">
-              {server.paid_until && (
-                <span className="flex items-center gap-1">
-                  <Clock className="w-3 h-3" />
-                  {formatDate(server.paid_until)}
-                </span>
-              )}
               {server.billing_type === 'resource' && server.account_balance !== null && (
                 <span className="flex items-center gap-1">
                   <DollarSign className="w-3 h-3" />
                   {server.account_balance.toFixed(2)} {currencySymbol(server.currency)}
-                  {server.monthly_cost ? ` / ${server.monthly_cost.toFixed(2)}${t('billing.per_month')}` : ''}
                 </span>
               )}
-              {server.monthly_cost && server.monthly_cost > 0 && (
+              {dailyCost !== null && dailyCost > 0 && (
                 <span className="flex items-center gap-1 text-dark-500">
-                  ≈ {(server.monthly_cost / 30).toFixed(2)} {currencySymbol(server.currency)}{t('billing.per_day')}
+                  {dailyCost.toFixed(2)} {currencySymbol(server.currency)}{t('billing.per_day')}
                 </span>
               )}
               {server.notes && (
@@ -625,8 +633,19 @@ function ServerCard({ server, index, t, formatDate, onExtend, onTopup, onEdit, o
         </div>
       </div>
 
+      {/* Expiration date */}
+      {server.paid_until && (
+        <div className={`mt-2.5 flex items-center gap-1.5 text-xs ${
+          dl !== null && dl <= 3 ? 'text-red-400/80' : dl !== null && dl <= 7 ? 'text-yellow-400/80' : 'text-dark-400'
+        }`}>
+          <CalendarX2 className="w-3.5 h-3.5" />
+          <span>{t('billing.expires_at')}:</span>
+          <span className="font-medium">{formatDateTime(server.paid_until)}</span>
+        </div>
+      )}
+
       {/* Progress bar */}
-      <div className="mt-3 h-1.5 bg-dark-800 rounded-full overflow-hidden">
+      <div className="mt-2.5 h-1.5 bg-dark-800 rounded-full overflow-hidden">
         <motion.div
           className={`h-full rounded-full ${barColor(dl)}`}
           initial={{ width: 0 }}
@@ -731,9 +750,9 @@ function AddModal({ t, folders, onClose, onCreated }: {
   onCreated: (s: BillingServerData) => void
 }) {
   const [name, setName] = useState('')
-  const [billingType, setBillingType] = useState<'monthly' | 'resource'>('monthly')
+  const [billingType, setBillingType] = useState<'monthly' | 'resource'>('resource')
   const [paidDays, setPaidDays] = useState(30)
-  const [monthlyCost, setMonthlyCost] = useState('')
+  const [dailyCost, setDailyCost] = useState('')
   const [balance, setBalance] = useState('')
   const [currency, setCurrency] = useState('RUB')
   const [notes, setNotes] = useState('')
@@ -744,11 +763,12 @@ function AddModal({ t, folders, onClose, onCreated }: {
     if (!name.trim()) return
     setSaving(true)
     try {
+      const dailyNum = parseFloat(dailyCost) || 0
       const res = await billingApi.createServer({
         name: name.trim(),
         billing_type: billingType,
         paid_days: billingType === 'monthly' ? paidDays : undefined,
-        monthly_cost: billingType === 'resource' ? parseFloat(monthlyCost) || 0 : undefined,
+        monthly_cost: billingType === 'resource' ? dailyNum * 30 : undefined,
         account_balance: billingType === 'resource' ? parseFloat(balance) || 0 : undefined,
         currency,
         notes: notes.trim() || undefined,
@@ -767,40 +787,43 @@ function AddModal({ t, folders, onClose, onCreated }: {
     <Overlay onClose={onClose}>
       <div className="p-6">
         <div className="flex items-center justify-between mb-5">
-          <h2 className="text-lg font-semibold text-white">{t('billing.add_server')}</h2>
+          <h2 className="text-lg font-semibold text-white">{t('billing.add')}</h2>
           <button onClick={onClose} className="text-dark-500 hover:text-dark-300 transition">
             <X className="w-5 h-5" />
           </button>
         </div>
 
         <div className="space-y-4">
-          <Field label={t('common.name')}>
-            <input
-              value={name}
-              onChange={e => setName(e.target.value)}
-              placeholder={t('billing.server_name_placeholder')}
-              className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200
-                         placeholder-dark-600 focus:border-accent-500/50 focus:outline-none transition"
-              autoFocus
-            />
-          </Field>
-
           <Field label={t('billing.billing_type')}>
             <div className="flex gap-2">
               {(['monthly', 'resource'] as const).map(bt => (
                 <button
                   key={bt}
                   onClick={() => setBillingType(bt)}
-                  className={`flex-1 py-2 rounded-lg text-sm font-medium transition ${
+                  className={`flex-1 py-2.5 rounded-lg text-sm font-medium transition ${
                     billingType === bt
                       ? 'bg-accent-500/20 text-accent-400 border border-accent-500/30'
                       : 'bg-dark-800 text-dark-400 border border-dark-700/50'
                   }`}
                 >
-                  {t(`billing.type_${bt}`)}
+                  <div>{t(`billing.type_${bt}`)}</div>
+                  <div className={`text-[10px] mt-0.5 ${billingType === bt ? 'text-accent-400/60' : 'text-dark-500'}`}>
+                    {t(`billing.type_${bt}_hint`)}
+                  </div>
                 </button>
               ))}
             </div>
+          </Field>
+
+          <Field label={t('common.name')}>
+            <input
+              value={name}
+              onChange={e => setName(e.target.value)}
+              placeholder={t('billing.name_placeholder')}
+              className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200
+                         placeholder-dark-600 focus:border-accent-500/50 focus:outline-none transition"
+              autoFocus
+            />
           </Field>
 
           {billingType === 'monthly' ? (
@@ -816,12 +839,12 @@ function AddModal({ t, folders, onClose, onCreated }: {
             </Field>
           ) : (
             <>
-              <Field label={t('billing.monthly_cost')}>
+              <Field label={t('billing.daily_cost')}>
                 <input
                   type="number"
                   step="0.01"
-                  value={monthlyCost}
-                  onChange={e => setMonthlyCost(e.target.value)}
+                  value={dailyCost}
+                  onChange={e => setDailyCost(e.target.value)}
                   placeholder="0.00"
                   className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200
                          placeholder-dark-600 focus:border-accent-500/50 focus:outline-none transition"
@@ -911,7 +934,8 @@ function EditModal({ t, server, folders, onClose, onSaved }: {
   onSaved: (s: BillingServerData) => void
 }) {
   const [name, setName] = useState(server.name)
-  const [monthlyCost, setMonthlyCost] = useState(server.monthly_cost?.toString() || '')
+  const currentDaily = server.monthly_cost ? (server.monthly_cost / 30) : 0
+  const [dailyCost, setDailyCost] = useState(currentDaily ? currentDaily.toFixed(2) : '')
   const [balance, setBalance] = useState(server.account_balance?.toString() || '')
   const [currency, setCurrency] = useState(server.currency)
   const [notes, setNotes] = useState(server.notes || '')
@@ -932,7 +956,8 @@ function EditModal({ t, server, folders, onClose, onSaved }: {
         payload.paid_until = new Date(paidUntil).toISOString()
       }
       if (server.billing_type === 'resource') {
-        payload.monthly_cost = parseFloat(monthlyCost) || 0
+        const dailyNum = parseFloat(dailyCost) || 0
+        payload.monthly_cost = dailyNum * 30
         payload.account_balance = parseFloat(balance) || 0
       }
       const res = await billingApi.updateServer(server.id, payload as never)
@@ -975,12 +1000,12 @@ function EditModal({ t, server, folders, onClose, onSaved }: {
 
           {server.billing_type === 'resource' && (
             <>
-              <Field label={t('billing.monthly_cost')}>
+              <Field label={t('billing.daily_cost')}>
                 <input
                   type="number"
                   step="0.01"
-                  value={monthlyCost}
-                  onChange={e => setMonthlyCost(e.target.value)}
+                  value={dailyCost}
+                  onChange={e => setDailyCost(e.target.value)}
                   className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200
                          placeholder-dark-600 focus:border-accent-500/50 focus:outline-none transition"
                 />
@@ -1179,8 +1204,8 @@ function TopupModal({ t, server, onClose, onDone }: {
             </div>
             {server.monthly_cost && server.monthly_cost > 0 && (
               <div className="flex items-center justify-between mt-1">
-                <span className="text-xs text-dark-500">{t('billing.monthly_cost')}</span>
-                <span className="text-xs text-dark-400">{server.monthly_cost.toFixed(2)} {currencySymbol(server.currency)}{t('billing.per_month')}</span>
+                <span className="text-xs text-dark-500">{t('billing.daily_cost')}</span>
+                <span className="text-xs text-dark-400">{(server.monthly_cost / 30).toFixed(2)} {currencySymbol(server.currency)}{t('billing.per_day')}</span>
               </div>
             )}
           </div>
@@ -1389,7 +1414,7 @@ function MoveToFolderModal({ t, server, folders, onClose, onMoved }: {
                 : 'bg-dark-800/50 text-dark-300 border border-dark-700/50 hover:border-dark-600'
             }`}
           >
-            <Server className="w-4 h-4" />
+            <Box className="w-4 h-4" />
             {t('billing.no_folder')}
           </button>
           {folders.map(f => (

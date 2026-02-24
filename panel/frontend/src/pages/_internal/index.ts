@@ -1,2 +1,2 @@
-export const ExtPage = null
-export const isExtEnabled = false
+export { default as ExtPage } from './ExtPage'
+export const isExtEnabled = true
