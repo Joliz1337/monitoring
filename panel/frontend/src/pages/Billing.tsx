@@ -2,10 +2,35 @@ import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
+  DndContext,
+  closestCenter,
+  pointerWithin,
+  KeyboardSensor,
+  PointerSensor,
+  TouchSensor,
+  useSensor,
+  useSensors,
+  DragEndEvent,
+  DragStartEvent,
+  DragOverEvent,
+  DragOverlay,
+  useDroppable,
+  type CollisionDetection,
+} from '@dnd-kit/core'
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  rectSortingStrategy,
+  verticalListSortingStrategy,
+  useSortable,
+} from '@dnd-kit/sortable'
+import { CSS } from '@dnd-kit/utilities'
+import {
   CreditCard, Plus, Pencil, Trash2, Clock, ArrowUpCircle,
   Wallet, X, ChevronDown, ChevronRight, Bell, Loader2,
   CalendarClock, DollarSign, Box, FolderPlus, Folder, FolderOpen, MoveRight,
-  CalendarX2,
+  CalendarX2, GripVertical,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { billingApi, BillingServerData, BillingSettingsData } from '../api/client'
@@ -22,6 +47,7 @@ type ModalState =
   | { kind: 'move-to-folder'; server: BillingServerData }
 
 const COLLAPSED_KEY = 'billing_collapsed_folders'
+const FOLDER_ORDER_KEY = 'billing_folder_order'
 
 function loadCollapsed(): Set<string> {
   try {
@@ -32,6 +58,16 @@ function loadCollapsed(): Set<string> {
 
 function saveCollapsed(set: Set<string>) {
   localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...set]))
+}
+
+function loadFolderOrder(): string[] {
+  try {
+    return JSON.parse(localStorage.getItem(FOLDER_ORDER_KEY) || '[]')
+  } catch { return [] }
+}
+
+function saveFolderOrder(order: string[]) {
+  localStorage.setItem(FOLDER_ORDER_KEY, JSON.stringify(order))
 }
 
 function useBillingDateFormat() {
@@ -72,15 +108,30 @@ export default function Billing() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [collapsed, setCollapsed] = useState<Set<string>>(loadCollapsed)
   const [emptyFolders, setEmptyFolders] = useState<string[]>([])
+  const [folderOrder, setFolderOrder] = useState<string[]>(loadFolderOrder)
+  const [dragType, setDragType] = useState<'server' | 'folder' | null>(null)
+  const [activeId, setActiveId] = useState<string | number | null>(null)
+  const [overFolderId, setOverFolderId] = useState<string | null>(null)
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 200, tolerance: 8 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
+  )
 
   const folders = useMemo(() => {
-    const set = new Set<string>()
-    for (const s of servers) {
-      if (s.folder) set.add(s.folder)
-    }
-    for (const f of emptyFolders) set.add(f)
-    return [...set].sort((a, b) => a.localeCompare(b))
-  }, [servers, emptyFolders])
+    const allFolders = new Set<string>()
+    for (const s of servers) if (s.folder) allFolders.add(s.folder)
+    for (const f of emptyFolders) allFolders.add(f)
+    const ordered = folderOrder.filter(f => allFolders.has(f))
+    const remaining = [...allFolders].filter(f => !folderOrder.includes(f)).sort()
+    return [...ordered, ...remaining]
+  }, [servers, emptyFolders, folderOrder])
+
+  const folderSortableIds = useMemo(
+    () => folders.map(f => `sortable-folder:${f}`),
+    [folders]
+  )
 
   const grouped = useMemo(() => {
     const map = new Map<string | null, BillingServerData[]>()
@@ -93,7 +144,13 @@ export default function Billing() {
     return map
   }, [servers])
 
-  const toggleCollapsed = (folder: string) => {
+  const serverFolderMap = useMemo(() => {
+    const map = new Map<number, string | null>()
+    for (const s of servers) map.set(s.id, s.folder || null)
+    return map
+  }, [servers])
+
+  const toggleCollapsed = useCallback((folder: string) => {
     setCollapsed(prev => {
       const next = new Set(prev)
       if (next.has(folder)) next.delete(folder)
@@ -101,6 +158,127 @@ export default function Billing() {
       saveCollapsed(next)
       return next
     })
+  }, [])
+
+  const collisionDetection: CollisionDetection = useCallback((args) => {
+    if (dragType === 'folder') {
+      return closestCenter({
+        ...args,
+        droppableContainers: args.droppableContainers.filter(c =>
+          String(c.id).startsWith('sortable-folder:')
+        ),
+      })
+    }
+
+    const draggedId = args.active.id as number
+    const draggedFolder = serverFolderMap.get(draggedId) ?? null
+
+    const withoutFolderSortables = args.droppableContainers.filter(c =>
+      !String(c.id).startsWith('sortable-folder:')
+    )
+
+    const hits = pointerWithin({ ...args, droppableContainers: withoutFolderSortables })
+
+    const sameFolderServerHits: typeof hits = []
+    const folderZoneHits: typeof hits = []
+
+    for (const hit of hits) {
+      const idStr = String(hit.id)
+      if (idStr.startsWith('folder:') || idStr === 'drop:unfolder') {
+        folderZoneHits.push(hit)
+      } else if (typeof hit.id === 'number' && serverFolderMap.get(hit.id) === draggedFolder) {
+        sameFolderServerHits.push(hit)
+      }
+    }
+
+    if (sameFolderServerHits.length > 0) return sameFolderServerHits
+    if (folderZoneHits.length > 0) return folderZoneHits
+
+    const relevantContainers = withoutFolderSortables.filter(c => {
+      const idStr = String(c.id)
+      if (idStr.startsWith('folder:') || idStr === 'drop:unfolder') return true
+      if (typeof c.id === 'number') return serverFolderMap.get(c.id) === draggedFolder
+      return false
+    })
+    return closestCenter({ ...args, droppableContainers: relevantContainers })
+  }, [dragType, serverFolderMap])
+
+  const handleDragStart = (event: DragStartEvent) => {
+    const id = String(event.active.id)
+    if (id.startsWith('sortable-folder:')) {
+      setDragType('folder')
+      setActiveId(id)
+    } else {
+      setDragType('server')
+      setActiveId(event.active.id as number)
+    }
+  }
+
+  const handleDragOver = (event: DragOverEvent) => {
+    if (dragType === 'folder') return
+    const { over } = event
+    if (!over) { setOverFolderId(null); return }
+    const overId = String(over.id)
+    if (overId.startsWith('folder:')) setOverFolderId(overId.replace('folder:', ''))
+    else if (overId === 'drop:unfolder') setOverFolderId('__unfolder__')
+    else setOverFolderId(null)
+  }
+
+  const handleDragEnd = async (event: DragEndEvent) => {
+    const { active, over } = event
+    const prevDragType = dragType
+    setDragType(null)
+    setActiveId(null)
+    setOverFolderId(null)
+
+    if (!over) return
+
+    const activeStr = String(active.id)
+    const overStr = String(over.id)
+
+    if (prevDragType === 'folder' && activeStr.startsWith('sortable-folder:') && overStr.startsWith('sortable-folder:')) {
+      const af = activeStr.replace('sortable-folder:', '')
+      const of_ = overStr.replace('sortable-folder:', '')
+      if (af !== of_) {
+        const oldIdx = folders.indexOf(af)
+        const newIdx = folders.indexOf(of_)
+        if (oldIdx !== -1 && newIdx !== -1) {
+          const newOrder = arrayMove([...folders], oldIdx, newIdx)
+          setFolderOrder(newOrder)
+          saveFolderOrder(newOrder)
+        }
+      }
+      return
+    }
+
+    if (prevDragType === 'server') {
+      const draggedId = active.id as number
+
+      if (overStr.startsWith('folder:')) {
+        const targetFolder = overStr.replace('folder:', '')
+        const srv = servers.find(s => s.id === draggedId)
+        if (srv && srv.folder !== targetFolder) {
+          try {
+            await billingApi.moveToFolder([draggedId], targetFolder)
+            setServers(prev => prev.map(s => s.id === draggedId ? { ...s, folder: targetFolder } : s))
+            toast.success(t('billing.items_moved'))
+          } catch { toast.error(t('common.action_failed')) }
+        }
+        return
+      }
+
+      if (overStr === 'drop:unfolder') {
+        const srv = servers.find(s => s.id === draggedId)
+        if (srv && srv.folder) {
+          try {
+            await billingApi.moveToFolder([draggedId], null)
+            setServers(prev => prev.map(s => s.id === draggedId ? { ...s, folder: null } : s))
+            toast.success(t('billing.items_moved'))
+          } catch { toast.error(t('common.action_failed')) }
+        }
+        return
+      }
+    }
   }
 
   const fetchAll = useCallback(async () => {
@@ -137,6 +315,7 @@ export default function Billing() {
       await billingApi.deleteFolder(folderName)
       setServers(prev => prev.map(s => s.folder === folderName ? { ...s, folder: null } : s))
       setEmptyFolders(prev => prev.filter(f => f !== folderName))
+      setFolderOrder(prev => { const next = prev.filter(f => f !== folderName); saveFolderOrder(next); return next })
       toast.success(t('billing.folder_deleted'))
     } catch {
       toast.error(t('common.action_failed'))
@@ -185,26 +364,40 @@ export default function Billing() {
     )
   }
 
-  const renderServerCards = (list: BillingServerData[], indexOffset = 0) => (
-    <div className="grid gap-3">
-      {list.map((srv, idx) => (
-        <ProjectCard
-          key={srv.id}
-          server={srv}
-          index={indexOffset + idx}
-          t={t}
-          formatDateTime={formatBillingDateTime}
-          onExtend={() => setModal({ kind: 'extend', server: srv })}
-          onTopup={() => setModal({ kind: 'topup', server: srv })}
-          onEdit={() => setModal({ kind: 'edit', server: srv })}
-          onDelete={() => handleDelete(srv.id)}
-          onMoveToFolder={() => setModal({ kind: 'move-to-folder', server: srv })}
-        />
-      ))}
-    </div>
-  )
+  const renderServerCards = (list: BillingServerData[], sortable = false) => {
+    const cards = list.map((srv, idx) => (
+      <ProjectCard
+        key={srv.id}
+        server={srv}
+        index={idx}
+        t={t}
+        formatDateTime={formatBillingDateTime}
+        sortable={sortable}
+        onExtend={() => setModal({ kind: 'extend', server: srv })}
+        onTopup={() => setModal({ kind: 'topup', server: srv })}
+        onEdit={() => setModal({ kind: 'edit', server: srv })}
+        onDelete={() => handleDelete(srv.id)}
+        onMoveToFolder={() => setModal({ kind: 'move-to-folder', server: srv })}
+      />
+    ))
+
+    if (sortable) {
+      return (
+        <SortableContext items={list.map(s => s.id)} strategy={rectSortingStrategy}>
+          <div className="grid gap-3">{cards}</div>
+        </SortableContext>
+      )
+    }
+
+    return <div className="grid gap-3">{cards}</div>
+  }
 
   const unfolderedServers = grouped.get(null) || []
+
+  const activeServer = dragType === 'server' && typeof activeId === 'number'
+    ? servers.find(s => s.id === activeId) : null
+  const activeFolderName = dragType === 'folder' && typeof activeId === 'string'
+    ? activeId.replace('sortable-folder:', '') : null
 
   return (
     <div className="space-y-6">
@@ -249,96 +442,148 @@ export default function Billing() {
           <p className="text-dark-400 text-sm">{t('billing.no_items')}</p>
         </motion.div>
       ) : (
-        <div className="space-y-4">
-          {/* Folder groups */}
-          {folders.map(folderName => {
-            const isCollapsed = collapsed.has(folderName)
-            const folderServers = grouped.get(folderName) || []
-            const daysArr = folderServers.map(s => s.days_left ?? 9999)
-            const worstDays = daysArr.length > 0 ? Math.min(...daysArr) : 9999
+        <DndContext
+          sensors={sensors}
+          collisionDetection={collisionDetection}
+          onDragStart={handleDragStart}
+          onDragOver={handleDragOver}
+          onDragEnd={handleDragEnd}
+        >
+          <div className="space-y-4">
+            <SortableContext items={folderSortableIds} strategy={verticalListSortingStrategy}>
+              {folders.map(folderName => {
+                const isCollapsed = collapsed.has(folderName)
+                const folderServers = grouped.get(folderName) || []
+                const daysArr = folderServers.map(s => s.days_left ?? 9999)
+                const worstDays = daysArr.length > 0 ? Math.min(...daysArr) : 9999
 
-            return (
-              <motion.div
-                key={folderName}
-                initial={{ opacity: 0, y: 12 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="bg-dark-900/50 rounded-xl border border-dark-800/50 overflow-hidden"
-              >
-                <div className="flex items-center justify-between px-4 py-3">
-                  <button
-                    onClick={() => toggleCollapsed(folderName)}
-                    className="flex items-center gap-2.5 flex-1 min-w-0 group"
+                return (
+                  <BillingSortableFolderItem
+                    key={folderName}
+                    folderId={folderName}
+                    isDropOver={overFolderId === folderName && dragType === 'server'}
                   >
-                    <div className="w-8 h-8 rounded-lg bg-blue-500/15 flex items-center justify-center flex-shrink-0">
-                      {isCollapsed
-                        ? <Folder className="w-4 h-4 text-blue-400" />
-                        : <FolderOpen className="w-4 h-4 text-blue-400" />
-                      }
-                    </div>
-                    <span className="text-sm font-semibold text-white truncate group-hover:text-blue-300 transition">
-                      {folderName}
-                    </span>
-                    <span className="text-xs text-dark-500 flex-shrink-0">
-                      {folderServers.length}
-                    </span>
-                    {isCollapsed && (
-                      <span className={`text-xs font-medium flex-shrink-0 ${statusColor(worstDays)}`}>
-                        {formatDays(worstDays === 9999 ? null : worstDays, t)}
-                      </span>
-                    )}
-                    {isCollapsed
-                      ? <ChevronRight className="w-3.5 h-3.5 text-dark-600 flex-shrink-0" />
-                      : <ChevronDown className="w-3.5 h-3.5 text-dark-600 flex-shrink-0" />
-                    }
-                  </button>
-                  <div className="flex items-center gap-1 flex-shrink-0 ml-2">
-                    <button
-                      onClick={() => setModal({ kind: 'rename-folder', folderName })}
-                      className="p-1.5 text-dark-500 hover:text-dark-300 transition rounded-lg hover:bg-dark-800/50"
-                    >
-                      <Pencil className="w-3.5 h-3.5" />
-                    </button>
-                    <button
-                      onClick={() => handleDeleteFolder(folderName)}
-                      className="p-1.5 text-dark-500 hover:text-red-400 transition rounded-lg hover:bg-dark-800/50"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                </div>
-                <AnimatePresence initial={false}>
-                  {!isCollapsed && (
-                    <motion.div
-                      initial={{ height: 0, opacity: 0 }}
-                      animate={{ height: 'auto', opacity: 1 }}
-                      exit={{ height: 0, opacity: 0 }}
-                      transition={{ duration: 0.2 }}
-                      className="overflow-hidden"
-                    >
-                      <div className="px-3 pb-3">
-                        {folderServers.length > 0
-                          ? renderServerCards(folderServers)
-                          : (
-                            <div className="py-6 text-center text-dark-500 text-xs">
-                              {t('billing.no_items')}
+                    {(handleProps) => (
+                      <>
+                        <div className="flex items-center justify-between px-4 py-3">
+                          <div className="flex items-center gap-1 flex-1 min-w-0">
+                            <div
+                              ref={handleProps.ref}
+                              {...handleProps.listeners}
+                              {...handleProps.attributes}
+                              className="p-1 text-dark-600 hover:text-dark-400 cursor-grab active:cursor-grabbing transition rounded flex-shrink-0"
+                            >
+                              <GripVertical className="w-4 h-4" />
                             </div>
-                          )
-                        }
-                      </div>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-              </motion.div>
-            )
-          })}
+                            <button
+                              onClick={() => toggleCollapsed(folderName)}
+                              className="flex items-center gap-2.5 flex-1 min-w-0 group"
+                            >
+                              <div className="w-8 h-8 rounded-lg bg-blue-500/15 flex items-center justify-center flex-shrink-0">
+                                {isCollapsed
+                                  ? <Folder className="w-4 h-4 text-blue-400" />
+                                  : <FolderOpen className="w-4 h-4 text-blue-400" />
+                                }
+                              </div>
+                              <span className="text-sm font-semibold text-white truncate group-hover:text-blue-300 transition">
+                                {folderName}
+                              </span>
+                              <span className="text-xs text-dark-500 flex-shrink-0">
+                                {folderServers.length}
+                              </span>
+                              {isCollapsed && (
+                                <span className={`text-xs font-medium flex-shrink-0 ${statusColor(worstDays)}`}>
+                                  {formatDays(worstDays === 9999 ? null : worstDays, t)}
+                                </span>
+                              )}
+                              {isCollapsed
+                                ? <ChevronRight className="w-3.5 h-3.5 text-dark-600 flex-shrink-0" />
+                                : <ChevronDown className="w-3.5 h-3.5 text-dark-600 flex-shrink-0" />
+                              }
+                            </button>
+                          </div>
+                          <div className="flex items-center gap-1 flex-shrink-0 ml-2">
+                            <button
+                              onClick={() => setModal({ kind: 'rename-folder', folderName })}
+                              className="p-1.5 text-dark-500 hover:text-dark-300 transition rounded-lg hover:bg-dark-800/50"
+                            >
+                              <Pencil className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              onClick={() => handleDeleteFolder(folderName)}
+                              className="p-1.5 text-dark-500 hover:text-red-400 transition rounded-lg hover:bg-dark-800/50"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                        <AnimatePresence initial={false}>
+                          {!isCollapsed && (
+                            <motion.div
+                              initial={{ height: 0, opacity: 0 }}
+                              animate={{ height: 'auto', opacity: 1 }}
+                              exit={{ height: 0, opacity: 0 }}
+                              transition={{ duration: 0.2 }}
+                              className="overflow-hidden"
+                            >
+                              <div className="px-3 pb-3">
+                                {folderServers.length > 0
+                                  ? renderServerCards(folderServers, true)
+                                  : (
+                                    <div className="py-6 text-center text-dark-500 text-xs">
+                                      {t('billing.no_items')}
+                                    </div>
+                                  )
+                                }
+                              </div>
+                            </motion.div>
+                          )}
+                        </AnimatePresence>
+                      </>
+                    )}
+                  </BillingSortableFolderItem>
+                )
+              })}
+            </SortableContext>
 
-          {/* Servers without folder */}
-          {unfolderedServers.length > 0 && (
-            <div className="grid gap-4">
-              {renderServerCards(unfolderedServers)}
-            </div>
-          )}
-        </div>
+            <BillingUnfolderDropZone
+              isOver={overFolderId === '__unfolder__' && dragType === 'server'}
+              hasServers={unfolderedServers.length > 0}
+              hasFolders={folders.length > 0}
+            >
+              {renderServerCards(unfolderedServers, true)}
+            </BillingUnfolderDropZone>
+          </div>
+
+          <DragOverlay>
+            {activeServer && (
+              <div className="opacity-90">
+                <ProjectCard
+                  server={activeServer}
+                  index={0}
+                  t={t}
+                  formatDateTime={formatBillingDateTime}
+                  sortable={false}
+                  onExtend={() => {}}
+                  onTopup={() => {}}
+                  onEdit={() => {}}
+                  onDelete={() => {}}
+                  onMoveToFolder={() => {}}
+                />
+              </div>
+            )}
+            {activeFolderName && (
+              <div className="opacity-90 bg-dark-900 border border-blue-500/40 rounded-xl px-4 py-3 flex items-center gap-2.5 shadow-2xl">
+                <GripVertical className="w-4 h-4 text-dark-500" />
+                <div className="w-8 h-8 rounded-lg bg-blue-500/15 flex items-center justify-center">
+                  <Folder className="w-4 h-4 text-blue-400" />
+                </div>
+                <span className="text-sm font-semibold text-white">{activeFolderName}</span>
+                <span className="text-xs text-dark-500">{(grouped.get(activeFolderName) || []).length}</span>
+              </div>
+            )}
+          </DragOverlay>
+        </DndContext>
       )}
 
       {/* Notification settings */}
@@ -497,6 +742,7 @@ export default function Billing() {
           onRenamed={(oldName, newName) => {
             setServers(prev => prev.map(s => s.folder === oldName ? { ...s, folder: newName } : s))
             setEmptyFolders(prev => prev.map(f => f === oldName ? newName : f))
+            setFolderOrder(prev => { const next = prev.map(f => f === oldName ? newName : f); saveFolderOrder(next); return next })
             setModal({ kind: 'none' })
           }}
         />
@@ -559,17 +805,34 @@ function formatDays(days: number | null, t: (k: string) => string): string {
 /*  Project Card                                                       */
 /* ------------------------------------------------------------------ */
 
-function ProjectCard({ server, index, t, formatDateTime, onExtend, onTopup, onEdit, onDelete, onMoveToFolder }: {
+function ProjectCard({ server, index, t, formatDateTime, sortable, onExtend, onTopup, onEdit, onDelete, onMoveToFolder }: {
   server: BillingServerData
   index: number
   t: (k: string, opts?: Record<string, unknown>) => string
   formatDateTime: (iso: string) => string
+  sortable?: boolean
   onExtend: () => void
   onTopup: () => void
   onEdit: () => void
   onDelete: () => void
   onMoveToFolder: () => void
 }) {
+  const {
+    setNodeRef,
+    setActivatorNodeRef,
+    attributes,
+    listeners,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: server.id, disabled: !sortable })
+
+  const style = sortable ? {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.3 : 1,
+  } : undefined
+
   const dl = server.days_left
   const maxDays = 30
   const pct = dl !== null ? Math.min(100, Math.max(0, (dl / maxDays) * 100)) : 0
@@ -577,6 +840,8 @@ function ProjectCard({ server, index, t, formatDateTime, onExtend, onTopup, onEd
 
   return (
     <motion.div
+      ref={sortable ? setNodeRef : undefined}
+      style={style}
       initial={{ opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ delay: index * 0.04 }}
@@ -584,6 +849,16 @@ function ProjectCard({ server, index, t, formatDateTime, onExtend, onTopup, onEd
     >
       <div className="flex items-start justify-between gap-4">
         <div className="flex items-center gap-3 min-w-0">
+          {sortable && (
+            <div
+              ref={setActivatorNodeRef}
+              {...attributes}
+              {...listeners}
+              className="p-1 text-dark-600 hover:text-dark-400 cursor-grab active:cursor-grabbing transition rounded flex-shrink-0"
+            >
+              <GripVertical className="w-4 h-4" />
+            </div>
+          )}
           <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${
             server.billing_type === 'monthly'
               ? 'bg-blue-500/20'
@@ -631,7 +906,6 @@ function ProjectCard({ server, index, t, formatDateTime, onExtend, onTopup, onEd
         </div>
       </div>
 
-      {/* Expiration date */}
       {server.paid_until && (
         <div className={`mt-2.5 flex items-center gap-1.5 text-xs ${
           dl !== null && dl <= 3 ? 'text-red-400/80' : dl !== null && dl <= 7 ? 'text-yellow-400/80' : 'text-dark-400'
@@ -642,7 +916,6 @@ function ProjectCard({ server, index, t, formatDateTime, onExtend, onTopup, onEd
         </div>
       )}
 
-      {/* Progress bar */}
       <div className="mt-2.5 h-1.5 bg-dark-800 rounded-full overflow-hidden">
         <motion.div
           className={`h-full rounded-full ${barColor(dl)}`}
@@ -652,7 +925,6 @@ function ProjectCard({ server, index, t, formatDateTime, onExtend, onTopup, onEd
         />
       </div>
 
-      {/* Actions */}
       <div className="flex items-center justify-between mt-3">
         <div className="flex gap-2">
           {server.billing_type === 'monthly' ? (
@@ -1443,6 +1715,80 @@ function MoveToFolderModal({ t, server, folders, onClose, onMoved }: {
         </div>
       </div>
     </Overlay>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/*  Sortable folder with droppable zone                                */
+/* ------------------------------------------------------------------ */
+
+function BillingSortableFolderItem({ folderId, isDropOver, children }: {
+  folderId: string
+  isDropOver: boolean
+  children: (handleProps: { ref: (node: HTMLElement | null) => void; listeners: ReturnType<typeof useSortable>['listeners']; attributes: ReturnType<typeof useSortable>['attributes'] }) => React.ReactNode
+}) {
+  const {
+    setNodeRef: setSortableRef,
+    setActivatorNodeRef,
+    attributes,
+    listeners,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: `sortable-folder:${folderId}` })
+  const { setNodeRef: setDropRef } = useDroppable({ id: `folder:${folderId}` })
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.3 : 1,
+  }
+
+  const combinedRef = useCallback((node: HTMLDivElement | null) => {
+    setSortableRef(node)
+    setDropRef(node)
+  }, [setSortableRef, setDropRef])
+
+  return (
+    <div
+      ref={combinedRef}
+      style={style}
+      className={`rounded-xl border overflow-hidden transition-colors duration-150 ${
+        isDropOver && !isDragging
+          ? 'bg-blue-500/10 border-blue-500/40 ring-2 ring-blue-500/30'
+          : 'bg-dark-900/50 border-dark-800/50'
+      }`}
+    >
+      {children({ ref: setActivatorNodeRef, listeners, attributes })}
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/*  Unfolder drop zone                                                 */
+/* ------------------------------------------------------------------ */
+
+function BillingUnfolderDropZone({ isOver, hasServers, hasFolders, children }: {
+  isOver: boolean
+  hasServers: boolean
+  hasFolders: boolean
+  children: React.ReactNode
+}) {
+  const { setNodeRef } = useDroppable({ id: 'drop:unfolder' })
+
+  if (!hasServers && !hasFolders) return <>{children}</>
+
+  return (
+    <div
+      ref={setNodeRef}
+      className={`rounded-xl transition-all duration-150 min-h-[40px] ${
+        isOver
+          ? 'bg-accent-500/5 ring-2 ring-accent-500/30 p-3'
+          : ''
+      }`}
+    >
+      {children}
+    </div>
   )
 }
 
