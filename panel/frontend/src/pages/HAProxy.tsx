@@ -1,4 +1,4 @@
-import { useState, useEffect, FormEvent, useMemo, useCallback } from 'react'
+import { useState, useEffect, useRef, FormEvent, useMemo, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useTranslation } from 'react-i18next'
@@ -83,6 +83,8 @@ export default function HAProxy() {
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [actionLoading, setActionLoading] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  
+  const lastLiveRefreshRef = useRef<number>(0)
   
   // Cache for offline data
   interface HAProxyCacheData {
@@ -226,8 +228,10 @@ export default function HAProxy() {
   }, [serverId, applyCachedResponse, loadFromCache, t])
 
   // Auto-refresh — single request from panel DB cache (lightweight, no loader)
+  // Skips if live data was fetched recently (within 35s) to prevent stale cache overwriting fresh data
   const refreshFromCache = useCallback(async () => {
     if (!serverId) return
+    if (Date.now() - lastLiveRefreshRef.current < 35000) return
     try {
       const { data } = await proxyApi.getHAProxyCached(Number(serverId))
       applyCachedResponse(data)
@@ -270,8 +274,8 @@ export default function HAProxy() {
       setError(null)
       setIsCached(false)
       setCachedAt(null)
+      lastLiveRefreshRef.current = Date.now()
       
-      // Save to cache
       saveToCache({
         status: statusData,
         rules: rulesData,

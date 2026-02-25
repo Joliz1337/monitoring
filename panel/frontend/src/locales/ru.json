@@ -997,7 +997,10 @@
     "type_tcp_finwait_spike": "TCP FIN Wait скачок",
     "settings_saved": "Настройки алертов сохранены",
     "settings_save_failed": "Не удалось сохранить настройки",
-    "history_cleared": "История алертов очищена"
+    "history_cleared": "История алертов очищена",
+    "excluded_servers": "Исключённые серверы",
+    "excluded_servers_hint": "Серверы из этого списка не будут отслеживаться системой уведомлений",
+    "add_excluded_server": "Добавить сервер в исключения"
   },
   "billing": {
     "title": "Оплата",

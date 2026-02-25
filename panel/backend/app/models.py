@@ -560,6 +560,9 @@ class AlertSettings(Base):
     tcp_finwait_enabled = Column(Boolean, default=False)
     tcp_finwait_spike_percent = Column(Float, default=200.0)
     tcp_finwait_sustained_seconds = Column(Integer, default=300)
+    
+    # Excluded servers (JSON array of server IDs)
+    excluded_server_ids = Column(Text, nullable=True)
 
 
 class AlertHistory(Base):

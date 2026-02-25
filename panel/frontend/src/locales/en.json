@@ -996,7 +996,10 @@
     "type_tcp_finwait_spike": "TCP FIN Wait Spike",
     "settings_saved": "Alert settings saved",
     "settings_save_failed": "Failed to save settings",
-    "history_cleared": "Alert history cleared"
+    "history_cleared": "Alert history cleared",
+    "excluded_servers": "Excluded Servers",
+    "excluded_servers_hint": "Servers in this list will not be monitored by the alerting system",
+    "add_excluded_server": "Add server to exclusions"
   },
   "billing": {
     "title": "Billing",

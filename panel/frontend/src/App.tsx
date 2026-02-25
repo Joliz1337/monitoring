@@ -132,9 +132,6 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 }
 
 export default function App() {
-  const navItem = useExtStore(s => s.navItem)
-  const extPath = navItem?.path || 'ext'
-  
   return (
     <>
     <Toaster 
@@ -176,7 +173,7 @@ export default function App() {
         <Route path="updates" element={<Suspense fallback={<LoadingScreen />}><Updates /></Suspense>} />
         {ExtPageLazy && (
           <Route 
-            path={extPath}
+            path="ip-search"
             element={
               <Suspense fallback={<LoadingScreen />}>
                 <ExtPageLazy />

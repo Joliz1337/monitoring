@@ -143,6 +143,13 @@ class ServerAlerter:
         now = time.time()
         self._last_check = datetime.now(timezone.utc).replace(tzinfo=None)
 
+        excluded_ids: set[int] = set()
+        if settings.excluded_server_ids:
+            try:
+                excluded_ids = set(json.loads(settings.excluded_server_ids))
+            except (json.JSONDecodeError, TypeError):
+                pass
+
         async with async_session() as db:
             result = await db.execute(
                 select(Server).where(Server.is_active == True)  # noqa: E712
@@ -150,14 +157,16 @@ class ServerAlerter:
             servers = result.scalars().all()
 
         for srv in servers:
+            if srv.id in excluded_ids:
+                continue
             if srv.id not in self._states:
                 self._states[srv.id] = ServerAlertState()
             state = self._states[srv.id]
 
             await self._check_server(srv, state, settings, now)
 
-        active_ids = {s.id for s in servers}
-        stale = [k for k in self._states if k not in active_ids]
+        monitored_ids = {s.id for s in servers} - excluded_ids
+        stale = [k for k in self._states if k not in monitored_ids]
         for k in stale:
             del self._states[k]
 

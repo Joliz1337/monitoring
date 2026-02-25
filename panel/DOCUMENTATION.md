@@ -523,6 +523,7 @@ Frontend lazy loading (panel/frontend/src/pages/Remnawave.tsx):
 - **Network**: спайк/падение трафика относительно EMA baseline.
 - **TCP**: отслеживание Established, Listen, Time Wait, Close Wait, SYN Sent, SYN Recv, FIN Wait по отдельности.
 - **Cooldown**: между повторными алертами одного типа/сервера (default 30 мин).
+- **Excluded servers**: серверы из списка исключений (`excluded_server_ids` в AlertSettings) полностью пропускаются при проверке.
 
 | Метод | Endpoint | Описание |
 |-------|----------|----------|

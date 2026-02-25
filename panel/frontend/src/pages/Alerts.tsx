@@ -3,12 +3,12 @@ import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Bell, Bot, Send, CheckCircle2, XCircle, Loader2,
-  ChevronDown, ChevronRight, Trash2, Server,
+  ChevronDown, ChevronRight, Trash2, Server, ShieldOff,
   Cpu, MemoryStick, Network, Cable, Power,
-  RefreshCw, Clock,
+  RefreshCw, Clock, X,
 } from 'lucide-react'
 import { toast } from 'sonner'
-import { alertsApi, AlertSettingsData, AlertHistoryItem, AlertStatus } from '../api/client'
+import { alertsApi, serversApi, AlertSettingsData, AlertHistoryItem, AlertStatus, Server as ServerType } from '../api/client'
 
 type TriggerSection = 'offline' | 'cpu' | 'ram' | 'network' | 'tcp'
 
@@ -29,20 +29,23 @@ export default function Alerts() {
 
   const [expanded, setExpanded] = useState<Set<TriggerSection>>(new Set())
   const [historyFilter, setHistoryFilter] = useState<string>('')
+  const [allServers, setAllServers] = useState<ServerType[]>([])
 
   const PAGE_SIZE = 20
 
   const fetchAll = useCallback(async () => {
     try {
-      const [sRes, stRes, hRes] = await Promise.all([
+      const [sRes, stRes, hRes, srvRes] = await Promise.all([
         alertsApi.getSettings(),
         alertsApi.getStatus(),
         alertsApi.getHistory({ limit: PAGE_SIZE, offset: 0 }),
+        serversApi.list(),
       ])
       setSettings(sRes.data)
       setStatus(stRes.data)
       setHistory(hRes.data.items)
       setHistoryTotal(hRes.data.total)
+      setAllServers(srvRes.data.servers)
     } catch (e) {
       console.error('Failed to load alert data:', e)
     } finally {
@@ -263,6 +266,40 @@ export default function Alerts() {
             min={300} max={7200} step={300}
             format={v => `${Math.floor(v / 60)} ${t('alerts.min')}`}
             onSave={v => save({ alert_cooldown: v })}
+          />
+        </div>
+      </Section>
+
+      {/* Excluded Servers */}
+      <Section title={t('alerts.excluded_servers')} icon={<ShieldOff className="w-4 h-4" />}>
+        <div className="space-y-3">
+          <p className="text-xs text-dark-500">{t('alerts.excluded_servers_hint')}</p>
+          {settings.excluded_server_ids.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {settings.excluded_server_ids.map(id => {
+                const srv = allServers.find(s => s.id === id)
+                return (
+                  <span
+                    key={id}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-dark-800 border border-dark-700/50 rounded-lg text-sm text-dark-300"
+                  >
+                    <Server className="w-3 h-3 text-dark-500" />
+                    {srv?.name || `#${id}`}
+                    <button
+                      onClick={() => save({ excluded_server_ids: settings.excluded_server_ids.filter(i => i !== id) })}
+                      className="ml-0.5 text-dark-500 hover:text-red-400 transition"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </span>
+                )
+              })}
+            </div>
+          )}
+          <ExcludeServerSelect
+            servers={allServers.filter(s => !settings.excluded_server_ids.includes(s.id))}
+            onAdd={id => save({ excluded_server_ids: [...settings.excluded_server_ids, id] })}
+            placeholder={t('alerts.add_excluded_server')}
           />
         </div>
       </Section>
@@ -677,6 +714,77 @@ function SliderRow({ label, value, min, max, step, format, onSave }: {
                    [&::-moz-range-thumb]:w-4 [&::-moz-range-thumb]:h-4 [&::-moz-range-thumb]:bg-accent-400
                    [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:border-0 [&::-moz-range-thumb]:cursor-pointer"
       />
+    </div>
+  )
+}
+
+function ExcludeServerSelect({ servers, onAdd, placeholder }: {
+  servers: ServerType[]
+  onAdd: (id: number) => void
+  placeholder: string
+}) {
+  const [open, setOpen] = useState(false)
+  const [search, setSearch] = useState('')
+
+  const filtered = servers.filter(s =>
+    s.name.toLowerCase().includes(search.toLowerCase())
+  )
+
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setOpen(!open)}
+        className="w-full flex items-center justify-between bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-400
+                   hover:border-dark-600 transition"
+      >
+        <span>{placeholder}</span>
+        <ChevronDown className={`w-4 h-4 transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+      <AnimatePresence>
+        {open && (
+          <motion.div
+            initial={{ opacity: 0, y: -4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -4 }}
+            transition={{ duration: 0.15 }}
+            className="absolute z-20 mt-1 w-full bg-dark-850 border border-dark-700 rounded-lg shadow-xl overflow-hidden"
+          >
+            {servers.length > 5 && (
+              <div className="p-2 border-b border-dark-700/50">
+                <input
+                  type="text"
+                  value={search}
+                  onChange={e => setSearch(e.target.value)}
+                  placeholder="..."
+                  autoFocus
+                  className="w-full bg-dark-800 border border-dark-700 rounded px-2 py-1 text-sm text-dark-200
+                             placeholder-dark-600 focus:border-accent-500/50 focus:outline-none"
+                />
+              </div>
+            )}
+            <div className="max-h-48 overflow-y-auto">
+              {filtered.length === 0 ? (
+                <div className="px-3 py-2 text-sm text-dark-500 text-center">—</div>
+              ) : (
+                filtered.map(s => (
+                  <button
+                    key={s.id}
+                    onClick={() => {
+                      onAdd(s.id)
+                      setOpen(false)
+                      setSearch('')
+                    }}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-dark-300 hover:bg-dark-800 transition text-left"
+                  >
+                    <Server className="w-3.5 h-3.5 text-dark-500 flex-shrink-0" />
+                    <span className="truncate">{s.name}</span>
+                  </button>
+                ))
+              )}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   )
 }

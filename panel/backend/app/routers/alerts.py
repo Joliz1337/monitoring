@@ -1,3 +1,5 @@
+import json
+
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select, delete, func, desc
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -72,6 +74,8 @@ class AlertSettingsUpdate(BaseModel):
     tcp_finwait_spike_percent: Optional[float] = None
     tcp_finwait_sustained_seconds: Optional[int] = None
 
+    excluded_server_ids: Optional[list[int]] = None
+
 
 class TelegramTestRequest(BaseModel):
     bot_token: str
@@ -127,6 +131,7 @@ def _settings_to_dict(s: AlertSettings) -> dict:
         "tcp_finwait_enabled": s.tcp_finwait_enabled,
         "tcp_finwait_spike_percent": s.tcp_finwait_spike_percent,
         "tcp_finwait_sustained_seconds": s.tcp_finwait_sustained_seconds,
+        "excluded_server_ids": json.loads(s.excluded_server_ids) if s.excluded_server_ids else [],
     }
 
 
@@ -156,7 +161,10 @@ async def update_alert_settings(
 
     update_data = data.model_dump(exclude_unset=True)
     for key, value in update_data.items():
-        setattr(settings, key, value)
+        if key == "excluded_server_ids":
+            setattr(settings, key, json.dumps(value) if value is not None else None)
+        else:
+            setattr(settings, key, value)
 
     await db.commit()
     await db.refresh(settings)
