@@ -281,9 +281,9 @@ export default function Alerts() {
                 return (
                   <span
                     key={id}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-dark-800/80 border border-dark-600/50 rounded-lg text-sm text-dark-200 shadow-sm"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-dark-700/60 border border-dark-600/40 rounded-lg text-sm text-dark-200"
                   >
-                    <Server className="w-3 h-3 text-dark-500" />
+                    <Server className="w-3.5 h-3.5 text-dark-400" />
                     {srv?.name || `#${id}`}
                     <button
                       onClick={() => save({ excluded_server_ids: settings.excluded_server_ids.filter(i => i !== id) })}
