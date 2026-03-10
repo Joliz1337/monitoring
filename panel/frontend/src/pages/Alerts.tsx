@@ -747,7 +747,7 @@ function ExcludeServerSelect({ servers, onAdd, placeholder }: {
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -4 }}
             transition={{ duration: 0.15 }}
-            className="absolute z-20 mt-1 w-full bg-dark-850 border border-dark-700 rounded-lg shadow-xl overflow-hidden"
+            className="absolute z-20 mt-1 w-full bg-dark-800 border border-dark-700 rounded-lg shadow-xl overflow-hidden"
           >
             {servers.length > 5 && (
               <div className="p-2 border-b border-dark-700/50">
