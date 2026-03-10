@@ -309,9 +309,9 @@ class RemnawaveUserCache(Base):
     
     # Subscription info
     expire_at = Column(DateTime(timezone=True), nullable=True)
-    subscription_url = Column(String(500), nullable=True)
+    subscription_url = Column(Text, nullable=True)
     sub_revoked_at = Column(DateTime(timezone=True), nullable=True)
-    sub_last_user_agent = Column(String(500), nullable=True)
+    sub_last_user_agent = Column(Text, nullable=True)
     sub_last_opened_at = Column(DateTime(timezone=True), nullable=True)
     
     # Traffic limits

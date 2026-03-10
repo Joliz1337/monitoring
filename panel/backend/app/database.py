@@ -159,6 +159,15 @@ async def run_migrations(conn):
                 except Exception:
                     pass
     
+    # Widen VARCHAR(500) → TEXT for long user agents / URLs
+    if user_cache_columns:
+        for col_name in ("subscription_url", "sub_last_user_agent"):
+            if col_name in user_cache_columns:
+                try:
+                    await conn.execute(text(f'ALTER TABLE remnawave_user_cache ALTER COLUMN "{col_name}" TYPE TEXT'))
+                except Exception:
+                    pass
+
     # Check xray_user_ip_stats columns
     result = await conn.execute(text("""
         SELECT column_name FROM information_schema.columns 
