@@ -28,7 +28,7 @@ from app.services.remnawave_api import get_remnawave_api, RemnawaveAPIError
 logger = logging.getLogger(__name__)
 
 UPSERT_BATCH_SIZE = 500
-USER_CACHE_BATCH_SIZE = 500
+USER_CACHE_BATCH_SIZE = 100
 
 # DNS cache for infrastructure addresses
 _dns_cache: dict[str, tuple[set[str], datetime]] = {}
@@ -580,14 +580,17 @@ class XrayStatsCollector:
                 
                 now = datetime.now(timezone.utc).replace(tzinfo=None)
                 async with async_session() as db:
-                    fetched_emails = set()
+                    seen_ids: dict[int, dict] = {}
                     for user in users:
                         uid = user.get("id")
-                        if uid:
-                            fetched_emails.add(uid)
+                        if uid is not None:
+                            seen_ids[uid] = user
                     
-                    if users:
-                        await self._batch_upsert_user_cache(db, users, now)
+                    unique_users = list(seen_ids.values())
+                    fetched_emails = set(seen_ids.keys())
+                    
+                    if unique_users:
+                        await self._batch_upsert_user_cache(db, unique_users, now)
                     
                     # Удаляем пользователей, которых больше нет в Remnawave
                     if fetched_emails:
@@ -600,9 +603,11 @@ class XrayStatsCollector:
                     await db.commit()
                 
                 self._last_user_cache_update = now
-                logger.info(f"User cache synced: {len(users)} users (stale removed)")
+                dedup_count = len(users) - len(unique_users)
+                dedup_msg = f", {dedup_count} duplicates removed" if dedup_count else ""
+                logger.info(f"User cache synced: {len(unique_users)} users{dedup_msg}")
                 self._user_cache_updating = False
-                return {"success": True, "count": len(users), "error": None}
+                return {"success": True, "count": len(unique_users), "error": None}
                 
             except RemnawaveAPIError as e:
                 last_error = e.message
@@ -668,22 +673,35 @@ class XrayStatsCollector:
         if not values:
             return
         
+        update_cols = [
+            'uuid', 'short_uuid', 'username', 'telegram_id', 'status',
+            'expire_at', 'subscription_url', 'sub_revoked_at', 'sub_last_user_agent',
+            'sub_last_opened_at', 'traffic_limit_bytes', 'traffic_limit_strategy',
+            'last_traffic_reset_at', 'used_traffic_bytes', 'lifetime_used_traffic_bytes',
+            'online_at', 'first_connected_at', 'last_connected_node_uuid',
+            'hwid_device_limit', 'user_email', 'description', 'tag',
+            'created_at', 'updated_at'
+        ]
+        
+        failed_batches = 0
+        total_batches = (len(values) + USER_CACHE_BATCH_SIZE - 1) // USER_CACHE_BATCH_SIZE
         for i in range(0, len(values), USER_CACHE_BATCH_SIZE):
             batch = values[i:i + USER_CACHE_BATCH_SIZE]
-            stmt = pg_insert(RemnawaveUserCache).values(batch)
-            stmt = stmt.on_conflict_do_update(
-                index_elements=['email'],
-                set_={col: getattr(stmt.excluded, col) for col in [
-                    'uuid', 'short_uuid', 'username', 'telegram_id', 'status',
-                    'expire_at', 'subscription_url', 'sub_revoked_at', 'sub_last_user_agent',
-                    'sub_last_opened_at', 'traffic_limit_bytes', 'traffic_limit_strategy',
-                    'last_traffic_reset_at', 'used_traffic_bytes', 'lifetime_used_traffic_bytes',
-                    'online_at', 'first_connected_at', 'last_connected_node_uuid',
-                    'hwid_device_limit', 'user_email', 'description', 'tag',
-                    'created_at', 'updated_at'
-                ]}
-            )
-            await db.execute(stmt)
+            try:
+                async with db.begin_nested():
+                    stmt = pg_insert(RemnawaveUserCache).values(batch)
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=['email'],
+                        set_={col: getattr(stmt.excluded, col) for col in update_cols}
+                    )
+                    await db.execute(stmt)
+            except Exception as e:
+                failed_batches += 1
+                batch_num = i // USER_CACHE_BATCH_SIZE + 1
+                logger.warning(f"User cache batch {batch_num}/{total_batches} failed: {e}")
+        
+        if failed_batches:
+            logger.warning(f"User cache: {failed_batches}/{total_batches} batches failed")
     
     def _parse_datetime(self, value: str | None) -> datetime | None:
         if not value:
