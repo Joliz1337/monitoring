@@ -270,7 +270,7 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
                     ) : (
                       <ShieldCheck className="w-4 h-4" />
                     )}
-                    <span className="font-mono text-xs truncate max-w-[120px]" title={metrics.certificates.closest_expiry.domain}>
+                    <span className="font-mono text-xs truncate" title={metrics.certificates.closest_expiry.domain}>
                       {metrics.certificates.closest_expiry.domain} ({metrics.certificates.closest_expiry.expired 
                         ? t('server_card.cert_expired')
                         : t('server_card.cert_days', { days: metrics.certificates.closest_expiry.days_left })})
@@ -434,26 +434,22 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
                   </div>
                 </div>
                 
-                <div className="pt-3 border-t border-dark-700/50 flex items-center justify-between text-xs text-dark-400">
-                  <div className="flex items-center gap-3">
-                    <div className="flex items-center gap-1.5">
+                <div className="pt-3 border-t border-dark-700/50 flex items-center justify-between text-xs text-dark-400 gap-2">
+                  <div className="flex items-center gap-3 min-w-0 flex-1">
+                    <div className="flex items-center gap-1.5 flex-shrink-0">
                       <Clock className="w-3.5 h-3.5" />
                       <span>{formatUptime(metrics.system.uptime_seconds)}</span>
                     </div>
                     {metrics.certificates?.closest_expiry ? (
-                      <div className={`flex items-center gap-1 ${
+                      <div className={`flex items-center gap-1 min-w-0 ${
                         metrics.certificates.closest_expiry.expired 
                           ? 'text-danger' 
                           : metrics.certificates.closest_expiry.days_left < 30 
                             ? 'text-warning' 
                             : 'text-success'
                       }`}>
-                        {metrics.certificates.closest_expiry.expired || metrics.certificates.closest_expiry.days_left < 30 ? (
-                          <ShieldAlert className="w-3.5 h-3.5" />
-                        ) : (
-                          <ShieldCheck className="w-3.5 h-3.5" />
-                        )}
-                        <span className="truncate max-w-[140px]" title={metrics.certificates.closest_expiry.domain}>
+                        <ShieldCheck className="w-3.5 h-3.5 flex-shrink-0" />
+                        <span className="truncate" title={metrics.certificates.closest_expiry.domain}>
                           {metrics.certificates.closest_expiry.expired 
                             ? t('server_card.cert_expired_domain', { domain: metrics.certificates.closest_expiry.domain }) 
                             : t('server_card.cert_days_domain', { 
@@ -469,7 +465,7 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
                       </div>
                     )}
                   </div>
-                  <span className="text-dark-500 truncate max-w-[120px]">{metrics.system.os}</span>
+                  <span className="text-dark-500 truncate flex-shrink-0 max-w-[140px]">{metrics.system.os}</span>
                 </div>
               </>
             )}
@@ -549,26 +545,22 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
                   </div>
                 )}
                 
-                <div className="pt-3 border-t border-dark-700/50 flex items-center justify-between text-xs text-dark-400">
-                  <div className="flex items-center gap-3">
-                    <div className="flex items-center gap-1.5">
+                <div className="pt-3 border-t border-dark-700/50 flex items-center justify-between text-xs text-dark-400 gap-2">
+                  <div className="flex items-center gap-3 min-w-0 flex-1">
+                    <div className="flex items-center gap-1.5 flex-shrink-0">
                       <Clock className="w-3.5 h-3.5" />
                       <span>{formatUptime(metrics.system.uptime_seconds)}</span>
                     </div>
                     {metrics.certificates?.closest_expiry ? (
-                      <div className={`flex items-center gap-1 ${
+                      <div className={`flex items-center gap-1 min-w-0 ${
                         metrics.certificates.closest_expiry.expired 
                           ? 'text-danger' 
                           : metrics.certificates.closest_expiry.days_left < 30 
                             ? 'text-warning' 
                             : 'text-success'
                       }`}>
-                        {metrics.certificates.closest_expiry.expired || metrics.certificates.closest_expiry.days_left < 30 ? (
-                          <ShieldAlert className="w-3.5 h-3.5" />
-                        ) : (
-                          <ShieldCheck className="w-3.5 h-3.5" />
-                        )}
-                        <span className="truncate max-w-[140px]" title={metrics.certificates.closest_expiry.domain}>
+                        <ShieldCheck className="w-3.5 h-3.5 flex-shrink-0" />
+                        <span className="truncate" title={metrics.certificates.closest_expiry.domain}>
                           {metrics.certificates.closest_expiry.expired 
                             ? t('server_card.cert_expired_domain', { domain: metrics.certificates.closest_expiry.domain }) 
                             : t('server_card.cert_days_domain', { 
@@ -584,7 +576,7 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
                       </div>
                     )}
                   </div>
-                  <span className="text-dark-500 truncate max-w-[120px]">{metrics.system.os}</span>
+                  <span className="text-dark-500 truncate flex-shrink-0 max-w-[140px]">{metrics.system.os}</span>
                 </div>
               </>
             )}

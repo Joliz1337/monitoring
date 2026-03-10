@@ -148,6 +148,7 @@ async def run_migrations(conn):
             ("description", "TEXT"),
             ("tag", "VARCHAR(100)"),
             ("created_at", "TIMESTAMP"),
+            ("updated_at", "TIMESTAMP DEFAULT NOW()"),
         ]
         
         for col_name, col_type in new_columns:
@@ -277,6 +278,13 @@ async def run_migrations(conn):
                     logger.info(f"Added column: alert_settings.{col_name}")
                 except Exception:
                     pass
+
+        if "excluded_server_ids" not in alert_columns:
+            try:
+                await conn.execute(text('ALTER TABLE alert_settings ADD COLUMN "excluded_server_ids" TEXT'))
+                logger.info("Added column: alert_settings.excluded_server_ids")
+            except Exception:
+                pass
     
     # Drop redundant indexes (covered by unique constraints or low-cardinality)
     redundant_indexes = [
