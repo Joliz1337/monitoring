@@ -281,7 +281,7 @@ export default function Alerts() {
                 return (
                   <span
                     key={id}
-                    className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-dark-800 border border-dark-700/50 rounded-lg text-sm text-dark-300"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-dark-800/80 border border-dark-600/50 rounded-lg text-sm text-dark-200 shadow-sm"
                   >
                     <Server className="w-3 h-3 text-dark-500" />
                     {srv?.name || `#${id}`}
