@@ -430,28 +430,15 @@ class XrayMonitorService:
         await asyncio.gather(*tasks, return_exceptions=True)
         await self._cleanup_old_checks()
 
-    async def _tcp_ping(self, address: str, port: int, timeout: float = 5.0) -> Optional[float]:
-        """Measure real network latency via TCP connect (SYN→SYN-ACK)."""
-        try:
-            start = time.monotonic()
-            _, writer = await asyncio.wait_for(
-                asyncio.open_connection(address, port), timeout=timeout,
-            )
-            elapsed = (time.monotonic() - start) * 1000
-            writer.close()
-            await writer.wait_closed()
-            return round(elapsed, 1)
-        except Exception:
-            return None
-
     async def _check_server(self, srv: XrayMonitorServer, settings: XrayMonitorSettings):
-        """Check one server: proxy reachability + real TCP ping."""
+        """Check one server: proxy reachability + VPN latency via warmed connection."""
         if not self._xray_healthy:
             return
 
         proxy_url = f"socks5://127.0.0.1:{srv.socks_port}"
         error_msg: Optional[str] = None
         check_ok = False
+        ping_ms: Optional[float] = None
 
         probe_targets = (
             "https://www.google.com/generate_204",
@@ -463,13 +450,17 @@ class XrayMonitorService:
                 transport = httpx.AsyncHTTPTransport(proxy=proxy_url)
                 async with httpx.AsyncClient(
                     transport=transport,
-                    timeout=httpx.Timeout(10.0, connect=6.0, read=6.0),
+                    timeout=httpx.Timeout(15.0, connect=8.0, read=8.0),
                     follow_redirects=True,
                     verify=False,
                 ) as client:
-                    resp = await client.get(target)
-                if resp.status_code < 500:
+                    warmup = await client.get(target)
+                    if warmup.status_code >= 500:
+                        continue
                     check_ok = True
+                    start = time.monotonic()
+                    await client.get(target)
+                    ping_ms = round((time.monotonic() - start) * 1000, 1)
                     break
             except Exception as e:
                 msg = str(e).strip()
@@ -477,10 +468,6 @@ class XrayMonitorService:
                     msg = msg[:180] + "..."
                 error_msg = f"{target}: {type(e).__name__}" + (f" ({msg})" if msg else "")
                 continue
-
-        ping_ms: Optional[float] = None
-        if check_ok:
-            ping_ms = await self._tcp_ping(srv.address, srv.port)
 
         was_offline = srv.status == "offline"
         fail_threshold = settings.fail_threshold or 2
