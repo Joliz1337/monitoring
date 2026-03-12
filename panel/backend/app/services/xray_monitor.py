@@ -436,11 +436,22 @@ class XrayMonitorService:
         error_msg: Optional[str] = None
         check_ok = False
 
-        for target in ("http://google.com", "http://one.one.one.one"):
+        # HTTP/80 is often blocked by providers; use HTTPS probe URLs to reduce false DOWN states.
+        probe_targets = (
+            "https://www.google.com/generate_204",
+            "https://one.one.one.one/cdn-cgi/trace",
+            "https://cloudflare.com/cdn-cgi/trace",
+        )
+        for target in probe_targets:
             try:
                 start = time.monotonic()
                 transport = httpx.AsyncHTTPTransport(proxy=proxy_url)
-                async with httpx.AsyncClient(transport=transport, timeout=10, follow_redirects=True) as client:
+                async with httpx.AsyncClient(
+                    transport=transport,
+                    timeout=httpx.Timeout(10.0, connect=6.0, read=6.0),
+                    follow_redirects=True,
+                    verify=False,
+                ) as client:
                     resp = await client.get(target)
                 elapsed = (time.monotonic() - start) * 1000
                 if resp.status_code < 500:
@@ -448,7 +459,10 @@ class XrayMonitorService:
                     check_ok = True
                     break
             except Exception as e:
-                error_msg = f"{target}: {type(e).__name__}"
+                msg = str(e).strip()
+                if len(msg) > 180:
+                    msg = msg[:180] + "..."
+                error_msg = f"{target}: {type(e).__name__}" + (f" ({msg})" if msg else "")
                 continue
 
         was_offline = srv.status == "offline"
