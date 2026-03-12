@@ -301,6 +301,20 @@ export default function XrayMonitor() {
                   />
                 </div>
 
+                <div>
+                  <label className="text-sm text-dark-400 mb-1 block">{t('xray_monitor.ignore_list')}</label>
+                  <textarea
+                    className="input w-full h-24 text-sm font-mono"
+                    placeholder={t('xray_monitor.ignore_list_hint')}
+                    value={(settings.ignore_list || []).join('\n')}
+                    onChange={e => setSettings({ ...settings, ignore_list: e.target.value.split('\n') })}
+                    onBlur={() => {
+                      const cleaned = (settings.ignore_list || []).map(s => s.trim()).filter(Boolean)
+                      saveSettings({ ignore_list: cleaned })
+                    }}
+                  />
+                </div>
+
                 <div className="space-y-2">
                   <span className="text-sm text-dark-400">{t('xray_monitor.notifications')}</span>
                   {(['notify_down', 'notify_recovery', 'notify_latency'] as const).map(key => (

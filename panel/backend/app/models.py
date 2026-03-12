@@ -640,6 +640,8 @@ class XrayMonitorSettings(Base):
     notify_recovery = Column(Boolean, default=True)
     notify_latency = Column(Boolean, default=True)
 
+    ignore_list = Column(Text, default="[]")
+
 
 class XrayMonitorSubscription(Base):
     """URL подписки с Xray-ключами"""

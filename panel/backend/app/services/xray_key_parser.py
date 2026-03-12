@@ -214,6 +214,23 @@ def is_valid_server(address: str, port: int) -> bool:
     return False
 
 
+def is_ignored_address(address: str, ignore_set: set[str]) -> bool:
+    """Check if address matches any entry in the ignore set.
+
+    Supports exact match and domain suffix: adding 'example.com'
+    also matches 'sub.example.com'.
+    """
+    if not ignore_set or not address:
+        return False
+    addr = address.strip().lower()
+    if addr in ignore_set:
+        return True
+    for pattern in ignore_set:
+        if addr.endswith("." + pattern):
+            return True
+    return False
+
+
 def parse_single_key(line: str) -> dict | None:
     """Try to parse a single key line."""
     line = line.strip()

@@ -15,7 +15,7 @@ from app.models import (
 )
 from app.auth import verify_auth
 from app.services.xray_monitor import get_xray_monitor_service
-from app.services.xray_key_parser import fetch_subscription, parse_keys, is_valid_server
+from app.services.xray_key_parser import fetch_subscription, parse_keys, is_valid_server, is_ignored_address
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +35,7 @@ class SettingsUpdate(BaseModel):
     notify_down: Optional[bool] = None
     notify_recovery: Optional[bool] = None
     notify_latency: Optional[bool] = None
+    ignore_list: Optional[list[str]] = None
 
 
 class SubscriptionCreate(BaseModel):
@@ -69,6 +70,11 @@ async def get_settings(db: AsyncSession = Depends(get_db), _=Depends(verify_auth
         db.add(settings)
         await db.commit()
         await db.refresh(settings)
+    try:
+        ignore = json.loads(settings.ignore_list or "[]")
+    except (json.JSONDecodeError, TypeError):
+        ignore = []
+
     return {
         "enabled": settings.enabled,
         "check_interval": settings.check_interval,
@@ -80,6 +86,7 @@ async def get_settings(db: AsyncSession = Depends(get_db), _=Depends(verify_auth
         "notify_down": settings.notify_down,
         "notify_recovery": settings.notify_recovery,
         "notify_latency": settings.notify_latency,
+        "ignore_list": ignore,
     }
 
 
@@ -96,7 +103,12 @@ async def update_settings(
         db.add(settings)
         await db.flush()
 
-    for field, value in body.model_dump(exclude_unset=True).items():
+    data = body.model_dump(exclude_unset=True)
+    if "ignore_list" in data:
+        raw = data.pop("ignore_list")
+        cleaned = sorted({v.strip().lower() for v in (raw or []) if v.strip()})
+        settings.ignore_list = json.dumps(cleaned, ensure_ascii=False)
+    for field, value in data.items():
         setattr(settings, field, value)
     await db.commit()
     return {"success": True}
@@ -372,12 +384,26 @@ async def test_notification(
 
 # ========================= Helpers =========================
 
+async def _load_ignore_set(db: AsyncSession) -> set[str]:
+    result = await db.execute(select(XrayMonitorSettings).limit(1))
+    s = result.scalar_one_or_none()
+    if not s or not s.ignore_list:
+        return set()
+    try:
+        return set(json.loads(s.ignore_list))
+    except (json.JSONDecodeError, TypeError):
+        return set()
+
+
 async def _save_parsed_keys(db: AsyncSession, keys: list[dict], subscription_id: int | None) -> int:
+    ignore_set = await _load_ignore_set(db)
     count = 0
     for idx, k in enumerate(keys):
         address = k.get("address", "").strip()
         port = int(k.get("port", 0))
         if not is_valid_server(address, port):
+            continue
+        if is_ignored_address(address, ignore_set):
             continue
         srv = XrayMonitorServer(
             subscription_id=subscription_id,

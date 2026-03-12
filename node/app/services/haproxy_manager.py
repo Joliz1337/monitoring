@@ -618,6 +618,22 @@ resolvers mydns
             content = content.rstrip() + f"\n\n{RULES_START_MARKER}\n{RULES_END_MARKER}\n"
             self._write_config(content)
         
+        # Ensure resolvers section exists for domain targets
+        if self._is_domain(rule.target_ip) and 'resolvers mydns' not in content:
+            resolvers_block = (
+                "\nresolvers mydns\n"
+                "    nameserver dns1 1.1.1.1:53\n"
+                "    nameserver dns2 8.8.8.8:53\n"
+                "    resolve_retries 3\n"
+                "    timeout resolve 1s\n"
+                "    timeout retry 1s\n"
+                "    hold valid 60s\n"
+                "    hold nx 10s\n"
+                "    hold other 10s\n"
+            )
+            content = content.replace(RULES_START_MARKER, resolvers_block + "\n" + RULES_START_MARKER)
+            self._write_config(content)
+        
         frontend_name = f"{rule.rule_type}_{rule.name}"
         backend_name = f"backend_{rule.rule_type}_{rule.name}"
         

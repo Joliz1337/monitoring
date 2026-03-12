@@ -259,36 +259,54 @@ export default function HAProxy() {
   }, [serverId, applyCachedResponse])
   
   // Background refresh (no full-screen loader)
+  // Each request has its own catch — partial success updates what it can
   const refreshData = useCallback(async () => {
     if (!serverId || isRefreshing) return
     setIsRefreshing(true)
     
     try {
       const [statusRes, rulesRes, certsRes, fwRes, allCertsRes] = await Promise.all([
-        proxyApi.getHAProxyStatus(Number(serverId)),
-        proxyApi.getHAProxyRules(Number(serverId)),
-        proxyApi.getHAProxyCerts(Number(serverId)),
-        proxyApi.getFirewallRules(Number(serverId)).catch(() => ({ data: { rules: [], active: false } })),
-        proxyApi.getAllCerts(Number(serverId)).catch(() => ({ data: { certificates: [] } })),
+        proxyApi.getHAProxyStatus(Number(serverId)).catch(() => null),
+        proxyApi.getHAProxyRules(Number(serverId)).catch(() => null),
+        proxyApi.getHAProxyCerts(Number(serverId)).catch(() => null),
+        proxyApi.getFirewallRules(Number(serverId)).catch(() => null),
+        proxyApi.getAllCerts(Number(serverId)).catch(() => null),
       ])
       
-      const statusData = statusRes.data
-      const rulesData = rulesRes.data.rules || []
-      const certsData = certsRes.data.certificates || []
-      const fwRulesData = fwRes.data.rules || []
-      const fwActiveData = fwRes.data.active || false
-      
-      const details: Record<string, Certificate> = {}
-      for (const cert of allCertsRes.data.certificates || []) {
-        details[cert.domain] = cert
+      const hasAnyData = statusRes || rulesRes || certsRes || fwRes || allCertsRes
+      if (!hasAnyData) {
+        if (!status && !rules.length) {
+          const cached = loadFromCache()
+          if (cached) {
+            setStatus(cached.status)
+            setRules(cached.rules)
+            setCerts(cached.certs)
+            setCertDetails(cached.certDetails)
+            setFirewallRules(cached.firewallRules)
+            setFirewallActive(cached.firewallActive)
+          }
+        }
+        return
       }
       
-      setStatus(statusData)
-      setRules(rulesData)
-      setCerts(certsData)
-      setFirewallRules(fwRulesData)
-      setFirewallActive(fwActiveData)
-      setCertDetails(details)
+      const statusData = statusRes?.data ?? status
+      const rulesData = rulesRes?.data?.rules ?? rules
+      const certsData = certsRes?.data?.certificates ?? certs.map(d => d)
+      const fwRulesData = fwRes?.data?.rules ?? firewallRules
+      const fwActiveData = fwRes?.data?.active ?? firewallActive
+      
+      const details: Record<string, Certificate> = allCertsRes
+        ? Object.fromEntries((allCertsRes.data.certificates || []).map((c: Certificate) => [c.domain, c]))
+        : { ...certDetails }
+      
+      if (statusRes) setStatus(statusData)
+      if (rulesRes) setRules(rulesData)
+      if (certsRes) setCerts(certsData)
+      if (fwRes) {
+        setFirewallRules(fwRulesData)
+        setFirewallActive(fwActiveData)
+      }
+      if (allCertsRes) setCertDetails(details)
       setError(null)
       setIsCached(false)
       setCachedAt(null)
@@ -302,23 +320,10 @@ export default function HAProxy() {
         firewallRules: fwRulesData,
         firewallActive: fwActiveData,
       })
-    } catch {
-      // On refresh error, try loading from cache if we don't have data yet
-      if (!status && !rules.length) {
-        const cached = loadFromCache()
-        if (cached) {
-          setStatus(cached.status)
-          setRules(cached.rules)
-          setCerts(cached.certs)
-          setCertDetails(cached.certDetails)
-          setFirewallRules(cached.firewallRules)
-          setFirewallActive(cached.firewallActive)
-        }
-      }
     } finally {
       setIsRefreshing(false)
     }
-  }, [serverId, isRefreshing, status, rules.length, saveToCache, loadFromCache, setIsCached, setCachedAt])
+  }, [serverId, isRefreshing, status, rules, certs, firewallRules, firewallActive, certDetails, saveToCache, loadFromCache, setIsCached, setCachedAt])
   
   // Quick status-only refresh
   const refreshStatus = async () => {
@@ -331,9 +336,16 @@ export default function HAProxy() {
     }
   }
   
+  const liveRefreshRef = useRef<() => Promise<void>>()
+  liveRefreshRef.current = refreshData
+
   useEffect(() => {
     fetchServers()
-    fetchData()
+    fetchData().then(() => {
+      // After showing cached data, fetch live data to ensure freshness
+      const timer = setTimeout(() => liveRefreshRef.current?.(), 300)
+      return () => clearTimeout(timer)
+    })
   }, [serverId, fetchServers, fetchData])
   
   useAutoRefresh(refreshFromCache, { immediate: false })

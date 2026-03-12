@@ -1066,6 +1066,8 @@
     "latency_threshold": "Latency threshold (ms)",
     "fail_threshold": "Fails before DOWN",
     "notifications": "Notifications",
+    "ignore_list": "Ignore list (domains / IPs)",
+    "ignore_list_hint": "One per line.\nexample.com — blocks all subdomains\n1.2.3.4 — exact match",
     "notify_down": "Notify when server goes DOWN",
     "notify_recovery": "Notify when server recovers",
     "notify_latency": "Notify on high latency",

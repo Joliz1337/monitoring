@@ -17,7 +17,7 @@ from app.models import (
     XrayMonitorSettings, XrayMonitorSubscription,
     XrayMonitorServer, XrayMonitorCheck, AlertSettings,
 )
-from app.services.xray_key_parser import is_valid_server, fetch_subscription
+from app.services.xray_key_parser import is_valid_server, is_ignored_address, fetch_subscription
 
 logger = logging.getLogger(__name__)
 
@@ -546,9 +546,22 @@ class XrayMonitorService:
         return events
 
     # ------------------------------------------------------------------ auto-refresh
+    async def _load_ignore_set(self) -> set[str]:
+        try:
+            async with async_session() as db:
+                result = await db.execute(select(XrayMonitorSettings).limit(1))
+                s = result.scalar_one_or_none()
+            if not s or not s.ignore_list:
+                return set()
+            return set(json.loads(s.ignore_list))
+        except Exception:
+            return set()
+
     async def _auto_refresh_subscriptions(self):
         """Refresh all auto_refresh subscriptions every hour."""
         try:
+            ignore_set = await self._load_ignore_set()
+
             async with async_session() as db:
                 result = await db.execute(
                     select(XrayMonitorSubscription).where(
@@ -565,7 +578,11 @@ class XrayMonitorService:
             for sub in subs:
                 try:
                     keys = await fetch_subscription(sub.url)
-                    valid_keys = [k for k in keys if is_valid_server(k.get("address", ""), int(k.get("port", 0)))]
+                    valid_keys = [
+                        k for k in keys
+                        if is_valid_server(k.get("address", ""), int(k.get("port", 0)))
+                        and not is_ignored_address(k.get("address", ""), ignore_set)
+                    ]
 
                     async with async_session() as db:
                         await db.execute(

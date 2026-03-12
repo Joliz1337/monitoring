@@ -1637,6 +1637,7 @@ export interface XrayMonitorSettingsData {
   notify_down: boolean
   notify_recovery: boolean
   notify_latency: boolean
+  ignore_list: string[]
 }
 
 export interface XrayMonitorServer {
