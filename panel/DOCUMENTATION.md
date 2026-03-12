@@ -13,6 +13,7 @@
 - **Remnawave** — интеграция с Remnawave Panel, статистика посещений из Xray логов
 - **Alerts** — Telegram-уведомления о состоянии серверов (offline, CPU, RAM, сеть, TCP)
 - **Billing** — отслеживание оплаты серверов (помесячная и ресурсная модели), уведомления об истечении через Telegram
+- **Xray Monitor** — мониторинг доступности Xray-серверов через подписки/ключи (vless, vmess, trojan, ss), проверка через xray-core, пинг, Telegram-уведомления
 
 ## Интервалы сбора данных
 
@@ -625,6 +626,32 @@ Frontend lazy loading (panel/frontend/src/pages/Remnawave.tsx):
 - Историей команд (сохраняется в localStorage)
 - Выбором таймаута (30s — 10m) и shell (sh/bash)
 - Отменой выполняющейся команды
+
+### Xray Monitor
+
+Мониторинг доступности Xray-серверов. Подписки и ключи парсятся, через xray-core делается реальное подключение к google.com/one.one.one.one.
+
+| Метод | Endpoint | Описание |
+|-------|----------|----------|
+| GET | /xray-monitor/settings | Настройки мониторинга |
+| PUT | /xray-monitor/settings | Обновить настройки |
+| GET | /xray-monitor/subscriptions | Список подписок |
+| POST | /xray-monitor/subscriptions | Добавить подписку |
+| PUT | /xray-monitor/subscriptions/{id} | Обновить подписку |
+| DELETE | /xray-monitor/subscriptions/{id} | Удалить подписку с серверами |
+| POST | /xray-monitor/subscriptions/{id}/refresh | Перезагрузить ключи |
+| GET | /xray-monitor/servers | Все серверы со статусами |
+| POST | /xray-monitor/servers | Добавить ключи вручную |
+| DELETE | /xray-monitor/servers/{id} | Удалить сервер |
+| GET | /xray-monitor/servers/{id}/history | История проверок |
+| GET | /xray-monitor/status | Статус сервиса |
+| POST | /xray-monitor/test-notification | Тест Telegram |
+
+**Файлы:**
+- `backend/app/routers/xray_monitor.py` — API роутер
+- `backend/app/services/xray_monitor.py` — фоновый сервис (xray-core, проверки, уведомления)
+- `backend/app/services/xray_key_parser.py` — парсинг подписок и ключей
+- `frontend/src/pages/XrayMonitor.tsx` — страница мониторинга
 
 ## Диагностика
 

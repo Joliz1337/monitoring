@@ -25,12 +25,13 @@ import {
   Clock,
   Save,
   ChevronDown,
+  Replace,
 } from 'lucide-react'
 import { serversApi, bulkApi, BulkResult, BulkTerminalResult, Server as ServerType } from '../api/client'
 import { Skeleton } from '../components/ui/Skeleton'
 import { Checkbox } from '../components/ui/Checkbox'
 
-type ActionType = 'haproxy_service' | 'haproxy' | 'traffic' | 'firewall' | 'terminal' | 'haproxy_config'
+type ActionType = 'haproxy_service' | 'haproxy' | 'traffic' | 'firewall' | 'terminal' | 'haproxy_config' | 'haproxy_find_replace'
 type ActionMode = 'create' | 'delete' | 'start' | 'stop'
 
 const RULES_START_MARKER = '# === RULES START ==='
@@ -58,6 +59,16 @@ defaults
     option splice-auto
     option clitcpka
     option srvtcpka
+
+resolvers mydns
+    nameserver dns1 1.1.1.1:53
+    nameserver dns2 8.8.8.8:53
+    resolve_retries 3
+    timeout resolve 1s
+    timeout retry 1s
+    hold valid 60s
+    hold nx 10s
+    hold other 10s
 
 ${RULES_START_MARKER}
 ${RULES_END_MARKER}
@@ -134,6 +145,13 @@ export default function BulkActions() {
   // HAProxy config form state
   const [configContent, setConfigContent] = useState(DEFAULT_HAPROXY_TEMPLATE)
   const [configReloadAfter, setConfigReloadAfter] = useState(true)
+  
+  // HAProxy find & replace form state
+  const [findReplaceForm, setFindReplaceForm] = useState({
+    search: '',
+    replace: '',
+    reload_after: true,
+  })
   
   const [formError, setFormError] = useState('')
   
@@ -229,6 +247,14 @@ export default function BulkActions() {
           selectedServerIds,
           configContent,
           configReloadAfter
+        )
+        response = res.data
+      } else if (activeType === 'haproxy_find_replace') {
+        const res = await bulkApi.findReplaceHAProxyConfig(
+          selectedServerIds,
+          findReplaceForm.search,
+          findReplaceForm.replace,
+          findReplaceForm.reload_after
         )
         response = res.data
       } else if (activeType === 'haproxy_service') {
@@ -442,6 +468,7 @@ export default function BulkActions() {
               { type: 'haproxy_service' as const, icon: Power, label: t('bulk_actions.haproxy_service') },
               { type: 'haproxy' as const, icon: Shield, label: t('bulk_actions.haproxy_rules') },
               { type: 'haproxy_config' as const, icon: Code, label: t('bulk_actions.haproxy_config') },
+              { type: 'haproxy_find_replace' as const, icon: Replace, label: t('bulk_actions.haproxy_find_replace') },
               { type: 'traffic' as const, icon: Network, label: t('bulk_actions.traffic_ports') },
               { type: 'firewall' as const, icon: Flame, label: t('bulk_actions.firewall_rules') },
               { type: 'terminal' as const, icon: Terminal, label: t('bulk_actions.terminal') },
@@ -475,7 +502,7 @@ export default function BulkActions() {
           </div>
           
           {/* Action mode tabs */}
-          {activeType !== 'terminal' && activeType !== 'haproxy_config' && (
+          {activeType !== 'terminal' && activeType !== 'haproxy_config' && activeType !== 'haproxy_find_replace' && (
           <div className="flex gap-2 mb-4">
             {activeType === 'haproxy_service' ? (
               <>
@@ -931,6 +958,50 @@ export default function BulkActions() {
                 </div>
               )}
               
+              {/* HAProxy Find & Replace Form */}
+              {activeType === 'haproxy_find_replace' && (
+                <div className="space-y-4">
+                  <div className="flex items-start gap-3 p-4 bg-dark-800/50 rounded-xl">
+                    <Replace className="w-5 h-5 mt-0.5 shrink-0 text-accent-500" />
+                    <div>
+                      <p className="text-dark-100 font-medium">{t('bulk_actions.haproxy_find_replace')}</p>
+                      <p className="text-sm text-dark-400 mt-1">{t('bulk_actions.find_replace_hint')}</p>
+                    </div>
+                  </div>
+                  
+                  <div>
+                    <label className="text-sm text-dark-400 block mb-1.5">{t('bulk_actions.search_text')}</label>
+                    <input
+                      type="text"
+                      value={findReplaceForm.search}
+                      onChange={e => setFindReplaceForm(prev => ({ ...prev, search: e.target.value }))}
+                      className="input w-full font-mono text-sm"
+                      placeholder="example.com"
+                      required
+                    />
+                  </div>
+                  
+                  <div>
+                    <label className="text-sm text-dark-400 block mb-1.5">{t('bulk_actions.replace_text')}</label>
+                    <input
+                      type="text"
+                      value={findReplaceForm.replace}
+                      onChange={e => setFindReplaceForm(prev => ({ ...prev, replace: e.target.value }))}
+                      className="input w-full font-mono text-sm"
+                      placeholder="1.2.3.4"
+                    />
+                  </div>
+                  
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <Checkbox
+                      checked={findReplaceForm.reload_after}
+                      onChange={e => setFindReplaceForm(prev => ({ ...prev, reload_after: (e.target as HTMLInputElement).checked }))}
+                    />
+                    <span className="text-sm text-dark-300">{t('bulk_actions.find_replace_reload')}</span>
+                  </label>
+                </div>
+              )}
+              
               {formError && (
                 <motion.div
                   className="mt-4 p-3 bg-danger/10 border border-danger/30 rounded-lg text-danger text-sm flex items-center gap-2"
@@ -947,7 +1018,7 @@ export default function BulkActions() {
                   type="submit"
                   disabled={isExecuting || selectedServerIds.length === 0}
                   className={`btn flex items-center gap-2 ${
-                    activeType === 'terminal' || activeType === 'haproxy_config' || activeMode === 'create' || activeMode === 'start' 
+                    activeType === 'terminal' || activeType === 'haproxy_config' || activeType === 'haproxy_find_replace' || activeMode === 'create' || activeMode === 'start' 
                       ? 'btn-primary' 
                       : 'bg-danger hover:bg-danger/80 text-white'
                   }`}
@@ -963,10 +1034,11 @@ export default function BulkActions() {
                     <>
                       {activeType === 'terminal' && <Play className="w-4 h-4" />}
                       {activeType === 'haproxy_config' && <Save className="w-4 h-4" />}
-                      {activeType !== 'terminal' && activeType !== 'haproxy_config' && activeMode === 'create' && <Plus className="w-4 h-4" />}
-                      {activeType !== 'terminal' && activeType !== 'haproxy_config' && activeMode === 'delete' && <Trash2 className="w-4 h-4" />}
-                      {activeType !== 'terminal' && activeType !== 'haproxy_config' && activeMode === 'start' && <Play className="w-4 h-4" />}
-                      {activeType !== 'terminal' && activeType !== 'haproxy_config' && activeMode === 'stop' && <Square className="w-4 h-4" />}
+                      {activeType === 'haproxy_find_replace' && <Replace className="w-4 h-4" />}
+                      {activeType !== 'terminal' && activeType !== 'haproxy_config' && activeType !== 'haproxy_find_replace' && activeMode === 'create' && <Plus className="w-4 h-4" />}
+                      {activeType !== 'terminal' && activeType !== 'haproxy_config' && activeType !== 'haproxy_find_replace' && activeMode === 'delete' && <Trash2 className="w-4 h-4" />}
+                      {activeType !== 'terminal' && activeType !== 'haproxy_config' && activeType !== 'haproxy_find_replace' && activeMode === 'start' && <Play className="w-4 h-4" />}
+                      {activeType !== 'terminal' && activeType !== 'haproxy_config' && activeType !== 'haproxy_find_replace' && activeMode === 'stop' && <Square className="w-4 h-4" />}
                       {t('bulk_actions.execute')}
                     </>
                   )}

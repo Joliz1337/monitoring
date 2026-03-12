@@ -504,6 +504,23 @@ class MetricsCollector:
                 except Exception:
                     pass
                 
+                # Fetch traffic history for offline cache
+                for endpoint, key, params in [
+                    ("/api/traffic/hourly", "hourly", {"hours": 24}),
+                    ("/api/traffic/daily", "daily", {"days": self._traffic_period_days}),
+                    ("/api/traffic/monthly", "monthly", {"months": 12}),
+                ]:
+                    try:
+                        res = await client.get(
+                            f"{server.url}{endpoint}",
+                            headers=headers,
+                            params=params
+                        )
+                        if res.status_code == 200:
+                            traffic_data[key] = res.json()
+                    except Exception:
+                        pass
+                
                 # Update cache in DB (own session)
                 update_values = {}
                 if haproxy_data:

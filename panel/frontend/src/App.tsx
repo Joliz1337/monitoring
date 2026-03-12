@@ -22,6 +22,7 @@ const Blocklist = lazy(() => import('./pages/Blocklist'))
 const Remnawave = lazy(() => import('./pages/Remnawave'))
 const Alerts = lazy(() => import('./pages/Alerts'))
 const Billing = lazy(() => import('./pages/Billing'))
+const XrayMonitor = lazy(() => import('./pages/XrayMonitor'))
 
 const ExtPageLazy = isExtEnabled 
   ? lazy(() => import('./pages/_internal/ExtPage'))
@@ -166,6 +167,7 @@ export default function App() {
         <Route path="billing" element={<Suspense fallback={<LoadingScreen />}><Billing /></Suspense>} />
         <Route path="blocklist" element={<Suspense fallback={<LoadingScreen />}><Blocklist /></Suspense>} />
         <Route path="remnawave" element={<Suspense fallback={<LoadingScreen />}><Remnawave /></Suspense>} />
+        <Route path="xray-monitor" element={<Suspense fallback={<LoadingScreen />}><XrayMonitor /></Suspense>} />
         <Route path="server/:serverId" element={<Suspense fallback={<LoadingScreen />}><ServerDetails /></Suspense>} />
         <Route path="server/:serverId/haproxy" element={<Suspense fallback={<LoadingScreen />}><HAProxy /></Suspense>} />
         <Route path="server/:serverId/traffic" element={<Suspense fallback={<LoadingScreen />}><Traffic /></Suspense>} />

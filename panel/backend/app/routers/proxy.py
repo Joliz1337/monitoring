@@ -40,6 +40,18 @@ async def get_server_by_id(server_id: int, db: AsyncSession) -> Server:
     return server
 
 
+def _get_traffic_cache(server: Server, key: str):
+    """Fallback to cached traffic data when node is unreachable."""
+    if server.last_traffic_data:
+        try:
+            data = json.loads(server.last_traffic_data)
+            if key in data:
+                return data[key]
+        except (json.JSONDecodeError, TypeError):
+            pass
+    raise HTTPException(status_code=503)
+
+
 def enrich_metrics_with_speeds(metrics: dict, snapshot: MetricsSnapshot) -> dict:
     """Enrich raw metrics with calculated network/disk speeds from snapshot.
     
@@ -766,7 +778,12 @@ async def get_traffic_summary(
     _: dict = Depends(verify_auth)
 ):
     server = await get_server_by_id(server_id, db)
-    return await proxy_request(server, "/api/traffic/summary", params={"days": days})
+    try:
+        return await proxy_request(server, "/api/traffic/summary", params={"days": days})
+    except HTTPException as e:
+        if e.status_code >= 500:
+            return _get_traffic_cache(server, "summary")
+        raise
 
 
 @router.get("/{server_id}/traffic/hourly")
@@ -784,7 +801,12 @@ async def get_hourly_traffic(
         params["interface"] = interface
     if port:
         params["port"] = port
-    return await proxy_request(server, "/api/traffic/hourly", params=params)
+    try:
+        return await proxy_request(server, "/api/traffic/hourly", params=params)
+    except HTTPException as e:
+        if e.status_code >= 500:
+            return _get_traffic_cache(server, "hourly")
+        raise
 
 
 @router.get("/{server_id}/traffic/daily")
@@ -802,7 +824,12 @@ async def get_daily_traffic(
         params["interface"] = interface
     if port:
         params["port"] = port
-    return await proxy_request(server, "/api/traffic/daily", params=params)
+    try:
+        return await proxy_request(server, "/api/traffic/daily", params=params)
+    except HTTPException as e:
+        if e.status_code >= 500:
+            return _get_traffic_cache(server, "daily")
+        raise
 
 
 @router.get("/{server_id}/traffic/monthly")
@@ -820,7 +847,12 @@ async def get_monthly_traffic(
         params["interface"] = interface
     if port:
         params["port"] = port
-    return await proxy_request(server, "/api/traffic/monthly", params=params)
+    try:
+        return await proxy_request(server, "/api/traffic/monthly", params=params)
+    except HTTPException as e:
+        if e.status_code >= 500:
+            return _get_traffic_cache(server, "monthly")
+        raise
 
 
 @router.get("/{server_id}/traffic/ports")
@@ -831,7 +863,12 @@ async def get_ports_traffic(
     _: dict = Depends(verify_auth)
 ):
     server = await get_server_by_id(server_id, db)
-    return await proxy_request(server, "/api/traffic/ports", params={"days": days})
+    try:
+        return await proxy_request(server, "/api/traffic/ports", params={"days": days})
+    except HTTPException as e:
+        if e.status_code >= 500:
+            return _get_traffic_cache(server, "ports")
+        raise
 
 
 @router.get("/{server_id}/traffic/interfaces")
@@ -842,7 +879,12 @@ async def get_interfaces_traffic(
     _: dict = Depends(verify_auth)
 ):
     server = await get_server_by_id(server_id, db)
-    return await proxy_request(server, "/api/traffic/interfaces", params={"days": days})
+    try:
+        return await proxy_request(server, "/api/traffic/interfaces", params={"days": days})
+    except HTTPException as e:
+        if e.status_code >= 500:
+            return _get_traffic_cache(server, "interfaces")
+        raise
 
 
 @router.get("/{server_id}/traffic/ports/tracked")
@@ -852,7 +894,12 @@ async def get_tracked_ports(
     _: dict = Depends(verify_auth)
 ):
     server = await get_server_by_id(server_id, db)
-    return await proxy_request(server, "/api/traffic/ports/tracked")
+    try:
+        return await proxy_request(server, "/api/traffic/ports/tracked")
+    except HTTPException as e:
+        if e.status_code >= 500:
+            return _get_traffic_cache(server, "tracked_ports")
+        raise
 
 
 @router.post("/{server_id}/traffic/ports/add")

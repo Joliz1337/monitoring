@@ -602,3 +602,94 @@ async def bulk_apply_haproxy_config(
 
     results = await asyncio.gather(*[apply_config(s) for s in servers])
     return list(results)
+
+
+# ==================== HAProxy Config Find & Replace ====================
+
+class BulkHAProxyFindReplace(BaseModel):
+    server_ids: list[int]
+    search: str
+    replace: str
+    reload_after: bool = True
+
+
+@router.post("/haproxy/config/find-replace", response_model=list[BulkResult])
+async def bulk_find_replace_haproxy_config(
+    data: BulkHAProxyFindReplace,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    servers = await get_servers_by_ids(data.server_ids, db)
+
+    if not servers:
+        raise HTTPException(status_code=404)
+
+    if not data.search:
+        raise HTTPException(status_code=400, detail="Search string cannot be empty")
+
+    async def find_replace_on_server(server: Server) -> BulkResult:
+        success, config_result = await proxy_request_safe(
+            server, "/api/haproxy/config"
+        )
+
+        if not success:
+            return BulkResult(
+                server_id=server.id,
+                server_name=server.name,
+                success=False,
+                message=f"Failed to get config: {config_result}",
+            )
+
+        config_content = config_result.get("content", "") if isinstance(config_result, dict) else ""
+        if not config_content:
+            return BulkResult(
+                server_id=server.id,
+                server_name=server.name,
+                success=False,
+                message="Empty config received",
+            )
+
+        count = config_content.count(data.search)
+        if count == 0:
+            return BulkResult(
+                server_id=server.id,
+                server_name=server.name,
+                success=True,
+                message="No matches found — config unchanged",
+            )
+
+        new_config = config_content.replace(data.search, data.replace)
+
+        apply_success, apply_result = await proxy_request_safe(
+            server, "/api/haproxy/config/apply", method="POST",
+            json_data={"config_content": new_config, "reload_after": data.reload_after},
+            timeout=30.0,
+        )
+
+        if apply_success and isinstance(apply_result, dict):
+            if apply_result.get("success"):
+                msg = f"Replaced {count} occurrence(s)"
+                if apply_result.get("reloaded"):
+                    msg += " (reloaded)"
+                return BulkResult(
+                    server_id=server.id,
+                    server_name=server.name,
+                    success=True,
+                    message=msg,
+                )
+            return BulkResult(
+                server_id=server.id,
+                server_name=server.name,
+                success=False,
+                message=apply_result.get("message", "Config validation failed"),
+            )
+
+        return BulkResult(
+            server_id=server.id,
+            server_name=server.name,
+            success=False,
+            message=str(apply_result),
+        )
+
+    results = await asyncio.gather(*[find_replace_on_server(s) for s in servers])
+    return list(results)

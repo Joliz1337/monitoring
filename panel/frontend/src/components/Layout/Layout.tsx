@@ -16,6 +16,7 @@ import {
   Radio,
   Bell,
   CreditCard,
+  Gauge,
   type LucideIcon
 } from 'lucide-react'
 import { useState } from 'react'
@@ -71,6 +72,7 @@ export default function Layout() {
     { to: `/${uid}/billing`, icon: CreditCard, label: t('common.billing'), end: false },
     { to: `/${uid}/blocklist`, icon: Shield, label: t('common.blocklist'), end: false },
     { to: `/${uid}/remnawave`, icon: Radio, label: t('common.remnawave'), end: false },
+    { to: `/${uid}/xray-monitor`, icon: Gauge, label: t('common.xray_monitor'), end: false },
     { to: `/${uid}/updates`, icon: Package, label: t('common.updates'), end: false },
     { to: `/${uid}/settings`, icon: Settings, label: t('common.settings'), end: false },
   ]

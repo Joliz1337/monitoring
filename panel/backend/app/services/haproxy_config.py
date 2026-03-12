@@ -2,6 +2,7 @@
 All config generation logic is here - node just applies the config.
 """
 
+import ipaddress
 import re
 from dataclasses import dataclass
 from typing import Optional
@@ -57,14 +58,33 @@ defaults
     option clitcpka
     option srvtcpka
 
+resolvers mydns
+    nameserver dns1 1.1.1.1:53
+    nameserver dns2 8.8.8.8:53
+    resolve_retries 3
+    timeout resolve 1s
+    timeout retry 1s
+    hold valid 60s
+    hold nx 10s
+    hold other 10s
+
 {RULES_START_MARKER}
 {RULES_END_MARKER}
 """
+    
+    @staticmethod
+    def _is_domain(target: str) -> bool:
+        try:
+            ipaddress.ip_address(target)
+            return False
+        except ValueError:
+            return True
     
     def generate_rule_block(self, rule: HAProxyRule, certs_base_path: str = "/etc/letsencrypt/live") -> str:
         """Generate frontend/backend block for a rule"""
         frontend_name = f"{rule.rule_type}_{rule.name}"
         backend_name = f"backend_{rule.rule_type}_{rule.name}"
+        resolver_opts = " resolvers mydns resolve-prefer ipv4 init-addr none" if self._is_domain(rule.target_ip) else ""
         
         if rule.rule_type == "tcp":
             return f"""
@@ -75,14 +95,14 @@ frontend {frontend_name}
 
 backend {backend_name}
     mode tcp
-    server srv1 {rule.target_ip}:{rule.target_port}
+    server srv1 {rule.target_ip}:{rule.target_port}{resolver_opts}
 """
         else:
-            # HTTPS rule - build server line with optional SSL to target
             cert_path = f"{certs_base_path}/{rule.cert_domain}/combined.pem"
             server_line = f"server srv1 {rule.target_ip}:{rule.target_port}"
             if rule.target_ssl:
                 server_line += f" ssl verify none sni str({rule.target_ip})"
+            server_line += resolver_opts
             
             return f"""
 frontend {frontend_name}

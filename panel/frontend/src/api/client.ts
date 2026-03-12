@@ -795,6 +795,11 @@ export const bulkApi = {
     api.post<BulkResult[]>('/bulk/haproxy/config', {
       server_ids: serverIds, config_content: configContent, reload_after: reloadAfter
     }),
+
+  findReplaceHAProxyConfig: (serverIds: number[], search: string, replace: string, reloadAfter: boolean = true) =>
+    api.post<BulkResult[]>('/bulk/haproxy/config/find-replace', {
+      server_ids: serverIds, search, replace, reload_after: reloadAfter
+    }),
 }
 
 export interface PanelIpInfo {
@@ -1618,6 +1623,88 @@ export const backupApi = {
   },
   getStatus: () =>
     api.get<BackupStatus>('/backup/status'),
+}
+
+// Xray Monitor
+export interface XrayMonitorSettingsData {
+  enabled: boolean
+  check_interval: number
+  latency_threshold_ms: number
+  fail_threshold: number
+  use_custom_bot: boolean
+  telegram_bot_token: string
+  telegram_chat_id: string
+  notify_down: boolean
+  notify_recovery: boolean
+  notify_latency: boolean
+}
+
+export interface XrayMonitorSubscription {
+  id: number
+  name: string
+  url: string
+  enabled: boolean
+  auto_refresh: boolean
+  last_refreshed: string | null
+  last_error: string | null
+  server_count: number
+  created_at: string | null
+}
+
+export interface XrayMonitorServer {
+  id: number
+  subscription_id: number | null
+  subscription_name: string | null
+  name: string
+  protocol: string
+  address: string
+  port: number
+  enabled: boolean
+  status: string
+  last_ping_ms: number | null
+  last_check: string | null
+  fail_count: number
+  created_at: string | null
+}
+
+export interface XrayMonitorCheckEntry {
+  id: number
+  timestamp: string | null
+  status: string
+  ping_ms: number | null
+  error: string | null
+}
+
+export const xrayMonitorApi = {
+  getSettings: () =>
+    api.get<XrayMonitorSettingsData>('/xray-monitor/settings'),
+  updateSettings: (data: Partial<XrayMonitorSettingsData>) =>
+    api.put<{ success: boolean }>('/xray-monitor/settings', data),
+
+  getSubscriptions: () =>
+    api.get<XrayMonitorSubscription[]>('/xray-monitor/subscriptions'),
+  addSubscription: (name: string, url: string) =>
+    api.post<{ id: number; server_count: number; error: string | null }>('/xray-monitor/subscriptions', { name, url }),
+  updateSubscription: (id: number, data: Partial<{ name: string; url: string; enabled: boolean; auto_refresh: boolean }>) =>
+    api.put<{ success: boolean }>(`/xray-monitor/subscriptions/${id}`, data),
+  deleteSubscription: (id: number) =>
+    api.delete<{ success: boolean }>(`/xray-monitor/subscriptions/${id}`),
+  refreshSubscription: (id: number) =>
+    api.post<{ server_count: number; error: string | null }>(`/xray-monitor/subscriptions/${id}/refresh`),
+
+  getServers: () =>
+    api.get<XrayMonitorServer[]>('/xray-monitor/servers'),
+  addKeys: (keys: string) =>
+    api.post<{ added: number }>('/xray-monitor/servers', { keys }),
+  deleteServer: (id: number) =>
+    api.delete<{ success: boolean }>(`/xray-monitor/servers/${id}`),
+  getServerHistory: (id: number, limit?: number) =>
+    api.get<XrayMonitorCheckEntry[]>(`/xray-monitor/servers/${id}/history`, { params: { limit: limit || 50 } }),
+
+  getStatus: () =>
+    api.get<{ running: boolean; xray_running: boolean; last_check: string | null }>('/xray-monitor/status'),
+  testNotification: (bot_token?: string, chat_id?: string) =>
+    api.post<{ success: boolean; error?: string }>('/xray-monitor/test-notification', { bot_token, chat_id }),
 }
 
 export default api

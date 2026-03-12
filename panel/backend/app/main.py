@@ -15,13 +15,14 @@ logging.basicConfig(
 
 from app.database import init_db, async_session
 from app.config import get_settings
-from app.routers import servers, auth_router, proxy, settings as settings_router, system, bulk_actions, blocklist, remnawave, alerts, billing, backup
+from app.routers import servers, auth_router, proxy, settings as settings_router, system, bulk_actions, blocklist, remnawave, alerts, billing, backup, xray_monitor
 from app.services.metrics_collector import start_collector, stop_collector
 from app.services.blocklist_manager import get_blocklist_manager
 from app.services.xray_stats_collector import start_xray_stats_collector, stop_xray_stats_collector
 from app.services.traffic_analyzer import start_traffic_analyzer, stop_traffic_analyzer
 from app.services.server_alerter import start_server_alerter, stop_server_alerter
 from app.services.billing_checker import start_billing_checker, stop_billing_checker
+from app.services.xray_monitor import start_xray_monitor, stop_xray_monitor
 from app.security import SecurityMiddleware
 # Import all models to register them with Base.metadata
 from app.models import (  # noqa: F401
@@ -30,6 +31,7 @@ from app.models import (  # noqa: F401
     XrayStats, XrayHourlyStats, RemnawaveUserCache, TrafficAnalyzerSettings,
     TrafficAnomalyLog, UserTrafficSnapshot, AlertSettings, AlertHistory,
     BillingServer, BillingSettings,
+    XrayMonitorSettings, XrayMonitorSubscription, XrayMonitorServer, XrayMonitorCheck,
 )
 
 settings = get_settings()
@@ -84,6 +86,7 @@ async def lifespan(app: FastAPI):
     await start_traffic_analyzer()
     await start_server_alerter()
     await start_billing_checker()
+    await start_xray_monitor()
     
     # Cache warming runs in background — doesn't block /health
     warmup_task = asyncio.create_task(_deferred_startup())
@@ -91,6 +94,7 @@ async def lifespan(app: FastAPI):
     yield
     
     warmup_task.cancel()
+    await stop_xray_monitor()
     await stop_billing_checker()
     await stop_server_alerter()
     await stop_traffic_analyzer()
@@ -146,6 +150,7 @@ app.include_router(remnawave.router)
 app.include_router(alerts.router)
 app.include_router(billing.router)
 app.include_router(backup.router)
+app.include_router(xray_monitor.router)
 
 try:
     from app.routers._internal import router as ext_router

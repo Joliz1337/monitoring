@@ -64,6 +64,16 @@ defaults
     option clitcpka
     option srvtcpka
 
+resolvers mydns
+    nameserver dns1 1.1.1.1:53
+    nameserver dns2 8.8.8.8:53
+    resolve_retries 3
+    timeout resolve 1s
+    timeout retry 1s
+    hold valid 60s
+    hold nx 10s
+    hold other 10s
+
 ${RULES_START_MARKER}
 ${RULES_END_MARKER}
 `

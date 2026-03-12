@@ -1,6 +1,7 @@
 """HAProxy configuration manager for native systemd HAProxy service"""
 
 import asyncio
+import ipaddress
 import logging
 import re
 import shutil
@@ -44,6 +45,14 @@ class HAProxyManager:
         self._status_cache: Optional[dict] = None
         self._status_cache_time: float = 0
         self._status_cache_ttl: float = 5.0  # 5 seconds
+    
+    @staticmethod
+    def _is_domain(target: str) -> bool:
+        try:
+            ipaddress.ip_address(target)
+            return False
+        except ValueError:
+            return True
     
     def _read_config(self) -> str:
         """Read HAProxy config file"""
@@ -95,6 +104,16 @@ defaults
     option splice-auto
     option clitcpka
     option srvtcpka
+
+resolvers mydns
+    nameserver dns1 1.1.1.1:53
+    nameserver dns2 8.8.8.8:53
+    resolve_retries 3
+    timeout resolve 1s
+    timeout retry 1s
+    hold valid 60s
+    hold nx 10s
+    hold other 10s
 
 {RULES_START_MARKER}
 {RULES_END_MARKER}
@@ -580,6 +599,8 @@ defaults
         frontend_name = f"{rule.rule_type}_{rule.name}"
         backend_name = f"backend_{rule.rule_type}_{rule.name}"
         
+        resolver_opts = " resolvers mydns resolve-prefer ipv4 init-addr none" if self._is_domain(rule.target_ip) else ""
+        
         if rule.rule_type == "tcp":
             server_opts = ""
             if rule.send_proxy:
@@ -595,7 +616,7 @@ frontend {frontend_name}
 backend {backend_name}
     mode tcp
     option tcp-check
-    server srv1 {rule.target_ip}:{rule.target_port}{server_opts}
+    server srv1 {rule.target_ip}:{rule.target_port}{resolver_opts}{server_opts}
 """
         else:
             if not rule.cert_domain:
@@ -610,10 +631,10 @@ backend {backend_name}
                     return False, f"Certificate for {rule.cert_domain} not found"
                 cert_path = created
             
-            # Build server line with optional SSL to target
             server_line = f"server srv1 {rule.target_ip}:{rule.target_port}"
             if rule.target_ssl:
                 server_line += f" ssl verify none sni str({rule.target_ip})"
+            server_line += resolver_opts
             
             new_block = f"""
 frontend {frontend_name}
