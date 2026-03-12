@@ -124,7 +124,7 @@ load_proxy
 # ==================== Configuration ====================
 
 # Timeouts (in seconds)
-DOCKER_PULL_TIMEOUT="${DOCKER_PULL_TIMEOUT:-300}"
+DOCKER_PULL_TIMEOUT="${DOCKER_PULL_TIMEOUT:-600}"
 
 # Arguments
 TMP_DIR="$1"
@@ -247,7 +247,7 @@ cd "$PANEL_DIR"
 
 set +e
 # Pull ready images from GHCR (normal flow)
-if ! spin_retry 120 2 10 "Pulling Docker images" docker compose pull 2>/dev/null; then
+if ! spin_retry 240 5 10 "Pulling Docker images" docker compose pull 2>/dev/null; then
     log_warn "Failed to pull from registry, building locally..."
     spin "Pulling base images" bash -c \
         'docker compose pull --ignore-buildable 2>/dev/null || true'

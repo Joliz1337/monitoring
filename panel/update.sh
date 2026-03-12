@@ -17,7 +17,7 @@ LOCK_FD=200
 
 TIMEOUT_GIT_CLONE=180
 TIMEOUT_DOCKER_COMPOSE_DOWN=120
-TIMEOUT_DOCKER_PULL=300
+TIMEOUT_DOCKER_PULL=600
 TIMEOUT_CONNECTIVITY_CHECK=15
 
 MAX_RETRIES=3
@@ -300,7 +300,7 @@ fallback_update() {
     chmod +x "$PANEL_DIR"/*.sh 2>/dev/null || true
 
     # Pull ready images from GHCR (normal flow)
-    if ! spin_retry 120 2 10 "Pulling Docker images" docker compose pull 2>/dev/null; then
+    if ! spin_retry 240 5 10 "Pulling Docker images" docker compose pull 2>/dev/null; then
         log_warn "Failed to pull from registry, building locally..."
         spin "Pulling base images" bash -c \
             'docker compose pull --ignore-buildable 2>/dev/null || true'
