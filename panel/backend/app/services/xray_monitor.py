@@ -295,13 +295,19 @@ class XrayMonitorService:
     # ------------------------------------------------------------------ xray management
     async def _reload_xray(self):
         """Regenerate config, assign ports, (re)start xray-core."""
+        ignore_set = await self._load_ignore_set()
+
         async with async_session() as db:
             result = await db.execute(
                 select(XrayMonitorServer).where(XrayMonitorServer.enabled == True)  # noqa: E712
             )
             servers = list(result.scalars().all())
 
-        valid_servers = [s for s in servers if is_valid_server(s.address, s.port)]
+        valid_servers = [
+            s for s in servers
+            if is_valid_server(s.address, s.port)
+            and not is_ignored_address(s.address, ignore_set)
+        ]
 
         port = SOCKS_PORT_BASE
         for srv in valid_servers:

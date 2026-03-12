@@ -104,13 +104,31 @@ async def update_settings(
         await db.flush()
 
     data = body.model_dump(exclude_unset=True)
+    ignore_changed = False
     if "ignore_list" in data:
         raw = data.pop("ignore_list")
         cleaned = sorted({v.strip().lower() for v in (raw or []) if v.strip()})
         settings.ignore_list = json.dumps(cleaned, ensure_ascii=False)
+        ignore_changed = bool(cleaned)
     for field, value in data.items():
         setattr(settings, field, value)
     await db.commit()
+
+    if ignore_changed:
+        ignore_set = set(json.loads(settings.ignore_list))
+        result_srv = await db.execute(select(XrayMonitorServer))
+        removed = 0
+        for srv in result_srv.scalars().all():
+            if is_ignored_address(srv.address, ignore_set):
+                await db.execute(delete(XrayMonitorCheck).where(XrayMonitorCheck.server_id == srv.id))
+                await db.execute(delete(XrayMonitorServer).where(XrayMonitorServer.id == srv.id))
+                removed += 1
+        if removed:
+            await db.commit()
+            svc = get_xray_monitor_service()
+            svc.mark_config_dirty()
+            logger.info(f"Ignore list: removed {removed} servers matching new rules")
+
     return {"success": True}
 
 
