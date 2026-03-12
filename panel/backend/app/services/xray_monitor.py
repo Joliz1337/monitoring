@@ -430,52 +430,18 @@ class XrayMonitorService:
         await asyncio.gather(*tasks, return_exceptions=True)
         await self._cleanup_old_checks()
 
-    async def _socks_tcp_ping(self, socks_port: int) -> Optional[float]:
-        """Measure VPN latency: SOCKS5 TCP CONNECT to 1.1.1.1:443, 3 attempts, return min."""
-        # SOCKS5 CONNECT to 1.1.1.1:443 — raw TCP through the VPN tunnel,
-        # no HTTP/TLS overhead to target. Cloudflare anycast is always near VPN exit.
-        CONNECT_REQ = b"\x05\x01\x00\x01\x01\x01\x01\x01\x01\xbb"
-        results: list[float] = []
-
-        for _ in range(3):
-            try:
-                reader, writer = await asyncio.wait_for(
-                    asyncio.open_connection("127.0.0.1", socks_port), timeout=5.0,
-                )
-                writer.write(b"\x05\x01\x00")
-                await writer.drain()
-                auth = await asyncio.wait_for(reader.readexactly(2), timeout=3.0)
-                if auth != b"\x05\x00":
-                    writer.close()
-                    continue
-
-                start = time.monotonic()
-                writer.write(CONNECT_REQ)
-                await writer.drain()
-                resp = await asyncio.wait_for(reader.readexactly(4), timeout=5.0)
-                elapsed = (time.monotonic() - start) * 1000
-
-                writer.close()
-                await writer.wait_closed()
-
-                if resp[1] == 0x00:
-                    results.append(elapsed)
-            except Exception:
-                continue
-
-        return round(min(results), 1) if results else None
-
     async def _check_server(self, srv: XrayMonitorServer, settings: XrayMonitorSettings):
-        """Check one server: HTTPS probe for alive + SOCKS TCP ping for latency."""
+        """Check one server: HTTPS probe for alive, warmed request for real VPN ping."""
         if not self._xray_healthy:
             return
 
         proxy_url = f"socks5://127.0.0.1:{srv.socks_port}"
         error_msg: Optional[str] = None
         check_ok = False
+        ping_ms: Optional[float] = None
 
         probe_targets = (
-            "https://www.google.com/generate_204",
+            "https://1.1.1.1/cdn-cgi/trace",
             "https://one.one.one.one/cdn-cgi/trace",
             "https://cloudflare.com/cdn-cgi/trace",
         )
@@ -484,13 +450,22 @@ class XrayMonitorService:
                 transport = httpx.AsyncHTTPTransport(proxy=proxy_url)
                 async with httpx.AsyncClient(
                     transport=transport,
-                    timeout=httpx.Timeout(10.0, connect=6.0, read=6.0),
+                    timeout=httpx.Timeout(12.0, connect=8.0, read=6.0),
                     follow_redirects=True,
                     verify=False,
                 ) as client:
-                    resp = await client.get(target)
-                if resp.status_code < 500:
+                    warmup = await client.get(target)
+                    if warmup.status_code >= 500:
+                        continue
                     check_ok = True
+
+                    results: list[float] = []
+                    for _ in range(3):
+                        start = time.monotonic()
+                        await client.get(target)
+                        results.append((time.monotonic() - start) * 1000)
+
+                    ping_ms = round(min(results), 1)
                     break
             except Exception as e:
                 msg = str(e).strip()
@@ -498,10 +473,6 @@ class XrayMonitorService:
                     msg = msg[:180] + "..."
                 error_msg = f"{target}: {type(e).__name__}" + (f" ({msg})" if msg else "")
                 continue
-
-        ping_ms: Optional[float] = None
-        if check_ok:
-            ping_ms = await self._socks_tcp_ping(srv.socks_port)
 
         was_offline = srv.status == "offline"
         fail_threshold = settings.fail_threshold or 2
