@@ -650,7 +650,7 @@ Frontend lazy loading (panel/frontend/src/pages/Remnawave.tsx):
 **Файлы:**
 - `backend/app/routers/xray_monitor.py` — API роутер
 - `backend/app/services/xray_monitor.py` — фоновый сервис (xray-core, проверки, уведомления)
-- `backend/app/services/xray_key_parser.py` — парсинг подписок и ключей
+- `backend/app/services/xray_key_parser.py` — парсинг подписок и ключей (URI-ключи, base64, JSON full xray-конфиги)
 - `frontend/src/pages/XrayMonitor.tsx` — страница мониторинга
 
 ## Диагностика

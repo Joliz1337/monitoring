@@ -258,36 +258,199 @@ def _try_decode_base64(text: str) -> str | None:
     return None
 
 
+_SKIP_PROTOCOLS = {"freedom", "blackhole", "dns", "loopback"}
+
+
+def _extract_from_xray_outbound(outbound: dict, remarks: str = "") -> dict | None:
+    """Extract server info from a full xray-core outbound config into flat params."""
+    protocol = outbound.get("protocol", "").lower()
+    if protocol in _SKIP_PROTOCOLS or not protocol:
+        return None
+
+    settings = outbound.get("settings", {})
+    stream = outbound.get("streamSettings", {})
+    address = ""
+    port = 0
+    config: dict = {}
+
+    if protocol in ("vless", "vmess"):
+        vnext = settings.get("vnext", [])
+        if not vnext:
+            return None
+        srv = vnext[0]
+        address = srv.get("address", "")
+        port = int(srv.get("port", 0))
+        users = srv.get("users", [])
+        if users:
+            u = users[0]
+            config["id"] = u.get("id", "")
+            if protocol == "vless":
+                config["encryption"] = u.get("encryption", "none")
+                if u.get("flow"):
+                    config["flow"] = u["flow"]
+            else:
+                config["alterId"] = int(u.get("alterId", 0))
+                config["security"] = u.get("security", "auto")
+
+    elif protocol in ("trojan",):
+        srvs = settings.get("servers", [])
+        if not srvs:
+            return None
+        srv = srvs[0]
+        address = srv.get("address", "")
+        port = int(srv.get("port", 0))
+        config["password"] = srv.get("password", "")
+
+    elif protocol in ("shadowsocks", "ss"):
+        protocol = "shadowsocks"
+        srvs = settings.get("servers", [])
+        if not srvs:
+            return None
+        srv = srvs[0]
+        address = srv.get("address", srv.get("server", ""))
+        port = int(srv.get("port", srv.get("server_port", 0)))
+        config["method"] = srv.get("method", "")
+        config["password"] = srv.get("password", "")
+
+    else:
+        return None
+
+    if not address or not port:
+        return None
+
+    network = stream.get("network", "tcp")
+    security = stream.get("security", "none")
+    config["net"] = network
+
+    if security == "reality":
+        config["security"] = "reality"
+        rs = stream.get("realitySettings", {})
+        config["sni"] = rs.get("serverName", "")
+        config["pbk"] = rs.get("publicKey", "")
+        config["sid"] = rs.get("shortId", "")
+        config["spx"] = rs.get("spiderX", "")
+        config["fp"] = rs.get("fingerprint", "chrome")
+    elif security == "tls":
+        config["security"] = "tls"
+        ts = stream.get("tlsSettings", {})
+        config["sni"] = ts.get("serverName", "")
+        config["fp"] = ts.get("fingerprint", "")
+        alpn = ts.get("alpn", [])
+        if isinstance(alpn, list) and alpn:
+            config["alpn"] = ",".join(alpn)
+        elif isinstance(alpn, str) and alpn:
+            config["alpn"] = alpn
+        if ts.get("allowInsecure"):
+            config["allowInsecure"] = "1"
+    else:
+        config["security"] = "none"
+
+    if network == "ws":
+        ws_s = stream.get("wsSettings", {})
+        config["path"] = ws_s.get("path", "/")
+        host = ws_s.get("headers", {}).get("Host", "")
+        if host:
+            config["host"] = host
+    elif network == "grpc":
+        grpc_s = stream.get("grpcSettings", {})
+        config["serviceName"] = grpc_s.get("serviceName", "")
+    elif network in ("h2", "http"):
+        http_s = stream.get("httpSettings", {})
+        config["path"] = http_s.get("path", "/")
+        hosts = http_s.get("host", [])
+        if hosts:
+            config["host"] = hosts[0] if isinstance(hosts, list) else hosts
+    elif network == "tcp":
+        tcp_s = stream.get("tcpSettings", {})
+        header = tcp_s.get("header", {})
+        if header.get("type") == "http":
+            config["headerType"] = "http"
+            paths = header.get("request", {}).get("path", [])
+            if paths:
+                config["path"] = paths[0]
+    elif network in ("splithttp", "xhttp"):
+        ns = stream.get(f"{network}Settings", {})
+        config["path"] = ns.get("path", "/")
+        if ns.get("host"):
+            config["host"] = ns["host"]
+
+    tag = outbound.get("tag", "")
+    name = remarks or tag or f"{address}:{port}"
+
+    return {
+        "name": name,
+        "protocol": protocol,
+        "address": str(address),
+        "port": int(port),
+        "config": config,
+    }
+
+
+def _extract_simple_server(item: dict) -> dict | None:
+    """Parse a flat server object with top-level address/port/protocol fields."""
+    protocol = item.get("protocol", item.get("type", "")).lower()
+    address = item.get("address", item.get("server", item.get("add", "")))
+    port = item.get("port", item.get("server_port", 0))
+    name = item.get("tag", item.get("ps", item.get("name", "")))
+
+    if not protocol or not address or not port:
+        return None
+
+    proto_map = {"ss": "shadowsocks"}
+    return {
+        "name": name or f"{address}:{port}",
+        "protocol": proto_map.get(protocol, protocol),
+        "address": str(address),
+        "port": int(port),
+        "config": item,
+        "raw_key": json.dumps(item, ensure_ascii=False),
+    }
+
+
+def _servers_from_full_config(data: dict) -> list[dict]:
+    """Extract proxy servers from a single full xray-core config JSON."""
+    remarks = data.get("remarks", "")
+    servers = []
+    for ob in data.get("outbounds", []):
+        if not isinstance(ob, dict):
+            continue
+        srv = _extract_from_xray_outbound(ob, remarks)
+        if srv:
+            servers.append(srv)
+    return servers
+
+
 def _try_parse_json_subscription(text: str) -> list[dict] | None:
-    """Try to parse JSON subscription (array of server objects or outbounds)."""
+    """Parse JSON subscription: full xray configs, arrays of configs, or simple server objects."""
     try:
         data = json.loads(text)
     except (json.JSONDecodeError, TypeError):
         return None
 
-    servers = []
-    items = data if isinstance(data, list) else data.get("outbounds", data.get("servers", []))
-    if not isinstance(items, list):
-        return None
+    servers: list[dict] = []
 
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        protocol = item.get("protocol", item.get("type", "")).lower()
-        address = item.get("address", item.get("server", item.get("add", "")))
-        port = item.get("port", item.get("server_port", 0))
-        name = item.get("tag", item.get("ps", item.get("name", "")))
+    if isinstance(data, list):
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            if "outbounds" in item:
+                servers.extend(_servers_from_full_config(item))
+            else:
+                srv = _extract_from_xray_outbound(item)
+                if not srv:
+                    srv = _extract_simple_server(item)
+                if srv:
+                    servers.append(srv)
 
-        if protocol and address and port:
-            proto_map = {"ss": "shadowsocks"}
-            servers.append({
-                "name": name or f"{address}:{port}",
-                "protocol": proto_map.get(protocol, protocol),
-                "address": str(address),
-                "port": int(port),
-                "config": item,
-                "raw_key": json.dumps(item, ensure_ascii=False),
-            })
+    elif isinstance(data, dict):
+        if "outbounds" in data:
+            servers = _servers_from_full_config(data)
+        else:
+            srv = _extract_from_xray_outbound(data)
+            if not srv:
+                srv = _extract_simple_server(data)
+            if srv:
+                servers.append(srv)
 
     return servers if servers else None
 

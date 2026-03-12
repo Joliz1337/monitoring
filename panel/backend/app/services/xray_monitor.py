@@ -40,6 +40,10 @@ def _build_outbound(server: XrayMonitorServer) -> dict | None:
 
     if protocol == "vless":
         stream = _build_stream_settings(config)
+        user: dict = {"id": config.get("id", ""), "encryption": "none"}
+        flow = config.get("flow", "")
+        if flow:
+            user["flow"] = flow
         return {
             "tag": tag,
             "protocol": "vless",
@@ -47,7 +51,7 @@ def _build_outbound(server: XrayMonitorServer) -> dict | None:
                 "vnext": [{
                     "address": server.address,
                     "port": server.port,
-                    "users": [{"id": config.get("id", ""), "encryption": "none"}],
+                    "users": [user],
                 }]
             },
             "streamSettings": stream,
