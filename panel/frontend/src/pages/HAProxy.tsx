@@ -41,6 +41,14 @@ import CachedDataBanner from '../components/ui/CachedDataBanner'
 const RULES_START_MARKER = '# === RULES START ==='
 const RULES_END_MARKER = '# === RULES END ==='
 
+const patchDnsResolvers = (content: string): string => {
+  return content.replace(/^(\s+server\s+\S+\s+)(\S+)(:\d+)(.*)/gm, (match, prefix, host, port, rest) => {
+    const isIP = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)
+    if (isIP || rest.includes('resolvers ')) return match
+    return `${prefix}${host}${port} resolvers mydns resolve-prefer ipv4 init-addr none${rest}`
+  })
+}
+
 const DEFAULT_HAPROXY_TEMPLATE = `global
     stats socket /var/run/haproxy.sock mode 660 level admin expose-fd listeners
     no log
@@ -806,7 +814,7 @@ export default function HAProxy() {
       )
     }
     
-    setConfigContent(newConfig)
+    setConfigContent(patchDnsResolvers(newConfig))
   }
   
   if (isLoading) {
