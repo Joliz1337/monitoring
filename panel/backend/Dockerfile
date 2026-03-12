@@ -13,7 +13,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     bash curl git rsync openssl unzip
 
 # Install xray-core for Xray monitor health checks
-ARG XRAY_VERSION=1.8.24
+ARG XRAY_VERSION=26.2.6
 RUN ARCH=$(dpkg --print-architecture) && \
     case "$ARCH" in \
       amd64) XRAY_ARCH="64" ;; \
