@@ -432,7 +432,7 @@ class MetricsCollector:
     async def _cache_server_haproxy_traffic(self, server: Server):
         """Cache HAProxy and Traffic data for a single server (uses own DB session)"""
         try:
-            async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+            async with httpx.AsyncClient(verify=False, timeout=15.0) as client:
                 headers = {"X-API-Key": server.api_key}
                 haproxy_data = {}
                 traffic_data = {}
@@ -521,14 +521,28 @@ class MetricsCollector:
                     except Exception:
                         pass
                 
-                # Update cache in DB (own session)
+                # Merge with existing cache — partial failures must not wipe previously collected data
                 update_values = {}
                 if haproxy_data:
-                    haproxy_data["cached_at"] = datetime.now(timezone.utc).isoformat()
-                    update_values["last_haproxy_data"] = json.dumps(haproxy_data)
+                    existing_haproxy = {}
+                    if server.last_haproxy_data:
+                        try:
+                            existing_haproxy = json.loads(server.last_haproxy_data)
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+                    existing_haproxy.update(haproxy_data)
+                    existing_haproxy["cached_at"] = datetime.now(timezone.utc).isoformat()
+                    update_values["last_haproxy_data"] = json.dumps(existing_haproxy)
                 if traffic_data:
-                    traffic_data["cached_at"] = datetime.now(timezone.utc).isoformat()
-                    update_values["last_traffic_data"] = json.dumps(traffic_data)
+                    existing_traffic = {}
+                    if server.last_traffic_data:
+                        try:
+                            existing_traffic = json.loads(server.last_traffic_data)
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+                    existing_traffic.update(traffic_data)
+                    existing_traffic["cached_at"] = datetime.now(timezone.utc).isoformat()
+                    update_values["last_traffic_data"] = json.dumps(existing_traffic)
                 
                 if update_values:
                     for attempt in range(1, 4):
