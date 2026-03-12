@@ -430,17 +430,29 @@ class XrayMonitorService:
         await asyncio.gather(*tasks, return_exceptions=True)
         await self._cleanup_old_checks()
 
+    async def _tcp_ping(self, address: str, port: int, timeout: float = 5.0) -> Optional[float]:
+        """Measure real network latency via TCP connect (SYN→SYN-ACK)."""
+        try:
+            start = time.monotonic()
+            _, writer = await asyncio.wait_for(
+                asyncio.open_connection(address, port), timeout=timeout,
+            )
+            elapsed = (time.monotonic() - start) * 1000
+            writer.close()
+            await writer.wait_closed()
+            return round(elapsed, 1)
+        except Exception:
+            return None
+
     async def _check_server(self, srv: XrayMonitorServer, settings: XrayMonitorSettings):
-        """Check one server through its SOCKS port."""
+        """Check one server: proxy reachability + real TCP ping."""
         if not self._xray_healthy:
             return
 
         proxy_url = f"socks5://127.0.0.1:{srv.socks_port}"
-        ping_ms: Optional[float] = None
         error_msg: Optional[str] = None
         check_ok = False
 
-        # HTTP/80 is often blocked by providers; use HTTPS probe URLs to reduce false DOWN states.
         probe_targets = (
             "https://www.google.com/generate_204",
             "https://one.one.one.one/cdn-cgi/trace",
@@ -448,7 +460,6 @@ class XrayMonitorService:
         )
         for target in probe_targets:
             try:
-                start = time.monotonic()
                 transport = httpx.AsyncHTTPTransport(proxy=proxy_url)
                 async with httpx.AsyncClient(
                     transport=transport,
@@ -457,9 +468,7 @@ class XrayMonitorService:
                     verify=False,
                 ) as client:
                     resp = await client.get(target)
-                elapsed = (time.monotonic() - start) * 1000
                 if resp.status_code < 500:
-                    ping_ms = round(elapsed, 1)
                     check_ok = True
                     break
             except Exception as e:
@@ -468,6 +477,10 @@ class XrayMonitorService:
                     msg = msg[:180] + "..."
                 error_msg = f"{target}: {type(e).__name__}" + (f" ({msg})" if msg else "")
                 continue
+
+        ping_ms: Optional[float] = None
+        if check_ok:
+            ping_ms = await self._tcp_ping(srv.address, srv.port)
 
         was_offline = srv.status == "offline"
         fail_threshold = settings.fail_threshold or 2
@@ -491,7 +504,6 @@ class XrayMonitorService:
                 db.add(XrayMonitorCheck(server_id=srv.id, status="fail", error=error_msg))
             await db.commit()
 
-        # Notifications
         if check_ok and was_offline and settings.notify_recovery:
             await self._send_notification(
                 settings, "info",
