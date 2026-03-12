@@ -413,6 +413,9 @@ class XrayMonitorService:
             )
             servers = list(result.scalars().all())
 
+            sub_result = await db.execute(select(XrayMonitorSubscription))
+            sub_names = {s.id: s.name for s in sub_result.scalars().all()}
+
         if not servers:
             return
 
@@ -427,13 +430,22 @@ class XrayMonitorService:
                 return
 
         tasks = [self._check_server(srv, settings) for srv in servers]
-        await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        events: list[dict] = []
+        for r in results:
+            if isinstance(r, list):
+                events.extend(r)
+
+        if events:
+            await self._send_batched_notifications(settings, events, sub_names)
+
         await self._cleanup_old_checks()
 
-    async def _check_server(self, srv: XrayMonitorServer, settings: XrayMonitorSettings):
-        """Check one server: HTTPS probe for alive, warmed request for real VPN ping."""
+    async def _check_server(self, srv: XrayMonitorServer, settings: XrayMonitorSettings) -> list[dict]:
+        """Check one server, update DB, return notification events."""
         if not self._xray_healthy:
-            return
+            return []
 
         proxy_url = f"socks5://127.0.0.1:{srv.socks_port}"
         error_msg: Optional[str] = None
@@ -459,13 +471,13 @@ class XrayMonitorService:
                         continue
                     check_ok = True
 
-                    results: list[float] = []
+                    timings: list[float] = []
                     for _ in range(3):
                         start = time.monotonic()
                         await client.get(target)
-                        results.append((time.monotonic() - start) * 1000)
+                        timings.append((time.monotonic() - start) * 1000)
 
-                    ping_ms = round(min(results), 1)
+                    ping_ms = round(min(timings), 1)
                     break
             except Exception as e:
                 msg = str(e).strip()
@@ -496,27 +508,29 @@ class XrayMonitorService:
                 db.add(XrayMonitorCheck(server_id=srv.id, status="fail", error=error_msg))
             await db.commit()
 
+        base = {
+            "name": srv.name, "address": srv.address,
+            "port": srv.port, "sub_id": srv.subscription_id,
+        }
+        events: list[dict] = []
+
         if check_ok and was_offline and settings.notify_recovery:
-            await self._send_notification(
-                settings, "info",
-                f"✅ <b>Xray Monitor</b>\n\nСервер восстановлен:\n<b>{srv.name}</b> ({srv.address}:{srv.port})\nPing: {ping_ms} ms",
-            )
+            events.append({**base, "type": "recovery", "ping_ms": ping_ms})
 
         if check_ok and ping_ms and settings.notify_latency:
             threshold = settings.latency_threshold_ms or 500
             if ping_ms > threshold:
-                await self._send_notification(
-                    settings, "warning",
-                    f"🟡 <b>Xray Monitor — High Latency</b>\n\n<b>{srv.name}</b> ({srv.address}:{srv.port})\nPing: {ping_ms} ms (порог: {threshold} ms)",
-                )
+                events.append({**base, "type": "latency", "ping_ms": ping_ms, "threshold": threshold})
 
         if not check_ok:
             new_fail = (srv.fail_count or 0) + 1
             if new_fail == fail_threshold and settings.notify_down:
-                await self._send_notification(
-                    settings, "critical",
-                    f"🔴 <b>Xray Monitor — Server DOWN</b>\n\n<b>{srv.name}</b> ({srv.address}:{srv.port})\nОшибка: {error_msg}",
-                )
+                err = error_msg or ""
+                if len(err) > 80:
+                    err = err[:80] + "…"
+                events.append({**base, "type": "down", "error": err})
+
+        return events
 
     # ------------------------------------------------------------------ auto-refresh
     async def _auto_refresh_subscriptions(self):
@@ -587,7 +601,89 @@ class XrayMonitorService:
             logger.error(f"Auto-refresh subscriptions error: {e}")
 
     # ------------------------------------------------------------------ telegram
-    async def _send_notification(self, settings: XrayMonitorSettings, severity: str, message: str):
+    _CATEGORY_ORDER = ("down", "recovery", "latency")
+    _CATEGORY_HEADER = {
+        "down": "🔴 <b>Серверы DOWN</b>",
+        "recovery": "✅ <b>Восстановились</b>",
+        "latency": "🟡 <b>Высокий пинг</b>",
+    }
+    TG_MSG_LIMIT = 4096
+
+    async def _send_batched_notifications(
+        self,
+        settings: XrayMonitorSettings,
+        events: list[dict],
+        sub_names: dict[int, str],
+    ):
+        by_cat: dict[str, list[dict]] = {}
+        for ev in events:
+            by_cat.setdefault(ev["type"], []).append(ev)
+
+        sections: list[str] = []
+        for cat in self._CATEGORY_ORDER:
+            items = by_cat.get(cat)
+            if not items:
+                continue
+
+            lines = [self._CATEGORY_HEADER[cat]]
+
+            by_source: dict[Optional[int], list[dict]] = {}
+            for ev in items:
+                by_source.setdefault(ev["sub_id"], []).append(ev)
+
+            for sub_id in sorted(by_source, key=lambda x: (x is None, x or 0)):
+                group = by_source[sub_id]
+                if sub_id and sub_id in sub_names:
+                    lines.append(f"\n📦 <b>{sub_names[sub_id]}</b>")
+                elif sub_id is None:
+                    lines.append("\n🔑 <b>Ручные ключи</b>")
+                else:
+                    lines.append(f"\n📦 <b>Подписка #{sub_id}</b>")
+
+                for ev in group:
+                    entry = f"  • {ev['name']} ({ev['address']}:{ev['port']})"
+                    if cat == "down":
+                        entry += f" — {ev.get('error', '?')}"
+                    elif cat == "recovery":
+                        entry += f" — {ev.get('ping_ms', '?')} ms"
+                    elif cat == "latency":
+                        entry += f" — {ev.get('ping_ms', '?')} ms (порог {ev.get('threshold', '?')})"
+                    lines.append(entry)
+
+            sections.append("\n".join(lines))
+
+        if not sections:
+            return
+
+        header = "📡 <b>Xray Monitor</b>\n"
+        full_text = header + "\n\n".join(sections)
+
+        for chunk in self._split_message(full_text):
+            await self._send_telegram(settings, chunk)
+
+    @staticmethod
+    def _split_message(text: str, limit: int = 4096) -> list[str]:
+        if len(text) <= limit:
+            return [text]
+
+        chunks: list[str] = []
+        while text:
+            if len(text) <= limit:
+                chunks.append(text)
+                break
+
+            cut = text.rfind("\n\n", 0, limit)
+            if cut < 1:
+                cut = text.rfind("\n", 0, limit)
+            if cut < 1:
+                cut = limit
+
+            chunks.append(text[:cut].rstrip())
+            text = text[cut:].lstrip("\n")
+
+        return chunks
+
+    async def _send_telegram(self, settings: XrayMonitorSettings, message: str):
         bot_token = settings.telegram_bot_token
         chat_id = settings.telegram_chat_id
 

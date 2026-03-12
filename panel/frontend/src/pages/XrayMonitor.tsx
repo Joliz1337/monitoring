@@ -439,7 +439,7 @@ export default function XrayMonitor() {
                       >
                         <div className="border-t border-dark-700/30 px-3 pb-3 pt-2">
                           {sub.servers.length === 0 ? (
-                            <p className="text-dark-500 text-sm py-2">{t('xray_monitor.no_servers')}</p>
+                            <p className="text-dark-500 text-sm py-2">{t('xray_monitor.no_sub_servers')}</p>
                           ) : (
                             <div className="space-y-1">
                               {sub.servers.map(srv => (

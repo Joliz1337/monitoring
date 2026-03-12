@@ -54,6 +54,27 @@ class HAProxyManager:
         except ValueError:
             return True
     
+    @classmethod
+    def _patch_dns_resolvers(cls, content: str) -> str:
+        """Add/update resolver params on server lines with domain targets"""
+        resolver_suffix = " resolvers mydns resolve-prefer ipv4 init-addr none"
+        
+        def patch_server_line(match: re.Match) -> str:
+            line = match.group(0)
+            server_match = re.search(r'server\s+\S+\s+(\S+):\d+', line)
+            if not server_match:
+                return line
+            target = server_match.group(1)
+            if not cls._is_domain(target):
+                return line
+            if "resolvers " in line:
+                return line
+            # Insert resolver params right after host:port (before other options like send-proxy, check, ssl)
+            host_port_end = server_match.end()
+            return line[:host_port_end] + resolver_suffix + line[host_port_end:]
+        
+        return re.sub(r'^    server .+$', patch_server_line, content, flags=re.MULTILINE)
+    
     def _read_config(self) -> str:
         """Read HAProxy config file"""
         if self.config_path.exists():
@@ -136,6 +157,7 @@ resolvers mydns
         new_config = self._generate_base_config()
         
         if rules_content.strip():
+            rules_content = self._patch_dns_resolvers(rules_content)
             new_config = new_config.replace(
                 RULES_END_MARKER,
                 rules_content.rstrip() + '\n' + RULES_END_MARKER
@@ -817,6 +839,7 @@ backend {backend_name}
         self._backup_config()
         
         try:
+            config_content = self._patch_dns_resolvers(config_content)
             self._write_config(config_content)
         except Exception as e:
             return False, f"Failed to write config: {e}", False
