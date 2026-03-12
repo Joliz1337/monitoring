@@ -1231,12 +1231,34 @@ async def _migrate_folder_columns(conn):
                     logger.warning(f"Could not add {table}.folder: {e}")
 
 
+async def _migrate_xray_monitor(conn):
+    """Migrate xray_monitor_servers: name to TEXT, add position column."""
+    try:
+        result = await conn.execute(text("""
+            SELECT column_name, data_type FROM information_schema.columns
+            WHERE table_name = 'xray_monitor_servers'
+        """))
+        cols = {row[0]: row[1] for row in result.fetchall()}
+        if not cols:
+            return
+        if cols.get("name") == "character varying":
+            await conn.execute(text('ALTER TABLE xray_monitor_servers ALTER COLUMN "name" TYPE TEXT'))
+            logger.info("Migrated xray_monitor_servers.name to TEXT")
+        if "position" not in cols:
+            await conn.execute(text('ALTER TABLE xray_monitor_servers ADD COLUMN "position" INTEGER DEFAULT 0'))
+            logger.info("Added column: xray_monitor_servers.position")
+    except Exception as e:
+        if "does not exist" not in str(e).lower():
+            logger.debug(f"xray_monitor migration: {e}")
+
+
 async def init_db():
     """Initialize database: create tables, run migrations."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await run_migrations(conn)
         await _migrate_folder_columns(conn)
+        await _migrate_xray_monitor(conn)
     
     try:
         await _seed_default_excluded_destinations()

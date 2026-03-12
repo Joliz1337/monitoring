@@ -3,22 +3,21 @@
 import asyncio
 import json
 import logging
-import os
-import signal
-import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
 import aiohttp
 import httpx
-from sqlalchemy import select, delete, func as sa_func
+from sqlalchemy import select, delete
 
 from app.database import async_session
 from app.models import (
-    XrayMonitorSettings, XrayMonitorServer, XrayMonitorCheck, AlertSettings,
+    XrayMonitorSettings, XrayMonitorSubscription,
+    XrayMonitorServer, XrayMonitorCheck, AlertSettings,
 )
+from app.services.xray_key_parser import is_valid_server, fetch_subscription
 
 logger = logging.getLogger(__name__)
 
@@ -27,18 +26,21 @@ SOCKS_PORT_BASE = 10001
 CONFIG_DIR = Path("/app/data/xray-monitor")
 CONFIG_PATH = CONFIG_DIR / "config.json"
 CHECK_HISTORY_RETENTION_HOURS = 24
+SUB_REFRESH_INTERVAL_SEC = 3600
 
 
-def _build_outbound(server: XrayMonitorServer) -> dict:
+def _build_outbound(server: XrayMonitorServer) -> dict | None:
     """Build xray-core outbound JSON from a parsed server record."""
+    if not is_valid_server(server.address, server.port):
+        return None
+
     config = json.loads(server.config_json) if server.config_json else {}
     protocol = server.protocol
     tag = f"out-{server.id}"
 
     if protocol == "vless":
-        security = config.get("security", "none")
         stream = _build_stream_settings(config)
-        outbound = {
+        return {
             "tag": tag,
             "protocol": "vless",
             "settings": {
@@ -50,11 +52,10 @@ def _build_outbound(server: XrayMonitorServer) -> dict:
             },
             "streamSettings": stream,
         }
-        return outbound
 
     if protocol == "vmess":
         stream = _build_stream_settings(config)
-        outbound = {
+        return {
             "tag": tag,
             "protocol": "vmess",
             "settings": {
@@ -70,11 +71,10 @@ def _build_outbound(server: XrayMonitorServer) -> dict:
             },
             "streamSettings": stream,
         }
-        return outbound
 
     if protocol == "trojan":
         stream = _build_stream_settings(config)
-        outbound = {
+        return {
             "tag": tag,
             "protocol": "trojan",
             "settings": {
@@ -86,10 +86,9 @@ def _build_outbound(server: XrayMonitorServer) -> dict:
             },
             "streamSettings": stream,
         }
-        return outbound
 
     if protocol == "shadowsocks":
-        outbound = {
+        return {
             "tag": tag,
             "protocol": "shadowsocks",
             "settings": {
@@ -101,9 +100,8 @@ def _build_outbound(server: XrayMonitorServer) -> dict:
                 }]
             },
         }
-        return outbound
 
-    return {"tag": tag, "protocol": "freedom", "settings": {}}
+    return None
 
 
 def _build_stream_settings(config: dict) -> dict:
@@ -115,23 +113,20 @@ def _build_stream_settings(config: dict) -> dict:
     stream["network"] = net
 
     if net == "ws":
-        stream["wsSettings"] = {
-            "path": config.get("path", "/"),
-            "headers": {"Host": config.get("host", "")} if config.get("host") else {},
-        }
+        ws: dict = {"path": config.get("path", "/")}
+        if config.get("host"):
+            ws["headers"] = {"Host": config["host"]}
+        stream["wsSettings"] = ws
     elif net == "grpc":
         stream["grpcSettings"] = {"serviceName": config.get("serviceName", config.get("path", ""))}
-    elif net == "h2" or net == "http":
+    elif net in ("h2", "http"):
         stream["httpSettings"] = {
             "path": config.get("path", "/"),
-            "host": [config.get("host", "")] if config.get("host") else [],
+            "host": [config["host"]] if config.get("host") else [],
         }
     elif net == "tcp" and config.get("headerType") == "http":
         stream["tcpSettings"] = {
-            "header": {
-                "type": "http",
-                "request": {"path": [config.get("path", "/")]},
-            }
+            "header": {"type": "http", "request": {"path": [config.get("path", "/")]}},
         }
     elif net == "splithttp":
         stream["splithttpSettings"] = {"path": config.get("path", "/"), "host": config.get("host", "")}
@@ -144,8 +139,7 @@ def _build_stream_settings(config: dict) -> dict:
         if sni:
             tls_obj["serverName"] = sni
         fp = config.get("fp", "")
-        if fp:
-            tls_obj["fingerprint"] = fp
+        tls_obj["fingerprint"] = fp or "chrome"
         alpn = config.get("alpn", "")
         if alpn:
             tls_obj["alpn"] = alpn.split(",") if isinstance(alpn, str) else alpn
@@ -166,15 +160,22 @@ def _build_stream_settings(config: dict) -> dict:
     return stream
 
 
-def _generate_xray_config(servers: list[XrayMonitorServer]) -> dict:
-    """Generate a full xray-core config with socks inbounds and per-server outbounds."""
+def _generate_xray_config(servers: list[XrayMonitorServer]) -> tuple[dict, int]:
+    """Generate xray-core config, returns (config_dict, valid_count)."""
     inbounds = []
     outbounds = []
     rules = []
+    skipped = 0
 
     for srv in servers:
         if not srv.socks_port:
             continue
+
+        outbound = _build_outbound(srv)
+        if outbound is None:
+            skipped += 1
+            continue
+
         in_tag = f"in-{srv.id}"
         out_tag = f"out-{srv.id}"
 
@@ -185,24 +186,21 @@ def _generate_xray_config(servers: list[XrayMonitorServer]) -> dict:
             "protocol": "socks",
             "settings": {"udp": False},
         })
-
-        outbounds.append(_build_outbound(srv))
-
-        rules.append({
-            "type": "field",
-            "inboundTag": [in_tag],
-            "outboundTag": out_tag,
-        })
+        outbounds.append(outbound)
+        rules.append({"type": "field", "inboundTag": [in_tag], "outboundTag": out_tag})
 
     if not outbounds:
         outbounds.append({"tag": "direct", "protocol": "freedom", "settings": {}})
 
-    return {
+    config = {
         "log": {"loglevel": "warning"},
         "inbounds": inbounds,
         "outbounds": outbounds,
         "routing": {"rules": rules} if rules else {},
     }
+    if skipped:
+        logger.info(f"Skipped {skipped} servers with invalid address/port")
+    return config, len(inbounds)
 
 
 class XrayMonitorService:
@@ -213,6 +211,8 @@ class XrayMonitorService:
         self._config_dirty = True
         self._last_check: Optional[datetime] = None
         self._time_since_check = 0
+        self._time_since_refresh = 0
+        self._xray_healthy = False
 
     async def start(self):
         if self._running:
@@ -239,12 +239,14 @@ class XrayMonitorService:
     def get_status(self) -> dict:
         return {
             "running": self._running,
-            "xray_running": self._xray_proc is not None and self._xray_proc.returncode is None,
+            "xray_running": self._xray_healthy,
             "last_check": self._last_check.isoformat() if self._last_check else None,
         }
 
+    # ------------------------------------------------------------------ loop
     async def _loop(self):
         self._time_since_check = 0
+        self._time_since_refresh = SUB_REFRESH_INTERVAL_SEC - 10  # first refresh soon after start
         first_run = True
 
         while self._running:
@@ -255,6 +257,11 @@ class XrayMonitorService:
                 if self._config_dirty:
                     await self._reload_xray()
                     self._config_dirty = False
+
+                # Auto-refresh subscriptions
+                if self._time_since_refresh >= SUB_REFRESH_INTERVAL_SEC:
+                    await self._auto_refresh_subscriptions()
+                    self._time_since_refresh = 0
 
                 should_check = settings and settings.enabled and (
                     first_run or self._time_since_check >= interval
@@ -267,18 +274,21 @@ class XrayMonitorService:
 
                 await asyncio.sleep(1)
                 self._time_since_check += 1
+                self._time_since_refresh += 1
             except asyncio.CancelledError:
                 raise
             except Exception as e:
                 logger.error(f"Xray monitor loop error: {e}")
                 await asyncio.sleep(10)
                 self._time_since_check += 10
+                self._time_since_refresh += 10
 
     async def _load_settings(self) -> Optional[XrayMonitorSettings]:
         async with async_session() as db:
             result = await db.execute(select(XrayMonitorSettings).limit(1))
             return result.scalar_one_or_none()
 
+    # ------------------------------------------------------------------ xray management
     async def _reload_xray(self):
         """Regenerate config, assign ports, (re)start xray-core."""
         async with async_session() as db:
@@ -287,48 +297,90 @@ class XrayMonitorService:
             )
             servers = list(result.scalars().all())
 
+        valid_servers = [s for s in servers if is_valid_server(s.address, s.port)]
+
         port = SOCKS_PORT_BASE
-        for srv in servers:
+        for srv in valid_servers:
             srv.socks_port = port
             port += 1
 
         async with async_session() as db:
-            for srv in servers:
+            for srv in valid_servers:
                 await db.execute(
                     XrayMonitorServer.__table__.update()
                     .where(XrayMonitorServer.id == srv.id)
                     .values(socks_port=srv.socks_port)
                 )
+            # Clear socks_port for invalid servers so they won't be checked
+            invalid_ids = [s.id for s in servers if not is_valid_server(s.address, s.port)]
+            if invalid_ids:
+                for inv_id in invalid_ids:
+                    await db.execute(
+                        XrayMonitorServer.__table__.update()
+                        .where(XrayMonitorServer.id == inv_id)
+                        .values(socks_port=None)
+                    )
             await db.commit()
 
-        config = _generate_xray_config(servers)
-        CONFIG_PATH.write_text(json.dumps(config, indent=2))
-        logger.info(f"Xray monitor config generated: {len(servers)} servers")
+        config, valid_count = _generate_xray_config(valid_servers)
+        CONFIG_PATH.write_text(json.dumps(config, indent=2, ensure_ascii=False))
+        logger.info(f"Xray monitor config generated: {valid_count} valid servers (total {len(servers)})")
 
         await self._stop_xray()
-        if servers:
+        if valid_count > 0:
             await self._start_xray()
+        else:
+            self._xray_healthy = False
 
     async def _start_xray(self):
         if not Path(XRAY_BIN).exists():
             logger.warning(f"xray binary not found at {XRAY_BIN}")
+            self._xray_healthy = False
             return
+
+        # Validate config first
+        try:
+            test_proc = await asyncio.create_subprocess_exec(
+                XRAY_BIN, "run", "-test", "-c", str(CONFIG_PATH),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(test_proc.communicate(), timeout=15)
+            if test_proc.returncode != 0:
+                combined = (stdout.decode() + stderr.decode()).strip()
+                logger.error(f"xray config validation failed (exit {test_proc.returncode}): {combined[:800]}")
+                self._xray_healthy = False
+                return
+        except asyncio.TimeoutError:
+            logger.error("xray config validation timed out")
+            self._xray_healthy = False
+            return
+        except Exception as e:
+            logger.error(f"xray config validation error: {e}")
+            self._xray_healthy = False
+            return
+
         try:
             self._xray_proc = await asyncio.create_subprocess_exec(
                 XRAY_BIN, "run", "-c", str(CONFIG_PATH),
-                stdout=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            await asyncio.sleep(1)
+            await asyncio.sleep(2)
             if self._xray_proc.returncode is not None:
+                stdout = await self._xray_proc.stdout.read()
                 stderr = await self._xray_proc.stderr.read()
-                logger.error(f"xray-core failed to start: {stderr.decode()[:500]}")
+                combined = (stdout.decode() + stderr.decode()).strip()
+                logger.error(f"xray-core exited immediately (code {self._xray_proc.returncode}): {combined[:800]}")
                 self._xray_proc = None
+                self._xray_healthy = False
             else:
                 logger.info(f"xray-core started (pid={self._xray_proc.pid})")
+                self._xray_healthy = True
         except Exception as e:
             logger.error(f"Failed to start xray-core: {e}")
             self._xray_proc = None
+            self._xray_healthy = False
 
     async def _stop_xray(self):
         if self._xray_proc and self._xray_proc.returncode is None:
@@ -339,11 +391,12 @@ class XrayMonitorService:
                 except asyncio.TimeoutError:
                     self._xray_proc.kill()
                     await self._xray_proc.wait()
-                logger.info("xray-core stopped")
             except Exception as e:
                 logger.warning(f"Error stopping xray-core: {e}")
         self._xray_proc = None
+        self._xray_healthy = False
 
+    # ------------------------------------------------------------------ checks
     async def _check_all(self, settings: XrayMonitorSettings):
         self._last_check = datetime.now(timezone.utc).replace(tzinfo=None)
 
@@ -361,18 +414,23 @@ class XrayMonitorService:
 
         xray_alive = self._xray_proc and self._xray_proc.returncode is None
         if not xray_alive:
-            logger.warning("xray-core not running, restarting...")
+            logger.warning("xray-core not running, attempting restart...")
             await self._reload_xray()
             self._config_dirty = False
             await asyncio.sleep(2)
+            if not self._xray_healthy:
+                logger.error("xray-core still not running, skipping checks")
+                return
 
         tasks = [self._check_server(srv, settings) for srv in servers]
         await asyncio.gather(*tasks, return_exceptions=True)
-
         await self._cleanup_old_checks()
 
     async def _check_server(self, srv: XrayMonitorServer, settings: XrayMonitorSettings):
         """Check one server through its SOCKS port."""
+        if not self._xray_healthy:
+            return
+
         proxy_url = f"socks5://127.0.0.1:{srv.socks_port}"
         ping_ms: Optional[float] = None
         error_msg: Optional[str] = None
@@ -394,7 +452,6 @@ class XrayMonitorService:
                 continue
 
         was_offline = srv.status == "offline"
-        was_online = srv.status == "online"
         fail_threshold = settings.fail_threshold or 2
 
         async with async_session() as db:
@@ -402,34 +459,21 @@ class XrayMonitorService:
                 await db.execute(
                     XrayMonitorServer.__table__.update()
                     .where(XrayMonitorServer.id == srv.id)
-                    .values(
-                        status="online",
-                        last_ping_ms=ping_ms,
-                        last_check=self._last_check,
-                        fail_count=0,
-                    )
+                    .values(status="online", last_ping_ms=ping_ms, last_check=self._last_check, fail_count=0)
                 )
-                db.add(XrayMonitorCheck(
-                    server_id=srv.id, status="ok", ping_ms=ping_ms,
-                ))
+                db.add(XrayMonitorCheck(server_id=srv.id, status="ok", ping_ms=ping_ms))
             else:
                 new_fail = (srv.fail_count or 0) + 1
                 new_status = "offline" if new_fail >= fail_threshold else srv.status
                 await db.execute(
                     XrayMonitorServer.__table__.update()
                     .where(XrayMonitorServer.id == srv.id)
-                    .values(
-                        status=new_status,
-                        last_check=self._last_check,
-                        fail_count=new_fail,
-                        last_ping_ms=None,
-                    )
+                    .values(status=new_status, last_check=self._last_check, fail_count=new_fail, last_ping_ms=None)
                 )
-                db.add(XrayMonitorCheck(
-                    server_id=srv.id, status="fail", error=error_msg,
-                ))
+                db.add(XrayMonitorCheck(server_id=srv.id, status="fail", error=error_msg))
             await db.commit()
 
+        # Notifications
         if check_ok and was_offline and settings.notify_recovery:
             await self._send_notification(
                 settings, "info",
@@ -452,6 +496,75 @@ class XrayMonitorService:
                     f"🔴 <b>Xray Monitor — Server DOWN</b>\n\n<b>{srv.name}</b> ({srv.address}:{srv.port})\nОшибка: {error_msg}",
                 )
 
+    # ------------------------------------------------------------------ auto-refresh
+    async def _auto_refresh_subscriptions(self):
+        """Refresh all auto_refresh subscriptions every hour."""
+        try:
+            async with async_session() as db:
+                result = await db.execute(
+                    select(XrayMonitorSubscription).where(
+                        XrayMonitorSubscription.enabled == True,  # noqa: E712
+                        XrayMonitorSubscription.auto_refresh == True,  # noqa: E712
+                    )
+                )
+                subs = list(result.scalars().all())
+
+            if not subs:
+                return
+
+            changed = False
+            for sub in subs:
+                try:
+                    keys = await fetch_subscription(sub.url)
+                    valid_keys = [k for k in keys if is_valid_server(k.get("address", ""), int(k.get("port", 0)))]
+
+                    async with async_session() as db:
+                        await db.execute(
+                            delete(XrayMonitorServer).where(XrayMonitorServer.subscription_id == sub.id)
+                        )
+                        count = 0
+                        for idx, k in enumerate(valid_keys):
+                            db.add(XrayMonitorServer(
+                                subscription_id=sub.id,
+                                position=idx,
+                                name=k.get("name", "Unknown"),
+                                protocol=k.get("protocol", "unknown"),
+                                address=k.get("address", "").strip(),
+                                port=int(k.get("port", 0)),
+                                raw_key=k.get("raw_key", ""),
+                                config_json=json.dumps(k.get("config", {}), ensure_ascii=False),
+                            ))
+                            count += 1
+
+                        await db.execute(
+                            XrayMonitorSubscription.__table__.update()
+                            .where(XrayMonitorSubscription.id == sub.id)
+                            .values(
+                                server_count=count,
+                                last_refreshed=datetime.now(timezone.utc).replace(tzinfo=None),
+                                last_error=None,
+                            )
+                        )
+                        await db.commit()
+                    changed = True
+                    logger.info(f"Auto-refreshed subscription '{sub.name}': {count} servers")
+                except Exception as e:
+                    logger.warning(f"Failed to auto-refresh subscription '{sub.name}': {e}")
+                    async with async_session() as db:
+                        await db.execute(
+                            XrayMonitorSubscription.__table__.update()
+                            .where(XrayMonitorSubscription.id == sub.id)
+                            .values(last_error=str(e)[:500])
+                        )
+                        await db.commit()
+
+            if changed:
+                self._config_dirty = True
+
+        except Exception as e:
+            logger.error(f"Auto-refresh subscriptions error: {e}")
+
+    # ------------------------------------------------------------------ telegram
     async def _send_notification(self, settings: XrayMonitorSettings, severity: str, message: str):
         bot_token = settings.telegram_bot_token
         chat_id = settings.telegram_chat_id
@@ -481,16 +594,12 @@ class XrayMonitorService:
         except Exception as e:
             logger.error(f"Telegram send error: {e}")
 
+    # ------------------------------------------------------------------ cleanup
     async def _cleanup_old_checks(self):
-        """Remove check history older than retention period."""
         try:
-            cutoff = datetime.now(timezone.utc).replace(tzinfo=None)
-            from datetime import timedelta
-            cutoff -= timedelta(hours=CHECK_HISTORY_RETENTION_HOURS)
+            cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=CHECK_HISTORY_RETENTION_HOURS)
             async with async_session() as db:
-                await db.execute(
-                    delete(XrayMonitorCheck).where(XrayMonitorCheck.timestamp < cutoff)
-                )
+                await db.execute(delete(XrayMonitorCheck).where(XrayMonitorCheck.timestamp < cutoff))
                 await db.commit()
         except Exception as e:
             logger.debug(f"Cleanup old checks error: {e}")

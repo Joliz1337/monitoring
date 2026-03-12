@@ -1639,6 +1639,20 @@ export interface XrayMonitorSettingsData {
   notify_latency: boolean
 }
 
+export interface XrayMonitorServer {
+  id: number
+  name: string
+  protocol: string
+  address: string
+  port: number
+  enabled: boolean
+  status: string
+  last_ping_ms: number | null
+  last_check: string | null
+  fail_count: number
+  position: number
+}
+
 export interface XrayMonitorSubscription {
   id: number
   name: string
@@ -1649,22 +1663,7 @@ export interface XrayMonitorSubscription {
   last_error: string | null
   server_count: number
   created_at: string | null
-}
-
-export interface XrayMonitorServer {
-  id: number
-  subscription_id: number | null
-  subscription_name: string | null
-  name: string
-  protocol: string
-  address: string
-  port: number
-  enabled: boolean
-  status: string
-  last_ping_ms: number | null
-  last_check: string | null
-  fail_count: number
-  created_at: string | null
+  servers: XrayMonitorServer[]
 }
 
 export interface XrayMonitorCheckEntry {

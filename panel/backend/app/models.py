@@ -662,7 +662,8 @@ class XrayMonitorServer(Base):
     
     id = Column(Integer, primary_key=True)
     subscription_id = Column(Integer, ForeignKey("xray_monitor_subscriptions.id", ondelete="CASCADE"), nullable=True, index=True)
-    name = Column(String(300), nullable=False)
+    position = Column(Integer, default=0)
+    name = Column(Text, nullable=False)
     protocol = Column(String(20), nullable=False)  # vless, vmess, trojan, shadowsocks
     address = Column(String(500), nullable=False)
     port = Column(Integer, nullable=False)

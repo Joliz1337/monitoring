@@ -635,12 +635,12 @@ Frontend lazy loading (panel/frontend/src/pages/Remnawave.tsx):
 |-------|----------|----------|
 | GET | /xray-monitor/settings | Настройки мониторинга |
 | PUT | /xray-monitor/settings | Обновить настройки |
-| GET | /xray-monitor/subscriptions | Список подписок |
+| GET | /xray-monitor/subscriptions | Список подписок (с вложенными серверами) |
 | POST | /xray-monitor/subscriptions | Добавить подписку |
 | PUT | /xray-monitor/subscriptions/{id} | Обновить подписку |
 | DELETE | /xray-monitor/subscriptions/{id} | Удалить подписку с серверами |
 | POST | /xray-monitor/subscriptions/{id}/refresh | Перезагрузить ключи |
-| GET | /xray-monitor/servers | Все серверы со статусами |
+| GET | /xray-monitor/servers | Ручные серверы (без подписки) |
 | POST | /xray-monitor/servers | Добавить ключи вручную |
 | DELETE | /xray-monitor/servers/{id} | Удалить сервер |
 | GET | /xray-monitor/servers/{id}/history | История проверок |

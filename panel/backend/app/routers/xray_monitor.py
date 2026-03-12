@@ -1,10 +1,11 @@
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select, delete, desc, func
+from sqlalchemy import select, delete, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -14,7 +15,7 @@ from app.models import (
 )
 from app.auth import verify_auth
 from app.services.xray_monitor import get_xray_monitor_service
-from app.services.xray_key_parser import fetch_subscription, parse_keys
+from app.services.xray_key_parser import fetch_subscription, parse_keys, is_valid_server
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +50,7 @@ class SubscriptionUpdate(BaseModel):
 
 
 class AddKeysRequest(BaseModel):
-    keys: str  # raw text with keys
+    keys: str
 
 
 class TestNotificationRequest(BaseModel):
@@ -103,10 +104,40 @@ async def update_settings(
 
 # ========================= Subscriptions =========================
 
+def _serialize_server(s: XrayMonitorServer) -> dict:
+    return {
+        "id": s.id,
+        "name": s.name,
+        "protocol": s.protocol,
+        "address": s.address,
+        "port": s.port,
+        "enabled": s.enabled,
+        "status": s.status,
+        "last_ping_ms": s.last_ping_ms,
+        "last_check": s.last_check.isoformat() if s.last_check else None,
+        "fail_count": s.fail_count,
+        "position": s.position,
+    }
+
+
 @router.get("/subscriptions")
 async def list_subscriptions(db: AsyncSession = Depends(get_db), _=Depends(verify_auth)):
     result = await db.execute(select(XrayMonitorSubscription).order_by(XrayMonitorSubscription.id))
     subs = result.scalars().all()
+
+    sub_ids = [s.id for s in subs]
+    servers_by_sub: dict[int, list] = {sid: [] for sid in sub_ids}
+
+    if sub_ids:
+        srv_result = await db.execute(
+            select(XrayMonitorServer)
+            .where(XrayMonitorServer.subscription_id.in_(sub_ids))
+            .order_by(XrayMonitorServer.position, XrayMonitorServer.id)
+        )
+        for srv in srv_result.scalars().all():
+            if srv.subscription_id in servers_by_sub:
+                servers_by_sub[srv.subscription_id].append(_serialize_server(srv))
+
     return [
         {
             "id": s.id,
@@ -118,6 +149,7 @@ async def list_subscriptions(db: AsyncSession = Depends(get_db), _=Depends(verif
             "last_error": s.last_error,
             "server_count": s.server_count,
             "created_at": s.created_at.isoformat() if s.created_at else None,
+            "servers": servers_by_sub.get(s.id, []),
         }
         for s in subs
     ]
@@ -134,14 +166,12 @@ async def add_subscription(
     await db.commit()
     await db.refresh(sub)
 
-    # Immediately fetch keys
     count = 0
     error = None
     try:
         keys = await fetch_subscription(body.url)
         count = await _save_parsed_keys(db, keys, sub.id)
         sub.server_count = count
-        from datetime import datetime, timezone
         sub.last_refreshed = datetime.now(timezone.utc).replace(tzinfo=None)
     except Exception as e:
         error = str(e)[:500]
@@ -197,7 +227,6 @@ async def refresh_subscription(
     if not sub:
         raise HTTPException(404, "Subscription not found")
 
-    # Remove old servers from this subscription
     await db.execute(delete(XrayMonitorServer).where(XrayMonitorServer.subscription_id == sub_id))
     await db.commit()
 
@@ -207,7 +236,6 @@ async def refresh_subscription(
         keys = await fetch_subscription(sub.url)
         count = await _save_parsed_keys(db, keys, sub.id)
         sub.server_count = count
-        from datetime import datetime, timezone
         sub.last_refreshed = datetime.now(timezone.utc).replace(tzinfo=None)
         sub.last_error = None
     except Exception as e:
@@ -221,45 +249,18 @@ async def refresh_subscription(
     return {"server_count": count, "error": error}
 
 
-# ========================= Servers =========================
+# ========================= Servers (manual only) =========================
 
 @router.get("/servers")
 async def list_servers(db: AsyncSession = Depends(get_db), _=Depends(verify_auth)):
+    """Only manual servers (subscription_id IS NULL)."""
     result = await db.execute(
-        select(XrayMonitorServer).order_by(
-            XrayMonitorServer.status.desc(),
-            XrayMonitorServer.last_ping_ms.asc().nullslast(),
-        )
+        select(XrayMonitorServer)
+        .where(XrayMonitorServer.subscription_id.is_(None))
+        .order_by(XrayMonitorServer.position, XrayMonitorServer.id)
     )
     servers = result.scalars().all()
-
-    sub_ids = {s.subscription_id for s in servers if s.subscription_id}
-    sub_names: dict[int, str] = {}
-    if sub_ids:
-        r = await db.execute(
-            select(XrayMonitorSubscription.id, XrayMonitorSubscription.name)
-            .where(XrayMonitorSubscription.id.in_(sub_ids))
-        )
-        sub_names = {row[0]: row[1] for row in r.fetchall()}
-
-    return [
-        {
-            "id": s.id,
-            "subscription_id": s.subscription_id,
-            "subscription_name": sub_names.get(s.subscription_id, "") if s.subscription_id else None,
-            "name": s.name,
-            "protocol": s.protocol,
-            "address": s.address,
-            "port": s.port,
-            "enabled": s.enabled,
-            "status": s.status,
-            "last_ping_ms": s.last_ping_ms,
-            "last_check": s.last_check.isoformat() if s.last_check else None,
-            "fail_count": s.fail_count,
-            "created_at": s.created_at.isoformat() if s.created_at else None,
-        }
-        for s in servers
-    ]
+    return [_serialize_server(s) for s in servers]
 
 
 @router.post("/servers")
@@ -354,7 +355,7 @@ async def test_notification(
 
     try:
         url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-        text = "✅ <b>Xray Monitor</b>\n\nTest notification — configuration is working!"
+        text = "\u2705 <b>Xray Monitor</b>\n\nTest notification \u2014 configuration is working!"
         async with aiohttp.ClientSession() as session:
             async with session.post(url, json={
                 "chat_id": chat_id,
@@ -373,13 +374,18 @@ async def test_notification(
 
 async def _save_parsed_keys(db: AsyncSession, keys: list[dict], subscription_id: int | None) -> int:
     count = 0
-    for k in keys:
+    for idx, k in enumerate(keys):
+        address = k.get("address", "").strip()
+        port = int(k.get("port", 0))
+        if not is_valid_server(address, port):
+            continue
         srv = XrayMonitorServer(
             subscription_id=subscription_id,
+            position=idx,
             name=k.get("name", "Unknown"),
             protocol=k.get("protocol", "unknown"),
-            address=k.get("address", ""),
-            port=int(k.get("port", 0)),
+            address=address,
+            port=port,
             raw_key=k.get("raw_key", ""),
             config_json=json.dumps(k.get("config", {}), ensure_ascii=False),
         )

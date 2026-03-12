@@ -194,6 +194,25 @@ _PARSERS = {
     "ss://": parse_shadowsocks,
 }
 
+_IP_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
+_DOMAIN_RE = re.compile(r"^[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)+$")
+
+
+def is_valid_server(address: str, port: int) -> bool:
+    """Check if address looks like a real IP or domain and port is valid."""
+    if not address or not port or port < 1 or port > 65535:
+        return False
+    address = address.strip()
+    if not address:
+        return False
+    if _IP_RE.match(address):
+        return True
+    if _DOMAIN_RE.match(address):
+        return True
+    if ":" in address:
+        return True  # IPv6
+    return False
+
 
 def parse_single_key(line: str) -> dict | None:
     """Try to parse a single key line."""
