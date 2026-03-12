@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, update, desc, func, and_
@@ -10,6 +11,7 @@ import json
 from app.database import get_db
 from app.models import Server, MetricsSnapshot
 from app.auth import verify_auth
+from app.services.blocklist_manager import get_blocklist_manager
 
 router = APIRouter(prefix="/servers", tags=["servers"])
 
@@ -256,6 +258,10 @@ async def create_server(
     await db.commit()
     await db.refresh(new_server)
     
+    asyncio.ensure_future(
+        get_blocklist_manager().sync_single_node_by_id(new_server.id)
+    )
+    
     return {
         "success": True,
         "server": {
@@ -352,6 +358,7 @@ async def update_server(
     if not server:
         raise HTTPException(status_code=404)
     
+    was_inactive = not server.is_active
     update_data = data.model_dump(exclude_unset=True)
     if "url" in update_data:
         update_data["url"] = update_data["url"].rstrip("/")
@@ -360,6 +367,11 @@ async def update_server(
         setattr(server, key, value)
     
     await db.commit()
+    
+    if was_inactive and server.is_active:
+        asyncio.ensure_future(
+            get_blocklist_manager().sync_single_node_by_id(server_id)
+        )
     
     return {"success": True, "message": "Server updated"}
 

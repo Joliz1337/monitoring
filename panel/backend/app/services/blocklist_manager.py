@@ -467,11 +467,11 @@ class BlocklistManager:
                         logger.warning(f"Source '{r['name']}' failed: {r['message']}")
                 
                 if any_changed:
-                    logger.info("Syncing updated blocklists to nodes")
+                    logger.info("Sources changed, clearing cache before sync")
                     self.clear_cache()
-                    await self.sync_all_nodes()
-                else:
-                    logger.info("No changes in blocklist sources, skipping sync")
+                
+                logger.info("Syncing blocklists to all nodes")
+                await self.sync_all_nodes()
                 
                 await asyncio.sleep(interval)
                 

@@ -305,7 +305,7 @@ CI/CD: `.github/workflows/docker-publish.yml` — 3 параллельных job
 - AntiScanner: `https://raw.githubusercontent.com/shadow-netlab/traffic-guard-lists/refs/heads/main/public/antiscanner.list`
 - Government Networks: `https://raw.githubusercontent.com/shadow-netlab/traffic-guard-lists/refs/heads/main/public/government_networks.list`
 
-Списки автоматически обновляются каждые 24 часа. При обнаружении изменений блоклисты синхронизируются со всеми активными нодами.
+Списки автоматически обновляются каждые 24 часа. Блоклисты синхронизируются со всеми активными нодами каждый цикл (независимо от изменений в источниках), что гарантирует получение блоклиста новыми серверами. Также sync автоматически запускается при создании сервера и при его активации (`is_active: false → true`).
 
 **Торрент-блокер:**
 
