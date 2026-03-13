@@ -275,7 +275,7 @@ export default function XrayMonitor() {
                     <label className="text-sm text-dark-400 mb-1 block">{t('xray_monitor.check_interval')}</label>
                     <input
                       type="number" className="input w-full" value={settings.check_interval}
-                      min={10} max={300}
+                      min={60} max={600}
                       onChange={e => setSettings({ ...settings, check_interval: Number(e.target.value) })}
                       onBlur={() => saveSettings({ check_interval: settings.check_interval })}
                     />

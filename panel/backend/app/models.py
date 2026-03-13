@@ -628,7 +628,7 @@ class XrayMonitorSettings(Base):
     
     id = Column(Integer, primary_key=True)
     enabled = Column(Boolean, default=False)
-    check_interval = Column(Integer, default=30)
+    check_interval = Column(Integer, default=60)
     latency_threshold_ms = Column(Integer, default=500)
     fail_threshold = Column(Integer, default=2)
     

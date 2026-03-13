@@ -256,7 +256,7 @@ class XrayMonitorService:
         while self._running:
             try:
                 settings = await self._load_settings()
-                interval = settings.check_interval if settings else 30
+                interval = max(60, settings.check_interval) if settings else 60
 
                 if self._config_dirty:
                     await self._reload_xray()
@@ -448,15 +448,13 @@ class XrayMonitorService:
 
         await self._cleanup_old_checks()
 
-    PING_INTERVAL_SEC = 2
+    PING_INTERVAL_SEC = 5
+    SAMPLES_PER_CHECK = 12
 
     async def _check_server(self, srv: XrayMonitorServer, settings: XrayMonitorSettings) -> list[dict]:
-        """Check one server, update DB, return notification events."""
+        """Ping server every 5s for 1 minute, compute average latency."""
         if not self._xray_healthy:
             return []
-
-        check_interval = settings.check_interval if settings else 30
-        sample_count = max(3, min(15, (check_interval - 6) // self.PING_INTERVAL_SEC))
 
         proxy_url = f"socks5://127.0.0.1:{srv.socks_port}"
         error_msg: Optional[str] = None
@@ -483,7 +481,7 @@ class XrayMonitorService:
                     check_ok = True
 
                     timings: list[float] = []
-                    for i in range(sample_count):
+                    for i in range(self.SAMPLES_PER_CHECK):
                         if i > 0:
                             await asyncio.sleep(self.PING_INTERVAL_SEC)
                         try:
@@ -495,7 +493,7 @@ class XrayMonitorService:
 
                     if timings:
                         timings.sort()
-                        trimmed = timings[1:-1] if len(timings) >= 5 else timings
+                        trimmed = timings[1:-1] if len(timings) >= 4 else timings
                         ping_ms = round(sum(trimmed) / len(trimmed), 1)
                     break
             except Exception as e:
