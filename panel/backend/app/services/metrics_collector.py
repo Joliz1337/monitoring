@@ -51,6 +51,8 @@ class MetricsCollector:
     """Collects metrics from all servers and stores in panel DB"""
     
     XRAY_CHECK_INTERVAL = 120  # Check xray availability every 2 minutes
+    ACTIVE_REFRESH_INTERVAL = 5  # Fast HAProxy cache refresh for active servers
+    ACTIVITY_TTL = 60  # Seconds of inactivity before server is no longer considered "active"
     
     def __init__(self):
         self._running = False
@@ -59,10 +61,14 @@ class MetricsCollector:
         self._haproxy_task: Optional[asyncio.Task] = None
         self._settings_task: Optional[asyncio.Task] = None
         self._xray_check_task: Optional[asyncio.Task] = None
+        self._active_cache_task: Optional[asyncio.Task] = None
         self._server_states: dict[int, ServerMetricsState] = {}
         self._collect_interval = DEFAULT_METRICS_INTERVAL
         self._haproxy_interval = DEFAULT_HAPROXY_INTERVAL
         self._traffic_period_days = 30
+        
+        # Activity tracking: server_id → last activity timestamp
+        self._active_servers: dict[int, float] = {}
         
         # Retention periods
         self._raw_retention_hours = 24  # keep raw data 24 hours
@@ -73,6 +79,10 @@ class MetricsCollector:
         now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
         self._last_hourly_aggregation: datetime = now_utc - timedelta(hours=2)
         self._last_daily_aggregation: datetime = now_utc - timedelta(days=2)
+    
+    def notify_activity(self, server_id: int):
+        """Mark server as having client activity — triggers fast HAProxy cache refresh (every 5s)"""
+        self._active_servers[server_id] = time.time()
     
     async def _load_settings(self):
         """Load collector intervals from database settings"""
@@ -131,12 +141,13 @@ class MetricsCollector:
         self._haproxy_task = asyncio.create_task(self._haproxy_cache_loop())
         self._settings_task = asyncio.create_task(self._settings_loop())
         self._xray_check_task = asyncio.create_task(self._xray_check_loop())
+        self._active_cache_task = asyncio.create_task(self._active_haproxy_cache_loop())
         logger.info(f"Metrics collector started (interval: {self._collect_interval}s, haproxy: {self._haproxy_interval}s)")
     
     async def stop(self):
         """Stop background collection"""
         self._running = False
-        for task in [self._task, self._aggregation_task, self._haproxy_task, self._settings_task, self._xray_check_task]:
+        for task in [self._task, self._aggregation_task, self._haproxy_task, self._settings_task, self._xray_check_task, self._active_cache_task]:
             if task:
                 task.cancel()
                 try:
@@ -409,13 +420,92 @@ class MetricsCollector:
                 logger.error(f"Aggregation error: {e}")
     
     async def _haproxy_cache_loop(self):
-        """Background loop for caching HAProxy and Traffic data (every 30 seconds)"""
+        """Background loop for caching HAProxy and Traffic data"""
         while self._running:
             try:
                 await asyncio.sleep(self._haproxy_interval)
                 await self._cache_haproxy_traffic_data()
             except Exception as e:
                 logger.error(f"HAProxy/Traffic cache error: {e}")
+    
+    async def _active_haproxy_cache_loop(self):
+        """Fast refresh loop (every 5s) for servers with recent client activity.
+        Only fetches HAProxy data (no traffic) to keep it lightweight."""
+        while self._running:
+            try:
+                await asyncio.sleep(self.ACTIVE_REFRESH_INTERVAL)
+                
+                now = time.time()
+                expired = [sid for sid, ts in self._active_servers.items()
+                           if now - ts > self.ACTIVITY_TTL]
+                for sid in expired:
+                    del self._active_servers[sid]
+                
+                if not self._active_servers:
+                    continue
+                
+                active_ids = list(self._active_servers.keys())
+                async with async_session() as db:
+                    result = await db.execute(
+                        select(Server).where(Server.id.in_(active_ids), Server.is_active == True)
+                    )
+                    servers = result.scalars().all()
+                
+                if servers:
+                    tasks = [self._cache_server_haproxy_only(s) for s in servers]
+                    await asyncio.gather(*tasks, return_exceptions=True)
+            except Exception as e:
+                logger.error(f"Active HAProxy cache error: {e}")
+    
+    async def _cache_server_haproxy_only(self, server: Server):
+        """Lightweight HAProxy-only cache refresh (no traffic data)"""
+        try:
+            async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+                headers = {"X-API-Key": server.api_key}
+                haproxy_data = {}
+                
+                for endpoint, key in [
+                    ("/api/haproxy/status", "status"),
+                    ("/api/haproxy/rules", "rules"),
+                    ("/api/haproxy/certs/all", "certs"),
+                    ("/api/haproxy/firewall/rules", "firewall"),
+                ]:
+                    try:
+                        res = await client.get(f"{server.url}{endpoint}", headers=headers)
+                        if res.status_code == 200:
+                            haproxy_data[key] = res.json()
+                    except Exception:
+                        pass
+                
+                if not haproxy_data:
+                    return
+                
+                existing = {}
+                if server.last_haproxy_data:
+                    try:
+                        existing = json.loads(server.last_haproxy_data)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                existing.update(haproxy_data)
+                existing["cached_at"] = datetime.now(timezone.utc).isoformat()
+                
+                for attempt in range(1, 4):
+                    try:
+                        async with async_session() as db:
+                            await db.execute(
+                                update(Server).where(Server.id == server.id).values(
+                                    last_haproxy_data=json.dumps(existing)
+                                )
+                            )
+                            await db.commit()
+                        break
+                    except Exception as db_err:
+                        if "deadlock" in str(db_err).lower() and attempt < 3:
+                            await asyncio.sleep(0.3 * attempt)
+                            continue
+                        raise
+        except Exception as e:
+            logger.debug(f"Failed to fast-refresh HAProxy for {server.name}: {e}")
     
     async def _cache_haproxy_traffic_data(self):
         """Cache HAProxy status/rules/certs and Traffic summary for all servers"""

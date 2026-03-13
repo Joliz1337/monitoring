@@ -145,6 +145,12 @@ async def proxy_request(
             logger.info(f"Response from {url}: {response.status_code}")
             
             if response.status_code == 200:
+                if method != "GET" and "/haproxy/" in endpoint:
+                    try:
+                        from app.services.metrics_collector import get_collector
+                        get_collector().notify_activity(server.id)
+                    except Exception:
+                        pass
                 return response.json()
             else:
                 raise HTTPException(status_code=response.status_code)
