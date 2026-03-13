@@ -448,11 +448,11 @@ class XrayMonitorService:
 
         await self._cleanup_old_checks()
 
-    PING_INTERVAL_SEC = 5
+    PING_INTERVAL_SEC = 1
     SAMPLES_PER_CHECK = 12
 
     async def _check_server(self, srv: XrayMonitorServer, settings: XrayMonitorSettings) -> list[dict]:
-        """Ping server every 5s for 1 minute, compute average latency."""
+        """Measure RTT on established connection: 12 pings with 1s gaps for connection reuse."""
         if not self._xray_healthy:
             return []
 
@@ -462,20 +462,20 @@ class XrayMonitorService:
         ping_ms: Optional[float] = None
 
         probe_targets = (
-            "https://1.1.1.1/cdn-cgi/trace",
-            "https://one.one.one.one/cdn-cgi/trace",
-            "https://cloudflare.com/cdn-cgi/trace",
+            "https://cp.cloudflare.com/generate_204",
+            "https://www.google.com/generate_204",
+            "https://connectivitycheck.gstatic.com/generate_204",
         )
         for target in probe_targets:
             try:
                 transport = httpx.AsyncHTTPTransport(proxy=proxy_url)
                 async with httpx.AsyncClient(
                     transport=transport,
-                    timeout=httpx.Timeout(12.0, connect=8.0, read=6.0),
+                    timeout=httpx.Timeout(8.0, connect=6.0, read=4.0),
                     follow_redirects=True,
                     verify=False,
                 ) as client:
-                    warmup = await client.get(target)
+                    warmup = await client.head(target)
                     if warmup.status_code >= 500:
                         continue
                     check_ok = True
@@ -486,7 +486,7 @@ class XrayMonitorService:
                             await asyncio.sleep(self.PING_INTERVAL_SEC)
                         try:
                             start = time.monotonic()
-                            await client.get(target)
+                            await client.head(target)
                             timings.append((time.monotonic() - start) * 1000)
                         except Exception:
                             pass
