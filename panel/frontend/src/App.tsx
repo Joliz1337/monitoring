@@ -1,31 +1,49 @@
 import { Routes, Route, Navigate } from 'react-router-dom'
-import { useEffect, Suspense, lazy } from 'react'
+import React, { useEffect, Suspense, lazy } from 'react'
 import { motion } from 'framer-motion'
 import { Activity } from 'lucide-react'
 import { Toaster } from 'sonner'
 import { useAuthStore } from './stores/authStore'
 import { useExtStore } from './stores/_extStore'
 import { useTranslation } from 'react-i18next'
+import ErrorBoundary from './components/ErrorBoundary'
 import Layout from './components/Layout/Layout'
 import Login from './pages/Login'
 import Dashboard from './pages/Dashboard'
 import Servers from './pages/Servers'
 import { isExtEnabled } from './pages/_internal'
 
-const ServerDetails = lazy(() => import('./pages/ServerDetails'))
-const HAProxy = lazy(() => import('./pages/HAProxy'))
-const Traffic = lazy(() => import('./pages/Traffic'))
-const Settings = lazy(() => import('./pages/Settings'))
-const Updates = lazy(() => import('./pages/Updates'))
-const BulkActions = lazy(() => import('./pages/BulkActions'))
-const Blocklist = lazy(() => import('./pages/Blocklist'))
-const Remnawave = lazy(() => import('./pages/Remnawave'))
-const Alerts = lazy(() => import('./pages/Alerts'))
-const Billing = lazy(() => import('./pages/Billing'))
-const XrayMonitor = lazy(() => import('./pages/XrayMonitor'))
+function lazyRetry<T extends React.ComponentType<unknown>>(
+  factory: () => Promise<{ default: T }>,
+  retries = 2
+): React.LazyExoticComponent<T> {
+  return lazy(async () => {
+    for (let i = 0; i <= retries; i++) {
+      try {
+        return await factory()
+      } catch (err) {
+        if (i === retries) throw err
+        await new Promise(r => setTimeout(r, 1000 * (i + 1)))
+      }
+    }
+    return factory()
+  })
+}
+
+const ServerDetails = lazyRetry(() => import('./pages/ServerDetails'))
+const HAProxy = lazyRetry(() => import('./pages/HAProxy'))
+const Traffic = lazyRetry(() => import('./pages/Traffic'))
+const Settings = lazyRetry(() => import('./pages/Settings'))
+const Updates = lazyRetry(() => import('./pages/Updates'))
+const BulkActions = lazyRetry(() => import('./pages/BulkActions'))
+const Blocklist = lazyRetry(() => import('./pages/Blocklist'))
+const Remnawave = lazyRetry(() => import('./pages/Remnawave'))
+const Alerts = lazyRetry(() => import('./pages/Alerts'))
+const Billing = lazyRetry(() => import('./pages/Billing'))
+const XrayMonitor = lazyRetry(() => import('./pages/XrayMonitor'))
 
 const ExtPageLazy = isExtEnabled 
-  ? lazy(() => import('./pages/_internal/ExtPage'))
+  ? lazyRetry(() => import('./pages/_internal/ExtPage'))
   : null
 
 function LoadingScreen() {
@@ -132,6 +150,16 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>
 }
 
+function SuspenseWithBoundary({ children }: { children: React.ReactNode }) {
+  return (
+    <ErrorBoundary>
+      <Suspense fallback={<LoadingScreen />}>
+        {children}
+      </Suspense>
+    </ErrorBoundary>
+  )
+}
+
 export default function App() {
   return (
     <>
@@ -150,41 +178,43 @@ export default function App() {
       visibleToasts={4}
       closeButton
     />
-    <Routes>
-      <Route path="/:uid/login" element={<Login />} />
-      <Route
-        path="/:uid"
-        element={
-          <ProtectedRoute>
-            <Layout />
-          </ProtectedRoute>
-        }
-      >
-        <Route index element={<Dashboard />} />
-        <Route path="servers" element={<Servers />} />
-        <Route path="bulk-actions" element={<Suspense fallback={<LoadingScreen />}><BulkActions /></Suspense>} />
-        <Route path="alerts" element={<Suspense fallback={<LoadingScreen />}><Alerts /></Suspense>} />
-        <Route path="billing" element={<Suspense fallback={<LoadingScreen />}><Billing /></Suspense>} />
-        <Route path="blocklist" element={<Suspense fallback={<LoadingScreen />}><Blocklist /></Suspense>} />
-        <Route path="remnawave" element={<Suspense fallback={<LoadingScreen />}><Remnawave /></Suspense>} />
-        <Route path="xray-monitor" element={<Suspense fallback={<LoadingScreen />}><XrayMonitor /></Suspense>} />
-        <Route path="server/:serverId" element={<Suspense fallback={<LoadingScreen />}><ServerDetails /></Suspense>} />
-        <Route path="server/:serverId/haproxy" element={<Suspense fallback={<LoadingScreen />}><HAProxy /></Suspense>} />
-        <Route path="server/:serverId/traffic" element={<Suspense fallback={<LoadingScreen />}><Traffic /></Suspense>} />
-        <Route path="settings" element={<Suspense fallback={<LoadingScreen />}><Settings /></Suspense>} />
-        <Route path="updates" element={<Suspense fallback={<LoadingScreen />}><Updates /></Suspense>} />
-        {ExtPageLazy && (
-          <Route 
-            path="ip-search"
-            element={
-              <Suspense fallback={<LoadingScreen />}>
-                <ExtPageLazy />
-              </Suspense>
-            } 
-          />
-        )}
-      </Route>
-    </Routes>
+    <ErrorBoundary>
+      <Routes>
+        <Route path="/:uid/login" element={<Login />} />
+        <Route
+          path="/:uid"
+          element={
+            <ProtectedRoute>
+              <Layout />
+            </ProtectedRoute>
+          }
+        >
+          <Route index element={<ErrorBoundary><Dashboard /></ErrorBoundary>} />
+          <Route path="servers" element={<ErrorBoundary><Servers /></ErrorBoundary>} />
+          <Route path="bulk-actions" element={<SuspenseWithBoundary><BulkActions /></SuspenseWithBoundary>} />
+          <Route path="alerts" element={<SuspenseWithBoundary><Alerts /></SuspenseWithBoundary>} />
+          <Route path="billing" element={<SuspenseWithBoundary><Billing /></SuspenseWithBoundary>} />
+          <Route path="blocklist" element={<SuspenseWithBoundary><Blocklist /></SuspenseWithBoundary>} />
+          <Route path="remnawave" element={<SuspenseWithBoundary><Remnawave /></SuspenseWithBoundary>} />
+          <Route path="xray-monitor" element={<SuspenseWithBoundary><XrayMonitor /></SuspenseWithBoundary>} />
+          <Route path="server/:serverId" element={<SuspenseWithBoundary><ServerDetails /></SuspenseWithBoundary>} />
+          <Route path="server/:serverId/haproxy" element={<SuspenseWithBoundary><HAProxy /></SuspenseWithBoundary>} />
+          <Route path="server/:serverId/traffic" element={<SuspenseWithBoundary><Traffic /></SuspenseWithBoundary>} />
+          <Route path="settings" element={<SuspenseWithBoundary><Settings /></SuspenseWithBoundary>} />
+          <Route path="updates" element={<SuspenseWithBoundary><Updates /></SuspenseWithBoundary>} />
+          {ExtPageLazy && (
+            <Route 
+              path="ip-search"
+              element={
+                <SuspenseWithBoundary>
+                  <ExtPageLazy />
+                </SuspenseWithBoundary>
+              } 
+            />
+          )}
+        </Route>
+      </Routes>
+    </ErrorBoundary>
     </>
   )
 }
