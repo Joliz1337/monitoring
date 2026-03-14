@@ -185,6 +185,9 @@ class SpeedtestScheduler:
         """Build the server list based on mode (public / panel / both)."""
         servers = []
 
+        if self._mode in ("public", "both"):
+            servers.extend(self._servers)
+
         if self._mode in ("panel", "both") and self._panel_address:
             servers.append({
                 "host": self._panel_address,
@@ -192,9 +195,6 @@ class SpeedtestScheduler:
                 "label": "Panel",
                 "region": "panel",
             })
-
-        if self._mode in ("public", "both"):
-            servers.extend(self._servers)
 
         return servers
 
