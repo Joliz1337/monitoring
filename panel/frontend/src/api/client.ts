@@ -326,6 +326,38 @@ export interface InterfacesTraffic {
   total_tx: number
 }
 
+export interface SpeedtestServerConfig {
+  host: string
+  port: number
+  label: string
+  region: string
+}
+
+export interface SpeedtestResultEntry {
+  server: string
+  port: number
+  download_mbps: number
+  upload_mbps?: number
+  retransmits?: number
+  error?: string
+}
+
+export interface SpeedtestResult {
+  best_speed_mbps: number
+  best_server: string
+  threshold_mbps: number
+  ok: boolean
+  results: SpeedtestResultEntry[]
+  tested_at: string | null
+}
+
+export interface ServerSpeedtest {
+  best_speed_mbps: number
+  best_server: string
+  ok: boolean
+  tested_at: string | null
+}
+
 export const authApi = {
   login: (password: string) => api.post('/auth/login', { password }),
   logout: () => api.post('/auth/logout'),
@@ -474,6 +506,12 @@ export const proxyApi = {
   
   // Get SSE URL for streaming command execution
   getExecuteStreamUrl: (serverId: number) => `/api/proxy/${serverId}/system/execute-stream`,
+  
+  // Speed test
+  runSpeedtest: (serverId: number) =>
+    api.post<{ success: boolean } & SpeedtestResult>(`/proxy/${serverId}/speedtest`),
+  getSpeedtest: (serverId: number) =>
+    api.get<SpeedtestResult>(`/proxy/${serverId}/speedtest`),
 }
 
 export interface ExecuteRequest {

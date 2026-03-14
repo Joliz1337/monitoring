@@ -215,6 +215,19 @@ async def list_servers(
             server_info["metrics"] = None
             server_info["status"] = "offline" if s.last_error else "loading"
         
+        # Include speedtest data if available
+        if include_metrics and s.last_speedtest:
+            try:
+                speedtest_data = json.loads(s.last_speedtest)
+                server_info["speedtest"] = {
+                    "best_speed_mbps": speedtest_data.get("best_speed_mbps", 0),
+                    "best_server": speedtest_data.get("best_server", ""),
+                    "ok": speedtest_data.get("ok", False),
+                    "tested_at": speedtest_data.get("tested_at"),
+                }
+            except json.JSONDecodeError:
+                pass
+        
         # Include cached traffic data if available
         if include_metrics and s.last_traffic_data:
             try:

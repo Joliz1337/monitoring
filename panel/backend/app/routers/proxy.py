@@ -1229,6 +1229,41 @@ async def set_ipset_timeout(
     return await proxy_request(server, "/api/ipset/timeout", method="PUT", json_data=data)
 
 
+# ==================== Speed Test ====================
+
+@router.post("/{server_id}/speedtest")
+async def run_speedtest(
+    server_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Trigger manual speed test on a node."""
+    from app.services.speedtest_scheduler import get_speedtest_scheduler
+    scheduler = get_speedtest_scheduler()
+    result = await scheduler.test_single_node_by_id(server_id)
+    if result is None:
+        raise HTTPException(status_code=404)
+    if "error" in result:
+        return {"success": False, **result}
+    return {"success": True, **result}
+
+
+@router.get("/{server_id}/speedtest")
+async def get_speedtest_result(
+    server_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Get last speed test result for a node."""
+    server = await get_server_by_id(server_id, db)
+    if server.last_speedtest:
+        try:
+            return json.loads(server.last_speedtest)
+        except json.JSONDecodeError:
+            pass
+    return {"best_speed_mbps": 0, "results": [], "tested_at": None}
+
+
 @router.post("/{server_id}/ipset/sync")
 async def sync_ipset(
     server_id: int,

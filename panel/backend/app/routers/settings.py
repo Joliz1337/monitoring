@@ -20,6 +20,15 @@ DEFAULT_SETTINGS = {
     # Collector intervals (in seconds)
     "metrics_collect_interval": "10",  # Recommended: 10-15s
     "haproxy_collect_interval": "60",  # Recommended: 60s
+    # Speedtest settings
+    "speedtest_enabled": "true",
+    "speedtest_mode": "both",
+    "speedtest_threshold": "500",
+    "speedtest_interval": "60",
+    "speedtest_duration": "3",
+    "speedtest_streams": "4",
+    "speedtest_panel_port": "5201",
+    "speedtest_panel_address": "",
 }
 
 

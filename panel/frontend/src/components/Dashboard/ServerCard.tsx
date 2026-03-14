@@ -19,8 +19,9 @@ import {
   ArrowUpFromLine,
   PowerOff,
   Database,
+  Gauge,
 } from 'lucide-react'
-import { Server, ServerMetrics } from '../../api/client'
+import { Server, ServerMetrics, ServerSpeedtest } from '../../api/client'
 import StatusBadge from '../ui/StatusBadge'
 import ProgressBar from '../ui/ProgressBar'
 import { formatBytes, formatBitsPerSecLocalized, formatUptime, formatTimeAgo } from '../../utils/format'
@@ -45,10 +46,19 @@ interface ServerTraffic {
   days: number
 }
 
+function getSpeedBadge(speedtest: ServerSpeedtest | null | undefined, threshold: number = 500): { color: string; textColor: string; icon: string } {
+  if (!speedtest || !speedtest.tested_at) return { color: 'bg-dark-600/50', textColor: 'text-dark-400', icon: '⚪' }
+  const speed = speedtest.best_speed_mbps
+  if (speed >= threshold) return { color: 'bg-success/15', textColor: 'text-success', icon: '🟢' }
+  if (speed >= threshold / 2) return { color: 'bg-warning/15', textColor: 'text-warning', icon: '🟡' }
+  return { color: 'bg-danger/15', textColor: 'text-danger', icon: '🔴' }
+}
+
 interface ServerCardProps {
   server: Server & { 
     metrics?: ServerMetrics | null
     traffic?: ServerTraffic | null
+    speedtest?: ServerSpeedtest | null
     status: 'online' | 'offline' | 'loading' | 'error'
     last_seen?: string | null
     last_error?: string | null
@@ -384,7 +394,9 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
             )}
             
             {/* Standard: CPU (общий), RAM, диск, сеть, footer */}
-            {detailLevel === 'standard' && (
+            {detailLevel === 'standard' && (() => {
+              const stdBadge = getSpeedBadge(server.speedtest)
+              return (
               <>
                 <div className="grid grid-cols-2 gap-4 mb-4">
                   <MetricItem
@@ -440,6 +452,14 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
                       <Clock className="w-3.5 h-3.5" />
                       <span>{formatUptime(metrics.system.uptime_seconds)}</span>
                     </div>
+                    {server.speedtest?.tested_at && (
+                      <div className={`flex items-center gap-1 flex-shrink-0 ${stdBadge.textColor}`}
+                        title={server.speedtest.best_server || ''}
+                      >
+                        <Gauge className="w-3.5 h-3.5" />
+                        <span className="font-mono">{Math.round(server.speedtest.best_speed_mbps)}</span>
+                      </div>
+                    )}
                     {metrics.certificates?.closest_expiry ? (
                       <div className={`flex items-center gap-1 min-w-0 ${
                         metrics.certificates.closest_expiry.expired 
@@ -468,10 +488,13 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
                   <span className="text-dark-500 truncate flex-shrink-0 max-w-[140px]">{metrics.system.os}</span>
                 </div>
               </>
-            )}
+              )
+            })()}
             
             {/* Detailed: полный вид с CPU по ядрам и трафиком */}
-            {detailLevel === 'detailed' && (
+            {detailLevel === 'detailed' && (() => {
+              const detBadge = getSpeedBadge(server.speedtest)
+              return (
               <>
                 <div className="grid grid-cols-2 gap-4 mb-4">
                   <CpuCoresItem
@@ -551,6 +574,14 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
                       <Clock className="w-3.5 h-3.5" />
                       <span>{formatUptime(metrics.system.uptime_seconds)}</span>
                     </div>
+                    {server.speedtest?.tested_at && (
+                      <div className={`flex items-center gap-1 flex-shrink-0 ${detBadge.textColor}`}
+                        title={server.speedtest.best_server || ''}
+                      >
+                        <Gauge className="w-3.5 h-3.5" />
+                        <span className="font-mono">{Math.round(server.speedtest.best_speed_mbps)}</span>
+                      </div>
+                    )}
                     {metrics.certificates?.closest_expiry ? (
                       <div className={`flex items-center gap-1 min-w-0 ${
                         metrics.certificates.closest_expiry.expired 
@@ -579,7 +610,8 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
                   <span className="text-dark-500 truncate flex-shrink-0 max-w-[140px]">{metrics.system.os}</span>
                 </div>
               </>
-            )}
+              )
+            })()}
           </div>
         ) : server.status === 'loading' ? (
           <div className="h-32 flex items-center justify-center">
@@ -642,7 +674,8 @@ const ServerCard = memo(ServerCardComponent, (prevProps, nextProps) => {
     prevProps.index === nextProps.index &&
     JSON.stringify(prevProps.server.metrics?.cpu?.usage_percent) === JSON.stringify(nextProps.server.metrics?.cpu?.usage_percent) &&
     JSON.stringify(prevProps.server.metrics?.memory?.ram?.percent) === JSON.stringify(nextProps.server.metrics?.memory?.ram?.percent) &&
-    JSON.stringify(prevProps.server.traffic) === JSON.stringify(nextProps.server.traffic)
+    JSON.stringify(prevProps.server.traffic) === JSON.stringify(nextProps.server.traffic) &&
+    prevProps.server.speedtest?.best_speed_mbps === nextProps.server.speedtest?.best_speed_mbps
   )
 })
 

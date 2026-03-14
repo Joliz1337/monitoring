@@ -1,9 +1,9 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { Settings as SettingsIcon, RefreshCw, Layout, Languages, Sparkles, Check, Clock, Activity, Shield, AlertTriangle, Loader2, CheckCircle2, XCircle, Terminal, Server, Zap, Cpu, HardDrive, MemoryStick, Database, Download, Upload, Trash2, Archive } from 'lucide-react'
+import { Settings as SettingsIcon, RefreshCw, Layout, Languages, Sparkles, Check, Clock, Activity, Shield, AlertTriangle, Loader2, CheckCircle2, XCircle, Terminal, Server, Zap, Cpu, HardDrive, MemoryStick, Database, Download, Upload, Trash2, Archive, Gauge, Plus, X } from 'lucide-react'
 import { useSettingsStore, TIMEZONE_OPTIONS, TRAFFIC_PERIOD_OPTIONS, METRICS_INTERVAL_OPTIONS, HAPROXY_INTERVAL_OPTIONS } from '../stores/settingsStore'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence, LayoutGroup } from 'framer-motion'
-import { systemApi, backupApi, PanelCertificateInfo, PanelServerStats, BackupInfo, BackupStatus } from '../api/client'
+import { systemApi, backupApi, settingsApi, PanelCertificateInfo, PanelServerStats, BackupInfo, BackupStatus, SpeedtestServerConfig } from '../api/client'
 import { toast } from 'sonner'
 
 interface RenewalResult {
@@ -1286,6 +1286,9 @@ export default function Settings() {
           ) : null}
         </motion.div>
 
+        {/* Speed Test */}
+        <SpeedtestSettings />
+
         {/* Info */}
         <motion.div 
           initial={{ opacity: 0, y: 20 }}
@@ -1307,6 +1310,280 @@ export default function Settings() {
             </div>
           </div>
         </motion.div>
+      </div>
+    </motion.div>
+  )
+}
+
+
+const DEFAULT_IPERF_SERVERS: SpeedtestServerConfig[] = [
+  { host: "ping.online.net", port: 5200, label: "Online.net (100G)", region: "EU-FR" },
+  { host: "speedtest.serverius.net", port: 5002, label: "Serverius (10G)", region: "EU-NL" },
+  { host: "iperf3.moji.fr", port: 5200, label: "Moji (100G)", region: "EU-FR" },
+  { host: "paris.bbr.iperf.bytel.fr", port: 9200, label: "Bouygues (10G)", region: "EU-FR" },
+  { host: "spd-rudp.hostkey.ru", port: 5201, label: "Hostkey Moscow", region: "RU-MOW" },
+  { host: "st.spb.ertelecom.ru", port: 5201, label: "Ertelecom SPb", region: "RU-SPB" },
+  { host: "st.ekat.ertelecom.ru", port: 5201, label: "Ertelecom Yekaterinburg", region: "RU-SVE" },
+  { host: "speedtest.uztelecom.uz", port: 5200, label: "Uztelecom (10G)", region: "Asia-UZ" },
+]
+
+function SpeedtestSettings() {
+  const { t } = useTranslation()
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+
+  const [enabled, setEnabled] = useState(true)
+  const [mode, setMode] = useState<'public' | 'panel' | 'both'>('both')
+  const [threshold, setThreshold] = useState(500)
+  const [interval, setInterval_] = useState(60)
+  const [duration, setDuration] = useState(3)
+  const [streams, setStreams] = useState(4)
+  const [panelPort, setPanelPort] = useState(5201)
+  const [panelAddress, setPanelAddress] = useState('')
+  const [servers, setServers] = useState<SpeedtestServerConfig[]>(DEFAULT_IPERF_SERVERS)
+  const [showServers, setShowServers] = useState(false)
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const { data } = await settingsApi.getAll()
+        const s = data.settings
+        setEnabled(s.speedtest_enabled !== 'false')
+        setMode((s.speedtest_mode || 'both') as 'public' | 'panel' | 'both')
+        setThreshold(parseInt(s.speedtest_threshold || '500', 10))
+        setInterval_(parseInt(s.speedtest_interval || '60', 10))
+        setDuration(parseInt(s.speedtest_duration || '3', 10))
+        setStreams(parseInt(s.speedtest_streams || '4', 10))
+        setPanelPort(parseInt(s.speedtest_panel_port || '5201', 10))
+        setPanelAddress(s.speedtest_panel_address || '')
+        if (s.speedtest_servers) {
+          try {
+            const parsed = JSON.parse(s.speedtest_servers)
+            if (Array.isArray(parsed) && parsed.length > 0) setServers(parsed)
+          } catch { /* keep defaults */ }
+        }
+      } catch { /* keep defaults */ }
+      setLoading(false)
+    })()
+  }, [])
+
+  const save = async () => {
+    setSaving(true)
+    try {
+      const updates: [string, string][] = [
+        ['speedtest_enabled', String(enabled)],
+        ['speedtest_mode', mode],
+        ['speedtest_threshold', String(threshold)],
+        ['speedtest_interval', String(interval)],
+        ['speedtest_duration', String(duration)],
+        ['speedtest_streams', String(streams)],
+        ['speedtest_panel_port', String(panelPort)],
+        ['speedtest_panel_address', panelAddress],
+        ['speedtest_servers', JSON.stringify(servers)],
+      ]
+      await Promise.all(updates.map(([k, v]) => settingsApi.set(k, v)))
+      toast.success(t('settings.speedtest_saved'))
+    } catch {
+      toast.error('Error saving')
+    }
+    setSaving(false)
+  }
+
+  const addServer = () => {
+    setServers([...servers, { host: '', port: 5201, label: '', region: '' }])
+  }
+
+  const removeServer = (idx: number) => {
+    setServers(servers.filter((_, i) => i !== idx))
+  }
+
+  const updateServer = (idx: number, field: keyof SpeedtestServerConfig, value: string | number) => {
+    setServers(servers.map((s, i) => i === idx ? { ...s, [field]: value } : s))
+  }
+
+  if (loading) return null
+
+  return (
+    <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }} className="card group hover:border-dark-700 transition-all">
+      <div className="flex items-center gap-3 mb-5">
+        <motion.div
+          className="w-11 h-11 rounded-xl bg-gradient-to-br from-accent-500/20 to-accent-600/20
+                     flex items-center justify-center border border-accent-500/20
+                     group-hover:shadow-lg group-hover:shadow-accent-500/10 transition-shadow"
+          whileHover={{ rotate: 10, scale: 1.05 }}
+        >
+          <Gauge className="w-5 h-5 text-accent-500" />
+        </motion.div>
+        <div className="flex-1">
+          <h2 className="font-semibold text-dark-100">{t('settings.speedtest_title')}</h2>
+          <p className="text-sm text-dark-500">{t('settings.speedtest_desc')}</p>
+        </div>
+      </div>
+
+      <div className="space-y-4">
+        {/* Enable toggle */}
+        <div className="flex items-center justify-between">
+          <span className="text-sm text-dark-300">{t('settings.speedtest_enabled')}</span>
+          <button
+            onClick={() => setEnabled(!enabled)}
+            className={`relative w-11 h-6 rounded-full transition-colors ${enabled ? 'bg-accent-500' : 'bg-dark-600'}`}
+          >
+            <div className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform ${enabled ? 'translate-x-5' : ''}`} />
+          </button>
+        </div>
+
+        {/* Mode */}
+        <div>
+          <label className="text-sm text-dark-300 block mb-1.5">{t('settings.speedtest_mode')}</label>
+          <div className="flex gap-2">
+            {(['public', 'panel', 'both'] as const).map(m => (
+              <button
+                key={m}
+                onClick={() => setMode(m)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                  mode === m ? 'bg-accent-500/20 text-accent-400 border border-accent-500/30' : 'bg-dark-800 text-dark-400 border border-dark-700 hover:border-dark-600'
+                }`}
+              >
+                {t(`settings.speedtest_mode_${m}`)}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Panel address (visible for panel/both modes) */}
+        {(mode === 'panel' || mode === 'both') && (
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-sm text-dark-300 block mb-1.5">{t('settings.speedtest_panel_address')}</label>
+              <input
+                type="text"
+                value={panelAddress}
+                onChange={e => setPanelAddress(e.target.value)}
+                placeholder={t('settings.speedtest_panel_address_hint')}
+                className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200 focus:outline-none focus:border-accent-500/50"
+              />
+            </div>
+            <div>
+              <label className="text-sm text-dark-300 block mb-1.5">{t('settings.speedtest_panel_port')}</label>
+              <input
+                type="number"
+                value={panelPort}
+                onChange={e => setPanelPort(parseInt(e.target.value, 10) || 5201)}
+                className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200 focus:outline-none focus:border-accent-500/50"
+              />
+            </div>
+          </div>
+        )}
+
+        {/* Numeric settings */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <div>
+            <label className="text-sm text-dark-300 block mb-1.5">{t('settings.speedtest_threshold')}</label>
+            <input
+              type="number"
+              value={threshold}
+              onChange={e => setThreshold(parseInt(e.target.value, 10) || 500)}
+              className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200 focus:outline-none focus:border-accent-500/50"
+            />
+          </div>
+          <div>
+            <label className="text-sm text-dark-300 block mb-1.5">{t('settings.speedtest_interval')}</label>
+            <input
+              type="number"
+              value={interval}
+              onChange={e => setInterval_(parseInt(e.target.value, 10) || 60)}
+              className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200 focus:outline-none focus:border-accent-500/50"
+            />
+          </div>
+          <div>
+            <label className="text-sm text-dark-300 block mb-1.5">{t('settings.speedtest_duration')}</label>
+            <input
+              type="number"
+              value={duration}
+              onChange={e => setDuration(parseInt(e.target.value, 10) || 3)}
+              className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200 focus:outline-none focus:border-accent-500/50"
+            />
+          </div>
+          <div>
+            <label className="text-sm text-dark-300 block mb-1.5">{t('settings.speedtest_streams')}</label>
+            <input
+              type="number"
+              value={streams}
+              onChange={e => setStreams(parseInt(e.target.value, 10) || 4)}
+              className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200 focus:outline-none focus:border-accent-500/50"
+            />
+          </div>
+        </div>
+
+        {/* Servers list */}
+        {(mode === 'public' || mode === 'both') && (
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <label className="text-sm text-dark-300">{t('settings.speedtest_servers')}</label>
+              <button onClick={() => setShowServers(!showServers)} className="text-xs text-accent-400 hover:text-accent-300">
+                {showServers ? t('common.hide') : t('common.show')} ({servers.length})
+              </button>
+            </div>
+            <AnimatePresence>
+              {showServers && (
+                <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="overflow-hidden">
+                  <div className="space-y-2 mb-2">
+                    {servers.map((srv, idx) => (
+                      <div key={idx} className="flex items-center gap-2">
+                        <input
+                          type="text"
+                          value={srv.host}
+                          onChange={e => updateServer(idx, 'host', e.target.value)}
+                          placeholder={t('settings.speedtest_host')}
+                          className="flex-1 bg-dark-800 border border-dark-700 rounded-lg px-2 py-1.5 text-xs text-dark-200 focus:outline-none focus:border-accent-500/50"
+                        />
+                        <input
+                          type="number"
+                          value={srv.port}
+                          onChange={e => updateServer(idx, 'port', parseInt(e.target.value, 10) || 5201)}
+                          className="w-16 bg-dark-800 border border-dark-700 rounded-lg px-2 py-1.5 text-xs text-dark-200 focus:outline-none focus:border-accent-500/50"
+                        />
+                        <input
+                          type="text"
+                          value={srv.label}
+                          onChange={e => updateServer(idx, 'label', e.target.value)}
+                          placeholder={t('settings.speedtest_label')}
+                          className="w-32 bg-dark-800 border border-dark-700 rounded-lg px-2 py-1.5 text-xs text-dark-200 focus:outline-none focus:border-accent-500/50"
+                        />
+                        <input
+                          type="text"
+                          value={srv.region}
+                          onChange={e => updateServer(idx, 'region', e.target.value)}
+                          placeholder={t('settings.speedtest_region')}
+                          className="w-20 bg-dark-800 border border-dark-700 rounded-lg px-2 py-1.5 text-xs text-dark-200 focus:outline-none focus:border-accent-500/50"
+                        />
+                        <button onClick={() => removeServer(idx)} className="text-dark-500 hover:text-danger transition-colors p-1">
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  <button onClick={addServer} className="flex items-center gap-1.5 text-xs text-accent-400 hover:text-accent-300">
+                    <Plus className="w-3.5 h-3.5" />
+                    {t('settings.speedtest_add_server')}
+                  </button>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+        )}
+
+        {/* Save button */}
+        <div className="pt-2">
+          <button
+            onClick={save}
+            disabled={saving}
+            className="px-4 py-2 bg-accent-500 hover:bg-accent-600 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition-colors flex items-center gap-2"
+          >
+            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
+            {t('common.save')}
+          </button>
+        </div>
       </div>
     </motion.div>
   )

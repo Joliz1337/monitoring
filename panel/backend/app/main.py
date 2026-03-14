@@ -23,6 +23,7 @@ from app.services.traffic_analyzer import start_traffic_analyzer, stop_traffic_a
 from app.services.server_alerter import start_server_alerter, stop_server_alerter
 from app.services.billing_checker import start_billing_checker, stop_billing_checker
 from app.services.xray_monitor import start_xray_monitor, stop_xray_monitor
+from app.services.speedtest_scheduler import start_speedtest_scheduler, stop_speedtest_scheduler
 from app.security import SecurityMiddleware
 # Import all models to register them with Base.metadata
 from app.models import (  # noqa: F401
@@ -87,6 +88,7 @@ async def lifespan(app: FastAPI):
     await start_server_alerter()
     await start_billing_checker()
     await start_xray_monitor()
+    await start_speedtest_scheduler()
     
     # Cache warming runs in background — doesn't block /health
     warmup_task = asyncio.create_task(_deferred_startup())
@@ -94,6 +96,7 @@ async def lifespan(app: FastAPI):
     yield
     
     warmup_task.cancel()
+    await stop_speedtest_scheduler()
     await stop_xray_monitor()
     await stop_billing_checker()
     await stop_server_alerter()

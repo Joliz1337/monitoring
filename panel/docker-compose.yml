@@ -128,6 +128,8 @@ services:
       - /usr/bin/docker:/usr/bin/docker:ro
       # For reading SSL certificate info (need root for Let's Encrypt files with 0600 perms)
       - /etc/letsencrypt:/etc/letsencrypt:ro
+    ports:
+      - "${IPERF_PORT:-5201}:5201"
     depends_on:
       postgres:
         condition: service_healthy

@@ -13,7 +13,7 @@ from fastapi import Depends, FastAPI
 
 from app.auth import verify_api_key
 from app.config import get_settings
-from app.routers import haproxy, metrics, traffic, system, ipset, remnawave, torrent_blocker
+from app.routers import haproxy, metrics, traffic, system, ipset, remnawave, torrent_blocker, speedtest
 from app.security import get_security_manager, SecurityMiddleware
 from app.services.traffic_collector import get_traffic_collector
 from app.services.ipset_manager import get_ipset_manager
@@ -115,6 +115,7 @@ app.include_router(system.router, dependencies=[Depends(verify_api_key)])
 app.include_router(ipset.router, dependencies=[Depends(verify_api_key)])
 app.include_router(remnawave.router, dependencies=[Depends(verify_api_key)])
 app.include_router(torrent_blocker.router, dependencies=[Depends(verify_api_key)])
+app.include_router(speedtest.router, dependencies=[Depends(verify_api_key)])
 
 @app.get("/health")
 async def health_check():

@@ -32,6 +32,9 @@ class Server(Base):
     
     # Xray node detection (updated periodically)
     has_xray_node = Column(Boolean, default=False, server_default="false")
+    
+    # Speed test results (JSON, updated by speedtest scheduler)
+    last_speedtest = Column(Text, nullable=True)
 
 
 class MetricsSnapshot(Base):

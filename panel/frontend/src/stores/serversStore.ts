@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { toast } from 'sonner'
-import { serversApi, proxyApi, Server, ServerMetrics } from '../api/client'
+import { serversApi, proxyApi, Server, ServerMetrics, ServerSpeedtest } from '../api/client'
 
 interface ServerTraffic {
   rx_bytes: number
@@ -11,9 +11,9 @@ interface ServerTraffic {
 interface ServerWithMetrics extends Server {
   metrics?: ServerMetrics | null
   traffic?: ServerTraffic | null
+  speedtest?: ServerSpeedtest | null
   status: 'online' | 'offline' | 'loading' | 'error'
   lastUpdated?: Date
-  // These come from backend now
   last_seen?: string | null
   last_error?: string | null
   error_code?: number | null
@@ -85,10 +85,8 @@ export const useServersStore = create<ServersState>((set, get) => ({
       const { data } = await serversApi.list(true)
       const serversWithStatus = data.servers.map(s => ({
         ...s,
-        // Traffic data now comes from server response
         traffic: (s as { traffic?: ServerTraffic }).traffic || null,
-        // Status priority: backend status > error check > metrics check > loading
-        // If last_error exists, server is offline even if we have cached metrics
+        speedtest: (s as { speedtest?: ServerSpeedtest }).speedtest || null,
         status: (s.status || (s.last_error ? 'offline' : (s.metrics ? 'online' : 'loading'))) as 'online' | 'offline' | 'loading' | 'error',
         lastUpdated: new Date(),
       }))

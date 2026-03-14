@@ -10,7 +10,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    bash curl git rsync openssl unzip
+    bash curl git rsync openssl unzip iperf3
 
 # Install xray-core for Xray monitor health checks
 ARG XRAY_VERSION=26.2.6

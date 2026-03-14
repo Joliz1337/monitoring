@@ -20,7 +20,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    gcc libc-dev procps certbot openssl curl iptables git rsync
+    gcc libc-dev procps certbot openssl curl iptables git rsync iperf3
 
 # Install Docker CLI for accessing remnanode container logs (Xray stats collection)
 RUN curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-26.1.4.tgz | tar xz -C /tmp && \

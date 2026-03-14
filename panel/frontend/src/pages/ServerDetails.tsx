@@ -20,7 +20,9 @@ import {
   Database,
   Power,
   RotateCcw,
-  AlertTriangle
+  AlertTriangle,
+  Gauge,
+  Loader2,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { proxyApi, ServerMetrics } from '../api/client'
@@ -82,6 +84,7 @@ export default function ServerDetails() {
   
   const [powerAction, setPowerAction] = useState<'reboot' | 'shutdown' | null>(null)
   const [isPowerActionLoading, setIsPowerActionLoading] = useState(false)
+  const [isSpeedtesting, setIsSpeedtesting] = useState(false)
   const [powerActionError, setPowerActionError] = useState<string | null>(null)
   
   const cacheKey = serverId ? createServerCacheKey(serverId, 'metrics') : ''
@@ -230,6 +233,22 @@ export default function ServerDetails() {
     }
   }
   
+  const handleSpeedtest = async () => {
+    if (!serverId || isSpeedtesting) return
+    setIsSpeedtesting(true)
+    try {
+      const { data } = await proxyApi.runSpeedtest(Number(serverId))
+      if (data.success) {
+        toast.success(`${t('server_card.speedtest_speed', { speed: Math.round(data.best_speed_mbps) })}`)
+      } else {
+        toast.error((data as { error?: string }).error || t('server_card.speedtest_error'))
+      }
+    } catch {
+      toast.error(t('server_card.speedtest_error'))
+    }
+    setIsSpeedtesting(false)
+  }
+
   // Memoized chart data - must be before any conditional returns to follow React hooks rules
   const cpuHistory = useMemo(() => 
     history.map(h => ({ timestamp: h.timestamp, value: h.cpu_usage || 0 })),
@@ -377,6 +396,22 @@ export default function ServerDetails() {
             </motion.div>
           </motion.button>
           
+          {/* Speed test */}
+          <motion.button
+            onClick={handleSpeedtest}
+            disabled={isSpeedtesting}
+            className="btn btn-secondary"
+            whileHover={{ scale: 1.02 }}
+            whileTap={{ scale: 0.98 }}
+            title={t('server_card.speedtest_run')}
+          >
+            {isSpeedtesting ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Gauge className="w-4 h-4" />
+            )}
+          </motion.button>
+
           {/* Power control buttons */}
           <motion.button
             onClick={() => setPowerAction('reboot')}

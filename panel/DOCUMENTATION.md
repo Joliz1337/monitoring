@@ -627,6 +627,25 @@ Frontend lazy loading (panel/frontend/src/pages/Remnawave.tsx):
 - Выбором таймаута (30s — 10m) и shell (sh/bash)
 - Отменой выполняющейся команды
 
+### Speed Test (iperf3)
+
+Система проверки скорости нод через iperf3. Периодические автоматические тесты + ручной запуск из UI.
+
+**Возможности:**
+- Автоматическое тестирование всех нод по расписанию (последовательно)
+- Три режима: публичные серверы / панель как сервер / оба
+- Настраиваемые параметры: порог, интервал, длительность, потоки, список серверов
+- Цветной бейдж скорости на карточке сервера (зелёный/жёлтый/красный)
+- Кнопка ручного запуска теста на странице сервера
+
+**Файлы:**
+- `node/app/services/speedtest_runner.py` — запуск iperf3, парсинг JSON, логика фоллбэка
+- `node/app/routers/speedtest.py` — POST /api/speedtest, GET /api/speedtest/status
+- `panel/backend/app/services/speedtest_scheduler.py` — фоновый планировщик + iperf3-сервер панели
+- `panel/backend/app/routers/proxy.py` — POST/GET /proxy/{id}/speedtest
+- `panel/frontend/src/pages/Settings.tsx` — секция настроек Speed Test
+- `panel/frontend/src/components/Dashboard/ServerCard.tsx` — бейдж скорости в футере
+
 ### Xray Monitor
 
 Мониторинг доступности Xray-серверов. Подписки и ключи парсятся, через xray-core делается реальное подключение к google.com/one.one.one.one.

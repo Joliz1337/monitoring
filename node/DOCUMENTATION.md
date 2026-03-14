@@ -63,8 +63,8 @@ node/
 │   ├── main.py           # FastAPI приложение
 │   ├── config.py         # Pydantic Settings
 │   ├── auth.py           # API Key авторизация
-│   ├── routers/          # API эндпоинты
-│   └── services/         # Сбор метрик, HAProxy, трафик
+│   ├── routers/          # API эндпоинты (metrics, haproxy, traffic, speedtest и др.)
+│   └── services/         # Сбор метрик, HAProxy, трафик, speedtest runner
 ├── scripts/
 │   ├── apply-update.sh   # Логика обновления (запускается из свежего репо)
 │   └── network-tune.sh   # RPS/RFS оптимизация сети
