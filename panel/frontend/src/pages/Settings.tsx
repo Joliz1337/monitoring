@@ -1330,7 +1330,7 @@ const DEFAULT_IPERF_SERVERS: SpeedtestServerConfig[] = [
 function SpeedtestSettings() {
   const { t } = useTranslation()
   const [loading, setLoading] = useState(true)
-  const [saving, setSaving] = useState(false)
+  const initialLoadDone = useRef(false)
 
   const [enabled, setEnabled] = useState(true)
   const [mode, setMode] = useState<'public' | 'panel' | 'both'>('both')
@@ -1355,7 +1355,12 @@ function SpeedtestSettings() {
         setDuration(parseInt(s.speedtest_duration || '3', 10))
         setStreams(parseInt(s.speedtest_streams || '4', 10))
         setPanelPort(parseInt(s.speedtest_panel_port || '5201', 10))
-        setPanelAddress(s.speedtest_panel_address || '')
+        let addr = s.speedtest_panel_address || ''
+        if (!addr) {
+          const { data: panelInfo } = await systemApi.getPanelIp()
+          addr = panelInfo.ip || panelInfo.domain || ''
+        }
+        setPanelAddress(addr)
         if (s.speedtest_servers) {
           try {
             const parsed = JSON.parse(s.speedtest_servers)
@@ -1364,30 +1369,32 @@ function SpeedtestSettings() {
         }
       } catch { /* keep defaults */ }
       setLoading(false)
+      initialLoadDone.current = true
     })()
   }, [])
 
-  const save = async () => {
-    setSaving(true)
-    try {
-      const updates: [string, string][] = [
-        ['speedtest_enabled', String(enabled)],
-        ['speedtest_mode', mode],
-        ['speedtest_threshold', String(threshold)],
-        ['speedtest_interval', String(interval)],
-        ['speedtest_duration', String(duration)],
-        ['speedtest_streams', String(streams)],
-        ['speedtest_panel_port', String(panelPort)],
-        ['speedtest_panel_address', panelAddress],
-        ['speedtest_servers', JSON.stringify(servers)],
-      ]
-      await Promise.all(updates.map(([k, v]) => settingsApi.set(k, v)))
-      toast.success(t('settings.speedtest_saved'))
-    } catch {
-      toast.error('Error saving')
-    }
-    setSaving(false)
-  }
+  useEffect(() => {
+    if (!initialLoadDone.current || loading) return
+    const timeout = setTimeout(async () => {
+      try {
+        const updates: [string, string][] = [
+          ['speedtest_enabled', String(enabled)],
+          ['speedtest_mode', mode],
+          ['speedtest_threshold', String(threshold)],
+          ['speedtest_interval', String(interval)],
+          ['speedtest_duration', String(duration)],
+          ['speedtest_streams', String(streams)],
+          ['speedtest_panel_port', String(panelPort)],
+          ['speedtest_panel_address', panelAddress],
+          ['speedtest_servers', JSON.stringify(servers)],
+        ]
+        await Promise.all(updates.map(([k, v]) => settingsApi.set(k, v)))
+      } catch {
+        toast.error(t('common.error'))
+      }
+    }, 500)
+    return () => clearTimeout(timeout)
+  }, [loading, enabled, mode, threshold, interval, duration, streams, panelPort, panelAddress, servers, t])
 
   const addServer = () => {
     setServers([...servers, { host: '', port: 5201, label: '', region: '' }])
@@ -1572,18 +1579,6 @@ function SpeedtestSettings() {
             </AnimatePresence>
           </div>
         )}
-
-        {/* Save button */}
-        <div className="pt-2">
-          <button
-            onClick={save}
-            disabled={saving}
-            className="px-4 py-2 bg-accent-500 hover:bg-accent-600 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition-colors flex items-center gap-2"
-          >
-            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
-            {t('common.save')}
-          </button>
-        </div>
       </div>
     </motion.div>
   )
