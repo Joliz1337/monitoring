@@ -359,6 +359,9 @@ async def update_server(
         raise HTTPException(status_code=404)
     
     was_inactive = not server.is_active
+    old_url = server.url
+    old_api_key = server.api_key
+
     update_data = data.model_dump(exclude_unset=True)
     if "url" in update_data:
         update_data["url"] = update_data["url"].rstrip("/")
@@ -367,8 +370,11 @@ async def update_server(
         setattr(server, key, value)
     
     await db.commit()
-    
-    if was_inactive and server.is_active:
+
+    node_changed = server.url != old_url or server.api_key != old_api_key
+    activated = was_inactive and server.is_active
+
+    if server.is_active and (activated or node_changed):
         asyncio.ensure_future(
             get_blocklist_manager().sync_single_node_by_id(server_id)
         )
