@@ -291,7 +291,18 @@
     "speedtest_label": "Label",
     "speedtest_region": "Region",
     "speedtest_saved": "Speed Test settings saved",
-    "speedtest_no_data": "No data"
+    "speedtest_no_data": "No data",
+    "speedtest_notifications": "Notifications",
+    "speedtest_notify_slow": "Notify when speed is below threshold",
+    "speedtest_notify_error": "Notify on test errors",
+    "speedtest_notify_recovery": "Notify when speed recovers",
+    "speedtest_use_custom_bot": "Use custom Telegram bot",
+    "speedtest_bot_token": "Bot token",
+    "speedtest_chat_id": "Chat ID",
+    "speedtest_test_notification": "Send test",
+    "speedtest_test_sent": "Test notification sent",
+    "speedtest_ignore_list": "Ignore list",
+    "speedtest_ignore_list_hint": "Servers excluded from speed testing"
   },
   "server_card": {
     "last_seen": "Last online: {{time}}",

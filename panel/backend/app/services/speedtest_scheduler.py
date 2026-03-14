@@ -11,11 +11,12 @@ import shutil
 import signal
 from typing import Optional
 
+import aiohttp
 import httpx
 from sqlalchemy import select, update
 
 from app.database import async_session
-from app.models import Server, PanelSettings
+from app.models import Server, PanelSettings, AlertSettings
 
 logger = logging.getLogger(__name__)
 
@@ -40,11 +41,19 @@ SETTINGS_KEYS = {
     "speedtest_streams": "4",
     "speedtest_panel_port": "5201",
     "speedtest_panel_address": "",
+    "speedtest_notify_slow": "true",
+    "speedtest_notify_error": "true",
+    "speedtest_notify_recovery": "false",
+    "speedtest_use_custom_bot": "false",
+    "speedtest_bot_token": "",
+    "speedtest_chat_id": "",
+    "speedtest_ignore_list": "[]",
 }
 
 
 class SpeedtestScheduler:
-    PAUSE_BETWEEN_NODES = 10  # seconds between testing different nodes
+    PAUSE_BETWEEN_NODES = 10
+    TG_MSG_LIMIT = 4096
 
     def __init__(self):
         self._running = False
@@ -56,11 +65,21 @@ class SpeedtestScheduler:
         self._mode = "both"
         self._servers = list(DEFAULT_IPERF_SERVERS)
         self._threshold = 500.0
-        self._interval = 60  # minutes
+        self._interval = 60
         self._duration = 3
         self._streams = 4
         self._panel_port = 5201
         self._panel_address = ""
+
+        self._notify_slow = True
+        self._notify_error = True
+        self._notify_recovery = False
+        self._use_custom_bot = False
+        self._bot_token = ""
+        self._chat_id = ""
+        self._ignore_list: set[int] = set()
+
+        self._prev_slow: set[int] = set()
 
     async def _load_settings(self):
         try:
@@ -90,6 +109,19 @@ class SpeedtestScheduler:
                     self._servers = list(DEFAULT_IPERF_SERVERS)
             except (json.JSONDecodeError, TypeError):
                 self._servers = list(DEFAULT_IPERF_SERVERS)
+
+            self._notify_slow = _get("speedtest_notify_slow").lower() == "true"
+            self._notify_error = _get("speedtest_notify_error").lower() == "true"
+            self._notify_recovery = _get("speedtest_notify_recovery").lower() == "true"
+            self._use_custom_bot = _get("speedtest_use_custom_bot").lower() == "true"
+            self._bot_token = _get("speedtest_bot_token")
+            self._chat_id = _get("speedtest_chat_id")
+
+            try:
+                ignore_raw = json.loads(_get("speedtest_ignore_list"))
+                self._ignore_list = {int(x) for x in ignore_raw if str(x).isdigit()}
+            except (json.JSONDecodeError, TypeError):
+                self._ignore_list = set()
 
         except Exception as e:
             logger.debug(f"Failed to load speedtest settings: {e}")
@@ -212,6 +244,10 @@ class SpeedtestScheduler:
         if not servers:
             return
 
+        servers = [s for s in servers if s.id not in self._ignore_list]
+        if not servers:
+            return
+
         server_list = self._build_server_list()
         if not server_list:
             logger.warning("Speedtest: no iperf3 servers configured")
@@ -219,11 +255,14 @@ class SpeedtestScheduler:
 
         logger.info(f"Speedtest: starting cycle for {len(servers)} nodes, {len(server_list)} iperf3 servers")
 
+        events: list[dict] = []
         for srv in servers:
             if not self._running:
                 break
             try:
-                await self._test_single_node(srv, server_list)
+                event = await self._test_single_node(srv, server_list)
+                if event:
+                    events.append(event)
             except Exception as e:
                 logger.debug(f"Speedtest failed for {srv.name}: {e}")
 
@@ -232,8 +271,11 @@ class SpeedtestScheduler:
 
         logger.info("Speedtest: cycle completed")
 
-    async def _test_single_node(self, server: Server, server_list: list[dict]):
-        """Send speedtest request to a single node and store result."""
+        if events:
+            await self._send_notifications(events)
+
+    async def _test_single_node(self, server: Server, server_list: list[dict]) -> Optional[dict]:
+        """Send speedtest request to a single node and store result. Returns notification event or None."""
         payload = {
             "servers": server_list,
             "duration": self._duration,
@@ -255,16 +297,25 @@ class SpeedtestScheduler:
                     logger.info(f"Speedtest {server.name}: {speed:.1f} Mbit/s")
                 elif response.status_code == 409:
                     logger.debug(f"Speedtest {server.name}: test already in progress")
-                    return
+                    return None
                 else:
                     logger.warning(f"Speedtest {server.name}: HTTP {response.status_code}")
-                    return
+                    if self._notify_error:
+                        self._prev_slow.discard(server.id)
+                        return {"type": "error", "name": server.name, "detail": f"HTTP {response.status_code}"}
+                    return None
         except httpx.TimeoutException:
             logger.warning(f"Speedtest {server.name}: timeout")
-            return
+            if self._notify_error:
+                self._prev_slow.discard(server.id)
+                return {"type": "error", "name": server.name, "detail": "timeout"}
+            return None
         except Exception as e:
             logger.debug(f"Speedtest {server.name}: {e}")
-            return
+            if self._notify_error:
+                self._prev_slow.discard(server.id)
+                return {"type": "error", "name": server.name, "detail": str(e)[:100]}
+            return None
 
         for attempt in range(1, 4):
             try:
@@ -281,6 +332,105 @@ class SpeedtestScheduler:
                     await asyncio.sleep(0.3 * attempt)
                     continue
                 logger.warning(f"Failed to save speedtest for {server.name}: {db_err}")
+
+        speed = result.get("best_speed_mbps", 0)
+        was_slow = server.id in self._prev_slow
+        is_slow = speed < self._threshold
+
+        if is_slow:
+            self._prev_slow.add(server.id)
+            if self._notify_slow:
+                return {"type": "slow", "name": server.name, "speed": speed, "threshold": self._threshold}
+        else:
+            self._prev_slow.discard(server.id)
+            if was_slow and self._notify_recovery:
+                return {"type": "recovery", "name": server.name, "speed": speed}
+
+        return None
+
+    async def _send_notifications(self, events: list[dict]):
+        sections: list[str] = []
+
+        slow = [e for e in events if e["type"] == "slow"]
+        errors = [e for e in events if e["type"] == "error"]
+        recovered = [e for e in events if e["type"] == "recovery"]
+
+        if slow:
+            lines = ["🔴 <b>Низкая скорость</b>"]
+            for e in slow:
+                lines.append(f"  • {e['name']} — {e['speed']:.1f} Mbit/s (порог {e['threshold']:.0f})")
+            sections.append("\n".join(lines))
+
+        if errors:
+            lines = ["⚠️ <b>Ошибки тестирования</b>"]
+            for e in errors:
+                lines.append(f"  • {e['name']} — {e['detail']}")
+            sections.append("\n".join(lines))
+
+        if recovered:
+            lines = ["✅ <b>Скорость восстановлена</b>"]
+            for e in recovered:
+                lines.append(f"  • {e['name']} — {e['speed']:.1f} Mbit/s")
+            sections.append("\n".join(lines))
+
+        if not sections:
+            return
+
+        header = "🚀 <b>Speed Test</b>\n"
+        full_text = header + "\n\n".join(sections)
+
+        for chunk in self._split_message(full_text):
+            await self._send_telegram(chunk)
+
+    @staticmethod
+    def _split_message(text: str, limit: int = 4096) -> list[str]:
+        if len(text) <= limit:
+            return [text]
+        chunks: list[str] = []
+        while text:
+            if len(text) <= limit:
+                chunks.append(text)
+                break
+            cut = text.rfind("\n\n", 0, limit)
+            if cut < 1:
+                cut = text.rfind("\n", 0, limit)
+            if cut < 1:
+                cut = limit
+            chunks.append(text[:cut].rstrip())
+            text = text[cut:].lstrip("\n")
+        return chunks
+
+    async def _send_telegram(self, message: str):
+        bot_token = self._bot_token if self._use_custom_bot else ""
+        chat_id = self._chat_id if self._use_custom_bot else ""
+
+        if not bot_token or not chat_id:
+            try:
+                async with async_session() as db:
+                    result = await db.execute(select(AlertSettings).limit(1))
+                    alert_settings = result.scalar_one_or_none()
+                if alert_settings and alert_settings.telegram_bot_token and alert_settings.telegram_chat_id:
+                    bot_token = alert_settings.telegram_bot_token
+                    chat_id = alert_settings.telegram_chat_id
+            except Exception:
+                pass
+
+        if not bot_token or not chat_id:
+            return
+
+        try:
+            url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json={
+                    "chat_id": chat_id,
+                    "text": message,
+                    "parse_mode": "HTML",
+                }) as resp:
+                    if resp.status != 200:
+                        body = await resp.text()
+                        logger.warning(f"Telegram send failed ({resp.status}): {body[:200]}")
+        except Exception as e:
+            logger.error(f"Telegram send error: {e}")
 
     async def test_single_node_by_id(self, server_id: int) -> Optional[dict]:
         """Manual test trigger — returns result directly."""

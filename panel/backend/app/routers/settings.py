@@ -1,11 +1,13 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 from typing import Optional
 
+import aiohttp
+
 from app.database import get_db
-from app.models import PanelSettings
+from app.models import PanelSettings, AlertSettings
 from app.auth import verify_auth
 
 router = APIRouter(prefix="/settings", tags=["settings"])
@@ -92,3 +94,44 @@ async def update_setting(
 ):
     await set_setting(key, data.value, db)
     return {"success": True, "key": key, "value": data.value}
+
+
+class SpeedtestTestNotification(BaseModel):
+    bot_token: Optional[str] = None
+    chat_id: Optional[str] = None
+
+
+@router.post("/speedtest/test-notification")
+async def speedtest_test_notification(
+    body: SpeedtestTestNotification,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth),
+):
+    bot_token = body.bot_token
+    chat_id = body.chat_id
+
+    if not bot_token or not chat_id:
+        result = await db.execute(select(AlertSettings).limit(1))
+        alert_s = result.scalar_one_or_none()
+        if alert_s:
+            bot_token = bot_token or alert_s.telegram_bot_token
+            chat_id = chat_id or alert_s.telegram_chat_id
+
+    if not bot_token or not chat_id:
+        raise HTTPException(400, "No bot token/chat ID configured")
+
+    try:
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        text = "✅ <b>Speed Test</b>\n\nТестовое уведомление — конфигурация работает!"
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json={
+                "chat_id": chat_id,
+                "text": text,
+                "parse_mode": "HTML",
+            }) as resp:
+                if resp.status != 200:
+                    body_text = await resp.text()
+                    return {"success": False, "error": body_text[:200]}
+                return {"success": True}
+    except Exception as e:
+        return {"success": False, "error": str(e)}

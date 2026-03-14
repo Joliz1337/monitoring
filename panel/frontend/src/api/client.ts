@@ -551,6 +551,8 @@ export const settingsApi = {
   getAll: () => api.get<{ settings: Record<string, string> }>('/settings'),
   get: (key: string) => api.get<{ key: string; value: string }>(`/settings/${key}`),
   set: (key: string, value: string) => api.put(`/settings/${key}`, { value }),
+  speedtestTestNotification: (bot_token?: string, chat_id?: string) =>
+    api.post<{ success: boolean; error?: string }>('/settings/speedtest/test-notification', { bot_token, chat_id }),
 }
 
 // Blocklist types

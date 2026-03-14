@@ -291,7 +291,18 @@
     "speedtest_label": "Название",
     "speedtest_region": "Регион",
     "speedtest_saved": "Настройки Speed Test сохранены",
-    "speedtest_no_data": "Нет данных"
+    "speedtest_no_data": "Нет данных",
+    "speedtest_notifications": "Уведомления",
+    "speedtest_notify_slow": "Уведомлять при низкой скорости (ниже порога)",
+    "speedtest_notify_error": "Уведомлять при ошибке тестирования",
+    "speedtest_notify_recovery": "Уведомлять при восстановлении скорости",
+    "speedtest_use_custom_bot": "Использовать отдельного Telegram-бота",
+    "speedtest_bot_token": "Токен бота",
+    "speedtest_chat_id": "Chat ID",
+    "speedtest_test_notification": "Отправить тест",
+    "speedtest_test_sent": "Тестовое уведомление отправлено",
+    "speedtest_ignore_list": "Игнор-лист серверов",
+    "speedtest_ignore_list_hint": "Серверы, исключённые из тестирования скорости"
   },
   "server_card": {
     "last_seen": "Был в сети: {{time}}",

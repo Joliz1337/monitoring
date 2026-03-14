@@ -1,9 +1,9 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { Settings as SettingsIcon, RefreshCw, Layout, Languages, Sparkles, Check, Clock, Activity, Shield, AlertTriangle, Loader2, CheckCircle2, XCircle, Terminal, Server, Zap, Cpu, HardDrive, MemoryStick, Database, Download, Upload, Trash2, Archive, Gauge, Plus, X } from 'lucide-react'
+import { Settings as SettingsIcon, RefreshCw, Layout, Languages, Sparkles, Check, Clock, Activity, Shield, AlertTriangle, Loader2, CheckCircle2, XCircle, Terminal, Server, Zap, Cpu, HardDrive, MemoryStick, Database, Download, Upload, Trash2, Archive, Gauge, Plus, X, Bell, Send } from 'lucide-react'
 import { useSettingsStore, TIMEZONE_OPTIONS, TRAFFIC_PERIOD_OPTIONS, METRICS_INTERVAL_OPTIONS, HAPROXY_INTERVAL_OPTIONS } from '../stores/settingsStore'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence, LayoutGroup } from 'framer-motion'
-import { systemApi, backupApi, settingsApi, PanelCertificateInfo, PanelServerStats, BackupInfo, BackupStatus, SpeedtestServerConfig } from '../api/client'
+import { systemApi, backupApi, settingsApi, serversApi, PanelCertificateInfo, PanelServerStats, BackupInfo, BackupStatus, SpeedtestServerConfig } from '../api/client'
 import { toast } from 'sonner'
 
 interface RenewalResult {
@@ -1343,11 +1343,25 @@ function SpeedtestSettings() {
   const [servers, setServers] = useState<SpeedtestServerConfig[]>(DEFAULT_IPERF_SERVERS)
   const [showServers, setShowServers] = useState(false)
 
+  const [notifySlow, setNotifySlow] = useState(true)
+  const [notifyError, setNotifyError] = useState(true)
+  const [notifyRecovery, setNotifyRecovery] = useState(false)
+  const [useCustomBot, setUseCustomBot] = useState(false)
+  const [botToken, setBotToken] = useState('')
+  const [chatId, setChatId] = useState('')
+  const [ignoreList, setIgnoreList] = useState<number[]>([])
+  const [allServers, setAllServers] = useState<{ id: number; name: string }[]>([])
+  const [testingSend, setTestingSend] = useState(false)
+
   useEffect(() => {
     (async () => {
       try {
-        const { data } = await settingsApi.getAll()
+        const [{ data }, { data: srvData }] = await Promise.all([
+          settingsApi.getAll(),
+          serversApi.list(),
+        ])
         const s = data.settings
+        setAllServers(srvData.servers.map(sv => ({ id: sv.id, name: sv.name })))
         setEnabled(s.speedtest_enabled !== 'false')
         setMode((s.speedtest_mode || 'both') as 'public' | 'panel' | 'both')
         setThreshold(parseInt(s.speedtest_threshold || '500', 10))
@@ -1367,6 +1381,16 @@ function SpeedtestSettings() {
             if (Array.isArray(parsed) && parsed.length > 0) setServers(parsed)
           } catch { /* keep defaults */ }
         }
+        setNotifySlow(s.speedtest_notify_slow !== 'false')
+        setNotifyError(s.speedtest_notify_error !== 'false')
+        setNotifyRecovery(s.speedtest_notify_recovery === 'true')
+        setUseCustomBot(s.speedtest_use_custom_bot === 'true')
+        setBotToken(s.speedtest_bot_token || '')
+        setChatId(s.speedtest_chat_id || '')
+        try {
+          const il = JSON.parse(s.speedtest_ignore_list || '[]')
+          if (Array.isArray(il)) setIgnoreList(il.map(Number).filter(n => !isNaN(n)))
+        } catch { /* keep defaults */ }
       } catch { /* keep defaults */ }
       setLoading(false)
       initialLoadDone.current = true
@@ -1387,6 +1411,13 @@ function SpeedtestSettings() {
           ['speedtest_panel_port', String(panelPort)],
           ['speedtest_panel_address', panelAddress],
           ['speedtest_servers', JSON.stringify(servers)],
+          ['speedtest_notify_slow', String(notifySlow)],
+          ['speedtest_notify_error', String(notifyError)],
+          ['speedtest_notify_recovery', String(notifyRecovery)],
+          ['speedtest_use_custom_bot', String(useCustomBot)],
+          ['speedtest_bot_token', botToken],
+          ['speedtest_chat_id', chatId],
+          ['speedtest_ignore_list', JSON.stringify(ignoreList)],
         ]
         await Promise.all(updates.map(([k, v]) => settingsApi.set(k, v)))
       } catch {
@@ -1394,7 +1425,25 @@ function SpeedtestSettings() {
       }
     }, 500)
     return () => clearTimeout(timeout)
-  }, [loading, enabled, mode, threshold, interval, duration, streams, panelPort, panelAddress, servers, t])
+  }, [loading, enabled, mode, threshold, interval, duration, streams, panelPort, panelAddress, servers, notifySlow, notifyError, notifyRecovery, useCustomBot, botToken, chatId, ignoreList, t])
+
+  const handleTestNotification = async () => {
+    setTestingSend(true)
+    try {
+      const { data } = await settingsApi.speedtestTestNotification(
+        useCustomBot ? botToken : undefined,
+        useCustomBot ? chatId : undefined,
+      )
+      if (data.success) {
+        toast.success(t('settings.speedtest_test_sent'))
+      } else {
+        toast.error(data.error || t('common.error'))
+      }
+    } catch {
+      toast.error(t('common.error'))
+    }
+    setTestingSend(false)
+  }
 
   const addServer = () => {
     setServers([...servers, { host: '', port: 5201, label: '', region: '' }])
@@ -1579,6 +1628,106 @@ function SpeedtestSettings() {
             </AnimatePresence>
           </div>
         )}
+
+        {/* Ignore list */}
+        {allServers.length > 0 && (
+          <div>
+            <label className="text-sm text-dark-300 block mb-1.5">{t('settings.speedtest_ignore_list')}</label>
+            <p className="text-xs text-dark-500 mb-2">{t('settings.speedtest_ignore_list_hint')}</p>
+            <div className="flex flex-wrap gap-2">
+              {allServers.map(srv => {
+                const ignored = ignoreList.includes(srv.id)
+                return (
+                  <button
+                    key={srv.id}
+                    onClick={() => setIgnoreList(ignored ? ignoreList.filter(id => id !== srv.id) : [...ignoreList, srv.id])}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-colors ${
+                      ignored
+                        ? 'bg-danger/20 text-danger border border-danger/30 line-through'
+                        : 'bg-dark-800 text-dark-300 border border-dark-700 hover:border-dark-600'
+                    }`}
+                  >
+                    {srv.name}
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Notifications */}
+        <div className="border-t border-dark-800/50 pt-4">
+          <div className="flex items-center gap-2 mb-3">
+            <Bell className="w-4 h-4 text-dark-400" />
+            <span className="text-sm font-medium text-dark-200">{t('settings.speedtest_notifications')}</span>
+          </div>
+
+          <div className="space-y-2 mb-3">
+            {([
+              ['notifySlow', notifySlow, setNotifySlow, 'settings.speedtest_notify_slow'] as const,
+              ['notifyError', notifyError, setNotifyError, 'settings.speedtest_notify_error'] as const,
+              ['notifyRecovery', notifyRecovery, setNotifyRecovery, 'settings.speedtest_notify_recovery'] as const,
+            ]).map(([key, value, setter, label]) => (
+              <label key={key} className="flex items-center gap-2.5 cursor-pointer group">
+                <input
+                  type="checkbox"
+                  checked={value}
+                  onChange={() => setter(!value)}
+                  className="w-4 h-4 rounded border-dark-600 bg-dark-800 text-accent-500 focus:ring-accent-500/50 cursor-pointer"
+                />
+                <span className="text-sm text-dark-300 group-hover:text-dark-200 transition-colors">{t(label)}</span>
+              </label>
+            ))}
+          </div>
+
+          <label className="flex items-center gap-2.5 cursor-pointer group mb-3">
+            <input
+              type="checkbox"
+              checked={useCustomBot}
+              onChange={() => setUseCustomBot(!useCustomBot)}
+              className="w-4 h-4 rounded border-dark-600 bg-dark-800 text-accent-500 focus:ring-accent-500/50 cursor-pointer"
+            />
+            <span className="text-sm text-dark-300 group-hover:text-dark-200 transition-colors">{t('settings.speedtest_use_custom_bot')}</span>
+          </label>
+
+          <AnimatePresence>
+            {useCustomBot && (
+              <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="overflow-hidden">
+                <div className="grid grid-cols-2 gap-3 mb-3">
+                  <div>
+                    <label className="text-sm text-dark-300 block mb-1.5">{t('settings.speedtest_bot_token')}</label>
+                    <input
+                      type="password"
+                      value={botToken}
+                      onChange={e => setBotToken(e.target.value)}
+                      placeholder="123456:ABC-DEF..."
+                      className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200 focus:outline-none focus:border-accent-500/50"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-sm text-dark-300 block mb-1.5">{t('settings.speedtest_chat_id')}</label>
+                    <input
+                      type="text"
+                      value={chatId}
+                      onChange={e => setChatId(e.target.value)}
+                      placeholder="-1001234567890"
+                      className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200 focus:outline-none focus:border-accent-500/50"
+                    />
+                  </div>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          <button
+            onClick={handleTestNotification}
+            disabled={testingSend}
+            className="flex items-center gap-1.5 text-xs text-accent-400 hover:text-accent-300 disabled:opacity-50 transition-colors"
+          >
+            {testingSend ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
+            {t('settings.speedtest_test_notification')}
+          </button>
+        </div>
       </div>
     </motion.div>
   )
