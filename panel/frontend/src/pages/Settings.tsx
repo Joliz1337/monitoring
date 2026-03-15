@@ -1334,10 +1334,11 @@ function SpeedtestSettings() {
 
   const [enabled, setEnabled] = useState(true)
   const [mode, setMode] = useState<'public' | 'panel' | 'both'>('both')
+  const [testMode, setTestMode] = useState<'light' | 'full'>('light')
   const [threshold, setThreshold] = useState(500)
   const [interval, setInterval_] = useState(60)
-  const [duration, setDuration] = useState(3)
-  const [streams, setStreams] = useState(4)
+  const [duration, setDuration] = useState(2)
+  const [streams, setStreams] = useState(1)
   const [panelPort, setPanelPort] = useState(5201)
   const [panelAddress, setPanelAddress] = useState('')
   const [servers, setServers] = useState<SpeedtestServerConfig[]>(DEFAULT_IPERF_SERVERS)
@@ -1364,10 +1365,12 @@ function SpeedtestSettings() {
         setAllServers(srvData.servers.map(sv => ({ id: sv.id, name: sv.name })))
         setEnabled(s.speedtest_enabled !== 'false')
         setMode((s.speedtest_mode || 'both') as 'public' | 'panel' | 'both')
+        const tm = s.speedtest_test_mode || 'light'
+        setTestMode(tm === 'full' ? 'full' : 'light')
         setThreshold(parseInt(s.speedtest_threshold || '500', 10))
         setInterval_(parseInt(s.speedtest_interval || '60', 10))
-        setDuration(parseInt(s.speedtest_duration || '3', 10))
-        setStreams(parseInt(s.speedtest_streams || '4', 10))
+        setDuration(parseInt(s.speedtest_duration || '2', 10))
+        setStreams(parseInt(s.speedtest_streams || '1', 10))
         setPanelPort(parseInt(s.speedtest_panel_port || '5201', 10))
         let addr = s.speedtest_panel_address || ''
         if (!addr) {
@@ -1404,6 +1407,7 @@ function SpeedtestSettings() {
         const updates: [string, string][] = [
           ['speedtest_enabled', String(enabled)],
           ['speedtest_mode', mode],
+          ['speedtest_test_mode', testMode],
           ['speedtest_threshold', String(threshold)],
           ['speedtest_interval', String(interval)],
           ['speedtest_duration', String(duration)],
@@ -1425,7 +1429,7 @@ function SpeedtestSettings() {
       }
     }, 500)
     return () => clearTimeout(timeout)
-  }, [loading, enabled, mode, threshold, interval, duration, streams, panelPort, panelAddress, servers, notifySlow, notifyError, notifyRecovery, useCustomBot, botToken, chatId, ignoreList, t])
+  }, [loading, enabled, mode, testMode, threshold, interval, duration, streams, panelPort, panelAddress, servers, notifySlow, notifyError, notifyRecovery, useCustomBot, botToken, chatId, ignoreList, t])
 
   const handleTestNotification = async () => {
     setTestingSend(true)
@@ -1531,6 +1535,36 @@ function SpeedtestSettings() {
           </div>
         )}
 
+        {/* Test mode */}
+        <div>
+          <label className="text-sm text-dark-300 block mb-1.5">{t('settings.speedtest_test_mode')}</label>
+          <div className="flex gap-2">
+            {(['light', 'full'] as const).map(m => (
+              <button
+                key={m}
+                onClick={() => {
+                  setTestMode(m)
+                  if (m === 'light') {
+                    setDuration(2)
+                    setStreams(1)
+                  } else {
+                    setDuration(3)
+                    setStreams(4)
+                  }
+                }}
+                className={`flex-1 px-3 py-2 rounded-lg text-xs font-medium transition-colors ${
+                  testMode === m ? 'bg-accent-500/20 text-accent-400 border border-accent-500/30' : 'bg-dark-800 text-dark-400 border border-dark-700 hover:border-dark-600'
+                }`}
+              >
+                <div className="font-medium">{t(`settings.speedtest_test_mode_${m}`)}</div>
+                <div className={`text-[10px] mt-0.5 ${testMode === m ? 'text-accent-400/70' : 'text-dark-500'}`}>
+                  {t(`settings.speedtest_test_mode_${m}_hint`)}
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+
         {/* Numeric settings */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           <div>
@@ -1556,16 +1590,18 @@ function SpeedtestSettings() {
             <input
               type="number"
               value={duration}
-              onChange={e => setDuration(parseInt(e.target.value, 10) || 3)}
+              onChange={e => setDuration(parseInt(e.target.value, 10) || 2)}
               className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200 focus:outline-none focus:border-accent-500/50"
             />
           </div>
           <div>
-            <label className="text-sm text-dark-300 block mb-1.5">{t('settings.speedtest_streams')}</label>
+            <label className="text-sm text-dark-300 block mb-1.5">
+              {testMode === 'full' ? t('settings.speedtest_processes') : t('settings.speedtest_streams')}
+            </label>
             <input
               type="number"
               value={streams}
-              onChange={e => setStreams(parseInt(e.target.value, 10) || 4)}
+              onChange={e => setStreams(parseInt(e.target.value, 10) || 1)}
               className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200 focus:outline-none focus:border-accent-500/50"
             />
           </div>

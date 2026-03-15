@@ -139,16 +139,28 @@ class ServerAlerter:
             return result.scalar_one_or_none()
 
     # ------------------------------------------------------------------
+    @staticmethod
+    def _parse_id_list(raw: str | None) -> set[int]:
+        if not raw:
+            return set()
+        try:
+            return set(json.loads(raw))
+        except (json.JSONDecodeError, TypeError):
+            return set()
+
     async def _check_all(self, settings: AlertSettings):
         now = time.time()
         self._last_check = datetime.now(timezone.utc).replace(tzinfo=None)
 
-        excluded_ids: set[int] = set()
-        if settings.excluded_server_ids:
-            try:
-                excluded_ids = set(json.loads(settings.excluded_server_ids))
-            except (json.JSONDecodeError, TypeError):
-                pass
+        excluded_ids = self._parse_id_list(settings.excluded_server_ids)
+
+        self._trigger_excluded = {
+            "offline": self._parse_id_list(settings.offline_excluded_server_ids),
+            "cpu": self._parse_id_list(settings.cpu_excluded_server_ids),
+            "ram": self._parse_id_list(settings.ram_excluded_server_ids),
+            "network": self._parse_id_list(settings.network_excluded_server_ids),
+            "tcp": self._parse_id_list(settings.tcp_excluded_server_ids),
+        }
 
         async with async_session() as db:
             result = await db.execute(
@@ -186,9 +198,10 @@ class ServerAlerter:
                 pass
 
         is_online = self._server_is_online(srv, settings)
+        tex = self._trigger_excluded
 
         # --- Offline / Recovery ---
-        if settings.offline_enabled:
+        if settings.offline_enabled and srv.id not in tex["offline"]:
             await self._check_offline(srv, state, settings, is_online, now)
 
         if not is_online or not metrics:
@@ -220,7 +233,7 @@ class ServerAlerter:
         cooldown = settings.alert_cooldown or 1800
 
         # --- CPU ---
-        if settings.cpu_enabled:
+        if settings.cpu_enabled and srv.id not in tex["cpu"]:
             await self._check_resource(
                 srv, state, settings, now, cooldown,
                 current=cpu_val,
@@ -236,7 +249,7 @@ class ServerAlerter:
             )
 
         # --- RAM ---
-        if settings.ram_enabled:
+        if settings.ram_enabled and srv.id not in tex["ram"]:
             await self._check_resource(
                 srv, state, settings, now, cooldown,
                 current=ram_val,
@@ -252,7 +265,7 @@ class ServerAlerter:
             )
 
         # --- Network ---
-        if settings.network_enabled:
+        if settings.network_enabled and srv.id not in tex["network"]:
             await self._check_deviation_both(
                 srv, state, settings, now, cooldown,
                 current_val=net_rx_speed + net_tx_speed,
@@ -268,9 +281,10 @@ class ServerAlerter:
             )
 
         tcp_min = settings.tcp_min_connections or 0
+        tcp_ignored = srv.id in tex["tcp"]
 
         # --- TCP Established ---
-        if settings.tcp_established_enabled:
+        if settings.tcp_established_enabled and not tcp_ignored:
             await self._check_deviation_both(
                 srv, state, settings, now, cooldown,
                 current_val=tcp.get("established", 0),
@@ -285,7 +299,7 @@ class ServerAlerter:
             )
 
         # --- TCP Listen ---
-        if settings.tcp_listen_enabled:
+        if settings.tcp_listen_enabled and not tcp_ignored:
             await self._check_deviation_spike(
                 srv, state, settings, now, cooldown,
                 current_val=tcp.get("listen", 0),
@@ -298,7 +312,7 @@ class ServerAlerter:
             )
 
         # --- TCP Time Wait ---
-        if settings.tcp_timewait_enabled:
+        if settings.tcp_timewait_enabled and not tcp_ignored:
             await self._check_deviation_spike(
                 srv, state, settings, now, cooldown,
                 current_val=tcp.get("time_wait", 0),
@@ -311,7 +325,7 @@ class ServerAlerter:
             )
 
         # --- TCP Close Wait ---
-        if settings.tcp_closewait_enabled:
+        if settings.tcp_closewait_enabled and not tcp_ignored:
             await self._check_deviation_spike(
                 srv, state, settings, now, cooldown,
                 current_val=tcp.get("close_wait", 0),
@@ -324,7 +338,7 @@ class ServerAlerter:
             )
 
         # --- TCP SYN Sent ---
-        if settings.tcp_synsent_enabled:
+        if settings.tcp_synsent_enabled and not tcp_ignored:
             await self._check_deviation_spike(
                 srv, state, settings, now, cooldown,
                 current_val=tcp.get("syn_sent", 0),
@@ -337,7 +351,7 @@ class ServerAlerter:
             )
 
         # --- TCP SYN Recv ---
-        if settings.tcp_synrecv_enabled:
+        if settings.tcp_synrecv_enabled and not tcp_ignored:
             await self._check_deviation_spike(
                 srv, state, settings, now, cooldown,
                 current_val=tcp.get("syn_recv", 0),
@@ -350,7 +364,7 @@ class ServerAlerter:
             )
 
         # --- TCP FIN Wait ---
-        if settings.tcp_finwait_enabled:
+        if settings.tcp_finwait_enabled and not tcp_ignored:
             await self._check_deviation_spike(
                 srv, state, settings, now, cooldown,
                 current_val=tcp.get("fin_wait", 0),

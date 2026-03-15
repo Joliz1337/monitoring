@@ -146,6 +146,8 @@ export default function Terminal({ serverId }: TerminalProps) {
 
       const decoder = new TextDecoder()
       let buffer = ''
+      let currentEvent = ''
+      let currentData = ''
 
       while (true) {
         const { done, value } = await reader.read()
@@ -153,20 +155,18 @@ export default function Terminal({ serverId }: TerminalProps) {
 
         buffer += decoder.decode(value, { stream: true })
         
-        // Parse SSE events
-        const lines = buffer.split('\n')
-        buffer = ''
+        const lastNewline = buffer.lastIndexOf('\n')
+        if (lastNewline === -1) continue
+
+        const complete = buffer.substring(0, lastNewline)
+        buffer = buffer.substring(lastNewline + 1)
         
-        let currentEvent = ''
-        let currentData = ''
-        
-        for (const line of lines) {
+        for (const line of complete.split('\n')) {
           if (line.startsWith('event: ')) {
-            currentEvent = line.slice(7)
+            currentEvent = line.slice(7).trim()
           } else if (line.startsWith('data: ')) {
             currentData = line.slice(6)
-          } else if (line === '' && currentEvent && currentData) {
-            // Process event
+          } else if (line.trim() === '' && currentEvent && currentData) {
             try {
               const data = JSON.parse(currentData)
               
@@ -212,9 +212,6 @@ export default function Terminal({ serverId }: TerminalProps) {
             
             currentEvent = ''
             currentData = ''
-          } else if (line !== '') {
-            // Incomplete line, add to buffer
-            buffer = line
           }
         }
       }

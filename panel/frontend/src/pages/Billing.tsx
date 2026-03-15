@@ -1533,12 +1533,14 @@ function TopupModal({ t, server, onClose, onDone }: {
             {[100, 500, 1000, 2000, 5000].map(v => (
               <button
                 key={v}
-                onClick={() => setAmount(v.toString())}
-                className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${
-                  amount === v.toString()
-                    ? 'bg-purple-500/20 text-purple-400 border border-purple-500/30'
-                    : 'bg-dark-800 text-dark-400 border border-dark-700/50 hover:border-dark-600'
-                }`}
+                onClick={() => setAmount(prev => {
+                  const current = parseFloat(prev) || 0
+                  return (current + v).toString()
+                })}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium transition
+                  bg-dark-800 text-dark-400 border border-dark-700/50 hover:border-dark-600
+                  hover:bg-purple-500/10 hover:text-purple-400 hover:border-purple-500/30
+                  active:scale-95"
               >
                 +{v} {currencySymbol(server.currency)}
               </button>

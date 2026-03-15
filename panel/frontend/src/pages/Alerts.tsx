@@ -319,6 +319,12 @@ export default function Alerts() {
         >
           <SliderRow label={t('alerts.fail_threshold')} value={settings.offline_fail_threshold} min={1} max={10} step={1} format={v => `${v}`} onSave={v => save({ offline_fail_threshold: v })} />
           <ToggleRow label={t('alerts.recovery_notify')} checked={settings.offline_recovery_notify} onChange={v => save({ offline_recovery_notify: v })} />
+          <TriggerIgnoreList
+            ids={settings.offline_excluded_server_ids}
+            allServers={allServers}
+            onSave={ids => save({ offline_excluded_server_ids: ids })}
+            t={t}
+          />
         </TriggerBlock>
 
         {/* CPU */}
@@ -334,6 +340,12 @@ export default function Alerts() {
           <SliderRow label={t('alerts.spike_percent')} value={settings.cpu_spike_percent} min={10} max={200} step={5} format={v => `${v}%`} onSave={v => save({ cpu_spike_percent: v })} />
           <SliderRow label={t('alerts.min_value')} value={settings.cpu_min_value} min={0} max={50} step={1} format={v => `${v}%`} onSave={v => save({ cpu_min_value: v })} />
           <SliderRow label={t('alerts.sustained')} value={settings.cpu_sustained_seconds} min={60} max={900} step={30} format={v => `${v}s`} onSave={v => save({ cpu_sustained_seconds: v })} />
+          <TriggerIgnoreList
+            ids={settings.cpu_excluded_server_ids}
+            allServers={allServers}
+            onSave={ids => save({ cpu_excluded_server_ids: ids })}
+            t={t}
+          />
         </TriggerBlock>
 
         {/* RAM */}
@@ -349,6 +361,12 @@ export default function Alerts() {
           <SliderRow label={t('alerts.spike_percent')} value={settings.ram_spike_percent} min={10} max={200} step={5} format={v => `${v}%`} onSave={v => save({ ram_spike_percent: v })} />
           <SliderRow label={t('alerts.min_value')} value={settings.ram_min_value} min={0} max={50} step={1} format={v => `${v}%`} onSave={v => save({ ram_min_value: v })} />
           <SliderRow label={t('alerts.sustained')} value={settings.ram_sustained_seconds} min={60} max={900} step={30} format={v => `${v}s`} onSave={v => save({ ram_sustained_seconds: v })} />
+          <TriggerIgnoreList
+            ids={settings.ram_excluded_server_ids}
+            allServers={allServers}
+            onSave={ids => save({ ram_excluded_server_ids: ids })}
+            t={t}
+          />
         </TriggerBlock>
 
         {/* Network */}
@@ -370,6 +388,12 @@ export default function Alerts() {
             onSave={v => save({ network_min_bytes: v * 1024 })}
           />
           <SliderRow label={t('alerts.sustained')} value={settings.network_sustained_seconds} min={60} max={900} step={30} format={v => `${v}s`} onSave={v => save({ network_sustained_seconds: v })} />
+          <TriggerIgnoreList
+            ids={settings.network_excluded_server_ids}
+            allServers={allServers}
+            onSave={ids => save({ network_excluded_server_ids: ids })}
+            t={t}
+          />
         </TriggerBlock>
 
         {/* TCP */}
@@ -460,6 +484,12 @@ export default function Alerts() {
               </div>
             )}
           </div>
+          <TriggerIgnoreList
+            ids={settings.tcp_excluded_server_ids}
+            allServers={allServers}
+            onSave={ids => save({ tcp_excluded_server_ids: ids })}
+            t={t}
+          />
         </TriggerBlock>
       </div>
 
@@ -785,6 +815,46 @@ function ExcludeServerSelect({ servers, onAdd, placeholder }: {
           </motion.div>
         )}
       </AnimatePresence>
+    </div>
+  )
+}
+
+function TriggerIgnoreList({ ids, allServers, onSave, t }: {
+  ids: number[]
+  allServers: ServerType[]
+  onSave: (ids: number[]) => void
+  t: (key: string) => string
+}) {
+  return (
+    <div className="border-t border-dark-700/50 pt-3 space-y-2">
+      <span className="text-xs text-dark-500">{t('alerts.trigger_ignore_list')}</span>
+      {ids.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {ids.map(id => {
+            const srv = allServers.find(s => s.id === id)
+            return (
+              <span
+                key={id}
+                className="inline-flex items-center gap-1 px-2 py-1 bg-dark-700 border border-dark-600 rounded-lg text-xs text-dark-300"
+              >
+                <Server className="w-3 h-3 text-dark-500" />
+                {srv?.name || `#${id}`}
+                <button
+                  onClick={() => onSave(ids.filter(i => i !== id))}
+                  className="ml-0.5 text-dark-500 hover:text-red-400 transition"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              </span>
+            )
+          })}
+        </div>
+      )}
+      <ExcludeServerSelect
+        servers={allServers.filter(s => !ids.includes(s.id))}
+        onAdd={id => onSave([...ids, id])}
+        placeholder={t('alerts.trigger_ignore_add')}
+      />
     </div>
   )
 }

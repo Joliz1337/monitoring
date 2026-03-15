@@ -1527,6 +1527,11 @@ export interface AlertSettingsData {
   tcp_finwait_spike_percent: number
   tcp_finwait_sustained_seconds: number
   excluded_server_ids: number[]
+  offline_excluded_server_ids: number[]
+  cpu_excluded_server_ids: number[]
+  ram_excluded_server_ids: number[]
+  network_excluded_server_ids: number[]
+  tcp_excluded_server_ids: number[]
 }
 
 export interface AlertHistoryItem {

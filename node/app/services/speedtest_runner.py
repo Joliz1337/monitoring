@@ -2,11 +2,13 @@
 
 Runs iperf3 tests against a list of servers and returns structured results.
 Smart logic: stops early if speed is above threshold, tests all servers if below.
+Two modes: light (low CPU, bandwidth-limited) and full (multi-process, max throughput).
 """
 
 import asyncio
 import json
 import logging
+import os
 import shutil
 from datetime import datetime, timezone
 from typing import Optional
@@ -48,7 +50,6 @@ def _parse_iperf3_json(raw: str) -> tuple[float, int]:
         raise ValueError(data["error"])
 
     end = data.get("end", {})
-    # Receiver side gives the actual throughput
     received = end.get("sum_received", {})
     bits_per_sec = received.get("bits_per_second", 0)
 
@@ -58,13 +59,15 @@ def _parse_iperf3_json(raw: str) -> tuple[float, int]:
     return bits_per_sec / 1_000_000, retransmits
 
 
-async def _run_single_test(
+async def _run_iperf3_process(
     host: str,
     port: int,
     duration: int,
-    streams: int,
+    streams: int = 1,
+    bandwidth_limit: str = "",
+    affinity: int = -1,
 ) -> SpeedtestResult:
-    """Run a single iperf3 test against one server."""
+    """Run a single iperf3 process."""
     result = SpeedtestResult()
     result.server = host
     result.port = port
@@ -75,15 +78,23 @@ async def _run_single_test(
         "-p", str(port),
         "-t", str(duration),
         "-P", str(streams),
-        "-J",                   # JSON output
-        "--connect-timeout", "5000",  # 5s connect timeout (ms)
+        "-J",
+        "--connect-timeout", "5000",
     ]
+
+    if bandwidth_limit:
+        cmd.extend(["-b", bandwidth_limit])
+
+    env = None
+    if affinity >= 0:
+        env = {**os.environ, "IPERF3_AFFINITY": str(affinity)}
 
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=env,
         )
         stdout, stderr = await asyncio.wait_for(
             proc.communicate(),
@@ -114,20 +125,86 @@ async def _run_single_test(
     return result
 
 
+async def _run_multiprocess_test(
+    host: str,
+    port: int,
+    duration: int,
+    processes: int,
+) -> SpeedtestResult:
+    """Run N separate iperf3 processes in parallel against a server.
+
+    Each process gets its own CPU core via affinity. iperf3 is single-threaded,
+    so this is the only way to utilize multiple cores for bandwidth testing.
+    Requires the server to support parallel connections (multiple ports or --parallel-streams).
+    Falls back to single-process with -P if parallel fails.
+    """
+    cpu_count = os.cpu_count() or 1
+    cores = list(range(min(processes, cpu_count)))
+
+    tasks = [
+        _run_iperf3_process(host, port, duration, streams=1, affinity=core)
+        for core in cores
+    ]
+
+    sub_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    total_mbps = 0.0
+    total_retransmits = 0
+    success_count = 0
+    errors: list[str] = []
+
+    for r in sub_results:
+        if isinstance(r, Exception):
+            errors.append(str(r)[:100])
+            continue
+        if r.error:
+            errors.append(r.error)
+            continue
+        total_mbps += r.download_mbps
+        total_retransmits += r.retransmits
+        success_count += 1
+
+    result = SpeedtestResult()
+    result.server = host
+    result.port = port
+
+    if success_count > 0:
+        result.download_mbps = total_mbps
+        result.retransmits = total_retransmits
+        if errors:
+            result.error = f"{success_count}/{len(cores)} ok, errors: {'; '.join(errors[:2])}"
+    elif success_count == 0 and len(cores) > 1:
+        logger.info(f"Multiprocess failed for {host}:{port}, falling back to single process -P {processes}")
+        return await _run_iperf3_process(host, port, duration, streams=processes)
+    else:
+        result.error = errors[0] if errors else "All processes failed"
+
+    return result
+
+
 async def run_speedtest(
     servers: list[dict],
-    duration: int = 3,
-    streams: int = 4,
+    duration: int = 2,
+    streams: int = 1,
     threshold_mbps: float = 500.0,
+    bandwidth_limit: str = "",
+    test_mode: str = "light",
 ) -> dict:
     """Run speed tests against a list of iperf3 servers.
 
-    Logic:
-    - Test servers sequentially
-    - If first server gives >= threshold -> stop, return result
-    - If < threshold -> test remaining servers to confirm it's a node issue
-    - Returns all results with the best one highlighted
+    test_mode:
+      - "light": 1 stream, bandwidth limited, low CPU usage
+      - "full": multi-process (one per core), no bandwidth limit, accurate max speed
     """
+    is_full = test_mode == "full"
+
+    if not is_full and not bandwidth_limit:
+        cap = int(threshold_mbps * 2)
+        bandwidth_limit = f"{cap}M"
+
+    if is_full:
+        bandwidth_limit = ""
+
     results: list[dict] = []
     best_speed = 0.0
     best_server = ""
@@ -139,11 +216,17 @@ async def run_speedtest(
         if not host:
             continue
 
-        logger.info(f"Speedtest: testing {host}:{port} (duration={duration}s, streams={streams})")
-        result = await _run_single_test(host, port, duration, streams)
+        if is_full:
+            procs = max(2, streams)
+            logger.info(f"Speedtest [full]: {host}:{port} (duration={duration}s, processes={procs})")
+            result = await _run_multiprocess_test(host, port, duration, procs)
+        else:
+            logger.info(f"Speedtest [light]: {host}:{port} (duration={duration}s, bw_limit={bandwidth_limit})")
+            result = await _run_iperf3_process(host, port, duration, streams=1, bandwidth_limit=bandwidth_limit)
+
         results.append(result.to_dict())
 
-        if result.error:
+        if result.error and result.download_mbps == 0:
             logger.warning(f"Speedtest {host}:{port} failed: {result.error}")
             continue
 
@@ -161,6 +244,7 @@ async def run_speedtest(
         "best_server": best_server,
         "threshold_mbps": threshold_mbps,
         "ok": best_speed >= threshold_mbps,
+        "test_mode": test_mode,
         "results": results,
         "tested_at": datetime.now(timezone.utc).isoformat(),
     }

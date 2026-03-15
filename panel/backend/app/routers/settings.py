@@ -27,8 +27,9 @@ DEFAULT_SETTINGS = {
     "speedtest_mode": "both",
     "speedtest_threshold": "500",
     "speedtest_interval": "60",
-    "speedtest_duration": "3",
-    "speedtest_streams": "4",
+    "speedtest_duration": "2",
+    "speedtest_streams": "1",
+    "speedtest_test_mode": "light",
     "speedtest_panel_port": "5201",
     "speedtest_panel_address": "",
 }

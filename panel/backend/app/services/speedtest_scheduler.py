@@ -37,8 +37,9 @@ SETTINGS_KEYS = {
     "speedtest_servers": json.dumps(DEFAULT_IPERF_SERVERS),
     "speedtest_threshold": "500",
     "speedtest_interval": "60",
-    "speedtest_duration": "3",
-    "speedtest_streams": "4",
+    "speedtest_duration": "2",
+    "speedtest_streams": "1",
+    "speedtest_test_mode": "light",
     "speedtest_panel_port": "5201",
     "speedtest_panel_address": "",
     "speedtest_notify_slow": "true",
@@ -66,8 +67,9 @@ class SpeedtestScheduler:
         self._servers = list(DEFAULT_IPERF_SERVERS)
         self._threshold = 500.0
         self._interval = 60
-        self._duration = 3
-        self._streams = 4
+        self._duration = 2
+        self._streams = 1
+        self._test_mode = "light"
         self._panel_port = 5201
         self._panel_address = ""
 
@@ -100,6 +102,7 @@ class SpeedtestScheduler:
             self._interval = max(1, int(_get("speedtest_interval")))
             self._duration = max(1, min(30, int(_get("speedtest_duration"))))
             self._streams = max(1, min(16, int(_get("speedtest_streams"))))
+            self._test_mode = _get("speedtest_test_mode") if _get("speedtest_test_mode") in ("light", "full") else "light"
             self._panel_port = int(_get("speedtest_panel_port"))
             self._panel_address = _get("speedtest_panel_address")
 
@@ -276,11 +279,14 @@ class SpeedtestScheduler:
 
     async def _test_single_node(self, server: Server, server_list: list[dict]) -> Optional[dict]:
         """Send speedtest request to a single node and store result. Returns notification event or None."""
+        bw_limit = f"{int(self._threshold * 2)}M" if self._test_mode == "light" else ""
         payload = {
             "servers": server_list,
             "duration": self._duration,
             "streams": self._streams,
             "threshold_mbps": self._threshold,
+            "bandwidth_limit": bw_limit,
+            "test_mode": self._test_mode,
         }
 
         try:
@@ -447,11 +453,14 @@ class SpeedtestScheduler:
         if not server_list:
             return {"error": "No iperf3 servers configured"}
 
+        bw_limit = f"{int(self._threshold * 2)}M" if self._test_mode == "light" else ""
         payload = {
             "servers": server_list,
             "duration": self._duration,
             "streams": self._streams,
             "threshold_mbps": self._threshold,
+            "bandwidth_limit": bw_limit,
+            "test_mode": self._test_mode,
         }
 
         try:

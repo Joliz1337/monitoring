@@ -276,10 +276,16 @@
     "speedtest_mode_public": "Public servers",
     "speedtest_mode_panel": "Panel as server",
     "speedtest_mode_both": "Both",
+    "speedtest_test_mode": "Test mode",
+    "speedtest_test_mode_light": "Light",
+    "speedtest_test_mode_light_hint": "Low CPU, checks above threshold",
+    "speedtest_test_mode_full": "Full",
+    "speedtest_test_mode_full_hint": "Max speed, multi-process",
     "speedtest_threshold": "Speed threshold (Mbit/s)",
     "speedtest_interval": "Interval (minutes)",
     "speedtest_duration": "Test duration (sec)",
     "speedtest_streams": "Streams",
+    "speedtest_processes": "Processes (cores)",
     "speedtest_panel_port": "Panel iperf3 port",
     "speedtest_panel_address": "Panel address for nodes",
     "speedtest_panel_address_hint": "IP or domain that nodes use to connect to panel",
@@ -1044,7 +1050,9 @@
     "history_cleared": "Alert history cleared",
     "excluded_servers": "Excluded Servers",
     "excluded_servers_hint": "Servers in this list will not be monitored by the alerting system",
-    "add_excluded_server": "Add server to exclusions"
+    "add_excluded_server": "Add server to exclusions",
+    "trigger_ignore_list": "Ignored servers for this trigger",
+    "trigger_ignore_add": "Add server to ignore list"
   },
   "billing": {
     "title": "Billing",

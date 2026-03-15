@@ -567,6 +567,13 @@ class AlertSettings(Base):
     # Excluded servers (JSON array of server IDs)
     excluded_server_ids = Column(Text, nullable=True)
 
+    # Per-trigger excluded servers (JSON arrays of server IDs)
+    offline_excluded_server_ids = Column(Text, nullable=True)
+    cpu_excluded_server_ids = Column(Text, nullable=True)
+    ram_excluded_server_ids = Column(Text, nullable=True)
+    network_excluded_server_ids = Column(Text, nullable=True)
+    tcp_excluded_server_ids = Column(Text, nullable=True)
+
 
 class AlertHistory(Base):
     """Лог отправленных алертов мониторинга"""

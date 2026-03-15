@@ -276,10 +276,16 @@
     "speedtest_mode_public": "Публичные серверы",
     "speedtest_mode_panel": "Панель как сервер",
     "speedtest_mode_both": "Оба",
+    "speedtest_test_mode": "Режим теста",
+    "speedtest_test_mode_light": "Лёгкий",
+    "speedtest_test_mode_light_hint": "Мин. нагрузка CPU, проверка >порога",
+    "speedtest_test_mode_full": "Полный",
+    "speedtest_test_mode_full_hint": "Макс. скорость, многопроцессный",
     "speedtest_threshold": "Порог скорости (Mbit/s)",
     "speedtest_interval": "Интервал (минуты)",
     "speedtest_duration": "Длительность теста (сек)",
     "speedtest_streams": "Потоки",
+    "speedtest_processes": "Процессы (ядра)",
     "speedtest_panel_port": "Порт iperf3 панели",
     "speedtest_panel_address": "Адрес панели для нод",
     "speedtest_panel_address_hint": "IP или домен, по которому ноды подключаются к панели",
@@ -1045,7 +1051,9 @@
     "history_cleared": "История алертов очищена",
     "excluded_servers": "Исключённые серверы",
     "excluded_servers_hint": "Серверы из этого списка не будут отслеживаться системой уведомлений",
-    "add_excluded_server": "Добавить сервер в исключения"
+    "add_excluded_server": "Добавить сервер в исключения",
+    "trigger_ignore_list": "Игнор-лист серверов для этого триггера",
+    "trigger_ignore_add": "Добавить сервер в игнор-лист"
   },
   "billing": {
     "title": "Оплата",

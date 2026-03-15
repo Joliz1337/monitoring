@@ -130,6 +130,7 @@ export default function Servers() {
   }
   
   const handleEdit = (server: typeof servers[0]) => {
+    setShowForm(false)
     setEditingId(server.id)
     const { host, port } = parseServerUrl(server.url)
     setFormData({
@@ -138,7 +139,6 @@ export default function Servers() {
       port,
       api_key: ''
     })
-    setShowForm(true)
     setError('')
   }
   
@@ -257,9 +257,9 @@ export default function Servers() {
         </AnimatePresence>
       </motion.div>
       
-      {/* Form */}
+      {/* Add Server Form */}
       <AnimatePresence>
-        {showForm && (
+        {showForm && !editingId && (
           <motion.div 
             className="card mb-6 overflow-hidden"
             initial={{ opacity: 0, height: 0, marginBottom: 0 }}
@@ -269,17 +269,8 @@ export default function Servers() {
           >
             <div className="flex items-center justify-between mb-6">
               <h2 className="text-lg font-semibold text-dark-100 flex items-center gap-2">
-                {editingId ? (
-                  <>
-                    <Edit2 className="w-5 h-5 text-accent-500" />
-                    {t('servers.edit_server')}
-                  </>
-                ) : (
-                  <>
-                    <Plus className="w-5 h-5 text-accent-500" />
-                    {t('servers.add_new_server')}
-                  </>
-                )}
+                <Plus className="w-5 h-5 text-accent-500" />
+                {t('servers.add_new_server')}
               </h2>
               <motion.button 
                 onClick={handleCancel} 
@@ -306,11 +297,7 @@ export default function Servers() {
             </AnimatePresence>
             
             <form onSubmit={handleSubmit} className="space-y-5" autoComplete="off" data-form-type="other">
-              <motion.div
-                initial={{ opacity: 0, x: -20 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ delay: 0.1 }}
-              >
+              <div>
                 <label className="block text-sm text-dark-300 mb-2 flex items-center gap-2">
                   <ServerIcon className="w-4 h-4" />
                   {t('servers.server_name')}
@@ -323,13 +310,9 @@ export default function Servers() {
                   className="input"
                   required
                 />
-              </motion.div>
+              </div>
               
-              <motion.div
-                initial={{ opacity: 0, x: -20 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ delay: 0.15 }}
-              >
+              <div>
                 <label className="block text-sm text-dark-300 mb-2 flex items-center gap-2">
                   <LinkIcon className="w-4 h-4" />
                   {t('servers.server_host')}
@@ -358,19 +341,12 @@ export default function Servers() {
                 <p className="text-xs text-dark-500 mt-1.5">
                   {t('servers.server_host_hint')}
                 </p>
-              </motion.div>
+              </div>
               
-              <motion.div
-                initial={{ opacity: 0, x: -20 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ delay: 0.2 }}
-              >
+              <div>
                 <label className="block text-sm text-dark-300 mb-2 flex items-center gap-2">
                   <Key className="w-4 h-4" />
                   {t('servers.api_key')}
-                  {editingId && (
-                    <span className="text-dark-500 font-normal">({t('servers.api_key_hint')})</span>
-                  )}
                 </label>
                 <input
                   type="password"
@@ -378,19 +354,14 @@ export default function Servers() {
                   onChange={(e) => setFormData(d => ({ ...d, api_key: e.target.value }))}
                   placeholder={t('servers.api_key_placeholder')}
                   className="input"
-                  required={!editingId}
+                  required
                   autoComplete="new-password"
                   data-lpignore="true"
                   data-form-type="other"
                 />
-              </motion.div>
+              </div>
               
-              <motion.div 
-                className="flex gap-3 pt-3"
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.25 }}
-              >
+              <div className="flex gap-3 pt-3">
                 <motion.button 
                   type="submit" 
                   disabled={isSubmitting} 
@@ -405,8 +376,6 @@ export default function Servers() {
                     >
                       <Loader2 className="w-4 h-4" />
                     </motion.div>
-                  ) : editingId ? (
-                    t('servers.update_server')
                   ) : (
                     t('servers.add_server')
                   )}
@@ -420,7 +389,7 @@ export default function Servers() {
                 >
                   {t('common.cancel')}
                 </motion.button>
-              </motion.div>
+              </div>
             </form>
           </motion.div>
         )}
@@ -456,159 +425,284 @@ export default function Servers() {
             </motion.div>
           ) : (
             servers.map((server, index) => (
-              <motion.div 
-                key={server.id} 
-                className={`card group transition-all duration-300 ${
-                  server.is_active 
-                    ? 'hover:border-dark-700' 
-                    : 'opacity-60 border-dark-700/50'
-                }`}
-                layout
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: server.is_active ? 1 : 0.6, y: 0 }}
-                exit={{ opacity: 0, x: -100 }}
-                transition={{ delay: index * 0.05 }}
-                whileHover={{ scale: server.is_active ? 1.01 : 1 }}
-              >
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-4">
-                    <motion.div 
-                      className={`w-12 h-12 rounded-xl bg-gradient-to-br from-dark-700 to-dark-800 
-                                 flex items-center justify-center border transition-colors ${
-                                   server.is_active 
-                                     ? 'border-dark-700/50 group-hover:border-accent-500/30' 
-                                     : 'border-dark-700/30'
-                                 }`}
-                      whileHover={{ rotate: server.is_active ? 5 : 0, scale: server.is_active ? 1.05 : 1 }}
-                    >
-                      <ServerIcon className={`w-5 h-5 ${server.is_active ? 'text-accent-500' : 'text-dark-500'}`} />
-                    </motion.div>
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <h3 className={`font-semibold transition-colors ${
-                          server.is_active 
-                            ? 'text-dark-100 group-hover:text-white' 
-                            : 'text-dark-400'
-                        }`}>
-                          {server.name}
-                        </h3>
-                        {!server.is_active && (
-                          <span className="text-xs px-2 py-0.5 rounded-md bg-dark-700/50 text-dark-400">
-                            {t('servers.disabled')}
-                          </span>
-                        )}
+              <div key={server.id}>
+                <motion.div 
+                  className={`card group transition-all duration-300 ${
+                    server.is_active 
+                      ? 'hover:border-dark-700' 
+                      : 'opacity-60 border-dark-700/50'
+                  } ${editingId === server.id ? 'rounded-b-none border-b-0' : ''}`}
+                  layout
+                  initial={{ opacity: 0, y: 20 }}
+                  animate={{ opacity: server.is_active ? 1 : 0.6, y: 0 }}
+                  exit={{ opacity: 0, x: -100 }}
+                  transition={{ delay: index * 0.05 }}
+                  whileHover={{ scale: server.is_active && editingId !== server.id ? 1.01 : 1 }}
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-4">
+                      <motion.div 
+                        className={`w-12 h-12 rounded-xl bg-gradient-to-br from-dark-700 to-dark-800 
+                                   flex items-center justify-center border transition-colors ${
+                                     server.is_active 
+                                       ? 'border-dark-700/50 group-hover:border-accent-500/30' 
+                                       : 'border-dark-700/30'
+                                   }`}
+                        whileHover={{ rotate: server.is_active ? 5 : 0, scale: server.is_active ? 1.05 : 1 }}
+                      >
+                        <ServerIcon className={`w-5 h-5 ${server.is_active ? 'text-accent-500' : 'text-dark-500'}`} />
+                      </motion.div>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <h3 className={`font-semibold transition-colors ${
+                            server.is_active 
+                              ? 'text-dark-100 group-hover:text-white' 
+                              : 'text-dark-400'
+                          }`}>
+                            {server.name}
+                          </h3>
+                          {!server.is_active && (
+                            <span className="text-xs px-2 py-0.5 rounded-md bg-dark-700/50 text-dark-400">
+                              {t('servers.disabled')}
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-sm text-dark-500 flex items-center gap-1.5">
+                          {server.url}
+                          <a 
+                            href={server.url} 
+                            target="_blank" 
+                            rel="noopener noreferrer"
+                            className="hover:text-accent-400 transition-colors"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <ExternalLink className="w-3 h-3" />
+                          </a>
+                        </p>
                       </div>
-                      <p className="text-sm text-dark-500 flex items-center gap-1.5">
-                        {server.url}
-                        <a 
-                          href={server.url} 
-                          target="_blank" 
-                          rel="noopener noreferrer"
-                          className="hover:text-accent-400 transition-colors"
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          <ExternalLink className="w-3 h-3" />
-                        </a>
-                      </p>
+                    </div>
+                    
+                    <div className="flex items-center gap-2">
+                      <AnimatePresence mode="wait">
+                        {testResults[server.id] && (
+                          <motion.div 
+                            className={`flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-lg ${
+                              testResults[server.id].status === 'online' 
+                                ? 'text-success bg-success/10' 
+                                : 'text-danger bg-danger/10'
+                            }`}
+                            initial={{ opacity: 0, scale: 0.8 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            exit={{ opacity: 0, scale: 0.8 }}
+                          >
+                            {testResults[server.id].status === 'online' ? (
+                              <CheckCircle2 className="w-4 h-4" />
+                            ) : (
+                              <XCircle className="w-4 h-4" />
+                            )}
+                            <span className="hidden sm:inline">
+                              {testResults[server.id].status === 'online' 
+                                ? t('common.connected') 
+                                : testResults[server.id].message || t('common.failed')}
+                            </span>
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                      
+                      <motion.button
+                        onClick={() => toggleServer(server.id, !server.is_active)}
+                        className={`relative flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm transition-all ${
+                          server.is_active
+                            ? 'bg-success/10 text-success hover:bg-success/20'
+                            : 'bg-dark-700/50 text-dark-400 hover:bg-dark-700'
+                        }`}
+                        whileHover={{ scale: 1.02 }}
+                        whileTap={{ scale: 0.98 }}
+                        title={server.is_active ? t('servers.monitoring_enabled') : t('servers.monitoring_disabled')}
+                      >
+                        <Power className="w-4 h-4" />
+                        <div className={`w-8 h-4 rounded-full transition-colors ${
+                          server.is_active ? 'bg-success' : 'bg-dark-600'
+                        }`}>
+                          <motion.div
+                            className="w-3 h-3 rounded-full bg-white shadow-sm mt-0.5"
+                            animate={{ x: server.is_active ? 17 : 2 }}
+                            transition={{ type: 'spring', stiffness: 500, damping: 30 }}
+                          />
+                        </div>
+                      </motion.button>
+                      
+                      <motion.button
+                        onClick={() => handleTest(server.id)}
+                        disabled={testingId === server.id || !server.is_active}
+                        className={`btn btn-secondary text-sm ${!server.is_active ? 'opacity-50 cursor-not-allowed' : ''}`}
+                        whileHover={{ scale: server.is_active ? 1.05 : 1 }}
+                        whileTap={{ scale: server.is_active ? 0.95 : 1 }}
+                      >
+                        {testingId === server.id ? (
+                          <motion.div
+                            animate={{ rotate: 360 }}
+                            transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}
+                          >
+                            <Loader2 className="w-4 h-4" />
+                          </motion.div>
+                        ) : (
+                          t('common.test')
+                        )}
+                      </motion.button>
+                      
+                      <motion.button
+                        onClick={() => editingId === server.id ? handleCancel() : handleEdit(server)}
+                        className={`btn btn-ghost p-2.5 ${editingId === server.id ? 'text-accent-400 bg-accent-500/10' : ''}`}
+                        whileHover={{ scale: 1.1 }}
+                        whileTap={{ scale: 0.9 }}
+                      >
+                        {editingId === server.id ? <X className="w-4 h-4" /> : <Edit2 className="w-4 h-4" />}
+                      </motion.button>
+                      
+                      <motion.button
+                        onClick={() => handleDelete(server.id)}
+                        className={`btn p-2.5 transition-all ${
+                          deleteConfirm === server.id 
+                            ? 'bg-danger text-white' 
+                            : 'btn-ghost text-danger hover:bg-danger/10'
+                        }`}
+                        whileHover={{ scale: 1.1 }}
+                        whileTap={{ scale: 0.9 }}
+                        animate={deleteConfirm === server.id ? { scale: [1, 1.1, 1] } : {}}
+                        transition={{ duration: 0.3 }}
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </motion.button>
                     </div>
                   </div>
-                  
-                  <div className="flex items-center gap-2">
-                    <AnimatePresence mode="wait">
-                      {testResults[server.id] && (
-                        <motion.div 
-                          className={`flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-lg ${
-                            testResults[server.id].status === 'online' 
-                              ? 'text-success bg-success/10' 
-                              : 'text-danger bg-danger/10'
-                          }`}
-                          initial={{ opacity: 0, scale: 0.8 }}
-                          animate={{ opacity: 1, scale: 1 }}
-                          exit={{ opacity: 0, scale: 0.8 }}
-                        >
-                          {testResults[server.id].status === 'online' ? (
-                            <CheckCircle2 className="w-4 h-4" />
-                          ) : (
-                            <XCircle className="w-4 h-4" />
-                          )}
-                          <span className="hidden sm:inline">
-                            {testResults[server.id].status === 'online' 
-                              ? t('common.connected') 
-                              : testResults[server.id].message || t('common.failed')}
-                          </span>
-                        </motion.div>
-                      )}
-                    </AnimatePresence>
-                    
-                    {/* Monitoring toggle */}
-                    <motion.button
-                      onClick={() => toggleServer(server.id, !server.is_active)}
-                      className={`relative flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm transition-all ${
-                        server.is_active
-                          ? 'bg-success/10 text-success hover:bg-success/20'
-                          : 'bg-dark-700/50 text-dark-400 hover:bg-dark-700'
-                      }`}
-                      whileHover={{ scale: 1.02 }}
-                      whileTap={{ scale: 0.98 }}
-                      title={server.is_active ? t('servers.monitoring_enabled') : t('servers.monitoring_disabled')}
-                    >
-                      <Power className="w-4 h-4" />
-                      <div className={`w-8 h-4 rounded-full transition-colors ${
-                        server.is_active ? 'bg-success' : 'bg-dark-600'
-                      }`}>
-                        <motion.div
-                          className="w-3 h-3 rounded-full bg-white shadow-sm mt-0.5"
-                          animate={{ x: server.is_active ? 17 : 2 }}
-                          transition={{ type: 'spring', stiffness: 500, damping: 30 }}
-                        />
-                      </div>
-                    </motion.button>
-                    
-                    <motion.button
-                      onClick={() => handleTest(server.id)}
-                      disabled={testingId === server.id || !server.is_active}
-                      className={`btn btn-secondary text-sm ${!server.is_active ? 'opacity-50 cursor-not-allowed' : ''}`}
-                      whileHover={{ scale: server.is_active ? 1.05 : 1 }}
-                      whileTap={{ scale: server.is_active ? 0.95 : 1 }}
-                    >
-                      {testingId === server.id ? (
-                        <motion.div
-                          animate={{ rotate: 360 }}
-                          transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}
-                        >
-                          <Loader2 className="w-4 h-4" />
-                        </motion.div>
-                      ) : (
-                        t('common.test')
-                      )}
-                    </motion.button>
-                    
-                    <motion.button
-                      onClick={() => handleEdit(server)}
-                      className="btn btn-ghost p-2.5"
-                      whileHover={{ scale: 1.1 }}
-                      whileTap={{ scale: 0.9 }}
-                    >
-                      <Edit2 className="w-4 h-4" />
-                    </motion.button>
-                    
-                    <motion.button
-                      onClick={() => handleDelete(server.id)}
-                      className={`btn p-2.5 transition-all ${
-                        deleteConfirm === server.id 
-                          ? 'bg-danger text-white' 
-                          : 'btn-ghost text-danger hover:bg-danger/10'
-                      }`}
-                      whileHover={{ scale: 1.1 }}
-                      whileTap={{ scale: 0.9 }}
-                      animate={deleteConfirm === server.id ? { scale: [1, 1.1, 1] } : {}}
+                </motion.div>
+
+                {/* Inline Edit Form */}
+                <AnimatePresence>
+                  {editingId === server.id && (
+                    <motion.div
+                      className="card rounded-t-none border-t-0 border-accent-500/20 bg-dark-800/60"
+                      initial={{ opacity: 0, height: 0 }}
+                      animate={{ opacity: 1, height: 'auto' }}
+                      exit={{ opacity: 0, height: 0 }}
                       transition={{ duration: 0.3 }}
                     >
-                      <Trash2 className="w-4 h-4" />
-                    </motion.button>
-                  </div>
-                </div>
-              </motion.div>
+                      <AnimatePresence>
+                        {error && (
+                          <motion.div 
+                            className="flex items-center gap-3 p-4 mb-4 bg-danger/10 border border-danger/20 rounded-xl text-danger"
+                            initial={{ opacity: 0, y: -10 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            exit={{ opacity: 0, y: -10 }}
+                          >
+                            <AlertTriangle className="w-5 h-5 flex-shrink-0" />
+                            <span className="text-sm">{error}</span>
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                      
+                      <form onSubmit={handleSubmit} className="space-y-4" autoComplete="off" data-form-type="other">
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          <div>
+                            <label className="block text-sm text-dark-300 mb-2 flex items-center gap-2">
+                              <ServerIcon className="w-4 h-4" />
+                              {t('servers.server_name')}
+                            </label>
+                            <input
+                              type="text"
+                              value={formData.name}
+                              onChange={(e) => setFormData(d => ({ ...d, name: e.target.value }))}
+                              placeholder={t('servers.server_name_placeholder')}
+                              className="input"
+                              required
+                            />
+                          </div>
+                          
+                          <div>
+                            <label className="block text-sm text-dark-300 mb-2 flex items-center gap-2">
+                              <Key className="w-4 h-4" />
+                              {t('servers.api_key')}
+                              <span className="text-dark-500 font-normal">({t('servers.api_key_hint')})</span>
+                            </label>
+                            <input
+                              type="password"
+                              value={formData.api_key}
+                              onChange={(e) => setFormData(d => ({ ...d, api_key: e.target.value }))}
+                              placeholder={t('servers.api_key_placeholder')}
+                              className="input"
+                              autoComplete="new-password"
+                              data-lpignore="true"
+                              data-form-type="other"
+                            />
+                          </div>
+                        </div>
+                        
+                        <div>
+                          <label className="block text-sm text-dark-300 mb-2 flex items-center gap-2">
+                            <LinkIcon className="w-4 h-4" />
+                            {t('servers.server_host')}
+                          </label>
+                          <div className="flex gap-3">
+                            <div className="flex-1">
+                              <input
+                                type="text"
+                                value={formData.host}
+                                onChange={(e) => setFormData(d => ({ ...d, host: e.target.value }))}
+                                placeholder={t('servers.server_host_placeholder')}
+                                className="input"
+                                required
+                              />
+                            </div>
+                            <div className="w-28">
+                              <input
+                                type="text"
+                                value={formData.port}
+                                onChange={(e) => setFormData(d => ({ ...d, port: e.target.value.replace(/\D/g, '') }))}
+                                placeholder={t('servers.server_port_placeholder')}
+                                className="input text-center"
+                              />
+                            </div>
+                          </div>
+                          <p className="text-xs text-dark-500 mt-1.5">
+                            {t('servers.server_host_hint')}
+                          </p>
+                        </div>
+                        
+                        <div className="flex gap-3 pt-2">
+                          <motion.button 
+                            type="submit" 
+                            disabled={isSubmitting} 
+                            className="btn btn-primary"
+                            whileHover={{ scale: 1.02 }}
+                            whileTap={{ scale: 0.98 }}
+                          >
+                            {isSubmitting ? (
+                              <motion.div
+                                animate={{ rotate: 360 }}
+                                transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}
+                              >
+                                <Loader2 className="w-4 h-4" />
+                              </motion.div>
+                            ) : (
+                              t('servers.update_server')
+                            )}
+                          </motion.button>
+                          <motion.button 
+                            type="button" 
+                            onClick={handleCancel} 
+                            className="btn btn-secondary"
+                            whileHover={{ scale: 1.02 }}
+                            whileTap={{ scale: 0.98 }}
+                          >
+                            {t('common.cancel')}
+                          </motion.button>
+                        </div>
+                      </form>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
             ))
           )}
         </AnimatePresence>

@@ -76,6 +76,12 @@ class AlertSettingsUpdate(BaseModel):
 
     excluded_server_ids: Optional[list[int]] = None
 
+    offline_excluded_server_ids: Optional[list[int]] = None
+    cpu_excluded_server_ids: Optional[list[int]] = None
+    ram_excluded_server_ids: Optional[list[int]] = None
+    network_excluded_server_ids: Optional[list[int]] = None
+    tcp_excluded_server_ids: Optional[list[int]] = None
+
 
 class TelegramTestRequest(BaseModel):
     bot_token: str
@@ -132,6 +138,11 @@ def _settings_to_dict(s: AlertSettings) -> dict:
         "tcp_finwait_spike_percent": s.tcp_finwait_spike_percent,
         "tcp_finwait_sustained_seconds": s.tcp_finwait_sustained_seconds,
         "excluded_server_ids": json.loads(s.excluded_server_ids) if s.excluded_server_ids else [],
+        "offline_excluded_server_ids": json.loads(s.offline_excluded_server_ids) if s.offline_excluded_server_ids else [],
+        "cpu_excluded_server_ids": json.loads(s.cpu_excluded_server_ids) if s.cpu_excluded_server_ids else [],
+        "ram_excluded_server_ids": json.loads(s.ram_excluded_server_ids) if s.ram_excluded_server_ids else [],
+        "network_excluded_server_ids": json.loads(s.network_excluded_server_ids) if s.network_excluded_server_ids else [],
+        "tcp_excluded_server_ids": json.loads(s.tcp_excluded_server_ids) if s.tcp_excluded_server_ids else [],
     }
 
 
@@ -159,9 +170,14 @@ async def update_alert_settings(
         db.add(settings)
         await db.flush()
 
+    json_list_fields = {
+        "excluded_server_ids", "offline_excluded_server_ids",
+        "cpu_excluded_server_ids", "ram_excluded_server_ids",
+        "network_excluded_server_ids", "tcp_excluded_server_ids",
+    }
     update_data = data.model_dump(exclude_unset=True)
     for key, value in update_data.items():
-        if key == "excluded_server_ids":
+        if key in json_list_fields:
             setattr(settings, key, json.dumps(value) if value is not None else None)
         else:
             setattr(settings, key, value)

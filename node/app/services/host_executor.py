@@ -211,32 +211,28 @@ class HostExecutor:
             )
             
             deadline = time.time() + timeout
-            stdout_queue: asyncio.Queue = asyncio.Queue()
-            stderr_queue: asyncio.Queue = asyncio.Queue()
+            merged_queue: asyncio.Queue = asyncio.Queue()
             
-            async def read_stream_to_queue(stream, queue: asyncio.Queue, stream_name: str):
-                """Read from stream and put lines into queue"""
+            async def read_stream_to_queue(stream, stream_name: str):
                 try:
                     while True:
                         line = await stream.readline()
                         if line:
                             decoded = line.decode('utf-8', errors='replace').rstrip('\n\r')
-                            await queue.put((stream_name, decoded))
+                            await merged_queue.put((stream_name, decoded))
                         else:
                             break
                 except Exception as e:
                     logger.debug(f"Stream {stream_name} read ended: {e}")
                 finally:
-                    await queue.put((stream_name, None))  # Signal end of stream
+                    await merged_queue.put((stream_name, None))
             
-            # Start reader tasks
-            stdout_task = asyncio.create_task(read_stream_to_queue(process.stdout, stdout_queue, "stdout"))
-            stderr_task = asyncio.create_task(read_stream_to_queue(process.stderr, stderr_queue, "stderr"))
+            stdout_task = asyncio.create_task(read_stream_to_queue(process.stdout, "stdout"))
+            stderr_task = asyncio.create_task(read_stream_to_queue(process.stderr, "stderr"))
             
-            stdout_done = False
-            stderr_done = False
+            streams_remaining = 2
             
-            while not (stdout_done and stderr_done):
+            while streams_remaining > 0:
                 remaining = deadline - time.time()
                 if remaining <= 0:
                     stdout_task.cancel()
@@ -249,29 +245,17 @@ class HostExecutor:
                     yield format_sse("done", {"exit_code": -1, "execution_time_ms": execution_time, "success": False})
                     return
                 
-                # Process stdout queue
-                if not stdout_done:
-                    try:
-                        stream_name, line = await asyncio.wait_for(stdout_queue.get(), timeout=0.05)
-                        if line is None:
-                            stdout_done = True
-                        else:
-                            yield format_sse("stdout", {"line": line})
-                    except asyncio.TimeoutError:
-                        pass
-                
-                # Process stderr queue
-                if not stderr_done:
-                    try:
-                        stream_name, line = await asyncio.wait_for(stderr_queue.get(), timeout=0.05)
-                        if line is None:
-                            stderr_done = True
-                        else:
-                            yield format_sse("stderr", {"line": line})
-                    except asyncio.TimeoutError:
-                        pass
+                try:
+                    stream_name, line = await asyncio.wait_for(
+                        merged_queue.get(), timeout=min(remaining, 1.0)
+                    )
+                    if line is None:
+                        streams_remaining -= 1
+                    else:
+                        yield format_sse(stream_name, {"line": line})
+                except asyncio.TimeoutError:
+                    pass
             
-            # Wait for process to finish
             await process.wait()
             await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
             
