@@ -652,10 +652,10 @@ function TriggerBlock({ title, icon, enabled, onToggle, expanded, onExpand, chil
   hideMainToggle?: boolean
 }) {
   return (
-    <div className="bg-dark-900/50 rounded-xl border border-dark-800/50 overflow-hidden">
+    <div className="bg-dark-900/50 rounded-xl border border-dark-800/50">
       <button
         onClick={onExpand}
-        className="w-full flex items-center justify-between p-4 hover:bg-dark-800/30 transition"
+        className="w-full flex items-center justify-between p-4 hover:bg-dark-800/30 transition rounded-xl"
       >
         <div className="flex items-center gap-3">
           <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${enabled ? 'bg-accent-500/20 text-accent-400' : 'bg-dark-800 text-dark-500'}`}>
@@ -666,14 +666,13 @@ function TriggerBlock({ title, icon, enabled, onToggle, expanded, onExpand, chil
         </div>
         {expanded ? <ChevronDown className="w-4 h-4 text-dark-500" /> : <ChevronRight className="w-4 h-4 text-dark-500" />}
       </button>
-      <AnimatePresence>
+      <AnimatePresence initial={false}>
         {expanded && (
           <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: 'auto', opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
+            initial={{ height: 0, opacity: 0, overflow: 'hidden' }}
+            animate={{ height: 'auto', opacity: 1, transitionEnd: { overflow: 'visible' } }}
+            exit={{ overflow: 'hidden', height: 0, opacity: 0 }}
             transition={{ duration: 0.2 }}
-            className="overflow-hidden"
           >
             <div className="px-4 pb-4 space-y-3">
               {!hideMainToggle && (
@@ -777,7 +776,7 @@ function ExcludeServerSelect({ servers, onAdd, placeholder }: {
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -4 }}
             transition={{ duration: 0.15 }}
-            className="absolute z-20 mt-1 w-full bg-dark-800 border border-dark-700 rounded-lg shadow-xl overflow-hidden"
+            className="absolute z-50 mt-1 w-full bg-dark-800 border border-dark-700 rounded-lg shadow-xl overflow-hidden"
           >
             {servers.length > 5 && (
               <div className="p-2 border-b border-dark-700/50">
