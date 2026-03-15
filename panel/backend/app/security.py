@@ -180,26 +180,16 @@ class SecurityMiddleware(BaseHTTPMiddleware):
         
         try:
             response = await call_next(request)
-            
-            # Drop connection on auth failures - only for login endpoint
-            # For other endpoints, 401 is normal (expired token) - let frontend redirect to login
-            if response.status_code in (401, 403):
-                if request.url.path.endswith("/auth/login"):
-                    # Only record failure for actual login attempts
-                    ip = security._get_client_ip(request)
-                    await security.record_auth_failure(ip)
-                    logger.warning(f"Auth failure from {ip}: {request.url.path}")
-                    return Response(status_code=444, content=b"")
-                # For other endpoints, return normal 401 to allow proper redirect
-            
-            return response
-            
         except ConnectionDrop:
             return Response(status_code=444, content=b"")
-        except Exception as e:
-            # Log unexpected errors but don't expose details
-            logger.error(f"Request error: {e}")
+        
+        if response.status_code in (401, 403) and request.url.path.endswith("/auth/login"):
+            ip = security._get_client_ip(request)
+            await security.record_auth_failure(ip)
+            logger.warning(f"Auth failure from {ip}: {request.url.path}")
             return Response(status_code=444, content=b"")
+        
+        return response
 
 
 def drop_connection():
