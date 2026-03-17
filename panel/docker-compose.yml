@@ -106,6 +106,8 @@ services:
     # Root access for docker.sock and Let's Encrypt certificate reading (0600 perms)
     user: root
     environment:
+      # IPERF_SERVER_DISABLED=1 — отключить iperf3-сервер панели (для диагностики сетевых проблем)
+      - IPERF_SERVER_DISABLED=${IPERF_SERVER_DISABLED:-0}
       - PANEL_UID=${PANEL_UID}
       - PANEL_PASSWORD=${PANEL_PASSWORD}
       - JWT_SECRET=${JWT_SECRET}

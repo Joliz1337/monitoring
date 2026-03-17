@@ -627,30 +627,35 @@ Frontend lazy loading (panel/frontend/src/pages/Remnawave.tsx):
 - Выбором таймаута (30s — 10m) и shell (sh/bash)
 - Отменой выполняющейся команды
 
-### Speed Test (iperf3)
+### Speed Test
 
-Система проверки скорости нод через iperf3. Автоматические тесты + ручной запуск с выбором режима.
+Система проверки скорости нод. Три метода: Ookla Speedtest CLI, iperf3, авто-выбор по гео.
 
-**Режимы тестирования:**
-- `quick` — 2-3 параллельных процесса iperf3 на последних CPU-ядрах, nice priority, ~5-8 сек
-- `full` — процесс на каждое ядро, без nice, точный максимум, ~10-15 сек
+**Методы тестирования:**
+- `auto` (по умолчанию) — Ookla для серверов вне РФ, iperf3 для серверов в РФ (Ookla заблокирован)
+- `ookla` — Ookla Speedtest CLI на хосте через nsenter, авто-выбор ближайшего сервера, до 40+ Гбит/с
+- `iperf3` — iperf3 с `-P` параллельными потоками и `-w` TCP window, публичные/свои серверы
+
+**Режимы теста:**
+- `quick` — 4 потока, 4MB TCP window, 5 сек (iperf3) / без upload (Ookla)
+- `full` — 16 потоков, 8MB TCP window, 10 сек (iperf3) / полный тест (Ookla)
 
 **Возможности:**
 - Автоматическое тестирование всех нод по расписанию (последовательно, 5 сек между нодами)
-- Гео-определение ноды по IP (ip-api.com) → тест на ближайших iperf3-серверах (2-3 штуки)
-- Три режима серверов: публичные / панель как сервер / оба
+- Гео-определение ноды по IP (ip-api.com) → авто-выбор метода + ближайшие iperf3-серверы
+- Автоустановка Ookla CLI на хосте при первом запуске (packagecloud / прямой бинарник)
+- Три режима iperf3 серверов: публичные / панель как сервер / оба
 - Dropdown-кнопка на странице сервера: «Быстрая» / «Полная» проверка
-- CPU affinity на последние ядра + nice для минимального влияния на основную нагрузку
 - Цветной бейдж скорости на карточке сервера (зелёный/жёлтый/красный)
 - Telegram-уведомления: низкая скорость, ошибки, восстановление
 
 **Файлы:**
-- `node/app/services/speedtest_runner.py` — запуск iperf3, мультипроцессный тест, CPU affinity, nice
-- `node/app/routers/speedtest.py` — POST /api/speedtest, GET /api/speedtest/status
-- `panel/backend/app/services/speedtest_scheduler.py` — фоновый планировщик + iperf3-сервер панели
+- `node/app/services/speedtest_runner.py` — iperf3 (-P -w) + Ookla CLI через nsenter
+- `node/app/routers/speedtest.py` — POST /api/speedtest (method, test_mode), GET /api/speedtest/status
+- `panel/backend/app/services/speedtest_scheduler.py` — фоновый планировщик, авто-выбор метода по гео
 - `panel/backend/app/services/geo_resolver.py` — определение гео по IP, фильтрация iperf3-серверов
-- `panel/backend/app/routers/proxy.py` — POST/GET /proxy/{id}/speedtest (принимает test_mode)
-- `panel/frontend/src/pages/Settings.tsx` — секция настроек Speed Test
+- `panel/backend/app/routers/proxy.py` — POST/GET /proxy/{id}/speedtest (method, test_mode)
+- `panel/frontend/src/pages/Settings.tsx` — секция настроек Speed Test (метод, режим, серверы)
 - `panel/frontend/src/pages/ServerDetails.tsx` — dropdown-кнопка Quick/Full
 - `panel/frontend/src/components/Dashboard/ServerCard.tsx` — бейдж скорости в футере
 
@@ -707,6 +712,41 @@ docker compose restart backend
 2. **Контейнер перезапустился** — если JWT_SECRET изменился
 
 **Решение:** просто перелогиньтесь
+
+### Проблема: Таймауты к нодам (504), внешние серверы недоступны
+
+Панель не может достучаться до нод вне хостинга, при этом внутренние (тот же хостинг) работают.
+
+**Причины:**
+1. **Оптимизации sysctl применены к хосту панели** — настройки для relay-серверов (nf_conntrack, ip_local_port_range) могут ломать малые VMs
+2. **Исчерпание conntrack** — много соединений (метрики, speedtest, xray monitor) заполняют таблицу
+3. **iperf3-сервер** — постоянный режим может создавать много соединений при тестах
+
+**Диагностика:**
+
+```bash
+# На ХОСТЕ панели (не в контейнере)
+cd /opt/monitoring-panel  # или путь к панели
+bash scripts/diagnose-network.sh
+```
+
+Пришлите вывод — по нему можно определить причину.
+
+**Быстрые проверки:**
+
+1. Если на хосте есть `/etc/sysctl.d/99-vless-tuning.conf` — оптимизации применены к панели по ошибке. Удалите и перезагрузите:
+   ```bash
+   sudo rm /etc/sysctl.d/99-vless-tuning.conf
+   sudo sysctl -p
+   ```
+
+2. Временно отключить iperf3-сервер панели (для теста):
+   ```bash
+   # В .env или при запуске
+   IPERF_SERVER_DISABLED=1 docker compose up -d
+   ```
+
+3. В настройках Speed Test переключить режим на «только публичные серверы» — iperf3 панели не будет запускаться.
 
 ## Команды
 

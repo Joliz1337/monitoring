@@ -1,7 +1,7 @@
 """Background speedtest scheduler.
 
 Tests nodes sequentially (one at a time) to avoid overloading iperf3 servers.
-Supports public iperf3 servers and panel-as-server mode.
+Supports three methods: iperf3 (improved), Ookla CLI, auto (geo-based selection).
 """
 
 import asyncio
@@ -39,14 +39,17 @@ DEFAULT_IPERF_SERVERS = [
     {"host": "nyc.speedtest.clouvider.net", "port": 5200, "label": "Clouvider NYC", "region": "US-NY"},
 ]
 
+OOKLA_BLOCKED_REGIONS = {"RU"}
+
 SETTINGS_KEYS = {
     "speedtest_enabled": "true",
+    "speedtest_method": "auto",
     "speedtest_mode": "both",
     "speedtest_servers": json.dumps(DEFAULT_IPERF_SERVERS),
     "speedtest_threshold": "500",
     "speedtest_interval": "60",
-    "speedtest_duration": "3",
-    "speedtest_streams": "3",
+    "speedtest_duration": "5",
+    "speedtest_streams": "4",
     "speedtest_test_mode": "quick",
     "speedtest_panel_port": "5201",
     "speedtest_panel_address": "",
@@ -71,12 +74,13 @@ class SpeedtestScheduler:
         self._iperf_server_proc: Optional[asyncio.subprocess.Process] = None
 
         self._enabled = True
+        self._method = "auto"
         self._mode = "both"
         self._servers = list(DEFAULT_IPERF_SERVERS)
         self._threshold = 500.0
         self._interval = 60
-        self._duration = 3
-        self._streams = 3
+        self._duration = 5
+        self._streams = 4
         self._test_mode = "quick"
         self._panel_port = 5201
         self._panel_address = ""
@@ -105,11 +109,13 @@ class SpeedtestScheduler:
                 return db_settings.get(key, SETTINGS_KEYS[key])
 
             self._enabled = _get("speedtest_enabled").lower() == "true"
+            raw_method = _get("speedtest_method")
+            self._method = raw_method if raw_method in ("auto", "ookla", "iperf3") else "auto"
             self._mode = _get("speedtest_mode")
             self._threshold = float(_get("speedtest_threshold"))
             self._interval = max(1, int(_get("speedtest_interval")))
             self._duration = max(1, min(30, int(_get("speedtest_duration"))))
-            self._streams = max(1, min(16, int(_get("speedtest_streams"))))
+            self._streams = max(1, min(64, int(_get("speedtest_streams"))))
             raw_mode = _get("speedtest_test_mode")
             self._test_mode = "full" if raw_mode == "full" else "quick"
             self._panel_port = int(_get("speedtest_panel_port"))
@@ -150,8 +156,12 @@ class SpeedtestScheduler:
                 logger.debug(f"Speedtest settings reload error: {e}")
 
     async def _manage_iperf_server(self):
-        """Start or stop the panel-side iperf3 server based on mode. Runs persistently (no --one-off)."""
-        should_run = self._mode in ("panel", "both") and self._enabled
+        """Start or stop the panel-side iperf3 server based on mode."""
+        import os
+        if os.environ.get("IPERF_SERVER_DISABLED", "").lower() in ("1", "true", "yes"):
+            should_run = False
+        else:
+            should_run = self._mode in ("panel", "both") and self._enabled
         iperf3_bin = shutil.which("iperf3") or "/usr/bin/iperf3"
 
         if should_run:
@@ -223,6 +233,16 @@ class SpeedtestScheduler:
         filtered = filter_servers_by_geo(all_servers, geo_region)
         return filtered if filtered else all_servers
 
+    def _resolve_method_for_node(self, server: Server) -> str:
+        """Determine the test method for a node based on settings and geo."""
+        if self._method in ("ookla", "iperf3"):
+            return self._method
+
+        geo_region = getattr(server, "geo_region", None) or ""
+        if geo_region in OOKLA_BLOCKED_REGIONS:
+            return "iperf3"
+        return "ookla"
+
     async def start(self):
         if self._running:
             return
@@ -231,7 +251,7 @@ class SpeedtestScheduler:
         self._task = asyncio.create_task(self._main_loop())
         self._settings_task = asyncio.create_task(self._settings_loop())
         await self._manage_iperf_server()
-        logger.info(f"Speedtest scheduler started (interval: {self._interval}min, enabled: {self._enabled})")
+        logger.info(f"Speedtest scheduler started (interval: {self._interval}min, method: {self._method})")
 
     async def stop(self):
         self._running = False
@@ -246,7 +266,7 @@ class SpeedtestScheduler:
         logger.info("Speedtest scheduler stopped")
 
     async def _main_loop(self):
-        await asyncio.sleep(30)  # initial delay
+        await asyncio.sleep(30)
         while self._running:
             try:
                 if self._enabled:
@@ -273,20 +293,16 @@ class SpeedtestScheduler:
         if not servers:
             return
 
-        base_list = self._build_server_list()
-        if not base_list:
-            logger.warning("Speedtest: no iperf3 servers configured")
-            return
-
-        logger.info(f"Speedtest: starting cycle for {len(servers)} nodes")
+        logger.info(f"Speedtest: starting cycle for {len(servers)} nodes (method: {self._method})")
 
         events: list[dict] = []
         for srv in servers:
             if not self._running:
                 break
             try:
-                node_servers = await self._build_server_list_for_node(srv)
-                event = await self._test_single_node(srv, node_servers or base_list)
+                node_method = self._resolve_method_for_node(srv)
+                node_servers = await self._build_server_list_for_node(srv) if node_method == "iperf3" else []
+                event = await self._test_single_node(srv, node_servers, node_method)
                 if event:
                     events.append(event)
             except Exception as e:
@@ -300,18 +316,34 @@ class SpeedtestScheduler:
         if events:
             await self._send_notifications(events)
 
-    async def _test_single_node(self, server: Server, server_list: list[dict]) -> Optional[dict]:
-        """Send speedtest request to a single node and store result. Returns notification event or None."""
-        payload = {
-            "servers": server_list,
+    async def _test_single_node(
+        self, server: Server, server_list: list[dict], method: str = "iperf3",
+    ) -> Optional[dict]:
+        """Send speedtest request to a single node and store result."""
+        payload: dict = {
             "duration": self._duration,
             "streams": self._streams,
             "threshold_mbps": self._threshold,
             "test_mode": self._test_mode,
+            "method": method,
         }
 
+        if method == "iperf3":
+            if not server_list:
+                base_list = self._build_server_list()
+                if not base_list:
+                    logger.warning(f"Speedtest {server.name}: no iperf3 servers configured")
+                    return None
+                server_list = base_list
+            payload["servers"] = server_list
+
+        if method == "ookla":
+            timeout = 150
+        else:
+            timeout = self._duration * max(len(server_list), 1) + 60
+
         try:
-            async with httpx.AsyncClient(verify=False, timeout=self._duration * len(server_list) + 30) as client:
+            async with httpx.AsyncClient(verify=False, timeout=timeout) as client:
                 response = await client.post(
                     f"{server.url}/api/speedtest",
                     headers={"X-API-Key": server.api_key},
@@ -321,7 +353,7 @@ class SpeedtestScheduler:
                 if response.status_code == 200:
                     result = response.json()
                     speed = result.get("best_speed_mbps", 0)
-                    logger.info(f"Speedtest {server.name}: {speed:.1f} Mbit/s")
+                    logger.info(f"Speedtest {server.name} [{method}]: {speed:.1f} Mbit/s")
                 elif response.status_code == 409:
                     logger.debug(f"Speedtest {server.name}: test already in progress")
                     return None
@@ -383,27 +415,27 @@ class SpeedtestScheduler:
         recovered = [e for e in events if e["type"] == "recovery"]
 
         if slow:
-            lines = ["🔴 <b>Низкая скорость</b>"]
+            lines = ["\U0001f534 <b>\u041d\u0438\u0437\u043a\u0430\u044f \u0441\u043a\u043e\u0440\u043e\u0441\u0442\u044c</b>"]
             for e in slow:
-                lines.append(f"  • {e['name']} — {e['speed']:.1f} Mbit/s (порог {e['threshold']:.0f})")
+                lines.append(f"  \u2022 {e['name']} \u2014 {e['speed']:.1f} Mbit/s (\u043f\u043e\u0440\u043e\u0433 {e['threshold']:.0f})")
             sections.append("\n".join(lines))
 
         if errors:
-            lines = ["⚠️ <b>Ошибки тестирования</b>"]
+            lines = ["\u26a0\ufe0f <b>\u041e\u0448\u0438\u0431\u043a\u0438 \u0442\u0435\u0441\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u044f</b>"]
             for e in errors:
-                lines.append(f"  • {e['name']} — {e['detail']}")
+                lines.append(f"  \u2022 {e['name']} \u2014 {e['detail']}")
             sections.append("\n".join(lines))
 
         if recovered:
-            lines = ["✅ <b>Скорость восстановлена</b>"]
+            lines = ["\u2705 <b>\u0421\u043a\u043e\u0440\u043e\u0441\u0442\u044c \u0432\u043e\u0441\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d\u0430</b>"]
             for e in recovered:
-                lines.append(f"  • {e['name']} — {e['speed']:.1f} Mbit/s")
+                lines.append(f"  \u2022 {e['name']} \u2014 {e['speed']:.1f} Mbit/s")
             sections.append("\n".join(lines))
 
         if not sections:
             return
 
-        header = "🚀 <b>Speed Test</b>\n"
+        header = "\U0001f680 <b>Speed Test</b>\n"
         full_text = header + "\n\n".join(sections)
 
         for chunk in self._split_message(full_text):
@@ -459,8 +491,10 @@ class SpeedtestScheduler:
         except Exception as e:
             logger.error(f"Telegram send error: {e}")
 
-    async def test_single_node_by_id(self, server_id: int, test_mode: Optional[str] = None) -> Optional[dict]:
-        """Manual test trigger — returns result directly. test_mode overrides scheduler settings."""
+    async def test_single_node_by_id(
+        self, server_id: int, test_mode: Optional[str] = None, method: Optional[str] = None,
+    ) -> Optional[dict]:
+        """Manual test trigger — returns result directly."""
         async with async_session() as db:
             result = await db.execute(
                 select(Server).where(Server.id == server_id, Server.is_active == True)
@@ -470,21 +504,33 @@ class SpeedtestScheduler:
         if not server:
             return None
 
-        server_list = await self._build_server_list_for_node(server)
-        if not server_list:
-            return {"error": "No iperf3 servers configured"}
-
         effective_mode = test_mode if test_mode in ("quick", "full") else self._test_mode
-        payload = {
-            "servers": server_list,
+        effective_method = method if method in ("iperf3", "ookla", "auto") else self._method
+
+        if effective_method == "auto":
+            effective_method = self._resolve_method_for_node(server)
+
+        payload: dict = {
             "duration": self._duration,
             "streams": self._streams,
             "threshold_mbps": self._threshold,
             "test_mode": effective_mode,
+            "method": effective_method,
         }
 
+        if effective_method == "iperf3":
+            server_list = await self._build_server_list_for_node(server)
+            if not server_list:
+                return {"error": "No iperf3 servers configured"}
+            payload["servers"] = server_list
+
+        if effective_method == "ookla":
+            timeout = 150
+        else:
+            server_list = payload.get("servers", [])
+            timeout = self._duration * max(len(server_list), 1) + 60
+
         try:
-            timeout = self._duration * len(server_list) + 30
             async with httpx.AsyncClient(verify=False, timeout=timeout) as client:
                 response = await client.post(
                     f"{server.url}/api/speedtest",

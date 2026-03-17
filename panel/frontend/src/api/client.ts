@@ -338,16 +338,20 @@ export interface SpeedtestResultEntry {
   port: number
   download_mbps: number
   upload_mbps?: number
+  latency_ms?: number
+  server_name?: string
   retransmits?: number
   error?: string
 }
 
 export interface SpeedtestResult {
   best_speed_mbps: number
+  upload_mbps?: number
   best_server: string
   threshold_mbps: number
   ok: boolean
   test_mode?: string
+  method?: string
   results: SpeedtestResultEntry[]
   tested_at: string | null
 }

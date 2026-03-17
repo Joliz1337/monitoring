@@ -1337,12 +1337,13 @@ function SpeedtestSettings() {
   const initialLoadDone = useRef(false)
 
   const [enabled, setEnabled] = useState(true)
+  const [speedtestMethod, setSpeedtestMethod] = useState<'auto' | 'ookla' | 'iperf3'>('auto')
   const [mode, setMode] = useState<'public' | 'panel' | 'both'>('both')
   const [testMode, setTestMode] = useState<'quick' | 'full'>('quick')
   const [threshold, setThreshold] = useState(500)
   const [interval, setInterval_] = useState(60)
-  const [duration, setDuration] = useState(2)
-  const [streams, setStreams] = useState(1)
+  const [duration, setDuration] = useState(5)
+  const [streams, setStreams] = useState(4)
   const [panelPort, setPanelPort] = useState(5201)
   const [panelAddress, setPanelAddress] = useState('')
   const [servers, setServers] = useState<SpeedtestServerConfig[]>(DEFAULT_IPERF_SERVERS)
@@ -1368,13 +1369,15 @@ function SpeedtestSettings() {
         const s = data.settings
         setAllServers(srvData.servers.map(sv => ({ id: sv.id, name: sv.name })))
         setEnabled(s.speedtest_enabled !== 'false')
+        const rawMethod = s.speedtest_method || 'auto'
+        setSpeedtestMethod(rawMethod === 'ookla' ? 'ookla' : rawMethod === 'iperf3' ? 'iperf3' : 'auto')
         setMode((s.speedtest_mode || 'both') as 'public' | 'panel' | 'both')
         const tm = s.speedtest_test_mode || 'quick'
         setTestMode(tm === 'full' ? 'full' : 'quick')
         setThreshold(parseInt(s.speedtest_threshold || '500', 10))
         setInterval_(parseInt(s.speedtest_interval || '60', 10))
-        setDuration(parseInt(s.speedtest_duration || '2', 10))
-        setStreams(parseInt(s.speedtest_streams || '1', 10))
+        setDuration(parseInt(s.speedtest_duration || '5', 10))
+        setStreams(parseInt(s.speedtest_streams || '4', 10))
         setPanelPort(parseInt(s.speedtest_panel_port || '5201', 10))
         let addr = s.speedtest_panel_address || ''
         if (!addr) {
@@ -1410,6 +1413,7 @@ function SpeedtestSettings() {
       try {
         const updates: [string, string][] = [
           ['speedtest_enabled', String(enabled)],
+          ['speedtest_method', speedtestMethod],
           ['speedtest_mode', mode],
           ['speedtest_test_mode', testMode],
           ['speedtest_threshold', String(threshold)],
@@ -1433,7 +1437,7 @@ function SpeedtestSettings() {
       }
     }, 500)
     return () => clearTimeout(timeout)
-  }, [loading, enabled, mode, testMode, threshold, interval, duration, streams, panelPort, panelAddress, servers, notifySlow, notifyError, notifyRecovery, useCustomBot, botToken, chatId, ignoreList, t])
+  }, [loading, enabled, speedtestMethod, mode, testMode, threshold, interval, duration, streams, panelPort, panelAddress, servers, notifySlow, notifyError, notifyRecovery, useCustomBot, botToken, chatId, ignoreList, t])
 
   const handleTestNotification = async () => {
     setTestingSend(true)
@@ -1496,26 +1500,49 @@ function SpeedtestSettings() {
           </button>
         </div>
 
-        {/* Mode */}
+        {/* Method selector */}
         <div>
-          <label className="text-sm text-dark-300 block mb-1.5">{t('settings.speedtest_mode')}</label>
+          <label className="text-sm text-dark-300 block mb-1.5">{t('settings.speedtest_method')}</label>
           <div className="flex gap-2">
-            {(['public', 'panel', 'both'] as const).map(m => (
+            {(['auto', 'ookla', 'iperf3'] as const).map(m => (
               <button
                 key={m}
-                onClick={() => setMode(m)}
-                className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-                  mode === m ? 'bg-accent-500/20 text-accent-400 border border-accent-500/30' : 'bg-dark-800 text-dark-400 border border-dark-700 hover:border-dark-600'
+                onClick={() => setSpeedtestMethod(m)}
+                className={`flex-1 px-3 py-2 rounded-lg text-xs font-medium transition-colors ${
+                  speedtestMethod === m ? 'bg-accent-500/20 text-accent-400 border border-accent-500/30' : 'bg-dark-800 text-dark-400 border border-dark-700 hover:border-dark-600'
                 }`}
               >
-                {t(`settings.speedtest_mode_${m}`)}
+                <div className="font-medium">{t(`settings.speedtest_method_${m}`)}</div>
+                <div className={`text-[10px] mt-0.5 ${speedtestMethod === m ? 'text-accent-400/70' : 'text-dark-500'}`}>
+                  {t(`settings.speedtest_method_${m}_hint`)}
+                </div>
               </button>
             ))}
           </div>
         </div>
 
-        {/* Panel address (visible for panel/both modes) */}
-        {(mode === 'panel' || mode === 'both') && (
+        {/* iperf3 server mode (only for iperf3 method) */}
+        {speedtestMethod === 'iperf3' && (
+          <div>
+            <label className="text-sm text-dark-300 block mb-1.5">{t('settings.speedtest_mode')}</label>
+            <div className="flex gap-2">
+              {(['public', 'panel', 'both'] as const).map(m => (
+                <button
+                  key={m}
+                  onClick={() => setMode(m)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                    mode === m ? 'bg-accent-500/20 text-accent-400 border border-accent-500/30' : 'bg-dark-800 text-dark-400 border border-dark-700 hover:border-dark-600'
+                  }`}
+                >
+                  {t(`settings.speedtest_mode_${m}`)}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Panel address (visible for panel/both iperf3 modes) */}
+        {speedtestMethod === 'iperf3' && (mode === 'panel' || mode === 'both') && (
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="text-sm text-dark-300 block mb-1.5">{t('settings.speedtest_panel_address')}</label>
@@ -1549,11 +1576,11 @@ function SpeedtestSettings() {
                 onClick={() => {
                   setTestMode(m)
                   if (m === 'quick') {
-                    setDuration(3)
-                    setStreams(3)
-                  } else {
                     setDuration(5)
                     setStreams(4)
+                  } else {
+                    setDuration(10)
+                    setStreams(16)
                   }
                 }}
                 className={`flex-1 px-3 py-2 rounded-lg text-xs font-medium transition-colors ${
@@ -1570,7 +1597,7 @@ function SpeedtestSettings() {
         </div>
 
         {/* Numeric settings */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div className={`grid grid-cols-2 ${speedtestMethod === 'iperf3' ? 'sm:grid-cols-4' : ''} gap-3`}>
           <div>
             <label className="text-sm text-dark-300 block mb-1.5">{t('settings.speedtest_threshold')}</label>
             <input
@@ -1589,30 +1616,32 @@ function SpeedtestSettings() {
               className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200 focus:outline-none focus:border-accent-500/50"
             />
           </div>
-          <div>
-            <label className="text-sm text-dark-300 block mb-1.5">{t('settings.speedtest_duration')}</label>
-            <input
-              type="number"
-              value={duration}
-              onChange={e => setDuration(parseInt(e.target.value, 10) || 2)}
-              className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200 focus:outline-none focus:border-accent-500/50"
-            />
-          </div>
-          <div>
-            <label className="text-sm text-dark-300 block mb-1.5">
-              {testMode === 'full' ? t('settings.speedtest_processes') : t('settings.speedtest_streams')}
-            </label>
-            <input
-              type="number"
-              value={streams}
-              onChange={e => setStreams(parseInt(e.target.value, 10) || 1)}
-              className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200 focus:outline-none focus:border-accent-500/50"
-            />
-          </div>
+          {speedtestMethod === 'iperf3' && (
+            <>
+              <div>
+                <label className="text-sm text-dark-300 block mb-1.5">{t('settings.speedtest_duration')}</label>
+                <input
+                  type="number"
+                  value={duration}
+                  onChange={e => setDuration(parseInt(e.target.value, 10) || 5)}
+                  className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200 focus:outline-none focus:border-accent-500/50"
+                />
+              </div>
+              <div>
+                <label className="text-sm text-dark-300 block mb-1.5">{t('settings.speedtest_streams')}</label>
+                <input
+                  type="number"
+                  value={streams}
+                  onChange={e => setStreams(parseInt(e.target.value, 10) || 4)}
+                  className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200 focus:outline-none focus:border-accent-500/50"
+                />
+              </div>
+            </>
+          )}
         </div>
 
-        {/* Servers list */}
-        {(mode === 'public' || mode === 'both') && (
+        {/* Servers list (iperf3 only) */}
+        {speedtestMethod === 'iperf3' && (mode === 'public' || mode === 'both') && (
           <div>
             <div className="flex items-center justify-between mb-2">
               <label className="text-sm text-dark-300">{t('settings.speedtest_servers')}</label>
