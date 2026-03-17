@@ -347,6 +347,7 @@ export interface SpeedtestResult {
   best_server: string
   threshold_mbps: number
   ok: boolean
+  test_mode?: string
   results: SpeedtestResultEntry[]
   tested_at: string | null
 }
@@ -508,8 +509,8 @@ export const proxyApi = {
   getExecuteStreamUrl: (serverId: number) => `/api/proxy/${serverId}/system/execute-stream`,
   
   // Speed test
-  runSpeedtest: (serverId: number) =>
-    api.post<{ success: boolean } & SpeedtestResult>(`/proxy/${serverId}/speedtest`),
+  runSpeedtest: (serverId: number, testMode?: 'quick' | 'full') =>
+    api.post<{ success: boolean } & SpeedtestResult>(`/proxy/${serverId}/speedtest`, { test_mode: testMode }),
   getSpeedtest: (serverId: number) =>
     api.get<SpeedtestResult>(`/proxy/${serverId}/speedtest`),
 }

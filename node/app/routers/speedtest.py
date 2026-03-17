@@ -19,11 +19,10 @@ _last_result: Optional[dict] = None
 
 class SpeedtestRequest(BaseModel):
     servers: list[dict] = Field(..., min_length=1)
-    duration: int = Field(default=2, ge=1, le=30)
-    streams: int = Field(default=1, ge=1, le=16)
+    duration: int = Field(default=3, ge=1, le=30)
+    streams: int = Field(default=3, ge=1, le=16)
     threshold_mbps: float = Field(default=500.0, ge=0)
-    bandwidth_limit: str = Field(default="")
-    test_mode: str = Field(default="light", pattern="^(light|full)$")
+    test_mode: str = Field(default="quick", pattern="^(quick|full|light)$")
 
 
 @router.post("")
@@ -41,7 +40,6 @@ async def run_test(request: SpeedtestRequest):
                 duration=request.duration,
                 streams=request.streams,
                 threshold_mbps=request.threshold_mbps,
-                bandwidth_limit=request.bandwidth_limit,
                 test_mode=request.test_mode,
             )
             _last_result = result

@@ -21,14 +21,22 @@ from app.models import Server, PanelSettings, AlertSettings
 logger = logging.getLogger(__name__)
 
 DEFAULT_IPERF_SERVERS = [
+    # Europe
     {"host": "ping.online.net", "port": 5200, "label": "Online.net (100G)", "region": "EU-FR"},
     {"host": "speedtest.serverius.net", "port": 5002, "label": "Serverius (10G)", "region": "EU-NL"},
     {"host": "iperf3.moji.fr", "port": 5200, "label": "Moji (100G)", "region": "EU-FR"},
     {"host": "paris.bbr.iperf.bytel.fr", "port": 9200, "label": "Bouygues (10G)", "region": "EU-FR"},
+    # Russia
     {"host": "spd-rudp.hostkey.ru", "port": 5201, "label": "Hostkey Moscow", "region": "RU-MOW"},
     {"host": "st.spb.ertelecom.ru", "port": 5201, "label": "Ertelecom SPb", "region": "RU-SPB"},
     {"host": "st.ekat.ertelecom.ru", "port": 5201, "label": "Ertelecom Yekaterinburg", "region": "RU-SVE"},
+    # Asia
     {"host": "speedtest.uztelecom.uz", "port": 5200, "label": "Uztelecom (10G)", "region": "Asia-UZ"},
+    {"host": "iperf.biznetnetworks.com", "port": 5201, "label": "Biznet Jakarta", "region": "Asia-SG"},
+    {"host": "iperf3.as49465.net", "port": 5200, "label": "AS49465 Tokyo", "region": "Asia-JP"},
+    # US
+    {"host": "iperf3.he.net", "port": 5201, "label": "Hurricane Electric", "region": "US-LA"},
+    {"host": "nyc.speedtest.clouvider.net", "port": 5200, "label": "Clouvider NYC", "region": "US-NY"},
 ]
 
 SETTINGS_KEYS = {
@@ -37,9 +45,9 @@ SETTINGS_KEYS = {
     "speedtest_servers": json.dumps(DEFAULT_IPERF_SERVERS),
     "speedtest_threshold": "500",
     "speedtest_interval": "60",
-    "speedtest_duration": "2",
-    "speedtest_streams": "1",
-    "speedtest_test_mode": "light",
+    "speedtest_duration": "3",
+    "speedtest_streams": "3",
+    "speedtest_test_mode": "quick",
     "speedtest_panel_port": "5201",
     "speedtest_panel_address": "",
     "speedtest_notify_slow": "true",
@@ -53,7 +61,7 @@ SETTINGS_KEYS = {
 
 
 class SpeedtestScheduler:
-    PAUSE_BETWEEN_NODES = 10
+    PAUSE_BETWEEN_NODES = 5
     TG_MSG_LIMIT = 4096
 
     def __init__(self):
@@ -67,9 +75,9 @@ class SpeedtestScheduler:
         self._servers = list(DEFAULT_IPERF_SERVERS)
         self._threshold = 500.0
         self._interval = 60
-        self._duration = 2
-        self._streams = 1
-        self._test_mode = "light"
+        self._duration = 3
+        self._streams = 3
+        self._test_mode = "quick"
         self._panel_port = 5201
         self._panel_address = ""
 
@@ -102,7 +110,8 @@ class SpeedtestScheduler:
             self._interval = max(1, int(_get("speedtest_interval")))
             self._duration = max(1, min(30, int(_get("speedtest_duration"))))
             self._streams = max(1, min(16, int(_get("speedtest_streams"))))
-            self._test_mode = _get("speedtest_test_mode") if _get("speedtest_test_mode") in ("light", "full") else "light"
+            raw_mode = _get("speedtest_test_mode")
+            self._test_mode = "full" if raw_mode == "full" else "quick"
             self._panel_port = int(_get("speedtest_panel_port"))
             self._panel_address = _get("speedtest_panel_address")
 
@@ -141,31 +150,23 @@ class SpeedtestScheduler:
                 logger.debug(f"Speedtest settings reload error: {e}")
 
     async def _manage_iperf_server(self):
-        """Start or stop the panel-side iperf3 server based on mode."""
+        """Start or stop the panel-side iperf3 server based on mode. Runs persistently (no --one-off)."""
         should_run = self._mode in ("panel", "both") and self._enabled
         iperf3_bin = shutil.which("iperf3") or "/usr/bin/iperf3"
 
-        if should_run and self._iperf_server_proc is None:
-            try:
-                self._iperf_server_proc = await asyncio.create_subprocess_exec(
-                    iperf3_bin, "-s", "-p", str(self._panel_port), "--one-off",
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL,
-                )
-                logger.info(f"iperf3 server started on port {self._panel_port}")
-            except Exception as e:
-                logger.warning(f"Failed to start iperf3 server: {e}")
+        if should_run:
+            alive = self._iperf_server_proc is not None and self._iperf_server_proc.returncode is None
+            if not alive:
                 self._iperf_server_proc = None
-
-        if should_run and self._iperf_server_proc is not None:
-            if self._iperf_server_proc.returncode is not None:
                 try:
                     self._iperf_server_proc = await asyncio.create_subprocess_exec(
-                        iperf3_bin, "-s", "-p", str(self._panel_port), "--one-off",
+                        iperf3_bin, "-s", "-p", str(self._panel_port),
                         stdout=asyncio.subprocess.DEVNULL,
                         stderr=asyncio.subprocess.DEVNULL,
                     )
-                except Exception:
+                    logger.info(f"iperf3 server started on port {self._panel_port}")
+                except Exception as e:
+                    logger.warning(f"Failed to start iperf3 server: {e}")
                     self._iperf_server_proc = None
 
         if not should_run and self._iperf_server_proc is not None:
@@ -200,6 +201,27 @@ class SpeedtestScheduler:
             })
 
         return servers
+
+    async def _build_server_list_for_node(self, server: Server) -> list[dict]:
+        """Build geo-filtered iperf3 server list for a specific node."""
+        all_servers = self._build_server_list()
+        if not all_servers:
+            return []
+
+        geo_region = getattr(server, "geo_region", None)
+        if not geo_region:
+            try:
+                from app.services.geo_resolver import resolve_server_geo
+                geo_region = await resolve_server_geo(server)
+            except Exception:
+                pass
+
+        if not geo_region:
+            return all_servers
+
+        from app.services.geo_resolver import filter_servers_by_geo
+        filtered = filter_servers_by_geo(all_servers, geo_region)
+        return filtered if filtered else all_servers
 
     async def start(self):
         if self._running:
@@ -251,19 +273,20 @@ class SpeedtestScheduler:
         if not servers:
             return
 
-        server_list = self._build_server_list()
-        if not server_list:
+        base_list = self._build_server_list()
+        if not base_list:
             logger.warning("Speedtest: no iperf3 servers configured")
             return
 
-        logger.info(f"Speedtest: starting cycle for {len(servers)} nodes, {len(server_list)} iperf3 servers")
+        logger.info(f"Speedtest: starting cycle for {len(servers)} nodes")
 
         events: list[dict] = []
         for srv in servers:
             if not self._running:
                 break
             try:
-                event = await self._test_single_node(srv, server_list)
+                node_servers = await self._build_server_list_for_node(srv)
+                event = await self._test_single_node(srv, node_servers or base_list)
                 if event:
                     events.append(event)
             except Exception as e:
@@ -279,13 +302,11 @@ class SpeedtestScheduler:
 
     async def _test_single_node(self, server: Server, server_list: list[dict]) -> Optional[dict]:
         """Send speedtest request to a single node and store result. Returns notification event or None."""
-        bw_limit = f"{int(self._threshold * 2)}M" if self._test_mode == "light" else ""
         payload = {
             "servers": server_list,
             "duration": self._duration,
             "streams": self._streams,
             "threshold_mbps": self._threshold,
-            "bandwidth_limit": bw_limit,
             "test_mode": self._test_mode,
         }
 
@@ -438,8 +459,8 @@ class SpeedtestScheduler:
         except Exception as e:
             logger.error(f"Telegram send error: {e}")
 
-    async def test_single_node_by_id(self, server_id: int) -> Optional[dict]:
-        """Manual test trigger — returns result directly."""
+    async def test_single_node_by_id(self, server_id: int, test_mode: Optional[str] = None) -> Optional[dict]:
+        """Manual test trigger — returns result directly. test_mode overrides scheduler settings."""
         async with async_session() as db:
             result = await db.execute(
                 select(Server).where(Server.id == server_id, Server.is_active == True)
@@ -449,18 +470,17 @@ class SpeedtestScheduler:
         if not server:
             return None
 
-        server_list = self._build_server_list()
+        server_list = await self._build_server_list_for_node(server)
         if not server_list:
             return {"error": "No iperf3 servers configured"}
 
-        bw_limit = f"{int(self._threshold * 2)}M" if self._test_mode == "light" else ""
+        effective_mode = test_mode if test_mode in ("quick", "full") else self._test_mode
         payload = {
             "servers": server_list,
             "duration": self._duration,
             "streams": self._streams,
             "threshold_mbps": self._threshold,
-            "bandwidth_limit": bw_limit,
-            "test_mode": self._test_mode,
+            "test_mode": effective_mode,
         }
 
         try:

@@ -36,6 +36,10 @@ class Server(Base):
     # Speed test results (JSON, updated by speedtest scheduler)
     last_speedtest = Column(Text, nullable=True)
 
+    # Geo data (resolved from server IP, cached)
+    country = Column(String(10), nullable=True)
+    geo_region = Column(String(20), nullable=True)
+
 
 class MetricsSnapshot(Base):
     """Хранит историю метрик для каждого сервера (сбор на панели)"""

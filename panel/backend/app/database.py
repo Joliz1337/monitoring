@@ -54,6 +54,8 @@ async def run_migrations(conn):
             ("last_traffic_data", "TEXT"),
             ("has_xray_node", "BOOLEAN DEFAULT FALSE"),
             ("last_speedtest", "TEXT"),
+            ("country", "VARCHAR(10)"),
+            ("geo_region", "VARCHAR(20)"),
         ]
         
         for col_name, col_type in migrations:

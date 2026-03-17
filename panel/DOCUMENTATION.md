@@ -629,21 +629,29 @@ Frontend lazy loading (panel/frontend/src/pages/Remnawave.tsx):
 
 ### Speed Test (iperf3)
 
-Система проверки скорости нод через iperf3. Периодические автоматические тесты + ручной запуск из UI.
+Система проверки скорости нод через iperf3. Автоматические тесты + ручной запуск с выбором режима.
+
+**Режимы тестирования:**
+- `quick` — 2-3 параллельных процесса iperf3 на последних CPU-ядрах, nice priority, ~5-8 сек
+- `full` — процесс на каждое ядро, без nice, точный максимум, ~10-15 сек
 
 **Возможности:**
-- Автоматическое тестирование всех нод по расписанию (последовательно)
-- Три режима: публичные серверы / панель как сервер / оба
-- Настраиваемые параметры: порог, интервал, длительность, потоки, список серверов
+- Автоматическое тестирование всех нод по расписанию (последовательно, 5 сек между нодами)
+- Гео-определение ноды по IP (ip-api.com) → тест на ближайших iperf3-серверах (2-3 штуки)
+- Три режима серверов: публичные / панель как сервер / оба
+- Dropdown-кнопка на странице сервера: «Быстрая» / «Полная» проверка
+- CPU affinity на последние ядра + nice для минимального влияния на основную нагрузку
 - Цветной бейдж скорости на карточке сервера (зелёный/жёлтый/красный)
-- Кнопка ручного запуска теста на странице сервера
+- Telegram-уведомления: низкая скорость, ошибки, восстановление
 
 **Файлы:**
-- `node/app/services/speedtest_runner.py` — запуск iperf3, парсинг JSON, логика фоллбэка
+- `node/app/services/speedtest_runner.py` — запуск iperf3, мультипроцессный тест, CPU affinity, nice
 - `node/app/routers/speedtest.py` — POST /api/speedtest, GET /api/speedtest/status
 - `panel/backend/app/services/speedtest_scheduler.py` — фоновый планировщик + iperf3-сервер панели
-- `panel/backend/app/routers/proxy.py` — POST/GET /proxy/{id}/speedtest
+- `panel/backend/app/services/geo_resolver.py` — определение гео по IP, фильтрация iperf3-серверов
+- `panel/backend/app/routers/proxy.py` — POST/GET /proxy/{id}/speedtest (принимает test_mode)
 - `panel/frontend/src/pages/Settings.tsx` — секция настроек Speed Test
+- `panel/frontend/src/pages/ServerDetails.tsx` — dropdown-кнопка Quick/Full
 - `panel/frontend/src/components/Dashboard/ServerCard.tsx` — бейдж скорости в футере
 
 ### Xray Monitor

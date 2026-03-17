@@ -277,10 +277,10 @@
     "speedtest_mode_panel": "Panel as server",
     "speedtest_mode_both": "Both",
     "speedtest_test_mode": "Test mode",
-    "speedtest_test_mode_light": "Light",
-    "speedtest_test_mode_light_hint": "Low CPU, checks above threshold",
+    "speedtest_test_mode_quick": "Quick",
+    "speedtest_test_mode_quick_hint": "2-3 streams, real speed",
     "speedtest_test_mode_full": "Full",
-    "speedtest_test_mode_full_hint": "Max speed, multi-process",
+    "speedtest_test_mode_full_hint": "Max speed, all cores",
     "speedtest_threshold": "Speed threshold (Mbit/s)",
     "speedtest_interval": "Interval (minutes)",
     "speedtest_duration": "Test duration (sec)",
@@ -323,7 +323,11 @@
     "speedtest_run": "Speed test",
     "speedtest_running": "Testing...",
     "speedtest_error": "Test error",
-    "speedtest_speed": "{{speed}} Mbit/s"
+    "speedtest_speed": "{{speed}} Mbit/s",
+    "speedtest_quick": "Quick test",
+    "speedtest_quick_hint": "2-3 streams, ~5 sec",
+    "speedtest_full": "Full test",
+    "speedtest_full_hint": "All cores, ~15 sec"
   },
   "process_table": {
     "search_placeholder": "Search...",

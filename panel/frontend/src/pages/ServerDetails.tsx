@@ -233,11 +233,25 @@ export default function ServerDetails() {
     }
   }
   
-  const handleSpeedtest = async () => {
+  const [showSpeedtestMenu, setShowSpeedtestMenu] = useState(false)
+  const speedtestMenuRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (speedtestMenuRef.current && !speedtestMenuRef.current.contains(e.target as Node)) {
+        setShowSpeedtestMenu(false)
+      }
+    }
+    if (showSpeedtestMenu) document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [showSpeedtestMenu])
+
+  const handleSpeedtest = async (mode: 'quick' | 'full') => {
     if (!serverId || isSpeedtesting) return
+    setShowSpeedtestMenu(false)
     setIsSpeedtesting(true)
     try {
-      const { data } = await proxyApi.runSpeedtest(Number(serverId))
+      const { data } = await proxyApi.runSpeedtest(Number(serverId), mode)
       if (data.success) {
         toast.success(`${t('server_card.speedtest_speed', { speed: Math.round(data.best_speed_mbps) })}`)
       } else {
@@ -396,21 +410,49 @@ export default function ServerDetails() {
             </motion.div>
           </motion.button>
           
-          {/* Speed test */}
-          <motion.button
-            onClick={handleSpeedtest}
-            disabled={isSpeedtesting}
-            className="btn btn-secondary"
-            whileHover={{ scale: 1.02 }}
-            whileTap={{ scale: 0.98 }}
-            title={t('server_card.speedtest_run')}
-          >
-            {isSpeedtesting ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : (
-              <Gauge className="w-4 h-4" />
-            )}
-          </motion.button>
+          {/* Speed test dropdown */}
+          <div className="relative" ref={speedtestMenuRef}>
+            <motion.button
+              onClick={() => !isSpeedtesting && setShowSpeedtestMenu(!showSpeedtestMenu)}
+              disabled={isSpeedtesting}
+              className="btn btn-secondary"
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.98 }}
+              title={t('server_card.speedtest_run')}
+            >
+              {isSpeedtesting ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Gauge className="w-4 h-4" />
+              )}
+            </motion.button>
+            <AnimatePresence>
+              {showSpeedtestMenu && (
+                <motion.div
+                  initial={{ opacity: 0, y: -4, scale: 0.95 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: -4, scale: 0.95 }}
+                  transition={{ duration: 0.15 }}
+                  className="absolute right-0 top-full mt-1 z-50 bg-dark-800 border border-dark-700 rounded-lg shadow-xl overflow-hidden min-w-[180px]"
+                >
+                  <button
+                    onClick={() => handleSpeedtest('quick')}
+                    className="w-full px-3 py-2.5 text-left hover:bg-dark-700 transition-colors"
+                  >
+                    <div className="text-sm text-dark-100 font-medium">{t('server_card.speedtest_quick')}</div>
+                    <div className="text-[11px] text-dark-500">{t('server_card.speedtest_quick_hint')}</div>
+                  </button>
+                  <button
+                    onClick={() => handleSpeedtest('full')}
+                    className="w-full px-3 py-2.5 text-left hover:bg-dark-700 transition-colors border-t border-dark-700/50"
+                  >
+                    <div className="text-sm text-dark-100 font-medium">{t('server_card.speedtest_full')}</div>
+                    <div className="text-[11px] text-dark-500">{t('server_card.speedtest_full_hint')}</div>
+                  </button>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
 
           {/* Power control buttons */}
           <motion.button

@@ -1325,6 +1325,10 @@ const DEFAULT_IPERF_SERVERS: SpeedtestServerConfig[] = [
   { host: "st.spb.ertelecom.ru", port: 5201, label: "Ertelecom SPb", region: "RU-SPB" },
   { host: "st.ekat.ertelecom.ru", port: 5201, label: "Ertelecom Yekaterinburg", region: "RU-SVE" },
   { host: "speedtest.uztelecom.uz", port: 5200, label: "Uztelecom (10G)", region: "Asia-UZ" },
+  { host: "iperf.biznetnetworks.com", port: 5201, label: "Biznet Jakarta", region: "Asia-SG" },
+  { host: "iperf3.as49465.net", port: 5200, label: "AS49465 Tokyo", region: "Asia-JP" },
+  { host: "iperf3.he.net", port: 5201, label: "Hurricane Electric", region: "US-LA" },
+  { host: "nyc.speedtest.clouvider.net", port: 5200, label: "Clouvider NYC", region: "US-NY" },
 ]
 
 function SpeedtestSettings() {
@@ -1334,7 +1338,7 @@ function SpeedtestSettings() {
 
   const [enabled, setEnabled] = useState(true)
   const [mode, setMode] = useState<'public' | 'panel' | 'both'>('both')
-  const [testMode, setTestMode] = useState<'light' | 'full'>('light')
+  const [testMode, setTestMode] = useState<'quick' | 'full'>('quick')
   const [threshold, setThreshold] = useState(500)
   const [interval, setInterval_] = useState(60)
   const [duration, setDuration] = useState(2)
@@ -1365,8 +1369,8 @@ function SpeedtestSettings() {
         setAllServers(srvData.servers.map(sv => ({ id: sv.id, name: sv.name })))
         setEnabled(s.speedtest_enabled !== 'false')
         setMode((s.speedtest_mode || 'both') as 'public' | 'panel' | 'both')
-        const tm = s.speedtest_test_mode || 'light'
-        setTestMode(tm === 'full' ? 'full' : 'light')
+        const tm = s.speedtest_test_mode || 'quick'
+        setTestMode(tm === 'full' ? 'full' : 'quick')
         setThreshold(parseInt(s.speedtest_threshold || '500', 10))
         setInterval_(parseInt(s.speedtest_interval || '60', 10))
         setDuration(parseInt(s.speedtest_duration || '2', 10))
@@ -1539,16 +1543,16 @@ function SpeedtestSettings() {
         <div>
           <label className="text-sm text-dark-300 block mb-1.5">{t('settings.speedtest_test_mode')}</label>
           <div className="flex gap-2">
-            {(['light', 'full'] as const).map(m => (
+            {(['quick', 'full'] as const).map(m => (
               <button
                 key={m}
                 onClick={() => {
                   setTestMode(m)
-                  if (m === 'light') {
-                    setDuration(2)
-                    setStreams(1)
-                  } else {
+                  if (m === 'quick') {
                     setDuration(3)
+                    setStreams(3)
+                  } else {
+                    setDuration(5)
                     setStreams(4)
                   }
                 }}

@@ -1234,13 +1234,17 @@ async def set_ipset_timeout(
 @router.post("/{server_id}/speedtest")
 async def run_speedtest(
     server_id: int,
+    body: dict = None,
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    """Trigger manual speed test on a node."""
+    """Trigger manual speed test on a node. Accepts optional test_mode: 'quick' | 'full'."""
     from app.services.speedtest_scheduler import get_speedtest_scheduler
     scheduler = get_speedtest_scheduler()
-    result = await scheduler.test_single_node_by_id(server_id)
+    test_mode = (body or {}).get("test_mode")
+    if test_mode not in ("quick", "full", None):
+        test_mode = None
+    result = await scheduler.test_single_node_by_id(server_id, test_mode=test_mode)
     if result is None:
         raise HTTPException(status_code=404)
     if "error" in result:

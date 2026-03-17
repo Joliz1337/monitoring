@@ -2,7 +2,9 @@
 
 Runs iperf3 tests against a list of servers and returns structured results.
 Smart logic: stops early if speed is above threshold, tests all servers if below.
-Two modes: light (low CPU, bandwidth-limited) and full (multi-process, max throughput).
+Two modes:
+  - quick: 2-3 parallel iperf3 processes, no bandwidth limits, pinned to last cores
+  - full: one process per core, no limits, accurate max throughput
 """
 
 import asyncio
@@ -16,6 +18,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 IPERF3_BIN = shutil.which("iperf3") or "/usr/bin/iperf3"
+NICE_BIN = shutil.which("nice") or "/usr/bin/nice"
 
 
 class SpeedtestResult:
@@ -59,20 +62,27 @@ def _parse_iperf3_json(raw: str) -> tuple[float, int]:
     return bits_per_sec / 1_000_000, retransmits
 
 
+def _get_tail_cores(count: int) -> list[int]:
+    """Return last N CPU core indices (to avoid interfering with main workload on core 0+)."""
+    cpu_count = os.cpu_count() or 1
+    count = min(count, cpu_count)
+    return list(range(cpu_count - count, cpu_count))
+
+
 async def _run_iperf3_process(
     host: str,
     port: int,
     duration: int,
     streams: int = 1,
-    bandwidth_limit: str = "",
     affinity: int = -1,
+    use_nice: bool = False,
 ) -> SpeedtestResult:
     """Run a single iperf3 process."""
     result = SpeedtestResult()
     result.server = host
     result.port = port
 
-    cmd = [
+    iperf_args = [
         IPERF3_BIN,
         "-c", host,
         "-p", str(port),
@@ -82,8 +92,10 @@ async def _run_iperf3_process(
         "--connect-timeout", "5000",
     ]
 
-    if bandwidth_limit:
-        cmd.extend(["-b", bandwidth_limit])
+    if use_nice:
+        cmd = [NICE_BIN, "-n", "19"] + iperf_args
+    else:
+        cmd = iperf_args
 
     env = None
     if affinity >= 0:
@@ -130,19 +142,17 @@ async def _run_multiprocess_test(
     port: int,
     duration: int,
     processes: int,
+    use_nice: bool = False,
 ) -> SpeedtestResult:
     """Run N separate iperf3 processes in parallel against a server.
 
-    Each process gets its own CPU core via affinity. iperf3 is single-threaded,
-    so this is the only way to utilize multiple cores for bandwidth testing.
-    Requires the server to support parallel connections (multiple ports or --parallel-streams).
+    Each process gets its own CPU core via affinity (pinned to last N cores).
     Falls back to single-process with -P if parallel fails.
     """
-    cpu_count = os.cpu_count() or 1
-    cores = list(range(min(processes, cpu_count)))
+    cores = _get_tail_cores(processes)
 
     tasks = [
-        _run_iperf3_process(host, port, duration, streams=1, affinity=core)
+        _run_iperf3_process(host, port, duration, streams=1, affinity=core, use_nice=use_nice)
         for core in cores
     ]
 
@@ -175,7 +185,8 @@ async def _run_multiprocess_test(
             result.error = f"{success_count}/{len(cores)} ok, errors: {'; '.join(errors[:2])}"
     elif success_count == 0 and len(cores) > 1:
         logger.info(f"Multiprocess failed for {host}:{port}, falling back to single process -P {processes}")
-        return await _run_iperf3_process(host, port, duration, streams=processes)
+        last_core = _get_tail_cores(1)[0]
+        return await _run_iperf3_process(host, port, duration, streams=processes, affinity=last_core, use_nice=use_nice)
     else:
         result.error = errors[0] if errors else "All processes failed"
 
@@ -184,26 +195,29 @@ async def _run_multiprocess_test(
 
 async def run_speedtest(
     servers: list[dict],
-    duration: int = 2,
-    streams: int = 1,
+    duration: int = 3,
+    streams: int = 3,
     threshold_mbps: float = 500.0,
-    bandwidth_limit: str = "",
-    test_mode: str = "light",
+    test_mode: str = "quick",
+    **_kwargs,
 ) -> dict:
     """Run speed tests against a list of iperf3 servers.
 
     test_mode:
-      - "light": 1 stream, bandwidth limited, low CPU usage
-      - "full": multi-process (one per core), no bandwidth limit, accurate max speed
+      - "quick": 2-3 parallel processes on last cores, nice priority, ~5-8 sec
+      - "full": one process per core, no nice, accurate max speed, ~10-15 sec
     """
+    if test_mode == "light":
+        test_mode = "quick"
     is_full = test_mode == "full"
-
-    if not is_full and not bandwidth_limit:
-        cap = int(threshold_mbps * 2)
-        bandwidth_limit = f"{cap}M"
+    use_nice = not is_full
 
     if is_full:
-        bandwidth_limit = ""
+        procs = max(2, os.cpu_count() or 2)
+        effective_duration = max(duration, 5)
+    else:
+        procs = min(3, max(2, streams))
+        effective_duration = max(duration, 3)
 
     results: list[dict] = []
     best_speed = 0.0
@@ -216,13 +230,8 @@ async def run_speedtest(
         if not host:
             continue
 
-        if is_full:
-            procs = max(2, streams)
-            logger.info(f"Speedtest [full]: {host}:{port} (duration={duration}s, processes={procs})")
-            result = await _run_multiprocess_test(host, port, duration, procs)
-        else:
-            logger.info(f"Speedtest [light]: {host}:{port} (duration={duration}s, bw_limit={bandwidth_limit})")
-            result = await _run_iperf3_process(host, port, duration, streams=1, bandwidth_limit=bandwidth_limit)
+        logger.info(f"Speedtest [{test_mode}]: {host}:{port} (duration={effective_duration}s, processes={procs})")
+        result = await _run_multiprocess_test(host, port, effective_duration, procs, use_nice=use_nice)
 
         results.append(result.to_dict())
 

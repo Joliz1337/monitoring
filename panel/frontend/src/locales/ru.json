@@ -277,10 +277,10 @@
     "speedtest_mode_panel": "Панель как сервер",
     "speedtest_mode_both": "Оба",
     "speedtest_test_mode": "Режим теста",
-    "speedtest_test_mode_light": "Лёгкий",
-    "speedtest_test_mode_light_hint": "Мин. нагрузка CPU, проверка >порога",
+    "speedtest_test_mode_quick": "Быстрый",
+    "speedtest_test_mode_quick_hint": "2-3 потока, реальная скорость",
     "speedtest_test_mode_full": "Полный",
-    "speedtest_test_mode_full_hint": "Макс. скорость, многопроцессный",
+    "speedtest_test_mode_full_hint": "Макс. скорость, все ядра",
     "speedtest_threshold": "Порог скорости (Mbit/s)",
     "speedtest_interval": "Интервал (минуты)",
     "speedtest_duration": "Длительность теста (сек)",
@@ -323,7 +323,11 @@
     "speedtest_run": "Тест скорости",
     "speedtest_running": "Тестирование...",
     "speedtest_error": "Ошибка теста",
-    "speedtest_speed": "{{speed}} Mbit/s"
+    "speedtest_speed": "{{speed}} Mbit/s",
+    "speedtest_quick": "Быстрая проверка",
+    "speedtest_quick_hint": "2-3 потока, ~5 сек",
+    "speedtest_full": "Полная проверка",
+    "speedtest_full_hint": "Все ядра, ~15 сек"
   },
   "process_table": {
     "search_placeholder": "Поиск...",
