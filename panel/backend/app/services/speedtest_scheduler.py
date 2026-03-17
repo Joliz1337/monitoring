@@ -233,14 +233,22 @@ class SpeedtestScheduler:
         filtered = filter_servers_by_geo(all_servers, geo_region)
         return filtered if filtered else all_servers
 
-    def _resolve_method_for_node(self, server: Server) -> str:
+    async def _resolve_method_for_node(self, server: Server) -> str:
         """Determine the test method for a node based on settings and geo."""
+        geo_region = getattr(server, "geo_region", None) or ""
+        if not geo_region:
+            try:
+                from app.services.geo_resolver import resolve_server_geo
+                geo_region = await resolve_server_geo(server) or ""
+            except Exception:
+                pass
+
+        if geo_region in OOKLA_BLOCKED_REGIONS:
+            return "iperf3"
+
         if self._method in ("ookla", "iperf3"):
             return self._method
 
-        geo_region = getattr(server, "geo_region", None) or ""
-        if geo_region in OOKLA_BLOCKED_REGIONS:
-            return "iperf3"
         return "ookla"
 
     async def start(self):
@@ -300,7 +308,7 @@ class SpeedtestScheduler:
             if not self._running:
                 break
             try:
-                node_method = self._resolve_method_for_node(srv)
+                node_method = await self._resolve_method_for_node(srv)
                 node_servers = await self._build_server_list_for_node(srv)
                 event = await self._test_single_node(srv, node_servers, node_method)
                 if event:
@@ -506,8 +514,8 @@ class SpeedtestScheduler:
         effective_mode = test_mode if test_mode in ("quick", "full") else self._test_mode
         effective_method = method if method in ("iperf3", "ookla", "auto") else self._method
 
-        if effective_method == "auto":
-            effective_method = self._resolve_method_for_node(server)
+        if effective_method in ("auto", "ookla"):
+            effective_method = await self._resolve_method_for_node(server)
 
         payload: dict = {
             "duration": self._duration,
