@@ -4,7 +4,7 @@ import time
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.gzip import GZipMiddleware
+from starlette.middleware.gzip import GZipMiddleware
 from sqlalchemy import delete
 
 # Configure logging to show app logs
@@ -140,7 +140,22 @@ app.add_middleware(
     allow_headers=["Content-Type", "Authorization"],
 )
 
-app.add_middleware(GZipMiddleware, minimum_size=500)
+class GZipMiddlewareNoSSE:
+    """GZip that bypasses streaming SSE endpoints to avoid buffering"""
+    def __init__(self, app):
+        self.app = app
+        self.gzip = GZipMiddleware(app, minimum_size=500)
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            path = scope.get("path", "")
+            if path.endswith("/execute-stream"):
+                await self.app(scope, receive, send)
+                return
+        await self.gzip(scope, receive, send)
+
+
+app.add_middleware(GZipMiddlewareNoSSE)
 
 app.include_router(auth_router.router)
 app.include_router(servers.router)

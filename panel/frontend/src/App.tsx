@@ -2,7 +2,7 @@ import { Routes, Route, Navigate } from 'react-router-dom'
 import React, { useEffect, Suspense, lazy } from 'react'
 import { motion } from 'framer-motion'
 import { Activity } from 'lucide-react'
-import { Toaster } from 'sonner'
+import { Toaster, toast } from 'sonner'
 import { useAuthStore } from './stores/authStore'
 import { useExtStore } from './stores/_extStore'
 import { useTranslation } from 'react-i18next'
@@ -161,12 +161,27 @@ function SuspenseWithBoundary({ children }: { children: React.ReactNode }) {
 }
 
 export default function App() {
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      const target = e.target as HTMLElement
+      if (target.closest('[data-close-button]')) return
+      if (target.closest('[data-button]')) return
+      const toastEl = target.closest('[data-sonner-toast]') as HTMLElement | null
+      if (!toastEl) return
+      const id = toastEl.getAttribute('data-sonner-toast')
+      toast.dismiss(id || undefined)
+    }
+    document.addEventListener('click', handler)
+    return () => document.removeEventListener('click', handler)
+  }, [])
+
   return (
     <>
     <Toaster 
       theme="dark"
       position="top-right"
       toastOptions={{
+        className: 'cursor-pointer',
         style: {
           background: 'rgba(30, 30, 40, 0.95)',
           border: '1px solid rgba(255, 255, 255, 0.08)',
