@@ -245,21 +245,18 @@ async def run_ookla_speedtest(
     test_mode: str = "quick",
     threshold_mbps: float = 500.0,
 ) -> dict:
-    """Run Ookla Speedtest CLI on the host via nsenter.
-
-    test_mode:
-      - "quick": download only (--no-upload), ~15s
-      - "full": download + upload, ~30s
-    """
+    """Run Ookla Speedtest CLI on the host via nsenter."""
     from app.services.host_executor import get_host_executor
     executor = get_host_executor()
 
-    check = await executor.execute(
-        "which speedtest 2>/dev/null && speedtest --version 2>&1 | head -1",
-        timeout=10,
-    )
+    check = await executor.execute("which speedtest 2>/dev/null", timeout=10)
+    if check.success:
+        ver = await executor.execute("speedtest --version 2>&1 | head -1", timeout=10)
+        has_ookla = ver.success and ("ookla" in (ver.stdout or "").lower() or "speedtest" in (ver.stdout or "").lower())
+    else:
+        has_ookla = False
 
-    if not check.success or "Speedtest by Ookla" not in (check.stdout or ""):
+    if not has_ookla:
         installed = await _install_ookla_cli()
         if not installed:
             return {
@@ -275,10 +272,8 @@ async def run_ookla_speedtest(
             }
 
     cmd = "speedtest --format=json --accept-license --accept-gdpr"
-    if test_mode == "quick":
-        cmd += " --no-upload"
 
-    timeout = 60 if test_mode == "quick" else 120
+    timeout = 120
     logger.info(f"Speedtest [ookla/{test_mode}]: running on host")
 
     result = await executor.execute(cmd, timeout=timeout, shell="bash")
@@ -374,12 +369,11 @@ async def run_speedtest(
     if test_mode == "light":
         test_mode = "quick"
 
-    if method == "ookla":
-        return await run_ookla_speedtest(test_mode=test_mode, threshold_mbps=threshold_mbps)
-
-    if method == "auto":
+    if method in ("ookla", "auto"):
         ookla_result = await run_ookla_speedtest(test_mode=test_mode, threshold_mbps=threshold_mbps)
         if ookla_result.get("best_speed_mbps", 0) > 0:
+            return ookla_result
+        if method == "ookla" and not servers:
             return ookla_result
         logger.info("Ookla failed, falling back to iperf3")
 

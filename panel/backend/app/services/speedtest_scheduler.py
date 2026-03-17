@@ -301,7 +301,7 @@ class SpeedtestScheduler:
                 break
             try:
                 node_method = self._resolve_method_for_node(srv)
-                node_servers = await self._build_server_list_for_node(srv) if node_method == "iperf3" else []
+                node_servers = await self._build_server_list_for_node(srv)
                 event = await self._test_single_node(srv, node_servers, node_method)
                 if event:
                     events.append(event)
@@ -328,19 +328,18 @@ class SpeedtestScheduler:
             "method": method,
         }
 
-        if method == "iperf3":
-            if not server_list:
-                base_list = self._build_server_list()
-                if not base_list:
-                    logger.warning(f"Speedtest {server.name}: no iperf3 servers configured")
-                    return None
+        if not server_list:
+            base_list = self._build_server_list()
+            if base_list:
                 server_list = base_list
+        if server_list:
             payload["servers"] = server_list
 
-        if method == "ookla":
-            timeout = 150
-        else:
-            timeout = self._duration * max(len(server_list), 1) + 60
+        if method == "iperf3" and not server_list:
+            logger.warning(f"Speedtest {server.name}: no iperf3 servers configured")
+            return None
+
+        timeout = 150 if method == "ookla" else self._duration * max(len(server_list), 1) + 60
 
         try:
             async with httpx.AsyncClient(verify=False, timeout=timeout) as client:
@@ -518,17 +517,14 @@ class SpeedtestScheduler:
             "method": effective_method,
         }
 
-        if effective_method == "iperf3":
-            server_list = await self._build_server_list_for_node(server)
-            if not server_list:
-                return {"error": "No iperf3 servers configured"}
+        server_list = await self._build_server_list_for_node(server)
+        if server_list:
             payload["servers"] = server_list
 
-        if effective_method == "ookla":
-            timeout = 150
-        else:
-            server_list = payload.get("servers", [])
-            timeout = self._duration * max(len(server_list), 1) + 60
+        if effective_method == "iperf3" and not server_list:
+            return {"error": "No iperf3 servers configured"}
+
+        timeout = 150 if effective_method == "ookla" else self._duration * max(len(server_list or []), 1) + 60
 
         try:
             async with httpx.AsyncClient(verify=False, timeout=timeout) as client:
