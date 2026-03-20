@@ -370,14 +370,23 @@ async def _run_speedtest_via_proxy(socks_port: int, server_id: int) -> dict:
     upload_mbps = round(ul_bw * 8 / 1_000_000, 2) if ul_bw else 0
     ookla_ping = round(_ookla_ping_ms_from_result(data), 1)
 
+    logger.info(
+        f"[speedtest srv={server_id}] Ookla raw: ping={ookla_ping} ms, "
+        f"download={download_mbps} Mbit/s, upload={upload_mbps} Mbit/s"
+    )
+
     ping_ms = ookla_ping
-    if ookla_ping < OOKLA_PING_SUSPICIOUS_MS:
-        http_ping = await _median_rtt_ms_via_socks(socks_port)
-        if http_ping is not None:
-            ping_ms = http_ping
-            logger.info(
-                f"Xray speedtest: Ookla ping {ookla_ping} ms looks low via SOCKS; using HTTP RTT {http_ping} ms"
-            )
+    http_ping = await _median_rtt_ms_via_socks(socks_port)
+    logger.info(
+        f"[speedtest srv={server_id}] HTTP RTT probe: {http_ping} ms"
+    )
+
+    if http_ping is not None:
+        ping_ms = http_ping
+        logger.info(
+            f"[speedtest srv={server_id}] Using HTTP RTT {http_ping} ms "
+            f"(Ookla reported {ookla_ping} ms)"
+        )
 
     srv_info = data.get("server", {})
     server_name = srv_info.get("name", "")
@@ -671,8 +680,12 @@ class XrayMonitorService:
 
         if check_ok:
             logger.info(
-                f"Speedtest {srv.name}: {download_mbps} Mbit/s down, "
-                f"{upload_mbps} Mbit/s up, {ping_ms} ms ping"
+                f"[speedtest] {srv.name}: "
+                f"↓{download_mbps} Mbit/s  ↑{upload_mbps} Mbit/s  ping={ping_ms} ms  → saved to DB"
+            )
+        else:
+            logger.warning(
+                f"[speedtest] {srv.name}: FAILED — {error_msg}"
             )
 
         async with async_session() as db:

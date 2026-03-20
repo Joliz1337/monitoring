@@ -1312,6 +1312,23 @@ async def _migrate_xray_monitor(conn):
             logger.debug(f"xray_monitor_checks migration: {e}")
 
 
+async def _disable_old_node_autotest(conn):
+    """Force-disable old node SpeedtestScheduler auto-test (replaced by Xray Monitor speedtest)."""
+    try:
+        result = await conn.execute(text(
+            "SELECT value FROM panel_settings WHERE key = 'speedtest_enabled'"
+        ))
+        row = result.fetchone()
+        if row and row[0] == "true":
+            await conn.execute(text(
+                "UPDATE panel_settings SET value = 'false' WHERE key = 'speedtest_enabled'"
+            ))
+            logger.info("Disabled old node auto-speedtest (speedtest_enabled → false)")
+    except Exception as e:
+        if "does not exist" not in str(e).lower():
+            logger.debug(f"_disable_old_node_autotest: {e}")
+
+
 async def init_db():
     """Initialize database: create tables, run migrations."""
     async with engine.begin() as conn:
@@ -1319,6 +1336,7 @@ async def init_db():
         await run_migrations(conn)
         await _migrate_folder_columns(conn)
         await _migrate_xray_monitor(conn)
+        await _disable_old_node_autotest(conn)
     
     try:
         await _seed_default_excluded_destinations()
