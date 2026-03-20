@@ -661,7 +661,7 @@ Frontend lazy loading (panel/frontend/src/pages/Remnawave.tsx):
 
 ### Xray Monitor
 
-Мониторинг Xray-серверов через speedtest. Подписки и ключи парсятся, через xray-core создаётся SOCKS5 прокси, через proxychains4 запускается Ookla speedtest CLI — измеряется download/upload скорость и пинг. Серверы тестируются последовательно. Автотест выключен по умолчанию.
+Мониторинг Xray-серверов через speedtest. Подписки и ключи парсятся, через xray-core создаётся SOCKS5 прокси, через proxychains4 запускается Ookla speedtest CLI — измеряется download/upload и пинг из JSON. Если Ookla через SOCKS отдаёт подозрительно низкий ping (менее 8 ms), в UI/БД сохраняется медианный RTT по HTTP HEAD через тот же SOCKS (ближе к реальной задержке). Серверы тестируются последовательно. Автотест выключен по умолчанию.
 
 | Метод | Endpoint | Описание |
 |-------|----------|----------|

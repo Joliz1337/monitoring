@@ -4,13 +4,13 @@ import asyncio
 import json
 import logging
 import shutil
-import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
 import aiohttp
+import httpx
 from sqlalchemy import select, delete
 
 from app.database import async_session
@@ -33,6 +33,93 @@ CHECK_HISTORY_RETENTION_HOURS = 24
 SUB_REFRESH_INTERVAL_SEC = 3600
 PAUSE_BETWEEN_SERVERS = 5
 SPEEDTEST_TIMEOUT = 120
+# Ookla CLI через SOCKS часто отдаёт заниженный ping; ниже порога берём RTT по HTTP через тот же SOCKS.
+OOKLA_PING_SUSPICIOUS_MS = 8.0
+
+
+def _parse_speedtest_json_output(raw: str) -> dict | None:
+    """Один JSON или NDJSON: берём последнюю запись с итогом теста."""
+    raw = raw.strip()
+    if not raw:
+        return None
+    try:
+        single = json.loads(raw)
+        if isinstance(single, dict) and (
+            single.get("type") == "result"
+            or (isinstance(single.get("download"), dict) and single.get("download", {}).get("bandwidth") is not None)
+        ):
+            return single
+    except json.JSONDecodeError:
+        pass
+
+    last: dict | None = None
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        if obj.get("type") == "result":
+            last = obj
+        elif isinstance(obj.get("download"), dict) and "bandwidth" in obj.get("download", {}):
+            last = obj
+    return last
+
+
+def _ookla_ping_ms_from_result(data: dict) -> float:
+    p = data.get("ping")
+    if isinstance(p, dict):
+        lat = p.get("latency")
+        if lat is not None:
+            return float(lat)
+        low, high = p.get("low"), p.get("high")
+        if low is not None and high is not None:
+            return (float(low) + float(high)) / 2.0
+    if isinstance(p, (int, float)):
+        return float(p)
+    return 0.0
+
+
+async def _median_rtt_ms_via_socks(socks_port: int) -> float | None:
+    """Медианный RTT HEAD через тот же SOCKS — ближе к реальной задержке через туннель."""
+    proxy_url = f"socks5://127.0.0.1:{socks_port}"
+    targets = (
+        "https://cp.cloudflare.com/generate_204",
+        "https://connectivitycheck.gstatic.com/generate_204",
+        "https://www.google.com/generate_204",
+    )
+    timings: list[float] = []
+    try:
+        transport = httpx.AsyncHTTPTransport(proxy=proxy_url)
+        async with httpx.AsyncClient(
+            transport=transport,
+            timeout=httpx.Timeout(12.0, connect=10.0, read=8.0),
+            follow_redirects=True,
+            verify=False,
+        ) as client:
+            for target in targets:
+                try:
+                    await client.head(target)
+                    for _ in range(6):
+                        t0 = time.perf_counter()
+                        await client.head(target)
+                        timings.append((time.perf_counter() - t0) * 1000)
+                    break
+                except Exception:
+                    continue
+    except Exception as e:
+        logger.debug(f"SOCKS RTT probe failed: {e}")
+        return None
+
+    if len(timings) < 2:
+        return None
+    timings.sort()
+    trimmed = timings[1:-1] if len(timings) >= 4 else timings
+    return round(sum(trimmed) / len(trimmed), 1)
 
 
 def _build_outbound(server: XrayMonitorServer) -> dict | None:
@@ -270,19 +357,27 @@ async def _run_speedtest_via_proxy(socks_port: int, server_id: int) -> dict:
             err = raw or f"exit code {proc.returncode}"
         return {"ok": False, "error": err[:300]}
 
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
+    data = _parse_speedtest_json_output(raw)
+    if not data:
         return {"ok": False, "error": f"invalid JSON: {raw[:200]}"}
 
     if "error" in data:
-        return {"ok": False, "error": data["error"][:300]}
+        return {"ok": False, "error": str(data["error"])[:300]}
 
     dl_bw = data.get("download", {}).get("bandwidth", 0)
     ul_bw = data.get("upload", {}).get("bandwidth", 0)
     download_mbps = round(dl_bw * 8 / 1_000_000, 2) if dl_bw else 0
     upload_mbps = round(ul_bw * 8 / 1_000_000, 2) if ul_bw else 0
-    ping_ms = round(data.get("ping", {}).get("latency", 0), 1)
+    ookla_ping = round(_ookla_ping_ms_from_result(data), 1)
+
+    ping_ms = ookla_ping
+    if ookla_ping < OOKLA_PING_SUSPICIOUS_MS:
+        http_ping = await _median_rtt_ms_via_socks(socks_port)
+        if http_ping is not None:
+            ping_ms = http_ping
+            logger.info(
+                f"Xray speedtest: Ookla ping {ookla_ping} ms looks low via SOCKS; using HTTP RTT {http_ping} ms"
+            )
 
     srv_info = data.get("server", {})
     server_name = srv_info.get("name", "")
@@ -359,10 +454,11 @@ class XrayMonitorService:
                     await self._auto_refresh_subscriptions()
                     self._time_since_refresh = 0
 
-                speedtest_enabled = settings and settings.speedtest_enabled
+                monitoring_on = bool(settings and settings.enabled)
+                auto_speedtest = monitoring_on and bool(settings.speedtest_enabled)
                 interval_sec = max(600, (settings.speedtest_interval or 30) * 60) if settings else 1800
 
-                should_check = speedtest_enabled and self._time_since_check >= interval_sec
+                should_check = auto_speedtest and self._time_since_check >= interval_sec
 
                 if should_check:
                     await self._check_all(settings)
