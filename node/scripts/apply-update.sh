@@ -11,12 +11,23 @@ export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=l
 export NEEDRESTART_SUSPEND=1
 
-# Trap для обработки прерываний
+CONTAINERS_STOPPED=0
+
 cleanup() {
     local exit_code=$?
     if [ $exit_code -ne 0 ]; then
         echo ""
         echo -e "\033[0;31m[ERROR] Script interrupted or failed (exit code: $exit_code)\033[0m"
+        if [ "$CONTAINERS_STOPPED" = "1" ]; then
+            echo -e "\033[1;33m[RECOVERY] Restarting containers after failed update...\033[0m"
+            cd "$NODE_DIR" 2>/dev/null || cd /opt/monitoring-node 2>/dev/null || true
+            if docker compose up -d 2>/dev/null; then
+                echo -e "\033[0;32m[RECOVERY] Containers restarted successfully\033[0m"
+            else
+                echo -e "\033[0;31m[RECOVERY] Failed to restart containers! Manual intervention required\033[0m"
+                echo -e "\033[0;31m[RECOVERY] Run: cd /opt/monitoring-node && docker compose up -d\033[0m"
+            fi
+        fi
     fi
     exit $exit_code
 }
@@ -379,6 +390,7 @@ fi
 # Stop containers
 log_info "Stopping API containers..."
 docker compose down --timeout 30 || true
+CONTAINERS_STOPPED=1
 
 # Wait for port 7500 to be released
 log_info "Waiting for port 7500 to be released..."
@@ -464,6 +476,7 @@ spin "Starting containers" docker compose up -d || {
     log_error "Failed to start containers"
     exit 1
 }
+CONTAINERS_STOPPED=0
 
 # Wait for API to be healthy
 log_info "Waiting for API..."

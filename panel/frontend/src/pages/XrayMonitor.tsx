@@ -5,7 +5,7 @@ import {
   Wifi, WifiOff, Trash2, RefreshCw, Settings2,
   ChevronDown, ChevronRight, Bot, Send, Loader2,
   Link2, KeyRound, Clock, Activity, X,
-  Globe, Gauge,
+  Globe, Gauge, Play,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import {
@@ -37,6 +37,7 @@ export default function XrayMonitor() {
   const [historyData, setHistoryData] = useState<XrayMonitorCheckEntry[]>([])
   const [historyLoading, setHistoryLoading] = useState(false)
   const [testing, setTesting] = useState(false)
+  const [speedtestingId, setSpeedtestingId] = useState<number | null>(null)
 
   const fetchAll = useCallback(async () => {
     try {
@@ -200,6 +201,24 @@ export default function XrayMonitor() {
     }
   }
 
+  const handleRunSpeedtest = async (serverId: number) => {
+    if (speedtestingId) return
+    setSpeedtestingId(serverId)
+    try {
+      const res = await xrayMonitorApi.runSpeedtest(serverId)
+      if (res.data.success) {
+        toast.success(`${res.data.download_mbps} Mbit/s ↓ / ${res.data.upload_mbps} Mbit/s ↑ / ${res.data.ping_ms} ms`)
+        await fetchAll()
+      } else {
+        toast.error(res.data.error || t('common.error'))
+      }
+    } catch {
+      toast.error(t('common.error'))
+    } finally {
+      setSpeedtestingId(null)
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex items-center justify-center py-20">
@@ -315,9 +334,47 @@ export default function XrayMonitor() {
                   />
                 </div>
 
+                <div className="space-y-3 pt-2 border-t border-dark-800/50">
+                  <div className="flex items-center justify-between">
+                    <span className="text-dark-300 flex items-center gap-2">
+                      <Gauge className="w-4 h-4 text-accent-400" />
+                      {t('xray_monitor.speedtest_enabled')}
+                    </span>
+                    <button
+                      onClick={() => saveSettings({ speedtest_enabled: !settings.speedtest_enabled })}
+                      className={`relative w-12 h-6 rounded-full transition-colors ${settings.speedtest_enabled ? 'bg-accent-500' : 'bg-dark-700'}`}
+                    >
+                      <div className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-transform ${settings.speedtest_enabled ? 'translate-x-6' : 'translate-x-0.5'}`} />
+                    </button>
+                  </div>
+
+                  {settings.speedtest_enabled && (
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <label className="text-sm text-dark-400 mb-1 block">{t('xray_monitor.speedtest_interval')}</label>
+                        <input
+                          type="number" className="input w-full" value={settings.speedtest_interval}
+                          min={10} max={1440}
+                          onChange={e => setSettings({ ...settings, speedtest_interval: Number(e.target.value) })}
+                          onBlur={() => saveSettings({ speedtest_interval: settings.speedtest_interval })}
+                        />
+                      </div>
+                      <div>
+                        <label className="text-sm text-dark-400 mb-1 block">{t('xray_monitor.speed_threshold')}</label>
+                        <input
+                          type="number" className="input w-full" value={settings.speed_threshold_mbps}
+                          min={1} max={10000}
+                          onChange={e => setSettings({ ...settings, speed_threshold_mbps: Number(e.target.value) })}
+                          onBlur={() => saveSettings({ speed_threshold_mbps: settings.speed_threshold_mbps })}
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
+
                 <div className="space-y-2">
                   <span className="text-sm text-dark-400">{t('xray_monitor.notifications')}</span>
-                  {(['notify_down', 'notify_recovery', 'notify_latency'] as const).map(key => (
+                  {(['notify_down', 'notify_recovery', 'notify_latency', 'notify_slow_speed'] as const).map(key => (
                     <label key={key} className="flex items-center gap-3 cursor-pointer">
                       <input
                         type="checkbox" checked={settings[key]}
@@ -465,6 +522,8 @@ export default function XrayMonitor() {
                                   historyLoading={historyLoading}
                                   onToggleHistory={toggleHistory}
                                   onDelete={handleDeleteServer}
+                                  onSpeedtest={handleRunSpeedtest}
+                                  speedtestingId={speedtestingId}
                                   t={t}
                                 />
                               ))}
@@ -497,11 +556,13 @@ export default function XrayMonitor() {
         ) : (
           <div className="space-y-1">
             <div className="grid grid-cols-12 gap-2 px-3 py-2 text-xs text-dark-500 uppercase tracking-wider">
-              <div className="col-span-4">{t('xray_monitor.col_name')}</div>
-              <div className="col-span-3">{t('xray_monitor.col_address')}</div>
+              <div className="col-span-3">{t('xray_monitor.col_name')}</div>
+              <div className="col-span-2">{t('xray_monitor.col_address')}</div>
               <div className="col-span-1">{t('xray_monitor.col_protocol')}</div>
               <div className="col-span-1">{t('xray_monitor.col_status')}</div>
               <div className="col-span-1">{t('xray_monitor.col_ping')}</div>
+              <div className="col-span-1">↓ Mbit/s</div>
+              <div className="col-span-1">↑ Mbit/s</div>
               <div className="col-span-2 text-right">{t('xray_monitor.col_actions')}</div>
             </div>
             {manualServers.map(srv => (
@@ -513,6 +574,8 @@ export default function XrayMonitor() {
                 historyLoading={historyLoading}
                 onToggleHistory={toggleHistory}
                 onDelete={handleDeleteServer}
+                onSpeedtest={handleRunSpeedtest}
+                speedtestingId={speedtestingId}
                 t={t}
               />
             ))}
@@ -590,6 +653,8 @@ function ServerRow({
   historyLoading,
   onToggleHistory,
   onDelete,
+  onSpeedtest,
+  speedtestingId,
   t,
 }: {
   server: XrayMonitorServer
@@ -598,9 +663,18 @@ function ServerRow({
   historyLoading: boolean
   onToggleHistory: (id: number) => void
   onDelete: (id: number) => void
+  onSpeedtest: (id: number) => void
+  speedtestingId: number | null
   t: (key: string) => string
 }) {
   const isOpen = historyServerId === srv.id
+  const isTesting = speedtestingId === srv.id
+
+  const formatSpeed = (v: number | null) => {
+    if (v == null) return '—'
+    return v >= 1000 ? `${(v / 1000).toFixed(1)}G` : `${Math.round(v)}`
+  }
+
   return (
     <div>
       <div
@@ -608,11 +682,11 @@ function ServerRow({
           ${srv.status === 'offline' ? 'bg-danger/5 border border-danger/20' : 'bg-dark-800/30 border border-dark-700/20 hover:bg-dark-800/50'}`}
         onClick={() => onToggleHistory(srv.id)}
       >
-        <div className="col-span-4 flex items-center gap-2 min-w-0">
+        <div className="col-span-3 flex items-center gap-2 min-w-0">
           {isOpen ? <ChevronDown className="w-3.5 h-3.5 text-dark-400 shrink-0" /> : <ChevronRight className="w-3.5 h-3.5 text-dark-400 shrink-0" />}
           <span className="text-dark-200 truncate text-sm">{srv.name}</span>
         </div>
-        <div className="col-span-3 text-dark-400 text-sm truncate">{srv.address}:{srv.port}</div>
+        <div className="col-span-2 text-dark-400 text-sm truncate">{srv.address}:{srv.port}</div>
         <div className="col-span-1">
           <span className="text-xs px-1.5 py-0.5 rounded bg-dark-700/60 text-dark-300 uppercase">
             {srv.protocol === 'shadowsocks' ? 'ss' : srv.protocol}
@@ -628,7 +702,25 @@ function ServerRow({
             <span className="text-dark-500">—</span>
           )}
         </div>
-        <div className="col-span-2 flex justify-end">
+        <div className="col-span-1 text-sm">
+          <span className={srv.last_download_mbps != null ? 'text-accent-300' : 'text-dark-500'}>
+            {formatSpeed(srv.last_download_mbps)}
+          </span>
+        </div>
+        <div className="col-span-1 text-sm">
+          <span className={srv.last_upload_mbps != null ? 'text-accent-300' : 'text-dark-500'}>
+            {formatSpeed(srv.last_upload_mbps)}
+          </span>
+        </div>
+        <div className="col-span-2 flex justify-end gap-1">
+          <button
+            onClick={e => { e.stopPropagation(); onSpeedtest(srv.id) }}
+            disabled={speedtestingId != null}
+            className="p-1.5 rounded-lg hover:bg-dark-700 text-dark-400 hover:text-accent-400 transition-colors disabled:opacity-40"
+            title={t('xray_monitor.run_speedtest')}
+          >
+            {isTesting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+          </button>
           <button
             onClick={e => { e.stopPropagation(); onDelete(srv.id) }}
             className="p-1.5 rounded-lg hover:bg-dark-700 text-dark-500 hover:text-danger transition-colors"
@@ -656,13 +748,24 @@ function ServerRow({
                 <p className="text-dark-500 text-sm">{t('xray_monitor.no_history')}</p>
               ) : (
                 <div className="flex flex-wrap gap-1">
-                  {historyData.slice().reverse().map(check => (
-                    <div
-                      key={check.id}
-                      className={`w-3 h-6 rounded-sm ${check.status === 'ok' ? 'bg-success/70' : 'bg-danger/70'}`}
-                      title={`${check.timestamp ? new Date(check.timestamp).toLocaleTimeString() : '?'} — ${check.status === 'ok' ? `${check.ping_ms} ms` : check.error || 'fail'}`}
-                    />
-                  ))}
+                  {historyData.slice().reverse().map(check => {
+                    const time = check.timestamp ? new Date(check.timestamp).toLocaleTimeString() : '?'
+                    let detail = ''
+                    if (check.status === 'ok') {
+                      detail = `${check.ping_ms ?? '?'} ms`
+                      if (check.download_mbps != null) detail += ` | ↓${Math.round(check.download_mbps)}`
+                      if (check.upload_mbps != null) detail += ` ↑${Math.round(check.upload_mbps)} Mbit/s`
+                    } else {
+                      detail = check.error || 'fail'
+                    }
+                    return (
+                      <div
+                        key={check.id}
+                        className={`w-3 h-6 rounded-sm ${check.status === 'ok' ? 'bg-success/70' : 'bg-danger/70'}`}
+                        title={`${time} — ${detail}`}
+                      />
+                    )
+                  })}
                 </div>
               )}
             </div>

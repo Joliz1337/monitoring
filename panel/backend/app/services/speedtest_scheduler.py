@@ -20,32 +20,15 @@ from app.models import Server, PanelSettings, AlertSettings
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_IPERF_SERVERS = [
-    # Europe
-    {"host": "ping.online.net", "port": 5200, "label": "Online.net (100G)", "region": "EU-FR"},
-    {"host": "speedtest.serverius.net", "port": 5002, "label": "Serverius (10G)", "region": "EU-NL"},
-    {"host": "iperf3.moji.fr", "port": 5200, "label": "Moji (100G)", "region": "EU-FR"},
-    {"host": "paris.bbr.iperf.bytel.fr", "port": 9200, "label": "Bouygues (10G)", "region": "EU-FR"},
-    # Russia
-    {"host": "spd-rudp.hostkey.ru", "port": 5201, "label": "Hostkey Moscow", "region": "RU-MOW"},
-    {"host": "st.spb.ertelecom.ru", "port": 5201, "label": "Ertelecom SPb", "region": "RU-SPB"},
-    {"host": "st.ekat.ertelecom.ru", "port": 5201, "label": "Ertelecom Yekaterinburg", "region": "RU-SVE"},
-    # Asia
-    {"host": "speedtest.uztelecom.uz", "port": 5200, "label": "Uztelecom (10G)", "region": "Asia-UZ"},
-    {"host": "iperf.biznetnetworks.com", "port": 5201, "label": "Biznet Jakarta", "region": "Asia-SG"},
-    {"host": "iperf3.as49465.net", "port": 5200, "label": "AS49465 Tokyo", "region": "Asia-JP"},
-    # US
-    {"host": "iperf3.he.net", "port": 5201, "label": "Hurricane Electric", "region": "US-LA"},
-    {"host": "nyc.speedtest.clouvider.net", "port": 5200, "label": "Clouvider NYC", "region": "US-NY"},
-]
+DEFAULT_IPERF_SERVERS: list[dict] = []
 
 OOKLA_BLOCKED_REGIONS = {"RU"}
 
 SETTINGS_KEYS = {
-    "speedtest_enabled": "true",
-    "speedtest_method": "auto",
+    "speedtest_enabled": "false",
+    "speedtest_method": "ookla",
     "speedtest_mode": "both",
-    "speedtest_servers": json.dumps(DEFAULT_IPERF_SERVERS),
+    "speedtest_servers": "[]",
     "speedtest_threshold": "500",
     "speedtest_interval": "60",
     "speedtest_duration": "5",
@@ -498,10 +481,8 @@ class SpeedtestScheduler:
         except Exception as e:
             logger.error(f"Telegram send error: {e}")
 
-    async def test_single_node_by_id(
-        self, server_id: int, test_mode: Optional[str] = None, method: Optional[str] = None,
-    ) -> Optional[dict]:
-        """Manual test trigger — returns result directly."""
+    async def test_single_node_by_id(self, server_id: int) -> Optional[dict]:
+        """Manual test trigger — always runs full Ookla speedtest on node."""
         async with async_session() as db:
             result = await db.execute(
                 select(Server).where(Server.id == server_id, Server.is_active == True)
@@ -511,28 +492,19 @@ class SpeedtestScheduler:
         if not server:
             return None
 
-        effective_mode = test_mode if test_mode in ("quick", "full") else self._test_mode
-        effective_method = method if method in ("iperf3", "ookla", "auto") else self._method
-
-        if effective_method in ("auto", "ookla"):
-            effective_method = await self._resolve_method_for_node(server)
-
         payload: dict = {
-            "duration": self._duration,
-            "streams": self._streams,
+            "duration": 10,
+            "streams": 16,
             "threshold_mbps": self._threshold,
-            "test_mode": effective_mode,
-            "method": effective_method,
+            "test_mode": "full",
+            "method": "ookla",
         }
 
         server_list = await self._build_server_list_for_node(server)
         if server_list:
             payload["servers"] = server_list
 
-        if effective_method == "iperf3" and not server_list:
-            return {"error": "No iperf3 servers configured"}
-
-        timeout = 150 if effective_method == "ookla" else self._duration * max(len(server_list or []), 1) + 60
+        timeout = 150
 
         try:
             async with httpx.AsyncClient(verify=False, timeout=timeout) as client:

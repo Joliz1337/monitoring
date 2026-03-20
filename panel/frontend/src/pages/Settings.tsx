@@ -1,9 +1,9 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { Settings as SettingsIcon, RefreshCw, Layout, Languages, Sparkles, Check, Clock, Activity, Shield, AlertTriangle, Loader2, CheckCircle2, XCircle, Terminal, Server, Zap, Cpu, HardDrive, MemoryStick, Database, Download, Upload, Trash2, Archive, Gauge, Plus, X, Bell, Send } from 'lucide-react'
+import { Settings as SettingsIcon, RefreshCw, Layout, Languages, Sparkles, Check, Clock, Activity, Shield, AlertTriangle, Loader2, CheckCircle2, XCircle, Terminal, Server, Zap, Cpu, HardDrive, MemoryStick, Database, Download, Upload, Trash2, Archive, Gauge, Bell, Send } from 'lucide-react'
 import { useSettingsStore, TIMEZONE_OPTIONS, TRAFFIC_PERIOD_OPTIONS, METRICS_INTERVAL_OPTIONS, HAPROXY_INTERVAL_OPTIONS } from '../stores/settingsStore'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence, LayoutGroup } from 'framer-motion'
-import { systemApi, backupApi, settingsApi, serversApi, PanelCertificateInfo, PanelServerStats, BackupInfo, BackupStatus, SpeedtestServerConfig } from '../api/client'
+import { systemApi, backupApi, settingsApi, serversApi, PanelCertificateInfo, PanelServerStats, BackupInfo, BackupStatus } from '../api/client'
 import { toast } from 'sonner'
 
 interface RenewalResult {
@@ -1316,38 +1316,14 @@ export default function Settings() {
 }
 
 
-const DEFAULT_IPERF_SERVERS: SpeedtestServerConfig[] = [
-  { host: "ping.online.net", port: 5200, label: "Online.net (100G)", region: "EU-FR" },
-  { host: "speedtest.serverius.net", port: 5002, label: "Serverius (10G)", region: "EU-NL" },
-  { host: "iperf3.moji.fr", port: 5200, label: "Moji (100G)", region: "EU-FR" },
-  { host: "paris.bbr.iperf.bytel.fr", port: 9200, label: "Bouygues (10G)", region: "EU-FR" },
-  { host: "spd-rudp.hostkey.ru", port: 5201, label: "Hostkey Moscow", region: "RU-MOW" },
-  { host: "st.spb.ertelecom.ru", port: 5201, label: "Ertelecom SPb", region: "RU-SPB" },
-  { host: "st.ekat.ertelecom.ru", port: 5201, label: "Ertelecom Yekaterinburg", region: "RU-SVE" },
-  { host: "speedtest.uztelecom.uz", port: 5200, label: "Uztelecom (10G)", region: "Asia-UZ" },
-  { host: "iperf.biznetnetworks.com", port: 5201, label: "Biznet Jakarta", region: "Asia-SG" },
-  { host: "iperf3.as49465.net", port: 5200, label: "AS49465 Tokyo", region: "Asia-JP" },
-  { host: "iperf3.he.net", port: 5201, label: "Hurricane Electric", region: "US-LA" },
-  { host: "nyc.speedtest.clouvider.net", port: 5200, label: "Clouvider NYC", region: "US-NY" },
-]
-
 function SpeedtestSettings() {
   const { t } = useTranslation()
   const [loading, setLoading] = useState(true)
   const initialLoadDone = useRef(false)
 
-  const [enabled, setEnabled] = useState(true)
-  const [speedtestMethod, setSpeedtestMethod] = useState<'auto' | 'ookla' | 'iperf3'>('auto')
-  const [mode, setMode] = useState<'public' | 'panel' | 'both'>('both')
-  const [testMode, setTestMode] = useState<'quick' | 'full'>('quick')
+  const [enabled, setEnabled] = useState(false)
   const [threshold, setThreshold] = useState(500)
   const [interval, setInterval_] = useState(60)
-  const [duration, setDuration] = useState(5)
-  const [streams, setStreams] = useState(4)
-  const [panelPort, setPanelPort] = useState(5201)
-  const [panelAddress, setPanelAddress] = useState('')
-  const [servers, setServers] = useState<SpeedtestServerConfig[]>(DEFAULT_IPERF_SERVERS)
-  const [showServers, setShowServers] = useState(false)
 
   const [notifySlow, setNotifySlow] = useState(true)
   const [notifyError, setNotifyError] = useState(true)
@@ -1368,29 +1344,9 @@ function SpeedtestSettings() {
         ])
         const s = data.settings
         setAllServers(srvData.servers.map(sv => ({ id: sv.id, name: sv.name })))
-        setEnabled(s.speedtest_enabled !== 'false')
-        const rawMethod = s.speedtest_method || 'auto'
-        setSpeedtestMethod(rawMethod === 'ookla' ? 'ookla' : rawMethod === 'iperf3' ? 'iperf3' : 'auto')
-        setMode((s.speedtest_mode || 'both') as 'public' | 'panel' | 'both')
-        const tm = s.speedtest_test_mode || 'quick'
-        setTestMode(tm === 'full' ? 'full' : 'quick')
+        setEnabled(s.speedtest_enabled === 'true')
         setThreshold(parseInt(s.speedtest_threshold || '500', 10))
         setInterval_(parseInt(s.speedtest_interval || '60', 10))
-        setDuration(parseInt(s.speedtest_duration || '5', 10))
-        setStreams(parseInt(s.speedtest_streams || '4', 10))
-        setPanelPort(parseInt(s.speedtest_panel_port || '5201', 10))
-        let addr = s.speedtest_panel_address || ''
-        if (!addr) {
-          const { data: panelInfo } = await systemApi.getPanelIp()
-          addr = panelInfo.ip || panelInfo.domain || ''
-        }
-        setPanelAddress(addr)
-        if (s.speedtest_servers) {
-          try {
-            const parsed = JSON.parse(s.speedtest_servers)
-            if (Array.isArray(parsed) && parsed.length > 0) setServers(parsed)
-          } catch { /* keep defaults */ }
-        }
         setNotifySlow(s.speedtest_notify_slow !== 'false')
         setNotifyError(s.speedtest_notify_error !== 'false')
         setNotifyRecovery(s.speedtest_notify_recovery === 'true')
@@ -1413,16 +1369,8 @@ function SpeedtestSettings() {
       try {
         const updates: [string, string][] = [
           ['speedtest_enabled', String(enabled)],
-          ['speedtest_method', speedtestMethod],
-          ['speedtest_mode', mode],
-          ['speedtest_test_mode', testMode],
           ['speedtest_threshold', String(threshold)],
           ['speedtest_interval', String(interval)],
-          ['speedtest_duration', String(duration)],
-          ['speedtest_streams', String(streams)],
-          ['speedtest_panel_port', String(panelPort)],
-          ['speedtest_panel_address', panelAddress],
-          ['speedtest_servers', JSON.stringify(servers)],
           ['speedtest_notify_slow', String(notifySlow)],
           ['speedtest_notify_error', String(notifyError)],
           ['speedtest_notify_recovery', String(notifyRecovery)],
@@ -1437,7 +1385,7 @@ function SpeedtestSettings() {
       }
     }, 500)
     return () => clearTimeout(timeout)
-  }, [loading, enabled, speedtestMethod, mode, testMode, threshold, interval, duration, streams, panelPort, panelAddress, servers, notifySlow, notifyError, notifyRecovery, useCustomBot, botToken, chatId, ignoreList, t])
+  }, [loading, enabled, threshold, interval, notifySlow, notifyError, notifyRecovery, useCustomBot, botToken, chatId, ignoreList, t])
 
   const handleTestNotification = async () => {
     setTestingSend(true)
@@ -1455,18 +1403,6 @@ function SpeedtestSettings() {
       toast.error(t('common.error'))
     }
     setTestingSend(false)
-  }
-
-  const addServer = () => {
-    setServers([...servers, { host: '', port: 5201, label: '', region: '' }])
-  }
-
-  const removeServer = (idx: number) => {
-    setServers(servers.filter((_, i) => i !== idx))
-  }
-
-  const updateServer = (idx: number, field: keyof SpeedtestServerConfig, value: string | number) => {
-    setServers(servers.map((s, i) => i === idx ? { ...s, [field]: value } : s))
   }
 
   if (loading) return null
@@ -1489,7 +1425,6 @@ function SpeedtestSettings() {
       </div>
 
       <div className="space-y-4">
-        {/* Enable toggle */}
         <div className="flex items-center justify-between">
           <span className="text-sm text-dark-300">{t('settings.speedtest_enabled')}</span>
           <button
@@ -1500,104 +1435,7 @@ function SpeedtestSettings() {
           </button>
         </div>
 
-        {/* Method selector */}
-        <div>
-          <label className="text-sm text-dark-300 block mb-1.5">{t('settings.speedtest_method')}</label>
-          <div className="flex gap-2">
-            {(['auto', 'ookla', 'iperf3'] as const).map(m => (
-              <button
-                key={m}
-                onClick={() => setSpeedtestMethod(m)}
-                className={`flex-1 px-3 py-2 rounded-lg text-xs font-medium transition-colors ${
-                  speedtestMethod === m ? 'bg-accent-500/20 text-accent-400 border border-accent-500/30' : 'bg-dark-800 text-dark-400 border border-dark-700 hover:border-dark-600'
-                }`}
-              >
-                <div className="font-medium">{t(`settings.speedtest_method_${m}`)}</div>
-                <div className={`text-[10px] mt-0.5 ${speedtestMethod === m ? 'text-accent-400/70' : 'text-dark-500'}`}>
-                  {t(`settings.speedtest_method_${m}_hint`)}
-                </div>
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* iperf3 server mode (only for iperf3 method) */}
-        {speedtestMethod === 'iperf3' && (
-          <div>
-            <label className="text-sm text-dark-300 block mb-1.5">{t('settings.speedtest_mode')}</label>
-            <div className="flex gap-2">
-              {(['public', 'panel', 'both'] as const).map(m => (
-                <button
-                  key={m}
-                  onClick={() => setMode(m)}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-                    mode === m ? 'bg-accent-500/20 text-accent-400 border border-accent-500/30' : 'bg-dark-800 text-dark-400 border border-dark-700 hover:border-dark-600'
-                  }`}
-                >
-                  {t(`settings.speedtest_mode_${m}`)}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Panel address (visible for panel/both iperf3 modes) */}
-        {speedtestMethod === 'iperf3' && (mode === 'panel' || mode === 'both') && (
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="text-sm text-dark-300 block mb-1.5">{t('settings.speedtest_panel_address')}</label>
-              <input
-                type="text"
-                value={panelAddress}
-                onChange={e => setPanelAddress(e.target.value)}
-                placeholder={t('settings.speedtest_panel_address_hint')}
-                className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200 focus:outline-none focus:border-accent-500/50"
-              />
-            </div>
-            <div>
-              <label className="text-sm text-dark-300 block mb-1.5">{t('settings.speedtest_panel_port')}</label>
-              <input
-                type="number"
-                value={panelPort}
-                onChange={e => setPanelPort(parseInt(e.target.value, 10) || 5201)}
-                className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200 focus:outline-none focus:border-accent-500/50"
-              />
-            </div>
-          </div>
-        )}
-
-        {/* Test mode */}
-        <div>
-          <label className="text-sm text-dark-300 block mb-1.5">{t('settings.speedtest_test_mode')}</label>
-          <div className="flex gap-2">
-            {(['quick', 'full'] as const).map(m => (
-              <button
-                key={m}
-                onClick={() => {
-                  setTestMode(m)
-                  if (m === 'quick') {
-                    setDuration(5)
-                    setStreams(4)
-                  } else {
-                    setDuration(10)
-                    setStreams(16)
-                  }
-                }}
-                className={`flex-1 px-3 py-2 rounded-lg text-xs font-medium transition-colors ${
-                  testMode === m ? 'bg-accent-500/20 text-accent-400 border border-accent-500/30' : 'bg-dark-800 text-dark-400 border border-dark-700 hover:border-dark-600'
-                }`}
-              >
-                <div className="font-medium">{t(`settings.speedtest_test_mode_${m}`)}</div>
-                <div className={`text-[10px] mt-0.5 ${testMode === m ? 'text-accent-400/70' : 'text-dark-500'}`}>
-                  {t(`settings.speedtest_test_mode_${m}_hint`)}
-                </div>
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* Numeric settings */}
-        <div className={`grid grid-cols-2 ${speedtestMethod === 'iperf3' ? 'sm:grid-cols-4' : ''} gap-3`}>
+        <div className="grid grid-cols-2 gap-3">
           <div>
             <label className="text-sm text-dark-300 block mb-1.5">{t('settings.speedtest_threshold')}</label>
             <input
@@ -1616,89 +1454,8 @@ function SpeedtestSettings() {
               className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200 focus:outline-none focus:border-accent-500/50"
             />
           </div>
-          {speedtestMethod === 'iperf3' && (
-            <>
-              <div>
-                <label className="text-sm text-dark-300 block mb-1.5">{t('settings.speedtest_duration')}</label>
-                <input
-                  type="number"
-                  value={duration}
-                  onChange={e => setDuration(parseInt(e.target.value, 10) || 5)}
-                  className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200 focus:outline-none focus:border-accent-500/50"
-                />
-              </div>
-              <div>
-                <label className="text-sm text-dark-300 block mb-1.5">{t('settings.speedtest_streams')}</label>
-                <input
-                  type="number"
-                  value={streams}
-                  onChange={e => setStreams(parseInt(e.target.value, 10) || 4)}
-                  className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200 focus:outline-none focus:border-accent-500/50"
-                />
-              </div>
-            </>
-          )}
         </div>
 
-        {/* Servers list (iperf3 only) */}
-        {speedtestMethod === 'iperf3' && (mode === 'public' || mode === 'both') && (
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <label className="text-sm text-dark-300">{t('settings.speedtest_servers')}</label>
-              <button onClick={() => setShowServers(!showServers)} className="text-xs text-accent-400 hover:text-accent-300">
-                {showServers ? t('common.hide') : t('common.show')} ({servers.length})
-              </button>
-            </div>
-            <AnimatePresence>
-              {showServers && (
-                <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="overflow-hidden">
-                  <div className="space-y-2 mb-2">
-                    {servers.map((srv, idx) => (
-                      <div key={idx} className="flex items-center gap-2">
-                        <input
-                          type="text"
-                          value={srv.host}
-                          onChange={e => updateServer(idx, 'host', e.target.value)}
-                          placeholder={t('settings.speedtest_host')}
-                          className="flex-1 bg-dark-800 border border-dark-700 rounded-lg px-2 py-1.5 text-xs text-dark-200 focus:outline-none focus:border-accent-500/50"
-                        />
-                        <input
-                          type="number"
-                          value={srv.port}
-                          onChange={e => updateServer(idx, 'port', parseInt(e.target.value, 10) || 5201)}
-                          className="w-16 bg-dark-800 border border-dark-700 rounded-lg px-2 py-1.5 text-xs text-dark-200 focus:outline-none focus:border-accent-500/50"
-                        />
-                        <input
-                          type="text"
-                          value={srv.label}
-                          onChange={e => updateServer(idx, 'label', e.target.value)}
-                          placeholder={t('settings.speedtest_label')}
-                          className="w-32 bg-dark-800 border border-dark-700 rounded-lg px-2 py-1.5 text-xs text-dark-200 focus:outline-none focus:border-accent-500/50"
-                        />
-                        <input
-                          type="text"
-                          value={srv.region}
-                          onChange={e => updateServer(idx, 'region', e.target.value)}
-                          placeholder={t('settings.speedtest_region')}
-                          className="w-20 bg-dark-800 border border-dark-700 rounded-lg px-2 py-1.5 text-xs text-dark-200 focus:outline-none focus:border-accent-500/50"
-                        />
-                        <button onClick={() => removeServer(idx)} className="text-dark-500 hover:text-danger transition-colors p-1">
-                          <X className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                  <button onClick={addServer} className="flex items-center gap-1.5 text-xs text-accent-400 hover:text-accent-300">
-                    <Plus className="w-3.5 h-3.5" />
-                    {t('settings.speedtest_add_server')}
-                  </button>
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </div>
-        )}
-
-        {/* Ignore list */}
         {allServers.length > 0 && (
           <div>
             <label className="text-sm text-dark-300 block mb-1.5">{t('settings.speedtest_ignore_list')}</label>
@@ -1724,7 +1481,6 @@ function SpeedtestSettings() {
           </div>
         )}
 
-        {/* Notifications */}
         <div className="border-t border-dark-800/50 pt-4">
           <div className="flex items-center gap-2 mb-3">
             <Bell className="w-4 h-4 text-dark-400" />

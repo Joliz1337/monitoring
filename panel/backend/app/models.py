@@ -654,6 +654,11 @@ class XrayMonitorSettings(Base):
     notify_recovery = Column(Boolean, default=True)
     notify_latency = Column(Boolean, default=True)
 
+    speedtest_enabled = Column(Boolean, default=False)
+    speedtest_interval = Column(Integer, default=30)
+    speed_threshold_mbps = Column(Integer, default=100)
+    notify_slow_speed = Column(Boolean, default=True)
+
     ignore_list = Column(Text, default="[]")
 
 
@@ -690,6 +695,8 @@ class XrayMonitorServer(Base):
     
     status = Column(String(20), default="unknown")  # online, offline, unknown
     last_ping_ms = Column(Float, nullable=True)
+    last_download_mbps = Column(Float, nullable=True)
+    last_upload_mbps = Column(Float, nullable=True)
     last_check = Column(DateTime(timezone=True), nullable=True)
     fail_count = Column(Integer, default=0)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -709,6 +716,8 @@ class XrayMonitorCheck(Base):
     timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
     status = Column(String(10), nullable=False)  # ok, fail
     ping_ms = Column(Float, nullable=True)
+    download_mbps = Column(Float, nullable=True)
+    upload_mbps = Column(Float, nullable=True)
     error = Column(String(500), nullable=True)
     
     __table_args__ = (

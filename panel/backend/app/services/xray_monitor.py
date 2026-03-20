@@ -1,15 +1,16 @@
-"""Background service for monitoring Xray connections via xray-core proxy checks."""
+"""Background service for monitoring Xray connections via speedtest through xray-core SOCKS5 proxies."""
 
 import asyncio
 import json
 import logging
+import shutil
+import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
 import aiohttp
-import httpx
 from sqlalchemy import select, delete
 
 from app.database import async_session
@@ -22,11 +23,16 @@ from app.services.xray_key_parser import is_valid_server, is_ignored_address, fe
 logger = logging.getLogger(__name__)
 
 XRAY_BIN = "/usr/local/bin/xray"
+SPEEDTEST_BIN = shutil.which("speedtest") or "/usr/local/bin/speedtest"
+PROXYCHAINS_BIN = shutil.which("proxychains4") or "/usr/bin/proxychains4"
 SOCKS_PORT_BASE = 10001
 CONFIG_DIR = Path("/app/data/xray-monitor")
 CONFIG_PATH = CONFIG_DIR / "config.json"
+PROXYCHAINS_DIR = Path("/tmp/proxychains")
 CHECK_HISTORY_RETENTION_HOURS = 24
 SUB_REFRESH_INTERVAL_SEC = 3600
+PAUSE_BETWEEN_SERVERS = 5
+SPEEDTEST_TIMEOUT = 120
 
 
 def _build_outbound(server: XrayMonitorServer) -> dict | None:
@@ -207,6 +213,93 @@ def _generate_xray_config(servers: list[XrayMonitorServer]) -> tuple[dict, int]:
     return config, len(inbounds)
 
 
+def _write_proxychains_config(socks_port: int, server_id: int) -> Path:
+    """Write a proxychains4 config file for a specific SOCKS5 port."""
+    PROXYCHAINS_DIR.mkdir(parents=True, exist_ok=True)
+    conf_path = PROXYCHAINS_DIR / f"pc_{server_id}.conf"
+    conf_path.write_text(
+        "strict_chain\n"
+        "quiet_mode\n"
+        "proxy_dns\n"
+        "[ProxyList]\n"
+        f"socks5 127.0.0.1 {socks_port}\n"
+    )
+    return conf_path
+
+
+async def _run_speedtest_via_proxy(socks_port: int, server_id: int) -> dict:
+    """Run Ookla speedtest CLI through proxychains4 SOCKS5 proxy.
+
+    Returns dict with keys: ok, download_mbps, upload_mbps, ping_ms, error, server_name.
+    """
+    conf_path = _write_proxychains_config(socks_port, server_id)
+
+    cmd = [
+        PROXYCHAINS_BIN, "-q", "-f", str(conf_path),
+        SPEEDTEST_BIN, "--format=json", "--accept-license", "--accept-gdpr",
+    ]
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=SPEEDTEST_TIMEOUT)
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+            await proc.wait()
+        except Exception:
+            pass
+        return {"ok": False, "error": "speedtest timeout"}
+    except FileNotFoundError as e:
+        return {"ok": False, "error": f"binary not found: {e.filename}"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200]}
+    finally:
+        try:
+            conf_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    raw = stdout.decode(errors="replace").strip()
+    if proc.returncode != 0 or not raw:
+        err = stderr.decode(errors="replace").strip()
+        if not err:
+            err = raw or f"exit code {proc.returncode}"
+        return {"ok": False, "error": err[:300]}
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {"ok": False, "error": f"invalid JSON: {raw[:200]}"}
+
+    if "error" in data:
+        return {"ok": False, "error": data["error"][:300]}
+
+    dl_bw = data.get("download", {}).get("bandwidth", 0)
+    ul_bw = data.get("upload", {}).get("bandwidth", 0)
+    download_mbps = round(dl_bw * 8 / 1_000_000, 2) if dl_bw else 0
+    upload_mbps = round(ul_bw * 8 / 1_000_000, 2) if ul_bw else 0
+    ping_ms = round(data.get("ping", {}).get("latency", 0), 1)
+
+    srv_info = data.get("server", {})
+    server_name = srv_info.get("name", "")
+    location = srv_info.get("location", "")
+    if location:
+        server_name = f"{server_name} ({location})"
+
+    return {
+        "ok": True,
+        "download_mbps": download_mbps,
+        "upload_mbps": upload_mbps,
+        "ping_ms": ping_ms,
+        "server_name": server_name,
+        "server_host": srv_info.get("host", ""),
+    }
+
+
 class XrayMonitorService:
     def __init__(self):
         self._running = False
@@ -217,6 +310,7 @@ class XrayMonitorService:
         self._time_since_check = 0
         self._time_since_refresh = 0
         self._xray_healthy = False
+        self._testing_server_id: Optional[int] = None
 
     async def start(self):
         if self._running:
@@ -245,36 +339,34 @@ class XrayMonitorService:
             "running": self._running,
             "xray_running": self._xray_healthy,
             "last_check": self._last_check.isoformat() if self._last_check else None,
+            "testing_server_id": self._testing_server_id,
         }
 
     # ------------------------------------------------------------------ loop
     async def _loop(self):
         self._time_since_check = 0
-        self._time_since_refresh = SUB_REFRESH_INTERVAL_SEC - 10  # first refresh soon after start
-        first_run = True
+        self._time_since_refresh = SUB_REFRESH_INTERVAL_SEC - 10
 
         while self._running:
             try:
                 settings = await self._load_settings()
-                interval = max(60, settings.check_interval) if settings else 60
 
                 if self._config_dirty:
                     await self._reload_xray()
                     self._config_dirty = False
 
-                # Auto-refresh subscriptions
                 if self._time_since_refresh >= SUB_REFRESH_INTERVAL_SEC:
                     await self._auto_refresh_subscriptions()
                     self._time_since_refresh = 0
 
-                should_check = settings and settings.enabled and (
-                    first_run or self._time_since_check >= interval
-                )
+                speedtest_enabled = settings and settings.speedtest_enabled
+                interval_sec = max(600, (settings.speedtest_interval or 30) * 60) if settings else 1800
+
+                should_check = speedtest_enabled and self._time_since_check >= interval_sec
 
                 if should_check:
                     await self._check_all(settings)
                     self._time_since_check = 0
-                    first_run = False
 
                 await asyncio.sleep(1)
                 self._time_since_check += 1
@@ -321,7 +413,6 @@ class XrayMonitorService:
                     .where(XrayMonitorServer.id == srv.id)
                     .values(socks_port=srv.socks_port)
                 )
-            # Clear socks_port for invalid servers so they won't be checked
             invalid_ids = [s.id for s in servers if not is_valid_server(s.address, s.port)]
             if invalid_ids:
                 for inv_id in invalid_ids:
@@ -348,7 +439,6 @@ class XrayMonitorService:
             self._xray_healthy = False
             return
 
-        # Validate config first
         try:
             test_proc = await asyncio.create_subprocess_exec(
                 XRAY_BIN, "run", "-test", "-c", str(CONFIG_PATH),
@@ -406,7 +496,16 @@ class XrayMonitorService:
         self._xray_proc = None
         self._xray_healthy = False
 
-    # ------------------------------------------------------------------ checks
+    # ------------------------------------------------------------------ speedtest checks
+    async def _ensure_xray_running(self) -> bool:
+        xray_alive = self._xray_proc and self._xray_proc.returncode is None
+        if not xray_alive:
+            logger.warning("xray-core not running, attempting restart...")
+            await self._reload_xray()
+            self._config_dirty = False
+            await asyncio.sleep(2)
+        return self._xray_healthy
+
     async def _check_all(self, settings: XrayMonitorSettings):
         self._last_check = datetime.now(timezone.utc).replace(tzinfo=None)
 
@@ -425,102 +524,90 @@ class XrayMonitorService:
         if not servers:
             return
 
-        xray_alive = self._xray_proc and self._xray_proc.returncode is None
-        if not xray_alive:
-            logger.warning("xray-core not running, attempting restart...")
-            await self._reload_xray()
-            self._config_dirty = False
-            await asyncio.sleep(2)
-            if not self._xray_healthy:
-                logger.error("xray-core still not running, skipping checks")
-                return
-
-        tasks = [self._check_server(srv, settings) for srv in servers]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        if not await self._ensure_xray_running():
+            logger.error("xray-core still not running, skipping checks")
+            return
 
         events: list[dict] = []
-        for r in results:
-            if isinstance(r, list):
-                events.extend(r)
+        for i, srv in enumerate(servers):
+            if not self._running:
+                break
+            try:
+                srv_events = await self._speedtest_server(srv, settings)
+                events.extend(srv_events)
+            except Exception as e:
+                logger.warning(f"Speedtest failed for {srv.name}: {e}")
+
+            if self._running and i < len(servers) - 1:
+                await asyncio.sleep(PAUSE_BETWEEN_SERVERS)
 
         if events:
             await self._send_batched_notifications(settings, events, sub_names)
 
         await self._cleanup_old_checks()
+        logger.info(f"Speedtest cycle completed: {len(servers)} servers")
 
-    PING_INTERVAL_SEC = 1
-    SAMPLES_PER_CHECK = 12
-
-    async def _check_server(self, srv: XrayMonitorServer, settings: XrayMonitorSettings) -> list[dict]:
-        """Measure RTT on established connection: 12 pings with 1s gaps for connection reuse."""
+    async def _speedtest_server(self, srv: XrayMonitorServer, settings: XrayMonitorSettings) -> list[dict]:
+        """Run speedtest through Xray SOCKS5 proxy for a single server."""
         if not self._xray_healthy:
             return []
 
-        proxy_url = f"socks5://127.0.0.1:{srv.socks_port}"
-        error_msg: Optional[str] = None
-        check_ok = False
-        ping_ms: Optional[float] = None
+        self._testing_server_id = srv.id
+        try:
+            return await self._do_speedtest_server(srv, settings)
+        finally:
+            self._testing_server_id = None
 
-        probe_targets = (
-            "https://cp.cloudflare.com/generate_204",
-            "https://www.google.com/generate_204",
-            "https://connectivitycheck.gstatic.com/generate_204",
-        )
-        for target in probe_targets:
-            try:
-                transport = httpx.AsyncHTTPTransport(proxy=proxy_url)
-                async with httpx.AsyncClient(
-                    transport=transport,
-                    timeout=httpx.Timeout(8.0, connect=6.0, read=4.0),
-                    follow_redirects=True,
-                    verify=False,
-                ) as client:
-                    warmup = await client.head(target)
-                    if warmup.status_code >= 500:
-                        continue
-                    check_ok = True
+    async def _do_speedtest_server(self, srv: XrayMonitorServer, settings: XrayMonitorSettings) -> list[dict]:
+        logger.info(f"Speedtest: {srv.name} ({srv.address}:{srv.port}) via SOCKS5 :{srv.socks_port}")
 
-                    timings: list[float] = []
-                    for i in range(self.SAMPLES_PER_CHECK):
-                        if i > 0:
-                            await asyncio.sleep(self.PING_INTERVAL_SEC)
-                        try:
-                            start = time.monotonic()
-                            await client.head(target)
-                            timings.append((time.monotonic() - start) * 1000)
-                        except Exception:
-                            pass
-
-                    if timings:
-                        timings.sort()
-                        trimmed = timings[1:-1] if len(timings) >= 4 else timings
-                        ping_ms = round(sum(trimmed) / len(trimmed), 1)
-                    break
-            except Exception as e:
-                msg = str(e).strip()
-                if len(msg) > 180:
-                    msg = msg[:180] + "..."
-                error_msg = f"{target}: {type(e).__name__}" + (f" ({msg})" if msg else "")
-                continue
+        result = await _run_speedtest_via_proxy(srv.socks_port, srv.id)
 
         was_offline = srv.status == "offline"
         fail_threshold = settings.fail_threshold or 2
+        check_time = datetime.now(timezone.utc).replace(tzinfo=None)
+
+        check_ok = result["ok"]
+        ping_ms = result.get("ping_ms") if check_ok else None
+        download_mbps = result.get("download_mbps") if check_ok else None
+        upload_mbps = result.get("upload_mbps") if check_ok else None
+        error_msg = result.get("error") if not check_ok else None
+
+        if check_ok:
+            logger.info(
+                f"Speedtest {srv.name}: {download_mbps} Mbit/s down, "
+                f"{upload_mbps} Mbit/s up, {ping_ms} ms ping"
+            )
 
         async with async_session() as db:
             if check_ok:
                 await db.execute(
                     XrayMonitorServer.__table__.update()
                     .where(XrayMonitorServer.id == srv.id)
-                    .values(status="online", last_ping_ms=ping_ms, last_check=self._last_check, fail_count=0)
+                    .values(
+                        status="online",
+                        last_ping_ms=ping_ms,
+                        last_download_mbps=download_mbps,
+                        last_upload_mbps=upload_mbps,
+                        last_check=check_time,
+                        fail_count=0,
+                    )
                 )
-                db.add(XrayMonitorCheck(server_id=srv.id, status="ok", ping_ms=ping_ms))
+                db.add(XrayMonitorCheck(
+                    server_id=srv.id, status="ok",
+                    ping_ms=ping_ms, download_mbps=download_mbps, upload_mbps=upload_mbps,
+                ))
             else:
                 new_fail = (srv.fail_count or 0) + 1
                 new_status = "offline" if new_fail >= fail_threshold else srv.status
                 await db.execute(
                     XrayMonitorServer.__table__.update()
                     .where(XrayMonitorServer.id == srv.id)
-                    .values(status=new_status, last_check=self._last_check, fail_count=new_fail, last_ping_ms=None)
+                    .values(
+                        status=new_status, last_check=check_time,
+                        fail_count=new_fail, last_ping_ms=None,
+                        last_download_mbps=None, last_upload_mbps=None,
+                    )
                 )
                 db.add(XrayMonitorCheck(server_id=srv.id, status="fail", error=error_msg))
             await db.commit()
@@ -532,12 +619,20 @@ class XrayMonitorService:
         events: list[dict] = []
 
         if check_ok and was_offline and settings.notify_recovery:
-            events.append({**base, "type": "recovery", "ping_ms": ping_ms})
+            events.append({**base, "type": "recovery", "ping_ms": ping_ms, "download_mbps": download_mbps})
 
         if check_ok and ping_ms and settings.notify_latency:
             threshold = settings.latency_threshold_ms or 500
             if ping_ms > threshold:
                 events.append({**base, "type": "latency", "ping_ms": ping_ms, "threshold": threshold})
+
+        if check_ok and download_mbps is not None and settings.notify_slow_speed:
+            speed_threshold = settings.speed_threshold_mbps or 100
+            if download_mbps < speed_threshold:
+                events.append({
+                    **base, "type": "slow_speed",
+                    "download_mbps": download_mbps, "threshold": speed_threshold,
+                })
 
         if not check_ok:
             new_fail = (srv.fail_count or 0) + 1
@@ -548,6 +643,62 @@ class XrayMonitorService:
                 events.append({**base, "type": "down", "error": err})
 
         return events
+
+    async def run_manual_speedtest(self, server_id: int) -> dict:
+        """Run speedtest for a single server on demand. Returns result dict."""
+        if not await self._ensure_xray_running():
+            return {"ok": False, "error": "xray-core is not running"}
+
+        async with async_session() as db:
+            result = await db.execute(
+                select(XrayMonitorServer).where(
+                    XrayMonitorServer.id == server_id,
+                    XrayMonitorServer.socks_port.isnot(None),
+                )
+            )
+            srv = result.scalar_one_or_none()
+
+        if not srv:
+            return {"ok": False, "error": "Server not found or has no SOCKS port"}
+
+        if self._testing_server_id:
+            return {"ok": False, "error": "Another speedtest is in progress"}
+
+        self._testing_server_id = srv.id
+        try:
+            st_result = await _run_speedtest_via_proxy(srv.socks_port, srv.id)
+
+            check_time = datetime.now(timezone.utc).replace(tzinfo=None)
+            async with async_session() as db:
+                if st_result["ok"]:
+                    await db.execute(
+                        XrayMonitorServer.__table__.update()
+                        .where(XrayMonitorServer.id == srv.id)
+                        .values(
+                            status="online",
+                            last_ping_ms=st_result.get("ping_ms"),
+                            last_download_mbps=st_result.get("download_mbps"),
+                            last_upload_mbps=st_result.get("upload_mbps"),
+                            last_check=check_time,
+                            fail_count=0,
+                        )
+                    )
+                    db.add(XrayMonitorCheck(
+                        server_id=srv.id, status="ok",
+                        ping_ms=st_result.get("ping_ms"),
+                        download_mbps=st_result.get("download_mbps"),
+                        upload_mbps=st_result.get("upload_mbps"),
+                    ))
+                else:
+                    db.add(XrayMonitorCheck(
+                        server_id=srv.id, status="fail",
+                        error=st_result.get("error", "")[:500],
+                    ))
+                await db.commit()
+
+            return st_result
+        finally:
+            self._testing_server_id = None
 
     # ------------------------------------------------------------------ auto-refresh
     async def _load_ignore_set(self) -> set[str]:
@@ -635,11 +786,12 @@ class XrayMonitorService:
             logger.error(f"Auto-refresh subscriptions error: {e}")
 
     # ------------------------------------------------------------------ telegram
-    _CATEGORY_ORDER = ("down", "recovery", "latency")
+    _CATEGORY_ORDER = ("down", "recovery", "latency", "slow_speed")
     _CATEGORY_HEADER = {
-        "down": "🔴 <b>Серверы DOWN</b>",
-        "recovery": "✅ <b>Восстановились</b>",
-        "latency": "🟡 <b>Высокий пинг</b>",
+        "down": "\U0001f534 <b>Серверы DOWN</b>",
+        "recovery": "\u2705 <b>Восстановились</b>",
+        "latency": "\U0001f7e1 <b>Высокий пинг</b>",
+        "slow_speed": "\U0001f7e0 <b>Низкая скорость</b>",
     }
     TG_MSG_LIMIT = 4096
 
@@ -668,20 +820,26 @@ class XrayMonitorService:
             for sub_id in sorted(by_source, key=lambda x: (x is None, x or 0)):
                 group = by_source[sub_id]
                 if sub_id and sub_id in sub_names:
-                    lines.append(f"\n📦 <b>{sub_names[sub_id]}</b>")
+                    lines.append(f"\n\U0001f4e6 <b>{sub_names[sub_id]}</b>")
                 elif sub_id is None:
-                    lines.append("\n🔑 <b>Ручные ключи</b>")
+                    lines.append("\n\U0001f511 <b>Ручные ключи</b>")
                 else:
-                    lines.append(f"\n📦 <b>Подписка #{sub_id}</b>")
+                    lines.append(f"\n\U0001f4e6 <b>Подписка #{sub_id}</b>")
 
                 for ev in group:
-                    entry = f"  • {ev['name']} ({ev['address']}:{ev['port']})"
+                    entry = f"  \u2022 {ev['name']} ({ev['address']}:{ev['port']})"
                     if cat == "down":
-                        entry += f" — {ev.get('error', '?')}"
+                        entry += f" \u2014 {ev.get('error', '?')}"
                     elif cat == "recovery":
-                        entry += f" — {ev.get('ping_ms', '?')} ms"
+                        ping = ev.get('ping_ms', '?')
+                        dl = ev.get('download_mbps', '')
+                        entry += f" \u2014 {ping} ms"
+                        if dl:
+                            entry += f", {dl} Mbit/s"
                     elif cat == "latency":
-                        entry += f" — {ev.get('ping_ms', '?')} ms (порог {ev.get('threshold', '?')})"
+                        entry += f" \u2014 {ev.get('ping_ms', '?')} ms (\u043f\u043e\u0440\u043e\u0433 {ev.get('threshold', '?')})"
+                    elif cat == "slow_speed":
+                        entry += f" \u2014 {ev.get('download_mbps', '?')} Mbit/s (\u043f\u043e\u0440\u043e\u0433 {ev.get('threshold', '?')})"
                     lines.append(entry)
 
             sections.append("\n".join(lines))
@@ -689,7 +847,7 @@ class XrayMonitorService:
         if not sections:
             return
 
-        header = "📡 <b>Xray Monitor</b>\n"
+        header = "\U0001f4e1 <b>Xray Monitor</b>\n"
         full_text = header + "\n\n".join(sections)
 
         for chunk in self._split_message(full_text):

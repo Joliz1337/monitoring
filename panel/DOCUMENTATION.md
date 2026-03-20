@@ -13,7 +13,7 @@
 - **Remnawave** — интеграция с Remnawave Panel, статистика посещений из Xray логов
 - **Alerts** — Telegram-уведомления о состоянии серверов (offline, CPU, RAM, сеть, TCP)
 - **Billing** — отслеживание оплаты серверов (помесячная и ресурсная модели), уведомления об истечении через Telegram
-- **Xray Monitor** — мониторинг доступности Xray-серверов через подписки/ключи (vless, vmess, trojan, ss), проверка через xray-core, пинг, Telegram-уведомления
+- **Xray Monitor** — мониторинг Xray-серверов через подписки/ключи (vless, vmess, trojan, ss): speedtest через proxychains4 + Ookla CLI для измерения скорости и пинга, последовательное тестирование, ручной speedtest, Telegram-уведомления (down/recovery/latency/slow speed)
 
 ## Интервалы сбора данных
 
@@ -661,11 +661,11 @@ Frontend lazy loading (panel/frontend/src/pages/Remnawave.tsx):
 
 ### Xray Monitor
 
-Мониторинг доступности Xray-серверов. Подписки и ключи парсятся, через xray-core делается реальное подключение к google.com/one.one.one.one.
+Мониторинг Xray-серверов через speedtest. Подписки и ключи парсятся, через xray-core создаётся SOCKS5 прокси, через proxychains4 запускается Ookla speedtest CLI — измеряется download/upload скорость и пинг. Серверы тестируются последовательно. Автотест выключен по умолчанию.
 
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
-| GET | /xray-monitor/settings | Настройки мониторинга |
+| GET | /xray-monitor/settings | Настройки мониторинга (вкл. speedtest) |
 | PUT | /xray-monitor/settings | Обновить настройки |
 | GET | /xray-monitor/subscriptions | Список подписок (с вложенными серверами) |
 | POST | /xray-monitor/subscriptions | Добавить подписку |
@@ -675,15 +675,16 @@ Frontend lazy loading (panel/frontend/src/pages/Remnawave.tsx):
 | GET | /xray-monitor/servers | Ручные серверы (без подписки) |
 | POST | /xray-monitor/servers | Добавить ключи вручную |
 | DELETE | /xray-monitor/servers/{id} | Удалить сервер |
-| GET | /xray-monitor/servers/{id}/history | История проверок |
+| POST | /xray-monitor/servers/{id}/speedtest | Ручной speedtest сервера |
+| GET | /xray-monitor/servers/{id}/history | История проверок (ping/download/upload) |
 | GET | /xray-monitor/status | Статус сервиса |
 | POST | /xray-monitor/test-notification | Тест Telegram |
 
 **Файлы:**
 - `backend/app/routers/xray_monitor.py` — API роутер
-- `backend/app/services/xray_monitor.py` — фоновый сервис (xray-core, проверки, уведомления)
+- `backend/app/services/xray_monitor.py` — фоновый сервис: xray-core, speedtest через proxychains4, уведомления (down/recovery/latency/slow_speed)
 - `backend/app/services/xray_key_parser.py` — парсинг подписок и ключей (URI-ключи, base64, JSON full xray-конфиги)
-- `frontend/src/pages/XrayMonitor.tsx` — страница мониторинга
+- `frontend/src/pages/XrayMonitor.tsx` — страница мониторинга (таблица с download/upload, кнопка speedtest, настройки speedtest)
 
 ## Диагностика
 

@@ -10,7 +10,17 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    bash curl git rsync openssl unzip iperf3
+    bash curl git rsync openssl unzip iperf3 proxychains4 gnupg apt-transport-https
+
+# Install Ookla Speedtest CLI
+RUN curl -s https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh | bash && \
+    apt-get install -y --no-install-recommends speedtest || \
+    ( ARCH=$(dpkg --print-architecture) && \
+      curl -fsSL "https://install.speedtest.net/app/cli/ookla-speedtest-1.2.0-linux-$([ "$ARCH" = "arm64" ] && echo "aarch64" || echo "x86_64").tgz" \
+        -o /tmp/speedtest.tgz && \
+      tar xzf /tmp/speedtest.tgz -C /usr/local/bin speedtest && \
+      chmod +x /usr/local/bin/speedtest && \
+      rm -f /tmp/speedtest.tgz )
 
 # Install xray-core for Xray monitor health checks
 ARG XRAY_VERSION=26.2.6

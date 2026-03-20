@@ -35,6 +35,10 @@ class SettingsUpdate(BaseModel):
     notify_down: Optional[bool] = None
     notify_recovery: Optional[bool] = None
     notify_latency: Optional[bool] = None
+    speedtest_enabled: Optional[bool] = None
+    speedtest_interval: Optional[int] = None
+    speed_threshold_mbps: Optional[int] = None
+    notify_slow_speed: Optional[bool] = None
     ignore_list: Optional[list[str]] = None
 
 
@@ -86,6 +90,10 @@ async def get_settings(db: AsyncSession = Depends(get_db), _=Depends(verify_auth
         "notify_down": settings.notify_down,
         "notify_recovery": settings.notify_recovery,
         "notify_latency": settings.notify_latency,
+        "speedtest_enabled": settings.speedtest_enabled,
+        "speedtest_interval": settings.speedtest_interval,
+        "speed_threshold_mbps": settings.speed_threshold_mbps,
+        "notify_slow_speed": settings.notify_slow_speed,
         "ignore_list": ignore,
     }
 
@@ -144,6 +152,8 @@ def _serialize_server(s: XrayMonitorServer) -> dict:
         "enabled": s.enabled,
         "status": s.status,
         "last_ping_ms": s.last_ping_ms,
+        "last_download_mbps": s.last_download_mbps,
+        "last_upload_mbps": s.last_upload_mbps,
         "last_check": s.last_check.isoformat() if s.last_check else None,
         "fail_count": s.fail_count,
         "position": s.position,
@@ -346,10 +356,32 @@ async def server_history(
             "timestamp": c.timestamp.isoformat() if c.timestamp else None,
             "status": c.status,
             "ping_ms": c.ping_ms,
+            "download_mbps": c.download_mbps,
+            "upload_mbps": c.upload_mbps,
             "error": c.error,
         }
         for c in checks
     ]
+
+
+# ========================= Speedtest =========================
+
+@router.post("/servers/{server_id}/speedtest")
+async def run_server_speedtest(
+    server_id: int,
+    _=Depends(verify_auth),
+):
+    svc = get_xray_monitor_service()
+    result = await svc.run_manual_speedtest(server_id)
+    if not result.get("ok"):
+        return {"success": False, "error": result.get("error", "Unknown error")}
+    return {
+        "success": True,
+        "download_mbps": result.get("download_mbps"),
+        "upload_mbps": result.get("upload_mbps"),
+        "ping_ms": result.get("ping_ms"),
+        "server_name": result.get("server_name", ""),
+    }
 
 
 # ========================= Status / Notifications =========================

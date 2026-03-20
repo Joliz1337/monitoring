@@ -1244,7 +1244,7 @@ async def _migrate_folder_columns(conn):
 
 
 async def _migrate_xray_monitor(conn):
-    """Migrate xray_monitor tables: name→TEXT, add position, add ignore_list."""
+    """Migrate xray_monitor tables: add missing columns for speedtest integration."""
     try:
         result = await conn.execute(text("""
             SELECT column_name, data_type FROM information_schema.columns
@@ -1258,6 +1258,12 @@ async def _migrate_xray_monitor(conn):
             if "position" not in cols:
                 await conn.execute(text('ALTER TABLE xray_monitor_servers ADD COLUMN "position" INTEGER DEFAULT 0'))
                 logger.info("Added column: xray_monitor_servers.position")
+            if "last_download_mbps" not in cols:
+                await conn.execute(text('ALTER TABLE xray_monitor_servers ADD COLUMN "last_download_mbps" DOUBLE PRECISION'))
+                logger.info("Added column: xray_monitor_servers.last_download_mbps")
+            if "last_upload_mbps" not in cols:
+                await conn.execute(text('ALTER TABLE xray_monitor_servers ADD COLUMN "last_upload_mbps" DOUBLE PRECISION'))
+                logger.info("Added column: xray_monitor_servers.last_upload_mbps")
     except Exception as e:
         if "does not exist" not in str(e).lower():
             logger.debug(f"xray_monitor_servers migration: {e}")
@@ -1268,12 +1274,42 @@ async def _migrate_xray_monitor(conn):
             WHERE table_name = 'xray_monitor_settings'
         """))
         cols = {row[0] for row in result.fetchall()}
-        if cols and "ignore_list" not in cols:
-            await conn.execute(text("""ALTER TABLE xray_monitor_settings ADD COLUMN "ignore_list" TEXT DEFAULT '[]'"""))
-            logger.info("Added column: xray_monitor_settings.ignore_list")
+        if cols:
+            if "ignore_list" not in cols:
+                await conn.execute(text("""ALTER TABLE xray_monitor_settings ADD COLUMN "ignore_list" TEXT DEFAULT '[]'"""))
+                logger.info("Added column: xray_monitor_settings.ignore_list")
+            if "speedtest_enabled" not in cols:
+                await conn.execute(text('ALTER TABLE xray_monitor_settings ADD COLUMN "speedtest_enabled" BOOLEAN DEFAULT FALSE'))
+                logger.info("Added column: xray_monitor_settings.speedtest_enabled")
+            if "speedtest_interval" not in cols:
+                await conn.execute(text('ALTER TABLE xray_monitor_settings ADD COLUMN "speedtest_interval" INTEGER DEFAULT 30'))
+                logger.info("Added column: xray_monitor_settings.speedtest_interval")
+            if "speed_threshold_mbps" not in cols:
+                await conn.execute(text('ALTER TABLE xray_monitor_settings ADD COLUMN "speed_threshold_mbps" INTEGER DEFAULT 100'))
+                logger.info("Added column: xray_monitor_settings.speed_threshold_mbps")
+            if "notify_slow_speed" not in cols:
+                await conn.execute(text('ALTER TABLE xray_monitor_settings ADD COLUMN "notify_slow_speed" BOOLEAN DEFAULT TRUE'))
+                logger.info("Added column: xray_monitor_settings.notify_slow_speed")
     except Exception as e:
         if "does not exist" not in str(e).lower():
             logger.debug(f"xray_monitor_settings migration: {e}")
+
+    try:
+        result = await conn.execute(text("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name = 'xray_monitor_checks'
+        """))
+        cols = {row[0] for row in result.fetchall()}
+        if cols:
+            if "download_mbps" not in cols:
+                await conn.execute(text('ALTER TABLE xray_monitor_checks ADD COLUMN "download_mbps" DOUBLE PRECISION'))
+                logger.info("Added column: xray_monitor_checks.download_mbps")
+            if "upload_mbps" not in cols:
+                await conn.execute(text('ALTER TABLE xray_monitor_checks ADD COLUMN "upload_mbps" DOUBLE PRECISION'))
+                logger.info("Added column: xray_monitor_checks.upload_mbps")
+    except Exception as e:
+        if "does not exist" not in str(e).lower():
+            logger.debug(f"xray_monitor_checks migration: {e}")
 
 
 async def init_db():

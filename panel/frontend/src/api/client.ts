@@ -513,8 +513,8 @@ export const proxyApi = {
   getExecuteStreamUrl: (serverId: number) => `/api/proxy/${serverId}/system/execute-stream`,
   
   // Speed test
-  runSpeedtest: (serverId: number, testMode?: 'quick' | 'full') =>
-    api.post<{ success: boolean } & SpeedtestResult>(`/proxy/${serverId}/speedtest`, { test_mode: testMode }),
+  runSpeedtest: (serverId: number) =>
+    api.post<{ success: boolean } & SpeedtestResult>(`/proxy/${serverId}/speedtest`),
   getSpeedtest: (serverId: number) =>
     api.get<SpeedtestResult>(`/proxy/${serverId}/speedtest`),
 }
@@ -1687,6 +1687,10 @@ export interface XrayMonitorSettingsData {
   notify_down: boolean
   notify_recovery: boolean
   notify_latency: boolean
+  speedtest_enabled: boolean
+  speedtest_interval: number
+  speed_threshold_mbps: number
+  notify_slow_speed: boolean
   ignore_list: string[]
 }
 
@@ -1699,6 +1703,8 @@ export interface XrayMonitorServer {
   enabled: boolean
   status: string
   last_ping_ms: number | null
+  last_download_mbps: number | null
+  last_upload_mbps: number | null
   last_check: string | null
   fail_count: number
   position: number
@@ -1722,7 +1728,18 @@ export interface XrayMonitorCheckEntry {
   timestamp: string | null
   status: string
   ping_ms: number | null
+  download_mbps: number | null
+  upload_mbps: number | null
   error: string | null
+}
+
+export interface XrayMonitorSpeedtestResult {
+  success: boolean
+  download_mbps?: number
+  upload_mbps?: number
+  ping_ms?: number
+  server_name?: string
+  error?: string
 }
 
 export const xrayMonitorApi = {
@@ -1751,8 +1768,11 @@ export const xrayMonitorApi = {
   getServerHistory: (id: number, limit?: number) =>
     api.get<XrayMonitorCheckEntry[]>(`/xray-monitor/servers/${id}/history`, { params: { limit: limit || 50 } }),
 
+  runSpeedtest: (serverId: number) =>
+    api.post<XrayMonitorSpeedtestResult>(`/xray-monitor/servers/${serverId}/speedtest`),
+
   getStatus: () =>
-    api.get<{ running: boolean; xray_running: boolean; last_check: string | null }>('/xray-monitor/status'),
+    api.get<{ running: boolean; xray_running: boolean; last_check: string | null; testing_server_id: number | null }>('/xray-monitor/status'),
   testNotification: (bot_token?: string, chat_id?: string) =>
     api.post<{ success: boolean; error?: string }>('/xray-monitor/test-notification', { bot_token, chat_id }),
 }
