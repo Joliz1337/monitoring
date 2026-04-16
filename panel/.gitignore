@@ -1,0 +1,44 @@
+# Environment
+.env
+
+# Generated nginx config
+nginx/nginx.conf
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+
+# Node
+node_modules/
+dist/
+.cache/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+data/
+!frontend/src/data/
+frontend/src/data/*
+!frontend/src/data/faq/
+!frontend/src/data/faq/**
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
