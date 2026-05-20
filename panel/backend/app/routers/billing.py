@@ -1,0 +1,464 @@
+import json
+from datetime import datetime, timedelta, timezone
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
+from sqlalchemy import select, desc
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.database import get_db
+from app.models import BillingServer, BillingSettings
+from app.auth import verify_auth
+from app.routers.servers import parse_flexible_date
+
+router = APIRouter(prefix="/billing", tags=["billing"])
+
+
+VALID_BILLING_TYPES = ("monthly", "resource", "yandex_cloud")
+
+
+class BillingServerCreate(BaseModel):
+    name: str
+    billing_type: str  # 'monthly' | 'resource' | 'yandex_cloud'
+    paid_days: Optional[int] = None
+    paid_until: Optional[str] = None
+    monthly_cost: Optional[float] = None
+    account_balance: Optional[float] = None
+    currency: Optional[str] = "USD"
+    notes: Optional[str] = None
+    folder: Optional[str] = None
+    yc_oauth_token: Optional[str] = None
+    yc_billing_account_id: Optional[str] = None
+    yc_balance_threshold: Optional[float] = 0
+
+
+class BillingServerUpdate(BaseModel):
+    name: Optional[str] = None
+    billing_type: Optional[str] = None
+    paid_until: Optional[str] = None
+    monthly_cost: Optional[float] = None
+    account_balance: Optional[float] = None
+    currency: Optional[str] = None
+    notes: Optional[str] = None
+    folder: Optional[str] = None
+    yc_oauth_token: Optional[str] = None
+    yc_billing_account_id: Optional[str] = None
+    yc_balance_threshold: Optional[float] = None
+
+
+class ExtendRequest(BaseModel):
+    days: int
+
+
+class TopupRequest(BaseModel):
+    amount: float
+
+
+class BillingSettingsUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    notify_days: Optional[list[int]] = None
+    check_interval_minutes: Optional[int] = None
+
+
+def _compute_paid_until_resource(monthly_cost: float, balance: float, from_time: datetime) -> Optional[datetime]:
+    if monthly_cost <= 0 or balance <= 0:
+        return from_time
+    days_left = (balance / monthly_cost) * 30
+    return from_time + timedelta(days=days_left)
+
+
+def _compute_live_balance(s: BillingServer, now: datetime) -> tuple[float | None, datetime | None, float | None]:
+    # YC баланс обновляется только через API sync, линейное уменьшение не нужно
+    if s.billing_type == "yandex_cloud":
+        days_left = None
+        if s.yc_daily_cost and s.yc_daily_cost > 0 and s.account_balance is not None:
+            threshold = s.yc_balance_threshold or 0
+            usable = s.account_balance - threshold
+            days_left = max(0.0, usable / s.yc_daily_cost) if usable > 0 else 0.0
+        return s.account_balance, s.paid_until, days_left
+
+    if (
+        s.billing_type != "resource"
+        or not s.monthly_cost
+        or s.monthly_cost <= 0
+        or s.account_balance is None
+        or not s.balance_updated_at
+    ):
+        return s.account_balance, s.paid_until, None
+
+    updated = s.balance_updated_at
+    if updated.tzinfo is None:
+        updated = updated.replace(tzinfo=timezone.utc)
+
+    elapsed_days = (now - updated).total_seconds() / 86400
+    daily_cost = s.monthly_cost / 30
+    consumed = elapsed_days * daily_cost
+    live_balance = max(0.0, s.account_balance - consumed)
+
+    if live_balance > 0:
+        remaining = live_balance / daily_cost
+        paid_until = now + timedelta(days=remaining)
+    else:
+        remaining = 0.0
+        paid_until = now
+
+    return live_balance, paid_until, remaining
+
+
+def _server_to_dict(s: BillingServer) -> dict:
+    now = datetime.now(timezone.utc)
+
+    live_balance, paid_until, resource_days = _compute_live_balance(s, now)
+
+    days_left = None
+    if resource_days is not None:
+        days_left = resource_days
+    elif paid_until:
+        if paid_until.tzinfo is None:
+            paid_until = paid_until.replace(tzinfo=timezone.utc)
+        days_left = max(0, (paid_until - now).total_seconds() / 86400)
+
+    result = {
+        "id": s.id,
+        "name": s.name,
+        "billing_type": s.billing_type,
+        "paid_until": paid_until.isoformat() if paid_until else None,
+        "days_left": round(days_left, 1) if days_left is not None else None,
+        "monthly_cost": s.monthly_cost,
+        "account_balance": round(live_balance, 2) if live_balance is not None else s.account_balance,
+        "balance_updated_at": s.balance_updated_at.isoformat() if s.balance_updated_at else None,
+        "currency": s.currency or "USD",
+        "notes": s.notes,
+        "folder": s.folder,
+        "created_at": s.created_at.isoformat() if s.created_at else None,
+        "updated_at": s.updated_at.isoformat() if s.updated_at else None,
+        "yc_billing_account_id": s.yc_billing_account_id,
+        "yc_balance_threshold": s.yc_balance_threshold,
+        "yc_daily_cost": s.yc_daily_cost,
+        "yc_last_sync_at": s.yc_last_sync_at.isoformat() if s.yc_last_sync_at else None,
+        "yc_last_error": s.yc_last_error,
+        "has_yc_token": bool(s.yc_oauth_token),
+    }
+    return result
+
+
+def _settings_to_dict(s: BillingSettings) -> dict:
+    try:
+        notify_days = json.loads(s.notify_days) if s.notify_days else [1, 3, 7]
+    except (json.JSONDecodeError, TypeError):
+        notify_days = [1, 3, 7]
+
+    return {
+        "enabled": s.enabled,
+        "notify_days": notify_days,
+        "check_interval_minutes": s.check_interval_minutes,
+    }
+
+
+@router.get("/servers", dependencies=[Depends(verify_auth)])
+async def list_billing_servers(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(BillingServer).order_by(BillingServer.paid_until.asc().nullsfirst())
+    )
+    servers = result.scalars().all()
+    return {"servers": [_server_to_dict(s) for s in servers], "count": len(servers)}
+
+
+@router.post("/servers", dependencies=[Depends(verify_auth)])
+async def create_billing_server(data: BillingServerCreate, db: AsyncSession = Depends(get_db)):
+    if data.billing_type not in VALID_BILLING_TYPES:
+        raise HTTPException(400, f"billing_type must be one of {VALID_BILLING_TYPES}")
+
+    now = datetime.now(timezone.utc)
+    server = BillingServer(
+        name=data.name,
+        billing_type=data.billing_type,
+        currency=data.currency or "USD",
+        notes=data.notes,
+        folder=data.folder,
+    )
+
+    if data.billing_type == "monthly":
+        if data.paid_until:
+            try:
+                server.paid_until = parse_flexible_date(data.paid_until)
+            except ValueError:
+                raise HTTPException(400, f"Invalid date format: {data.paid_until}")
+        else:
+            days = data.paid_days or 30
+            server.paid_until = now + timedelta(days=days)
+    elif data.billing_type == "resource":
+        server.monthly_cost = data.monthly_cost or 0
+        server.account_balance = data.account_balance or 0
+        server.balance_updated_at = now
+        server.paid_until = _compute_paid_until_resource(
+            server.monthly_cost, server.account_balance, now
+        )
+    elif data.billing_type == "yandex_cloud":
+        server.yc_oauth_token = data.yc_oauth_token
+        server.yc_billing_account_id = data.yc_billing_account_id
+        server.yc_balance_threshold = data.yc_balance_threshold or 0
+        server.currency = data.currency or "RUB"
+
+    db.add(server)
+    await db.commit()
+    await db.refresh(server)
+    return {"success": True, "server": _server_to_dict(server)}
+
+
+@router.put("/servers/{server_id}", dependencies=[Depends(verify_auth)])
+async def update_billing_server(
+    server_id: int, data: BillingServerUpdate, db: AsyncSession = Depends(get_db)
+):
+    result = await db.execute(select(BillingServer).where(BillingServer.id == server_id))
+    server = result.scalar_one_or_none()
+    if not server:
+        raise HTTPException(404, "Server not found")
+
+    update = data.model_dump(exclude_unset=True)
+
+    if "billing_type" in update and update["billing_type"] not in VALID_BILLING_TYPES:
+        raise HTTPException(400, f"billing_type must be one of {VALID_BILLING_TYPES}")
+
+    for key, value in update.items():
+        if key == "paid_until":
+            if value:
+                try:
+                    server.paid_until = parse_flexible_date(value)
+                except ValueError:
+                    raise HTTPException(400, f"Invalid date format: {value}")
+            else:
+                server.paid_until = None
+        elif key == "account_balance" and value is not None:
+            server.account_balance = value
+            server.balance_updated_at = datetime.now(timezone.utc)
+        elif key == "yc_oauth_token":
+            if value:
+                server.yc_oauth_token = value
+        else:
+            setattr(server, key, value)
+
+    if server.billing_type == "resource" and server.monthly_cost and server.account_balance is not None:
+        base = server.balance_updated_at or datetime.now(timezone.utc)
+        server.paid_until = _compute_paid_until_resource(
+            server.monthly_cost, server.account_balance, base
+        )
+
+    server.last_notified_days = None
+    await db.commit()
+    await db.refresh(server)
+    return _server_to_dict(server)
+
+
+@router.delete("/servers/{server_id}", dependencies=[Depends(verify_auth)])
+async def delete_billing_server(server_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(BillingServer).where(BillingServer.id == server_id))
+    server = result.scalar_one_or_none()
+    if not server:
+        raise HTTPException(404, "Server not found")
+
+    await db.delete(server)
+    await db.commit()
+    return {"success": True}
+
+
+@router.post("/servers/{server_id}/extend", dependencies=[Depends(verify_auth)])
+async def extend_billing_server(
+    server_id: int, data: ExtendRequest, db: AsyncSession = Depends(get_db)
+):
+    result = await db.execute(select(BillingServer).where(BillingServer.id == server_id))
+    server = result.scalar_one_or_none()
+    if not server:
+        raise HTTPException(404, "Server not found")
+
+    now = datetime.now(timezone.utc)
+    base = server.paid_until or now
+    if base.tzinfo is None:
+        base = base.replace(tzinfo=timezone.utc)
+    if base < now:
+        base = now
+
+    server.paid_until = base + timedelta(days=data.days)
+    server.last_notified_days = None
+    await db.commit()
+    await db.refresh(server)
+    return _server_to_dict(server)
+
+
+@router.post("/servers/{server_id}/topup", dependencies=[Depends(verify_auth)])
+async def topup_billing_server(
+    server_id: int, data: TopupRequest, db: AsyncSession = Depends(get_db)
+):
+    result = await db.execute(select(BillingServer).where(BillingServer.id == server_id))
+    server = result.scalar_one_or_none()
+    if not server:
+        raise HTTPException(404, "Server not found")
+
+    if server.billing_type != "resource":
+        raise HTTPException(400, "Topup is only for resource billing type")
+
+    now = datetime.now(timezone.utc)
+
+    if server.balance_updated_at and server.monthly_cost and server.monthly_cost > 0:
+        updated = server.balance_updated_at
+        if updated.tzinfo is None:
+            updated = updated.replace(tzinfo=timezone.utc)
+        elapsed_days = (now - updated).total_seconds() / 86400
+        daily_cost = server.monthly_cost / 30
+        consumed = elapsed_days * daily_cost
+        server.account_balance = max(0, (server.account_balance or 0) - consumed)
+
+    server.account_balance = (server.account_balance or 0) + data.amount
+    server.balance_updated_at = now
+    server.paid_until = _compute_paid_until_resource(
+        server.monthly_cost or 0, server.account_balance, now
+    )
+    server.last_notified_days = None
+    await db.commit()
+    await db.refresh(server)
+    return _server_to_dict(server)
+
+
+@router.post("/servers/{server_id}/yc-sync", dependencies=[Depends(verify_auth)])
+async def sync_yc_billing(server_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(BillingServer).where(BillingServer.id == server_id))
+    server = result.scalar_one_or_none()
+    if not server:
+        raise HTTPException(404, "Server not found")
+    if server.billing_type != "yandex_cloud":
+        raise HTTPException(400, "Not a Yandex Cloud billing server")
+    if not server.yc_oauth_token or not server.yc_billing_account_id:
+        raise HTTPException(400, "OAuth token and billing account ID are required")
+
+    from app.services.yc_token_manager import get_yc_token_manager, YCTokenError
+    from app.services.yandex_billing import (
+        fetch_yc_balance, fetch_yc_daily_cost, compute_yc_days_left,
+    )
+
+    now = datetime.now(timezone.utc)
+    try:
+        iam_token = await get_yc_token_manager().get_iam_token(server.yc_oauth_token)
+    except YCTokenError as e:
+        server.yc_last_error = str(e)
+        await db.commit()
+        raise HTTPException(502, f"YC token error: {e}")
+
+    balance, currency, error = await fetch_yc_balance(
+        iam_token, server.yc_billing_account_id,
+    )
+    if error:
+        server.yc_last_error = error
+        await db.commit()
+        raise HTTPException(502, f"YC API error: {error}")
+
+    daily_cost, cost_err = await fetch_yc_daily_cost(
+        iam_token, server.yc_billing_account_id,
+    )
+
+    server.account_balance = balance
+    server.balance_updated_at = now
+    server.currency = currency
+    if daily_cost is not None:
+        server.yc_daily_cost = daily_cost
+    server.yc_last_sync_at = now
+    server.yc_last_error = cost_err if not daily_cost and cost_err else None
+
+    threshold = server.yc_balance_threshold or 0
+    effective_cost = server.yc_daily_cost
+    days_left = compute_yc_days_left(balance, threshold, effective_cost)
+    if days_left is not None:
+        server.paid_until = now + timedelta(days=days_left)
+        server.monthly_cost = effective_cost * 30 if effective_cost else None
+    else:
+        server.paid_until = None
+
+    server.last_notified_days = None
+    await db.commit()
+    await db.refresh(server)
+    return _server_to_dict(server)
+
+
+class MoveToFolderRequest(BaseModel):
+    server_ids: list[int]
+    folder: Optional[str] = None
+
+
+class RenameFolderRequest(BaseModel):
+    old_name: str
+    new_name: str
+
+
+@router.post("/servers/move-to-folder", dependencies=[Depends(verify_auth)])
+async def move_servers_to_folder(data: MoveToFolderRequest, db: AsyncSession = Depends(get_db)):
+    folder_value = data.folder.strip() if data.folder and data.folder.strip() else None
+    result = await db.execute(
+        select(BillingServer).where(BillingServer.id.in_(data.server_ids))
+    )
+    servers = result.scalars().all()
+    for s in servers:
+        s.folder = folder_value
+    await db.commit()
+    return {"success": True, "moved": len(servers)}
+
+
+@router.post("/folders/rename", dependencies=[Depends(verify_auth)])
+async def rename_billing_folder(data: RenameFolderRequest, db: AsyncSession = Depends(get_db)):
+    new_name = data.new_name.strip() if data.new_name else None
+    if not new_name:
+        raise HTTPException(400, "new_name is required")
+    result = await db.execute(
+        select(BillingServer).where(BillingServer.folder == data.old_name)
+    )
+    servers = result.scalars().all()
+    for s in servers:
+        s.folder = new_name
+    await db.commit()
+    return {"success": True, "renamed": len(servers)}
+
+
+@router.delete("/folders/{folder_name}", dependencies=[Depends(verify_auth)])
+async def delete_billing_folder(folder_name: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(BillingServer).where(BillingServer.folder == folder_name)
+    )
+    servers = result.scalars().all()
+    for s in servers:
+        s.folder = None
+    await db.commit()
+    return {"success": True, "unfoldered": len(servers)}
+
+
+@router.get("/settings", dependencies=[Depends(verify_auth)])
+async def get_billing_settings(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(BillingSettings).limit(1))
+    settings = result.scalar_one_or_none()
+    if not settings:
+        settings = BillingSettings()
+        db.add(settings)
+        await db.commit()
+        await db.refresh(settings)
+    return _settings_to_dict(settings)
+
+
+@router.put("/settings", dependencies=[Depends(verify_auth)])
+async def update_billing_settings(
+    data: BillingSettingsUpdate, db: AsyncSession = Depends(get_db)
+):
+    result = await db.execute(select(BillingSettings).limit(1))
+    settings = result.scalar_one_or_none()
+    if not settings:
+        settings = BillingSettings()
+        db.add(settings)
+        await db.flush()
+
+    update = data.model_dump(exclude_unset=True)
+    for key, value in update.items():
+        if key == "notify_days":
+            settings.notify_days = json.dumps(value)
+        else:
+            setattr(settings, key, value)
+
+    await db.commit()
+    await db.refresh(settings)
+    return _settings_to_dict(settings)

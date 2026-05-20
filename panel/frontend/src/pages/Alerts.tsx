@@ -1,0 +1,934 @@
+import { useEffect, useState, useCallback } from 'react'
+import { useTranslation } from 'react-i18next'
+import { motion, AnimatePresence } from 'framer-motion'
+import {
+  Bell, Bot, Send, CheckCircle2, XCircle, Loader2,
+  ChevronDown, ChevronRight, Trash2, Server, ShieldOff,
+  Cpu, MemoryStick, Network, Cable, Power, Activity,
+  RefreshCw, Clock, X,
+} from 'lucide-react'
+import { toast } from 'sonner'
+import { alertsApi, serversApi, AlertSettingsData, AlertHistoryItem, AlertStatus, Server as ServerType } from '../api/client'
+import { formatBitsPerSec } from '../utils/format'
+import { Tooltip } from '../components/ui/Tooltip'
+import { FAQIcon, type FAQScreen } from '../components/FAQ'
+
+type TriggerSection = 'offline' | 'cpu' | 'ram' | 'network' | 'load_avg' | 'tcp'
+
+export default function Alerts() {
+  const { t } = useTranslation()
+
+  const [settings, setSettings] = useState<AlertSettingsData | null>(null)
+  const [status, setStatus] = useState<AlertStatus | null>(null)
+  const [history, setHistory] = useState<AlertHistoryItem[]>([])
+  const [historyTotal, setHistoryTotal] = useState(0)
+  const [historyPage, setHistoryPage] = useState(0)
+
+  const [loading, setLoading] = useState(true)
+  const [, setSaving] = useState(false)
+  const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null)
+  const [testing, setTesting] = useState(false)
+  const [clearing, setClearing] = useState(false)
+
+  const [expanded, setExpanded] = useState<Set<TriggerSection>>(new Set())
+  const [historyFilter, setHistoryFilter] = useState<string>('')
+  const [allServers, setAllServers] = useState<ServerType[]>([])
+
+  const PAGE_SIZE = 20
+
+  const fetchAll = useCallback(async () => {
+    try {
+      const [sRes, stRes, hRes, srvRes] = await Promise.all([
+        alertsApi.getSettings(),
+        alertsApi.getStatus(),
+        alertsApi.getHistory({ limit: PAGE_SIZE, offset: 0 }),
+        serversApi.list(),
+      ])
+      setSettings(sRes.data)
+      setStatus(stRes.data)
+      setHistory(hRes.data.items)
+      setHistoryTotal(hRes.data.total)
+      setAllServers(srvRes.data.servers)
+    } catch (e) {
+      console.error('Failed to load alert data:', e)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    fetchAll()
+  }, [fetchAll])
+
+  const fetchHistory = useCallback(async (offset: number, filter?: string) => {
+    try {
+      const params: Record<string, unknown> = { limit: PAGE_SIZE, offset }
+      if (filter) params.alert_type = filter
+      const res = await alertsApi.getHistory(params as never)
+      setHistory(res.data.items)
+      setHistoryTotal(res.data.total)
+    } catch (e) {
+      console.error('Failed to load history:', e)
+    }
+  }, [])
+
+  const save = useCallback(async (patch: Partial<AlertSettingsData>) => {
+    if (!settings) return
+    setSaving(true)
+    try {
+      const res = await alertsApi.updateSettings(patch)
+      setSettings(res.data)
+      toast.success(t('alerts.settings_saved'))
+    } catch (e) {
+      console.error('Failed to save settings:', e)
+      toast.error(t('alerts.settings_save_failed'))
+    } finally {
+      setSaving(false)
+    }
+  }, [settings, t])
+
+  const handleTest = async () => {
+    if (!settings) return
+    setTesting(true)
+    setTestResult(null)
+    try {
+      const res = await alertsApi.testTelegram(settings.telegram_bot_token, settings.telegram_chat_id)
+      setTestResult({ success: res.data.success, message: res.data.error || res.data.message || '' })
+    } catch (e) {
+      setTestResult({ success: false, message: 'Connection error' })
+    } finally {
+      setTesting(false)
+    }
+  }
+
+  const handleClearHistory = async () => {
+    if (!confirm(t('alerts.confirm_clear'))) return
+    setClearing(true)
+    try {
+      await alertsApi.clearHistory()
+      setHistory([])
+      setHistoryTotal(0)
+      setHistoryPage(0)
+    } catch (e) {
+      console.error('Failed to clear history:', e)
+    } finally {
+      setClearing(false)
+    }
+  }
+
+  const toggle = (section: TriggerSection) => {
+    setExpanded(prev => {
+      const next = new Set(prev)
+      if (next.has(section)) next.delete(section)
+      else next.add(section)
+      return next
+    })
+  }
+
+  if (loading || !settings) {
+    return (
+      <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-6">
+        <div className="space-y-2">
+          <div className="h-7 w-40 bg-dark-700/50 rounded-lg animate-pulse" />
+          <div className="h-4 w-64 bg-dark-700/30 rounded-lg animate-pulse" />
+        </div>
+        {Array.from({ length: 3 }).map((_, i) => (
+          <div key={i} className="card p-5 space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 bg-dark-700/50 rounded-xl animate-pulse" />
+              <div className="space-y-2 flex-1">
+                <div className="h-4 w-32 bg-dark-700/50 rounded animate-pulse" />
+                <div className="h-3 w-48 bg-dark-700/30 rounded animate-pulse" />
+              </div>
+            </div>
+          </div>
+        ))}
+      </motion.div>
+    )
+  }
+
+  const alertTypeLabel = (t_: string) => {
+    const map: Record<string, string> = {
+      offline: t('alerts.type_offline'),
+      recovery: t('alerts.type_recovery'),
+      cpu_critical: t('alerts.type_cpu_critical'),
+      cpu_spike: t('alerts.type_cpu_spike'),
+      ram_critical: t('alerts.type_ram_critical'),
+      ram_spike: t('alerts.type_ram_spike'),
+      network_spike: t('alerts.type_network_spike'),
+      network_drop: t('alerts.type_network_drop'),
+      tcp_established_spike: t('alerts.type_tcp_est_spike'),
+      tcp_established_drop: t('alerts.type_tcp_est_drop'),
+      tcp_listen_spike: t('alerts.type_tcp_listen_spike'),
+      tcp_timewait_spike: t('alerts.type_tcp_tw_spike'),
+      tcp_closewait_spike: t('alerts.type_tcp_cw_spike'),
+      tcp_synsent_spike: t('alerts.type_tcp_synsent_spike'),
+      tcp_synrecv_spike: t('alerts.type_tcp_synrecv_spike'),
+      tcp_finwait_spike: t('alerts.type_tcp_finwait_spike'),
+      load_avg_high: t('alerts.type_load_avg_high'),
+    }
+    return map[t_] || t_
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-amber-500/20 to-orange-500/20 flex items-center justify-center">
+            <Bell className="w-5 h-5 text-amber-400" />
+          </div>
+          <div>
+            <h1 className="text-xl font-semibold text-white flex items-center gap-2">
+              {t('alerts.title')}
+              <FAQIcon screen="PAGE_ALERTS" />
+            </h1>
+            <p className="text-sm text-dark-400">{t('alerts.subtitle')}</p>
+          </div>
+        </div>
+        {status && (
+          <div className="flex items-center gap-2 text-xs text-dark-400">
+            <div className={`w-2 h-2 rounded-full ${status.running && settings.enabled ? 'bg-green-400' : 'bg-dark-600'}`} />
+            {status.running && settings.enabled
+              ? `${t('alerts.monitoring')} ${status.monitored_servers} ${t('alerts.servers_count')}`
+              : t('alerts.disabled')}
+          </div>
+        )}
+      </div>
+
+      <div className="grid grid-cols-[repeat(auto-fill,minmax(360px,1fr))] gap-6 items-start">
+        {/* Telegram + Enable */}
+        <Section title={t('alerts.telegram_settings')} icon={<Bot className="w-4 h-4" />} faqScreen="ALERTS_TELEGRAM">
+          <div className="space-y-4">
+            <ToggleRow
+              label={t('alerts.enable_alerts')}
+              checked={settings.enabled}
+              onChange={v => save({ enabled: v })}
+            />
+            <InputRow
+              label={t('alerts.bot_token')}
+              value={settings.telegram_bot_token}
+              placeholder="123456:ABC-DEF..."
+              type="password"
+              onSave={v => save({ telegram_bot_token: v })}
+            />
+            <InputRow
+              label={t('alerts.chat_id')}
+              value={settings.telegram_chat_id}
+              placeholder="-1001234567890"
+              onSave={v => save({ telegram_chat_id: v })}
+            />
+            <div className="space-y-1">
+              <label className="text-sm text-dark-300">{t('alerts.notification_language')}</label>
+              <select
+                value={settings.language || 'en'}
+                onChange={e => save({ language: e.target.value })}
+                className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200
+                           focus:border-accent-500/50 focus:outline-none transition"
+              >
+                <option value="en">English</option>
+                <option value="ru">Русский</option>
+              </select>
+            </div>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={handleTest}
+                disabled={testing || !settings.telegram_bot_token || !settings.telegram_chat_id}
+                className="px-4 py-2 bg-accent-500/20 text-accent-400 rounded-lg text-sm font-medium
+                           hover:bg-accent-500/30 transition disabled:opacity-40 disabled:cursor-not-allowed
+                           flex items-center gap-2"
+              >
+                {testing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+                {t('alerts.test_send')}
+              </button>
+              <AnimatePresence>
+                {testResult && (
+                  <motion.span
+                    initial={{ opacity: 0, x: -10 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    exit={{ opacity: 0 }}
+                    className={`text-sm flex items-center gap-1 ${testResult.success ? 'text-green-400' : 'text-red-400'}`}
+                  >
+                    {testResult.success ? <CheckCircle2 className="w-4 h-4" /> : <XCircle className="w-4 h-4" />}
+                    {testResult.success ? t('alerts.test_ok') : testResult.message}
+                  </motion.span>
+                )}
+              </AnimatePresence>
+            </div>
+          </div>
+        </Section>
+
+        {/* General settings */}
+        <Section title={t('alerts.general_settings')} icon={<Clock className="w-4 h-4" />}>
+          <div className="space-y-4">
+            <SliderRow
+              label={t('alerts.check_interval')}
+              value={settings.check_interval}
+              min={10} max={300} step={10}
+              format={v => `${v}s`}
+              onSave={v => save({ check_interval: v })}
+            />
+            <SliderRow
+              label={t('alerts.cooldown')}
+              value={settings.alert_cooldown}
+              min={300} max={7200} step={300}
+              format={v => `${Math.floor(v / 60)} ${t('alerts.min')}`}
+              onSave={v => save({ alert_cooldown: v })}
+            />
+          </div>
+        </Section>
+
+        {/* Excluded Servers */}
+        <Section title={t('alerts.excluded_servers')} icon={<ShieldOff className="w-4 h-4" />}>
+          <div className="space-y-3">
+            <p className="text-xs text-dark-500">{t('alerts.excluded_servers_hint')}</p>
+            {settings.excluded_server_ids.length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {settings.excluded_server_ids.map(id => {
+                  const srv = allServers.find(s => s.id === id)
+                  return (
+                    <span
+                      key={id}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-dark-700 border border-dark-600 rounded-lg text-sm text-dark-200"
+                    >
+                      <Server className="w-3.5 h-3.5 text-dark-400" />
+                      {srv?.name || `#${id}`}
+                      <Tooltip label={t('common.remove_from_list')}>
+                        <button
+                          onClick={() => save({ excluded_server_ids: settings.excluded_server_ids.filter(i => i !== id) })}
+                          className="ml-0.5 text-dark-500 hover:text-red-400 transition"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </Tooltip>
+                    </span>
+                  )
+                })}
+              </div>
+            )}
+            <ExcludeServerSelect
+              servers={allServers.filter(s => !settings.excluded_server_ids.includes(s.id))}
+              onAdd={id => save({ excluded_server_ids: [...settings.excluded_server_ids, id] })}
+              placeholder={t('alerts.add_excluded_server')}
+            />
+          </div>
+        </Section>
+      </div>
+
+      {/* Triggers */}
+      <div className="space-y-3">
+        <h2 className="text-sm font-medium text-dark-300 uppercase tracking-wider">{t('alerts.triggers')}</h2>
+        <div className="grid grid-cols-[repeat(auto-fill,minmax(400px,1fr))] gap-3">
+
+        {/* Offline */}
+        <TriggerBlock
+          title={t('alerts.trigger_offline')}
+          icon={<Power className="w-4 h-4" />}
+          enabled={settings.offline_enabled}
+          onToggle={v => save({ offline_enabled: v })}
+          expanded={expanded.has('offline')}
+          onExpand={() => toggle('offline')}
+          faqScreen="ALERTS_TRIGGER_OFFLINE"
+        >
+          <SliderRow label={t('alerts.fail_threshold')} value={settings.offline_fail_threshold} min={1} max={10} step={1} format={v => `${v}`} onSave={v => save({ offline_fail_threshold: v })} />
+          <ToggleRow label={t('alerts.recovery_notify')} checked={settings.offline_recovery_notify} onChange={v => save({ offline_recovery_notify: v })} />
+          <TriggerIgnoreList
+            ids={settings.offline_excluded_server_ids}
+            allServers={allServers}
+            onSave={ids => save({ offline_excluded_server_ids: ids })}
+            t={t}
+          />
+        </TriggerBlock>
+
+        {/* CPU */}
+        <TriggerBlock
+          title={t('alerts.trigger_cpu')}
+          icon={<Cpu className="w-4 h-4" />}
+          enabled={settings.cpu_enabled}
+          onToggle={v => save({ cpu_enabled: v })}
+          expanded={expanded.has('cpu')}
+          onExpand={() => toggle('cpu')}
+          faqScreen="ALERTS_TRIGGER_CPU"
+        >
+          <SliderRow label={t('alerts.critical_threshold')} value={settings.cpu_critical_threshold} min={50} max={100} step={1} format={v => `${v}%`} onSave={v => save({ cpu_critical_threshold: v })} />
+          <SliderRow label={t('alerts.spike_percent')} value={settings.cpu_spike_percent} min={10} max={200} step={5} format={v => `${v}%`} onSave={v => save({ cpu_spike_percent: v })} />
+          <SliderRow label={t('alerts.min_value')} value={settings.cpu_min_value} min={0} max={50} step={1} format={v => `${v}%`} onSave={v => save({ cpu_min_value: v })} />
+          <SliderRow label={t('alerts.sustained')} value={settings.cpu_sustained_seconds} min={60} max={900} step={30} format={v => `${v}s`} onSave={v => save({ cpu_sustained_seconds: v })} />
+          <TriggerIgnoreList
+            ids={settings.cpu_excluded_server_ids}
+            allServers={allServers}
+            onSave={ids => save({ cpu_excluded_server_ids: ids })}
+            t={t}
+          />
+        </TriggerBlock>
+
+        {/* RAM */}
+        <TriggerBlock
+          title={t('alerts.trigger_ram')}
+          icon={<MemoryStick className="w-4 h-4" />}
+          enabled={settings.ram_enabled}
+          onToggle={v => save({ ram_enabled: v })}
+          expanded={expanded.has('ram')}
+          onExpand={() => toggle('ram')}
+          faqScreen="ALERTS_TRIGGER_RAM"
+        >
+          <SliderRow label={t('alerts.critical_threshold')} value={settings.ram_critical_threshold} min={50} max={100} step={1} format={v => `${v}%`} onSave={v => save({ ram_critical_threshold: v })} />
+          <SliderRow label={t('alerts.spike_percent')} value={settings.ram_spike_percent} min={10} max={200} step={5} format={v => `${v}%`} onSave={v => save({ ram_spike_percent: v })} />
+          <SliderRow label={t('alerts.min_value')} value={settings.ram_min_value} min={0} max={50} step={1} format={v => `${v}%`} onSave={v => save({ ram_min_value: v })} />
+          <SliderRow label={t('alerts.sustained')} value={settings.ram_sustained_seconds} min={60} max={900} step={30} format={v => `${v}s`} onSave={v => save({ ram_sustained_seconds: v })} />
+          <TriggerIgnoreList
+            ids={settings.ram_excluded_server_ids}
+            allServers={allServers}
+            onSave={ids => save({ ram_excluded_server_ids: ids })}
+            t={t}
+          />
+        </TriggerBlock>
+
+        {/* Network */}
+        <TriggerBlock
+          title={t('alerts.trigger_network')}
+          icon={<Network className="w-4 h-4" />}
+          enabled={settings.network_enabled}
+          onToggle={v => save({ network_enabled: v })}
+          expanded={expanded.has('network')}
+          onExpand={() => toggle('network')}
+          faqScreen="ALERTS_TRIGGER_NETWORK"
+        >
+          <SliderRow label={t('alerts.spike_percent')} value={settings.network_spike_percent} min={50} max={1000} step={25} format={v => `${v}%`} onSave={v => save({ network_spike_percent: v })} />
+          <SliderRow label={t('alerts.drop_percent')} value={settings.network_drop_percent} min={30} max={100} step={5} format={v => `${v}%`} onSave={v => save({ network_drop_percent: v })} />
+          <SliderRow
+            label={t('alerts.network_min_bytes')}
+            value={settings.network_min_bytes / 1024}
+            min={0} max={10240} step={10}
+            format={v => formatBitsPerSec(v * 1024)}
+            onSave={v => save({ network_min_bytes: v * 1024 })}
+          />
+          <SliderRow label={t('alerts.sustained')} value={settings.network_sustained_seconds} min={60} max={900} step={30} format={v => `${v}s`} onSave={v => save({ network_sustained_seconds: v })} />
+          <TriggerIgnoreList
+            ids={settings.network_excluded_server_ids}
+            allServers={allServers}
+            onSave={ids => save({ network_excluded_server_ids: ids })}
+            t={t}
+          />
+        </TriggerBlock>
+
+        {/* Load Average */}
+        <TriggerBlock
+          title={t('alerts.trigger_load_avg')}
+          icon={<Activity className="w-4 h-4" />}
+          enabled={settings.load_avg_enabled}
+          onToggle={v => save({ load_avg_enabled: v })}
+          expanded={expanded.has('load_avg')}
+          onExpand={() => toggle('load_avg')}
+          faqScreen="ALERTS_TRIGGER_LOADAVG"
+        >
+          <SliderRow label={t('alerts.load_avg_offset')} value={settings.load_avg_threshold_offset} min={0} max={8} step={0.5} format={v => `+${v}`} onSave={v => save({ load_avg_threshold_offset: v })} />
+          <SliderRow label={t('alerts.load_avg_checks')} value={settings.load_avg_sustained_checks} min={1} max={10} step={1} format={v => `${v}`} onSave={v => save({ load_avg_sustained_checks: v })} />
+          <TriggerIgnoreList
+            ids={settings.load_avg_excluded_server_ids}
+            allServers={allServers}
+            onSave={ids => save({ load_avg_excluded_server_ids: ids })}
+            t={t}
+          />
+        </TriggerBlock>
+
+        {/* TCP */}
+        <TriggerBlock
+          title={t('alerts.trigger_tcp')}
+          icon={<Cable className="w-4 h-4" />}
+          enabled={settings.tcp_established_enabled || settings.tcp_listen_enabled || settings.tcp_timewait_enabled || settings.tcp_closewait_enabled || settings.tcp_synsent_enabled || settings.tcp_synrecv_enabled || settings.tcp_finwait_enabled}
+          onToggle={() => toggle('tcp')}
+          expanded={expanded.has('tcp')}
+          onExpand={() => toggle('tcp')}
+          faqScreen="ALERTS_TRIGGER_TCP"
+          hideMainToggle
+        >
+          <SliderRow
+            label={t('alerts.tcp_min_connections')}
+            value={settings.tcp_min_connections}
+            min={0} max={1000} step={10}
+            format={v => `${v}`}
+            onSave={v => save({ tcp_min_connections: v })}
+          />
+          {/* Established */}
+          <div className="border-t border-dark-700/50 pt-3">
+            <ToggleRow label="TCP Established" checked={settings.tcp_established_enabled} onChange={v => save({ tcp_established_enabled: v })} />
+            {settings.tcp_established_enabled && (
+              <div className="ml-4 mt-2 space-y-2">
+                <SliderRow label={t('alerts.spike_percent')} value={settings.tcp_established_spike_percent} min={50} max={1000} step={25} format={v => `${v}%`} onSave={v => save({ tcp_established_spike_percent: v })} />
+                <SliderRow label={t('alerts.drop_percent')} value={settings.tcp_established_drop_percent} min={30} max={100} step={5} format={v => `${v}%`} onSave={v => save({ tcp_established_drop_percent: v })} />
+                <SliderRow label={t('alerts.sustained')} value={settings.tcp_established_sustained_seconds} min={60} max={900} step={30} format={v => `${v}s`} onSave={v => save({ tcp_established_sustained_seconds: v })} />
+              </div>
+            )}
+          </div>
+          {/* Listen */}
+          <div className="border-t border-dark-700/50 pt-3">
+            <ToggleRow label="TCP Listen" checked={settings.tcp_listen_enabled} onChange={v => save({ tcp_listen_enabled: v })} />
+            {settings.tcp_listen_enabled && (
+              <div className="ml-4 mt-2 space-y-2">
+                <SliderRow label={t('alerts.spike_percent')} value={settings.tcp_listen_spike_percent} min={50} max={1000} step={25} format={v => `${v}%`} onSave={v => save({ tcp_listen_spike_percent: v })} />
+                <SliderRow label={t('alerts.sustained')} value={settings.tcp_listen_sustained_seconds} min={60} max={900} step={30} format={v => `${v}s`} onSave={v => save({ tcp_listen_sustained_seconds: v })} />
+              </div>
+            )}
+          </div>
+          {/* Time Wait */}
+          <div className="border-t border-dark-700/50 pt-3">
+            <ToggleRow label="TCP Time Wait" checked={settings.tcp_timewait_enabled} onChange={v => save({ tcp_timewait_enabled: v })} />
+            {settings.tcp_timewait_enabled && (
+              <div className="ml-4 mt-2 space-y-2">
+                <SliderRow label={t('alerts.spike_percent')} value={settings.tcp_timewait_spike_percent} min={50} max={1000} step={25} format={v => `${v}%`} onSave={v => save({ tcp_timewait_spike_percent: v })} />
+                <SliderRow label={t('alerts.sustained')} value={settings.tcp_timewait_sustained_seconds} min={60} max={900} step={30} format={v => `${v}s`} onSave={v => save({ tcp_timewait_sustained_seconds: v })} />
+              </div>
+            )}
+          </div>
+          {/* Close Wait */}
+          <div className="border-t border-dark-700/50 pt-3">
+            <ToggleRow label="TCP Close Wait" checked={settings.tcp_closewait_enabled} onChange={v => save({ tcp_closewait_enabled: v })} />
+            {settings.tcp_closewait_enabled && (
+              <div className="ml-4 mt-2 space-y-2">
+                <SliderRow label={t('alerts.spike_percent')} value={settings.tcp_closewait_spike_percent} min={50} max={1000} step={25} format={v => `${v}%`} onSave={v => save({ tcp_closewait_spike_percent: v })} />
+                <SliderRow label={t('alerts.sustained')} value={settings.tcp_closewait_sustained_seconds} min={60} max={900} step={30} format={v => `${v}s`} onSave={v => save({ tcp_closewait_sustained_seconds: v })} />
+              </div>
+            )}
+          </div>
+          {/* SYN Sent */}
+          <div className="border-t border-dark-700/50 pt-3">
+            <ToggleRow label="TCP SYN Sent" checked={settings.tcp_synsent_enabled} onChange={v => save({ tcp_synsent_enabled: v })} />
+            {settings.tcp_synsent_enabled && (
+              <div className="ml-4 mt-2 space-y-2">
+                <SliderRow label={t('alerts.spike_percent')} value={settings.tcp_synsent_spike_percent} min={50} max={1000} step={25} format={v => `${v}%`} onSave={v => save({ tcp_synsent_spike_percent: v })} />
+                <SliderRow label={t('alerts.sustained')} value={settings.tcp_synsent_sustained_seconds} min={60} max={900} step={30} format={v => `${v}s`} onSave={v => save({ tcp_synsent_sustained_seconds: v })} />
+              </div>
+            )}
+          </div>
+          {/* SYN Recv */}
+          <div className="border-t border-dark-700/50 pt-3">
+            <ToggleRow label="TCP SYN Recv" checked={settings.tcp_synrecv_enabled} onChange={v => save({ tcp_synrecv_enabled: v })} />
+            {settings.tcp_synrecv_enabled && (
+              <div className="ml-4 mt-2 space-y-2">
+                <SliderRow label={t('alerts.spike_percent')} value={settings.tcp_synrecv_spike_percent} min={50} max={1000} step={25} format={v => `${v}%`} onSave={v => save({ tcp_synrecv_spike_percent: v })} />
+                <SliderRow label={t('alerts.sustained')} value={settings.tcp_synrecv_sustained_seconds} min={60} max={900} step={30} format={v => `${v}s`} onSave={v => save({ tcp_synrecv_sustained_seconds: v })} />
+              </div>
+            )}
+          </div>
+          {/* FIN Wait */}
+          <div className="border-t border-dark-700/50 pt-3">
+            <ToggleRow label="TCP FIN Wait" checked={settings.tcp_finwait_enabled} onChange={v => save({ tcp_finwait_enabled: v })} />
+            {settings.tcp_finwait_enabled && (
+              <div className="ml-4 mt-2 space-y-2">
+                <SliderRow label={t('alerts.spike_percent')} value={settings.tcp_finwait_spike_percent} min={50} max={1000} step={25} format={v => `${v}%`} onSave={v => save({ tcp_finwait_spike_percent: v })} />
+                <SliderRow label={t('alerts.sustained')} value={settings.tcp_finwait_sustained_seconds} min={60} max={900} step={30} format={v => `${v}s`} onSave={v => save({ tcp_finwait_sustained_seconds: v })} />
+              </div>
+            )}
+          </div>
+          <TriggerIgnoreList
+            ids={settings.tcp_excluded_server_ids}
+            allServers={allServers}
+            onSave={ids => save({ tcp_excluded_server_ids: ids })}
+            t={t}
+          />
+        </TriggerBlock>
+        </div>
+      </div>
+
+      {/* History */}
+      <Section
+        title={t('alerts.history')}
+        icon={<Clock className="w-4 h-4" />}
+        right={
+          <div className="flex items-center gap-2">
+            <select
+              value={historyFilter}
+              onChange={e => {
+                setHistoryFilter(e.target.value)
+                setHistoryPage(0)
+                fetchHistory(0, e.target.value)
+              }}
+              className="bg-dark-800 border border-dark-700 rounded-lg px-2 py-1 text-xs text-dark-300"
+            >
+              <option value="">{t('alerts.all_types')}</option>
+              <option value="offline">{t('alerts.type_offline')}</option>
+              <option value="recovery">{t('alerts.type_recovery')}</option>
+              <option value="cpu_critical">{t('alerts.type_cpu_critical')}</option>
+              <option value="cpu_spike">{t('alerts.type_cpu_spike')}</option>
+              <option value="ram_critical">{t('alerts.type_ram_critical')}</option>
+              <option value="ram_spike">{t('alerts.type_ram_spike')}</option>
+              <option value="network_spike">{t('alerts.type_network_spike')}</option>
+              <option value="network_drop">{t('alerts.type_network_drop')}</option>
+              <option value="tcp_established_spike">{t('alerts.type_tcp_est_spike')}</option>
+              <option value="tcp_established_drop">{t('alerts.type_tcp_est_drop')}</option>
+              <option value="tcp_listen_spike">{t('alerts.type_tcp_listen_spike')}</option>
+              <option value="tcp_timewait_spike">{t('alerts.type_tcp_tw_spike')}</option>
+              <option value="tcp_closewait_spike">{t('alerts.type_tcp_cw_spike')}</option>
+              <option value="tcp_synsent_spike">{t('alerts.type_tcp_synsent_spike')}</option>
+              <option value="tcp_synrecv_spike">{t('alerts.type_tcp_synrecv_spike')}</option>
+              <option value="tcp_finwait_spike">{t('alerts.type_tcp_finwait_spike')}</option>
+              <option value="load_avg_high">{t('alerts.type_load_avg_high')}</option>
+            </select>
+            <button
+              onClick={handleClearHistory}
+              disabled={clearing || history.length === 0}
+              className="px-3 py-1 bg-red-500/10 text-red-400 rounded-lg text-xs hover:bg-red-500/20
+                         transition disabled:opacity-40 flex items-center gap-1"
+            >
+              {clearing ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
+              {t('alerts.clear')}
+            </button>
+            <Tooltip label={t('common.refresh_data')}>
+              <button
+                onClick={() => fetchHistory(historyPage * PAGE_SIZE, historyFilter)}
+                className="p-1 text-dark-400 hover:text-dark-200 transition"
+              >
+                <RefreshCw className="w-4 h-4" />
+              </button>
+            </Tooltip>
+          </div>
+        }
+      >
+        {history.length === 0 ? (
+          <p className="text-dark-500 text-sm text-center py-8">{t('alerts.no_history')}</p>
+        ) : (
+          <div className="space-y-2">
+            {history.map(item => (
+              <div
+                key={item.id}
+                className="flex items-start gap-3 p-3 bg-dark-800/50 rounded-lg border border-dark-700/30"
+              >
+                <div className={`mt-0.5 w-2 h-2 rounded-full flex-shrink-0 ${
+                  item.severity === 'critical' ? 'bg-red-400' : item.severity === 'warning' ? 'bg-yellow-400' : 'bg-green-400'
+                }`} />
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xs font-medium text-dark-300">{alertTypeLabel(item.alert_type)}</span>
+                    <span className="text-xs text-dark-500">|</span>
+                    <span className="text-xs text-dark-400 flex items-center gap-1">
+                      <Server className="w-3 h-3" />
+                      {item.server_name}
+                    </span>
+                    {item.notified && (
+                      <span className="text-xs text-accent-500">TG</span>
+                    )}
+                  </div>
+                  <p className="text-sm text-dark-200 mt-1 break-words">{item.message}</p>
+                  <span className="text-xs text-dark-500 mt-1 block">
+                    {item.created_at ? new Date(item.created_at).toLocaleString() : ''}
+                  </span>
+                </div>
+              </div>
+            ))}
+
+            {/* Pagination */}
+            {historyTotal > PAGE_SIZE && (
+              <div className="flex items-center justify-center gap-3 pt-2">
+                <button
+                  onClick={() => {
+                    const p = Math.max(0, historyPage - 1)
+                    setHistoryPage(p)
+                    fetchHistory(p * PAGE_SIZE, historyFilter)
+                  }}
+                  disabled={historyPage === 0}
+                  className="px-3 py-1 text-xs bg-dark-800 text-dark-300 rounded-lg disabled:opacity-30"
+                >
+                  {t('alerts.prev')}
+                </button>
+                <span className="text-xs text-dark-400">
+                  {historyPage + 1} / {Math.ceil(historyTotal / PAGE_SIZE)}
+                </span>
+                <button
+                  onClick={() => {
+                    const p = historyPage + 1
+                    setHistoryPage(p)
+                    fetchHistory(p * PAGE_SIZE, historyFilter)
+                  }}
+                  disabled={(historyPage + 1) * PAGE_SIZE >= historyTotal}
+                  className="px-3 py-1 text-xs bg-dark-800 text-dark-300 rounded-lg disabled:opacity-30"
+                >
+                  {t('alerts.next')}
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+      </Section>
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/*  Reusable UI components                                             */
+/* ------------------------------------------------------------------ */
+
+function Section({ title, icon, children, right, faqScreen }: {
+  title: string
+  icon?: React.ReactNode
+  children: React.ReactNode
+  right?: React.ReactNode
+  faqScreen?: FAQScreen
+}) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 12 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="bg-dark-900/50 rounded-xl border border-dark-800/50 p-5"
+    >
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-2 text-dark-200 text-sm font-medium">
+          {icon}
+          {title}
+          {faqScreen && <FAQIcon screen={faqScreen} size="sm" />}
+        </div>
+        {right}
+      </div>
+      {children}
+    </motion.div>
+  )
+}
+
+function TriggerBlock({ title, icon, enabled, onToggle, expanded, onExpand, children, hideMainToggle, faqScreen }: {
+  title: string
+  icon: React.ReactNode
+  enabled: boolean
+  onToggle: (v: boolean) => void
+  expanded: boolean
+  onExpand: () => void
+  children: React.ReactNode
+  hideMainToggle?: boolean
+  faqScreen?: FAQScreen
+}) {
+  return (
+    <div className={`bg-dark-900/50 rounded-xl border border-dark-800/50 ${expanded ? 'relative z-10' : ''}`}>
+      <div className="w-full flex items-center justify-between p-4 hover:bg-dark-800/30 transition rounded-xl">
+        <button onClick={onExpand} className="flex-1 flex items-center gap-3 text-left">
+          <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${enabled ? 'bg-accent-500/20 text-accent-400' : 'bg-dark-800 text-dark-500'}`}>
+            {icon}
+          </div>
+          <span className="text-sm font-medium text-dark-200">{title}</span>
+          <div className={`w-2 h-2 rounded-full ${enabled ? 'bg-green-400' : 'bg-dark-600'}`} />
+        </button>
+        <div className="flex items-center gap-1">
+          {faqScreen && <FAQIcon screen={faqScreen} size="sm" />}
+          <button onClick={onExpand} className="p-1 text-dark-500">
+            {expanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+          </button>
+        </div>
+      </div>
+      <AnimatePresence initial={false}>
+        {expanded && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            className="overflow-visible"
+          >
+            <div className="px-4 pb-4 space-y-3">
+              {!hideMainToggle && (
+                <ToggleRow label="" checked={enabled} onChange={onToggle} inline />
+              )}
+              {children}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  )
+}
+
+function ToggleRow({ label, checked, onChange, inline }: {
+  label: string
+  checked: boolean
+  onChange: (v: boolean) => void
+  inline?: boolean
+}) {
+  return (
+    <div className={`flex items-center ${inline ? 'justify-end' : 'justify-between'} gap-3`}>
+      {label && <span className="text-sm text-dark-300">{label}</span>}
+      <button
+        onClick={() => onChange(!checked)}
+        className={`relative w-10 h-5 rounded-full transition-colors ${checked ? 'bg-accent-500' : 'bg-dark-700'}`}
+      >
+        <motion.div
+          className="absolute top-0.5 w-4 h-4 bg-white rounded-full shadow"
+          animate={{ left: checked ? 22 : 2 }}
+          transition={{ type: 'spring', stiffness: 500, damping: 30 }}
+        />
+      </button>
+    </div>
+  )
+}
+
+function SliderRow({ label, value, min, max, step, format, onSave }: {
+  label: string
+  value: number
+  min: number
+  max: number
+  step: number
+  format: (v: number) => string
+  onSave: (v: number) => void
+}) {
+  const [local, setLocal] = useState(value)
+  useEffect(() => setLocal(value), [value])
+
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center justify-between">
+        <span className="text-sm text-dark-300">{label}</span>
+        <span className="text-sm text-accent-400 font-mono">{format(local)}</span>
+      </div>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={local}
+        onChange={e => setLocal(Number(e.target.value))}
+        onMouseUp={() => { if (local !== value) onSave(local) }}
+        onTouchEnd={() => { if (local !== value) onSave(local) }}
+        className="w-full h-1.5 bg-dark-700 rounded-full appearance-none cursor-pointer
+                   [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:h-4
+                   [&::-webkit-slider-thumb]:bg-accent-400 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:cursor-pointer
+                   [&::-moz-range-thumb]:w-4 [&::-moz-range-thumb]:h-4 [&::-moz-range-thumb]:bg-accent-400
+                   [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:border-0 [&::-moz-range-thumb]:cursor-pointer"
+      />
+    </div>
+  )
+}
+
+function ExcludeServerSelect({ servers, onAdd, placeholder }: {
+  servers: ServerType[]
+  onAdd: (id: number) => void
+  placeholder: string
+}) {
+  const [open, setOpen] = useState(false)
+  const [search, setSearch] = useState('')
+
+  const filtered = servers.filter(s =>
+    s.name.toLowerCase().includes(search.toLowerCase())
+  )
+
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setOpen(!open)}
+        className="w-full flex items-center justify-between bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-400
+                   hover:border-dark-600 transition"
+      >
+        <span>{placeholder}</span>
+        <ChevronDown className={`w-4 h-4 transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+      <AnimatePresence>
+        {open && (
+          <motion.div
+            initial={{ opacity: 0, y: -4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -4 }}
+            transition={{ duration: 0.15 }}
+            className="absolute z-50 mt-1 w-full bg-dark-800 border border-dark-700 rounded-lg shadow-xl overflow-hidden"
+          >
+            {servers.length > 5 && (
+              <div className="p-2 border-b border-dark-700/50">
+                <input
+                  type="text"
+                  value={search}
+                  onChange={e => setSearch(e.target.value)}
+                  placeholder="..."
+                  autoFocus
+                  className="w-full bg-dark-800 border border-dark-700 rounded px-2 py-1 text-sm text-dark-200
+                             placeholder-dark-600 focus:border-accent-500/50 focus:outline-none"
+                />
+              </div>
+            )}
+            <div className="max-h-48 overflow-y-auto">
+              {filtered.length === 0 ? (
+                <div className="px-3 py-2 text-sm text-dark-500 text-center">—</div>
+              ) : (
+                filtered.map(s => (
+                  <button
+                    key={s.id}
+                    onClick={() => {
+                      onAdd(s.id)
+                      setOpen(false)
+                      setSearch('')
+                    }}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-dark-300 hover:bg-dark-800 transition text-left"
+                  >
+                    <Server className="w-3.5 h-3.5 text-dark-500 flex-shrink-0" />
+                    <span className="truncate">{s.name}</span>
+                  </button>
+                ))
+              )}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  )
+}
+
+function TriggerIgnoreList({ ids, allServers, onSave, t }: {
+  ids: number[]
+  allServers: ServerType[]
+  onSave: (ids: number[]) => void
+  t: (key: string) => string
+}) {
+  return (
+    <div className="border-t border-dark-700/50 pt-3 space-y-2">
+      <span className="text-xs text-dark-500">{t('alerts.trigger_ignore_list')}</span>
+      {ids.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {ids.map(id => {
+            const srv = allServers.find(s => s.id === id)
+            return (
+              <span
+                key={id}
+                className="inline-flex items-center gap-1 px-2 py-1 bg-dark-700 border border-dark-600 rounded-lg text-xs text-dark-300"
+              >
+                <Server className="w-3 h-3 text-dark-500" />
+                {srv?.name || `#${id}`}
+                <Tooltip label={t('common.remove_from_list')}>
+                  <button
+                    onClick={() => onSave(ids.filter(i => i !== id))}
+                    className="ml-0.5 text-dark-500 hover:text-red-400 transition"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                </Tooltip>
+              </span>
+            )
+          })}
+        </div>
+      )}
+      <ExcludeServerSelect
+        servers={allServers.filter(s => !ids.includes(s.id))}
+        onAdd={id => onSave([...ids, id])}
+        placeholder={t('alerts.trigger_ignore_add')}
+      />
+    </div>
+  )
+}
+
+function InputRow({ label, value, placeholder, type, onSave }: {
+  label: string
+  value: string
+  placeholder?: string
+  type?: string
+  onSave: (v: string) => void
+}) {
+  const [local, setLocal] = useState(value)
+  useEffect(() => setLocal(value), [value])
+
+  return (
+    <div className="space-y-1">
+      <label className="text-sm text-dark-300">{label}</label>
+      <input
+        type={type || 'text'}
+        value={local}
+        placeholder={placeholder}
+        onChange={e => setLocal(e.target.value)}
+        onBlur={() => { if (local !== value) onSave(local) }}
+        className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200
+                   placeholder-dark-600 focus:border-accent-500/50 focus:outline-none transition"
+      />
+    </div>
+  )
+}
