@@ -2883,10 +2883,15 @@ PROXYEOF
 
     if [ "${MON_INSTALL_OPTIMIZATIONS:-0}" = "1" ]; then
         [ -d "$TMP_DIR/configs" ] || clone_repo || true
-        local auto_nic
-        auto_nic=$(auto_detect_nic_mode)
-        log_info "Auto-selected NIC mode: $auto_nic"
-        apply_system_optimizations "${MON_OPT_PROFILE:-vpn}" "$auto_nic" \
+        local nic_mode
+        if [ -n "${MON_NIC_MODE:-}" ] && [ "$MON_NIC_MODE" != "auto" ]; then
+            nic_mode="$MON_NIC_MODE"
+            log_info "NIC mode (manual): $nic_mode"
+        else
+            nic_mode=$(auto_detect_nic_mode)
+            log_info "NIC mode (auto-detected): $nic_mode"
+        fi
+        apply_system_optimizations "${MON_OPT_PROFILE:-vpn}" "$nic_mode" \
             || log_warn "System optimizations step failed"
     fi
 

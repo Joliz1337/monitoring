@@ -63,6 +63,7 @@ interface DeployFormData {
   installWarp: boolean
   installOptimizations: boolean
   optProfile: 'vpn' | 'panel'
+  optNicMode: 'auto' | 'multiqueue' | 'hybrid' | 'rps'
   installRemnawave: boolean
   remnaCertMode: 'inline' | 'saved'
   remnaCertInline: string
@@ -85,6 +86,7 @@ const DEPLOY_DEFAULTS: DeployFormData = {
   installWarp: false,
   installOptimizations: false,
   optProfile: 'vpn',
+  optNicMode: 'auto',
   installRemnawave: false,
   remnaCertMode: 'inline',
   remnaCertInline: '',
@@ -274,6 +276,7 @@ export default function Servers() {
       install_warp: deploy.installWarp,
       install_optimizations: deploy.installOptimizations,
       opt_profile: deploy.optProfile,
+      nic_mode: deploy.optNicMode,
       install_remnawave: deploy.installRemnawave,
       remnawave_cert_profile_id:
         deploy.installRemnawave && deploy.remnaCertMode === 'saved' ? deploy.remnaCertProfileId : null,
@@ -804,17 +807,37 @@ export default function Servers() {
                           </span>
                         </label>
                         {deploy.installOptimizations && (
-                          <div className="ml-6 flex gap-2">
-                            {(['vpn', 'panel'] as const).map(p => (
-                              <button
-                                key={p}
-                                type="button"
-                                onClick={() => setDeploy(d => ({ ...d, optProfile: p }))}
-                                className={`btn text-xs flex-1 ${deploy.optProfile === p ? 'btn-primary' : 'btn-secondary'}`}
-                              >
-                                {t(p === 'vpn' ? 'servers.deploy_opt_vpn' : 'servers.deploy_opt_universal')}
-                              </button>
-                            ))}
+                          <div className="ml-6 space-y-2">
+                            <div>
+                              <label className="block text-xs text-dark-400 mb-1">{t('servers.deploy_opt_profile')}</label>
+                              <div className="flex gap-2">
+                                {(['vpn', 'panel'] as const).map(p => (
+                                  <button
+                                    key={p}
+                                    type="button"
+                                    onClick={() => setDeploy(d => ({ ...d, optProfile: p }))}
+                                    className={`btn text-xs flex-1 ${deploy.optProfile === p ? 'btn-primary' : 'btn-secondary'}`}
+                                  >
+                                    {t(p === 'vpn' ? 'servers.deploy_opt_vpn' : 'servers.deploy_opt_universal')}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                            <div>
+                              <label className="block text-xs text-dark-400 mb-1">{t('servers.deploy_opt_nic')}</label>
+                              <div className="flex gap-2">
+                                {(['auto', 'multiqueue', 'hybrid', 'rps'] as const).map(m => (
+                                  <button
+                                    key={m}
+                                    type="button"
+                                    onClick={() => setDeploy(d => ({ ...d, optNicMode: m }))}
+                                    className={`btn text-xs flex-1 ${deploy.optNicMode === m ? 'btn-primary' : 'btn-secondary'}`}
+                                  >
+                                    {t(`servers.deploy_nic_${m}`)}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
                           </div>
                         )}
 

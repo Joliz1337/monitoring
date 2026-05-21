@@ -146,6 +146,7 @@ class DeployRequest(BaseModel):
     install_warp: bool = False
     install_optimizations: bool = False
     opt_profile: str = "vpn"
+    nic_mode: str = "auto"  # auto | multiqueue | hybrid | rps
     install_remnawave: bool = False
     remnawave_cert_profile_id: Optional[int] = None
     remnawave_cert_inline: Optional[str] = None
@@ -305,6 +306,7 @@ async def deploy_server(
         install_warp=req.install_warp,
         install_optimizations=req.install_optimizations,
         opt_profile="panel" if req.opt_profile == "panel" else "vpn",
+        nic_mode=req.nic_mode if req.nic_mode in ("multiqueue", "hybrid", "rps") else "auto",
         install_remnawave=req.install_remnawave,
         remnawave_cert=remnawave_cert,
         proxy_url=proxy_url,

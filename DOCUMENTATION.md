@@ -76,8 +76,9 @@ bash install.sh --unattended
 | `MON_INSTALL_NODE=1` | Установить ноду мониторинга |
 | `MON_INSTALL_WARP=1` | Установить Cloudflare WARP |
 | `MON_INSTALL_REMNAWAVE=1` | Установить ноду Remnawave |
-| `MON_INSTALL_OPTIMIZATIONS=1` | Установить системные оптимизации (NIC-режим определяется автоматически) |
+| `MON_INSTALL_OPTIMIZATIONS=1` | Установить системные оптимизации |
 | `MON_OPT_PROFILE` | Профиль sysctl-оптимизаций: `vpn` (по умолчанию) или `panel` |
+| `MON_NIC_MODE` | NIC-режим оптимизаций: `auto` (по умолчанию, автоопределение через `auto_detect_nic_mode()`), `multiqueue`, `hybrid`, `rps`; если задан и не равен `auto`, режим применяется без автодетекта |
 | `MON_PROXY_URL` | HTTP-прокси для скачивания компонентов |
 | `NODE_SECRET` | Ключ API ноды мониторинга |
 | `PANEL_IP` | IP панели (для UFW ноды мониторинга) |

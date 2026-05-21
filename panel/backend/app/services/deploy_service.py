@@ -37,6 +37,7 @@ class DeployParams:
     proxy_url: str | None = None
     install_optimizations: bool = False
     opt_profile: str = "vpn"
+    nic_mode: str = "auto"  # auto | multiqueue | hybrid | rps
 
 
 def _build_inner_command(params: DeployParams) -> str:
@@ -55,6 +56,8 @@ def _build_inner_command(params: DeployParams) -> str:
     if params.install_optimizations:
         env["MON_INSTALL_OPTIMIZATIONS"] = "1"
         env["MON_OPT_PROFILE"] = params.opt_profile
+        if params.nic_mode and params.nic_mode != "auto":
+            env["MON_NIC_MODE"] = params.nic_mode
     if params.install_warp:
         env["MON_INSTALL_WARP"] = "1"
     if params.install_remnawave:
