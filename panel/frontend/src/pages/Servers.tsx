@@ -58,6 +58,7 @@ interface DeployFormData {
   sshPrivateKey: string
   sshPassphrase: string
   installWarp: boolean
+  installOptimizations: boolean
   installRemnawave: boolean
   remnaCertMode: 'inline' | 'saved'
   remnaCertInline: string
@@ -75,6 +76,7 @@ const DEPLOY_DEFAULTS: DeployFormData = {
   sshPrivateKey: '',
   sshPassphrase: '',
   installWarp: false,
+  installOptimizations: false,
   installRemnawave: false,
   remnaCertMode: 'inline',
   remnaCertInline: '',
@@ -258,6 +260,7 @@ export default function Servers() {
       ssh_private_key: deploy.sshAuth === 'key' ? deploy.sshPrivateKey : null,
       ssh_key_passphrase: deploy.sshAuth === 'key' ? deploy.sshPassphrase : null,
       install_warp: deploy.installWarp,
+      install_optimizations: deploy.installOptimizations,
       install_remnawave: deploy.installRemnawave,
       remnawave_cert_profile_id:
         deploy.installRemnawave && deploy.remnaCertMode === 'saved' ? deploy.remnaCertProfileId : null,
@@ -315,14 +318,26 @@ export default function Servers() {
     if (!name || !name.trim()) return
     setSavingCert(true)
     try {
-      await serversApi.saveRemnawaveCert(name.trim(), deploy.remnaCertInline.trim())
+      const { data } = await serversApi.saveRemnawaveCert(name.trim(), deploy.remnaCertInline.trim())
       toast.success(t('servers.deploy_remna_saved'))
       loadRemnaCertProfiles()
+      setDeploy(d => ({ ...d, remnaCertMode: 'saved', remnaCertProfileId: data.id }))
     } catch (e) {
       const err = e as { response?: { data?: { detail?: string } } }
       toast.error(err.response?.data?.detail || t('servers.deploy_remna_save_failed'))
     }
     setSavingCert(false)
+  }
+
+  const handleDeleteCert = async (id: number) => {
+    if (!window.confirm(t('servers.deploy_remna_delete_confirm'))) return
+    try {
+      await serversApi.deleteRemnawaveCert(id)
+      setRemnaCertProfiles(prev => prev.filter(p => p.id !== id))
+      setDeploy(d => (d.remnaCertProfileId === id ? { ...d, remnaCertProfileId: null } : d))
+    } catch {
+      toast.error(t('servers.deploy_remna_save_failed'))
+    }
   }
 
   const handleEdit = (server: typeof servers[0]) => {
@@ -718,6 +733,20 @@ export default function Servers() {
                           <span className="text-sm text-dark-200">{t('servers.deploy_install_warp')}</span>
                         </label>
 
+                        {/* System optimizations */}
+                        <label className="flex items-start gap-2.5 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={deploy.installOptimizations}
+                            onChange={(e) => setDeploy(d => ({ ...d, installOptimizations: e.target.checked }))}
+                            className="w-4 h-4 mt-0.5 rounded accent-accent-500 cursor-pointer"
+                          />
+                          <span className="text-sm text-dark-200">
+                            {t('servers.deploy_install_optimizations')}
+                            <span className="block text-xs text-dark-500">{t('servers.deploy_optimizations_hint')}</span>
+                          </span>
+                        </label>
+
                         {/* Remnawave */}
                         <label className="flex items-center gap-2.5 cursor-pointer">
                           <input
@@ -734,35 +763,60 @@ export default function Servers() {
                         </label>
                         {deploy.installRemnawave && (
                           <div className="ml-6 space-y-2">
-                            {remnaCertProfiles.length > 0 && (
-                              <div className="flex gap-2">
-                                {(['saved', 'inline'] as const).map(mode => (
-                                  <button
-                                    key={mode}
-                                    type="button"
-                                    onClick={() => setDeploy(d => ({ ...d, remnaCertMode: mode }))}
-                                    className={`btn text-xs flex-1 ${deploy.remnaCertMode === mode ? 'btn-primary' : 'btn-secondary'}`}
+                            <div className="flex flex-wrap gap-2">
+                              {remnaCertProfiles.map(p => {
+                                const active = deploy.remnaCertMode === 'saved' && deploy.remnaCertProfileId === p.id
+                                return (
+                                  <div
+                                    key={p.id}
+                                    className={`flex items-center rounded-lg border text-xs overflow-hidden ${
+                                      active
+                                        ? 'border-accent-500/50 bg-accent-500/10'
+                                        : 'border-dark-700/50 bg-dark-800/50'
+                                    }`}
                                   >
-                                    {t(mode === 'saved' ? 'servers.deploy_remna_use_saved' : 'servers.deploy_remna_new')}
-                                  </button>
-                                ))}
-                              </div>
-                            )}
-                            {deploy.remnaCertMode === 'saved' && remnaCertProfiles.length > 0 ? (
-                              <select
-                                value={deploy.remnaCertProfileId ?? ''}
-                                onChange={(e) => setDeploy(d => ({
+                                    <button
+                                      type="button"
+                                      onClick={() => setDeploy(d => ({
+                                        ...d,
+                                        remnaCertMode: 'saved',
+                                        remnaCertProfileId: p.id,
+                                      }))}
+                                      className={`px-2.5 py-1.5 transition-colors ${
+                                        active ? 'text-accent-300' : 'text-dark-200 hover:text-dark-50'
+                                      }`}
+                                    >
+                                      {p.name}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleDeleteCert(p.id)}
+                                      className="px-1.5 py-1.5 text-dark-500 hover:text-danger hover:bg-danger/10 transition-colors"
+                                      title={t('common.delete')}
+                                    >
+                                      <X className="w-3 h-3" />
+                                    </button>
+                                  </div>
+                                )
+                              })}
+                              <button
+                                type="button"
+                                onClick={() => setDeploy(d => ({
                                   ...d,
-                                  remnaCertProfileId: e.target.value ? Number(e.target.value) : null,
+                                  remnaCertMode: 'inline',
+                                  remnaCertProfileId: null,
                                 }))}
-                                className="input"
+                                className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs transition-colors ${
+                                  deploy.remnaCertMode === 'inline'
+                                    ? 'border-accent-500/50 bg-accent-500/10 text-accent-300'
+                                    : 'border-dark-700/50 bg-dark-800/50 text-dark-200 hover:text-dark-50'
+                                }`}
                               >
-                                <option value="">{t('servers.deploy_remna_select')}</option>
-                                {remnaCertProfiles.map(p => (
-                                  <option key={p.id} value={p.id}>{p.name}</option>
-                                ))}
-                              </select>
-                            ) : (
+                                <Plus className="w-3 h-3" />
+                                {t('servers.deploy_remna_new')}
+                              </button>
+                            </div>
+                            {deploy.remnaCertMode === 'inline' && (
                               <>
                                 <textarea
                                   value={deploy.remnaCertInline}

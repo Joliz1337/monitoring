@@ -1061,45 +1061,74 @@ detect_multiqueue_support() {
     fi
 }
 
+# Авто-выбор NIC-режима по числу аппаратных очередей и CPU.
+# Выводит: multiqueue (очередей хватает на все ядра либо их 3+),
+# hybrid (1<очередей<3 и меньше ядер), rps (нет аппаратного multiqueue).
+auto_detect_nic_mode() {
+    local cpu_count max_q=0 q dev_path
+    cpu_count=$(nproc 2>/dev/null || echo 1)
+    if command -v ethtool &>/dev/null; then
+        for dev_path in /sys/class/net/*; do
+            [ -d "$dev_path/device" ] || continue
+            [ -d "$dev_path/bridge" ] && continue
+            [ -f "$dev_path/bonding/slaves" ] && continue
+            [ "$(cat "$dev_path/operstate" 2>/dev/null)" = "up" ] || continue
+            q=$(get_max_hw_queues "$(basename "$dev_path")")
+            [ "${q:-0}" -gt "$max_q" ] 2>/dev/null && max_q=$q
+        done
+    fi
+    if [ "$max_q" -le 1 ] 2>/dev/null; then
+        echo "rps"
+    elif [ "$max_q" -ge 3 ] 2>/dev/null || [ "$max_q" -ge "$cpu_count" ] 2>/dev/null; then
+        echo "multiqueue"
+    else
+        echo "hybrid"
+    fi
+}
+
+# При вызове с аргументами (profile, nic_mode) меню пропускается — для --unattended.
 apply_system_optimizations() {
-    echo ""
-    echo -e "  ${CYAN}$(msg opt_profile_select)${NC}"
-    echo -e "  ${CYAN}1)${NC} $(msg opt_profile_vpn)"
-    echo -e "  ${CYAN}2)${NC} $(msg opt_profile_panel)"
-    echo -e "  ${YELLOW}0)${NC} $(msg opt_mode_back)"
-    echo ""
+    local opt_profile="$1"
+    local nic_mode="$2"
 
-    local profile_choice
-    profile_choice=$(safe_read "$(msg select_action): " "0" 30)
+    if [ -z "$opt_profile" ] || [ -z "$nic_mode" ]; then
+        echo ""
+        echo -e "  ${CYAN}$(msg opt_profile_select)${NC}"
+        echo -e "  ${CYAN}1)${NC} $(msg opt_profile_vpn)"
+        echo -e "  ${CYAN}2)${NC} $(msg opt_profile_panel)"
+        echo -e "  ${YELLOW}0)${NC} $(msg opt_mode_back)"
+        echo ""
 
-    local opt_profile
-    case "$profile_choice" in
-        1) opt_profile="vpn" ;;
-        2) opt_profile="panel" ;;
-        *) return 0 ;;
-    esac
+        local profile_choice
+        profile_choice=$(safe_read "$(msg select_action): " "0" 30)
 
-    echo ""
-    echo -e "  ${CYAN}$(msg nic_hw_detect):${NC}"
-    detect_multiqueue_support
-    echo ""
-    echo -e "  $(msg opt_select_mode)"
-    echo -e "  ${CYAN}1)${NC} $(msg opt_mode_multiqueue)"
-    echo -e "  ${CYAN}2)${NC} $(msg opt_mode_hybrid)"
-    echo -e "  ${CYAN}3)${NC} $(msg opt_mode_singlequeue)"
-    echo -e "  ${YELLOW}0)${NC} $(msg opt_mode_back)"
-    echo ""
+        case "$profile_choice" in
+            1) opt_profile="vpn" ;;
+            2) opt_profile="panel" ;;
+            *) return 0 ;;
+        esac
 
-    local mode
-    mode=$(safe_read "$(msg select_action): " "0" 30)
+        echo ""
+        echo -e "  ${CYAN}$(msg nic_hw_detect):${NC}"
+        detect_multiqueue_support
+        echo ""
+        echo -e "  $(msg opt_select_mode)"
+        echo -e "  ${CYAN}1)${NC} $(msg opt_mode_multiqueue)"
+        echo -e "  ${CYAN}2)${NC} $(msg opt_mode_hybrid)"
+        echo -e "  ${CYAN}3)${NC} $(msg opt_mode_singlequeue)"
+        echo -e "  ${YELLOW}0)${NC} $(msg opt_mode_back)"
+        echo ""
 
-    local nic_mode
-    case "$mode" in
-        1) nic_mode="multiqueue" ;;
-        2) nic_mode="hybrid" ;;
-        3) nic_mode="rps" ;;
-        *) return 0 ;;
-    esac
+        local mode
+        mode=$(safe_read "$(msg select_action): " "0" 30)
+
+        case "$mode" in
+            1) nic_mode="multiqueue" ;;
+            2) nic_mode="hybrid" ;;
+            3) nic_mode="rps" ;;
+            *) return 0 ;;
+        esac
+    fi
 
     log_info "$(msg optimizing_system)"
 
@@ -2850,8 +2879,18 @@ PROXYEOF
         check_git || { log_error "git is required"; exit 1; }
         clone_repo || { log_error "Failed to download repository"; exit 1; }
         install_node || { log_error "Node installation failed"; cleanup_temp; exit 1; }
-        cleanup_temp
     fi
+
+    if [ "${MON_INSTALL_OPTIMIZATIONS:-0}" = "1" ]; then
+        [ -d "$TMP_DIR/configs" ] || clone_repo || true
+        local auto_nic
+        auto_nic=$(auto_detect_nic_mode)
+        log_info "Auto-selected NIC mode: $auto_nic"
+        apply_system_optimizations "${MON_OPT_PROFILE:-vpn}" "$auto_nic" \
+            || log_warn "System optimizations step failed"
+    fi
+
+    cleanup_temp
 
     if [ "${MON_INSTALL_WARP:-0}" = "1" ]; then
         install_warp || { log_error "WARP installation failed"; exit 1; }

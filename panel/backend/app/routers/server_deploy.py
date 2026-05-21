@@ -143,6 +143,7 @@ class DeployRequest(BaseModel):
     ssh_private_key: Optional[str] = None
     ssh_key_passphrase: Optional[str] = None
     install_warp: bool = False
+    install_optimizations: bool = False
     install_remnawave: bool = False
     remnawave_cert_profile_id: Optional[int] = None
     remnawave_cert_inline: Optional[str] = None
@@ -246,6 +247,7 @@ async def deploy_server(
         ssh_private_key=req.ssh_private_key,
         ssh_key_passphrase=req.ssh_key_passphrase,
         install_warp=req.install_warp,
+        install_optimizations=req.install_optimizations,
         install_remnawave=req.install_remnawave,
         remnawave_cert=remnawave_cert,
         proxy_url=proxy_url,

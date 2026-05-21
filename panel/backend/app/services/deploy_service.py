@@ -35,6 +35,7 @@ class DeployParams:
     install_remnawave: bool = False
     remnawave_cert: str | None = None
     proxy_url: str | None = None
+    install_optimizations: bool = False
 
 
 def _build_inner_command(params: DeployParams) -> str:
@@ -50,6 +51,8 @@ def _build_inner_command(params: DeployParams) -> str:
         env["PANEL_IP"] = params.panel_ip
     if params.proxy_url:
         env["MON_PROXY_URL"] = params.proxy_url
+    if params.install_optimizations:
+        env["MON_INSTALL_OPTIMIZATIONS"] = "1"
     if params.install_warp:
         env["MON_INSTALL_WARP"] = "1"
     if params.install_remnawave:
