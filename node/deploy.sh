@@ -122,26 +122,32 @@ spin() {
 
     "$@" >"$logf" 2>&1 &
     local pid=$!
-    local i=0
 
-    while kill -0 "$pid" 2>/dev/null; do
-        local e=$(( $(date +%s) - t0 ))
-        local m=$((e / 60)) s=$((e % 60))
-        if [ $m -gt 0 ]; then
-            printf "\r  \033[0;36m%s\033[0m %s \033[1;33m[%dm %02ds]\033[0m  " \
-                "${chars:$((i % 10)):1}" "$desc" "$m" "$s"
-        else
-            printf "\r  \033[0;36m%s\033[0m %s \033[1;33m[%ds]\033[0m  " \
-                "${chars:$((i % 10)):1}" "$desc" "$s"
-        fi
-        i=$((i + 1))
-        sleep 0.12 2>/dev/null || sleep 1
-    done
+    # Анимированный спиннер — только в реальном терминале. Вне TTY (запуск
+    # по SSH из панели) \r-перерисовка превращается в мусор, поэтому только ждём.
+    if [ -t 1 ]; then
+        local i=0
+        while kill -0 "$pid" 2>/dev/null; do
+            local e=$(( $(date +%s) - t0 ))
+            local m=$((e / 60)) s=$((e % 60))
+            if [ $m -gt 0 ]; then
+                printf "\r  \033[0;36m%s\033[0m %s \033[1;33m[%dm %02ds]\033[0m  " \
+                    "${chars:$((i % 10)):1}" "$desc" "$m" "$s"
+            else
+                printf "\r  \033[0;36m%s\033[0m %s \033[1;33m[%ds]\033[0m  " \
+                    "${chars:$((i % 10)):1}" "$desc" "$s"
+            fi
+            i=$((i + 1))
+            sleep 0.12 2>/dev/null || sleep 1
+        done
+    else
+        echo "  • ${desc}..."
+    fi
 
     wait "$pid" 2>/dev/null
     local rc=$?
     local e=$(( $(date +%s) - t0 ))
-    printf "\r\033[2K"
+    [ -t 1 ] && printf "\r\033[2K"
 
     if [ $rc -eq 0 ]; then
         echo -e "  ${GREEN}✓${NC} ${desc} ${CYAN}(${e}s)${NC}"

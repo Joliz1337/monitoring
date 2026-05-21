@@ -107,6 +107,14 @@ const buildServerUrl = (host: string, port: string): string => {
   return `https://${host}:${port || '9100'}`
 }
 
+// Лог установки приходит с ANSI-кодами и \r-перерисовкой спиннеров —
+// берём последний сегмент после \r и вырезаем управляющие последовательности
+const cleanLogLine = (line: string): string => {
+  const visible = line.split('\r').pop() ?? line
+  // eslint-disable-next-line no-control-regex
+  return visible.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b/g, '').trimEnd()
+}
+
 export default function Servers() {
   const { servers, fetchServersWithMetrics, addServer, deleteServer, testServer, updateServer, toggleServer } = useServersStore()
   const { t } = useTranslation()
@@ -295,7 +303,7 @@ export default function Servers() {
         body,
         (ev) => {
           if (ev.type === 'log') {
-            setDeployLog(prev => [...prev, ev.line])
+            setDeployLog(prev => [...prev, cleanLogLine(ev.line)])
           } else if (ev.type === 'start') {
             setDeployLog(prev => [...prev, `--- ${ev.host} ---`])
           } else if (ev.type === 'error') {
