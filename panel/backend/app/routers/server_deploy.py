@@ -144,6 +144,7 @@ class DeployRequest(BaseModel):
     ssh_key_passphrase: Optional[str] = None
     install_warp: bool = False
     install_optimizations: bool = False
+    opt_profile: str = "vpn"
     install_remnawave: bool = False
     remnawave_cert_profile_id: Optional[int] = None
     remnawave_cert_inline: Optional[str] = None
@@ -248,6 +249,7 @@ async def deploy_server(
         ssh_key_passphrase=req.ssh_key_passphrase,
         install_warp=req.install_warp,
         install_optimizations=req.install_optimizations,
+        opt_profile="panel" if req.opt_profile == "panel" else "vpn",
         install_remnawave=req.install_remnawave,
         remnawave_cert=remnawave_cert,
         proxy_url=proxy_url,

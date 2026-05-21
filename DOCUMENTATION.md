@@ -60,8 +60,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/in
 - `configs/multiqueue-tune.service` — systemd-unit для `multiqueue-tune.sh`
 - `configs/hybrid-tune.sh` — гибридный режим: те же хелперы `is_safe_interface()`, `cpu_index_mask()`, `parse_channels()`; ring buffer resize удалён; число активных очередей — на stdout для расчёта RPS-маски через `configure_rps_remaining`; summary: `hw queues: ...`
 - `configs/sysctl.conf` — базовый sysctl для VPN/relay-нод; `disable_ipv6=1`; `arp_announce=2`/`arp_ignore=1`
-- `configs/vpn/sysctl.conf` — VPN-профиль sysctl; `disable_ipv6=1`; `arp_announce=2`/`arp_ignore=1`
-- `configs/panel/sysctl.conf` — панельный sysctl (умеренные лимиты); `arp_announce=2`/`arp_ignore=1`
+- `configs/vpn/sysctl.conf` — VPN-профиль sysctl (`MON_OPT_PROFILE=vpn`): агрессивный тюнинг для VPN/прокси-нод; `disable_ipv6=1`; `file-max 2097152`; `nf_conntrack_max 2097152`; `arp_announce=2`/`arp_ignore=1`
+- `configs/panel/sysctl.conf` — универсальный профиль sysctl (`MON_OPT_PROFILE=panel`): умеренный тюнинг для панелей и смешанных нагрузок; IPv6 не отключается; `file-max 524288`; `nf_conntrack_max 262144`; расслабленные conntrack-таймауты; `arp_announce=2`/`arp_ignore=1`
 
 **Неинтерактивный режим (`--unattended`):**
 
@@ -77,7 +77,7 @@ bash install.sh --unattended
 | `MON_INSTALL_WARP=1` | Установить Cloudflare WARP |
 | `MON_INSTALL_REMNAWAVE=1` | Установить ноду Remnawave |
 | `MON_INSTALL_OPTIMIZATIONS=1` | Установить системные оптимизации (NIC-режим определяется автоматически) |
-| `MON_OPT_PROFILE` | Профиль оптимизаций: `vpn` (по умолчанию) или `panel` |
+| `MON_OPT_PROFILE` | Профиль sysctl-оптимизаций: `vpn` (по умолчанию) или `panel` |
 | `MON_PROXY_URL` | HTTP-прокси для скачивания компонентов |
 | `NODE_SECRET` | Ключ API ноды мониторинга |
 | `PANEL_IP` | IP панели (для UFW ноды мониторинга) |

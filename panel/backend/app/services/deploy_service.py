@@ -36,6 +36,7 @@ class DeployParams:
     remnawave_cert: str | None = None
     proxy_url: str | None = None
     install_optimizations: bool = False
+    opt_profile: str = "vpn"
 
 
 def _build_inner_command(params: DeployParams) -> str:
@@ -53,6 +54,7 @@ def _build_inner_command(params: DeployParams) -> str:
         env["MON_PROXY_URL"] = params.proxy_url
     if params.install_optimizations:
         env["MON_INSTALL_OPTIMIZATIONS"] = "1"
+        env["MON_OPT_PROFILE"] = params.opt_profile
     if params.install_warp:
         env["MON_INSTALL_WARP"] = "1"
     if params.install_remnawave:

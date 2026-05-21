@@ -197,6 +197,8 @@
     "deploy_install_warp": "Cloudflare WARP",
     "deploy_install_optimizations": "Системные оптимизации",
     "deploy_optimizations_hint": "BBR, sysctl, лимиты — NIC-режим подбирается автоматически",
+    "deploy_opt_vpn": "VPN-сервер",
+    "deploy_opt_universal": "Универсальные",
     "deploy_install_remnawave": "Нода Remnawave",
     "deploy_install_proxy": "HTTP-прокси установщика (apt/docker через прокси)",
     "deploy_remna_new": "Новый сертификат",

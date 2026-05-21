@@ -59,6 +59,7 @@ interface DeployFormData {
   sshPassphrase: string
   installWarp: boolean
   installOptimizations: boolean
+  optProfile: 'vpn' | 'panel'
   installRemnawave: boolean
   remnaCertMode: 'inline' | 'saved'
   remnaCertInline: string
@@ -77,6 +78,7 @@ const DEPLOY_DEFAULTS: DeployFormData = {
   sshPassphrase: '',
   installWarp: false,
   installOptimizations: false,
+  optProfile: 'vpn',
   installRemnawave: false,
   remnaCertMode: 'inline',
   remnaCertInline: '',
@@ -261,6 +263,7 @@ export default function Servers() {
       ssh_key_passphrase: deploy.sshAuth === 'key' ? deploy.sshPassphrase : null,
       install_warp: deploy.installWarp,
       install_optimizations: deploy.installOptimizations,
+      opt_profile: deploy.optProfile,
       install_remnawave: deploy.installRemnawave,
       remnawave_cert_profile_id:
         deploy.installRemnawave && deploy.remnaCertMode === 'saved' ? deploy.remnaCertProfileId : null,
@@ -746,6 +749,20 @@ export default function Servers() {
                             <span className="block text-xs text-dark-500">{t('servers.deploy_optimizations_hint')}</span>
                           </span>
                         </label>
+                        {deploy.installOptimizations && (
+                          <div className="ml-6 flex gap-2">
+                            {(['vpn', 'panel'] as const).map(p => (
+                              <button
+                                key={p}
+                                type="button"
+                                onClick={() => setDeploy(d => ({ ...d, optProfile: p }))}
+                                className={`btn text-xs flex-1 ${deploy.optProfile === p ? 'btn-primary' : 'btn-secondary'}`}
+                              >
+                                {t(p === 'vpn' ? 'servers.deploy_opt_vpn' : 'servers.deploy_opt_universal')}
+                              </button>
+                            ))}
+                          </div>
+                        )}
 
                         {/* Remnawave */}
                         <label className="flex items-center gap-2.5 cursor-pointer">
