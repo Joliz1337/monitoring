@@ -962,59 +962,19 @@ install_nic_tune() {
     fi
 }
 
-# Arms an auto-rollback for a tune service.
-# If user loses SSH within ROLLBACK_DELAY seconds, the service is stopped,
-# disabled and its files removed — sysctl tuning stays but NIC-tune doesn't
-# re-fire on reboot. Returns the systemd unit name of the timer.
-arm_tune_rollback() {
-    local service_name="$1"
-    local script_path="$2"
-    local delay="${ROLLBACK_DELAY:-180}"
-    local rb_unit="mon-tune-rollback"
-
-    command -v systemd-run >/dev/null 2>&1 || { echo ""; return 1; }
-
-    systemctl stop  "${rb_unit}.timer"   >/dev/null 2>&1 || true
-    systemctl stop  "${rb_unit}.service" >/dev/null 2>&1 || true
-    systemctl reset-failed "${rb_unit}.timer" "${rb_unit}.service" >/dev/null 2>&1 || true
-
-    local rb_cmd
-    rb_cmd="systemctl stop ${service_name}; systemctl disable ${service_name}; rm -f /etc/systemd/system/${service_name} ${script_path}; systemctl daemon-reload; logger -t mon-installer 'auto-rollback fired for ${service_name}'"
-
-    if systemd-run --quiet --on-active="${delay}" --unit="${rb_unit}" \
-        /bin/bash -c "$rb_cmd" >/dev/null 2>&1; then
-        echo "$rb_unit"
-        return 0
-    fi
-    echo ""
-    return 1
-}
-
-cancel_tune_rollback() {
-    local rb_unit="$1"
-    [ -n "$rb_unit" ] || return 0
-    systemctl stop "${rb_unit}.timer"   >/dev/null 2>&1 || true
-    systemctl stop "${rb_unit}.service" >/dev/null 2>&1 || true
-    systemctl reset-failed "${rb_unit}.timer" "${rb_unit}.service" >/dev/null 2>&1 || true
-}
-
-# Enables and starts the tune service with SSH-loss safety net.
+# Enables and starts the tune service.
 # $1 = service name, $2 = script path
 enable_tune_service() {
     local service_name="$1"
     local script_path="$2"
 
+    # Clear leftover auto-rollback timer from older installer versions
+    systemctl stop mon-tune-rollback.timer mon-tune-rollback.service >/dev/null 2>&1 || true
+    systemctl reset-failed mon-tune-rollback.timer mon-tune-rollback.service >/dev/null 2>&1 || true
+
     log_info "Enabling $service_name..."
     timeout "$TIMEOUT_SYSTEMCTL" systemctl daemon-reload >/dev/null 2>&1 || true
     timeout "$TIMEOUT_SYSTEMCTL" systemctl enable "$service_name" >/dev/null 2>&1 || true
-
-    local rb_unit
-    rb_unit=$(arm_tune_rollback "$service_name" "$script_path")
-    if [ -n "$rb_unit" ]; then
-        log_info "Safety: auto-rollback armed (180s) — unit ${rb_unit}.timer"
-    else
-        log_warn "Safety: could not arm auto-rollback (no systemd-run)"
-    fi
 
     if ! timeout "$TIMEOUT_SYSTEMCTL" systemctl restart "$service_name" >/dev/null 2>&1; then
         log_warn "Service restart failed, trying direct execution..."
@@ -1025,17 +985,6 @@ enable_tune_service() {
         fi
     else
         log_success "$service_name enabled and applied"
-    fi
-
-    if [ -n "$rb_unit" ]; then
-        local confirm
-        confirm=$(safe_read "Сеть жива? Введите 'yes' в течение 120с чтобы отменить откат [yes/no]: " "no" 120)
-        if [ "$confirm" = "yes" ] || [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
-            cancel_tune_rollback "$rb_unit"
-            log_success "Auto-rollback cancelled, tune service stays enabled"
-        else
-            log_warn "Auto-rollback will fire — service files will be removed within $((${ROLLBACK_DELAY:-180}))s"
-        fi
     fi
 }
 

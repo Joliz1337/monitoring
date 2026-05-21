@@ -49,9 +49,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/in
 
 **Безопасность применения tune-скриптов**
 
-На ряде хостеров (OVH и аналогичных с port-security на свитчах) `ethtool -G` (resize ring buffers) на интерфейсах `igb`/`ixgbe`/`i40e` вызывает hard link reset, что может лишить доступа к серверу. Кроме того, tune-сервис запускался без возможности авто-отката. По этим причинам:
-- `ethtool -G` полностью удалён из всех tune-скриптов;
-- в `enable_tune_service()` добавлен safety-net: перед запуском сервиса ставится автоматический rollback через `systemd-run`, который срабатывает через 180 с если пользователь не подтвердил живость сети.
+На ряде хостеров (OVH и аналогичных с port-security на свитчах) `ethtool -G` (resize ring buffers) на интерфейсах `igb`/`ixgbe`/`i40e` вызывает hard link reset, что может лишить доступа к серверу. По этой причине:
+- `ethtool -G` полностью удалён из всех tune-скриптов.
 
 **Файлы оптимизации сети:**
 
@@ -71,9 +70,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/in
 - `remove_rps()` — останавливает `network-tune.service`, удаляет скрипт и service-файл, сбрасывает `rps_cpus`/`rps_flow_cnt`
 - `remove_multiqueue()` — останавливает `multiqueue-tune.service`, удаляет скрипт и service-файл
 - `install_nic_tune()` — универсальная установка: копирует скрипт и service-файл для выбранного режима
-- `arm_tune_rollback()` — через `systemd-run --on-active=180s` ставит отложенный rollback: при срабатывании останавливает tune-сервис, отключает и удаляет скрипт; возвращает имя unit-таймера
-- `cancel_tune_rollback()` — останавливает таймер и сервис rollback-unit
-- `enable_tune_service()` — активирует tune-сервис, вызывает `arm_tune_rollback()` (safety-net на 180 с), запускает сервис, затем через `safe_read` предлагает пользователю подтвердить живость сети (`yes` в течение 120 с); при подтверждении — вызывает `cancel_tune_rollback()`; при тайм-ауте или `no` — rollback срабатывает автоматически
+- `enable_tune_service()` — активирует и запускает tune-сервис: снимает зависший таймер `mon-tune-rollback` от старых версий установщика (`systemctl stop`/`reset-failed` для `.timer` и `.service`), затем выполняет `daemon-reload`, `enable`, `restart`; если `restart` не удался — fallback на прямой запуск скрипта; подтверждения сети и авто-отката нет, оптимизации применяются сразу и навсегда
 
 ## Компоненты
 
