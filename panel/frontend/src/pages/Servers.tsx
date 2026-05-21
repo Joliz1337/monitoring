@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, FormEvent } from 'react'
+import { useState, useEffect, useMemo, useRef, FormEvent } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Plus,
@@ -19,12 +19,23 @@ import {
   Zap,
   ShieldCheck,
   ShieldAlert,
-  Search
+  Search,
+  Rocket,
+  Terminal,
+  KeyRound,
+  Save
 } from 'lucide-react'
 import { useServersStore } from '../stores/serversStore'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
-import { serversApi, systemApi } from '../api/client'
+import {
+  serversApi,
+  systemApi,
+  serverDeployStreamUrl,
+  ServerDeployEvent,
+  RemnawaveCertProfile,
+} from '../api/client'
+import { streamNdjson, StreamUnauthorizedError } from '../utils/ndjsonStream'
 import InfraTree from '../components/Infra/InfraTree'
 import { Tooltip } from '../components/ui/Tooltip'
 import { CopyableIp } from '../components/ui/CopyableIp'
@@ -36,6 +47,40 @@ interface ServerFormData {
   name: string
   host: string
   port: string
+}
+
+interface DeployFormData {
+  enabled: boolean
+  sshPort: string
+  sshUser: string
+  sshAuth: 'password' | 'key'
+  sshPassword: string
+  sshPrivateKey: string
+  sshPassphrase: string
+  installWarp: boolean
+  installRemnawave: boolean
+  remnaCertMode: 'inline' | 'saved'
+  remnaCertInline: string
+  remnaCertProfileId: number | null
+  installProxy: boolean
+  proxyUrl: string
+}
+
+const DEPLOY_DEFAULTS: DeployFormData = {
+  enabled: false,
+  sshPort: '22',
+  sshUser: 'root',
+  sshAuth: 'password',
+  sshPassword: '',
+  sshPrivateKey: '',
+  sshPassphrase: '',
+  installWarp: false,
+  installRemnawave: false,
+  remnaCertMode: 'inline',
+  remnaCertInline: '',
+  remnaCertProfileId: null,
+  installProxy: false,
+  proxyUrl: '',
 }
 
 const parseServerUrl = (url: string): { host: string; port: string } => {
@@ -67,6 +112,18 @@ export default function Servers() {
   const [installerToken, setInstallerToken] = useState<string | null>(null)
   const [tokenCopied, setTokenCopied] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
+
+  const [deploy, setDeploy] = useState<DeployFormData>(DEPLOY_DEFAULTS)
+  const [remnaCertProfiles, setRemnaCertProfiles] = useState<RemnawaveCertProfile[]>([])
+  const [deployLog, setDeployLog] = useState<string[]>([])
+  const [isDeploying, setIsDeploying] = useState(false)
+  const [savingCert, setSavingCert] = useState(false)
+  const deployLogRef = useRef<HTMLPreElement>(null)
+
+  useEffect(() => {
+    const el = deployLogRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [deployLog])
 
   const filteredServers = useMemo(() => {
     const q = searchQuery.toLowerCase().trim()
@@ -110,6 +167,17 @@ export default function Servers() {
       .catch(() => {})
   }, [showForm, editingId, installerToken])
 
+  const loadRemnaCertProfiles = () => {
+    serversApi.remnawaveCerts()
+      .then(res => setRemnaCertProfiles(res.data.profiles))
+      .catch(() => {})
+  }
+
+  useEffect(() => {
+    if (!showForm || editingId) return
+    loadRemnaCertProfiles()
+  }, [showForm, editingId])
+
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
     setError('')
@@ -131,6 +199,10 @@ export default function Servers() {
         toast.error(t('servers.failed_update'))
         setError(t('servers.failed_update'))
       }
+    } else if (deploy.enabled) {
+      setIsSubmitting(false)
+      await handleDeploy()
+      return
     } else {
       const serverData = {
         name: formData.name,
@@ -150,6 +222,109 @@ export default function Servers() {
     setIsSubmitting(false)
   }
 
+  const handleDeploy = async () => {
+    if (deploy.sshAuth === 'password' && !deploy.sshPassword.trim()) {
+      setError(t('servers.deploy_no_password'))
+      return
+    }
+    if (deploy.sshAuth === 'key' && !deploy.sshPrivateKey.trim()) {
+      setError(t('servers.deploy_no_key'))
+      return
+    }
+    if (deploy.installRemnawave) {
+      const hasInline = deploy.remnaCertMode === 'inline' && deploy.remnaCertInline.trim()
+      const hasSaved = deploy.remnaCertMode === 'saved' && deploy.remnaCertProfileId != null
+      if (!hasInline && !hasSaved) {
+        setError(t('servers.deploy_no_remna_cert'))
+        return
+      }
+    }
+    if (deploy.installProxy && !deploy.proxyUrl.trim()) {
+      setError(t('servers.deploy_no_proxy'))
+      return
+    }
+
+    setError('')
+    setDeployLog([])
+    setIsDeploying(true)
+
+    const body = {
+      name: formData.name,
+      host: formData.host,
+      monitoring_port: parseInt(formData.port || '9100', 10),
+      ssh_port: parseInt(deploy.sshPort || '22', 10),
+      ssh_user: deploy.sshUser.trim() || 'root',
+      ssh_password: deploy.sshAuth === 'password' ? deploy.sshPassword : null,
+      ssh_private_key: deploy.sshAuth === 'key' ? deploy.sshPrivateKey : null,
+      ssh_key_passphrase: deploy.sshAuth === 'key' ? deploy.sshPassphrase : null,
+      install_warp: deploy.installWarp,
+      install_remnawave: deploy.installRemnawave,
+      remnawave_cert_profile_id:
+        deploy.installRemnawave && deploy.remnaCertMode === 'saved' ? deploy.remnaCertProfileId : null,
+      remnawave_cert_inline:
+        deploy.installRemnawave && deploy.remnaCertMode === 'inline' ? deploy.remnaCertInline : null,
+      install_proxy: deploy.installProxy,
+      proxy_url: deploy.installProxy ? deploy.proxyUrl : null,
+    }
+
+    let succeeded = false
+    try {
+      await streamNdjson<ServerDeployEvent>(
+        serverDeployStreamUrl,
+        body,
+        (ev) => {
+          if (ev.type === 'log') {
+            setDeployLog(prev => [...prev, ev.line])
+          } else if (ev.type === 'start') {
+            setDeployLog(prev => [...prev, `--- ${ev.host} ---`])
+          } else if (ev.type === 'error') {
+            setDeployLog(prev => [...prev, `[ERROR] ${ev.message}`])
+            setError(ev.message)
+          } else if (ev.type === 'done') {
+            succeeded = ev.exit_code === 0
+          }
+        },
+        new AbortController().signal,
+      )
+    } catch (e) {
+      if (!(e instanceof StreamUnauthorizedError)) {
+        const msg = e instanceof Error ? e.message : String(e)
+        setError(msg)
+        setDeployLog(prev => [...prev, `[ERROR] ${msg}`])
+      }
+    }
+
+    setIsDeploying(false)
+
+    if (succeeded) {
+      toast.success(t('servers.deploy_success'))
+      await fetchServersWithMetrics()
+      setShowForm(false)
+      setEditingId(null)
+      setFormData({ name: '', host: '', port: '9100' })
+      setDeploy(DEPLOY_DEFAULTS)
+      setDeployLog([])
+      setError('')
+    } else {
+      toast.error(t('servers.deploy_failed'))
+    }
+  }
+
+  const handleSaveCert = async () => {
+    const name = window.prompt(t('servers.deploy_remna_save_prompt'))
+    if (!name || !name.trim()) return
+    setSavingCert(true)
+    try {
+      await serversApi.saveRemnawaveCert(name.trim(), deploy.remnaCertInline.trim())
+      toast.success(t('servers.deploy_remna_saved'))
+      loadRemnaCertProfiles()
+    } catch (e) {
+      const err = e as { response?: { data?: { detail?: string } } }
+      toast.error(err.response?.data?.detail || t('servers.deploy_remna_save_failed'))
+    }
+    setSavingCert(false)
+  }
+
   const handleEdit = (server: typeof servers[0]) => {
     setShowForm(false)
     setEditingId(server.id)
@@ -163,9 +338,12 @@ export default function Servers() {
   }
 
   const handleCancel = () => {
+    if (isDeploying) return
     setShowForm(false)
     setEditingId(null)
     setFormData({ name: '', host: '', port: '9100' })
+    setDeploy(DEPLOY_DEFAULTS)
+    setDeployLog([])
     setError('')
   }
 
@@ -433,15 +611,237 @@ export default function Servers() {
                 </p>
               </div>
 
+              {/* Авторазвёртывание по SSH */}
+              <div className="rounded-xl border border-dark-700/50 bg-dark-800/30 overflow-hidden">
+                <label className="flex items-center gap-3 p-4 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={deploy.enabled}
+                    onChange={(e) => setDeploy(d => ({ ...d, enabled: e.target.checked }))}
+                    className="w-4 h-4 rounded accent-accent-500 cursor-pointer"
+                  />
+                  <Rocket className="w-4 h-4 text-accent-500 flex-shrink-0" />
+                  <div>
+                    <span className="text-sm font-medium text-dark-100">{t('servers.deploy_title')}</span>
+                    <p className="text-xs text-dark-500">{t('servers.deploy_subtitle')}</p>
+                  </div>
+                </label>
+
+                <AnimatePresence>
+                  {deploy.enabled && (
+                    <motion.div
+                      className="px-4 pb-4 space-y-4 border-t border-dark-700/50 overflow-hidden"
+                      initial={{ height: 0, opacity: 0 }}
+                      animate={{ height: 'auto', opacity: 1 }}
+                      exit={{ height: 0, opacity: 0 }}
+                      transition={{ duration: 0.15 }}
+                    >
+                      <div className="grid grid-cols-3 gap-3 pt-4">
+                        <div>
+                          <label className="block text-xs text-dark-400 mb-1.5">{t('servers.deploy_ssh_port')}</label>
+                          <input
+                            type="text"
+                            value={deploy.sshPort}
+                            onChange={(e) => setDeploy(d => ({ ...d, sshPort: e.target.value.replace(/\D/g, '') }))}
+                            placeholder="22"
+                            className="input text-center"
+                          />
+                        </div>
+                        <div className="col-span-2">
+                          <label className="block text-xs text-dark-400 mb-1.5">{t('servers.deploy_ssh_user')}</label>
+                          <input
+                            type="text"
+                            value={deploy.sshUser}
+                            onChange={(e) => setDeploy(d => ({ ...d, sshUser: e.target.value }))}
+                            placeholder="root"
+                            className="input"
+                            autoComplete="off"
+                          />
+                        </div>
+                      </div>
+
+                      <div>
+                        <label className="block text-xs text-dark-400 mb-1.5">{t('servers.deploy_ssh_auth')}</label>
+                        <div className="flex gap-2 mb-2">
+                          {(['password', 'key'] as const).map(m => (
+                            <button
+                              key={m}
+                              type="button"
+                              onClick={() => setDeploy(d => ({ ...d, sshAuth: m }))}
+                              className={`btn text-sm flex-1 ${deploy.sshAuth === m ? 'btn-primary' : 'btn-secondary'}`}
+                            >
+                              {m === 'password' ? <KeyRound className="w-4 h-4" /> : <Terminal className="w-4 h-4" />}
+                              {t(m === 'password' ? 'servers.deploy_auth_password' : 'servers.deploy_auth_key')}
+                            </button>
+                          ))}
+                        </div>
+                        {deploy.sshAuth === 'password' ? (
+                          <input
+                            type="password"
+                            value={deploy.sshPassword}
+                            onChange={(e) => setDeploy(d => ({ ...d, sshPassword: e.target.value }))}
+                            placeholder={t('servers.deploy_ssh_password')}
+                            className="input"
+                            autoComplete="new-password"
+                          />
+                        ) : (
+                          <div className="space-y-2">
+                            <textarea
+                              value={deploy.sshPrivateKey}
+                              onChange={(e) => setDeploy(d => ({ ...d, sshPrivateKey: e.target.value }))}
+                              placeholder={t('servers.deploy_ssh_key_placeholder')}
+                              className="input font-mono text-xs resize-none w-full min-h-[88px]"
+                            />
+                            <input
+                              type="password"
+                              value={deploy.sshPassphrase}
+                              onChange={(e) => setDeploy(d => ({ ...d, sshPassphrase: e.target.value }))}
+                              placeholder={t('servers.deploy_ssh_passphrase')}
+                              className="input"
+                              autoComplete="new-password"
+                            />
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="space-y-3 pt-1">
+                        <p className="text-xs text-dark-400">{t('servers.deploy_extras')}</p>
+
+                        {/* WARP */}
+                        <label className="flex items-center gap-2.5 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={deploy.installWarp}
+                            onChange={(e) => setDeploy(d => ({ ...d, installWarp: e.target.checked }))}
+                            className="w-4 h-4 rounded accent-accent-500 cursor-pointer"
+                          />
+                          <span className="text-sm text-dark-200">{t('servers.deploy_install_warp')}</span>
+                        </label>
+
+                        {/* Remnawave */}
+                        <label className="flex items-center gap-2.5 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={deploy.installRemnawave}
+                            onChange={(e) => setDeploy(d => ({
+                              ...d,
+                              installRemnawave: e.target.checked,
+                              remnaCertMode: e.target.checked && remnaCertProfiles.length > 0 ? 'saved' : 'inline',
+                            }))}
+                            className="w-4 h-4 rounded accent-accent-500 cursor-pointer"
+                          />
+                          <span className="text-sm text-dark-200">{t('servers.deploy_install_remnawave')}</span>
+                        </label>
+                        {deploy.installRemnawave && (
+                          <div className="ml-6 space-y-2">
+                            {remnaCertProfiles.length > 0 && (
+                              <div className="flex gap-2">
+                                {(['saved', 'inline'] as const).map(mode => (
+                                  <button
+                                    key={mode}
+                                    type="button"
+                                    onClick={() => setDeploy(d => ({ ...d, remnaCertMode: mode }))}
+                                    className={`btn text-xs flex-1 ${deploy.remnaCertMode === mode ? 'btn-primary' : 'btn-secondary'}`}
+                                  >
+                                    {t(mode === 'saved' ? 'servers.deploy_remna_use_saved' : 'servers.deploy_remna_new')}
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                            {deploy.remnaCertMode === 'saved' && remnaCertProfiles.length > 0 ? (
+                              <select
+                                value={deploy.remnaCertProfileId ?? ''}
+                                onChange={(e) => setDeploy(d => ({
+                                  ...d,
+                                  remnaCertProfileId: e.target.value ? Number(e.target.value) : null,
+                                }))}
+                                className="input"
+                              >
+                                <option value="">{t('servers.deploy_remna_select')}</option>
+                                {remnaCertProfiles.map(p => (
+                                  <option key={p.id} value={p.id}>{p.name}</option>
+                                ))}
+                              </select>
+                            ) : (
+                              <>
+                                <textarea
+                                  value={deploy.remnaCertInline}
+                                  onChange={(e) => setDeploy(d => ({ ...d, remnaCertInline: e.target.value }))}
+                                  placeholder={t('servers.deploy_remna_cert_placeholder')}
+                                  className="input font-mono text-xs resize-none w-full min-h-[72px]"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={handleSaveCert}
+                                  disabled={savingCert || !deploy.remnaCertInline.trim()}
+                                  className="btn btn-secondary text-xs"
+                                >
+                                  {savingCert ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+                                  {t('servers.deploy_remna_save')}
+                                </button>
+                              </>
+                            )}
+                          </div>
+                        )}
+
+                        {/* Installer proxy */}
+                        <label className="flex items-center gap-2.5 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={deploy.installProxy}
+                            onChange={(e) => setDeploy(d => ({ ...d, installProxy: e.target.checked }))}
+                            className="w-4 h-4 rounded accent-accent-500 cursor-pointer"
+                          />
+                          <span className="text-sm text-dark-200">{t('servers.deploy_install_proxy')}</span>
+                        </label>
+                        {deploy.installProxy && (
+                          <div className="ml-6">
+                            <input
+                              type="text"
+                              value={deploy.proxyUrl}
+                              onChange={(e) => setDeploy(d => ({ ...d, proxyUrl: e.target.value }))}
+                              placeholder={t('servers.deploy_proxy_placeholder')}
+                              className="input"
+                              autoComplete="off"
+                            />
+                            <p className="text-xs text-dark-500 mt-1">{t('servers.deploy_proxy_hint')}</p>
+                          </div>
+                        )}
+                      </div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+
+              {/* Лог установки */}
+              {(isDeploying || deployLog.length > 0) && (
+                <div className="rounded-xl bg-dark-900/70 border border-dark-700/50 p-3">
+                  <div className="flex items-center gap-2 mb-2 text-xs text-dark-400">
+                    {isDeploying
+                      ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      : <Terminal className="w-3.5 h-3.5" />}
+                    {t('servers.deploy_log')}
+                  </div>
+                  <pre
+                    ref={deployLogRef}
+                    className="text-[11px] leading-relaxed font-mono text-dark-300 max-h-64 overflow-auto whitespace-pre-wrap"
+                  >
+                    {deployLog.join('\n')}
+                  </pre>
+                </div>
+              )}
+
               <div className="flex gap-3 pt-3">
                 <motion.button
                   type="submit"
-                  disabled={isSubmitting}
+                  disabled={isSubmitting || isDeploying}
                   className="btn btn-primary"
                   whileTap={{ scale: 0.98 }}
                 >
-                  {isSubmitting ? (
+                  {isSubmitting || isDeploying ? (
                     <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : deploy.enabled ? (
+                    <><Rocket className="w-4 h-4" />{t('servers.deploy_btn')}</>
                   ) : (
                     t('servers.add_server')
                   )}
@@ -449,6 +849,7 @@ export default function Servers() {
                 <motion.button
                   type="button"
                   onClick={handleCancel}
+                  disabled={isDeploying}
                   className="btn btn-secondary"
                   whileTap={{ scale: 0.98 }}
                 >

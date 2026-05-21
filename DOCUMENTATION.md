@@ -63,6 +63,26 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/in
 - `configs/vpn/sysctl.conf` — VPN-профиль sysctl; `disable_ipv6=1`; `arp_announce=2`/`arp_ignore=1`
 - `configs/panel/sysctl.conf` — панельный sysctl (умеренные лимиты); `arp_announce=2`/`arp_ignore=1`
 
+**Неинтерактивный режим (`--unattended`):**
+
+```bash
+bash install.sh --unattended
+```
+
+Запускает установку без меню и подтверждений. Компоненты выбираются через env-переменные:
+
+| Переменная | Описание |
+|------------|----------|
+| `MON_INSTALL_NODE=1` | Установить ноду мониторинга |
+| `MON_INSTALL_WARP=1` | Установить Cloudflare WARP |
+| `MON_INSTALL_REMNAWAVE=1` | Установить ноду Remnawave |
+| `MON_PROXY_URL` | HTTP-прокси для скачивания компонентов |
+| `NODE_SECRET` | Ключ API ноды мониторинга |
+| `PANEL_IP` | IP панели (для UFW ноды мониторинга) |
+| `REMNAWAVE_CERT` | Сертификат ноды Remnawave (не читается из /dev/tty) |
+
+Глобальный флаг `UNATTENDED=1` — все запросы подтверждения переустановки (нода/WARP/Remnawave) автоматически принимаются. Функция `run_unattended()` выполняет компоненты в порядке: HTTP-прокси установщика → нода мониторинга → WARP → нода Remnawave. Интерактивное меню без изменений.
+
 **Функции `install.sh`:**
 
 - `install_warp()` — устанавливает Cloudflare WARP; маппит кодовое имя дистрибутива на поддерживаемый Cloudflare релиз (bullseye/bookworm/jammy/noble) — неподдерживаемые кодовые имена (например Ubuntu 25.04 "plucky") автоматически подменяются на `noble`; после `apt-get install cloudflare-warp` проверяет успешность установки: если пакет не установился или `warp-cli` недоступен — выводит `[ERROR]`, удаляет нерабочий файл `/etc/apt/sources.list.d/cloudflare-client.list` и возвращает код 1; добавлены ключи локализации `warp_codename_fallback` и `warp_install_failed` (MSG_EN и MSG_RU)

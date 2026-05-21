@@ -15,7 +15,7 @@ logging.basicConfig(
 
 from app.database import init_db, async_session
 from app.config import get_settings
-from app.routers import servers, auth_router, proxy, settings as settings_router, system, bulk_actions, blocklist, remnawave, alerts, billing, backup, xray_monitor, ssh_security, infra, notes, wildcard_ssl, haproxy_profiles, torrent_blocker, firewall_profiles
+from app.routers import servers, server_deploy, auth_router, proxy, settings as settings_router, system, bulk_actions, blocklist, remnawave, alerts, billing, backup, xray_monitor, ssh_security, infra, notes, wildcard_ssl, haproxy_profiles, torrent_blocker, firewall_profiles
 from app.services.metrics_collector import start_collector, stop_collector
 from app.services.blocklist_manager import get_blocklist_manager
 from app.services.xray_stats_collector import start_xray_stats_collector, stop_xray_stats_collector
@@ -165,7 +165,7 @@ class GZipMiddlewareNoSSE:
         if scope["type"] == "http":
             path = scope.get("path", "")
             if (path.endswith("/execute-stream") or path.endswith("/notes/stream")
-                    or "/ssh-security/bulk/" in path):
+                    or "/ssh-security/bulk/" in path or path.endswith("/servers/deploy")):
                 await self.app(scope, receive, send)
                 return
         await self.gzip(scope, receive, send)
@@ -174,6 +174,9 @@ class GZipMiddlewareNoSSE:
 app.add_middleware(GZipMiddlewareNoSSE)
 
 app.include_router(auth_router.router)
+# server_deploy раньше servers: статичные пути /servers/remnawave-certs и /servers/deploy
+# должны матчиться до параметрического GET /servers/{server_id}
+app.include_router(server_deploy.router)
 app.include_router(servers.router)
 app.include_router(proxy.router)
 app.include_router(settings_router.router)

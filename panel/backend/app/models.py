@@ -17,6 +17,16 @@ class PKIKeygen(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
+class RemnawaveCertProfile(Base):
+    """Сохранённый сертификат (SECRET_KEY) ноды Remnawave — переиспользуется при автоустановке."""
+    __tablename__ = "remnawave_cert_profiles"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(100), nullable=False, unique=True)
+    secret_key = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
 class Server(Base):
     __tablename__ = "servers"
 

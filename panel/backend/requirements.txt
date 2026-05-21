@@ -22,3 +22,4 @@ psycopg2-binary>=2.9.0
 grpcio>=1.60.0
 certbot>=2.0.0
 certbot-dns-cloudflare>=2.0.0
+asyncssh>=2.14.0

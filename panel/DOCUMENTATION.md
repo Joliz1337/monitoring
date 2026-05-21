@@ -21,6 +21,7 @@
 - **Wildcard SSL** — выпуск wildcard сертификатов через certbot + Cloudflare DNS challenge, продление, деплой на ноды через API порта 9100; фоновое автопродление каждые 24ч; настройка пути деплоя и reload-команды для каждого сервера
 - **HAProxy Configs** — централизованные профили конфигурации HAProxy с массовой раскаткой на серверы: CRUD профилей и правил, балансировщик нагрузки, привязка серверов, history синхронизаций; запуск HAProxy per-server и bulk-запуск всех остановленных нод одним кликом
 - **Firewall Profiles** — шаблоны UFW с массовой раскаткой на серверы: CRUD профилей, привязка 1 сервер ↔ 1 активный профиль, history синхронизаций, node-API-port-guard (защита связи панели с нодой через порт 9100), drift-детекция по SHA256-хэшу
+- **Авторазвёртывание ноды** — установка ноды мониторинга прямо из вкладки «Серверы»: подключение по SSH (пароль или приватный ключ), запуск `install.sh --unattended` на целевом сервере, живой лог установки в браузере; опционально устанавливает WARP и ноду Remnawave с сохранёнными именованными сертификатами
 
 ## Интервалы сбора данных
 
@@ -276,6 +277,10 @@ Lifecycle клиентов управляется через `lifespan` в `main
 | PUT | /api/servers/{id} | Обновить (включая is_active для вкл/выкл мониторинга) |
 | DELETE | /api/servers/{id} | Удалить |
 | POST | /api/servers/{id}/test | Тест подключения |
+| POST | /api/servers/deploy | Авторазвёртывание ноды по SSH (NDJSON-стрим лога) |
+| GET | /api/servers/remnawave-certs | Список сохранённых сертификатов Remnawave (без секретов) |
+| POST | /api/servers/remnawave-certs | Сохранить сертификат {name, secret_key} |
+| DELETE | /api/servers/remnawave-certs/{id} | Удалить сохранённый сертификат |
 
 ### Infrastructure Tree (иерархия серверов)
 
@@ -790,6 +795,64 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 **Файлы:**
 - `panel/backend/app/services/ssh_manager.py` — пресеты безопасности; `proxy_to_node()` с параметром `use_apply_client` (HTTP/1.1 для долгих шагов fail2ban/password)
 - `panel/backend/app/routers/ssh_security.py` — API роутер; хелперы: `_ndjson()`, `_apply_steps()`, `_fetch_ssh_status()`, `_stream_ndjson()`
+
+### Авторазвёртывание ноды
+
+Установка ноды мониторинга на новый сервер прямо из вкладки «Серверы» панели. Подключается к целевому серверу по SSH, скачивает `install.sh` и запускает его в режиме `--unattended`.
+
+**Принцип работы:**
+1. Пользователь открывает форму «Добавить сервер», включает чекбокс «Автоустановка ноды по SSH»
+2. Вводит SSH-данные (порт, логин, пароль или приватный ключ + passphrase) и выбирает доп. компоненты
+3. Frontend отправляет `POST /api/servers/deploy`; бэкенд подключается по SSH через `asyncssh`
+4. Скачивает `install.sh`, запускает с `--unattended` и нужными env-переменными
+5. Построчный лог установки стримится в браузер через NDJSON
+6. При успехе создаётся запись `Server` (mTLS, shared cert)
+
+**SSH-подключение:**
+- Авторизация: пароль или приватный ключ (+ passphrase опционально)
+- Пароль SSH нигде не сохраняется
+- `known_hosts` отключён — целевые серверы заранее неизвестны
+- Таймаут установки: 25 минут
+
+**Дополнительные компоненты (чекбоксы в форме):**
+- **Cloudflare WARP** — устанавливается через `MON_INSTALL_WARP=1`
+- **Нода Remnawave** — устанавливается через `MON_INSTALL_REMNAWAVE=1`; сертификат передаётся через `REMNAWAVE_CERT`; доступен ввод сертификата вручную или выбор сохранённого профиля
+- **HTTP-прокси** — передаётся через `MON_PROXY_URL` для окружений без прямого доступа
+
+**Сохранённые сертификаты Remnawave (`RemnawaveCertProfile`):**
+
+Модель `RemnawaveCertProfile` (таблица `remnawave_cert_profiles`): id, name (unique), secret_key, created_at. Позволяет сохранить именованный сертификат один раз и переиспользовать при последующих развёртываниях. В ответах на `GET /api/servers/remnawave-certs` поле `secret_key` не возвращается.
+
+**NDJSON-стриминг лога (`POST /api/servers/deploy`):**
+
+```json
+{"type": "log", "line": "Installing monitoring node..."}
+{"type": "log", "line": "[OK] Node installed"}
+{"type": "done", "success": true}
+```
+
+При ошибке: `{"type": "done", "success": false, "error": "..."}`. GZip-middleware для `/servers/deploy` отключён — данные не буферизуются.
+
+**Регистрация роутера:** `server_deploy.router` зарегистрирован в `main.py` до `servers.router`, чтобы статичные пути (`/servers/deploy`, `/servers/remnawave-certs`) матчились раньше параметрического `GET /servers/{id}`.
+
+**Frontend (`panel/frontend/src/pages/Servers.tsx`):**
+- Чекбокс «Автоустановка ноды по SSH» в форме добавления сервера; при выключенном — сервер добавляется как раньше через `POST /api/servers`
+- SSH-поля: порт, логин, пароль или приватный ключ + passphrase
+- Чекбоксы компонентов: WARP, Remnawave (с вводом/выбором сертификата + кнопка «Сохранить сертификат»), HTTP-прокси
+- При submit — живой лог в форме, обновляется по мере поступления NDJSON-событий
+
+**Зависимости:**
+- `asyncssh` добавлен в `panel/backend/requirements.txt`
+
+**Локали:** новые строки `servers.deploy_*` в `ru.json` / `en.json`.
+
+**Файлы:**
+- `panel/backend/app/services/deploy_service.py` — SSH-подключение, скачивание и запуск `install.sh --unattended`, построчный стриминг лога
+- `panel/backend/app/routers/server_deploy.py` — роутер (prefix `/servers`): deploy, remnawave-certs CRUD
+- `panel/backend/app/models.py` — модель `RemnawaveCertProfile` (таблица `remnawave_cert_profiles`)
+- `panel/frontend/src/pages/Servers.tsx` — расширенная форма добавления сервера
+- `panel/frontend/src/api/client.ts` — методы `serversApi.remnawaveCerts/saveRemnawaveCert/deleteRemnawaveCert`, константа `serverDeployStreamUrl`, типы `RemnawaveCertProfile`, `ServerDeployEvent`
+- `panel/frontend/src/locales/ru.json`, `en.json` — ключи `servers.deploy_*`
 
 ### Backup & Restore
 

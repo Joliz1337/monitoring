@@ -433,6 +433,22 @@ export interface ServerWithMetrics extends Server {
   status?: 'online' | 'offline' | 'loading' | 'error'
 }
 
+export interface RemnawaveCertProfile {
+  id: number
+  name: string
+  created_at: string | null
+}
+
+// События NDJSON-стрима авторазвёртывания ноды (POST /servers/deploy)
+export type ServerDeployEvent =
+  | { type: 'start'; host: string }
+  | { type: 'log'; line: string }
+  | { type: 'error'; message: string }
+  | { type: 'done'; exit_code: number; server_id: number | null }
+
+// Стрим идёт не через axios — нужен полный путь с /api для fetch
+export const serverDeployStreamUrl = '/api/servers/deploy'
+
 export const serversApi = {
   list: (includeMetrics?: boolean) =>
     api.get<{ count: number; servers: ServerWithMetrics[] }>('/servers', {
@@ -478,6 +494,15 @@ export const serversApi = {
     api.post<{ success: boolean; renamed: number }>('/servers/folders/rename', { old_name: oldName, new_name: newName }),
   deleteFolder: (folderName: string) =>
     api.delete<{ success: boolean; unfoldered: number }>(`/servers/folders/${encodeURIComponent(folderName)}`),
+  remnawaveCerts: () =>
+    api.get<{ profiles: RemnawaveCertProfile[] }>('/servers/remnawave-certs'),
+  saveRemnawaveCert: (name: string, secretKey: string) =>
+    api.post<{ success: boolean; id: number; name: string }>('/servers/remnawave-certs', {
+      name,
+      secret_key: secretKey,
+    }),
+  deleteRemnawaveCert: (id: number) =>
+    api.delete<{ success: boolean }>(`/servers/remnawave-certs/${id}`),
 }
 
 export const proxyApi = {

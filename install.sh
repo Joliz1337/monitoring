@@ -100,6 +100,9 @@ BIN_PATH="/usr/local/bin/mon"
 
 LANG_CODE="en"
 
+# Неинтерактивный режим (--unattended): подтверждения переустановки берут дефолт "y"
+UNATTENDED=0
+
 # ==================== Proxy Support ====================
 
 load_proxy() {
@@ -1686,8 +1689,9 @@ install_node() {
     
     if [ -d "$NODE_DIR" ]; then
         log_warn "$(msg node_already_installed) $NODE_DIR"
-        local confirm
-        confirm=$(safe_read "$(msg reinstall_confirm) " "n" 30)
+        local confirm confirm_default="n"
+        [ "$UNATTENDED" = "1" ] && confirm_default="y"
+        confirm=$(safe_read "$(msg reinstall_confirm) " "$confirm_default" 30)
         if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
             log_info "$(msg installation_cancelled)"
             return 1
@@ -1963,8 +1967,9 @@ randomhtml_remnawave() {
 install_remnawave() {
     if [ -d "$REMNAWAVE_DIR" ] && [ -f "$REMNAWAVE_DIR/docker-compose.yml" ]; then
         log_warn "$(msg remnawave_already_installed) $REMNAWAVE_DIR"
-        local confirm
-        confirm=$(safe_read "$(msg remnawave_reinstall_confirm) " "n" 30)
+        local confirm confirm_default="n"
+        [ "$UNATTENDED" = "1" ] && confirm_default="y"
+        confirm=$(safe_read "$(msg remnawave_reinstall_confirm) " "$confirm_default" 30)
         if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
             log_info "$(msg installation_cancelled)"
             return 1
@@ -1977,15 +1982,24 @@ install_remnawave() {
     install_docker_if_needed || return 1
 
     echo ""
-    log_info "$(msg remnawave_enter_key)"
     local CERTIFICATE=""
-    while IFS= read -r line; do
-        if [ -z "$line" ]; then
-            [ -n "$CERTIFICATE" ] && break
-        else
-            CERTIFICATE="${CERTIFICATE}${line}\n"
-        fi
-    done </dev/tty
+    if [ -n "${REMNAWAVE_CERT:-}" ]; then
+        # Сертификат пришёл из env (автоустановка) — переводы строк уже экранированы как \n
+        CERTIFICATE="$REMNAWAVE_CERT"
+    else
+        log_info "$(msg remnawave_enter_key)"
+        while IFS= read -r line; do
+            if [ -z "$line" ]; then
+                [ -n "$CERTIFICATE" ] && break
+            else
+                CERTIFICATE="${CERTIFICATE}${line}\n"
+            fi
+        done </dev/tty
+    fi
+    if [ -z "$CERTIFICATE" ]; then
+        log_error "Remnawave certificate is empty"
+        return 1
+    fi
 
     log_info "$(msg remnawave_installing)"
 
@@ -2153,8 +2167,9 @@ install_warp() {
     # Проверка: уже установлен?
     if command -v warp-cli &>/dev/null; then
         log_warn "$(msg warp_already_installed): $(warp-cli --version 2>/dev/null || echo '?')"
-        local answer
-        answer=$(safe_read "$(msg warp_reinstall_confirm) " "n" 30)
+        local answer answer_default="n"
+        [ "$UNATTENDED" = "1" ] && answer_default="y"
+        answer=$(safe_read "$(msg warp_reinstall_confirm) " "$answer_default" 30)
         [[ "$answer" =~ ^[Yy]$ ]] || return 0
     fi
 
@@ -2803,11 +2818,63 @@ show_menu() {
 
 # ==================== Main ====================
 
+# ==================== Unattended Mode ====================
+
+# Неинтерактивная установка по env-флагам — вызывается панелью по SSH.
+# Порядок: прокси установщика → нода мониторинга → WARP → нода Remnawave.
+run_unattended() {
+    UNATTENDED=1
+
+    mkdir -p /etc/monitoring 2>/dev/null || true
+    [ -f /etc/monitoring/language ] || echo "en" > /etc/monitoring/language 2>/dev/null || true
+    load_language
+
+    echo "=========================================="
+    echo " Monitoring Installer — unattended mode"
+    echo "=========================================="
+
+    if [ -n "${MON_PROXY_URL:-}" ]; then
+        log_info "Configuring installer proxy"
+        cat > /etc/monitoring/proxy.conf << PROXYEOF
+PROXY_ENABLED=1
+PROXY_URL=${MON_PROXY_URL}
+PROXYEOF
+        chmod 600 /etc/monitoring/proxy.conf 2>/dev/null || true
+        load_proxy
+        configure_apt_proxy
+        configure_docker_proxy
+        log_success "Installer proxy configured"
+    fi
+
+    if [ "${MON_INSTALL_NODE:-0}" = "1" ]; then
+        check_git || { log_error "git is required"; exit 1; }
+        clone_repo || { log_error "Failed to download repository"; exit 1; }
+        install_node || { log_error "Node installation failed"; cleanup_temp; exit 1; }
+        cleanup_temp
+    fi
+
+    if [ "${MON_INSTALL_WARP:-0}" = "1" ]; then
+        install_warp || { log_error "WARP installation failed"; exit 1; }
+    fi
+
+    if [ "${MON_INSTALL_REMNAWAVE:-0}" = "1" ]; then
+        install_remnawave || { log_error "Remnawave installation failed"; exit 1; }
+    fi
+
+    log_success "Unattended installation complete"
+}
+
 main() {
     # Acquire lock to prevent parallel execution
     acquire_lock
-    
+
     check_root
+
+    if [ "${1:-}" = "--unattended" ]; then
+        run_unattended
+        exit $?
+    fi
+
     load_language
     load_proxy
     
