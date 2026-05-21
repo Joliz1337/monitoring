@@ -256,6 +256,25 @@ Lifecycle клиентов управляется через `lifespan` в `main
 - Применяются только через UI панели (раздел Обновления) или API
 - Включают: sysctl настройки, limits, systemd limits
 
+**Страница «Системные оптимизации» (SystemOptimizations.tsx):**
+
+Отображает диагностику NIC на каждой ноде через `GET /api/system/nic-info`. Оператор видит бейджи диагностики и выбирает режим (rps/hybrid/multiqueue) самостоятельно — авто-рекомендация не используется.
+
+Диагностика на карточке ноды:
+- Бейдж «Multiqueue: N очередей» или «Multiqueue: нет» (по `max_hw_queues` из `interfaces[]`)
+- Бейдж «CPU: Nя / Nп» — физические ядра / логические потоки
+
+**Интерфейс `NicInfo` (`panel/frontend/src/api/client.ts`):**
+```typescript
+interface NicInfo {
+    nic_mode: string;
+    multiqueue_supported: boolean;
+    cpu_cores: number;
+    cpu_threads: number;
+    interfaces: { name: string; max_hw_queues: number; current_hw_queues: number }[];
+}
+```
+
 ### Авторизация
 
 | Метод | Endpoint | Описание |

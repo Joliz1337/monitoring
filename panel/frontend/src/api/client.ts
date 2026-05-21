@@ -791,7 +791,8 @@ export interface NicInterface {
 export interface NicInfo {
   nic_mode: string
   multiqueue_supported: boolean
-  hybrid_recommended?: boolean
+  cpu_cores: number
+  cpu_threads: number
   interfaces: NicInterface[]
 }
 

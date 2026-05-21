@@ -287,6 +287,33 @@ export default function SystemOptimizations() {
   const loadingOrOffline = nodesList.filter(n => (n.loadState !== 'loaded' || n.status === 'offline') && !n.installed)
 
   // Рендер карточки ноды
+  // Диагностика NIC/CPU: аппаратный multiqueue, число очередей, ядра/потоки —
+  // оператор выбирает режим сам, без авто-рекомендации
+  const renderNicDiag = (nicInfo: NicInfo) => {
+    const maxQueues = nicInfo.interfaces.reduce((m, i) => Math.max(m, i.max_hw_queues), 0)
+    return (
+      <>
+        <Tooltip label={t('sys_opt.nic_mq_hint')}>
+          <span className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-medium rounded-full border cursor-help ${
+            nicInfo.multiqueue_supported
+              ? 'bg-purple-500/10 text-purple-400 border-purple-500/30'
+              : 'bg-dark-700/50 text-dark-400 border-dark-600/50'
+          }`}>
+            {nicInfo.multiqueue_supported
+              ? t('sys_opt.nic_mq_yes', { queues: maxQueues })
+              : t('sys_opt.nic_mq_no')}
+          </span>
+        </Tooltip>
+        <Tooltip label={t('sys_opt.nic_cpu_hint')}>
+          <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-medium rounded-full border bg-dark-700/50 text-dark-300 border-dark-600/50 cursor-help">
+            <Cpu className="w-2.5 h-2.5" />
+            {t('sys_opt.nic_cpu', { cores: nicInfo.cpu_cores, threads: nicInfo.cpu_threads })}
+          </span>
+        </Tooltip>
+      </>
+    )
+  }
+
   const renderNodeCard = (node: NodeState, _defaultProfile?: string) => {
     const isApplying = applyingNodes.has(node.id)
     const isRemoving = removingNodes.has(node.id)
@@ -297,7 +324,6 @@ export default function SystemOptimizations() {
     const showModeDropdown = modeDropdown === node.id
     const showConfirmRemove = confirmRemove === node.id
     const mqSupported = node.nicInfo?.multiqueue_supported ?? false
-    const hybridRecommended = node.nicInfo?.hybrid_recommended ?? false
     const currentProfile = node.optProfile || 'vpn'
     const hasOpenDropdown = showModeDropdown || showConfirmRemove
 
@@ -338,28 +364,7 @@ export default function SystemOptimizations() {
                         {getNicModeLabel(node.nicMode)}
                       </span>
                     )}
-                    {node.installed && !node.nodeOutdated && node.nicInfo && (() => {
-                      const { multiqueue_supported, hybrid_recommended } = node.nicInfo
-                      if (hybrid_recommended && node.nicMode !== 'hybrid') {
-                        return (
-                          <Tooltip label={t('sys_opt.mq_available_hint')}>
-                            <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-medium rounded-full border bg-success/10 text-success border-success/30 cursor-help">
-                              {t('sys_opt.recommended')}: {getNicModeLabel('hybrid')}
-                            </span>
-                          </Tooltip>
-                        )
-                      }
-                      if (multiqueue_supported && (!node.nicMode || node.nicMode === 'rps' || node.nicMode === 'none')) {
-                        return (
-                          <Tooltip label={t('sys_opt.mq_available_hint')}>
-                            <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-medium rounded-full border bg-purple-500/10 text-purple-400 border-purple-500/30 cursor-help">
-                              {t('sys_opt.mq_available')}
-                            </span>
-                          </Tooltip>
-                        )
-                      }
-                      return null
-                    })()}
+                    {node.installed && !node.nodeOutdated && node.nicInfo && renderNicDiag(node.nicInfo)}
                     {node.nodeOutdated && (
                       <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-medium rounded-full border bg-warning/20 text-warning border-warning/30">
                         <AlertTriangle className="w-2.5 h-2.5" />
@@ -475,7 +480,6 @@ export default function SystemOptimizations() {
                                 <div className="text-dark-200 flex items-center gap-1.5">
                                   {t('sys_opt.nic_hybrid')}
                                   {node.nicMode === 'hybrid' && <span className="text-[9px] text-success">{t('sys_opt.current')}</span>}
-                                  {hybridRecommended && node.nicMode !== 'hybrid' && <span className="text-[9px] text-success">{t('sys_opt.recommended')}</span>}
                                 </div>
                                 <div className="text-[10px] text-dark-500">{t('sys_opt.hybrid_desc')}</div>
                               </div>
@@ -562,7 +566,6 @@ export default function SystemOptimizations() {
     const result = results[`node-${node.id}`]
     const showModeDropdown = modeDropdown === node.id
     const mqSupported = node.nicInfo?.multiqueue_supported ?? false
-    const hybridRecommended = node.nicInfo?.hybrid_recommended ?? false
 
     return (
       <motion.div
@@ -584,28 +587,7 @@ export default function SystemOptimizations() {
               </h3>
               <div className="flex items-center gap-2 mt-0.5 flex-wrap">
                 <span className="text-xs text-dark-500">{t('sys_opt.not_installed')}</span>
-                {node.nicInfo && (() => {
-                  const { multiqueue_supported, hybrid_recommended } = node.nicInfo
-                  if (hybrid_recommended) {
-                    return (
-                      <Tooltip label={t('sys_opt.mq_available_hint')}>
-                        <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-medium rounded-full border bg-success/10 text-success border-success/30 cursor-help">
-                          {t('sys_opt.recommended')}: {getNicModeLabel('hybrid')}
-                        </span>
-                      </Tooltip>
-                    )
-                  }
-                  if (multiqueue_supported) {
-                    return (
-                      <Tooltip label={t('sys_opt.mq_available_hint')}>
-                        <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-medium rounded-full border bg-purple-500/10 text-purple-400 border-purple-500/30 cursor-help">
-                          {t('sys_opt.mq_available')}
-                        </span>
-                      </Tooltip>
-                    )
-                  }
-                  return null
-                })()}
+                {node.nicInfo && renderNicDiag(node.nicInfo)}
               </div>
             </div>
           </div>
@@ -691,7 +673,6 @@ export default function SystemOptimizations() {
                               <div>
                                 <div className="text-dark-200 flex items-center gap-1.5">
                                   {t('sys_opt.nic_hybrid')}
-                                  {hybridRecommended && <span className="text-[9px] text-success">{t('sys_opt.recommended')}</span>}
                                 </div>
                                 <div className="text-[10px] text-dark-500">{t('sys_opt.hybrid_desc')}</div>
                               </div>

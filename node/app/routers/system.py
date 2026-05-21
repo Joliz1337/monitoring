@@ -560,13 +560,6 @@ EXPECTED_SYSCTL_VALUES = {
     "net.ipv4.tcp_keepalive_intvl": "15",
 }
 
-# Порог достаточности аппаратных очередей NIC. Каждая очередь обрабатывается
-# своим ядром и тянет ~1 Гбит/с, поэтому 3+ очередей покрывают типовую
-# нагрузку и программный RPS (режим hybrid) даёт только оверхед.
-# Hybrid имеет смысл рекомендовать лишь при 1-2 аппаратных очередях.
-HW_QUEUES_SUFFICIENT = 3
-
-
 async def read_host_file(path: str) -> Optional[str]:
     """Read file from host filesystem via nsenter"""
     executor = get_host_executor()
@@ -705,28 +698,27 @@ async def get_nic_info():
                 "current_hw_queues": current_hw,
             })
 
-    hybrid_recommended = False
-    if multiqueue_supported:
-        nproc_result = await executor.execute("nproc", timeout=3)
-        if nproc_result.success and nproc_result.stdout.strip().isdigit():
-            cpu_count = int(nproc_result.stdout.strip())
-            max_hw_queues = max(
-                (iface["max_hw_queues"] for iface in interfaces),
-                default=0,
-            )
-            # RPS поверх аппаратных очередей (hybrid) оправдан, только когда
-            # очередей мало: 3+ очередей уже покрывают типовую нагрузку, и
-            # добавлять программный RPS — лишь тратить CPU. Нужны и свободные
-            # ядра под RPS, иначе режим вырождается в чистый multiqueue.
-            hybrid_recommended = (
-                0 < max_hw_queues < HW_QUEUES_SUFFICIENT
-                and max_hw_queues < cpu_count
-            )
+    # CPU: логические потоки (nproc) и физические ядра (lscpu) — для ручного
+    # выбора режима оператором, без авто-рекомендации
+    cpu_threads = 0
+    cpu_cores = 0
+    nproc_result = await executor.execute("nproc", timeout=3)
+    if nproc_result.success and nproc_result.stdout.strip().isdigit():
+        cpu_threads = int(nproc_result.stdout.strip())
+    cores_result = await executor.execute(
+        "lscpu -p=CORE 2>/dev/null | grep -v '^#' | sort -u | grep -c .",
+        timeout=3, shell="bash",
+    )
+    if cores_result.success and cores_result.stdout.strip().isdigit():
+        cpu_cores = int(cores_result.stdout.strip())
+    if cpu_cores <= 0:
+        cpu_cores = cpu_threads
 
     return {
         "nic_mode": nic_mode,
         "multiqueue_supported": multiqueue_supported,
-        "hybrid_recommended": hybrid_recommended,
+        "cpu_cores": cpu_cores,
+        "cpu_threads": cpu_threads,
         "interfaces": interfaces,
     }
 
