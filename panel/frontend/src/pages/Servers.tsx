@@ -57,6 +57,9 @@ interface DeployFormData {
   sshPassword: string
   sshPrivateKey: string
   sshPassphrase: string
+  sshPreset: 'none' | 'recommended' | 'maximum'
+  changePassword: boolean
+  newPassword: string
   installWarp: boolean
   installOptimizations: boolean
   optProfile: 'vpn' | 'panel'
@@ -76,6 +79,9 @@ const DEPLOY_DEFAULTS: DeployFormData = {
   sshPassword: '',
   sshPrivateKey: '',
   sshPassphrase: '',
+  sshPreset: 'none',
+  changePassword: false,
+  newPassword: '',
   installWarp: false,
   installOptimizations: false,
   optProfile: 'vpn',
@@ -247,6 +253,10 @@ export default function Servers() {
       setError(t('servers.deploy_no_proxy'))
       return
     }
+    if (deploy.changePassword && deploy.newPassword.length < 8) {
+      setError(t('servers.deploy_password_short'))
+      return
+    }
 
     setError('')
     setDeployLog([])
@@ -271,6 +281,8 @@ export default function Servers() {
         deploy.installRemnawave && deploy.remnaCertMode === 'inline' ? deploy.remnaCertInline : null,
       install_proxy: deploy.installProxy,
       proxy_url: deploy.installProxy ? deploy.proxyUrl : null,
+      ssh_preset: deploy.sshPreset === 'none' ? null : deploy.sshPreset,
+      new_root_password: deploy.changePassword ? deploy.newPassword : null,
     }
 
     let succeeded = false
@@ -715,6 +727,48 @@ export default function Servers() {
                               value={deploy.sshPassphrase}
                               onChange={(e) => setDeploy(d => ({ ...d, sshPassphrase: e.target.value }))}
                               placeholder={t('servers.deploy_ssh_passphrase')}
+                              className="input"
+                              autoComplete="new-password"
+                            />
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="space-y-3 pt-1">
+                        <p className="text-xs text-dark-400">{t('servers.deploy_ssh_hardening')}</p>
+
+                        <div>
+                          <label className="block text-xs text-dark-400 mb-1.5">{t('servers.deploy_ssh_preset')}</label>
+                          <div className="flex gap-2">
+                            {(['none', 'recommended', 'maximum'] as const).map(p => (
+                              <button
+                                key={p}
+                                type="button"
+                                onClick={() => setDeploy(d => ({ ...d, sshPreset: p }))}
+                                className={`btn text-xs flex-1 ${deploy.sshPreset === p ? 'btn-primary' : 'btn-secondary'}`}
+                              >
+                                {t(`servers.deploy_preset_${p}`)}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        <label className="flex items-center gap-2.5 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={deploy.changePassword}
+                            onChange={(e) => setDeploy(d => ({ ...d, changePassword: e.target.checked }))}
+                            className="w-4 h-4 rounded accent-accent-500 cursor-pointer"
+                          />
+                          <span className="text-sm text-dark-200">{t('servers.deploy_change_password')}</span>
+                        </label>
+                        {deploy.changePassword && (
+                          <div className="ml-6">
+                            <input
+                              type="password"
+                              value={deploy.newPassword}
+                              onChange={(e) => setDeploy(d => ({ ...d, newPassword: e.target.value }))}
+                              placeholder={t('servers.deploy_new_password')}
                               className="input"
                               autoComplete="new-password"
                             />

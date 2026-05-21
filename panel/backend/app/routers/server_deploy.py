@@ -23,6 +23,7 @@ from app.models import RemnawaveCertProfile, Server
 from app.services.blocklist_manager import get_blocklist_manager
 from app.services.deploy_service import DeployParams, deploy_node
 from app.services.pki import build_installer_token
+from app.services.ssh_manager import proxy_to_node, RECOMMENDED_PRESET, MAXIMUM_PRESET
 from app.services.time_sync import get_time_sync_service
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -152,6 +153,8 @@ class DeployRequest(BaseModel):
     save_remnawave_cert_name: Optional[str] = None
     install_proxy: bool = False
     proxy_url: Optional[str] = None
+    ssh_preset: Optional[str] = None  # None | "recommended" | "maximum"
+    new_root_password: Optional[str] = None
 
 
 async def _resolve_remnawave_cert(req: DeployRequest) -> str:
@@ -212,6 +215,53 @@ async def _create_server(name: str, url: str) -> int:
     return server_id
 
 
+async def _post_install(server_id: int, req: "DeployRequest"):
+    """Постустановочные шаги через API ноды: смена пароля root и SSH-пресет.
+
+    Best-effort — нода уже развёрнута; ошибки шагов только логируются в стрим.
+    """
+    if not req.ssh_preset and not req.new_root_password:
+        return
+
+    async with async_session_maker() as db:
+        result = await db.execute(select(Server).where(Server.id == server_id))
+        server = result.scalar_one_or_none()
+    if not server:
+        return
+
+    # Дать ноде подняться и принять mTLS-подключение панели
+    await asyncio.sleep(8)
+    yield {"type": "log", "line": "[panel] Применение SSH-настроек через API ноды..."}
+
+    if req.new_root_password:
+        try:
+            await proxy_to_node(
+                server, "POST", "/api/ssh/password",
+                {"user": "root", "password": req.new_root_password},
+                timeout=120.0, use_apply_client=True,
+            )
+            yield {"type": "log", "line": "[panel] Пароль root изменён"}
+        except Exception as exc:  # noqa: BLE001 — best-effort постшаг
+            yield {"type": "log", "line": f"[panel] Не удалось сменить пароль root: {exc}"}
+
+    if req.ssh_preset:
+        preset = RECOMMENDED_PRESET if req.ssh_preset == "recommended" else MAXIMUM_PRESET
+        label = "рекомендуемый" if req.ssh_preset == "recommended" else "максимальный"
+        try:
+            await proxy_to_node(server, "POST", "/api/ssh/config", preset["ssh"], timeout=30.0)
+            yield {"type": "log", "line": f"[panel] SSH-конфиг применён (пресет: {label})"}
+        except Exception as exc:  # noqa: BLE001 — best-effort постшаг
+            yield {"type": "log", "line": f"[panel] SSH-конфиг не применён: {exc}"}
+        try:
+            await proxy_to_node(
+                server, "POST", "/api/ssh/fail2ban/config", preset["fail2ban"],
+                timeout=120.0, use_apply_client=True,
+            )
+            yield {"type": "log", "line": "[panel] fail2ban настроен"}
+        except Exception as exc:  # noqa: BLE001 — best-effort постшаг
+            yield {"type": "log", "line": f"[panel] fail2ban не настроен: {exc}"}
+
+
 @router.post("/deploy")
 async def deploy_server(
     req: DeployRequest,
@@ -233,6 +283,11 @@ async def deploy_server(
         proxy_url = (req.proxy_url or "").strip()
         if not proxy_url:
             raise HTTPException(400, "Не указан адрес прокси")
+
+    if req.ssh_preset and req.ssh_preset not in ("recommended", "maximum"):
+        raise HTTPException(400, "Некорректный SSH-пресет")
+    if req.new_root_password is not None and len(req.new_root_password) < 8:
+        raise HTTPException(400, "Пароль root: минимум 8 символов")
 
     panel_ip = _resolve_panel_ip()
     node_secret = build_installer_token(request.app.state.pki, panel_ip=panel_ip)
@@ -272,6 +327,8 @@ async def deploy_server(
                                 "message": f"Установка прошла, но не удалось добавить сервер: {exc}",
                             })
                             return
+                        async for log_event in _post_install(server_id, req):
+                            yield _ndjson(log_event)
                     yield _ndjson({
                         "type": "done",
                         "exit_code": exit_code,

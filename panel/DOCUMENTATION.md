@@ -833,11 +833,22 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 
 Модель `RemnawaveCertProfile` (таблица `remnawave_cert_profiles`): id, name (unique), secret_key, created_at. Позволяет сохранить именованный сертификат один раз и переиспользовать при последующих развёртываниях. В ответах на `GET /api/servers/remnawave-certs` поле `secret_key` не возвращается.
 
-**Поля запроса `POST /api/servers/deploy` (оптимизации):**
+**Поля запроса `POST /api/servers/deploy`:**
 
-`DeployRequest` → `DeployParams` содержат:
+`DeployRequest` содержит:
 - `install_optimizations: bool` — при `true` передаётся `MON_INSTALL_OPTIMIZATIONS=1`; NIC-режим определяется автоматически через `auto_detect_nic_mode()` на целевом сервере
 - `opt_profile: str` — профиль sysctl (`vpn` по умолчанию или `panel`); передаётся через `MON_OPT_PROFILE` только когда `install_optimizations=true`
+- `ssh_preset: str | None` — пресет защиты SSH для постустановочного применения: `None` / `recommended` / `maximum`; соответствует пресетам из `app/services/ssh_manager.py`
+- `new_root_password: str | None` — новый пароль root (минимум 8 символов); если задан — меняется после установки ноды
+
+**Постустановочная защита SSH (`_post_install`):**
+
+После того как нода установлена и запись `Server` создана, роутер `server_deploy.py` запускает асинхронный генератор `_post_install(server_id, req)` в фоне. Шаги:
+1. Пауза ~8 секунд — нода поднимается после установки
+2. Если `new_root_password` задан — вызов `POST /api/ssh/password` на ноде через `proxy_to_node()`
+3. Если `ssh_preset` задан — вызов `POST /api/ssh/config` и `POST /api/ssh/fail2ban/config` с данными из соответствующего пресета (`RECOMMENDED_PRESET` / `MAXIMUM_PRESET`)
+
+Все шаги **best-effort**: ошибки пишутся в лог установки как NDJSON-события `{"type": "log", ...}`, но не отменяют результат — нода считается успешно добавленной. Лог постустановки попадает в тот же NDJSON-стрим, что и лог `install.sh`.
 
 **NDJSON-стриминг лога (`POST /api/servers/deploy`):**
 
@@ -856,6 +867,9 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 - SSH-поля: порт, логин, пароль или приватный ключ + passphrase
 - Чекбоксы компонентов: **Системные оптимизации** (NIC-режим определяется автоматически), WARP, Remnawave, HTTP-прокси; при включении оптимизаций появляется переключатель «VPN-сервер» / «Универсальные» — выбранный профиль уходит в поле `opt_profile`
 - Выбор сертификата Remnawave: сохранённые профили отображаются кликабельными чипами с именами; клик — выбор; крестик на чипе — удаление; кнопка «Новый сертификат» переключает в режим ввода нового; при вводе нового доступна кнопка «Сохранить сертификат»
+- Раздел **«Защита SSH»** в форме автоустановки (после компонентов):
+  - Переключатель пресета: «Не менять» / «Рекомендуемый» / «Максимальный» (соответствуют `None`, `recommended`, `maximum` в поле `ssh_preset`)
+  - Чекбокс «Сменить пароль root» + поле нового пароля (минимум 8 символов); отправляется в поле `new_root_password`
 - При submit — живой лог в форме, обновляется по мере поступления NDJSON-событий
 
 **Зависимости:**
