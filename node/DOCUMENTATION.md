@@ -419,9 +419,13 @@ data: {"message": "error description"}
 
 Хранятся в `/etc/monitoring/ufw_backup_<timestamp>.json` на хост-системе (через nsenter). При превышении `MAX_BACKUPS=5` старые удаляются.
 
+**Автоустановка UFW:**
+
+Перед применением профиля `apply_profile` проверяет наличие `ufw` на хосте (`command -v ufw`). Если `ufw` не установлен — нода автоматически ставит его через `apt-get install -y -qq ufw` (сначала из кеша, при неудаче — `apt-get update` и повтор). Если установить не удалось — apply возвращает понятную ошибку «UFW недоступен на хосте: ...» вместо сообщения nsenter.
+
 **Файлы:**
 - `node/app/models/firewall_profile.py` — Pydantic модели
-- `node/app/services/firewall_manager.py` — `FirewallManager`: `apply_profile`, `_backup_state`, `_restore_state`, `compute_rules_hash`, `get_full_state`
+- `node/app/services/firewall_manager.py` — `FirewallManager`: `apply_profile`, `_ensure_ufw`, `_ufw_available`, `_install_ufw`, `_run_host`, `_backup_state`, `_restore_state`, `compute_rules_hash`, `get_full_state`
 - `node/app/routers/firewall_profile.py` — API роутер (prefix `/api/firewall`)
 - `node/app/main.py` — регистрация роутера с `verify_api_key`
 

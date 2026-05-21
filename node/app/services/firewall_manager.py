@@ -100,7 +100,21 @@ class FirewallManager:
             return False, "", "Command timed out"
         except Exception as e:
             return False, "", str(e)
-    
+
+    def _run_host(self, args: list[str], timeout: int = 30) -> tuple[bool, str, str]:
+        """Выполнить произвольную команду на хосте (через nsenter в контейнере)."""
+        if self._use_nsenter:
+            cmd = ["nsenter", "-t", "1", "-m", "-u", "-n", "-i", "--"] + args
+        else:
+            cmd = args
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            return result.returncode == 0, result.stdout.strip(), result.stderr.strip()
+        except subprocess.TimeoutExpired:
+            return False, "", "Command timed out"
+        except Exception as e:
+            return False, "", str(e)
+
     def is_active(self) -> bool:
         """Check if UFW is active"""
         success, stdout, _ = self._run_ufw(["status"])
@@ -706,6 +720,40 @@ class FirewallManager:
                 return True
         return False
 
+    def _ufw_available(self) -> bool:
+        """ufw присутствует на хосте и доступен для запуска."""
+        ok, stdout, _ = self._run_host(["sh", "-c", "command -v ufw"])
+        return ok and bool(stdout)
+
+    def _install_ufw(self) -> tuple[bool, str]:
+        """Поставить ufw на хост через apt (хост — Ubuntu/Debian)."""
+        logger.warning("ufw отсутствует на хосте — устанавливаю через apt")
+        install_cmd = "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ufw"
+
+        # Сначала пробуем из кеша apt — обычно укладывается в таймаут панели
+        ok, stdout, stderr = self._run_host(["sh", "-c", install_cmd], timeout=90)
+        if ok and self._ufw_available():
+            logger.info("ufw установлен на хосте")
+            return True, ""
+
+        # Кеш пуст или устарел — обновляем списки пакетов и повторяем
+        self._run_host(
+            ["sh", "-c", "DEBIAN_FRONTEND=noninteractive apt-get update -qq"],
+            timeout=90,
+        )
+        ok, stdout, stderr = self._run_host(["sh", "-c", install_cmd], timeout=90)
+        if ok and self._ufw_available():
+            logger.info("ufw установлен на хосте после apt-get update")
+            return True, ""
+
+        return False, f"не удалось установить ufw: {stderr or stdout or 'unknown error'}"
+
+    def _ensure_ufw(self) -> tuple[bool, str]:
+        """Гарантировать наличие ufw на хосте перед применением профиля."""
+        if self._ufw_available():
+            return True, ""
+        return self._install_ufw()
+
     def apply_profile(
         self,
         rules: list[dict],
@@ -729,6 +777,16 @@ class FirewallManager:
                 "rules_hash": None,
                 "rolled_back": False,
                 "error_log": None,
+            }
+
+        ufw_ok, ufw_err = self._ensure_ufw()
+        if not ufw_ok:
+            return {
+                "success": False,
+                "message": f"UFW недоступен на хосте: {ufw_err}",
+                "rules_hash": None,
+                "rolled_back": False,
+                "error_log": ufw_err,
             }
 
         backup_path = self._backup_state()
