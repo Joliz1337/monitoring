@@ -560,6 +560,12 @@ EXPECTED_SYSCTL_VALUES = {
     "net.ipv4.tcp_keepalive_intvl": "15",
 }
 
+# Порог достаточности аппаратных очередей NIC. Каждая очередь обрабатывается
+# своим ядром и тянет ~1 Гбит/с, поэтому 3+ очередей покрывают типовую
+# нагрузку и программный RPS (режим hybrid) даёт только оверхед.
+# Hybrid имеет смысл рекомендовать лишь при 1-2 аппаратных очередях.
+HW_QUEUES_SUFFICIENT = 3
+
 
 async def read_host_file(path: str) -> Optional[str]:
     """Read file from host filesystem via nsenter"""
@@ -619,6 +625,48 @@ async def detect_nic_mode(executor) -> str:
     return "none"
 
 
+async def detect_iface_hw_queues(executor, iface: str) -> tuple[int, int]:
+    """Определить число аппаратных очередей интерфейса как (max, current).
+
+    Зеркалит get_max_hw_queues() из install.sh: учитывает не только Combined,
+    но и раздельные RX/TX-очереди — карты mlx4_en и часть igb/ixgbe показывают
+    `Combined: n/a`, но имеют рабочие RX/TX. Если ethtool без channels API —
+    fallback на подсчёт rx-очередей в sysfs.
+    """
+    ethtool_result = await executor.execute(f"ethtool -l {iface} 2>/dev/null", timeout=5)
+    if ethtool_result.success and ethtool_result.exit_code == 0:
+        preset = {"Combined": 0, "RX": 0, "TX": 0}
+        current = {"Combined": 0, "RX": 0, "TX": 0}
+        section: Optional[dict] = None
+        for raw_line in ethtool_result.stdout.split("\n"):
+            line = raw_line.strip()
+            if "Pre-set maximums" in line:
+                section = preset
+            elif "Current hardware settings" in line:
+                section = current
+            elif section is not None and ":" in line:
+                key, _, value = line.partition(":")
+                key, value = key.strip(), value.strip()
+                if key in section and value.isdigit():
+                    section[key] = int(value)
+
+        max_hw = preset["Combined"] or max(preset["RX"], preset["TX"])
+        current_hw = current["Combined"] or max(current["RX"], current["TX"])
+        if max_hw > 0:
+            return max_hw, (current_hw or max_hw)
+
+    # Fallback: драйвер без channels API — считаем rx-очереди в sysfs
+    sysfs_result = await executor.execute(
+        f"ls -d /sys/class/net/{iface}/queues/rx-* 2>/dev/null | wc -l", timeout=5
+    )
+    if sysfs_result.success and sysfs_result.stdout.strip().isdigit():
+        count = int(sysfs_result.stdout.strip())
+        if count > 0:
+            return count, count
+
+    return 1, 1
+
+
 @router.get("/nic-info")
 async def get_nic_info():
     """Detect NIC tuning mode and hardware multiqueue capabilities."""
@@ -647,39 +695,14 @@ async def get_nic_info():
             if not iface:
                 continue
 
-            max_combined = 1
-            current_combined = 1
-
-            ethtool_result = await executor.execute(
-                f"ethtool -l {iface} 2>/dev/null", timeout=5
-            )
-            if ethtool_result.success and ethtool_result.exit_code == 0:
-                # Парсим Pre-set maximums и Current hardware settings
-                in_preset = False
-                in_current = False
-                for line in ethtool_result.stdout.split("\n"):
-                    line = line.strip()
-                    if "Pre-set maximums" in line:
-                        in_preset = True
-                        in_current = False
-                    elif "Current hardware settings" in line:
-                        in_current = True
-                        in_preset = False
-                    elif line.startswith("Combined:"):
-                        val = line.split(":")[1].strip()
-                        if val.isdigit():
-                            if in_preset:
-                                max_combined = int(val)
-                            elif in_current:
-                                current_combined = int(val)
-
-            if max_combined > 1:
+            max_hw, current_hw = await detect_iface_hw_queues(executor, iface)
+            if max_hw > 1:
                 multiqueue_supported = True
 
             interfaces.append({
                 "name": iface,
-                "max_combined": max_combined,
-                "current_combined": current_combined,
+                "max_hw_queues": max_hw,
+                "current_hw_queues": current_hw,
             })
 
     hybrid_recommended = False
@@ -688,10 +711,17 @@ async def get_nic_info():
         if nproc_result.success and nproc_result.stdout.strip().isdigit():
             cpu_count = int(nproc_result.stdout.strip())
             max_hw_queues = max(
-                (iface["max_combined"] for iface in interfaces if iface.get("max_combined")),
+                (iface["max_hw_queues"] for iface in interfaces),
                 default=0,
             )
-            hybrid_recommended = 0 < max_hw_queues < cpu_count
+            # RPS поверх аппаратных очередей (hybrid) оправдан, только когда
+            # очередей мало: 3+ очередей уже покрывают типовую нагрузку, и
+            # добавлять программный RPS — лишь тратить CPU. Нужны и свободные
+            # ядра под RPS, иначе режим вырождается в чистый multiqueue.
+            hybrid_recommended = (
+                0 < max_hw_queues < HW_QUEUES_SUFFICIENT
+                and max_hw_queues < cpu_count
+            )
 
     return {
         "nic_mode": nic_mode,

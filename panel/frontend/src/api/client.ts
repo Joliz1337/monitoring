@@ -759,8 +759,8 @@ export interface NodeOptimizationsInfo {
 
 export interface NicInterface {
   name: string
-  max_combined: number
-  current_combined: number
+  max_hw_queues: number
+  current_hw_queues: number
 }
 
 export interface NicInfo {

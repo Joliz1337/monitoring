@@ -125,6 +125,8 @@ node/
 | GET | /api/system/update/status | Статус обновления |
 | GET | /api/system/optimizations/version | Версия системных оптимизаций (installed + version) |
 | POST | /api/system/optimizations/apply | Применить системные оптимизации |
+| POST | /api/system/optimizations/remove | Удалить все системные оптимизации |
+| GET | /api/system/nic-info | Режим NIC и аппаратные возможности multiqueue |
 | POST | /api/system/execute | Выполнить команду на хосте |
 | POST | /api/system/execute-stream | Выполнить команду с потоковым выводом (SSE) |
 | POST | /api/system/time-sync | Установить часовой пояс и синхронизировать NTP |
@@ -189,6 +191,39 @@ data: {"exit_code": 0, "execution_time_ms": 1234, "success": true}
 event: error
 data: {"message": "error description"}
 ```
+
+**Детект NIC и рекомендация режима** (`GET /api/system/nic-info`):
+
+Определяет активный режим NIC-тюнинга и аппаратные возможности multiqueue для каждого физического интерфейса с поднятым линком. Используется панелью на вкладке `/system-optimizations` для рекомендации оптимального режима.
+
+```json
+// Response
+{
+    "nic_mode": "multiqueue",
+    "multiqueue_supported": true,
+    "hybrid_recommended": false,
+    "interfaces": [
+        {
+            "name": "eth0",
+            "max_hw_queues": 4,
+            "current_hw_queues": 4
+        }
+    ]
+}
+```
+
+Поля:
+- `nic_mode` — активный режим: `"rps"`, `"multiqueue"`, `"hybrid"` или `"none"` (определяется по enabled-статусу systemd-сервисов)
+- `multiqueue_supported` — `true`, если хотя бы один интерфейс имеет `max_hw_queues > 1`
+- `hybrid_recommended` — `true`, если аппаратных очередей мало (1–2) и есть свободные ядра CPU под программный RPS; при 3+ очередях всегда `false` (константа `HW_QUEUES_SUFFICIENT = 3`)
+- `interfaces[].max_hw_queues` — максимальное число аппаратных очередей; при наличии `Combined` — берётся оно, иначе `max(RX, TX)`; если ethtool не поддерживает channels API — fallback на подсчёт `rx-*` в sysfs
+- `interfaces[].current_hw_queues` — текущее активное число очередей
+
+Алгоритм определения очередей (`detect_iface_hw_queues`) зеркалит `get_max_hw_queues()` из `install.sh` и корректно обрабатывает карты с `Combined: n/a` (mlx4_en, часть igb/ixgbe), которые показывают только раздельные RX/TX.
+
+Логика `hybrid_recommended`:
+- Было: `0 < max_hw_queues < cpu_count` — рекомендовался при любом числе очередей меньше ядер CPU
+- Стало: `0 < max_hw_queues < HW_QUEUES_SUFFICIENT and max_hw_queues < cpu_count` — только при 1–2 очередях; 3+ очередей достаточно для типовой нагрузки, добавлять RPS поверх них — лишний оверхед
 
 **Механизм обновления**:
 1. API создаёт временный контейнер `monitoring-updater` (образ `docker:cli`)
