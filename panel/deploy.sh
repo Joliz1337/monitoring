@@ -810,19 +810,29 @@ setup_cert_renewal_cron() {
     # Symlinked cert — renewal is managed by the source certificate owner
     if [ -L "$cert_path" ]; then
         print_info "Certificate is linked — auto-renewal managed externally"
+        # Снять устаревшую задачу продления, оставшуюся от прямого сертификата
+        if crontab -l 2>/dev/null | grep -q "certbot renew"; then
+            crontab -l 2>/dev/null | grep -v "certbot renew" | crontab - 2>/dev/null || true
+        fi
         return 0
     fi
 
-    local cron_job="0 3 * * * certbot renew --quiet --deploy-hook 'docker compose -f ${SCRIPT_DIR}/docker-compose.yml restart nginx'"
+    # panel-nginx постоянно держит порт 80, поэтому standalone-плагин certbot
+    # не сможет его занять во время продления. Контейнер останавливается
+    # перед продлением (--pre-hook) и поднимается обратно после (--post-hook).
+    # Ограничение --cert-name защищает от попыток продлить wildcard-сертификаты
+    # (их продлевает панель через Cloudflare DNS, у них нет файла credentials).
+    local cron_job="0 3 * * * certbot renew --cert-name '${DOMAIN}' --quiet --pre-hook 'docker stop panel-nginx >/dev/null 2>&1 || true' --post-hook 'docker start panel-nginx >/dev/null 2>&1 || true'"
 
-    if crontab -l 2>/dev/null | grep -q "certbot renew"; then
+    if crontab -l 2>/dev/null | grep -qF "$cron_job"; then
         print_status "Certificate auto-renewal cron job already exists"
         return 0
     fi
 
     print_info "Setting up automatic certificate renewal..."
 
-    (crontab -l 2>/dev/null; echo "$cron_job") | crontab - 2>/dev/null || {
+    # Заменяем любую прежнюю (в т.ч. сломанную) задачу certbot renew на актуальную
+    { crontab -l 2>/dev/null | grep -v "certbot renew"; echo "$cron_job"; } | crontab - 2>/dev/null || {
         print_warning "Could not add cron job"
         return 1
     }

@@ -62,7 +62,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/in
 
 **Поведение для symlink-сертификатов:**
 - certbot не устанавливается
-- cron автопродления не настраивается (`setup_cert_renewal_cron` пропускает шаг)
+- cron автопродления не устанавливается (`setup_cert_renewal_cron` пропускает шаг); если старая cron-задача уже существует — она удаляется
 - `print_credentials` показывает путь к источнику и пометку "Managed externally"
 
 **Пример:** wildcard `*.nexyonn.com` лежит в `/etc/letsencrypt/live/nexyonn.com/`. Домен панели `panel.nexyonn.com` — скрипт найдёт сертификат автоматически и создаст symlink, certbot не запустится.
@@ -71,6 +71,22 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/in
 - В разделе **Настройки** отображается информация о сертификате панели
 - Показывается домен, дата истечения и дней до истечения
 - Кнопка "Продлить" для ручного продления через веб-интерфейс
+
+**Cron автопродления (только для сертификатов, выпущенных certbot напрямую):**
+
+`setup_cert_renewal_cron()` устанавливает ежедневную задачу с pre/post-hook:
+
+```
+certbot renew --cert-name '<DOMAIN>' --quiet \
+  --pre-hook  'docker stop panel-nginx ...' \
+  --post-hook 'docker start panel-nginx ...'
+```
+
+- `--cert-name <DOMAIN>` — ограничивает задачу только сертификатом панели; wildcard-сертификаты (продлеваются через Cloudflare DNS) не затрагиваются
+- `--pre-hook` останавливает `panel-nginx` перед certbot, освобождая порт 80 для standalone-плагина
+- `--post-hook` поднимает `panel-nginx` обратно независимо от результата
+- `renew-cert.sh` (ручное продление через UI) использует аналогичный подход: `trap 'docker start panel-nginx ...' EXIT` сразу после остановки nginx — контейнер гарантированно поднимается при любом исходе, включая ошибку certbot
+- Идемпотентность: при повторном запуске `deploy.sh` старая строка `certbot renew` удаляется из crontab и заменяется актуальной
 
 **Требования для certbot (только если нет wildcard/SAN):**
 - Домен должен указывать на IP сервера

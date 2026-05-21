@@ -7,7 +7,8 @@
 # Usage: renew-cert.sh [--force]
 #   --force: Force renewal even if certificate is not due
 
-set -e
+# Без set -e: скрипт сам разбирает коды возврата certbot ниже.
+# При set -e падение `CERTBOT_OUTPUT=$(...)` прервало бы скрипт до старта nginx.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FORCE_RENEWAL=""
@@ -52,6 +53,9 @@ fi
 # Stop nginx to free port 80
 echo "Stopping nginx..."
 docker stop panel-nginx 2>/dev/null || true
+# nginx обязан подняться даже при любом сбое certbot ниже,
+# иначе панель останется недоступной
+trap 'docker start panel-nginx >/dev/null 2>&1 || true' EXIT
 sleep 2
 
 # Run certbot via Docker
