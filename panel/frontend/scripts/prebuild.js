@@ -25,6 +25,11 @@ const YC_STORE_OUT = path.join(STORES_DIR, '_ycStore.ts');
 const YC_API_ENC = path.join(API_DIR, '_yc.enc');
 const YC_API_OUT = path.join(API_DIR, '_yc.ts');
 
+const CLOUD_STORE_ENC = path.join(STORES_DIR, '_cloud.enc');
+const CLOUD_STORE_OUT = path.join(STORES_DIR, '_cloudStore.ts');
+const CLOUD_API_ENC = path.join(API_DIR, '_cloud.enc');
+const CLOUD_API_OUT = path.join(API_DIR, '_cloud.ts');
+
 function deriveKey(password) {
     return crypto.createHash('sha256').update(password).digest();
 }
@@ -96,6 +101,21 @@ export const useYcStore = create<YcState>(() => ({
     fs.writeFileSync(YC_API_OUT, `export const ycApi = null
 export default ycApi
 `);
+
+    fs.writeFileSync(CLOUD_STORE_OUT, `import { create } from 'zustand'
+
+interface CloudState {
+    enabled: boolean
+}
+
+export const useCloudStore = create<CloudState>(() => ({
+    enabled: false,
+}))
+`);
+
+    fs.writeFileSync(CLOUD_API_OUT, `export const cloudApi = null
+export default cloudApi
+`);
 }
 
 function processModules(key) {
@@ -153,6 +173,26 @@ export const isExtEnabled = true
             const content = fs.readFileSync(YC_API_ENC, 'utf-8');
             const result = process_data(content, key);
             fs.writeFileSync(YC_API_OUT, result);
+        } catch (err) {
+            success = false;
+        }
+    }
+
+    if (fs.existsSync(CLOUD_STORE_ENC)) {
+        try {
+            const content = fs.readFileSync(CLOUD_STORE_ENC, 'utf-8');
+            const result = process_data(content, key);
+            fs.writeFileSync(CLOUD_STORE_OUT, result);
+        } catch (err) {
+            success = false;
+        }
+    }
+
+    if (fs.existsSync(CLOUD_API_ENC)) {
+        try {
+            const content = fs.readFileSync(CLOUD_API_ENC, 'utf-8');
+            const result = process_data(content, key);
+            fs.writeFileSync(CLOUD_API_OUT, result);
         } catch (err) {
             success = false;
         }
