@@ -550,7 +550,7 @@ KNOWN_UA_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-VERSION_PATTERN = re.compile(r'^[\d._]+$')
+VERSION_PATTERN = re.compile(r'\d')
 
 
 @router.get("/anomalies")
@@ -675,7 +675,7 @@ async def get_anomalies(
         problems = []
         if not platform or not platform.strip():
             problems.append("платформа: пусто")
-        if not os_version or not VERSION_PATTERN.match(os_version.strip()):
+        if not os_version or not VERSION_PATTERN.search(os_version.strip()):
             problems.append(f"версия: «{os_version or 'пусто'}»")
         if not device_model or not device_model.strip():
             problems.append("модель: пусто")
