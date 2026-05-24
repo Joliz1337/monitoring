@@ -673,15 +673,15 @@ class XrayStatsCollector:
 
             lines = [
                 "\u26a0\ufe0f <b>Аномалия: IP превышает лимит</b>\n",
-                f"\ud83d\udc64 <b>{cached.username or f'#{email}'}</b> (ID: <code>{email}</code>)",
-                f"\ud83c\udf10 IP: <b>{ip_count}</b> / {cached.hwid_device_limit} (ASN: <b>{unique_asn_count}</b>)",
+                f"\U0001F464 <b>{cached.username or f'#{email}'}</b> (ID: <code>{email}</code>)",
+                f"\U0001F310 IP: <b>{ip_count}</b> / {cached.hwid_device_limit} (ASN: <b>{unique_asn_count}</b>)",
                 "",
             ]
             for group in asn_groups:
                 asn_label = f"AS{group['asn']}" if group["asn"] else "Unknown"
                 holder = group.get("holder") or ""
                 header = f"{asn_label} {holder}".strip()
-                lines.append(f"\ud83d\udccd <b>{header}</b> — {group['count']} IP")
+                lines.append(f"\U0001F4CD <b>{header}</b> — {group['count']} IP")
                 for ip in group["ips"][:5]:
                     lines.append(f"  \u2022 <code>{ip}</code>")
                 if group["count"] > 5:
@@ -740,9 +740,9 @@ class XrayStatsCollector:
                     from app.services.telegram_bot import get_telegram_bot_service
                     await get_telegram_bot_service().send_message(
                         bot_token, chat_id,
-                        f"\ud83d\udd0d <b>Аномалия: Неизвестный User-Agent</b>\n\n"
-                        f"\ud83d\udc64 <b>{cached.username or f'#{cached.email}'}</b> (ID: <code>{cached.email}</code>)\n"
-                        f"\ud83d\udcbb {platform or '?'} / {device_model or '?'}\n"
+                        f"\U0001F50D <b>Аномалия: Неизвестный User-Agent</b>\n\n"
+                        f"\U0001F464 <b>{cached.username or f'#{cached.email}'}</b> (ID: <code>{cached.email}</code>)\n"
+                        f"\U0001F4BB {platform or '?'} / {device_model or '?'}\n"
                         f"<code>{user_agent[:80]}</code>",
                         reply_markup={"inline_keyboard": keyboard},
                     )
@@ -769,8 +769,8 @@ class XrayStatsCollector:
                 await get_telegram_bot_service().send_message(
                     bot_token, chat_id,
                     f"\u26a0\ufe0f <b>Аномалия: Невалидные данные устройства</b>\n\n"
-                    f"\ud83d\udc64 <b>{cached.username or f'#{cached.email}'}</b> (ID: <code>{cached.email}</code>)\n"
-                    f"\ud83d\udcbb HWID: <code>{hwid[:40]}</code>\n"
+                    f"\U0001F464 <b>{cached.username or f'#{cached.email}'}</b> (ID: <code>{cached.email}</code>)\n"
+                    f"\U0001F4BB HWID: <code>{hwid[:40]}</code>\n"
                     f"\u274c {', '.join(problems)}",
                     reply_markup={"inline_keyboard": keyboard},
                 )
