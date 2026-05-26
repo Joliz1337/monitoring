@@ -1,9 +1,13 @@
 #!/bin/bash
 #
 # Monitoring System Installer
-# 
-# Quick install:
+#
+# Interactive install (menu):
 #   bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh)
+#
+# Auto-install node (one-liner for cloud-init / hosting user-data):
+#   bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh) <NODE_SECRET>
+#   bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh) <NODE_SECRET> --optimize
 #
 # After installation, run: mon
 #
@@ -2920,7 +2924,71 @@ main() {
 
     check_root
 
-    if [ "${1:-}" = "--unattended" ]; then
+    # ---- Quick auto-install:
+    #   bash install.sh <NODE_SECRET>                       — устанавливает ноду
+    #   bash install.sh <NODE_SECRET> --optimize            — нода + sysctl/NIC
+    #   bash install.sh <NODE_SECRET> --optimize --profile=panel
+    #   bash install.sh --node=<NODE_SECRET> [--optimize]   — то же явным флагом
+    #   bash install.sh --unattended                        — старый env-режим
+    local quick_token=""
+    local quick_optimize=0
+    local quick_profile=""
+    local saw_unattended=0
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --unattended)
+                saw_unattended=1
+                ;;
+            --optimize)
+                quick_optimize=1
+                ;;
+            --profile=*)
+                quick_profile="${1#--profile=}"
+                ;;
+            --node=*)
+                quick_token="${1#--node=}"
+                ;;
+            -h|--help)
+                cat <<'HELPEOF'
+Monitoring System Installer
+
+Usage:
+  bash install.sh                              Interactive menu
+  bash install.sh <NODE_SECRET>                Auto-install node (unattended)
+  bash install.sh <NODE_SECRET> --optimize     Node + system optimizations (auto NIC)
+  bash install.sh <NODE_SECRET> --optimize --profile=panel|vpn
+  bash install.sh --node=<NODE_SECRET>         Same as positional form
+  bash install.sh --unattended                 Env-driven install (MON_INSTALL_*, NODE_SECRET, ...)
+
+Quick remote install:
+  bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh) <NODE_SECRET>
+HELPEOF
+                exit 0
+                ;;
+            -*)
+                log_warn "Unknown option: $1"
+                ;;
+            *)
+                [ -z "$quick_token" ] && quick_token="$1"
+                ;;
+        esac
+        shift
+    done
+
+    if [ -n "$quick_token" ]; then
+        export NODE_SECRET="$quick_token"
+        export MON_INSTALL_NODE=1
+        if [ "$quick_optimize" = "1" ]; then
+            export MON_INSTALL_OPTIMIZATIONS=1
+            [ -z "${MON_NIC_MODE:-}" ] && export MON_NIC_MODE="auto"
+            [ -n "$quick_profile" ] && export MON_OPT_PROFILE="$quick_profile"
+        fi
+        run_unattended
+        exit $?
+    fi
+
+    if [ "$saw_unattended" = "1" ]; then
         run_unattended
         exit $?
     fi

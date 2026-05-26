@@ -63,6 +63,35 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/in
 - `configs/vpn/sysctl.conf` — VPN-профиль sysctl (`MON_OPT_PROFILE=vpn`): агрессивный тюнинг для VPN/прокси-нод; `disable_ipv6=1`; `file-max 2097152`; `nf_conntrack_max 2097152`; `arp_announce=2`/`arp_ignore=1`
 - `configs/panel/sysctl.conf` — универсальный профиль sysctl (`MON_OPT_PROFILE=panel`): умеренный тюнинг для панелей и смешанных нагрузок; IPv6 не отключается; `file-max 524288`; `nf_conntrack_max 262144`; расслабленные conntrack-таймауты; `arp_announce=2`/`arp_ignore=1`
 
+**Быстрая установка ноды (one-liner):**
+
+```bash
+# Установить только ноду
+bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh) <NODE_SECRET>
+
+# Нода + системные оптимизации (автоопределение NIC)
+bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh) <NODE_SECRET> --optimize
+
+# Нода + оптимизации с явным профилем sysctl
+bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh) <NODE_SECRET> --optimize --profile=vpn
+
+# То же через именованный флаг
+bash install.sh --node=<NODE_SECRET> [--optimize] [--profile=vpn|panel]
+```
+
+Аргументы командной строки `main()`:
+
+| Аргумент | Описание |
+|----------|----------|
+| `<NODE_SECRET>` (позиционный) | Экспортирует `NODE_SECRET`, `MON_INSTALL_NODE=1` и вызывает `run_unattended` |
+| `--node=<NODE_SECRET>` | Эквивалент позиционного аргумента |
+| `--optimize` | Дополнительно ставит `MON_INSTALL_OPTIMIZATIONS=1` и `MON_NIC_MODE=auto` |
+| `--profile=vpn\|panel` | Задаёт `MON_OPT_PROFILE`; применяется только вместе с `--optimize` |
+| `--unattended` | Старый env-driven режим, поведение не изменилось |
+| `-h`, `--help` | Печатает справку и выходит |
+
+При передаче `NODE_SECRET` скрипт вычитывает `panel_ip` из самого токена — дополнительно `PANEL_IP` задавать не нужно.
+
 **Неинтерактивный режим (`--unattended`):**
 
 ```bash
