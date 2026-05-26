@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 PAGE_SIZE = 500
 BAN_RETENTION_DAYS = 35
+SEND_CONCURRENCY = 30  # макс параллельных POST к нодам — без лимита 100+ одновременных запросов забивают keepalive-пул и роняют поток метрик
 
 
 class TorrentBlockerService:
@@ -122,26 +123,29 @@ class TorrentBlockerService:
             logger.warning("No target nodes for torrent blocker bans")
             return {}
 
+        sem = asyncio.Semaphore(SEND_CONCURRENCY)
+
         async def _send_one(server: Server) -> dict:
-            try:
-                client = get_node_client(server)
-                response = await client.post(
-                    f"{server.url}/api/ipset/bulk-add",
-                    headers=node_auth_headers(server),
-                    json={
-                        "ips": ips,
-                        "permanent": False,
-                        "direction": "in",
-                        "timeout": ban_seconds,
-                    },
-                    timeout=20.0,
-                )
-                if response.status_code == 200:
-                    data = response.json()
-                    return {"success": True, "added": data.get("added", 0)}
-                return {"success": False, "error": f"HTTP {response.status_code}"}
-            except Exception as e:
-                return {"success": False, "error": str(e)}
+            async with sem:
+                try:
+                    client = get_node_client(server)
+                    response = await client.post(
+                        f"{server.url}/api/ipset/bulk-add",
+                        headers=node_auth_headers(server),
+                        json={
+                            "ips": ips,
+                            "permanent": False,
+                            "direction": "in",
+                            "timeout": ban_seconds,
+                        },
+                        timeout=20.0,
+                    )
+                    if response.status_code == 200:
+                        data = response.json()
+                        return {"success": True, "added": data.get("added", 0)}
+                    return {"success": False, "error": f"HTTP {response.status_code}"}
+                except Exception as e:
+                    return {"success": False, "error": str(e)}
 
         tasks = [_send_one(s) for s in targets]
         results_list = await asyncio.gather(*tasks)

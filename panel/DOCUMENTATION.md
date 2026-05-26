@@ -151,11 +151,26 @@ CI/CD: `.github/workflows/docker-publish.yml` — 3 параллельных job
 
 ### HTTP-клиент (backend → ноды)
 
-`panel/backend/app/services/http_client.py` предоставляет два долгоживущих `httpx.AsyncClient` с connection pooling:
-- `_node_client` — для запросов к нодам (`verify=False`, переиспользует TCP-соединения)
-- `_external_client` — для внешних API
+`panel/backend/app/services/http_client.py` предоставляет четыре долгоживущих `httpx.AsyncClient` с connection pooling:
 
-Lifecycle клиентов управляется через `lifespan` в `main.py` (создаются при старте, закрываются при остановке). Все роутеры и сервисы используют эти клиенты вместо создания нового `AsyncClient` на каждый запрос.
+| Клиент | Назначение |
+|--------|-----------|
+| `_node_client_legacy` | Короткие запросы метрик к legacy-нодам (`verify=False`) |
+| `_node_client_mtls` | Короткие запросы к mTLS-нодам |
+| `_node_apply_client_legacy` | Длительные apply-операции (firewall/HAProxy profile apply, `read=300s`), отдельный пул 20 соединений — не конкурирует с потоком метрик |
+| `_node_apply_client_mtls` | То же для mTLS-нод |
+| `_external_client` | Внешние API (`http2=True`) |
+
+Lifecycle управляется через `lifespan` в `main.py`. Выбор клиента — через `get_node_client(server)` / `get_node_apply_client(server)`.
+
+**Параметры основного клиента к нодам (`_NODE_LIMITS`, `_NODE_TIMEOUT`):**
+- `keepalive_expiry=30` сек — намеренно меньше `keepalive_timeout` nginx нод (65 сек), чтобы панель не переиспользовала соединения, уже закрытые сервером
+- `read=10.0` сек — нагруженные ноды могут отвечать дольше 5 сек
+- `http2=False` на всех клиентах к нодам — HTTP/2 state machine при попытке отправки в уже закрытое nginx соединение вызывает фатальную ошибку (`ConnectionInputs.SEND_HEADERS in state CLOSED`), HTTP/1.1 делает переподключение автоматически
+
+**Корень проблемы с offline-нодами:** несовпадение `keepalive_expiry` клиента (ранее 120 сек) с `keepalive_timeout` nginx нод (65 сек) + `http2=True` давало фатальные h2-ошибки → срабатывал circuit breaker (3 сбоя → 30 сек skip) → `last_seen` уходил за порог offline (60 сек) → панель показывала ноду offline. Устранено в v10.4.1.
+
+**Параллелизм Torrent Blocker:** `torrent_blocker.py` при каждом цикле рассылает POST-запросы на все активные ноды. Константа `SEND_CONCURRENCY = 30` ограничивает число одновременных запросов через `asyncio.Semaphore(30)` — без лимита 100+ одновременных запросов забивали keepalive-пул и роняли параллельный поток метрик пачками ошибок.
 
 ### Frontend: авто-обновление данных
 

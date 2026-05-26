@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 _NODE_LIMITS = httpx.Limits(
     max_connections=500,
     max_keepalive_connections=100,
-    keepalive_expiry=120,
+    keepalive_expiry=30,
 )
 
 _EXTERNAL_LIMITS = httpx.Limits(
@@ -29,13 +29,13 @@ _EXTERNAL_LIMITS = httpx.Limits(
     keepalive_expiry=60,
 )
 
-_NODE_TIMEOUT = httpx.Timeout(connect=2.0, read=5.0, write=2.0, pool=2.0)
+_NODE_TIMEOUT = httpx.Timeout(connect=2.0, read=10.0, write=2.0, pool=2.0)
 _EXTERNAL_TIMEOUT = httpx.Timeout(connect=5.0, read=15.0, write=5.0, pool=5.0)
 
 _node_client_mtls: httpx.AsyncClient | None = None
 _node_client_legacy: httpx.AsyncClient | None = None
-# Отдельные HTTP/1.1 клиенты для долгих apply-запросов: HTTP/2 + nginx (proxy_read_timeout)
-# выдают StreamReset PROTOCOL_ERROR на запросах длиннее ~60 сек, на HTTP/1.1 это работает стабильно.
+# Отдельные клиенты для долгих apply-запросов: read=300s и свой пул соединений,
+# чтобы тяжёлые операции не конкурировали с потоком метрик за keepalive-слоты.
 _node_apply_client_mtls: httpx.AsyncClient | None = None
 _node_apply_client_legacy: httpx.AsyncClient | None = None
 _external_client: httpx.AsyncClient | None = None
@@ -69,7 +69,7 @@ async def init_http_clients(keygen: "PKIKeygenData | None" = None) -> None:
         timeout=_NODE_TIMEOUT,
         limits=_NODE_LIMITS,
         follow_redirects=False,
-        http2=True,
+        http2=False,
         trust_env=False,
     )
 
@@ -92,7 +92,7 @@ async def init_http_clients(keygen: "PKIKeygenData | None" = None) -> None:
             timeout=_NODE_TIMEOUT,
             limits=_NODE_LIMITS,
             follow_redirects=False,
-            http2=True,
+            http2=False,
             trust_env=False,
         )
         _node_apply_client_mtls = httpx.AsyncClient(
@@ -103,7 +103,7 @@ async def init_http_clients(keygen: "PKIKeygenData | None" = None) -> None:
             http2=False,
             trust_env=False,
         )
-        logger.info("mTLS http clients initialized (default http2=True, apply http2=False)")
+        logger.info("mTLS http clients initialized (http2=False on all node clients)")
     else:
         logger.warning("mTLS http client not initialized: keygen missing")
 
@@ -156,13 +156,8 @@ def get_node_client(server: "Server | None" = None) -> httpx.AsyncClient:
 
 
 def get_node_apply_client(server: "Server | None" = None) -> httpx.AsyncClient:
-    """HTTP/1.1 клиент для долгих apply-запросов (firewall/haproxy profile apply).
-
-    Default-клиент использует HTTP/2; nginx ноды обрывает HTTP/2-поток на запросах
-    дольше proxy_read_timeout (60 сек) с PROTOCOL_ERROR — что httpx превращает в
-    StreamReset. HTTP/1.1 в той же ситуации просто получит read timeout, и мы
-    можем разумно поднять read до 300 сек.
-    """
+    """Клиент для долгих apply-запросов (firewall/haproxy profile apply) с read=300s
+    и отдельным пулом, чтобы не конкурировать с потоком коротких запросов метрик."""
     if server is not None and getattr(server, "pki_enabled", False):
         if _node_apply_client_mtls is None:
             raise RuntimeError(
