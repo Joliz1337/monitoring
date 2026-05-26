@@ -1,6 +1,5 @@
 import { Routes, Route, Navigate } from 'react-router-dom'
 import React, { useEffect, Suspense, lazy } from 'react'
-import { motion } from 'framer-motion'
 import { Activity } from 'lucide-react'
 import { Toaster, toast } from 'sonner'
 import { useAuthStore } from './stores/authStore'
@@ -53,76 +52,43 @@ const ExtPageLazy = isExtEnabled
 
 function LoadingScreen() {
   const { t } = useTranslation()
-  
+
   return (
     <div className="min-h-screen bg-dark-950 flex items-center justify-center relative overflow-hidden">
-      {/* Animated background */}
-      <div className="absolute inset-0">
-        <motion.div
-          className="absolute top-1/4 left-1/4 w-64 h-64 bg-accent-500/10 rounded-full blur-[80px]"
-          animate={{
-            scale: [1, 1.2, 1],
-            opacity: [0.3, 0.5, 0.3],
-          }}
-          transition={{ duration: 3, repeat: Infinity, ease: 'easeInOut' }}
+      {/* Animated background — CSS-only, blur уменьшен с 80 до 48 (в 2.7x легче) */}
+      <div className="absolute inset-0 pointer-events-none">
+        <div
+          className="loading-blob top-1/4 left-1/4 bg-accent-500/10"
         />
-        <motion.div
-          className="absolute bottom-1/4 right-1/4 w-64 h-64 bg-purple/10 rounded-full blur-[80px]"
-          animate={{
-            scale: [1, 1.3, 1],
-            opacity: [0.2, 0.4, 0.2],
-          }}
-          transition={{ duration: 4, repeat: Infinity, ease: 'easeInOut', delay: 1 }}
+        <div
+          className="loading-blob bottom-1/4 right-1/4 bg-purple/10"
+          style={{ animationDelay: '1s', animationDuration: '4s' }}
         />
       </div>
-      
-      <motion.div
-        className="relative z-10 flex flex-col items-center"
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.5 }}
-      >
+
+      <div className="relative z-10 flex flex-col items-center fade-in">
         {/* Logo */}
-        <motion.div 
-          className="w-16 h-16 rounded-2xl bg-gradient-to-br from-dark-800 to-dark-900 
+        <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-dark-800 to-dark-900
                      flex items-center justify-center border border-dark-700/50 mb-6
-                     shadow-2xl shadow-accent-500/10"
-          animate={{
-            rotate: [0, 5, -5, 0],
-          }}
-          transition={{ duration: 4, repeat: Infinity, ease: 'easeInOut' }}
-        >
+                     shadow-2xl shadow-accent-500/10 loading-logo-wobble">
           <Activity className="w-8 h-8 text-accent-400" />
-        </motion.div>
-        
-        {/* Spinner */}
-        <div className="relative mb-4">
-          <motion.div
-            className="w-12 h-12 border-2 border-accent-500/20 rounded-full"
-            animate={{ rotate: 360 }}
-            transition={{ duration: 3, repeat: Infinity, ease: 'linear' }}
-          />
-          <motion.div
-            className="absolute inset-0 w-12 h-12 border-2 border-transparent border-t-accent-500 rounded-full"
-            animate={{ rotate: 360 }}
-            transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}
-          />
-          <motion.div
-            className="absolute inset-1 w-10 h-10 border-2 border-transparent border-b-accent-400/50 rounded-full"
-            animate={{ rotate: -360 }}
-            transition={{ duration: 1.5, repeat: Infinity, ease: 'linear' }}
+        </div>
+
+        {/* Spinner — два кольца через CSS */}
+        <div className="relative mb-4 w-12 h-12">
+          <div className="absolute inset-0 border-2 border-accent-500/20 rounded-full" />
+          <div className="absolute inset-0 border-2 border-transparent border-t-accent-500 rounded-full icon-spin" />
+          <div
+            className="absolute inset-1 border-2 border-transparent border-b-accent-400/50 rounded-full icon-spin"
+            style={{ animationDuration: '1.5s', animationDirection: 'reverse' }}
           />
         </div>
-        
+
         {/* Text */}
-        <motion.p
-          className="text-dark-400 text-sm"
-          animate={{ opacity: [0.5, 1, 0.5] }}
-          transition={{ duration: 1.5, repeat: Infinity }}
-        >
+        <p className="text-dark-400 text-sm loading-text-pulse">
           {t('common.loading')}
-        </motion.p>
-      </motion.div>
+        </p>
+      </div>
     </div>
   )
 }

@@ -2,7 +2,6 @@ import { memo } from 'react'
 import { useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { useNavigate, useParams } from 'react-router-dom'
-import { motion } from 'framer-motion'
 import {
   GripVertical,
   Cpu,
@@ -59,7 +58,7 @@ function getSpeedBadge(speedtest: ServerSpeedtest | null | undefined, threshold:
 }
 
 interface ServerCardProps {
-  server: Server & { 
+  server: Server & {
     metrics?: ServerMetrics | null
     traffic?: ServerTraffic | null
     speedtest?: ServerSpeedtest | null
@@ -77,7 +76,7 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
   const { uid } = useParams()
   const navigate = useNavigate()
   const { t } = useTranslation()
-  
+
   const {
     attributes,
     listeners,
@@ -86,48 +85,30 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
     transition,
     isDragging,
   } = useSortable({ id: server.id })
-  
+
+  // dnd-kit transform — оставляем как inline-style (он меняется в DOM напрямую при drag, без React-ререндера)
+  // animationDelay тоже inline — entrance keyframe запускается один раз при mount
   const sortableStyle: React.CSSProperties = {
     transform: CSS.Transform.toString(transform),
     transition,
     zIndex: isDragging ? 50 : undefined,
     position: 'relative' as const,
+    animationDelay: `${Math.min(index, 20) * 30}ms`,
   }
-  
+
   const metrics = server.metrics
-  
+
   const handleClick = () => {
     navigate(`/${uid}/server/${server.id}`)
   }
 
-  const cardVariants = {
-    hidden: { opacity: 0, y: 15, scale: 0.98 },
-    visible: { 
-      opacity: 1, 
-      y: 0, 
-      scale: 1,
-      transition: { 
-        duration: 0.25,
-        delay: index * 0.03,
-        ease: [0.4, 0, 0.2, 1]
-      }
-    },
-    hover: {
-      y: -4,
-      transition: { duration: 0.2, ease: 'easeOut' }
-    }
-  }
-  
   // Server disabled (monitoring off)
   if (!server.is_active) {
     if (compact) {
       return (
-        <div ref={setNodeRef} style={sortableStyle}>
-          <motion.div
-            variants={cardVariants}
-            initial="hidden"
-            animate={isDragging ? undefined : "visible"}
-            className={`server-card card group cursor-pointer transition-all duration-300 opacity-50 ${
+        <div ref={setNodeRef} style={sortableStyle} className="card-enter">
+          <div
+            className={`server-card card group cursor-pointer opacity-50 ${
               isDragging ? 'shadow-2xl ring-2 ring-dark-600/30' : ''
             }`}
             onClick={handleClick}
@@ -136,13 +117,13 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
               <button
                 {...attributes}
                 {...listeners}
-                className="p-1.5 text-dark-600 hover:text-dark-400 cursor-grab active:cursor-grabbing 
+                className="p-1.5 text-dark-600 hover:text-dark-400 cursor-grab active:cursor-grabbing
                            hover:bg-dark-800 rounded-lg transition-colors touch-none"
                 onClick={(e) => e.stopPropagation()}
               >
                 <GripVertical className="w-5 h-5" />
               </button>
-              
+
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-3">
                   <h3 className="font-semibold text-dark-400 truncate">
@@ -154,23 +135,20 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
                   </span>
                 </div>
               </div>
-              
+
               <div className="flex items-center">
                 <ChevronRight className="w-5 h-5 text-dark-600" />
               </div>
             </div>
-          </motion.div>
+          </div>
         </div>
       )
     }
-    
+
     return (
-      <div ref={setNodeRef} style={sortableStyle}>
-        <motion.div
-          variants={cardVariants}
-          initial="hidden"
-          animate={isDragging ? undefined : "visible"}
-          className={`server-card card group cursor-pointer transition-all duration-300 opacity-50 ${
+      <div ref={setNodeRef} style={sortableStyle} className="card-enter">
+        <div
+          className={`server-card card group cursor-pointer opacity-50 ${
             isDragging ? 'shadow-2xl ring-2 ring-dark-600/30' : ''
           }`}
           onClick={handleClick}
@@ -199,29 +177,25 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
               {t('servers.disabled')}
             </span>
           </div>
-          
+
           <div className="h-24 flex flex-col items-center justify-center gap-3">
             <PowerOff className="w-8 h-8 text-dark-600" />
             <span className="text-dark-500 text-sm">{t('servers.monitoring_disabled')}</span>
           </div>
-          
+
           <div className="absolute right-4 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity">
             <ChevronRight className="w-5 h-5 text-dark-500" />
           </div>
-        </motion.div>
+        </div>
       </div>
     )
   }
-  
+
   if (compact) {
     return (
-      <div ref={setNodeRef} style={sortableStyle}>
-        <motion.div
-          variants={cardVariants}
-          initial="hidden"
-          animate={isDragging ? undefined : "visible"}
-          whileHover={isDragging ? undefined : "hover"}
-          className={`server-card card group cursor-pointer transition-all duration-300 ${
+      <div ref={setNodeRef} style={sortableStyle} className="card-enter">
+        <div
+          className={`server-card card group cursor-pointer ${
             isDragging ? 'opacity-70 shadow-2xl shadow-accent-500/20 ring-2 ring-accent-500/30' : ''
           }`}
           onClick={handleClick}
@@ -230,13 +204,13 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
             <button
               {...attributes}
               {...listeners}
-              className="p-1.5 text-dark-500 hover:text-dark-300 cursor-grab active:cursor-grabbing 
+              className="p-1.5 text-dark-500 hover:text-dark-300 cursor-grab active:cursor-grabbing
                          hover:bg-dark-800 rounded-lg transition-colors touch-none"
               onClick={(e) => e.stopPropagation()}
             >
               <GripVertical className="w-5 h-5" />
             </button>
-            
+
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-3">
                 <h3 className="font-semibold text-dark-100 truncate">
@@ -246,10 +220,9 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
                 <StatusBadge status={server.status} showLabel={false} />
               </div>
             </div>
-            
+
             {metrics && (
               <div className="hidden sm:flex items-center gap-6 text-sm">
-                {/* Cached indicator in compact view */}
                 {server.status === 'offline' && (
                   <div className="flex items-center gap-1 px-1.5 py-0.5 bg-warning/15 border border-warning/25 rounded text-[10px] text-warning" title={t('cache.cached')}>
                     <Database className="w-2.5 h-2.5" />
@@ -273,10 +246,10 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
                 )}
                 {metrics.certificates?.closest_expiry ? (
                   <div className={`flex items-center gap-2 ${
-                    metrics.certificates.closest_expiry.expired 
-                      ? 'text-danger' 
-                      : metrics.certificates.closest_expiry.days_left < 30 
-                        ? 'text-warning' 
+                    metrics.certificates.closest_expiry.expired
+                      ? 'text-danger'
+                      : metrics.certificates.closest_expiry.days_left < 30
+                        ? 'text-warning'
                         : 'text-success'
                   }`}>
                     {metrics.certificates.closest_expiry.expired || metrics.certificates.closest_expiry.days_left < 30 ? (
@@ -285,7 +258,7 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
                       <ShieldCheck className="w-4 h-4" />
                     )}
                     <span className="font-mono text-xs truncate" title={metrics.certificates.closest_expiry.domain}>
-                      {metrics.certificates.closest_expiry.domain} ({metrics.certificates.closest_expiry.expired 
+                      {metrics.certificates.closest_expiry.domain} ({metrics.certificates.closest_expiry.expired
                         ? t('server_card.cert_expired')
                         : t('server_card.cert_days', { days: metrics.certificates.closest_expiry.days_left })})
                     </span>
@@ -302,24 +275,20 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
                 </div>
               </div>
             )}
-            
+
             <div className="flex items-center">
               <ChevronRight className="w-5 h-5 text-dark-500 group-hover:text-accent-400 transition-colors" />
             </div>
           </div>
-        </motion.div>
+        </div>
       </div>
     )
   }
-  
+
   return (
-    <div ref={setNodeRef} style={sortableStyle}>
-      <motion.div
-        variants={cardVariants}
-        initial="hidden"
-        animate={isDragging ? undefined : "visible"}
-        whileHover={isDragging ? undefined : "hover"}
-        className={`server-card card group cursor-pointer transition-all duration-300 ${
+    <div ref={setNodeRef} style={sortableStyle} className="card-enter">
+      <div
+        className={`server-card card group cursor-pointer ${
           isDragging ? 'opacity-70 shadow-2xl shadow-accent-500/20 ring-2 ring-accent-500/30' : ''
         }`}
         onClick={handleClick}
@@ -332,7 +301,7 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
             zIndex: -1
           }}
         />
-        
+
         <div className="flex items-start justify-between mb-4">
           <div className="flex items-center gap-3">
             <button
@@ -359,25 +328,21 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
             </div>
           </div>
           <div className="flex items-center gap-2">
-            {/* Show cached indicator when offline but have metrics */}
             {server.status === 'offline' && metrics && (
-              <motion.div
-                initial={{ opacity: 0, scale: 0.8 }}
-                animate={{ opacity: 1, scale: 1 }}
+              <div
                 className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-warning/15 border border-warning/25 rounded text-[10px] text-warning"
                 title={server.last_seen ? t('cache.last_update', { time: formatTimeAgo(server.last_seen) }) : t('cache.cached')}
               >
                 <Database className="w-2.5 h-2.5" />
                 <span className="font-medium">{t('cache.cached')}</span>
-              </motion.div>
+              </div>
             )}
             <StatusBadge status={server.status} />
           </div>
         </div>
-        
+
         {metrics ? (
           <div>
-            {/* Minimal: только CPU и RAM в одну строку */}
             {detailLevel === 'minimal' && (
               <div className="flex items-center gap-4">
                 <div className="flex items-center gap-2 flex-1">
@@ -396,8 +361,7 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
                 </div>
               </div>
             )}
-            
-            {/* Standard: CPU (общий), RAM, диск, сеть, footer */}
+
             {detailLevel === 'standard' && (() => {
               const stdBadge = getSpeedBadge(server.speedtest)
               return (
@@ -407,24 +371,21 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
                     icon={<Cpu className="w-4 h-4" />}
                     label={t('common.cpu')}
                     value={metrics.cpu.usage_percent}
-                    delay={0.1}
                   />
                   <MetricItem
                     icon={<MemoryStick className="w-4 h-4" />}
                     label={t('common.ram')}
                     value={metrics.memory.ram.percent}
-                    delay={0.15}
                     usedBytes={metrics.memory.ram.used}
                     totalBytes={metrics.memory.ram.total}
                   />
                 </div>
-                
+
                 <div className="grid grid-cols-2 gap-4 mb-4">
                   <MetricItem
                     icon={<HardDrive className="w-4 h-4" />}
                     label={t('common.disk')}
                     value={metrics.disk.partitions[0]?.percent || 0}
-                    delay={0.2}
                     usedBytes={metrics.disk.partitions[0]?.used}
                     totalBytes={metrics.disk.partitions[0]?.total}
                   />
@@ -449,7 +410,7 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
                     </div>
                   </div>
                 </div>
-                
+
                 <div className="pt-3 border-t border-dark-700/50 flex flex-wrap items-center text-xs text-dark-400 gap-x-3 gap-y-1">
                   <div className="flex items-center gap-1.5">
                     <Clock className="w-3.5 h-3.5" />
@@ -503,7 +464,6 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
               )
             })()}
 
-            {/* Detailed: полный вид с CPU по ядрам и трафиком */}
             {detailLevel === 'detailed' && (() => {
               const detBadge = getSpeedBadge(server.speedtest)
               return (
@@ -514,24 +474,21 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
                     label={t('common.cpu')}
                     totalUsage={metrics.cpu.usage_percent}
                     perCpuPercent={metrics.cpu.per_cpu_percent}
-                    delay={0.1}
                   />
                   <MetricItem
                     icon={<MemoryStick className="w-4 h-4" />}
                     label={t('common.ram')}
                     value={metrics.memory.ram.percent}
-                    delay={0.15}
                     usedBytes={metrics.memory.ram.used}
                     totalBytes={metrics.memory.ram.total}
                   />
                 </div>
-                
+
                 <div className="grid grid-cols-2 gap-4 mb-4">
                   <MetricItem
                     icon={<HardDrive className="w-4 h-4" />}
                     label={t('common.disk')}
                     value={metrics.disk.partitions[0]?.percent || 0}
-                    delay={0.2}
                     usedBytes={metrics.disk.partitions[0]?.used}
                     totalBytes={metrics.disk.partitions[0]?.total}
                   />
@@ -556,8 +513,7 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
                     </div>
                   </div>
                 </div>
-                
-                {/* Traffic summary */}
+
                 {server.traffic && (server.traffic.rx_bytes > 0 || server.traffic.tx_bytes > 0) && (
                   <div className="mb-4 p-3 bg-dark-800/40 rounded-xl border border-dark-700/30">
                     <div className="flex items-center justify-between">
@@ -579,7 +535,7 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
                     </div>
                   </div>
                 )}
-                
+
                 <div className="pt-3 border-t border-dark-700/50 flex flex-wrap items-center text-xs text-dark-400 gap-x-3 gap-y-1">
                   <div className="flex items-center gap-1.5">
                     <Clock className="w-3.5 h-3.5" />
@@ -635,18 +591,7 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
           </div>
         ) : server.status === 'loading' ? (
           <div className="h-32 flex items-center justify-center">
-            <div className="relative">
-              <motion.div
-                className="w-10 h-10 border-2 border-accent-500/30 rounded-full"
-                animate={{ rotate: 360 }}
-                transition={{ duration: 1.5, repeat: Infinity, ease: 'linear' }}
-              />
-              <motion.div
-                className="absolute inset-0 w-10 h-10 border-2 border-transparent border-t-accent-500 rounded-full"
-                animate={{ rotate: 360 }}
-                transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}
-              />
-            </div>
+            <div className="spinner" />
           </div>
         ) : (
           <div className="h-32 flex flex-col items-center justify-center gap-3">
@@ -672,32 +617,52 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
             )}
           </div>
         )}
-        
-        {/* Hover arrow indicator */}
+
         <div className="absolute right-4 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity">
           <ChevronRight className="w-5 h-5 text-accent-400" />
         </div>
-      </motion.div>
+      </div>
     </div>
   )
 }
 
-// Memoize ServerCard to prevent unnecessary re-renders
 const ServerCard = memo(ServerCardComponent, (prevProps, nextProps) => {
-  // Custom comparison - only re-render if important props changed
-  return (
-    prevProps.server.id === nextProps.server.id &&
-    prevProps.server.status === nextProps.server.status &&
-    prevProps.server.is_active === nextProps.server.is_active &&
-    prevProps.compact === nextProps.compact &&
-    prevProps.detailLevel === nextProps.detailLevel &&
-    prevProps.index === nextProps.index &&
-    JSON.stringify(prevProps.server.metrics?.cpu?.usage_percent) === JSON.stringify(nextProps.server.metrics?.cpu?.usage_percent) &&
-    prevProps.server.metrics?.cpu?.load_avg_1 === nextProps.server.metrics?.cpu?.load_avg_1 &&
-    JSON.stringify(prevProps.server.metrics?.memory?.ram?.percent) === JSON.stringify(nextProps.server.metrics?.memory?.ram?.percent) &&
-    JSON.stringify(prevProps.server.traffic) === JSON.stringify(nextProps.server.traffic) &&
-    prevProps.server.speedtest?.best_speed_mbps === nextProps.server.speedtest?.best_speed_mbps
-  )
+  const a = prevProps.server
+  const b = nextProps.server
+  if (a.id !== b.id) return false
+  if (a.status !== b.status) return false
+  if (a.is_active !== b.is_active) return false
+  if (prevProps.compact !== nextProps.compact) return false
+  if (prevProps.detailLevel !== nextProps.detailLevel) return false
+  if (prevProps.index !== nextProps.index) return false
+  if (a.folder !== b.folder) return false
+
+  const am = a.metrics
+  const bm = b.metrics
+  if (!am !== !bm) return false
+  if (am && bm) {
+    if (am.cpu.usage_percent !== bm.cpu.usage_percent) return false
+    if (am.cpu.load_avg_1 !== bm.cpu.load_avg_1) return false
+    if (am.memory.ram.percent !== bm.memory.ram.percent) return false
+    if (am.memory.ram.used !== bm.memory.ram.used) return false
+    if (am.disk.partitions[0]?.percent !== bm.disk.partitions[0]?.percent) return false
+    if (am.network.total?.rx_bytes_per_sec !== bm.network.total?.rx_bytes_per_sec) return false
+    if (am.network.total?.tx_bytes_per_sec !== bm.network.total?.tx_bytes_per_sec) return false
+    if (am.system.uptime_seconds !== bm.system.uptime_seconds) return false
+    // per_cpu_percent — мелкий массив, сравним длиной и поэлементно
+    if (prevProps.detailLevel === 'detailed') {
+      const ac = am.cpu.per_cpu_percent
+      const bc = bm.cpu.per_cpu_percent
+      if (ac.length !== bc.length) return false
+      for (let i = 0; i < ac.length; i++) if (ac[i] !== bc[i]) return false
+    }
+  }
+
+  if (a.traffic?.rx_bytes !== b.traffic?.rx_bytes) return false
+  if (a.traffic?.tx_bytes !== b.traffic?.tx_bytes) return false
+  if (a.speedtest?.best_speed_mbps !== b.speedtest?.best_speed_mbps) return false
+
+  return true
 })
 
 export default ServerCard
@@ -706,18 +671,13 @@ interface MetricItemProps {
   icon: React.ReactNode
   label: string
   value: number
-  delay: number
   usedBytes?: number
   totalBytes?: number
 }
 
-function MetricItem({ icon, label, value, delay, usedBytes, totalBytes }: MetricItemProps) {
+function MetricItem({ icon, label, value, usedBytes, totalBytes }: MetricItemProps) {
   return (
-    <motion.div
-      initial={{ opacity: 0, x: -10 }}
-      animate={{ opacity: 1, x: 0 }}
-      transition={{ delay }}
-    >
+    <div>
       <div className="flex items-center gap-2 mb-2">
         <span className="text-accent-500">{icon}</span>
         <span className="text-sm text-dark-300">{label}</span>
@@ -731,7 +691,7 @@ function MetricItem({ icon, label, value, delay, usedBytes, totalBytes }: Metric
           {formatBytes(usedBytes)} / {formatBytes(totalBytes)}
         </div>
       )}
-    </motion.div>
+    </div>
   )
 }
 
@@ -740,7 +700,6 @@ interface CpuCoresItemProps {
   label: string
   totalUsage: number
   perCpuPercent: number[]
-  delay: number
 }
 
 function getColorForPercent(percent: number): string {
@@ -749,13 +708,9 @@ function getColorForPercent(percent: number): string {
   return 'bg-success'
 }
 
-function CpuCoresItem({ icon, label, totalUsage, perCpuPercent, delay }: CpuCoresItemProps) {
+function CpuCoresItem({ icon, label, totalUsage, perCpuPercent }: CpuCoresItemProps) {
   return (
-    <motion.div
-      initial={{ opacity: 0, x: -10 }}
-      animate={{ opacity: 1, x: 0 }}
-      transition={{ delay }}
-    >
+    <div>
       <div className="flex items-center gap-2 mb-2">
         <span className="text-accent-500">{icon}</span>
         <span className="text-sm text-dark-300">{label}</span>
@@ -768,17 +723,15 @@ function CpuCoresItem({ icon, label, totalUsage, perCpuPercent, delay }: CpuCore
           <div key={index} className="flex items-center gap-2">
             <span className="text-xs font-mono text-dark-500 w-4 text-right">{index}</span>
             <div className="flex-1 h-1.5 bg-dark-800/60 rounded-full overflow-hidden">
-              <motion.div
-                className={`h-full rounded-full ${getColorForPercent(percent)}`}
-                initial={{ width: 0 }}
-                animate={{ width: `${Math.min(100, percent)}%` }}
-                transition={{ duration: 0.6, ease: [0.4, 0, 0.2, 1], delay: delay + index * 0.02 }}
+              <div
+                className={`cpu-core-fill ${getColorForPercent(percent)}`}
+                style={{ width: `${Math.min(100, percent)}%` }}
               />
             </div>
             <span className="text-xs font-mono text-dark-400 w-10 text-right">{percent.toFixed(0)}%</span>
           </div>
         ))}
       </div>
-    </motion.div>
+    </div>
   )
 }

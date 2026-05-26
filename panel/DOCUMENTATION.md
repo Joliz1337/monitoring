@@ -163,6 +163,28 @@ Lifecycle клиентов управляется через `lifespan` в `main
 
 Баг с двойным fetch при открытии страницы устранён: visibility effect пропускает первый mount через `mountedRef`, чтобы не дублировать запрос, который уже выполнил `useEffect` компонента при инициализации.
 
+### Frontend: анимации (CSS вместо framer-motion)
+
+Массовые анимации переведены с framer-motion на CSS keyframes/transitions. framer-motion вычисляет каждый кадр в JS на main thread; CSS-анимации исполняются на GPU compositor без JS-нагрузки.
+
+**Затронутые компоненты:**
+
+- `panel/frontend/src/index.css` — CSS-классы: `.btn-scale` (hover/tap), `.live-mode-pulse`, `.status-ping`, `.status-ping-delay`, `.status-blink`, `.card-enter` (entrance с inline `animation-delay`), `.metric-enter`, `.fade-in`, `.pb-track/.pb-fill/.pb-fill-shimmer/.pb-fill-pulse` (прогресс-бар), `.cpu-core-fill` (ядра CPU, `transition: width`), `.loading-blob/.loading-logo-wobble/.loading-text-pulse` (LoadingScreen), `.icon-float` (empty state). Из `.card` убран `backdrop-blur-md` (заменён на непрозрачный фон `bg-dark-900/80`) — backdrop-blur пересчитывается GPU на каждый кадр под слоем при N карточках.
+
+- `panel/frontend/src/components/ui/ProgressBar.tsx` — переписан без framer-motion; ширина обновляется через `transition: width`, анимированный режим — через CSS pseudo-элементы shimmer/pulse.
+
+- `panel/frontend/src/components/ui/Skeleton.tsx` — переписан без framer-motion; использует CSS `.skeleton` shimmer-эффект.
+
+- `panel/frontend/src/components/ui/StatusBadge.tsx` — переписан без framer-motion; online-ореол → CSS `.status-ping` + `.status-ping-delay`, offline-blink → `.status-blink`, loading-спин → `.icon-spin`. Устраняет 2–3 infinite JS-анимации на каждый online-сервер (60+ при 30 серверах).
+
+- `panel/frontend/src/components/Dashboard/ServerCard.tsx` — убраны motion.div entrance/hover variants, заменены на `.card-enter` с `animation-delay` (capped на индексе 20); ядра CPU через `.cpu-core-fill` вместо motion.div (критично: 16 JS-анимаций на обновление метрик при 16-ядерном сервере); `memo` comparator заменён с `JSON.stringify` на цепочку прямых сравнений примитивов.
+
+- `panel/frontend/src/pages/Dashboard.tsx` — staggered entrance-анимации заголовка убраны; motion.button → `<button>` + `.btn-scale`; live-mode бейдж `animate opacity Infinity` → `.live-mode-pulse`; AnimatePresence mode="wait" вокруг loading/empty/servers удалён; motion-обёртки оставлены только там где JS-анимация неизбежна (collapsible folder height, ModalOverlay); убраны `backdrop-blur-sm` на toggle-группах header.
+
+- `panel/frontend/src/App.tsx` — LoadingScreen полностью переписан без framer-motion: `blur(80px)` → `blur(48px)` через `.loading-blob` (нагрузка на GPU квадратична по радиусу), 3 кольца спиннера → CSS `.icon-spin` с `animation-duration` через inline style.
+
+**Результат:** при 30 online-серверах устранено ~200+ постоянных JS-таймеров framer-motion на main thread (StatusBadge ×2 = 60, ProgressBar ×3–6 на карточку = 100+, live-mode = 1 и др.). Все infinite-анимации идут через CSS на GPU compositor.
+
 ### nginx keepalive и TCP-оптимизации
 
 `panel/nginx/nginx.conf.template`:

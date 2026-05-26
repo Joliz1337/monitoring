@@ -24,7 +24,7 @@ import {
   useSortable,
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { motion, AnimatePresence } from 'framer-motion'
+import { AnimatePresence, motion } from 'framer-motion'
 import { 
   Server as ServerIcon, 
   LayoutGrid, 
@@ -335,31 +335,16 @@ export default function Dashboard() {
   const unfolderedServers = grouped.get(null) || []
 
   return (
-    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
+    <div className="animate-page-enter">
       {/* Header */}
-      <motion.div 
-        className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-8"
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.4 }}
-      >
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-8">
         <div>
-          <motion.h1 
-            className="text-2xl font-bold text-dark-50 flex items-center gap-3"
-            initial={{ opacity: 0, x: -20 }}
-            animate={{ opacity: 1, x: 0 }}
-            transition={{ duration: 0.5 }}
-          >
+          <h1 className="text-2xl font-bold text-dark-50 flex items-center gap-3">
             <Activity className="w-7 h-7 text-accent-400" />
             {t('dashboard.title')}
             <FAQIcon screen="PAGE_DASHBOARD" />
-          </motion.h1>
-          <motion.p 
-            className="text-dark-400 mt-1 flex items-center gap-3"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ delay: 0.2 }}
-          >
+          </h1>
+          <p className="text-dark-400 mt-1 flex items-center gap-3">
             <span>{subtitle}</span>
             <span className="flex items-center gap-1.5">
               <Wifi className="w-3.5 h-3.5 text-success" />
@@ -377,73 +362,60 @@ export default function Dashboard() {
                 <span className="text-dark-500">{disabledCount}</span>
               </span>
             )}
-          </motion.p>
+          </p>
         </div>
-        
-        <motion.div 
-          className="flex items-center gap-3"
-          initial={{ opacity: 0, x: 20 }}
-          animate={{ opacity: 1, x: 0 }}
-          transition={{ delay: 0.3 }}
-        >
-          <div className="flex items-center bg-dark-800/60 backdrop-blur-sm rounded-xl p-1 border border-dark-700/50">
+
+        <div className="flex items-center gap-3">
+          <div className="flex items-center bg-dark-800/60 rounded-xl p-1 border border-dark-700/50">
             <Tooltip label={t('dashboard.grid_view')}>
-              <motion.button
+              <button
                 onClick={() => setCompactView(false)}
-                className={`p-2.5 rounded-lg transition-all ${!compactView ? 'bg-accent-500/20 text-accent-400 shadow-lg shadow-accent-500/10' : 'text-dark-400 hover:text-dark-200'}`}
-                whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
+                className={`btn-scale p-2.5 rounded-lg transition-colors ${!compactView ? 'bg-accent-500/20 text-accent-400 shadow-lg shadow-accent-500/10' : 'text-dark-400 hover:text-dark-200'}`}
               >
                 <LayoutGrid className="w-4 h-4" />
-              </motion.button>
+              </button>
             </Tooltip>
             <Tooltip label={t('dashboard.list_view')}>
-              <motion.button
+              <button
                 onClick={() => setCompactView(true)}
-                className={`p-2.5 rounded-lg transition-all ${compactView ? 'bg-accent-500/20 text-accent-400 shadow-lg shadow-accent-500/10' : 'text-dark-400 hover:text-dark-200'}`}
-                whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
+                className={`btn-scale p-2.5 rounded-lg transition-colors ${compactView ? 'bg-accent-500/20 text-accent-400 shadow-lg shadow-accent-500/10' : 'text-dark-400 hover:text-dark-200'}`}
               >
                 <List className="w-4 h-4" />
-              </motion.button>
+              </button>
             </Tooltip>
           </div>
-          
+
           {!compactView && (
-            <div className="hidden md:flex items-center bg-dark-800/60 backdrop-blur-sm rounded-xl p-1 border border-dark-700/50">
+            <div className="hidden md:flex items-center bg-dark-800/60 rounded-xl p-1 border border-dark-700/50">
               {(['minimal', 'standard', 'detailed'] as const).map(level => (
                 <Tooltip key={level} label={t(`dashboard.detail_${level}`)}>
-                  <motion.button
+                  <button
                     onClick={() => setDetailLevel(level)}
-                    className={`p-2.5 rounded-lg transition-all ${detailLevel === level ? 'bg-accent-500/20 text-accent-400 shadow-lg shadow-accent-500/10' : 'text-dark-400 hover:text-dark-200'}`}
-                    whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
+                    className={`btn-scale p-2.5 rounded-lg transition-colors ${detailLevel === level ? 'bg-accent-500/20 text-accent-400 shadow-lg shadow-accent-500/10' : 'text-dark-400 hover:text-dark-200'}`}
                   >
                     {level === 'minimal' ? <Minus className="w-4 h-4" /> : level === 'standard' ? <Equal className="w-4 h-4" /> : <AlignJustify className="w-4 h-4" />}
-                  </motion.button>
+                  </button>
                 </Tooltip>
               ))}
             </div>
           )}
-          
+
           {!compactView && (
-            <div className="hidden lg:flex items-center bg-dark-800/60 backdrop-blur-sm rounded-xl p-1 border border-dark-700/50">
+            <div className="hidden lg:flex items-center bg-dark-800/60 rounded-xl p-1 border border-dark-700/50">
               {(['small', 'medium', 'large'] as const).map(scale => (
                 <Tooltip key={scale} label={t(`dashboard.scale_${scale}`)}>
-                  <motion.button
+                  <button
                     onClick={() => setCardScale(scale)}
-                    className={`p-2.5 rounded-lg transition-all ${cardScale === scale ? 'bg-accent-500/20 text-accent-400 shadow-lg shadow-accent-500/10' : 'text-dark-400 hover:text-dark-200'}`}
-                    whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
+                    className={`btn-scale p-2.5 rounded-lg transition-colors ${cardScale === scale ? 'bg-accent-500/20 text-accent-400 shadow-lg shadow-accent-500/10' : 'text-dark-400 hover:text-dark-200'}`}
                   >
                     {scale === 'small' ? <Grid3x3 className="w-4 h-4" /> : scale === 'medium' ? <LayoutGrid className="w-4 h-4" /> : <Square className="w-4 h-4" />}
-                  </motion.button>
+                  </button>
                 </Tooltip>
               ))}
             </div>
           )}
-          
-          <motion.div 
-            className="text-xs text-dark-500 hidden sm:flex items-center gap-1.5 bg-dark-800/40 px-3 py-2 rounded-lg"
-            animate={{ opacity: [0.5, 1, 0.5] }}
-            transition={{ duration: 2, repeat: Infinity }}
-          >
+
+          <div className="text-xs text-dark-500 hidden sm:flex items-center gap-1.5 bg-dark-800/40 px-3 py-2 rounded-lg live-mode-pulse">
             {isPageVisible ? (
               <>
                 <Zap className="w-3.5 h-3.5 text-accent-500" />
@@ -457,60 +429,57 @@ export default function Dashboard() {
                 <span>{t('dashboard.background_mode')}</span>
               </>
             )}
-          </motion.div>
+          </div>
 
           <Tooltip label={t('dashboard.create_folder')}>
-            <motion.button
+            <button
               onClick={() => setModalState({ kind: 'create-folder' })}
-              className="p-2.5 bg-dark-800/60 backdrop-blur-sm rounded-xl border border-dark-700/50 text-dark-400 hover:text-white transition"
-              whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
+              className="btn-scale p-2.5 bg-dark-800/60 rounded-xl border border-dark-700/50 text-dark-400 hover:text-white transition-colors"
             >
               <FolderPlus className="w-4 h-4" />
-            </motion.button>
+            </button>
           </Tooltip>
-          
-          <motion.button
+
+          <button
             onClick={() => navigate(`/${uid}/servers`)}
             className="btn btn-primary"
-            whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
           >
             <Plus className="w-4 h-4" />
             <span className="hidden sm:inline">{t('common.add_server')}</span>
-          </motion.button>
-        </motion.div>
-      </motion.div>
+          </button>
+        </div>
+      </div>
       
       {/* Content */}
-      <AnimatePresence mode="wait">
-        {isLoading && activeServers.length === 0 ? (
-          <motion.div className={gridClass} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} key="loading">
-            {Array.from({ length: 6 }).map((_, i) => (
-              <ServerCardSkeleton key={i} compact={compactView} />
-            ))}
-          </motion.div>
-        ) : activeServers.length === 0 ? (
-          <motion.div className="card text-center py-20" initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} transition={{ duration: 0.5 }} key="empty">
-            <motion.div initial={{ y: 20, opacity: 0 }} animate={{ y: 0, opacity: 1 }} transition={{ delay: 0.2 }}>
-              <motion.div animate={{ y: [0, -10, 0] }} transition={{ duration: 3, repeat: Infinity, ease: 'easeInOut' }}>
-                <ServerIcon className="w-20 h-20 text-dark-600 mx-auto mb-6" />
-              </motion.div>
-              <h2 className="text-xl font-semibold text-dark-200 mb-2">{t('dashboard.no_servers')}</h2>
-              <p className="text-dark-400 mb-8">{t('dashboard.add_first')}</p>
-              <motion.button onClick={() => navigate(`/${uid}/servers`)} className="btn btn-primary mx-auto" whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}>
-                <Plus className="w-4 h-4" />
-                {t('common.add_server')}
-              </motion.button>
-            </motion.div>
-          </motion.div>
-        ) : (
-          <DndContext
-            sensors={sensors}
-            collisionDetection={collisionDetection}
-            onDragStart={handleDragStart}
-            onDragOver={handleDragOver}
-            onDragEnd={handleDragEnd}
-          >
-            <motion.div className="space-y-6" initial={{ opacity: 0 }} animate={{ opacity: 1 }} key="servers">
+      {isLoading && activeServers.length === 0 ? (
+        <div className={`${gridClass} fade-in`} key="loading">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <ServerCardSkeleton key={i} compact={compactView} />
+          ))}
+        </div>
+      ) : activeServers.length === 0 ? (
+        <div className="card text-center py-20 fade-in" key="empty">
+          <div>
+            <div className="icon-float inline-block">
+              <ServerIcon className="w-20 h-20 text-dark-600 mx-auto mb-6" />
+            </div>
+            <h2 className="text-xl font-semibold text-dark-200 mb-2">{t('dashboard.no_servers')}</h2>
+            <p className="text-dark-400 mb-8">{t('dashboard.add_first')}</p>
+            <button onClick={() => navigate(`/${uid}/servers`)} className="btn btn-primary mx-auto btn-scale">
+              <Plus className="w-4 h-4" />
+              {t('common.add_server')}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <DndContext
+          sensors={sensors}
+          collisionDetection={collisionDetection}
+          onDragStart={handleDragStart}
+          onDragOver={handleDragOver}
+          onDragEnd={handleDragEnd}
+        >
+          <div className="space-y-6 fade-in" key="servers">
               {/* Sortable folder list */}
               <SortableContext items={folderSortableIds} strategy={verticalListSortingStrategy}>
                 {folders.map(folderName => {
@@ -600,29 +569,28 @@ export default function Dashboard() {
                     ))}
                   </div>
                 </SortableContext>
-              </UnfolderDropZone>
-            </motion.div>
-            
-            <DragOverlay>
-              {activeServer && (
-                <div className="opacity-90">
-                  <ServerCard server={activeServer} compact={compactView} detailLevel={detailLevel} index={0} />
+            </UnfolderDropZone>
+          </div>
+
+          <DragOverlay>
+            {activeServer && (
+              <div className="opacity-90">
+                <ServerCard server={activeServer} compact={compactView} detailLevel={detailLevel} index={0} />
+              </div>
+            )}
+            {activeFolderName && (
+              <div className="opacity-90 bg-dark-900 border border-blue-500/40 rounded-xl px-4 py-3 flex items-center gap-2.5 shadow-2xl">
+                <GripVertical className="w-4 h-4 text-dark-500" />
+                <div className="w-8 h-8 rounded-lg bg-blue-500/15 flex items-center justify-center">
+                  <Folder className="w-4 h-4 text-blue-400" />
                 </div>
-              )}
-              {activeFolderName && (
-                <div className="opacity-90 bg-dark-900 border border-blue-500/40 rounded-xl px-4 py-3 flex items-center gap-2.5 shadow-2xl">
-                  <GripVertical className="w-4 h-4 text-dark-500" />
-                  <div className="w-8 h-8 rounded-lg bg-blue-500/15 flex items-center justify-center">
-                    <Folder className="w-4 h-4 text-blue-400" />
-                  </div>
-                  <span className="text-sm font-semibold text-white">{activeFolderName}</span>
-                  <span className="text-xs text-dark-500">{(grouped.get(activeFolderName) || []).length}</span>
-                </div>
-              )}
-            </DragOverlay>
-          </DndContext>
-        )}
-      </AnimatePresence>
+                <span className="text-sm font-semibold text-white">{activeFolderName}</span>
+                <span className="text-xs text-dark-500">{(grouped.get(activeFolderName) || []).length}</span>
+              </div>
+            )}
+          </DragOverlay>
+        </DndContext>
+      )}
 
       {/* Modals */}
       {modalState.kind === 'create-folder' && (
@@ -653,7 +621,7 @@ export default function Dashboard() {
           }}
         />
       )}
-    </motion.div>
+    </div>
   )
 }
 

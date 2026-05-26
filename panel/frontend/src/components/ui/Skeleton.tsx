@@ -1,17 +1,9 @@
-import { motion } from 'framer-motion'
-
 interface SkeletonProps {
   className?: string
 }
 
 export function Skeleton({ className = '' }: SkeletonProps) {
-  return (
-    <motion.div
-      className={`bg-dark-700/50 rounded-lg ${className}`}
-      animate={{ opacity: [0.3, 0.6, 0.3] }}
-      transition={{ duration: 1.5, repeat: Infinity, ease: 'easeInOut' }}
-    />
-  )
+  return <div className={`skeleton rounded-lg ${className}`} />
 }
 
 export function ServerCardSkeleton({ compact = false }: { compact?: boolean }) {

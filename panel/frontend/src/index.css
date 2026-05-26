@@ -94,8 +94,9 @@ body {
   }
   
   .card {
-    @apply bg-dark-900/60 border border-dark-800/50 rounded-2xl p-5;
-    @apply backdrop-blur-md;
+    /* backdrop-blur-md убран: компонует каждый кадр под слоем — самое тяжёлое на мобильном.
+       Цвет фона чуть плотнее, визуально разница минимальна. */
+    @apply bg-dark-900/80 border border-dark-800/50 rounded-2xl p-5;
     @apply transition-all duration-300;
     position: relative;
     overflow: hidden;
@@ -370,6 +371,16 @@ body {
   50% { transform: translateY(-3px); }
 }
 
+/* Парящая иконка (для empty state) */
+.icon-float {
+  animation: icon-float 3s ease-in-out infinite;
+}
+
+@keyframes icon-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-10px); }
+}
+
 /* ========== TEXT GRADIENT ========== */
 .text-gradient {
   background: linear-gradient(135deg, #22d3ee 0%, #10b981 100%);
@@ -594,6 +605,175 @@ body {
     opacity: 1;
     transform: translateY(0);
   }
+}
+
+/* ========== BTN SCALE (заменяет framer-motion whileHover/whileTap) ========== */
+.btn-scale {
+  transition: transform 0.15s ease, background-color 0.2s, color 0.2s, box-shadow 0.2s;
+  will-change: transform;
+}
+
+.btn-scale:hover {
+  transform: scale(1.05);
+}
+
+.btn-scale:active {
+  transform: scale(0.95);
+}
+
+/* ========== LIVE MODE PULSE (бейдж "live mode" на Dashboard) ========== */
+.live-mode-pulse {
+  animation: live-pulse 2s ease-in-out infinite;
+}
+
+@keyframes live-pulse {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+
+/* ========== STATUS PING (ореол вокруг статус-точки online) ========== */
+/* background-color приходит из tailwind utility (.bg-success и т.п.) */
+.status-ping {
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  animation: status-ping 1.5s ease-out infinite;
+  pointer-events: none;
+}
+
+.status-ping-delay {
+  animation-delay: 0.5s;
+}
+
+@keyframes status-ping {
+  0% { transform: scale(1); opacity: 0.7; }
+  60%, 100% { transform: scale(2); opacity: 0; }
+}
+
+/* ========== OFFLINE BLINK ========== */
+.status-blink {
+  animation: status-blink 2s ease-in-out infinite;
+}
+
+@keyframes status-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+/* ========== CARD ENTRANCE (для серверных карточек) ========== */
+.card-enter {
+  opacity: 0;
+  animation: card-enter 0.25s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+@keyframes card-enter {
+  from { opacity: 0; transform: translateY(15px) scale(0.98); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* ========== METRIC ITEM ENTRANCE ========== */
+.metric-enter {
+  opacity: 0;
+  animation: metric-enter 0.3s ease forwards;
+}
+
+@keyframes metric-enter {
+  from { opacity: 0; transform: translateX(-10px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+/* ========== FADE IN (универсальный) ========== */
+.fade-in {
+  animation: fade-in 0.3s ease forwards;
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* ========== PROGRESS BAR (без motion) ========== */
+.pb-track {
+  width: 100%;
+  border-radius: 9999px;
+  overflow: hidden;
+}
+
+.pb-fill {
+  height: 100%;
+  border-radius: 9999px;
+  transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+  overflow: hidden;
+  /* compositor-friendly */
+  will-change: width;
+}
+
+.pb-fill-shimmer::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.18), transparent);
+  transform: translateX(-100%);
+  animation: pb-shimmer 2s linear infinite;
+  pointer-events: none;
+}
+
+.pb-fill-pulse::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: rgba(255,255,255,0.1);
+  opacity: 0;
+  animation: pb-pulse 1.5s ease-in-out infinite;
+  pointer-events: none;
+}
+
+@keyframes pb-shimmer {
+  to { transform: translateX(100%); }
+}
+
+@keyframes pb-pulse {
+  0%, 100% { opacity: 0; }
+  50% { opacity: 0.3; }
+}
+
+/* ========== CPU CORE BAR (заменяет motion в CpuCoresItem) ========== */
+.cpu-core-fill {
+  height: 100%;
+  border-radius: 9999px;
+  transition: width 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+  will-change: width;
+}
+
+/* ========== LOADING SCREEN (CSS вместо framer-motion) ========== */
+.loading-blob {
+  position: absolute;
+  width: 16rem;
+  height: 16rem;
+  border-radius: 9999px;
+  filter: blur(48px);
+  animation: blob-pulse 3s ease-in-out infinite;
+  /* Меньше blur (48px вместо 80) = в 2.7x легче, разница глазу почти не видна */
+}
+
+@keyframes blob-pulse {
+  0%, 100% { transform: scale(1); opacity: 0.3; }
+  50% { transform: scale(1.2); opacity: 0.5; }
+}
+
+.loading-logo-wobble {
+  animation: logo-wobble 4s ease-in-out infinite;
+}
+
+@keyframes logo-wobble {
+  0%, 100% { transform: rotate(0deg); }
+  25% { transform: rotate(5deg); }
+  75% { transform: rotate(-5deg); }
+}
+
+.loading-text-pulse {
+  animation: live-pulse 1.5s ease-in-out infinite;
 }
 
 /* ========== COLLAPSIBLE SECTION (CSS Grid trick) ========== */
