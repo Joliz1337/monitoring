@@ -231,7 +231,17 @@
     "deploy_no_password": "Укажите SSH-пароль",
     "deploy_no_key": "Вставьте приватный SSH-ключ",
     "deploy_no_remna_cert": "Укажите сертификат ноды Remnawave",
-    "deploy_no_proxy": "Укажите адрес прокси"
+    "deploy_no_proxy": "Укажите адрес прокси",
+    "deploy_add_extra": "Установить ещё один сервер",
+    "deploy_btn_multi": "Развернуть ноды ({{count}})",
+    "deploy_success_multi": "Все ноды развёрнуты",
+    "deploy_failed_multi": "Часть нод не установлена — проверьте логи и нажмите «Повторить»",
+    "deploy_primary": "Основной сервер",
+    "deploy_extra_default_name": "Сервер #{{n}}",
+    "deploy_extra_ok": "Готов",
+    "deploy_extra_failed": "Ошибка",
+    "deploy_extra_retry": "Повторить",
+    "deploy_extra_remove": "Удалить из списка"
   },
   "infra": {
     "title": "Инфраструктура",

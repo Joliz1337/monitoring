@@ -231,7 +231,17 @@
     "deploy_no_password": "Enter the SSH password",
     "deploy_no_key": "Paste the private SSH key",
     "deploy_no_remna_cert": "Provide the Remnawave node certificate",
-    "deploy_no_proxy": "Enter the proxy address"
+    "deploy_no_proxy": "Enter the proxy address",
+    "deploy_add_extra": "Install another server",
+    "deploy_btn_multi": "Deploy nodes ({{count}})",
+    "deploy_success_multi": "All nodes deployed",
+    "deploy_failed_multi": "Some nodes failed — check logs and click Retry",
+    "deploy_primary": "Primary server",
+    "deploy_extra_default_name": "Server #{{n}}",
+    "deploy_extra_ok": "Ready",
+    "deploy_extra_failed": "Error",
+    "deploy_extra_retry": "Retry",
+    "deploy_extra_remove": "Remove from list"
   },
   "infra": {
     "title": "Infrastructure",
