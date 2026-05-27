@@ -241,7 +241,15 @@
     "deploy_extra_ok": "Готов",
     "deploy_extra_failed": "Ошибка",
     "deploy_extra_retry": "Повторить",
-    "deploy_extra_remove": "Удалить из списка"
+    "deploy_extra_remove": "Удалить из списка",
+    "deploy_bindings": "Привязать к профилям:",
+    "deploy_haproxy_profile": "HAProxy-конфиг",
+    "deploy_firewall_profile": "Firewall-профиль",
+    "deploy_profile_none": "Не добавлять",
+    "deploy_linked_haproxy": "Сервер добавлен в HAProxy-конфиг",
+    "deploy_link_haproxy_failed": "Не удалось привязать HAProxy-конфиг",
+    "deploy_linked_firewall": "Сервер добавлен в Firewall-профиль",
+    "deploy_link_firewall_failed": "Не удалось привязать Firewall-профиль"
   },
   "infra": {
     "title": "Инфраструктура",

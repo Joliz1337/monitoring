@@ -1,7 +1,7 @@
-import { Terminal, KeyRound, Save, Loader2, Plus, X } from 'lucide-react'
+import { Terminal, KeyRound, Save, Loader2, Plus, X, Network, Shield } from 'lucide-react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useTranslation } from 'react-i18next'
-import type { RemnawaveCertProfile } from '../../api/client'
+import type { RemnawaveCertProfile, HAProxyConfigProfile, FirewallProfile } from '../../api/client'
 
 export interface DeployFormData {
   enabled: boolean
@@ -24,6 +24,8 @@ export interface DeployFormData {
   remnaCertProfileId: number | null
   installProxy: boolean
   proxyUrl: string
+  haproxyProfileId: number | null
+  firewallProfileId: number | null
 }
 
 export const DEPLOY_DEFAULTS: DeployFormData = {
@@ -47,12 +49,16 @@ export const DEPLOY_DEFAULTS: DeployFormData = {
   remnaCertProfileId: null,
   installProxy: false,
   proxyUrl: '',
+  haproxyProfileId: null,
+  firewallProfileId: null,
 }
 
 interface Props {
   deploy: DeployFormData
   onChange: (patch: Partial<DeployFormData>) => void
   remnaCertProfiles: RemnawaveCertProfile[]
+  haproxyProfiles: HAProxyConfigProfile[]
+  firewallProfiles: FirewallProfile[]
   savingCert: boolean
   onSaveCert: () => void
   onDeleteCert: (id: number) => void
@@ -63,6 +69,8 @@ export default function DeployTargetFields({
   deploy,
   onChange,
   remnaCertProfiles,
+  haproxyProfiles,
+  firewallProfiles,
   savingCert,
   onSaveCert,
   onDeleteCert,
@@ -359,9 +367,47 @@ export default function DeployTargetFields({
             <p className="text-xs text-dark-500 mt-1">{t('servers.deploy_proxy_hint')}</p>
           </div>
         )}
-
-        {footerSlot}
       </div>
+
+      <div className="space-y-3 pt-1">
+        <p className="text-xs text-dark-400">{t('servers.deploy_bindings')}</p>
+
+        <div>
+          <label className="block text-xs text-dark-400 mb-1.5 flex items-center gap-1.5">
+            <Network className="w-3.5 h-3.5" />
+            {t('servers.deploy_haproxy_profile')}
+          </label>
+          <select
+            value={deploy.haproxyProfileId ?? ''}
+            onChange={(e) => onChange({ haproxyProfileId: e.target.value ? Number(e.target.value) : null })}
+            className="input"
+          >
+            <option value="">{t('servers.deploy_profile_none')}</option>
+            {haproxyProfiles.map(p => (
+              <option key={p.id} value={p.id}>{p.name}</option>
+            ))}
+          </select>
+        </div>
+
+        <div>
+          <label className="block text-xs text-dark-400 mb-1.5 flex items-center gap-1.5">
+            <Shield className="w-3.5 h-3.5" />
+            {t('servers.deploy_firewall_profile')}
+          </label>
+          <select
+            value={deploy.firewallProfileId ?? ''}
+            onChange={(e) => onChange({ firewallProfileId: e.target.value ? Number(e.target.value) : null })}
+            className="input"
+          >
+            <option value="">{t('servers.deploy_profile_none')}</option>
+            {firewallProfiles.map(p => (
+              <option key={p.id} value={p.id}>{p.name}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      {footerSlot}
     </div>
   )
 }

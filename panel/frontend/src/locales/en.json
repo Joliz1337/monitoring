@@ -241,7 +241,15 @@
     "deploy_extra_ok": "Ready",
     "deploy_extra_failed": "Error",
     "deploy_extra_retry": "Retry",
-    "deploy_extra_remove": "Remove from list"
+    "deploy_extra_remove": "Remove from list",
+    "deploy_bindings": "Bind to profiles:",
+    "deploy_haproxy_profile": "HAProxy config",
+    "deploy_firewall_profile": "Firewall profile",
+    "deploy_profile_none": "Do not bind",
+    "deploy_linked_haproxy": "Server added to HAProxy config",
+    "deploy_link_haproxy_failed": "Failed to link HAProxy config",
+    "deploy_linked_firewall": "Server added to firewall profile",
+    "deploy_link_firewall_failed": "Failed to link firewall profile"
   },
   "infra": {
     "title": "Infrastructure",

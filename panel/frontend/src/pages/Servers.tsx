@@ -33,6 +33,10 @@ import {
   serverDeployStreamUrl,
   ServerDeployEvent,
   RemnawaveCertProfile,
+  haproxyProfilesApi,
+  firewallProfilesApi,
+  HAProxyConfigProfile,
+  FirewallProfile,
 } from '../api/client'
 import { streamNdjson, StreamUnauthorizedError } from '../utils/ndjsonStream'
 import InfraTree from '../components/Infra/InfraTree'
@@ -103,6 +107,8 @@ export default function Servers() {
 
   const [deploy, setDeploy] = useState<DeployFormData>(DEPLOY_DEFAULTS)
   const [remnaCertProfiles, setRemnaCertProfiles] = useState<RemnawaveCertProfile[]>([])
+  const [haproxyProfiles, setHaproxyProfiles] = useState<HAProxyConfigProfile[]>([])
+  const [firewallProfiles, setFirewallProfiles] = useState<FirewallProfile[]>([])
   const [deployLog, setDeployLog] = useState<string[]>([])
   const [primaryStatus, setPrimaryStatus] = useState<DeployStatus>('idle')
   const [extras, setExtras] = useState<ExtraTarget[]>([])
@@ -179,6 +185,12 @@ export default function Servers() {
   useEffect(() => {
     if (!showForm || editingId) return
     loadRemnaCertProfiles()
+    haproxyProfilesApi.getProfiles()
+      .then(res => setHaproxyProfiles(res.data))
+      .catch(() => {})
+    firewallProfilesApi.list()
+      .then(res => setFirewallProfiles(res.data))
+      .catch(() => {})
   }, [showForm, editingId])
 
   const handleSubmit = async (e: FormEvent) => {
@@ -295,8 +307,34 @@ export default function Servers() {
     return { ok, error: err }
   }
 
+  const applyProfileBindings = async (
+    serverId: number,
+    d: DeployFormData,
+    pushLog: (line: string) => void,
+  ) => {
+    if (d.haproxyProfileId != null) {
+      try {
+        await haproxyProfilesApi.linkServer(d.haproxyProfileId, serverId)
+        pushLog(`[panel] ${t('servers.deploy_linked_haproxy')}`)
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        pushLog(`[panel] ${t('servers.deploy_link_haproxy_failed')}: ${msg}`)
+      }
+    }
+    if (d.firewallProfileId != null) {
+      try {
+        await firewallProfilesApi.linkServer(d.firewallProfileId, serverId)
+        pushLog(`[panel] ${t('servers.deploy_linked_firewall')}`)
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        pushLog(`[panel] ${t('servers.deploy_link_firewall_failed')}: ${msg}`)
+      }
+    }
+  }
+
   const deployPrimary = async (): Promise<boolean> => {
     const body = buildDeployBody(formData.name, formData.host, formData.port, deploy)
+    let serverId: number | null = null
     const { ok, error: err } = await streamDeploy(body, (ev) => {
       if (ev.type === 'log') {
         setDeployLog(prev => [...prev, cleanLogLine(ev.line)])
@@ -304,8 +342,13 @@ export default function Servers() {
         setDeployLog(prev => [...prev, `--- ${ev.host} ---`])
       } else if (ev.type === 'error') {
         setDeployLog(prev => [...prev, `[ERROR] ${ev.message}`])
+      } else if (ev.type === 'done' && ev.server_id != null) {
+        serverId = ev.server_id
       }
     })
+    if (ok && serverId != null) {
+      await applyProfileBindings(serverId, deploy, (line) => setDeployLog(prev => [...prev, line]))
+    }
     setPrimaryStatus(ok ? 'success' : 'error')
     if (!ok && err) setError(err)
     return ok
@@ -315,6 +358,7 @@ export default function Servers() {
     const target = extras.find(t => t.id === id)
     if (!target) return false
     const body = buildDeployBody(target.name, target.host, target.port, target.deploy)
+    let serverId: number | null = null
     const { ok, error: err } = await streamDeploy(body, (ev) => {
       if (ev.type === 'log') {
         setExtras(prev => prev.map(x => x.id === id ? { ...x, log: [...x.log, cleanLogLine(ev.line)] } : x))
@@ -323,10 +367,16 @@ export default function Servers() {
       } else if (ev.type === 'error') {
         setExtras(prev => prev.map(x => x.id === id ? { ...x, log: [...x.log, `[ERROR] ${ev.message}`], error: ev.message } : x))
       } else if (ev.type === 'done' && ev.server_id != null) {
+        serverId = ev.server_id
         const sid = ev.server_id
         setExtras(prev => prev.map(x => x.id === id ? { ...x, serverId: sid } : x))
       }
     })
+    if (ok && serverId != null) {
+      await applyProfileBindings(serverId, target.deploy, (line) =>
+        setExtras(prev => prev.map(x => x.id === id ? { ...x, log: [...x.log, line] } : x)),
+      )
+    }
     setExtras(prev => prev.map(x => x.id === id
       ? { ...x, status: ok ? 'success' : 'error', error: ok ? null : (err ?? x.error) }
       : x,
@@ -765,6 +815,8 @@ export default function Servers() {
                         deploy={deploy}
                         onChange={patchDeploy}
                         remnaCertProfiles={remnaCertProfiles}
+                        haproxyProfiles={haproxyProfiles}
+                        firewallProfiles={firewallProfiles}
                         savingCert={savingCert}
                         onSaveCert={handleSaveCert}
                         onDeleteCert={handleDeleteCert}
@@ -798,7 +850,10 @@ export default function Servers() {
                         onDeployChange={(patch) => updateExtraDeploy(target.id, patch)}
                         onRemove={() => removeExtra(target.id)}
                         onRetry={() => retryExtra(target.id)}
+                        onAddAnother={addExtra}
                         remnaCertProfiles={remnaCertProfiles}
+                        haproxyProfiles={haproxyProfiles}
+                        firewallProfiles={firewallProfiles}
                         savingCert={savingCert}
                         onSaveCert={handleSaveCert}
                         onDeleteCert={handleDeleteCert}

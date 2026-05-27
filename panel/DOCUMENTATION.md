@@ -21,7 +21,7 @@
 - **Wildcard SSL** — выпуск wildcard сертификатов через certbot + Cloudflare DNS challenge, продление, деплой на ноды через API порта 9100; фоновое автопродление каждые 24ч; настройка пути деплоя и reload-команды для каждого сервера
 - **HAProxy Configs** — централизованные профили конфигурации HAProxy с массовой раскаткой на серверы: CRUD профилей и правил, балансировщик нагрузки, привязка серверов, history синхронизаций; запуск HAProxy per-server и bulk-запуск всех остановленных нод одним кликом
 - **Firewall Profiles** — шаблоны UFW с массовой раскаткой на серверы: CRUD профилей, привязка 1 сервер ↔ 1 активный профиль, history синхронизаций, node-API-port-guard (защита связи панели с нодой через порт 9100), drift-детекция по SHA256-хэшу
-- **Авторазвёртывание ноды** — установка ноды мониторинга прямо из вкладки «Серверы»: подключение по SSH (пароль или приватный ключ), запуск `install.sh --unattended` на целевом сервере, живой лог установки в браузере; опционально устанавливает WARP и ноду Remnawave с сохранёнными именованными сертификатами; **массовый деплой** — кнопка «Установить ещё один сервер» добавляет произвольное количество дополнительных целей, каждая со своими SSH-реквизитами и опциями; все серверы деплоятся параллельно, каждый со своим NDJSON-стримом лога и per-target кнопкой Retry при ошибке
+- **Авторазвёртывание ноды** — установка ноды мониторинга прямо из вкладки «Серверы»: подключение по SSH (пароль или приватный ключ), запуск `install.sh --unattended` на целевом сервере, живой лог установки в браузере; опционально устанавливает WARP и ноду Remnawave с сохранёнными именованными сертификатами; **массовый деплой** — кнопка «Установить ещё один сервер» добавляет произвольное количество дополнительных целей, каждая со своими SSH-реквизитами и опциями; кнопка также дублируется внизу каждой extra-карточки рядом с «Повторить» — удобно при заполнении длинной формы без скролла вверх; все серверы деплоятся параллельно, каждый со своим NDJSON-стримом лога и per-target кнопкой Retry при ошибке; после успешного деплоя панель автоматически привязывает сервер к выбранным HAProxy-профилю и/или Firewall-профилю
 
 ## Интервалы сбора данных
 
@@ -958,7 +958,7 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 
 **Массовый авто-деплой (multi-target):**
 
-Кнопка «Установить ещё один сервер» (внутри primary deploy-секции, под блоком HTTP-прокси) добавляет карточку дополнительной цели с настройками, скопированными из primary. Произвольное количество карточек.
+Кнопка «Установить ещё один сервер» (внутри primary deploy-секции, под блоком HTTP-прокси) добавляет карточку дополнительной цели с настройками, скопированными из primary. Произвольное количество карточек. Кнопка **дублируется внизу каждой extra-карточки** рядом с «Повторить» — позволяет добавить следующий сервер сразу после заполнения текущей карточки, без скролла вверх.
 
 При нажатии «Развернуть ноды (N)»:
 - `handleDeployAll` запускает `Promise.all` — каждый таргет (primary + все extras) деплоится параллельно
@@ -971,11 +971,28 @@ Submit-кнопка меняет надпись: «Развернуть ноду
 
 При снятии чекбокса «Авторазвёртывание» — extras и статусы очищаются.
 
-**Новые компоненты:**
-- `panel/frontend/src/components/servers/DeployTargetFields.tsx` — переиспользуемые поля SSH/опций/прокси/Remnawave/SSH-пресета/смены пароля; экспортирует `DEPLOY_DEFAULTS` и тип `DeployFormData`; принимает `footerSlot` для встраивания кнопки «+ещё сервер»
-- `panel/frontend/src/components/servers/ExtraServerCard.tsx` — карточка дополнительной цели: имя, host:port, `<DeployTargetFields>`, per-target лог, статус (idle/running/success/error), Retry при ошибке, кнопка удаления; экспортирует `ExtraTarget` и `DeployStatus`
+**Постдеплой: привязка к профилям (`applyProfileBindings`):**
 
-**i18n:** новые ключи `deploy_add_extra`, `deploy_btn_multi`, `deploy_success_multi`, `deploy_failed_multi`, `deploy_primary`, `deploy_extra_default_name`, `deploy_extra_ok`, `deploy_extra_failed`, `deploy_extra_retry`, `deploy_extra_remove` в `ru.json` и `en.json`.
+Каждая карточка (primary + extras) содержит блок «Привязать к профилям» с двумя выпадающими списками:
+- **HAProxy-профиль** — выбрать профиль или «Не добавлять»
+- **Firewall-профиль** — выбрать профиль или «Не добавлять»
+
+Список профилей загружается при открытии формы (`haproxyProfilesApi.getProfiles()` + `firewallProfilesApi.list()`).
+
+После получения `server_id` из `done`-события NDJSON-стрима вызывается `applyProfileBindings(serverId, deploy, pushLog)`:
+1. Если выбран HAProxy-профиль — `POST /haproxy-profiles/{profile_id}/servers/{server_id}` (существующий эндпоинт)
+2. Если выбран Firewall-профиль — `POST /firewall-profiles/{profile_id}/servers/{server_id}` (существующий эндпоинт)
+3. Результат каждого шага пишется в per-target лог деплоя
+
+Бэкенд не менялся — используются существующие эндпоинты привязки серверов к профилям.
+
+Поля `haproxyProfileId` / `firewallProfileId` добавлены в `DeployFormData` и `DEPLOY_DEFAULTS` (значение по умолчанию: пустая строка = «Не добавлять»).
+
+**Новые компоненты:**
+- `panel/frontend/src/components/servers/DeployTargetFields.tsx` — переиспользуемые поля SSH/опций/прокси/Remnawave/SSH-пресета/смены пароля; блок «Привязать к профилям» (HAProxy + Firewall); принимает пропы `haproxyProfiles`, `firewallProfiles`; экспортирует `DEPLOY_DEFAULTS` и тип `DeployFormData`; принимает `footerSlot` для встраивания кнопки «+ещё сервер»
+- `panel/frontend/src/components/servers/ExtraServerCard.tsx` — карточка дополнительной цели: имя, host:port, `<DeployTargetFields>`, per-target лог, статус (idle/running/success/error), Retry при ошибке, кнопка удаления, кнопка «+ Установить ещё один сервер» внизу карточки; принимает пропы `haproxyProfiles`, `firewallProfiles`, `onAddAnother`; экспортирует `ExtraTarget` и `DeployStatus`
+
+**i18n:** новые ключи `deploy_add_extra`, `deploy_btn_multi`, `deploy_success_multi`, `deploy_failed_multi`, `deploy_primary`, `deploy_extra_default_name`, `deploy_extra_ok`, `deploy_extra_failed`, `deploy_extra_retry`, `deploy_extra_remove`, `deploy_bindings`, `deploy_haproxy_profile`, `deploy_firewall_profile`, `deploy_profile_none`, `deploy_linked_haproxy`, `deploy_link_haproxy_failed`, `deploy_linked_firewall`, `deploy_link_firewall_failed` в `ru.json` и `en.json`.
 
 **Зависимости:**
 - `asyncssh` добавлен в `panel/backend/requirements.txt`

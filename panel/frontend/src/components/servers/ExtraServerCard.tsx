@@ -10,10 +10,11 @@ import {
   Terminal,
   RotateCw,
   AlertTriangle,
+  PlusCircle,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import DeployTargetFields, { type DeployFormData } from './DeployTargetFields'
-import type { RemnawaveCertProfile } from '../../api/client'
+import type { RemnawaveCertProfile, HAProxyConfigProfile, FirewallProfile } from '../../api/client'
 
 export type DeployStatus = 'idle' | 'running' | 'success' | 'error'
 
@@ -36,7 +37,10 @@ interface Props {
   onDeployChange: (patch: Partial<DeployFormData>) => void
   onRemove: () => void
   onRetry: () => void
+  onAddAnother: () => void
   remnaCertProfiles: RemnawaveCertProfile[]
+  haproxyProfiles: HAProxyConfigProfile[]
+  firewallProfiles: FirewallProfile[]
   savingCert: boolean
   onSaveCert: () => void
   onDeleteCert: (id: number) => void
@@ -50,7 +54,10 @@ export default function ExtraServerCard({
   onDeployChange,
   onRemove,
   onRetry,
+  onAddAnother,
   remnaCertProfiles,
+  haproxyProfiles,
+  firewallProfiles,
   savingCert,
   onSaveCert,
   onDeleteCert,
@@ -161,6 +168,8 @@ export default function ExtraServerCard({
             deploy={target.deploy}
             onChange={onDeployChange}
             remnaCertProfiles={remnaCertProfiles}
+            haproxyProfiles={haproxyProfiles}
+            firewallProfiles={firewallProfiles}
             savingCert={savingCert}
             onSaveCert={onSaveCert}
             onDeleteCert={onDeleteCert}
@@ -191,17 +200,28 @@ export default function ExtraServerCard({
           </div>
         )}
 
-        {status === 'error' && (
+        <div className="flex flex-wrap gap-2">
+          {status === 'error' && (
+            <button
+              type="button"
+              onClick={onRetry}
+              disabled={disabled}
+              className="btn btn-secondary text-sm"
+            >
+              <RotateCw className="w-4 h-4" />
+              {t('servers.deploy_extra_retry')}
+            </button>
+          )}
           <button
             type="button"
-            onClick={onRetry}
+            onClick={onAddAnother}
             disabled={disabled}
             className="btn btn-secondary text-sm"
           >
-            <RotateCw className="w-4 h-4" />
-            {t('servers.deploy_extra_retry')}
+            <PlusCircle className="w-4 h-4" />
+            {t('servers.deploy_add_extra')}
           </button>
-        )}
+        </div>
       </div>
     </motion.div>
   )
