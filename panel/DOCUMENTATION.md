@@ -929,8 +929,8 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 
 После того как нода установлена и запись `Server` создана, роутер `server_deploy.py` запускает асинхронный генератор `_post_install(server_id, req)` в фоне. Шаги:
 1. Пауза ~8 секунд — нода поднимается после установки
-2. Если `new_root_password` задан — вызов `POST /api/ssh/password` на ноде через `proxy_to_node()`
-3. Если `ssh_preset` задан — вызов `POST /api/ssh/config` и `POST /api/ssh/fail2ban/config` с данными из соответствующего пресета (`RECOMMENDED_PRESET` / `MAXIMUM_PRESET`)
+2. Если `ssh_preset` задан — вызов `POST /api/ssh/config` и `POST /api/ssh/fail2ban/config` с данными из соответствующего пресета (`RECOMMENDED_PRESET` / `MAXIMUM_PRESET`)
+3. Если `new_root_password` задан — вызов `POST /api/ssh/password` на ноде через `proxy_to_node()`
 
 Все шаги **best-effort**: ошибки пишутся в лог установки как NDJSON-события `{"type": "log", ...}`, но не отменяют результат — нода считается успешно добавленной. Лог постустановки попадает в тот же NDJSON-стрим, что и лог `install.sh`.
 

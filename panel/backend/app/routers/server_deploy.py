@@ -234,17 +234,6 @@ async def _post_install(server_id: int, req: "DeployRequest"):
     await asyncio.sleep(8)
     yield {"type": "log", "line": "[panel] Применение SSH-настроек через API ноды..."}
 
-    if req.new_root_password:
-        try:
-            await proxy_to_node(
-                server, "POST", "/api/ssh/password",
-                {"user": "root", "password": req.new_root_password},
-                timeout=120.0, use_apply_client=True,
-            )
-            yield {"type": "log", "line": "[panel] Пароль root изменён"}
-        except Exception as exc:  # noqa: BLE001 — best-effort постшаг
-            yield {"type": "log", "line": f"[panel] Не удалось сменить пароль root: {exc}"}
-
     if req.ssh_preset:
         preset = RECOMMENDED_PRESET if req.ssh_preset == "recommended" else MAXIMUM_PRESET
         label = "рекомендуемый" if req.ssh_preset == "recommended" else "максимальный"
@@ -261,6 +250,17 @@ async def _post_install(server_id: int, req: "DeployRequest"):
             yield {"type": "log", "line": "[panel] fail2ban настроен"}
         except Exception as exc:  # noqa: BLE001 — best-effort постшаг
             yield {"type": "log", "line": f"[panel] fail2ban не настроен: {exc}"}
+
+    if req.new_root_password:
+        try:
+            await proxy_to_node(
+                server, "POST", "/api/ssh/password",
+                {"user": "root", "password": req.new_root_password},
+                timeout=120.0, use_apply_client=True,
+            )
+            yield {"type": "log", "line": "[panel] Пароль root изменён"}
+        except Exception as exc:  # noqa: BLE001 — best-effort постшаг
+            yield {"type": "log", "line": f"[panel] Не удалось сменить пароль root: {exc}"}
 
 
 @router.post("/deploy")
