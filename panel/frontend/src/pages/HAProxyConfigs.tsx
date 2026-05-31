@@ -21,9 +21,18 @@ import { Tooltip } from '../components/ui/Tooltip'
 import { FAQIcon } from '../components/FAQ'
 
 
-function SyncStatusBadge({ status }: { status: string | null }) {
+function SyncStatusBadge({ status, online }: { status: string | null; online?: boolean }) {
   const { t } = useTranslation()
   if (!status) return null
+
+  // Офлайн-сервер в ожидании синхронизации — раскатка отложена до его восстановления.
+  if (status === 'pending' && online === false) {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border text-dark-300 bg-dark-700/40 border-dark-600/40">
+        <Clock className="w-3 h-3" /> {t('haproxy_configs.waiting_server')}
+      </span>
+    )
+  }
 
   const map: Record<string, { color: string; icon: React.ReactNode; label: string }> = {
     synced: { color: 'text-green-400 bg-green-500/10 border-green-500/20', icon: <CheckCircle2 className="w-3 h-3" />, label: t('haproxy_configs.synced') },
@@ -624,6 +633,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
   const [showConfig, setShowConfig] = useState(false)
   const [configEdit, setConfigEdit] = useState('')
   const [configSaving, setConfigSaving] = useState(false)
+  const [configValidating, setConfigValidating] = useState(false)
   const [serverSearch, setServerSearch] = useState('')
   const [configModalMouseDown, setConfigModalMouseDown] = useState(false)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -761,6 +771,17 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
     } finally { setConfigSaving(false) }
   }
 
+  const handleValidateConfig = async () => {
+    setConfigValidating(true)
+    try {
+      const res = await haproxyProfilesApi.validateConfig(configEdit)
+      if (res.data.valid) toast.success(t('haproxy_configs.config_valid'))
+      else toast.error(`${t('haproxy_configs.config_invalid')}: ${res.data.message}`)
+    } catch {
+      toast.error(t('haproxy_configs.validate_error'))
+    } finally { setConfigValidating(false) }
+  }
+
   const handleApplyTemplate = async () => {
     try {
       const res = await haproxyProfilesApi.regenerateConfig(profileId)
@@ -777,9 +798,11 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
     try {
       const res = await haproxyProfilesApi.syncAll(profileId)
       const results = res.data.results
-      const ok = results.filter((r: HAProxySyncResult) => r.success).length
-      const fail = results.filter((r: HAProxySyncResult) => !r.success).length
-      if (fail === 0) toast.success(t('haproxy_configs.sync_success', { count: ok }))
+      const ok = results.filter((r: HAProxySyncResult) => r.status === 'success').length
+      const queued = results.filter((r: HAProxySyncResult) => r.status === 'queued').length
+      const fail = results.filter((r: HAProxySyncResult) => r.status === 'failed').length
+      if (fail === 0 && queued === 0) toast.success(t('haproxy_configs.sync_success', { count: ok }))
+      else if (fail === 0 && queued > 0) toast.info(t('haproxy_configs.sync_queued', { ok, queued }))
       else toast.warning(t('haproxy_configs.sync_partial', { ok, fail }))
       await fetchDetail(); onRefreshList()
     } catch { toast.error(t('haproxy_configs.sync_error')) }
@@ -790,7 +813,8 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
     setSyncingServerId(serverId)
     try {
       const res = await haproxyProfilesApi.syncOne(profileId, serverId)
-      if (res.data.success) toast.success(res.data.message)
+      if (res.data.status === 'queued') toast.info(t('haproxy_configs.sync_one_queued'))
+      else if (res.data.success) toast.success(res.data.message)
       else toast.error(res.data.message)
       await fetchDetail(); onRefreshList()
     } catch { toast.error(t('haproxy_configs.sync_error')) }
@@ -810,7 +834,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
   }
 
   const handleStartAllStopped = async () => {
-    const stopped = serversStatus.filter(s => s.haproxy_running === false)
+    const stopped = serversStatus.filter(s => s.online && s.haproxy_running === false)
     if (stopped.length === 0) return
     setStartingAll(true)
     const results = await Promise.allSettled(stopped.map(s => proxyApi.startHAProxy(s.server_id)))
@@ -1016,6 +1040,10 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                     <RefreshCw className="w-4 h-4" /> {t('haproxy_configs.apply_template')}
                   </button>
                   <div className="flex items-center gap-3">
+                    <button onClick={handleValidateConfig} disabled={configValidating}
+                      className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm text-dark-300 hover:text-dark-100 bg-dark-800 hover:bg-dark-700 border border-dark-700 transition-colors disabled:opacity-50">
+                      {configValidating ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />} {t('haproxy_configs.validate_config')}
+                    </button>
                     <button onClick={() => setShowConfig(false)}
                       className="px-4 py-2 rounded-lg text-sm text-dark-300 hover:text-dark-100 bg-dark-800 hover:bg-dark-700 border border-dark-700 transition-colors">
                       {t('common.close')}
@@ -1044,7 +1072,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-dark-300 hover:text-dark-100 bg-dark-800/50 hover:bg-dark-700/50 border border-dark-700/50 transition-colors">
                 <Link2 className="w-3.5 h-3.5" /> {t('haproxy_configs.add_server')}
               </button>
-              {serversStatus.some(s => s.haproxy_running === false) && (
+              {serversStatus.some(s => s.online && s.haproxy_running === false) && (
                 <button onClick={handleStartAllStopped} disabled={startingAll}
                   className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-green-600 hover:bg-green-500 text-white transition-colors disabled:opacity-50">
                   {startingAll ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />} {t('haproxy_configs.start_all_stopped')}
@@ -1097,12 +1125,23 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                 }
                 const laPercent = m?.la1 != null && m?.cores ? (m.la1 / m.cores * 100) : null
                 return (
-                  <div key={s.server_id} className="flex items-center justify-between px-3 py-2 rounded-lg bg-dark-900/30 border border-dark-800/50">
+                  <div key={s.server_id} className={`flex items-center justify-between px-3 py-2 rounded-lg bg-dark-900/30 border border-dark-800/50 ${s.online ? '' : 'opacity-60'}`}>
                     <div className="flex items-center gap-2.5 min-w-0">
-                      <div className={`w-2 h-2 rounded-full shrink-0 ${s.haproxy_running ? 'bg-green-400' : s.haproxy_running === false ? 'bg-red-400' : 'bg-dark-600'}`}
-                        title={s.haproxy_running ? 'HAProxy running' : s.haproxy_running === false ? 'HAProxy stopped' : 'Unknown'} />
+                      {/* Сигнализатор сервера: живой / мёртвый */}
+                      <Tooltip label={s.online ? t('haproxy_configs.server_online') : t('haproxy_configs.server_offline')}>
+                        <span className="relative flex w-2.5 h-2.5 shrink-0">
+                          {s.online && <span className="absolute inline-flex w-full h-full rounded-full bg-green-400/60 animate-ping" />}
+                          <span className={`relative inline-flex w-2.5 h-2.5 rounded-full ${s.online ? 'bg-green-400' : 'bg-red-500'}`} />
+                        </span>
+                      </Tooltip>
                       <span className="text-sm text-dark-200 truncate">{s.server_name}</span>
-                      <SyncStatusBadge status={s.sync_status} />
+                      {/* Состояние службы HAProxy на ноде */}
+                      {s.online && s.haproxy_running != null && (
+                        <Tooltip label={s.haproxy_running ? t('haproxy_configs.haproxy_running') : t('haproxy_configs.haproxy_stopped')}>
+                          <Activity className={`w-3.5 h-3.5 shrink-0 ${s.haproxy_running ? 'text-green-400/70' : 'text-red-400/70'}`} />
+                        </Tooltip>
+                      )}
+                      <SyncStatusBadge status={s.sync_status} online={s.online} />
                     </div>
                     <div className="flex items-center gap-3 shrink-0">
                       {m && (() => {
@@ -1117,7 +1156,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                         )
                       })()}
                       <div className="flex items-center gap-1">
-                        {s.haproxy_running === false && (
+                        {s.online && s.haproxy_running === false && (
                           <Tooltip label={t('haproxy_configs.start_haproxy')}>
                             <button onClick={() => handleStartHaproxy(s.server_id)} disabled={startingServerId === s.server_id}
                               className="p-1.5 rounded-lg text-dark-400 hover:text-green-400 hover:bg-green-500/10 transition-colors disabled:opacity-50">

@@ -10,10 +10,11 @@ import json
 import logging
 
 from app.database import get_db, async_session_maker
-from app.models import Server, HAProxyConfigProfile, HAProxySyncLog, ServerCache, MetricsSnapshot
+from app.models import Server, HAProxyConfigProfile, HAProxySyncLog, ServerCache, MetricsSnapshot, PanelSettings
 from app.auth import verify_auth
-from app.services.haproxy_profile_sync import sync_profile_to_servers, compute_config_hash
+from app.services.haproxy_profile_sync import sync_profile_to_servers, compute_config_hash, is_server_online
 from app.services.haproxy_config import HAProxyRule, BackendServer, BalancerOptions, get_config_generator
+from app.services.haproxy_validator import validate_config
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +200,17 @@ async def get_available_servers(db: AsyncSession = Depends(get_db), _=Depends(ve
     ]
 
 
+class ValidateRequest(BaseModel):
+    config_content: str
+
+
+@router.post("/validate")
+async def validate_profile_config(data: ValidateRequest, _=Depends(verify_auth)):
+    """Проверяет конфиг HAProxy на панели через `haproxy -c` до раскатки на серверы."""
+    valid, message = await validate_config(data.config_content)
+    return {"valid": valid, "message": message}
+
+
 @router.post("/reorder")
 async def reorder_profiles(data: ReorderRequest, db: AsyncSession = Depends(get_db), _=Depends(verify_auth)):
     for i, pid in enumerate(data.profile_ids):
@@ -380,6 +392,9 @@ async def update_profile(profile_id: int, data: ProfileUpdate, bg: BackgroundTas
     if data.description is not None:
         profile.description = data.description
     if data.config_content is not None:
+        valid, message = await validate_config(data.config_content)
+        if not valid:
+            raise HTTPException(400, f"Конфиг не прошёл проверку HAProxy: {message}")
         profile.config_content = data.config_content
         config_changed = True
 
@@ -466,7 +481,7 @@ async def sync_all(profile_id: int, db: AsyncSession = Depends(get_db), _=Depend
 
     return {
         "results": [
-            {"server_id": r.server_id, "server_name": r.server_name, "success": r.success, "message": r.message}
+            {"server_id": r.server_id, "server_name": r.server_name, "success": r.success, "message": r.message, "status": r.status}
             for r in results
         ]
     }
@@ -481,7 +496,7 @@ async def sync_one(profile_id: int, server_id: int, db: AsyncSession = Depends(g
         raise HTTPException(404, "Server not linked to this profile or inactive")
 
     r = results[0]
-    return {"server_id": r.server_id, "server_name": r.server_name, "success": r.success, "message": r.message}
+    return {"server_id": r.server_id, "server_name": r.server_name, "success": r.success, "message": r.message, "status": r.status}
 
 
 # ==================== Import ====================
@@ -717,6 +732,13 @@ async def get_servers_status(profile_id: int, db: AsyncSession = Depends(get_db)
 
     server_ids = [s.id for s in servers]
 
+    interval_row = await db.execute(
+        select(PanelSettings.value).where(PanelSettings.key == "metrics_collect_interval")
+    )
+    interval_val = interval_row.scalar_one_or_none()
+    collect_interval = int(interval_val) if interval_val else 10
+    online_threshold = max(90, collect_interval * 3 + 30)
+
     cache_result = await db.execute(
         select(ServerCache).where(ServerCache.server_id.in_(server_ids))
     )
@@ -776,6 +798,7 @@ async def get_servers_status(profile_id: int, db: AsyncSession = Depends(get_db)
             "server_id": s.id,
             "server_name": s.name,
             "server_url": s.url,
+            "online": is_server_online(s, online_threshold),
             "sync_status": s.haproxy_sync_status,
             "config_hash": s.haproxy_config_hash,
             "last_sync_at": s.haproxy_last_sync_at.isoformat() if s.haproxy_last_sync_at else None,

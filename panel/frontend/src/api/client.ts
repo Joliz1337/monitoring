@@ -1715,6 +1715,7 @@ export interface HAProxySyncResult {
   server_name: string
   success: boolean
   message: string
+  status: 'success' | 'failed' | 'queued'
 }
 
 export interface HAProxySyncLogEntry {
@@ -1739,6 +1740,7 @@ export interface HAProxyServerStatus {
   server_id: number
   server_name: string
   server_url: string
+  online: boolean
   sync_status: 'synced' | 'pending' | 'failed' | null
   config_hash: string | null
   last_sync_at: string | null
@@ -1848,6 +1850,8 @@ export const haproxyProfilesApi = {
     api.delete<{ success: boolean; rules: HAProxyProfileRule[] }>(`/haproxy-profiles/${profileId}/rules/${ruleName}`),
   regenerateConfig: (profileId: number) =>
     api.post<{ config_content: string }>(`/haproxy-profiles/${profileId}/regenerate-config`),
+  validateConfig: (config_content: string) =>
+    api.post<{ valid: boolean; message: string }>('/haproxy-profiles/validate', { config_content }),
 }
 
 // ==================== Firewall Profiles (UFW) ====================

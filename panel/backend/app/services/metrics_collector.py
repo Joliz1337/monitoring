@@ -53,6 +53,7 @@ class MetricsCollector:
     """Collects metrics from all servers and stores in panel DB"""
     
     XRAY_CHECK_INTERVAL = 120
+    HAPROXY_RETRY_INTERVAL = 30  # как часто досинхронизировать ожившие ноды
     ACTIVE_REFRESH_INTERVAL = 5
     ACTIVITY_TTL = 60
     
@@ -71,6 +72,7 @@ class MetricsCollector:
         self._settings_task: Optional[asyncio.Task] = None
         self._xray_check_task: Optional[asyncio.Task] = None
         self._active_cache_task: Optional[asyncio.Task] = None
+        self._haproxy_retry_task: Optional[asyncio.Task] = None
         self._server_states: dict[int, ServerMetricsState] = {}
         self._collect_interval = DEFAULT_METRICS_INTERVAL
         self._haproxy_interval = DEFAULT_HAPROXY_INTERVAL
@@ -155,12 +157,13 @@ class MetricsCollector:
         self._settings_task = asyncio.create_task(self._settings_loop())
         self._xray_check_task = asyncio.create_task(self._xray_check_loop())
         self._active_cache_task = asyncio.create_task(self._active_haproxy_cache_loop())
+        self._haproxy_retry_task = asyncio.create_task(self._haproxy_pending_sync_loop())
         logger.info(f"Metrics collector started (interval: {self._collect_interval}s, haproxy: {self._haproxy_interval}s)")
     
     async def stop(self):
         """Stop background collection"""
         self._running = False
-        for task in [self._task, self._aggregation_task, self._haproxy_task, self._settings_task, self._xray_check_task, self._active_cache_task]:
+        for task in [self._task, self._aggregation_task, self._haproxy_task, self._settings_task, self._xray_check_task, self._active_cache_task, self._haproxy_retry_task]:
             if task:
                 task.cancel()
                 try:
@@ -684,6 +687,21 @@ class MetricsCollector:
         except Exception as e:
             logger.debug(f"Failed to cache HAProxy/Traffic for {server.name}: {e}")
     
+    async def _haproxy_pending_sync_loop(self):
+        """Досинхронизирует ожившие ноды, у которых раскатка HAProxy-конфига была отложена (offline)."""
+        from app.services.haproxy_profile_sync import retry_pending_haproxy_syncs
+
+        await asyncio.sleep(20)  # дать нодам подняться после старта
+        while self._running:
+            try:
+                async with async_session() as db:
+                    synced = await retry_pending_haproxy_syncs(db)
+                if synced:
+                    logger.info("HAProxy: досинхронизировано %d оживших нод", synced)
+            except Exception as e:
+                logger.error(f"HAProxy pending sync error: {e}")
+            await asyncio.sleep(self.HAPROXY_RETRY_INTERVAL)
+
     async def _xray_check_loop(self):
         """Periodically check which servers have a running remnanode container."""
         await asyncio.sleep(10)  # Initial delay to let servers come online

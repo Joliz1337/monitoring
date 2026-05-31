@@ -10,7 +10,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    bash curl git rsync openssl unzip iperf3 proxychains4 gnupg apt-transport-https
+    bash curl git rsync openssl unzip iperf3 proxychains4 gnupg apt-transport-https haproxy
 
 # Install Ookla Speedtest CLI
 RUN curl -s https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh | bash && \
