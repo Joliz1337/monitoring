@@ -1,9 +1,10 @@
 """Авторазвёртывание ноды по SSH и хранилище сертификатов Remnawave.
 
-POST /servers/deploy — подключается к серверу по SSH, ставит ноду (+опции)
-и стримит лог установки (NDJSON). При успехе создаёт запись Server.
+POST /servers/deploy — запускает фоновую задачу установки ноды (+опции) и
+возвращает её job_id. Сама установка идёт независимо от HTTP-соединения: лог
+читается через GET /servers/deploy/{job_id}/stream (NDJSON), список активных
+и недавних задач — через GET /servers/deploy/jobs.
 """
-import asyncio
 import ipaddress
 import json
 import logging
@@ -19,12 +20,10 @@ from typing import Optional
 from app.auth import verify_auth
 from app.config import get_settings
 from app.database import async_session_maker, get_db
-from app.models import RemnawaveCertProfile, Server
-from app.services.blocklist_manager import get_blocklist_manager
-from app.services.deploy_service import DeployParams, deploy_node
+from app.models import RemnawaveCertProfile
+from app.services.deploy_job_manager import PostDeployOptions, get_deploy_job_manager
+from app.services.deploy_service import DeployParams
 from app.services.pki import build_installer_token
-from app.services.ssh_manager import proxy_to_node, RECOMMENDED_PRESET, MAXIMUM_PRESET
-from app.services.time_sync import get_time_sync_service
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
@@ -156,6 +155,8 @@ class DeployRequest(BaseModel):
     proxy_url: Optional[str] = None
     ssh_preset: Optional[str] = None  # None | "recommended" | "maximum"
     new_root_password: Optional[str] = None
+    haproxy_profile_id: Optional[int] = None
+    firewall_profile_id: Optional[int] = None
 
 
 async def _resolve_remnawave_cert(req: DeployRequest) -> str:
@@ -193,83 +194,16 @@ async def _resolve_remnawave_cert(req: DeployRequest) -> str:
     return cert
 
 
-async def _create_server(name: str, url: str) -> int:
-    """Создаёт запись ноды после успешной установки (mTLS, shared cert)."""
-    async with async_session_maker() as db:
-        result = await db.execute(select(Server).order_by(Server.position.desc()))
-        last = result.scalars().first()
-        server = Server(
-            name=name,
-            url=url.rstrip("/"),
-            api_key=None,
-            pki_enabled=True,
-            uses_shared_cert=True,
-            position=(last.position + 1) if last else 0,
-        )
-        db.add(server)
-        await db.commit()
-        await db.refresh(server)
-        server_id = server.id
-
-    asyncio.ensure_future(get_blocklist_manager().sync_single_node_by_id(server_id))
-    asyncio.ensure_future(get_time_sync_service().sync_single_server(server_id))
-    return server_id
-
-
-async def _post_install(server_id: int, req: "DeployRequest"):
-    """Постустановочные шаги через API ноды: смена пароля root и SSH-пресет.
-
-    Best-effort — нода уже развёрнута; ошибки шагов только логируются в стрим.
-    """
-    if not req.ssh_preset and not req.new_root_password:
-        return
-
-    async with async_session_maker() as db:
-        result = await db.execute(select(Server).where(Server.id == server_id))
-        server = result.scalar_one_or_none()
-    if not server:
-        return
-
-    # Дать ноде подняться и принять mTLS-подключение панели
-    await asyncio.sleep(8)
-    yield {"type": "log", "line": "[panel] Применение SSH-настроек через API ноды..."}
-
-    if req.ssh_preset:
-        preset = RECOMMENDED_PRESET if req.ssh_preset == "recommended" else MAXIMUM_PRESET
-        label = "рекомендуемый" if req.ssh_preset == "recommended" else "максимальный"
-        try:
-            await proxy_to_node(server, "POST", "/api/ssh/config", preset["ssh"], timeout=30.0)
-            yield {"type": "log", "line": f"[panel] SSH-конфиг применён (пресет: {label})"}
-        except Exception as exc:  # noqa: BLE001 — best-effort постшаг
-            yield {"type": "log", "line": f"[panel] SSH-конфиг не применён: {exc}"}
-        try:
-            await proxy_to_node(
-                server, "POST", "/api/ssh/fail2ban/config", preset["fail2ban"],
-                timeout=120.0, use_apply_client=True,
-            )
-            yield {"type": "log", "line": "[panel] fail2ban настроен"}
-        except Exception as exc:  # noqa: BLE001 — best-effort постшаг
-            yield {"type": "log", "line": f"[panel] fail2ban не настроен: {exc}"}
-
-    if req.new_root_password:
-        try:
-            await proxy_to_node(
-                server, "POST", "/api/ssh/password",
-                {"user": "root", "password": req.new_root_password},
-                timeout=120.0, use_apply_client=True,
-            )
-            yield {"type": "log", "line": "[panel] Пароль root изменён"}
-        except Exception as exc:  # noqa: BLE001 — best-effort постшаг
-            yield {"type": "log", "line": f"[panel] Не удалось сменить пароль root: {exc}"}
-
-
 @router.post("/deploy")
 async def deploy_server(
     req: DeployRequest,
     request: Request,
     _: dict = Depends(verify_auth),
 ):
-    """Развернуть ноду на удалённом сервере по SSH, стримит лог установки (NDJSON)."""
+    """Запустить фоновую установку ноды на удалённом сервере по SSH.
+
+    Возвращает job_id — лог читается отдельным запросом к /deploy/{job_id}/stream.
+    """
     host = _validate_host(req.host)
 
     if not req.ssh_password and not req.ssh_private_key:
@@ -312,35 +246,33 @@ async def deploy_server(
         proxy_url=proxy_url,
     )
 
+    post_opts = PostDeployOptions(
+        ssh_preset=req.ssh_preset,
+        new_root_password=req.new_root_password,
+        haproxy_profile_id=req.haproxy_profile_id,
+        firewall_profile_id=req.firewall_profile_id,
+    )
+
+    job_id = get_deploy_job_manager().start(params, req.name, server_url, post_opts)
+    return {"job_id": job_id}
+
+
+@router.get("/deploy/jobs")
+async def list_deploy_jobs(_: dict = Depends(verify_auth)):
+    """Активные и недавно завершённые задачи установки — для восстановления UI."""
+    return {"jobs": get_deploy_job_manager().list_jobs()}
+
+
+@router.get("/deploy/{job_id}/stream")
+async def stream_deploy_job(job_id: str, _: dict = Depends(verify_auth)):
+    """NDJSON-стрим лога задачи установки. Переподключаемый."""
+    manager = get_deploy_job_manager()
+    if manager.get(job_id) is None:
+        raise HTTPException(404, "Задача установки не найдена")
+
     async def generate():
-        yield _ndjson({"type": "start", "host": host})
-        try:
-            async for event in deploy_node(params):
-                if event.get("type") == "done":
-                    exit_code = event.get("exit_code", 1)
-                    server_id = None
-                    if exit_code == 0:
-                        try:
-                            server_id = await _create_server(req.name, server_url)
-                        except Exception as exc:  # noqa: BLE001 — финальная граница
-                            logger.error("Deploy: failed to create server: %s", exc)
-                            yield _ndjson({
-                                "type": "error",
-                                "message": f"Установка прошла, но не удалось добавить сервер: {exc}",
-                            })
-                            return
-                        async for log_event in _post_install(server_id, req):
-                            yield _ndjson(log_event)
-                    yield _ndjson({
-                        "type": "done",
-                        "exit_code": exit_code,
-                        "server_id": server_id,
-                    })
-                    return
-                yield _ndjson(event)
-        except Exception as exc:  # noqa: BLE001 — верхнеуровневая граница стрима
-            logger.error("Deploy stream failed: %s", exc)
-            yield _ndjson({"type": "error", "message": str(exc)})
+        async for event in manager.subscribe(job_id):
+            yield _ndjson(event)
 
     return StreamingResponse(
         generate(),

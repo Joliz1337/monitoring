@@ -28,6 +28,7 @@ export interface ExtraTarget {
   log: string[]
   error: string | null
   serverId?: number
+  jobId?: string
 }
 
 interface Props {

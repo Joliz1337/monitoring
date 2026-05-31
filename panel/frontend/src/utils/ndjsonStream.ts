@@ -13,25 +13,7 @@ function redirectToLogin() {
   }
 }
 
-/**
- * Читает NDJSON-поток ответа: построчно парсит JSON и отдаёт каждый объект в onMessage.
- * Используется для bulk-операций SSH Security, где результат приходит по серверу
- * по мере готовности. Стриминг не идёт через axios — нужен прямой fetch с ReadableStream.
- */
-export async function streamNdjson<T>(
-  url: string,
-  body: unknown,
-  onMessage: (msg: T) => void,
-  signal: AbortSignal,
-): Promise<void> {
-  const res = await fetch(url, {
-    method: 'POST',
-    credentials: 'include',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-    signal,
-  })
-
+async function readNdjsonResponse<T>(res: Response, onMessage: (msg: T) => void): Promise<void> {
   if (res.status === 401) {
     redirectToLogin()
     throw new StreamUnauthorizedError()
@@ -67,4 +49,41 @@ export async function streamNdjson<T>(
 
   const tail = buffer.trim()
   if (tail) onMessage(JSON.parse(tail) as T)
+}
+
+/**
+ * Читает NDJSON-поток ответа на POST: построчно парсит JSON и отдаёт каждый
+ * объект в onMessage. Используется для bulk-операций SSH Security.
+ */
+export async function streamNdjson<T>(
+  url: string,
+  body: unknown,
+  onMessage: (msg: T) => void,
+  signal: AbortSignal,
+): Promise<void> {
+  const res = await fetch(url, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal,
+  })
+  await readNdjsonResponse(res, onMessage)
+}
+
+/**
+ * Читает NDJSON-поток ответа на GET. Используется для подписки на лог фоновой
+ * задачи установки ноды — поток переподключаемый и не привязан к телу запроса.
+ */
+export async function streamNdjsonGet<T>(
+  url: string,
+  onMessage: (msg: T) => void,
+  signal: AbortSignal,
+): Promise<void> {
+  const res = await fetch(url, {
+    method: 'GET',
+    credentials: 'include',
+    signal,
+  })
+  await readNdjsonResponse(res, onMessage)
 }

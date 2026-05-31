@@ -245,11 +245,7 @@
     "deploy_bindings": "Bind to profiles:",
     "deploy_haproxy_profile": "HAProxy config",
     "deploy_firewall_profile": "Firewall profile",
-    "deploy_profile_none": "Do not bind",
-    "deploy_linked_haproxy": "Server added to HAProxy config",
-    "deploy_link_haproxy_failed": "Failed to link HAProxy config",
-    "deploy_linked_firewall": "Server added to firewall profile",
-    "deploy_link_firewall_failed": "Failed to link firewall profile"
+    "deploy_profile_none": "Do not bind"
   },
   "infra": {
     "title": "Infrastructure",

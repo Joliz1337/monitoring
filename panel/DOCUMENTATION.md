@@ -21,7 +21,7 @@
 - **Wildcard SSL** — выпуск wildcard сертификатов через certbot + Cloudflare DNS challenge, продление, деплой на ноды через API порта 9100; фоновое автопродление каждые 24ч; настройка пути деплоя и reload-команды для каждого сервера
 - **HAProxy Configs** — централизованные профили конфигурации HAProxy с массовой раскаткой на серверы: CRUD профилей и правил, балансировщик нагрузки, привязка серверов, history синхронизаций; запуск HAProxy per-server и bulk-запуск всех остановленных нод одним кликом
 - **Firewall Profiles** — шаблоны UFW с массовой раскаткой на серверы: CRUD профилей, привязка 1 сервер ↔ 1 активный профиль, history синхронизаций, node-API-port-guard (защита связи панели с нодой через порт 9100), drift-детекция по SHA256-хэшу
-- **Авторазвёртывание ноды** — установка ноды мониторинга прямо из вкладки «Серверы»: подключение по SSH (пароль или приватный ключ), запуск `install.sh --unattended` на целевом сервере, живой лог установки в браузере; опционально устанавливает WARP и ноду Remnawave с сохранёнными именованными сертификатами; **массовый деплой** — кнопка «Установить ещё один сервер» добавляет произвольное количество дополнительных целей, каждая со своими SSH-реквизитами и опциями; кнопка также дублируется внизу каждой extra-карточки рядом с «Повторить» — удобно при заполнении длинной формы без скролла вверх; все серверы деплоятся параллельно, каждый со своим NDJSON-стримом лога и per-target кнопкой Retry при ошибке; после успешного деплоя панель автоматически привязывает сервер к выбранным HAProxy-профилю и/или Firewall-профилю
+- **Авторазвёртывание ноды** — установка ноды мониторинга прямо из вкладки «Серверы»: подключение по SSH (пароль или приватный ключ), запуск `install.sh --unattended` на целевом сервере; установка выполняется **в фоне на бэкенде** — закрытие вкладки браузера не прерывает процесс; живой лог переподключаем (GET-стрим с реплеем); опционально устанавливает WARP и ноду Remnawave с сохранёнными именованными сертификатами; **массовый деплой** — произвольное количество дополнительных целей, каждая со своим SSH и опциями; после успешного деплоя бэкенд автоматически привязывает сервер к выбранным HAProxy-профилю и/или Firewall-профилю; незавершённые задачи переживают перезагрузку страницы (восстановление через localStorage + `GET /deploy/jobs`)
 
 ## Интервалы сбора данных
 
@@ -349,7 +349,9 @@ interface NicInfo {
 | PUT | /api/servers/{id} | Обновить (включая is_active для вкл/выкл мониторинга) |
 | DELETE | /api/servers/{id} | Удалить |
 | POST | /api/servers/{id}/test | Тест подключения |
-| POST | /api/servers/deploy | Авторазвёртывание ноды по SSH (NDJSON-стрим лога) |
+| POST | /api/servers/deploy | Запустить авторазвёртывание ноды (возвращает `{"job_id": "..."}`) |
+| GET | /api/servers/deploy/jobs | Список активных и недавно завершённых задач деплоя |
+| GET | /api/servers/deploy/{job_id}/stream | NDJSON-стрим лога задачи (переподключаемый) |
 | GET | /api/servers/remnawave-certs | Список сохранённых сертификатов Remnawave (без секретов) |
 | POST | /api/servers/remnawave-certs | Сохранить сертификат {name, secret_key} |
 | DELETE | /api/servers/remnawave-certs/{id} | Удалить сохранённый сертификат |
@@ -870,15 +872,27 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 
 ### Авторазвёртывание ноды
 
-Установка ноды мониторинга на новый сервер прямо из вкладки «Серверы» панели. Подключается к целевому серверу по SSH, скачивает `install.sh` и запускает его в режиме `--unattended`.
+Установка ноды мониторинга на новый сервер прямо из вкладки «Серверы» панели. Подключается к целевому серверу по SSH, скачивает `install.sh` и запускает его в режиме `--unattended`. Установка выполняется в **фоновой asyncio-задаче** — закрытие вкладки браузера не прерывает процесс (SSH-сессию держит backend).
 
-**Принцип работы:**
+**Принцип работы (job-модель):**
 1. Пользователь открывает форму «Добавить сервер», включает чекбокс «Автоустановка ноды по SSH»
 2. Вводит SSH-данные (порт, логин, пароль или приватный ключ + passphrase) и выбирает доп. компоненты
-3. Frontend отправляет `POST /api/servers/deploy`; бэкенд подключается по SSH через `asyncssh`
-4. Скачивает `install.sh`, запускает с `--unattended` и нужными env-переменными
-5. Построчный лог установки стримится в браузер через NDJSON
-6. При успехе создаётся запись `Server` (mTLS, shared cert)
+3. Frontend отправляет `POST /api/servers/deploy` → бэкенд немедленно возвращает `{"job_id": "<hex>"}` и запускает `asyncio.create_task`
+4. Frontend подписывается на лог через `GET /api/servers/deploy/{job_id}/stream` (NDJSON)
+5. При успехе backend создаёт запись `Server`, применяет SSH-пресет/пароль (`_post_install`) и привязывает к выбранным HAProxy/Firewall-профилям (`_bind_profiles`)
+6. Завершённые задачи хранятся 600 секунд (`FINISHED_TTL_SECONDS`) для переподключения, затем удаляются из памяти
+
+**Ограничение:** перезапуск backend-контейнера во время установки прерывает её.
+
+**Менеджер фоновых задач (`DeployJobManager`):**
+
+Singleton-сервис `panel/backend/app/services/deploy_job_manager.py`. Управляет задачами установки нод:
+- Лог буферизуется в памяти (лимит 5000 строк) и раздаётся подписчикам через pub/sub (`asyncio.Queue`)
+- Дедупликация строк между реплеем и live-потоком — по индексу `_idx`
+- `_create_server` — создание записи `Server` после успешной установки
+- `_post_install` — постустановочные шаги (SSH-пресет, fail2ban, смена пароля root)
+- `_bind_profiles` — привязка к HAProxy/Firewall-профилям (выполняется на бэке внутри задачи — срабатывает даже при закрытой странице)
+- `get_deploy_job_manager()` — dependency для получения singleton через FastAPI DI
 
 **SSH-подключение:**
 - Авторизация: пароль или приватный ключ (+ passphrase опционально)
@@ -919,92 +933,97 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 **Поля запроса `POST /api/servers/deploy`:**
 
 `DeployRequest` содержит:
+- `haproxy_profile_id: int | None` — привязать к HAProxy-профилю после установки
+- `firewall_profile_id: int | None` — привязать к Firewall-профилю после установки
 - `install_optimizations: bool` — при `true` передаётся `MON_INSTALL_OPTIMIZATIONS=1`
-- `opt_profile: str` — профиль sysctl (`vpn` по умолчанию или `panel`); передаётся через `MON_OPT_PROFILE` только когда `install_optimizations=true`
-- `nic_mode: str` — NIC-режим (`auto` по умолчанию, либо `multiqueue`/`hybrid`/`rps`); при значении, отличном от `auto`, передаётся через `MON_NIC_MODE`; только когда `install_optimizations=true`
-- `ssh_preset: str | None` — пресет защиты SSH для постустановочного применения: `None` / `recommended` / `maximum`; соответствует пресетам из `app/services/ssh_manager.py`
-- `new_root_password: str | None` — новый пароль root (минимум 8 символов); если задан — меняется после установки ноды
+- `opt_profile: str` — профиль sysctl (`vpn` по умолчанию или `panel`)
+- `nic_mode: str` — NIC-режим (`auto` по умолчанию, либо `multiqueue`/`hybrid`/`rps`)
+- `ssh_preset: str | None` — пресет защиты SSH: `None` / `recommended` / `maximum`
+- `new_root_password: str | None` — новый пароль root (минимум 8 символов)
 
-**Постустановочная защита SSH (`_post_install`):**
+Ответ: `{"job_id": "<hex>"}`.
 
-После того как нода установлена и запись `Server` создана, роутер `server_deploy.py` запускает асинхронный генератор `_post_install(server_id, req)` в фоне. Шаги:
-1. Пауза ~8 секунд — нода поднимается после установки
-2. Если `ssh_preset` задан — вызов `POST /api/ssh/config` и `POST /api/ssh/fail2ban/config` с данными из соответствующего пресета (`RECOMMENDED_PRESET` / `MAXIMUM_PRESET`)
-3. Если `new_root_password` задан — вызов `POST /api/ssh/password` на ноде через `proxy_to_node()`
+**API deploy-задач:**
 
-Все шаги **best-effort**: ошибки пишутся в лог установки как NDJSON-события `{"type": "log", ...}`, но не отменяют результат — нода считается успешно добавленной. Лог постустановки попадает в тот же NDJSON-стрим, что и лог `install.sh`.
+| Метод | Endpoint | Описание |
+|-------|----------|----------|
+| POST | /api/servers/deploy | Запустить задачу деплоя → `{"job_id": "..."}` |
+| GET | /api/servers/deploy/jobs | Список задач: job_id, name, host, status, exit_code, server_id, error |
+| GET | /api/servers/deploy/{job_id}/stream | Переподключаемый NDJSON-стрим лога (реплей + live) |
 
-**NDJSON-стриминг лога (`POST /api/servers/deploy`):**
+**NDJSON-протокол стрима (`GET /api/servers/deploy/{job_id}/stream`):**
 
 ```json
-{"type": "log", "line": "Installing monitoring node..."}
-{"type": "log", "line": "[OK] Node installed"}
-{"type": "done", "success": true}
+{"type": "start"}
+{"type": "log", "line": "Installing monitoring node...", "_idx": 0}
+{"type": "log", "line": "[OK] Node installed", "_idx": 1}
+{"type": "done", "success": true, "server_id": 42}
 ```
 
-При ошибке: `{"type": "done", "success": false, "error": "..."}`. GZip-middleware для `/servers/deploy` отключён — данные не буферизуются.
+При ошибке: `{"type": "error", "line": "..."}` и `{"type": "done", "success": false}`. Клиент дедуплицирует строки по полю `_idx` — при переподключении реплей не создаёт дублей. GZip-middleware пропускает путь `/servers/deploy/.../stream` без буферизации.
+
+**Постустановочная защита SSH и привязка профилей:**
+
+Всё выполняется внутри фоновой задачи (не в HTTP-контексте):
+1. Пауза ~8 секунд — нода поднимается после установки
+2. Если `ssh_preset` задан — SSH-конфиг + fail2ban через ноду API
+3. Если `new_root_password` задан — смена пароля root через ноду API
+4. Если `haproxy_profile_id` задан — `POST /haproxy-profiles/{id}/servers/{server_id}`
+5. Если `firewall_profile_id` задан — `POST /firewall-profiles/{id}/servers/{server_id}`
+
+Все шаги **best-effort**: ошибки пишутся в лог как NDJSON-события, нода считается успешно добавленной.
+
+**Восстановление задач при перезагрузке страницы:**
+
+Frontend сохраняет незавершённые job_id в `localStorage` (`deploy_active_jobs_v1`). При загрузке страницы вызывается `restoreDeployJobs` — сверяет сохранённые job_id с ответом `GET /api/servers/deploy/jobs` и переподключает активные задачи.
+
+**Авто-скрытие после успеха:** через ~6 секунд (`AUTO_HIDE_MS`) после успешного деплоя лог скрывается, а extra-карточка удаляется.
 
 **Регистрация роутера:** `server_deploy.router` зарегистрирован в `main.py` до `servers.router`, чтобы статичные пути (`/servers/deploy`, `/servers/remnawave-certs`) матчились раньше параметрического `GET /servers/{id}`.
 
 **Frontend (`panel/frontend/src/pages/Servers.tsx`):**
 - Чекбокс «Автоустановка ноды по SSH» в форме добавления сервера; при выключенном — сервер добавляется как раньше через `POST /api/servers`
 - SSH-поля: порт, логин, пароль или приватный ключ + passphrase
-- Чекбоксы компонентов: **Системные оптимизации**, WARP, Remnawave, HTTP-прокси; при включении оптимизаций появляются переключатель профиля «VPN-сервер» / «Универсальные» (`opt_profile`) и переключатель «NIC-режим»: **Авто** / **Multiqueue** / **Hybrid** / **RPS** (`nic_mode`); по умолчанию «Авто»
-- Выбор сертификата Remnawave: сохранённые профили отображаются кликабельными чипами с именами; клик — выбор; крестик на чипе — удаление; кнопка «Новый сертификат» переключает в режим ввода нового; при вводе нового доступна кнопка «Сохранить сертификат»
-- Раздел **«Защита SSH»** в форме автоустановки (после компонентов):
-  - Переключатель пресета: «Не менять» / «Рекомендуемый» / «Максимальный» (соответствуют `None`, `recommended`, `maximum` в поле `ssh_preset`)
-  - Чекбокс «Сменить пароль root» + поле нового пароля (минимум 8 символов); отправляется в поле `new_root_password`
-- При submit — живой лог в форме, обновляется по мере поступления NDJSON-событий
+- Чекбоксы компонентов: **Системные оптимизации**, WARP, Remnawave, HTTP-прокси
+- При включении оптимизаций: переключатель профиля и переключатель NIC-режима
+- Выбор сертификата Remnawave: кликабельные чипы с именами
+- Раздел **«Защита SSH»**: переключатель пресета + смена пароля root
+- При submit: POST startDeploy → job_id → подписка через `streamNdjsonGet`; живой лог в форме
 
 **Массовый авто-деплой (multi-target):**
 
-Кнопка «Установить ещё один сервер» (внутри primary deploy-секции, под блоком HTTP-прокси) добавляет карточку дополнительной цели с настройками, скопированными из primary. Произвольное количество карточек. Кнопка **дублируется внизу каждой extra-карточки** рядом с «Повторить» — позволяет добавить следующий сервер сразу после заполнения текущей карточки, без скролла вверх.
+Кнопка «Установить ещё один сервер» добавляет карточку дополнительной цели. Кнопка дублируется внизу каждой extra-карточки рядом с «Повторить».
 
 При нажатии «Развернуть ноды (N)»:
-- `handleDeployAll` запускает `Promise.all` — каждый таргет (primary + все extras) деплоится параллельно
-- Каждый таргет открывает отдельный NDJSON-стрим на `POST /api/servers/deploy`
+- `handleDeployAll` запускает `Promise.all` — каждый таргет деплоится параллельно
+- Каждый таргет: POST startDeploy → job_id → `streamNdjsonGet` для чтения лога
+- Незавершённые job_id сохраняются в `localStorage` и переподключаются при перезагрузке страницы
 - Уже успешные таргеты при повторном запуске пропускаются
-- При успехе всех таргетов форма закрывается; при провале хотя бы одного — остаётся открытой
-- Retry-кнопки: per-target (`retryExtra(id)` / `retryPrimary`) — повторный деплой без изменения настроек
+- Retry-кнопки: per-target (`retryExtra(id)` / `retryPrimary`)
 
-Submit-кнопка меняет надпись: «Развернуть ноду» при 0 extras → «Развернуть ноды (N)» при N > 0.
-
-При снятии чекбокса «Авторазвёртывание» — extras и статусы очищаются.
-
-**Постдеплой: привязка к профилям (`applyProfileBindings`):**
-
-Каждая карточка (primary + extras) содержит блок «Привязать к профилям» с двумя выпадающими списками:
-- **HAProxy-профиль** — выбрать профиль или «Не добавлять»
-- **Firewall-профиль** — выбрать профиль или «Не добавлять»
-
-Список профилей загружается при открытии формы (`haproxyProfilesApi.getProfiles()` + `firewallProfilesApi.list()`).
-
-После получения `server_id` из `done`-события NDJSON-стрима вызывается `applyProfileBindings(serverId, deploy, pushLog)`:
-1. Если выбран HAProxy-профиль — `POST /haproxy-profiles/{profile_id}/servers/{server_id}` (существующий эндпоинт)
-2. Если выбран Firewall-профиль — `POST /firewall-profiles/{profile_id}/servers/{server_id}` (существующий эндпоинт)
-3. Результат каждого шага пишется в per-target лог деплоя
-
-Бэкенд не менялся — используются существующие эндпоинты привязки серверов к профилям.
-
-Поля `haproxyProfileId` / `firewallProfileId` добавлены в `DeployFormData` и `DEPLOY_DEFAULTS` (значение по умолчанию: пустая строка = «Не добавлять»).
+**NDJSON-утилиты (`panel/frontend/src/utils/ndjsonStream.ts`):**
+- `streamNdjson(url, body, onEvent)` — POST-стрим (SSH bulk-операции)
+- `streamNdjsonGet(url, onEvent)` — GET-стрим (подписка на лог задачи деплоя)
+- `readNdjsonResponse` — общая логика чтения, вынесена из обеих функций
 
 **Новые компоненты:**
-- `panel/frontend/src/components/servers/DeployTargetFields.tsx` — переиспользуемые поля SSH/опций/прокси/Remnawave/SSH-пресета/смены пароля; блок «Привязать к профилям» (HAProxy + Firewall); принимает пропы `haproxyProfiles`, `firewallProfiles`; экспортирует `DEPLOY_DEFAULTS` и тип `DeployFormData`; принимает `footerSlot` для встраивания кнопки «+ещё сервер»
-- `panel/frontend/src/components/servers/ExtraServerCard.tsx` — карточка дополнительной цели: имя, host:port, `<DeployTargetFields>`, per-target лог, статус (idle/running/success/error), Retry при ошибке, кнопка удаления, кнопка «+ Установить ещё один сервер» внизу карточки; принимает пропы `haproxyProfiles`, `firewallProfiles`, `onAddAnother`; экспортирует `ExtraTarget` и `DeployStatus`
+- `panel/frontend/src/components/servers/DeployTargetFields.tsx` — переиспользуемые поля SSH/опций/прокси/Remnawave/SSH-пресета/смены пароля; блок «Привязать к профилям» (HAProxy + Firewall); экспортирует `DEPLOY_DEFAULTS` и тип `DeployFormData`
+- `panel/frontend/src/components/servers/ExtraServerCard.tsx` — карточка дополнительной цели; поле `jobId?` в типе `ExtraTarget`
 
-**i18n:** новые ключи `deploy_add_extra`, `deploy_btn_multi`, `deploy_success_multi`, `deploy_failed_multi`, `deploy_primary`, `deploy_extra_default_name`, `deploy_extra_ok`, `deploy_extra_failed`, `deploy_extra_retry`, `deploy_extra_remove`, `deploy_bindings`, `deploy_haproxy_profile`, `deploy_firewall_profile`, `deploy_profile_none`, `deploy_linked_haproxy`, `deploy_link_haproxy_failed`, `deploy_linked_firewall`, `deploy_link_firewall_failed` в `ru.json` и `en.json`.
+**i18n:** ключи `deploy_add_extra`, `deploy_btn_multi`, `deploy_success_multi`, `deploy_failed_multi`, `deploy_primary`, `deploy_extra_default_name`, `deploy_extra_ok`, `deploy_extra_failed`, `deploy_extra_retry`, `deploy_extra_remove`, `deploy_bindings`, `deploy_haproxy_profile`, `deploy_firewall_profile`, `deploy_profile_none` в `ru.json` и `en.json`.
 
 **Зависимости:**
 - `asyncssh` добавлен в `panel/backend/requirements.txt`
 
-**Локали:** новые строки `servers.deploy_*` в `ru.json` / `en.json`.
-
 **Файлы:**
-- `panel/backend/app/services/deploy_service.py` — SSH-подключение, скачивание и запуск `install.sh --unattended`, построчный стриминг лога
-- `panel/backend/app/routers/server_deploy.py` — роутер (prefix `/servers`): deploy, remnawave-certs CRUD
+- `panel/backend/app/services/deploy_job_manager.py` — `DeployJobManager`: singleton, in-memory буфер лога, pub/sub, `_create_server`, `_post_install`, `_bind_profiles`; `PostDeployOptions` dataclass; `get_deploy_job_manager()`
+- `panel/backend/app/services/deploy_service.py` — SSH-подключение через `asyncssh`, скачивание и запуск `install.sh --unattended`, построчный стриминг лога
+- `panel/backend/app/routers/server_deploy.py` — роутер (prefix `/servers`): `POST /deploy`, `GET /deploy/jobs`, `GET /deploy/{job_id}/stream`, remnawave-certs CRUD
 - `panel/backend/app/models.py` — модель `RemnawaveCertProfile` (таблица `remnawave_cert_profiles`)
-- `panel/frontend/src/pages/Servers.tsx` — расширенная форма добавления сервера
-- `panel/frontend/src/api/client.ts` — методы `serversApi.remnawaveCerts/saveRemnawaveCert/deleteRemnawaveCert`, константа `serverDeployStreamUrl`, типы `RemnawaveCertProfile`, `ServerDeployEvent`
+- `panel/backend/app/main.py` — `GZipMiddlewareNoSSE` расширен: bypass для `/servers/deploy/.../stream`
+- `panel/frontend/src/pages/Servers.tsx` — job-модель деплоя, `restoreDeployJobs`, `AUTO_HIDE_MS`
+- `panel/frontend/src/utils/ndjsonStream.ts` — `streamNdjson`, `streamNdjsonGet`, `readNdjsonResponse`
+- `panel/frontend/src/api/client.ts` — `serversApi.startDeploy()`, `serversApi.listDeployJobs()`, `serverDeployJobStreamUrl(jobId)`, интерфейс `DeployJobInfo`
 - `panel/frontend/src/locales/ru.json`, `en.json` — ключи `servers.deploy_*`
 
 ### Backup & Restore

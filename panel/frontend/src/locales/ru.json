@@ -245,11 +245,7 @@
     "deploy_bindings": "Привязать к профилям:",
     "deploy_haproxy_profile": "HAProxy-конфиг",
     "deploy_firewall_profile": "Firewall-профиль",
-    "deploy_profile_none": "Не добавлять",
-    "deploy_linked_haproxy": "Сервер добавлен в HAProxy-конфиг",
-    "deploy_link_haproxy_failed": "Не удалось привязать HAProxy-конфиг",
-    "deploy_linked_firewall": "Сервер добавлен в Firewall-профиль",
-    "deploy_link_firewall_failed": "Не удалось привязать Firewall-профиль"
+    "deploy_profile_none": "Не добавлять"
   },
   "infra": {
     "title": "Инфраструктура",

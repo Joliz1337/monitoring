@@ -165,7 +165,8 @@ class GZipMiddlewareNoSSE:
         if scope["type"] == "http":
             path = scope.get("path", "")
             if (path.endswith("/execute-stream") or path.endswith("/notes/stream")
-                    or "/ssh-security/bulk/" in path or path.endswith("/servers/deploy")):
+                    or "/ssh-security/bulk/" in path or path.endswith("/servers/deploy")
+                    or ("/servers/deploy/" in path and path.endswith("/stream"))):
                 await self.app(scope, receive, send)
                 return
         await self.gzip(scope, receive, send)

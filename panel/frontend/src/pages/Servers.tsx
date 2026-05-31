@@ -30,7 +30,7 @@ import { toast } from 'sonner'
 import {
   serversApi,
   systemApi,
-  serverDeployStreamUrl,
+  serverDeployJobStreamUrl,
   ServerDeployEvent,
   RemnawaveCertProfile,
   haproxyProfilesApi,
@@ -38,7 +38,7 @@ import {
   HAProxyConfigProfile,
   FirewallProfile,
 } from '../api/client'
-import { streamNdjson, StreamUnauthorizedError } from '../utils/ndjsonStream'
+import { streamNdjsonGet, StreamUnauthorizedError } from '../utils/ndjsonStream'
 import InfraTree from '../components/Infra/InfraTree'
 import { Tooltip } from '../components/ui/Tooltip'
 import { CopyableIp } from '../components/ui/CopyableIp'
@@ -85,6 +85,49 @@ const cleanLogLine = (line: string): string => {
   const visible = line.split('\r').pop() ?? line
   // eslint-disable-next-line no-control-regex
   return visible.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b/g, '').trimEnd()
+}
+
+// Установка идёт в фоне на бэке — после успеха показываем результат и убираем
+const AUTO_HIDE_MS = 6000
+
+// Незавершённые задачи установки храним в localStorage, чтобы переподключить
+// их лог после перезагрузки страницы (SSH держит бэкенд, фон не прерывается)
+const DEPLOY_JOBS_KEY = 'deploy_active_jobs_v1'
+
+interface StoredDeployJob {
+  jobId: string
+  kind: 'primary' | 'extra'
+  extraId?: string
+  name: string
+  host: string
+  port: string
+}
+
+const readStoredJobs = (): StoredDeployJob[] => {
+  try {
+    const raw = localStorage.getItem(DEPLOY_JOBS_KEY)
+    return raw ? (JSON.parse(raw) as StoredDeployJob[]) : []
+  } catch {
+    return []
+  }
+}
+
+const writeStoredJobs = (jobs: StoredDeployJob[]) => {
+  try {
+    localStorage.setItem(DEPLOY_JOBS_KEY, JSON.stringify(jobs))
+  } catch {
+    // localStorage недоступен — восстановление после перезагрузки просто не сработает
+  }
+}
+
+const storeJob = (job: StoredDeployJob) => {
+  const jobs = readStoredJobs().filter(j => j.jobId !== job.jobId)
+  jobs.push(job)
+  writeStoredJobs(jobs)
+}
+
+const removeStoredJob = (jobId: string) => {
+  writeStoredJobs(readStoredJobs().filter(j => j.jobId !== jobId))
 }
 
 export default function Servers() {
@@ -278,21 +321,28 @@ export default function Servers() {
     proxy_url: d.installProxy ? d.proxyUrl : null,
     ssh_preset: d.sshPreset === 'none' ? null : d.sshPreset,
     new_root_password: d.changePassword ? d.newPassword : null,
+    haproxy_profile_id: d.haproxyProfileId ?? null,
+    firewall_profile_id: d.firewallProfileId ?? null,
   })
 
-  const streamDeploy = async (
-    body: ReturnType<typeof buildDeployBody>,
+  // Читает NDJSON-лог фоновой задачи. finished=true только если дошли до 'done'
+  // (терминал). Обрыв соединения без done — задача продолжается на бэке.
+  const consumeStream = async (
+    jobId: string,
     onEvent: (ev: ServerDeployEvent) => void,
-  ): Promise<{ ok: boolean; error: string | null }> => {
+  ): Promise<{ ok: boolean; error: string | null; finished: boolean }> => {
     let ok = false
     let err: string | null = null
+    let finished = false
     try {
-      await streamNdjson<ServerDeployEvent>(
-        serverDeployStreamUrl,
-        body,
+      await streamNdjsonGet<ServerDeployEvent>(
+        serverDeployJobStreamUrl(jobId),
         (ev) => {
           onEvent(ev)
-          if (ev.type === 'done') ok = ev.exit_code === 0
+          if (ev.type === 'done') {
+            ok = ev.exit_code === 0
+            finished = true
+          }
           if (ev.type === 'error') err = ev.message
         },
         new AbortController().signal,
@@ -304,62 +354,44 @@ export default function Servers() {
         err = e instanceof Error ? e.message : String(e)
       }
     }
-    return { ok, error: err }
+    return { ok, error: err, finished }
   }
 
-  const applyProfileBindings = async (
-    serverId: number,
-    d: DeployFormData,
-    pushLog: (line: string) => void,
-  ) => {
-    if (d.haproxyProfileId != null) {
-      try {
-        await haproxyProfilesApi.linkServer(d.haproxyProfileId, serverId)
-        pushLog(`[panel] ${t('servers.deploy_linked_haproxy')}`)
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e)
-        pushLog(`[panel] ${t('servers.deploy_link_haproxy_failed')}: ${msg}`)
-      }
-    }
-    if (d.firewallProfileId != null) {
-      try {
-        await firewallProfilesApi.linkServer(d.firewallProfileId, serverId)
-        pushLog(`[panel] ${t('servers.deploy_linked_firewall')}`)
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e)
-        pushLog(`[panel] ${t('servers.deploy_link_firewall_failed')}: ${msg}`)
-      }
-    }
+  const schedulePrimaryHide = () => {
+    setTimeout(() => {
+      setPrimaryStatus('idle')
+      setDeployLog([])
+    }, AUTO_HIDE_MS)
   }
 
-  const deployPrimary = async (): Promise<boolean> => {
-    const body = buildDeployBody(formData.name, formData.host, formData.port, deploy)
-    let serverId: number | null = null
-    const { ok, error: err } = await streamDeploy(body, (ev) => {
+  const scheduleExtraHide = (id: string) => {
+    setTimeout(() => removeExtra(id), AUTO_HIDE_MS)
+  }
+
+  const attachPrimaryStream = async (jobId: string): Promise<boolean> => {
+    const { ok, error: err, finished } = await consumeStream(jobId, (ev) => {
       if (ev.type === 'log') {
         setDeployLog(prev => [...prev, cleanLogLine(ev.line)])
       } else if (ev.type === 'start') {
         setDeployLog(prev => [...prev, `--- ${ev.host} ---`])
       } else if (ev.type === 'error') {
         setDeployLog(prev => [...prev, `[ERROR] ${ev.message}`])
-      } else if (ev.type === 'done' && ev.server_id != null) {
-        serverId = ev.server_id
       }
     })
-    if (ok && serverId != null) {
-      await applyProfileBindings(serverId, deploy, (line) => setDeployLog(prev => [...prev, line]))
+    if (finished) {
+      removeStoredJob(jobId)
+      setPrimaryStatus(ok ? 'success' : 'error')
+      if (ok) schedulePrimaryHide()
+      else if (err) setError(err)
+    } else if (err !== null) {
+      setPrimaryStatus('error')
+      setError(err)
     }
-    setPrimaryStatus(ok ? 'success' : 'error')
-    if (!ok && err) setError(err)
     return ok
   }
 
-  const deployExtra = async (id: string): Promise<boolean> => {
-    const target = extras.find(t => t.id === id)
-    if (!target) return false
-    const body = buildDeployBody(target.name, target.host, target.port, target.deploy)
-    let serverId: number | null = null
-    const { ok, error: err } = await streamDeploy(body, (ev) => {
+  const attachExtraStream = async (id: string, jobId: string): Promise<boolean> => {
+    const { ok, error: err, finished } = await consumeStream(jobId, (ev) => {
       if (ev.type === 'log') {
         setExtras(prev => prev.map(x => x.id === id ? { ...x, log: [...x.log, cleanLogLine(ev.line)] } : x))
       } else if (ev.type === 'start') {
@@ -367,22 +399,106 @@ export default function Servers() {
       } else if (ev.type === 'error') {
         setExtras(prev => prev.map(x => x.id === id ? { ...x, log: [...x.log, `[ERROR] ${ev.message}`], error: ev.message } : x))
       } else if (ev.type === 'done' && ev.server_id != null) {
-        serverId = ev.server_id
         const sid = ev.server_id
         setExtras(prev => prev.map(x => x.id === id ? { ...x, serverId: sid } : x))
       }
     })
-    if (ok && serverId != null) {
-      await applyProfileBindings(serverId, target.deploy, (line) =>
-        setExtras(prev => prev.map(x => x.id === id ? { ...x, log: [...x.log, line] } : x)),
-      )
+    if (finished) {
+      removeStoredJob(jobId)
+      setExtras(prev => prev.map(x => x.id === id
+        ? { ...x, status: ok ? 'success' : 'error', error: ok ? null : (err ?? x.error) }
+        : x,
+      ))
+      if (ok) scheduleExtraHide(id)
+    } else if (err !== null) {
+      setExtras(prev => prev.map(x => x.id === id ? { ...x, status: 'error', error: err } : x))
     }
-    setExtras(prev => prev.map(x => x.id === id
-      ? { ...x, status: ok ? 'success' : 'error', error: ok ? null : (err ?? x.error) }
-      : x,
-    ))
     return ok
   }
+
+  const deployPrimary = async (): Promise<boolean> => {
+    const body = buildDeployBody(formData.name, formData.host, formData.port, deploy)
+    let jobId: string
+    try {
+      const res = await serversApi.startDeploy(body)
+      jobId = res.data.job_id
+    } catch (e) {
+      setPrimaryStatus('error')
+      setError(e instanceof Error ? e.message : String(e))
+      return false
+    }
+    storeJob({ jobId, kind: 'primary', name: formData.name, host: formData.host, port: formData.port })
+    return attachPrimaryStream(jobId)
+  }
+
+  const deployExtra = async (id: string): Promise<boolean> => {
+    const target = extras.find(t => t.id === id)
+    if (!target) return false
+    const body = buildDeployBody(target.name, target.host, target.port, target.deploy)
+    let jobId: string
+    try {
+      const res = await serversApi.startDeploy(body)
+      jobId = res.data.job_id
+    } catch (e) {
+      setExtras(prev => prev.map(x => x.id === id
+        ? { ...x, status: 'error', error: e instanceof Error ? e.message : String(e) }
+        : x,
+      ))
+      return false
+    }
+    setExtras(prev => prev.map(x => x.id === id ? { ...x, jobId } : x))
+    storeJob({ jobId, kind: 'extra', extraId: id, name: target.name, host: target.host, port: target.port })
+    return attachExtraStream(id, jobId)
+  }
+
+  // Переподключение к незавершённым задачам установки после перезагрузки страницы
+  const restoreDeployJobs = async () => {
+    const stored = readStoredJobs()
+    if (stored.length === 0) return
+
+    let liveIds: Set<string>
+    try {
+      const res = await serversApi.listDeployJobs()
+      liveIds = new Set(res.data.jobs.map(j => j.job_id))
+    } catch {
+      return
+    }
+
+    const alive = stored.filter(s => liveIds.has(s.jobId))
+    writeStoredJobs(alive)
+    if (alive.length === 0) return
+
+    setShowForm(true)
+    setDeploy(prev => ({ ...prev, enabled: true }))
+
+    for (const s of alive) {
+      if (s.kind === 'primary') {
+        setFormData({ name: s.name, host: s.host, port: s.port })
+        setPrimaryStatus('running')
+        setDeployLog([])
+        void attachPrimaryStream(s.jobId)
+      } else {
+        const extraId = s.extraId || s.jobId
+        setExtras(prev => prev.some(x => x.id === extraId) ? prev : [...prev, {
+          id: extraId,
+          name: s.name,
+          host: s.host,
+          port: s.port,
+          deploy: { ...DEPLOY_DEFAULTS, enabled: true },
+          status: 'running',
+          log: [],
+          error: null,
+          jobId: s.jobId,
+        }])
+        void attachExtraStream(extraId, s.jobId)
+      }
+    }
+  }
+
+  useEffect(() => {
+    void restoreDeployJobs()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const handleDeployAll = async () => {
     const primaryErr = validateDeployForm(formData.name, formData.host, deploy)
@@ -419,14 +535,8 @@ export default function Servers() {
     await fetchServersWithMetrics()
 
     if (allOk) {
+      // Успех показываем с галочкой — лог и карточки убираются таймером (AUTO_HIDE_MS)
       toast.success(extras.length > 0 ? t('servers.deploy_success_multi') : t('servers.deploy_success'))
-      setShowForm(false)
-      setEditingId(null)
-      setFormData({ name: '', host: '', port: '9100' })
-      setDeploy(DEPLOY_DEFAULTS)
-      setDeployLog([])
-      setExtras([])
-      setPrimaryStatus('idle')
       setError('')
     } else {
       toast.error(t('servers.deploy_failed_multi'))

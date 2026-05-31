@@ -439,15 +439,27 @@ export interface RemnawaveCertProfile {
   created_at: string | null
 }
 
-// События NDJSON-стрима авторазвёртывания ноды (POST /servers/deploy)
+// События NDJSON-стрима лога установки ноды (GET /servers/deploy/{job_id}/stream)
 export type ServerDeployEvent =
   | { type: 'start'; host: string }
   | { type: 'log'; line: string }
   | { type: 'error'; message: string }
   | { type: 'done'; exit_code: number; server_id: number | null }
 
-// Стрим идёт не через axios — нужен полный путь с /api для fetch
-export const serverDeployStreamUrl = '/api/servers/deploy'
+// Фоновая задача установки ноды (GET /servers/deploy/jobs)
+export interface DeployJobInfo {
+  job_id: string
+  name: string
+  host: string
+  status: 'running' | 'success' | 'error'
+  exit_code: number | null
+  server_id: number | null
+  error: string | null
+}
+
+// Стрим лога читается не через axios — нужен полный путь с /api для fetch
+export const serverDeployJobStreamUrl = (jobId: string) =>
+  `/api/servers/deploy/${jobId}/stream`
 
 export const serversApi = {
   list: (includeMetrics?: boolean) =>
@@ -494,6 +506,10 @@ export const serversApi = {
     api.post<{ success: boolean; renamed: number }>('/servers/folders/rename', { old_name: oldName, new_name: newName }),
   deleteFolder: (folderName: string) =>
     api.delete<{ success: boolean; unfoldered: number }>(`/servers/folders/${encodeURIComponent(folderName)}`),
+  startDeploy: (body: unknown) =>
+    api.post<{ job_id: string }>('/servers/deploy', body),
+  listDeployJobs: () =>
+    api.get<{ jobs: DeployJobInfo[] }>('/servers/deploy/jobs'),
   remnawaveCerts: () =>
     api.get<{ profiles: RemnawaveCertProfile[] }>('/servers/remnawave-certs'),
   saveRemnawaveCert: (name: string, secretKey: string) =>
