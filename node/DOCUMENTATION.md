@@ -405,6 +405,14 @@ data: {"message": "error description"}
 3. `ufw reset` → установка политик → применение правил → `ufw enable`
 4. При любой ошибке — `_restore_state(backup_path)` (автоматический rollback)
 
+**Идемпотентность `add_advanced_rule()`:**
+
+Метод `add_advanced_rule()` получил параметр `skip_duplicate_check: bool = False`. Перед запуском ufw вызывает `_rule_already_present(port, protocol, action, from_ip, direction)` — проверяет активные правила через `list_rules`. Если идентичное правило уже существует и `skip_duplicate_check=False`, команда ufw не выполняется, возвращается `(True, "Rule already exists: ...", None)`. Результат success=True сохраняется намеренно: вызывающий код (например haproxy_manager) проверяет только флаг успеха.
+
+`_apply_rules_list()` (путь apply_profile) вызывает `add_advanced_rule` с `skip_duplicate_check=True` — правила добавляются на чистый UFW после reset, лишние проверки `ufw status` не нужны.
+
+Хелпер `_normalize_from(from_ip)`: нормализует источник правила — пустая строка, `any`, `anywhere` → `'anywhere'`. Используется при сравнении в `_rule_already_present`.
+
 **`GET /api/firewall/profile/state`** — возвращает `ProfileStateResponse`:
 - `rules` — активные правила UFW
 - `default_incoming`, `default_outgoing` — текущие политики
@@ -427,7 +435,7 @@ data: {"message": "error description"}
 
 **Файлы:**
 - `node/app/models/firewall_profile.py` — Pydantic модели
-- `node/app/services/firewall_manager.py` — `FirewallManager`: `apply_profile`, `_ensure_ufw`, `_ufw_available`, `_install_ufw`, `_run_host`, `_backup_state`, `_restore_state`, `compute_rules_hash`, `get_full_state`
+- `node/app/services/firewall_manager.py` — `FirewallManager`: `apply_profile`, `_ensure_ufw`, `_ufw_available`, `_install_ufw`, `_run_host`, `_backup_state`, `_restore_state`, `compute_rules_hash`, `get_full_state`, `_rule_already_present`, `_normalize_from`
 - `node/app/routers/firewall_profile.py` — API роутер (prefix `/api/firewall`)
 - `node/app/main.py` — регистрация роутера с `verify_api_key`
 

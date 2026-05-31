@@ -82,6 +82,19 @@ def _serialize_rules(profile: FirewallProfile) -> list[dict]:
         return []
 
 
+def _rule_identity(rule: dict) -> tuple:
+    """Каноничный ключ правила для сравнения дубликатов (как минимум по порту,
+    плюс протокол, действие, источник, направление). Комментарий не учитывается."""
+    from_ip = (rule.get("from_ip") or "").strip().lower() or None
+    return (
+        int(rule.get("port", 0)),
+        (rule.get("protocol") or "tcp").lower(),
+        (rule.get("action") or "allow").lower(),
+        from_ip,
+        (rule.get("direction") or "in").lower(),
+    )
+
+
 def _has_node_port_allow(rules: list[dict], default_in: str) -> bool:
     """Гарантирует, что панель не потеряет связь с нодой после применения."""
     if (default_in or "deny").lower() == "allow":
@@ -395,7 +408,12 @@ async def add_rule(
 ):
     profile = await _get_profile(profile_id, db)
     rules = _serialize_rules(profile)
-    rules.append(rule.model_dump())
+
+    new_rule = rule.model_dump()
+    if any(_rule_identity(r) == _rule_identity(new_rule) for r in rules):
+        raise HTTPException(409, "Такое правило уже есть в профиле")
+
+    rules.append(new_rule)
     profile.rules_json = json.dumps(rules)
 
     new_hash = compute_rules_hash(profile.rules_json, profile.default_incoming, profile.default_outgoing)
@@ -427,7 +445,12 @@ async def update_rule(
     if not 0 <= rule_index < len(rules):
         raise HTTPException(404, "Rule index out of range")
 
-    rules[rule_index] = rule.model_dump()
+    new_rule = rule.model_dump()
+    new_key = _rule_identity(new_rule)
+    if any(i != rule_index and _rule_identity(r) == new_key for i, r in enumerate(rules)):
+        raise HTTPException(409, "Такое правило уже есть в профиле")
+
+    rules[rule_index] = new_rule
     profile.rules_json = json.dumps(rules)
 
     new_hash = compute_rules_hash(profile.rules_json, profile.default_incoming, profile.default_outgoing)

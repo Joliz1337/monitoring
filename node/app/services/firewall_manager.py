@@ -135,6 +135,7 @@ class FirewallManager:
         from_ip: Optional[str] = None,
         direction: str = "in",
         comment: Optional[str] = None,
+        skip_duplicate_check: bool = False,
     ) -> tuple[bool, str, Optional[str]]:
         """
         Add firewall rule with full control
@@ -146,6 +147,8 @@ class FirewallManager:
             from_ip: Source IP (None = Anywhere)
             direction: in or out
             comment: optional UFW rule comment
+            skip_duplicate_check: пропустить проверку дубликатов (для apply_profile,
+                где правила добавляются на чистый UFW сразу после reset)
 
         Returns: (success, message, error_log)
         """
@@ -163,13 +166,25 @@ class FirewallManager:
         if direction not in ("in", "out"):
             return False, "Invalid direction (use in or out)", None
 
+        if from_ip and from_ip.lower() not in ("any", "anywhere", ""):
+            if not _is_valid_from_ip(from_ip):
+                return False, f"Invalid from_ip (expected IPv4/IPv6 or CIDR): {from_ip}", None
+
+        # Идемпотентность: то же правило (порт + протокол + действие + источник +
+        # направление) не добавляем дважды — UFW создал бы дубль либо молча пропустил.
+        if not skip_duplicate_check and self._rule_already_present(
+            port, protocol, action, from_ip, direction
+        ):
+            from_desc = from_ip if from_ip else "Anywhere"
+            rule_desc = f"{action.upper()} {direction.upper()} port {port}/{protocol} from {from_desc}"
+            logger.info(f"Firewall: rule already exists, skipping - {rule_desc}")
+            return True, f"Rule already exists: {rule_desc}", None
+
         # Build UFW command
         # Format: ufw [allow|deny] [in|out] [from IP] to any port PORT [proto PROTOCOL] [comment 'TEXT']
         args = [action, direction]
 
         if from_ip and from_ip.lower() not in ("any", "anywhere", ""):
-            if not _is_valid_from_ip(from_ip):
-                return False, f"Invalid from_ip (expected IPv4/IPv6 or CIDR): {from_ip}", None
             args.extend(["from", from_ip])
 
         # UFW requires "to any" before "port"
@@ -370,9 +385,42 @@ class FirewallManager:
             if rule.port == port and rule.action == "ALLOW":
                 if protocol == "any" or rule.protocol == "any" or rule.protocol == protocol:
                     return True
-        
+
         return False
-    
+
+    @staticmethod
+    def _normalize_from(value: Optional[str]) -> str:
+        """Приводит источник к каноничному виду: пусто/any/anywhere → 'anywhere'."""
+        if not value or value.strip().lower() in ("any", "anywhere", ""):
+            return "anywhere"
+        return value.strip().lower()
+
+    def _rule_already_present(
+        self,
+        port: int,
+        protocol: str,
+        action: str,
+        from_ip: Optional[str],
+        direction: str,
+    ) -> bool:
+        """Есть ли уже идентичное правило (как минимум по порту, плюс протокол,
+        действие, источник и направление)."""
+        target_from = self._normalize_from(from_ip)
+        for rule in self.list_rules():
+            if rule.port != port:
+                continue
+            rule_proto = rule.protocol.lower()
+            if not (protocol == "any" or rule_proto == "any" or rule_proto == protocol):
+                continue
+            if rule.action.lower() != action:
+                continue
+            if rule.direction.lower() != direction:
+                continue
+            if self._normalize_from(rule.from_ip) != target_from:
+                continue
+            return True
+        return False
+
     def get_status(self) -> dict:
         """Get firewall status summary"""
         success, stdout, stderr = self._run_ufw(["status", "verbose"])
@@ -625,6 +673,7 @@ class FirewallManager:
                 from_ip=normalized["from_ip"],
                 direction=normalized["direction"],
                 comment=comment,
+                skip_duplicate_check=True,
             )
             if not ok:
                 return False, f"Rule #{index + 1} failed: {msg}"
