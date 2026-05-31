@@ -200,7 +200,7 @@ async def reload_haproxy():
     success, message = await asyncio.to_thread(manager.reload)
 
     if not success:
-        raise HTTPException(status_code=500)
+        raise HTTPException(status_code=500, detail=message)
     
     return HAProxyActionResponse(success=True, message=message)
 
@@ -212,7 +212,7 @@ async def restart_haproxy():
     success, message = await asyncio.to_thread(manager.restart)
 
     if not success:
-        raise HTTPException(status_code=500)
+        raise HTTPException(status_code=500, detail=message)
     
     return HAProxyActionResponse(success=True, message=message)
 
@@ -224,7 +224,7 @@ async def start_haproxy():
     success, message = await asyncio.to_thread(manager.start_haproxy)
 
     if not success:
-        raise HTTPException(status_code=500)
+        raise HTTPException(status_code=500, detail=message)
     
     return HAProxyActionResponse(success=True, message=message)
 
@@ -236,7 +236,7 @@ async def stop_haproxy():
     success, message = await asyncio.to_thread(manager.stop_haproxy)
 
     if not success:
-        raise HTTPException(status_code=500)
+        raise HTTPException(status_code=500, detail=message)
     
     return HAProxyActionResponse(success=True, message=message)
 
