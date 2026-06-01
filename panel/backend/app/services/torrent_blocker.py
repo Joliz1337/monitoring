@@ -27,6 +27,9 @@ PAGE_SIZE = 500
 BAN_RETENTION_DAYS = 35
 SEND_CONCURRENCY = 30  # макс параллельных POST к нодам — без лимита 100+ одновременных запросов забивают keepalive-пул и роняют поток метрик
 WEBHOOK_CONCURRENCY = 20
+# Нода считается живой, если сборщик метрик видел её не дольше этого окна назад.
+# Сборщик опрашивает ноды каждые ~10с (макс 300с), 300с — заведомо живой запас.
+LIVE_THRESHOLD_SECONDS = 300
 
 
 @dataclass
@@ -212,6 +215,15 @@ class TorrentBlockerService:
         results = await asyncio.gather(*[_send_one(t) for t in targets])
         return sum(1 for ok in results if ok)
 
+    @staticmethod
+    def _is_node_live(server: Server, cutoff: datetime) -> bool:
+        if not server.last_seen:
+            return False
+        last_seen = server.last_seen
+        if last_seen.tzinfo is None:
+            last_seen = last_seen.replace(tzinfo=timezone.utc)
+        return last_seen >= cutoff
+
     async def _send_to_nodes(
         self, ips: list[str], ban_seconds: int, excluded_ids: set[int]
     ) -> dict[int, dict]:
@@ -221,9 +233,17 @@ class TorrentBlockerService:
             )
             servers = result.scalars().all()
 
-        targets = [s for s in servers if s.id not in excluded_ids]
+        # Слать бан только на живые ноды: мёртвые лишь висят до таймаута 20с и тормозят
+        # весь цикл (gather ждёт всех). Живость — по свежести last_seen от сборщика метрик.
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=LIVE_THRESHOLD_SECONDS)
+        candidates = [s for s in servers if s.id not in excluded_ids]
+        targets = [s for s in candidates if self._is_node_live(s, cutoff)]
+
+        skipped_dead = len(candidates) - len(targets)
+        if skipped_dead:
+            logger.info(f"Torrent blocker: skipping {skipped_dead} offline node(s)")
         if not targets:
-            logger.warning("No target nodes for torrent blocker bans")
+            logger.warning("No live target nodes for torrent blocker bans")
             return {}
 
         sem = asyncio.Semaphore(SEND_CONCURRENCY)
