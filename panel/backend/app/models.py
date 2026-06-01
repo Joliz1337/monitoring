@@ -358,6 +358,13 @@ class TorrentBlockerSettings(Base):
     ban_duration_minutes = Column(Integer, default=30)
     excluded_server_ids = Column(Text, nullable=True)
 
+    # Вебхук-предупреждение: панель уведомляет внешний сервис (бота) о грядущем бане,
+    # ждёт webhook_delay_seconds (грейс-период для пользователя), затем банит IP.
+    webhook_enabled = Column(Boolean, default=False)
+    webhook_url = Column(Text, nullable=True)
+    webhook_secret = Column(Text, nullable=True)
+    webhook_delay_seconds = Column(Integer, default=60)
+
     last_poll_at = Column(DateTime(timezone=True), nullable=True)
     last_poll_status = Column(String(20), nullable=True)
     last_poll_message = Column(Text, nullable=True)

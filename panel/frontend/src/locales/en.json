@@ -1557,7 +1557,16 @@
     "col_user": "User",
     "col_node": "Node",
     "col_blocked": "Blocked",
-    "col_time": "Time"
+    "col_time": "Time",
+    "webhook_enable": "Webhook warning",
+    "webhook_hint": "Before banning, the panel sends a POST to your service with the user's Remnawave and Telegram id and a message that the IP will be banned after the configured delay",
+    "webhook_url": "Webhook URL (HTTPS only)",
+    "webhook_secret": "Signing secret",
+    "webhook_secret_placeholder": "Optional",
+    "webhook_secret_hint": "If set, the panel signs the request body with an X-Signature: sha256=HMAC header",
+    "webhook_delay": "Delay before ban (seconds)",
+    "webhook_delay_hint": "How long to wait after sending the webhook before banning the IP (grace period for the user). Should be less than the poll interval",
+    "webhook_test": "Send test webhook"
   },
   "faq": {
     "title": "Help",

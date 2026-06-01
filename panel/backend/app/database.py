@@ -343,6 +343,28 @@ async def run_migrations(conn):
         except Exception:
             pass
     
+    # Add webhook columns to torrent_blocker_settings
+    result = await conn.execute(text("""
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'torrent_blocker_settings'
+    """))
+    torrent_blocker_columns = {row[0] for row in result.fetchall()}
+
+    if torrent_blocker_columns:
+        webhook_columns = [
+            ("webhook_enabled", "BOOLEAN DEFAULT FALSE"),
+            ("webhook_url", "TEXT"),
+            ("webhook_secret", "TEXT"),
+            ("webhook_delay_seconds", "INTEGER DEFAULT 60"),
+        ]
+        for col_name, col_type in webhook_columns:
+            if col_name not in torrent_blocker_columns:
+                try:
+                    await conn.execute(text(f'ALTER TABLE torrent_blocker_settings ADD COLUMN "{col_name}" {col_type}'))
+                    logger.info(f"Added column: torrent_blocker_settings.{col_name}")
+                except Exception:
+                    pass
+
     # Drop redundant indexes (covered by unique constraints or low-cardinality)
     redundant_indexes = [
         "idx_xray_stats_server",      # covered by PK (server_id, ...)

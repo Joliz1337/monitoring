@@ -1,15 +1,24 @@
 import asyncio
+import hashlib
+import hmac
 import ipaddress
 import json
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy import delete, select
 
 from app.database import async_session
-from app.models import TorrentBlockerBan, TorrentBlockerSettings, RemnawaveSettings, Server
-from app.services.http_client import get_node_client, node_auth_headers
+from app.models import (
+    RemnawaveSettings,
+    RemnawaveUserCache,
+    Server,
+    TorrentBlockerBan,
+    TorrentBlockerSettings,
+)
+from app.services.http_client import get_external_client, get_node_client, node_auth_headers
 from app.services.remnawave_api import RemnawaveAPI, RemnawaveAPIError
 
 logger = logging.getLogger(__name__)
@@ -17,6 +26,19 @@ logger = logging.getLogger(__name__)
 PAGE_SIZE = 500
 BAN_RETENTION_DAYS = 35
 SEND_CONCURRENCY = 30  # макс параллельных POST к нодам — без лимита 100+ одновременных запросов забивают keepalive-пул и роняют поток метрик
+WEBHOOK_CONCURRENCY = 20
+
+
+@dataclass
+class BanTarget:
+    """IP-кандидат на бан вместе с данными пользователя для вебхук-уведомления."""
+    ip: str
+    user_uuid: Optional[str] = None
+    username: Optional[str] = None
+    node_name: Optional[str] = None
+    node_country: Optional[str] = None
+    telegram_id: Optional[int] = None
+    short_uuid: Optional[str] = None
 
 
 class TorrentBlockerService:
@@ -85,9 +107,9 @@ class TorrentBlockerService:
         return all_records
 
     @staticmethod
-    def _extract_ips(records: list[dict]) -> list[str]:
+    def _extract_ban_targets(records: list[dict]) -> list[BanTarget]:
         seen: set[str] = set()
-        valid_ips: list[str] = []
+        targets: list[BanTarget] = []
         for record in records:
             report = record.get("report", {})
             action = report.get("actionReport", {})
@@ -104,10 +126,91 @@ class TorrentBlockerService:
                 ipaddress.ip_address(ip_str)
             except ValueError:
                 continue
-            if ip_str not in seen:
-                seen.add(ip_str)
-                valid_ips.append(ip_str)
-        return valid_ips
+            if ip_str in seen:
+                continue
+            seen.add(ip_str)
+            user = record.get("user", {})
+            node = record.get("node", {})
+            targets.append(BanTarget(
+                ip=ip_str,
+                user_uuid=user.get("uuid") or None,
+                username=user.get("username") or None,
+                node_name=node.get("name") or None,
+                node_country=node.get("countryCode") or None,
+            ))
+        return targets
+
+    async def _enrich_targets(self, targets: list[BanTarget]):
+        """Подтянуть telegram_id и shortUuid пользователей из кэша Remnawave по uuid."""
+        uuids = {t.user_uuid for t in targets if t.user_uuid}
+        if not uuids:
+            return
+        async with async_session() as db:
+            rows = (await db.execute(
+                select(
+                    RemnawaveUserCache.uuid,
+                    RemnawaveUserCache.telegram_id,
+                    RemnawaveUserCache.short_uuid,
+                    RemnawaveUserCache.username,
+                ).where(RemnawaveUserCache.uuid.in_(uuids))
+            )).all()
+        by_uuid = {row.uuid: row for row in rows}
+        for target in targets:
+            row = by_uuid.get(target.user_uuid)
+            if not row:
+                continue
+            target.telegram_id = row.telegram_id
+            target.short_uuid = target.short_uuid or row.short_uuid
+            target.username = target.username or row.username
+
+    async def _send_webhooks(
+        self, targets: list[BanTarget], settings: TorrentBlockerSettings,
+        ban_seconds: int, ban_at: datetime,
+    ) -> int:
+        url = (settings.webhook_url or "").strip()
+        if not url:
+            return 0
+
+        secret = (settings.webhook_secret or "").encode("utf-8")
+        delay_seconds = max(0, settings.webhook_delay_seconds or 0)
+        scheduled_at = datetime.now(timezone.utc).isoformat()
+        client = get_external_client()
+        sem = asyncio.Semaphore(WEBHOOK_CONCURRENCY)
+
+        async def _send_one(target: BanTarget) -> bool:
+            payload = {
+                "event": "torrent_ban_scheduled",
+                "ip": target.ip,
+                "user": {
+                    "uuid": target.user_uuid,
+                    "short_uuid": target.short_uuid,
+                    "username": target.username,
+                    "telegram_id": target.telegram_id,
+                },
+                "node": {"name": target.node_name, "country": target.node_country},
+                "ban_duration_seconds": ban_seconds,
+                "delay_seconds": delay_seconds,
+                "ban_at": ban_at.isoformat(),
+                "scheduled_at": scheduled_at,
+            }
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            headers = {"Content-Type": "application/json"}
+            if secret:
+                signature = hmac.new(secret, body, hashlib.sha256).hexdigest()
+                headers["X-Signature"] = f"sha256={signature}"
+            async with sem:
+                try:
+                    response = await client.post(url, content=body, headers=headers)
+                    if response.status_code < 400:
+                        return True
+                    logger.warning(f"Torrent blocker webhook for {target.ip}: HTTP {response.status_code}")
+                    return False
+                except Exception as e:
+                    logger.warning(f"Torrent blocker webhook for {target.ip} failed: {e}")
+                    return False
+
+        results = await asyncio.gather(*[_send_one(t) for t in targets])
+        return sum(1 for ok in results if ok)
 
     async def _send_to_nodes(
         self, ips: list[str], ban_seconds: int, excluded_ids: set[int]
@@ -172,8 +275,8 @@ class TorrentBlockerService:
                     await api.close()
                     return
 
-                ips = self._extract_ips(records)
-                if not ips:
+                targets = self._extract_ban_targets(records)
+                if not targets:
                     await self._update_status("no_reports", "Reports found but no valid IPs", len(records), 0)
                     await api.close()
                     return
@@ -186,6 +289,19 @@ class TorrentBlockerService:
                         pass
 
                 ban_seconds = settings.ban_duration_minutes * 60
+                ips = [t.ip for t in targets]
+
+                # Вебхук-предупреждение + грейс-период: уведомляем бота о грядущем бане,
+                # ждём задержку, затем баним. Сбой вебхука бан не отменяет (fail-open).
+                webhook_sent = None
+                if settings.webhook_enabled and (settings.webhook_url or "").strip():
+                    delay_seconds = max(0, settings.webhook_delay_seconds or 0)
+                    ban_at = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
+                    await self._enrich_targets(targets)
+                    webhook_sent = await self._send_webhooks(targets, settings, ban_seconds, ban_at)
+                    if delay_seconds > 0:
+                        await asyncio.sleep(delay_seconds)
+
                 node_results = await self._send_to_nodes(ips, ban_seconds, excluded_ids)
 
                 successful = sum(1 for r in node_results.values() if r.get("success"))
@@ -204,6 +320,8 @@ class TorrentBlockerService:
                             logger.warning(f"Torrent blocker: node {sid} failed: {r.get('error')}")
 
                 msg = f"Banned {len(ips)} IPs on {successful}/{successful + failed} nodes"
+                if webhook_sent is not None:
+                    msg += f"; webhooks {webhook_sent}/{len(targets)}"
                 status = "success" if successful > 0 else "error"
                 await self._update_status(status, msg, len(records), len(ips))
                 logger.info(f"Torrent blocker: {msg}")
@@ -274,6 +392,44 @@ class TorrentBlockerService:
 
     async def run_now(self):
         asyncio.ensure_future(self._poll_cycle())
+
+    @staticmethod
+    async def send_test_webhook(url: str, secret: Optional[str]) -> tuple[bool, str]:
+        """Отправить тестовый payload на вебхук. Возвращает (успех, сообщение)."""
+        url = (url or "").strip()
+        if not url.startswith("https://"):
+            return False, "webhook_url must use https://"
+
+        now = datetime.now(timezone.utc)
+        payload = {
+            "event": "torrent_ban_scheduled",
+            "test": True,
+            "ip": "203.0.113.10",
+            "user": {
+                "uuid": "00000000-0000-0000-0000-000000000000",
+                "short_uuid": "testshort",
+                "username": "test_user",
+                "telegram_id": 123456789,
+            },
+            "node": {"name": "test-node", "country": "NL"},
+            "ban_duration_seconds": 1800,
+            "delay_seconds": 60,
+            "ban_at": (now + timedelta(seconds=60)).isoformat(),
+            "scheduled_at": now.isoformat(),
+        }
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        if secret:
+            signature = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+            headers["X-Signature"] = f"sha256={signature}"
+
+        try:
+            response = await get_external_client().post(url, content=body, headers=headers)
+            if response.status_code < 400:
+                return True, f"HTTP {response.status_code}"
+            return False, f"HTTP {response.status_code}"
+        except Exception as e:
+            return False, str(e)
 
 
 _service: Optional[TorrentBlockerService] = None

@@ -30,6 +30,7 @@ interface TorrentBlockerState {
   fetchServers: () => Promise<void>
   pollNow: () => Promise<void>
   truncateReports: () => Promise<void>
+  testWebhook: (url: string, secret: string) => Promise<boolean>
 }
 
 export const useTorrentBlockerStore = create<TorrentBlockerState>((set, get) => ({
@@ -119,6 +120,21 @@ export const useTorrentBlockerStore = create<TorrentBlockerState>((set, get) => 
       toast.success('Reports cleared')
     } catch {
       toast.error('Failed to clear reports')
+    }
+  },
+
+  testWebhook: async (url, secret) => {
+    try {
+      const { data } = await torrentBlockerApi.testWebhook(url, secret)
+      if (data.success) {
+        toast.success(`Webhook OK: ${data.message}`)
+      } else {
+        toast.error(`Webhook failed: ${data.message}`)
+      }
+      return data.success
+    } catch {
+      toast.error('Failed to test webhook')
+      return false
     }
   },
 }))

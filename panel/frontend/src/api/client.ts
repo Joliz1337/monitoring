@@ -1993,6 +1993,10 @@ export interface TorrentBlockerSettings {
   poll_interval_minutes: number
   ban_duration_minutes: number
   excluded_server_ids: number[]
+  webhook_enabled: boolean
+  webhook_url: string
+  webhook_secret: string
+  webhook_delay_seconds: number
 }
 
 export interface TorrentBlockerStatus {
@@ -2058,6 +2062,11 @@ export const torrentBlockerApi = {
     api.post('/torrent-blocker/poll-now'),
   truncate: () =>
     api.delete('/torrent-blocker/truncate'),
+  testWebhook: (webhookUrl: string, webhookSecret: string) =>
+    api.post<{ success: boolean; message: string }>('/torrent-blocker/test-webhook', {
+      webhook_url: webhookUrl,
+      webhook_secret: webhookSecret || null,
+    }),
 }
 
 export default api

@@ -5,7 +5,7 @@ import type { ApexOptions } from 'apexcharts'
 import {
   ShieldBan, Settings, Activity, BarChart3, FileText,
   Play, Trash2, Save, Loader2, CheckCircle2, XCircle,
-  Server as ServerIcon, Search, X,
+  Server as ServerIcon, Search, X, Webhook, Send,
 } from 'lucide-react'
 import { useTorrentBlockerStore } from '../stores/torrentBlockerStore'
 import type { TorrentBlockerStatsRange } from '../api/client'
@@ -48,8 +48,13 @@ export default function TorrentBlocker() {
     poll_interval_minutes: 5,
     ban_duration_minutes: 30,
     excluded_server_ids: [] as number[],
+    webhook_enabled: false,
+    webhook_url: '',
+    webhook_secret: '',
+    webhook_delay_seconds: 60,
   })
   const [saving, setSaving] = useState(false)
+  const [testingWebhook, setTestingWebhook] = useState(false)
   const [reportsPage, setReportsPage] = useState(0)
   const [showReports, setShowReports] = useState(false)
   const [serverSearch, setServerSearch] = useState('')
@@ -80,6 +85,10 @@ export default function TorrentBlocker() {
         poll_interval_minutes: store.settings.poll_interval_minutes,
         ban_duration_minutes: store.settings.ban_duration_minutes,
         excluded_server_ids: store.settings.excluded_server_ids || [],
+        webhook_enabled: store.settings.webhook_enabled ?? false,
+        webhook_url: store.settings.webhook_url ?? '',
+        webhook_secret: store.settings.webhook_secret ?? '',
+        webhook_delay_seconds: store.settings.webhook_delay_seconds ?? 60,
       })
     }
   }, [store.settings])
@@ -104,6 +113,12 @@ export default function TorrentBlocker() {
     setSaving(true)
     await store.updateSettings(localSettings)
     setSaving(false)
+  }
+
+  const handleTestWebhook = async () => {
+    setTestingWebhook(true)
+    await store.testWebhook(localSettings.webhook_url, localSettings.webhook_secret)
+    setTestingWebhook(false)
   }
 
   const toggleExclusion = (serverId: number) => {
@@ -364,6 +379,75 @@ export default function TorrentBlocker() {
                 </div>
               )}
             </div>
+          </div>
+
+          <div className="border-t border-dark-800 pt-4 space-y-3">
+            <label className="flex items-center justify-between cursor-pointer">
+              <span className="flex items-center gap-2 text-sm text-dark-300">
+                <Webhook className="w-4 h-4 text-dark-400" />
+                {t('torrent_blocker.webhook_enable')}
+              </span>
+              <button
+                onClick={() => setLocalSettings(prev => ({ ...prev, webhook_enabled: !prev.webhook_enabled }))}
+                className={`relative w-10 h-5 rounded-full transition-colors ${
+                  localSettings.webhook_enabled ? 'bg-accent-500' : 'bg-dark-700'
+                }`}
+              >
+                <div className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform ${
+                  localSettings.webhook_enabled ? 'translate-x-5' : ''
+                }`} />
+              </button>
+            </label>
+            <p className="text-xs text-dark-500">{t('torrent_blocker.webhook_hint')}</p>
+
+            {localSettings.webhook_enabled && (
+              <div className="space-y-3">
+                <div className="space-y-1">
+                  <label className="text-sm text-dark-300">{t('torrent_blocker.webhook_url')}</label>
+                  <input
+                    type="url"
+                    value={localSettings.webhook_url}
+                    onChange={e => setLocalSettings(prev => ({ ...prev, webhook_url: e.target.value }))}
+                    placeholder="https://bot.example.com/torrent-webhook"
+                    className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200 focus:border-accent-500 focus:outline-none"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-sm text-dark-300">{t('torrent_blocker.webhook_secret')}</label>
+                  <input
+                    type="password"
+                    value={localSettings.webhook_secret}
+                    onChange={e => setLocalSettings(prev => ({ ...prev, webhook_secret: e.target.value }))}
+                    placeholder={t('torrent_blocker.webhook_secret_placeholder')}
+                    className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200 focus:border-accent-500 focus:outline-none"
+                  />
+                  <p className="text-xs text-dark-500">{t('torrent_blocker.webhook_secret_hint')}</p>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-sm text-dark-300">{t('torrent_blocker.webhook_delay')}</label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={1800}
+                    value={localSettings.webhook_delay_seconds}
+                    onChange={e => setLocalSettings(prev => ({ ...prev, webhook_delay_seconds: Number(e.target.value) || 0 }))}
+                    className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200 focus:border-accent-500 focus:outline-none"
+                  />
+                  <p className="text-xs text-dark-500">{t('torrent_blocker.webhook_delay_hint')}</p>
+                </div>
+
+                <button
+                  onClick={handleTestWebhook}
+                  disabled={testingWebhook || !localSettings.webhook_url}
+                  className="w-full flex items-center justify-center gap-2 bg-dark-800 hover:bg-dark-700 text-dark-200 rounded-lg px-4 py-2 text-sm font-medium transition-colors disabled:opacity-50"
+                >
+                  {testingWebhook ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+                  {t('torrent_blocker.webhook_test')}
+                </button>
+              </div>
+            )}
           </div>
 
           <button

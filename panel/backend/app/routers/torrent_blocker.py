@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,6 +21,20 @@ class UpdateSettings(BaseModel):
     poll_interval_minutes: Optional[int] = Field(None, ge=1, le=60)
     ban_duration_minutes: Optional[int] = Field(None, ge=1, le=43200)
     excluded_server_ids: Optional[list[int]] = None
+    webhook_enabled: Optional[bool] = None
+    webhook_url: Optional[str] = Field(None, max_length=2000)
+    webhook_secret: Optional[str] = Field(None, max_length=500)
+    webhook_delay_seconds: Optional[int] = Field(None, ge=0, le=1800)
+
+    @field_validator("webhook_url")
+    @classmethod
+    def _require_https(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        value = value.strip()
+        if value and not value.startswith("https://"):
+            raise ValueError("webhook_url must use https://")
+        return value
 
 
 def _settings_to_dict(s: TorrentBlockerSettings) -> dict:
@@ -35,6 +49,10 @@ def _settings_to_dict(s: TorrentBlockerSettings) -> dict:
         "poll_interval_minutes": s.poll_interval_minutes,
         "ban_duration_minutes": s.ban_duration_minutes,
         "excluded_server_ids": excluded,
+        "webhook_enabled": s.webhook_enabled,
+        "webhook_url": s.webhook_url or "",
+        "webhook_secret": s.webhook_secret or "",
+        "webhook_delay_seconds": s.webhook_delay_seconds if s.webhook_delay_seconds is not None else 60,
     }
 
 
@@ -43,6 +61,10 @@ DEFAULTS = {
     "poll_interval_minutes": 5,
     "ban_duration_minutes": 30,
     "excluded_server_ids": [],
+    "webhook_enabled": False,
+    "webhook_url": "",
+    "webhook_secret": "",
+    "webhook_delay_seconds": 60,
 }
 
 
@@ -79,6 +101,14 @@ async def update_settings(
         settings.ban_duration_minutes = body.ban_duration_minutes
     if body.excluded_server_ids is not None:
         settings.excluded_server_ids = json.dumps(body.excluded_server_ids)
+    if body.webhook_enabled is not None:
+        settings.webhook_enabled = body.webhook_enabled
+    if body.webhook_url is not None:
+        settings.webhook_url = body.webhook_url or None
+    if body.webhook_secret is not None:
+        settings.webhook_secret = body.webhook_secret or None
+    if body.webhook_delay_seconds is not None:
+        settings.webhook_delay_seconds = body.webhook_delay_seconds
 
     await db.commit()
     await db.refresh(settings)
@@ -96,6 +126,18 @@ async def poll_now(_: dict = Depends(verify_auth)):
     service = get_torrent_blocker_service()
     await service.run_now()
     return {"message": "Poll cycle triggered"}
+
+
+class TestWebhook(BaseModel):
+    webhook_url: str = Field(..., max_length=2000)
+    webhook_secret: Optional[str] = Field(None, max_length=500)
+
+
+@router.post("/test-webhook")
+async def test_webhook(body: TestWebhook, _: dict = Depends(verify_auth)):
+    service = get_torrent_blocker_service()
+    success, message = await service.send_test_webhook(body.webhook_url, body.webhook_secret)
+    return {"success": success, "message": message}
 
 
 async def _get_rw_api(db: AsyncSession) -> RemnawaveAPI:
