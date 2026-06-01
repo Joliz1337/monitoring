@@ -7,7 +7,7 @@ import {
   type TorrentBlockerStatus,
   type TorrentBlockerInternalStats,
   type TorrentBlockerStatsRange,
-  type TorrentBlockerReport,
+  type TorrentBlockerActiveBan,
   type ServerWithMetrics,
 } from '../api/client'
 
@@ -16,8 +16,8 @@ interface TorrentBlockerState {
   status: TorrentBlockerStatus | null
   internalStats: TorrentBlockerInternalStats | null
   statsRange: TorrentBlockerStatsRange
-  reports: TorrentBlockerReport[]
-  reportsTotal: number
+  activeBans: TorrentBlockerActiveBan[]
+  activeBansTotal: number
   servers: ServerWithMetrics[]
   isLoading: boolean
 
@@ -26,10 +26,9 @@ interface TorrentBlockerState {
   fetchStatus: () => Promise<void>
   fetchInternalStats: (range?: TorrentBlockerStatsRange) => Promise<void>
   setStatsRange: (range: TorrentBlockerStatsRange) => void
-  fetchReports: (start?: number, size?: number) => Promise<void>
+  fetchActiveBans: (start?: number, size?: number) => Promise<void>
   fetchServers: () => Promise<void>
   pollNow: () => Promise<void>
-  truncateReports: () => Promise<void>
   testWebhook: (url: string, secret: string) => Promise<boolean>
 }
 
@@ -38,8 +37,8 @@ export const useTorrentBlockerStore = create<TorrentBlockerState>((set, get) => 
   status: null,
   internalStats: null,
   statsRange: '24h',
-  reports: [],
-  reportsTotal: 0,
+  activeBans: [],
+  activeBansTotal: 0,
   servers: [],
   isLoading: false,
 
@@ -86,10 +85,10 @@ export const useTorrentBlockerStore = create<TorrentBlockerState>((set, get) => 
     get().fetchInternalStats(range)
   },
 
-  fetchReports: async (start = 0, size = 50) => {
+  fetchActiveBans: async (start = 0, size = 50) => {
     try {
-      const { data } = await torrentBlockerApi.getReports(start, size)
-      set({ reports: data.records || [], reportsTotal: data.total || 0 })
+      const { data } = await torrentBlockerApi.getActiveBans(start, size)
+      set({ activeBans: data.records || [], activeBansTotal: data.total || 0 })
     } catch {
       // ignore
     }
@@ -110,16 +109,6 @@ export const useTorrentBlockerStore = create<TorrentBlockerState>((set, get) => 
       toast.success('Poll triggered')
     } catch {
       toast.error('Failed to trigger poll')
-    }
-  },
-
-  truncateReports: async () => {
-    try {
-      await torrentBlockerApi.truncate()
-      set({ reports: [], reportsTotal: 0 })
-      toast.success('Reports cleared')
-    } catch {
-      toast.error('Failed to clear reports')
     }
   },
 

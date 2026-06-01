@@ -140,6 +140,48 @@ async def test_webhook(body: TestWebhook, _: dict = Depends(verify_auth)):
     return {"success": success, "message": message}
 
 
+@router.get("/active-bans")
+async def get_active_bans(
+    start: int = 0,
+    size: int = 50,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth),
+):
+    """Список IP, заблокированных на данный момент (бан ещё не истёк).
+
+    IP мог баниться несколько раз — группируем по IP и берём самый поздний срок.
+    """
+    now = datetime.now(timezone.utc)
+    expires_col = func.max(TorrentBlockerBan.expires_at).label("expires_at")
+    grouped = (
+        select(
+            TorrentBlockerBan.ip,
+            func.max(TorrentBlockerBan.banned_at).label("banned_at"),
+            expires_col,
+        )
+        .group_by(TorrentBlockerBan.ip)
+        .having(func.max(TorrentBlockerBan.expires_at) > now)
+    )
+
+    total = (await db.execute(
+        select(func.count()).select_from(grouped.subquery())
+    )).scalar_one() or 0
+
+    rows = (await db.execute(
+        grouped.order_by(expires_col.desc()).offset(start).limit(size)
+    )).all()
+
+    records = [
+        {
+            "ip": row.ip,
+            "banned_at": row.banned_at.isoformat() if row.banned_at else None,
+            "expires_at": row.expires_at.isoformat() if row.expires_at else None,
+        }
+        for row in rows
+    ]
+    return {"records": records, "total": int(total)}
+
+
 async def _get_rw_api(db: AsyncSession) -> RemnawaveAPI:
     result = await db.execute(select(RemnawaveSettings).limit(1))
     rw = result.scalar_one_or_none()

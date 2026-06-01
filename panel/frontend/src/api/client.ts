@@ -2025,26 +2025,10 @@ export interface TorrentBlockerInternalStats {
   buckets: TorrentBlockerStatsBucket[]
 }
 
-export interface TorrentBlockerReport {
-  id: number
-  user: { uuid: string; username: string }
-  node: { uuid: string; name: string; countryCode: string }
-  report: {
-    actionReport: {
-      blocked: boolean
-      ip: string
-      blockDuration: number
-      willUnblockAt: string
-      processedAt: string
-    }
-    xrayReport: {
-      source: string
-      destination: string
-      protocol: string | null
-      network: string
-    }
-  }
-  createdAt: string
+export interface TorrentBlockerActiveBan {
+  ip: string
+  banned_at: string | null
+  expires_at: string | null
 }
 
 export const torrentBlockerApi = {
@@ -2056,12 +2040,10 @@ export const torrentBlockerApi = {
     api.get<TorrentBlockerStatus>('/torrent-blocker/status'),
   getInternalStats: (range: TorrentBlockerStatsRange) =>
     api.get<TorrentBlockerInternalStats>('/torrent-blocker/stats-internal', { params: { range } }),
-  getReports: (start = 0, size = 50) =>
-    api.get<{ records: TorrentBlockerReport[]; total: number }>('/torrent-blocker/reports', { params: { start, size } }),
+  getActiveBans: (start = 0, size = 50) =>
+    api.get<{ records: TorrentBlockerActiveBan[]; total: number }>('/torrent-blocker/active-bans', { params: { start, size } }),
   pollNow: () =>
     api.post('/torrent-blocker/poll-now'),
-  truncate: () =>
-    api.delete('/torrent-blocker/truncate'),
   testWebhook: (webhookUrl: string, webhookSecret: string) =>
     api.post<{ success: boolean; message: string }>('/torrent-blocker/test-webhook', {
       webhook_url: webhookUrl,

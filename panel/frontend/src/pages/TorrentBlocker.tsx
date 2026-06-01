@@ -3,8 +3,8 @@ import { useTranslation } from 'react-i18next'
 import ReactApexChart from 'react-apexcharts'
 import type { ApexOptions } from 'apexcharts'
 import {
-  ShieldBan, Settings, Activity, BarChart3, FileText,
-  Play, Trash2, Save, Loader2, CheckCircle2, XCircle,
+  ShieldBan, Settings, Activity, BarChart3, Ban,
+  Play, Save, Loader2, CheckCircle2,
   Server as ServerIcon, Search, X, Webhook, Send,
 } from 'lucide-react'
 import { useTorrentBlockerStore } from '../stores/torrentBlockerStore'
@@ -21,6 +21,18 @@ function formatRelative(iso: string | null): string {
   const hours = Math.floor(mins / 60)
   if (hours < 24) return `${hours}h ago`
   return `${Math.floor(hours / 24)}d ago`
+}
+
+function formatRemaining(iso: string | null): string {
+  if (!iso) return '—'
+  const diff = new Date(iso).getTime() - Date.now()
+  if (diff <= 0) return '—'
+  const mins = Math.floor(diff / 60000)
+  if (mins < 1) return '<1m'
+  if (mins < 60) return `${mins}m`
+  const hours = Math.floor(mins / 60)
+  if (hours < 24) return `${hours}h ${mins % 60}m`
+  return `${Math.floor(hours / 24)}d ${hours % 24}h`
 }
 
 function StatusBadge({ status }: { status: string | null }) {
@@ -55,8 +67,7 @@ export default function TorrentBlocker() {
   })
   const [saving, setSaving] = useState(false)
   const [testingWebhook, setTestingWebhook] = useState(false)
-  const [reportsPage, setReportsPage] = useState(0)
-  const [showReports, setShowReports] = useState(false)
+  const [bansPage, setBansPage] = useState(0)
   const [serverSearch, setServerSearch] = useState('')
   const [serverDropdownOpen, setServerDropdownOpen] = useState(false)
   const dropdownRef = useRef<HTMLDivElement>(null)
@@ -74,9 +85,10 @@ export default function TorrentBlocker() {
     const interval = setInterval(() => {
       store.fetchStatus()
       store.fetchInternalStats()
+      store.fetchActiveBans(bansPage * 50, 50)
     }, 5000)
     return () => clearInterval(interval)
-  }, [])
+  }, [bansPage])
 
   useEffect(() => {
     if (store.settings) {
@@ -94,10 +106,8 @@ export default function TorrentBlocker() {
   }, [store.settings])
 
   useEffect(() => {
-    if (showReports) {
-      store.fetchReports(reportsPage * 50, 50)
-    }
-  }, [showReports, reportsPage])
+    store.fetchActiveBans(bansPage * 50, 50)
+  }, [bansPage])
 
   useEffect(() => {
     const handleClick = (e: MouseEvent) => {
@@ -568,85 +578,59 @@ export default function TorrentBlocker() {
         </div>
       </div>
 
-      {/* Current Reports */}
+      {/* Currently banned IPs */}
       <div className="bg-dark-900/50 border border-dark-800 rounded-xl p-5 space-y-4">
-        <div className="flex items-center justify-between">
-          <button
-            onClick={() => setShowReports(!showReports)}
-            className="flex items-center gap-2 text-dark-200 font-medium hover:text-dark-100 transition-colors"
-          >
-            <FileText className="w-4 h-4" />
-            {t('torrent_blocker.reports')}
-            <span className="text-xs text-dark-500">({store.reportsTotal})</span>
-          </button>
-          {showReports && store.reportsTotal > 0 && (
-            <button
-              onClick={() => { if (confirm(t('torrent_blocker.truncate_confirm'))) store.truncateReports() }}
-              className="flex items-center gap-1.5 bg-red-500/10 hover:bg-red-500/20 text-red-400 rounded-lg px-3 py-1.5 text-xs transition-colors"
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-              {t('torrent_blocker.truncate')}
-            </button>
-          )}
+        <div className="flex items-center gap-2 text-dark-200 font-medium">
+          <Ban className="w-4 h-4 text-red-400" />
+          {t('torrent_blocker.active_bans')}
+          <span className="text-xs text-dark-500">({store.activeBansTotal})</span>
         </div>
 
-        {showReports && (
+        {store.activeBans.length === 0 ? (
+          <p className="text-dark-500 text-sm text-center py-4">{t('torrent_blocker.no_active_bans')}</p>
+        ) : (
           <div className="space-y-2">
-            {store.reports.length === 0 ? (
-              <p className="text-dark-500 text-sm text-center py-4">{t('torrent_blocker.no_reports')}</p>
-            ) : (
-              <>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="text-dark-500 text-xs border-b border-dark-800">
-                        <th className="text-left pb-2 pr-3">{t('torrent_blocker.col_user')}</th>
-                        <th className="text-left pb-2 pr-3">{t('torrent_blocker.col_node')}</th>
-                        <th className="text-left pb-2 pr-3">IP</th>
-                        <th className="text-left pb-2 pr-3">{t('torrent_blocker.col_blocked')}</th>
-                        <th className="text-left pb-2">{t('torrent_blocker.col_time')}</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {store.reports.map(r => (
-                        <tr key={r.id} className="border-b border-dark-800/50 hover:bg-dark-800/30">
-                          <td className="py-2 pr-3 text-dark-300">{r.user.username}</td>
-                          <td className="py-2 pr-3 text-dark-400">{r.node.name}</td>
-                          <td className="py-2 pr-3 font-mono text-dark-300">{r.report.actionReport.ip}</td>
-                          <td className="py-2 pr-3">
-                            {r.report.actionReport.blocked
-                              ? <CheckCircle2 className="w-4 h-4 text-green-400" />
-                              : <XCircle className="w-4 h-4 text-dark-500" />}
-                          </td>
-                          <td className="py-2 text-dark-500 text-xs">{formatRelative(r.createdAt)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-dark-500 text-xs border-b border-dark-800">
+                    <th className="text-left pb-2 pr-3">IP</th>
+                    <th className="text-left pb-2 pr-3">{t('torrent_blocker.col_banned_at')}</th>
+                    <th className="text-left pb-2">{t('torrent_blocker.col_expires_in')}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {store.activeBans.map(b => (
+                    <tr key={b.ip} className="border-b border-dark-800/50 hover:bg-dark-800/30">
+                      <td className="py-2 pr-3 font-mono text-dark-300">{b.ip}</td>
+                      <td className="py-2 pr-3 text-dark-500 text-xs">{formatRelative(b.banned_at)}</td>
+                      <td className="py-2 text-dark-300 font-mono text-xs">{formatRemaining(b.expires_at)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
 
-                {store.reportsTotal > 50 && (
-                  <div className="flex items-center justify-center gap-2 pt-2">
-                    <button
-                      disabled={reportsPage === 0}
-                      onClick={() => setReportsPage(p => p - 1)}
-                      className="px-3 py-1 text-xs bg-dark-800 rounded hover:bg-dark-700 disabled:opacity-30 text-dark-300"
-                    >
-                      Prev
-                    </button>
-                    <span className="text-xs text-dark-500">
-                      {reportsPage + 1} / {Math.ceil(store.reportsTotal / 50)}
-                    </span>
-                    <button
-                      disabled={(reportsPage + 1) * 50 >= store.reportsTotal}
-                      onClick={() => setReportsPage(p => p + 1)}
-                      className="px-3 py-1 text-xs bg-dark-800 rounded hover:bg-dark-700 disabled:opacity-30 text-dark-300"
-                    >
-                      Next
-                    </button>
-                  </div>
-                )}
-              </>
+            {store.activeBansTotal > 50 && (
+              <div className="flex items-center justify-center gap-2 pt-2">
+                <button
+                  disabled={bansPage === 0}
+                  onClick={() => setBansPage(p => p - 1)}
+                  className="px-3 py-1 text-xs bg-dark-800 rounded hover:bg-dark-700 disabled:opacity-30 text-dark-300"
+                >
+                  Prev
+                </button>
+                <span className="text-xs text-dark-500">
+                  {bansPage + 1} / {Math.ceil(store.activeBansTotal / 50)}
+                </span>
+                <button
+                  disabled={(bansPage + 1) * 50 >= store.activeBansTotal}
+                  onClick={() => setBansPage(p => p + 1)}
+                  className="px-3 py-1 text-xs bg-dark-800 rounded hover:bg-dark-700 disabled:opacity-30 text-dark-300"
+                >
+                  Next
+                </button>
+              </div>
             )}
           </div>
         )}
