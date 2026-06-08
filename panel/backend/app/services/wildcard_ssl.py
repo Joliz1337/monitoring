@@ -134,7 +134,19 @@ class WildcardSSLManager:
             if not cf_token:
                 return False, "Cloudflare API token not configured"
 
-            result = await self._run_certbot(cert.base_domain, email or "", cf_token, force_renewal=True)
+            old_expiry = cert.expiry_date
+            if old_expiry and old_expiry.tzinfo is None:
+                old_expiry = old_expiry.replace(tzinfo=timezone.utc)
+
+            # Целимся в реальную линию certbot: после сбоев её имя может быть
+            # base_domain-000X. Продление по точному имени идёт «на месте» и не
+            # плодит новые дубли (forking случается, когда named-линию не загрузить).
+            lineage = await self._find_cert_lineage(cert.base_domain)
+            cert_name = lineage[0] if lineage else cert.base_domain
+
+            result = await self._run_certbot(
+                cert.base_domain, email or "", cf_token, force_renewal=True, cert_name=cert_name
+            )
             if not result[0]:
                 return result
 
@@ -142,13 +154,26 @@ class WildcardSSLManager:
             if not fullchain:
                 return False, "Certificate files not found after renewal"
 
+            # certbot вернул 0, но срок не сдвинулся → линия повреждена и сертификат
+            # не обновился. Не выдаём это за успех — иначе панель тихо показывает старый.
+            if old_expiry and expiry and expiry <= old_expiry:
+                logger.error(
+                    f"Renewal of *.{cert.base_domain} did not advance expiry "
+                    f"(old={old_expiry.isoformat()}, new={expiry.isoformat()}); "
+                    f"certbot lineage '{cert_name}' likely broken"
+                )
+                return False, "Сертификат не продлился: срок не сдвинулся (повреждённая certbot-линия)"
+
             cert.fullchain_pem = fullchain
             cert.privkey_pem = privkey
             cert.expiry_date = expiry
             cert.last_renewed = datetime.now(timezone.utc)
             await db.commit()
 
-            logger.info(f"Wildcard certificate renewed for *.{cert.base_domain}")
+            logger.info(
+                f"Wildcard certificate renewed for *.{cert.base_domain} "
+                f"(expires {expiry.isoformat() if expiry else '?'})"
+            )
             return True, f"Certificate renewed for *.{cert.base_domain}"
 
     # ─── Deploy ───
@@ -264,7 +289,8 @@ class WildcardSSLManager:
     # ─── Certbot runner ───
 
     async def _run_certbot(
-        self, base_domain: str, email: str, cf_token: str, force_renewal: bool
+        self, base_domain: str, email: str, cf_token: str, force_renewal: bool,
+        cert_name: Optional[str] = None,
     ) -> tuple[bool, str]:
         # Записать credentials во временный файл
         cf_ini = tempfile.NamedTemporaryFile(
@@ -280,7 +306,7 @@ class WildcardSSLManager:
                 "--non-interactive",
                 "--agree-tos",
                 "--expand",
-                "--cert-name", base_domain,
+                "--cert-name", cert_name or base_domain,
                 "--dns-cloudflare",
                 "--dns-cloudflare-credentials", cf_ini.name,
                 "--dns-cloudflare-propagation-seconds", "30",
@@ -316,42 +342,69 @@ class WildcardSSLManager:
 
     # ─── Helpers ───
 
+    async def _find_cert_lineage(self, base_domain: str) -> Optional[tuple[str, Path]]:
+        """Найти актуальную certbot-линию для домена.
+
+        После сбоев certbot может расплодить дубли base_domain-0001, -0002...
+        Берём линию с самым поздним сроком; при равенстве предпочитаем ту, у
+        которой цел renewal-конфиг (её certbot сможет продлить «на месте»).
+        Возвращает (имя_линии, каталог в live) или None.
+        """
+        live_root = Path("/etc/letsencrypt/live")
+        renewal_root = Path("/etc/letsencrypt/renewal")
+        if not live_root.exists():
+            return None
+
+        oldest = datetime.min.replace(tzinfo=timezone.utc)
+        candidates = []
+        for d in live_root.iterdir():
+            if not d.is_dir():
+                continue
+            if d.name != base_domain and not d.name.startswith(f"{base_domain}-"):
+                continue
+            fullchain = d / "fullchain.pem"
+            if not (fullchain.exists() and (d / "privkey.pem").exists()):
+                continue
+            conf = renewal_root / f"{d.name}.conf"
+            conf_valid = conf.exists() and conf.stat().st_size > 0
+            expiry = await self._read_expiry(fullchain)
+            candidates.append((expiry or oldest, conf_valid, d.name, d))
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda c: (c[0], c[1]), reverse=True)
+        _, _, name, path = candidates[0]
+        return name, path
+
     async def _read_cert_files(self, base_domain: str) -> tuple[Optional[str], Optional[str], Optional[datetime]]:
-        cert_dir = Path(f"/etc/letsencrypt/live/{base_domain}")
+        lineage = await self._find_cert_lineage(base_domain)
+        if not lineage:
+            return None, None, None
 
-        # certbot может создать domain-0001
-        if not cert_dir.exists():
-            parent = Path("/etc/letsencrypt/live")
-            if parent.exists():
-                for d in sorted(parent.iterdir(), reverse=True):
-                    if d.name.startswith(base_domain) and (d / "fullchain.pem").exists():
-                        cert_dir = d
-                        break
-
+        _, cert_dir = lineage
         fullchain_path = cert_dir / "fullchain.pem"
         privkey_path = cert_dir / "privkey.pem"
 
-        if not fullchain_path.exists() or not privkey_path.exists():
-            return None, None, None
-
         fullchain = fullchain_path.read_text()
         privkey = privkey_path.read_text()
+        expiry = await self._read_expiry(fullchain_path)
+        return fullchain, privkey, expiry
 
-        # Прочитать expiry через openssl
-        expiry = None
+    async def _read_expiry(self, fullchain_path: Path) -> Optional[datetime]:
         try:
             proc = await asyncio.create_subprocess_exec(
                 "openssl", "x509", "-enddate", "-noout", "-in", str(fullchain_path),
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
             out, _ = await proc.communicate()
-            if proc.returncode == 0:
-                expiry_str = out.decode().strip().replace("notAfter=", "")
-                expiry = datetime.strptime(expiry_str, "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc)
+            if proc.returncode != 0:
+                return None
+            expiry_str = out.decode().strip().replace("notAfter=", "")
+            return datetime.strptime(expiry_str, "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc)
         except Exception as e:
-            logger.warning(f"Could not parse cert expiry: {e}")
-
-        return fullchain, privkey, expiry
+            logger.warning(f"Could not parse cert expiry for {fullchain_path}: {e}")
+            return None
 
     @staticmethod
     async def _get_setting(db, key: str) -> Optional[str]:
