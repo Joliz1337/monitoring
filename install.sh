@@ -34,6 +34,7 @@ TIMEOUT_USER_INPUT=300          # 5 min for user input
 TIMEOUT_GIT_CLONE=180           # 3 min for git clone
 TIMEOUT_APT_UPDATE=120          # 2 min for apt update
 TIMEOUT_APT_INSTALL=300         # 5 min for apt install
+TIMEOUT_APT_LOCK=300            # 5 min wait for dpkg lock (unattended-upgrades on fresh boot)
 TIMEOUT_CURL=60                 # 1 min for curl requests
 TIMEOUT_DOCKER_COMPOSE_DOWN=120 # 2 min for docker compose down
 TIMEOUT_SYSTEMCTL=60            # 1 min for systemctl operations
@@ -631,13 +632,16 @@ clone_repo_with_fallback() {
 # ==================== APT Operations ====================
 
 wait_for_apt_lock() {
-    local max_wait=120
+    local max_wait="${TIMEOUT_APT_LOCK:-300}"
     local waited=0
     while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || \
           fuser /var/lib/apt/lists/lock >/dev/null 2>&1 || \
           fuser /var/lib/dpkg/lock >/dev/null 2>&1; do
         if [ $waited -eq 0 ]; then
-            log_warn "Waiting for apt lock..."
+            local holder_pid holder
+            holder_pid=$(fuser /var/lib/dpkg/lock-frontend 2>/dev/null | awk '{print $1}')
+            holder=$(ps -o comm= -p "${holder_pid:-0}" 2>/dev/null)
+            log_warn "Waiting for apt lock (held by ${holder:-another process}, up to ${max_wait}s)..."
         fi
         sleep 3
         waited=$((waited + 3))
@@ -654,7 +658,8 @@ apt_update_safe() {
     wait_for_apt_lock
     spin_retry "$TIMEOUT_APT_UPDATE" "$MAX_RETRIES" "$RETRY_DELAY" "Updating package lists" \
         env DEBIAN_FRONTEND=noninteractive \
-        apt-get update -qq
+        apt-get update -qq \
+        -o DPkg::Lock::Timeout=60
 }
 
 apt_install_safe() {
@@ -664,6 +669,7 @@ apt_install_safe() {
     spin_retry "$TIMEOUT_APT_INSTALL" "$MAX_RETRIES" "$RETRY_DELAY" "Installing: $packages" \
         env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l NEEDRESTART_SUSPEND=1 \
         apt-get install -y -qq \
+        -o DPkg::Lock::Timeout=60 \
         -o Dpkg::Options::="--force-confold" \
         -o Dpkg::Options::="--force-confdef" \
         $packages

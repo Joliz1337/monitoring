@@ -839,14 +839,24 @@ class SSHConfigManager:
     def _install_fail2ban(self) -> tuple[bool, str]:
         pkg = self._os_info["pkg_manager"]
         if pkg == "apt":
-            cmd = ["apt-get", "install", "-y", "fail2ban"]
+            # На свежем сервере unattended-upgrades держит dpkg-lock несколько минут.
+            # DPkg::Lock::Timeout заставляет apt дождаться освобождения, а не падать сразу.
+            cmd = [
+                "env", "DEBIAN_FRONTEND=noninteractive",
+                "apt-get", "install", "-y",
+                "-o", "DPkg::Lock::Timeout=300",
+                "fail2ban",
+            ]
+            timeout = 420
         elif pkg == "dnf":
             cmd = ["dnf", "install", "-y", "fail2ban"]
+            timeout = 300
         else:
             cmd = ["yum", "install", "-y", "fail2ban"]
+            timeout = 300
 
         logger.info("installing_fail2ban", extra={"pkg_manager": pkg})
-        ok, _, stderr = self._run_cmd(cmd, timeout=120)
+        ok, _, stderr = self._run_cmd(cmd, timeout=timeout)
         if not ok:
             return False, f"Failed to install fail2ban via {pkg}: {stderr}"
         return True, ""
