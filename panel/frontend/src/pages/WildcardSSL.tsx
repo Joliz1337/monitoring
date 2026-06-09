@@ -457,9 +457,16 @@ export default function WildcardSSL() {
     setDeploying(true)
     try {
       const res = await wildcardSSLApi.deployToAll(cert.id)
-      const results = res.data.results
-      const ok = results.filter(r => r.success).length
-      toast.success(t('wildcard_ssl.deploy_success', { success: ok, total: results.length }))
+      const nodeResults = res.data.results.filter(r => r.server_id != null)
+      const failed = nodeResults.filter(r => !r.success)
+      const ok = nodeResults.length - failed.length
+      if (failed.length === 0) {
+        toast.success(t('wildcard_ssl.deploy_success', { success: ok, total: nodeResults.length }))
+      } else {
+        const names = failed.map(r => r.server_name || `#${r.server_id}`).join(', ')
+        toast.error(t('wildcard_ssl.deploy_partial', { success: ok, total: nodeResults.length, failed: names }), { duration: 8000 })
+        failed.forEach(r => toast.error(`${r.server_name || `#${r.server_id}`}: ${r.message}`, { duration: 8000 }))
+      }
     } catch {
       toast.error('Deploy failed')
     } finally {

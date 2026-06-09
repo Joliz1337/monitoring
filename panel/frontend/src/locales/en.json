@@ -1316,6 +1316,7 @@
     "deploy_all": "Deploy to All Servers",
     "deploying": "Deploying...",
     "deploy_success": "Deployed to {{success}} of {{total}} servers",
+    "deploy_partial": "Deployed {{success}} of {{total}}, failed: {{failed}}",
     "deploy_one": "Deploy",
     "delete": "Delete",
     "delete_confirm": "Delete this wildcard certificate?",

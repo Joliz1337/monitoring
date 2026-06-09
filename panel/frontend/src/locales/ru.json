@@ -1317,6 +1317,7 @@
     "deploy_all": "Раскидать по серверам",
     "deploying": "Деплой...",
     "deploy_success": "Задеплоено на {{success}} из {{total}} серверов",
+    "deploy_partial": "Задеплоено {{success}} из {{total}}, не удалось: {{failed}}",
     "deploy_one": "Деплой",
     "delete": "Удалить",
     "delete_confirm": "Удалить wildcard сертификат?",

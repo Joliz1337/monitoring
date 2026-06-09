@@ -9,7 +9,7 @@ from typing import Optional
 from sqlalchemy import select, update
 
 from app.database import async_session
-from app.models import WildcardCertificate, Server, PanelSettings
+from app.models import WildcardCertificate, Server, PanelSettings, AlertSettings
 from app.services.http_client import get_node_client, node_auth_headers
 
 logger = logging.getLogger(__name__)
@@ -272,19 +272,72 @@ class WildcardSSLManager:
             certs = (await db.execute(
                 select(WildcardCertificate).where(WildcardCertificate.auto_renew == True)
             )).scalars().all()
+            alerts = (await db.execute(select(AlertSettings).limit(1))).scalar_one_or_none()
 
             now = datetime.now(timezone.utc)
             for cert in certs:
                 if not cert.expiry_date:
                     continue
                 days_left = (cert.expiry_date - now).days
-                if days_left <= days_before:
-                    logger.info(f"Auto-renewing *.{cert.base_domain} ({days_left} days left)")
-                    ok, msg = await self.renew_certificate(cert.id)
-                    if ok:
-                        await self.deploy_to_all(cert.id)
-                    else:
-                        logger.error(f"Auto-renew failed for *.{cert.base_domain}: {msg}")
+                if days_left > days_before:
+                    continue
+
+                logger.info(f"Auto-renewing *.{cert.base_domain} ({days_left} days left)")
+                ok, msg = await self.renew_certificate(cert.id)
+                if not ok:
+                    logger.error(f"Auto-renew failed for *.{cert.base_domain}: {msg}")
+                    await self._notify(alerts, self._msg_renew_failed(alerts, cert.base_domain, msg))
+                    continue
+
+                results = await self.deploy_to_all(cert.id)
+                failed = [r for r in results if r.get("server_id") and not r.get("success")]
+                if failed:
+                    logger.error(
+                        f"Auto-deploy of *.{cert.base_domain} failed on {len(failed)}/{len(results)} nodes"
+                    )
+                    await self._notify(
+                        alerts, self._msg_deploy_failed(alerts, cert.base_domain, failed, len(results))
+                    )
+
+    # ─── Notifications ───
+
+    @staticmethod
+    def _alert_lang(settings: Optional[AlertSettings]) -> str:
+        return (settings.language or "en").lower() if settings else "en"
+
+    def _msg_renew_failed(self, settings: Optional[AlertSettings], base_domain: str, reason: str) -> str:
+        if self._alert_lang(settings) == "ru":
+            return f"Не удалось автоматически продлить сертификат *.{base_domain}:\n{reason}"
+        return f"Failed to auto-renew certificate *.{base_domain}:\n{reason}"
+
+    def _msg_deploy_failed(
+        self, settings: Optional[AlertSettings], base_domain: str, failed: list[dict], total: int
+    ) -> str:
+        lines = "\n".join(
+            f"• {r.get('server_name') or r.get('server_id')}: {r.get('message') or '?'}"
+            for r in failed
+        )
+        if self._alert_lang(settings) == "ru":
+            return (
+                f"Сертификат *.{base_domain} продлён, но не развернулся "
+                f"на {len(failed)} из {total} нод:\n{lines}"
+            )
+        return (
+            f"Certificate *.{base_domain} renewed, but deploy failed "
+            f"on {len(failed)} of {total} nodes:\n{lines}"
+        )
+
+    async def _notify(self, settings: Optional[AlertSettings], message: str):
+        if not settings or not settings.telegram_bot_token or not settings.telegram_chat_id:
+            return
+        text = f"\U0001f534 <b>Wildcard SSL</b>\n\n{message}"
+        try:
+            from app.services.telegram_bot import get_telegram_bot_service
+            await get_telegram_bot_service().send_message(
+                settings.telegram_bot_token, settings.telegram_chat_id, text,
+            )
+        except Exception as e:
+            logger.error(f"Wildcard SSL notification failed: {e}")
 
     # ─── Certbot runner ───
 

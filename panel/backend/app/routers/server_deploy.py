@@ -244,6 +244,7 @@ async def deploy_server(
         install_remnawave=req.install_remnawave,
         remnawave_cert=remnawave_cert,
         proxy_url=proxy_url,
+        new_password=req.new_root_password,
     )
 
     post_opts = PostDeployOptions(
