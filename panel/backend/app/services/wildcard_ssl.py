@@ -359,6 +359,11 @@ class WildcardSSLManager:
                 "--non-interactive",
                 "--agree-tos",
                 "--expand",
+                # Переиспользуем приватный ключ при продлении: cert обновляется,
+                # ключ остаётся прежним. Это нужно внешним потребителям ключа
+                # (anti-DDoS фронт Куратор) — им ключ передаётся один раз, а не
+                # каждый цикл продления.
+                "--reuse-key",
                 "--cert-name", cert_name or base_domain,
                 "--dns-cloudflare",
                 "--dns-cloudflare-credentials", cf_ini.name,
