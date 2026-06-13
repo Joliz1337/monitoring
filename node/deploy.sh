@@ -53,9 +53,10 @@ release_lock() {
 cleanup() {
     local exit_code=$?
     trap - EXIT INT TERM
-    
+
     release_lock
-    
+    disable_apt_guard
+
     if [ $exit_code -ne 0 ] && [ $exit_code -ne 130 ] && [ $exit_code -ne 143 ]; then
         echo ""
         echo -e "\033[0;31m[ERROR] Script failed (exit code: $exit_code)\033[0m"
@@ -289,6 +290,37 @@ wait_for_apt_lock() {
         fi
     done
     return 0
+}
+
+# ==================== dpkg Self-Heal ====================
+#
+# Сразу после провижининга systemd бывает ещё не готов, и postinst пакетов
+# (openssh-server и т.п.) падает на `systemctl restart`, оставляя dpkg в битом
+# состоянии — после чего ЛЮБАЯ команда apt валится с "dpkg returned error".
+# Гард policy-rc.d=101 запрещает пакетным скриптам трогать сервисы во время
+# установки, что разрывает этот цикл, а `dpkg --configure -a` донастраивает
+# застрявшие пакеты. На наши прямые `systemctl start docker` гард НЕ влияет —
+# его читают только invoke-rc.d/deb-systemd-invoke, а не сам systemctl.
+
+POLICY_RC_D="/usr/sbin/policy-rc.d"
+POLICY_RC_D_OWNED=0
+
+enable_apt_guard() {
+    if [ ! -e "$POLICY_RC_D" ]; then
+        if printf '#!/bin/sh\nexit 101\n' > "$POLICY_RC_D" 2>/dev/null; then
+            chmod +x "$POLICY_RC_D" 2>/dev/null || true
+            POLICY_RC_D_OWNED=1
+        fi
+    fi
+
+    wait_for_apt_lock
+    DEBIAN_FRONTEND=noninteractive dpkg --configure -a >/dev/null 2>&1 || true
+}
+
+disable_apt_guard() {
+    [ "$POLICY_RC_D_OWNED" = "1" ] || return 0
+    rm -f "$POLICY_RC_D" 2>/dev/null || true
+    POLICY_RC_D_OWNED=0
 }
 
 # ==================== System Checks ====================
@@ -986,6 +1018,7 @@ main() {
     check_haproxy_status
     prompt_node_secret
     unpack_node_secret_to_ssl || exit 1
+    enable_apt_guard
     install_docker || exit 1
     configure_docker_proxy
     setup_firewall

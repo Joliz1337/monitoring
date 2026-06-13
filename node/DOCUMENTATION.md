@@ -25,6 +25,24 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/in
 
 При установке скрипт запросит **IP-адрес панели** для настройки firewall.
 
+## dpkg Self-Heal (deploy.sh)
+
+На свежих серверах — особенно сразу после провижининга, до полной готовности systemd — postinst-скрипты пакетов (например `openssh-server`) падают на `systemctl restart`, оставляя dpkg в битом состоянии. После этого любая команда apt завершается ошибкой `Sub-process /usr/bin/dpkg returned an error code (1)`, и установка Docker/UFW не проходит.
+
+`deploy.sh` решает это через два механизма:
+
+**`enable_apt_guard()`** — вызывается перед `install_docker`:
+- Создаёт `/usr/sbin/policy-rc.d` со скриптом `exit 101`, если файл ещё не существует; выставляет флаг `POLICY_RC_D_OWNED=1`
+- `policy-rc.d` запрещает пакетным maintainer-скриптам трогать сервисы во время установки (читается только `invoke-rc.d`/`deb-systemd-invoke`, но **не** самим `systemctl`)
+- Дожидается apt-lock (`wait_for_apt_lock`)
+- Запускает `dpkg --configure -a` для донастройки застрявших пакетов
+
+**`disable_apt_guard()`** — вызывается в `cleanup()` при любом выходе (успех/ошибка/прерывание):
+- Удаляет `/usr/sbin/policy-rc.d` только если флаг `POLICY_RC_D_OWNED=1` — не трогает pre-existing файл
+- Сбрасывает флаг в 0
+
+Прямые вызовы `systemctl start docker` внутри `ensure_docker_running` работают без изменений — гард не влияет на прямые вызовы systemctl.
+
 ## HAProxy
 
 HAProxy работает как **нативный systemd сервис** на хосте (не в Docker). При установке ноды HAProxy устанавливается автоматически если не установлен.
