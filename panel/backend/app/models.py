@@ -235,14 +235,16 @@ class BlocklistRule(Base):
     # server_id = NULL означает глобальное правило (для всех серверов)
     is_permanent = Column(Boolean, default=True)
     direction = Column(String(3), default="in")  # 'in' (incoming/INPUT) or 'out' (outgoing/OUTPUT)
+    list_type = Column(String(10), default="block")  # 'block' (DROP) or 'allow' (whitelist/ACCEPT)
     comment = Column(String(200), nullable=True)
     source = Column(String(50), default="manual")  # manual, auto_list
     created_at = Column(DateTime(timezone=True), server_default=func.now())
-    
+
     __table_args__ = (
         Index('idx_blocklist_server', 'server_id'),
         Index('idx_blocklist_source', 'source'),
         Index('idx_blocklist_direction', 'direction'),
+        Index('idx_blocklist_list_type', 'list_type'),
     )
 
 

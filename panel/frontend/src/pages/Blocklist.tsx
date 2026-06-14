@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react'
-import { Shield, Plus, Trash2, RefreshCw, Server, Globe, List, Loader2, ExternalLink, AlertCircle, Check, X, ArrowDownToLine, ArrowUpFromLine, CheckCircle2, XCircle, ChevronDown } from 'lucide-react'
+import { Shield, ShieldCheck, Plus, Trash2, RefreshCw, Server, Globe, List, Loader2, ExternalLink, AlertCircle, Check, X, ArrowDownToLine, ArrowUpFromLine, CheckCircle2, XCircle, ChevronDown } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
@@ -8,7 +8,7 @@ import { Skeleton } from '../components/ui/Skeleton'
 import { Tooltip } from '../components/ui/Tooltip'
 import { FAQIcon } from '../components/FAQ'
 
-type TabType = 'global' | 'servers' | 'sources'
+type TabType = 'global' | 'allowlist' | 'servers' | 'sources'
 
 interface SimpleSyncToast {
   id: number
@@ -77,6 +77,13 @@ export default function Blocklist() {
   const [newGlobalDirection, setNewGlobalDirection] = useState<'in' | 'out' | 'both'>('both')
   const [addingGlobal, setAddingGlobal] = useState(false)
 
+  // Allow list (whitelist, global, both directions)
+  const [allowRulesIn, setAllowRulesIn] = useState<BlocklistRule[]>([])
+  const [allowRulesOut, setAllowRulesOut] = useState<BlocklistRule[]>([])
+  const [newAllowIps, setNewAllowIps] = useState('')
+  const [newAllowDirection, setNewAllowDirection] = useState<'in' | 'out' | 'both'>('both')
+  const [addingAllow, setAddingAllow] = useState(false)
+
   // Server rules (accordion)
   const [servers, setServers] = useState<ServerType[]>([])
   const [expandedServerIds, setExpandedServerIds] = useState<Set<number>>(new Set())
@@ -119,6 +126,19 @@ export default function Blocklist() {
   const fetchAllGlobalRules = useCallback(async () => {
     await Promise.all([fetchGlobalRulesIn(), fetchGlobalRulesOut()])
   }, [fetchGlobalRulesIn, fetchGlobalRulesOut])
+
+  const fetchAllAllowRules = useCallback(async () => {
+    try {
+      const [inResp, outResp] = await Promise.all([
+        blocklistApi.getGlobal('in', 'allow'),
+        blocklistApi.getGlobal('out', 'allow')
+      ])
+      setAllowRulesIn(inResp.data.rules)
+      setAllowRulesOut(outResp.data.rules)
+    } catch (err) {
+      console.error('Failed to fetch allow rules:', err)
+    }
+  }, [])
 
   const fetchServers = useCallback(async () => {
     try {
@@ -286,8 +306,9 @@ export default function Blocklist() {
   useEffect(() => {
     const loadData = async () => {
       setLoading(true)
-      const [, serverList] = await Promise.all([
+      const [, , serverList] = await Promise.all([
         fetchAllGlobalRules(),
+        fetchAllAllowRules(),
         fetchServers(),
         fetchAllSources()
       ])
@@ -348,6 +369,47 @@ export default function Blocklist() {
       toast.success(t('common.deleted'))
     } catch (err: any) {
       console.error('Failed to delete rule:', err)
+      toast.error(t('common.action_failed'))
+    }
+  }
+
+  // === Handlers: Allow List (whitelist) ===
+
+  const handleAddAllowRules = async () => {
+    if (!newAllowIps.trim()) return
+    setAddingAllow(true)
+    try {
+      const ips = newAllowIps.split('\n').map(ip => ip.trim()).filter(Boolean)
+
+      if (newAllowDirection === 'both') {
+        await Promise.all([
+          blocklistApi.addGlobalBulk(ips, true, 'in', 'allow'),
+          blocklistApi.addGlobalBulk(ips, true, 'out', 'allow')
+        ])
+      } else {
+        await blocklistApi.addGlobalBulk(ips, true, newAllowDirection, 'allow')
+      }
+
+      setNewAllowIps('')
+      await fetchAllAllowRules()
+      startSyncToast()
+      toast.success(t('blocklist.sync_success'))
+    } catch (err: any) {
+      console.error('Failed to add allow rules:', err)
+      toast.error(err.response?.data?.detail || 'Failed to add rules')
+    } finally {
+      setAddingAllow(false)
+    }
+  }
+
+  const handleDeleteAllowRule = async (ruleId: number) => {
+    try {
+      await blocklistApi.deleteGlobal(ruleId)
+      await fetchAllAllowRules()
+      startSyncToast()
+      toast.success(t('common.deleted'))
+    } catch (err: any) {
+      console.error('Failed to delete allow rule:', err)
       toast.error(t('common.action_failed'))
     }
   }
@@ -481,6 +543,7 @@ export default function Blocklist() {
 
   const tabs = [
     { id: 'global' as TabType, icon: Globe, label: t('blocklist.global_rules') },
+    { id: 'allowlist' as TabType, icon: ShieldCheck, label: t('blocklist.allowlist') },
     { id: 'servers' as TabType, icon: Server, label: t('blocklist.server_rules') },
     { id: 'sources' as TabType, icon: List, label: t('blocklist.auto_lists') }
   ]
@@ -689,6 +752,110 @@ export default function Blocklist() {
                   rules={globalRulesOut}
                   onDelete={handleDeleteGlobalRule}
                   emptyMessage={t('blocklist.no_rules')}
+                />
+              </div>
+            </div>
+          </motion.div>
+        )}
+
+        {/* ========== ALLOW LIST (WHITELIST) TAB ========== */}
+        {activeTab === 'allowlist' && (
+          <motion.div
+            key="allowlist"
+            initial={{ opacity: 0, x: -20 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: 20 }}
+            className="space-y-4"
+          >
+            {/* Add Form */}
+            <div className="card">
+              <h3 className="text-lg font-semibold text-dark-100 mb-2 flex items-center gap-2">
+                <ShieldCheck className="w-5 h-5 text-emerald-400" />
+                {t('blocklist.add_allow')}
+              </h3>
+              <p className="text-sm text-dark-400 mb-4">
+                {t('blocklist.allowlist_desc')}
+              </p>
+
+              <div className="space-y-3">
+                <textarea
+                  value={newAllowIps}
+                  onChange={(e) => setNewAllowIps(e.target.value)}
+                  placeholder={t('blocklist.ip_placeholder')}
+                  rows={3}
+                  className="input w-full resize-none font-mono text-sm"
+                />
+
+                <div className="flex items-center gap-3 flex-wrap">
+                  <div className="flex gap-1.5">
+                    {directionPills.map((pill) => (
+                      <button
+                        key={pill.id}
+                        onClick={() => setNewAllowDirection(pill.id)}
+                        className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${
+                          newAllowDirection === pill.id
+                            ? pill.color
+                            : 'text-dark-400 hover:text-dark-200 bg-dark-800 border border-dark-700'
+                        }`}
+                      >
+                        {pill.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  <motion.button
+                    onClick={handleAddAllowRules}
+                    disabled={addingAllow || !newAllowIps.trim()}
+                    className="btn btn-primary"
+                    whileHover={{ scale: 1.02 }}
+                    whileTap={{ scale: 0.98 }}
+                  >
+                    {addingAllow ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <Plus className="w-4 h-4" />
+                    )}
+                    {t('blocklist.add')}
+                  </motion.button>
+                </div>
+              </div>
+            </div>
+
+            {/* Two columns: IN and OUT */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {/* Incoming allow rules */}
+              <div className="card">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <ArrowDownToLine className="w-4 h-4 text-emerald-400" />
+                    <h3 className="font-semibold text-dark-100">{t('blocklist.allow_in')}</h3>
+                  </div>
+                  <span className="text-sm text-dark-400">
+                    {allowRulesIn.length} {t('blocklist.rules')}
+                  </span>
+                </div>
+                <RulesList
+                  rules={allowRulesIn}
+                  onDelete={handleDeleteAllowRule}
+                  emptyMessage={t('blocklist.no_allow_rules')}
+                />
+              </div>
+
+              {/* Outgoing allow rules */}
+              <div className="card">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <ArrowUpFromLine className="w-4 h-4 text-emerald-400" />
+                    <h3 className="font-semibold text-dark-100">{t('blocklist.allow_out')}</h3>
+                  </div>
+                  <span className="text-sm text-dark-400">
+                    {allowRulesOut.length} {t('blocklist.rules')}
+                  </span>
+                </div>
+                <RulesList
+                  rules={allowRulesOut}
+                  onDelete={handleDeleteAllowRule}
+                  emptyMessage={t('blocklist.no_allow_rules')}
                 />
               </div>
             </div>

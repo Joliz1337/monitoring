@@ -235,6 +235,13 @@ async def run_migrations(conn):
             logger.info("Added column: blocklist_rules.direction")
         except Exception:
             pass
+
+    if blocklist_rules_columns and "list_type" not in blocklist_rules_columns:
+        try:
+            await conn.execute(text("ALTER TABLE blocklist_rules ADD COLUMN list_type VARCHAR(10) DEFAULT 'block'"))
+            logger.info("Added column: blocklist_rules.list_type")
+        except Exception:
+            pass
     
     # Add direction column to blocklist_sources
     result = await conn.execute(text("""

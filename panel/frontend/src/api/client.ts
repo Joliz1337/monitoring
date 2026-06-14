@@ -704,6 +704,7 @@ export const settingsApi = {
 
 // Blocklist types
 export type BlocklistDirection = 'in' | 'out'
+export type BlocklistListType = 'block' | 'allow'
 
 export interface BlocklistRule {
   id: number
@@ -711,6 +712,7 @@ export interface BlocklistRule {
   server_id: number | null
   is_permanent: boolean
   direction: BlocklistDirection
+  list_type?: BlocklistListType
   comment: string | null
   source: string
   created_at: string
@@ -750,12 +752,12 @@ export interface SyncStatus {
 
 export const blocklistApi = {
   // Global rules
-  getGlobal: (direction: BlocklistDirection = 'in') =>
-    api.get<{ count: number; direction: string; rules: BlocklistRule[] }>('/blocklist/global', { params: { direction } }),
-  addGlobal: (data: { ip_cidr: string; is_permanent?: boolean; direction?: BlocklistDirection; comment?: string }) =>
+  getGlobal: (direction: BlocklistDirection = 'in', list_type: BlocklistListType = 'block') =>
+    api.get<{ count: number; direction: string; list_type: string; rules: BlocklistRule[] }>('/blocklist/global', { params: { direction, list_type } }),
+  addGlobal: (data: { ip_cidr: string; is_permanent?: boolean; direction?: BlocklistDirection; list_type?: BlocklistListType; comment?: string }) =>
     api.post('/blocklist/global', data),
-  addGlobalBulk: (ips: string[], is_permanent: boolean = true, direction: BlocklistDirection = 'in') =>
-    api.post('/blocklist/global/bulk', { ips, is_permanent, direction }),
+  addGlobalBulk: (ips: string[], is_permanent: boolean = true, direction: BlocklistDirection = 'in', list_type: BlocklistListType = 'block') =>
+    api.post('/blocklist/global/bulk', { ips, is_permanent, direction, list_type }),
   deleteGlobal: (id: number) => api.delete(`/blocklist/global/${id}`),
   
   // Server rules

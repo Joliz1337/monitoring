@@ -36,6 +36,11 @@ class SyncRequest(BaseModel):
     direction: str = Field("in", pattern="^(in|out)$", description="Traffic direction: in or out")
 
 
+class AllowSyncRequest(BaseModel):
+    ips: list[str] = Field(..., description="List of IP addresses or CIDR notations")
+    direction: str = Field("in", pattern="^(in|out)$", description="Traffic direction: in or out")
+
+
 class TimeoutRequest(BaseModel):
     timeout: int = Field(..., ge=1, le=2592000, description="Timeout in seconds (1-2592000)")
 
@@ -50,11 +55,13 @@ async def get_status():
             "permanent_count": status.incoming.permanent_count,
             "temp_count": status.incoming.temp_count,
             "iptables_rules_exist": status.incoming.iptables_rules_exist,
+            "allow_count": status.incoming.allow_count,
         },
         "outgoing": {
             "permanent_count": status.outgoing.permanent_count,
             "temp_count": status.outgoing.temp_count,
             "iptables_rules_exist": status.outgoing.iptables_rules_exist,
+            "allow_count": status.outgoing.allow_count,
         },
         "temp_timeout": status.temp_timeout,
         # Backward compat fields (incoming totals)
@@ -213,14 +220,35 @@ async def sync_list(request: SyncRequest):
     success, message, result = manager.sync(
         request.ips, permanent=request.permanent, direction=request.direction
     )
-    
+
     if not success:
         raise HTTPException(status_code=500, detail=message)
-    
+
     return {
         "success": True,
         "message": message,
         "list": "permanent" if request.permanent else "temp",
+        "direction": request.direction,
+        "total": result['total'],
+        "added": result['added'],
+        "removed": result['removed'],
+        "invalid": result['invalid'][:10] if result['invalid'] else []
+    }
+
+
+@router.post("/allowlist/sync")
+async def sync_allowlist(request: AllowSyncRequest):
+    """Sync (replace) entire allow list — trusted IPs that always pass (ACCEPT)."""
+    manager = get_ipset_manager()
+    success, message, result = manager.sync_allow(request.ips, direction=request.direction)
+
+    if not success:
+        raise HTTPException(status_code=500, detail=message)
+
+    return {
+        "success": True,
+        "message": message,
+        "list": "allow",
         "direction": request.direction,
         "total": result['total'],
         "added": result['added'],

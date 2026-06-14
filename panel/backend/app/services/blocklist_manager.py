@@ -171,18 +171,26 @@ class BlocklistManager:
         settings["auto_update_interval"] = int(interval) if interval else UPDATE_INTERVAL
         return settings
     
-    async def get_global_rules(self, db: AsyncSession, direction: str = "in") -> list[str]:
+    async def get_global_rules(
+        self, db: AsyncSession, direction: str = "in", list_type: str = "block"
+    ) -> list[str]:
         result = await db.execute(
             select(BlocklistRule).where(
                 and_(
                     BlocklistRule.server_id.is_(None),
                     BlocklistRule.is_permanent == True,
-                    BlocklistRule.direction == direction
+                    BlocklistRule.direction == direction,
+                    BlocklistRule.list_type == list_type
                 )
             )
         )
         rules = result.scalars().all()
         return [r.ip_cidr for r in rules]
+
+    async def get_allow_ips_global(self, db: AsyncSession, direction: str = "in") -> list[str]:
+        """Глобальные правила белого списка (allow) для направления, дедуплицированные."""
+        allow_ips = await self.get_global_rules(db, direction, list_type="allow")
+        return self.deduplicate_ips(allow_ips)
     
     async def get_server_rules(self, server_id: int, db: AsyncSession, direction: str = "in") -> list[str]:
         result = await db.execute(
@@ -190,7 +198,8 @@ class BlocklistManager:
                 and_(
                     BlocklistRule.server_id == server_id,
                     BlocklistRule.is_permanent == True,
-                    BlocklistRule.direction == direction
+                    BlocklistRule.direction == direction,
+                    BlocklistRule.list_type == "block"
                 )
             )
         )
@@ -252,6 +261,37 @@ class BlocklistManager:
             logger.error(f"Failed to sync to {server.name}: {e}")
             return False, str(e), {}
 
+    async def sync_allow_to_node(
+        self,
+        server: Server,
+        ips: list[str],
+        direction: str = "in",
+        timeout: float = 20.0
+    ) -> tuple[bool, str, dict]:
+        """Синхронизировать белый список на ноду. На старой ноде (нет эндпоинта) — graceful."""
+        try:
+            client = get_node_client(server)
+            response = await client.post(
+                f"{server.url}/api/ipset/allowlist/sync",
+                headers=node_auth_headers(server),
+                json={"ips": ips, "direction": direction},
+                timeout=timeout,
+            )
+            if response.status_code == 200:
+                data = response.json()
+                return True, data.get("message", "Synced"), data
+            if response.status_code == 404:
+                # нода старой версии без allowlist — не считаем фатальной ошибкой
+                return True, "Allowlist not supported by node", {}
+            return False, f"HTTP {response.status_code}", {}
+        except httpx.TimeoutException:
+            return False, "Timeout", {}
+        except httpx.RequestError as e:
+            return False, f"Request error: {str(e)}", {}
+        except Exception as e:
+            logger.error(f"Failed to sync allowlist to {server.name}: {e}")
+            return False, str(e), {}
+
     async def _sync_one_server(self, server: Server) -> dict:
         """Sync both directions for a single server (own DB session)."""
         server_result = {
@@ -268,14 +308,27 @@ class BlocklistManager:
                     success, message, data = await self.sync_to_node(
                         server, ips, direction=direction
                     )
+
+                    allow_ips = await self.get_allow_ips_global(db, direction)
+                    allow_ok, allow_msg, allow_data = await self.sync_allow_to_node(
+                        server, allow_ips, direction=direction
+                    )
+
                     server_result[direction] = {
-                        "success": success,
+                        "success": success and allow_ok,
                         "message": message,
                         "ip_count": len(ips),
                         "added": data.get("added", 0),
                         "removed": data.get("removed", 0),
+                        "allow": {
+                            "success": allow_ok,
+                            "message": allow_msg,
+                            "ip_count": len(allow_ips),
+                            "added": allow_data.get("added", 0),
+                            "removed": allow_data.get("removed", 0),
+                        },
                     }
-                    if not success:
+                    if not (success and allow_ok):
                         server_result["success"] = False
                 except Exception as e:
                     logger.error(f"Failed to sync {direction} to {server.name}: {e}")

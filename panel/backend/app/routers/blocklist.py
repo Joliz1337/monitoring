@@ -57,6 +57,7 @@ class AddRuleRequest(BaseModel):
     ip_cidr: str = Field(..., description="IP address or CIDR notation")
     is_permanent: bool = Field(True, description="Permanent (True) or temporary (False)")
     direction: str = Field("in", pattern="^(in|out)$", description="Traffic direction: in or out")
+    list_type: str = Field("block", pattern="^(block|allow)$", description="block (DROP) or allow (whitelist)")
     comment: Optional[str] = Field(None, max_length=200)
 
 
@@ -64,6 +65,7 @@ class BulkAddRequest(BaseModel):
     ips: list[str] = Field(..., description="List of IP addresses or CIDR notations")
     is_permanent: bool = Field(True)
     direction: str = Field("in", pattern="^(in|out)$")
+    list_type: str = Field("block", pattern="^(block|allow)$")
 
 
 class AddSourceRequest(BaseModel):
@@ -88,15 +90,17 @@ class UpdateSettingsRequest(BaseModel):
 @router.get("/global")
 async def get_global_rules(
     direction: str = Query("in", pattern="^(in|out)$"),
+    list_type: str = Query("block", pattern="^(block|allow)$"),
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    """Get all global blocklist rules filtered by direction"""
+    """Get all global blocklist rules filtered by direction and list_type"""
     result = await db.execute(
         select(BlocklistRule).where(
             and_(
                 BlocklistRule.server_id.is_(None),
-                BlocklistRule.direction == direction
+                BlocklistRule.direction == direction,
+                BlocklistRule.list_type == list_type
             )
         ).order_by(BlocklistRule.created_at.desc())
     )
@@ -105,12 +109,14 @@ async def get_global_rules(
     return {
         "count": len(rules),
         "direction": direction,
+        "list_type": list_type,
         "rules": [
             {
                 "id": r.id,
                 "ip_cidr": r.ip_cidr,
                 "is_permanent": r.is_permanent,
                 "direction": r.direction or "in",
+                "list_type": r.list_type or "block",
                 "comment": r.comment,
                 "source": r.source,
                 "created_at": r.created_at.isoformat() if r.created_at else None
@@ -140,18 +146,23 @@ async def add_global_rule(
             and_(
                 BlocklistRule.ip_cidr == normalized,
                 BlocklistRule.server_id.is_(None),
-                BlocklistRule.direction == request.direction
+                BlocklistRule.direction == request.direction,
+                BlocklistRule.list_type == request.list_type
             )
         )
     )
     if result.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="Rule already exists")
 
+    # allow (белый список) не имеет временного режима — всегда постоянное
+    is_permanent = True if request.list_type == "allow" else request.is_permanent
+
     rule = BlocklistRule(
         ip_cidr=normalized,
         server_id=None,
-        is_permanent=request.is_permanent,
+        is_permanent=is_permanent,
         direction=request.direction,
+        list_type=request.list_type,
         comment=request.comment,
         source="manual"
     )
@@ -169,6 +180,7 @@ async def add_global_rule(
             "ip_cidr": rule.ip_cidr,
             "is_permanent": rule.is_permanent,
             "direction": rule.direction,
+            "list_type": rule.list_type,
             "comment": rule.comment
         }
     }
@@ -200,7 +212,8 @@ async def add_global_rules_bulk(
                 and_(
                     BlocklistRule.ip_cidr == normalized,
                     BlocklistRule.server_id.is_(None),
-                    BlocklistRule.direction == request.direction
+                    BlocklistRule.direction == request.direction,
+                    BlocklistRule.list_type == request.list_type
                 )
             )
         )
@@ -211,8 +224,9 @@ async def add_global_rules_bulk(
         rule = BlocklistRule(
             ip_cidr=normalized,
             server_id=None,
-            is_permanent=request.is_permanent,
+            is_permanent=True if request.list_type == "allow" else request.is_permanent,
             direction=request.direction,
+            list_type=request.list_type,
             source="manual"
         )
         db.add(rule)
@@ -229,7 +243,8 @@ async def add_global_rules_bulk(
         "added": added,
         "skipped": skipped,
         "invalid": invalid[:10],
-        "direction": request.direction
+        "direction": request.direction,
+        "list_type": request.list_type
     }
 
 

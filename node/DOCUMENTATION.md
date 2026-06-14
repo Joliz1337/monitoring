@@ -323,11 +323,17 @@ data: {"message": "error description"}
 
 ### IPSet Blocklist
 
-Блокировка IP/CIDR через ipset. Два списка: `blocklist_permanent` (постоянный) и `blocklist_temp` (временный с таймаутом).
+Блокировка IP/CIDR через ipset. Два типа списков:
+- **Блок-список** — `blocklist_permanent` (постоянный) и `blocklist_temp` (временный с таймаутом); направления: in (INPUT) и out (OUTPUT).
+- **Белый список (allowlist)** — доверенные IP/CIDR, которые **всегда** проходят через ноду вне зависимости от блокировок.
+
+**Белый список:**
+
+Сеты `allowlist` (in → INPUT, match src) и `allowlist_out` (out → OUTPUT, match dst), тип `hash:net`. Правило `iptables ... -j ACCEPT` всегда вставляется на позицию 1 в цепочке (выше всех DROP) — netfilter обходит цепочку сверху вниз и ACCEPT прерывает обход. Это корректно перекрывает и точечные блоки, и CIDR-перекрытия (например, разрешить `1.2.3.4` при заблокированном `1.2.3.0/24`). Белый список всегда permanent — временного режима нет.
 
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
-| GET | /api/ipset/status | Статус списков (count, timeout) |
+| GET | /api/ipset/status | Статус списков (count, timeout, allow_count) |
 | GET | /api/ipset/list/{set_type} | Получить IP из списка (permanent/temp) |
 | POST | /api/ipset/add | Добавить IP/CIDR |
 | POST | /api/ipset/bulk-add | Массовое добавление |
@@ -335,13 +341,21 @@ data: {"message": "error description"}
 | POST | /api/ipset/bulk-remove | Массовое удаление |
 | POST | /api/ipset/clear/{set_type} | Очистить список |
 | PUT | /api/ipset/timeout | Изменить timeout temp списка |
-| POST | /api/ipset/sync | Синхронизация (замена всего списка) |
+| POST | /api/ipset/sync | Синхронизация блок-списка (замена всего списка) |
+| POST | /api/ipset/allowlist/sync | Синхронизация белого списка (замена) |
+
+**`POST /api/ipset/allowlist/sync`** — принимает `AllowSyncRequest`:
+- `ips` — массив IP/CIDR для белого списка
+- `direction` — `"in"` или `"out"`
+
+**Поля в `GET /api/ipset/status`** — добавлены `incoming.allow_count` и `outgoing.allow_count` (количество записей в allowlist).
 
 **Особенности:**
 - Тип ipset: `hash:net` (поддержка IP и CIDR)
-- Правила iptables: `INPUT -m set --match-set blocklist_* src -j DROP`
-- Постоянные правила сохраняются в `/var/lib/monitoring/blocklist.json`
-- При старте ноды: постоянные правила восстанавливаются, временный список пустой
+- Правила iptables блок-списка: `INPUT/OUTPUT -m set --match-set blocklist_* src/dst -j DROP`
+- Правила allowlist: `-I INPUT 1 ... -j ACCEPT` / `-I OUTPUT 1 ... -j ACCEPT` (позиция 1, выше DROP)
+- Все постоянные правила сохраняются в `/var/lib/monitoring/blocklist.json` (ключи `in_allow`, `out_allow` для белого списка)
+- При старте ноды: постоянные правила восстанавливаются, временный список пустой, allowlist загружается из персиста
 
 ### SSH Security
 

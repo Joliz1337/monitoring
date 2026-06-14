@@ -550,31 +550,41 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 
 ### IP Blocklist
 
-Блокировка IP/CIDR через ipset с поддержкой двух направлений:
-- **Входящие (in)** — блокировка входящего трафика (iptables INPUT chain, match src)
-- **Исходящие (out)** — блокировка исходящего трафика (iptables OUTPUT chain, match dst)
+Блокировка и разрешение IP/CIDR через ipset с поддержкой двух направлений:
+- **Входящие (in)** — iptables INPUT chain, match src
+- **Исходящие (out)** — iptables OUTPUT chain, match dst
 
 Поддержка глобальных правил (для всех серверов), правил по серверам и автоматических списков из GitHub. Каждое правило и источник привязаны к направлению.
 
-На ноде создаются 4 ipset-списка: `blocklist_permanent`, `blocklist_temp` (входящие), `blocklist_out_permanent`, `blocklist_out_temp` (исходящие).
+На ноде создаются 6 ipset-сетов: `blocklist_permanent`, `blocklist_temp` (блок, входящие), `blocklist_out_permanent`, `blocklist_out_temp` (блок, исходящие), `allowlist` (белый список, входящие), `allowlist_out` (белый список, исходящие).
+
+**Белый список (allowlist):**
+
+Доверенные IP/CIDR, которые **всегда** проходят через ноду вне зависимости от любых блокировок. ACCEPT-правило для allowlist вставляется на позицию 1 в цепочке iptables — выше всех DROP. Только глобальная область (per-server allowlist не поддерживается). Всегда permanent — временного режима нет.
+
+**Поле `list_type` в правилах:**
+
+В таблице `blocklist_rules` добавлена колонка `list_type VARCHAR(10)` (значения `"block"` / `"allow"`, дефолт `"block"`) с индексом `idx_blocklist_list_type`. Позволяет хранить блок- и allow-правила в одной таблице.
 
 **Глобальные правила:**
 
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
-| GET | /api/blocklist/global?direction=in\|out | Все глобальные правила (фильтр по направлению) |
-| POST | /api/blocklist/global | Добавить глобальное правило (direction в теле) |
-| POST | /api/blocklist/global/bulk | Массовое добавление (direction в теле) |
+| GET | /api/blocklist/global?direction=in\|out&list_type=block\|allow | Глобальные правила (фильтр по направлению и типу) |
+| POST | /api/blocklist/global | Добавить правило (`direction`, `list_type` в теле) |
+| POST | /api/blocklist/global/bulk | Массовое добавление (`direction`, `list_type` в теле) |
 | DELETE | /api/blocklist/global/{id} | Удалить правило |
+
+Для `list_type="allow"` панель принудительно устанавливает `is_permanent=True`. Уникальность проверяется с учётом `list_type` — один и тот же IP может быть одновременно в блок-списке и белом списке (разные типы).
 
 **Правила по серверам:**
 
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
-| GET | /api/blocklist/server/{id}?direction=in\|out | Правила сервера (фильтр по направлению) |
+| GET | /api/blocklist/server/{id}?direction=in\|out | Правила сервера (фильтр по направлению, только block) |
 | POST | /api/blocklist/server/{id} | Добавить правило для сервера (direction в теле) |
 | DELETE | /api/blocklist/server/{id}/{rule_id} | Удалить правило |
-| GET | /api/blocklist/server/{id}/status | Статус ipset на ноде (оба направления) |
+| GET | /api/blocklist/server/{id}/status | Статус ipset на ноде (оба направления, включая allow_count) |
 
 **Автоматические списки:**
 
@@ -593,16 +603,19 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 |-------|----------|----------|
 | GET | /api/blocklist/settings | Текущие настройки (включая глобальный порог детекции) |
 | PUT | /api/blocklist/settings | Обновить настройки |
-| POST | /api/blocklist/sync | Синхронизировать все ноды (параллельно, оба направления) |
-| POST | /api/blocklist/sync/{id} | Синхронизировать одну ноду (оба направления) |
-| GET | /api/blocklist/sync/status | Статус последней синхронизации (результат по серверам) |
+| POST | /api/blocklist/sync | Синхронизировать все ноды (параллельно, блок + allowlist, оба направления) |
+| POST | /api/blocklist/sync/{id} | Синхронизировать одну ноду (блок + allowlist, оба направления) |
+| GET | /api/blocklist/sync/status | Статус последней синхронизации (результат по серверам, включая allow) |
 
-**Hot-apply**: все изменения правил (добавление/удаление глобальных, серверных правил, переключение источников) автоматически запускают синхронизацию в фоне через BackgroundTasks. Кнопка "Синхронизировать всё" убрана — применение происходит автоматически.
+Синхронизация теперь включает как блок-список, так и allowlist — `_sync_one_server` отправляет оба типа для обоих направлений. При синхронизации на ноду со старым API (404 на `/api/ipset/allowlist/sync`) allowlist пропускается gracefully.
 
-**Frontend (Blocklist.tsx):** select сервера без ограничения ширины (убран max-w-xs). Двухколоночный grid на вкладках:
+**Hot-apply**: все изменения правил (добавление/удаление глобальных, серверных правил, переключение источников) автоматически запускают синхронизацию в фоне через BackgroundTasks.
+
+**Frontend (Blocklist.tsx):** select сервера без ограничения ширины (убран max-w-xs). Четырёхвкладочный интерфейс:
 - **Global** — форма добавления правила слева, список правил справа
 - **Servers** — выбор сервера + форма добавления слева, список правил сервера справа
 - **Sources** — список источников слева, форма добавления источника + настройки справа
+- **Белый список** (иконка ShieldCheck) — форма добавления (in/out/both) слева, двухколоночный список IN/OUT справа; переиспользует компонент `RulesList`
 
 **Параллельная синхронизация**: `sync_all_nodes()` использует `asyncio.gather` — все серверы синхронизируются одновременно с per-server таймаутом 30 секунд. Если сервер не отвечает — он получает статус ошибки, остальные не блокируются.
 

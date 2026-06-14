@@ -3,12 +3,19 @@
 Works from Docker container by using nsenter to execute commands on host.
 Requires container to run with: privileged: true, pid: host
 
-Four lists (two per direction):
+Four block lists (two per direction):
 - blocklist_permanent / blocklist_out_permanent: permanent blocks (hash:net)
 - blocklist_temp / blocklist_out_temp: temporary blocks with timeout (hash:net)
 
-Incoming (in): iptables INPUT chain, match src → DROP
-Outgoing (out): iptables OUTPUT chain, match dst → DROP
+Two allow lists (one per direction):
+- allowlist / allowlist_out: trusted IPs that must always pass (hash:net)
+
+Incoming (in): iptables INPUT chain, match src → DROP (block) / ACCEPT (allow)
+Outgoing (out): iptables OUTPUT chain, match dst → DROP (block) / ACCEPT (allow)
+
+Правило ACCEPT белого списка всегда вставляется в позицию 1 цепочки (выше всех
+DROP) — iptables идёт сверху вниз и ACCEPT обрывает обход, поэтому доверенный IP
+проходит ещё до блокировок, даже если попадает под заблокированный CIDR.
 """
 
 import json
@@ -32,6 +39,10 @@ SET_TEMP = "blocklist_temp"
 SET_OUT_PERMANENT = "blocklist_out_permanent"
 SET_OUT_TEMP = "blocklist_out_temp"
 
+# Allow lists (whitelist) — one per direction, always permanent
+SET_ALLOW = "allowlist"
+SET_ALLOW_OUT = "allowlist_out"
+
 DEFAULT_TIMEOUT = 600  # 10 minutes
 
 # Direction config: chain + match flag
@@ -40,12 +51,19 @@ _DIR_CONFIG = {
     "out": {"chain": "OUTPUT", "match": "dst", "perm": SET_OUT_PERMANENT, "temp": SET_OUT_TEMP},
 }
 
+# Allow config: chain + match flag + set name per direction
+_ALLOW_CONFIG = {
+    "in":  {"chain": "INPUT",  "match": "src", "set": SET_ALLOW},
+    "out": {"chain": "OUTPUT", "match": "dst", "set": SET_ALLOW_OUT},
+}
+
 
 @dataclass
 class DirectionStatus:
     permanent_count: int
     temp_count: int
     iptables_rules_exist: bool
+    allow_count: int = 0
 
 
 @dataclass
@@ -102,6 +120,9 @@ class IpsetManager:
     def _resolve_set(self, permanent: bool, direction: str = "in") -> str:
         cfg = self._get_dir_cfg(direction)
         return cfg["perm"] if permanent else cfg["temp"]
+
+    def _get_allow_cfg(self, direction: str) -> dict:
+        return _ALLOW_CONFIG.get(direction, _ALLOW_CONFIG["in"])
     
     # ── IP validation ──
     
@@ -183,6 +204,25 @@ class IpsetManager:
             logger.info(f"Removed iptables {cfg['chain']} rule for {set_name}")
             return True, f"Rule for {set_name} removed"
         return False, f"Failed to remove rule: {stderr}"
+
+    # ── allowlist iptables rule (ACCEPT, must sit above DROP rules) ──
+
+    def _ensure_allow_rule_priority(self, direction: str = "in") -> None:
+        """Гарантирует, что ACCEPT белого списка стоит первым в цепочке.
+
+        Удаляет существующее правило (если есть) и вставляет в позицию 1, выше
+        всех DROP. Вызывается после любой операции, способной всплыть DROP-правило
+        наверх (init_sets, set_timeout)."""
+        cfg = self._get_allow_cfg(direction)
+        rule = ["-m", "set", "--match-set", cfg["set"], cfg["match"], "-j", "ACCEPT"]
+        # idempotent: снимаем дубликаты, затем ставим единственное правило на верх
+        while self._run_iptables(["-C", cfg["chain"]] + rule)[0]:
+            self._run_iptables(["-D", cfg["chain"]] + rule)
+        success, _, stderr = self._run_iptables(["-I", cfg["chain"], "1"] + rule)
+        if success:
+            logger.info(f"Allowlist ACCEPT rule on top of {cfg['chain']} ({direction})")
+        else:
+            logger.error(f"Failed to add allowlist ACCEPT rule ({direction}): {stderr}")
     
     # ── init ──
     
@@ -210,11 +250,19 @@ class IpsetManager:
             success, msg = self._add_iptables_rule(cfg["temp"], direction)
             if not success:
                 return False, f"Failed to add iptables rule for {direction} temp: {msg}"
-        
+
+        # Allow lists: create set, затем поставить ACCEPT выше всех DROP
+        for direction, cfg in _ALLOW_CONFIG.items():
+            success, msg = self._create_set(cfg["set"], with_timeout=False)
+            if not success:
+                return False, f"Failed to create {direction} allow set: {msg}"
+            self._ensure_allow_rule_priority(direction)
+
         self._load_permanent_ips()
-        
+        self._load_allow_ips()
+
         self._initialized = True
-        logger.info("IpsetManager initialized successfully (in + out)")
+        logger.info("IpsetManager initialized successfully (in + out, block + allow)")
         return True, "Initialized successfully"
     
     # ── persistence ──
@@ -231,11 +279,11 @@ class IpsetManager:
     
     def _save_config(self):
         try:
-            in_ips = self.list_ips(permanent=True, direction="in")
-            out_ips = self.list_ips(permanent=True, direction="out")
             data = {
-                'in_permanent': in_ips,
-                'out_permanent': out_ips,
+                'in_permanent': self.list_ips(permanent=True, direction="in"),
+                'out_permanent': self.list_ips(permanent=True, direction="out"),
+                'in_allow': self.list_allow_ips(direction="in"),
+                'out_allow': self.list_allow_ips(direction="out"),
                 'temp_timeout': self._temp_timeout,
             }
             Path(PERSISTENT_FILE).parent.mkdir(parents=True, exist_ok=True)
@@ -267,6 +315,25 @@ class IpsetManager:
                     logger.info(f"Loaded {count} {direction} permanent IPs from file")
         except Exception as e:
             logger.warning(f"Failed to load permanent IPs: {e}")
+
+    def _load_allow_ips(self):
+        try:
+            if not os.path.exists(PERSISTENT_FILE):
+                return
+            with open(PERSISTENT_FILE, 'r') as f:
+                data = json.load(f)
+
+            for direction, key in [("in", "in_allow"), ("out", "out_allow")]:
+                ips = data.get(key, [])
+                if ips:
+                    count = 0
+                    for ip in ips:
+                        success, _ = self.add_allow_ip(ip, direction=direction, save=False)
+                        if success:
+                            count += 1
+                    logger.info(f"Loaded {count} {direction} allow IPs from file")
+        except Exception as e:
+            logger.warning(f"Failed to load allow IPs: {e}")
     
     # ── core operations ──
     
@@ -372,7 +439,10 @@ class IpsetManager:
             success, msg = self._add_iptables_rule(temp_set, direction)
             if not success:
                 return False, f"Failed to re-add iptables rule for {direction} temp: {msg}"
-        
+
+            # temp-DROP всплыл в позицию 1 — вернуть ACCEPT белого списка выше него
+            self._ensure_allow_rule_priority(direction)
+
         self._save_config()
         logger.info(f"Changed temp timeout to {seconds}s")
         return True, f"Timeout changed to {seconds} seconds"
@@ -447,7 +517,111 @@ class IpsetManager:
         }
         logger.info(f"Synced {set_name}: added {added}, removed {removed}")
         return True, f"Synced {set_name}", result
-    
+
+    # ── allow list operations (always permanent, no timeout) ──
+
+    def add_allow_ip(self, ip: str, direction: str = "in", save: bool = True) -> tuple[bool, str]:
+        ip = self._normalize_ip(ip)
+        if not self._validate_ip_cidr(ip):
+            return False, f"Invalid IP/CIDR: {ip}"
+
+        set_name = self._get_allow_cfg(direction)["set"]
+        if self._ip_in_set(ip, set_name):
+            return True, f"{ip} already in {set_name}"
+
+        success, _, stderr = self._run_ipset(["add", set_name, ip])
+        if success:
+            logger.info(f"Added {ip} to {set_name}")
+            if save:
+                self._save_config()
+            return True, f"Added {ip} to {set_name}"
+        if "already added" in stderr.lower() or "already in set" in stderr.lower():
+            return True, f"{ip} already in {set_name}"
+        logger.error(f"Failed to add {ip} to {set_name}: {stderr}")
+        return False, f"Failed to add: {stderr}"
+
+    def remove_allow_ip(self, ip: str, direction: str = "in") -> tuple[bool, str]:
+        ip = self._normalize_ip(ip)
+        if not self._validate_ip_cidr(ip):
+            return False, f"Invalid IP/CIDR: {ip}"
+
+        set_name = self._get_allow_cfg(direction)["set"]
+        success, _, stderr = self._run_ipset(["del", set_name, ip])
+        if success:
+            logger.info(f"Removed {ip} from {set_name}")
+            self._save_config()
+            return True, f"Removed {ip} from {set_name}"
+        if "not in set" in stderr.lower() or "element is missing" in stderr.lower():
+            return True, f"{ip} was not in {set_name}"
+        logger.error(f"Failed to remove {ip} from {set_name}: {stderr}")
+        return False, f"Failed to remove: {stderr}"
+
+    def list_allow_ips(self, direction: str = "in") -> list[str]:
+        set_name = self._get_allow_cfg(direction)["set"]
+        success, stdout, stderr = self._run_ipset(["list", set_name])
+        if not success:
+            logger.error(f"Failed to list {set_name}: {stderr}")
+            return []
+
+        ips = []
+        in_members = False
+        for line in stdout.split('\n'):
+            line = line.strip()
+            if line.startswith('Members:'):
+                in_members = True
+                continue
+            if in_members and line:
+                parts = line.split()
+                if parts:
+                    ips.append(parts[0])
+        return ips
+
+    def clear_allow(self, direction: str = "in") -> tuple[bool, str]:
+        set_name = self._get_allow_cfg(direction)["set"]
+        success, _, stderr = self._run_ipset(["flush", set_name])
+        if success:
+            logger.info(f"Cleared {set_name}")
+            self._save_config()
+            return True, f"Cleared {set_name}"
+        logger.error(f"Failed to clear {set_name}: {stderr}")
+        return False, f"Failed to clear: {stderr}"
+
+    def sync_allow(self, ips: list[str], direction: str = "in") -> tuple[bool, str, dict]:
+        set_name = self._get_allow_cfg(direction)["set"]
+
+        normalized_ips = set()
+        invalid_ips = []
+        for ip in ips:
+            ip = self._normalize_ip(ip)
+            if self._validate_ip_cidr(ip):
+                normalized_ips.add(ip)
+            else:
+                invalid_ips.append(ip)
+
+        current_ips = set(self.list_allow_ips(direction=direction))
+        to_add = normalized_ips - current_ips
+        to_remove = current_ips - normalized_ips
+
+        added = 0
+        removed = 0
+        for ip in to_remove:
+            if self.remove_allow_ip(ip, direction=direction)[0]:
+                removed += 1
+        for ip in to_add:
+            if self.add_allow_ip(ip, direction=direction, save=False)[0]:
+                added += 1
+
+        self._save_config()
+
+        result = {
+            'total': len(normalized_ips),
+            'added': added,
+            'removed': removed,
+            'invalid': invalid_ips,
+        }
+        logger.info(f"Synced {set_name}: added {added}, removed {removed}")
+        return True, f"Synced {set_name}", result
+
     def get_status(self) -> IpsetStatus:
         def _dir_status(direction: str) -> DirectionStatus:
             cfg = self._get_dir_cfg(direction)
@@ -458,6 +632,7 @@ class IpsetManager:
                     self._iptables_rule_exists(cfg["perm"], direction)
                     and self._iptables_rule_exists(cfg["temp"], direction)
                 ),
+                allow_count=len(self.list_allow_ips(direction=direction)),
             )
         
         return IpsetStatus(
