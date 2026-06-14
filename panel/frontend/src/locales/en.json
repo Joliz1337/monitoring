@@ -718,6 +718,8 @@
     "update_all_nodes": "Update All Nodes",
     "in_progress": "Updating...",
     "panel_restarting": "Panel restarting...",
+    "waiting_reboot": "Waiting for panel to restart...",
+    "panel_back": "Panel is back online, reloading...",
     "offline": "Offline",
     "unknown": "Unknown",
     "no_nodes": "No nodes added",

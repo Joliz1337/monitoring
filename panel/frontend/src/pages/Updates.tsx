@@ -30,6 +30,36 @@ interface NodeState {
   status: 'online' | 'offline'
 }
 
+// После запуска обновления панель уходит в перезапуск (updater-контейнер пересобирает образ).
+// Ждём 10с прежде чем начать опрос — за это время старая панель успевает погаснуть.
+const PANEL_REBOOT_INITIAL_DELAY_MS = 10_000
+const PANEL_REBOOT_POLL_INTERVAL_MS = 5_000
+const PANEL_PROBE_TIMEOUT_MS = 4_000
+
+const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
+
+// /health из браузера недоступен (nginx отдаёт его только внутренним IP), поэтому живость
+// бэкенда проверяем лёгким /api/auth/check напрямую через fetch — минуя axios-интерсепторы
+// (редирект на /login при 401 и ретраи нам тут не нужны). Любой HTTP-ответ кроме шлюзовой
+// ошибки означает, что бэкенд снова поднялся; сетевой сбой или 502/503/504 — ещё лежит.
+async function isPanelBackendAlive(): Promise<boolean> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), PANEL_PROBE_TIMEOUT_MS)
+  try {
+    const resp = await fetch('/api/auth/check', {
+      method: 'GET',
+      cache: 'no-store',
+      credentials: 'include',
+      signal: controller.signal,
+    })
+    return resp.status !== 502 && resp.status !== 503 && resp.status !== 504
+  } catch {
+    return false
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 export default function Updates() {
   const { t } = useTranslation()
 
@@ -48,9 +78,12 @@ export default function Updates() {
   const [isChecking, setIsChecking] = useState(false)
 
   const abortRef = useRef(false)
+  const rebootWaitCancelRef = useRef(false)
   const lastActivityRef = useRef(Date.now())
   const IDLE_THRESHOLD = 5000
   const AUTO_REFRESH_INTERVAL = 12000
+
+  useEffect(() => () => { rebootWaitCancelRef.current = true }, [])
 
   useEffect(() => {
     const markActive = () => { lastActivityRef.current = Date.now() }
@@ -161,6 +194,35 @@ export default function Updates() {
     fetchBase(true)
   }, [fetchBase])
 
+  // Дожидаемся, пока панель сначала уйдёт в перезапуск (бэкенд недоступен), а затем снова
+  // поднимется, и только тогда перезагружаем страницу. Требование "сначала увидеть падение"
+  // защищает от reload на ещё живой старой панели, пока updater пересобирает образ.
+  const waitForPanelRebootAndReload = useCallback(async () => {
+    rebootWaitCancelRef.current = false
+    setUpdateResults(prev => ({
+      ...prev,
+      panel: { success: true, message: t('updates.waiting_reboot') }
+    }))
+
+    await sleep(PANEL_REBOOT_INITIAL_DELAY_MS)
+
+    let sawDown = false
+    while (!rebootWaitCancelRef.current) {
+      const alive = await isPanelBackendAlive()
+      if (!alive) {
+        sawDown = true
+      } else if (sawDown) {
+        setUpdateResults(prev => ({
+          ...prev,
+          panel: { success: true, message: t('updates.panel_back') }
+        }))
+        window.location.reload()
+        return
+      }
+      await sleep(PANEL_REBOOT_POLL_INTERVAL_MS)
+    }
+  }, [t])
+
   const handleUpdatePanel = async () => {
     if (updatingPanel) return
 
@@ -174,12 +236,7 @@ export default function Updates() {
         panel: { success: true, message: response.data.message }
       }))
       toast.success(t('updates.panel_restarting'))
-      setTimeout(() => {
-        setUpdateResults(prev => ({
-          ...prev,
-          panel: { success: true, message: t('updates.panel_restarting') }
-        }))
-      }, 2000)
+      waitForPanelRebootAndReload()
     } catch (err: any) {
       setUpdateResults(prev => ({
         ...prev,

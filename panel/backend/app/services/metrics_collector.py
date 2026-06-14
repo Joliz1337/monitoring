@@ -63,7 +63,10 @@ class MetricsCollector:
 
     CB_FAILURE_THRESHOLD = 3   # после стольких подряд неудач нода уходит в skip
     CB_SKIP_CYCLES = 3         # пропускать N циклов перед повторной попыткой
-    
+
+    DOWN_THRESHOLD_SECONDS = 120  # сколько молчания считаем "definitively offline" для recovery
+    RECONCILE_CONCURRENCY = 5     # одновременных восстановлений оживших нод
+
     def __init__(self):
         self._running = False
         self._task: Optional[asyncio.Task] = None
@@ -94,7 +97,12 @@ class MetricsCollector:
 
         self._node_failures: dict[int, int] = {}
         self._node_skip_cycles: dict[int, int] = {}
-    
+
+        # Наблюдаемый переход offline → online для авто-восстановления состояния ноды.
+        self._down_servers: set[int] = set()
+        self._reconcile_inflight: set[int] = set()
+        self._reconcile_sem = asyncio.Semaphore(self.RECONCILE_CONCURRENCY)
+
     def notify_activity(self, server_id: int):
         """Mark server as having client activity — triggers fast HAProxy cache refresh (every 5s)"""
         self._active_servers[server_id] = time.time()
@@ -200,13 +208,18 @@ class MetricsCollector:
         now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
         snapshots = []
         server_updates = []
-        
+        recovered_ids: list[int] = []
+
         for server, result in zip(servers, results):
             if isinstance(result, Exception):
                 continue
-            
+
             metrics, error_info = result
             if metrics:
+                # Наблюдаемое оживание: нода молчала дольше порога, теперь снова ответила.
+                if server.id in self._down_servers:
+                    self._down_servers.discard(server.id)
+                    recovered_ids.append(server.id)
                 snapshot_data = self._build_snapshot(server.id, metrics, now_utc)
                 if snapshot_data:
                     snapshots.append(snapshot_data)
@@ -218,6 +231,10 @@ class MetricsCollector:
                     "last_metrics": json.dumps(metrics)
                 })
             elif error_info:
+                # Помечаем "definitively offline" только если раньше нода была живой и давно молчит.
+                if server.last_seen is not None and \
+                        self._seconds_since(server.last_seen, now_utc) >= self.DOWN_THRESHOLD_SECONDS:
+                    self._down_servers.add(server.id)
                 server_updates.append({
                     "id": server.id,
                     "last_error": error_info["message"],
@@ -280,7 +297,11 @@ class MetricsCollector:
                     )
 
                 await db.commit()
-        
+
+        # Восстановление состояния оживших нод — last_seen уже закоммичен (сервер считается online).
+        for sid in recovered_ids:
+            asyncio.create_task(self._launch_reconcile(sid))
+
         # Cleanup throttled — only every CLEANUP_INTERVAL seconds
         now = time.time()
         if now - self._last_cleanup >= self.CLEANUP_INTERVAL:
@@ -338,6 +359,29 @@ class MetricsCollector:
             logger.debug(f"Request to {server.name} failed: {e}")
             return None, {"message": f"{ErrorTypes.UNKNOWN}: {str(e)[:100]}", "code": 500}
     
+    @staticmethod
+    def _seconds_since(last_seen: datetime, now_utc_naive: datetime) -> float:
+        """Возраст last_seen в секундах. last_seen может прийти tz-aware из PostgreSQL —
+        приводим к naive UTC, иначе вычитание aware/naive бросит TypeError."""
+        ls = last_seen
+        if ls.tzinfo is not None:
+            ls = ls.astimezone(timezone.utc).replace(tzinfo=None)
+        return (now_utc_naive - ls).total_seconds()
+
+    async def _launch_reconcile(self, server_id: int):
+        """Восстанавливает привязанное состояние ноды после наблюдаемого down→up.
+        Запускается отдельным task — гасит исключения, чтобы не уронить коллектор."""
+        if server_id in self._reconcile_inflight:
+            return
+        self._reconcile_inflight.add(server_id)
+        try:
+            from app.services.recovery_reconciler import reconcile_recovered_server
+            await reconcile_recovered_server(server_id, self._reconcile_sem)
+        except Exception as e:
+            logger.error(f"Recovery reconcile failed for server {server_id}: {e}")
+        finally:
+            self._reconcile_inflight.discard(server_id)
+
     def _build_snapshot(self, server_id: int, metrics: dict, now_utc: datetime) -> Optional[dict]:
         """Build a snapshot dict for batch insert. Returns None if data invalid."""
         current_time = time.time()
