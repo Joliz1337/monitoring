@@ -24,6 +24,10 @@ import asyncssh
 INSTALLER_URL = "https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh"
 REMOTE_SCRIPT = "/tmp/mon-install.sh"
 
+# install.sh печатает этот маркер перед ребутом из Rescue System — по нему
+# деплой понимает, что ОС установлена и обрыв SSH ожидаем (не ошибка).
+RESCUE_REBOOT_MARKER = "MON_RESCUE_OS_INSTALLED_REBOOTING"
+
 # Установка с нуля (apt, docker, pull образов) укладывается в ~25 минут
 DEPLOY_TIMEOUT = 1500
 CONNECT_TIMEOUT = 30
@@ -324,11 +328,27 @@ async def deploy_node(params: DeployParams) -> AsyncIterator[dict]:
 
     while True:
         result: dict | None = None
+        rescue_reboot = False
         async for event in _run_install_once(connect_kwargs, params):
-            if event.get("type") == "_result":
+            etype = event.get("type")
+            if etype == "_result":
                 result = event
                 break
+            if etype == "log":
+                if RESCUE_REBOOT_MARKER in event.get("line", ""):
+                    rescue_reboot = True
+                yield event
+                continue
+            if etype == "error" and rescue_reboot:
+                # Ожидаемый обрыв: сервер ушёл в ребут после установки ОС в rescue
+                yield {"type": "log", "line": "[panel] SSH закрыт — сервер перезагружается в установленную ОС"}
+                break
             yield event
+
+        # Rescue System: ОС установлена, нода доустановится сама после ребута
+        if rescue_reboot:
+            yield {"type": "done", "exit_code": 0, "rescue": True}
+            return
 
         if result is None:
             return  # фатальная ошибка соединения уже отправлена в лог

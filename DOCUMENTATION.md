@@ -92,6 +92,36 @@ bash install.sh --node=<NODE_SECRET> [--optimize] [--profile=vpn|panel]
 
 При передаче `NODE_SECRET` скрипт вычитывает `panel_ip` из самого токена — дополнительно `PANEL_IP` задавать не нужно.
 
+**Режим Hetzner Rescue System (автоматическая установка ОС):**
+
+Если установщик запущен внутри Hetzner Rescue System (временный Linux в RAM до установки настоящей ОС), `detect_rescue_system()` обнаруживает это и переключается в режим провижининга ОС — обычная установка ноды в этом режиме невозможна.
+
+Сценарии использования:
+
+```bash
+# Установить Ubuntu 24.04 + после ребута автоматически поставить ноду
+bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh) <NODE_SECRET> [--optimize] [--profile=vpn|panel]
+
+# Только чистая Ubuntu 24.04 (с подтверждением), без автопродолжения
+bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh)
+```
+
+Поведение в rescue:
+
+1. `find_ubuntu2404_image()` — находит образ `Ubuntu-2404-noble-<arch>-base.tar.{zst,gz}` в `/root/images` или `/root/.oldroot/nfs/images`; предпочитает `.tar.zst`.
+2. Диски определяются через `lsblk`. При наличии двух дисков одинакового размера — RAID1 (`mdraid`), иначе один диск без RAID.
+3. Разметка: `/boot ext4 1024 МБ`, `swap 8 ГБ`, `/` ext4 остаток.
+4. Hostname задаётся через `MON_OS_HOSTNAME` (по умолчанию `ubuntu`).
+5. Если переданы параметры установки (`NODE_SECRET`, `MON_INSTALL_*`) — генерируется post-install скрипт (`-x`): он создаёт `/etc/monitoring/firstboot.env` (chmod 600) и one-shot systemd-сервис `mon-firstboot.service`. После первого старта Ubuntu сервис скачивает `install.sh` и запускает его в режиме `--unattended` с сохранёнными параметрами, затем удаляет себя (идемпотентно).
+6. Запускается `installimage -a ...`; при успехе — автоматический `reboot`.
+7. Root-пароль новой системы совпадает с паролем Rescue System (поведение `installimage`).
+
+Новая env-переменная установщика:
+
+| Переменная | Описание |
+|------------|----------|
+| `MON_OS_HOSTNAME` | Hostname новой системы (по умолчанию `ubuntu`) |
+
 **Неинтерактивный режим (`--unattended`):**
 
 ```bash

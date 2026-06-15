@@ -32,6 +32,10 @@ logger = logging.getLogger(__name__)
 FINISHED_TTL_SECONDS = 600
 # Защита от разрастания памяти на очень длинных логах установки
 LOG_BUFFER_LIMIT = 5000
+# Сколько ждать появления ноды после ребута из Rescue System (firstboot ставит
+# ОС → нода → docker pull может занять ~30 мин на медленном канале)
+RESCUE_ONLINE_TIMEOUT = 2400
+RESCUE_POLL_INTERVAL = 10
 
 
 @dataclass
@@ -137,7 +141,10 @@ class DeployJobManager:
             async for event in deploy_node(params):
                 etype = event.get("type")
                 if etype == "done":
-                    await self._on_install_done(job, event.get("exit_code", 1), post_opts)
+                    if event.get("rescue"):
+                        await self._on_rescue_reboot(job, params, post_opts)
+                    else:
+                        await self._on_install_done(job, event.get("exit_code", 1), post_opts)
                     return
                 if etype == "error":
                     job.error = event.get("message")
@@ -186,6 +193,61 @@ class DeployJobManager:
         await self._bind_profiles(job, server_id, post_opts)
         self._emit(job, {"type": "done", "exit_code": 0, "server_id": server_id})
         self._finish(job, "success")
+
+    async def _on_rescue_reboot(
+        self,
+        job: DeployJob,
+        params: DeployParams,
+        post_opts: PostDeployOptions,
+    ) -> None:
+        """Rescue-сценарий: ОС поставлена, сервер ушёл в ребут. Нода доустановится
+        сама (firstboot) с тем же NODE_SECRET. Ждём её появления, затем выполняем
+        обычные постустановочные шаги (создание записи, SSH-пресет, профили)."""
+        self._emit(job, {
+            "type": "log",
+            "line": "[panel] ОС установлена, сервер перезагружается. Нода доустановится "
+                    "автоматически — ожидаю её появления (до 40 мин)...",
+        })
+
+        # Транзиентный объект (без записи в БД) — только чтобы поллить ноду по mTLS.
+        # Реальную запись создаём через _create_server, когда нода ответит.
+        probe = Server(
+            name=job.name,
+            url=job.server_url.rstrip("/"),
+            api_key=None,
+            pki_enabled=True,
+            uses_shared_cert=True,
+        )
+
+        if not await self._wait_node_online(job, probe):
+            message = ("Нода не появилась за отведённое время (~40 мин). "
+                       "ОС установлена — проверьте сервер вручную.")
+            self._emit(job, {"type": "error", "message": message})
+            self._emit(job, {"type": "done", "exit_code": 1, "server_id": None})
+            self._finish(job, "error", message)
+            return
+
+        # Нода онлайн — дальше тот же путь, что и при обычном успешном деплое
+        await self._on_install_done(job, 0, post_opts)
+
+    async def _wait_node_online(self, job: DeployJob, server: Server) -> bool:
+        """Поллит /api/version ноды до ответа или таймаута. True — нода поднялась.
+        Периодический лог служит и keepalive для NDJSON-стрима."""
+        deadline = time.time() + RESCUE_ONLINE_TIMEOUT
+        attempt = 0
+        while time.time() < deadline:
+            try:
+                await proxy_to_node(server, "GET", "/api/version", timeout=10.0)
+                self._emit(job, {"type": "log", "line": "[panel] Нода онлайн — продолжаю настройку"})
+                return True
+            except Exception:  # noqa: BLE001 — нода ещё грузится, любой сбой = ещё не готова
+                pass
+            attempt += 1
+            if attempt % 3 == 0:  # ~раз в 30 c
+                remaining = max(0, int(deadline - time.time()))
+                self._emit(job, {"type": "log", "line": f"[panel] Жду ноду... осталось ~{remaining // 60} мин"})
+            await asyncio.sleep(RESCUE_POLL_INTERVAL)
+        return False
 
     async def _create_server(self, name: str, url: str) -> int:
         """Создаёт запись ноды после успешной установки (mTLS, shared cert)."""

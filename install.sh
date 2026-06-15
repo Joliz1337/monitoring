@@ -103,6 +103,9 @@ NODE_DIR="/opt/monitoring-node"
 REMNAWAVE_DIR="/opt/remnawave"
 BIN_PATH="/usr/local/bin/mon"
 
+# Путь к installimage внутри Rescue System — заполняется detect_rescue_system()
+RESCUE_INSTALLIMAGE=""
+
 LANG_CODE="en"
 
 # Неинтерактивный режим (--unattended): подтверждения переустановки берут дефолт "y"
@@ -268,6 +271,25 @@ MSG_EN[remnawave_docker_installing]="Installing Docker..."
 MSG_EN[remnawave_docker_error]="Failed to install Docker"
 MSG_EN[remnawave_starting]="Starting Remnawave containers..."
 MSG_EN[remnawave_started]="Remnawave containers started"
+MSG_EN[rescue_detected]="Hetzner Rescue System detected"
+MSG_EN[rescue_intro]="No OS is installed yet. A clean Ubuntu 24.04 will be installed to disk."
+MSG_EN[rescue_target]="Target drive(s)"
+MSG_EN[rescue_raid]="Software RAID"
+MSG_EN[rescue_image]="Image"
+MSG_EN[rescue_hostname]="Hostname"
+MSG_EN[rescue_access_note]="Login after install: same root password as this Rescue System"
+MSG_EN[rescue_chain_enabled]="After reboot the saved setup runs automatically (node/optimizations)"
+MSG_EN[rescue_chain_none]="After reboot: clean Ubuntu only (nothing else)"
+MSG_EN[rescue_wipe_warning]="ALL DATA on the disk(s) above will be ERASED!"
+MSG_EN[rescue_confirm]="Install clean Ubuntu 24.04 now? (y/N)"
+MSG_EN[rescue_cancelled]="OS installation cancelled"
+MSG_EN[rescue_no_image]="Ubuntu 24.04 image not found in the Rescue System"
+MSG_EN[rescue_no_disks]="No target disks found"
+MSG_EN[rescue_installing]="Installing Ubuntu 24.04 via installimage — this takes a few minutes..."
+MSG_EN[rescue_failed]="OS installation failed (installimage). The server was NOT rebooted."
+MSG_EN[rescue_done]="Ubuntu 24.04 installed successfully"
+MSG_EN[rescue_reboot_note]="The SSH host key will change and the server boots into Ubuntu. Reconnect in a few minutes."
+MSG_EN[rescue_rebooting]="Rebooting into the new system in 5 seconds..."
 
 # Russian messages
 MSG_RU[select_language]="Select language / Выберите язык:"
@@ -409,6 +431,25 @@ MSG_RU[remnawave_docker_installing]="Установка Docker..."
 MSG_RU[remnawave_docker_error]="Не удалось установить Docker"
 MSG_RU[remnawave_starting]="Запуск контейнеров Remnawave..."
 MSG_RU[remnawave_started]="Контейнеры Remnawave запущены"
+MSG_RU[rescue_detected]="Обнаружена Hetzner Rescue System"
+MSG_RU[rescue_intro]="ОС ещё не установлена. На диск будет установлена чистая Ubuntu 24.04."
+MSG_RU[rescue_target]="Целевой диск(и)"
+MSG_RU[rescue_raid]="Программный RAID"
+MSG_RU[rescue_image]="Образ"
+MSG_RU[rescue_hostname]="Имя хоста"
+MSG_RU[rescue_access_note]="Вход после установки: тот же root-пароль, что и в Rescue System"
+MSG_RU[rescue_chain_enabled]="После перезагрузки автоматически выполнится сохранённая настройка (нода/оптимизации)"
+MSG_RU[rescue_chain_none]="После перезагрузки: только чистая Ubuntu (без доп. настройки)"
+MSG_RU[rescue_wipe_warning]="ВСЕ ДАННЫЕ на дисках выше будут СТЁРТЫ!"
+MSG_RU[rescue_confirm]="Установить чистую Ubuntu 24.04 сейчас? (y/N)"
+MSG_RU[rescue_cancelled]="Установка ОС отменена"
+MSG_RU[rescue_no_image]="Образ Ubuntu 24.04 не найден в Rescue System"
+MSG_RU[rescue_no_disks]="Целевые диски не найдены"
+MSG_RU[rescue_installing]="Установка Ubuntu 24.04 через installimage — это займёт несколько минут..."
+MSG_RU[rescue_failed]="Установка ОС не удалась (installimage). Сервер НЕ перезагружался."
+MSG_RU[rescue_done]="Ubuntu 24.04 успешно установлена"
+MSG_RU[rescue_reboot_note]="SSH-ключ хоста сменится, сервер загрузится в Ubuntu. Переподключитесь через пару минут."
+MSG_RU[rescue_rebooting]="Перезагрузка в новую систему через 5 секунд..."
 
 msg() {
     local key="$1"
@@ -2924,6 +2965,243 @@ PROXYEOF
     log_success "Unattended installation complete"
 }
 
+# ==================== Rescue System (OS provisioning) ====================
+#
+# При первом запуске сервер у Hetzner грузится не в установленную ОС, а во
+# временный Linux в RAM (Rescue System). Поставить ноду туда нельзя — сначала
+# нужно установить настоящую Ubuntu на диск через installimage, перезагрузиться
+# и уже в установленной системе доделать настройку.
+
+# Определяет, что мы внутри Rescue System. Заполняет RESCUE_INSTALLIMAGE путём
+# к бинарю. Алиас installimage недоступен в неинтерактивном bash, поэтому
+# ориентируемся на реальный путь и маркер pivot-rescue (/root/.oldroot).
+detect_rescue_system() {
+    if [ -x /root/.oldroot/nfs/install/installimage ]; then
+        RESCUE_INSTALLIMAGE="/root/.oldroot/nfs/install/installimage"
+        return 0
+    fi
+
+    local found
+    found=$(command -v installimage 2>/dev/null)
+    if [ -n "$found" ] && [ -x "$found" ] && { [ -d /root/.oldroot ] || [ -f /etc/hetzner-build ]; }; then
+        RESCUE_INSTALLIMAGE="$found"
+        return 0
+    fi
+    return 1
+}
+
+# Находит локальный tar-образ Ubuntu 24.04 под текущую архитектуру.
+find_ubuntu2404_image() {
+    local arch=amd64
+    case "$(uname -m)" in
+        aarch64|arm64) arch=arm64 ;;
+    esac
+
+    local dir candidate
+    for dir in /root/images /root/.oldroot/nfs/images; do
+        [ -d "$dir" ] || continue
+        for candidate in \
+            "$dir/Ubuntu-2404-noble-${arch}-base.tar.zst" \
+            "$dir/Ubuntu-2404-noble-${arch}-base.tar.gz"; do
+            [ -f "$candidate" ] && { echo "$candidate"; return 0; }
+        done
+    done
+    return 1
+}
+
+# Печатает KEY=value (bash-safe) для переменных, с которыми был запущен
+# установщик. Эти параметры доедут до новой ОС и продолжат настройку.
+collect_firstboot_env() {
+    local var
+    for var in NODE_SECRET PANEL_IP MON_PROXY_URL \
+               MON_INSTALL_NODE MON_INSTALL_OPTIMIZATIONS MON_INSTALL_WARP \
+               MON_INSTALL_REMNAWAVE MON_NIC_MODE MON_OPT_PROFILE REMNAWAVE_CERT; do
+        [ -n "${!var:-}" ] && printf '%s=%q\n' "$var" "${!var}"
+    done
+}
+
+# Готовит post-install скрипт для installimage (-x). Он выполняется внутри
+# chroot новой системы и ставит one-shot systemd-сервис, который на первом
+# старте Ubuntu сам запустит установщик в режиме --unattended с сохранёнными
+# параметрами, после чего удалит себя.
+write_post_install_script() {
+    local path="$1"
+    {
+        cat <<'POST_HEAD'
+#!/bin/bash
+# Generated by the monitoring installer in the Rescue System.
+# Runs inside the freshly installed system (chroot) right after installimage.
+mkdir -p /etc/monitoring /usr/local/sbin
+cat > /etc/monitoring/firstboot.env <<'ENVEOF'
+POST_HEAD
+
+        collect_firstboot_env
+
+        cat <<'POST_TAIL'
+ENVEOF
+chmod 600 /etc/monitoring/firstboot.env
+
+cat > /usr/local/sbin/mon-firstboot.sh <<'RUNEOF'
+#!/bin/bash
+ENVF=/etc/monitoring/firstboot.env
+[ -f "$ENVF" ] || exit 0
+set -a; . "$ENVF"; set +a
+for _ in $(seq 1 30); do
+    curl -fsI https://raw.githubusercontent.com >/dev/null 2>&1 && break
+    sleep 5
+done
+SCRIPT=$(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh 2>/dev/null)
+[ -n "$SCRIPT" ] && bash -c "$SCRIPT" -- --unattended
+systemctl disable mon-firstboot.service >/dev/null 2>&1 || true
+rm -f /etc/systemd/system/mon-firstboot.service \
+      /etc/systemd/system/multi-user.target.wants/mon-firstboot.service \
+      /etc/monitoring/firstboot.env /usr/local/sbin/mon-firstboot.sh
+systemctl daemon-reload >/dev/null 2>&1 || true
+RUNEOF
+chmod +x /usr/local/sbin/mon-firstboot.sh
+
+cat > /etc/systemd/system/mon-firstboot.service <<'SVCEOF'
+[Unit]
+Description=Monitoring first-boot setup
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/monitoring/firstboot.env
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/mon-firstboot.sh
+TimeoutStartSec=1800
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+
+mkdir -p /etc/systemd/system/multi-user.target.wants
+ln -sf /etc/systemd/system/mon-firstboot.service \
+       /etc/systemd/system/multi-user.target.wants/mon-firstboot.service
+POST_TAIL
+    } > "$path"
+    chmod +x "$path"
+}
+
+# Устанавливает чистую Ubuntu 24.04 через installimage и перезагружается.
+# $1 — want_unattended (1 = без подтверждения, как в quick/unattended режимах).
+run_rescue_install() {
+    local want_unattended="${1:-0}"
+
+    load_language
+
+    local drives=() sizes=()
+    local dev dtype size
+    while read -r dev dtype size; do
+        [ "$dtype" = "disk" ] || continue
+        drives+=("$dev")
+        sizes+=("$size")
+    done < <(lsblk -dn -o NAME,TYPE,SIZE 2>/dev/null)
+
+    if [ "${#drives[@]}" -eq 0 ]; then
+        log_error "$(msg rescue_no_disks)"
+        return 1
+    fi
+
+    # Два одинаковых диска → зеркало (RAID1), иначе один диск без RAID.
+    local use_drives raid="no" level=""
+    if [ "${#drives[@]}" -ge 2 ] && [ "${sizes[0]}" = "${sizes[1]}" ]; then
+        use_drives="${drives[0]},${drives[1]}"
+        raid="yes"
+        level="1"
+    else
+        use_drives="${drives[0]}"
+    fi
+
+    local image
+    image=$(find_ubuntu2404_image)
+    if [ -z "$image" ]; then
+        log_error "$(msg rescue_no_image)"
+        return 1
+    fi
+
+    local host="${MON_OS_HOSTNAME:-ubuntu}"
+    local part='/boot:ext4:1024M,swap:swap:8G,/:ext4:all'
+
+    local has_intent=0
+    [ -n "${NODE_SECRET:-}" ] && has_intent=1
+    [ "${MON_INSTALL_NODE:-0}" = "1" ] && has_intent=1
+    [ "${MON_INSTALL_OPTIMIZATIONS:-0}" = "1" ] && has_intent=1
+    [ "${MON_INSTALL_WARP:-0}" = "1" ] && has_intent=1
+    [ "${MON_INSTALL_REMNAWAVE:-0}" = "1" ] && has_intent=1
+
+    echo ""
+    log_warn "$(msg rescue_detected)"
+    echo -e "  $(msg rescue_intro)"
+    echo ""
+    echo -e "  ${CYAN}$(msg rescue_target):${NC} ${use_drives}"
+    if [ "$raid" = "yes" ]; then
+        echo -e "  ${CYAN}$(msg rescue_raid):${NC} RAID${level}"
+    else
+        echo -e "  ${CYAN}$(msg rescue_raid):${NC} no"
+    fi
+    echo -e "  ${CYAN}$(msg rescue_image):${NC} $(basename "$image")"
+    echo -e "  ${CYAN}$(msg rescue_hostname):${NC} ${host}"
+    echo -e "  ${GREEN}$(msg rescue_access_note)${NC}"
+    if [ "$has_intent" = "1" ]; then
+        echo -e "  ${GREEN}$(msg rescue_chain_enabled)${NC}"
+    else
+        echo -e "  ${YELLOW}$(msg rescue_chain_none)${NC}"
+    fi
+    echo ""
+    log_warn "$(msg rescue_wipe_warning)"
+    echo ""
+
+    if [ "$want_unattended" != "1" ]; then
+        local answer
+        answer=$(safe_read "$(msg rescue_confirm) " "n" "$TIMEOUT_USER_INPUT")
+        case "$answer" in
+            y|Y|yes|YES) ;;
+            *) log_info "$(msg rescue_cancelled)"; return 0 ;;
+        esac
+    fi
+
+    local post_install=""
+    if [ "$has_intent" = "1" ]; then
+        post_install="/tmp/mon-post-install.sh"
+        write_post_install_script "$post_install"
+    fi
+
+    local cmd=( "$RESCUE_INSTALLIMAGE" -a -n "$host" -d "$use_drives" -i "$image" -p "$part" )
+    if [ "$raid" = "yes" ]; then
+        cmd+=( -r yes -l "$level" )
+    else
+        cmd+=( -r no )
+    fi
+    [ -n "$post_install" ] && cmd+=( -x "$post_install" )
+
+    log_info "$(msg rescue_installing)"
+    echo -e "  ${BLUE}\$ ${cmd[*]}${NC}"
+    echo ""
+
+    "${cmd[@]}"
+    local rc=$?
+
+    if [ $rc -ne 0 ]; then
+        log_error "$(msg rescue_failed)"
+        return 1
+    fi
+
+    log_success "$(msg rescue_done)"
+    echo ""
+    log_warn "$(msg rescue_reboot_note)"
+    log_info "$(msg rescue_rebooting)"
+    # Стабильный маркер для авто-деплоя панели: дальше SSH-сессия оборвётся из-за
+    # ребута. По нему панель понимает, что ОС поставлена, и ждёт появления ноды,
+    # которая доустановится сама (firstboot) с тем же NODE_SECRET.
+    echo "MON_RESCUE_OS_INSTALLED_REBOOTING"
+    sync
+    sleep 5
+    reboot
+    return 0
+}
+
 main() {
     # Acquire lock to prevent parallel execution
     acquire_lock
@@ -2990,11 +3268,20 @@ HELPEOF
             [ -z "${MON_NIC_MODE:-}" ] && export MON_NIC_MODE="auto"
             [ -n "$quick_profile" ] && export MON_OPT_PROFILE="$quick_profile"
         fi
-        run_unattended
+    fi
+
+    local want_unattended=0
+    [ -n "$quick_token" ] && want_unattended=1
+    [ "$saw_unattended" = "1" ] && want_unattended=1
+
+    # Rescue System (Hetzner): настоящей ОС ещё нет — ставим чистую Ubuntu 24.04,
+    # зашиваем сохранённую настройку для продолжения на первом старте, ребутимся.
+    if detect_rescue_system; then
+        run_rescue_install "$want_unattended"
         exit $?
     fi
 
-    if [ "$saw_unattended" = "1" ]; then
+    if [ "$want_unattended" = "1" ]; then
         run_unattended
         exit $?
     fi
