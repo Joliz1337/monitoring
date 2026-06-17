@@ -1,7 +1,9 @@
 import asyncio
+import hashlib
 import ipaddress
+import time
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import select, update, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 import re
@@ -288,12 +290,58 @@ class ServerResponse(BaseModel):
         from_attributes = True
 
 
+# Кэш тяжёлого ответа /servers?include_metrics=true. Метрики меняются раз в цикл
+# коллектора (~10с), поэтому в пределах TTL все вкладки операторов получают готовый
+# JSON без повторных запросов к БД и пересборки. ETag даёт браузеру 304 на неизменных
+# данных — вместо ~1 МБ на каждый поллинг при сотнях нод.
+_LIST_CACHE_TTL = 3.0
+_list_cache_lock = asyncio.Lock()
+_list_cache_body: Optional[str] = None
+_list_cache_etag: str = ""
+_list_cache_at: float = 0.0
+
+
+async def _get_cached_servers_list(db: AsyncSession) -> tuple[str, str]:
+    global _list_cache_body, _list_cache_etag, _list_cache_at
+    now = time.monotonic()
+    if _list_cache_body is not None and (now - _list_cache_at) < _LIST_CACHE_TTL:
+        return _list_cache_body, _list_cache_etag
+
+    async with _list_cache_lock:
+        # Повторная проверка: пока ждали лок, другой запрос мог пересобрать кэш.
+        now = time.monotonic()
+        if _list_cache_body is not None and (now - _list_cache_at) < _LIST_CACHE_TTL:
+            return _list_cache_body, _list_cache_etag
+
+        payload = await _build_servers_list(db, include_metrics=True)
+        body = json.dumps(payload, default=str)
+        etag = '"' + hashlib.md5(body.encode("utf-8")).hexdigest() + '"'
+        _list_cache_body, _list_cache_etag, _list_cache_at = body, etag, now
+        return body, etag
+
+
 @router.get("")
 async def list_servers(
+    request: Request,
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth),
     include_metrics: bool = False
 ):
+    # Лёгкий путь (без метрик) дёшев и не кэшируется; тяжёлый — через кэш + ETag.
+    if not include_metrics:
+        return await _build_servers_list(db, include_metrics=False)
+
+    body, etag = await _get_cached_servers_list(db)
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers={"ETag": etag})
+    return Response(
+        content=body,
+        media_type="application/json",
+        headers={"ETag": etag, "Cache-Control": "no-cache"},
+    )
+
+
+async def _build_servers_list(db: AsyncSession, include_metrics: bool) -> dict:
     result = await db.execute(
         select(Server).order_by(Server.position, Server.id)
     )
