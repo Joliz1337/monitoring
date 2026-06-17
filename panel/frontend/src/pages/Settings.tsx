@@ -367,7 +367,7 @@ export default function Settings() {
       }
     })
     
-    const statsInterval = setInterval(fetchServerStats, 5000)
+    const statsInterval = setInterval(() => { if (!document.hidden) fetchServerStats() }, 5000)
     return () => clearInterval(statsInterval)
   }, [fetchSettings, fetchCertInfo, fetchServerStats, fetchTimeSyncStatus, fetchBackups, fetchBackupStatus, startBackupPoll])
   

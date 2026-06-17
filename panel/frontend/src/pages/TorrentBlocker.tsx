@@ -83,6 +83,7 @@ export default function TorrentBlocker() {
 
   useEffect(() => {
     const interval = setInterval(() => {
+      if (document.hidden) return
       store.fetchStatus()
       store.fetchInternalStats()
       store.fetchActiveBans(bansPage * 50, 50)

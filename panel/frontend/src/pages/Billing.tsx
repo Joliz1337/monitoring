@@ -888,11 +888,16 @@ function ProjectCard({ server, index, t, formatDateTime, sortable, onExtend, onT
     isDragging,
   } = useSortable({ id: server.id, disabled: !sortable })
 
-  const style = sortable ? {
-    transform: CSS.Transform.toString(transform),
-    transition,
-    opacity: isDragging ? 0.3 : 1,
-  } : undefined
+  const style: React.CSSProperties = {
+    ...(sortable ? {
+      transform: CSS.Transform.toString(transform),
+      transition,
+      opacity: isDragging ? 0.3 : 1,
+    } : {}),
+    // Виртуализация без удаления из DOM: офф-скрин карточки не рендерятся (важно на большом флоте).
+    contentVisibility: isDragging ? 'visible' : 'auto',
+    containIntrinsicSize: 'auto 200px',
+  }
 
   const dl = server.days_left
   const maxDays = 30
