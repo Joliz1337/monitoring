@@ -681,13 +681,17 @@ async def migrate_all_servers(
     auto_migrated: list[dict] = []
     failed: list[dict] = []
 
+    # Bounded fan-out: на сотнях нод не пушим сертификат разом во все mTLS-соединения.
+    sem = asyncio.Semaphore(20)
+
     async def _one(s: Server) -> None:
-        try:
-            await push_shared_cert_to_node(s, keygen)
-            s.uses_shared_cert = True
-            auto_migrated.append({"id": s.id, "name": s.name})
-        except Exception as exc:
-            failed.append({"id": s.id, "name": s.name, "error": str(exc)})
+        async with sem:
+            try:
+                await push_shared_cert_to_node(s, keygen)
+                s.uses_shared_cert = True
+                auto_migrated.append({"id": s.id, "name": s.name})
+            except Exception as exc:
+                failed.append({"id": s.id, "name": s.name, "error": str(exc)})
 
     if auto_targets:
         await asyncio.gather(*(_one(s) for s in auto_targets))

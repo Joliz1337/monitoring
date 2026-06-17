@@ -170,7 +170,7 @@ bash install.sh --unattended
 
 Подробная документация по каждому компоненту:
 
-- [panel/DOCUMENTATION.md](panel/DOCUMENTATION.md) — веб-панель: API, БД, конфигурация, безопасность (v10.14.1)
+- [panel/DOCUMENTATION.md](panel/DOCUMENTATION.md) — веб-панель: API, БД, конфигурация, безопасность (v10.14.2)
 - [node/DOCUMENTATION.md](node/DOCUMENTATION.md) — нода-агент: API, метрики, HAProxy, трафик, Remnawave, Firewall Profiles
 
 ## Архитектура
@@ -187,6 +187,12 @@ Browser → nginx (SSL) → panel frontend (React)
 ```
 
 Панель собирает метрики с нод через proxy-роутер (`/api/proxy/{id}/...`). Ноды хранят данные локально в SQLite. Панель агрегирует и хранит историю в PostgreSQL.
+
+### Пул соединений PostgreSQL
+
+Бэкенд использует SQLAlchemy async pool (`pool_size=40`, `max_overflow=80`). Ключевой паттерн масштабируемости: сессия БД закрывается (`await db.commit()`) **до** любых сетевых запросов к нодам — медленные или зависшие ноды не удерживают коннекты пула. Неограниченные fan-out по нодам ограничены `asyncio.Semaphore`. PostgreSQL настроен на `max_connections=200` (задаётся в `panel/docker-compose.yml`).
+
+Следующий архитектурный шаг при дальнейшем росте (когда bounded-семафоров и `max_connections=200` станет мало) — PgBouncer в режиме transaction pooling. На текущем масштабе не требуется.
 
 ## CI/CD
 

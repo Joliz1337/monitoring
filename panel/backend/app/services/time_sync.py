@@ -98,8 +98,15 @@ class TimeSyncService:
                 )
                 servers = list(result.scalars().all())
 
-            # Синхронизация нод параллельно
-            node_tasks = [self._sync_node(s, tz) for s in servers]
+            # Синхронизация нод параллельно, но волнами — иначе на 500 нодах это
+            # 500 одновременных POST разом, конкурирующих с потоком метрик за пул.
+            sem = asyncio.Semaphore(50)
+
+            async def _guarded(srv):
+                async with sem:
+                    return await self._sync_node(srv, tz)
+
+            node_tasks = [_guarded(s) for s in servers]
             panel_task = self._sync_panel_host(tz)
             all_results = await asyncio.gather(
                 *node_tasks, panel_task,

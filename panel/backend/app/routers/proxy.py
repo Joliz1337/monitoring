@@ -39,6 +39,11 @@ async def get_server_by_id(server_id: int, db: AsyncSession) -> Server:
     server = result.scalar_one_or_none()
     if not server:
         raise HTTPException(status_code=404)
+    # Освобождаем коннект пула перед сетевым вызовом к ноде: держать соединение БД
+    # на всё время (медленного) проксирования — выгребает пул на зависших нодах.
+    # expire_on_commit=False → server остаётся доступным; следующий запрос к db
+    # (если есть) возьмёт коннект заново.
+    await db.commit()
     return server
 
 

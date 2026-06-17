@@ -195,6 +195,9 @@ class WildcardSSLManager:
             return await self._deploy_to_node(cert, server)
 
     async def deploy_to_all(self, cert_id: int) -> list[dict]:
+        # Читаем cert и серверы в короткой сессии и закрываем её до сетевого fan-out:
+        # expire_on_commit=False оставляет объекты доступными, а коннект пула не висит
+        # открытым на всё время раскатки.
         async with async_session() as db:
             cert = (await db.execute(
                 select(WildcardCertificate).where(WildcardCertificate.id == cert_id)
@@ -202,18 +205,24 @@ class WildcardSSLManager:
             if not cert:
                 return [{"success": False, "message": "Certificate not found"}]
 
-            servers = (await db.execute(
+            servers = list((await db.execute(
                 select(Server).where(
                     Server.wildcard_ssl_enabled == True,
                     Server.is_active == True,
                 )
-            )).scalars().all()
+            )).scalars().all())
 
-            if not servers:
-                return [{"success": False, "message": "No servers with wildcard SSL enabled"}]
+        if not servers:
+            return [{"success": False, "message": "No servers with wildcard SSL enabled"}]
 
-            tasks = [self._deploy_to_node(cert, s) for s in servers]
-            return await asyncio.gather(*tasks, return_exceptions=False)
+        # Bounded fan-out: на сотнях нод не открываем разом сотни TLS-соединений.
+        sem = asyncio.Semaphore(30)
+
+        async def _guarded(s):
+            async with sem:
+                return await self._deploy_to_node(cert, s)
+
+        return await asyncio.gather(*[_guarded(s) for s in servers], return_exceptions=False)
 
     async def _deploy_to_node(self, cert: WildcardCertificate, server: Server) -> dict:
         payload = {

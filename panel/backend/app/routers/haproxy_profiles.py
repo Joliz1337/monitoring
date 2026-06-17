@@ -117,16 +117,17 @@ async def get_server_cores(
     # Все серверы панели (backend-адреса могут указывать на любой сервер)
     result = await db.execute(select(Server))
     servers = list(result.scalars().all())
+    # Дальше только DNS-резолвы — освобождаем коннект пула, чтобы не держать его
+    # на всё время (возможно медленных) lookup'ов; expire_on_commit=False оставляет
+    # объекты servers доступными.
+    await db.commit()
     if not servers:
         return {}
 
-    loop = asyncio.get_event_loop()
+    from urllib.parse import urlparse
 
-    def _resolve(host: str) -> str | None:
-        try:
-            return socket.gethostbyname(host)
-        except socket.gaierror:
-            return None
+    loop = asyncio.get_event_loop()
+    sem = asyncio.Semaphore(20)
 
     def _is_ip(s: str) -> bool:
         try:
@@ -135,50 +136,49 @@ async def get_server_cores(
         except socket.error:
             return False
 
-    from urllib.parse import urlparse
+    async def _resolve(host: str) -> str | None:
+        if not host:
+            return None
+        if _is_ip(host):
+            return host
+        async with sem:
+            try:
+                return await loop.run_in_executor(None, socket.gethostbyname, host)
+            except socket.gaierror:
+                return None
 
-    # IP → cores для каждой ноды
-    ip_cores: dict[str, int] = {}
+    # Хосты нод с известным числом ядер
+    node_hosts: list[tuple[str, int]] = []
     for s in servers:
         cores_val = None
         if s.last_metrics:
             try:
-                m = json.loads(s.last_metrics)
-                cores_val = m.get("cpu", {}).get("cores_logical")
+                cores_val = json.loads(s.last_metrics).get("cpu", {}).get("cores_logical")
             except (json.JSONDecodeError, AttributeError):
                 pass
         if not cores_val or cores_val <= 0:
-            logger.info("server-cores: server %s (%s) — no cores data", s.name, s.url)
             continue
-
         try:
             host = urlparse(s.url).hostname or ""
         except Exception:
             continue
+        if host:
+            node_hosts.append((host, cores_val))
 
-        # Резолвим hostname ноды в IP
-        if _is_ip(host):
-            ip_cores[host] = cores_val
-        else:
-            resolved = await loop.run_in_executor(None, _resolve, host)
-            if resolved:
-                ip_cores[resolved] = cores_val
-        logger.info("server-cores: node %s (%s) → host=%s, cores=%d", s.name, s.url, host, cores_val)
+    # Резолвим хосты нод и backend-адреса параллельно (волнами), затем матчим по IP.
+    node_ips = await asyncio.gather(*[_resolve(h) for h, _ in node_hosts])
+    ip_cores: dict[str, int] = {}
+    for (_, cores_val), ip in zip(node_hosts, node_ips):
+        if ip:
+            ip_cores[ip] = cores_val
 
-    logger.info("server-cores: ip_cores=%s", ip_cores)
-
-    # Резолвим адреса backend-серверов и матчим
+    addr_list = addresses[:50]
+    addr_ips = await asyncio.gather(*[_resolve(a) for a in addr_list])
     result_map: dict[str, int] = {}
-    for addr in addresses[:50]:
-        if _is_ip(addr):
-            ip = addr
-        else:
-            ip = await loop.run_in_executor(None, _resolve, addr)
-        logger.info("server-cores: backend %s → ip=%s, match=%s", addr, ip, ip in ip_cores if ip else False)
+    for addr, ip in zip(addr_list, addr_ips):
         if ip and ip in ip_cores:
             result_map[addr] = ip_cores[ip]
 
-    logger.info("server-cores: result=%s", result_map)
     return result_map
 
 
