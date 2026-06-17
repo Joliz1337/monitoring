@@ -8,7 +8,7 @@ from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery, Message, Update,
-    InlineKeyboardMarkup, InlineKeyboardButton,
+    InlineKeyboardMarkup, InlineKeyboardButton, ReplyParameters,
 )
 
 logger = logging.getLogger(__name__)
@@ -74,6 +74,37 @@ class TelegramBotService:
 
     # --- Публичный API для сервисов ---
 
+    async def _send(
+        self,
+        bot_token: str,
+        chat_id: str,
+        text: str,
+        parse_mode: str = "HTML",
+        reply_markup: dict | None = None,
+        reply_to_message_id: int | None = None,
+    ) -> Message | None:
+        if not bot_token or not chat_id:
+            return None
+        bot = await self._get_or_create_bot(bot_token)
+
+        markup = self._convert_markup(reply_markup)
+        reply_params = (
+            ReplyParameters(message_id=reply_to_message_id, allow_sending_without_reply=True)
+            if reply_to_message_id else None
+        )
+
+        try:
+            return await bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode=parse_mode,
+                reply_markup=markup,
+                reply_parameters=reply_params,
+            )
+        except Exception as e:
+            logger.warning(f"Telegram send failed: {e}")
+            return None
+
     async def send_message(
         self,
         bot_token: str,
@@ -82,23 +113,19 @@ class TelegramBotService:
         parse_mode: str = "HTML",
         reply_markup: dict | None = None,
     ) -> bool:
-        if not bot_token or not chat_id:
-            return False
-        bot = await self._get_or_create_bot(bot_token)
+        return (await self._send(bot_token, chat_id, text, parse_mode, reply_markup)) is not None
 
-        markup = self._convert_markup(reply_markup)
-
-        try:
-            await bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                parse_mode=parse_mode,
-                reply_markup=markup,
-            )
-            return True
-        except Exception as e:
-            logger.warning(f"Telegram send failed: {e}")
-            return False
+    async def send_message_returning_id(
+        self,
+        bot_token: str,
+        chat_id: str,
+        text: str,
+        parse_mode: str = "HTML",
+        reply_markup: dict | None = None,
+        reply_to_message_id: int | None = None,
+    ) -> int | None:
+        msg = await self._send(bot_token, chat_id, text, parse_mode, reply_markup, reply_to_message_id)
+        return msg.message_id if msg else None
 
     @staticmethod
     def _convert_markup(reply_markup) -> InlineKeyboardMarkup | None:

@@ -320,6 +320,20 @@ class XrayStats(Base):
     )
 
 
+class RemnawaveIpAnomalyState(Base):
+    """Персистентное состояние IP-аномалии по пользователю: счётчик срабатываний,
+    известные IP (анти-спам) и message_id предыдущего уведомления для reply-threading."""
+    __tablename__ = "remnawave_ip_anomaly_state"
+
+    email = Column(Integer, primary_key=True)            # user id Remnawave (как XrayStats.email)
+    trigger_count = Column(Integer, default=0, nullable=False)   # сквозной счётчик «N-е срабатывание»
+    known_ips = Column(Text, nullable=True)              # JSON-массив строк — уже показанные IP
+    last_message_id = Column(BigInteger, nullable=True)  # message_id предыдущего уведомления (reply)
+    last_chat_id = Column(String(100), nullable=True)    # чат предыдущего уведомления (валидация reply)
+    last_notified_at = Column(DateTime(timezone=True), nullable=True)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
 class RemnawaveUserCache(Base):
     __tablename__ = "remnawave_user_cache"
     

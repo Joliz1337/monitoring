@@ -23,6 +23,7 @@ from app.database import async_session
 from app.models import RemnawaveSettings, XrayStats, RemnawaveUserCache, RemnawaveHwidDevice, AlertSettings
 from app.services.remnawave_api import get_remnawave_api, RemnawaveAPIError
 from app.services.asn_lookup import lookup_ips_cached, group_ips_by_asn, effective_ip_count, enrich_with_names
+from app.services import ip_anomaly_state
 
 logger = logging.getLogger(__name__)
 
@@ -626,7 +627,9 @@ class XrayStatsCollector:
         COOLDOWN_SECONDS = 86400
         IP_CONFIRM_THRESHOLD = 5
 
-        # 1) IP > лимит → уведомление с кнопкой [Игнор IP] (после 5 подтверждений подряд)
+        # 1) IP > лимит (после 5 подтверждений подряд). Показанные IP запоминаются:
+        #    повторное уведомление — только при новых IP, со счётчиком «N-е срабатывание»
+        #    и reply на предыдущее уведомление этого пользователя.
         current_anomaly_emails: set[int] = set()
         for email, ip_count in ip_rows:
             if email in ignored_all or email in ignore_ip:
@@ -647,11 +650,24 @@ class XrayStatsCollector:
             if streak < IP_CONFIRM_THRESHOLD:
                 continue
 
-            # ASN-проверка: группируем IP по провайдеру
-            user_ips = ips_by_email.get(email, [])
-            asn_map = await lookup_ips_cached(user_ips) if user_ips else {}
-            asn_groups = group_ips_by_asn(asn_map)
-            unique_asn_count = effective_ip_count(asn_groups)
+            current_ips = set(ips_by_email.get(email, []))
+
+            async with async_session() as db:
+                state = await ip_anomaly_state.get_or_create(db, email)
+                known = ip_anomaly_state.parse_ips(state.known_ips)
+                since = ip_anomaly_state.seconds_since_last(state, now)
+                reply_to = state.last_message_id if state.last_chat_id == chat_id else None
+                trigger_no = (state.trigger_count or 0) + 1
+
+            new_ips = current_ips - known
+            if not new_ips:
+                continue
+            if since is not None and since < (settings.anomaly_cooldown or 0):
+                continue
+
+            # ASN-проверка: группируем все текущие IP по провайдеру
+            asn_map = await lookup_ips_cached(list(current_ips)) if current_ips else {}
+            unique_asn_count = effective_ip_count(group_ips_by_asn(asn_map))
 
             if unique_asn_count <= cached.hwid_device_limit:
                 logger.info(
@@ -660,24 +676,19 @@ class XrayStatsCollector:
                 )
                 continue
 
-            key = f"ip:{email}"
-            last = self._anomaly_last_notified.get(key)
-            if last and (now - last).total_seconds() < COOLDOWN_SECONDS:
-                continue
-            self._anomaly_last_notified[key] = now
-            self._ip_anomaly_streak.pop(email, None)
-
-            # Обогащаем ASN-группы именами провайдеров для TG
+            # Обогащаем именами провайдеров и группируем ТОЛЬКО новые IP
             await enrich_with_names(asn_map)
-            asn_groups = group_ips_by_asn(asn_map)
+            new_groups = group_ips_by_asn({ip: asn_map[ip] for ip in new_ips if ip in asn_map})
 
             lines = [
                 "\u26a0\ufe0f <b>Аномалия: IP превышает лимит</b>\n",
                 f"\U0001F464 <b>{cached.username or f'#{email}'}</b> (ID: <code>{email}</code>)",
                 f"\U0001F310 IP: <b>{ip_count}</b> / {cached.hwid_device_limit} (ASN: <b>{unique_asn_count}</b>)",
                 "",
+                f"\U0001F501 <b>{trigger_no}-е срабатывание</b>",
+                f"\U0001F195 <b>Новые IP ({len(new_ips)}):</b>",
             ]
-            for group in asn_groups:
+            for group in new_groups:
                 asn_label = f"AS{group['asn']}" if group["asn"] else "Unknown"
                 holder = group.get("holder") or ""
                 header = f"{asn_label} {holder}".strip()
@@ -689,12 +700,25 @@ class XrayStatsCollector:
 
             keyboard = [[
                 {"text": "\U0001f6ab Игнор IP", "callback_data": f"rw_ignore:ip:{email}"},
+                {"text": "♻️ Сбросить", "callback_data": f"rw_reset:ip:{email}"},
             ]]
             from app.services.telegram_bot import get_telegram_bot_service
-            await get_telegram_bot_service().send_message(
+            mid = await get_telegram_bot_service().send_message_returning_id(
                 bot_token, chat_id, "\n".join(lines),
                 reply_markup={"inline_keyboard": keyboard},
+                reply_to_message_id=reply_to,
             )
+
+            # Сбой отправки → не фиксируем (счётчик/known_ips не трогаем) — повтор в следующем цикле
+            if mid is None:
+                continue
+
+            async with async_session() as db:
+                state = await ip_anomaly_state.get_or_create(db, email)
+                await ip_anomaly_state.record_notification(
+                    db, state, current_ips=current_ips,
+                    message_id=mid, chat_id=chat_id, now=now,
+                )
 
         # Сброс streak для тех, кто вернулся в норму
         for email in list(self._ip_anomaly_streak):
@@ -965,6 +989,23 @@ async def handle_rw_ignore(callback: CallbackQuery):
 
     labels = {"ip": "IP", "hwid": "HWID", "all": "всех проверок"}
     await callback.answer(f"#{user_id} добавлен в игнор {labels.get(list_type, list_type)}")
+
+
+@_rw_callback_router.callback_query(F.data.startswith("rw_reset:ip:"))
+async def handle_rw_reset(callback: CallbackQuery):
+    """Сброс счётчика IP-аномалии и забывание известных IP — следующее срабатывание с чистого листа."""
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        return
+    try:
+        email = int(parts[2])
+    except ValueError:
+        return
+
+    async with async_session() as db:
+        await ip_anomaly_state.reset(db, email)
+
+    await callback.answer(f"#{email}: счётчик сброшен, известные IP забыты")
 
 
 # --- Singleton ---

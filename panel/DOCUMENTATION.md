@@ -1,4 +1,4 @@
-# Monitoring Panel
+# Monitoring Panel v10.13.0
 
 Веб-панель для мониторинга серверов. Собирает метрики с нод с настраиваемым интервалом (по умолчанию 10 сек) и хранит историю локально.
 
@@ -659,6 +659,7 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 - **remnawave_user_cache** — кэш пользователей (обновляется каждые 30 минут); поля `sub_last_user_agent` и `sub_last_opened_at` удалены в Remnawave Panel 2.7.0
 - **remnawave_settings** — настройки подключения; поле `anomaly_use_custom_bot` (Boolean) — использовать отдельного бота для аномалий или бот из AlertSettings; поля `traffic_threshold_gb` (Float, default 30.0) и `traffic_confirm_count` (Integer, default 2) — настройки детектора трафик-аномалий
 - **remnawave_hwid_devices** — HWID-устройства из Remnawave API (user_uuid, hwid, platform, created_at)
+- **remnawave_ip_anomaly_state** — персистентное состояние IP-аномалии по пользователю (email, trigger_count, known_ips JSON, last_notified_at, last_message_id, last_chat_id); создаётся автоматически через `Base.metadata.create_all`, отдельная миграция не требуется
 
 **Принцип работы:**
 1. `xray_stats_collector.py` вызывает `remnawave_api.get_all_nodes()` — получает список нод из Remnawave Panel
@@ -679,16 +680,16 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 
 | Тип | Логика | TG-кнопка |
 |-----|--------|-----------|
-| `ip_exceeds_limit` | IP-адресов > `hwid_device_limit + 2` | [Игнор IP] |
+| `ip_exceeds_limit` | IP-адресов > `hwid_device_limit + 2` | [Игнор IP] [Сбросить] |
 | `hwid_exceeds_limit` | HWID-устройств > `hwid_device_limit`; триггерит авто-очистку через API | нет уведомления |
 | `unknown_user_agent` | User-Agent не совпадает с известными клиентами (`KNOWN_UA_PATTERN`) | [Игнор HWID] |
 | `traffic_exceeds_limit` | Потребление трафика за 30 минут > `traffic_threshold_gb` ГБ N раз подряд | нет кнопки |
 
-**3-кратное подтверждение IP аномалий**: уведомление в Telegram отправляется только после 3 подряд обнаружений (`IP_CONFIRM_THRESHOLD = 3`). Если IP-count упал ниже лимита — streak (`_ip_anomaly_streak`) сбрасывается. Защита от ложных срабатываний при кратковременных всплесках.
+**5-кратное подтверждение IP аномалий**: уведомление в Telegram отправляется только после 5 подряд обнаружений (`IP_CONFIRM_THRESHOLD = 5`). Если IP-count упал ниже лимита — streak (`_ip_anomaly_streak`) сбрасывается. Защита от ложных срабатываний при кратковременных всплесках.
+
+**Умные повторные уведомления по IP**: состояние IP-аномалии хранится персистентно в PostgreSQL (`remnawave_ip_anomaly_state`). Повторное уведомление отправляется **только при появлении новых IP** (которых не было в предыдущем уведомлении). Если новых IP нет — уведомление не отправляется (анти-спам). В уведомлении отображается сквозной счётчик «N-е срабатывание» по пользователю, блок с новыми IP сгруппированными по ASN, и кнопка «♻️ Сбросить» (обнуляет счётчик и забывает известные IP). Каждое новое уведомление отправляется как reply на предыдущее (threading истории). Мягкий floor между уведомлениями контролируется существующей настройкой `anomaly_cooldown`. Известные IP сохраняются как JSON в таблице; поля `last_message_id` / `last_chat_id` обеспечивают reply-threading.
 
 **3-кратное подтверждение трафик-аномалий**: уведомление отправляется только после N подряд превышений порога (настраивается через `traffic_confirm_count`, default 2). Если текущий снимок меньше предыдущего (сброс трафика) — delta считается 0. Streak сбрасывается при падении ниже порога.
-
-**Cooldown уведомлений**: 24 часа между повторными уведомлениями по одному пользователю (`COOLDOWN_SECONDS = 86400`).
 
 **Фильтрация топ-пользователей:**
 - Поиск по email выполняется в SQL через JOIN с `remnawave_user_cache`
@@ -710,8 +711,11 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 
 **Файлы:**
 - `panel/backend/app/routers/remnawave.py` — API роутер
-- `panel/backend/app/services/xray_stats_collector.py` — сбор IP через Remnawave Panel API + HWID-синхронизация
+- `panel/backend/app/services/xray_stats_collector.py` — сбор IP через Remnawave Panel API + HWID-синхронизация; IP-блок `_check_anomalies` переписан: счётчик/новые IP/reply-threading/анти-спам; хендлер `handle_rw_reset` для callback `rw_reset:ip:{email}`
+- `panel/backend/app/services/ip_anomaly_state.py` — репозиторий состояния IP-аномалий (`get_or_create`, `record_notification`, `reset`), JSON-хелперы (`parse_ips`, `dump_ips`), `seconds_since_last`
 - `panel/backend/app/services/remnawave_api.py` — клиент: `get_all_nodes()`, `poll_users_ips()`, `get_all_hwid_devices_paginated()`
+- `panel/backend/app/services/telegram_bot.py` — приватный `_send() -> Message | None` с поддержкой `reply_to_message_id`; `send_message` сохраняет bool-контракт; `send_message_returning_id() -> int | None`
+- `panel/backend/app/models.py` — модель `RemnawaveIpAnomalyState`
 - `panel/frontend/src/pages/Remnawave.tsx` — страница (overview, users, settings)
 - `panel/frontend/src/api/client.ts` — API-клиент
 - `panel/frontend/src/locales/en.json`, `ru.json` — переводы
