@@ -21,6 +21,12 @@ import {
   XCircle,
   Clock,
   Copy,
+  Search,
+  Folder,
+  FolderOpen,
+  ChevronDown,
+  Eye,
+  EyeOff,
 } from 'lucide-react'
 import {
   firewallProfilesApi,
@@ -754,22 +760,188 @@ function ServersTab({
   onUnlink: (serverId: number) => void
   onLink: (serverId: number) => void
 }) {
+  const [searchQuery, setSearchQuery] = useState('')
+  const [showBusy, setShowBusy] = useState(false)
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem('fw_add_expanded_folders')
+      return raw ? new Set(JSON.parse(raw)) : new Set()
+    } catch { return new Set() }
+  })
+
+  const toggleCollapsed = (folder: string) => {
+    setExpandedFolders(prev => {
+      const next = new Set(prev)
+      if (next.has(folder)) next.delete(folder)
+      else next.add(folder)
+      localStorage.setItem('fw_add_expanded_folders', JSON.stringify([...next]))
+      return next
+    })
+  }
+
   const linkedIds = useMemo(() => new Set(profile.servers.map(s => s.server_id)), [profile.servers])
-  const candidates = availableServers.filter(s => !linkedIds.has(s.id))
+
+  const base = useMemo(
+    () => availableServers.filter(s => !linkedIds.has(s.id)),
+    [availableServers, linkedIds]
+  )
+  const hiddenBusy = useMemo(() => base.filter(s => s.active_profile_id != null).length, [base])
+  const visibleCandidates = useMemo(
+    () => (showBusy ? base : base.filter(s => s.active_profile_id == null)),
+    [base, showBusy]
+  )
+
+  const grouped = useMemo(() => {
+    const folders = new Map<string, FirewallAvailableServer[]>()
+    const noFolder: FirewallAvailableServer[] = []
+    for (const s of visibleCandidates) {
+      if (s.folder) {
+        if (!folders.has(s.folder)) folders.set(s.folder, [])
+        folders.get(s.folder)!.push(s)
+      } else {
+        noFolder.push(s)
+      }
+    }
+    return { folders, noFolder }
+  }, [visibleCandidates])
+
+  const sortedFolderNames = useMemo(() => {
+    const allNames = [...grouped.folders.keys()]
+    try {
+      const saved: string[] = JSON.parse(localStorage.getItem('dashboard_folder_order') || '[]')
+      const ordered = saved.filter(f => allNames.includes(f))
+      const rest = allNames.filter(f => !saved.includes(f)).sort()
+      return [...ordered, ...rest]
+    } catch {
+      return allNames.sort()
+    }
+  }, [grouped.folders])
+
+  const matchesQuery = (name: string, url: string, q: string) =>
+    name.toLowerCase().includes(q) || url.toLowerCase().includes(q)
+
+  const filteredGroups = useMemo(() => {
+    const q = searchQuery.toLowerCase().trim()
+    if (!q) return grouped
+    const folders = new Map<string, FirewallAvailableServer[]>()
+    for (const [name, svrs] of grouped.folders) {
+      const matched = svrs.filter(s => matchesQuery(s.name, s.url, q))
+      if (matched.length > 0) folders.set(name, matched)
+    }
+    const noFolder = grouped.noFolder.filter(s => matchesQuery(s.name, s.url, q))
+    return { folders, noFolder }
+  }, [searchQuery, grouped])
+
+  const filteredLinked = useMemo(() => {
+    const q = searchQuery.toLowerCase().trim()
+    if (!q) return profile.servers
+    return profile.servers.filter(s => matchesQuery(s.server_name, s.server_url, q))
+  }, [searchQuery, profile.servers])
+
+  const searching = searchQuery.trim().length > 0
+  const hasFolders = grouped.folders.size > 0
+  const noCandidates = filteredGroups.folders.size === 0 && filteredGroups.noFolder.length === 0
+  const emptyCandidatesMsg = searching
+    ? 'Ничего не найдено'
+    : base.length === 0
+      ? 'Все доступные серверы уже привязаны'
+      : hiddenBusy > 0
+        ? 'Свободных серверов нет — включите «Показать занятые»'
+        : 'Все доступные серверы уже привязаны'
+
+  const renderCandidate = (srv: FirewallAvailableServer) => (
+    <div key={srv.id} className="flex items-center justify-between px-3 py-2 rounded-lg bg-dark-900/30 border border-dark-800/50">
+      <div className="flex items-center gap-3 min-w-0">
+        <Server className="w-4 h-4 text-dark-400 shrink-0" />
+        <div className="min-w-0">
+          <div className="text-sm text-dark-200 truncate">{srv.name}</div>
+          <div className="text-xs text-dark-500 truncate">{srv.url}</div>
+        </div>
+        {srv.active_profile_id && (
+          <span className="text-xs text-yellow-400/80 shrink-0">Уже в другом профиле</span>
+        )}
+      </div>
+      <button
+        onClick={() => onLink(srv.id)}
+        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-accent-400 hover:text-accent-300 bg-accent-500/10 hover:bg-accent-500/20 transition-colors"
+      >
+        <Link2 className="w-3.5 h-3.5" /> Привязать
+      </button>
+    </div>
+  )
+
+  const renderCandidateGroup = (
+    key: string,
+    label: string,
+    servers: FirewallAvailableServer[],
+    isFolder: boolean,
+  ) => {
+    const isCollapsed = !searching && !expandedFolders.has(key)
+    const icon = isFolder
+      ? (isCollapsed
+          ? <Folder className="w-4 h-4 text-accent-400 shrink-0" />
+          : <FolderOpen className="w-4 h-4 text-accent-400 shrink-0" />)
+      : <Server className="w-4 h-4 text-dark-400 shrink-0" />
+    return (
+      <div key={key} className="mb-1">
+        <div
+          className="flex items-center gap-2 p-2 rounded-lg hover:bg-dark-800/50 transition-colors cursor-pointer"
+          onClick={() => toggleCollapsed(key)}
+        >
+          {icon}
+          <span className={`font-medium text-sm truncate ${isFolder ? 'text-dark-200' : 'text-dark-400'}`}>{label}</span>
+          <span className="text-xs text-dark-500 ml-auto shrink-0">{servers.length}</span>
+          <motion.div animate={{ rotate: isCollapsed ? -90 : 0 }} transition={{ duration: 0.15 }}>
+            <ChevronDown className="w-3.5 h-3.5 text-dark-500" />
+          </motion.div>
+        </div>
+        <AnimatePresence initial={false}>
+          {!isCollapsed && (
+            <motion.div
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: 'auto', opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              transition={{ duration: 0.15 }}
+              className="overflow-hidden"
+            >
+              <div className="pl-4 space-y-1.5 pt-1.5">
+                {servers.map(renderCandidate)}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+    )
+  }
 
   return (
     <div className="space-y-5">
+      <div className="relative">
+        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-dark-500 pointer-events-none" />
+        <input
+          type="text"
+          value={searchQuery}
+          onChange={e => setSearchQuery(e.target.value)}
+          placeholder="Поиск по имени или адресу…"
+          className="w-full pl-9 pr-3 py-2 rounded-lg bg-dark-900/50 border border-dark-800 text-sm text-dark-200 placeholder-dark-500 focus:outline-none focus:border-accent-500/50 transition-colors"
+        />
+      </div>
+
       <div>
         <h3 className="text-sm font-medium text-dark-200 mb-3">
-          Привязанные серверы ({profile.servers.length})
+          Привязанные серверы ({searching ? `${filteredLinked.length}/${profile.servers.length}` : profile.servers.length})
         </h3>
         {profile.servers.length === 0 ? (
           <div className="text-center text-dark-500 text-sm py-6 bg-dark-900/30 rounded-lg border border-dark-800/50">
             Нет привязанных серверов
           </div>
+        ) : filteredLinked.length === 0 ? (
+          <div className="text-center text-dark-500 text-sm py-6 bg-dark-900/30 rounded-lg border border-dark-800/50">
+            Ничего не найдено
+          </div>
         ) : (
           <div className="space-y-1.5">
-            {profile.servers.map((srv: FirewallProfileServerInfo) => (
+            {filteredLinked.map((srv: FirewallProfileServerInfo) => (
               <div key={srv.server_id} className="flex items-center justify-between px-3 py-2 rounded-lg bg-dark-900/30 border border-dark-800/50">
                 <div className="flex items-center gap-3 min-w-0">
                   <Server className="w-4 h-4 text-dark-400 shrink-0" />
@@ -808,33 +980,38 @@ function ServersTab({
       </div>
 
       <div>
-        <h3 className="text-sm font-medium text-dark-200 mb-3">Добавить серверы</h3>
-        {candidates.length === 0 ? (
+        <div className="flex items-center justify-between gap-2 mb-3">
+          <h3 className="text-sm font-medium text-dark-200">Добавить серверы</h3>
+          {hiddenBusy > 0 && (
+            <button
+              onClick={() => setShowBusy(v => !v)}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs whitespace-nowrap border transition-colors ${
+                showBusy
+                  ? 'text-accent-400 bg-accent-500/10 border-accent-500/30'
+                  : 'text-dark-400 bg-dark-900/40 border-dark-800 hover:text-dark-200'
+              }`}
+              title="Серверы, привязанные к другим профилям"
+            >
+              {showBusy ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+              {showBusy ? 'Скрыть занятые' : `Показать занятые (${hiddenBusy})`}
+            </button>
+          )}
+        </div>
+        {noCandidates ? (
           <div className="text-center text-dark-500 text-sm py-6 bg-dark-900/30 rounded-lg border border-dark-800/50">
-            Все доступные серверы уже привязаны
+            {emptyCandidatesMsg}
+          </div>
+        ) : hasFolders ? (
+          <div className="space-y-1">
+            {sortedFolderNames
+              .filter(name => filteredGroups.folders.has(name))
+              .map(name => renderCandidateGroup(name, name, filteredGroups.folders.get(name)!, true))}
+            {filteredGroups.noFolder.length > 0 &&
+              renderCandidateGroup('__no_folder__', 'Без папки', filteredGroups.noFolder, false)}
           </div>
         ) : (
           <div className="space-y-1.5">
-            {candidates.map(srv => (
-              <div key={srv.id} className="flex items-center justify-between px-3 py-2 rounded-lg bg-dark-900/30 border border-dark-800/50">
-                <div className="flex items-center gap-3 min-w-0">
-                  <Server className="w-4 h-4 text-dark-400 shrink-0" />
-                  <div className="min-w-0">
-                    <div className="text-sm text-dark-200 truncate">{srv.name}</div>
-                    <div className="text-xs text-dark-500 truncate">{srv.url}</div>
-                  </div>
-                  {srv.active_profile_id && (
-                    <span className="text-xs text-yellow-400/80 shrink-0">Уже в другом профиле</span>
-                  )}
-                </div>
-                <button
-                  onClick={() => onLink(srv.id)}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-accent-400 hover:text-accent-300 bg-accent-500/10 hover:bg-accent-500/20 transition-colors"
-                >
-                  <Link2 className="w-3.5 h-3.5" /> Привязать
-                </button>
-              </div>
-            ))}
+            {filteredGroups.noFolder.map(renderCandidate)}
           </div>
         )}
       </div>

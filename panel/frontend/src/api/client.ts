@@ -1928,6 +1928,7 @@ export interface FirewallAvailableServer {
   url: string
   active_profile_id: number | null
   sync_status: FirewallSyncStatus
+  folder?: string | null
 }
 
 export const firewallProfilesApi = {
