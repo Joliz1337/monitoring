@@ -45,12 +45,19 @@ DEFAULT_SOURCES = [
 
 
 class BlocklistManager:
+    # Fan-out по нодам ограничен семафорами, поэтому нагрузка на БД и общий HTTP-пул
+    # остаётся постоянной независимо от числа серверов — сервера синкаются волнами.
+    DB_CONCURRENCY = 10    # max parallel DB sessions during fan-out sync
+    HTTP_CONCURRENCY = 50  # max parallel servers syncing over HTTP at once
+
     def __init__(self):
         self._running = False
         self._update_task: Optional[asyncio.Task] = None
         self._cache: dict[str, tuple[float, list[str]]] = {}
         self._last_sync: Optional[dict] = None
         self._sync_in_progress = False
+        self._db_sem = asyncio.Semaphore(self.DB_CONCURRENCY)
+        self._http_sem = asyncio.Semaphore(self.HTTP_CONCURRENCY)
     
     def _validate_ip_cidr(self, ip: str) -> bool:
         ip = ip.strip()
@@ -293,7 +300,12 @@ class BlocklistManager:
             return False, str(e), {}
 
     async def _sync_one_server(self, server: Server) -> dict:
-        """Sync both directions for a single server (own DB session)."""
+        """Sync both directions for a single server.
+
+        IP-списки читаются из БД в короткой сессии под семафором, после чего
+        соединение освобождается — медленные HTTP-синки к ноде идут уже без
+        удержания коннекта, иначе пул PostgreSQL исчерпывается при fan-out.
+        """
         server_result = {
             "server_id": server.id,
             "server_name": server.name,
@@ -301,15 +313,32 @@ class BlocklistManager:
             "in": {},
             "out": {},
         }
-        async with async_session() as db:
+
+        try:
+            ip_lists = {}
+            async with self._db_sem:
+                async with async_session() as db:
+                    for direction in ("in", "out"):
+                        ip_lists[direction] = {
+                            "block": await self.get_combined_ips_for_server(server.id, db, direction),
+                            "allow": await self.get_allow_ips_global(db, direction),
+                        }
+        except Exception as e:
+            logger.error(f"Failed to load blocklist IPs for {server.name}: {e}")
+            for direction in ("in", "out"):
+                server_result[direction] = {"success": False, "message": str(e), "ip_count": 0}
+            server_result["success"] = False
+            return server_result
+
+        async with self._http_sem:
             for direction in ("in", "out"):
                 try:
-                    ips = await self.get_combined_ips_for_server(server.id, db, direction)
+                    ips = ip_lists[direction]["block"]
                     success, message, data = await self.sync_to_node(
                         server, ips, direction=direction
                     )
 
-                    allow_ips = await self.get_allow_ips_global(db, direction)
+                    allow_ips = ip_lists[direction]["allow"]
                     allow_ok, allow_msg, allow_data = await self.sync_allow_to_node(
                         server, allow_ips, direction=direction
                     )

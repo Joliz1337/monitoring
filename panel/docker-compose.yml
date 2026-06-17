@@ -3,6 +3,9 @@ services:
     image: postgres:16-alpine
     container_name: panel-postgres
     restart: unless-stopped
+    # max_connections поднят выше потолка пула бэкенда (pool_size 40 + max_overflow 80 = 120),
+    # чтобы фоновые синки не упирались в "too many clients already" при fan-out по нодам
+    command: ["postgres", "-c", "max_connections=200"]
     environment:
       - POSTGRES_USER=${POSTGRES_USER:-panel}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-panel_secret}
