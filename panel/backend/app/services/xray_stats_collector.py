@@ -922,6 +922,14 @@ class XrayStatsCollector:
     async def _cleanup_old_data(self):
         """Очистка устаревших данных кэша (IP-данные эфемерные, чистятся при каждом сборе)."""
         now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+        # In-memory cooldown-словарь аномалий копит ключи per-device/per-user и сам
+        # никогда не вытесняет старое — на крупной инсталляции это утечка памяти.
+        # Записи старше 2×COOLDOWN (cooldown = 1 день) уже не влияют на дедуп.
+        stale = now - timedelta(days=2)
+        for key in [k for k, v in self._anomaly_last_notified.items() if v < stale]:
+            del self._anomaly_last_notified[key]
+
         try:
             async with async_session() as db:
                 cache_cutoff = now - timedelta(days=7)

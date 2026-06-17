@@ -1,10 +1,12 @@
 import asyncio
 import logging
+import time
 from typing import Optional
 
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramRetryAfter
 from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery, Message, Update,
@@ -14,6 +16,10 @@ from aiogram.types import (
 logger = logging.getLogger(__name__)
 
 SETTINGS_CHECK_INTERVAL = 60
+
+# Пейсинг отправки под лимит Telegram (~30 msg/s на бота): на 500 нодах массовый
+# всплеск алертов иначе ловит 429 и теряется молча.
+MIN_SEND_INTERVAL = 0.05
 
 
 class TelegramBotService:
@@ -33,6 +39,16 @@ class TelegramBotService:
         self._dp.include_router(self._main_router)
         self._settings_check_task: asyncio.Task | None = None
         self._running = False
+        # Сериализация и пейсинг отправок по токену (защита от 429-burst)
+        self._send_locks: dict[str, asyncio.Lock] = {}
+        self._last_send_at: dict[str, float] = {}
+
+    def _send_lock(self, token: str) -> asyncio.Lock:
+        lock = self._send_locks.get(token)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._send_locks[token] = lock
+        return lock
 
     @property
     def dispatcher(self) -> Dispatcher:
@@ -93,17 +109,34 @@ class TelegramBotService:
             if reply_to_message_id else None
         )
 
-        try:
-            return await bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                parse_mode=parse_mode,
-                reply_markup=markup,
-                reply_parameters=reply_params,
-            )
-        except Exception as e:
-            logger.warning(f"Telegram send failed: {e}")
-            return None
+        async with self._send_lock(bot_token):
+            gap = time.monotonic() - self._last_send_at.get(bot_token, 0.0)
+            if gap < MIN_SEND_INTERVAL:
+                await asyncio.sleep(MIN_SEND_INTERVAL - gap)
+
+            for attempt in range(2):
+                try:
+                    msg = await bot.send_message(
+                        chat_id=chat_id,
+                        text=text,
+                        parse_mode=parse_mode,
+                        reply_markup=markup,
+                        reply_parameters=reply_params,
+                    )
+                    self._last_send_at[bot_token] = time.monotonic()
+                    return msg
+                except TelegramRetryAfter as e:
+                    # Telegram попросил подождать — единственная попытка переждать и повторить.
+                    self._last_send_at[bot_token] = time.monotonic()
+                    if attempt == 0:
+                        await asyncio.sleep(e.retry_after + 0.5)
+                        continue
+                    logger.warning(f"Telegram 429 after retry: {e}")
+                    return None
+                except Exception as e:
+                    logger.warning(f"Telegram send failed: {e}")
+                    return None
+        return None
 
     async def send_message(
         self,
