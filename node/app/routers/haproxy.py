@@ -269,7 +269,8 @@ async def apply_config(request: ConfigApplyRequest):
     success, message, reloaded = await asyncio.to_thread(
         manager.apply_config,
         config_content=request.config_content,
-        reload_after=request.reload_after
+        reload_after=request.reload_after,
+        ensure_started=request.ensure_started
     )
     
     if success:

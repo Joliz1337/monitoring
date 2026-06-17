@@ -12,7 +12,7 @@ import logging
 from app.database import get_db, async_session_maker
 from app.models import Server, HAProxyConfigProfile, HAProxySyncLog, ServerCache, MetricsSnapshot, PanelSettings
 from app.auth import verify_auth
-from app.services.haproxy_profile_sync import sync_profile_to_servers, compute_config_hash, is_server_online
+from app.services.haproxy_profile_sync import sync_profile_to_servers, compute_config_hash, is_server_online, stop_haproxy_on_server
 from app.services.haproxy_config import HAProxyRule, BackendServer, BalancerOptions, get_config_generator
 from app.services.haproxy_validator import validate_config
 
@@ -452,12 +452,14 @@ async def link_server(profile_id: int, server_id: int, bg: BackgroundTasks, db: 
     server.haproxy_sync_status = "pending"
     await db.commit()
 
-    bg.add_task(_bg_sync_profile, profile_id)
+    # Раскатываем конфиг только на привязываемый сервер и заодно поднимаем HAProxy,
+    # чтобы не трогать остальные ноды профиля (например, остановленные вручную).
+    bg.add_task(_bg_sync_server_start, profile_id, server_id)
     return {"success": True}
 
 
 @router.delete("/{profile_id}/servers/{server_id}")
-async def unlink_server(profile_id: int, server_id: int, db: AsyncSession = Depends(get_db), _=Depends(verify_auth)):
+async def unlink_server(profile_id: int, server_id: int, bg: BackgroundTasks, db: AsyncSession = Depends(get_db), _=Depends(verify_auth)):
     result = await db.execute(select(Server).where(Server.id == server_id))
     server = result.scalar_one_or_none()
     if not server:
@@ -469,6 +471,8 @@ async def unlink_server(profile_id: int, server_id: int, db: AsyncSession = Depe
     server.haproxy_last_sync_at = None
     await db.commit()
 
+    # Отвязали от профиля — гасим HAProxy на ноде (stop + disable autostart)
+    bg.add_task(_bg_stop_haproxy, server_id)
     return {"success": True}
 
 
@@ -559,6 +563,28 @@ async def _bg_sync_profile(profile_id: int):
                 await sync_profile_to_servers(profile, db)
         except Exception as e:
             logger.error("Background sync failed for profile %s: %s", profile_id, e)
+
+
+async def _bg_sync_server_start(profile_id: int, server_id: int):
+    """Раскатка конфига на один (привязанный) сервер с авто-запуском HAProxy."""
+    async with async_session_maker() as db:
+        try:
+            profile = await db.get(HAProxyConfigProfile, profile_id)
+            if profile:
+                await sync_profile_to_servers(profile, db, server_ids=[server_id], ensure_started=True)
+        except Exception as e:
+            logger.error("Background sync+start failed for server %s: %s", server_id, e)
+
+
+async def _bg_stop_haproxy(server_id: int):
+    """Остановка HAProxy на ноде после отвязки от профиля."""
+    async with async_session_maker() as db:
+        try:
+            server = await db.get(Server, server_id)
+            if server:
+                await stop_haproxy_on_server(server)
+        except Exception as e:
+            logger.error("Background HAProxy stop failed for server %s: %s", server_id, e)
 
 
 # ==================== Rules Management ====================

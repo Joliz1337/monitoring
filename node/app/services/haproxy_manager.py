@@ -1015,32 +1015,34 @@ backend {backend_name}
         """Get full config content"""
         return self._read_config()
     
-    def apply_config(self, config_content: str, reload_after: bool = True) -> tuple[bool, str, bool]:
+    def apply_config(self, config_content: str, reload_after: bool = True, ensure_started: bool = False) -> tuple[bool, str, bool]:
         """Apply HAProxy config from panel.
-        
+
         Args:
             config_content: Full config content
             reload_after: Whether to reload HAProxy after applying
-        
+            ensure_started: Start HAProxy if stopped (enable autostart) instead of leaving it down
+
         Returns: (success, message, reloaded)
         """
         self._backup_config()
-        
+
         try:
             config_content = self._patch_dns_resolvers(config_content)
             self._write_config(config_content)
         except Exception as e:
             return False, f"Failed to write config: {e}", False
-        
+
         # Validate config
         is_valid, error = self.check_config()
         if not is_valid:
             self._restore_config()
             return False, f"Config validation failed: {error}", False
-        
+
         if reload_after:
-            # Reload with auto_start=False - don't fail if service not running
-            success, reload_msg = self.reload(auto_start=False)
+            # ensure_started=True поднимает остановленный сервис (start + enable),
+            # иначе только reload работающего, а остановленный остаётся лежать
+            success, reload_msg = self.reload(auto_start=ensure_started)
             if not success:
                 self._restore_config()
                 return False, f"Reload failed: {reload_msg}", False

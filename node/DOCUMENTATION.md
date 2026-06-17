@@ -293,7 +293,7 @@ data: {"message": "error description"}
 
 При ошибке `/start`, `/stop`, `/reload`, `/restart` возвращают `HTTP 500` с полем `detail`, содержащим реальную причину от менеджера (например: `"Restart failed: ..."`, `"Config validation failed: ..."`, `"HAProxy is not installed"`, `"Failed to stop: ..."`). Панель транслирует это сообщение в результатах массовых действий по каждому серверу.
 | GET | /api/haproxy/config | Получить конфиг |
-| POST | /api/haproxy/config/apply | Применить конфиг |
+| POST | /api/haproxy/config/apply | Применить конфиг; тело `ConfigApplyRequest`: `config_content`, `ensure_started: bool = False` — при `True` поднимает остановленный HAProxy через `reload(auto_start=True)` |
 | GET | /api/haproxy/logs | Логи (journalctl, tail=100) |
 
 ### Сертификаты

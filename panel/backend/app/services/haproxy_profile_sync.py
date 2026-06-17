@@ -48,9 +48,12 @@ async def _sync_single_server(
     config_content: str,
     config_hash: str,
     profile_id: int,
+    ensure_started: bool = False,
 ) -> SyncResult:
     """Применяет конфиг на одну (живую) ноду. Использует собственную сессию БД и коммитит
-    результат сразу — статус сервера обновляется в реальном времени, не дожидаясь остальных."""
+    результат сразу — статус сервера обновляется в реальном времени, не дожидаясь остальных.
+
+    ensure_started=True заодно поднимает HAProxy, если он остановлен (используется при привязке)."""
     url = f"{server.url}/api/haproxy/config/apply"
 
     async with async_session_maker() as db:
@@ -59,7 +62,7 @@ async def _sync_single_server(
             response = await client.post(
                 url,
                 headers=node_auth_headers(server),
-                json={"config_content": config_content, "reload_after": True},
+                json={"config_content": config_content, "reload_after": True, "ensure_started": ensure_started},
                 timeout=30.0,
             )
 
@@ -138,6 +141,7 @@ async def sync_profile_to_servers(
     profile: HAProxyConfigProfile,
     db: AsyncSession,
     server_ids: list[int] | None = None,
+    ensure_started: bool = False,
 ) -> list[SyncResult]:
     config_hash = compute_config_hash(profile.config_content)
 
@@ -182,7 +186,7 @@ async def sync_profile_to_servers(
 
     async def _guarded(server: Server) -> SyncResult:
         async with semaphore:
-            return await _sync_single_server(server, profile.config_content, config_hash, profile.id)
+            return await _sync_single_server(server, profile.config_content, config_hash, profile.id, ensure_started)
 
     online_results = await asyncio.gather(*[_guarded(s) for s in online])
     results.extend(online_results)
@@ -214,6 +218,33 @@ async def retry_pending_haproxy_syncs(db: AsyncSession) -> int:
         profile = await db.get(HAProxyConfigProfile, profile_id)
         if not profile:
             continue
-        res = await sync_profile_to_servers(profile, db, server_ids=sids)
+        # Ожившая привязанная нода должна прийти к состоянию «HAProxy запущен»,
+        # как и при онлайн-привязке (вручную остановленные остаются synced, не pending — их не трогаем)
+        res = await sync_profile_to_servers(profile, db, server_ids=sids, ensure_started=True)
         synced += sum(1 for r in res if r.status == "success")
     return synced
+
+
+async def stop_haproxy_on_server(server: Server) -> bool:
+    """Останавливает HAProxy на ноде после отвязки от профиля (stop + disable autostart).
+
+    Офлайн-сервер пропускаем — достучаться нельзя. Ошибки связи логируем, но не пробрасываем:
+    отвязка в БД уже выполнена, остановка — best-effort.
+    """
+    if not is_server_online(server):
+        logger.info("HAProxy stop пропущен — сервер %s офлайн", server.name)
+        return False
+
+    url = f"{server.url}/api/haproxy/stop"
+    try:
+        client = get_node_client(server)
+        response = await client.post(url, headers=node_auth_headers(server), timeout=30.0)
+        if response.status_code == 200:
+            logger.info("HAProxy остановлен на сервере %s после отвязки", server.name)
+            return True
+        logger.warning("HAProxy stop на %s не удался: HTTP %s", server.name, response.status_code)
+    except httpx.TimeoutException:
+        logger.warning("HAProxy stop на %s не удался: таймаут", server.name)
+    except httpx.RequestError as e:
+        logger.warning("HAProxy stop на %s не удался: %s", server.name, e)
+    return False

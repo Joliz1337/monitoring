@@ -1413,6 +1413,7 @@
     "link_error": "Failed to link server",
     "unlink_error": "Failed to unlink server",
     "unlink_server": "Unlink server",
+    "unlink_confirm": "Unlink server from profile? HAProxy on the node will be stopped.",
     "synced": "Synced",
     "pending": "Pending",
     "failed": "Failed",

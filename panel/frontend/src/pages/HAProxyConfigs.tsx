@@ -855,6 +855,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
   }
 
   const handleUnlinkServer = async (serverId: number) => {
+    if (!confirm(t('haproxy_configs.unlink_confirm'))) return
     try {
       await haproxyProfilesApi.unlinkServer(profileId, serverId)
       toast.success(t('haproxy_configs.server_unlinked'))

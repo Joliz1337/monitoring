@@ -295,6 +295,7 @@ class ConfigApplyRequest(BaseModel):
     """Request to apply HAProxy config from panel"""
     config_content: str = Field(..., min_length=1, description="Full HAProxy config content")
     reload_after: bool = Field(True, description="Reload HAProxy after applying config")
+    ensure_started: bool = Field(False, description="Start HAProxy if stopped (enable autostart)")
 
 
 class ConfigApplyResponse(BaseModel):
