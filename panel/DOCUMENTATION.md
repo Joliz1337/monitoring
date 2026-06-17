@@ -1,4 +1,4 @@
-# Monitoring Panel v10.14.0
+# Monitoring Panel v10.14.5
 
 Веб-панель для мониторинга серверов. Собирает метрики с нод с настраиваемым интервалом (по умолчанию 10 сек) и хранит историю локально.
 
@@ -269,6 +269,16 @@ PK обеих таблиц переведены с `Integer` (int32) на `BigIn
 **`billing_checker.py` — короткие сессии:**
 
 Настройки и список ID billing-серверов теперь читаются в одной короткой сессии, которая закрывается до начала HTTP-вызовов к Yandex Cloud и Telegram. Каждый сервер обрабатывается в отдельной короткой сессии. Устраняет idle-in-transaction на время внешних HTTP-запросов (раньше одна сессия держалась открытой на весь последовательный обход). YC-результаты теперь сохраняются даже когда `paid_until` пустой.
+
+### Масштабируемость: снижение пиков ОЗУ при анализе аномалий (v10.14.5)
+
+**`xray_stats_collector.py` — проекция `RemnawaveUserCache`:**
+
+В методе `_check_anomalies` таблица `RemnawaveUserCache` теперь читается через проекцию пяти нужных колонок (`email`, `uuid`, `status`, `hwid_device_limit`, `username`) с доступом к результатам по имени через `Row`. Ранее загружались полные ORM-объекты (`select(RemnawaveUserCache).scalars().all()`) — при десятках-сотнях тысяч пользователей это создавало значительный пик ОЗУ каждые ~5 минут (цикл анализа аномалий).
+
+**`xray_stats_collector.py` — ленивая загрузка IP-адресов:**
+
+Детальный список IP из таблицы `xray_stats` теперь загружается **по требованию только для пользователей с подтверждённой аномалией** — точечным запросом `WHERE email = :email` по индексированному полю. Ранее вся таблица пар `email → source_ip` загружалась в память для всех пользователей сразу (`ips_by_email`). Пики ОЗУ при анализе аномалий больше не масштабируются с размером таблицы `xray_stats`.
 
 ## Конфигурация (.env)
 
@@ -729,7 +739,7 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 
 **Файлы:**
 - `panel/backend/app/routers/remnawave.py` — API роутер
-- `panel/backend/app/services/xray_stats_collector.py` — сбор IP через Remnawave Panel API + HWID-синхронизация; IP-блок `_check_anomalies` переписан: счётчик/новые IP/reply-threading/анти-спам; хендлер `handle_rw_reset` для callback `rw_reset:ip:{email}`
+- `panel/backend/app/services/xray_stats_collector.py` — сбор IP через Remnawave Panel API + HWID-синхронизация; IP-блок `_check_anomalies` переписан: счётчик/новые IP/reply-threading/анти-спам; хендлер `handle_rw_reset` для callback `rw_reset:ip:{email}`; оптимизация памяти при анализе аномалий (см. ниже)
 - `panel/backend/app/services/ip_anomaly_state.py` — репозиторий состояния IP-аномалий (`get_or_create`, `record_notification`, `reset`), JSON-хелперы (`parse_ips`, `dump_ips`), `seconds_since_last`
 - `panel/backend/app/services/remnawave_api.py` — клиент: `get_all_nodes()`, `poll_users_ips()`, `get_all_hwid_devices_paginated()`
 - `panel/backend/app/services/telegram_bot.py` — приватный `_send() -> Message | None` с поддержкой `reply_to_message_id`; `send_message` сохраняет bool-контракт; `send_message_returning_id() -> int | None`

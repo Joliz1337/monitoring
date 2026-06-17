@@ -600,10 +600,6 @@ class XrayStatsCollector:
                 .group_by(XrayStats.email)
             )).all()
 
-            ip_detail_rows = (await db.execute(
-                select(XrayStats.email, XrayStats.source_ip)
-            )).all()
-
             hwid_rows = (await db.execute(
                 select(RemnawaveHwidDevice.user_uuid, sql_func.count().label("cnt"))
                 .group_by(RemnawaveHwidDevice.user_uuid)
@@ -615,15 +611,22 @@ class XrayStatsCollector:
                        RemnawaveHwidDevice.os_version, RemnawaveHwidDevice.hwid)
             )).all()
 
-            cache_result = await db.execute(select(RemnawaveUserCache))
-            cache_list = cache_result.scalars().all()
-            by_email = {u.email: u for u in cache_list}
-            by_uuid = {u.uuid: u for u in cache_list if u.uuid}
+            # Только нужные 5 колонок, а не весь ORM-объект: на крупной инсталляции
+            # RemnawaveUserCache — десятки-сотни тысяч строк (Row даёт доступ по имени).
+            cache_rows = (await db.execute(
+                select(
+                    RemnawaveUserCache.email,
+                    RemnawaveUserCache.uuid,
+                    RemnawaveUserCache.status,
+                    RemnawaveUserCache.hwid_device_limit,
+                    RemnawaveUserCache.username,
+                )
+            )).all()
+            by_email = {u.email: u for u in cache_rows}
+            by_uuid = {u.uuid: u for u in cache_rows if u.uuid}
 
-        ips_by_email: dict[int, list[str]] = {}
-        for eid, sip in ip_detail_rows:
-            ips_by_email.setdefault(eid, []).append(sip)
-
+        # Детальный список IP больше НЕ грузим целиком — только по подтверждённым
+        # аномальным пользователям (см. ниже), иначе это вся таблица XrayStats в памяти.
         COOLDOWN_SECONDS = 86400
         IP_CONFIRM_THRESHOLD = 5
 
@@ -650,9 +653,13 @@ class XrayStatsCollector:
             if streak < IP_CONFIRM_THRESHOLD:
                 continue
 
-            current_ips = set(ips_by_email.get(email, []))
-
             async with async_session() as db:
+                # IP грузим только для этого подтверждённого юзера — по индексу email.
+                current_ips = {
+                    r[0] for r in (await db.execute(
+                        select(XrayStats.source_ip).where(XrayStats.email == email)
+                    )).all()
+                }
                 state = await ip_anomaly_state.get_or_create(db, email)
                 known = ip_anomaly_state.parse_ips(state.known_ips)
                 since = ip_anomaly_state.seconds_since_last(state, now)
