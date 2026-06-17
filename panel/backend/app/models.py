@@ -246,8 +246,8 @@ class BlocklistRule(Base):
     __table_args__ = (
         Index('idx_blocklist_server', 'server_id'),
         Index('idx_blocklist_source', 'source'),
-        Index('idx_blocklist_direction', 'direction'),
-        Index('idx_blocklist_list_type', 'list_type'),
+        # direction (in/out) и list_type (block/allow) — кардинальность 2; индекс
+        # бесполезен для планировщика и только удорожает массовую загрузку auto-list.
     )
 
 
@@ -318,9 +318,8 @@ class XrayStats(Base):
     source_ip = Column(String(45), primary_key=True, nullable=False)
     last_seen = Column(DateTime(timezone=True), server_default=func.now())
 
-    __table_args__ = (
-        Index('idx_xray_stats_email', 'email'),
-    )
+    # email — ведущая колонка составного PK (email, source_ip), поэтому отдельный
+    # индекс на email избыточен: PK-индекс уже покрывает фильтр WHERE email = ...
 
 
 class RemnawaveIpAnomalyState(Base):

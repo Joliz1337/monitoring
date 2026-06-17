@@ -1904,6 +1904,17 @@ async def _migrate_bigint_pk_ids(conn):
             logger.warning(f"BIGINT migration for {table}: {e}")
 
 
+async def _migrate_drop_redundant_indexes(conn):
+    """Удаляет избыточные индексы: idx_xray_stats_email (покрыт PK email,source_ip)
+    и idx_blocklist_direction/idx_blocklist_list_type (кардинальность 2 — бесполезны,
+    только удорожают массовые вставки). Идемпотентно (IF EXISTS)."""
+    for idx in ("idx_xray_stats_email", "idx_blocklist_direction", "idx_blocklist_list_type"):
+        try:
+            await conn.execute(text(f"DROP INDEX IF EXISTS {idx}"))
+        except Exception as e:
+            logger.warning(f"Dropping index {idx}: {e}")
+
+
 async def init_db():
     """Initialize database: create tables, run migrations."""
     async with engine.begin() as conn:
@@ -1926,6 +1937,7 @@ async def init_db():
         await _migrate_wildcard_ssl(conn)
         await _migrate_aggregated_metrics_unique(conn)
         await _migrate_bigint_pk_ids(conn)
+        await _migrate_drop_redundant_indexes(conn)
 
     await _warmup_pool()
 

@@ -453,12 +453,14 @@ async def get_migration_status(
     _: dict = Depends(verify_auth),
 ):
     """Сколько нод ещё не на shared cert — для условного показа баннера."""
-    result = await db.execute(select(Server))
-    servers = result.scalars().all()
+    # Проекция двух колонок вместо полных ORM-объектов (с тяжёлыми TEXT last_metrics
+    # и т.п.) — classify_server читает только их; Row даёт доступ по имени.
+    result = await db.execute(select(Server.uses_shared_cert, Server.pki_enabled))
+    rows = result.all()
     counters = {"shared": 0, "per_server": 0, "legacy": 0}
-    for s in servers:
-        counters[classify_server(s)] += 1
-    counters["total"] = len(servers)
+    for r in rows:
+        counters[classify_server(r)] += 1
+    counters["total"] = len(rows)
     counters["needs_migration"] = counters["per_server"] + counters["legacy"]
     return counters
 

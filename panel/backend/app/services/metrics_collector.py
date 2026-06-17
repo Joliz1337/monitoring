@@ -829,8 +829,8 @@ class MetricsCollector:
                 server_id, :hour_start, 'hour',
                 AVG(cpu_usage), MAX(cpu_usage), AVG(load_avg_1),
                 AVG(memory_percent), MAX(memory_percent), AVG(disk_percent),
-                COALESCE(SUM(net_rx_bytes_per_sec * 10), 0)::BIGINT,
-                COALESCE(SUM(net_tx_bytes_per_sec * 10), 0)::BIGINT,
+                COALESCE(SUM(net_rx_bytes_per_sec * :interval), 0)::BIGINT,
+                COALESCE(SUM(net_tx_bytes_per_sec * :interval), 0)::BIGINT,
                 AVG(net_rx_bytes_per_sec), AVG(net_tx_bytes_per_sec),
                 AVG(disk_read_bytes_per_sec), AVG(disk_write_bytes_per_sec),
                 AVG(tcp_established), AVG(tcp_listen), AVG(tcp_time_wait),
@@ -840,7 +840,7 @@ class MetricsCollector:
             WHERE timestamp >= :hour_start AND timestamp < :hour_end
             GROUP BY server_id
             ON CONFLICT DO NOTHING
-        """), {"hour_start": hour_start, "hour_end": hour_end})
+        """), {"hour_start": hour_start, "hour_end": hour_end, "interval": self._collect_interval})
         
         await db.commit()
         logger.info(f"Hourly aggregation completed for {hour_start}")
