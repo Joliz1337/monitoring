@@ -11,6 +11,7 @@ import httpx
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.database import async_session_maker
 from app.models import Server, FirewallProfile, FirewallSyncLog
 from app.services.http_client import get_node_apply_client, node_auth_headers
 
@@ -63,7 +64,9 @@ def compute_rules_hash(rules_json: str, default_in: str, default_out: str) -> st
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
-async def _log_failure(db: AsyncSession, server: Server, profile_id: int, message: str, rules_hash: str):
+async def _log_failure(
+    db: AsyncSession, server: Server, profile_id: int, message: str, rules_hash: str,
+) -> SyncResult:
     await db.execute(
         update(Server).where(Server.id == server.id).values(firewall_sync_status="failed")
     )
@@ -74,6 +77,8 @@ async def _log_failure(db: AsyncSession, server: Server, profile_id: int, messag
         message=message,
         rules_hash=rules_hash,
     ))
+    await db.commit()
+    return SyncResult(server.id, server.name, False, message)
 
 
 async def _sync_single_server(
@@ -84,8 +89,10 @@ async def _sync_single_server(
     rules_hash: str,
     profile_id: int,
     force: bool,
-    db: AsyncSession,
 ) -> SyncResult:
+    """Применяет профиль на одну ноду. Собственная короткая сессия БД с немедленным
+    коммитом результата — статус виден сразу, и один коннект пула не держится за весь
+    fan-out (AsyncSession не поддерживает конкурентную запись из gather)."""
     url = f"{server.url.rstrip('/')}/api/firewall/profile/apply"
     payload = {
         "rules": rules,
@@ -94,79 +101,76 @@ async def _sync_single_server(
         "force": force,
     }
 
-    try:
-        client = get_node_apply_client(server)
-        response = await client.post(
-            url,
-            headers=node_auth_headers(server),
-            json=payload,
-            timeout=APPLY_TIMEOUT_SECONDS,
-        )
+    async with async_session_maker() as db:
+        try:
+            client = get_node_apply_client(server)
+            response = await client.post(
+                url,
+                headers=node_auth_headers(server),
+                json=payload,
+                timeout=APPLY_TIMEOUT_SECONDS,
+            )
 
-        if response.status_code == 404:
-            msg = "На ноде нет роутера firewall_profile — обновите образ ноды (docker compose pull && up -d)"
-            await _log_failure(db, server, profile_id, msg, rules_hash)
-            return SyncResult(server.id, server.name, False, msg)
+            if response.status_code == 404:
+                msg = "На ноде нет роутера firewall_profile — обновите образ ноды (docker compose pull && up -d)"
+                return await _log_failure(db, server, profile_id, msg, rules_hash)
 
-        if response.status_code != 200:
-            error_detail = f"HTTP {response.status_code}"
-            try:
-                error_detail = response.json().get("detail", error_detail)
-            except Exception:
-                pass
-            await _log_failure(db, server, profile_id, error_detail, rules_hash)
-            return SyncResult(server.id, server.name, False, error_detail)
+            if response.status_code != 200:
+                error_detail = f"HTTP {response.status_code}"
+                try:
+                    error_detail = response.json().get("detail", error_detail)
+                except Exception:
+                    pass
+                return await _log_failure(db, server, profile_id, error_detail, rules_hash)
 
-        data = response.json() if response.content else {}
-        ok = bool(data.get("success", False))
-        msg = data.get("message", "Profile applied")
-        rolled_back = bool(data.get("rolled_back", False))
-        node_hash = data.get("rules_hash") or rules_hash
+            data = response.json() if response.content else {}
+            ok = bool(data.get("success", False))
+            msg = data.get("message", "Profile applied")
+            rolled_back = bool(data.get("rolled_back", False))
+            node_hash = data.get("rules_hash") or rules_hash
 
-        if ok:
-            now = datetime.now(timezone.utc)
-            await db.execute(
-                update(Server)
-                .where(Server.id == server.id)
-                .values(
-                    firewall_rules_hash=node_hash,
-                    firewall_last_sync_at=now,
-                    firewall_sync_status="synced",
+            if ok:
+                now = datetime.now(timezone.utc)
+                await db.execute(
+                    update(Server)
+                    .where(Server.id == server.id)
+                    .values(
+                        firewall_rules_hash=node_hash,
+                        firewall_last_sync_at=now,
+                        firewall_sync_status="synced",
+                    )
                 )
+                db.add(FirewallSyncLog(
+                    server_id=server.id,
+                    profile_id=profile_id,
+                    status="success",
+                    message=msg,
+                    rules_hash=node_hash,
+                ))
+                await db.commit()
+                return SyncResult(server.id, server.name, True, msg, rolled_back=False)
+
+            status = "rolled_back" if rolled_back else "failed"
+            await db.execute(
+                update(Server).where(Server.id == server.id).values(firewall_sync_status=status)
             )
             db.add(FirewallSyncLog(
                 server_id=server.id,
                 profile_id=profile_id,
-                status="success",
+                status=status,
                 message=msg,
-                rules_hash=node_hash,
+                rules_hash=rules_hash,
             ))
-            return SyncResult(server.id, server.name, True, msg, rolled_back=False)
+            await db.commit()
+            return SyncResult(server.id, server.name, False, msg, rolled_back=rolled_back)
 
-        status = "rolled_back" if rolled_back else "failed"
-        await db.execute(
-            update(Server).where(Server.id == server.id).values(firewall_sync_status=status)
-        )
-        db.add(FirewallSyncLog(
-            server_id=server.id,
-            profile_id=profile_id,
-            status=status,
-            message=msg,
-            rules_hash=rules_hash,
-        ))
-        return SyncResult(server.id, server.name, False, msg, rolled_back=rolled_back)
-
-    except httpx.TimeoutException:
-        await _log_failure(db, server, profile_id, "Connection timeout", rules_hash)
-        return SyncResult(server.id, server.name, False, "Connection timeout")
-    except httpx.RequestError as e:
-        msg = f"Connection error: {e}"
-        await _log_failure(db, server, profile_id, msg, rules_hash)
-        return SyncResult(server.id, server.name, False, msg)
-    except Exception as e:
-        logger.exception("Unexpected error syncing firewall profile to server %s", server.name)
-        await _log_failure(db, server, profile_id, str(e), rules_hash)
-        return SyncResult(server.id, server.name, False, str(e))
+        except httpx.TimeoutException:
+            return await _log_failure(db, server, profile_id, "Connection timeout", rules_hash)
+        except httpx.RequestError as e:
+            return await _log_failure(db, server, profile_id, f"Connection error: {e}", rules_hash)
+        except Exception as e:
+            logger.exception("Unexpected error syncing firewall profile to server %s", server.name)
+            return await _log_failure(db, server, profile_id, str(e), rules_hash)
 
 
 async def sync_profile_to_servers(
@@ -199,7 +203,7 @@ async def sync_profile_to_servers(
     await db.execute(
         update(Server).where(Server.id.in_(ids)).values(firewall_sync_status="pending")
     )
-    await db.flush()
+    await db.commit()
 
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_SYNCS)
 
@@ -207,9 +211,8 @@ async def sync_profile_to_servers(
         async with semaphore:
             return await _sync_single_server(
                 server, rules, profile.default_incoming, profile.default_outgoing,
-                rules_hash, profile.id, force, db,
+                rules_hash, profile.id, force,
             )
 
     results = await asyncio.gather(*[_guarded(s) for s in servers])
-    await db.commit()
     return list(results)

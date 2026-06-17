@@ -62,69 +62,79 @@ class BillingChecker:
             alert_row = (await db.execute(select(AlertSettings).limit(1))).scalar_one_or_none()
             if not alert_row or not alert_row.telegram_bot_token or not alert_row.telegram_chat_id:
                 return
+            bot_token = alert_row.telegram_bot_token
+            chat_id = alert_row.telegram_chat_id
 
             tz_setting = (await db.execute(
                 select(PanelSettings).where(PanelSettings.key == "timezone")
             )).scalar_one_or_none()
             tz_name = tz_setting.value if tz_setting and tz_setting.value and tz_setting.value != "auto" else None
 
-            servers = (await db.execute(select(BillingServer))).scalars().all()
-            now = datetime.now(timezone.utc)
+            server_ids = list((await db.execute(select(BillingServer.id))).scalars().all())
 
-            for srv in servers:
-                await self._check_server(db, srv, now, notify_days, alert_row, tz_name)
+        # Сессия закрыта — внешние вызовы (Yandex Cloud, Telegram) идут без удержания
+        # коннекта пула; каждый сервер обрабатывается в собственной короткой сессии.
+        now = datetime.now(timezone.utc)
+        for server_id in server_ids:
+            try:
+                await self._check_server(server_id, now, notify_days, bot_token, chat_id, tz_name)
+            except Exception as e:
+                logger.error(f"Billing check failed for server {server_id}: {e}")
 
     async def _check_server(
         self,
-        db,
-        srv: BillingServer,
+        server_id: int,
         now: datetime,
         notify_days: list[int],
-        alert: AlertSettings,
+        bot_token: str,
+        chat_id: str,
         tz_name: Optional[str] = None,
     ):
-        if srv.billing_type == "yandex_cloud":
-            await self._sync_yandex_cloud(srv, now)
+        async with async_session() as db:
+            srv = await db.get(BillingServer, server_id)
+            if not srv:
+                return
 
-        elif srv.billing_type == "resource" and srv.monthly_cost and srv.monthly_cost > 0:
-            if srv.balance_updated_at and srv.account_balance is not None:
-                updated = srv.balance_updated_at
-                if updated.tzinfo is None:
-                    updated = updated.replace(tzinfo=timezone.utc)
-                elapsed = (now - updated).total_seconds() / 86400
-                daily_cost = srv.monthly_cost / 30
-                consumed = elapsed * daily_cost
-                new_balance = max(0, srv.account_balance - consumed)
-                srv.account_balance = new_balance
-                srv.balance_updated_at = now
-                if new_balance > 0:
-                    days_remaining = new_balance / daily_cost
-                    srv.paid_until = now + timedelta(days=days_remaining)
-                else:
-                    srv.paid_until = now
+            if srv.billing_type == "yandex_cloud":
+                await self._sync_yandex_cloud(srv, now)
 
-        if not srv.paid_until:
-            return
+            elif srv.billing_type == "resource" and srv.monthly_cost and srv.monthly_cost > 0:
+                if srv.balance_updated_at and srv.account_balance is not None:
+                    updated = srv.balance_updated_at
+                    if updated.tzinfo is None:
+                        updated = updated.replace(tzinfo=timezone.utc)
+                    elapsed = (now - updated).total_seconds() / 86400
+                    daily_cost = srv.monthly_cost / 30
+                    consumed = elapsed * daily_cost
+                    new_balance = max(0, srv.account_balance - consumed)
+                    srv.account_balance = new_balance
+                    srv.balance_updated_at = now
+                    if new_balance > 0:
+                        days_remaining = new_balance / daily_cost
+                        srv.paid_until = now + timedelta(days=days_remaining)
+                    else:
+                        srv.paid_until = now
 
-        paid_until = srv.paid_until
-        if paid_until.tzinfo is None:
-            paid_until = paid_until.replace(tzinfo=timezone.utc)
+            if srv.paid_until:
+                paid_until = srv.paid_until
+                if paid_until.tzinfo is None:
+                    paid_until = paid_until.replace(tzinfo=timezone.utc)
 
-        days_left = (paid_until - now).total_seconds() / 86400
+                days_left = (paid_until - now).total_seconds() / 86400
 
-        try:
-            already_notified = json.loads(srv.last_notified_days) if srv.last_notified_days else []
-        except (json.JSONDecodeError, TypeError):
-            already_notified = []
+                try:
+                    already_notified = json.loads(srv.last_notified_days) if srv.last_notified_days else []
+                except (json.JSONDecodeError, TypeError):
+                    already_notified = []
 
-        for threshold in notify_days:
-            if days_left <= threshold and threshold not in already_notified:
-                sent = await self._send_notification(alert, srv, days_left, threshold, tz_name)
-                if sent:
-                    already_notified.append(threshold)
-                    srv.last_notified_days = json.dumps(already_notified)
+                for threshold in notify_days:
+                    if days_left <= threshold and threshold not in already_notified:
+                        sent = await self._send_notification(bot_token, chat_id, srv, days_left, threshold, tz_name)
+                        if sent:
+                            already_notified.append(threshold)
+                            srv.last_notified_days = json.dumps(already_notified)
 
-        await db.commit()
+            await db.commit()
 
     async def _sync_yandex_cloud(self, srv, now: datetime):
         from app.services.yc_token_manager import get_yc_token_manager, YCTokenError
@@ -188,7 +198,8 @@ class BillingChecker:
 
     async def _send_notification(
         self,
-        alert: AlertSettings,
+        bot_token: str,
+        chat_id: str,
         srv: BillingServer,
         days_left: float,
         threshold: int,
@@ -234,10 +245,10 @@ class BillingChecker:
         text = "\n".join(lines)
 
         try:
-            url = f"https://api.telegram.org/bot{alert.telegram_bot_token}/sendMessage"
+            url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, json={
-                    "chat_id": alert.telegram_chat_id,
+                    "chat_id": chat_id,
                     "text": text,
                     "parse_mode": "HTML",
                 }, timeout=aiohttp.ClientTimeout(total=10)) as resp:

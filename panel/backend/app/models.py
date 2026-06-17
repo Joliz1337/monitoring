@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, Float, BigInteger, Index, ForeignKey
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, Float, BigInteger, Index, ForeignKey, UniqueConstraint
 from sqlalchemy.sql import func
 from app.database import Base
 
@@ -106,8 +106,9 @@ class ServerCache(Base):
 class MetricsSnapshot(Base):
     """Хранит историю метрик для каждого сервера (сбор на панели)"""
     __tablename__ = "metrics_snapshots"
-    
-    id = Column(Integer, primary_key=True)
+
+    # BigInteger: при 500 нодах int4-serial переполнился бы за ~1.5 года
+    id = Column(BigInteger, primary_key=True)
     server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), nullable=False, index=True)
     timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
     
@@ -201,9 +202,11 @@ class AggregatedMetrics(Base):
     
     # Count of data points aggregated
     data_points = Column(Integer, default=0)
-    
+
+    # UNIQUE обязателен: на нём держится ON CONFLICT DO NOTHING в агрегации —
+    # без него повторный прогон за период (после рестарта панели) плодил дубли
     __table_args__ = (
-        Index('idx_aggregated_server_period', 'server_id', 'period_type', 'timestamp'),
+        UniqueConstraint('server_id', 'period_type', 'timestamp', name='uq_aggregated_metrics'),
     )
 
 
@@ -641,7 +644,7 @@ class XrayMonitorCheck(Base):
     """Результат одной проверки"""
     __tablename__ = "xray_monitor_checks"
 
-    id = Column(Integer, primary_key=True)
+    id = Column(BigInteger, primary_key=True)
     server_id = Column(Integer, ForeignKey("xray_monitor_servers.id", ondelete="CASCADE"), nullable=False, index=True)
     timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
     status = Column(String(10), nullable=False)  # ok, fail

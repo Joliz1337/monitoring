@@ -1842,6 +1842,68 @@ async def _migrate_wildcard_ssl(conn):
                     logger.warning(f"Could not add servers.{col_name}: {e}")
 
 
+async def _migrate_aggregated_metrics_unique(conn):
+    """Дедуп aggregated_metrics + UNIQUE(server_id, period_type, timestamp).
+
+    Без уникального констрейнта ON CONFLICT DO NOTHING в часовой/дневной агрегации
+    был no-op: каждый рестарт панели в пределах периода плодил дубль-строки, и
+    графики за 7/30/365 дней двоились. Идемпотентно — выходим, если констрейнт уже есть.
+    """
+    try:
+        exists = await conn.execute(text(
+            "SELECT 1 FROM pg_constraint WHERE conname = 'uq_aggregated_metrics'"
+        ))
+        if exists.first():
+            return
+
+        table_exists = await conn.execute(text(
+            "SELECT 1 FROM information_schema.tables WHERE table_name = 'aggregated_metrics'"
+        ))
+        if not table_exists.first():
+            return
+
+        logger.info("Deduplicating aggregated_metrics before adding unique constraint...")
+        await conn.execute(text("""
+            DELETE FROM aggregated_metrics a
+            USING aggregated_metrics b
+            WHERE a.id > b.id
+              AND a.server_id = b.server_id
+              AND a.period_type = b.period_type
+              AND a.timestamp = b.timestamp
+        """))
+        await conn.execute(text("""
+            ALTER TABLE aggregated_metrics
+            ADD CONSTRAINT uq_aggregated_metrics UNIQUE (server_id, period_type, timestamp)
+        """))
+        # Старый обычный индекс полностью покрывается уникальным — убираем дубль.
+        await conn.execute(text("DROP INDEX IF EXISTS idx_aggregated_server_period"))
+        logger.info("aggregated_metrics: duplicates removed, unique constraint added")
+    except Exception as e:
+        logger.warning(f"aggregated_metrics unique migration: {e}")
+
+
+async def _migrate_bigint_pk_ids(conn):
+    """metrics_snapshots.id / xray_monitor_checks.id: int4 → int8.
+
+    int4-serial при 500 нодах (×10с) переполняется за ~1.5 года и валит сбор метрик
+    на всех нодах разом. Выполняется один раз, пока таблицы небольшие (проверка типа).
+    """
+    for table in ("metrics_snapshots", "xray_monitor_checks"):
+        try:
+            res = await conn.execute(text("""
+                SELECT data_type FROM information_schema.columns
+                WHERE table_name = :t AND column_name = 'id'
+            """), {"t": table})
+            row = res.first()
+            if not row or row[0] == "bigint":
+                continue
+            logger.info(f"Migrating {table}.id to BIGINT (one-time table rewrite)...")
+            await conn.execute(text(f"ALTER TABLE {table} ALTER COLUMN id TYPE BIGINT"))
+            logger.info(f"{table}.id migrated to BIGINT")
+        except Exception as e:
+            logger.warning(f"BIGINT migration for {table}: {e}")
+
+
 async def init_db():
     """Initialize database: create tables, run migrations."""
     async with engine.begin() as conn:
@@ -1862,6 +1924,8 @@ async def init_db():
         await _migrate_remnawave_ephemeral_ips(conn)
         await _migrate_yandex_cloud_billing(conn)
         await _migrate_wildcard_ssl(conn)
+        await _migrate_aggregated_metrics_unique(conn)
+        await _migrate_bigint_pk_ids(conn)
 
     await _warmup_pool()
 

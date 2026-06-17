@@ -170,7 +170,7 @@ bash install.sh --unattended
 
 Подробная документация по каждому компоненту:
 
-- [panel/DOCUMENTATION.md](panel/DOCUMENTATION.md) — веб-панель: API, БД, конфигурация, безопасность (v10.13.1)
+- [panel/DOCUMENTATION.md](panel/DOCUMENTATION.md) — веб-панель: API, БД, конфигурация, безопасность (v10.14.0)
 - [node/DOCUMENTATION.md](node/DOCUMENTATION.md) — нода-агент: API, метрики, HAProxy, трафик, Remnawave, Firewall Profiles
 
 ## Архитектура
