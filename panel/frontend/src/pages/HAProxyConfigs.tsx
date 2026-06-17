@@ -675,8 +675,9 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
   useEffect(() => { fetchDetail() }, [fetchDetail])
 
   // Автообновление статусов серверов каждые 3 секунды
+  // (пропускаем, когда вкладка скрыта — не долбим бэкенд в фоне)
   useEffect(() => {
-    pollRef.current = setInterval(fetchServersStatus, 3000)
+    pollRef.current = setInterval(() => { if (!document.hidden) fetchServersStatus() }, 3000)
     return () => { if (pollRef.current) clearInterval(pollRef.current) }
   }, [fetchServersStatus])
 

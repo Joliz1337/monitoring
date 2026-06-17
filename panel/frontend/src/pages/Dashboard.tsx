@@ -118,9 +118,17 @@ export default function Dashboard() {
     fetchServersWithMetrics().then(() => { initialLoadDone.current = true })
   }, [fetchServersWithMetrics, fetchSettings])
   
+  // На больших флотах поллить чаще, чем собираются метрики (~10с), бессмысленно —
+  // поднимаем минимальный интервал, чтобы не гонять тяжёлый ответ зря.
+  const effectiveInterval = useMemo(() => {
+    const count = servers.length
+    const floorSec = count > 300 ? 15 : count > 120 ? 10 : 0
+    return Math.max(refreshInterval, floorSec) * 1000
+  }, [servers.length, refreshInterval])
+
   const { isPageVisible } = useAutoRefresh(
     fetchServersWithMetrics,
-    { immediate: false, pauseWhenHidden: true, refreshOnVisible: true }
+    { immediate: false, pauseWhenHidden: true, refreshOnVisible: true, customInterval: effectiveInterval }
   )
 
   const { activeServers, onlineCount, offlineCount, disabledCount } = useMemo(() => {

@@ -1152,8 +1152,9 @@ function ProfileDetail({
   }, [profileId, fetchProfile, fetchAvailableServers])
 
   // Автообновление статусов серверов и счётчиков sync каждые 3 секунды
+  // (пропускаем, когда вкладка скрыта — не долбим бэкенд в фоне)
   useEffect(() => {
-    const id = setInterval(refreshProfileSilent, 3000)
+    const id = setInterval(() => { if (!document.hidden) refreshProfileSilent() }, 3000)
     return () => clearInterval(id)
   }, [refreshProfileSilent])
 

@@ -94,6 +94,10 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
     zIndex: isDragging ? 50 : undefined,
     position: 'relative' as const,
     animationDelay: `${Math.min(index, 20) * 30}ms`,
+    // Виртуализация без удаления из DOM: браузер пропускает рендер/лейаут офф-скрин
+    // карточек (критично на сотнях нод). При drag выключаем, чтобы не мешать перетаскиванию.
+    contentVisibility: isDragging ? 'visible' : 'auto',
+    containIntrinsicSize: 'auto 320px',
   }
 
   const metrics = server.metrics
