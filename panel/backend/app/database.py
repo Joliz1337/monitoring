@@ -463,6 +463,25 @@ async def run_migrations(conn):
                     if "already exists" not in str(e).lower():
                         logger.warning(f"Could not add column {col_name}: {e}")
 
+    # Anti-DDoS emergency-mode state columns (mirrored from node watchdog)
+    if columns:
+        antiddos_columns = [
+            ("antiddos_emergency_mode", "BOOLEAN NOT NULL DEFAULT FALSE"),
+            ("antiddos_source", "VARCHAR(10)"),
+            ("antiddos_since", "TIMESTAMP"),
+            ("antiddos_reason", "VARCHAR(200)"),
+            ("antiddos_watchdog", "BOOLEAN NOT NULL DEFAULT TRUE"),
+            ("antiddos_last_sync_at", "TIMESTAMP"),
+        ]
+        for col_name, col_type in antiddos_columns:
+            if col_name not in columns:
+                try:
+                    await conn.execute(text(f'ALTER TABLE servers ADD COLUMN "{col_name}" {col_type}'))
+                    logger.info(f"Added column: servers.{col_name}")
+                except Exception as e:
+                    if "already exists" not in str(e).lower():
+                        logger.warning(f"Could not add column {col_name}: {e}")
+
     # PKI (mTLS канал panel↔node): singleton таблица keygen + колонки в servers
     try:
         await conn.execute(text("""

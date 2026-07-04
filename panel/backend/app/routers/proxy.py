@@ -1219,6 +1219,79 @@ async def remove_node_optimizations(
     return result
 
 
+# ==================== Anti-DDoS (per-node) ====================
+
+@router.get("/{server_id}/antiddos/status")
+async def get_node_antiddos_status(
+    server_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Live emergency state from a node (also persisted to Server.antiddos_*)."""
+    from app.services.antiddos_manager import get_antiddos_manager
+    server = await get_server_by_id(server_id, db)
+    manager = get_antiddos_manager()
+    status = await manager.get_node_status(server)
+    if status is None:
+        raise HTTPException(status_code=502, detail="Node unreachable or antiddos not installed")
+    await manager._store_status(server_id, status)
+    return status
+
+
+@router.post("/{server_id}/antiddos/emergency")
+async def set_node_antiddos_emergency(
+    server_id: int,
+    body: dict = None,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Manually toggle emergency mode on a node (manual pin — watchdog won't undo it)."""
+    from app.services.antiddos_manager import get_antiddos_manager
+    server = await get_server_by_id(server_id, db)
+    enabled = bool((body or {}).get("enabled", False))
+    manager = get_antiddos_manager()
+    ok, msg, status = await manager.set_node_emergency(server, enabled)
+    if ok and status:
+        await manager._store_status(server_id, status)
+    return {"success": ok, "message": msg, "status": status}
+
+
+@router.post("/{server_id}/antiddos/watchdog")
+async def set_node_antiddos_watchdog(
+    server_id: int,
+    body: dict = None,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Enable/disable the auto-detection watchdog on a node."""
+    from app.services.antiddos_manager import get_antiddos_manager
+    server = await get_server_by_id(server_id, db)
+    enabled = bool((body or {}).get("enabled", True))
+    manager = get_antiddos_manager()
+    ok, msg = await manager.set_node_watchdog(server, enabled)
+    status = await manager.get_node_status(server)
+    if status:
+        await manager._store_status(server_id, status)
+    return {"success": ok, "message": msg, "status": status}
+
+
+@router.post("/{server_id}/antiddos/install")
+async def install_node_antiddos(
+    server_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Install/refresh the watchdog service on a node (fetches script from GitHub)."""
+    from app.services.antiddos_manager import get_antiddos_manager
+    server = await get_server_by_id(server_id, db)
+    manager = get_antiddos_manager()
+    ok, msg = await manager.install_to_node(server)
+    status = await manager.get_node_status(server) if ok else None
+    if status:
+        await manager._store_status(server_id, status)
+    return {"success": ok, "message": msg, "status": status}
+
+
 # ==================== IPSet Management ====================
 
 @router.get("/{server_id}/ipset/status")

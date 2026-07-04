@@ -382,6 +382,7 @@ async def _build_servers_list(db: AsyncSession, include_metrics: bool) -> dict:
             "pki_enabled": bool(s.pki_enabled),
             "uses_shared_cert": bool(s.uses_shared_cert),
             "auth_kind": classify_server(s),
+            "antiddos_emergency_mode": bool(s.antiddos_emergency_mode),
         }
 
         if include_metrics and s.last_metrics:

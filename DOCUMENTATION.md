@@ -35,6 +35,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/in
 - **7** — Применить системные оптимизации (с выбором режима NIC)
 - **9** — Установить Remnawave ноду (без домена/SSL); контейнер `remnanode` запускается с `cap_add: NET_ADMIN` для управления сетевыми интерфейсами
 
+Вкладка панели **«Анти-DDoS»** (иконка Siren в меню) — многослойная защита от DDoS-атак на нодах, см. раздел ниже.
+
 ### Пункт 7 — Системные оптимизации
 
 При выборе пункта 7 перед подменю выводится блок автоматической детекции аппаратного multiqueue — для каждого реального интерфейса показывается поддерживается ли multiqueue и максимальное число очередей. Далее появляется подменю выбора режима NIC:
@@ -52,16 +54,26 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/in
 На ряде хостеров (OVH и аналогичных с port-security на свитчах) `ethtool -G` (resize ring buffers) на интерфейсах `igb`/`ixgbe`/`i40e` вызывает hard link reset, что может лишить доступа к серверу. По этой причине:
 - `ethtool -G` полностью удалён из всех tune-скриптов.
 
+**Анти-DDoS хардening conntrack (по итогам инцидента с ACK-флудом ~294k pps):**
+
+ACK-флуд заполнял conntrack-таблицу (262144 записей) мусорными записями без реальных TCP-сокетов, при этом реальных TCP-соединений было на порядок меньше (~19k). Во всех sysctl-профилях и всех tune-скриптах:
+- Строгий conntrack: `nf_conntrack_tcp_loose=0`, `nf_conntrack_tcp_be_liberal=0` (было 1/1) — mid-stream ACK без предшествующего SYN-handshake больше не создаёт запись
+- Укороченные SYN-таймауты (`syn_sent` 30→15, `syn_recv` 30→10), добавлены `nf_conntrack_checksum=0` (NIC уже проверил чексуммы) и `nf_conntrack_log_invalid=0` (не топить dmesg/journald при флуде)
+- `tcp_fastopen` 3→1 — только клиентский TFO (серверный принимает data-in-SYN, чем могут злоупотреблять спуф-флуды); добавлен `tcp_invalid_ratelimit=500` — не отвечать на каждый мусорный/вне-окна пакет
+- `kernel.printk_ratelimit=5` / `printk_ratelimit_burst=10` — не топить journald при атаке
+- `configure_conntrack()` во всех tune-скриптах теперь пишет раннюю загрузку модуля (`/etc/modules-load.d/nf_conntrack.conf` — без неё после ребута `nf_conntrack_*` остаётся на дефолтах ядра, `max=262144`, ровно та таблица что переполнилась) и персистит hashsize через `/etc/modprobe.d/nf_conntrack.conf`
+- Новая функция `configure_memory_budget()` — динамически по объёму RAM задаёт `net.ipv4.tcp_mem` (потолок ~RAM/3; дефолт ядра ~9% RAM упирается в «TCP: out of memory» на нагруженных релеях), `net.ipv4.udp_mem` и `vm.min_free_kbytes` (резерв GFP_ATOMIC, чтобы NIC-драйвер не дропал пакеты при 300k+ pps); поэтому `tcp_mem`/`udp_mem`/`min_free_kbytes` больше не хардкодятся в sysctl.conf — они зависят от размера сервера
+
 **Файлы оптимизации сети:**
 
-- `configs/network-tune.sh` — программный RPS/RFS: устанавливает `rps_cpus` и `rps_flow_cnt` на всех очередях сетевых интерфейсов; содержит `is_safe_interface()` и `cpu_index_mask()`
+- `configs/network-tune.sh` — программный RPS/RFS: устанавливает `rps_cpus` и `rps_flow_cnt` на всех очередях сетевых интерфейсов; содержит `is_safe_interface()` и `cpu_index_mask()`; `configure_conntrack()`/`configure_memory_budget()` — анти-DDoS хардening, см. выше
 - `configs/network-tune.service` — systemd-unit для `network-tune.sh`
-- `configs/multiqueue-tune.sh` — аппаратный multiqueue: хелперы `parse_channels()` (awk, 6 значений за проход), `is_pos_int()`, `get_current_hw_queues()`, `cpu_index_mask()` (hex-маска для CPU с индексом >32 через awk, без переполнения bash); `is_safe_interface()` пропускает slave-интерфейсы bond (`/master`), интерфейсы с carrier=0 (link DOWN) и operstate != up; ring buffer resize (`ethtool -G`) удалён; если драйвер поддерживает combined channels — `ethtool -L combined N`, иначе (mlx4_en и подобные) — `ethtool -L rx N tx N`; число активных очередей — на stdout, логи — в stderr; настраивает XPS, IRQ affinity, conntrack
+- `configs/multiqueue-tune.sh` — аппаратный multiqueue: хелперы `parse_channels()` (awk, 6 значений за проход), `is_pos_int()`, `get_current_hw_queues()`, `cpu_index_mask()` (hex-маска для CPU с индексом >32 через awk, без переполнения bash); `is_safe_interface()` пропускает slave-интерфейсы bond (`/master`), интерфейсы с carrier=0 (link DOWN) и operstate != up; ring buffer resize (`ethtool -G`) удалён; если драйвер поддерживает combined channels — `ethtool -L combined N`, иначе (mlx4_en и подобные) — `ethtool -L rx N tx N`; число активных очередей — на stdout, логи — в stderr; настраивает XPS, IRQ affinity, conntrack и динамический бюджет памяти (`configure_conntrack()`/`configure_memory_budget()` — см. выше)
 - `configs/multiqueue-tune.service` — systemd-unit для `multiqueue-tune.sh`
-- `configs/hybrid-tune.sh` — гибридный режим: те же хелперы `is_safe_interface()`, `cpu_index_mask()`, `parse_channels()`; ring buffer resize удалён; число активных очередей — на stdout для расчёта RPS-маски через `configure_rps_remaining`; summary: `hw queues: ...`
-- `configs/sysctl.conf` — базовый sysctl для VPN/relay-нод; `disable_ipv6=1`; `arp_announce=2`/`arp_ignore=1`
-- `configs/vpn/sysctl.conf` — VPN-профиль sysctl (`MON_OPT_PROFILE=vpn`): агрессивный тюнинг для VPN/прокси-нод; `disable_ipv6=1`; `file-max 2097152`; `nf_conntrack_max 2097152`; `arp_announce=2`/`arp_ignore=1`
-- `configs/panel/sysctl.conf` — универсальный профиль sysctl (`MON_OPT_PROFILE=panel`): умеренный тюнинг для панелей и смешанных нагрузок; IPv6 не отключается; `file-max 524288`; `nf_conntrack_max 262144`; расслабленные conntrack-таймауты; `arp_announce=2`/`arp_ignore=1`
+- `configs/hybrid-tune.sh` — гибридный режим: те же хелперы `is_safe_interface()`, `cpu_index_mask()`, `parse_channels()`; ring buffer resize удалён; число активных очередей — на stdout для расчёта RPS-маски через `configure_rps_remaining`; summary: `hw queues: ...`; тот же `configure_conntrack()`/`configure_memory_budget()`, что и в остальных tune-скриптах
+- `configs/sysctl.conf` — базовый sysctl для VPN/relay-нод (fallback-копия, идентична `configs/vpn/sysctl.conf`); `disable_ipv6=1`; `arp_announce=2`/`arp_ignore=1`; анти-DDoS хардening conntrack — см. выше
+- `configs/vpn/sysctl.conf` — VPN-профиль sysctl (`MON_OPT_PROFILE=vpn`): агрессивный тюнинг для VPN/прокси-нод; `disable_ipv6=1`; `file-max 2097152`; `nf_conntrack_max 2097152`; `arp_announce=2`/`arp_ignore=1`; анти-DDoS хардening conntrack — см. выше
+- `configs/panel/sysctl.conf` — универсальный профиль sysctl (`MON_OPT_PROFILE=panel`): умеренный тюнинг для панелей и смешанных нагрузок; IPv6 не отключается; `file-max 524288`; `nf_conntrack_max 262144`; расслабленные conntrack-таймауты (кроме SYN — тоже сокращены); `arp_announce=2`/`arp_ignore=1`; анти-DDoS хардening conntrack — см. выше
 
 **Быстрая установка ноды (one-liner):**
 
@@ -166,12 +178,32 @@ bash install.sh --unattended
 - `install_nic_tune()` — универсальная установка: копирует скрипт и service-файл для выбранного режима
 - `enable_tune_service()` — активирует и запускает tune-сервис: снимает зависший таймер `mon-tune-rollback` от старых версий установщика (`systemctl stop`/`reset-failed` для `.timer` и `.service`), затем выполняет `daemon-reload`, `enable`, `restart`; если `restart` не удался — fallback на прямой запуск скрипта; подтверждения сети и авто-отката нет, оптимизации применяются сразу и навсегда
 
+## Анти-DDoS защита
+
+Многослойная защита от DDoS-атак на нодах, независимая от `network-tune`/`multiqueue-tune`/`hybrid-tune` (conntrack-харденинг оттуда остаётся первой линией обороны). Три слоя:
+
+1. **Дежурный режим** — никаких лимитов по IP в мирное время, нулевые накладные расходы и ложные срабатывания.
+2. **Аварийный режим («под атакой»)** — набор iptables-правил в отдельной цепочке `ANTIDDOS` (не в raw INPUT — переживает `ufw --force reset` от Firewall Profiles): whitelist ACCEPT первым → established ACCEPT → SSH(22)/node-API(9100) ACCEPT (никогда не дропаются) → drop INVALID (в связке с `nf_conntrack_tcp_loose=0`) → на автоопределённые клиентские порты: SYNPROXY (проверка TCP-рукопожатия до conntrack — от SYN-флуда со спуфнутых IP), connlimit (лимит одновременных соединений с IP) и hashlimit (лимит новых соединений/сек с IP). Джамп из INPUT в `ANTIDDOS` ставится только пока режим активен.
+3. **Автодетект (watchdog)** — локальный сторож на ноде читает сигналы из `/proc` (заполнение conntrack, всплеск SyncookiesSent, pps при мелком среднем пакете, softirq%) с консервативными порогами: сильный сигнал включает режим сразу, слабые — после удержания ~45 с; авто-выключение после ~15 мин тишины. Ручной пин (`source=manual`) автоматика не снимает — только админ. Self-heal: watchdog переставляет джамп в INPUT после стороннего `ufw reset`.
+
+**Whitelist** — отдельный ipset-набор `antiddos_allow` на диске ноды (переживает ребут и недоступность панели). Панель наполняет его ежечасно: авто-часть (IP всех активных нод + IP панели) + ручная часть (CIDR-подсети CDN и т.п., настраиваются в панели). ACCEPT по нему работает только в аварийном режиме.
+
+**Файлы:**
+- `configs/ddos-watchdog.sh` — самодостаточный host-скрипт (не зависит от Docker/панели). CLI: `loop` (systemd-сервис — детект + self-heal), `enable-manual`/`disable-manual`, `watchdog-on`/`watchdog-off`, `apply`/`clear`, `selfheal`, `whitelist-sync` (IP через stdin), `detect-ports`, `status`. Состояние — `/opt/monitoring/antiddos/state.json` (mode/source/since/reason/watchdog). Тюнинг-пороги в шапке скрипта, переопределяются через `/opt/monitoring/antiddos/config`.
+- `configs/ddos-watchdog.service` — systemd-unit (`Type=simple`, `Restart=always`, `ExecStart=... loop`).
+
+**Установка:** кнопка «Установить watchdog на все» в панели (`POST /antiddos/install-all` → на каждой ноде `POST /api/antiddos/install`) — не требует обновления ноды, ставит скрипт+сервис на хост и включает watchdog по умолчанию. Так же раскатывается на уже существующие ноды.
+
+**Требования к ядру:** SYNPROXY использует `xt_SYNPROXY`/`nf_synproxy_core` (best-effort — если модули недоступны, SYNPROXY пропускается, connlimit/hashlimit/drop-invalid остаются), плюс `connlimit` и `hashlimit`. На Ubuntu 24 iptables = iptables-nft (тот же стек, что UFW/Docker/ipset_manager).
+
+Подробности API и полей БД — в [panel/DOCUMENTATION.md](panel/DOCUMENTATION.md#анти-ddos-защита) и [node/DOCUMENTATION.md](node/DOCUMENTATION.md#анти-ddos).
+
 ## Компоненты
 
 Подробная документация по каждому компоненту:
 
-- [panel/DOCUMENTATION.md](panel/DOCUMENTATION.md) — веб-панель: API, БД, конфигурация, безопасность (v10.14.7)
-- [node/DOCUMENTATION.md](node/DOCUMENTATION.md) — нода-агент: API, метрики, HAProxy, трафик, Remnawave, Firewall Profiles
+- [panel/DOCUMENTATION.md](panel/DOCUMENTATION.md) — веб-панель: API, БД, конфигурация, безопасность (v10.15.0)
+- [node/DOCUMENTATION.md](node/DOCUMENTATION.md) — нода-агент: API, метрики, HAProxy, трафик, Remnawave, Firewall Profiles, Анти-DDoS
 
 ## Архитектура
 

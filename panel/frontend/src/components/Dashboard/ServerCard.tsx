@@ -341,6 +341,12 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
                 <span className="font-medium">{t('cache.cached')}</span>
               </div>
             )}
+            {server.antiddos_emergency_mode && (
+              <div className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-red-500/15 border border-red-500/25 text-[10px] text-red-400" title={t('anti_ddos.mode_emergency')}>
+                <ShieldAlert className="w-2.5 h-2.5" />
+                <span className="font-medium">{t('anti_ddos.mode_emergency')}</span>
+              </div>
+            )}
             <StatusBadge status={server.status} />
           </div>
         </div>
@@ -636,6 +642,7 @@ const ServerCard = memo(ServerCardComponent, (prevProps, nextProps) => {
   if (a.id !== b.id) return false
   if (a.status !== b.status) return false
   if (a.is_active !== b.is_active) return false
+  if (a.antiddos_emergency_mode !== b.antiddos_emergency_mode) return false
   if (prevProps.compact !== nextProps.compact) return false
   if (prevProps.detailLevel !== nextProps.detailLevel) return false
   if (prevProps.index !== nextProps.index) return false

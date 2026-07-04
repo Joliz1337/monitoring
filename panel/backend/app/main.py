@@ -15,7 +15,7 @@ logging.basicConfig(
 
 from app.database import init_db, async_session
 from app.config import get_settings
-from app.routers import servers, server_deploy, auth_router, proxy, settings as settings_router, system, bulk_actions, blocklist, remnawave, alerts, billing, backup, xray_monitor, ssh_security, infra, notes, wildcard_ssl, haproxy_profiles, torrent_blocker, firewall_profiles
+from app.routers import servers, server_deploy, auth_router, proxy, settings as settings_router, system, bulk_actions, blocklist, remnawave, alerts, billing, backup, xray_monitor, ssh_security, infra, notes, wildcard_ssl, haproxy_profiles, torrent_blocker, firewall_profiles, antiddos
 from app.services.metrics_collector import start_collector, stop_collector
 from app.services.blocklist_manager import get_blocklist_manager
 from app.services.xray_stats_collector import start_xray_stats_collector, stop_xray_stats_collector
@@ -26,6 +26,7 @@ from app.services.telegram_bot import start_telegram_bot_service, stop_telegram_
 from app.services.time_sync import start_time_sync, stop_time_sync
 from app.services.wildcard_ssl import start_wildcard_ssl_manager, stop_wildcard_ssl_manager
 from app.services.torrent_blocker import start_torrent_blocker, stop_torrent_blocker
+from app.services.antiddos_manager import start_antiddos_manager, stop_antiddos_manager
 from app.services.http_client import init_http_clients, close_http_clients
 from app.services.pki import load_or_create_keygen
 from app.security import SecurityMiddleware
@@ -39,7 +40,7 @@ from app.models import (  # noqa: F401
     InfraAccount, InfraProject, InfraProjectServer,
     SharedNote, SharedTask, WildcardCertificate,
     HAProxyConfigProfile, HAProxySyncLog,
-    TorrentBlockerSettings, PKIKeygen,
+    TorrentBlockerSettings, PKIKeygen, AntiDdosSettings,
 )
 
 settings = get_settings()
@@ -101,6 +102,7 @@ async def lifespan(app: FastAPI):
     await start_time_sync()
     await start_wildcard_ssl_manager()
     await start_torrent_blocker()
+    await start_antiddos_manager()
 
     # Cache warming runs in background — doesn't block /health
     warmup_task = asyncio.create_task(_deferred_startup())
@@ -109,6 +111,7 @@ async def lifespan(app: FastAPI):
     
     warmup_task.cancel()
     await close_http_clients()
+    await stop_antiddos_manager()
     await stop_torrent_blocker()
     await stop_wildcard_ssl_manager()
     await stop_time_sync()
@@ -196,6 +199,7 @@ app.include_router(wildcard_ssl.router)
 app.include_router(haproxy_profiles.router)
 app.include_router(firewall_profiles.router)
 app.include_router(torrent_blocker.router)
+app.include_router(antiddos.router)
 
 try:
     from app.routers._internal import router as ext_router

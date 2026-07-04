@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.middleware.gzip import GZipMiddleware
 
 from app.config import get_settings
-from app.routers import haproxy, metrics, traffic, system, ipset, remnawave, speedtest, ssh, ssl, firewall_profile
+from app.routers import haproxy, metrics, traffic, system, ipset, remnawave, speedtest, ssh, ssl, firewall_profile, antiddos
 from app.security import get_security_manager, SecurityMiddleware
 from app.services.traffic_collector import get_traffic_collector
 from app.services.ipset_manager import get_ipset_manager
@@ -83,6 +83,7 @@ app.include_router(speedtest.router)
 app.include_router(ssh.router)
 app.include_router(ssl.router)
 app.include_router(firewall_profile.router)
+app.include_router(antiddos.router)
 
 
 @app.get("/health")

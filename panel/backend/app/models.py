@@ -86,6 +86,14 @@ class Server(Base):
     uses_shared_cert = Column(Boolean, default=False, server_default="false", nullable=False)
     haproxy_sync_status = Column(String(20), nullable=True)
 
+    # Anti-DDoS emergency mode state (mirrored from node ddos-watchdog)
+    antiddos_emergency_mode = Column(Boolean, default=False, server_default="false", nullable=False)
+    antiddos_source = Column(String(10), nullable=True)   # auto | manual | none
+    antiddos_since = Column(DateTime(timezone=True), nullable=True)
+    antiddos_reason = Column(String(200), nullable=True)
+    antiddos_watchdog = Column(Boolean, default=True, server_default="true", nullable=False)
+    antiddos_last_sync_at = Column(DateTime(timezone=True), nullable=True)
+
 
 class ServerCache(Base):
     """Отдельная таблица для тяжёлых JSON-кешей, часто обновляемых фоновыми задачами.
@@ -404,6 +412,28 @@ class TorrentBlockerBan(Base):
 
 Index("ix_torrent_blocker_bans_banned_at", TorrentBlockerBan.banned_at)
 Index("ix_torrent_blocker_bans_expires_at", TorrentBlockerBan.expires_at)
+
+
+# ==================== Anti-DDoS ====================
+
+class AntiDdosSettings(Base):
+    """Настройки анти-DDoS защиты (singleton, одна запись).
+
+    Whitelist из двух частей: авто (IP всех нод + IP панели, вычисляется на лету)
+    и ручная (user_cidrs — подсети CDN и пр.). Панель ежечасно объединяет их и
+    рассылает нодам одним набором."""
+    __tablename__ = "antiddos_settings"
+
+    id = Column(Integer, primary_key=True)
+    enabled = Column(Boolean, default=True)
+    whitelist_push_interval = Column(Integer, default=3600)   # seconds
+    status_poll_interval = Column(Integer, default=60)        # seconds
+    watchdog_default_enabled = Column(Boolean, default=True)
+    user_cidrs = Column(Text, nullable=True)                  # JSON array of IP/CIDR
+
+    last_push_at = Column(DateTime(timezone=True), nullable=True)
+    last_push_status = Column(String(20), nullable=True)
+    last_push_count = Column(Integer, default=0)
 
 
 # ==================== Server Alerts ====================

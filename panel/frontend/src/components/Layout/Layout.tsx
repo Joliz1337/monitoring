@@ -16,6 +16,7 @@ import {
   ShieldBan,
   FileCode2,
   Flame,
+  Siren,
   KeyRound,
   Radio,
   Bell,
@@ -81,6 +82,7 @@ export default function Layout() {
     { to: `/${uid}/wildcard-ssl`, icon: ShieldCheck, label: t('wildcard_ssl.title'), end: false },
     { to: `/${uid}/updates`, icon: Package, label: t('common.updates'), end: false },
     { to: `/${uid}/system-optimizations`, icon: Settings2, label: t('sys_opt.title'), end: false },
+    { to: `/${uid}/anti-ddos`, icon: Siren, label: t('anti_ddos.title'), end: false },
     { to: `/${uid}/settings`, icon: Settings, label: t('common.settings'), end: false },
   ]
   

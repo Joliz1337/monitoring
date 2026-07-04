@@ -51,6 +51,15 @@ configure_conntrack() {
 
     [ -f "$hashsize_file" ] || return 0
 
+    # nf_conntrack may load after systemd-sysctl at boot (pulled in by Docker),
+    # leaving nf_conntrack_* at kernel defaults (max=262144 — the exact table
+    # that overflowed under flood). Load the module early on next boots and
+    # re-apply our sysctl config now that the module is present.
+    echo "nf_conntrack" > /etc/modules-load.d/nf_conntrack.conf 2>/dev/null || true
+    if [ -f /etc/sysctl.d/99-vless-tuning.conf ]; then
+        sysctl -p /etc/sysctl.d/99-vless-tuning.conf >/dev/null 2>&1 || true
+    fi
+
     local conntrack_max ideal_hashsize min_hashsize current
     conntrack_max=$(sysctl -n net.netfilter.nf_conntrack_max 2>/dev/null || echo 2097152)
     ideal_hashsize=$(( conntrack_max / 4 ))
@@ -60,8 +69,36 @@ configure_conntrack() {
     [ $ideal_hashsize -lt $min_hashsize ] && ideal_hashsize=$min_hashsize
     [ $ideal_hashsize -gt 2097152 ] && ideal_hashsize=2097152
 
+    # Persist for future module loads: with the default hash table 2M entries
+    # mean ~32-entry bucket chains and CPU burns on lookups during floods
+    echo "options nf_conntrack hashsize=$ideal_hashsize" > /etc/modprobe.d/nf_conntrack.conf 2>/dev/null || true
+
     current=$(cat "$hashsize_file" 2>/dev/null || echo 0)
     [ "$current" -lt "$ideal_hashsize" ] && echo "$ideal_hashsize" > "$hashsize_file" 2>/dev/null || true
+}
+
+# Global socket memory budgets scale with RAM, so they live here instead of
+# sysctl.conf (one config for any server size). Kernel defaults cap tcp_mem
+# at ~9% of RAM — busy relays hit "TCP: out of memory" stalls; raise the
+# ceiling to ~RAM/3. min_free_kbytes reserves GFP_ATOMIC memory: without it
+# the NIC driver drops packets at 300k+ pps.
+configure_memory_budget() {
+    local mem_kb page_size pages
+    mem_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null)
+    [ -n "$mem_kb" ] && [ "$mem_kb" -gt 0 ] 2>/dev/null || return 0
+    page_size=$(getconf PAGE_SIZE 2>/dev/null)
+    [[ "$page_size" =~ ^[0-9]+$ ]] || page_size=4096
+    pages=$(( mem_kb * 1024 / page_size ))
+
+    sysctl -qw net.ipv4.tcp_mem="$(( pages / 6 )) $(( pages / 4 )) $(( pages / 3 ))" 2>/dev/null || true
+    sysctl -qw net.ipv4.udp_mem="$(( pages / 12 )) $(( pages / 8 )) $(( pages / 6 ))" 2>/dev/null || true
+
+    local min_free current_min_free
+    min_free=$(( mem_kb / 128 ))
+    [ "$min_free" -lt 32768 ] && min_free=32768
+    [ "$min_free" -gt 262144 ] && min_free=262144
+    current_min_free=$(sysctl -n vm.min_free_kbytes 2>/dev/null || echo 0)
+    [ "$current_min_free" -lt "$min_free" ] && sysctl -qw vm.min_free_kbytes="$min_free" 2>/dev/null || true
 }
 
 parse_channels() {
@@ -220,6 +257,7 @@ is_safe_interface() {
 
 main() {
     configure_conntrack
+    configure_memory_budget
 
     for dev_path in /sys/class/net/*; do
         [ -d "$dev_path" ] || continue
@@ -239,6 +277,8 @@ main() {
     echo "CPU cores: $(nproc)"
     echo "Conntrack max: $(sysctl -n net.netfilter.nf_conntrack_max 2>/dev/null || echo 'N/A')"
     echo "Conntrack hashsize: $(cat /sys/module/nf_conntrack/parameters/hashsize 2>/dev/null || echo 'N/A')"
+    echo "tcp_mem (pages): $(sysctl -n net.ipv4.tcp_mem 2>/dev/null || echo 'N/A')"
+    echo "min_free_kbytes: $(sysctl -n vm.min_free_kbytes 2>/dev/null || echo 'N/A')"
     echo "RPS flow entries: $(cat /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null || echo 'N/A')"
     echo "Configured interfaces:"
     for dev_path in /sys/class/net/*; do

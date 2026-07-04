@@ -103,6 +103,7 @@ export interface Server {
   pki_enabled?: boolean
   uses_shared_cert?: boolean
   auth_kind?: 'shared' | 'per_server' | 'legacy'
+  antiddos_emergency_mode?: boolean
 }
 
 export interface TimezoneInfo {
@@ -1007,6 +1008,58 @@ export const systemApi = {
   
   // Panel server statistics (CPU, RAM, Disk)
   getServerStats: () => api.get<PanelServerStats>('/system/stats'),
+}
+
+// Anti-DDoS types
+export interface AntiDdosSettings {
+  enabled: boolean
+  whitelist_push_interval: number
+  status_poll_interval: number
+  watchdog_default_enabled: boolean
+  user_cidrs: string[]
+  last_push_at: string | null
+  last_push_status: string | null
+  last_push_count: number
+}
+
+export interface NodeAntiDdosState {
+  server_id: number
+  server_name: string
+  emergency_mode: boolean
+  source: string          // auto | manual | none
+  reason: string
+  watchdog: boolean
+  since: string | null
+  last_sync_at: string | null
+}
+
+export interface AntiDdosStatus {
+  nodes: NodeAntiDdosState[]
+  active_count: number
+  total: number
+}
+
+export const antiDdosApi = {
+  getSettings: () => api.get<AntiDdosSettings>('/antiddos/settings'),
+  updateSettings: (data: Partial<AntiDdosSettings>) =>
+    api.put<AntiDdosSettings>('/antiddos/settings', data),
+  getStatus: () => api.get<AntiDdosStatus>('/antiddos/status'),
+  emergencyAll: (enabled: boolean) =>
+    api.post<{ success: boolean; nodes: number; ok: number }>('/antiddos/emergency-all', { enabled }),
+  pushWhitelist: () =>
+    api.post<{ success: boolean; whitelist_size: number; nodes: number; ok: number }>('/antiddos/whitelist/push'),
+  installAll: () =>
+    api.post<{ success: boolean; nodes: number; ok: number }>('/antiddos/install-all'),
+
+  // per-node (proxy)
+  setNodeEmergency: (serverId: number, enabled: boolean) =>
+    api.post(`/proxy/${serverId}/antiddos/emergency`, { enabled }),
+  setNodeWatchdog: (serverId: number, enabled: boolean) =>
+    api.post(`/proxy/${serverId}/antiddos/watchdog`, { enabled }),
+  getNodeStatus: (serverId: number) =>
+    api.get(`/proxy/${serverId}/antiddos/status`, { timeout: 20000 }),
+  installNode: (serverId: number) =>
+    api.post(`/proxy/${serverId}/antiddos/install`, {}, { timeout: 70000 }),
 }
 
 // Remnawave types

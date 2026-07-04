@@ -15,6 +15,7 @@ API агент для сбора метрик сервера, отслежива
 - **SSH Security** — управление SSH-безопасностью сервера: настройки sshd, fail2ban, SSH-ключи
 - **Wildcard SSL** — приём и деплой wildcard сертификатов от панели: запись файлов на хост, бэкап, откат при ошибке reload, валидация PEM через openssl
 - **Firewall Profiles** — атомарное применение UFW-профилей от панели: backup → reset → apply → enable, авторолбэк при ошибке, node-API-port-guard (порт 9100), drift-детекция по SHA256-хэшу
+- **Анти-DDoS** — многослойная защита: дежурный режим без лимитов, аварийный режим (SYNPROXY + connlimit + hashlimit в отдельной iptables-цепочке `ANTIDDOS`), автодетект атаки по сигналам из `/proc` (watchdog), whitelist на ipset, переживающий ребут и недоступность панели
 
 ## Быстрый старт
 
@@ -92,13 +93,13 @@ node/
 │   ├── models/
 │   │   ├── ssl.py        # Pydantic модели: WildcardDeployRequest/Response, WildcardStatusResponse
 │   │   └── firewall_profile.py  # Pydantic модели: ProfileRule, ProfileApplyRequest/Response, ProfileStateResponse
-│   ├── routers/          # API эндпоинты (metrics, haproxy, traffic, speedtest, ssh, ssl, firewall и др.)
+│   ├── routers/          # API эндпоинты (metrics, haproxy, traffic, speedtest, ssh, ssl, firewall, antiddos и др.)
 │   └── services/         # Сбор метрик, HAProxy, трафик, speedtest runner, SSH менеджер
 │       ├── ssl_manager.py          # Деплой wildcard сертификатов: запись на хост, бэкап, откат, валидация
-│       └── firewall_manager.py     # UFW: apply_profile, backup/restore, compute_rules_hash, get_full_state
+│       ├── firewall_manager.py     # UFW: apply_profile, backup/restore, compute_rules_hash, get_full_state
+│       └── antiddos_manager.py     # Тонкая обёртка над ddos-watchdog.sh (nsenter): enable/disable emergency, watchdog, whitelist sync
 ├── scripts/
-│   ├── apply-update.sh   # Логика обновления (запускается из свежего репо)
-│   └── network-tune.sh   # RPS/RFS оптимизация сети
+│   └── apply-update.sh   # Логика обновления (запускается из свежего репо)
 ├── nginx/                # Reverse proxy с SSL
 ├── docker-compose.yml
 ├── update.sh             # Скачивает репо и запускает apply-update.sh
@@ -470,6 +471,53 @@ data: {"message": "error description"}
 - `node/app/services/firewall_manager.py` — `FirewallManager`: `apply_profile`, `_ensure_ufw`, `_ufw_available`, `_install_ufw`, `_run_host`, `_backup_state`, `_restore_state`, `compute_rules_hash`, `get_full_state`, `_rule_already_present`, `_normalize_from`
 - `node/app/routers/firewall_profile.py` — API роутер (prefix `/api/firewall`)
 - `node/app/main.py` — регистрация роутера с `verify_api_key`
+
+### Анти-DDoS
+
+Многослойная защита от DDoS-атак: дежурный режим без лимитов → аварийный режим с iptables-правилами в отдельной цепочке `ANTIDDOS` → автодетект атаки локальным watchdog-сервисом. Вся логика правил и детекции живёт в одном host-скрипте `configs/ddos-watchdog.sh` — нода лишь дёргает его CLI-команды через `nsenter`, поэтому набор правил идентичен независимо от того, кто включил режим (watchdog или панель).
+
+Без auth-зависимости (как остальные роутеры ноды — mTLS терминируется на nginx перед uvicorn).
+
+| Метод | Endpoint | Описание |
+|-------|----------|----------|
+| GET | /api/antiddos/status | Текущее состояние: installed, mode (on/off), source (auto/manual/none), since, reason, watchdog (on/off), watchdog_active, client_ports |
+| POST | /api/antiddos/emergency | Включить/выключить аварийный режим вручную (`source=manual` — автоматика не снимает) |
+| POST | /api/antiddos/watchdog | Включить/выключить автодетект (сервис watchdog продолжает работать, но не трогает правила) |
+| POST | /api/antiddos/whitelist/sync | Полная замена ipset-набора `antiddos_allow` (принимает `ips: string[]`) |
+| POST | /api/antiddos/install | Установить/обновить `ddos-watchdog.sh` + systemd-сервис на хосте, включить (`daemon-reload` → `enable` → `restart`) |
+| GET | /api/antiddos/client-ports | Автоопределённые клиентские TCP-порты (слушающие, кроме 22/9100) |
+
+**Аварийный режим (цепочка `ANTIDDOS`, джамп из INPUT только пока активен):**
+1. ACCEPT по whitelist (`antiddos_allow`, ipset `hash:net`) — первым
+2. ACCEPT established/related соединений
+3. ACCEPT SSH (22) и node API (9100) — никогда не дропаются
+4. DROP INVALID (эффективно вместе с `nf_conntrack_tcp_loose=0` из системных оптимизаций)
+5. На автоопределённые клиентские порты — SYNPROXY (проверка TCP-рукопожатия до создания conntrack-записи, гасит SYN-флуд со спуфнутых IP; best-effort — если `xt_SYNPROXY`/`nf_synproxy_core` недоступны, шаг пропускается), connlimit (лимит одновременных соединений с одного IP) и hashlimit (лимит новых соединений/сек с одного IP)
+
+Джамп ставится только на время активного режима — в дежурном режиме никаких дополнительных правил и накладных расходов.
+
+**Watchdog (автодетект, `ddos-watchdog.sh loop` — systemd-сервис `ddos-watchdog.service`):**
+- Сигналы читаются из `/proc` каждые ~10 сек: заполнение conntrack-таблицы (%), рост `SyncookiesSent` за цикл, pps при малом среднем размере пакета, загрузка softirq
+- Сильный сигнал (например резкий рост SyncookiesSent) включает аварийный режим немедленно; слабые сигналы — только после устойчивого удержания ~45 сек (защита от ложных срабатываний на вечернем пике)
+- Автовыключение — после ~15 мин без сигналов
+- Ручной пин (`source=manual`, включённый через `POST /api/antiddos/emergency`) автоматика не снимает — выключить может только явный вызов `POST /api/antiddos/emergency {enabled: false}`
+- **Self-heal**: если сторонний процесс (например применение Firewall Profile через `ufw --force reset`) снёс джамп в `ANTIDDOS`, watchdog восстанавливает его в течение одного цикла
+- Тюнинг-пороги (интервал, connlimit/newrate, пороги детекции) заданы константами в шапке `ddos-watchdog.sh`, переопределяются файлом `/opt/monitoring/antiddos/config` без правки самого скрипта
+
+**Whitelist:** ipset-набор `antiddos_allow` (`hash:net`), хранится на диске ноды (`/opt/monitoring/antiddos/whitelist.json`) — переживает ребут и недоступность панели. ACCEPT по нему действует только в аварийном режиме (в дежурном режиме проходит весь трафик без ipset-проверок). Панель наполняет набор ежечасно через `POST /api/antiddos/whitelist/sync`.
+
+**CLI-команды `ddos-watchdog.sh`** (вызываются нодой через `nsenter`, доступны и вручную на хосте): `loop`, `enable-manual`, `disable-manual`, `watchdog-on`, `watchdog-off`, `apply`, `clear`, `selfheal`, `whitelist-sync` (IP через stdin), `detect-ports`, `status`. Состояние — `/opt/monitoring/antiddos/state.json` (mode/source/since/reason/watchdog).
+
+**Установка:** `install.sh`/обновление ноды **не** ставит watchdog автоматически — раскатка идёт по кнопке «Установить watchdog на все» в панели (см. panel/DOCUMENTATION.md), которая качает `configs/ddos-watchdog.sh`/`.service` с GitHub и передаёт их на ноду через `POST /api/antiddos/install`. Watchdog включён по умолчанию сразу после установки.
+
+**Требования к ядру:** `xt_SYNPROXY`/`nf_synproxy_core`, `connlimit`, `hashlimit`. На Ubuntu 24 iptables работает через nft-бэкенд (iptables-nft) — тот же стек, что UFW/Docker/ipset_manager.
+
+**Файлы:**
+- `configs/ddos-watchdog.sh` — весь host-скрипт: правила, детект, self-heal, CLI
+- `configs/ddos-watchdog.service` — systemd-unit (`Type=simple`, `Restart=always`)
+- `node/app/services/antiddos_manager.py` — обёртка над скриптом через `get_host_executor()` (nsenter); валидация IP/CIDR перед whitelist-sync; `install()` пишет скрипт+сервис на хост и запускает
+- `node/app/routers/antiddos.py` — API роутер (prefix `/api/antiddos`)
+- `node/app/main.py` — регистрация роутера
 
 ## Производительность
 

@@ -45,6 +45,7 @@ const HAProxyConfigs = lazyRetry(() => import('./pages/HAProxyConfigs'))
 const FirewallProfiles = lazyRetry(() => import('./pages/FirewallProfiles'))
 const SystemOptimizations = lazyRetry(() => import('./pages/SystemOptimizations'))
 const TorrentBlocker = lazyRetry(() => import('./pages/TorrentBlocker'))
+const AntiDdos = lazyRetry(() => import('./pages/AntiDdos'))
 
 const ExtPageLazy = isExtEnabled 
   ? lazyRetry(() => import('./pages/_internal/ExtPage'))
@@ -194,6 +195,7 @@ export default function App() {
           <Route path="settings" element={<SuspenseWithBoundary><Settings /></SuspenseWithBoundary>} />
           <Route path="updates" element={<SuspenseWithBoundary><Updates /></SuspenseWithBoundary>} />
           <Route path="system-optimizations" element={<SuspenseWithBoundary><SystemOptimizations /></SuspenseWithBoundary>} />
+          <Route path="anti-ddos" element={<SuspenseWithBoundary><AntiDdos /></SuspenseWithBoundary>} />
           {ExtPageLazy && (
             <Route 
               path="ip-search"
