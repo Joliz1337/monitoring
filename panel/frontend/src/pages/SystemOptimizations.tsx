@@ -52,6 +52,7 @@ export default function SystemOptimizations() {
 
   const [applyingNodes, setApplyingNodes] = useState<Set<number>>(new Set())
   const [removingNodes, setRemovingNodes] = useState<Set<number>>(new Set())
+  const [updatingAll, setUpdatingAll] = useState(false)
   const [results, setResults] = useState<Record<string, { success: boolean; message: string }>>({})
 
   const [modeDropdown, setModeDropdown] = useState<number | null>(null)
@@ -261,6 +262,33 @@ export default function SystemOptimizations() {
     return !node.version || node.version !== baseInfo.optimizations.latest_version
   }
 
+  // Bulk re-apply on every node that has an update available, preserving each
+  // node's own profile (vpn/panel) and NIC mode. A node with NIC mode "none"
+  // gets the safe software default (rps).
+  const handleUpdateAll = async () => {
+    if (updatingAll) return
+    const targets = Array.from(nodes.values()).filter(
+      n => n.loadState === 'loaded' && n.status === 'online' && n.installed && needsUpdate(n)
+    )
+    if (targets.length === 0) return
+
+    setUpdatingAll(true)
+    const queue = [...targets]
+    const POOL_SIZE = 6
+    const worker = async () => {
+      while (queue.length > 0) {
+        const node = queue.shift()
+        if (!node) break
+        const profile = node.optProfile || 'vpn'
+        const nic = node.nicMode === 'multiqueue' || node.nicMode === 'hybrid' ? node.nicMode : 'rps'
+        await handleApply(node.id, node.name, nic, profile)
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(POOL_SIZE, queue.length) }, worker))
+    setUpdatingAll(false)
+    toast.success(t('sys_opt.update_all_done', { count: targets.length }))
+  }
+
   const getNicModeLabel = (mode: string): string => {
     switch (mode) {
       case 'hybrid': return t('sys_opt.nic_hybrid')
@@ -285,6 +313,9 @@ export default function SystemOptimizations() {
   const vpnNodes = nodesList.filter(n => n.installed && (n.optProfile === 'vpn' || !n.optProfile))
   const panelNodes = nodesList.filter(n => n.installed && n.optProfile === 'panel')
   const loadingOrOffline = nodesList.filter(n => (n.loadState !== 'loaded' || n.status === 'offline') && !n.installed)
+  const updatableCount = nodesList.filter(
+    n => n.loadState === 'loaded' && n.status === 'online' && n.installed && needsUpdate(n)
+  ).length
 
   // Рендер карточки ноды
   // Диагностика NIC/CPU: аппаратный multiqueue, число очередей, ядра/потоки —
@@ -361,7 +392,7 @@ export default function SystemOptimizations() {
                     {node.installed && !node.nodeOutdated && (
                       <span className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-medium rounded-full border ${getNicModeBadgeClass(node.nicMode)}`}>
                         <Cpu className="w-2.5 h-2.5" />
-                        {getNicModeLabel(node.nicMode)}
+                        {t('sys_opt.nic_label')}: {getNicModeLabel(node.nicMode)}
                       </span>
                     )}
                     {node.installed && !node.nodeOutdated && node.nicInfo && renderNicDiag(node.nicInfo)}
@@ -759,12 +790,24 @@ export default function SystemOptimizations() {
               {t('sys_opt.latest_version')}: <span className="font-mono text-dark-300">v{baseInfo.optimizations.latest_version}</span>
             </span>
           )}
+          {updatableCount > 0 && (
+            <motion.button
+              onClick={handleUpdateAll}
+              className="btn btn-primary"
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.98 }}
+              disabled={updatingAll}
+            >
+              {updatingAll ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+              {updatingAll ? t('sys_opt.updating_all') : `${t('sys_opt.update_all')} (${updatableCount})`}
+            </motion.button>
+          )}
           <motion.button
             onClick={handleRefresh}
             className="btn btn-secondary"
             whileHover={{ scale: 1.02 }}
             whileTap={{ scale: 0.98 }}
-            disabled={isChecking}
+            disabled={isChecking || updatingAll}
           >
             <RefreshCw className={`w-4 h-4 ${isChecking ? 'animate-spin' : ''}`} />
             {isChecking ? t('sys_opt.checking') : t('common.refresh')}
