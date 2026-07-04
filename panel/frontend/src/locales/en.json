@@ -744,7 +744,7 @@
     "tab_whitelist": "Whitelist",
     "tab_info": "How it works",
     "global_title": "Global control",
-    "global_hint": "Emergency mode turns on strict rate limits and SYNPROXY. Keep it off in peacetime — nodes enable protection themselves under attack.",
+    "global_hint": "The \"Protection enabled\" master switch controls auto-detection across all nodes at once: turn it off and nodes stop reacting to attacks and any auto emergency is lifted (full stand-down). Fine-tune individual nodes with the toggles below.",
     "feature_enabled": "Protection enabled",
     "nodes_under_attack": "Under attack: {{count}} of {{total}} nodes in emergency mode",
     "all_normal": "All {{total}} nodes normal",
@@ -775,7 +775,7 @@
     "info_sections": [
       { "title": "Standby mode (default)", "body": "In peacetime there are no per-IP limits — nodes run at full speed with no overhead and no risk of hurting legitimate clients." },
       { "title": "Emergency mode", "body": "Turns on a firewall ruleset: SYNPROXY (validates the TCP handshake before a connection reaches the server — kills SYN floods from spoofed addresses), a per-IP concurrent-connection cap, a new-connections-per-second limit, and dropping of junk packets. Applied only to client ports (auto-detected); SSH and the panel port are never touched." },
-      { "title": "Auto-detect (watchdog)", "body": "Each node runs an independent watchdog that watches for attack signatures: conntrack table filling up, a spike in SYN-cookies, a flood of tiny packets, softirq load. On clear signs it enables emergency mode itself within seconds — without waiting for an admin — and clears it after 15 minutes of quiet. Thresholds are conservative, so an evening client peak won't trigger it. The panel installs and updates the watchdog on nodes automatically — as soon as a node is on the new image, protection appears by itself, no manual rollout needed. The \"Install on all\" button is only for reinstalling on demand." },
+      { "title": "Auto-detect (watchdog)", "body": "Each node runs an independent watchdog that watches for attack signatures: conntrack table filling up, a spike in SYN-cookies, a flood of tiny packets, softirq load. On clear signs it enables emergency mode itself within seconds — without waiting for an admin — and clears it after 15 minutes of quiet. Thresholds are conservative, so an evening client peak won't trigger it. The panel installs and updates the watchdog on nodes automatically — as soon as a node is on the new image, protection appears by itself, no manual rollout needed. You can disable auto-detection any time: the master switch at the top does it across all nodes, the per-node \"Auto-detect\" toggle does one node; disabling lifts any active auto-protection and returns the node to normal." },
       { "title": "Manual pin", "body": "The \"I'm under attack\" button turns on emergency mode manually. Auto-detect won't clear such a mode by itself — only an admin will. Handy when you learn about an attack before the watchdog does." },
       { "title": "Whitelist", "body": "Your relays, the panel and CDN subnets always bypass every limit — otherwise the strict rules would hit your own infrastructure (a relay and a CDN arrive from the same IPs carrying thousands of clients). The list lives on the node's disk and survives reboots and panel downtime." }
     ]

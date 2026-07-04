@@ -18,7 +18,7 @@ set -u
 
 # Bumped when the script logic changes — the panel compares this against what a
 # node reports and auto-reinstalls on drift, so updates roll out without clicks.
-WATCHDOG_VERSION="1.0.0"
+WATCHDOG_VERSION="1.1.0"
 
 STATE_DIR="/opt/monitoring/antiddos"
 STATE_FILE="$STATE_DIR/state.json"
@@ -348,8 +348,11 @@ run_loop() {
             sleep "$INTERVAL"; continue
         fi
 
+        # auto-detection off: an auto-triggered emergency must not linger — clear
+        # it so "disable watchdog" truly returns the node to normal. Manual pins
+        # are already handled above and kept.
         if [ "$WATCHDOG" != "on" ]; then
-            [ "$MODE" = "on" ] && selfheal
+            [ "$MODE" = "on" ] && disable_mode
             sleep "$INTERVAL"; continue
         fi
 

@@ -314,6 +314,30 @@ class AntiDdosManager:
         ok_count = sum(1 for r in results if isinstance(r, dict) and r.get("success"))
         return {"nodes": len(servers), "ok": ok_count}
 
+    async def set_watchdog_all(self, enabled: bool) -> dict:
+        servers = await self._active_servers()
+
+        async def _one(srv: Server):
+            async with self._http_sem:
+                ok, _ = await self.set_node_watchdog(srv, enabled)
+                return ok
+
+        results = await asyncio.gather(*[_one(s) for s in servers], return_exceptions=True)
+        ok_count = sum(1 for r in results if r is True)
+        return {"nodes": len(servers), "ok": ok_count}
+
+    async def apply_master_state(self, enabled: bool):
+        """Make the master toggle mean it: OFF stands every node down (clears
+        emergencies + turns off auto-detection), ON re-arms auto-detection."""
+        try:
+            if enabled:
+                await self.set_watchdog_all(True)
+            else:
+                await self.set_emergency_all(False)
+                await self.set_watchdog_all(False)
+        except Exception as e:
+            logger.error(f"apply_master_state({enabled}) failed: {e}")
+
     async def install_all(self) -> dict:
         servers = await self._active_servers()
 

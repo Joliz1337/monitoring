@@ -6,6 +6,7 @@ global fan-out ("enable on all nodes"), the manual whitelist push, and the
 watchdog installer.
 """
 
+import asyncio
 import ipaddress
 import json
 from typing import Optional
@@ -86,7 +87,9 @@ async def update_settings(
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth),
 ):
-    settings = await get_antiddos_manager().get_or_create_settings(db)
+    manager = get_antiddos_manager()
+    settings = await manager.get_or_create_settings(db)
+    was_enabled = settings.enabled
     data = payload.model_dump(exclude_unset=True)
     if "user_cidrs" in data:
         settings.user_cidrs = json.dumps(data.pop("user_cidrs"))
@@ -94,6 +97,11 @@ async def update_settings(
         setattr(settings, key, value)
     await db.commit()
     await db.refresh(settings)
+
+    # Master switch flip → stand the whole fleet up or down in the background
+    if settings.enabled != was_enabled:
+        asyncio.create_task(manager.apply_master_state(settings.enabled))
+
     return _settings_to_dict(settings)
 
 

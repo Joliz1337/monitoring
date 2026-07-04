@@ -501,6 +501,7 @@ data: {"message": "error description"}
 - Сильный сигнал (например резкий рост SyncookiesSent) включает аварийный режим немедленно; слабые сигналы — только после устойчивого удержания ~45 сек (защита от ложных срабатываний на вечернем пике)
 - Автовыключение — после ~15 мин без сигналов
 - Ручной пин (`source=manual`, включённый через `POST /api/antiddos/emergency`) автоматика не снимает — выключить может только явный вызов `POST /api/antiddos/emergency {enabled: false}`
+- Выключение автодетекта (`watchdog=off`, через `POST /api/antiddos/watchdog {enabled: false}`) в цикле `loop` снимает активный **авто**-аварийный режим (`disable_mode`) — нода возвращается в дежурный режим. Ручные пины (`source=manual`) обрабатываются раньше в цикле и этим не затрагиваются. Раньше (до `WATCHDOG_VERSION` 1.1.0) при `watchdog=off` активный авто-режим только самолечился (`selfheal`) и оставался включённым — «выключить автодетект» не возвращало ноду в норму.
 - **Self-heal**: если сторонний процесс (например применение Firewall Profile через `ufw --force reset`) снёс джамп в `ANTIDDOS`, watchdog восстанавливает его в течение одного цикла
 - Тюнинг-пороги (интервал, connlimit/newrate, пороги детекции) заданы константами в шапке `ddos-watchdog.sh`, переопределяются файлом `/opt/monitoring/antiddos/config` без правки самого скрипта
 
@@ -508,9 +509,9 @@ data: {"message": "error description"}
 
 **CLI-команды `ddos-watchdog.sh`** (вызываются нодой через `nsenter`, доступны и вручную на хосте): `loop`, `enable-manual`, `disable-manual`, `watchdog-on`, `watchdog-off`, `apply`, `clear`, `selfheal`, `whitelist-sync` (IP через stdin), `detect-ports`, `version`, `status`. Состояние — `/opt/monitoring/antiddos/state.json` (mode/source/since/reason/watchdog).
 
-**Версионирование watchdog-скрипта:** константа `WATCHDOG_VERSION` в шапке `ddos-watchdog.sh` (сейчас `"1.0.0"`) — команда `status` возвращает её полем `version`, отдельная команда `version` печатает только её. Значение растёт при изменении логики скрипта; панель сверяет его с версией, установленной на ноде (см. «Установка» ниже).
+**Версионирование watchdog-скрипта:** константа `WATCHDOG_VERSION` в шапке `ddos-watchdog.sh` (сейчас `"1.1.0"`) — команда `status` возвращает её полем `version`, отдельная команда `version` печатает только её. Значение растёт при изменении логики скрипта; панель сверяет его с версией, установленной на ноде (см. «Установка» ниже).
 
-**Установка — zero-touch:** `install.sh`/обновление ноды по-прежнему **не** ставит watchdog напрямую — раскатка идёт с панели, но теперь без ручных действий. Панель в фоновом опросе статуса (см. panel/DOCUMENTATION.md) видит, что нода отвечает на `/api/antiddos/status` (значит образ node-api уже новый), и сама вызывает `POST /api/antiddos/install`, если watchdog не установлен (`installed:false`) либо его `version` отличается от актуальной версии `ddos-watchdog.sh` на GitHub. Кнопка «Установить watchdog на все» в панели остаётся как ручной способ обновить/переустановить немедленно. Watchdog включён по умолчанию сразу после установки.
+**Установка — zero-touch:** `install.sh`/обновление ноды по-прежнему **не** ставит watchdog напрямую — раскатка полностью на панели, без ручных действий и без кнопки в интерфейсе. Панель в фоновом опросе статуса (см. panel/DOCUMENTATION.md) видит, что нода отвечает на `/api/antiddos/status` (значит образ node-api уже новый), и сама вызывает `POST /api/antiddos/install`, если watchdog не установлен (`installed:false`) либо его `version` отличается от актуальной версии `ddos-watchdog.sh` на GitHub. Backend-эндпоинты ручной установки (`POST /antiddos/install-all` в панели, `POST /api/antiddos/install` на ноде) остаются доступны по API. Watchdog включён по умолчанию сразу после установки.
 
 **Требования к ядру:** `xt_SYNPROXY`/`nf_synproxy_core`, `connlimit`, `hashlimit`. На Ubuntu 24 iptables работает через nft-бэкенд (iptables-nft) — тот же стек, что UFW/Docker/ipset_manager.
 

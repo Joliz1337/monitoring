@@ -4,7 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
 import {
   Siren, ShieldAlert, ShieldCheck, Settings as SettingsIcon, ListChecks,
-  BookOpen, Loader2, RefreshCw, Trash2, Save, Power, Download, Radar,
+  BookOpen, Loader2, RefreshCw, Trash2, Save, Power, Radar,
 } from 'lucide-react'
 import {
   antiDdosApi, type AntiDdosSettings, type AntiDdosStatus, type NodeAntiDdosState,
@@ -185,13 +185,6 @@ export default function AntiDdos() {
                     className="flex items-center gap-2 px-3 py-2 text-sm rounded bg-dark-700 hover:bg-dark-600 text-dark-100 disabled:opacity-50">
                     {busy === 'push-wl' ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
                     {t('anti_ddos.push_whitelist')}
-                  </button>
-                  <button
-                    onClick={() => runAction('install-all', () => antiDdosApi.installAll(), t('anti_ddos.installed'))}
-                    disabled={busy === 'install-all'}
-                    className="flex items-center gap-2 px-3 py-2 text-sm rounded bg-dark-700 hover:bg-dark-600 text-dark-100 disabled:opacity-50">
-                    {busy === 'install-all' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-                    {t('anti_ddos.install_all')}
                   </button>
                 </div>
               </div>
