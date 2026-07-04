@@ -46,7 +46,7 @@ class TimeoutRequest(BaseModel):
 
 
 @router.get("/status")
-async def get_status():
+def get_status():
     """Get ipset lists status for both directions"""
     manager = get_ipset_manager()
     status = manager.get_status()
@@ -72,7 +72,7 @@ async def get_status():
 
 
 @router.get("/list/{set_type}")
-async def list_ips(set_type: str, direction: str = "in"):
+def list_ips(set_type: str, direction: str = "in"):
     """Get IPs from list
 
     Args:
@@ -96,7 +96,7 @@ async def list_ips(set_type: str, direction: str = "in"):
 
 
 @router.post("/add")
-async def add_ip(request: IpAddRequest):
+def add_ip(request: IpAddRequest):
     """Add IP/CIDR to blocklist"""
     manager = get_ipset_manager()
     success, message = manager.add_ip(request.ip, permanent=request.permanent, direction=request.direction)
@@ -114,7 +114,7 @@ async def add_ip(request: IpAddRequest):
 
 
 @router.post("/bulk-add")
-async def bulk_add_ips(request: BulkIpRequest):
+def bulk_add_ips(request: BulkIpRequest):
     """Add multiple IPs to blocklist"""
     manager = get_ipset_manager()
     success_count, fail_count, errors = manager.bulk_add(
@@ -134,7 +134,7 @@ async def bulk_add_ips(request: BulkIpRequest):
 
 
 @router.delete("/remove")
-async def remove_ip(request: IpRemoveRequest):
+def remove_ip(request: IpRemoveRequest):
     """Remove IP/CIDR from blocklist"""
     manager = get_ipset_manager()
     success, message = manager.remove_ip(request.ip, permanent=request.permanent, direction=request.direction)
@@ -152,7 +152,7 @@ async def remove_ip(request: IpRemoveRequest):
 
 
 @router.post("/bulk-remove")
-async def bulk_remove_ips(request: BulkIpRequest):
+def bulk_remove_ips(request: BulkIpRequest):
     """Remove multiple IPs from blocklist"""
     manager = get_ipset_manager()
     success_count, fail_count, errors = manager.bulk_remove(
@@ -171,7 +171,7 @@ async def bulk_remove_ips(request: BulkIpRequest):
 
 
 @router.post("/clear/{set_type}")
-async def clear_set(set_type: str, direction: str = "in"):
+def clear_set(set_type: str, direction: str = "in"):
     """Clear all IPs from list
 
     Args:
@@ -198,7 +198,7 @@ async def clear_set(set_type: str, direction: str = "in"):
 
 
 @router.put("/timeout")
-async def set_timeout(request: TimeoutRequest):
+def set_timeout(request: TimeoutRequest):
     """Change temp list timeout (recreates both direction temp lists)"""
     manager = get_ipset_manager()
     success, message = manager.set_timeout(request.timeout)
@@ -214,7 +214,7 @@ async def set_timeout(request: TimeoutRequest):
 
 
 @router.post("/sync")
-async def sync_list(request: SyncRequest):
+def sync_list(request: SyncRequest):
     """Sync (replace) entire list with new IPs — atomic diff-based."""
     manager = get_ipset_manager()
     success, message, result = manager.sync(
@@ -232,12 +232,13 @@ async def sync_list(request: SyncRequest):
         "total": result['total'],
         "added": result['added'],
         "removed": result['removed'],
-        "invalid": result['invalid'][:10] if result['invalid'] else []
+        "invalid": result['invalid'][:10] if result['invalid'] else [],
+        "skipped_non_public": result.get('skipped_non_public', 0)
     }
 
 
 @router.post("/allowlist/sync")
-async def sync_allowlist(request: AllowSyncRequest):
+def sync_allowlist(request: AllowSyncRequest):
     """Sync (replace) entire allow list — trusted IPs that always pass (ACCEPT)."""
     manager = get_ipset_manager()
     success, message, result = manager.sync_allow(request.ips, direction=request.direction)

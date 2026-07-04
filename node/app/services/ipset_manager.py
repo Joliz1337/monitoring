@@ -18,18 +18,39 @@ DROP) — iptables идёт сверху вниз и ACCEPT обрывает о�
 проходит ещё до блокировок, даже если попадает под заблокированный CIDR.
 """
 
+import ipaddress
 import json
 import logging
 import os
 import re
 import subprocess
-from dataclasses import dataclass, field
+import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 PERSISTENT_FILE = "/var/lib/monitoring/blocklist.json"
+
+# Приватные/служебные диапазоны никогда не попадают в block-сеты: DROP по ним
+# убивает loopback, docker-bridge и внутренние сети хостера (инцидент с
+# firehol_level1, который включает bogon-диапазоны для бордер-роутеров).
+NON_PUBLIC_NETS = tuple(ipaddress.ip_network(n) for n in (
+    "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
+    "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24",
+    "192.168.0.0/16", "198.18.0.0/15", "198.51.100.0/24",
+    "203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4",
+))
+
+
+def is_public_range(ip: str) -> bool:
+    """True, если IP/CIDR не пересекается с приватными/служебными диапазонами."""
+    try:
+        net = ipaddress.ip_network(ip, strict=False)
+    except ValueError:
+        return False
+    return not any(net.overlaps(bad) for bad in NON_PUBLIC_NETS)
 
 # Incoming (default)
 SET_PERMANENT = "blocklist_permanent"
@@ -81,6 +102,9 @@ class IpsetManager:
         self._use_nsenter = self._check_nsenter_needed()
         self._temp_timeout = DEFAULT_TIMEOUT
         self._initialized = False
+        # Мутации сетов сериализуются: эндпоинты выполняются в threadpool,
+        # параллельные sync с панели не должны перемешивать diff-ы.
+        self._mutate_lock = threading.Lock()
     
     def _check_nsenter_needed(self) -> bool:
         if os.path.exists('/.dockerenv'):
@@ -108,7 +132,43 @@ class IpsetManager:
     
     def _run_ipset(self, args: list[str]) -> tuple[bool, str, str]:
         return self._run_cmd(["ipset"] + args)
-    
+
+    def _run_ipset_restore(self, lines: list[str], timeout: int = 180) -> tuple[bool, str, str]:
+        """Применить пачку add/del одним процессом `ipset restore`.
+
+        Per-IP вызовы ipset (2 subprocess на запись) на списках в десятки тысяч
+        записей блокируют API ноды на десятки минут; restore применяет весь diff
+        за доли секунды. `-exist` — уже существующие/отсутствующие записи не ошибка.
+        """
+        if not lines:
+            return True, "", ""
+        cmd = ["ipset", "-exist", "restore"]
+        if self._use_nsenter:
+            cmd = ["nsenter", "-t", "1", "-m", "-u", "-n", "-i", "--"] + cmd
+        try:
+            result = subprocess.run(
+                cmd, input="\n".join(lines) + "\n",
+                capture_output=True, text=True, timeout=timeout,
+            )
+            return result.returncode == 0, result.stdout.strip(), result.stderr.strip()
+        except subprocess.TimeoutExpired:
+            return False, "", "ipset restore timed out"
+        except Exception as e:
+            return False, "", str(e)
+
+    def _set_count(self, set_name: str) -> int:
+        """Число записей из заголовка `ipset list -t` — не выгружает весь сет."""
+        success, stdout, _ = self._run_ipset(["list", set_name, "-t"])
+        if not success:
+            return 0
+        for line in stdout.split('\n'):
+            if line.startswith('Number of entries:'):
+                try:
+                    return int(line.split(':', 1)[1].strip())
+                except ValueError:
+                    return 0
+        return 0
+
     def _run_iptables(self, args: list[str]) -> tuple[bool, str, str]:
         return self._run_cmd(["iptables"] + args)
 
@@ -306,13 +366,18 @@ class IpsetManager:
             
             for direction, key in [("in", "in_permanent"), ("out", "out_permanent")]:
                 ips = data.get(key, [])
-                if ips:
-                    count = 0
-                    for ip in ips:
-                        success, _ = self.add_ip(ip, permanent=True, direction=direction, save=False)
-                        if success:
-                            count += 1
-                    logger.info(f"Loaded {count} {direction} permanent IPs from file")
+                if not ips:
+                    continue
+                set_name = self._resolve_set(permanent=True, direction=direction)
+                valid, _, skipped = self._prepare_block_ips(ips)
+                success, _, stderr = self._run_ipset_restore(
+                    [f"add {set_name} {ip}" for ip in sorted(valid)]
+                )
+                if success:
+                    logger.info(f"Loaded {len(valid)} {direction} permanent IPs from file"
+                                + (f" (skipped {skipped} non-public)" if skipped else ""))
+                else:
+                    logger.error(f"Failed to load {direction} permanent IPs: {stderr}")
         except Exception as e:
             logger.warning(f"Failed to load permanent IPs: {e}")
 
@@ -325,13 +390,20 @@ class IpsetManager:
 
             for direction, key in [("in", "in_allow"), ("out", "out_allow")]:
                 ips = data.get(key, [])
-                if ips:
-                    count = 0
-                    for ip in ips:
-                        success, _ = self.add_allow_ip(ip, direction=direction, save=False)
-                        if success:
-                            count += 1
-                    logger.info(f"Loaded {count} {direction} allow IPs from file")
+                if not ips:
+                    continue
+                set_name = self._get_allow_cfg(direction)["set"]
+                valid = sorted({
+                    self._normalize_ip(ip) for ip in ips
+                    if self._validate_ip_cidr(self._normalize_ip(ip))
+                })
+                success, _, stderr = self._run_ipset_restore(
+                    [f"add {set_name} {ip}" for ip in valid]
+                )
+                if success:
+                    logger.info(f"Loaded {len(valid)} {direction} allow IPs from file")
+                else:
+                    logger.error(f"Failed to load {direction} allow IPs: {stderr}")
         except Exception as e:
             logger.warning(f"Failed to load allow IPs: {e}")
     
@@ -345,6 +417,8 @@ class IpsetManager:
         ip = self._normalize_ip(ip)
         if not self._validate_ip_cidr(ip):
             return False, f"Invalid IP/CIDR: {ip}"
+        if not is_public_range(ip):
+            return False, f"Refused to block non-public range: {ip}"
 
         set_name = self._resolve_set(permanent, direction)
 
@@ -447,114 +521,108 @@ class IpsetManager:
         logger.info(f"Changed temp timeout to {seconds}s")
         return True, f"Timeout changed to {seconds} seconds"
     
+    def _prepare_block_ips(self, ips: list[str]) -> tuple[set[str], list[str], int]:
+        """Нормализовать входные записи для block-сета.
+
+        Возвращает (валидные, невалидные, число отброшенных приватных)."""
+        normalized: set[str] = set()
+        invalid: list[str] = []
+        skipped_non_public = 0
+        for ip in ips:
+            ip = self._normalize_ip(ip)
+            if not self._validate_ip_cidr(ip):
+                invalid.append(ip)
+            elif not is_public_range(ip):
+                skipped_non_public += 1
+            else:
+                normalized.add(ip)
+        return normalized, invalid, skipped_non_public
+
     def bulk_add(self, ips: list[str], permanent: bool = True, direction: str = "in", timeout: int | None = None) -> tuple[int, int, list[str]]:
-        success_count = 0
-        fail_count = 0
-        errors = []
-        for ip in ips:
-            success, msg = self.add_ip(ip, permanent=permanent, direction=direction, save=False, timeout=timeout)
-            if success:
-                success_count += 1
-            else:
-                fail_count += 1
-                errors.append(f"{ip}: {msg}")
-        if permanent and success_count > 0:
-            self._save_config()
-        return success_count, fail_count, errors
-    
-    def bulk_remove(self, ips: list[str], permanent: bool = True, direction: str = "in") -> tuple[int, int, list[str]]:
-        success_count = 0
-        fail_count = 0
-        errors = []
-        for ip in ips:
-            success, msg = self.remove_ip(ip, permanent=permanent, direction=direction)
-            if success:
-                success_count += 1
-            else:
-                fail_count += 1
-                errors.append(f"{ip}: {msg}")
-        return success_count, fail_count, errors
-    
-    def sync(self, ips: list[str], permanent: bool = True, direction: str = "in") -> tuple[bool, str, dict]:
         set_name = self._resolve_set(permanent, direction)
-        
-        normalized_ips = set()
-        invalid_ips = []
+        normalized, invalid, skipped_non_public = self._prepare_block_ips(ips)
+
+        errors = [f"{ip}: Invalid IP/CIDR" for ip in invalid]
+        if skipped_non_public:
+            errors.append(f"Refused to block {skipped_non_public} non-public range(s)")
+
+        suffix = ""
+        if not permanent:
+            effective_timeout = timeout if timeout is not None else self._temp_timeout
+            suffix = f" timeout {effective_timeout}"
+
+        with self._mutate_lock:
+            lines = [f"add {set_name} {ip}{suffix}" for ip in sorted(normalized)]
+            success, _, stderr = self._run_ipset_restore(lines)
+            if not success:
+                logger.error(f"bulk_add restore failed for {set_name}: {stderr}")
+                return 0, len(ips), errors + [f"ipset restore: {stderr}"]
+            if permanent and normalized:
+                self._save_config()
+
+        fail_count = len(invalid) + skipped_non_public
+        logger.info(f"Bulk-added {len(normalized)} entries to {set_name}")
+        return len(normalized), fail_count, errors
+
+    def bulk_remove(self, ips: list[str], permanent: bool = True, direction: str = "in") -> tuple[int, int, list[str]]:
+        set_name = self._resolve_set(permanent, direction)
+
+        normalized: set[str] = set()
+        invalid: list[str] = []
         for ip in ips:
             ip = self._normalize_ip(ip)
             if self._validate_ip_cidr(ip):
-                normalized_ips.add(ip)
+                normalized.add(ip)
             else:
-                invalid_ips.append(ip)
-        
-        current_ips = set(self.list_ips(permanent=permanent, direction=direction))
-        new_ips = normalized_ips
-        
-        to_add = new_ips - current_ips
-        to_remove = current_ips - new_ips
-        
-        added = 0
-        removed = 0
-        
-        for ip in to_remove:
-            success, _ = self.remove_ip(ip, permanent=permanent, direction=direction)
-            if success:
-                removed += 1
-        
-        for ip in to_add:
-            success, _ = self.add_ip(ip, permanent=permanent, direction=direction, save=False)
-            if success:
-                added += 1
-        
-        if permanent:
-            self._save_config()
-        
+                invalid.append(ip)
+
+        errors = [f"{ip}: Invalid IP/CIDR" for ip in invalid]
+
+        with self._mutate_lock:
+            lines = [f"del {set_name} {ip}" for ip in sorted(normalized)]
+            success, _, stderr = self._run_ipset_restore(lines)
+            if not success:
+                logger.error(f"bulk_remove restore failed for {set_name}: {stderr}")
+                return 0, len(ips), errors + [f"ipset restore: {stderr}"]
+            if permanent and normalized:
+                self._save_config()
+
+        logger.info(f"Bulk-removed {len(normalized)} entries from {set_name}")
+        return len(normalized), len(invalid), errors
+
+    def sync(self, ips: list[str], permanent: bool = True, direction: str = "in") -> tuple[bool, str, dict]:
+        set_name = self._resolve_set(permanent, direction)
+        new_ips, invalid_ips, skipped_non_public = self._prepare_block_ips(ips)
+
+        with self._mutate_lock:
+            current_ips = set(self.list_ips(permanent=permanent, direction=direction))
+
+            to_add = new_ips - current_ips
+            to_remove = current_ips - new_ips
+
+            lines = [f"del {set_name} {ip}" for ip in sorted(to_remove)]
+            lines += [f"add {set_name} {ip}" for ip in sorted(to_add)]
+            success, _, stderr = self._run_ipset_restore(lines)
+            if not success:
+                logger.error(f"sync restore failed for {set_name}: {stderr}")
+                return False, f"ipset restore failed: {stderr}", {}
+
+            if permanent:
+                self._save_config()
+
         result = {
             'total': len(new_ips),
-            'added': added,
-            'removed': removed,
-            'invalid': invalid_ips
+            'added': len(to_add),
+            'removed': len(to_remove),
+            'invalid': invalid_ips,
+            'skipped_non_public': skipped_non_public,
         }
-        logger.info(f"Synced {set_name}: added {added}, removed {removed}")
+        if skipped_non_public:
+            logger.warning(f"Sync {set_name}: refused {skipped_non_public} non-public range(s)")
+        logger.info(f"Synced {set_name}: added {len(to_add)}, removed {len(to_remove)}")
         return True, f"Synced {set_name}", result
 
     # ── allow list operations (always permanent, no timeout) ──
-
-    def add_allow_ip(self, ip: str, direction: str = "in", save: bool = True) -> tuple[bool, str]:
-        ip = self._normalize_ip(ip)
-        if not self._validate_ip_cidr(ip):
-            return False, f"Invalid IP/CIDR: {ip}"
-
-        set_name = self._get_allow_cfg(direction)["set"]
-        if self._ip_in_set(ip, set_name):
-            return True, f"{ip} already in {set_name}"
-
-        success, _, stderr = self._run_ipset(["add", set_name, ip])
-        if success:
-            logger.info(f"Added {ip} to {set_name}")
-            if save:
-                self._save_config()
-            return True, f"Added {ip} to {set_name}"
-        if "already added" in stderr.lower() or "already in set" in stderr.lower():
-            return True, f"{ip} already in {set_name}"
-        logger.error(f"Failed to add {ip} to {set_name}: {stderr}")
-        return False, f"Failed to add: {stderr}"
-
-    def remove_allow_ip(self, ip: str, direction: str = "in") -> tuple[bool, str]:
-        ip = self._normalize_ip(ip)
-        if not self._validate_ip_cidr(ip):
-            return False, f"Invalid IP/CIDR: {ip}"
-
-        set_name = self._get_allow_cfg(direction)["set"]
-        success, _, stderr = self._run_ipset(["del", set_name, ip])
-        if success:
-            logger.info(f"Removed {ip} from {set_name}")
-            self._save_config()
-            return True, f"Removed {ip} from {set_name}"
-        if "not in set" in stderr.lower() or "element is missing" in stderr.lower():
-            return True, f"{ip} was not in {set_name}"
-        logger.error(f"Failed to remove {ip} from {set_name}: {stderr}")
-        return False, f"Failed to remove: {stderr}"
 
     def list_allow_ips(self, direction: str = "in") -> list[str]:
         set_name = self._get_allow_cfg(direction)["set"]
@@ -576,16 +644,6 @@ class IpsetManager:
                     ips.append(parts[0])
         return ips
 
-    def clear_allow(self, direction: str = "in") -> tuple[bool, str]:
-        set_name = self._get_allow_cfg(direction)["set"]
-        success, _, stderr = self._run_ipset(["flush", set_name])
-        if success:
-            logger.info(f"Cleared {set_name}")
-            self._save_config()
-            return True, f"Cleared {set_name}"
-        logger.error(f"Failed to clear {set_name}: {stderr}")
-        return False, f"Failed to clear: {stderr}"
-
     def sync_allow(self, ips: list[str], direction: str = "in") -> tuple[bool, str, dict]:
         set_name = self._get_allow_cfg(direction)["set"]
 
@@ -598,41 +656,40 @@ class IpsetManager:
             else:
                 invalid_ips.append(ip)
 
-        current_ips = set(self.list_allow_ips(direction=direction))
-        to_add = normalized_ips - current_ips
-        to_remove = current_ips - normalized_ips
+        with self._mutate_lock:
+            current_ips = set(self.list_allow_ips(direction=direction))
+            to_add = normalized_ips - current_ips
+            to_remove = current_ips - normalized_ips
 
-        added = 0
-        removed = 0
-        for ip in to_remove:
-            if self.remove_allow_ip(ip, direction=direction)[0]:
-                removed += 1
-        for ip in to_add:
-            if self.add_allow_ip(ip, direction=direction, save=False)[0]:
-                added += 1
+            lines = [f"del {set_name} {ip}" for ip in sorted(to_remove)]
+            lines += [f"add {set_name} {ip}" for ip in sorted(to_add)]
+            success, _, stderr = self._run_ipset_restore(lines)
+            if not success:
+                logger.error(f"sync_allow restore failed for {set_name}: {stderr}")
+                return False, f"ipset restore failed: {stderr}", {}
 
-        self._save_config()
+            self._save_config()
 
         result = {
             'total': len(normalized_ips),
-            'added': added,
-            'removed': removed,
+            'added': len(to_add),
+            'removed': len(to_remove),
             'invalid': invalid_ips,
         }
-        logger.info(f"Synced {set_name}: added {added}, removed {removed}")
+        logger.info(f"Synced {set_name}: added {len(to_add)}, removed {len(to_remove)}")
         return True, f"Synced {set_name}", result
 
     def get_status(self) -> IpsetStatus:
         def _dir_status(direction: str) -> DirectionStatus:
             cfg = self._get_dir_cfg(direction)
             return DirectionStatus(
-                permanent_count=len(self.list_ips(permanent=True, direction=direction)),
-                temp_count=len(self.list_ips(permanent=False, direction=direction)),
+                permanent_count=self._set_count(cfg["perm"]),
+                temp_count=self._set_count(cfg["temp"]),
                 iptables_rules_exist=(
                     self._iptables_rule_exists(cfg["perm"], direction)
                     and self._iptables_rule_exists(cfg["temp"], direction)
                 ),
-                allow_count=len(self.list_allow_ips(direction=direction)),
+                allow_count=self._set_count(self._get_allow_cfg(direction)["set"]),
             )
         
         return IpsetStatus(

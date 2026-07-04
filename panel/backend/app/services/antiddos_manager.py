@@ -15,7 +15,6 @@ import ipaddress
 import json
 import logging
 import re
-import socket
 from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urlparse
@@ -23,10 +22,10 @@ from urllib.parse import urlparse
 import httpx
 from sqlalchemy import select
 
-from app.config import get_settings
 from app.database import async_session
 from app.models import Server, AntiDdosSettings, AlertSettings, AlertHistory, AntiDdosWhitelistSource
 from app.services.http_client import get_node_client, get_node_apply_client, get_external_client, node_auth_headers
+from app.services.net_utils import resolve_panel_ip, host_to_ip
 
 logger = logging.getLogger(__name__)
 
@@ -91,41 +90,17 @@ class AntiDdosManager:
 
     # ── whitelist assembly ─────────────────────────────────────────────────
 
-    @staticmethod
-    def _resolve_panel_ip() -> Optional[str]:
-        domain = get_settings().domain
-        if not domain:
-            return None
-        try:
-            return socket.gethostbyname(domain)
-        except (socket.gaierror, OSError):
-            return None
-
-    @staticmethod
-    def _host_to_ip(host: str) -> Optional[str]:
-        if not host:
-            return None
-        try:
-            ipaddress.ip_address(host)
-            return host
-        except ValueError:
-            pass
-        try:
-            return socket.gethostbyname(host)
-        except (socket.gaierror, OSError):
-            return None
-
     async def build_whitelist(self, db) -> list[str]:
         """Auto (node IPs + panel IP) + manual (user CIDRs) + auto-source lists."""
         ips: set[str] = set()
 
         servers = (await db.execute(select(Server).where(Server.is_active == True))).scalars().all()  # noqa: E712
         for srv in servers:
-            ip = self._host_to_ip(urlparse(srv.url).hostname or "")
+            ip = host_to_ip(urlparse(srv.url).hostname or "")
             if ip:
                 ips.add(ip)
 
-        panel_ip = self._resolve_panel_ip()
+        panel_ip = resolve_panel_ip()
         if panel_ip:
             ips.add(panel_ip)
 

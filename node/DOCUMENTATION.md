@@ -8,7 +8,7 @@ API агент для сбора метрик сервера, отслежива
 - **Трафик** — история по интерфейсам и портам (SQLite + iptables)
 - **HAProxy** — управление нативным systemd сервисом, конфигом, правилами, сертификатами
 - **Firewall** — управление UFW через API
-- **IPSet Blocklist** — блокировка IP/CIDR через ipset (постоянный и временный списки)
+- **IPSet Blocklist** — блокировка IP/CIDR через ipset (постоянный и временный списки), отказ от приватных/служебных диапазонов, массовое применение одним `ipset restore`
 - **Терминал** — выполнение произвольных команд и bash-скриптов на хосте (max 65000 символов)
 - **Remnawave** — проверка доступности контейнера remnanode
 - **Синхронизация времени** — установка IANA timezone через `timedatectl`, включение NTP и принудительная синхронизация через `systemd-timesyncd`
@@ -328,6 +328,8 @@ data: {"message": "error description"}
 - **Блок-список** — `blocklist_permanent` (постоянный) и `blocklist_temp` (временный с таймаутом); направления: in (INPUT) и out (OUTPUT).
 - **Белый список (allowlist)** — доверенные IP/CIDR, которые **всегда** проходят через ноду вне зависимости от блокировок.
 
+**Защита от приватных диапазонов:** нода самостоятельно отказывается добавлять в block-сеты IP/CIDR, пересекающиеся с приватными/служебными диапазонами (`0.0.0.0/8`, `10.0.0.0/8`, `127.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` и т.п. — полный список в `NON_PUBLIC_NETS`, `app/services/ipset_manager.py`), через `is_public_range()`. Проверка стоит в каждой точке входа: `add_ip`, `bulk_add`, `sync`, загрузка постоянного списка из `blocklist.json` при старте. Это defense-in-depth независимо от версии панели — панель фильтрует источники и ручные правила на своей стороне (см. [panel/DOCUMENTATION.md](../panel/DOCUMENTATION.md#ip-blocklist)), но нода не доверяет входу целиком: DROP по приватному диапазону убивает loopback и docker-bridge самой ноды.
+
 **Белый список:**
 
 Сеты `allowlist` (in → INPUT, match src) и `allowlist_out` (out → OUTPUT, match dst), тип `hash:net`. Правило `iptables ... -j ACCEPT` всегда вставляется на позицию 1 в цепочке (выше всех DROP) — netfilter обходит цепочку сверху вниз и ACCEPT прерывает обход. Это корректно перекрывает и точечные блоки, и CIDR-перекрытия (например, разрешить `1.2.3.4` при заблокированном `1.2.3.0/24`). Белый список всегда permanent — временного режима нет.
@@ -342,7 +344,7 @@ data: {"message": "error description"}
 | POST | /api/ipset/bulk-remove | Массовое удаление |
 | POST | /api/ipset/clear/{set_type} | Очистить список |
 | PUT | /api/ipset/timeout | Изменить timeout temp списка |
-| POST | /api/ipset/sync | Синхронизация блок-списка (замена всего списка) |
+| POST | /api/ipset/sync | Синхронизация блок-списка (замена всего списка, атомарный diff через `ipset restore`) |
 | POST | /api/ipset/allowlist/sync | Синхронизация белого списка (замена) |
 
 **`POST /api/ipset/allowlist/sync`** — принимает `AllowSyncRequest`:
@@ -351,12 +353,16 @@ data: {"message": "error description"}
 
 **Поля в `GET /api/ipset/status`** — добавлены `incoming.allow_count` и `outgoing.allow_count` (количество записей в allowlist).
 
+`POST /api/ipset/sync` и `/bulk-add` дополнительно отдают `skipped_non_public` — сколько записей отброшено как приватные/служебные (см. «Защита от приватных диапазонов» выше).
+
 **Особенности:**
 - Тип ipset: `hash:net` (поддержка IP и CIDR)
 - Правила iptables блок-списка: `INPUT/OUTPUT -m set --match-set blocklist_* src/dst -j DROP`
 - Правила allowlist: `-I INPUT 1 ... -j ACCEPT` / `-I OUTPUT 1 ... -j ACCEPT` (позиция 1, выше DROP)
 - Все постоянные правила сохраняются в `/var/lib/monitoring/blocklist.json` (ключи `in_allow`, `out_allow` для белого списка)
 - При старте ноды: постоянные правила восстанавливаются, временный список пустой, allowlist загружается из персиста
+- Массовые операции (`sync`, `bulk_add`, `bulk_remove`, `sync_allow`, загрузка permanent/allow из `blocklist.json` при старте) применяются одним вызовом `ipset -exist restore` вместо по-IP `ipset add`/`del` — десятки тысяч записей применяются за доли секунды; мутации сериализованы `threading.Lock`
+- Счётчики в `GET /api/ipset/status` читаются из заголовка `ipset list -t` (`Number of entries`), без выгрузки всего сета
 
 ### SSH Security
 
@@ -539,6 +545,14 @@ data: {"message": "error description"}
 - Все `subprocess.run()` заменены на `asyncio.create_subprocess_exec()`
 - Чтение `/proc/net/dev` выполняется через `asyncio.to_thread()`
 - Все iptables-методы каскадно асинхронизированы
+
+### IPSet: пакетное применение вместо per-IP вызовов (инцидент с зависанием API)
+
+Прежняя реализация `ipset_manager.py` делала 2 subprocess-вызова `ipset` на каждую запись (`add`/`del`). На списке в десятки тысяч записей применение занимало десятки минут — и всё это время блокировало event loop, так как `routers/ipset.py` был `async def`, а `subprocess.run()` внутри синхронный: зависал не только запрос синхронизации, а **все** эндпоинты node-API (nginx отдавал 504 на любой запрос к ноде).
+
+- `ipset_manager.py`: все массовые операции (`sync`, `bulk_add`, `bulk_remove`, `sync_allow`, загрузка permanent/allow-списков из `blocklist.json` при старте) собирают diff и применяют его одним вызовом `ipset -exist restore` (`_run_ipset_restore()`) — весь diff применяется за доли секунды независимо от размера списка.
+- `routers/ipset.py`: все эндпоинты переведены с `async def` на `def` — FastAPI выполняет синхронные хендлеры в threadpool, поэтому длинная блокирующая операция больше не держит event loop и не замораживает остальные эндпоинты ноды.
+- Мутации ipset-сетов сериализованы `threading.Lock` (`_mutate_lock`) — параллельный sync с панели и ручной bulk-add не перемешивают diff-ы.
 
 ### SQLite PRAGMA оптимизации
 

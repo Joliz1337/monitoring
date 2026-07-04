@@ -19,6 +19,12 @@ from app.auth import verify_auth
 from app.database import get_db
 from app.models import BlocklistRule, BlocklistSource, Server, PanelSettings
 from app.services.blocklist_manager import get_blocklist_manager
+from app.services.net_utils import is_public_range
+
+NON_PUBLIC_BLOCK_ERROR = (
+    "Blocking private/reserved ranges is not allowed: "
+    "it breaks loopback, Docker networks and node management traffic"
+)
 
 router = APIRouter(prefix="/blocklist", tags=["blocklist"])
 
@@ -141,6 +147,9 @@ async def add_global_rule(
 
     normalized = manager._normalize_ip(request.ip_cidr)
 
+    if request.list_type == "block" and not is_public_range(normalized):
+        raise HTTPException(status_code=400, detail=NON_PUBLIC_BLOCK_ERROR)
+
     result = await db.execute(
         select(BlocklistRule).where(
             and_(
@@ -206,6 +215,10 @@ async def add_global_rules_bulk(
             continue
 
         normalized = manager._normalize_ip(ip)
+
+        if request.list_type == "block" and not is_public_range(normalized):
+            invalid.append(ip)
+            continue
 
         result = await db.execute(
             select(BlocklistRule).where(
@@ -385,6 +398,9 @@ async def add_server_rule(
         raise HTTPException(status_code=400, detail="Invalid IP/CIDR format")
 
     normalized = manager._normalize_ip(request.ip_cidr)
+
+    if request.list_type == "block" and not is_public_range(normalized):
+        raise HTTPException(status_code=400, detail=NON_PUBLIC_BLOCK_ERROR)
 
     result = await db.execute(
         select(BlocklistRule).where(

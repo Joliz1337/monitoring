@@ -16,7 +16,10 @@ from typing import Optional
 
 import httpx
 from sqlalchemy import select, and_
+from urllib.parse import urlparse
+
 from app.services.http_client import get_node_client, get_external_client, node_auth_headers
+from app.services.net_utils import is_public_range, resolve_panel_ip, host_to_ip
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import async_session
@@ -96,7 +99,12 @@ class BlocklistManager:
         return result
     
     def parse_list_content(self, content: str) -> list[str]:
+        """Извлечь блокируемые IP/CIDR из текста списка.
+
+        Приватные/служебные диапазоны (bogons в firehol и подобных списках)
+        отбрасываются: DROP по ним убивает loopback и docker-сети нод."""
         ips = []
+        skipped_non_public = 0
         for line in content.split('\n'):
             line = line.strip()
             if not line or line.startswith('#'):
@@ -105,8 +113,15 @@ class BlocklistManager:
                 line = line.split('#')[0].strip()
             if not line:
                 continue
-            if self._validate_ip_cidr(line):
-                ips.append(self._normalize_ip(line))
+            if not self._validate_ip_cidr(line):
+                continue
+            normalized = self._normalize_ip(line)
+            if not is_public_range(normalized):
+                skipped_non_public += 1
+                continue
+            ips.append(normalized)
+        if skipped_non_public:
+            logger.warning(f"Blocklist source: dropped {skipped_non_public} non-public range(s)")
         return ips
     
     def _get_cached(self, url: str) -> Optional[list[str]]:
@@ -195,9 +210,25 @@ class BlocklistManager:
         return [r.ip_cidr for r in rules]
 
     async def get_allow_ips_global(self, db: AsyncSession, direction: str = "in") -> list[str]:
-        """Глобальные правила белого списка (allow) для направления, дедуплицированные."""
-        allow_ips = await self.get_global_rules(db, direction, list_type="allow")
-        return self.deduplicate_ips(allow_ips)
+        """Белый список для синка: ручные allow-правила + авто (IP панели и всех нод).
+
+        IP панели и нод всегда в allowlist — ACCEPT стоит первым в цепочке,
+        поэтому управляющий трафик не попадёт под DROP даже при плохом блок-листе."""
+        ips = set(await self.get_global_rules(db, direction, list_type="allow"))
+
+        servers = (await db.execute(
+            select(Server).where(Server.is_active == True)
+        )).scalars().all()
+        for srv in servers:
+            ip = host_to_ip(urlparse(srv.url).hostname or "")
+            if ip:
+                ips.add(ip)
+
+        panel_ip = resolve_panel_ip()
+        if panel_ip:
+            ips.add(panel_ip)
+
+        return self.deduplicate_ips(sorted(ips))
     
     async def get_server_rules(self, server_id: int, db: AsyncSession, direction: str = "in") -> list[str]:
         result = await db.execute(
@@ -236,7 +267,13 @@ class BlocklistManager:
         global_ips = await self.get_global_rules(db, direction)
         server_ips = await self.get_server_rules(server_id, db, direction)
         auto_ips = await self.get_auto_list_ips(db, direction)
-        all_ips = global_ips + server_ips + auto_ips
+        # auto_ips уже отфильтрованы при парсинге; ручные правила (в т.ч. старые
+        # записи в БД) дополнительно чистятся от приватных диапазонов здесь
+        manual_ips = [
+            ip for ip in global_ips + server_ips
+            if is_public_range(self._normalize_ip(ip))
+        ]
+        all_ips = manual_ips + auto_ips
         return self.deduplicate_ips(all_ips)
     
     async def sync_to_node(
