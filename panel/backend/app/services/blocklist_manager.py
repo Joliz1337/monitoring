@@ -61,6 +61,7 @@ class BlocklistManager:
         self._sync_in_progress = False
         self._db_sem = asyncio.Semaphore(self.DB_CONCURRENCY)
         self._http_sem = asyncio.Semaphore(self.HTTP_CONCURRENCY)
+        self._sync_lock = asyncio.Lock()
     
     def _validate_ip_cidr(self, ip: str) -> bool:
         ip = ip.strip()
@@ -150,7 +151,9 @@ class BlocklistManager:
             if response.status_code != 200:
                 return False, [], f"HTTP {response.status_code}"
             content = response.text
-            ips = self.parse_list_content(content)
+            # Парсинг больших списков (100k+ строк) — CPU-bound, в поток,
+            # иначе event loop замирает на десятки секунд
+            ips = await asyncio.to_thread(self.parse_list_content, content)
             self._set_cache(url, ips)
             return True, ips, ""
         except httpx.TimeoutException:
@@ -165,16 +168,6 @@ class BlocklistManager:
         sorted_ips = sorted(set(ips))
         content = '\n'.join(sorted_ips)
         return hashlib.sha256(content.encode()).hexdigest()
-    
-    async def check_list_updated(self, source: BlocklistSource) -> tuple[bool, list[str]]:
-        success, ips, error = await self.fetch_github_list(source.url)
-        if not success:
-            logger.warning(f"Failed to fetch {source.name}: {error}")
-            return False, []
-        new_hash = self.calculate_hash(ips)
-        if source.last_hash and source.last_hash == new_hash:
-            return False, ips
-        return True, ips
     
     async def get_setting(self, key: str, db: AsyncSession) -> Optional[str]:
         result = await db.execute(
@@ -261,20 +254,32 @@ class BlocklistManager:
                 all_ips.extend(ips)
         return all_ips
     
-    async def get_combined_ips_for_server(
-        self, server_id: int, db: AsyncSession, direction: str = "in"
-    ) -> list[str]:
-        global_ips = await self.get_global_rules(db, direction)
-        server_ips = await self.get_server_rules(server_id, db, direction)
-        auto_ips = await self.get_auto_list_ips(db, direction)
-        # auto_ips уже отфильтрованы при парсинге; ручные правила (в т.ч. старые
-        # записи в БД) дополнительно чистятся от приватных диапазонов здесь
-        manual_ips = [
-            ip for ip in global_ips + server_ips
-            if is_public_range(self._normalize_ip(ip))
-        ]
-        all_ips = manual_ips + auto_ips
-        return self.deduplicate_ips(all_ips)
+    async def build_shared_lists(self) -> dict:
+        """Общие для всех серверов списки (глобальные правила + авто-источники + allow).
+
+        Считается ОДИН раз на прогон синка: дедупликация 100k+ записей отдельно
+        для каждого сервера (42 сервера × 2 направления) съедала минуты CPU и
+        вешала event loop панели. Тяжёлый дедуп — в потоке."""
+        shared = {}
+        async with async_session() as db:
+            for direction in ("in", "out"):
+                global_ips = await self.get_global_rules(db, direction)
+                auto_ips = await self.get_auto_list_ips(db, direction)
+                # auto_ips уже отфильтрованы при парсинге; ручные правила (в т.ч.
+                # старые записи в БД) дополнительно чистятся от приватных диапазонов
+                manual_ips = [
+                    ip for ip in global_ips
+                    if is_public_range(self._normalize_ip(ip))
+                ]
+                block = await asyncio.to_thread(
+                    self.deduplicate_ips, manual_ips + auto_ips
+                )
+                shared[direction] = {
+                    "block": block,
+                    "block_set": set(block),
+                    "allow": await self.get_allow_ips_global(db, direction),
+                }
+        return shared
     
     async def sync_to_node(
         self,
@@ -336,12 +341,13 @@ class BlocklistManager:
             logger.error(f"Failed to sync allowlist to {server.name}: {e}")
             return False, str(e), {}
 
-    async def _sync_one_server(self, server: Server) -> dict:
+    async def _sync_one_server(self, server: Server, shared: dict) -> dict:
         """Sync both directions for a single server.
 
-        IP-списки читаются из БД в короткой сессии под семафором, после чего
-        соединение освобождается — медленные HTTP-синки к ноде идут уже без
-        удержания коннекта, иначе пул PostgreSQL исчерпывается при fan-out.
+        `shared` — предвычисленные общие списки из build_shared_lists(); здесь
+        к ним добавляются только per-server правила (обычно единицы записей).
+        Короткая сессия БД под семафором освобождается до медленных HTTP-синков,
+        иначе пул PostgreSQL исчерпывается при fan-out.
         """
         server_result = {
             "server_id": server.id,
@@ -356,9 +362,14 @@ class BlocklistManager:
             async with self._db_sem:
                 async with async_session() as db:
                     for direction in ("in", "out"):
+                        server_rules = await self.get_server_rules(server.id, db, direction)
+                        extra = [
+                            ip for ip in self.deduplicate_ips(server_rules)
+                            if is_public_range(ip) and ip not in shared[direction]["block_set"]
+                        ]
                         ip_lists[direction] = {
-                            "block": await self.get_combined_ips_for_server(server.id, db, direction),
-                            "allow": await self.get_allow_ips_global(db, direction),
+                            "block": shared[direction]["block"] + extra,
+                            "allow": shared[direction]["allow"],
                         }
         except Exception as e:
             logger.error(f"Failed to load blocklist IPs for {server.name}: {e}")
@@ -406,11 +417,11 @@ class BlocklistManager:
                     server_result["success"] = False
         return server_result
 
-    async def _sync_one_server_safe(self, server: Server) -> dict:
+    async def _sync_one_server_safe(self, server: Server, shared: dict) -> dict:
         """Sync one server with a global timeout wrapper — never raises."""
         try:
             return await asyncio.wait_for(
-                self._sync_one_server(server), timeout=30.0
+                self._sync_one_server(server, shared), timeout=30.0
             )
         except asyncio.TimeoutError:
             return {
@@ -445,30 +456,35 @@ class BlocklistManager:
         return {"in_progress": False, "timestamp": None, "servers": {}}
 
     async def sync_all_nodes(self) -> dict:
-        """Sync blocklists to all active nodes in parallel (both directions)."""
-        self._sync_in_progress = True
-        results = {}
-        try:
-            async with async_session() as db:
-                result = await db.execute(
-                    select(Server).where(Server.is_active == True)
-                )
-                servers = result.scalars().all()
+        """Sync blocklists to all active nodes in parallel (both directions).
 
-            if not servers:
-                self._store_sync_result({})
-                return {}
+        Под замком: параллельные полные синки (ручной + автообновление) не
+        дублируют работу, второй вызов дождётся первого и прогонит свежие данные."""
+        async with self._sync_lock:
+            self._sync_in_progress = True
+            results = {}
+            try:
+                async with async_session() as db:
+                    result = await db.execute(
+                        select(Server).where(Server.is_active == True)
+                    )
+                    servers = result.scalars().all()
 
-            tasks = [self._sync_one_server_safe(s) for s in servers]
-            done = await asyncio.gather(*tasks)
+                if not servers:
+                    self._store_sync_result({})
+                    return {}
 
-            for sr in done:
-                results[sr["server_id"]] = sr
-        except Exception as e:
-            logger.error(f"sync_all_nodes failed: {e}")
-        finally:
-            self._store_sync_result(results)
-        return results
+                shared = await self.build_shared_lists()
+                tasks = [self._sync_one_server_safe(s, shared) for s in servers]
+                done = await asyncio.gather(*tasks)
+
+                for sr in done:
+                    results[sr["server_id"]] = sr
+            except Exception as e:
+                logger.error(f"sync_all_nodes failed: {e}")
+            finally:
+                self._store_sync_result(results)
+            return results
 
     async def sync_single_node_by_id(self, server_id: int) -> dict:
         """Sync one server by ID (both directions). Returns per-server result."""
@@ -484,7 +500,8 @@ class BlocklistManager:
                 self._sync_in_progress = False
                 return {}
 
-            sr = await self._sync_one_server_safe(server)
+            shared = await self.build_shared_lists()
+            sr = await self._sync_one_server_safe(server, shared)
             prev = self._last_sync.get("servers", {}) if self._last_sync else {}
             prev[sr["server_id"]] = sr
             self._store_sync_result(prev)
