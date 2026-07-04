@@ -268,6 +268,14 @@ class AntiDdosManager:
 
     # ── fan-out actions ────────────────────────────────────────────────────
 
+    async def run_bg(self, coro):
+        """Await a fan-out coroutine as a fire-and-forget background task,
+        swallowing errors so a dropped client or a bad node can't crash it."""
+        try:
+            await coro
+        except Exception as e:
+            logger.error(f"background antiddos task failed: {e}")
+
     async def _active_servers(self) -> list[Server]:
         async with self._db_sem:
             async with async_session() as db:

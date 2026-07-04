@@ -127,19 +127,27 @@ async def get_status(db: AsyncSession = Depends(get_db), _: dict = Depends(verif
     return {"nodes": nodes, "active_count": active, "total": len(nodes)}
 
 
+# Fleet-wide fan-outs can take tens of seconds (dozens of nodes, per-node
+# timeouts, some unreachable). Running them inside the request meant nginx/the
+# browser cut the connection (499) mid-rollout, leaving the fleet half-applied.
+# Fire them in the background and return immediately; the status poll reflects
+# progress within a cycle.
 @router.post("/emergency-all")
 async def emergency_all(payload: EmergencyAllRequest, _: dict = Depends(verify_auth)):
-    result = await get_antiddos_manager().set_emergency_all(payload.enabled)
-    return {"success": True, **result}
+    mgr = get_antiddos_manager()
+    asyncio.create_task(mgr.run_bg(mgr.set_emergency_all(payload.enabled)))
+    return {"success": True, "started": True}
 
 
 @router.post("/whitelist/push")
 async def whitelist_push_now(_: dict = Depends(verify_auth)):
-    result = await get_antiddos_manager().push_whitelist_all()
-    return {"success": True, **result}
+    mgr = get_antiddos_manager()
+    asyncio.create_task(mgr.run_bg(mgr.push_whitelist_all()))
+    return {"success": True, "started": True}
 
 
 @router.post("/install-all")
 async def install_all(_: dict = Depends(verify_auth)):
-    result = await get_antiddos_manager().install_all()
-    return {"success": True, **result}
+    mgr = get_antiddos_manager()
+    asyncio.create_task(mgr.run_bg(mgr.install_all()))
+    return {"success": True, "started": True}
