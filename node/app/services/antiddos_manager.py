@@ -45,6 +45,7 @@ class AntiDdosStatus:
     watchdog: str      # on | off
     watchdog_active: bool
     client_ports: list[int]
+    version: str       # installed watchdog script version ("" if unknown)
 
 
 class AntiDdosManager:
@@ -146,6 +147,7 @@ class AntiDdosManager:
             return AntiDdosStatus(
                 installed=False, mode="off", source="none", since=0,
                 reason="", watchdog="off", watchdog_active=False, client_ports=[],
+                version="",
             )
 
         ok, stdout, _ = await self._run("status", timeout=15)
@@ -170,6 +172,7 @@ class AntiDdosManager:
             watchdog=state.get("watchdog", "on"),
             watchdog_active=watchdog_active,
             client_ports=await self.get_client_ports(),
+            version=state.get("version", ""),
         )
 
 

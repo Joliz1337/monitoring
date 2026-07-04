@@ -40,6 +40,7 @@ def _status_dict(status) -> dict:
         "watchdog": status.watchdog,
         "watchdog_active": status.watchdog_active,
         "client_ports": status.client_ports,
+        "version": status.version,
     }
 
 

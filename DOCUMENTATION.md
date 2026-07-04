@@ -189,10 +189,10 @@ bash install.sh --unattended
 **Whitelist** — отдельный ipset-набор `antiddos_allow` на диске ноды (переживает ребут и недоступность панели). Панель наполняет его ежечасно: авто-часть (IP всех активных нод + IP панели) + ручная часть (CIDR-подсети CDN и т.п., настраиваются в панели). ACCEPT по нему работает только в аварийном режиме.
 
 **Файлы:**
-- `configs/ddos-watchdog.sh` — самодостаточный host-скрипт (не зависит от Docker/панели). CLI: `loop` (systemd-сервис — детект + self-heal), `enable-manual`/`disable-manual`, `watchdog-on`/`watchdog-off`, `apply`/`clear`, `selfheal`, `whitelist-sync` (IP через stdin), `detect-ports`, `status`. Состояние — `/opt/monitoring/antiddos/state.json` (mode/source/since/reason/watchdog). Тюнинг-пороги в шапке скрипта, переопределяются через `/opt/monitoring/antiddos/config`.
+- `configs/ddos-watchdog.sh` — самодостаточный host-скрипт (не зависит от Docker/панели). CLI: `loop` (systemd-сервис — детект + self-heal), `enable-manual`/`disable-manual`, `watchdog-on`/`watchdog-off`, `apply`/`clear`, `selfheal`, `whitelist-sync` (IP через stdin), `detect-ports`, `version`, `status`. Состояние — `/opt/monitoring/antiddos/state.json` (mode/source/since/reason/watchdog). Тюнинг-пороги в шапке скрипта, переопределяются через `/opt/monitoring/antiddos/config`.
 - `configs/ddos-watchdog.service` — systemd-unit (`Type=simple`, `Restart=always`, `ExecStart=... loop`).
 
-**Установка:** кнопка «Установить watchdog на все» в панели (`POST /antiddos/install-all` → на каждой ноде `POST /api/antiddos/install`) — не требует обновления ноды, ставит скрипт+сервис на хост и включает watchdog по умолчанию. Так же раскатывается на уже существующие ноды.
+**Установка — zero-touch:** панель раскатывает watchdog на ноды сама, без ручных действий. Тот же фоновый опрос статуса (раз в ~60 сек) сверяет версию установленного на ноде скрипта с версией `ddos-watchdog.sh` на GitHub (константа `WATCHDOG_VERSION`) и автоматически ставит/обновляет его через `POST /api/antiddos/install`, если он не установлен или устарел. Единственное условие — на ноде уже должен стоять образ node-api с эндпоинтом `/api/antiddos` (обычное обновление ноды). Кнопка «Установить watchdog на все» в панели (`POST /antiddos/install-all`) осталась — теперь это способ форсировать переустановку/обновление немедленно, не дожидаясь очередного опроса.
 
 **Требования к ядру:** SYNPROXY использует `xt_SYNPROXY`/`nf_synproxy_core` (best-effort — если модули недоступны, SYNPROXY пропускается, connlimit/hashlimit/drop-invalid остаются), плюс `connlimit` и `hashlimit`. На Ubuntu 24 iptables = iptables-nft (тот же стек, что UFW/Docker/ipset_manager).
 
@@ -202,7 +202,7 @@ bash install.sh --unattended
 
 Подробная документация по каждому компоненту:
 
-- [panel/DOCUMENTATION.md](panel/DOCUMENTATION.md) — веб-панель: API, БД, конфигурация, безопасность (v10.15.0)
+- [panel/DOCUMENTATION.md](panel/DOCUMENTATION.md) — веб-панель: API, БД, конфигурация, безопасность (v10.15.1)
 - [node/DOCUMENTATION.md](node/DOCUMENTATION.md) — нода-агент: API, метрики, HAProxy, трафик, Remnawave, Firewall Profiles, Анти-DDoS
 
 ## Архитектура

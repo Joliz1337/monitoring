@@ -14,6 +14,7 @@ import asyncio
 import ipaddress
 import json
 import logging
+import re
 import socket
 from datetime import datetime, timezone
 from typing import Optional
@@ -39,6 +40,7 @@ FILES_CACHE_TTL = 300  # seconds
 class AntiDdosManager:
     DB_CONCURRENCY = 10
     HTTP_CONCURRENCY = 50
+    INSTALL_RETRY_INTERVAL = 600  # don't retry a failing auto-install more often
 
     def __init__(self):
         self._running = False
@@ -47,6 +49,7 @@ class AntiDdosManager:
         self._db_sem = asyncio.Semaphore(self.DB_CONCURRENCY)
         self._http_sem = asyncio.Semaphore(self.HTTP_CONCURRENCY)
         self._files_cache: Optional[tuple[float, str, str]] = None
+        self._install_cooldown: dict[int, float] = {}
 
     # ── lifecycle ──────────────────────────────────────────────────────────
 
@@ -230,6 +233,13 @@ class AntiDdosManager:
             logger.error(f"Failed to fetch watchdog files: {e}")
             return None
 
+    async def _expected_watchdog_version(self) -> Optional[str]:
+        files = await self._fetch_watchdog_files()
+        if not files:
+            return None
+        match = re.search(r'WATCHDOG_VERSION="?([0-9][0-9.]*)"?', files[0])
+        return match.group(1) if match else None
+
     async def install_to_node(self, server: Server, timeout: float = 60.0) -> tuple[bool, str]:
         files = await self._fetch_watchdog_files()
         if not files:
@@ -374,14 +384,52 @@ class AntiDdosManager:
         except Exception as e:
             logger.error(f"Failed to send antiddos alert: {e}")
 
+    async def _maybe_auto_install(self, server: Server, status: dict, expected_version: Optional[str]) -> dict:
+        """Zero-touch rollout: if a node has the new agent (/api/antiddos exists,
+        so status came back) but the watchdog isn't installed — or it's an older
+        version — the panel installs/updates it itself. No admin action, no per-node
+        clicking. A per-node cooldown keeps a failing install from retrying every poll.
+        """
+        installed = status.get("installed", False)
+        version = status.get("version") or ""
+        needs = (not installed) or (expected_version and version and version != expected_version)
+        if not needs:
+            return status
+
+        loop = asyncio.get_event_loop()
+        now = loop.time()
+        if now - self._install_cooldown.get(server.id, 0.0) < self.INSTALL_RETRY_INTERVAL:
+            return status
+        self._install_cooldown[server.id] = now
+
+        ok, msg = await self.install_to_node(server)
+        if not ok:
+            logger.warning(f"Auto-install of watchdog on {server.name} failed: {msg}")
+            return status
+
+        logger.info(f"Auto-installed watchdog on {server.name}")
+        # give the freshly-installed node its whitelist immediately
+        try:
+            async with async_session() as db:
+                ips = await self.build_whitelist(db)
+            await self.sync_whitelist_to_node(server, ips)
+        except Exception as e:
+            logger.warning(f"Post-install whitelist push to {server.name} failed: {e}")
+
+        fresh = await self.get_node_status(server)
+        return fresh if fresh is not None else status
+
     async def poll_status_all(self):
         servers = await self._active_servers()
+        expected_version = await self._expected_watchdog_version()
 
         async def _one(srv: Server):
             async with self._http_sem:
                 status = await self.get_node_status(srv)
-                if status is not None:
-                    await self._store_status(srv.id, status, alert=True)
+                if status is None:
+                    return  # unreachable, or old agent without /api/antiddos
+                status = await self._maybe_auto_install(srv, status, expected_version)
+                await self._store_status(srv.id, status, alert=True)
 
         await asyncio.gather(*[_one(s) for s in servers], return_exceptions=True)
 

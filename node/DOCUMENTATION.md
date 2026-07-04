@@ -480,7 +480,7 @@ data: {"message": "error description"}
 
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
-| GET | /api/antiddos/status | Текущее состояние: installed, mode (on/off), source (auto/manual/none), since, reason, watchdog (on/off), watchdog_active, client_ports |
+| GET | /api/antiddos/status | Текущее состояние: installed, mode (on/off), source (auto/manual/none), since, reason, watchdog (on/off), watchdog_active, client_ports, version |
 | POST | /api/antiddos/emergency | Включить/выключить аварийный режим вручную (`source=manual` — автоматика не снимает) |
 | POST | /api/antiddos/watchdog | Включить/выключить автодетект (сервис watchdog продолжает работать, но не трогает правила) |
 | POST | /api/antiddos/whitelist/sync | Полная замена ipset-набора `antiddos_allow` (принимает `ips: string[]`) |
@@ -506,9 +506,11 @@ data: {"message": "error description"}
 
 **Whitelist:** ipset-набор `antiddos_allow` (`hash:net`), хранится на диске ноды (`/opt/monitoring/antiddos/whitelist.json`) — переживает ребут и недоступность панели. ACCEPT по нему действует только в аварийном режиме (в дежурном режиме проходит весь трафик без ipset-проверок). Панель наполняет набор ежечасно через `POST /api/antiddos/whitelist/sync`.
 
-**CLI-команды `ddos-watchdog.sh`** (вызываются нодой через `nsenter`, доступны и вручную на хосте): `loop`, `enable-manual`, `disable-manual`, `watchdog-on`, `watchdog-off`, `apply`, `clear`, `selfheal`, `whitelist-sync` (IP через stdin), `detect-ports`, `status`. Состояние — `/opt/monitoring/antiddos/state.json` (mode/source/since/reason/watchdog).
+**CLI-команды `ddos-watchdog.sh`** (вызываются нодой через `nsenter`, доступны и вручную на хосте): `loop`, `enable-manual`, `disable-manual`, `watchdog-on`, `watchdog-off`, `apply`, `clear`, `selfheal`, `whitelist-sync` (IP через stdin), `detect-ports`, `version`, `status`. Состояние — `/opt/monitoring/antiddos/state.json` (mode/source/since/reason/watchdog).
 
-**Установка:** `install.sh`/обновление ноды **не** ставит watchdog автоматически — раскатка идёт по кнопке «Установить watchdog на все» в панели (см. panel/DOCUMENTATION.md), которая качает `configs/ddos-watchdog.sh`/`.service` с GitHub и передаёт их на ноду через `POST /api/antiddos/install`. Watchdog включён по умолчанию сразу после установки.
+**Версионирование watchdog-скрипта:** константа `WATCHDOG_VERSION` в шапке `ddos-watchdog.sh` (сейчас `"1.0.0"`) — команда `status` возвращает её полем `version`, отдельная команда `version` печатает только её. Значение растёт при изменении логики скрипта; панель сверяет его с версией, установленной на ноде (см. «Установка» ниже).
+
+**Установка — zero-touch:** `install.sh`/обновление ноды по-прежнему **не** ставит watchdog напрямую — раскатка идёт с панели, но теперь без ручных действий. Панель в фоновом опросе статуса (см. panel/DOCUMENTATION.md) видит, что нода отвечает на `/api/antiddos/status` (значит образ node-api уже новый), и сама вызывает `POST /api/antiddos/install`, если watchdog не установлен (`installed:false`) либо его `version` отличается от актуальной версии `ddos-watchdog.sh` на GitHub. Кнопка «Установить watchdog на все» в панели остаётся как ручной способ обновить/переустановить немедленно. Watchdog включён по умолчанию сразу после установки.
 
 **Требования к ядру:** `xt_SYNPROXY`/`nf_synproxy_core`, `connlimit`, `hashlimit`. На Ubuntu 24 iptables работает через nft-бэкенд (iptables-nft) — тот же стек, что UFW/Docker/ipset_manager.
 

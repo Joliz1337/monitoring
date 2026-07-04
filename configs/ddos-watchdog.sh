@@ -16,6 +16,10 @@
 
 set -u
 
+# Bumped when the script logic changes — the panel compares this against what a
+# node reports and auto-reinstalls on drift, so updates roll out without clicks.
+WATCHDOG_VERSION="1.0.0"
+
 STATE_DIR="/opt/monitoring/antiddos"
 STATE_FILE="$STATE_DIR/state.json"
 WHITELIST_FILE="$STATE_DIR/whitelist.json"
@@ -61,6 +65,7 @@ read_state() {
     MODE=$(grep -oE '"mode"[[:space:]]*:[[:space:]]*"[^"]*"' "$STATE_FILE" | grep -oE '[^"]*"$' | tr -d '"')
     SOURCE=$(grep -oE '"source"[[:space:]]*:[[:space:]]*"[^"]*"' "$STATE_FILE" | grep -oE '[^"]*"$' | tr -d '"')
     SINCE=$(grep -oE '"since"[[:space:]]*:[[:space:]]*[0-9]+' "$STATE_FILE" | grep -oE '[0-9]+$')
+    REASON=$(grep -oE '"reason"[[:space:]]*:[[:space:]]*"[^"]*"' "$STATE_FILE" | grep -oE '[^"]*"$' | tr -d '"')
     WATCHDOG=$(grep -oE '"watchdog"[[:space:]]*:[[:space:]]*"[^"]*"' "$STATE_FILE" | grep -oE '[^"]*"$' | tr -d '"')
     [ -n "$MODE" ] || MODE=off
     [ -n "$SOURCE" ] || SOURCE=none
@@ -395,6 +400,11 @@ case "${1:-loop}" in
     selfheal)        read_state; [ "$MODE" = "on" ] && selfheal ;;
     whitelist-sync)  whitelist_sync ;;
     detect-ports)    ports_csv ;;
-    status)          ensure_dirs; [ -r "$STATE_FILE" ] && cat "$STATE_FILE" || echo '{"mode":"off","source":"none","since":0,"reason":"","watchdog":"on"}' ;;
-    *)               echo "usage: $0 {loop|enable-manual|disable-manual|watchdog-on|watchdog-off|apply|clear|selfheal|whitelist-sync|detect-ports|status}" >&2; exit 1 ;;
+    version)         echo "$WATCHDOG_VERSION" ;;
+    status)
+        ensure_dirs; read_state
+        r=$(printf '%s' "$REASON" | tr -d '"\\')
+        printf '{"mode":"%s","source":"%s","since":%s,"reason":"%s","watchdog":"%s","version":"%s"}\n' \
+            "$MODE" "$SOURCE" "${SINCE:-0}" "$r" "$WATCHDOG" "$WATCHDOG_VERSION" ;;
+    *)               echo "usage: $0 {loop|enable-manual|disable-manual|watchdog-on|watchdog-off|apply|clear|selfheal|whitelist-sync|detect-ports|version|status}" >&2; exit 1 ;;
 esac
