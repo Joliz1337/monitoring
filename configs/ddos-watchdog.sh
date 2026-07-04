@@ -18,7 +18,7 @@ set -u
 
 # Bumped when the script logic changes — the panel compares this against what a
 # node reports and auto-reinstalls on drift, so updates roll out without clicks.
-WATCHDOG_VERSION="1.3.0"
+WATCHDOG_VERSION="1.4.0"
 
 STATE_DIR="/opt/monitoring/antiddos"
 STATE_FILE="$STATE_DIR/state.json"
@@ -38,7 +38,8 @@ NEWBURST=60                 # burst for the rate limiter
 NEVER_DROP_PORTS="9100 7500"  # node API (nginx + uvicorn); SSH port auto-detected
 
 # detection thresholds (conservative — must not fire on a legit evening peak)
-CONNTRACK_PCT=80            # conntrack table fill % → strong signal
+CONNTRACK_DROP_DELTA=50     # insert_failed growth/cycle → strong (table full, dropping)
+CONNTRACK_PCT=95            # conntrack fill % → weak hint only (near exhaustion)
 SYNCOOKIE_DELTA=200         # SyncookiesSent growth per cycle → strong signal (SYN flood)
 PPS_THRESHOLD=150000        # rx packets/sec …
 SMALL_PKT_BYTES=200         # …combined with avg packet < this → flood-of-tiny (weak)
@@ -292,11 +293,37 @@ disable_mode() {
 read_prev() { cat "$RUN_DIR/$1" 2>/dev/null || echo 0; }
 save_prev() { echo "$2" > "$RUN_DIR/$1" 2>/dev/null || true; }
 
+# Sum the conntrack insert_failed counter across CPUs — the real "table full,
+# dropping packets" signal. /proc/net/stat/nf_conntrack has a named header then
+# per-CPU hex rows; parse in bash (mawk lacks strtonum).
+read_insert_failed() {
+    local f="/proc/net/stat/nf_conntrack" col total=0 h
+    [ -r "$f" ] || { echo 0; return 0; }
+    col=$(awk 'NR==1{for(i=1;i<=NF;i++) if($i=="insert_failed"){print i; exit}}' "$f")
+    [ -n "$col" ] || { echo 0; return 0; }
+    while read -r h; do
+        [[ "$h" =~ ^[0-9a-fA-F]+$ ]] && total=$(( total + 0x$h ))
+    done < <(awk -v c="$col" 'NR>1{print $c}' "$f")
+    echo "$total"
+}
+
 # sets globals: SIG_STRONG SIG_WEAK SIG_REASON
 sample_signals() {
     SIG_STRONG=0; SIG_WEAK=0; SIG_REASON=""
 
-    # conntrack fill %
+    # conntrack: the real attack signal is inserts actually FAILING (table full,
+    # dropping packets) — not a high fill on a merely-busy node. Use the delta of
+    # insert_failed; a near-full table is only a weak corroborating hint.
+    local cur_if prev_if dif
+    cur_if=$(read_insert_failed)
+    prev_if=$(read_prev insertfailed)
+    save_prev insertfailed "$cur_if"
+    dif=$(( cur_if - prev_if ))
+    [ "$dif" -lt 0 ] && dif=0
+    if [ "$dif" -ge "$CONNTRACK_DROP_DELTA" ] 2>/dev/null; then
+        SIG_STRONG=1; SIG_REASON="conntrack dropping (+${dif}/cycle)"
+    fi
+
     local ct_count ct_max fill=0
     ct_count=$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null || echo 0)
     ct_max=$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null || echo 0)
@@ -304,7 +331,8 @@ sample_signals() {
         fill=$(( ct_count * 100 / ct_max ))
     fi
     if [ "$fill" -ge "$CONNTRACK_PCT" ] 2>/dev/null; then
-        SIG_STRONG=1; SIG_REASON="conntrack ${fill}%"
+        SIG_WEAK=1
+        SIG_REASON="${SIG_REASON:+$SIG_REASON, }conntrack ${fill}%"
     fi
 
     # SyncookiesSent delta (active SYN flood). /proc/net/netstat has a TcpExt
