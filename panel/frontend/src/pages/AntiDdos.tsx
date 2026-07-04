@@ -4,7 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
 import {
   Siren, ShieldAlert, ShieldCheck, Settings as SettingsIcon, ListChecks,
-  BookOpen, Loader2, RefreshCw, Trash2, Save, Power, Radar,
+  BookOpen, Loader2, RefreshCw, Trash2, Save, Radar,
 } from 'lucide-react'
 import {
   antiDdosApi, type AntiDdosSettings, type AntiDdosStatus, type NodeAntiDdosState,
@@ -147,13 +147,14 @@ export default function AntiDdos() {
           {activeTab === 'control' && (
             <div className="space-y-4">
               <div className="card p-5 space-y-4">
+                {/* Auto-detection (watchdog) — fleet-wide master switch */}
                 <div className="flex items-center justify-between">
                   <div>
-                    <h2 className="text-sm font-semibold flex items-center gap-2"><Power className="w-4 h-4" /> {t('anti_ddos.global_title')}</h2>
-                    <p className="text-xs text-dark-400 mt-1">{t('anti_ddos.global_hint')}</p>
+                    <h2 className="text-sm font-semibold flex items-center gap-2"><Radar className="w-4 h-4" /> {t('anti_ddos.autodetect_title')}</h2>
+                    <p className="text-xs text-dark-400 mt-1">{t('anti_ddos.autodetect_hint')}</p>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs text-dark-400">{t('anti_ddos.feature_enabled')}</span>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span className="text-xs text-dark-400">{t('anti_ddos.autodetect_all')}</span>
                     <Toggle on={!!settings?.enabled} onClick={() => settings && patchSettings({ enabled: !settings.enabled })} />
                   </div>
                 </div>
@@ -164,21 +165,30 @@ export default function AntiDdos() {
                     : t('anti_ddos.all_normal', { total: status?.total ?? 0 })}
                 </div>
 
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    onClick={() => runAction('emg-all-on', () => antiDdosApi.emergencyAll(true), t('anti_ddos.done'))}
-                    disabled={busy === 'emg-all-on'}
-                    className="flex items-center gap-2 px-3 py-2 text-sm rounded bg-red-500/90 hover:bg-red-500 text-white disabled:opacity-50">
-                    {busy === 'emg-all-on' ? <Loader2 className="w-4 h-4 animate-spin" /> : <ShieldAlert className="w-4 h-4" />}
-                    {t('anti_ddos.enable_all')}
-                  </button>
-                  <button
-                    onClick={() => runAction('emg-all-off', () => antiDdosApi.emergencyAll(false), t('anti_ddos.done'))}
-                    disabled={busy === 'emg-all-off'}
-                    className="flex items-center gap-2 px-3 py-2 text-sm rounded bg-dark-700 hover:bg-dark-600 text-dark-100 disabled:opacity-50">
-                    {busy === 'emg-all-off' ? <Loader2 className="w-4 h-4 animate-spin" /> : <ShieldCheck className="w-4 h-4" />}
-                    {t('anti_ddos.disable_all')}
-                  </button>
+                {/* Manual emergency — separate control, independent of auto-detection */}
+                <div className="border-t border-dark-800 pt-3">
+                  <div className="text-xs font-medium text-dark-300 mb-2 flex items-center gap-1.5">
+                    <ShieldAlert className="w-3.5 h-3.5 text-red-400" /> {t('anti_ddos.emergency_manual_title')}
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      onClick={() => runAction('emg-all-on', () => antiDdosApi.emergencyAll(true), t('anti_ddos.done'))}
+                      disabled={busy === 'emg-all-on'}
+                      className="flex items-center gap-2 px-3 py-2 text-sm rounded bg-red-500/90 hover:bg-red-500 text-white disabled:opacity-50">
+                      {busy === 'emg-all-on' ? <Loader2 className="w-4 h-4 animate-spin" /> : <ShieldAlert className="w-4 h-4" />}
+                      {t('anti_ddos.enable_all')}
+                    </button>
+                    <button
+                      onClick={() => runAction('emg-all-off', () => antiDdosApi.emergencyAll(false), t('anti_ddos.done'))}
+                      disabled={busy === 'emg-all-off'}
+                      className="flex items-center gap-2 px-3 py-2 text-sm rounded bg-dark-700 hover:bg-dark-600 text-dark-100 disabled:opacity-50">
+                      {busy === 'emg-all-off' ? <Loader2 className="w-4 h-4 animate-spin" /> : <ShieldCheck className="w-4 h-4" />}
+                      {t('anti_ddos.disable_all')}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="border-t border-dark-800 pt-3">
                   <button
                     onClick={() => runAction('push-wl', () => antiDdosApi.pushWhitelist(), t('anti_ddos.whitelist_pushed'))}
                     disabled={busy === 'push-wl'}

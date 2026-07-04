@@ -335,14 +335,11 @@ class AntiDdosManager:
         return {"nodes": len(servers), "ok": ok_count}
 
     async def apply_master_state(self, enabled: bool):
-        """Make the master toggle mean it: OFF stands every node down (clears
-        emergencies + turns off auto-detection), ON re-arms auto-detection."""
+        """The master switch controls ONLY fleet-wide auto-detection (watchdog).
+        Manual emergency mode is a separate control and is never touched here, so
+        turning auto-detection off never clears an emergency an admin pinned."""
         try:
-            if enabled:
-                await self.set_watchdog_all(True)
-            else:
-                await self.set_emergency_all(False)
-                await self.set_watchdog_all(False)
+            await self.set_watchdog_all(enabled)
         except Exception as e:
             logger.error(f"apply_master_state({enabled}) failed: {e}")
 
