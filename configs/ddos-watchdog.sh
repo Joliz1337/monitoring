@@ -18,7 +18,7 @@ set -u
 
 # Bumped when the script logic changes — the panel compares this against what a
 # node reports and auto-reinstalls on drift, so updates roll out without clicks.
-WATCHDOG_VERSION="1.1.0"
+WATCHDOG_VERSION="1.3.0"
 
 STATE_DIR="/opt/monitoring/antiddos"
 STATE_FILE="$STATE_DIR/state.json"
@@ -35,7 +35,7 @@ INTERVAL=10                 # loop period, seconds
 CONNLIMIT=100               # max concurrent conns per source /32 on client ports
 NEWRATE=30                  # max new conns/sec per source
 NEWBURST=60                 # burst for the rate limiter
-NEVER_DROP_PORTS="22 9100"  # SSH + node API — always ACCEPT
+NEVER_DROP_PORTS="9100 7500"  # node API (nginx + uvicorn); SSH port auto-detected
 
 # detection thresholds (conservative — must not fire on a legit evening peak)
 CONNTRACK_PCT=80            # conntrack table fill % → strong signal
@@ -87,10 +87,34 @@ now() { date +%s; }
 
 # ── client-port detection ───────────────────────────────────────────────────
 
+# SSH port isn't always 22 — detect it from config + socket activation + live
+# listeners, so a node on a custom SSH port never gets rate-limited or locked out.
+detect_ssh_ports() {
+    local ports=""
+    # sshd_config Port directives
+    ports="$ports $(grep -rhiE '^[[:space:]]*Port[[:space:]]+[0-9]+' \
+        /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null | awk '{print $2}')"
+    # systemd socket activation (Ubuntu 24 default): ListenStream=[addr:]port
+    ports="$ports $(grep -rhiE '^[[:space:]]*ListenStream=' \
+        /lib/systemd/system/ssh.socket /etc/systemd/system/ssh.socket.d/*.conf 2>/dev/null \
+        | grep -oE '[0-9]+[[:space:]]*$' )"
+    # live sshd listeners (catches anything the above missed)
+    ports="$ports $(ss -H -tlnp 2>/dev/null | awk '/sshd/{print $4}' | sed -E 's/.*:([0-9]+)$/\1/')"
+
+    ports=$(printf '%s\n' $ports | grep -E '^[0-9]+$' | sort -un)
+    [ -z "$ports" ] && ports=22
+    echo $ports
+}
+
+# Management ports (static) + auto-detected SSH port(s) — never rate-limited.
+effective_never_drop() {
+    printf '%s\n' $NEVER_DROP_PORTS $(detect_ssh_ports) | grep -E '^[0-9]+$' | sort -un
+}
+
 # Listening TCP ports on non-loopback addresses, minus the never-drop set.
 detect_client_ports() {
     local exclude
-    exclude=$(printf '%s\n' $NEVER_DROP_PORTS)
+    exclude=$(effective_never_drop)
     ss -H -tln 2>/dev/null | awk '
         {
             addr=$4
@@ -173,9 +197,9 @@ build_chain() {
     # 2. keep established traffic flowing untouched
     ipt -A "$CHAIN" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 
-    # 3. never touch SSH / node API
+    # 3. never touch SSH (auto-detected port) / node API
     local p
-    for p in $NEVER_DROP_PORTS; do
+    for p in $(effective_never_drop); do
         ipt -A "$CHAIN" -p tcp --dport "$p" -j ACCEPT
     done
 
@@ -185,25 +209,38 @@ build_chain() {
 
     [ -z "$ports" ] && return 0
 
-    # 5. SYNPROXY on client ports — validate the handshake before conntrack
-    if synproxy_available; then
+    # iptables -m multiport takes at most 15 ports per rule — a busy Xray node
+    # can listen on far more, so split the detected ports into groups of 15 and
+    # emit the SYNPROXY / connlimit / hashlimit rules per group.
+    local synproxy_ok=0
+    synproxy_available && synproxy_ok=1
+
+    if [ "$synproxy_ok" = "1" ]; then
         for p in $(detect_client_ports); do
             iptables -t raw -C PREROUTING -p tcp --dport "$p" --syn -j CT --notrack 2>/dev/null \
                 || iptables -t raw -A PREROUTING -p tcp --dport "$p" --syn -j CT --notrack 2>/dev/null || true
         done
-        ipt -A "$CHAIN" -p tcp -m multiport --dports "$ports" -m conntrack --ctstate INVALID,UNTRACKED \
-            -j SYNPROXY --sack-perm --wscale 7 --mss 1460
     fi
 
-    # 6. per-source connection cap on client ports
-    ipt -A "$CHAIN" -p tcp -m multiport --dports "$ports" \
-        -m connlimit --connlimit-above "$CONNLIMIT" --connlimit-mask 32 -j DROP
+    local chunk idx=0
+    while read -r chunk; do
+        [ -z "$chunk" ] && continue
+        idx=$((idx + 1))
 
-    # 7. per-source new-connection rate limit on client ports
-    ipt -A "$CHAIN" -p tcp -m multiport --dports "$ports" -m conntrack --ctstate NEW \
-        -m hashlimit --hashlimit-above "${NEWRATE}/sec" --hashlimit-burst "$NEWBURST" \
-        --hashlimit-mode srcip --hashlimit-name antiddos \
-        --hashlimit-htable-max 1000000 --hashlimit-htable-expire 60000 -j DROP
+        # SYNPROXY: validate the handshake before conntrack (skipped if no module)
+        [ "$synproxy_ok" = "1" ] && ipt -A "$CHAIN" -p tcp -m multiport --dports "$chunk" \
+            -m conntrack --ctstate INVALID,UNTRACKED -j SYNPROXY --sack-perm --wscale 7 --mss 1460
+
+        # per-source concurrent-connection cap
+        ipt -A "$CHAIN" -p tcp -m multiport --dports "$chunk" \
+            -m connlimit --connlimit-above "$CONNLIMIT" --connlimit-mask 32 -j DROP
+
+        # per-source new-connection rate limit (unique hashlimit table per group)
+        ipt -A "$CHAIN" -p tcp -m multiport --dports "$chunk" -m conntrack --ctstate NEW \
+            -m hashlimit --hashlimit-above "${NEWRATE}/sec" --hashlimit-burst "$NEWBURST" \
+            --hashlimit-mode srcip --hashlimit-name "antiddos${idx}" \
+            --hashlimit-htable-max 1000000 --hashlimit-htable-expire 60000 -j DROP
+    done < <(detect_client_ports | awk 'NF{ buf=(c?buf","$0:$0); c++; if(c==15){print buf; buf=""; c=0} } END{ if(c) print buf }')
 }
 
 teardown_synproxy_raw() {

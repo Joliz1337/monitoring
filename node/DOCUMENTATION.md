@@ -485,14 +485,18 @@ data: {"message": "error description"}
 | POST | /api/antiddos/watchdog | Включить/выключить автодетект (сервис watchdog продолжает работать, но не трогает правила) |
 | POST | /api/antiddos/whitelist/sync | Полная замена ipset-набора `antiddos_allow` (принимает `ips: string[]`) |
 | POST | /api/antiddos/install | Установить/обновить `ddos-watchdog.sh` + systemd-сервис на хосте, включить (`daemon-reload` → `enable` → `restart`) |
-| GET | /api/antiddos/client-ports | Автоопределённые клиентские TCP-порты (слушающие, кроме 22/9100) |
+| GET | /api/antiddos/client-ports | Автоопределённые клиентские TCP-порты (слушающие, кроме SSH (автоопределяется), 9100, 7500) |
 
 **Аварийный режим (цепочка `ANTIDDOS`, джамп из INPUT только пока активен):**
 1. ACCEPT по whitelist (`antiddos_allow`, ipset `hash:net`) — первым
 2. ACCEPT established/related соединений
-3. ACCEPT SSH (22) и node API (9100) — никогда не дропаются
+3. ACCEPT SSH (порт автоопределяется, см. ниже), nginx mTLS API (9100) и внутренний uvicorn-API ноды (7500) — никогда не дропаются
 4. DROP INVALID (эффективно вместе с `nf_conntrack_tcp_loose=0` из системных оптимизаций)
 5. На автоопределённые клиентские порты — SYNPROXY (проверка TCP-рукопожатия до создания conntrack-записи, гасит SYN-флуд со спуфнутых IP; best-effort — если `xt_SYNPROXY`/`nf_synproxy_core` недоступны, шаг пропускается), connlimit (лимит одновременных соединений с одного IP) и hashlimit (лимит новых соединений/сек с одного IP)
+
+**Разбивка портов на группы (`build_chain`):** `iptables -m multiport --dports` принимает не более 15 портов на правило. Busy Xray-нода может слушать 30+ клиентских инбаундов, поэтому `detect_client_ports` разбивается на группы по ≤15 портов, и для каждой группы генерируется свой набор правил SYNPROXY/connlimit/hashlimit с уникальной hashlimit-таблицей (`--hashlimit-name antiddos1`, `antiddos2`, ...) — так все обнаруженные порты гарантированно покрыты лимитами, а не только первые 15.
+
+**Автоопределение SSH-порта (`detect_ssh_ports()`):** раньше SSH в never-drop был захардкожен как порт 22 — на ноде с нестандартным SSH-портом реальный порт не получал бы ACCEPT и мог попасть под connlimit/hashlimit клиентских портов, а хардкод-22 просто вешал бы бесполезное правило. Порт(ы) определяются из трёх источников и объединяются: директива `Port` в `/etc/ssh/sshd_config` и `/etc/ssh/sshd_config.d/*.conf`; `ListenStream=` в systemd socket-активации (`ssh.socket` и override'ы — дефолт Ubuntu 24); живые sshd-листенеры через `ss -H -tlnp` (грепом по `sshd`). Если ни один источник не дал результата — откат на 22. `effective_never_drop()` объединяет статические management-порты (`NEVER_DROP_PORTS="9100 7500"`) с автоопределёнными SSH-портами (дедуп) — используется и при исключении клиентских портов (`detect_client_ports`), и при генерации ACCEPT-правил (`build_chain`).
 
 Джамп ставится только на время активного режима — в дежурном режиме никаких дополнительных правил и накладных расходов.
 
@@ -509,7 +513,7 @@ data: {"message": "error description"}
 
 **CLI-команды `ddos-watchdog.sh`** (вызываются нодой через `nsenter`, доступны и вручную на хосте): `loop`, `enable-manual`, `disable-manual`, `watchdog-on`, `watchdog-off`, `apply`, `clear`, `selfheal`, `whitelist-sync` (IP через stdin), `detect-ports`, `version`, `status`. Состояние — `/opt/monitoring/antiddos/state.json` (mode/source/since/reason/watchdog).
 
-**Версионирование watchdog-скрипта:** константа `WATCHDOG_VERSION` в шапке `ddos-watchdog.sh` (сейчас `"1.1.0"`) — команда `status` возвращает её полем `version`, отдельная команда `version` печатает только её. Значение растёт при изменении логики скрипта; панель сверяет его с версией, установленной на ноде (см. «Установка» ниже).
+**Версионирование watchdog-скрипта:** константа `WATCHDOG_VERSION` в шапке `ddos-watchdog.sh` (сейчас `"1.3.0"`) — команда `status` возвращает её полем `version`, отдельная команда `version` печатает только её. Значение растёт при изменении логики скрипта; панель сверяет его с версией, установленной на ноде (см. «Установка» ниже).
 
 **Установка — zero-touch:** `install.sh`/обновление ноды по-прежнему **не** ставит watchdog напрямую — раскатка полностью на панели, без ручных действий и без кнопки в интерфейсе. Панель в фоновом опросе статуса (см. panel/DOCUMENTATION.md) видит, что нода отвечает на `/api/antiddos/status` (значит образ node-api уже новый), и сама вызывает `POST /api/antiddos/install`, если watchdog не установлен (`installed:false`) либо его `version` отличается от актуальной версии `ddos-watchdog.sh` на GitHub. Backend-эндпоинты ручной установки (`POST /antiddos/install-all` в панели, `POST /api/antiddos/install` на ноде) остаются доступны по API. Watchdog включён по умолчанию сразу после установки.
 
