@@ -429,7 +429,7 @@ class XrayStatsCollector:
                 "expire_at": self._parse_datetime(user.get("expireAt")),
                 "subscription_url": user.get("subscriptionUrl"),
                 "sub_revoked_at": self._parse_datetime(user.get("subRevokedAt")),
-                "traffic_limit_bytes": user.get("trafficLimitBytes"),
+                "traffic_limit_bytes": self._as_int(user.get("trafficLimitBytes")),
                 "traffic_limit_strategy": user.get("trafficLimitStrategy"),
                 "last_traffic_reset_at": self._parse_datetime(user.get("lastTrafficResetAt")),
                 "used_traffic_bytes": user_traffic.get("usedTrafficBytes"),
@@ -496,6 +496,15 @@ class XrayStatsCollector:
 
             now = datetime.now(timezone.utc).replace(tzinfo=None)
 
+            # Remnawave >= 2.8.0 отдаёт userId (число) вместо userUuid —
+            # восстанавливаем uuid через кэш пользователей (email = числовой id Remnawave)
+            async with async_session() as db:
+                uuid_rows = (await db.execute(
+                    select(RemnawaveUserCache.email, RemnawaveUserCache.uuid)
+                    .where(RemnawaveUserCache.uuid.isnot(None))
+                )).all()
+            uuid_by_user_id = {user_id: uuid for user_id, uuid in uuid_rows}
+
             # Дедупликация по hwid — API может вернуть дубли
             unique: dict[str, dict] = {}
             for dev in devices:
@@ -504,7 +513,7 @@ class XrayStatsCollector:
                     continue
                 unique[hwid] = {
                     "hwid": hwid,
-                    "user_uuid": dev.get("userUuid", ""),
+                    "user_uuid": dev.get("userUuid") or uuid_by_user_id.get(dev.get("userId"), ""),
                     "platform": dev.get("platform"),
                     "os_version": dev.get("osVersion"),
                     "device_model": dev.get("deviceModel"),
@@ -514,6 +523,10 @@ class XrayStatsCollector:
                     "synced_at": now,
                 }
             values = list(unique.values())
+
+            unmapped = sum(1 for v in values if not v["user_uuid"])
+            if unmapped:
+                logger.warning(f"HWID sync: {unmapped}/{len(values)} devices without user mapping (user cache stale?)")
 
             update_cols = [
                 'user_uuid', 'platform', 'os_version', 'device_model',
@@ -960,6 +973,16 @@ class XrayStatsCollector:
                 value = value[:-1] + '+00:00'
             dt = datetime.fromisoformat(value)
             return dt.replace(tzinfo=None)
+        except (ValueError, TypeError):
+            return None
+
+    @staticmethod
+    def _as_int(value) -> int | None:
+        # Remnawave 2.8.0: trafficLimitBytes в схеме integer → number, БД ждёт BIGINT
+        if value is None:
+            return None
+        try:
+            return int(value)
         except (ValueError, TypeError):
             return None
 

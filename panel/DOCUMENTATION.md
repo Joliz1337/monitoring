@@ -1,4 +1,4 @@
-# Monitoring Panel v10.20.0
+# Monitoring Panel v10.20.1
 
 Веб-панель для мониторинга серверов. Собирает метрики с нод с настраиваемым интервалом (по умолчанию 10 сек) и хранит историю локально.
 
@@ -738,6 +738,8 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 7. Аномалии проверяются только для ACTIVE пользователей (фильтрация по `status == 'ACTIVE'` в коллекторе и в роутере `/api/remnawave/anomalies`)
 
 **Эфемерные IP:** данные IP не накапливаются. Каждый цикл сбора полностью заменяет таблицу `xray_stats`. Период-фильтр на эндпоинтах отсутствует — данные всегда актуальные. Автоочистка (`_cleanup_loop`) больше не затрагивает `xray_stats`.
+
+**Совместимость с Remnawave Panel 2.8.0:** `GET /api/hwid/devices` возвращает поле `userId` (числовой id пользователя) вместо `userUuid`. `_sync_hwid_devices()` резолвит uuid через кэш `remnawave_user_cache` (колонка `email` хранит числовой id Remnawave) с fallback на `userUuid` для более старых версий Remnawave; если часть устройств не удалось смаппить (кэш ещё не прогрет) — warning в лог. Поле `trafficLimitBytes` в схеме пользователя изменено с `integer` на `number` — приводится к `int` статическим хелпером `_as_int()` перед записью в BIGINT-колонку `traffic_limit_bytes`.
 
 **Telegram-бот для аномалий:** если `anomaly_use_custom_bot=False` (по умолчанию), используется bot_token и chat_id из `AlertSettings`. Если `True` — используются отдельные поля в `RemnawaveSettings`.
 
