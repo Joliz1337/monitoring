@@ -4,10 +4,11 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
 import {
   Siren, ShieldAlert, ShieldCheck, Settings as SettingsIcon, ListChecks,
-  BookOpen, Loader2, RefreshCw, Trash2, Save, Radar,
+  BookOpen, Loader2, RefreshCw, Trash2, Save, Radar, Globe, Plus,
 } from 'lucide-react'
 import {
   antiDdosApi, type AntiDdosSettings, type AntiDdosStatus, type NodeAntiDdosState,
+  type AntiDdosSource,
 } from '../api/client'
 
 type TabType = 'control' | 'whitelist' | 'info'
@@ -49,6 +50,9 @@ export default function AntiDdos() {
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState<string | null>(null)
   const [cidrText, setCidrText] = useState('')
+  const [sources, setSources] = useState<AntiDdosSource[]>([])
+  const [srcName, setSrcName] = useState('')
+  const [srcUrl, setSrcUrl] = useState('')
 
   const loadStatus = useCallback(async () => {
     try {
@@ -65,11 +69,53 @@ export default function AntiDdos() {
     } catch { /* keep last */ }
   }, [])
 
+  const loadSources = useCallback(async () => {
+    try {
+      const { data } = await antiDdosApi.getSources()
+      setSources(data.sources)
+    } catch { /* keep last */ }
+  }, [])
+
   useEffect(() => {
-    Promise.all([loadStatus(), loadSettings()]).finally(() => setLoading(false))
+    Promise.all([loadStatus(), loadSettings(), loadSources()]).finally(() => setLoading(false))
     const id = setInterval(() => { if (!document.hidden) loadStatus() }, 10000)
     return () => clearInterval(id)
-  }, [loadStatus, loadSettings])
+  }, [loadStatus, loadSettings, loadSources])
+
+  const addSource = async () => {
+    const url = srcUrl.trim()
+    if (!url || busy) return
+    setBusy('add-src')
+    try {
+      await antiDdosApi.addSource({ name: srcName.trim() || url, url })
+      setSrcName(''); setSrcUrl('')
+      await loadSources()
+      toast.success(t('anti_ddos.src_added'))
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || t('anti_ddos.action_failed'))
+    } finally { setBusy(null) }
+  }
+
+  const toggleSource = async (s: AntiDdosSource) => {
+    try { await antiDdosApi.updateSource(s.id, { enabled: !s.enabled }) } catch { /* ignore */ }
+    await loadSources()
+  }
+
+  const removeSource = async (id: number) => {
+    try { await antiDdosApi.deleteSource(id) } catch { /* ignore */ }
+    await loadSources()
+  }
+
+  const refreshAllSources = async () => {
+    if (busy) return
+    setBusy('refresh-src')
+    try {
+      await antiDdosApi.refreshSources()
+      toast.success(t('anti_ddos.src_refreshed'))
+      setTimeout(loadSources, 3000)
+    } catch { toast.error(t('anti_ddos.action_failed')) }
+    finally { setBusy(null) }
+  }
 
   const patchSettings = async (patch: Partial<AntiDdosSettings>) => {
     try {
@@ -283,6 +329,70 @@ export default function AntiDdos() {
                           <Trash2 className="w-3 h-3" />
                         </button>
                       </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="card p-5 space-y-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <h2 className="text-sm font-semibold flex items-center gap-2"><Globe className="w-4 h-4" /> {t('anti_ddos.src_title')}</h2>
+                    <p className="text-sm text-dark-400 mt-1">{t('anti_ddos.src_desc')}</p>
+                  </div>
+                  <button
+                    onClick={refreshAllSources}
+                    disabled={busy === 'refresh-src'}
+                    className="flex items-center gap-2 px-3 py-2 text-sm rounded bg-dark-700 hover:bg-dark-600 text-dark-100 disabled:opacity-50 shrink-0">
+                    {busy === 'refresh-src' ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                    {t('anti_ddos.src_refresh')}
+                  </button>
+                </div>
+
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <input
+                    value={srcName}
+                    onChange={e => setSrcName(e.target.value)}
+                    placeholder={t('anti_ddos.src_name_placeholder')}
+                    className="sm:w-40 bg-dark-900 border border-dark-700 rounded px-3 py-2 text-sm focus:border-accent-500 outline-none"
+                  />
+                  <input
+                    value={srcUrl}
+                    onChange={e => setSrcUrl(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter') addSource() }}
+                    placeholder="https://www.cloudflare.com/ips-v4/"
+                    className="flex-1 bg-dark-900 border border-dark-700 rounded px-3 py-2 text-sm font-mono focus:border-accent-500 outline-none"
+                  />
+                  <button
+                    onClick={addSource}
+                    disabled={busy === 'add-src' || !srcUrl.trim()}
+                    className="flex items-center gap-2 px-3 py-2 text-sm rounded bg-accent-500 hover:bg-accent-600 text-white disabled:opacity-50 shrink-0">
+                    {busy === 'add-src' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
+                    {t('anti_ddos.src_add')}
+                  </button>
+                </div>
+
+                {sources.length === 0 ? (
+                  <p className="text-xs text-dark-500">{t('anti_ddos.src_empty')}</p>
+                ) : (
+                  <div className="border border-dark-800 rounded divide-y divide-dark-800">
+                    {sources.map(s => (
+                      <div key={s.id} className="p-3 flex items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="font-medium text-sm truncate">{s.name}</span>
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-dark-800 text-dark-400">{s.ip_count} IP/CIDR</span>
+                          </div>
+                          <div className="text-xs text-dark-500 truncate font-mono">{s.url}</div>
+                          {s.error_message && <div className="text-xs text-red-400 truncate">{s.error_message}</div>}
+                        </div>
+                        <div className="flex items-center gap-3 shrink-0">
+                          <Toggle on={s.enabled} onClick={() => toggleSource(s)} />
+                          <button onClick={() => removeSource(s.id)} className="text-dark-500 hover:text-red-400">
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
                     ))}
                   </div>
                 )}

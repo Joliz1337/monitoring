@@ -25,7 +25,7 @@ from sqlalchemy import select
 
 from app.config import get_settings
 from app.database import async_session
-from app.models import Server, AntiDdosSettings, AlertSettings, AlertHistory
+from app.models import Server, AntiDdosSettings, AlertSettings, AlertHistory, AntiDdosWhitelistSource
 from app.services.http_client import get_node_client, get_node_apply_client, get_external_client, node_auth_headers
 
 logger = logging.getLogger(__name__)
@@ -34,7 +34,12 @@ GITHUB_CONFIGS_BASE = "https://raw.githubusercontent.com/Joliz1337/monitoring/ma
 WATCHDOG_SH_URL = f"{GITHUB_CONFIGS_BASE}/ddos-watchdog.sh"
 WATCHDOG_SERVICE_URL = f"{GITHUB_CONFIGS_BASE}/ddos-watchdog.service"
 
-FILES_CACHE_TTL = 300  # seconds
+FILES_CACHE_TTL = 300   # seconds
+SOURCE_CACHE_TTL = 300  # seconds — cache fetched source lists
+
+# Extract IPv4 / IPv4-CIDR from any response body (JSON, plain text, HTML) so a
+# whitelist source works regardless of format (Cloudflare list, Yandex yc.json…).
+_IPV4_CIDR_RE = re.compile(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?:/\d{1,2})?\b")
 
 
 class AntiDdosManager:
@@ -50,6 +55,7 @@ class AntiDdosManager:
         self._http_sem = asyncio.Semaphore(self.HTTP_CONCURRENCY)
         self._files_cache: Optional[tuple[float, str, str]] = None
         self._install_cooldown: dict[int, float] = {}
+        self._source_cache: dict[str, tuple[float, list[str]]] = {}
 
     # ── lifecycle ──────────────────────────────────────────────────────────
 
@@ -110,7 +116,7 @@ class AntiDdosManager:
             return None
 
     async def build_whitelist(self, db) -> list[str]:
-        """Auto part (all node IPs + panel IP) + manual part (user CIDRs)."""
+        """Auto (node IPs + panel IP) + manual (user CIDRs) + auto-source lists."""
         ips: set[str] = set()
 
         servers = (await db.execute(select(Server).where(Server.is_active == True))).scalars().all()  # noqa: E712
@@ -133,7 +139,68 @@ class AntiDdosManager:
             except (ValueError, TypeError):
                 pass
 
+        for entry in await self.fetch_all_source_ips(db):
+            ips.add(entry)
+
         return sorted(ips)
+
+    # ── auto-source lists (Cloudflare, Yandex Cloud, …) ─────────────────────
+
+    def _extract_ips(self, content: str) -> list[str]:
+        seen: set[str] = set()
+        out: list[str] = []
+        for match in _IPV4_CIDR_RE.finditer(content):
+            value = match.group(0)
+            if value in seen or not self._valid_ip_cidr(value):
+                continue
+            seen.add(value)
+            out.append(value)
+        return out
+
+    async def _fetch_source(self, url: str, use_cache: bool = True) -> tuple[bool, list[str], str]:
+        now = asyncio.get_event_loop().time()
+        if use_cache:
+            cached = self._source_cache.get(url)
+            if cached and (now - cached[0]) < SOURCE_CACHE_TTL:
+                return True, cached[1], ""
+        try:
+            resp = await get_external_client().get(url, timeout=30.0)
+            if resp.status_code != 200:
+                return False, [], f"HTTP {resp.status_code}"
+            ips = self._extract_ips(resp.text)
+            self._source_cache[url] = (now, ips)
+            return True, ips, ""
+        except httpx.TimeoutException:
+            return False, [], "timeout"
+        except Exception as e:
+            return False, [], str(e)
+
+    async def fetch_all_source_ips(self, db, use_cache: bool = True) -> list[str]:
+        """Fetch every enabled source, merge their IPs, and record per-source
+        stats (count/error/last_updated) back on the rows."""
+        sources = (await db.execute(
+            select(AntiDdosWhitelistSource).where(AntiDdosWhitelistSource.enabled == True)  # noqa: E712
+        )).scalars().all()
+        merged: list[str] = []
+        touched = False
+        for src in sources:
+            ok, ips, err = await self._fetch_source(src.url, use_cache=use_cache)
+            if ok:
+                merged.extend(ips)
+                src.ip_count = len(ips)
+                src.error_message = None
+                src.last_updated = datetime.now(timezone.utc)
+            else:
+                src.error_message = err[:500]
+            touched = True
+        if touched:
+            await db.commit()
+        return merged
+
+    async def refresh_sources_and_push(self):
+        """Force a fresh fetch of all sources (bypass cache) and push to nodes."""
+        self._source_cache.clear()
+        await self.push_whitelist_all()
 
     @staticmethod
     def _valid_ip_cidr(value: str) -> bool:

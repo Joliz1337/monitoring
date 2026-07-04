@@ -11,14 +11,14 @@ import ipaddress
 import json
 from typing import Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import verify_auth
 from app.database import get_db
-from app.models import AntiDdosSettings, Server
+from app.models import AntiDdosSettings, AntiDdosWhitelistSource, Server
 from app.services.antiddos_manager import get_antiddos_manager
 
 router = APIRouter(prefix="/antiddos", tags=["antiddos"])
@@ -150,4 +150,104 @@ async def whitelist_push_now(_: dict = Depends(verify_auth)):
 async def install_all(_: dict = Depends(verify_auth)):
     mgr = get_antiddos_manager()
     asyncio.create_task(mgr.run_bg(mgr.install_all()))
+    return {"success": True, "started": True}
+
+
+# ── whitelist auto-source lists (Cloudflare, Yandex Cloud, …) ───────────────
+
+class AddSourceRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    url: str = Field(..., min_length=1, max_length=500)
+
+    @field_validator("url")
+    @classmethod
+    def _http_url(cls, value: str) -> str:
+        value = value.strip()
+        if not (value.startswith("http://") or value.startswith("https://")):
+            raise ValueError("url must start with http:// or https://")
+        return value
+
+
+class UpdateSourceRequest(BaseModel):
+    enabled: Optional[bool] = None
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+
+
+def _source_to_dict(s: AntiDdosWhitelistSource) -> dict:
+    return {
+        "id": s.id,
+        "name": s.name,
+        "url": s.url,
+        "enabled": s.enabled,
+        "ip_count": s.ip_count,
+        "last_updated": s.last_updated.isoformat() if s.last_updated else None,
+        "error_message": s.error_message,
+    }
+
+
+def _push_bg():
+    mgr = get_antiddos_manager()
+    asyncio.create_task(mgr.run_bg(mgr.push_whitelist_all()))
+
+
+@router.get("/sources")
+async def get_sources(db: AsyncSession = Depends(get_db), _: dict = Depends(verify_auth)):
+    rows = (await db.execute(
+        select(AntiDdosWhitelistSource).order_by(AntiDdosWhitelistSource.name)
+    )).scalars().all()
+    return {"sources": [_source_to_dict(s) for s in rows]}
+
+
+@router.post("/sources")
+async def add_source(payload: AddSourceRequest, db: AsyncSession = Depends(get_db), _: dict = Depends(verify_auth)):
+    exists = (await db.execute(
+        select(AntiDdosWhitelistSource).where(AntiDdosWhitelistSource.url == payload.url)
+    )).scalar_one_or_none()
+    if exists:
+        raise HTTPException(status_code=400, detail="Source with this URL already exists")
+    source = AntiDdosWhitelistSource(name=payload.name, url=payload.url, enabled=True)
+    db.add(source)
+    await db.commit()
+    await db.refresh(source)
+    _push_bg()
+    return {"success": True, "source": _source_to_dict(source)}
+
+
+@router.put("/sources/{source_id}")
+async def update_source(source_id: int, payload: UpdateSourceRequest,
+                        db: AsyncSession = Depends(get_db), _: dict = Depends(verify_auth)):
+    source = (await db.execute(
+        select(AntiDdosWhitelistSource).where(AntiDdosWhitelistSource.id == source_id)
+    )).scalar_one_or_none()
+    if not source:
+        raise HTTPException(status_code=404, detail="Source not found")
+    toggled = payload.enabled is not None and payload.enabled != source.enabled
+    if payload.enabled is not None:
+        source.enabled = payload.enabled
+    if payload.name is not None:
+        source.name = payload.name
+    await db.commit()
+    await db.refresh(source)
+    if toggled:
+        _push_bg()
+    return {"success": True, "source": _source_to_dict(source)}
+
+
+@router.delete("/sources/{source_id}")
+async def delete_source(source_id: int, db: AsyncSession = Depends(get_db), _: dict = Depends(verify_auth)):
+    source = (await db.execute(
+        select(AntiDdosWhitelistSource).where(AntiDdosWhitelistSource.id == source_id)
+    )).scalar_one_or_none()
+    if not source:
+        raise HTTPException(status_code=404, detail="Source not found")
+    await db.delete(source)
+    await db.commit()
+    _push_bg()
+    return {"success": True}
+
+
+@router.post("/sources/refresh")
+async def refresh_sources(_: dict = Depends(verify_auth)):
+    mgr = get_antiddos_manager()
+    asyncio.create_task(mgr.run_bg(mgr.refresh_sources_and_push()))
     return {"success": True, "started": True}

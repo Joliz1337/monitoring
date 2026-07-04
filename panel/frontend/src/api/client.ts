@@ -1039,6 +1039,16 @@ export interface AntiDdosStatus {
   total: number
 }
 
+export interface AntiDdosSource {
+  id: number
+  name: string
+  url: string
+  enabled: boolean
+  ip_count: number
+  last_updated: string | null
+  error_message: string | null
+}
+
 export const antiDdosApi = {
   getSettings: () => api.get<AntiDdosSettings>('/antiddos/settings'),
   updateSettings: (data: Partial<AntiDdosSettings>) =>
@@ -1060,6 +1070,14 @@ export const antiDdosApi = {
     api.get(`/proxy/${serverId}/antiddos/status`, { timeout: 20000 }),
   installNode: (serverId: number) =>
     api.post(`/proxy/${serverId}/antiddos/install`, {}, { timeout: 70000 }),
+
+  // whitelist auto-source lists
+  getSources: () => api.get<{ sources: AntiDdosSource[] }>('/antiddos/sources'),
+  addSource: (data: { name: string; url: string }) => api.post('/antiddos/sources', data),
+  updateSource: (id: number, data: { enabled?: boolean; name?: string }) =>
+    api.put(`/antiddos/sources/${id}`, data),
+  deleteSource: (id: number) => api.delete(`/antiddos/sources/${id}`),
+  refreshSources: () => api.post('/antiddos/sources/refresh'),
 }
 
 // Remnawave types

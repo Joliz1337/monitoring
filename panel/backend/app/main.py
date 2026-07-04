@@ -40,7 +40,7 @@ from app.models import (  # noqa: F401
     InfraAccount, InfraProject, InfraProjectServer,
     SharedNote, SharedTask, WildcardCertificate,
     HAProxyConfigProfile, HAProxySyncLog,
-    TorrentBlockerSettings, PKIKeygen, AntiDdosSettings,
+    TorrentBlockerSettings, PKIKeygen, AntiDdosSettings, AntiDdosWhitelistSource,
 )
 
 settings = get_settings()

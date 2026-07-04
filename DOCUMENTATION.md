@@ -192,7 +192,7 @@ bash install.sh --unattended
 
 **Мастер-переключатель «Автодетект атак» (`AntiDdosSettings.enabled`)** — управляет только watchdog (автодетектом) на всех активных нодах разом: вкл/выкл вызывает `set_watchdog_all(enabled)` и больше ничего. Аварийный режим — независимый контрол: глобальные кнопки «Включить/выключить аварийный на всех» и per-node тумблер «Аварийный» им не затрагиваются ни в одну сторону, ручной пин оператора не сбрасывается при обычном выключении автодетекта. Тонкая настройка остаётся на уровне отдельных нод: тумблеры «Автодетект»/«Аварийный», ручная кнопка «Я под атакой».
 
-**Whitelist** — отдельный ipset-набор `antiddos_allow` на диске ноды (переживает ребут и недоступность панели). Панель наполняет его ежечасно: авто-часть (IP всех активных нод + IP панели) + ручная часть (CIDR-подсети CDN и т.п., настраиваются в панели). ACCEPT по нему работает только в аварийном режиме.
+**Whitelist** — отдельный ipset-набор `antiddos_allow` на диске ноды (переживает ребут и недоступность панели). Панель наполняет его ежечасно из трёх частей: авто (IP всех активных нод + IP панели), ручная (CIDR-подсети CDN и т.п., настраиваются в панели) и авто-источники по URL (произвольные списки IP/CIDR, например Cloudflare/Yandex Cloud — панель парсит IPv4/CIDR из ответа независимо от формата). ACCEPT по нему работает только в аварийном режиме.
 
 **Файлы:**
 - `configs/ddos-watchdog.sh` — самодостаточный host-скрипт (не зависит от Docker/панели). CLI: `loop` (systemd-сервис — детект + self-heal), `enable-manual`/`disable-manual`, `watchdog-on`/`watchdog-off`, `apply`/`clear`, `selfheal`, `whitelist-sync` (IP через stdin), `detect-ports`, `version`, `status`. Состояние — `/opt/monitoring/antiddos/state.json` (mode/source/since/reason/watchdog). Тюнинг-пороги в шапке скрипта, переопределяются через `/opt/monitoring/antiddos/config`.
@@ -208,7 +208,7 @@ bash install.sh --unattended
 
 Подробная документация по каждому компоненту:
 
-- [panel/DOCUMENTATION.md](panel/DOCUMENTATION.md) — веб-панель: API, БД, конфигурация, безопасность (v10.16.1)
+- [panel/DOCUMENTATION.md](panel/DOCUMENTATION.md) — веб-панель: API, БД, конфигурация, безопасность (v10.17.0)
 - [node/DOCUMENTATION.md](node/DOCUMENTATION.md) — нода-агент: API, метрики, HAProxy, трафик, Remnawave, Firewall Profiles, Анти-DDoS
 
 ## Архитектура

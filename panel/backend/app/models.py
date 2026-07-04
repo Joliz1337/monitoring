@@ -436,6 +436,24 @@ class AntiDdosSettings(Base):
     last_push_count = Column(Integer, default=0)
 
 
+class AntiDdosWhitelistSource(Base):
+    """Авто-источник IP/CIDR для анти-DDoS whitelist (Cloudflare, Yandex Cloud и т.п.).
+
+    Панель периодически тянет URL, извлекает IPv4/CIDR (JSON, текст — не важно) и
+    добавляет их в набор antiddos_allow на нодах. Этот набор ACCEPT'ится только
+    внутри цепочки ANTIDDOS, т.е. работает лишь когда включён аварийный режим."""
+    __tablename__ = "antiddos_whitelist_sources"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(100), nullable=False)
+    url = Column(String(500), nullable=False, unique=True)
+    enabled = Column(Boolean, default=True)
+    last_updated = Column(DateTime(timezone=True), nullable=True)
+    ip_count = Column(Integer, default=0)
+    error_message = Column(String(500), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
 # ==================== Server Alerts ====================
 
 class AlertSettings(Base):
