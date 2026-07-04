@@ -10,31 +10,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    bash curl git rsync openssl unzip iperf3 proxychains4 gnupg apt-transport-https haproxy
-
-# Install Ookla Speedtest CLI
-RUN curl -s https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh | bash && \
-    apt-get install -y --no-install-recommends speedtest || \
-    ( ARCH=$(dpkg --print-architecture) && \
-      curl -fsSL "https://install.speedtest.net/app/cli/ookla-speedtest-1.2.0-linux-$([ "$ARCH" = "arm64" ] && echo "aarch64" || echo "x86_64").tgz" \
-        -o /tmp/speedtest.tgz && \
-      tar xzf /tmp/speedtest.tgz -C /usr/local/bin speedtest && \
-      chmod +x /usr/local/bin/speedtest && \
-      rm -f /tmp/speedtest.tgz )
-
-# Install xray-core for Xray monitor health checks
-ARG XRAY_VERSION=26.2.6
-RUN ARCH=$(dpkg --print-architecture) && \
-    case "$ARCH" in \
-      amd64) XRAY_ARCH="64" ;; \
-      arm64) XRAY_ARCH="arm64-v8a" ;; \
-      *) XRAY_ARCH="64" ;; \
-    esac && \
-    curl -fsSL "https://github.com/XTLS/Xray-core/releases/download/v${XRAY_VERSION}/Xray-linux-${XRAY_ARCH}.zip" \
-      -o /tmp/xray.zip && \
-    unzip /tmp/xray.zip xray -d /usr/local/bin/ && \
-    chmod +x /usr/local/bin/xray && \
-    rm /tmp/xray.zip
+    bash curl git rsync openssl haproxy
 
 # Copy requirements and install Python dependencies with cache
 COPY backend/requirements.txt .

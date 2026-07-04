@@ -50,13 +50,6 @@ class Server(Base):
     
     # Xray node detection (updated periodically)
     has_xray_node = Column(Boolean, default=False, server_default="false")
-    
-    # Speed test results (JSON, updated by speedtest scheduler)
-    last_speedtest = Column(Text, nullable=True)
-
-    # Geo data (resolved from server IP, cached)
-    country = Column(String(10), nullable=True)
-    geo_region = Column(String(20), nullable=True)
 
     # Wildcard SSL deployment config
     wildcard_ssl_enabled = Column(Boolean, default=False, server_default="false")
@@ -612,97 +605,6 @@ class BillingSettings(Base):
     enabled = Column(Boolean, default=False)
     notify_days = Column(Text, default="[1, 3, 7]")  # JSON array
     check_interval_minutes = Column(Integer, default=60)
-
-
-# ==================== Xray Monitor ====================
-
-class XrayMonitorSettings(Base):
-    """Настройки мониторинга Xray подключений (singleton)"""
-    __tablename__ = "xray_monitor_settings"
-    
-    id = Column(Integer, primary_key=True)
-    enabled = Column(Boolean, default=False)
-    check_interval = Column(Integer, default=60)
-    latency_threshold_ms = Column(Integer, default=500)
-    fail_threshold = Column(Integer, default=2)
-    
-    use_custom_bot = Column(Boolean, default=False)
-    telegram_bot_token = Column(String(200), nullable=True)
-    telegram_chat_id = Column(String(100), nullable=True)
-    
-    notify_down = Column(Boolean, default=True)
-    notify_recovery = Column(Boolean, default=True)
-    notify_latency = Column(Boolean, default=True)
-
-    speedtest_enabled = Column(Boolean, default=False)
-    speedtest_interval = Column(Integer, default=30)
-    speed_threshold_mbps = Column(Integer, default=100)
-    notify_slow_speed = Column(Boolean, default=True)
-
-    ignore_list = Column(Text, default="[]")
-
-
-class XrayMonitorSubscription(Base):
-    """URL подписки с Xray-ключами"""
-    __tablename__ = "xray_monitor_subscriptions"
-    
-    id = Column(Integer, primary_key=True)
-    name = Column(String(200), nullable=False)
-    url = Column(String(1000), nullable=False)
-    enabled = Column(Boolean, default=True)
-    auto_refresh = Column(Boolean, default=True)
-    last_refreshed = Column(DateTime(timezone=True), nullable=True)
-    last_error = Column(String(500), nullable=True)
-    server_count = Column(Integer, default=0)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-
-
-class XrayMonitorServer(Base):
-    """Отдельный Xray-сервер для мониторинга"""
-    __tablename__ = "xray_monitor_servers"
-    
-    id = Column(Integer, primary_key=True)
-    subscription_id = Column(Integer, ForeignKey("xray_monitor_subscriptions.id", ondelete="CASCADE"), nullable=True, index=True)
-    position = Column(Integer, default=0)
-    name = Column(Text, nullable=False)
-    protocol = Column(String(20), nullable=False)  # vless, vmess, trojan, shadowsocks
-    address = Column(String(500), nullable=False)
-    port = Column(Integer, nullable=False)
-    raw_key = Column(Text, nullable=False)
-    config_json = Column(Text, nullable=True)  # parsed outbound settings as JSON
-    enabled = Column(Boolean, default=True)
-    socks_port = Column(Integer, nullable=True)
-    
-    status = Column(String(20), default="unknown")  # online, offline, unknown
-    last_ping_ms = Column(Float, nullable=True)
-    last_download_mbps = Column(Float, nullable=True)
-    last_upload_mbps = Column(Float, nullable=True)
-    last_check = Column(DateTime(timezone=True), nullable=True)
-    fail_count = Column(Integer, default=0)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    
-    __table_args__ = (
-        Index('idx_xray_monitor_server_sub', 'subscription_id'),
-        Index('idx_xray_monitor_server_status', 'status'),
-    )
-
-
-class XrayMonitorCheck(Base):
-    """Результат одной проверки"""
-    __tablename__ = "xray_monitor_checks"
-
-    id = Column(BigInteger, primary_key=True)
-    server_id = Column(Integer, ForeignKey("xray_monitor_servers.id", ondelete="CASCADE"), nullable=False, index=True)
-    timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
-    status = Column(String(10), nullable=False)  # ok, fail
-    ping_ms = Column(Float, nullable=True)
-    download_mbps = Column(Float, nullable=True)
-    upload_mbps = Column(Float, nullable=True)
-    error = Column(String(500), nullable=True)
-
-    __table_args__ = (
-        Index('idx_xray_check_server_time', 'server_id', 'timestamp'),
-    )
 
 
 # ==================== Infrastructure Tree ====================

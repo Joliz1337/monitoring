@@ -53,9 +53,6 @@ async def run_migrations(conn):
             ("last_haproxy_data", "TEXT"),
             ("last_traffic_data", "TEXT"),
             ("has_xray_node", "BOOLEAN DEFAULT FALSE"),
-            ("last_speedtest", "TEXT"),
-            ("country", "VARCHAR(10)"),
-            ("geo_region", "VARCHAR(20)"),
         ]
         
         for col_name, col_type in migrations:
@@ -1478,92 +1475,6 @@ async def _migrate_folder_columns(conn):
                     logger.warning(f"Could not add {table}.folder: {e}")
 
 
-async def _migrate_xray_monitor(conn):
-    """Migrate xray_monitor tables: add missing columns for speedtest integration."""
-    try:
-        result = await conn.execute(text("""
-            SELECT column_name, data_type FROM information_schema.columns
-            WHERE table_name = 'xray_monitor_servers'
-        """))
-        cols = {row[0]: row[1] for row in result.fetchall()}
-        if cols:
-            if cols.get("name") == "character varying":
-                await conn.execute(text('ALTER TABLE xray_monitor_servers ALTER COLUMN "name" TYPE TEXT'))
-                logger.info("Migrated xray_monitor_servers.name to TEXT")
-            if "position" not in cols:
-                await conn.execute(text('ALTER TABLE xray_monitor_servers ADD COLUMN "position" INTEGER DEFAULT 0'))
-                logger.info("Added column: xray_monitor_servers.position")
-            if "last_download_mbps" not in cols:
-                await conn.execute(text('ALTER TABLE xray_monitor_servers ADD COLUMN "last_download_mbps" DOUBLE PRECISION'))
-                logger.info("Added column: xray_monitor_servers.last_download_mbps")
-            if "last_upload_mbps" not in cols:
-                await conn.execute(text('ALTER TABLE xray_monitor_servers ADD COLUMN "last_upload_mbps" DOUBLE PRECISION'))
-                logger.info("Added column: xray_monitor_servers.last_upload_mbps")
-    except Exception as e:
-        if "does not exist" not in str(e).lower():
-            logger.debug(f"xray_monitor_servers migration: {e}")
-
-    try:
-        result = await conn.execute(text("""
-            SELECT column_name FROM information_schema.columns
-            WHERE table_name = 'xray_monitor_settings'
-        """))
-        cols = {row[0] for row in result.fetchall()}
-        if cols:
-            if "ignore_list" not in cols:
-                await conn.execute(text("""ALTER TABLE xray_monitor_settings ADD COLUMN "ignore_list" TEXT DEFAULT '[]'"""))
-                logger.info("Added column: xray_monitor_settings.ignore_list")
-            if "speedtest_enabled" not in cols:
-                await conn.execute(text('ALTER TABLE xray_monitor_settings ADD COLUMN "speedtest_enabled" BOOLEAN DEFAULT FALSE'))
-                logger.info("Added column: xray_monitor_settings.speedtest_enabled")
-            if "speedtest_interval" not in cols:
-                await conn.execute(text('ALTER TABLE xray_monitor_settings ADD COLUMN "speedtest_interval" INTEGER DEFAULT 30'))
-                logger.info("Added column: xray_monitor_settings.speedtest_interval")
-            if "speed_threshold_mbps" not in cols:
-                await conn.execute(text('ALTER TABLE xray_monitor_settings ADD COLUMN "speed_threshold_mbps" INTEGER DEFAULT 100'))
-                logger.info("Added column: xray_monitor_settings.speed_threshold_mbps")
-            if "notify_slow_speed" not in cols:
-                await conn.execute(text('ALTER TABLE xray_monitor_settings ADD COLUMN "notify_slow_speed" BOOLEAN DEFAULT TRUE'))
-                logger.info("Added column: xray_monitor_settings.notify_slow_speed")
-    except Exception as e:
-        if "does not exist" not in str(e).lower():
-            logger.debug(f"xray_monitor_settings migration: {e}")
-
-    try:
-        result = await conn.execute(text("""
-            SELECT column_name FROM information_schema.columns
-            WHERE table_name = 'xray_monitor_checks'
-        """))
-        cols = {row[0] for row in result.fetchall()}
-        if cols:
-            if "download_mbps" not in cols:
-                await conn.execute(text('ALTER TABLE xray_monitor_checks ADD COLUMN "download_mbps" DOUBLE PRECISION'))
-                logger.info("Added column: xray_monitor_checks.download_mbps")
-            if "upload_mbps" not in cols:
-                await conn.execute(text('ALTER TABLE xray_monitor_checks ADD COLUMN "upload_mbps" DOUBLE PRECISION'))
-                logger.info("Added column: xray_monitor_checks.upload_mbps")
-    except Exception as e:
-        if "does not exist" not in str(e).lower():
-            logger.debug(f"xray_monitor_checks migration: {e}")
-
-
-async def _disable_old_node_autotest(conn):
-    """Force-disable old node SpeedtestScheduler auto-test (replaced by Xray Monitor speedtest)."""
-    try:
-        result = await conn.execute(text(
-            "SELECT value FROM panel_settings WHERE key = 'speedtest_enabled'"
-        ))
-        row = result.fetchone()
-        if row and row[0] == "true":
-            await conn.execute(text(
-                "UPDATE panel_settings SET value = 'false' WHERE key = 'speedtest_enabled'"
-            ))
-            logger.info("Disabled old node auto-speedtest (speedtest_enabled → false)")
-    except Exception as e:
-        if "does not exist" not in str(e).lower():
-            logger.debug(f"_disable_old_node_autotest: {e}")
-
-
 async def _migrate_simplify_remnawave(conn):
     """Remove destinations/analyzer/export and simplify xray_stats to (email, source_ip) -> count.
     
@@ -1902,12 +1813,12 @@ async def _migrate_aggregated_metrics_unique(conn):
 
 
 async def _migrate_bigint_pk_ids(conn):
-    """metrics_snapshots.id / xray_monitor_checks.id: int4 → int8.
+    """metrics_snapshots.id: int4 → int8.
 
     int4-serial при 500 нодах (×10с) переполняется за ~1.5 года и валит сбор метрик
     на всех нодах разом. Выполняется один раз, пока таблицы небольшие (проверка типа).
     """
-    for table in ("metrics_snapshots", "xray_monitor_checks"):
+    for table in ("metrics_snapshots",):
         try:
             res = await conn.execute(text("""
                 SELECT data_type FROM information_schema.columns
@@ -1946,8 +1857,6 @@ async def init_db():
         await run_migrations(conn)
         await _migrate_server_cache_split(conn)
         await _migrate_folder_columns(conn)
-        await _migrate_xray_monitor(conn)
-        await _disable_old_node_autotest(conn)
         await _migrate_simplify_remnawave(conn)
         await _migrate_remnawave_api_collection(conn)
         await _migrate_remnawave_anomaly_settings(conn)

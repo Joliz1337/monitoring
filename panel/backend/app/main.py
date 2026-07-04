@@ -15,13 +15,12 @@ logging.basicConfig(
 
 from app.database import init_db, async_session
 from app.config import get_settings
-from app.routers import servers, server_deploy, auth_router, proxy, settings as settings_router, system, bulk_actions, blocklist, remnawave, alerts, billing, backup, xray_monitor, ssh_security, infra, notes, wildcard_ssl, haproxy_profiles, torrent_blocker, firewall_profiles, antiddos
+from app.routers import servers, server_deploy, auth_router, proxy, settings as settings_router, system, bulk_actions, blocklist, remnawave, alerts, billing, backup, ssh_security, infra, notes, wildcard_ssl, haproxy_profiles, torrent_blocker, firewall_profiles, antiddos
 from app.services.metrics_collector import start_collector, stop_collector
 from app.services.blocklist_manager import get_blocklist_manager
 from app.services.xray_stats_collector import start_xray_stats_collector, stop_xray_stats_collector
 from app.services.server_alerter import start_server_alerter, stop_server_alerter
 from app.services.billing_checker import start_billing_checker, stop_billing_checker
-from app.services.xray_monitor import start_xray_monitor, stop_xray_monitor
 from app.services.telegram_bot import start_telegram_bot_service, stop_telegram_bot_service
 from app.services.time_sync import start_time_sync, stop_time_sync
 from app.services.wildcard_ssl import start_wildcard_ssl_manager, stop_wildcard_ssl_manager
@@ -36,7 +35,6 @@ from app.models import (  # noqa: F401
     BlocklistRule, BlocklistSource, RemnawaveSettings, RemnawaveHwidDevice,
     XrayStats, RemnawaveUserCache, AlertSettings, AlertHistory,
     BillingServer, BillingSettings,
-    XrayMonitorSettings, XrayMonitorSubscription, XrayMonitorServer, XrayMonitorCheck,
     InfraAccount, InfraProject, InfraProjectServer,
     SharedNote, SharedTask, WildcardCertificate,
     HAProxyConfigProfile, HAProxySyncLog,
@@ -98,7 +96,6 @@ async def lifespan(app: FastAPI):
     await start_xray_stats_collector()
     await start_server_alerter()
     await start_billing_checker()
-    await start_xray_monitor()
     await start_time_sync()
     await start_wildcard_ssl_manager()
     await start_torrent_blocker()
@@ -115,7 +112,6 @@ async def lifespan(app: FastAPI):
     await stop_torrent_blocker()
     await stop_wildcard_ssl_manager()
     await stop_time_sync()
-    await stop_xray_monitor()
     await stop_billing_checker()
     await stop_server_alerter()
     await stop_xray_stats_collector()
@@ -191,7 +187,6 @@ app.include_router(remnawave.router)
 app.include_router(alerts.router)
 app.include_router(billing.router)
 app.include_router(backup.router)
-app.include_router(xray_monitor.router)
 app.include_router(ssh_security.router)
 app.include_router(infra.router)
 app.include_router(notes.router)

@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { toast } from 'sonner'
-import { serversApi, proxyApi, Server, ServerMetrics, ServerSpeedtest } from '../api/client'
+import { serversApi, proxyApi, Server, ServerMetrics } from '../api/client'
 
 interface ServerTraffic {
   rx_bytes: number
@@ -11,7 +11,6 @@ interface ServerTraffic {
 interface ServerWithMetrics extends Server {
   metrics?: ServerMetrics | null
   traffic?: ServerTraffic | null
-  speedtest?: ServerSpeedtest | null
   status: 'online' | 'offline' | 'loading' | 'error'
   lastUpdated?: Date
   last_seen?: string | null
@@ -86,7 +85,6 @@ export const useServersStore = create<ServersState>((set, get) => ({
       const serversWithStatus = data.servers.map(s => ({
         ...s,
         traffic: (s as { traffic?: ServerTraffic }).traffic || null,
-        speedtest: (s as { speedtest?: ServerSpeedtest }).speedtest || null,
         status: (s.status || (s.last_error ? 'offline' : (s.metrics ? 'online' : 'loading'))) as 'online' | 'offline' | 'loading' | 'error',
         lastUpdated: new Date(),
       }))

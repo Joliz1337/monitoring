@@ -21,7 +21,7 @@ interface RetryableConfig extends InternalAxiosRequestConfig {
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 function resolveTimeout(url: string): number {
-  if (url.includes('/speedtest') || url.includes('/backup')) return 300_000
+  if (url.includes('/backup')) return 300_000
   if (url.includes('/system/update') || url.includes('/wildcard-ssl')) return 180_000
   if (
     url.includes('/metrics') ||
@@ -385,43 +385,6 @@ export interface InterfacesTraffic {
   total_tx: number
 }
 
-export interface SpeedtestServerConfig {
-  host: string
-  port: number
-  label: string
-  region: string
-}
-
-export interface SpeedtestResultEntry {
-  server: string
-  port: number
-  download_mbps: number
-  upload_mbps?: number
-  latency_ms?: number
-  server_name?: string
-  retransmits?: number
-  error?: string
-}
-
-export interface SpeedtestResult {
-  best_speed_mbps: number
-  upload_mbps?: number
-  best_server: string
-  threshold_mbps: number
-  ok: boolean
-  test_mode?: string
-  method?: string
-  results: SpeedtestResultEntry[]
-  tested_at: string | null
-}
-
-export interface ServerSpeedtest {
-  best_speed_mbps: number
-  best_server: string
-  ok: boolean
-  tested_at: string | null
-}
-
 export const authApi = {
   login: (password: string) => api.post('/auth/login', { password }),
   logout: () => api.post('/auth/logout'),
@@ -638,12 +601,6 @@ export const proxyApi = {
   
   // Get SSE URL for streaming command execution
   getExecuteStreamUrl: (serverId: number) => `/api/proxy/${serverId}/system/execute-stream`,
-  
-  // Speed test
-  runSpeedtest: (serverId: number) =>
-    api.post<{ success: boolean } & SpeedtestResult>(`/proxy/${serverId}/speedtest`),
-  getSpeedtest: (serverId: number) =>
-    api.get<SpeedtestResult>(`/proxy/${serverId}/speedtest`),
 }
 
 export interface ExecuteRequest {
@@ -697,8 +654,6 @@ export const settingsApi = {
   getAll: () => api.get<{ settings: Record<string, string> }>('/settings'),
   get: (key: string) => api.get<{ key: string; value: string }>(`/settings/${key}`),
   set: (key: string, value: string) => api.put(`/settings/${key}`, { value }),
-  speedtestTestNotification: (bot_token?: string, chat_id?: string) =>
-    api.post<{ success: boolean; error?: string }>('/settings/speedtest/test-notification', { bot_token, chat_id }),
   timeSyncRun: () => api.post<{ success: boolean }>('/settings/time-sync/run'),
   timeSyncStatus: () => api.get<TimeSyncStatus>('/settings/time-sync/status'),
 }

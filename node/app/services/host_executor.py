@@ -19,7 +19,6 @@ MAX_TIMEOUT = 600
 DEFAULT_TIMEOUT = 30
 
 # Extended PATH to include common binary locations (snap, local bins, etc.)
-# This ensures commands like speedtest (installed via snap) work from panel
 EXTENDED_PATH = "/snap/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 

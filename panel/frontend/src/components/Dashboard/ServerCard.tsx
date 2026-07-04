@@ -18,10 +18,9 @@ import {
   ArrowUpFromLine,
   PowerOff,
   Database,
-  Gauge,
   Activity,
 } from 'lucide-react'
-import { Server, ServerMetrics, ServerSpeedtest } from '../../api/client'
+import { Server, ServerMetrics } from '../../api/client'
 import StatusBadge from '../ui/StatusBadge'
 import ProgressBar from '../ui/ProgressBar'
 import { formatBytes, formatBitsPerSecLocalized, formatUptime, formatTimeAgo, extractHost } from '../../utils/format'
@@ -42,26 +41,10 @@ function getLoadAvgColor(loadAvg: number, coresLogical: number): string {
   return 'text-success'
 }
 
-function isSpeedtestFresh(speedtest: ServerSpeedtest | null | undefined): boolean {
-  if (!speedtest?.tested_at) return false
-  const testedAt = new Date(speedtest.tested_at).getTime()
-  const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000
-  return testedAt > oneDayAgo
-}
-
-function getSpeedBadge(speedtest: ServerSpeedtest | null | undefined, threshold: number = 500): { color: string; textColor: string; icon: string } {
-  if (!speedtest || !speedtest.tested_at || !isSpeedtestFresh(speedtest)) return { color: 'bg-dark-600/50', textColor: 'text-dark-400', icon: '⚪' }
-  const speed = speedtest.best_speed_mbps
-  if (speed >= threshold) return { color: 'bg-success/15', textColor: 'text-success', icon: '🟢' }
-  if (speed >= threshold / 2) return { color: 'bg-warning/15', textColor: 'text-warning', icon: '🟡' }
-  return { color: 'bg-danger/15', textColor: 'text-danger', icon: '🔴' }
-}
-
 interface ServerCardProps {
   server: Server & {
     metrics?: ServerMetrics | null
     traffic?: ServerTraffic | null
-    speedtest?: ServerSpeedtest | null
     status: 'online' | 'offline' | 'loading' | 'error'
     last_seen?: string | null
     last_error?: string | null
@@ -372,9 +355,7 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
               </div>
             )}
 
-            {detailLevel === 'standard' && (() => {
-              const stdBadge = getSpeedBadge(server.speedtest)
-              return (
+            {detailLevel === 'standard' && (
               <>
                 <div className="grid grid-cols-2 gap-4 mb-4">
                   <MetricItem
@@ -436,14 +417,6 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
                       <span className={getLoadAvgColor(metrics.cpu.load_avg_15, metrics.cpu.cores_logical)}>{metrics.cpu.load_avg_15.toFixed(2)}</span>
                     </span>
                   </div>
-                  {isSpeedtestFresh(server.speedtest) && (
-                    <div className={`flex items-center gap-1 ${stdBadge.textColor}`}
-                      title={server.speedtest!.best_server || ''}
-                    >
-                      <Gauge className="w-3.5 h-3.5" />
-                      <span className="font-mono">{Math.round(server.speedtest!.best_speed_mbps)}</span>
-                    </div>
-                  )}
                   {metrics.certificates?.closest_expiry ? (
                     <div className={`flex items-center gap-1 ${
                       metrics.certificates.closest_expiry.expired
@@ -471,12 +444,9 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
                   <span className="text-dark-500 truncate max-w-[140px] ml-auto">{metrics.system.os}</span>
                 </div>
               </>
-              )
-            })()}
+            )}
 
-            {detailLevel === 'detailed' && (() => {
-              const detBadge = getSpeedBadge(server.speedtest)
-              return (
+            {detailLevel === 'detailed' && (
               <>
                 <div className="grid grid-cols-2 gap-4 mb-4">
                   <CpuCoresItem
@@ -561,14 +531,6 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
                       <span className={getLoadAvgColor(metrics.cpu.load_avg_15, metrics.cpu.cores_logical)}>{metrics.cpu.load_avg_15.toFixed(2)}</span>
                     </span>
                   </div>
-                  {isSpeedtestFresh(server.speedtest) && (
-                    <div className={`flex items-center gap-1 ${detBadge.textColor}`}
-                      title={server.speedtest!.best_server || ''}
-                    >
-                      <Gauge className="w-3.5 h-3.5" />
-                      <span className="font-mono">{Math.round(server.speedtest!.best_speed_mbps)}</span>
-                    </div>
-                  )}
                   {metrics.certificates?.closest_expiry ? (
                     <div className={`flex items-center gap-1 ${
                       metrics.certificates.closest_expiry.expired
@@ -596,8 +558,7 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
                   <span className="text-dark-500 truncate max-w-[140px] ml-auto">{metrics.system.os}</span>
                 </div>
               </>
-              )
-            })()}
+            )}
           </div>
         ) : server.status === 'loading' ? (
           <div className="h-32 flex items-center justify-center">
@@ -671,7 +632,6 @@ const ServerCard = memo(ServerCardComponent, (prevProps, nextProps) => {
 
   if (a.traffic?.rx_bytes !== b.traffic?.rx_bytes) return false
   if (a.traffic?.tx_bytes !== b.traffic?.tx_bytes) return false
-  if (a.speedtest?.best_speed_mbps !== b.speedtest?.best_speed_mbps) return false
 
   return true
 })

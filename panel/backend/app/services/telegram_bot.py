@@ -282,7 +282,7 @@ class TelegramBotService:
 
     async def _cleanup_stale_bots(self):
         from app.database import async_session
-        from app.models import AlertSettings, RemnawaveSettings, XrayMonitorSettings
+        from app.models import AlertSettings, RemnawaveSettings
         from sqlalchemy import select
 
         active_tokens: set[str] = set()
@@ -297,11 +297,6 @@ class TelegramBotService:
             rw = result.scalar_one_or_none()
             if rw and rw.anomaly_use_custom_bot and rw.anomaly_tg_bot_token:
                 active_tokens.add(rw.anomaly_tg_bot_token)
-
-            result = await db.execute(select(XrayMonitorSettings).limit(1))
-            xm = result.scalar_one_or_none()
-            if xm and xm.use_custom_bot and xm.telegram_bot_token:
-                active_tokens.add(xm.telegram_bot_token)
 
         for token in list(self._bots):
             if token not in active_tokens:

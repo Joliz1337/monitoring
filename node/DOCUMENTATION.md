@@ -93,8 +93,8 @@ node/
 │   ├── models/
 │   │   ├── ssl.py        # Pydantic модели: WildcardDeployRequest/Response, WildcardStatusResponse
 │   │   └── firewall_profile.py  # Pydantic модели: ProfileRule, ProfileApplyRequest/Response, ProfileStateResponse
-│   ├── routers/          # API эндпоинты (metrics, haproxy, traffic, speedtest, ssh, ssl, firewall, antiddos и др.)
-│   └── services/         # Сбор метрик, HAProxy, трафик, speedtest runner, SSH менеджер
+│   ├── routers/          # API эндпоинты (metrics, haproxy, traffic, ssh, ssl, firewall, antiddos и др.)
+│   └── services/         # Сбор метрик, HAProxy, трафик, SSH менеджер
 │       ├── ssl_manager.py          # Деплой wildcard сертификатов: запись на хост, бэкап, откат, валидация
 │       ├── firewall_manager.py     # UFW: apply_profile, backup/restore, compute_rules_hash, get_full_state
 │       └── antiddos_manager.py     # Тонкая обёртка над ddos-watchdog.sh (nsenter): enable/disable emergency, watchdog, whitelist sync
@@ -166,7 +166,7 @@ node/
 
 Эндпоинт `/api/system/execute` позволяет выполнять произвольные shell-команды и многострочные bash-скрипты на хост-системе через `nsenter`. Работает из Docker контейнера благодаря `privileged: true` и `pid: host`. Максимальная длина поля `command` — 65000 символов.
 
-**PATH**: Все команды выполняются с расширенным PATH (`/snap/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`), что позволяет использовать snap-пакеты (speedtest, etc.) и локально установленные бинарники.
+**PATH**: Все команды выполняются с расширенным PATH (`/snap/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`), что позволяет использовать snap-пакеты и локально установленные бинарники.
 
 ```json
 // Request

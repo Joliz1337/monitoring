@@ -1,4 +1,4 @@
-# Monitoring Panel v10.17.0
+# Monitoring Panel v10.18.0
 
 Веб-панель для мониторинга серверов. Собирает метрики с нод с настраиваемым интервалом (по умолчанию 10 сек) и хранит историю локально.
 
@@ -15,7 +15,6 @@
 - **Billing** — отслеживание оплаты серверов: помесячная, ресурсная и Yandex Cloud модели; автосинхронизация баланса YC, уведомления об истечении через Telegram
 - **Синхронизация времени** — автоматическая установка часового пояса и синхронизация NTP на всех серверах и хосте панели
 - **SSH Security** — управление SSH-безопасностью серверов: настройки sshd, fail2ban, SSH-ключи с пресетами безопасности и bulk-применением
-- **Xray Monitor** — мониторинг Xray-серверов через подписки/ключи (vless, vmess, trojan, ss): Ookla CLI через proxychains4 с флагом `--no-upload` (только download), последовательное тестирование, ручной speedtest, Telegram-уведомления (down/recovery/slow speed); предварительная проверка канала панели с задержкой уведомления через счётчик `_panel_slow_streak`
 - **Infrastructure Tree** — двухуровневая иерархия серверов на странице Servers: Аккаунт (облачный email) → Проект (кластер) → Серверы; дерево встроено в существующую страницу, сворачивается, состояние сохраняется в localStorage
 - **Shared Notes & Tasks** — совместный блокнот и список задач с синхронизацией в реальном времени через SSE; открывается через плавающий жёлтый таб на правом крае экрана (amber-500); две вкладки: «Блокнот» и «Задачи»
 - **Wildcard SSL** — выпуск wildcard сертификатов через certbot + Cloudflare DNS challenge, продление, деплой на ноды через API порта 9100; фоновое автопродление каждые 24ч с Telegram-уведомлениями при сбое; настройка пути деплоя и reload-команды для каждого сервера
@@ -259,9 +258,9 @@ Lifecycle управляется через `lifespan` в `main.py`. Выбор 
 
 Добавлен `UniqueConstraint('server_id', 'period_type', 'timestamp', name='uq_aggregated_metrics')`. Без него `ON CONFLICT DO NOTHING` в часовой/дневной агрегации был no-op — при каждом рестарте панели в пределах периода создавались дубль-строки и графики за 7/30/365 дней двоились. Миграция `_migrate_aggregated_metrics_unique` дедуплицирует существующие строки, добавляет UNIQUE и удаляет ставший избыточным индекс `idx_aggregated_server_period`. Выполняется при старте через `init_db`, идемпотентна.
 
-**`metrics_snapshots.id` и `xray_monitor_checks.id` → `BigInteger`:**
+**`metrics_snapshots.id` → `BigInteger`:**
 
-PK обеих таблиц переведены с `Integer` (int32) на `BigInteger`. При 500 нодах с интервалом метрик 10 сек int4-serial исчерпывался бы менее чем за 2 года. Миграция `_migrate_bigint_pk_ids` выполняет `ALTER COLUMN id TYPE BIGINT` только если текущий тип `int4` (идемпотентна, безопасна на свежей БД). Выполняется при старте, пока таблицы ещё небольшие.
+PK таблицы переведён с `Integer` (int32) на `BigInteger`. При 500 нодах с интервалом метрик 10 сек int4-serial исчерпывался бы менее чем за 2 года. Миграция `_migrate_bigint_pk_ids` выполняет `ALTER COLUMN id TYPE BIGINT` только если текущий тип `int4` (идемпотентна, безопасна на свежей БД). Выполняется при старте, пока таблица ещё небольшая.
 
 **`firewall_profile_sync.py` — изоляция сессий при fan-out:**
 
@@ -1671,90 +1670,6 @@ SSE-события: `note_update` — `{"content": "...", "version": N}`, `tasks
 - Выбором таймаута (30s — 10m) и shell (sh/bash)
 - Отменой выполняющейся команды
 
-### Speed Test
-
-Система проверки скорости нод. Три метода: Ookla Speedtest CLI, iperf3, авто-выбор по гео.
-
-**Методы тестирования:**
-- `auto` (по умолчанию) — Ookla для серверов вне РФ, iperf3 для серверов в РФ (Ookla заблокирован)
-- `ookla` — Ookla Speedtest CLI на хосте через nsenter, авто-выбор ближайшего сервера, до 40+ Гбит/с
-- `iperf3` — iperf3 с `-P` параллельными потоками и `-w` TCP window, публичные/свои серверы
-
-**Режимы теста:**
-- `quick` — 4 потока, 4MB TCP window, 5 сек (iperf3) / без upload (Ookla)
-- `full` — 16 потоков, 8MB TCP window, 10 сек (iperf3) / полный тест (Ookla)
-
-**Возможности:**
-- Автоматическое тестирование всех нод по расписанию (последовательно, 5 сек между нодами)
-- Гео-определение ноды по IP (ip-api.com) → авто-выбор метода + ближайшие iperf3-серверы
-- Автоустановка Ookla CLI на хосте при первом запуске (packagecloud / прямой бинарник)
-- Три режима iperf3 серверов: публичные / панель как сервер / оба
-- Dropdown-кнопка на странице сервера: «Быстрая» / «Полная» проверка
-- Цветной бейдж скорости на карточке сервера (зелёный/жёлтый/красный)
-- Telegram-уведомления: низкая скорость, ошибки, восстановление
-
-**Файлы:**
-- `node/app/services/speedtest_runner.py` — iperf3 (-P -w) + Ookla CLI через nsenter
-- `node/app/routers/speedtest.py` — POST /api/speedtest (method, test_mode), GET /api/speedtest/status
-- `panel/backend/app/services/speedtest_scheduler.py` — фоновый планировщик, авто-выбор метода по гео
-- `panel/backend/app/services/geo_resolver.py` — определение гео по IP, фильтрация iperf3-серверов
-- `panel/backend/app/routers/proxy.py` — POST/GET /proxy/{id}/speedtest (method, test_mode)
-- `panel/frontend/src/pages/Settings.tsx` — секция настроек Speed Test (метод, режим, серверы)
-- `panel/frontend/src/pages/ServerDetails.tsx` — dropdown-кнопка Quick/Full
-- `panel/frontend/src/components/Dashboard/ServerCard.tsx` — бейдж скорости в футере
-
-### Xray Monitor
-
-Мониторинг Xray-серверов через speedtest. Подписки и ключи парсятся, через xray-core создаётся SOCKS5 прокси — измеряется download скорость. Серверы тестируются последовательно. Автотест выключен по умолчанию.
-
-**Метод спидтеста:**
-
-Ookla Speedtest CLI через proxychains4 с флагом `--no-upload`. Тестируется только download; upload не замеряется по двум причинам: proxychains не всегда корректно перехватывает upload-соединения Ookla (upload шёл мимо VPN-туннеля), и флаг `--no-upload` существенно сокращает время теста.
-
-**Предварительная проверка канала панели:**
-
-Перед каждым циклом тестирования VPN-серверов сервис запускает Ookla speedtest напрямую на сервере панели (без proxychains/VPN). Если download ниже `PANEL_SPEED_THRESHOLD_MBPS = 1000 Mbit/s` — весь цикл пропускается с предупреждением в лог.
-
-Telegram-уведомление о низкой скорости отправляется не с первого раза, а только когда счётчик `_panel_slow_streak` достигает `fail_threshold` (по умолчанию 2) подряд идущих обнаружений. При нормальной скорости счётчик сбрасывается в 0. Это исключает ложные срабатывания при кратковременных просадках канала.
-
-- `_run_panel_speedtest()`: Ookla CLI без proxychains; инкрементирует/сбрасывает `_panel_slow_streak`
-
-**Настройки (UI):**
-- Один мастер-тогл включения (синхронно контролирует мониторинг и speedtest)
-- Интервал проверки
-- Порог скорости (Mbit/s) — ниже порога = уведомление "slow speed"
-- Провалов до offline
-- Игнор-лист серверов
-- Telegram-уведомления: down / recovery / slow speed
-- Кастомный Telegram-бот (отдельный token/chat_id)
-
-**Таблица серверов:** отображаются колонки Download и Upload скорости (пинг не отображается).
-
-| Метод | Endpoint | Описание |
-|-------|----------|----------|
-| GET | /xray-monitor/settings | Настройки мониторинга |
-| PUT | /xray-monitor/settings | Обновить настройки |
-| GET | /xray-monitor/subscriptions | Список подписок (с вложенными серверами) |
-| POST | /xray-monitor/subscriptions | Добавить подписку |
-| PUT | /xray-monitor/subscriptions/{id} | Обновить подписку |
-| DELETE | /xray-monitor/subscriptions/{id} | Удалить подписку с серверами |
-| POST | /xray-monitor/subscriptions/{id}/refresh | Перезагрузить ключи |
-| GET | /xray-monitor/servers | Ручные серверы (без подписки) |
-| POST | /xray-monitor/servers | Добавить ключи вручную |
-| DELETE | /xray-monitor/servers/{id} | Удалить сервер |
-| POST | /xray-monitor/servers/{id}/speedtest | Ручной speedtest сервера |
-| GET | /xray-monitor/servers/{id}/history | История проверок (ping/download/upload) |
-| GET | /xray-monitor/status | Статус сервиса |
-| POST | /xray-monitor/test-notification | Тест Telegram |
-
-**Файлы:**
-- `backend/app/models.py` — `XrayMonitorSettings`
-- `backend/app/routers/xray_monitor.py` — роутер
-- `backend/app/services/xray_monitor.py` — `_run_panel_speedtest()` (проверка канала панели), `_ookla_speedtest_via_proxychains()` (тест через VPN)
-- `backend/app/services/xray_key_parser.py` — парсинг подписок и ключей (URI-ключи, base64, JSON full xray-конфиги)
-- `frontend/src/pages/XrayMonitor.tsx` — страница мониторинга
-- `frontend/src/api/client.ts` — тип настроек
-
 ### Torrent Blocker
 
 Обнаружение торрент-трафика с автоматической блокировкой IP. Панель опрашивает Remnawave API, получает текущие сессии пользователей, детектирует торрент-паттерны и рассылает команду бана на все активные ноды. Опционально перед баном отправляет вебхук-предупреждение с задержкой — даёт пользователю время выключить клиент.
@@ -1880,8 +1795,7 @@ docker compose restart backend
 
 **Причины:**
 1. **Оптимизации sysctl применены к хосту панели** — настройки для relay-серверов (nf_conntrack, ip_local_port_range) могут ломать малые VMs
-2. **Исчерпание conntrack** — много соединений (метрики, speedtest, xray monitor) заполняют таблицу
-3. **iperf3-сервер** — постоянный режим может создавать много соединений при тестах
+2. **Исчерпание conntrack** — много соединений (сбор метрик со всех нод) заполняют таблицу
 
 **Диагностика:**
 
@@ -1893,21 +1807,13 @@ bash scripts/diagnose-network.sh
 
 Пришлите вывод — по нему можно определить причину.
 
-**Быстрые проверки:**
+**Быстрая проверка:**
 
-1. Если на хосте есть `/etc/sysctl.d/99-vless-tuning.conf` — оптимизации применены к панели по ошибке. Удалите и перезагрузите:
-   ```bash
-   sudo rm /etc/sysctl.d/99-vless-tuning.conf
-   sudo sysctl -p
-   ```
-
-2. Временно отключить iperf3-сервер панели (для теста):
-   ```bash
-   # В .env или при запуске
-   IPERF_SERVER_DISABLED=1 docker compose up -d
-   ```
-
-3. В настройках Speed Test переключить режим на «только публичные серверы» — iperf3 панели не будет запускаться.
+Если на хосте есть `/etc/sysctl.d/99-vless-tuning.conf` — оптимизации применены к панели по ошибке. Удалите и перезагрузите:
+```bash
+sudo rm /etc/sysctl.d/99-vless-tuning.conf
+sudo sysctl -p
+```
 
 ## Команды
 
