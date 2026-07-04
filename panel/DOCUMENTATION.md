@@ -1,4 +1,4 @@
-# Monitoring Panel v10.19.0
+# Monitoring Panel v10.19.1
 
 Веб-панель для мониторинга серверов. Собирает метрики с нод с настраиваемым интервалом (по умолчанию 10 сек) и хранит историю локально.
 
@@ -655,6 +655,8 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 | DELETE | /api/blocklist/sources/{id} | Удалить источник |
 | POST | /api/blocklist/sources/{id}/refresh | Обновить источник |
 | POST | /api/blocklist/sources/refresh-all | Обновить все |
+
+`POST /sources` сразу после создания записи скачивает и парсит список (`manager.refresh_source`) — в ответе сразу приходят актуальные `ip_count` и `error_message`, без ожидания ручного «Обновить» или суточного автообновления.
 
 **Настройки и синхронизация:**
 

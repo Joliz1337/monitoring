@@ -561,6 +561,11 @@ async def add_source(
     await db.commit()
     await db.refresh(source)
 
+    # Сразу скачать и распарсить список — в UI виден ip_count и ошибка фетча,
+    # не дожидаясь ручного refresh или суточного автоапдейта
+    manager = get_blocklist_manager()
+    fetch_ok, fetch_message, ip_count, _ = await manager.refresh_source(source.id)
+
     bg.add_task(manager_sync_all)
 
     return {
@@ -570,7 +575,9 @@ async def add_source(
             "name": source.name,
             "url": source.url,
             "enabled": source.enabled,
-            "direction": source.direction
+            "direction": source.direction,
+            "ip_count": ip_count,
+            "error_message": None if fetch_ok else fetch_message
         }
     }
 
