@@ -1,4 +1,4 @@
-import { memo } from 'react'
+import { memo, useState } from 'react'
 import { useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { useNavigate, useParams } from 'react-router-dom'
@@ -108,6 +108,20 @@ function ServerCardView({
       ? 'opacity-30'
       : 'opacity-50'
 
+  // CSS-анимация появления с fill-mode: forwards навсегда перебивает inline-transform
+  // от dnd-kit (анимации в каскаде сильнее inline-стилей) — карточки не раздвигались
+  // при перетаскивании. После завершения анимации снимаем класс с обёртки.
+  const [entered, setEntered] = useState(isOverlay)
+  const wrapperProps = {
+    style: sortableStyle,
+    className: entered ? undefined : 'card-enter',
+    onAnimationEnd: entered
+      ? undefined
+      : (e: React.AnimationEvent<HTMLDivElement>) => {
+          if (e.animationName === 'card-enter') setEntered(true)
+        },
+  }
+
   const metrics = server.metrics
 
   const handleClick = () => {
@@ -118,7 +132,7 @@ function ServerCardView({
   if (!server.is_active) {
     if (compact) {
       return (
-        <div ref={cardRef} style={sortableStyle} className="card-enter">
+        <div ref={cardRef} {...wrapperProps}>
           <div
             className={`server-card card group cursor-pointer ${disabledDragClass}`}
             onClick={handleClick}
@@ -156,7 +170,7 @@ function ServerCardView({
     }
 
     return (
-      <div ref={cardRef} style={sortableStyle} className="card-enter">
+      <div ref={cardRef} {...wrapperProps}>
         <div
           className={`server-card card group cursor-pointer ${disabledDragClass}`}
           onClick={handleClick}
@@ -201,7 +215,7 @@ function ServerCardView({
 
   if (compact) {
     return (
-      <div ref={cardRef} style={sortableStyle} className="card-enter">
+      <div ref={cardRef} {...wrapperProps}>
         <div
           className={`server-card card group cursor-pointer ${dragClass}`}
           onClick={handleClick}
@@ -292,7 +306,7 @@ function ServerCardView({
   }
 
   return (
-    <div ref={cardRef} style={sortableStyle} className="card-enter">
+    <div ref={cardRef} {...wrapperProps}>
       <div
         className={`server-card card group cursor-pointer ${dragClass}`}
         onClick={handleClick}

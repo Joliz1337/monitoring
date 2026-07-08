@@ -1,4 +1,4 @@
-# Monitoring Panel v10.20.2
+# Monitoring Panel v10.20.3
 
 Веб-панель для мониторинга серверов. Собирает метрики с нод с настраиваемым интервалом (по умолчанию 10 сек) и хранит историю локально.
 
@@ -435,6 +435,7 @@ interface NicInfo {
 
 **Frontend:**
 - `ServerCard.tsx` разделён на презентационный `ServerCardView`, sortable-обёртку `SortableServerCard` (default export `ServerCard` = `memo` обёртки) и `ServerCardOverlay` — копия карточки для `DragOverlay` без `useSortable`. Важно не заводить `useSortable` внутри `DragOverlay` с тем же `id`, что и у настоящей карточки: это перезаписывает регистрацию draggable/droppable в реестре dnd-kit, а при размонтировании оверлея удаляет её вместе с настоящей карточкой — drag ломается после первого переноса, пока компонент не перемонтируется. Настоящая карточка во время drag — приглушённый placeholder (`opacity-30`), кольцо/тень — только у оверлея.
+- Entrance-анимация карточки (класс `card-enter`, `fill-mode: forwards`) держится дольше, чем нужно: по CSS-каскаду анимация на `transform` перебивает inline-`transform` от dnd-kit, из-за чего live-предпросмотр drag (раздвижение карточек, перемещение placeholder) не работал вообще. `ServerCardView` снимает класс `card-enter` по `animationend` (проверка `e.animationName === 'card-enter'`), после чего dnd-kit применяет свой transform как обычно; у `ServerCardOverlay` этой анимации нет — состояние `entered` там сразу `true`.
 - `Dashboard.tsx` — multi-container паттерн dnd-kit: локальная копия списка на время drag (`dragServers`), `onDragOver` переносит карточку между папками и раздвигает соседей, показывая реальную позицию вставки; collision detection — карточка под курсором → зона папки → `closestCenter`; `handleDragEnd` одним вызовом сохраняет и папку, и позицию; поллинг метрик приостанавливается на время drag (смена высоты карточек mid-drag иначе сбивает расчёт коллизий); папка, из которой утащили последний сервер, не пропадает из-под курсора до конца drag.
 - `serversStore.ts` — единый экшен `applyServerArrangement(orderedIds, movedId, folder)`: атомарный optimistic-апдейт порядка и папки одним `set`, откат при ошибке API; серверы вне переданного порядка (например неактивные) сохраняются в хвосте списка.
 
