@@ -8,7 +8,7 @@ interface ServerTraffic {
   days: number
 }
 
-interface ServerWithMetrics extends Server {
+export interface ServerWithMetrics extends Server {
   metrics?: ServerMetrics | null
   traffic?: ServerTraffic | null
   status: 'online' | 'offline' | 'loading' | 'error'
@@ -35,9 +35,8 @@ interface ServersState {
   updateServer: (id: number, data: Partial<Server>) => Promise<void>
   toggleServer: (id: number, isActive: boolean) => Promise<void>
   deleteServer: (id: number) => Promise<void>
-  reorderServers: (serverIds: number[]) => Promise<void>
+  applyServerArrangement: (orderedIds: number[], movedId: number, folder: string | null) => Promise<void>
   testServer: (id: number) => Promise<{ success: boolean; status: string; message?: string }>
-  moveToFolder: (serverIds: number[], folder: string | null) => Promise<void>
   renameFolder: (oldName: string, newName: string) => Promise<void>
   deleteFolder: (folderName: string) => Promise<void>
 }
@@ -278,28 +277,45 @@ export const useServersStore = create<ServersState>((set, get) => ({
     set({ servers: get().servers.filter(s => s.id !== id) })
   },
   
-  reorderServers: async (serverIds) => {
+  // Атомарный optimistic-апдейт после drag&drop на дашборде: новый глобальный порядок
+  // и (если сменилась) папка перенесённого сервера применяются одним set, чтобы карточка
+  // не мигала промежуточным состоянием, пока идут запросы к API. При ошибке — откат.
+  applyServerArrangement: async (orderedIds, movedId, folder) => {
     const { servers } = get()
-    const reordered = serverIds.map((id, index) => {
-      const server = servers.find(s => s.id === id)!
-      return { ...server, position: index }
-    })
-    set({ servers: reordered })
-    await serversApi.reorder(serverIds)
+    const prev = servers
+    const byId = new Map(servers.map(s => [s.id, s]))
+    const moved = byId.get(movedId)
+    if (!moved) return
+
+    const folderChanged = (moved.folder || null) !== folder
+    const idSet = new Set(orderedIds)
+    const ordered = orderedIds
+      .map(id => byId.get(id))
+      .filter((s): s is ServerWithMetrics => s !== undefined)
+    // Серверы вне переданного порядка (например, неактивные) сохраняем в хвосте,
+    // иначе они пропадут из стора до следующего fetch
+    const rest = servers.filter(s => !idSet.has(s.id))
+    const next = [...ordered, ...rest].map((s, index) => ({
+      ...s,
+      position: index,
+      folder: s.id === movedId ? folder : s.folder,
+    }))
+    set({ servers: next })
+
+    try {
+      if (folderChanged) {
+        await serversApi.moveToFolder([movedId], folder)
+      }
+      await serversApi.reorder(next.map(s => s.id))
+    } catch (e) {
+      set({ servers: prev })
+      throw e
+    }
   },
-  
+
   testServer: async (id) => {
     const { data } = await serversApi.test(id)
     return data
-  },
-
-  moveToFolder: async (serverIds, folder) => {
-    await serversApi.moveToFolder(serverIds, folder)
-    set({
-      servers: get().servers.map(s =>
-        serverIds.includes(s.id) ? { ...s, folder } : s
-      )
-    })
   },
 
   renameFolder: async (oldName, newName) => {

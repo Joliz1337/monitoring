@@ -55,33 +55,58 @@ interface ServerCardProps {
   index?: number
 }
 
-function ServerCardComponent({ server, compact, detailLevel = 'standard', index = 0 }: ServerCardProps) {
+interface DragHandle {
+  attributes: ReturnType<typeof useSortable>['attributes']
+  listeners: ReturnType<typeof useSortable>['listeners']
+}
+
+interface ServerCardViewProps extends ServerCardProps {
+  cardRef?: (node: HTMLElement | null) => void
+  dndStyle?: React.CSSProperties
+  isDragging?: boolean
+  isOverlay?: boolean
+  handle?: DragHandle
+}
+
+function ServerCardView({
+  server,
+  compact,
+  detailLevel = 'standard',
+  index = 0,
+  cardRef,
+  dndStyle,
+  isDragging = false,
+  isOverlay = false,
+  handle,
+}: ServerCardViewProps) {
   const { uid } = useParams()
   const navigate = useNavigate()
   const { t } = useTranslation()
 
-  const {
-    attributes,
-    listeners,
-    setNodeRef,
-    transform,
-    transition,
-    isDragging,
-  } = useSortable({ id: server.id })
-
   // dnd-kit transform — оставляем как inline-style (он меняется в DOM напрямую при drag, без React-ререндера)
   // animationDelay тоже inline — entrance keyframe запускается один раз при mount
   const sortableStyle: React.CSSProperties = {
-    transform: CSS.Transform.toString(transform),
-    transition,
-    zIndex: isDragging ? 50 : undefined,
+    ...dndStyle,
     position: 'relative' as const,
     animationDelay: `${Math.min(index, 20) * 30}ms`,
     // Виртуализация без удаления из DOM: браузер пропускает рендер/лейаут офф-скрин
     // карточек (критично на сотнях нод). При drag выключаем, чтобы не мешать перетаскиванию.
-    contentVisibility: isDragging ? 'visible' : 'auto',
+    contentVisibility: isDragging || isOverlay ? 'visible' : 'auto',
     containIntrinsicSize: 'auto 320px',
   }
+
+  // Во время drag настоящая карточка остаётся на месте приглушённым placeholder'ом,
+  // за курсором едет копия в DragOverlay
+  const dragClass = isOverlay
+    ? 'shadow-2xl shadow-accent-500/20 ring-2 ring-accent-500/30'
+    : isDragging
+      ? 'opacity-30'
+      : ''
+  const disabledDragClass = isOverlay
+    ? 'opacity-50 shadow-2xl ring-2 ring-dark-600/30'
+    : isDragging
+      ? 'opacity-30'
+      : 'opacity-50'
 
   const metrics = server.metrics
 
@@ -93,17 +118,15 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
   if (!server.is_active) {
     if (compact) {
       return (
-        <div ref={setNodeRef} style={sortableStyle} className="card-enter">
+        <div ref={cardRef} style={sortableStyle} className="card-enter">
           <div
-            className={`server-card card group cursor-pointer opacity-50 ${
-              isDragging ? 'shadow-2xl ring-2 ring-dark-600/30' : ''
-            }`}
+            className={`server-card card group cursor-pointer ${disabledDragClass}`}
             onClick={handleClick}
           >
             <div className="flex items-center gap-4">
               <button
-                {...attributes}
-                {...listeners}
+                {...handle?.attributes}
+                {...handle?.listeners}
                 className="p-1.5 text-dark-600 hover:text-dark-400 cursor-grab active:cursor-grabbing
                            hover:bg-dark-800 rounded-lg transition-colors touch-none"
                 onClick={(e) => e.stopPropagation()}
@@ -133,18 +156,16 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
     }
 
     return (
-      <div ref={setNodeRef} style={sortableStyle} className="card-enter">
+      <div ref={cardRef} style={sortableStyle} className="card-enter">
         <div
-          className={`server-card card group cursor-pointer opacity-50 ${
-            isDragging ? 'shadow-2xl ring-2 ring-dark-600/30' : ''
-          }`}
+          className={`server-card card group cursor-pointer ${disabledDragClass}`}
           onClick={handleClick}
         >
           <div className="flex items-start justify-between mb-4">
             <div className="flex items-center gap-3">
               <button
-                {...attributes}
-                {...listeners}
+                {...handle?.attributes}
+                {...handle?.listeners}
                 className="p-1.5 text-dark-600 hover:text-dark-400 cursor-grab active:cursor-grabbing
                            hover:bg-dark-800 rounded-lg transition-colors touch-none"
                 onClick={(e) => e.stopPropagation()}
@@ -180,17 +201,15 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
 
   if (compact) {
     return (
-      <div ref={setNodeRef} style={sortableStyle} className="card-enter">
+      <div ref={cardRef} style={sortableStyle} className="card-enter">
         <div
-          className={`server-card card group cursor-pointer ${
-            isDragging ? 'opacity-70 shadow-2xl shadow-accent-500/20 ring-2 ring-accent-500/30' : ''
-          }`}
+          className={`server-card card group cursor-pointer ${dragClass}`}
           onClick={handleClick}
         >
           <div className="flex items-center gap-4">
             <button
-              {...attributes}
-              {...listeners}
+              {...handle?.attributes}
+              {...handle?.listeners}
               className="p-1.5 text-dark-500 hover:text-dark-300 cursor-grab active:cursor-grabbing
                          hover:bg-dark-800 rounded-lg transition-colors touch-none"
               onClick={(e) => e.stopPropagation()}
@@ -273,11 +292,9 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
   }
 
   return (
-    <div ref={setNodeRef} style={sortableStyle} className="card-enter">
+    <div ref={cardRef} style={sortableStyle} className="card-enter">
       <div
-        className={`server-card card group cursor-pointer ${
-          isDragging ? 'opacity-70 shadow-2xl shadow-accent-500/20 ring-2 ring-accent-500/30' : ''
-        }`}
+        className={`server-card card group cursor-pointer ${dragClass}`}
         onClick={handleClick}
       >
         {/* Gradient border on hover */}
@@ -292,8 +309,8 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
         <div className="flex items-start justify-between mb-4">
           <div className="flex items-center gap-3">
             <button
-              {...attributes}
-              {...listeners}
+              {...handle?.attributes}
+              {...handle?.listeners}
               className="p-1.5 text-dark-500 hover:text-dark-300 cursor-grab active:cursor-grabbing
                          hover:bg-dark-800 rounded-lg transition-colors touch-none"
               onClick={(e) => e.stopPropagation()}
@@ -597,7 +614,34 @@ function ServerCardComponent({ server, compact, detailLevel = 'standard', index 
   )
 }
 
-const ServerCard = memo(ServerCardComponent, (prevProps, nextProps) => {
+function SortableServerCard(props: ServerCardProps) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: props.server.id })
+
+  const dndStyle: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    zIndex: isDragging ? 50 : undefined,
+  }
+
+  return (
+    <ServerCardView
+      {...props}
+      cardRef={setNodeRef}
+      dndStyle={dndStyle}
+      isDragging={isDragging}
+      handle={{ attributes, listeners }}
+    />
+  )
+}
+
+const ServerCard = memo(SortableServerCard, (prevProps, nextProps) => {
   const a = prevProps.server
   const b = nextProps.server
   if (a.id !== b.id) return false
@@ -637,6 +681,13 @@ const ServerCard = memo(ServerCardComponent, (prevProps, nextProps) => {
 })
 
 export default ServerCard
+
+// Копия карточки для DragOverlay: без useSortable, иначе оверлей регистрирует второй
+// draggable/droppable с тем же id и при размонтировании удаляет из реестра dnd-kit
+// регистрацию настоящей карточки — сервер после первого drag переставал перетаскиваться.
+export function ServerCardOverlay(props: ServerCardProps) {
+  return <ServerCardView {...props} isOverlay />
+}
 
 interface MetricItemProps {
   icon: React.ReactNode

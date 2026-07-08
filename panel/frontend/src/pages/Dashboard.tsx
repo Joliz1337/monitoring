@@ -53,10 +53,10 @@ import {
   GripVertical,
 } from 'lucide-react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { useServersStore } from '../stores/serversStore'
+import { useServersStore, type ServerWithMetrics } from '../stores/serversStore'
 import { useSettingsStore } from '../stores/settingsStore'
 import { useAutoRefresh } from '../hooks/useAutoRefresh'
-import ServerCard from '../components/Dashboard/ServerCard'
+import ServerCard, { ServerCardOverlay } from '../components/Dashboard/ServerCard'
 import { ServerCardSkeleton } from '../components/ui/Skeleton'
 import { Tooltip } from '../components/ui/Tooltip'
 import { useTranslation } from 'react-i18next'
@@ -90,7 +90,7 @@ function saveFolderOrder(order: string[]) {
 export default function Dashboard() {
   const { uid } = useParams()
   const navigate = useNavigate()
-  const { servers, fetchServersWithMetrics, reorderServers, moveToFolder, renameFolder, deleteFolder, isLoading } = useServersStore()
+  const { servers, fetchServersWithMetrics, applyServerArrangement, renameFolder, deleteFolder, isLoading } = useServersStore()
   const { refreshInterval, compactView, setCompactView, fetchSettings, detailLevel, cardScale, setDetailLevel, setCardScale } = useSettingsStore()
   const { t } = useTranslation()
   
@@ -98,6 +98,11 @@ export default function Dashboard() {
   const [dragType, setDragType] = useState<'server' | 'folder' | null>(null)
   const [activeId, setActiveId] = useState<string | number | null>(null)
   const [overFolderId, setOverFolderId] = useState<string | null>(null)
+  // Локальная копия списка на время drag: onDragOver двигает сервер между папками в ней,
+  // чтобы dnd-kit раздвигал карточки и показывал слот вставки; стор не трогаем до drop
+  const [dragServers, setDragServers] = useState<ServerWithMetrics[] | null>(null)
+  const dragServersRef = useRef<ServerWithMetrics[] | null>(null)
+  const isDraggingRef = useRef(false)
   const [collapsed, setCollapsed] = useState<Set<string>>(loadCollapsed)
   const [emptyFolders, setEmptyFolders] = useState<string[]>([])
   const [folderOrder, setFolderOrder] = useState<string[]>(loadFolderOrder)
@@ -126,20 +131,29 @@ export default function Dashboard() {
     return Math.max(refreshInterval, floorSec) * 1000
   }, [servers.length, refreshInterval])
 
+  // Во время drag поллинг пропускаем: замена массива серверов меняет высоты карточек
+  // и лейаут, а dnd-kit меряет ректы droppable-зон на старте drag — коллизии уезжают
+  const refreshServers = useCallback(async () => {
+    if (isDraggingRef.current) return
+    await fetchServersWithMetrics()
+  }, [fetchServersWithMetrics])
+
   const { isPageVisible } = useAutoRefresh(
-    fetchServersWithMetrics,
+    refreshServers,
     { immediate: false, pauseWhenHidden: true, refreshOnVisible: true, customInterval: effectiveInterval }
   )
 
+  const displayedServers = dragServers ?? servers
+
   const { activeServers, onlineCount, offlineCount, disabledCount } = useMemo(() => {
-    const active = servers.filter(s => s.is_active)
+    const active = displayedServers.filter(s => s.is_active)
     return {
       activeServers: active,
       onlineCount: active.filter(s => s.status === 'online').length,
       offlineCount: active.filter(s => s.status === 'offline').length,
-      disabledCount: servers.filter(s => !s.is_active).length,
+      disabledCount: displayedServers.filter(s => !s.is_active).length,
     }
-  }, [servers])
+  }, [displayedServers])
 
   const folders = useMemo(() => {
     const allFolders = new Set<string>()
@@ -166,12 +180,6 @@ export default function Dashboard() {
     return map
   }, [activeServers])
 
-  const serverFolderMap = useMemo(() => {
-    const map = new Map<number, string | null>()
-    for (const s of activeServers) map.set(s.id, s.folder || null)
-    return map
-  }, [activeServers])
-
   const toggleCollapsed = useCallback((folder: string) => {
     setCollapsed(prev => {
       const next = new Set(prev)
@@ -192,67 +200,119 @@ export default function Dashboard() {
       })
     }
 
-    const draggedId = args.active.id as number
-    const draggedFolder = serverFolderMap.get(draggedId) ?? null
-
-    const withoutFolderSortables = args.droppableContainers.filter(c =>
+    const containers = args.droppableContainers.filter(c =>
       !String(c.id).startsWith('sortable-folder:')
     )
+    const hits = pointerWithin({ ...args, droppableContainers: containers })
 
-    const hits = pointerWithin({ ...args, droppableContainers: withoutFolderSortables })
+    // Карточка под курсором точнее зоны папки: даёт конкретный слот вставки
+    const cardHits = hits.filter(h => typeof h.id === 'number' && h.id !== args.active.id)
+    if (cardHits.length > 0) return cardHits
 
-    const sameFolderServerHits: typeof hits = []
-    const folderZoneHits: typeof hits = []
-
-    for (const hit of hits) {
-      const idStr = String(hit.id)
-      if (idStr.startsWith('folder:') || idStr === 'drop:unfolder') {
-        folderZoneHits.push(hit)
-      } else if (typeof hit.id === 'number' && serverFolderMap.get(hit.id) === draggedFolder) {
-        sameFolderServerHits.push(hit)
-      }
-    }
-
-    if (sameFolderServerHits.length > 0) return sameFolderServerHits
-    if (folderZoneHits.length > 0) return folderZoneHits
-
-    const relevantContainers = withoutFolderSortables.filter(c => {
-      const idStr = String(c.id)
-      if (idStr.startsWith('folder:') || idStr === 'drop:unfolder') return true
-      if (typeof c.id === 'number') return serverFolderMap.get(c.id) === draggedFolder
-      return false
+    const zoneHits = hits.filter(h => {
+      const idStr = String(h.id)
+      return idStr.startsWith('folder:') || idStr === 'drop:unfolder'
     })
-    return closestCenter({ ...args, droppableContainers: relevantContainers })
-  }, [dragType, serverFolderMap])
-  
+    if (zoneHits.length > 0) return zoneHits
+
+    return closestCenter({
+      ...args,
+      droppableContainers: containers.filter(c => c.id !== args.active.id),
+    })
+  }, [dragType])
+
   const handleDragStart = (event: DragStartEvent) => {
+    isDraggingRef.current = true
     const id = String(event.active.id)
     if (id.startsWith('sortable-folder:')) {
       setDragType('folder')
       setActiveId(id)
-    } else {
-      setDragType('server')
-      setActiveId(event.active.id as number)
+      return
     }
+    setDragType('server')
+    setActiveId(event.active.id as number)
+    dragServersRef.current = servers
+    setDragServers(servers)
+    // Фиксируем все текущие папки как «существующие»: если из папки утащат
+    // последний сервер, она не должна исчезнуть из-под курсора посреди drag
+    setEmptyFolders(prev => Array.from(new Set([...prev, ...folders])))
   }
 
   const handleDragOver = (event: DragOverEvent) => {
-    if (dragType === 'folder') return
-    const { over } = event
-    if (!over) { setOverFolderId(null); return }
-    const overId = String(over.id)
-    if (overId.startsWith('folder:')) setOverFolderId(overId.replace('folder:', ''))
-    else if (overId === 'drop:unfolder') setOverFolderId('__unfolder__')
-    else setOverFolderId(null)
-  }
-  
-  const handleDragEnd = async (event: DragEndEvent) => {
+    if (dragType !== 'server') return
     const { active, over } = event
-    const prevDragType = dragType
+    if (!over) {
+      setOverFolderId(null)
+      return
+    }
+
+    const list = dragServersRef.current
+    const overStr = String(over.id)
+    let targetFolder: string | null
+    let overServerId: number | null = null
+
+    if (typeof over.id === 'number') {
+      overServerId = over.id
+      targetFolder = (list ?? servers).find(s => s.id === over.id)?.folder || null
+      setOverFolderId(null)
+    } else if (overStr.startsWith('folder:')) {
+      targetFolder = overStr.replace('folder:', '')
+      setOverFolderId(targetFolder)
+    } else if (overStr === 'drop:unfolder') {
+      targetFolder = null
+      setOverFolderId('__unfolder__')
+    } else {
+      setOverFolderId(null)
+      return
+    }
+
+    if (!list) return
+    const draggedId = active.id as number
+    const dragged = list.find(s => s.id === draggedId)
+    if (!dragged || (dragged.folder || null) === targetFolder) return
+
+    // Смена контейнера прямо во время drag: локально переносим сервер в целевую
+    // папку, чтобы её SortableContext включил его и показал слот вставки
+    const without = list.filter(s => s.id !== draggedId)
+    let insertIdx: number
+    if (overServerId != null) {
+      const overIdx = without.findIndex(s => s.id === overServerId)
+      const activeRect = active.rect.current.translated
+      const isBelow = activeRect !== null && activeRect.top > over.rect.top + over.rect.height
+      insertIdx = overIdx === -1 ? without.length : overIdx + (isBelow ? 1 : 0)
+    } else {
+      // Наведение на зону папки (не на карточку) — в конец её блока
+      let lastIdx = -1
+      for (let i = 0; i < without.length; i++) {
+        if ((without[i].folder || null) === targetFolder) lastIdx = i
+      }
+      insertIdx = lastIdx === -1 ? without.length : lastIdx + 1
+    }
+
+    const next = [
+      ...without.slice(0, insertIdx),
+      { ...dragged, folder: targetFolder },
+      ...without.slice(insertIdx),
+    ]
+    dragServersRef.current = next
+    setDragServers(next)
+  }
+
+  const resetDragState = () => {
+    isDraggingRef.current = false
+    dragServersRef.current = null
     setDragType(null)
     setActiveId(null)
     setOverFolderId(null)
-    
+    setDragServers(null)
+  }
+
+  const handleDragEnd = async (event: DragEndEvent) => {
+    const { active, over } = event
+    const prevDragType = dragType
+    const localList = dragServersRef.current
+    resetDragState()
+
     if (!over) return
 
     const activeStr = String(active.id)
@@ -274,42 +334,30 @@ export default function Dashboard() {
       return
     }
 
-    // Server → folder
-    if (prevDragType === 'server') {
-      const draggedId = active.id as number
+    if (prevDragType !== 'server' || !localList) return
 
-      if (overStr.startsWith('folder:')) {
-        const targetFolder = overStr.replace('folder:', '')
-        const srv = activeServers.find(s => s.id === draggedId)
-        if (srv && srv.folder !== targetFolder) {
-          try {
-            await moveToFolder([draggedId], targetFolder)
-            toast.success(t('dashboard.server_moved'))
-          } catch { toast.error(t('common.action_failed')) }
-        }
-        return
-      }
+    // Финальная позиция: смена папки уже применена в localList на dragOver,
+    // остаётся зафиксировать перестановку внутри контейнера
+    const draggedId = active.id as number
+    let list = localList
+    if (typeof over.id === 'number' && over.id !== draggedId) {
+      const oldIndex = list.findIndex(s => s.id === draggedId)
+      const newIndex = list.findIndex(s => s.id === over.id)
+      if (oldIndex !== -1 && newIndex !== -1) list = arrayMove(list, oldIndex, newIndex)
+    }
 
-      if (overStr === 'drop:unfolder') {
-        const srv = activeServers.find(s => s.id === draggedId)
-        if (srv && srv.folder) {
-          try {
-            await moveToFolder([draggedId], null)
-            toast.success(t('dashboard.server_moved'))
-          } catch { toast.error(t('common.action_failed')) }
-        }
-        return
-      }
+    const dragged = list.find(s => s.id === draggedId)
+    if (!dragged) return
+    const original = servers.find(s => s.id === draggedId)
+    const folderChanged = (original?.folder || null) !== (dragged.folder || null)
+    const orderChanged = list.length !== servers.length || list.some((s, i) => s.id !== servers[i].id)
+    if (!folderChanged && !orderChanged) return
 
-      // Server reorder
-      if (active.id !== over.id) {
-        const oldIndex = activeServers.findIndex(s => s.id === active.id)
-        const newIndex = activeServers.findIndex(s => s.id === over.id)
-        if (oldIndex !== -1 && newIndex !== -1) {
-          const newOrder = arrayMove(activeServers, oldIndex, newIndex)
-          reorderServers(newOrder.map(s => s.id))
-        }
-      }
+    try {
+      await applyServerArrangement(list.map(s => s.id), draggedId, dragged.folder || null)
+      if (folderChanged) toast.success(t('dashboard.server_moved'))
+    } catch {
+      toast.error(t('common.action_failed'))
     }
   }
 
@@ -486,6 +534,7 @@ export default function Dashboard() {
           onDragStart={handleDragStart}
           onDragOver={handleDragOver}
           onDragEnd={handleDragEnd}
+          onDragCancel={resetDragState}
         >
           <div className="space-y-6 fade-in" key="servers">
               {/* Sortable folder list */}
@@ -583,7 +632,7 @@ export default function Dashboard() {
           <DragOverlay>
             {activeServer && (
               <div className="opacity-90">
-                <ServerCard server={activeServer} compact={compactView} detailLevel={detailLevel} index={0} />
+                <ServerCardOverlay server={activeServer} compact={compactView} detailLevel={detailLevel} index={0} />
               </div>
             )}
             {activeFolderName && (
@@ -696,9 +745,9 @@ function UnfolderDropZone({ isOver, hasServers, hasFolders, children }: {
   return (
     <div
       ref={setNodeRef}
-      className={`rounded-xl transition-all duration-150 min-h-[40px] ${
+      className={`rounded-xl transition-colors duration-150 min-h-[40px] ${
         isOver
-          ? 'bg-accent-500/5 ring-2 ring-accent-500/30 p-3'
+          ? 'bg-accent-500/5 ring-2 ring-accent-500/30'
           : ''
       }`}
     >

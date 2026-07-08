@@ -301,6 +301,14 @@ _list_cache_etag: str = ""
 _list_cache_at: float = 0.0
 
 
+def _invalidate_list_cache() -> None:
+    # Мутации раскладки (порядок, папки) должны быть видны сразу: иначе поллинг
+    # в пределах TTL возвращает старый JSON и фронт откатывает optimistic-обновление.
+    global _list_cache_body, _list_cache_at
+    _list_cache_body = None
+    _list_cache_at = 0.0
+
+
 async def _get_cached_servers_list(db: AsyncSession) -> tuple[str, str]:
     global _list_cache_body, _list_cache_etag, _list_cache_at
     now = time.monotonic()
@@ -509,6 +517,7 @@ async def move_servers_to_folder(
     for s in servers:
         s.folder = folder_value
     await db.commit()
+    _invalidate_list_cache()
     return {"success": True, "moved": len(servers)}
 
 
@@ -526,6 +535,7 @@ async def rename_server_folder(
     for s in servers:
         s.folder = new_name
     await db.commit()
+    _invalidate_list_cache()
     return {"success": True, "renamed": len(servers)}
 
 
@@ -540,6 +550,7 @@ async def delete_server_folder(
     for s in servers:
         s.folder = None
     await db.commit()
+    _invalidate_list_cache()
     return {"success": True, "unfoldered": len(servers)}
 
 
@@ -761,9 +772,10 @@ async def reorder_servers(
         await db.execute(
             update(Server).where(Server.id == server_id).values(position=position)
         )
-    
+
     await db.commit()
-    
+    _invalidate_list_cache()
+
     return {"success": True, "message": "Servers reordered"}
 
 
