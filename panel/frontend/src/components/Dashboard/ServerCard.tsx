@@ -111,7 +111,9 @@ function ServerCardView({
   // CSS-анимация появления с fill-mode: forwards навсегда перебивает inline-transform
   // от dnd-kit (анимации в каскаде сильнее inline-стилей) — карточки не раздвигались
   // при перетаскивании. После завершения анимации снимаем класс с обёртки.
-  const [entered, setEntered] = useState(isOverlay)
+  // Карточка, перемонтированная посреди drag (перенос в другую папку), появляется
+  // без entrance-анимации — иначе она снова глушит transform и мигает.
+  const [entered, setEntered] = useState(isOverlay || isDragging)
   const wrapperProps = {
     style: sortableStyle,
     className: entered ? undefined : 'card-enter',
