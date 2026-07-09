@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 from typing import Optional
 
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import async_session
@@ -109,10 +109,61 @@ class ServerAlerter:
         }
 
     # ------------------------------------------------------------------
+    async def _restore_state_from_history(self):
+        """Восстановить кулдауны и offline-флаги из истории алертов.
+
+        Состояние алертера живёт в памяти: при рестарте бэкенда оно обнулялось,
+        и каждый рестарт заново слал алерты по всё ещё лежащим серверам —
+        при crash-loop панели это превращалось в спам одинаковых уведомлений."""
+        try:
+            cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=1)
+            async with async_session() as db:
+                result = await db.execute(
+                    select(
+                        AlertHistory.server_id,
+                        AlertHistory.alert_type,
+                        func.max(AlertHistory.created_at),
+                    )
+                    .where(AlertHistory.created_at >= cutoff)
+                    .group_by(AlertHistory.server_id, AlertHistory.alert_type)
+                )
+                rows = result.all()
+
+            now_ts = time.time()
+            now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+            last_offline_event: dict[int, tuple[datetime, str]] = {}
+
+            for server_id, alert_type, created_at in rows:
+                if created_at is None:
+                    continue
+                if created_at.tzinfo is not None:
+                    created_at = created_at.replace(tzinfo=None)
+
+                state = self._states.setdefault(server_id, ServerAlertState())
+                state.last_alert[alert_type] = now_ts - (now_utc - created_at).total_seconds()
+
+                if alert_type in ("offline", "recovery"):
+                    prev = last_offline_event.get(server_id)
+                    if prev is None or created_at > prev[0]:
+                        last_offline_event[server_id] = (created_at, alert_type)
+
+            # Сервер, по которому offline свежее recovery, всё ещё считается лежащим —
+            # повторный offline-алерт не уйдёт, а recovery при оживании сработает
+            for server_id, (_, alert_type) in last_offline_event.items():
+                if alert_type == "offline":
+                    self._states[server_id].was_offline = True
+
+            if rows:
+                logger.info(f"Alert state restored from history: {len(rows)} entries")
+        except Exception as e:
+            logger.warning(f"Alert state restore failed: {e}")
+
     async def _loop(self):
         self._time_since_check = 0
         self._last_cleanup: float = 0
         first_run = True
+
+        await self._restore_state_from_history()
 
         while self._running:
             try:
