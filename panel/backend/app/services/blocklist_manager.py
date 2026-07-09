@@ -9,6 +9,7 @@ Handles:
 import asyncio
 import hashlib
 import ipaddress
+import json
 import logging
 import time
 from datetime import datetime, timezone
@@ -30,6 +31,11 @@ logger = logging.getLogger(__name__)
 DEFAULT_TIMEOUT = 600
 UPDATE_INTERVAL = 86400  # 24 hours
 CACHE_TTL = 300  # 5 minutes cache for fetched lists
+MAX_LIST_BYTES = 256 * 1024 * 1024  # потолок размера скачиваемого списка (~15 млн IP)
+NODE_MAX_IPSET_ENTRIES = 1_000_000  # maxelem ipset на нодах — больше нода физически не примет
+SYNC_BASE_TIMEOUT = 20.0
+ALLOW_SYNC_TIMEOUT = 20.0
+SYNC_TIMEOUT_IPS_PER_SEC = 40_000  # +1 сек к таймауту синка на каждые 40k IP
 
 DEFAULT_SOURCES = [
     {
@@ -62,6 +68,9 @@ class BlocklistManager:
         self._db_sem = asyncio.Semaphore(self.DB_CONCURRENCY)
         self._http_sem = asyncio.Semaphore(self.HTTP_CONCURRENCY)
         self._sync_lock = asyncio.Lock()
+        # Отдельные JSON-тела нужны только нодам со своими правилами; при списках
+        # в миллионы IP каждое тело ~70 МБ — больше двух одновременно не собираем
+        self._extra_body_sem = asyncio.Semaphore(2)
     
     def _validate_ip_cidr(self, ip: str) -> bool:
         ip = ip.strip()
@@ -130,14 +139,18 @@ class BlocklistManager:
             timestamp, ips = self._cache[url]
             if time.monotonic() - timestamp < CACHE_TTL:
                 return ips
+            del self._cache[url]
         return None
-    
+
     def _set_cache(self, url: str, ips: list[str]):
-        self._cache[url] = (time.monotonic(), ips)
-    
-    def clear_cache(self):
-        self._cache.clear()
-    
+        # Протухшие записи выкидываются сразу: список отключённого источника
+        # может весить сотни МБ и иначе висел бы в памяти навсегда
+        now = time.monotonic()
+        expired = [u for u, (ts, _) in self._cache.items() if now - ts >= CACHE_TTL]
+        for u in expired:
+            del self._cache[u]
+        self._cache[url] = (now, ips)
+
     async def fetch_github_list(
         self, url: str, timeout: float = 30.0, use_cache: bool = True
     ) -> tuple[bool, list[str], str]:
@@ -147,10 +160,18 @@ class BlocklistManager:
                 return True, cached, ""
         try:
             client = get_external_client()
-            response = await client.get(url, timeout=timeout)
-            if response.status_code != 200:
-                return False, [], f"HTTP {response.status_code}"
-            content = response.text
+            chunks: list[bytes] = []
+            total = 0
+            async with client.stream("GET", url, timeout=timeout) as response:
+                if response.status_code != 200:
+                    return False, [], f"HTTP {response.status_code}"
+                async for chunk in response.aiter_bytes():
+                    total += len(chunk)
+                    if total > MAX_LIST_BYTES:
+                        return False, [], f"List exceeds {MAX_LIST_BYTES // (1024 * 1024)} MB limit"
+                    chunks.append(chunk)
+            content = b"".join(chunks).decode("utf-8", errors="replace")
+            chunks.clear()
             # Парсинг больших списков (100k+ строк) — CPU-bound, в поток,
             # иначе event loop замирает на десятки секунд
             ips = await asyncio.to_thread(self.parse_list_content, content)
@@ -163,11 +184,15 @@ class BlocklistManager:
         except Exception as e:
             logger.error(f"Failed to fetch {url}: {e}")
             return False, [], str(e)
-    
+
     def calculate_hash(self, ips: list[str]) -> str:
-        sorted_ips = sorted(set(ips))
-        content = '\n'.join(sorted_ips)
-        return hashlib.sha256(content.encode()).hexdigest()
+        # Хэш по элементам вместо '\n'.join: склейка миллионов строк давала
+        # лишние ~120 МБ транзиентной памяти на каждый refresh
+        digest = hashlib.sha256()
+        for ip in sorted(set(ips)):
+            digest.update(ip.encode())
+            digest.update(b'\n')
+        return digest.hexdigest()
     
     async def get_setting(self, key: str, db: AsyncSession) -> Optional[str]:
         result = await db.execute(
@@ -250,52 +275,109 @@ class BlocklistManager:
         all_ips = []
         for source in sources:
             success, ips, error = await self.fetch_github_list(source.url)
-            if success:
-                all_ips.extend(ips)
+            if not success:
+                continue
+            if len(ips) > NODE_MAX_IPSET_ENTRIES:
+                logger.warning(
+                    f"Source '{source.name}' skipped: {len(ips)} IPs exceeds "
+                    f"node ipset limit ({NODE_MAX_IPSET_ENTRIES})"
+                )
+                continue
+            all_ips.extend(ips)
         return all_ips
     
+    @staticmethod
+    def _merge_deduplicated(manual_ips: list[str], auto_ips: list[str]) -> tuple[list[str], set[str], int]:
+        """Слить уже нормализованные списки без повторной нормализации.
+
+        deduplicate_ips прогонял все записи через _normalize_ip заново и создавал
+        вторую копию каждой строки — на списке в 4 млн IP это ~500 МБ лишней памяти.
+
+        Итог обрезается по NODE_MAX_IPSET_ENTRIES: ipset на нодах создан с этим
+        maxelem, сверх лимита restore падает и синк разваливается целиком.
+        Ручные правила идут первыми и под обрезку не попадают."""
+        block: list[str] = []
+        block_set: set[str] = set()
+        overflow = 0
+        for ips in (manual_ips, auto_ips):
+            for ip in ips:
+                if ip in block_set:
+                    continue
+                if len(block) >= NODE_MAX_IPSET_ENTRIES:
+                    overflow += 1
+                    continue
+                block_set.add(ip)
+                block.append(ip)
+        return block, block_set, overflow
+
+    @staticmethod
+    def _build_sync_body(ips: list[str], direction: str) -> bytes:
+        return json.dumps(
+            {"ips": ips, "permanent": True, "direction": direction},
+            separators=(",", ":"),
+        ).encode()
+
     async def build_shared_lists(self) -> dict:
         """Общие для всех серверов списки (глобальные правила + авто-источники + allow).
 
         Считается ОДИН раз на прогон синка: дедупликация 100k+ записей отдельно
         для каждого сервера (42 сервера × 2 направления) съедала минуты CPU и
-        вешала event loop панели. Тяжёлый дедуп — в потоке."""
+        вешала event loop панели. Тяжёлый дедуп — в потоке.
+
+        JSON-тело запроса тоже собирается один раз на направление и переиспользуется
+        всеми нодами без своих правил: сериализация списка на каждую ноду держала
+        в памяти десятки тел по ~70 МБ одновременно — OOM панели на списке в 4 млн IP."""
         shared = {}
         async with async_session() as db:
             for direction in ("in", "out"):
                 global_ips = await self.get_global_rules(db, direction)
                 auto_ips = await self.get_auto_list_ips(db, direction)
-                # auto_ips уже отфильтрованы при парсинге; ручные правила (в т.ч.
-                # старые записи в БД) дополнительно чистятся от приватных диапазонов
+                # auto_ips уже нормализованы и отфильтрованы при парсинге; ручные
+                # правила (в т.ч. старые записи в БД) чистятся от приватных диапазонов
                 manual_ips = [
-                    ip for ip in global_ips
-                    if is_public_range(self._normalize_ip(ip))
+                    ip for ip in self.deduplicate_ips(global_ips)
+                    if is_public_range(ip)
                 ]
-                block = await asyncio.to_thread(
-                    self.deduplicate_ips, manual_ips + auto_ips
+                block, block_set, overflow = await asyncio.to_thread(
+                    self._merge_deduplicated, manual_ips, auto_ips
                 )
+                if overflow:
+                    logger.warning(
+                        f"Blocklist '{direction}': {overflow} entries dropped — "
+                        f"node ipset limit is {NODE_MAX_IPSET_ENTRIES}"
+                    )
+                body = await asyncio.to_thread(self._build_sync_body, block, direction)
                 shared[direction] = {
                     "block": block,
-                    "block_set": set(block),
+                    "block_set": block_set,
+                    "count": len(block),
+                    "body": body,
                     "allow": await self.get_allow_ips_global(db, direction),
                 }
         return shared
     
+    @staticmethod
+    def _sync_timeout(ip_count: int) -> float:
+        """Таймаут синка растёт со списком: ноде нужно время распарсить и применить."""
+        return SYNC_BASE_TIMEOUT + ip_count / SYNC_TIMEOUT_IPS_PER_SEC
+
     async def sync_to_node(
         self,
         server: Server,
-        ips: list[str],
-        permanent: bool = True,
-        direction: str = "in",
-        timeout: float = 20.0
+        body: bytes,
+        ip_count: int,
     ) -> tuple[bool, str, dict]:
+        """Отправить готовое JSON-тело блок-листа на ноду.
+
+        Тело сериализуется заранее (build_shared_lists) и переиспользуется
+        всеми нодами — httpx с json= собирал бы свою копию на каждый запрос."""
         try:
             client = get_node_client(server)
             response = await client.post(
                 f"{server.url}/api/ipset/sync",
-                headers=node_auth_headers(server),
-                json={"ips": ips, "permanent": permanent, "direction": direction},
-                timeout=timeout,
+                headers={**node_auth_headers(server), "Content-Type": "application/json"},
+                content=body,
+                timeout=self._sync_timeout(ip_count),
             )
             if response.status_code == 200:
                 data = response.json()
@@ -315,7 +397,7 @@ class BlocklistManager:
         server: Server,
         ips: list[str],
         direction: str = "in",
-        timeout: float = 20.0
+        timeout: float = ALLOW_SYNC_TIMEOUT
     ) -> tuple[bool, str, dict]:
         """Синхронизировать белый список на ноду. На старой ноде (нет эндпоинта) — graceful."""
         try:
@@ -344,8 +426,8 @@ class BlocklistManager:
     async def _sync_one_server(self, server: Server, shared: dict) -> dict:
         """Sync both directions for a single server.
 
-        `shared` — предвычисленные общие списки из build_shared_lists(); здесь
-        к ним добавляются только per-server правила (обычно единицы записей).
+        `shared` — предвычисленные общие списки и JSON-тела из build_shared_lists();
+        нода без своих правил получает общее тело как есть — ни одной копии списка.
         Короткая сессия БД под семафором освобождается до медленных HTTP-синков,
         иначе пул PostgreSQL исчерпывается при fan-out.
         """
@@ -358,19 +440,15 @@ class BlocklistManager:
         }
 
         try:
-            ip_lists = {}
+            extras = {}
             async with self._db_sem:
                 async with async_session() as db:
                     for direction in ("in", "out"):
                         server_rules = await self.get_server_rules(server.id, db, direction)
-                        extra = [
+                        extras[direction] = [
                             ip for ip in self.deduplicate_ips(server_rules)
                             if is_public_range(ip) and ip not in shared[direction]["block_set"]
                         ]
-                        ip_lists[direction] = {
-                            "block": shared[direction]["block"] + extra,
-                            "allow": shared[direction]["allow"],
-                        }
         except Exception as e:
             logger.error(f"Failed to load blocklist IPs for {server.name}: {e}")
             for direction in ("in", "out"):
@@ -381,12 +459,29 @@ class BlocklistManager:
         async with self._http_sem:
             for direction in ("in", "out"):
                 try:
-                    ips = ip_lists[direction]["block"]
-                    success, message, data = await self.sync_to_node(
-                        server, ips, direction=direction
-                    )
+                    extra = extras[direction]
+                    ip_count = shared[direction]["count"] + len(extra)
 
-                    allow_ips = ip_lists[direction]["allow"]
+                    if extra:
+                        # У ноды свои правила — собираем отдельное тело; семафор
+                        # держит его до конца отправки, чтобы гигантские тела
+                        # не копились в памяти по числу таких нод
+                        async with self._extra_body_sem:
+                            body = await asyncio.to_thread(
+                                self._build_sync_body,
+                                shared[direction]["block"] + extra,
+                                direction,
+                            )
+                            success, message, data = await self.sync_to_node(
+                                server, body, ip_count
+                            )
+                            del body
+                    else:
+                        success, message, data = await self.sync_to_node(
+                            server, shared[direction]["body"], ip_count
+                        )
+
+                    allow_ips = shared[direction]["allow"]
                     allow_ok, allow_msg, allow_data = await self.sync_allow_to_node(
                         server, allow_ips, direction=direction
                     )
@@ -394,7 +489,7 @@ class BlocklistManager:
                     server_result[direction] = {
                         "success": success and allow_ok,
                         "message": message,
-                        "ip_count": len(ips),
+                        "ip_count": ip_count,
                         "added": data.get("added", 0),
                         "removed": data.get("removed", 0),
                         "allow": {
@@ -419,9 +514,15 @@ class BlocklistManager:
 
     async def _sync_one_server_safe(self, server: Server, shared: dict) -> dict:
         """Sync one server with a global timeout wrapper — never raises."""
+        # Бюджет масштабируется под размер списков: фиксированные 30с обрубали
+        # синк крупных блок-листов на середине
+        budget = 10.0 + sum(
+            self._sync_timeout(shared[d]["count"]) + ALLOW_SYNC_TIMEOUT
+            for d in ("in", "out")
+        )
         try:
             return await asyncio.wait_for(
-                self._sync_one_server(server, shared), timeout=30.0
+                self._sync_one_server(server, shared), timeout=budget
             )
         except asyncio.TimeoutError:
             return {
@@ -521,8 +622,17 @@ class BlocklistManager:
                 return False, "Source not found", 0, False
             
             success, ips, error = await self.fetch_github_list(source.url, use_cache=False)
+            if success and len(ips) > NODE_MAX_IPSET_ENTRIES:
+                source.ip_count = len(ips)
+                source.last_updated = datetime.now(timezone.utc)
+                source.error_message = (
+                    f"{len(ips)} IPs exceeds node limit of {NODE_MAX_IPSET_ENTRIES:,} — excluded from sync"
+                )
+                await db.commit()
+                return False, source.error_message, len(ips), False
             if success:
-                new_hash = self.calculate_hash(ips)
+                # Хэш миллионов записей — CPU-bound, в поток
+                new_hash = await asyncio.to_thread(self.calculate_hash, ips)
                 changed = source.last_hash != new_hash
                 source.last_hash = new_hash
                 source.last_updated = datetime.now(timezone.utc)
@@ -594,7 +704,7 @@ class BlocklistManager:
                 interval = settings.get("auto_update_interval", UPDATE_INTERVAL)
                 
                 logger.info("Starting auto-update of blocklist sources")
-                results, any_changed = await self.refresh_all_sources()
+                results, _ = await self.refresh_all_sources()
                 
                 for source_id, r in results.items():
                     if r.get("changed"):
@@ -604,10 +714,8 @@ class BlocklistManager:
                     else:
                         logger.warning(f"Source '{r['name']}' failed: {r['message']}")
                 
-                if any_changed:
-                    logger.info("Sources changed, clearing cache before sync")
-                    self.clear_cache()
-                
+                # refresh_all_sources уже положил свежие списки в кэш —
+                # прежний clear_cache() заставлял скачивать миллионы IP второй раз
                 logger.info("Syncing blocklists to all nodes")
                 await self.sync_all_nodes()
                 

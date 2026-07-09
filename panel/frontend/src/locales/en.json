@@ -935,6 +935,8 @@
     "sources_in": "Incoming Sources",
     "sources_out": "Outgoing Sources",
     "no_sources": "No sources",
+    "sources_limit_hint": "Node limit — 1,000,000 entries per direction (total across sources): nodes physically reject larger lists, such sources are excluded from sync. Memory: every 100,000 entries ≈ 10 MB of RAM on each node.",
+    "large_source_ram": "Large list: ~{{mb}} MB of RAM on each node",
     "default": "Default",
     "last_updated": "Updated",
     "refresh": "Refresh",

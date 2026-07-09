@@ -1080,6 +1080,8 @@ export default function Blocklist() {
                     {t('blocklist.refresh_all')}
                   </motion.button>
                 </div>
+
+                <p className="text-xs text-dark-400">{t('blocklist.sources_limit_hint')}</p>
               </div>
             </div>
 
@@ -1142,13 +1144,18 @@ export default function Blocklist() {
   )
 }
 
+// Порог показа предупреждения о памяти: ~100 байт ядра на запись ipset,
+// 500k записей ≈ 50 МБ ОЗУ на каждой ноде
+const LARGE_SOURCE_WARN_THRESHOLD = 500_000
+const IPSET_ENTRIES_PER_MB = 10_000
+
 function SourceCard({ source, refreshingSource, onToggle, onRefresh, onDelete, t }: {
   source: BlocklistSource
   refreshingSource: number | null
   onToggle: (id: number, enabled: boolean) => void
   onRefresh: (id: number) => void
   onDelete: (id: number) => void
-  t: (key: string) => string
+  t: (key: string, opts?: Record<string, unknown>) => string
 }) {
   return (
     <div className={`card ${!source.enabled ? 'opacity-60' : ''}`}>
@@ -1190,6 +1197,13 @@ function SourceCard({ source, refreshingSource, onToggle, onRefresh, onDelete, t
 
           {source.error_message && (
             <p className="text-xs text-danger mt-2">{source.error_message}</p>
+          )}
+
+          {!source.error_message && source.ip_count >= LARGE_SOURCE_WARN_THRESHOLD && (
+            <p className="flex items-center gap-1 text-xs text-orange-400 mt-2">
+              <AlertCircle className="w-3 h-3 shrink-0" />
+              {t('blocklist.large_source_ram', { mb: Math.round(source.ip_count / IPSET_ENTRIES_PER_MB) })}
+            </p>
           )}
         </div>
 
