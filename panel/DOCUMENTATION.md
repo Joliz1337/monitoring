@@ -1,10 +1,10 @@
-# Monitoring Panel v10.20.6
+# Monitoring Panel v10.20.7
 
 Веб-панель для мониторинга серверов. Собирает метрики с нод с настраиваемым интервалом (по умолчанию 10 сек) и хранит историю локально.
 
 ## Возможности
 
-- **Dashboard** — карточки серверов с drag-and-drop, статус SSL, Load Average; IP-адрес ноды копируется в буфер обмена кликом ЛКМ
+- **Dashboard** — карточки серверов с drag-and-drop, статус SSL, Load Average; сводная панель флота (суммарные CPU/RAM/скорость сети по всем нодам) над списком; IP-адрес ноды копируется в буфер обмена кликом ЛКМ
 - **Server Details** — графики CPU/RAM/Network/TCP States/Load Average History, процессы с фильтрацией, управление питанием (перезагрузка/выключение)
 - **HAProxy** — управление правилами, сертификатами, firewall (UFW)
 - **Traffic** — статистика по интерфейсам и портам, TCP/UDP соединения
@@ -446,6 +446,20 @@ interface NicInfo {
 - `panel/frontend/src/pages/Dashboard.tsx`
 - `panel/frontend/src/stores/serversStore.ts`
 - `panel/backend/app/routers/servers.py`
+
+### Dashboard: сводная панель флота
+
+Ряд из 4 stat-плиток между хедером Dashboard и списком папок/серверов (адаптивно: 2×2 на мобильных, 4 в ряд на lg+): суммарные CPU, RAM и скорость сети (↓/↑) по всем активным онлайн-серверам с метриками.
+
+**Frontend:**
+- `components/Dashboard/FleetSummary.tsx` — агрегация целиком на клиенте, один `useMemo`-проход по `servers`; учитываются только серверы с `is_active && status === 'online' && metrics` (offline-серверы с кэшированными метриками исключаются, чтобы не завышать сумму устаревшими данными). CPU — процент, взвешенный по числу логических ядер (`cpu.cores_logical`) каждого сервера, а не простое среднее, плюс суммарное число логических ядер флота. RAM — сумма занято/всего в байтах + процент. Скорость — сумма `network.total.rx_bytes_per_sec`/`tx_bytes_per_sec`. Если нет ни одного подходящего сервера, компонент возвращает `null` (панель скрывается).
+- Переиспользует существующие `formatBytes`/`formatBitsPerSecLocalized` (`utils/format.ts`) и i18n-ключи `common.cpu/ram/download/upload/cores` — новых зависимостей и локалей не добавлено.
+- `Dashboard.tsx` передаёт компоненту стабильную ссылку на `servers` из `serversStore` (не локальную `dragServers`-копию, используемую на время drag), поэтому drag-and-drop карточек не вызывает лишних ререндеров сводки; сам компонент обёрнут в `memo`.
+- Бэкенд не менялся — данные уже приходили в `GET /api/servers?include_metrics=true`.
+
+**Файлы:**
+- `panel/frontend/src/components/Dashboard/FleetSummary.tsx`
+- `panel/frontend/src/pages/Dashboard.tsx`
 
 ### Infrastructure Tree (иерархия серверов)
 

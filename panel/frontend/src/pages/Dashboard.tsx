@@ -57,6 +57,7 @@ import { useServersStore, type ServerWithMetrics } from '../stores/serversStore'
 import { useSettingsStore } from '../stores/settingsStore'
 import { useAutoRefresh } from '../hooks/useAutoRefresh'
 import ServerCard, { ServerCardOverlay } from '../components/Dashboard/ServerCard'
+import FleetSummary from '../components/Dashboard/FleetSummary'
 import { ServerCardSkeleton } from '../components/ui/Skeleton'
 import { Tooltip } from '../components/ui/Tooltip'
 import { useTranslation } from 'react-i18next'
@@ -532,7 +533,10 @@ export default function Dashboard() {
           </button>
         </div>
       </div>
-      
+
+      {/* Fleet summary */}
+      <FleetSummary servers={servers} />
+
       {/* Content */}
       {isLoading && activeServers.length === 0 ? (
         <div className={`${gridClass} fade-in`} key="loading">
