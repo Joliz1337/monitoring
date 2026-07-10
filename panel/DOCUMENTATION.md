@@ -1,4 +1,4 @@
-# Monitoring Panel v10.20.8
+# Monitoring Panel v10.21.0
 
 Веб-панель для мониторинга серверов. Собирает метрики с нод с настраиваемым интервалом (по умолчанию 10 сек) и хранит историю локально.
 
@@ -23,6 +23,7 @@
 - **Анти-DDoS** — многослойная защита от DDoS-атак на нодах: дежурный режим без лимитов, аварийный режим (iptables-цепочка `ANTIDDOS`: SYNPROXY + connlimit + hashlimit) включаемый вручную или автоматически локальным watchdog по сигналам из `/proc`, whitelist на ipset с ежечасной автосинхронизацией (активен только в аварийном режиме); whitelist собирается из трёх источников — авто (ноды + панель), ручные CIDR и авто-источники по URL (список IP/CIDR формат-независимо парсится из JSON/plain text/HTML, например Cloudflare/Yandex Cloud); страница с независимыми контролами автодетекта и аварийного режима по нодам, редактированием ручного whitelist и управлением авто-источниками; установка watchdog на ноды полностью автоматическая (zero-touch)
 - **Авто-восстановление ноды** — при возвращении сервера в сеть панель автоматически сверяет состояние firewall (UFW), HAProxy-конфига, статуса HAProxy и IP Blocklist с ожидаемым; переприменяет только сбившееся (drift-detection по SHA256-хэшам); без Telegram-уведомлений
 - **Авторазвёртывание ноды** — установка ноды мониторинга прямо из вкладки «Серверы»: подключение по SSH (пароль или приватный ключ), запуск `install.sh --unattended` на целевом сервере; установка выполняется **в фоне на бэкенде** — закрытие вкладки браузера не прерывает процесс; живой лог переподключаем (GET-стрим с реплеем); опционально устанавливает WARP и ноду Remnawave с сохранёнными именованными сертификатами; **массовый деплой** — произвольное количество дополнительных целей, каждая со своим SSH и опциями; после успешного деплоя бэкенд автоматически привязывает сервер к выбранным HAProxy-профилю и/или Firewall-профилю; незавершённые задачи переживают перезагрузку страницы (восстановление через localStorage + `GET /deploy/jobs`); **поддержка Hetzner Rescue System** — при обнаружении rescue-среды `install.sh` устанавливает Ubuntu 24.04, перезагружается, панель ждёт ноду до 40 мин через поллинг и завершает деплой автоматически
+- **SOCKS5-прокси до ноды** — опциональное поле у сервера (`ip:port` или `ip:port@login:pass`): при заполнении все HTTP-запросы панели к этой ноде (метрики, proxy-роутер, синхронизация блок-листов/анти-DDoS, SSE-терминал, тест подключения) идут через указанный прокси вместо прямого соединения
 
 ## Интервалы сбора данных
 
@@ -165,6 +166,8 @@ CI/CD: `.github/workflows/docker-publish.yml` — 3 параллельных job
 | `_external_client` | Внешние API (`http2=True`) |
 
 Lifecycle управляется через `lifespan` в `main.py`. Выбор клиента — через `get_node_client(server)` / `get_node_apply_client(server)`.
+
+Если у сервера задан `proxy_url`, оба метода возвращают клиент через SOCKS5-прокси вместо одного из четырёх основных — см. «SOCKS5-прокси до ноды» в разделе API. Такие клиенты кэшируются лениво (по мере обращения к нодам с прокси) в отдельном `dict`, а не создаются заранее в `init_http_clients()`.
 
 **Параметры основного клиента к нодам (`_NODE_LIMITS`, `_NODE_TIMEOUT`):**
 - `keepalive_expiry=30` сек — намеренно меньше `keepalive_timeout` nginx нод (65 сек), чтобы панель не переиспользовала соединения, уже закрытые сервером
@@ -428,6 +431,39 @@ interface NicInfo {
 | POST | /api/servers/move-to-folder | Переместить серверы в папку (`server_ids`, `folder` или `null` — без папки) |
 | POST | /api/servers/folders/rename | Переименовать папку (`old_name` → `new_name`) |
 | DELETE | /api/servers/folders/{folder_name} | Расформировать папку (серверы остаются, `folder` очищается) |
+
+Поле `proxy_url` в `ServerCreate`/`ServerUpdate` и во всех ответах (`GET /servers`, `GET /servers/{id}`, `POST /servers`) — см. «SOCKS5-прокси до ноды» ниже.
+
+### SOCKS5-прокси до ноды
+
+Опциональное поле сервера `proxy_url`: при заполнении **все** HTTP-запросы панели к этой ноде (сбор метрик, proxy-роутер `/api/proxy/{id}/...`, sync-сервисы IP Blocklist/Анти-DDoS, SSE-терминал, тест подключения) идут через указанный SOCKS5-прокси вместо прямого соединения. По образцу аналогичной функции в Remnawave. Новых зависимостей не потребовалось — `httpx[socks,http2]` уже был в `requirements.txt`.
+
+**Формат ввода:** `ip:port` или `ip:port@login:pass` (пароль может содержать `:`/`@`/любые непробельные символы). Пустая строка = прокси выключен. `validate_proxy_input()` в `http_client.py` проверяет формат (regex, порт 1–65535) на уровне Pydantic-валидатора `ServerCreate`/`ServerUpdate`; та же проверка дублируется на фронте (`PROXY_RE` в `Servers.tsx`) для мгновенной обратной связи.
+
+**Backend (`panel/backend/app/services/http_client.py`):**
+- `_proxy_raw_to_url()` — нормализует `ip:port@login:pass` в `socks5://login:pass@ip:port`; логин/пароль percent-квотируются (`urllib.parse.quote`), поэтому спецсимволы в пароле безопасны
+- `_get_proxy_client(raw, mtls, apply)` — ленивое создание и кэширование `httpx.AsyncClient(proxy=...)` в module-level `_proxy_clients` по ключу (строка прокси, mtls, apply); mTLS SSL-контекст переиспользуется из module-global `_mtls_ctx` (сохраняется в `init_http_clients()`), не пересоздаётся на каждый прокси
+- `get_node_client(server)` / `get_node_apply_client(server)` — при наличии `server.proxy_url` прозрачно возвращают прокси-клиент вместо обычного mTLS/legacy; сигнатуры функций не изменились, поэтому все существующие вызовы по кодовой базе (~30 точек) получили поддержку прокси автоматически, без правок в вызывающем коде
+- `close_http_clients()` закрывает и очищает кэш прокси-клиентов (важно для Backup & Restore: восстановление бэкапа делает `close_http_clients()` + `init_http_clients()`, старый mTLS-контекст не должен пережить рестарт)
+- `sanitize_proxy()` — маскирует креды до `host:port` в логах
+- Смена/удаление прокси у сервера действует со следующего запроса без рестарта панели; в `PUT /api/servers/{id}` смена `proxy_url` считается `node_changed` (триггерит пере-синк IP Blocklist на ноду, как смена `url`/`api_key`)
+
+**Ограничения:**
+- SSH-каналы (Авторазвёртывание ноды, SSH Security) прокси не покрывают — используют отдельный транспорт `asyncssh`
+- IPv6-адрес прокси форматом ввода не поддерживается
+- Недоступный прокси: нода отображается offline с `last_error = "Proxy connection error"` — `metrics_collector.py` перехватывает `httpx.ProxyError` отдельно от `ConnectError` (новый `ErrorTypes.PROXY_ERROR`), чтобы оператор отличал мёртвый прокси от мёртвой ноды; текст SOCKS-ошибки в лог не пишется (может содержать креды)
+
+**Frontend (`pages/Servers.tsx`):** поле «SOCKS5-прокси» в форме добавления сервера (скрыто в режиме SSH-деплоя — прокси там не участвует, задаётся после через редактирование) и в inline-форме редактирования сервера.
+
+**Файлы:**
+- `panel/backend/app/services/http_client.py`
+- `panel/backend/app/models.py` (`Server.proxy_url`)
+- `panel/backend/app/database.py` (миграция колонки `proxy_url`)
+- `panel/backend/app/routers/servers.py`
+- `panel/backend/app/services/metrics_collector.py`
+- `panel/frontend/src/pages/Servers.tsx`
+- `panel/frontend/src/api/client.ts`
+- `panel/frontend/src/stores/serversStore.ts`
 
 ### Dashboard: drag-and-drop серверов по папкам
 

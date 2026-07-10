@@ -34,6 +34,8 @@ class Server(Base):
     name = Column(String(100), nullable=False)
     url = Column(String(500), nullable=False)
     api_key = Column(String(200), nullable=True)
+    # SOCKS5-прокси панель→нода: "ip:port" или "ip:port@login:pass"
+    proxy_url = Column(String(255), nullable=True)
     position = Column(Integer, default=0)
     is_active = Column(Boolean, default=True)
     folder = Column(String(200), nullable=True)

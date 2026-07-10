@@ -52,7 +52,11 @@ interface ServerFormData {
   name: string
   host: string
   port: string
+  proxy: string
 }
+
+// SOCKS5-прокси панель→нода: ip:port или ip:port@login:pass (пароль может содержать ':' и '@')
+const PROXY_RE = /^[^\s:@/]+:\d{1,5}(@[^\s:@/]+:\S+)?$/
 
 const makeExtraTarget = (seed: DeployFormData): ExtraTarget => ({
   id: typeof crypto !== 'undefined' && 'randomUUID' in crypto
@@ -61,6 +65,7 @@ const makeExtraTarget = (seed: DeployFormData): ExtraTarget => ({
   name: '',
   host: '',
   port: '9100',
+  proxy: '',
   deploy: { ...seed, enabled: true },
   status: 'idle',
   log: [],
@@ -136,7 +141,7 @@ export default function Servers() {
 
   const [showForm, setShowForm] = useState(false)
   const [editingId, setEditingId] = useState<number | null>(null)
-  const [formData, setFormData] = useState<ServerFormData>({ name: '', host: '', port: '9100' })
+  const [formData, setFormData] = useState<ServerFormData>({ name: '', host: '', port: '9100', proxy: '' })
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [testResults, setTestResults] = useState<Record<number, { status: string; message?: string }>>({})
@@ -241,17 +246,25 @@ export default function Servers() {
     setError('')
     setIsSubmitting(true)
 
+    const proxyTrim = formData.proxy.trim()
+    if (proxyTrim && !PROXY_RE.test(proxyTrim)) {
+      setError(t('servers.proxy_invalid'))
+      setIsSubmitting(false)
+      return
+    }
+
     if (editingId) {
-      const updateData: { name: string; url: string } = {
+      const updateData: { name: string; url: string; proxy_url: string | null } = {
         name: formData.name,
         url: buildServerUrl(formData.host, formData.port),
+        proxy_url: proxyTrim || null,
       }
 
       try {
         await updateServer(editingId, updateData)
         toast.success(t('servers.server_updated'))
         setEditingId(null)
-        setFormData({ name: '', host: '', port: '9100' })
+        setFormData({ name: '', host: '', port: '9100', proxy: '' })
         setShowForm(false)
       } catch {
         toast.error(t('servers.failed_update'))
@@ -265,12 +278,13 @@ export default function Servers() {
       const serverData = {
         name: formData.name,
         url: buildServerUrl(formData.host, formData.port),
+        proxy_url: proxyTrim || null,
       }
       const result = await addServer(serverData)
       if (result.success) {
         toast.success(t('servers.server_added'))
         setShowForm(false)
-        setFormData({ name: '', host: '', port: '9100' })
+        setFormData({ name: '', host: '', port: '9100', proxy: '' })
       } else {
         toast.error(result.error || t('servers.failed_add'))
         setError(result.error || t('servers.failed_add'))
@@ -284,9 +298,11 @@ export default function Servers() {
     name: string,
     host: string,
     d: DeployFormData,
+    proxy: string,
   ): string | null => {
     if (!name.trim()) return t('servers.server_name_placeholder')
     if (!host.trim()) return t('servers.server_host_placeholder')
+    if (proxy.trim() && !PROXY_RE.test(proxy.trim())) return t('servers.proxy_invalid')
     if (d.sshAuth === 'password' && !d.sshPassword.trim()) return t('servers.deploy_no_password')
     if (d.sshAuth === 'key' && !d.sshPrivateKey.trim()) return t('servers.deploy_no_key')
     if (d.installRemnawave) {
@@ -299,9 +315,10 @@ export default function Servers() {
     return null
   }
 
-  const buildDeployBody = (name: string, host: string, port: string, d: DeployFormData) => ({
+  const buildDeployBody = (name: string, host: string, port: string, d: DeployFormData, proxy: string) => ({
     name,
     host,
+    socks5_proxy: proxy.trim() || null,
     monitoring_port: parseInt(port || '9100', 10),
     ssh_port: parseInt(d.sshPort || '22', 10),
     ssh_user: d.sshUser.trim() || 'root',
@@ -417,7 +434,7 @@ export default function Servers() {
   }
 
   const deployPrimary = async (): Promise<boolean> => {
-    const body = buildDeployBody(formData.name, formData.host, formData.port, deploy)
+    const body = buildDeployBody(formData.name, formData.host, formData.port, deploy, formData.proxy)
     let jobId: string
     try {
       const res = await serversApi.startDeploy(body)
@@ -434,7 +451,7 @@ export default function Servers() {
   const deployExtra = async (id: string): Promise<boolean> => {
     const target = extras.find(t => t.id === id)
     if (!target) return false
-    const body = buildDeployBody(target.name, target.host, target.port, target.deploy)
+    const body = buildDeployBody(target.name, target.host, target.port, target.deploy, target.proxy)
     let jobId: string
     try {
       const res = await serversApi.startDeploy(body)
@@ -473,7 +490,7 @@ export default function Servers() {
 
     for (const s of alive) {
       if (s.kind === 'primary') {
-        setFormData({ name: s.name, host: s.host, port: s.port })
+        setFormData({ name: s.name, host: s.host, port: s.port, proxy: '' })
         setPrimaryStatus('running')
         setDeployLog([])
         void attachPrimaryStream(s.jobId)
@@ -484,6 +501,7 @@ export default function Servers() {
           name: s.name,
           host: s.host,
           port: s.port,
+          proxy: '',
           deploy: { ...DEPLOY_DEFAULTS, enabled: true },
           status: 'running',
           log: [],
@@ -501,7 +519,7 @@ export default function Servers() {
   }, [])
 
   const handleDeployAll = async () => {
-    const primaryErr = validateDeployForm(formData.name, formData.host, deploy)
+    const primaryErr = validateDeployForm(formData.name, formData.host, deploy, formData.proxy)
     if (primaryErr && primaryStatus !== 'success') {
       setError(primaryErr)
       return
@@ -509,7 +527,7 @@ export default function Servers() {
 
     const extrasToRun = extras.filter(t => t.status !== 'success')
     for (const t of extrasToRun) {
-      const e = validateDeployForm(t.name, t.host, t.deploy)
+      const e = validateDeployForm(t.name, t.host, t.deploy, t.proxy)
       if (e) {
         setExtras(prev => prev.map(x => x.id === t.id ? { ...x, status: 'error', error: e } : x))
         setError(t.name ? `${t.name}: ${e}` : e)
@@ -544,7 +562,7 @@ export default function Servers() {
   }
 
   const retryPrimary = async () => {
-    const err = validateDeployForm(formData.name, formData.host, deploy)
+    const err = validateDeployForm(formData.name, formData.host, deploy, formData.proxy)
     if (err) {
       setError(err)
       return
@@ -561,7 +579,7 @@ export default function Servers() {
   const retryExtra = async (id: string) => {
     const target = extras.find(t => t.id === id)
     if (!target) return
-    const err = validateDeployForm(target.name, target.host, target.deploy)
+    const err = validateDeployForm(target.name, target.host, target.deploy, target.proxy)
     if (err) {
       updateExtra(id, { status: 'error', error: err })
       return
@@ -608,6 +626,7 @@ export default function Servers() {
       name: server.name,
       host,
       port,
+      proxy: server.proxy_url ?? '',
     })
     setError('')
   }
@@ -616,7 +635,7 @@ export default function Servers() {
     if (isDeploying) return
     setShowForm(false)
     setEditingId(null)
-    setFormData({ name: '', host: '', port: '9100' })
+    setFormData({ name: '', host: '', port: '9100', proxy: '' })
     setDeploy(DEPLOY_DEFAULTS)
     setDeployLog([])
     setPrimaryStatus('idle')
@@ -885,6 +904,24 @@ export default function Servers() {
                 </div>
                 <p className="text-xs text-dark-500 mt-1.5">
                   {t('servers.server_host_hint')}
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-sm text-dark-300 mb-2 flex items-center gap-2">
+                  <Globe className="w-4 h-4" />
+                  {t('servers.proxy_label')}
+                </label>
+                <input
+                  type="text"
+                  value={formData.proxy}
+                  onChange={(e) => setFormData(d => ({ ...d, proxy: e.target.value }))}
+                  placeholder="ip:port@login:pass"
+                  className="input"
+                  autoComplete="off"
+                />
+                <p className="text-xs text-dark-500 mt-1.5">
+                  {t('servers.proxy_hint')}
                 </p>
               </div>
 
@@ -1375,6 +1412,24 @@ export default function Servers() {
                             </div>
                             <p className="text-xs text-dark-500 mt-1.5">
                               {t('servers.server_host_hint')}
+                            </p>
+                          </div>
+
+                          <div>
+                            <label className="block text-sm text-dark-300 mb-2 flex items-center gap-2">
+                              <Globe className="w-4 h-4" />
+                              {t('servers.proxy_label')}
+                            </label>
+                            <input
+                              type="text"
+                              value={formData.proxy}
+                              onChange={(e) => setFormData(d => ({ ...d, proxy: e.target.value }))}
+                              placeholder="ip:port@login:pass"
+                              className="input"
+                              autoComplete="off"
+                            />
+                            <p className="text-xs text-dark-500 mt-1.5">
+                              {t('servers.proxy_hint')}
                             </p>
                           </div>
 

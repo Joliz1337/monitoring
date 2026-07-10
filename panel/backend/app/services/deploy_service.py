@@ -20,6 +20,11 @@ from dataclasses import dataclass
 from typing import AsyncIterator
 
 import asyncssh
+from python_socks import ProxyType
+from python_socks import ProxyError as SocksProxyError
+from python_socks.async_.asyncio import Proxy as SocksProxy
+
+from app.services.http_client import parse_proxy_input, sanitize_proxy
 
 INSTALLER_URL = "https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh"
 REMOTE_SCRIPT = "/tmp/mon-install.sh"
@@ -75,6 +80,9 @@ class DeployParams:
     install_remnawave: bool = False
     remnawave_cert: str | None = None
     proxy_url: str | None = None
+    # SOCKS5-прокси панель→сервер для самого SSH-подключения ("ip:port[@login:pass]").
+    # Не путать с proxy_url — это HTTP-прокси для apt/docker, устанавливаемый НА ноду.
+    socks5_proxy: str | None = None
     install_optimizations: bool = False
     opt_profile: str = "vpn"
     nic_mode: str = "auto"  # auto | multiqueue | hybrid | rps
@@ -170,6 +178,31 @@ def _connect_kwargs(params: DeployParams) -> dict:
     return kwargs
 
 
+async def _ssh_connect(
+    connect_kwargs: dict, socks5_proxy: str | None
+) -> asyncssh.SSHClientConnection:
+    """SSH-подключение: напрямую или через SOCKS5-прокси.
+
+    С прокси сокет открывается python-socks и передаётся в asyncssh через sock=
+    (поддерживается с asyncssh 2.12). Ошибки прокси нормализуются в OSError с
+    адресом без креденшалов — существующие обработчики вызовов их уже ловят.
+    """
+    if not socks5_proxy:
+        return await asyncssh.connect(**connect_kwargs)
+
+    host, port, login, password = parse_proxy_input(socks5_proxy)
+    proxy = SocksProxy(ProxyType.SOCKS5, host, port, username=login, password=password)
+    try:
+        sock = await proxy.connect(
+            dest_host=connect_kwargs["host"],
+            dest_port=connect_kwargs["port"],
+            timeout=CONNECT_TIMEOUT,
+        )
+    except (SocksProxyError, OSError, asyncio.TimeoutError) as exc:
+        raise OSError(f"SOCKS5-прокси {sanitize_proxy(socks5_proxy)}: {exc}") from exc
+    return await asyncssh.connect(**connect_kwargs, sock=sock)
+
+
 async def _run_install_once(connect_kwargs: dict, params: DeployParams) -> AsyncIterator[dict]:
     """Один прогон установки. Стримит лог построчно, в конце отдаёт служебное
     событие {"type": "_result", "exit_code", "expired"}. Фатальные сбои
@@ -180,10 +213,11 @@ async def _run_install_once(connect_kwargs: dict, params: DeployParams) -> Async
     expired = False
 
     try:
-        async with asyncssh.connect(**connect_kwargs) as conn:
+        async with await _ssh_connect(connect_kwargs, params.socks5_proxy) as conn:
+            via_proxy = f" через SOCKS5 {sanitize_proxy(params.socks5_proxy)}" if params.socks5_proxy else ""
             yield {
                 "type": "log",
-                "line": f"[panel] SSH-подключение к {params.host}:{params.ssh_port} установлено",
+                "line": f"[panel] SSH-подключение к {params.host}:{params.ssh_port} установлено{via_proxy}",
             }
             process = await conn.create_process(command, stderr=asyncssh.STDOUT)
 
@@ -241,7 +275,7 @@ def _wants_retype(text: str) -> bool:
 
 
 async def _change_expired_password(
-    connect_kwargs: dict, old_password: str, new_password: str
+    connect_kwargs: dict, old_password: str, new_password: str, socks5_proxy: str | None
 ) -> AsyncIterator[dict]:
     """Меняет просроченный пароль через PTY-логин: отвечает на промпты PAM
     (текущий → новый → повтор нового). Финальное событие — {"type": "pwchange",
@@ -249,7 +283,7 @@ async def _change_expired_password(
     паролем, поэтому здесь достаточно отработать диалог и отсечь явный отказ.
     """
     try:
-        async with asyncssh.connect(**connect_kwargs) as conn:
+        async with await _ssh_connect(connect_kwargs, socks5_proxy) as conn:
             process = await conn.create_process(term_type="ansi", term_size=(120, 40))
             answered_current = answered_new = answered_retype = False
             buffer = ""
@@ -361,7 +395,9 @@ async def deploy_node(params: DeployParams) -> AsyncIterator[dict]:
             yield {"type": "log", "line": "[panel] Пароль root просрочен — меняю через TTY (OVH)"}
 
             ok, message = False, None
-            async for ev in _change_expired_password(connect_kwargs, params.ssh_password, new_password):
+            async for ev in _change_expired_password(
+                connect_kwargs, params.ssh_password, new_password, params.socks5_proxy
+            ):
                 if ev.get("type") == "pwchange":
                     ok, message = ev.get("ok", False), ev.get("message")
                     continue

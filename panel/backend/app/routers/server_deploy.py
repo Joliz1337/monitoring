@@ -12,7 +12,7 @@ import socket
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from typing import Optional
@@ -23,6 +23,7 @@ from app.database import async_session_maker, get_db
 from app.models import RemnawaveCertProfile
 from app.services.deploy_job_manager import PostDeployOptions, get_deploy_job_manager
 from app.services.deploy_service import DeployParams
+from app.services.http_client import validate_proxy_input
 from app.services.pki import build_installer_token
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -153,10 +154,18 @@ class DeployRequest(BaseModel):
     save_remnawave_cert_name: Optional[str] = None
     install_proxy: bool = False
     proxy_url: Optional[str] = None
+    # SOCKS5-прокси панель→сервер: используется для SSH-подключения при установке
+    # и сохраняется у созданного сервера (вся дальнейшая связь — тоже через него)
+    socks5_proxy: Optional[str] = None
     ssh_preset: Optional[str] = None  # None | "recommended" | "maximum"
     new_root_password: Optional[str] = None
     haproxy_profile_id: Optional[int] = None
     firewall_profile_id: Optional[int] = None
+
+    @field_validator('socks5_proxy')
+    @classmethod
+    def validate_socks5_proxy(cls, v: Optional[str]) -> Optional[str]:
+        return validate_proxy_input(v)
 
 
 async def _resolve_remnawave_cert(req: DeployRequest) -> str:
@@ -244,6 +253,7 @@ async def deploy_server(
         install_remnawave=req.install_remnawave,
         remnawave_cert=remnawave_cert,
         proxy_url=proxy_url,
+        socks5_proxy=req.socks5_proxy,
         new_password=req.new_root_password,
     )
 

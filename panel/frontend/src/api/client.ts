@@ -94,6 +94,7 @@ export interface Server {
   id: number
   name: string
   url: string
+  proxy_url?: string | null
   position: number
   is_active: boolean
   folder?: string | null
@@ -431,7 +432,7 @@ export const serversApi = {
       params: includeMetrics ? { include_metrics: true } : undefined
     }),
   get: (id: number) => api.get<Server>(`/servers/${id}`),
-  create: (data: { name: string; url: string }) =>
+  create: (data: { name: string; url: string; proxy_url?: string | null }) =>
     api.post<{
       success: boolean
       server: Server

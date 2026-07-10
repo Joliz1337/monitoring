@@ -53,6 +53,7 @@ class DeployJob:
     name: str
     host: str
     server_url: str
+    proxy_url: Optional[str] = None  # SOCKS5 панель→нода, наследуется созданным сервером
     status: str = "running"  # running | success | error
     log: list[str] = field(default_factory=list)
     exit_code: Optional[int] = None
@@ -107,7 +108,13 @@ class DeployJobManager:
     ) -> str:
         self._cleanup_finished()
         job_id = uuid.uuid4().hex
-        job = DeployJob(id=job_id, name=name, host=params.host, server_url=server_url)
+        job = DeployJob(
+            id=job_id,
+            name=name,
+            host=params.host,
+            server_url=server_url,
+            proxy_url=params.socks5_proxy,
+        )
         self._jobs[job_id] = job
         job.task = asyncio.create_task(self._run(job, params, post_opts))
         return job_id
@@ -179,7 +186,7 @@ class DeployJobManager:
             return
 
         try:
-            server_id = await self._create_server(job.name, job.server_url)
+            server_id = await self._create_server(job.name, job.server_url, job.proxy_url)
         except Exception as exc:  # noqa: BLE001 — финальная граница создания сервера
             logger.error("Deploy job %s: create server failed: %s", job.id, exc)
             message = f"Установка прошла, но не удалось добавить сервер: {exc}"
@@ -215,6 +222,7 @@ class DeployJobManager:
             name=job.name,
             url=job.server_url.rstrip("/"),
             api_key=None,
+            proxy_url=job.proxy_url,
             pki_enabled=True,
             uses_shared_cert=True,
         )
@@ -249,7 +257,7 @@ class DeployJobManager:
             await asyncio.sleep(RESCUE_POLL_INTERVAL)
         return False
 
-    async def _create_server(self, name: str, url: str) -> int:
+    async def _create_server(self, name: str, url: str, proxy_url: Optional[str]) -> int:
         """Создаёт запись ноды после успешной установки (mTLS, shared cert)."""
         async with async_session_maker() as db:
             result = await db.execute(select(Server).order_by(Server.position.desc()))
@@ -258,6 +266,7 @@ class DeployJobManager:
                 name=name,
                 url=url.rstrip("/"),
                 api_key=None,
+                proxy_url=proxy_url,
                 pki_enabled=True,
                 uses_shared_cert=True,
                 position=(last.position + 1) if last else 0,

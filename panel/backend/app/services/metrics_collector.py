@@ -34,6 +34,7 @@ class ErrorTypes:
     SSL_ERROR = "SSL certificate error"
     AUTH_ERROR = "Authentication failed"
     SERVER_ERROR = "Server error"
+    PROXY_ERROR = "Proxy connection error"
     UNKNOWN = "Unknown error"
 
 
@@ -348,6 +349,11 @@ class MetricsCollector:
         except httpx.TimeoutException:
             logger.debug(f"Timeout connecting to {server.name}")
             return None, {"message": ErrorTypes.TIMEOUT, "code": 504}
+        except httpx.ProxyError:
+            # Отдельный тип: оператор должен отличать мёртвый прокси от мёртвой ноды.
+            # str(e) не пишем — текст SOCKS-ошибки бесполезен, а прокси-креды секретны.
+            logger.debug(f"Proxy error connecting to {server.name}")
+            return None, {"message": ErrorTypes.PROXY_ERROR, "code": 502}
         except httpx.ConnectError as e:
             error_str = str(e).lower()
             if "refused" in error_str:

@@ -3,6 +3,7 @@ import { motion } from 'framer-motion'
 import {
   Server as ServerIcon,
   Link as LinkIcon,
+  Globe,
   Trash2,
   CheckCircle2,
   XCircle,
@@ -23,6 +24,7 @@ export interface ExtraTarget {
   name: string
   host: string
   port: string
+  proxy: string
   deploy: DeployFormData
   status: DeployStatus
   log: string[]
@@ -162,6 +164,23 @@ export default function ExtraServerCard({
               />
             </div>
           </div>
+        </div>
+
+        <div>
+          <label className="block text-sm text-dark-300 mb-2 flex items-center gap-2">
+            <Globe className="w-4 h-4" />
+            {t('servers.proxy_label')}
+          </label>
+          <input
+            type="text"
+            value={target.proxy}
+            onChange={(e) => onChange({ proxy: e.target.value })}
+            placeholder="ip:port@login:pass"
+            className="input"
+            autoComplete="off"
+            disabled={status === 'running'}
+          />
+          <p className="text-xs text-dark-500 mt-1.5">{t('servers.proxy_hint')}</p>
         </div>
 
         <div className="border-t border-dark-700/50 pt-4">

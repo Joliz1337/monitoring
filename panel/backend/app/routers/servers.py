@@ -12,7 +12,7 @@ from pydantic import BaseModel, field_validator
 from typing import Optional
 import httpx
 import json
-from app.services.http_client import get_node_client, node_auth_headers
+from app.services.http_client import get_node_client, node_auth_headers, validate_proxy_input
 
 from app.database import get_db
 from app.models import Server, ServerCache, MetricsSnapshot, PanelSettings
@@ -243,11 +243,17 @@ def _clean_url(v: str) -> str:
 class ServerCreate(BaseModel):
     name: str
     url: str
+    proxy_url: Optional[str] = None
 
     @field_validator('url')
     @classmethod
     def validate_url(cls, v: str) -> str:
         return _clean_url(v)
+
+    @field_validator('proxy_url')
+    @classmethod
+    def validate_proxy(cls, v: str | None) -> str | None:
+        return validate_proxy_input(v)
 
 
 class ServerUpdate(BaseModel):
@@ -256,6 +262,7 @@ class ServerUpdate(BaseModel):
     api_key: Optional[str] = None
     is_active: Optional[bool] = None
     folder: Optional[str] = None
+    proxy_url: Optional[str] = None
 
     @field_validator('url')
     @classmethod
@@ -263,6 +270,11 @@ class ServerUpdate(BaseModel):
         if v is None:
             return v
         return _clean_url(v)
+
+    @field_validator('proxy_url')
+    @classmethod
+    def validate_proxy(cls, v: str | None) -> str | None:
+        return validate_proxy_input(v)
 
 
 class ServerReorder(BaseModel):
@@ -381,6 +393,7 @@ async def _build_servers_list(db: AsyncSession, include_metrics: bool) -> dict:
             "id": s.id,
             "name": s.name,
             "url": s.url,
+            "proxy_url": s.proxy_url,
             "position": s.position,
             "is_active": s.is_active,
             "folder": s.folder,
@@ -476,6 +489,7 @@ async def create_server(
         name=server.name,
         url=server.url.rstrip("/"),
         api_key=None,
+        proxy_url=server.proxy_url,
         pki_enabled=True,
         uses_shared_cert=True,
         position=next_position,
@@ -483,6 +497,7 @@ async def create_server(
     db.add(new_server)
     await db.commit()
     await db.refresh(new_server)
+    _invalidate_list_cache()
 
     asyncio.ensure_future(
         get_blocklist_manager().sync_single_node_by_id(new_server.id)
@@ -497,6 +512,7 @@ async def create_server(
             "id": new_server.id,
             "name": new_server.name,
             "url": new_server.url,
+            "proxy_url": new_server.proxy_url,
             "position": new_server.position,
             "pki_enabled": True,
             "uses_shared_cert": True,
@@ -570,6 +586,7 @@ async def get_server(
         "id": server.id,
         "name": server.name,
         "url": server.url,
+        "proxy_url": server.proxy_url,
         "position": server.position,
         "is_active": server.is_active,
         "folder": server.folder,
@@ -642,6 +659,7 @@ async def confirm_migration(
     probe = Server(
         id=server.id,
         url=server.url,
+        proxy_url=server.proxy_url,
         pki_enabled=True,
         api_key=None,
     )
@@ -723,6 +741,7 @@ async def update_server(
     was_inactive = not server.is_active
     old_url = server.url
     old_api_key = server.api_key
+    old_proxy = server.proxy_url
 
     update_data = data.model_dump(exclude_unset=True)
     if "url" in update_data:
@@ -730,10 +749,15 @@ async def update_server(
 
     for key, value in update_data.items():
         setattr(server, key, value)
-    
-    await db.commit()
 
-    node_changed = server.url != old_url or server.api_key != old_api_key
+    await db.commit()
+    _invalidate_list_cache()
+
+    node_changed = (
+        server.url != old_url
+        or server.api_key != old_api_key
+        or server.proxy_url != old_proxy
+    )
     activated = was_inactive and server.is_active
 
     if server.is_active and (activated or node_changed):
