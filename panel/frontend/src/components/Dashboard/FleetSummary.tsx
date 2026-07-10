@@ -76,7 +76,7 @@ function FleetSummaryInner({ servers }: { servers: ServerWithMetrics[] }) {
         iconBg="bg-accent-500/15"
         label={t('common.cpu')}
         value={`${totals.cpuPercent.toFixed(0)}%`}
-        sub={`${totals.cores} ${t('common.cores')}`}
+        sub={t('common.cores_count', { count: totals.cores })}
       />
       <StatTile
         icon={<MemoryStick className="w-4 h-4 text-purple" />}

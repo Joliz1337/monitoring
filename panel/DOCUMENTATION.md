@@ -1,4 +1,4 @@
-# Monitoring Panel v10.20.7
+# Monitoring Panel v10.20.8
 
 Веб-панель для мониторинга серверов. Собирает метрики с нод с настраиваемым интервалом (по умолчанию 10 сек) и хранит историю локально.
 
@@ -453,7 +453,8 @@ interface NicInfo {
 
 **Frontend:**
 - `components/Dashboard/FleetSummary.tsx` — агрегация целиком на клиенте, один `useMemo`-проход по `servers`; учитываются только серверы с `is_active && status === 'online' && metrics` (offline-серверы с кэшированными метриками исключаются, чтобы не завышать сумму устаревшими данными). CPU — процент, взвешенный по числу логических ядер (`cpu.cores_logical`) каждого сервера, а не простое среднее, плюс суммарное число логических ядер флота. RAM — сумма занято/всего в байтах + процент. Скорость — сумма `network.total.rx_bytes_per_sec`/`tx_bytes_per_sec`. Если нет ни одного подходящего сервера, компонент возвращает `null` (панель скрывается).
-- Переиспользует существующие `formatBytes`/`formatBitsPerSecLocalized` (`utils/format.ts`) и i18n-ключи `common.cpu/ram/download/upload/cores` — новых зависимостей и локалей не добавлено.
+- Переиспользует существующие `formatBytes`/`formatBitsPerSecLocalized` (`utils/format.ts`) и i18n-ключи `common.cpu/ram/download/upload` — новых зависимостей не добавлено.
+- Число ядер (`sub` у CPU-плитки) выводится через плюральные ключи i18next v4 `common.cores_count_one/few/many/other` (ru) и `common.cores_count_one/other` (en) вместо статичного `common.cores` — корректное склонение «1 ядро», «2 ядра», «5 ядер».
 - `Dashboard.tsx` передаёт компоненту стабильную ссылку на `servers` из `serversStore` (не локальную `dragServers`-копию, используемую на время drag), поэтому drag-and-drop карточек не вызывает лишних ререндеров сводки; сам компонент обёрнут в `memo`.
 - Бэкенд не менялся — данные уже приходили в `GET /api/servers?include_metrics=true`.
 
