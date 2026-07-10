@@ -23,7 +23,7 @@
 - **Анти-DDoS** — многослойная защита от DDoS-атак на нодах: дежурный режим без лимитов, аварийный режим (iptables-цепочка `ANTIDDOS`: SYNPROXY + connlimit + hashlimit) включаемый вручную или автоматически локальным watchdog по сигналам из `/proc`, whitelist на ipset с ежечасной автосинхронизацией (активен только в аварийном режиме); whitelist собирается из трёх источников — авто (ноды + панель), ручные CIDR и авто-источники по URL (список IP/CIDR формат-независимо парсится из JSON/plain text/HTML, например Cloudflare/Yandex Cloud); страница с независимыми контролами автодетекта и аварийного режима по нодам, редактированием ручного whitelist и управлением авто-источниками; установка watchdog на ноды полностью автоматическая (zero-touch)
 - **Авто-восстановление ноды** — при возвращении сервера в сеть панель автоматически сверяет состояние firewall (UFW), HAProxy-конфига, статуса HAProxy и IP Blocklist с ожидаемым; переприменяет только сбившееся (drift-detection по SHA256-хэшам); без Telegram-уведомлений
 - **Авторазвёртывание ноды** — установка ноды мониторинга прямо из вкладки «Серверы»: подключение по SSH (пароль или приватный ключ), запуск `install.sh --unattended` на целевом сервере; установка выполняется **в фоне на бэкенде** — закрытие вкладки браузера не прерывает процесс; живой лог переподключаем (GET-стрим с реплеем); опционально устанавливает WARP и ноду Remnawave с сохранёнными именованными сертификатами; **массовый деплой** — произвольное количество дополнительных целей, каждая со своим SSH и опциями; после успешного деплоя бэкенд автоматически привязывает сервер к выбранным HAProxy-профилю и/или Firewall-профилю; незавершённые задачи переживают перезагрузку страницы (восстановление через localStorage + `GET /deploy/jobs`); **поддержка Hetzner Rescue System** — при обнаружении rescue-среды `install.sh` устанавливает Ubuntu 24.04, перезагружается, панель ждёт ноду до 40 мин через поллинг и завершает деплой автоматически
-- **SOCKS5-прокси до ноды** — опциональное поле у сервера (`ip:port` или `ip:port@login:pass`): при заполнении все HTTP-запросы панели к этой ноде (метрики, proxy-роутер, синхронизация блок-листов/анти-DDoS, SSE-терминал, тест подключения) идут через указанный прокси вместо прямого соединения
+- **SOCKS5-прокси до ноды** — опциональное поле у сервера (`ip:port` или `ip:port@login:pass`): при заполнении все запросы панели к этой ноде идут через указанный прокси вместо прямого соединения — и HTTP (метрики, proxy-роутер, синхронизация блок-листов/анти-DDoS, SSE-терминал, тест подключения), и SSH при авторазвёртывании ноды
 
 ## Интервалы сбора данных
 
@@ -436,32 +436,46 @@ interface NicInfo {
 
 ### SOCKS5-прокси до ноды
 
-Опциональное поле сервера `proxy_url`: при заполнении **все** HTTP-запросы панели к этой ноде (сбор метрик, proxy-роутер `/api/proxy/{id}/...`, sync-сервисы IP Blocklist/Анти-DDoS, SSE-терминал, тест подключения) идут через указанный SOCKS5-прокси вместо прямого соединения. По образцу аналогичной функции в Remnawave. Новых зависимостей не потребовалось — `httpx[socks,http2]` уже был в `requirements.txt`.
+Опциональное поле сервера `proxy_url`: при заполнении **все** запросы панели к этой ноде идут через указанный SOCKS5-прокси вместо прямого соединения — и HTTP (сбор метрик, proxy-роутер `/api/proxy/{id}/...`, sync-сервисы IP Blocklist/Анти-DDoS, SSE-терминал, тест подключения), и SSH-подключение при авторазвёртывании ноды. Единый способ обслуживать ноду, находящуюся за NAT/файрволом, — до установки и после. По образцу аналогичной функции в Remnawave. Для HTTP-трафика новых зависимостей не потребовалось — `httpx[socks,http2]` уже был в `requirements.txt`; для SSH добавлена зависимость `python-socks==2.8.2` (async SOCKS5-клиент, нужен именно для `asyncssh` — у него нет встроенной поддержки SOCKS).
 
-**Формат ввода:** `ip:port` или `ip:port@login:pass` (пароль может содержать `:`/`@`/любые непробельные символы). Пустая строка = прокси выключен. `validate_proxy_input()` в `http_client.py` проверяет формат (regex, порт 1–65535) на уровне Pydantic-валидатора `ServerCreate`/`ServerUpdate`; та же проверка дублируется на фронте (`PROXY_RE` в `Servers.tsx`) для мгновенной обратной связи.
+**Формат ввода:** `ip:port` или `ip:port@login:pass` (пароль может содержать `:`/`@`/любые непробельные символы). Пустая строка = прокси выключен. `validate_proxy_input()` в `http_client.py` проверяет формат (regex, порт 1–65535) на уровне Pydantic-валидатора `ServerCreate`/`ServerUpdate` и `DeployRequest.socks5_proxy` (SSH-деплой); та же проверка дублируется на фронте (`PROXY_RE`) для мгновенной обратной связи.
 
-**Backend (`panel/backend/app/services/http_client.py`):**
-- `_proxy_raw_to_url()` — нормализует `ip:port@login:pass` в `socks5://login:pass@ip:port`; логин/пароль percent-квотируются (`urllib.parse.quote`), поэтому спецсимволы в пароле безопасны
+**Backend, HTTP-трафик (`panel/backend/app/services/http_client.py`):**
+- `parse_proxy_input(raw) -> (host, port, login, password)` — единый разбор формата `ip:port[@login:pass]`; переиспользуется и HTTP-клиентом, и SSH-деплоем (`deploy_service.py`)
+- `_proxy_raw_to_url()` — строит `socks5://login:pass@ip:port` через `parse_proxy_input()`; логин/пароль percent-квотируются (`urllib.parse.quote`), поэтому спецсимволы в пароле безопасны
 - `_get_proxy_client(raw, mtls, apply)` — ленивое создание и кэширование `httpx.AsyncClient(proxy=...)` в module-level `_proxy_clients` по ключу (строка прокси, mtls, apply); mTLS SSL-контекст переиспользуется из module-global `_mtls_ctx` (сохраняется в `init_http_clients()`), не пересоздаётся на каждый прокси
 - `get_node_client(server)` / `get_node_apply_client(server)` — при наличии `server.proxy_url` прозрачно возвращают прокси-клиент вместо обычного mTLS/legacy; сигнатуры функций не изменились, поэтому все существующие вызовы по кодовой базе (~30 точек) получили поддержку прокси автоматически, без правок в вызывающем коде
 - `close_http_clients()` закрывает и очищает кэш прокси-клиентов (важно для Backup & Restore: восстановление бэкапа делает `close_http_clients()` + `init_http_clients()`, старый mTLS-контекст не должен пережить рестарт)
 - `sanitize_proxy()` — маскирует креды до `host:port` в логах
 - Смена/удаление прокси у сервера действует со следующего запроса без рестарта панели; в `PUT /api/servers/{id}` смена `proxy_url` считается `node_changed` (триггерит пере-синк IP Blocklist на ноду, как смена `url`/`api_key`)
 
-**Ограничения:**
-- SSH-каналы (Авторазвёртывание ноды, SSH Security) прокси не покрывают — используют отдельный транспорт `asyncssh`
-- IPv6-адрес прокси форматом ввода не поддерживается
-- Недоступный прокси: нода отображается offline с `last_error = "Proxy connection error"` — `metrics_collector.py` перехватывает `httpx.ProxyError` отдельно от `ConnectError` (новый `ErrorTypes.PROXY_ERROR`), чтобы оператор отличал мёртвый прокси от мёртвой ноды; текст SOCKS-ошибки в лог не пишется (может содержать креды)
+**Backend, SSH-деплой (`panel/backend/app/services/deploy_service.py`):**
+- `DeployParams.socks5_proxy` — не путать с `DeployParams.proxy_url`: это HTTP-прокси apt/docker, устанавливаемый **на саму ноду** во время установки, к SOCKS5-прокси панели отношения не имеет
+- `_ssh_connect(connect_kwargs, socks5_proxy)` — при заданном прокси открывает сокет через `python-socks` (`Proxy(ProxyType.SOCKS5, host, port, username, password).connect(dest_host, dest_port, timeout=CONNECT_TIMEOUT)`) и передаёт его в `asyncssh.connect(..., sock=sock)` (поддерживается asyncssh ≥2.12, в requirements закреплён ≥2.14); ошибки прокси нормализуются в `OSError` с адресом прокси без креденшалов (`sanitize_proxy()`)
+- Оба места SSH-подключения (`_run_install_once` — сама установка, `_change_expired_password` — смена просроченного пароля на OVH) идут через этот хелпер; в лог деплоя пишется «SSH-подключение ... установлено через SOCKS5 host:port»
+- `routers/server_deploy.py`: поле `socks5_proxy` в `DeployRequest` + `field_validator` (`validate_proxy_input`), прокидывается в `DeployParams`
+- `services/deploy_job_manager.py`: `DeployJob.proxy_url`; `_create_server(name, url, proxy_url)` — сервер, созданный после успешного деплоя, сразу наследует `proxy_url` (вся дальнейшая связь панели с ним — включая поллинг Hetzner Rescue System — тоже идёт через прокси)
 
-**Frontend (`pages/Servers.tsx`):** поле «SOCKS5-прокси» в форме добавления сервера (скрыто в режиме SSH-деплоя — прокси там не участвует, задаётся после через редактирование) и в inline-форме редактирования сервера.
+**Ограничения:**
+- IPv6-адрес прокси форматом ввода не поддерживается
+- Недоступный прокси при HTTP-запросах: нода отображается offline с `last_error = "Proxy connection error"` — `metrics_collector.py` перехватывает `httpx.ProxyError` отдельно от `ConnectError` (новый `ErrorTypes.PROXY_ERROR`), чтобы оператор отличал мёртвый прокси от мёртвой ноды; текст SOCKS-ошибки в лог не пишется (может содержать креды)
+
+**Frontend:**
+- `pages/Servers.tsx` — поле «SOCKS5-прокси» видно в форме добавления сервера всегда, включая режим SSH-деплоя (раньше скрывалось); `buildDeployBody` передаёт `socks5_proxy`; `validateDeployForm` проверяет формат прокси (`PROXY_RE`) и для основного сервера, и для каждой дополнительной цели массового деплоя; поле также есть в inline-форме редактирования сервера и в retry-деплое
+- `components/servers/ExtraServerCard.tsx` — у каждой дополнительной цели массового деплоя своё поле «SOCKS5-прокси» (`ExtraTarget.proxy`)
 
 **Файлы:**
 - `panel/backend/app/services/http_client.py`
+- `panel/backend/app/services/deploy_service.py`
+- `panel/backend/app/routers/server_deploy.py`
+- `panel/backend/app/services/deploy_job_manager.py`
 - `panel/backend/app/models.py` (`Server.proxy_url`)
 - `panel/backend/app/database.py` (миграция колонки `proxy_url`)
 - `panel/backend/app/routers/servers.py`
 - `panel/backend/app/services/metrics_collector.py`
+- `panel/backend/requirements.txt` (`python-socks==2.8.2`)
 - `panel/frontend/src/pages/Servers.tsx`
+- `panel/frontend/src/components/servers/ExtraServerCard.tsx`
 - `panel/frontend/src/api/client.ts`
 - `panel/frontend/src/stores/serversStore.ts`
 
