@@ -28,6 +28,9 @@ logger = logging.getLogger(__name__)
 VERSION_FILE = Path("/app/VERSION")
 UPDATER_CONTAINER_NAME = "monitoring-updater"
 UPDATER_IMAGE = "docker:cli"
+# apply-update.sh качает образы ДО рестарта контейнеров: на медленной сети pull
+# занимает десятки минут (наблюдалось 755с на слой) — ждём до 2 часов
+UPDATER_WAIT_TIMEOUT = 7200
 
 _update_status = {
     "in_progress": False,
@@ -333,10 +336,9 @@ echo "[SUCCESS] Update completed!"
         
         logger.info(f"Updater started: {container.id[:12]}")
         
-        # Wait for completion (10 min timeout)
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: container.wait(timeout=600)
+            lambda: container.wait(timeout=UPDATER_WAIT_TIMEOUT)
         )
         
         exit_code = result.get("StatusCode", -1)
@@ -359,7 +361,7 @@ echo "[SUCCESS] Update completed!"
             
     except asyncio.TimeoutError:
         _update_status["last_result"] = "failed"
-        _update_status["last_error"] = "Update timed out (10 minutes)"
+        _update_status["last_error"] = f"Update timed out ({UPDATER_WAIT_TIMEOUT // 60} minutes)"
         logger.error("Update timed out")
     except ImageNotFound as e:
         _update_status["last_result"] = "failed"

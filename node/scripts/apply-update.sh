@@ -21,7 +21,10 @@ cleanup() {
         if [ "$CONTAINERS_STOPPED" = "1" ]; then
             echo -e "\033[1;33m[RECOVERY] Restarting containers after failed update...\033[0m"
             cd "$NODE_DIR" 2>/dev/null || cd /opt/monitoring-node 2>/dev/null || true
-            if docker compose up -d 2>/dev/null; then
+            # up -d может упасть на ожидании healthy, оставив nginx в Created —
+            # добиваем прямым стартом без ожидания здоровья
+            if docker compose up -d 2>/dev/null || docker compose start 2>/dev/null \
+                || docker start monitoring-api monitoring-nginx 2>/dev/null; then
                 echo -e "\033[0;32m[RECOVERY] Containers restarted successfully\033[0m"
             else
                 echo -e "\033[0;31m[RECOVERY] Failed to restart containers! Manual intervention required\033[0m"
@@ -152,7 +155,13 @@ load_proxy
 # ==================== Configuration ====================
 
 # Timeouts (in seconds)
-DOCKER_PULL_TIMEOUT="${DOCKER_PULL_TIMEOUT:-600}"
+# Pull идёт ДО остановки контейнеров, поэтому длинный таймаут безопасен: нода
+# продолжает работать на старой версии всё время скачивания. На нодах с очень
+# медленной сетью один слой может качаться 10-15+ минут (реальный случай: 755с).
+# Docker переиспользует уже скачанные слои между попытками.
+DOCKER_PULL_TIMEOUT="${DOCKER_PULL_TIMEOUT:-1800}"
+DOCKER_PULL_RETRIES=3
+DOCKER_PULL_RETRY_DELAY=15
 
 # Arguments
 TMP_DIR="$1"
@@ -530,22 +539,9 @@ else
     fi
 fi
 
-# Stop containers
-log_info "Stopping API containers..."
-docker compose down --timeout 30 || true
-CONTAINERS_STOPPED=1
-
-# Wait for port 7500 to be released
-log_info "Waiting for port 7500 to be released..."
-for i in {1..15}; do
-    if ! ss -tlnp 2>/dev/null | grep -q ':7500 '; then
-        break
-    fi
-    sleep 1
-done
-log_success "Containers stopped"
-
-# Copy files (preserve .env and SSL certs)
+# Copy files (preserve .env and SSL certs). Контейнеры ещё работают: rsync меняет
+# файлы на диске через rename (новый inode), bind-mounts запущенных контейнеров
+# продолжают видеть старые — ноль даунтайма на этом шаге.
 log_info "Copying new files..."
 rsync -av --delete \
     --exclude='.env' \
@@ -593,17 +589,20 @@ if [ -f "/etc/systemd/system/network-tune.service" ]; then
     fi
 fi
 
-# Pull new Docker images
+# Pull new Docker images ДО остановки контейнеров: пока образы качаются
+# (на плохой сети — десятки минут), нода продолжает работать на старой версии.
+# Если скачать/собрать не удалось — обновление отменяется без даунтайма.
 cd "$NODE_DIR"
 
 set +e
 # Pull ready images from GHCR (normal flow)
-if ! spin_retry 240 5 10 "Pulling Docker images" docker compose pull 2>/dev/null; then
+if ! spin_retry "$DOCKER_PULL_TIMEOUT" "$DOCKER_PULL_RETRIES" "$DOCKER_PULL_RETRY_DELAY" \
+    "Pulling Docker images" docker compose pull; then
     log_warn "Failed to pull from registry, building locally..."
     spin "Pulling base images" bash -c \
         'docker compose pull --ignore-buildable 2>/dev/null || true'
-    spin_retry 600 2 10 "Building images from source" docker compose build || {
-        log_error "Failed to build images"
+    spin_retry 900 2 10 "Building images from source" docker compose build || {
+        log_error "Failed to get new images — update cancelled, node keeps running old version"
         exit 1
     }
 fi
@@ -614,11 +613,28 @@ if [ $IN_CONTAINER -eq 0 ]; then
     ensure_haproxy_dir
 fi
 
-# Start containers
-spin "Starting containers" docker compose up -d || {
-    log_error "Failed to start containers"
-    exit 1
-}
+# Образы на диске — теперь короткий рестарт на новую версию
+log_info "Restarting containers on new version..."
+docker compose down --timeout 30 || true
+CONTAINERS_STOPPED=1
+
+# Wait for port 7500 to be released
+for i in {1..15}; do
+    if ! ss -tlnp 2>/dev/null | grep -q ':7500 '; then
+        break
+    fi
+    sleep 1
+done
+
+# up -d ждёт healthy у api (depends_on) и при медленном старте может выйти с
+# ошибкой, оставив nginx в статусе Created — тогда поднимаем контейнеры напрямую
+if ! spin "Starting containers" docker compose up -d; then
+    log_warn "compose up failed, starting containers directly..."
+    docker compose start 2>/dev/null || docker start monitoring-api monitoring-nginx || {
+        log_error "Failed to start containers"
+        exit 1
+    }
+fi
 CONTAINERS_STOPPED=0
 
 # Wait for API to be healthy

@@ -17,7 +17,9 @@ LOCK_FD=200
 
 TIMEOUT_GIT_CLONE=180
 TIMEOUT_DOCKER_COMPOSE_DOWN=120
-TIMEOUT_DOCKER_PULL=600
+# Pull идёт до остановки контейнеров — длинный таймаут безопасен, нода
+# работает на старой версии всё время скачивания (медленные сети: слой 10-15+ мин)
+TIMEOUT_DOCKER_PULL=1800
 TIMEOUT_CONNECTIVITY_CHECK=15
 
 MAX_RETRIES=3
@@ -256,11 +258,11 @@ fallback_update() {
         new_version=$(cat "$TMP_DIR/node/VERSION" 2>/dev/null || echo "unknown")
     fi
     log_info "New version: $new_version"
-    
-    cd "$NODE_DIR" || return 1
-    spin "Stopping containers" \
-        timeout "$TIMEOUT_DOCKER_COMPOSE_DOWN" docker compose down --timeout 30 2>/dev/null || true
 
+    cd "$NODE_DIR" || return 1
+
+    # Контейнеры не трогаем, пока новые файлы и образы не готовы:
+    # на медленной сети скачивание занимает десятки минут, нода остаётся онлайн
     log_info "Copying new files..."
     if ! rsync -av --delete \
         --exclude='.env' \
@@ -276,20 +278,28 @@ fallback_update() {
     chmod +x "$NODE_DIR"/*.sh 2>/dev/null || true
 
     # Pull ready images from GHCR (normal flow)
-    if ! spin_retry 240 5 10 "Pulling Docker images" docker compose pull 2>/dev/null; then
+    if ! spin_retry "$TIMEOUT_DOCKER_PULL" 3 15 "Pulling Docker images" docker compose pull; then
         log_warn "Failed to pull from registry, building locally..."
         spin "Pulling base images" bash -c \
             'docker compose pull --ignore-buildable 2>/dev/null || true'
-        spin_retry 600 2 10 "Building images from source" docker compose build || {
-            log_error "Failed to build images"
+        spin_retry 900 2 10 "Building images from source" docker compose build || {
+            log_error "Failed to get new images — update cancelled, node keeps running old version"
             return 1
         }
     fi
 
-    spin "Starting containers" docker compose up -d || {
-        log_error "Failed to start containers"
-        return 1
-    }
+    spin "Stopping containers" \
+        timeout "$TIMEOUT_DOCKER_COMPOSE_DOWN" docker compose down --timeout 30 2>/dev/null || true
+
+    # up -d ждёт healthy у api и может выйти с ошибкой, оставив nginx в Created —
+    # тогда поднимаем контейнеры напрямую
+    if ! spin "Starting containers" docker compose up -d; then
+        log_warn "compose up failed, starting containers directly..."
+        docker compose start 2>/dev/null || docker start monitoring-api monitoring-nginx || {
+            log_error "Failed to start containers"
+            return 1
+        }
+    fi
 
     log_success "=== Update Complete ==="
     log_info "Version: $CURRENT_VERSION → $new_version"
