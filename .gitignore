@@ -68,3 +68,5 @@ CHANGELOG.md
 CLAUDE.md
 .mcp.json
 .claude
+.agents/
+skills-lock.json
