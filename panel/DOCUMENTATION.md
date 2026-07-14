@@ -1,4 +1,4 @@
-# Monitoring Panel v10.21.0
+# Monitoring Panel v10.22.0
 
 Веб-панель для мониторинга серверов. Собирает метрики с нод с настраиваемым интервалом (по умолчанию 10 сек) и хранит историю локально.
 
@@ -616,7 +616,12 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 | DELETE | /api/proxy/{id}/haproxy/rules/{name} | Удалить правило |
 | POST | /api/proxy/{id}/haproxy/start | Запустить |
 | POST | /api/proxy/{id}/haproxy/stop | Остановить |
-| POST | /api/proxy/{id}/haproxy/reload | Перезагрузить конфиг |
+| POST | /api/proxy/{id}/haproxy/reload | Перезагрузить конфиг (graceful, `systemctl reload`) |
+| POST | /api/proxy/{id}/haproxy/restart | Перезапустить процесс (`systemctl restart`) |
+
+**Перезагрузка конфига vs перезапуск процесса:**
+
+Кнопка «Перезагрузить» на странице `HAProxy.tsx` — выпадающее меню с двумя действиями: «Перезагрузить конфиг» (`handleReload` → `reload`, плавно, без разрыва активных соединений) и «Перезагрузить процесс» (`handleRestart` → `restart`, полный `systemctl restart`, активные соединения разрываются). Оба эндпоинта существовали и раньше; до этой доработки со страницы вызывался только `reload`, `restart` был доступен исключительно через bulk-эндпоинт `/bulk/haproxy/restart`. Оверлей загрузки карточки действий общий для обеих операций (`actionLoading === 'reload' | 'restart'`).
 
 **Проброс ошибок через прокси:**
 

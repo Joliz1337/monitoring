@@ -53,6 +53,8 @@ export default function HAProxy() {
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [actionLoading, setActionLoading] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [reloadMenuOpen, setReloadMenuOpen] = useState(false)
+  const reloadMenuRef = useRef<HTMLDivElement>(null)
   
   const lastLiveRefreshRef = useRef<number>(0)
   
@@ -302,13 +304,35 @@ export default function HAProxy() {
   }, [serverId, fetchServers, fetchData])
   
   useAutoRefresh(refreshFromCache, { immediate: false })
-  
+
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (reloadMenuRef.current && !reloadMenuRef.current.contains(e.target as Node)) {
+        setReloadMenuOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
+
   const handleReload = async () => {
     setActionLoading('reload')
     try {
       await proxyApi.reloadHAProxy(Number(serverId))
       await refreshData()
       toast.success(t('haproxy.haproxy_reloaded'))
+    } catch {
+      toast.error(t('haproxy.failed_save_rule'))
+    }
+    setActionLoading(null)
+  }
+
+  const handleRestart = async () => {
+    setActionLoading('restart')
+    try {
+      await proxyApi.restartHAProxy(Number(serverId))
+      await refreshData()
+      toast.success(t('haproxy.haproxy_restarted'))
     } catch {
       toast.error(t('haproxy.failed_save_rule'))
     }
@@ -887,40 +911,63 @@ export default function HAProxy() {
                 </div>
               </motion.div>
               
-              <motion.div 
-                className="card relative overflow-hidden"
+              <motion.div
+                className="card relative overflow-visible"
                 whileHover={{ scale: 1.02 }}
               >
-                {/* Loading overlay for reload */}
+                {/* Loading overlay for reload/restart */}
                 <AnimatePresence>
-                  {actionLoading === 'reload' && (
+                  {(actionLoading === 'reload' || actionLoading === 'restart') && (
                     <motion.div
-                      className="absolute inset-0 bg-dark-900/50 backdrop-blur-sm flex items-center justify-center z-10"
+                      className="absolute inset-0 rounded-2xl bg-dark-900/50 backdrop-blur-sm flex items-center justify-center z-10"
                       initial={{ opacity: 0 }}
                       animate={{ opacity: 1 }}
                       exit={{ opacity: 0 }}
                     >
                       <div className="flex items-center gap-2 text-accent-400">
                         <Loader2 className="w-5 h-5 animate-spin" />
-                        <span className="text-sm">{t('haproxy.reloading')}</span>
+                        <span className="text-sm">
+                          {actionLoading === 'restart' ? t('haproxy.restarting') : t('haproxy.reloading')}
+                        </span>
                       </div>
                     </motion.div>
                   )}
                 </AnimatePresence>
-                
+
                 <div className="flex items-center gap-2 flex-wrap">
                   {status?.running ? (
                     <>
-                      <motion.button
-                        onClick={handleReload}
-                        disabled={!!actionLoading}
-                        className="btn btn-secondary flex-1"
-                        whileHover={{ scale: 1.02 }}
-                        whileTap={{ scale: 0.98 }}
-                      >
-                        <RefreshCw className={`w-4 h-4 ${actionLoading === 'reload' ? 'animate-spin' : ''}`} />
-                        {t('haproxy.reload')}
-                      </motion.button>
+                      <div className="relative flex-1" ref={reloadMenuRef}>
+                        <motion.button
+                          onClick={() => setReloadMenuOpen(!reloadMenuOpen)}
+                          disabled={!!actionLoading}
+                          className="btn btn-secondary w-full"
+                          whileHover={{ scale: 1.02 }}
+                          whileTap={{ scale: 0.98 }}
+                        >
+                          <RefreshCw className={`w-4 h-4 ${actionLoading === 'reload' || actionLoading === 'restart' ? 'animate-spin' : ''}`} />
+                          {t('haproxy.reload')}
+                          <ChevronDown className={`w-3.5 h-3.5 transition-transform ${reloadMenuOpen ? 'rotate-180' : ''}`} />
+                        </motion.button>
+                        {reloadMenuOpen && (
+                          <div className="absolute left-0 top-full z-20 mt-1 min-w-[16rem] bg-dark-900 border border-dark-700 rounded-lg shadow-xl overflow-hidden">
+                            <button
+                              onClick={() => { setReloadMenuOpen(false); handleReload() }}
+                              className="w-full text-left px-3 py-2.5 hover:bg-dark-800 transition-colors"
+                            >
+                              <p className="text-sm text-dark-100">{t('haproxy.reload_config')}</p>
+                              <p className="text-xs text-dark-400">({t('haproxy.reload_config_hint')})</p>
+                            </button>
+                            <button
+                              onClick={() => { setReloadMenuOpen(false); handleRestart() }}
+                              className="w-full text-left px-3 py-2.5 hover:bg-dark-800 transition-colors border-t border-dark-800"
+                            >
+                              <p className="text-sm text-dark-100">{t('haproxy.restart_process')}</p>
+                              <p className="text-xs text-dark-400">({t('haproxy.restart_process_hint')})</p>
+                            </button>
+                          </div>
+                        )}
+                      </div>
                       <motion.button
                         onClick={handleStopHAProxy}
                         disabled={!!actionLoading}
