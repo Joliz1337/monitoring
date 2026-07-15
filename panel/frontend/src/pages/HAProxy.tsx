@@ -912,7 +912,7 @@ export default function HAProxy() {
               </motion.div>
               
               <motion.div
-                className="card relative overflow-visible"
+                className={`card relative overflow-visible ${reloadMenuOpen ? 'z-30' : ''}`}
                 whileHover={{ scale: 1.02 }}
               >
                 {/* Loading overlay for reload/restart */}
