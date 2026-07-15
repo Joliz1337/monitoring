@@ -858,41 +858,46 @@ export interface BulkTerminalResult extends BulkResult {
   execution_time_ms: number
 }
 
+export type BulkJobAction =
+  | 'haproxy_start'
+  | 'haproxy_stop'
+  | 'haproxy_restart'
+  | 'traffic_port_add'
+  | 'traffic_port_remove'
+  | 'firewall_rule_add'
+  | 'firewall_rule_delete'
+  | 'terminal_execute'
+
+export interface BulkJobResult extends BulkResult {
+  stdout?: string
+  stderr?: string
+  exit_code?: number
+  execution_time_ms?: number
+}
+
+export interface BulkJobSummary {
+  job_id: string
+  action: BulkJobAction
+  status: 'running' | 'completed'
+  total: number
+  done: number
+}
+
+export interface BulkJob extends BulkJobSummary {
+  results: BulkJobResult[]
+}
+
+// Массовые операции выполняются в фоне на бэкенде: создаём задачу и
+// опрашиваем её прогресс — обрыв связи с панелью выполнение не прерывает
 export const bulkApi = {
-  // HAProxy service
-  startHAProxy: (serverIds: number[]) =>
-    api.post<BulkResult[]>('/bulk/haproxy/start', { server_ids: serverIds }),
-  
-  stopHAProxy: (serverIds: number[]) =>
-    api.post<BulkResult[]>('/bulk/haproxy/stop', { server_ids: serverIds }),
+  createJob: (action: BulkJobAction, serverIds: number[], params: Record<string, unknown> = {}) =>
+    api.post<{ job_id: string }>('/bulk/jobs', { action, server_ids: serverIds, params }),
 
-  restartHAProxy: (serverIds: number[]) =>
-    api.post<BulkResult[]>('/bulk/haproxy/restart', { server_ids: serverIds }),
+  listJobs: () =>
+    api.get<{ jobs: BulkJobSummary[] }>('/bulk/jobs'),
 
-  // Traffic ports
-  addTrackedPort: (serverIds: number[], port: number) =>
-    api.post<BulkResult[]>('/bulk/traffic/ports', { server_ids: serverIds, port }),
-  
-  removeTrackedPort: (serverIds: number[], port: number) =>
-    api.delete<BulkResult[]>('/bulk/traffic/ports', { data: { server_ids: serverIds, port } }),
-  
-  // Firewall rules
-  addFirewallRule: (serverIds: number[], rule: {
-    port: number
-    protocol: 'tcp' | 'udp' | 'any'
-    action: 'allow' | 'deny'
-    from_ip?: string | null
-    direction: 'in' | 'out'
-  }) => api.post<BulkResult[]>('/bulk/firewall/rules', { server_ids: serverIds, ...rule }),
-  
-  deleteFirewallRule: (serverIds: number[], port: number) =>
-    api.delete<BulkResult[]>('/bulk/firewall/rules', { data: { server_ids: serverIds, port } }),
-
-  executeCommand: (serverIds: number[], command: string, timeout: number = 30, shell: 'sh' | 'bash' = 'sh') =>
-    api.post<BulkTerminalResult[]>('/bulk/terminal/execute', {
-      server_ids: serverIds, command, timeout, shell
-    }),
-
+  getJob: (jobId: string) =>
+    api.get<BulkJob>(`/bulk/jobs/${jobId}`),
 }
 
 export interface PanelIpInfo {

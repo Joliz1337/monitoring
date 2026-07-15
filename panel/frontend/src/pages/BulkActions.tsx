@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, FormEvent } from 'react'
+import { useState, useEffect, useMemo, useRef, FormEvent } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -26,7 +26,7 @@ import {
   Folder,
   FolderOpen,
 } from 'lucide-react'
-import { serversApi, bulkApi, BulkResult, BulkTerminalResult, Server as ServerType } from '../api/client'
+import { serversApi, bulkApi, BulkJob, BulkJobAction, BulkResult, BulkTerminalResult, Server as ServerType } from '../api/client'
 import { Skeleton } from '../components/ui/Skeleton'
 import { Checkbox } from '../components/ui/Checkbox'
 import { FAQIcon } from '../components/FAQ'
@@ -41,6 +41,10 @@ const TIMEOUT_OPTIONS = [
   { value: 300, label: '5m' },
   { value: 600, label: '10m' },
 ]
+
+const JOB_POLL_INTERVAL_MS = 1500
+
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
 export default function BulkActions() {
   const { t } = useTranslation()
@@ -85,6 +89,8 @@ export default function BulkActions() {
   const [expandedOutputs, setExpandedOutputs] = useState<Set<number>>(new Set())
   
   const [formError, setFormError] = useState('')
+  const [jobProgress, setJobProgress] = useState<{ done: number; total: number } | null>(null)
+  const pollCancelledRef = useRef(false)
 
   const [searchQuery, setSearchQuery] = useState('')
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(() => {
@@ -96,6 +102,8 @@ export default function BulkActions() {
 
   useEffect(() => {
     fetchServers()
+    resumeRunningJob()
+    return () => { pollCancelledRef.current = true }
   }, [])
 
   const fetchServers = async () => {
@@ -216,87 +224,142 @@ export default function BulkActions() {
     })
   }
   
+  // Задача выполняется в фоне на бэкенде: применяем её состояние по мере поллинга
+  const applyJobState = (job: BulkJob) => {
+    setJobProgress({ done: job.done, total: job.total })
+    setResults(job.results)
+    if (job.action === 'terminal_execute') {
+      setTerminalResults(job.results.map(r => ({
+        ...r,
+        stdout: r.stdout ?? '',
+        stderr: r.stderr ?? '',
+        exit_code: r.exit_code ?? -1,
+        execution_time_ms: r.execution_time_ms ?? 0,
+      })))
+    }
+  }
+
+  const notifyJobFinished = (job: BulkJob) => {
+    const ok = job.results.filter(r => r.success).length
+    const fail = job.results.length - ok
+    if (fail === 0) {
+      toast.success(t('bulk_actions.all_success', { count: ok }))
+    } else if (ok === 0) {
+      toast.error(t('bulk_actions.all_failed', { count: fail }))
+    } else {
+      toast.warning(t('bulk_actions.partial_success', { success: ok, failed: fail }))
+    }
+  }
+
+  // Сетевые сбои поллинга не останавливают отслеживание — задача на бэкенде
+  // продолжается, опрашиваем дальше до её завершения
+  const trackJob = async (jobId: string) => {
+    setIsExecuting(true)
+    try {
+      while (!pollCancelledRef.current) {
+        let job: BulkJob | null = null
+        try {
+          const res = await bulkApi.getJob(jobId)
+          job = res.data
+        } catch (err: unknown) {
+          const status = (err as { response?: { status?: number } }).response?.status
+          if (status === 404) {
+            toast.error(t('bulk_actions.job_lost'))
+            return
+          }
+        }
+        if (job) {
+          applyJobState(job)
+          if (job.status === 'completed') {
+            notifyJobFinished(job)
+            return
+          }
+        }
+        await sleep(JOB_POLL_INTERVAL_MS)
+      }
+    } finally {
+      setIsExecuting(false)
+      setJobProgress(null)
+    }
+  }
+
+  const resumeRunningJob = async () => {
+    try {
+      const res = await bulkApi.listJobs()
+      const running = res.data.jobs.filter(j => j.status === 'running').pop()
+      if (!running) return
+      toast.info(t('bulk_actions.job_resumed'))
+      await trackJob(running.job_id)
+    } catch {
+      // ignore
+    }
+  }
+
+  const resolveJobRequest = (): { action: BulkJobAction; params: Record<string, unknown> } => {
+    if (activeType === 'terminal') {
+      return {
+        action: 'terminal_execute',
+        params: {
+          command: terminalForm.command,
+          timeout: terminalForm.timeout,
+          shell: terminalForm.shell,
+        },
+      }
+    }
+    if (activeType === 'haproxy_service') {
+      if (activeMode === 'start') return { action: 'haproxy_start', params: {} }
+      if (activeMode === 'stop') return { action: 'haproxy_stop', params: {} }
+      return { action: 'haproxy_restart', params: {} }
+    }
+    if (activeType === 'traffic') {
+      return {
+        action: activeMode === 'create' ? 'traffic_port_add' : 'traffic_port_remove',
+        params: { port: parseInt(trafficForm.port) },
+      }
+    }
+    if (activeMode === 'create') {
+      return {
+        action: 'firewall_rule_add',
+        params: {
+          port: parseInt(firewallForm.port),
+          protocol: firewallForm.protocol,
+          action: firewallForm.action,
+          from_ip: firewallForm.from_ip || null,
+          direction: firewallForm.direction,
+        },
+      }
+    }
+    return {
+      action: 'firewall_rule_delete',
+      params: { port: parseInt(firewallDeleteForm.port) },
+    }
+  }
+
   const handleExecute = async (e: FormEvent) => {
     e.preventDefault()
     setFormError('')
     setResults([])
     setTerminalResults([])
     setExpandedOutputs(new Set())
-    
+
     if (selectedServerIds.length === 0) {
       setFormError(t('bulk_actions.no_servers_selected'))
       return
     }
-    
+
     setIsExecuting(true)
-    
+    setJobProgress({ done: 0, total: selectedServerIds.length })
+
     try {
-      let response: BulkResult[] = []
-      
-      if (activeType === 'terminal') {
-        const res = await bulkApi.executeCommand(
-          selectedServerIds,
-          terminalForm.command,
-          terminalForm.timeout,
-          terminalForm.shell
-        )
-        setTerminalResults(res.data)
-        response = res.data
-      } else if (activeType === 'haproxy_service') {
-        if (activeMode === 'start') {
-          const res = await bulkApi.startHAProxy(selectedServerIds)
-          response = res.data
-        } else if (activeMode === 'stop') {
-          const res = await bulkApi.stopHAProxy(selectedServerIds)
-          response = res.data
-        } else if (activeMode === 'restart') {
-          const res = await bulkApi.restartHAProxy(selectedServerIds)
-          response = res.data
-        }
-      } else if (activeType === 'traffic') {
-        const port = parseInt(trafficForm.port)
-        if (activeMode === 'create') {
-          const res = await bulkApi.addTrackedPort(selectedServerIds, port)
-          response = res.data
-        } else {
-          const res = await bulkApi.removeTrackedPort(selectedServerIds, port)
-          response = res.data
-        }
-      } else if (activeType === 'firewall') {
-        if (activeMode === 'create') {
-          const res = await bulkApi.addFirewallRule(selectedServerIds, {
-            port: parseInt(firewallForm.port),
-            protocol: firewallForm.protocol,
-            action: firewallForm.action,
-            from_ip: firewallForm.from_ip || null,
-            direction: firewallForm.direction,
-          })
-          response = res.data
-        } else {
-          const res = await bulkApi.deleteFirewallRule(
-            selectedServerIds,
-            parseInt(firewallDeleteForm.port)
-          )
-          response = res.data
-        }
-      }
-      
-      setResults(response)
-      const ok = response.filter(r => r.success).length
-      const fail = response.filter(r => !r.success).length
-      if (fail === 0) {
-        toast.success(t('bulk_actions.all_success', { count: ok }))
-      } else if (ok === 0) {
-        toast.error(t('bulk_actions.all_failed', { count: fail }))
-      } else {
-        toast.warning(t('bulk_actions.partial_success', { success: ok, failed: fail }))
-      }
+      const request = resolveJobRequest()
+      const res = await bulkApi.createJob(request.action, selectedServerIds, request.params)
+      await trackJob(res.data.job_id)
     } catch (err: unknown) {
       const error = err as { response?: { data?: { detail?: string } } }
       setFormError(error.response?.data?.detail || t('common.error'))
       toast.error(t('common.action_failed'))
-    } finally {
       setIsExecuting(false)
+      setJobProgress(null)
     }
   }
   
@@ -1015,6 +1078,28 @@ export default function BulkActions() {
                   )}
                 </motion.button>
               </div>
+
+              {isExecuting && jobProgress && (
+                <motion.div
+                  className="mt-4 p-3 bg-dark-800/50 border border-dark-600 rounded-lg"
+                  initial={{ opacity: 0, y: -10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                >
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-sm text-dark-300 flex items-center gap-2">
+                      <Loader2 className="w-4 h-4 animate-spin text-accent-400" />
+                      {t('bulk_actions.job_progress', { done: jobProgress.done, total: jobProgress.total })}
+                    </span>
+                  </div>
+                  <div className="h-2 bg-dark-800 rounded-full overflow-hidden mb-2">
+                    <div
+                      className="h-full bg-accent-500 transition-all duration-300"
+                      style={{ width: `${jobProgress.total > 0 ? (jobProgress.done / jobProgress.total) * 100 : 0}%` }}
+                    />
+                  </div>
+                  <p className="text-xs text-dark-500">{t('bulk_actions.job_background_hint')}</p>
+                </motion.div>
+              )}
             </form>
           </div>
           

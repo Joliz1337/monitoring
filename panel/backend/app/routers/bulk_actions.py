@@ -1,9 +1,9 @@
+from enum import Enum
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
-from pydantic import BaseModel
-import asyncio
+from pydantic import BaseModel, Field, ValidationError
 import httpx
 from app.services.http_client import get_node_client, node_auth_headers
 import logging
@@ -11,14 +11,11 @@ import logging
 from app.database import get_db
 from app.models import Server
 from app.auth import verify_auth
+from app.services.bulk_job_manager import BulkExecutor, get_bulk_job_manager, run_bulk
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/bulk", tags=["bulk"])
-
-
-class BulkServerIds(BaseModel):
-    server_ids: list[int]
 
 
 class BulkHAProxyRuleCreate(BaseModel):
@@ -41,13 +38,15 @@ class BulkHAProxyRuleDelete(BaseModel):
     target_port: int
 
 
-class BulkTrafficPort(BaseModel):
-    server_ids: list[int]
+class TrafficPortParams(BaseModel):
     port: int
 
 
-class BulkFirewallRuleCreate(BaseModel):
+class BulkTrafficPort(TrafficPortParams):
     server_ids: list[int]
+
+
+class FirewallRuleParams(BaseModel):
     port: int
     protocol: str = "any"
     action: str = "allow"
@@ -55,9 +54,26 @@ class BulkFirewallRuleCreate(BaseModel):
     direction: str = "in"
 
 
-class BulkFirewallRuleDelete(BaseModel):
+class BulkFirewallRuleCreate(FirewallRuleParams):
     server_ids: list[int]
+
+
+class FirewallRuleDeleteParams(BaseModel):
     port: int
+
+
+class BulkFirewallRuleDelete(FirewallRuleDeleteParams):
+    server_ids: list[int]
+
+
+class TerminalExecuteParams(BaseModel):
+    command: str
+    timeout: int = 30
+    shell: str = "sh"
+
+
+class BulkTerminalExecute(TerminalExecuteParams):
+    server_ids: list[int]
 
 
 class BulkResult(BaseModel):
@@ -65,6 +81,13 @@ class BulkResult(BaseModel):
     server_name: str
     success: bool
     message: str
+
+
+class BulkTerminalResult(BulkResult):
+    stdout: str = ""
+    stderr: str = ""
+    exit_code: int = -1
+    execution_time_ms: int = 0
 
 
 async def get_servers_by_ids(server_ids: list[int], db: AsyncSession) -> list[Server]:
@@ -84,7 +107,7 @@ async def proxy_request_safe(
 ) -> tuple[bool, dict | str]:
     """Make a proxy request and return (success, result/error)."""
     url = f"{server.url}{endpoint}"
-    
+
     try:
         client = get_node_client(server)
         headers = node_auth_headers(server)
@@ -113,96 +136,27 @@ async def proxy_request_safe(
         return False, str(e)
 
 
-# ==================== HAProxy Service ====================
+# ==================== Executors ====================
+# Действие над одним сервером. Одни и те же executor-функции используются
+# синхронными эндпоинтами (через run_bulk) и фоновыми задачами (/bulk/jobs).
 
-class BulkHAProxyService(BaseModel):
-    server_ids: list[int]
+_HAPROXY_SERVICE_MESSAGES = {
+    "start": "HAProxy started",
+    "stop": "HAProxy stopped",
+    "restart": "HAProxy restarted",
+}
 
 
-@router.post("/haproxy/start", response_model=list[BulkResult])
-async def bulk_start_haproxy(
-    data: BulkHAProxyService,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """Start HAProxy on multiple servers."""
-    servers = await get_servers_by_ids(data.server_ids, db)
-    
-    if not servers:
-        raise HTTPException(status_code=404)
-    
-    async def start_haproxy(server: Server) -> BulkResult:
+def haproxy_service_executor(op: str) -> BulkExecutor:
+    default_msg = _HAPROXY_SERVICE_MESSAGES[op]
+
+    async def run(server: Server) -> BulkResult:
         success, result = await proxy_request_safe(
-            server, "/api/haproxy/start", method="POST"
-        )
-        
-        if success:
-            msg = result.get("message", "HAProxy started") if isinstance(result, dict) else "HAProxy started"
-        else:
-            msg = str(result)
-        
-        return BulkResult(
-            server_id=server.id,
-            server_name=server.name,
-            success=success,
-            message=msg
-        )
-    
-    results = await asyncio.gather(*[start_haproxy(s) for s in servers])
-    return list(results)
-
-
-@router.post("/haproxy/stop", response_model=list[BulkResult])
-async def bulk_stop_haproxy(
-    data: BulkHAProxyService,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """Stop HAProxy on multiple servers."""
-    servers = await get_servers_by_ids(data.server_ids, db)
-    
-    if not servers:
-        raise HTTPException(status_code=404)
-    
-    async def stop_haproxy(server: Server) -> BulkResult:
-        success, result = await proxy_request_safe(
-            server, "/api/haproxy/stop", method="POST"
-        )
-        
-        if success:
-            msg = result.get("message", "HAProxy stopped") if isinstance(result, dict) else "HAProxy stopped"
-        else:
-            msg = str(result)
-        
-        return BulkResult(
-            server_id=server.id,
-            server_name=server.name,
-            success=success,
-            message=msg
-        )
-    
-    results = await asyncio.gather(*[stop_haproxy(s) for s in servers])
-    return list(results)
-
-
-@router.post("/haproxy/restart", response_model=list[BulkResult])
-async def bulk_restart_haproxy(
-    data: BulkHAProxyService,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    servers = await get_servers_by_ids(data.server_ids, db)
-
-    if not servers:
-        raise HTTPException(status_code=404)
-
-    async def restart_haproxy(server: Server) -> BulkResult:
-        success, result = await proxy_request_safe(
-            server, "/api/haproxy/restart", method="POST"
+            server, f"/api/haproxy/{op}", method="POST"
         )
 
         if success:
-            msg = result.get("message", "HAProxy restarted") if isinstance(result, dict) else "HAProxy restarted"
+            msg = result.get("message", default_msg) if isinstance(result, dict) else default_msg
         else:
             msg = str(result)
 
@@ -213,155 +167,29 @@ async def bulk_restart_haproxy(
             message=msg
         )
 
-    results = await asyncio.gather(*[restart_haproxy(s) for s in servers])
-    return list(results)
+    return run
 
 
-# ==================== HAProxy Rules ====================
-
-@router.post("/haproxy/rules", response_model=list[BulkResult])
-async def bulk_create_haproxy_rule(
-    data: BulkHAProxyRuleCreate,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """Create HAProxy rule on multiple servers."""
-    servers = await get_servers_by_ids(data.server_ids, db)
-    
-    if not servers:
-        raise HTTPException(status_code=404)
-    
-    rule_data = {
-        "name": data.name,
-        "rule_type": data.rule_type,
-        "listen_port": data.listen_port,
-        "target_ip": data.target_ip,
-        "target_port": data.target_port,
-        "cert_domain": data.cert_domain,
-        "target_ssl": data.target_ssl,
-        "send_proxy": data.send_proxy,
-        "accept_proxy": data.accept_proxy,
-    }
-    
-    async def create_rule(server: Server) -> BulkResult:
+def traffic_port_add_executor(port: int) -> BulkExecutor:
+    async def run(server: Server) -> BulkResult:
         success, result = await proxy_request_safe(
-            server, "/api/haproxy/rules", method="POST", json_data=rule_data
+            server, "/api/traffic/ports/add", method="POST", json_data={"port": port}
         )
         return BulkResult(
             server_id=server.id,
             server_name=server.name,
             success=success,
-            message="Rule created" if success else str(result)
+            message=f"Port {port} added" if success else str(result)
         )
-    
-    results = await asyncio.gather(*[create_rule(s) for s in servers])
-    return list(results)
+
+    return run
 
 
-@router.delete("/haproxy/rules", response_model=list[BulkResult])
-async def bulk_delete_haproxy_rule(
-    data: BulkHAProxyRuleDelete,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """Delete HAProxy rule by listen_port + target_ip + target_port on multiple servers."""
-    servers = await get_servers_by_ids(data.server_ids, db)
-    
-    if not servers:
-        raise HTTPException(status_code=404)
-    
-    async def delete_rule(server: Server) -> BulkResult:
-        # First, get all rules to find the matching one
-        success, rules_result = await proxy_request_safe(server, "/api/haproxy/rules")
-        
-        if not success:
-            return BulkResult(
-                server_id=server.id,
-                server_name=server.name,
-                success=False,
-                message=f"Failed to get rules: {rules_result}"
-            )
-        
-        # Find matching rule
-        rules = rules_result.get("rules", [])
-        matching_rule = None
-        for rule in rules:
-            if (rule.get("listen_port") == data.listen_port and
-                rule.get("target_ip") == data.target_ip and
-                rule.get("target_port") == data.target_port):
-                matching_rule = rule
-                break
-        
-        if not matching_rule:
-            return BulkResult(
-                server_id=server.id,
-                server_name=server.name,
-                success=False,
-                message=f"Rule not found (port {data.listen_port} -> {data.target_ip}:{data.target_port})"
-            )
-        
-        # Delete the rule
-        rule_name = matching_rule.get("name")
-        success, result = await proxy_request_safe(
-            server, f"/api/haproxy/rules/{rule_name}", method="DELETE"
-        )
-        
-        return BulkResult(
-            server_id=server.id,
-            server_name=server.name,
-            success=success,
-            message=f"Rule '{rule_name}' deleted" if success else str(result)
-        )
-    
-    results = await asyncio.gather(*[delete_rule(s) for s in servers])
-    return list(results)
-
-
-# ==================== Traffic Ports ====================
-
-@router.post("/traffic/ports", response_model=list[BulkResult])
-async def bulk_add_tracked_port(
-    data: BulkTrafficPort,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """Add tracked port on multiple servers."""
-    servers = await get_servers_by_ids(data.server_ids, db)
-    
-    if not servers:
-        raise HTTPException(status_code=404)
-    
-    async def add_port(server: Server) -> BulkResult:
-        success, result = await proxy_request_safe(
-            server, "/api/traffic/ports/add", method="POST", json_data={"port": data.port}
-        )
-        return BulkResult(
-            server_id=server.id,
-            server_name=server.name,
-            success=success,
-            message=f"Port {data.port} added" if success else str(result)
-        )
-    
-    results = await asyncio.gather(*[add_port(s) for s in servers])
-    return list(results)
-
-
-@router.delete("/traffic/ports", response_model=list[BulkResult])
-async def bulk_remove_tracked_port(
-    data: BulkTrafficPort,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """Remove tracked port from multiple servers."""
-    servers = await get_servers_by_ids(data.server_ids, db)
-    
-    if not servers:
-        raise HTTPException(status_code=404)
-    
-    async def remove_port(server: Server) -> BulkResult:
+def traffic_port_remove_executor(port: int) -> BulkExecutor:
+    async def run(server: Server) -> BulkResult:
         # First check if port is tracked
         success, tracked_result = await proxy_request_safe(server, "/api/traffic/ports/tracked")
-        
+
         if not success:
             return BulkResult(
                 server_id=server.id,
@@ -369,96 +197,67 @@ async def bulk_remove_tracked_port(
                 success=False,
                 message=f"Failed to get tracked ports: {tracked_result}"
             )
-        
+
         tracked_ports = tracked_result.get("tracked_ports", [])
-        if data.port not in tracked_ports:
+        if port not in tracked_ports:
             return BulkResult(
                 server_id=server.id,
                 server_name=server.name,
                 success=False,
-                message=f"Port {data.port} is not tracked"
+                message=f"Port {port} is not tracked"
             )
-        
-        # Remove the port
+
         success, result = await proxy_request_safe(
-            server, "/api/traffic/ports/remove", method="POST", json_data={"port": data.port}
+            server, "/api/traffic/ports/remove", method="POST", json_data={"port": port}
         )
-        
+
         return BulkResult(
             server_id=server.id,
             server_name=server.name,
             success=success,
-            message=f"Port {data.port} removed" if success else str(result)
+            message=f"Port {port} removed" if success else str(result)
         )
-    
-    results = await asyncio.gather(*[remove_port(s) for s in servers])
-    return list(results)
+
+    return run
 
 
-# ==================== Firewall Rules ====================
-
-@router.post("/firewall/rules", response_model=list[BulkResult])
-async def bulk_add_firewall_rule(
-    data: BulkFirewallRuleCreate,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """Add firewall rule on multiple servers."""
-    servers = await get_servers_by_ids(data.server_ids, db)
-    
-    if not servers:
-        raise HTTPException(status_code=404)
-    
+def firewall_rule_add_executor(params: FirewallRuleParams) -> BulkExecutor:
     rule_data = {
-        "port": data.port,
-        "protocol": data.protocol,
-        "action": data.action,
-        "from_ip": data.from_ip,
-        "direction": data.direction,
+        "port": params.port,
+        "protocol": params.protocol,
+        "action": params.action,
+        "from_ip": params.from_ip,
+        "direction": params.direction,
     }
-    
-    async def add_rule(server: Server) -> BulkResult:
+
+    async def run(server: Server) -> BulkResult:
         success, result = await proxy_request_safe(
             server, "/api/haproxy/firewall/rule", method="POST", json_data=rule_data
         )
-        
-        if success:
-            # Check response for success field
-            if isinstance(result, dict) and result.get("success") is False:
-                return BulkResult(
-                    server_id=server.id,
-                    server_name=server.name,
-                    success=False,
-                    message=result.get("message", "Failed to add rule")
-                )
-        
+
+        if success and isinstance(result, dict) and result.get("success") is False:
+            return BulkResult(
+                server_id=server.id,
+                server_name=server.name,
+                success=False,
+                message=result.get("message", "Failed to add rule")
+            )
+
         return BulkResult(
             server_id=server.id,
             server_name=server.name,
             success=success,
-            message=f"Firewall rule added (port {data.port})" if success else str(result)
+            message=f"Firewall rule added (port {params.port})" if success else str(result)
         )
-    
-    results = await asyncio.gather(*[add_rule(s) for s in servers])
-    return list(results)
+
+    return run
 
 
-@router.delete("/firewall/rules", response_model=list[BulkResult])
-async def bulk_delete_firewall_rule(
-    data: BulkFirewallRuleDelete,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """Delete firewall rule by port on multiple servers."""
-    servers = await get_servers_by_ids(data.server_ids, db)
-    
-    if not servers:
-        raise HTTPException(status_code=404)
-    
-    async def delete_rule(server: Server) -> BulkResult:
+def firewall_rule_delete_executor(port: int) -> BulkExecutor:
+    async def run(server: Server) -> BulkResult:
         # First get firewall rules to check if port exists
         success, rules_result = await proxy_request_safe(server, "/api/haproxy/firewall/rules")
-        
+
         if not success:
             return BulkResult(
                 server_id=server.id,
@@ -466,23 +265,22 @@ async def bulk_delete_firewall_rule(
                 success=False,
                 message=f"Failed to get firewall rules: {rules_result}"
             )
-        
-        # Find rules matching the port
+
         rules = rules_result.get("rules", [])
-        matching_rules = [r for r in rules if r.get("port") == data.port and not r.get("ipv6", False)]
-        
+        matching_rules = [r for r in rules if r.get("port") == port and not r.get("ipv6", False)]
+
         if not matching_rules:
             return BulkResult(
                 server_id=server.id,
                 server_name=server.name,
                 success=False,
-                message=f"No firewall rule found for port {data.port}"
+                message=f"No firewall rule found for port {port}"
             )
-        
+
         # Delete all matching rules (there may be multiple for tcp/udp)
         deleted_count = 0
         errors = []
-        
+
         for rule in matching_rules:
             rule_number = rule.get("number")
             if rule_number:
@@ -493,65 +291,33 @@ async def bulk_delete_firewall_rule(
                     deleted_count += 1
                 else:
                     errors.append(str(result))
-        
+
         if deleted_count > 0:
             return BulkResult(
                 server_id=server.id,
                 server_name=server.name,
                 success=True,
-                message=f"Deleted {deleted_count} rule(s) for port {data.port}"
+                message=f"Deleted {deleted_count} rule(s) for port {port}"
             )
-        else:
-            return BulkResult(
-                server_id=server.id,
-                server_name=server.name,
-                success=False,
-                message=f"Failed to delete rules: {'; '.join(errors)}"
-            )
-    
-    results = await asyncio.gather(*[delete_rule(s) for s in servers])
-    return list(results)
+        return BulkResult(
+            server_id=server.id,
+            server_name=server.name,
+            success=False,
+            message=f"Failed to delete rules: {'; '.join(errors)}"
+        )
+
+    return run
 
 
-# ==================== Terminal ====================
-
-class BulkTerminalExecute(BaseModel):
-    server_ids: list[int]
-    command: str
-    timeout: int = 30
-    shell: str = "sh"
-
-
-class BulkTerminalResult(BaseModel):
-    server_id: int
-    server_name: str
-    success: bool
-    message: str
-    stdout: str = ""
-    stderr: str = ""
-    exit_code: int = -1
-    execution_time_ms: int = 0
-
-
-@router.post("/terminal/execute", response_model=list[BulkTerminalResult])
-async def bulk_execute_command(
-    data: BulkTerminalExecute,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    servers = await get_servers_by_ids(data.server_ids, db)
-
-    if not servers:
-        raise HTTPException(status_code=404)
-
+def terminal_execute_executor(params: TerminalExecuteParams) -> BulkExecutor:
     exec_data = {
-        "command": data.command,
-        "timeout": min(max(data.timeout, 1), 600),
-        "shell": data.shell if data.shell in ("sh", "bash") else "sh",
+        "command": params.command,
+        "timeout": min(max(params.timeout, 1), 600),
+        "shell": params.shell if params.shell in ("sh", "bash") else "sh",
     }
     request_timeout = float(exec_data["timeout"] + 15)
 
-    async def execute_on_server(server: Server) -> BulkTerminalResult:
+    async def run(server: Server) -> BulkTerminalResult:
         success, result = await proxy_request_safe(
             server, "/api/system/execute", method="POST",
             json_data=exec_data, timeout=request_timeout
@@ -576,8 +342,309 @@ async def bulk_execute_command(
             message=str(result),
         )
 
-    results = await asyncio.gather(*[execute_on_server(s) for s in servers])
-    return list(results)
+    return run
+
+
+# ==================== Background Jobs ====================
+# Операция выполняется в фоне на бэкенде: обрыв связи с фронтом её не прерывает.
+# Фронт опрашивает GET /bulk/jobs/{id} и показывает прогресс.
+
+class BulkJobAction(str, Enum):
+    HAPROXY_START = "haproxy_start"
+    HAPROXY_STOP = "haproxy_stop"
+    HAPROXY_RESTART = "haproxy_restart"
+    TRAFFIC_PORT_ADD = "traffic_port_add"
+    TRAFFIC_PORT_REMOVE = "traffic_port_remove"
+    FIREWALL_RULE_ADD = "firewall_rule_add"
+    FIREWALL_RULE_DELETE = "firewall_rule_delete"
+    TERMINAL_EXECUTE = "terminal_execute"
+
+
+class BulkJobCreate(BaseModel):
+    action: BulkJobAction
+    server_ids: list[int]
+    params: dict = Field(default_factory=dict)
+
+
+def build_job_executor(action: BulkJobAction, params: dict) -> BulkExecutor:
+    try:
+        if action is BulkJobAction.HAPROXY_START:
+            return haproxy_service_executor("start")
+        if action is BulkJobAction.HAPROXY_STOP:
+            return haproxy_service_executor("stop")
+        if action is BulkJobAction.HAPROXY_RESTART:
+            return haproxy_service_executor("restart")
+        if action is BulkJobAction.TRAFFIC_PORT_ADD:
+            return traffic_port_add_executor(TrafficPortParams(**params).port)
+        if action is BulkJobAction.TRAFFIC_PORT_REMOVE:
+            return traffic_port_remove_executor(TrafficPortParams(**params).port)
+        if action is BulkJobAction.FIREWALL_RULE_ADD:
+            return firewall_rule_add_executor(FirewallRuleParams(**params))
+        if action is BulkJobAction.FIREWALL_RULE_DELETE:
+            return firewall_rule_delete_executor(FirewallRuleDeleteParams(**params).port)
+        return terminal_execute_executor(TerminalExecuteParams(**params))
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/jobs", status_code=202)
+async def create_bulk_job(
+    data: BulkJobCreate,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    executor = build_job_executor(data.action, data.params)
+    servers = await get_servers_by_ids(data.server_ids, db)
+
+    if not servers:
+        raise HTTPException(status_code=404)
+
+    job_id = get_bulk_job_manager().start(data.action.value, servers, executor)
+    return {"job_id": job_id}
+
+
+@router.get("/jobs")
+async def list_bulk_jobs(_: dict = Depends(verify_auth)):
+    return {"jobs": get_bulk_job_manager().list_jobs()}
+
+
+@router.get("/jobs/{job_id}")
+async def get_bulk_job(job_id: str, _: dict = Depends(verify_auth)):
+    manager = get_bulk_job_manager()
+    job = manager.get(job_id)
+
+    if job is None:
+        raise HTTPException(status_code=404)
+
+    return manager.job_state(job)
+
+
+# ==================== HAProxy Service ====================
+
+class BulkHAProxyService(BaseModel):
+    server_ids: list[int]
+
+
+@router.post("/haproxy/start", response_model=list[BulkResult])
+async def bulk_start_haproxy(
+    data: BulkHAProxyService,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Start HAProxy on multiple servers."""
+    servers = await get_servers_by_ids(data.server_ids, db)
+
+    if not servers:
+        raise HTTPException(status_code=404)
+
+    return await run_bulk(servers, haproxy_service_executor("start"))
+
+
+@router.post("/haproxy/stop", response_model=list[BulkResult])
+async def bulk_stop_haproxy(
+    data: BulkHAProxyService,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Stop HAProxy on multiple servers."""
+    servers = await get_servers_by_ids(data.server_ids, db)
+
+    if not servers:
+        raise HTTPException(status_code=404)
+
+    return await run_bulk(servers, haproxy_service_executor("stop"))
+
+
+@router.post("/haproxy/restart", response_model=list[BulkResult])
+async def bulk_restart_haproxy(
+    data: BulkHAProxyService,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    servers = await get_servers_by_ids(data.server_ids, db)
+
+    if not servers:
+        raise HTTPException(status_code=404)
+
+    return await run_bulk(servers, haproxy_service_executor("restart"))
+
+
+# ==================== HAProxy Rules ====================
+
+@router.post("/haproxy/rules", response_model=list[BulkResult])
+async def bulk_create_haproxy_rule(
+    data: BulkHAProxyRuleCreate,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Create HAProxy rule on multiple servers."""
+    servers = await get_servers_by_ids(data.server_ids, db)
+
+    if not servers:
+        raise HTTPException(status_code=404)
+
+    rule_data = {
+        "name": data.name,
+        "rule_type": data.rule_type,
+        "listen_port": data.listen_port,
+        "target_ip": data.target_ip,
+        "target_port": data.target_port,
+        "cert_domain": data.cert_domain,
+        "target_ssl": data.target_ssl,
+        "send_proxy": data.send_proxy,
+        "accept_proxy": data.accept_proxy,
+    }
+
+    async def create_rule(server: Server) -> BulkResult:
+        success, result = await proxy_request_safe(
+            server, "/api/haproxy/rules", method="POST", json_data=rule_data
+        )
+        return BulkResult(
+            server_id=server.id,
+            server_name=server.name,
+            success=success,
+            message="Rule created" if success else str(result)
+        )
+
+    return await run_bulk(servers, create_rule)
+
+
+@router.delete("/haproxy/rules", response_model=list[BulkResult])
+async def bulk_delete_haproxy_rule(
+    data: BulkHAProxyRuleDelete,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Delete HAProxy rule by listen_port + target_ip + target_port on multiple servers."""
+    servers = await get_servers_by_ids(data.server_ids, db)
+
+    if not servers:
+        raise HTTPException(status_code=404)
+
+    async def delete_rule(server: Server) -> BulkResult:
+        # First, get all rules to find the matching one
+        success, rules_result = await proxy_request_safe(server, "/api/haproxy/rules")
+
+        if not success:
+            return BulkResult(
+                server_id=server.id,
+                server_name=server.name,
+                success=False,
+                message=f"Failed to get rules: {rules_result}"
+            )
+
+        # Find matching rule
+        rules = rules_result.get("rules", [])
+        matching_rule = None
+        for rule in rules:
+            if (rule.get("listen_port") == data.listen_port and
+                rule.get("target_ip") == data.target_ip and
+                rule.get("target_port") == data.target_port):
+                matching_rule = rule
+                break
+
+        if not matching_rule:
+            return BulkResult(
+                server_id=server.id,
+                server_name=server.name,
+                success=False,
+                message=f"Rule not found (port {data.listen_port} -> {data.target_ip}:{data.target_port})"
+            )
+
+        # Delete the rule
+        rule_name = matching_rule.get("name")
+        success, result = await proxy_request_safe(
+            server, f"/api/haproxy/rules/{rule_name}", method="DELETE"
+        )
+
+        return BulkResult(
+            server_id=server.id,
+            server_name=server.name,
+            success=success,
+            message=f"Rule '{rule_name}' deleted" if success else str(result)
+        )
+
+    return await run_bulk(servers, delete_rule)
+
+
+# ==================== Traffic Ports ====================
+
+@router.post("/traffic/ports", response_model=list[BulkResult])
+async def bulk_add_tracked_port(
+    data: BulkTrafficPort,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Add tracked port on multiple servers."""
+    servers = await get_servers_by_ids(data.server_ids, db)
+
+    if not servers:
+        raise HTTPException(status_code=404)
+
+    return await run_bulk(servers, traffic_port_add_executor(data.port))
+
+
+@router.delete("/traffic/ports", response_model=list[BulkResult])
+async def bulk_remove_tracked_port(
+    data: BulkTrafficPort,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Remove tracked port from multiple servers."""
+    servers = await get_servers_by_ids(data.server_ids, db)
+
+    if not servers:
+        raise HTTPException(status_code=404)
+
+    return await run_bulk(servers, traffic_port_remove_executor(data.port))
+
+
+# ==================== Firewall Rules ====================
+
+@router.post("/firewall/rules", response_model=list[BulkResult])
+async def bulk_add_firewall_rule(
+    data: BulkFirewallRuleCreate,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Add firewall rule on multiple servers."""
+    servers = await get_servers_by_ids(data.server_ids, db)
+
+    if not servers:
+        raise HTTPException(status_code=404)
+
+    return await run_bulk(servers, firewall_rule_add_executor(data))
+
+
+@router.delete("/firewall/rules", response_model=list[BulkResult])
+async def bulk_delete_firewall_rule(
+    data: BulkFirewallRuleDelete,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Delete firewall rule by port on multiple servers."""
+    servers = await get_servers_by_ids(data.server_ids, db)
+
+    if not servers:
+        raise HTTPException(status_code=404)
+
+    return await run_bulk(servers, firewall_rule_delete_executor(data.port))
+
+
+# ==================== Terminal ====================
+
+@router.post("/terminal/execute", response_model=list[BulkTerminalResult])
+async def bulk_execute_command(
+    data: BulkTerminalExecute,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    servers = await get_servers_by_ids(data.server_ids, db)
+
+    if not servers:
+        raise HTTPException(status_code=404)
+
+    return await run_bulk(servers, terminal_execute_executor(data))
 
 
 # ==================== HAProxy Config ====================
@@ -635,8 +702,7 @@ async def bulk_apply_haproxy_config(
             message=str(result),
         )
 
-    results = await asyncio.gather(*[apply_config(s) for s in servers])
-    return list(results)
+    return await run_bulk(servers, apply_config)
 
 
 # ==================== HAProxy Config Find & Replace ====================
@@ -726,5 +792,4 @@ async def bulk_find_replace_haproxy_config(
             message=str(apply_result),
         )
 
-    results = await asyncio.gather(*[find_replace_on_server(s) for s in servers])
-    return list(results)
+    return await run_bulk(servers, find_replace_on_server)

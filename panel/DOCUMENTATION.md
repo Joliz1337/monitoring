@@ -1,4 +1,4 @@
-# Monitoring Panel v10.22.0
+# Monitoring Panel v10.23.0
 
 Веб-панель для мониторинга серверов. Собирает метрики с нод с настраиваемым интервалом (по умолчанию 10 сек) и хранит историю локально.
 
@@ -8,7 +8,7 @@
 - **Server Details** — графики CPU/RAM/Network/TCP States/Load Average History, процессы с фильтрацией, управление питанием (перезагрузка/выключение)
 - **HAProxy** — управление правилами, сертификатами, firewall (UFW)
 - **Traffic** — статистика по интерфейсам и портам, TCP/UDP соединения
-- **Bulk Actions** — массовое создание/удаление правил HAProxy, портов трафика и firewall; терминал с поддержкой режима скрипта (многострочный bash)
+- **Bulk Actions** — массовое создание/удаление правил HAProxy, портов трафика и firewall; терминал с поддержкой режима скрипта (многострочный bash); операции запуска/остановки HAProxy, портов, firewall и терминала можно запустить как **фоновую задачу на бэкенде** (`POST /api/bulk/jobs`) — обрыв связи или закрытие вкладки не прерывает выполнение, прогресс переподключается
 - **IP Blocklist** — блокировка IP/CIDR через ipset с автообновлением списков из GitHub; источники и ручные правила защищены от приватных/служебных диапазонов (bogons)
 - **Remnawave** — интеграция с Remnawave Panel: пользователи, IP-адреса, HWID-устройства, обнаружение аномалий (только ACTIVE пользователи)
 - **Alerts** — Telegram-уведомления о состоянии серверов (offline, CPU, RAM, сеть, TCP)
@@ -126,6 +126,7 @@ panel/
 │       ├── routers/notes.py             # Shared Notes API роутер (SSE + REST)
 │       ├── routers/wildcard_ssl.py      # Wildcard SSL API роутер: CRUD сертификатов, деплой, настройки
 │       ├── routers/firewall_profiles.py # Firewall Profiles API роутер: CRUD профилей и правил, sync, log
+│       ├── routers/bulk_actions.py      # Bulk Actions API роутер: sync-эндпоинты + фоновые задачи /bulk/jobs
 │       └── services/
 │           ├── ssh_manager.py           # Пресеты безопасности SSH + proxy helper
 │           ├── net_utils.py             # Общие сетевые хелперы: is_public_range(), resolve_panel_ip(), host_to_ip()
@@ -133,7 +134,8 @@ panel/
 │           ├── notes_broadcaster.py     # asyncio.Queue-based pub/sub для SSE
 │           ├── wildcard_ssl.py          # Выпуск через certbot + Cloudflare, продление, деплой на ноды, автопродление
 │           ├── firewall_profile_sync.py # Массовая раскатка UFW-профилей: compute_rules_hash, sync_profile_to_servers
-│           └── recovery_reconciler.py   # Авто-восстановление ноды после offline→online: drift-detection + переприменение firewall/haproxy/blocklist
+│           ├── recovery_reconciler.py   # Авто-восстановление ноды после offline→online: drift-detection + переприменение firewall/haproxy/blocklist
+│           └── bulk_job_manager.py      # In-memory реестр фоновых массовых операций (по образцу deploy_job_manager)
 ├── nginx/             # Reverse proxy с SSL
 ├── docker-compose.yml # Образы из GHCR + fallback build
 ├── deploy.sh          # Установка: docker compose pull + up
@@ -671,27 +673,62 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 
 ### Массовые действия (Bulk Actions)
 
+Действия над несколькими серверами одновременно, два режима вызова с общими per-server executor-функциями (`app/routers/bulk_actions.py`):
+
+- **Синхронные эндпоинты** — ответ (`list[BulkResult]`) приходит сразу в теле HTTP-запроса.
+- **Фоновые задачи** (`POST /api/bulk/jobs`) — выполнение продолжается на бэкенде независимо от соединения с фронтом; фронт опрашивает прогресс отдельным запросом. Нужны для операций, которые могут занять дольше, чем терпит один HTTP-запрос (таймаут axios), особенно на большом парке нод.
+
+Оба режима идут через `run_bulk(servers, executor)` (`app/services/bulk_job_manager.py`) — конкурентность запросов к нодам ограничена `asyncio.Semaphore(NODE_CONCURRENCY=20)`; сбой на одной ноде не прерывает остальные (записывается как результат с `success: false`).
+
+**Синхронные эндпоинты:**
+
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
 | POST | /api/bulk/haproxy/start | Запустить HAProxy на выбранных серверах |
 | POST | /api/bulk/haproxy/stop | Остановить HAProxy на выбранных серверах |
+| POST | /api/bulk/haproxy/restart | Перезапустить HAProxy на выбранных серверах |
 | POST | /api/bulk/haproxy/rules | Создать HAProxy правило на выбранных серверах |
 | DELETE | /api/bulk/haproxy/rules | Удалить по listen_port + target_ip + target_port |
+| POST | /api/bulk/haproxy/config | Заменить конфиг HAProxy на выбранных серверах |
+| POST | /api/bulk/haproxy/config/find-replace | Найти и заменить строку в конфиге HAProxy на выбранных серверах |
 | POST | /api/bulk/traffic/ports | Добавить отслеживаемый порт |
 | DELETE | /api/bulk/traffic/ports | Удалить отслеживаемый порт |
 | POST | /api/bulk/firewall/rules | Создать правило firewall |
 | DELETE | /api/bulk/firewall/rules | Удалить правило по порту |
 | POST | /api/bulk/terminal/execute | Выполнить команду на выбранных серверах |
-| POST | /api/bulk/haproxy/config | Заменить конфиг HAProxy на выбранных серверах |
 
-Все bulk-эндпоинты принимают `server_ids: list[int]` и возвращают результат для каждого сервера.
-При удалении выполняется проверка наличия правила перед удалением.
+Все принимают `server_ids: list[int]` и возвращают результат по каждому серверу сразу в ответе. При удалении выполняется проверка наличия правила перед удалением.
 
-**Массовый терминал** (`/bulk/terminal/execute`): принимает `command`, `timeout` (1-600), `shell` (sh/bash). Выполняет команду параллельно на всех серверах через `asyncio.gather`. Возвращает расширенный результат с `stdout`, `stderr`, `exit_code`, `execution_time_ms`.
+**Массовый терминал** (`/bulk/terminal/execute`): принимает `command`, `timeout` (1-600), `shell` (sh/bash). Возвращает расширенный результат с `stdout`, `stderr`, `exit_code`, `execution_time_ms`.
 
 **Массовая замена конфига HAProxy** (`/bulk/haproxy/config`): принимает `config_content` и `reload_after` (default true). Полностью заменяет конфиг HAProxy на выбранных серверах и опционально перезагружает сервис.
 
-**Frontend (BulkActions.tsx):** инпуты port и from_ip занимают доступную ширину колонки (убран max-w-xs).
+**Фоновые задачи (`app/services/bulk_job_manager.py`):**
+
+| Метод | Endpoint | Описание |
+|-------|----------|----------|
+| POST | /api/bulk/jobs | Создать фоновую задачу `{action, server_ids, params}` → `202 {job_id}` |
+| GET | /api/bulk/jobs | Активные и недавно завершённые задачи (для восстановления на фронте): `{jobs: [{job_id, action, status, total, done}]}` |
+| GET | /api/bulk/jobs/{job_id} | Прогресс и результаты: `{job_id, action, status, total, done, results}` |
+
+Доступные `action` (enum `BulkJobAction`): `haproxy_start`, `haproxy_stop`, `haproxy_restart`, `traffic_port_add`, `traffic_port_remove`, `firewall_rule_add`, `firewall_rule_delete`, `terminal_execute`. `params` валидируются pydantic-моделью, специфичной для action (`build_job_executor()`) — несовпадение полей даёт `422`. Массовая замена/find-replace конфига HAProxy в job-модель не вошли — остались только синхронными эндпоинтами.
+
+`BulkJobManager` — in-memory реестр (`_jobs: dict[str, BulkJob]`), без БД:
+- `start()` создаёт `asyncio.create_task` и сразу возвращает `job_id`
+- `BulkJob` (dataclass): `id`, `action`, `total`, `status` (`running`/`completed`), `done`, `results: list[dict]`, `started_at`, `finished_at`, `task`
+- Завершённые задачи хранятся `FINISHED_TTL_SECONDS = 600` сек — фронт успевает переподключиться и посмотреть результат после перезагрузки страницы
+- Executor-функции (`haproxy_service_executor`, `traffic_port_add_executor`, `traffic_port_remove_executor`, `firewall_rule_add_executor`, `firewall_rule_delete_executor`, `terminal_execute_executor`) — module-level фабрики в `bulk_actions.py`, общие для синхронных эндпоинтов и фоновых задач
+
+**Ограничение:** задачи живут в памяти процесса backend — перезапуск контейнера теряет их вместе с результатами; фронт получает `404` при опросе несуществующего `job_id`.
+
+**Frontend (`pages/BulkActions.tsx`):** запуск через `POST /bulk/jobs`, дальше поллинг `GET /bulk/jobs/{id}` каждые 1.5 сек (`JOB_POLL_INTERVAL_MS`). Прогресс-бар «Выполнено N из M» с подсказкой, что операция идёт на сервере панели и обрыв связи её не прервёт; результаты по серверам появляются в списке по мере выполнения. Сетевой сбой самого поллинга не сбрасывает отслеживание (задача на бэке продолжается, опрос повторяется); `404` трактуется как «задача потеряна» (панель перезапускалась). При открытии страницы `GET /bulk/jobs` проверяет наличие running-задачи — если есть, прогресс подхватывается автоматически (toast «прогресс восстановлен»).
+
+**Файлы:**
+- `panel/backend/app/services/bulk_job_manager.py`
+- `panel/backend/app/routers/bulk_actions.py`
+- `panel/frontend/src/api/client.ts` (`bulkApi`, типы `BulkJobAction`, `BulkJobResult`, `BulkJobSummary`, `BulkJob`)
+- `panel/frontend/src/pages/BulkActions.tsx`
+- `panel/frontend/src/locales/ru.json`, `en.json` (namespace `bulk_actions`, ключи `job_progress`, `job_background_hint`, `job_resumed`, `job_lost`)
 
 ### IP Blocklist
 
