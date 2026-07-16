@@ -341,7 +341,12 @@ class MetricsCollector:
             # Таймаут берётся из клиента (_NODE_TIMEOUT = 2/5/2/2) — без лишних аллокаций.
             response = await client.get(url, headers=node_auth_headers(server))
             if response.status_code == 200:
-                return response.json(), None
+                data = response.json()
+                # Момент ответа ноды — база времени для расчёта скоростей.
+                # Сборка снапшотов идёт после gather по всем нодам, и её момент
+                # плавает вместе с самой медленной нодой (см. _build_snapshot).
+                data["collected_at"] = time.time()
+                return data, None
             elif response.status_code == 401 or response.status_code == 403:
                 return None, {"message": ErrorTypes.AUTH_ERROR, "code": response.status_code}
             else:
@@ -390,7 +395,12 @@ class MetricsCollector:
 
     def _build_snapshot(self, server_id: int, metrics: dict, now_utc: datetime) -> Optional[dict]:
         """Build a snapshot dict for batch insert. Returns None if data invalid."""
-        current_time = time.time()
+        # Счётчики байт сняты в момент ответа конкретной ноды, поэтому и dt считаем
+        # между этими моментами. time.time() здесь (после gather по всем нодам) даёт
+        # dt, не совпадающий с реальным интервалом счётчиков: при скачке длительности
+        # цикла (зависшая нода → circuit breaker) скорость завышалась до ~x2
+        # или занижалась до ~x0.5 на один цикл у всех нод сразу.
+        current_time = metrics.get("collected_at") or time.time()
         
         if server_id not in self._server_states:
             self._server_states[server_id] = ServerMetricsState()

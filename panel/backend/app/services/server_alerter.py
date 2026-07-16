@@ -293,7 +293,9 @@ class ServerAlerter:
         raw_rx, raw_tx = self._extract_network(metrics)
         tcp = self._extract_tcp(metrics)
 
-        net_rx_speed, net_tx_speed = self._calc_net_speed(state, raw_rx, raw_tx)
+        net_rx_speed, net_tx_speed = self._calc_net_speed(
+            state, raw_rx, raw_tx, metrics.get("collected_at")
+        )
 
         state.update_ema("ema_cpu", cpu_val)
         state.update_ema("ema_ram", ram_val)
@@ -869,9 +871,19 @@ class ServerAlerter:
         return total.get("rx_bytes", 0) or 0, total.get("tx_bytes", 0) or 0
 
     @staticmethod
-    def _calc_net_speed(state: "ServerAlertState", raw_rx: float, raw_tx: float) -> tuple[float, float]:
-        """Calculate bytes/sec from consecutive cumulative counter readings."""
-        current_time = time.time()
+    def _calc_net_speed(
+        state: "ServerAlertState",
+        raw_rx: float,
+        raw_tx: float,
+        collected_at: Optional[float] = None,
+    ) -> tuple[float, float]:
+        """Calculate bytes/sec from consecutive cumulative counter readings.
+
+        collected_at — момент получения метрик коллектором: счётчики двигаются
+        в темпе опроса нод, а не тиков алертера, поэтому дельту байт делим на
+        интервал между выборками, иначе скорость искажается и даёт ложные алерты.
+        """
+        current_time = collected_at or time.time()
         rx_speed = 0.0
         tx_speed = 0.0
 
