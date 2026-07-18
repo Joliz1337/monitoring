@@ -6,6 +6,7 @@ import asyncio
 import os
 import socket
 import platform
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,12 +21,18 @@ class MetricsCollector:
     Speed calculations are done on the panel side.
     """
     
+    # psutil.cpu_percent(interval=None) меряет от предыдущего вызова; на интервалах
+    # порядка миллисекунд гранулярность jiffies (~10мс) даёт мусор вида
+    # «одно ядро 100%, остальные 0» — не пересэмплируем чаще этого порога
+    CPU_SAMPLE_MIN_INTERVAL = 0.5
+
     def __init__(self):
         self.settings = get_settings()
         # Initialize CPU baseline for non-blocking calls
         psutil.cpu_percent(percpu=True)
         self._last_cpu_percent: list = [0.0] * (psutil.cpu_count() or 1)
-        self._cpu_warmup_calls: int = 0
+        self._last_cpu_sample_at: float = time.monotonic()
+        self._cpu_lock = threading.Lock()
         # Process cache to avoid blocking
         self._processes_cache: list = []
         self._processes_cache_time: float = 0
@@ -45,25 +52,36 @@ class MetricsCollector:
             return fallback.read_text(encoding='utf-8', errors='replace')
         return ""
     
+    def prime_cpu_baseline(self):
+        """Стартовый блокирующий замер (~0.25с) при запуске ноды: первый запрос
+        метрик сразу получает реальные значения per-CPU, а не нули/мусор
+        нулевого интервала."""
+        with self._cpu_lock:
+            self._last_cpu_percent = psutil.cpu_percent(interval=0.25, percpu=True)
+            self._last_cpu_sample_at = time.monotonic()
+
+    def _sample_per_cpu(self) -> list:
+        """Per-CPU % с защитой от слишком коротких интервалов замера.
+
+        Состояние psutil глобально на процесс, а запросы метрик идут из тред-пула:
+        без лока и порога два близких запроса укорачивают интервал друг друга
+        до миллисекунд и получают мусор. Ранним запросам отдаём последний
+        валидный замер."""
+        with self._cpu_lock:
+            now = time.monotonic()
+            if now - self._last_cpu_sample_at >= self.CPU_SAMPLE_MIN_INTERVAL:
+                sampled = psutil.cpu_percent(interval=None, percpu=True)
+                if sampled:
+                    self._last_cpu_percent = sampled
+                    self._last_cpu_sample_at = now
+            return self._last_cpu_percent
+
     def get_cpu_info(self) -> dict:
         """Get CPU information and usage"""
         cpu_count_logical = psutil.cpu_count(logical=True) or 1
         cpu_count_physical = psutil.cpu_count(logical=False) or 1
-        
-        per_cpu = psutil.cpu_percent(interval=None, percpu=True)
-        if per_cpu and all(v == 0.0 for v in per_cpu):
-            per_cpu = self._last_cpu_percent
-        elif per_cpu and self._cpu_warmup_calls < 2:
-            # First few calls after init can return garbage (e.g. one core 100%, rest 0%)
-            # due to insufficient measurement interval — use fallback
-            non_zero = sum(1 for v in per_cpu if v > 0)
-            if non_zero <= 1 and any(v >= 99.0 for v in per_cpu):
-                per_cpu = self._last_cpu_percent
-            else:
-                self._last_cpu_percent = per_cpu
-            self._cpu_warmup_calls += 1
-        else:
-            self._last_cpu_percent = per_cpu
+
+        per_cpu = self._sample_per_cpu()
         
         try:
             load_avg = os.getloadavg()
