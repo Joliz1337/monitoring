@@ -110,12 +110,20 @@ export default function BulkActions() {
     setIsLoading(true)
     try {
       const res = await serversApi.list()
-      setServers(res.data.servers || [])
+      // Деактивированные серверы в массовых действиях не участвуют
+      setServers((res.data.servers || []).filter(s => s.is_active))
     } catch {
       // ignore
     } finally {
       setIsLoading(false)
     }
+  }
+
+  // Офлайн-ноды бэкенд пропускает мгновенно, индикатор предупреждает об этом заранее
+  const statusDotClass = (server: ServerType) => {
+    if (server.status === 'online') return 'bg-success'
+    if (server.status === 'offline') return 'bg-danger'
+    return 'bg-warning'
   }
 
   const groupedServers = useMemo(() => {
@@ -536,7 +544,7 @@ export default function BulkActions() {
                                             <p className="font-medium text-sm text-dark-100 truncate">{server.name}</p>
                                             <p className="text-xs text-dark-500 truncate">{server.url}</p>
                                           </div>
-                                          <div className={`w-2 h-2 rounded-full shrink-0 ${server.is_active ? 'bg-success' : 'bg-dark-600'}`} />
+                                          <div className={`w-2 h-2 rounded-full shrink-0 ${statusDotClass(server)}`} />
                                         </motion.label>
                                       ))}
                                     </div>
@@ -604,7 +612,7 @@ export default function BulkActions() {
                                           <p className="font-medium text-sm text-dark-100 truncate">{server.name}</p>
                                           <p className="text-xs text-dark-500 truncate">{server.url}</p>
                                         </div>
-                                        <div className={`w-2 h-2 rounded-full shrink-0 ${server.is_active ? 'bg-success' : 'bg-dark-600'}`} />
+                                        <div className={`w-2 h-2 rounded-full shrink-0 ${statusDotClass(server)}`} />
                                       </motion.label>
                                     ))}
                                   </div>
@@ -643,7 +651,7 @@ export default function BulkActions() {
                             <p className="font-medium text-dark-100 truncate">{server.name}</p>
                             <p className="text-xs text-dark-500 truncate">{server.url}</p>
                           </div>
-                          <div className={`w-2 h-2 rounded-full ${server.is_active ? 'bg-success' : 'bg-dark-600'}`} />
+                          <div className={`w-2 h-2 rounded-full ${statusDotClass(server)}`} />
                         </motion.label>
                       ))}
                       {filteredGroups.noFolder.length === 0 && (

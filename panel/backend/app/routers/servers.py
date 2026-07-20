@@ -15,9 +15,10 @@ import json
 from app.services.http_client import get_node_client, node_auth_headers, validate_proxy_input
 
 from app.database import get_db
-from app.models import Server, ServerCache, MetricsSnapshot, PanelSettings
+from app.models import Server, ServerCache, MetricsSnapshot
 from app.auth import verify_auth
 from app.services.blocklist_manager import get_blocklist_manager
+from app.services.server_status import get_offline_threshold, resolve_status
 from app.services.time_sync import get_time_sync_service
 import socket
 from app.config import get_settings
@@ -36,8 +37,6 @@ def _resolve_panel_ip() -> str | None:
         return socket.gethostbyname(domain)
     except socket.gaierror:
         return None
-
-DEFAULT_OFFLINE_THRESHOLD = 60
 
 RUSSIAN_MONTHS = {
     "января": 1, "янв": 1,
@@ -101,22 +100,6 @@ def parse_flexible_date(raw: str) -> datetime:
 
     raise ValueError(f"Unrecognized date format: {raw}")
 
-
-def _resolve_status(server: Server, threshold: int = DEFAULT_OFFLINE_THRESHOLD) -> str:
-    """Determine server status tolerant to transient failures.
-
-    Server is 'offline' only if last_seen is older than threshold seconds.
-    A single timeout (last_error set but last_seen still fresh) is 'online'.
-    """
-    if not server.last_seen:
-        return "offline" if server.last_error else "loading"
-
-    now = datetime.now(timezone.utc)
-    age = (now - server.last_seen).total_seconds()
-
-    if age > threshold:
-        return "offline"
-    return "online"
 
 router = APIRouter(prefix="/servers", tags=["servers"])
 
@@ -369,7 +352,7 @@ async def _build_servers_list(db: AsyncSession, include_metrics: bool) -> dict:
     
     snapshots_map = {}
     cache_map: dict[int, ServerCache] = {}
-    offline_threshold = DEFAULT_OFFLINE_THRESHOLD
+    offline_threshold = await get_offline_threshold(db)
     if include_metrics:
         server_ids = [s.id for s in servers]
         snapshots_map = await get_latest_snapshots_bulk(server_ids, db)
@@ -379,13 +362,6 @@ async def _build_servers_list(db: AsyncSession, include_metrics: bool) -> dict:
                 select(ServerCache).where(ServerCache.server_id.in_(server_ids))
             )
             cache_map = {c.server_id: c for c in cache_result.scalars().all()}
-
-        interval_row = await db.execute(
-            select(PanelSettings.value).where(PanelSettings.key == "metrics_collect_interval")
-        )
-        interval_val = interval_row.scalar_one_or_none()
-        collect_interval = int(interval_val) if interval_val else 10
-        offline_threshold = max(DEFAULT_OFFLINE_THRESHOLD, collect_interval * 3 + 30)
 
     servers_data = []
     for s in servers:
@@ -411,13 +387,15 @@ async def _build_servers_list(db: AsyncSession, include_metrics: bool) -> dict:
                 metrics = json.loads(s.last_metrics)
                 snapshot = snapshots_map.get(s.id)
                 server_info["metrics"] = enrich_metrics_with_speeds(metrics, snapshot)
-                server_info["status"] = _resolve_status(s, offline_threshold)
+                server_info["status"] = resolve_status(s, offline_threshold)
             except json.JSONDecodeError:
                 server_info["metrics"] = None
                 server_info["status"] = "error" if s.last_error else "loading"
         elif include_metrics:
             server_info["metrics"] = None
-            server_info["status"] = _resolve_status(s, offline_threshold) if s.last_seen else "loading"
+            server_info["status"] = resolve_status(s, offline_threshold) if s.last_seen else "loading"
+        else:
+            server_info["status"] = resolve_status(s, offline_threshold)
         
         # Traffic data from server_cache table
         cache = cache_map.get(s.id)

@@ -101,6 +101,7 @@ export interface Server {
   last_seen?: string | null
   last_error?: string | null
   error_code?: number | null
+  status?: 'online' | 'offline' | 'loading' | 'error'
   pki_enabled?: boolean
   uses_shared_cert?: boolean
   auth_kind?: 'shared' | 'per_server' | 'legacy'

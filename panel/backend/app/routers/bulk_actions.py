@@ -12,6 +12,7 @@ from app.database import get_db
 from app.models import Server
 from app.auth import verify_auth
 from app.services.bulk_job_manager import BulkExecutor, get_bulk_job_manager, run_bulk
+from app.services.server_status import get_offline_threshold, resolve_status
 
 logger = logging.getLogger(__name__)
 
@@ -91,10 +92,38 @@ class BulkTerminalResult(BulkResult):
 
 
 async def get_servers_by_ids(server_ids: list[int], db: AsyncSession) -> list[Server]:
-    """Get multiple servers by their IDs."""
-    result = await db.execute(select(Server).where(Server.id.in_(server_ids)))
-    servers = result.scalars().all()
-    return list(servers)
+    """Активные серверы по списку id — деактивированные в bulk-операциях не участвуют."""
+    result = await db.execute(
+        select(Server).where(Server.id.in_(server_ids), Server.is_active.is_(True))
+    )
+    return list(result.scalars().all())
+
+
+def skip_offline(executor: BulkExecutor, offline_threshold: int) -> BulkExecutor:
+    """Офлайн-ноды получают мгновенный fail-результат вместо ожидания сетевого таймаута."""
+
+    async def run(server: Server) -> BaseModel:
+        if resolve_status(server, offline_threshold) == "offline":
+            return BulkResult(
+                server_id=server.id,
+                server_name=server.name,
+                success=False,
+                message="Node is offline — skipped",
+            )
+        return await executor(server)
+
+    return run
+
+
+async def run_bulk_for_ids(server_ids: list[int], executor: BulkExecutor, db: AsyncSession) -> list[BaseModel]:
+    """Общий путь синхронных bulk-эндпоинтов: активные серверы, офлайн — пропуск без таймаута."""
+    servers = await get_servers_by_ids(server_ids, db)
+
+    if not servers:
+        raise HTTPException(status_code=404)
+
+    offline_threshold = await get_offline_threshold(db)
+    return await run_bulk(servers, skip_offline(executor, offline_threshold))
 
 
 async def proxy_request_safe(
@@ -399,7 +428,10 @@ async def create_bulk_job(
     if not servers:
         raise HTTPException(status_code=404)
 
-    job_id = get_bulk_job_manager().start(data.action.value, servers, executor)
+    offline_threshold = await get_offline_threshold(db)
+    job_id = get_bulk_job_manager().start(
+        data.action.value, servers, skip_offline(executor, offline_threshold)
+    )
     return {"job_id": job_id}
 
 
@@ -432,12 +464,7 @@ async def bulk_start_haproxy(
     _: dict = Depends(verify_auth)
 ):
     """Start HAProxy on multiple servers."""
-    servers = await get_servers_by_ids(data.server_ids, db)
-
-    if not servers:
-        raise HTTPException(status_code=404)
-
-    return await run_bulk(servers, haproxy_service_executor("start"))
+    return await run_bulk_for_ids(data.server_ids, haproxy_service_executor("start"), db)
 
 
 @router.post("/haproxy/stop", response_model=list[BulkResult])
@@ -447,12 +474,7 @@ async def bulk_stop_haproxy(
     _: dict = Depends(verify_auth)
 ):
     """Stop HAProxy on multiple servers."""
-    servers = await get_servers_by_ids(data.server_ids, db)
-
-    if not servers:
-        raise HTTPException(status_code=404)
-
-    return await run_bulk(servers, haproxy_service_executor("stop"))
+    return await run_bulk_for_ids(data.server_ids, haproxy_service_executor("stop"), db)
 
 
 @router.post("/haproxy/restart", response_model=list[BulkResult])
@@ -461,12 +483,7 @@ async def bulk_restart_haproxy(
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    servers = await get_servers_by_ids(data.server_ids, db)
-
-    if not servers:
-        raise HTTPException(status_code=404)
-
-    return await run_bulk(servers, haproxy_service_executor("restart"))
+    return await run_bulk_for_ids(data.server_ids, haproxy_service_executor("restart"), db)
 
 
 # ==================== HAProxy Rules ====================
@@ -478,11 +495,6 @@ async def bulk_create_haproxy_rule(
     _: dict = Depends(verify_auth)
 ):
     """Create HAProxy rule on multiple servers."""
-    servers = await get_servers_by_ids(data.server_ids, db)
-
-    if not servers:
-        raise HTTPException(status_code=404)
-
     rule_data = {
         "name": data.name,
         "rule_type": data.rule_type,
@@ -506,7 +518,7 @@ async def bulk_create_haproxy_rule(
             message="Rule created" if success else str(result)
         )
 
-    return await run_bulk(servers, create_rule)
+    return await run_bulk_for_ids(data.server_ids, create_rule, db)
 
 
 @router.delete("/haproxy/rules", response_model=list[BulkResult])
@@ -516,11 +528,6 @@ async def bulk_delete_haproxy_rule(
     _: dict = Depends(verify_auth)
 ):
     """Delete HAProxy rule by listen_port + target_ip + target_port on multiple servers."""
-    servers = await get_servers_by_ids(data.server_ids, db)
-
-    if not servers:
-        raise HTTPException(status_code=404)
-
     async def delete_rule(server: Server) -> BulkResult:
         # First, get all rules to find the matching one
         success, rules_result = await proxy_request_safe(server, "/api/haproxy/rules")
@@ -564,7 +571,7 @@ async def bulk_delete_haproxy_rule(
             message=f"Rule '{rule_name}' deleted" if success else str(result)
         )
 
-    return await run_bulk(servers, delete_rule)
+    return await run_bulk_for_ids(data.server_ids, delete_rule, db)
 
 
 # ==================== Traffic Ports ====================
@@ -576,12 +583,7 @@ async def bulk_add_tracked_port(
     _: dict = Depends(verify_auth)
 ):
     """Add tracked port on multiple servers."""
-    servers = await get_servers_by_ids(data.server_ids, db)
-
-    if not servers:
-        raise HTTPException(status_code=404)
-
-    return await run_bulk(servers, traffic_port_add_executor(data.port))
+    return await run_bulk_for_ids(data.server_ids, traffic_port_add_executor(data.port), db)
 
 
 @router.delete("/traffic/ports", response_model=list[BulkResult])
@@ -591,12 +593,7 @@ async def bulk_remove_tracked_port(
     _: dict = Depends(verify_auth)
 ):
     """Remove tracked port from multiple servers."""
-    servers = await get_servers_by_ids(data.server_ids, db)
-
-    if not servers:
-        raise HTTPException(status_code=404)
-
-    return await run_bulk(servers, traffic_port_remove_executor(data.port))
+    return await run_bulk_for_ids(data.server_ids, traffic_port_remove_executor(data.port), db)
 
 
 # ==================== Firewall Rules ====================
@@ -608,12 +605,7 @@ async def bulk_add_firewall_rule(
     _: dict = Depends(verify_auth)
 ):
     """Add firewall rule on multiple servers."""
-    servers = await get_servers_by_ids(data.server_ids, db)
-
-    if not servers:
-        raise HTTPException(status_code=404)
-
-    return await run_bulk(servers, firewall_rule_add_executor(data))
+    return await run_bulk_for_ids(data.server_ids, firewall_rule_add_executor(data), db)
 
 
 @router.delete("/firewall/rules", response_model=list[BulkResult])
@@ -623,12 +615,7 @@ async def bulk_delete_firewall_rule(
     _: dict = Depends(verify_auth)
 ):
     """Delete firewall rule by port on multiple servers."""
-    servers = await get_servers_by_ids(data.server_ids, db)
-
-    if not servers:
-        raise HTTPException(status_code=404)
-
-    return await run_bulk(servers, firewall_rule_delete_executor(data.port))
+    return await run_bulk_for_ids(data.server_ids, firewall_rule_delete_executor(data.port), db)
 
 
 # ==================== Terminal ====================
@@ -639,12 +626,7 @@ async def bulk_execute_command(
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    servers = await get_servers_by_ids(data.server_ids, db)
-
-    if not servers:
-        raise HTTPException(status_code=404)
-
-    return await run_bulk(servers, terminal_execute_executor(data))
+    return await run_bulk_for_ids(data.server_ids, terminal_execute_executor(data), db)
 
 
 # ==================== HAProxy Config ====================
@@ -661,11 +643,6 @@ async def bulk_apply_haproxy_config(
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    servers = await get_servers_by_ids(data.server_ids, db)
-
-    if not servers:
-        raise HTTPException(status_code=404)
-
     config_data = {
         "config_content": data.config_content,
         "reload_after": data.reload_after,
@@ -702,7 +679,7 @@ async def bulk_apply_haproxy_config(
             message=str(result),
         )
 
-    return await run_bulk(servers, apply_config)
+    return await run_bulk_for_ids(data.server_ids, apply_config, db)
 
 
 # ==================== HAProxy Config Find & Replace ====================
@@ -720,11 +697,6 @@ async def bulk_find_replace_haproxy_config(
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    servers = await get_servers_by_ids(data.server_ids, db)
-
-    if not servers:
-        raise HTTPException(status_code=404)
-
     if not data.search:
         raise HTTPException(status_code=400, detail="Search string cannot be empty")
 
@@ -792,4 +764,4 @@ async def bulk_find_replace_haproxy_config(
             message=str(apply_result),
         )
 
-    return await run_bulk(servers, find_replace_on_server)
+    return await run_bulk_for_ids(data.server_ids, find_replace_on_server, db)

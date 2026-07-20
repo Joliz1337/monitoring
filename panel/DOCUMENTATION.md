@@ -1,4 +1,4 @@
-# Monitoring Panel v10.24.0
+# Monitoring Panel v10.25.0
 
 Веб-панель для мониторинга серверов. Собирает метрики с нод с настраиваемым интервалом (по умолчанию 10 сек) и хранит историю локально.
 
@@ -8,7 +8,7 @@
 - **Server Details** — графики CPU/RAM/Network/TCP States/Load Average History, процессы с фильтрацией, управление питанием (перезагрузка/выключение)
 - **HAProxy** — управление правилами, сертификатами, firewall (UFW)
 - **Traffic** — статистика по интерфейсам и портам, TCP/UDP соединения
-- **Bulk Actions** — массовое создание/удаление правил HAProxy, портов трафика и firewall; терминал с поддержкой режима скрипта (многострочный bash); операции запуска/остановки HAProxy, портов, firewall и терминала можно запустить как **фоновую задачу на бэкенде** (`POST /api/bulk/jobs`) — обрыв связи или закрытие вкладки не прерывает выполнение, прогресс переподключается
+- **Bulk Actions** — массовое создание/удаление правил HAProxy, портов трафика и firewall; терминал с поддержкой режима скрипта (многострочный bash); операции запуска/остановки HAProxy, портов, firewall и терминала можно запустить как **фоновую задачу на бэкенде** (`POST /api/bulk/jobs`) — обрыв связи или закрытие вкладки не прерывает выполнение, прогресс переподключается; деактивированные серверы не участвуют; офлайн-ноды пропускаются мгновенно, без ожидания сетевого таймаута
 - **IP Blocklist** — блокировка IP/CIDR через ipset с автообновлением списков из GitHub; источники и ручные правила защищены от приватных/служебных диапазонов (bogons)
 - **Remnawave** — интеграция с Remnawave Panel: пользователи, IP-адреса, HWID-устройства, обнаружение аномалий (только ACTIVE пользователи)
 - **Alerts** — Telegram-уведомления о состоянии серверов (offline, CPU, RAM, сеть, TCP)
@@ -436,6 +436,8 @@ interface NicInfo {
 
 Поле `proxy_url` в `ServerCreate`/`ServerUpdate` и во всех ответах (`GET /servers`, `GET /servers/{id}`, `POST /servers`) — см. «SOCKS5-прокси до ноды» ниже.
 
+`GET /servers` без `include_metrics` (лёгкий путь, не кэшируется) тоже возвращает поле `status` (`online`/`offline`/`loading`) — раньше оно отдавалось только вместе с метриками. Оба пути используют общий `resolve_status()` из `app/services/server_status.py` (см. «Массовые действия (Bulk Actions)» ниже — тот же модуль лежит в основе пропуска офлайн-нод в bulk-операциях).
+
 ### SOCKS5-прокси до ноды
 
 Опциональное поле сервера `proxy_url`: при заполнении **все** запросы панели к этой ноде идут через указанный SOCKS5-прокси вместо прямого соединения — и HTTP (сбор метрик, proxy-роутер `/api/proxy/{id}/...`, sync-сервисы IP Blocklist/Анти-DDoS, SSE-терминал, тест подключения), и SSH-подключение при авторазвёртывании ноды. Единый способ обслуживать ноду, находящуюся за NAT/файрволом, — до установки и после. По образцу аналогичной функции в Remnawave. Для HTTP-трафика новых зависимостей не потребовалось — `httpx[socks,http2]` уже был в `requirements.txt`; для SSH добавлена зависимость `python-socks==2.8.2` (async SOCKS5-клиент, нужен именно для `asyncssh` — у него нет встроенной поддержки SOCKS).
@@ -694,6 +696,10 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 
 Оба режима идут через `run_bulk(servers, executor)` (`app/services/bulk_job_manager.py`) — конкурентность запросов к нодам ограничена `asyncio.Semaphore(NODE_CONCURRENCY=20)`; сбой на одной ноде не прерывает остальные (записывается как результат с `success: false`).
 
+`get_servers_by_ids()` выбирает только активные серверы (`Server.id.in_(ids), Server.is_active.is_(True)`) — деактивированный сервер не участвует в bulk-операции, даже если его id передан в запросе явно.
+
+Обёртка `skip_offline(executor, threshold)` перед вызовом executor'а проверяет статус ноды через `resolve_status()` (`app/services/server_status.py`, тот же модуль, что и в «Серверы» выше) — если нода офлайн по данным метрик-коллектора, executor не вызывается вовсе: результат `"Node is offline — skipped"` возвращается мгновенно вместо ожидания сетевого таймаута (до 30с на ноду). Применяется единообразно во всех синхронных эндпоинтах (через общий helper `run_bulk_for_ids(server_ids, executor, db)` — выборка активных серверов, `404` если пусто, `run_bulk` со `skip_offline`) и в фоновых задачах `POST /bulk/jobs`.
+
 **Синхронные эндпоинты:**
 
 | Метод | Endpoint | Описание |
@@ -738,10 +744,11 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 **Frontend (`pages/BulkActions.tsx`):** запуск через `POST /bulk/jobs`, дальше поллинг `GET /bulk/jobs/{id}` каждые 1.5 сек (`JOB_POLL_INTERVAL_MS`). Прогресс-бар «Выполнено N из M» с подсказкой, что операция идёт на сервере панели и обрыв связи её не прервёт; результаты по серверам появляются в списке по мере выполнения. Сетевой сбой самого поллинга не сбрасывает отслеживание (задача на бэке продолжается, опрос повторяется); `404` трактуется как «задача потеряна» (панель перезапускалась). При открытии страницы `GET /bulk/jobs` проверяет наличие running-задачи — если есть, прогресс подхватывается автоматически (toast «прогресс восстановлен»).
 
 **Файлы:**
+- `panel/backend/app/services/server_status.py` (`resolve_status()`, `get_offline_threshold()` — общий модуль, см. также «Серверы» выше)
 - `panel/backend/app/services/bulk_job_manager.py`
 - `panel/backend/app/routers/bulk_actions.py`
-- `panel/frontend/src/api/client.ts` (`bulkApi`, типы `BulkJobAction`, `BulkJobResult`, `BulkJobSummary`, `BulkJob`)
-- `panel/frontend/src/pages/BulkActions.tsx`
+- `panel/frontend/src/api/client.ts` (`bulkApi`, типы `BulkJobAction`, `BulkJobResult`, `BulkJobSummary`, `BulkJob`; поле `status?: 'online' | 'offline' | 'loading' | 'error'` в `Server`)
+- `panel/frontend/src/pages/BulkActions.tsx` (скрывает деактивированные серверы из списка выбора; индикатор-точка показывает реальный статус — зелёная online, красная offline, жёлтая loading)
 - `panel/frontend/src/locales/ru.json`, `en.json` (namespace `bulk_actions`, ключи `job_progress`, `job_background_hint`, `job_resumed`, `job_lost`)
 
 ### IP Blocklist
