@@ -90,11 +90,15 @@ class HAProxyConfigGenerator:
         self.ulimit = ulimit
     
     def generate_base_config(self) -> str:
-        """Generate base HAProxy config for high-speed TCP proxying"""
+        """Generate base HAProxy config for high-speed TCP proxying.
+
+        Без maxconn в global: профиль применяется на серверы с разной RAM,
+        поэтому потолок соединений вычисляет и подставляет нода при применении
+        (HAProxyManager._ensure_global_maxconn)."""
         return f"""global
     stats socket /var/run/haproxy.sock mode 660 level admin expose-fd listeners
     no log
-    tune.bufsize 32768
+    tune.bufsize 16384
     tune.maxpollevents 1024
     tune.recv_enough 16384
 
@@ -103,7 +107,7 @@ defaults
     timeout connect 5s
     timeout client 30m
     timeout server 30m
-    timeout tunnel 2h
+    timeout tunnel 1h
     timeout client-fin 5s
     timeout server-fin 5s
     option dontlognull
@@ -112,7 +116,13 @@ defaults
     option tcp-smart-connect
     option splice-auto
     option clitcpka
+    clitcpka-idle 60s
+    clitcpka-intvl 10s
+    clitcpka-cnt 3
     option srvtcpka
+    srvtcpka-idle 60s
+    srvtcpka-intvl 10s
+    srvtcpka-cnt 3
 
 resolvers mydns
     nameserver dns1 1.1.1.1:53

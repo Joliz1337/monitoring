@@ -1,4 +1,4 @@
-# Monitoring Panel v10.23.2
+# Monitoring Panel v10.24.0
 
 Веб-панель для мониторинга серверов. Собирает метрики с нод с настраиваемым интервалом (по умолчанию 10 сек) и хранит историю локально.
 
@@ -656,6 +656,14 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 В форме создания/редактирования HTTPS-правила в `HAProxy.tsx` доступен тумблер «Wildcard сертификат». При включении `use_wildcard=True` нода извлекает родительский домен через `_extract_parent_domain()` в `haproxy_manager.py` и использует его для поиска сертификата вместо точного домена из поля `cert_domain`. Аналогичный параметр доступен в форме Bulk Actions (`BulkActions.tsx`).
 
 Логика в `panel/backend/app/services/haproxy_config.py` и `node/app/services/haproxy_manager.py` при `use_wildcard=True` заменяет домен сертификата на родительский перед генерацией строки `crt` в конфиге HAProxy.
+
+**Базовый шаблон конфига — память под нагруженными нодами (v10.24.0):**
+
+По итогам инцидента на нагруженной ноде (одно правило держало ~115k сессий HAProxy, из которых ~99k — мёртвые туннели от клиентов за NAT/ТСПУ, обрывающихся без FIN; каждая держала 32 КБ буфера вплоть до `timeout tunnel`, суммарно HAProxy съедал ~4 ГБ RSS) базовый шаблон (`generate_base_config()` в `haproxy_config.py`, тот же шаблон дублируется в `node/app/services/haproxy_manager.py`) изменён: `tune.bufsize` 32768 → 16384, `timeout tunnel` 2h → 1h, добавлены интервалы TCP keepalive (`clitcpka-idle 60s`/`-intvl 10s`/`-cnt 3`, аналогично `srvtcpka-*`) — мёртвое соединение детектится ядром за ~1.5 минуты вместо часов ожидания `timeout tunnel`.
+
+Панельный шаблон **не** содержит `maxconn` в секции `global` — один профиль применяется на серверы с разной RAM, поэтому потолок соединений вычисляет и подставляет сама нода при `apply_config()` (см. «Лимит соединений (maxconn)» в [node/DOCUMENTATION.md](../node/DOCUMENTATION.md#haproxy)).
+
+Существующие профили получают новый шаблон через кнопку «Перегенерировать конфиг» (`POST /haproxy-profiles/{id}/regenerate-config`) — новые профили создаются с ним сразу.
 
 ### Сертификаты
 
@@ -1701,6 +1709,7 @@ Whitelist можно наполнять из внешних списков по 
 | POST | /haproxy-profiles/{id}/sync | Синхронизировать профиль на все привязанные серверы |
 | POST | /haproxy-profiles/{id}/sync/{server_id} | Синхронизировать на один сервер |
 | GET | /haproxy-profiles/{id}/log | История синхронизаций |
+| POST | /haproxy-profiles/{id}/regenerate-config | Перегенерировать конфиг из текущих правил (актуальный базовый шаблон) |
 | GET | /haproxy-profiles/{id}/servers-status | Статусы серверов профиля (включая `online: bool`) |
 | POST | /haproxy-profiles/validate | Валидировать config_content без сохранения → `{valid, message}` |
 | GET | /haproxy-profiles/available-servers | Серверы доступные для привязки |

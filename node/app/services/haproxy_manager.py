@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+import psutil
+
 from app.config import get_settings
 from app.services.host_executor import get_host_executor
 
@@ -18,6 +20,10 @@ logger = logging.getLogger(__name__)
 
 RULES_START_MARKER = "# === RULES START ==="
 RULES_END_MARKER = "# === RULES END ==="
+
+MAXCONN_PER_RAM_MB = 10
+MAXCONN_MIN = 10000
+MAXCONN_MAX = 500000
 
 
 @dataclass
@@ -148,12 +154,41 @@ class HAProxyManager:
         if backup_path.exists():
             shutil.copy(backup_path, self.config_path)
     
+    def _compute_maxconn(self) -> int:
+        """Потолок соединений от RAM хоста: ~40 КБ на соединение в худшем случае
+        (2 буфера по 16 КБ + структуры сессии), 10 соединений на МБ RAM — HAProxy
+        займёт не больше ~40% памяти. Дополнительно ограничен fs.nr_open (~2 fd
+        на соединение + запас): при явном maxconn выше возможного fd-лимита
+        strict-limits не даст HAProxy стартовать."""
+        ram_mb = psutil.virtual_memory().total // (1024 * 1024)
+        nr_open = 1048576
+        try:
+            nr_open = int(Path("/proc/sys/fs/nr_open").read_text().strip())
+        except (OSError, ValueError):
+            pass
+        fd_based = (nr_open - 1024) // 3
+        return max(MAXCONN_MIN, min(ram_mb * MAXCONN_PER_RAM_MB, fd_based, MAXCONN_MAX))
+
+    def _ensure_global_maxconn(self, content: str) -> str:
+        """Вставляет рассчитанный maxconn в секцию global, если он не задан явно.
+
+        Конфиг из панельного профиля один на много серверов с разной RAM,
+        поэтому потолок соединений вычисляется на ноде при применении."""
+        global_match = re.search(r'^global[ \t]*\n((?:[ \t]+\S.*\n?)*)', content, re.MULTILINE)
+        if not global_match:
+            return content
+        if re.search(r'^[ \t]+maxconn\b', global_match.group(1), re.MULTILINE):
+            return content
+        insert_pos = global_match.start(1)
+        return content[:insert_pos] + f"    maxconn {self._compute_maxconn()}\n" + content[insert_pos:]
+
     def _generate_base_config(self) -> str:
         """Generate base HAProxy config for high-speed TCP relay"""
         return f"""global
     stats socket /var/run/haproxy.sock mode 660 level admin expose-fd listeners
     no log
-    tune.bufsize 32768
+    maxconn {self._compute_maxconn()}
+    tune.bufsize 16384
     tune.maxpollevents 1024
     tune.recv_enough 16384
 
@@ -162,7 +197,7 @@ defaults
     timeout connect 5s
     timeout client 30m
     timeout server 30m
-    timeout tunnel 2h
+    timeout tunnel 1h
     timeout client-fin 5s
     timeout server-fin 5s
     option dontlognull
@@ -171,7 +206,13 @@ defaults
     option tcp-smart-connect
     option splice-auto
     option clitcpka
+    clitcpka-idle 60s
+    clitcpka-intvl 10s
+    clitcpka-cnt 3
     option srvtcpka
+    srvtcpka-idle 60s
+    srvtcpka-intvl 10s
+    srvtcpka-cnt 3
 
 resolvers mydns
     nameserver dns1 1.1.1.1:53
@@ -1029,6 +1070,7 @@ backend {backend_name}
 
         try:
             config_content = self._patch_dns_resolvers(config_content)
+            config_content = self._ensure_global_maxconn(config_content)
             self._write_config(config_content)
         except Exception as e:
             return False, f"Failed to write config: {e}", False
