@@ -685,6 +685,7 @@
     "update": "Обновить",
     "update_panel": "Обновить панель",
     "update_all_nodes": "Обновить все ноды",
+    "dev_channel_badge": "Dev-канал: обновление доступно всегда",
     "in_progress": "Обновление...",
     "panel_restarting": "Панель перезапускается...",
     "waiting_reboot": "Ожидание перезапуска панели...",

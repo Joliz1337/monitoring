@@ -18,6 +18,7 @@ import { useTranslation } from 'react-i18next'
 import { systemApi, VersionBaseInfo, SingleNodeVersion } from '../api/client'
 import { Skeleton } from '../components/ui/Skeleton'
 import { FAQIcon } from '../components/FAQ'
+import { useSettingsStore } from '../stores/settingsStore'
 
 type NodeLoadState = 'pending' | 'loading' | 'loaded' | 'error'
 
@@ -62,6 +63,9 @@ async function isPanelBackendAlive(): Promise<boolean> {
 
 export default function Updates() {
   const { t } = useTranslation()
+  const { updateBranch, fetchSettings } = useSettingsStore()
+  // На dev-ветке версии между пушами могут не меняться — обновление разрешено всегда
+  const isDevChannel = updateBranch === 'dev'
 
   const [baseInfo, setBaseInfo] = useState<VersionBaseInfo | null>(null)
   const [loading, setLoading] = useState(true)
@@ -174,9 +178,10 @@ export default function Updates() {
   }, [t, fetchNodeVersion])
 
   useEffect(() => {
+    fetchSettings()
     fetchBase()
     return () => { abortRef.current = true }
-  }, [fetchBase])
+  }, [fetchSettings, fetchBase])
 
   useEffect(() => {
     const id = setInterval(() => {
@@ -289,11 +294,11 @@ export default function Updates() {
     if (updatingAll || !baseInfo) return
 
     setUpdatingAll(true)
-    const outdated = Array.from(nodes.values()).filter(n =>
-      n.loadState === 'loaded' && n.status === 'online' && getNodeNeedsUpdate(n)
+    const targets = Array.from(nodes.values()).filter(n =>
+      n.loadState === 'loaded' && n.status === 'online' && (isDevChannel || getNodeNeedsUpdate(n))
     )
 
-    await Promise.all(outdated.map(n => handleUpdateNode(n.id, n.name)))
+    await Promise.all(targets.map(n => handleUpdateNode(n.id, n.name)))
 
     setUpdatingAll(false)
   }
@@ -307,6 +312,11 @@ export default function Updates() {
   const nodesNeedUpdate = loadedNodes.filter(n =>
     n.loadState === 'loaded' && n.status === 'online' && getNodeNeedsUpdate(n)
   ).length
+  const onlineNodesCount = loadedNodes.filter(n =>
+    n.loadState === 'loaded' && n.status === 'online'
+  ).length
+  // На dev-канале кнопка «Обновить все» доступна для всех онлайн-нод
+  const updateAllCount = isDevChannel ? onlineNodesCount : nodesNeedUpdate
 
   const allNodesLoaded = loadedNodes.every(n => n.loadState === 'loaded' || n.loadState === 'error')
 
@@ -349,6 +359,11 @@ export default function Updates() {
           >
             <Package className="w-7 h-7 text-accent-400" />
             {t('updates.title')}
+            {isDevChannel && (
+              <span className="px-2.5 py-1 text-xs font-medium rounded-full bg-warning/15 text-warning border border-warning/20">
+                {t('updates.dev_channel_badge')}
+              </span>
+            )}
             <FAQIcon screen="PAGE_UPDATES" />
           </motion.h1>
           <motion.p
@@ -470,7 +485,7 @@ export default function Updates() {
 
             <motion.button
               onClick={handleUpdatePanel}
-              disabled={updatingPanel || !baseInfo?.panel.update_available}
+              disabled={updatingPanel || (!baseInfo?.panel.update_available && !isDevChannel)}
               className="btn btn-primary"
               whileHover={{ scale: 1.02 }}
               whileTap={{ scale: 0.98 }}
@@ -507,10 +522,10 @@ export default function Updates() {
             )}
           </div>
 
-          {nodesNeedUpdate > 0 && (
+          {updateAllCount > 0 && (
             <motion.button
               onClick={handleUpdateAllNodes}
-              disabled={updatingAll || nodesNeedUpdate === 0}
+              disabled={updatingAll}
               className="btn btn-secondary"
               whileHover={{ scale: 1.02 }}
               whileTap={{ scale: 0.98 }}
@@ -520,7 +535,7 @@ export default function Updates() {
               ) : (
                 <ArrowUpCircle className="w-4 h-4" />
               )}
-              {t('updates.update_all_nodes')} ({nodesNeedUpdate})
+              {t('updates.update_all_nodes')} ({updateAllCount})
             </motion.button>
           )}
         </div>
@@ -657,7 +672,7 @@ export default function Updates() {
 
                       <motion.button
                         onClick={() => handleUpdateNode(node.id, node.name)}
-                        disabled={isUpdating || isNodeLoading || node.status === 'offline' || !needsUpdate}
+                        disabled={isUpdating || isNodeLoading || node.status === 'offline' || (!needsUpdate && !isDevChannel)}
                         className="btn btn-secondary text-xs px-3 py-1.5 flex-shrink-0"
                         whileHover={{ scale: 1.05 }}
                         whileTap={{ scale: 0.95 }}
