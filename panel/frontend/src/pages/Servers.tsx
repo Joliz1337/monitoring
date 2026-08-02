@@ -1,0 +1,1471 @@
+import { useState, useEffect, useMemo, useRef, FormEvent } from 'react'
+import { motion, AnimatePresence } from 'framer-motion'
+import {
+  Plus,
+  Trash2,
+  Server as ServerIcon,
+  CheckCircle2,
+  XCircle,
+  Loader2,
+  ExternalLink,
+  Edit2,
+  X,
+  Link as LinkIcon,
+  AlertTriangle,
+  Power,
+  Copy,
+  Check,
+  Globe,
+  Zap,
+  ShieldCheck,
+  ShieldAlert,
+  Search,
+  Rocket,
+  Terminal,
+  PlusCircle,
+} from 'lucide-react'
+import { useServersStore } from '../stores/serversStore'
+import { useTranslation } from 'react-i18next'
+import { toast } from 'sonner'
+import {
+  serversApi,
+  systemApi,
+  serverDeployJobStreamUrl,
+  ServerDeployEvent,
+  RemnawaveCertProfile,
+  haproxyProfilesApi,
+  firewallProfilesApi,
+  HAProxyConfigProfile,
+  FirewallProfile,
+} from '../api/client'
+import { streamNdjsonGet, StreamUnauthorizedError } from '../utils/ndjsonStream'
+import InfraTree from '../components/Infra/InfraTree'
+import { Tooltip } from '../components/ui/Tooltip'
+import { CopyableIp } from '../components/ui/CopyableIp'
+import { extractHost } from '../utils/format'
+import { FAQIcon } from '../components/FAQ'
+import MigrationBanner from '../components/MigrationBanner'
+import DeployTargetFields, { DEPLOY_DEFAULTS, type DeployFormData } from '../components/servers/DeployTargetFields'
+import ExtraServerCard, { type ExtraTarget, type DeployStatus } from '../components/servers/ExtraServerCard'
+
+interface ServerFormData {
+  name: string
+  host: string
+  port: string
+  proxy: string
+}
+
+// SOCKS5-прокси панель→нода: ip:port или ip:port@login:pass (пароль может содержать ':' и '@')
+const PROXY_RE = /^[^\s:@/]+:\d{1,5}(@[^\s:@/]+:\S+)?$/
+
+const makeExtraTarget = (seed: DeployFormData): ExtraTarget => ({
+  id: typeof crypto !== 'undefined' && 'randomUUID' in crypto
+    ? crypto.randomUUID()
+    : `t-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+  name: '',
+  host: '',
+  port: '9100',
+  proxy: '',
+  deploy: { ...seed, enabled: true },
+  status: 'idle',
+  log: [],
+  error: null,
+})
+
+const parseServerUrl = (url: string): { host: string; port: string } => {
+  const match = url.match(/^https?:\/\/([^:/]+):?(\d+)?/)
+  return {
+    host: match?.[1] || '',
+    port: match?.[2] || '9100'
+  }
+}
+
+const buildServerUrl = (host: string, port: string): string => {
+  return `https://${host}:${port || '9100'}`
+}
+
+// Лог установки приходит с ANSI-кодами и \r-перерисовкой спиннеров —
+// берём последний сегмент после \r и вырезаем управляющие последовательности
+const cleanLogLine = (line: string): string => {
+  const visible = line.split('\r').pop() ?? line
+  // eslint-disable-next-line no-control-regex
+  return visible.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b/g, '').trimEnd()
+}
+
+// Установка идёт в фоне на бэке — после успеха показываем результат и убираем
+const AUTO_HIDE_MS = 6000
+
+// Незавершённые задачи установки храним в localStorage, чтобы переподключить
+// их лог после перезагрузки страницы (SSH держит бэкенд, фон не прерывается)
+const DEPLOY_JOBS_KEY = 'deploy_active_jobs_v1'
+
+interface StoredDeployJob {
+  jobId: string
+  kind: 'primary' | 'extra'
+  extraId?: string
+  name: string
+  host: string
+  port: string
+}
+
+const readStoredJobs = (): StoredDeployJob[] => {
+  try {
+    const raw = localStorage.getItem(DEPLOY_JOBS_KEY)
+    return raw ? (JSON.parse(raw) as StoredDeployJob[]) : []
+  } catch {
+    return []
+  }
+}
+
+const writeStoredJobs = (jobs: StoredDeployJob[]) => {
+  try {
+    localStorage.setItem(DEPLOY_JOBS_KEY, JSON.stringify(jobs))
+  } catch {
+    // localStorage недоступен — восстановление после перезагрузки просто не сработает
+  }
+}
+
+const storeJob = (job: StoredDeployJob) => {
+  const jobs = readStoredJobs().filter(j => j.jobId !== job.jobId)
+  jobs.push(job)
+  writeStoredJobs(jobs)
+}
+
+const removeStoredJob = (jobId: string) => {
+  writeStoredJobs(readStoredJobs().filter(j => j.jobId !== jobId))
+}
+
+export default function Servers() {
+  const { servers, fetchServersWithMetrics, addServer, deleteServer, testServer, updateServer, toggleServer } = useServersStore()
+  const { t } = useTranslation()
+
+  const [showForm, setShowForm] = useState(false)
+  const [editingId, setEditingId] = useState<number | null>(null)
+  const [formData, setFormData] = useState<ServerFormData>({ name: '', host: '', port: '9100', proxy: '' })
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  const [error, setError] = useState('')
+  const [testResults, setTestResults] = useState<Record<number, { status: string; message?: string }>>({})
+  const [testingId, setTestingId] = useState<number | null>(null)
+  const [deleteConfirm, setDeleteConfirm] = useState<number | null>(null)
+  const [copied, setCopied] = useState(false)
+  const [panelIp, setPanelIp] = useState<string | null>(null)
+  const [installerToken, setInstallerToken] = useState<string | null>(null)
+  const [tokenCopied, setTokenCopied] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
+
+  const [deploy, setDeploy] = useState<DeployFormData>(DEPLOY_DEFAULTS)
+  const [remnaCertProfiles, setRemnaCertProfiles] = useState<RemnawaveCertProfile[]>([])
+  const [haproxyProfiles, setHaproxyProfiles] = useState<HAProxyConfigProfile[]>([])
+  const [firewallProfiles, setFirewallProfiles] = useState<FirewallProfile[]>([])
+  const [deployLog, setDeployLog] = useState<string[]>([])
+  const [primaryStatus, setPrimaryStatus] = useState<DeployStatus>('idle')
+  const [extras, setExtras] = useState<ExtraTarget[]>([])
+  const [savingCert, setSavingCert] = useState(false)
+  const deployLogRef = useRef<HTMLPreElement>(null)
+
+  const isDeploying = primaryStatus === 'running' || extras.some(e => e.status === 'running')
+
+  const patchDeploy = (patch: Partial<DeployFormData>) => setDeploy(d => ({ ...d, ...patch }))
+
+  const updateExtra = (id: string, patch: Partial<Omit<ExtraTarget, 'id' | 'deploy'>>) =>
+    setExtras(prev => prev.map(t => (t.id === id ? { ...t, ...patch } : t)))
+
+  const updateExtraDeploy = (id: string, patch: Partial<DeployFormData>) =>
+    setExtras(prev => prev.map(t => (t.id === id ? { ...t, deploy: { ...t.deploy, ...patch } } : t)))
+
+  const removeExtra = (id: string) => setExtras(prev => prev.filter(t => t.id !== id))
+
+  const addExtra = () => setExtras(prev => [...prev, makeExtraTarget(deploy)])
+
+  useEffect(() => {
+    const el = deployLogRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [deployLog])
+
+  const filteredServers = useMemo(() => {
+    const q = searchQuery.toLowerCase().trim()
+    if (!q) return servers
+    return servers.filter(s =>
+      s.name.toLowerCase().includes(q) || s.url.toLowerCase().includes(q)
+    )
+  }, [searchQuery, servers])
+
+  const handleCopyPanelIp = async () => {
+    if (!panelIp) return
+    try {
+      await navigator.clipboard.writeText(panelIp)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch {
+      // Fallback for older browsers
+      const textArea = document.createElement('textarea')
+      textArea.value = panelIp
+      document.body.appendChild(textArea)
+      textArea.select()
+      document.execCommand('copy')
+      document.body.removeChild(textArea)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    }
+  }
+  
+  useEffect(() => {
+    fetchServersWithMetrics()
+    systemApi.getPanelIp().then(res => {
+      setPanelIp(res.data.ip)
+    }).catch(() => {})
+  }, [fetchServersWithMetrics])
+
+  useEffect(() => {
+    if (!showForm || editingId) return
+    if (installerToken) return
+    serversApi.installerToken()
+      .then(res => setInstallerToken(res.data.token))
+      .catch(() => {})
+  }, [showForm, editingId, installerToken])
+
+  const loadRemnaCertProfiles = () => {
+    serversApi.remnawaveCerts()
+      .then(res => setRemnaCertProfiles(res.data.profiles))
+      .catch(() => {})
+  }
+
+  useEffect(() => {
+    if (!showForm || editingId) return
+    loadRemnaCertProfiles()
+    haproxyProfilesApi.getProfiles()
+      .then(res => setHaproxyProfiles(res.data))
+      .catch(() => {})
+    firewallProfilesApi.list()
+      .then(res => setFirewallProfiles(res.data))
+      .catch(() => {})
+  }, [showForm, editingId])
+
+  const handleSubmit = async (e: FormEvent) => {
+    e.preventDefault()
+    setError('')
+    setIsSubmitting(true)
+
+    const proxyTrim = formData.proxy.trim()
+    if (proxyTrim && !PROXY_RE.test(proxyTrim)) {
+      setError(t('servers.proxy_invalid'))
+      setIsSubmitting(false)
+      return
+    }
+
+    if (editingId) {
+      const updateData: { name: string; url: string; proxy_url: string | null } = {
+        name: formData.name,
+        url: buildServerUrl(formData.host, formData.port),
+        proxy_url: proxyTrim || null,
+      }
+
+      try {
+        await updateServer(editingId, updateData)
+        toast.success(t('servers.server_updated'))
+        setEditingId(null)
+        setFormData({ name: '', host: '', port: '9100', proxy: '' })
+        setShowForm(false)
+      } catch {
+        toast.error(t('servers.failed_update'))
+        setError(t('servers.failed_update'))
+      }
+    } else if (deploy.enabled) {
+      setIsSubmitting(false)
+      await handleDeployAll()
+      return
+    } else {
+      const serverData = {
+        name: formData.name,
+        url: buildServerUrl(formData.host, formData.port),
+        proxy_url: proxyTrim || null,
+      }
+      const result = await addServer(serverData)
+      if (result.success) {
+        toast.success(t('servers.server_added'))
+        setShowForm(false)
+        setFormData({ name: '', host: '', port: '9100', proxy: '' })
+      } else {
+        toast.error(result.error || t('servers.failed_add'))
+        setError(result.error || t('servers.failed_add'))
+      }
+    }
+
+    setIsSubmitting(false)
+  }
+
+  const validateDeployForm = (
+    name: string,
+    host: string,
+    d: DeployFormData,
+    proxy: string,
+  ): string | null => {
+    if (!name.trim()) return t('servers.server_name_placeholder')
+    if (!host.trim()) return t('servers.server_host_placeholder')
+    if (proxy.trim() && !PROXY_RE.test(proxy.trim())) return t('servers.proxy_invalid')
+    if (d.sshAuth === 'password' && !d.sshPassword.trim()) return t('servers.deploy_no_password')
+    if (d.sshAuth === 'key' && !d.sshPrivateKey.trim()) return t('servers.deploy_no_key')
+    if (d.installRemnawave) {
+      const hasInline = d.remnaCertMode === 'inline' && d.remnaCertInline.trim()
+      const hasSaved = d.remnaCertMode === 'saved' && d.remnaCertProfileId != null
+      if (!hasInline && !hasSaved) return t('servers.deploy_no_remna_cert')
+    }
+    if (d.installProxy && !d.proxyUrl.trim()) return t('servers.deploy_no_proxy')
+    if (d.changePassword && d.newPassword.length < 8) return t('servers.deploy_password_short')
+    return null
+  }
+
+  const buildDeployBody = (name: string, host: string, port: string, d: DeployFormData, proxy: string) => ({
+    name,
+    host,
+    socks5_proxy: proxy.trim() || null,
+    monitoring_port: parseInt(port || '9100', 10),
+    ssh_port: parseInt(d.sshPort || '22', 10),
+    ssh_user: d.sshUser.trim() || 'root',
+    ssh_password: d.sshAuth === 'password' ? d.sshPassword : null,
+    ssh_private_key: d.sshAuth === 'key' ? d.sshPrivateKey : null,
+    ssh_key_passphrase: d.sshAuth === 'key' ? d.sshPassphrase : null,
+    install_warp: d.installWarp,
+    install_optimizations: d.installOptimizations,
+    opt_profile: d.optProfile,
+    nic_mode: d.optNicMode,
+    install_remnawave: d.installRemnawave,
+    remnawave_cert_profile_id:
+      d.installRemnawave && d.remnaCertMode === 'saved' ? d.remnaCertProfileId : null,
+    remnawave_cert_inline:
+      d.installRemnawave && d.remnaCertMode === 'inline' ? d.remnaCertInline : null,
+    install_proxy: d.installProxy,
+    proxy_url: d.installProxy ? d.proxyUrl : null,
+    ssh_preset: d.sshPreset === 'none' ? null : d.sshPreset,
+    new_root_password: d.changePassword ? d.newPassword : null,
+    haproxy_profile_id: d.haproxyProfileId ?? null,
+    firewall_profile_id: d.firewallProfileId ?? null,
+  })
+
+  // Читает NDJSON-лог фоновой задачи. finished=true только если дошли до 'done'
+  // (терминал). Обрыв соединения без done — задача продолжается на бэке.
+  const consumeStream = async (
+    jobId: string,
+    onEvent: (ev: ServerDeployEvent) => void,
+  ): Promise<{ ok: boolean; error: string | null; finished: boolean }> => {
+    let ok = false
+    let err: string | null = null
+    let finished = false
+    try {
+      await streamNdjsonGet<ServerDeployEvent>(
+        serverDeployJobStreamUrl(jobId),
+        (ev) => {
+          onEvent(ev)
+          if (ev.type === 'done') {
+            ok = ev.exit_code === 0
+            finished = true
+          }
+          if (ev.type === 'error') err = ev.message
+        },
+        new AbortController().signal,
+      )
+    } catch (e) {
+      if (e instanceof StreamUnauthorizedError) {
+        err = null
+      } else {
+        err = e instanceof Error ? e.message : String(e)
+      }
+    }
+    return { ok, error: err, finished }
+  }
+
+  const schedulePrimaryHide = () => {
+    setTimeout(() => {
+      setPrimaryStatus('idle')
+      setDeployLog([])
+    }, AUTO_HIDE_MS)
+  }
+
+  const scheduleExtraHide = (id: string) => {
+    setTimeout(() => removeExtra(id), AUTO_HIDE_MS)
+  }
+
+  const attachPrimaryStream = async (jobId: string): Promise<boolean> => {
+    const { ok, error: err, finished } = await consumeStream(jobId, (ev) => {
+      if (ev.type === 'log') {
+        setDeployLog(prev => [...prev, cleanLogLine(ev.line)])
+      } else if (ev.type === 'start') {
+        setDeployLog(prev => [...prev, `--- ${ev.host} ---`])
+      } else if (ev.type === 'error') {
+        setDeployLog(prev => [...prev, `[ERROR] ${ev.message}`])
+      }
+    })
+    if (finished) {
+      removeStoredJob(jobId)
+      setPrimaryStatus(ok ? 'success' : 'error')
+      if (ok) schedulePrimaryHide()
+      else if (err) setError(err)
+    } else if (err !== null) {
+      setPrimaryStatus('error')
+      setError(err)
+    }
+    return ok
+  }
+
+  const attachExtraStream = async (id: string, jobId: string): Promise<boolean> => {
+    const { ok, error: err, finished } = await consumeStream(jobId, (ev) => {
+      if (ev.type === 'log') {
+        setExtras(prev => prev.map(x => x.id === id ? { ...x, log: [...x.log, cleanLogLine(ev.line)] } : x))
+      } else if (ev.type === 'start') {
+        setExtras(prev => prev.map(x => x.id === id ? { ...x, log: [...x.log, `--- ${ev.host} ---`] } : x))
+      } else if (ev.type === 'error') {
+        setExtras(prev => prev.map(x => x.id === id ? { ...x, log: [...x.log, `[ERROR] ${ev.message}`], error: ev.message } : x))
+      } else if (ev.type === 'done' && ev.server_id != null) {
+        const sid = ev.server_id
+        setExtras(prev => prev.map(x => x.id === id ? { ...x, serverId: sid } : x))
+      }
+    })
+    if (finished) {
+      removeStoredJob(jobId)
+      setExtras(prev => prev.map(x => x.id === id
+        ? { ...x, status: ok ? 'success' : 'error', error: ok ? null : (err ?? x.error) }
+        : x,
+      ))
+      if (ok) scheduleExtraHide(id)
+    } else if (err !== null) {
+      setExtras(prev => prev.map(x => x.id === id ? { ...x, status: 'error', error: err } : x))
+    }
+    return ok
+  }
+
+  const deployPrimary = async (): Promise<boolean> => {
+    const body = buildDeployBody(formData.name, formData.host, formData.port, deploy, formData.proxy)
+    let jobId: string
+    try {
+      const res = await serversApi.startDeploy(body)
+      jobId = res.data.job_id
+    } catch (e) {
+      setPrimaryStatus('error')
+      setError(e instanceof Error ? e.message : String(e))
+      return false
+    }
+    storeJob({ jobId, kind: 'primary', name: formData.name, host: formData.host, port: formData.port })
+    return attachPrimaryStream(jobId)
+  }
+
+  const deployExtra = async (id: string): Promise<boolean> => {
+    const target = extras.find(t => t.id === id)
+    if (!target) return false
+    const body = buildDeployBody(target.name, target.host, target.port, target.deploy, target.proxy)
+    let jobId: string
+    try {
+      const res = await serversApi.startDeploy(body)
+      jobId = res.data.job_id
+    } catch (e) {
+      setExtras(prev => prev.map(x => x.id === id
+        ? { ...x, status: 'error', error: e instanceof Error ? e.message : String(e) }
+        : x,
+      ))
+      return false
+    }
+    setExtras(prev => prev.map(x => x.id === id ? { ...x, jobId } : x))
+    storeJob({ jobId, kind: 'extra', extraId: id, name: target.name, host: target.host, port: target.port })
+    return attachExtraStream(id, jobId)
+  }
+
+  // Переподключение к незавершённым задачам установки после перезагрузки страницы
+  const restoreDeployJobs = async () => {
+    const stored = readStoredJobs()
+    if (stored.length === 0) return
+
+    let liveIds: Set<string>
+    try {
+      const res = await serversApi.listDeployJobs()
+      liveIds = new Set(res.data.jobs.map(j => j.job_id))
+    } catch {
+      return
+    }
+
+    const alive = stored.filter(s => liveIds.has(s.jobId))
+    writeStoredJobs(alive)
+    if (alive.length === 0) return
+
+    setShowForm(true)
+    setDeploy(prev => ({ ...prev, enabled: true }))
+
+    for (const s of alive) {
+      if (s.kind === 'primary') {
+        setFormData({ name: s.name, host: s.host, port: s.port, proxy: '' })
+        setPrimaryStatus('running')
+        setDeployLog([])
+        void attachPrimaryStream(s.jobId)
+      } else {
+        const extraId = s.extraId || s.jobId
+        setExtras(prev => prev.some(x => x.id === extraId) ? prev : [...prev, {
+          id: extraId,
+          name: s.name,
+          host: s.host,
+          port: s.port,
+          proxy: '',
+          deploy: { ...DEPLOY_DEFAULTS, enabled: true },
+          status: 'running',
+          log: [],
+          error: null,
+          jobId: s.jobId,
+        }])
+        void attachExtraStream(extraId, s.jobId)
+      }
+    }
+  }
+
+  useEffect(() => {
+    void restoreDeployJobs()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const handleDeployAll = async () => {
+    const primaryErr = validateDeployForm(formData.name, formData.host, deploy, formData.proxy)
+    if (primaryErr && primaryStatus !== 'success') {
+      setError(primaryErr)
+      return
+    }
+
+    const extrasToRun = extras.filter(t => t.status !== 'success')
+    for (const t of extrasToRun) {
+      const e = validateDeployForm(t.name, t.host, t.deploy, t.proxy)
+      if (e) {
+        setExtras(prev => prev.map(x => x.id === t.id ? { ...x, status: 'error', error: e } : x))
+        setError(t.name ? `${t.name}: ${e}` : e)
+        return
+      }
+    }
+
+    setError('')
+    const runPrimary = primaryStatus !== 'success'
+    if (runPrimary) {
+      setDeployLog([])
+      setPrimaryStatus('running')
+    }
+    setExtras(prev => prev.map(t => t.status === 'success' ? t : { ...t, status: 'running', log: [], error: null }))
+
+    const tasks: Promise<boolean>[] = []
+    if (runPrimary) tasks.push(deployPrimary())
+    for (const t of extrasToRun) tasks.push(deployExtra(t.id))
+
+    const results = await Promise.all(tasks)
+    const allOk = results.every(Boolean)
+
+    await fetchServersWithMetrics()
+
+    if (allOk) {
+      // Успех показываем с галочкой — лог и карточки убираются таймером (AUTO_HIDE_MS)
+      toast.success(extras.length > 0 ? t('servers.deploy_success_multi') : t('servers.deploy_success'))
+      setError('')
+    } else {
+      toast.error(t('servers.deploy_failed_multi'))
+    }
+  }
+
+  const retryPrimary = async () => {
+    const err = validateDeployForm(formData.name, formData.host, deploy, formData.proxy)
+    if (err) {
+      setError(err)
+      return
+    }
+    setError('')
+    setDeployLog([])
+    setPrimaryStatus('running')
+    const ok = await deployPrimary()
+    await fetchServersWithMetrics()
+    if (ok) toast.success(t('servers.deploy_success'))
+    else toast.error(t('servers.deploy_failed'))
+  }
+
+  const retryExtra = async (id: string) => {
+    const target = extras.find(t => t.id === id)
+    if (!target) return
+    const err = validateDeployForm(target.name, target.host, target.deploy, target.proxy)
+    if (err) {
+      updateExtra(id, { status: 'error', error: err })
+      return
+    }
+    setExtras(prev => prev.map(x => x.id === id ? { ...x, status: 'running', log: [], error: null } : x))
+    const ok = await deployExtra(id)
+    await fetchServersWithMetrics()
+    if (ok) toast.success(t('servers.deploy_success'))
+    else toast.error(t('servers.deploy_failed'))
+  }
+
+  const handleSaveCert = async () => {
+    const name = window.prompt(t('servers.deploy_remna_save_prompt'))
+    if (!name || !name.trim()) return
+    setSavingCert(true)
+    try {
+      const { data } = await serversApi.saveRemnawaveCert(name.trim(), deploy.remnaCertInline.trim())
+      toast.success(t('servers.deploy_remna_saved'))
+      loadRemnaCertProfiles()
+      setDeploy(d => ({ ...d, remnaCertMode: 'saved', remnaCertProfileId: data.id }))
+    } catch (e) {
+      const err = e as { response?: { data?: { detail?: string } } }
+      toast.error(err.response?.data?.detail || t('servers.deploy_remna_save_failed'))
+    }
+    setSavingCert(false)
+  }
+
+  const handleDeleteCert = async (id: number) => {
+    if (!window.confirm(t('servers.deploy_remna_delete_confirm'))) return
+    try {
+      await serversApi.deleteRemnawaveCert(id)
+      setRemnaCertProfiles(prev => prev.filter(p => p.id !== id))
+      setDeploy(d => (d.remnaCertProfileId === id ? { ...d, remnaCertProfileId: null } : d))
+    } catch {
+      toast.error(t('servers.deploy_remna_save_failed'))
+    }
+  }
+
+  const handleEdit = (server: typeof servers[0]) => {
+    setShowForm(false)
+    setEditingId(server.id)
+    const { host, port } = parseServerUrl(server.url)
+    setFormData({
+      name: server.name,
+      host,
+      port,
+      proxy: server.proxy_url ?? '',
+    })
+    setError('')
+  }
+
+  const handleCancel = () => {
+    if (isDeploying) return
+    setShowForm(false)
+    setEditingId(null)
+    setFormData({ name: '', host: '', port: '9100', proxy: '' })
+    setDeploy(DEPLOY_DEFAULTS)
+    setDeployLog([])
+    setPrimaryStatus('idle')
+    setExtras([])
+    setError('')
+  }
+
+  const handleCopyToken = async () => {
+    if (!installerToken) return
+    try {
+      await navigator.clipboard.writeText(installerToken)
+    } catch {
+      const ta = document.createElement('textarea')
+      ta.value = installerToken
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      document.body.removeChild(ta)
+    }
+    setTokenCopied(true)
+    setTimeout(() => setTokenCopied(false), 2000)
+  }
+
+  const handleTest = async (serverId: number) => {
+    setTestingId(serverId)
+    const result = await testServer(serverId)
+    setTestResults(prev => ({ ...prev, [serverId]: result }))
+    if (result.status === 'online') {
+      toast.success(t('servers.test_success'))
+    } else {
+      toast.error(result.message || t('servers.test_failed'))
+    }
+    setTestingId(null)
+  }
+  
+  const handleDelete = async (serverId: number) => {
+    if (deleteConfirm === serverId) {
+      await deleteServer(serverId)
+      toast.success(t('servers.server_deleted'))
+      setDeleteConfirm(null)
+    } else {
+      setDeleteConfirm(serverId)
+      setTimeout(() => setDeleteConfirm(null), 3000)
+    }
+  }
+  
+  return (
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+    >
+      {/* Panel IP */}
+      {panelIp && (
+        <motion.div
+          className="mb-6 p-4 rounded-xl bg-dark-800/40 border border-dark-700/50 flex items-center justify-between"
+          initial={{ opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.15 }}
+        >
+          <div className="flex items-center gap-3">
+            <Globe className="w-5 h-5 text-accent-500" />
+            <span className="text-dark-300">{t('servers.panel_ip')}</span>
+            <code className="px-2 py-1 bg-dark-900/50 rounded-lg text-dark-100 font-mono text-sm">
+              {panelIp}
+            </code>
+          </div>
+          <motion.button
+            onClick={handleCopyPanelIp}
+            className={`btn btn-secondary text-sm ${copied ? 'bg-success/20 text-success border-success/30' : ''}`}
+            whileTap={{ scale: 0.98 }}
+          >
+            {copied ? (
+              <>
+                <Check className="w-4 h-4" />
+                {t('servers.copied')}
+              </>
+            ) : (
+              <>
+                <Copy className="w-4 h-4" />
+                {t('common.copy')}
+              </>
+            )}
+          </motion.button>
+        </motion.div>
+      )}
+
+      {/* Header */}
+      <motion.div
+        className="flex items-center justify-between mb-8"
+        initial={{ opacity: 0, y: 8 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.15 }}
+      >
+        <div>
+          <h1 className="text-2xl font-bold text-dark-50 flex items-center gap-3">
+            <ServerIcon className="w-7 h-7 text-accent-400" />
+            {t('servers.title')}
+            <FAQIcon screen="PAGE_SERVERS" />
+          </h1>
+          <p className="text-dark-400 mt-1">
+            {t('servers.subtitle')}
+          </p>
+        </div>
+
+        <AnimatePresence>
+          {!showForm && (
+            <motion.button
+              onClick={() => setShowForm(true)}
+              className="btn btn-primary"
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.9 }}
+              whileTap={{ scale: 0.98 }}
+            >
+              <Plus className="w-4 h-4" />
+              {t('servers.add_server')}
+            </motion.button>
+          )}
+        </AnimatePresence>
+      </motion.div>
+      
+      {/* Infrastructure Tree */}
+      <InfraTree />
+
+      <MigrationBanner onMigrated={fetchServersWithMetrics} />
+
+      {/* Search */}
+      {servers.length > 0 && (
+        <div className="flex items-center gap-2 mb-4">
+          <div className="flex-1 flex items-center gap-2 bg-dark-800/50 border border-dark-700/50 rounded-xl px-3 py-2">
+            <Search className="w-4 h-4 text-dark-400 shrink-0" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+              placeholder={t('servers.search_placeholder')}
+              className="bg-transparent text-sm text-dark-100 placeholder-dark-500 outline-none w-full"
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Add Server Form */}
+      <AnimatePresence>
+        {showForm && !editingId && (
+          <motion.div 
+            className="card mb-6 overflow-hidden"
+            initial={{ opacity: 0, height: 0, marginBottom: 0 }}
+            animate={{ opacity: 1, height: 'auto', marginBottom: 24 }}
+            exit={{ opacity: 0, height: 0, marginBottom: 0 }}
+            transition={{ duration: 0.15 }}
+          >
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="text-lg font-semibold text-dark-100 flex items-center gap-2">
+                <Plus className="w-5 h-5 text-accent-500" />
+                {t('servers.add_new_server')}
+              </h2>
+              <motion.button
+                onClick={handleCancel}
+                className="p-2 hover:bg-dark-700 rounded-xl text-dark-400 transition-colors"
+                whileTap={{ scale: 0.95 }}
+              >
+                <X className="w-5 h-5" />
+              </motion.button>
+            </div>
+            
+            <AnimatePresence>
+              {error && (
+                <motion.div
+                  className="flex items-center gap-3 p-4 mb-6 bg-danger/10 border border-danger/20 rounded-xl text-danger"
+                  initial={{ opacity: 0, y: -10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -10 }}
+                >
+                  <AlertTriangle className="w-5 h-5 flex-shrink-0" />
+                  <span className="text-sm">{error}</span>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            <div className="mb-6 p-4 rounded-xl bg-accent-500/5 border border-accent-500/20">
+              <div className="flex items-center gap-2 mb-2">
+                <ShieldCheck className="w-5 h-5 text-accent-500" />
+                <h3 className="text-sm font-semibold text-dark-100">{t('servers.installer_token_title')}</h3>
+              </div>
+              <p className="text-xs text-dark-400 mb-3">{t('servers.installer_token_subtitle')}</p>
+              {installerToken ? (
+                <>
+                  <textarea
+                    readOnly
+                    value={installerToken}
+                    className="input font-mono text-xs break-all resize-none w-full min-h-[88px] mb-3"
+                    onClick={(e) => (e.target as HTMLTextAreaElement).select()}
+                  />
+                  <motion.button
+                    type="button"
+                    onClick={handleCopyToken}
+                    className={`btn text-sm ${tokenCopied ? 'bg-success/20 text-success border-success/30' : 'btn-secondary'}`}
+                    whileTap={{ scale: 0.98 }}
+                  >
+                    {tokenCopied ? (
+                      <><Check className="w-4 h-4" />{t('servers.copied')}</>
+                    ) : (
+                      <><Copy className="w-4 h-4" />{t('servers.copy_installer_token')}</>
+                    )}
+                  </motion.button>
+                  <details className="mt-3 text-xs text-dark-300">
+                    <summary className="cursor-pointer text-dark-200 font-medium">{t('servers.install_steps_title')}</summary>
+                    <ol className="list-decimal list-inside mt-2 space-y-1 text-dark-400">
+                      <li>{t('servers.install_step_1')}</li>
+                      <li>{t('servers.install_step_2')}</li>
+                      <li>{t('servers.install_step_3')}</li>
+                      <li>{t('servers.install_step_4')}</li>
+                    </ol>
+                  </details>
+                </>
+              ) : (
+                <div className="flex items-center gap-2 text-dark-400 text-sm">
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  {t('common.loading')}
+                </div>
+              )}
+            </div>
+
+            <form onSubmit={handleSubmit} className="space-y-5" autoComplete="off" data-form-type="other">
+              <div>
+                <label className="block text-sm text-dark-300 mb-2 flex items-center gap-2">
+                  <ServerIcon className="w-4 h-4" />
+                  {t('servers.server_name')}
+                </label>
+                <input
+                  type="text"
+                  value={formData.name}
+                  onChange={(e) => setFormData(d => ({ ...d, name: e.target.value }))}
+                  placeholder={t('servers.server_name_placeholder')}
+                  className="input"
+                  required
+                />
+              </div>
+              
+              <div>
+                <label className="block text-sm text-dark-300 mb-2 flex items-center gap-2">
+                  <LinkIcon className="w-4 h-4" />
+                  {t('servers.server_host')}
+                </label>
+                <div className="flex gap-3">
+                  <div className="flex-1">
+                    <input
+                      type="text"
+                      value={formData.host}
+                      onChange={(e) => setFormData(d => ({ ...d, host: e.target.value }))}
+                      placeholder={t('servers.server_host_placeholder')}
+                      className="input"
+                      required
+                    />
+                  </div>
+                  <div className="w-28">
+                    <input
+                      type="text"
+                      value={formData.port}
+                      onChange={(e) => setFormData(d => ({ ...d, port: e.target.value.replace(/\D/g, '') }))}
+                      placeholder={t('servers.server_port_placeholder')}
+                      className="input text-center"
+                    />
+                  </div>
+                </div>
+                <p className="text-xs text-dark-500 mt-1.5">
+                  {t('servers.server_host_hint')}
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-sm text-dark-300 mb-2 flex items-center gap-2">
+                  <Globe className="w-4 h-4" />
+                  {t('servers.proxy_label')}
+                </label>
+                <input
+                  type="text"
+                  value={formData.proxy}
+                  onChange={(e) => setFormData(d => ({ ...d, proxy: e.target.value }))}
+                  placeholder="ip:port@login:pass"
+                  className="input"
+                  autoComplete="off"
+                />
+                <p className="text-xs text-dark-500 mt-1.5">
+                  {t('servers.proxy_hint')}
+                </p>
+              </div>
+
+              {/* Авторазвёртывание по SSH */}
+              <div className="rounded-xl border border-dark-700/50 bg-dark-800/30 overflow-hidden">
+                <label className="flex items-center gap-3 p-4 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={deploy.enabled}
+                    onChange={(e) => {
+                      const enabled = e.target.checked
+                      setDeploy(d => ({ ...d, enabled }))
+                      if (!enabled) {
+                        setExtras([])
+                        setPrimaryStatus('idle')
+                        setDeployLog([])
+                      }
+                    }}
+                    className="w-4 h-4 rounded accent-accent-500 cursor-pointer"
+                  />
+                  <Rocket className="w-4 h-4 text-accent-500 flex-shrink-0" />
+                  <div>
+                    <span className="text-sm font-medium text-dark-100">{t('servers.deploy_title')}</span>
+                    <p className="text-xs text-dark-500">{t('servers.deploy_subtitle')}</p>
+                  </div>
+                </label>
+
+                <AnimatePresence>
+                  {deploy.enabled && (
+                    <motion.div
+                      className="px-4 pb-4 pt-4 border-t border-dark-700/50 overflow-hidden"
+                      initial={{ height: 0, opacity: 0 }}
+                      animate={{ height: 'auto', opacity: 1 }}
+                      exit={{ height: 0, opacity: 0 }}
+                      transition={{ duration: 0.15 }}
+                    >
+                      <DeployTargetFields
+                        deploy={deploy}
+                        onChange={patchDeploy}
+                        remnaCertProfiles={remnaCertProfiles}
+                        haproxyProfiles={haproxyProfiles}
+                        firewallProfiles={firewallProfiles}
+                        savingCert={savingCert}
+                        onSaveCert={handleSaveCert}
+                        onDeleteCert={handleDeleteCert}
+                        footerSlot={
+                          <button
+                            type="button"
+                            onClick={addExtra}
+                            disabled={isDeploying}
+                            className="btn btn-secondary text-sm w-full mt-2"
+                          >
+                            <PlusCircle className="w-4 h-4" />
+                            {t('servers.deploy_add_extra')}
+                          </button>
+                        }
+                      />
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+
+              {/* Extras */}
+              {deploy.enabled && extras.length > 0 && (
+                <div className="space-y-3">
+                  <AnimatePresence>
+                    {extras.map((target, idx) => (
+                      <ExtraServerCard
+                        key={target.id}
+                        index={idx}
+                        target={target}
+                        onChange={(patch) => updateExtra(target.id, patch)}
+                        onDeployChange={(patch) => updateExtraDeploy(target.id, patch)}
+                        onRemove={() => removeExtra(target.id)}
+                        onRetry={() => retryExtra(target.id)}
+                        onAddAnother={addExtra}
+                        remnaCertProfiles={remnaCertProfiles}
+                        haproxyProfiles={haproxyProfiles}
+                        firewallProfiles={firewallProfiles}
+                        savingCert={savingCert}
+                        onSaveCert={handleSaveCert}
+                        onDeleteCert={handleDeleteCert}
+                        disabled={isDeploying}
+                      />
+                    ))}
+                  </AnimatePresence>
+                </div>
+              )}
+
+              {/* Primary deploy log + status */}
+              {deploy.enabled && (deployLog.length > 0 || primaryStatus === 'running') && (
+                <div className="rounded-xl bg-dark-900/70 border border-dark-700/50 p-3">
+                  <div className="flex items-center justify-between mb-2 text-xs">
+                    <div className="flex items-center gap-2 text-dark-400">
+                      {primaryStatus === 'running'
+                        ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        : <Terminal className="w-3.5 h-3.5" />}
+                      {t('servers.deploy_log')}
+                      <span className="text-dark-500">— {formData.name.trim() || formData.host || t('servers.deploy_primary')}</span>
+                    </div>
+                    {primaryStatus === 'success' && (
+                      <span className="flex items-center gap-1 text-success">
+                        <CheckCircle2 className="w-3 h-3" />
+                        {t('servers.deploy_extra_ok')}
+                      </span>
+                    )}
+                    {primaryStatus === 'error' && (
+                      <span className="flex items-center gap-1 text-danger">
+                        <XCircle className="w-3 h-3" />
+                        {t('servers.deploy_extra_failed')}
+                      </span>
+                    )}
+                  </div>
+                  <pre
+                    ref={deployLogRef}
+                    className="text-[11px] leading-relaxed font-mono text-dark-300 max-h-64 overflow-auto whitespace-pre-wrap"
+                  >
+                    {deployLog.join('\n')}
+                  </pre>
+                  {primaryStatus === 'error' && (
+                    <button
+                      type="button"
+                      onClick={retryPrimary}
+                      disabled={isDeploying}
+                      className="btn btn-secondary text-sm mt-3"
+                    >
+                      <Rocket className="w-4 h-4" />
+                      {t('servers.deploy_extra_retry')}
+                    </button>
+                  )}
+                </div>
+              )}
+
+              <div className="flex gap-3 pt-3">
+                <motion.button
+                  type="submit"
+                  disabled={isSubmitting || isDeploying}
+                  className="btn btn-primary"
+                  whileTap={{ scale: 0.98 }}
+                >
+                  {isSubmitting || isDeploying ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : deploy.enabled ? (
+                    <>
+                      <Rocket className="w-4 h-4" />
+                      {extras.length > 0
+                        ? t('servers.deploy_btn_multi', { count: 1 + extras.filter(e => e.status !== 'success').length })
+                        : t('servers.deploy_btn')}
+                    </>
+                  ) : (
+                    t('servers.add_server')
+                  )}
+                </motion.button>
+                <motion.button
+                  type="button"
+                  onClick={handleCancel}
+                  disabled={isDeploying}
+                  className="btn btn-secondary"
+                  whileTap={{ scale: 0.98 }}
+                >
+                  {t('common.cancel')}
+                </motion.button>
+              </div>
+            </form>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Server list */}
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+        <AnimatePresence mode="popLayout">
+          {filteredServers.length === 0 ? (
+            searchQuery.trim() ? (
+              <motion.div
+                className="card text-center py-16 col-span-full"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                key="no-results"
+              >
+                <Search className="w-12 h-12 text-dark-600 mx-auto mb-3" />
+                <p className="text-dark-400">{t('common.no_results')}</p>
+              </motion.div>
+            ) : (
+              <motion.div
+                className="card text-center py-16 col-span-full"
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                key="empty"
+              >
+                <motion.div
+                  animate={{ y: [0, -6, 0] }}
+                  transition={{ duration: 2.5, repeat: Infinity, ease: 'easeInOut' }}
+                >
+                  <ServerIcon className="w-16 h-16 text-dark-600 mx-auto mb-4" />
+                </motion.div>
+                <p className="text-dark-400 mb-4">{t('servers.no_servers')}</p>
+                <motion.button
+                  onClick={() => setShowForm(true)}
+                  className="btn btn-primary mx-auto"
+                  whileTap={{ scale: 0.97 }}
+                >
+                  <Plus className="w-4 h-4" />
+                  {t('servers.add_first_server')}
+                </motion.button>
+              </motion.div>
+            )
+          ) : (
+            filteredServers.map((server) => {
+              const isEditing = editingId === server.id
+              const isTesting = testingId === server.id
+              const testResult = testResults[server.id]
+
+              return (
+                <motion.div
+                  key={server.id}
+                  className={isEditing ? 'col-span-full' : ''}
+                  layout
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, scale: 0.95 }}
+                  transition={{ duration: 0.15 }}
+                >
+                  <div
+                    className={`card group transition-all overflow-visible flex flex-col ${
+                      server.is_active
+                        ? 'hover:border-dark-700'
+                        : 'opacity-60 border-dark-700/50'
+                    } ${isEditing ? 'rounded-b-none border-b-0 border-accent-500/30' : ''}`}
+                  >
+                    {/* Шапка: иконка + имя + URL */}
+                    <div className="flex items-center gap-3">
+                      <div
+                        className={`w-10 h-10 rounded-xl flex items-center justify-center border flex-shrink-0 transition-colors ${
+                          server.is_active
+                            ? 'bg-gradient-to-br from-dark-700 to-dark-800 border-dark-700/50 group-hover:border-accent-500/30'
+                            : 'bg-dark-800/50 border-dark-700/30'
+                        }`}
+                      >
+                        <ServerIcon className={`w-4 h-4 ${server.is_active ? 'text-accent-500' : 'text-dark-500'}`} />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <h3 className="font-semibold text-dark-100 flex items-center gap-2 truncate">
+                          <span className="truncate">{server.name}</span>
+                          <span
+                            className={`w-2 h-2 rounded-full flex-shrink-0 ${
+                              !server.is_active
+                                ? 'bg-dark-500'
+                                : server.status === 'online'
+                                  ? 'bg-success'
+                                  : server.status === 'loading'
+                                    ? 'bg-dark-400 animate-pulse'
+                                    : 'bg-danger'
+                            }`}
+                          />
+                          {server.uses_shared_cert ? (
+                            <Tooltip label={t('servers.shared_cert_tooltip')}>
+                              <ShieldCheck className="w-3.5 h-3.5 text-success flex-shrink-0" />
+                            </Tooltip>
+                          ) : (
+                            <Tooltip label={t('servers.needs_migration_tooltip')}>
+                              <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-warning/10 text-warning text-[10px] font-medium flex-shrink-0">
+                                <ShieldAlert className="w-3 h-3" />
+                                {server.auth_kind === 'legacy'
+                                  ? t('servers.legacy_badge')
+                                  : t('servers.old_key_badge')}
+                              </span>
+                            </Tooltip>
+                          )}
+                        </h3>
+                        <p className="text-xs text-dark-500 flex items-center gap-1.5 min-w-0">
+                          <CopyableIp value={extractHost(server.url)} display={server.url} className="truncate" />
+                          <a
+                            href={server.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="hover:text-accent-400 transition-colors flex-shrink-0"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <ExternalLink className="w-3 h-3" />
+                          </a>
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Статус + кнопки действий */}
+                    <div className="flex items-center justify-between mt-3 pt-3 border-t border-dark-700/30 gap-2">
+                      <div className="flex-1 min-w-0">
+                        <AnimatePresence mode="wait">
+                          {testResult ? (
+                            <motion.div
+                              key="test-result"
+                              className={`flex items-center gap-1.5 text-xs px-2 py-1 rounded-lg w-fit ${
+                                testResult.status === 'online'
+                                  ? 'text-success bg-success/10'
+                                  : 'text-danger bg-danger/10'
+                              }`}
+                              initial={{ opacity: 0, scale: 0.8 }}
+                              animate={{ opacity: 1, scale: 1 }}
+                              exit={{ opacity: 0, scale: 0.8 }}
+                            >
+                              {testResult.status === 'online' ? (
+                                <CheckCircle2 className="w-3.5 h-3.5" />
+                              ) : (
+                                <XCircle className="w-3.5 h-3.5" />
+                              )}
+                              <span className="truncate max-w-[140px]">
+                                {testResult.status === 'online'
+                                  ? t('common.connected')
+                                  : testResult.message || t('common.failed')}
+                              </span>
+                            </motion.div>
+                          ) : !server.is_active ? (
+                            <motion.span
+                              key="disabled"
+                              className="px-2 py-0.5 text-xs font-medium bg-dark-700/50 text-dark-400 rounded-full"
+                              initial={{ opacity: 0 }}
+                              animate={{ opacity: 1 }}
+                            >
+                              {t('servers.disabled')}
+                            </motion.span>
+                          ) : server.status === 'online' ? (
+                            <motion.span
+                              key="online"
+                              className="flex items-center gap-1.5 text-xs text-success"
+                              initial={{ opacity: 0 }}
+                              animate={{ opacity: 1 }}
+                            >
+                              <CheckCircle2 className="w-3.5 h-3.5" />
+                              {t('common.online')}
+                            </motion.span>
+                          ) : server.status === 'loading' ? (
+                            <motion.span
+                              key="loading"
+                              className="flex items-center gap-1.5 text-xs text-dark-400"
+                              initial={{ opacity: 0 }}
+                              animate={{ opacity: 1 }}
+                            >
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              {t('common.loading')}
+                            </motion.span>
+                          ) : (
+                            <motion.span
+                              key="offline"
+                              className="flex items-center gap-1.5 text-xs text-danger"
+                              initial={{ opacity: 0 }}
+                              animate={{ opacity: 1 }}
+                            >
+                              <XCircle className="w-3.5 h-3.5" />
+                              <span className="truncate max-w-[140px]">
+                                {server.last_error || t('common.offline')}
+                              </span>
+                            </motion.span>
+                          )}
+                        </AnimatePresence>
+                      </div>
+
+                      <div className="flex items-center gap-1 flex-shrink-0">
+                        <Tooltip label={server.is_active ? t('servers.monitoring_enabled') : t('servers.monitoring_disabled')}>
+                          <motion.button
+                            onClick={() => toggleServer(server.id, !server.is_active)}
+                            className={`p-2 rounded-lg transition-all ${
+                              server.is_active
+                                ? 'text-success hover:bg-success/10'
+                                : 'text-dark-500 hover:bg-dark-700/50'
+                            }`}
+                            whileTap={{ scale: 0.9 }}
+                          >
+                            <Power className="w-3.5 h-3.5" />
+                          </motion.button>
+                        </Tooltip>
+
+                        <Tooltip label={t('common.test')}>
+                          <motion.button
+                            onClick={() => handleTest(server.id)}
+                            disabled={isTesting || !server.is_active}
+                            className={`p-2 rounded-lg transition-all text-dark-300 hover:bg-dark-700/50 ${
+                              !server.is_active ? 'opacity-40 cursor-not-allowed' : ''
+                            }`}
+                            whileTap={{ scale: server.is_active ? 0.9 : 1 }}
+                          >
+                            {isTesting ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <Zap className="w-3.5 h-3.5" />
+                            )}
+                          </motion.button>
+                        </Tooltip>
+
+                        <Tooltip label={isEditing ? t('common.cancel') : t('common.edit')}>
+                          <motion.button
+                            onClick={() => (isEditing ? handleCancel() : handleEdit(server))}
+                            className={`p-2 rounded-lg transition-all ${
+                              isEditing
+                                ? 'text-accent-400 bg-accent-500/10'
+                                : 'text-dark-300 hover:bg-dark-700/50'
+                            }`}
+                            whileTap={{ scale: 0.9 }}
+                          >
+                            {isEditing ? <X className="w-3.5 h-3.5" /> : <Edit2 className="w-3.5 h-3.5" />}
+                          </motion.button>
+                        </Tooltip>
+
+                        <Tooltip label={t('common.delete')}>
+                          <motion.button
+                            onClick={() => handleDelete(server.id)}
+                            className={`p-2 rounded-lg transition-all ${
+                              deleteConfirm === server.id
+                                ? 'bg-danger text-white'
+                                : 'text-danger hover:bg-danger/10'
+                            }`}
+                            whileTap={{ scale: 0.9 }}
+                            animate={deleteConfirm === server.id ? { scale: [1, 1.1, 1] } : {}}
+                            transition={{ duration: 0.15 }}
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </motion.button>
+                        </Tooltip>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Inline Edit Form */}
+                  <AnimatePresence>
+                    {isEditing && (
+                      <motion.div
+                        className="card rounded-t-none border-t-0 border-accent-500/30 bg-dark-800/60"
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: 'auto' }}
+                        exit={{ opacity: 0, height: 0 }}
+                        transition={{ duration: 0.15 }}
+                      >
+                        <AnimatePresence>
+                          {error && (
+                            <motion.div
+                              className="flex items-center gap-3 p-4 mb-4 bg-danger/10 border border-danger/20 rounded-xl text-danger"
+                              initial={{ opacity: 0, y: -10 }}
+                              animate={{ opacity: 1, y: 0 }}
+                              exit={{ opacity: 0, y: -10 }}
+                            >
+                              <AlertTriangle className="w-5 h-5 flex-shrink-0" />
+                              <span className="text-sm">{error}</span>
+                            </motion.div>
+                          )}
+                        </AnimatePresence>
+
+                        <form onSubmit={handleSubmit} className="space-y-4" autoComplete="off" data-form-type="other">
+                          <div>
+                            <label className="block text-sm text-dark-300 mb-2 flex items-center gap-2">
+                              <ServerIcon className="w-4 h-4" />
+                              {t('servers.server_name')}
+                            </label>
+                            <input
+                              type="text"
+                              value={formData.name}
+                              onChange={(e) => setFormData(d => ({ ...d, name: e.target.value }))}
+                              placeholder={t('servers.server_name_placeholder')}
+                              className="input"
+                              required
+                            />
+                          </div>
+
+                          <div>
+                            <label className="block text-sm text-dark-300 mb-2 flex items-center gap-2">
+                              <LinkIcon className="w-4 h-4" />
+                              {t('servers.server_host')}
+                            </label>
+                            <div className="flex gap-3">
+                              <div className="flex-1">
+                                <input
+                                  type="text"
+                                  value={formData.host}
+                                  onChange={(e) => setFormData(d => ({ ...d, host: e.target.value }))}
+                                  placeholder={t('servers.server_host_placeholder')}
+                                  className="input"
+                                  required
+                                />
+                              </div>
+                              <div className="w-28">
+                                <input
+                                  type="text"
+                                  value={formData.port}
+                                  onChange={(e) => setFormData(d => ({ ...d, port: e.target.value.replace(/\D/g, '') }))}
+                                  placeholder={t('servers.server_port_placeholder')}
+                                  className="input text-center"
+                                />
+                              </div>
+                            </div>
+                            <p className="text-xs text-dark-500 mt-1.5">
+                              {t('servers.server_host_hint')}
+                            </p>
+                          </div>
+
+                          <div>
+                            <label className="block text-sm text-dark-300 mb-2 flex items-center gap-2">
+                              <Globe className="w-4 h-4" />
+                              {t('servers.proxy_label')}
+                            </label>
+                            <input
+                              type="text"
+                              value={formData.proxy}
+                              onChange={(e) => setFormData(d => ({ ...d, proxy: e.target.value }))}
+                              placeholder="ip:port@login:pass"
+                              className="input"
+                              autoComplete="off"
+                            />
+                            <p className="text-xs text-dark-500 mt-1.5">
+                              {t('servers.proxy_hint')}
+                            </p>
+                          </div>
+
+                          <div className="flex gap-3 pt-2">
+                            <motion.button
+                              type="submit"
+                              disabled={isSubmitting}
+                              className="btn btn-primary"
+                              whileTap={{ scale: 0.98 }}
+                            >
+                              {isSubmitting ? (
+                                <Loader2 className="w-4 h-4 animate-spin" />
+                              ) : (
+                                t('servers.update_server')
+                              )}
+                            </motion.button>
+                            <motion.button
+                              type="button"
+                              onClick={handleCancel}
+                              className="btn btn-secondary"
+                              whileTap={{ scale: 0.98 }}
+                            >
+                              {t('common.cancel')}
+                            </motion.button>
+                          </div>
+                        </form>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </motion.div>
+              )
+            })
+          )}
+        </AnimatePresence>
+      </div>
+
+    </motion.div>
+  )
+}

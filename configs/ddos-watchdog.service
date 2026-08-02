@@ -1,0 +1,17 @@
+# OPTIMIZATION_VERSION=2.0
+[Unit]
+Description=Anti-DDoS watchdog (auto emergency mode + rule self-heal)
+After=network-online.target systemd-modules-load.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/monitoring/scripts/ddos-watchdog.sh loop
+Restart=always
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

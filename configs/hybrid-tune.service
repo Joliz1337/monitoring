@@ -1,0 +1,28 @@
+# OPTIMIZATION_VERSION=5.0
+[Unit]
+Description=Hybrid NIC tuning (hardware multi-queue + RPS on remaining cores)
+Documentation=https://www.kernel.org/doc/Documentation/networking/scaling.txt
+After=network-online.target systemd-modules-load.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Re-render the kernel tuning before the NIC pass. Two reasons this must happen
+# here and not only at install time:
+#   * systemd-sysctl runs very early in boot, long before network-online.target,
+#     so a config rendered later would not be live until the NEXT boot;
+#   * a resized VPS (RAM/CPU changed) gets correct values on the next reboot
+#     without anyone touching the panel.
+# The renderer is idempotent: identical bytes mean no sysctl -p, no
+# daemon-reload and no .prev rotation. `-` prefix: a render failure must not
+# stop the NIC tuning, and the renderer keeps the previous config on any error.
+ExecStartPre=-/opt/monitoring/scripts/tune-sysctl.sh render
+ExecStart=/opt/monitoring/scripts/hybrid-tune.sh
+RemainAfterExit=yes
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,129 @@
+import { create } from 'zustand'
+import { toast } from 'sonner'
+import {
+  torrentBlockerApi,
+  serversApi,
+  type TorrentBlockerSettings,
+  type TorrentBlockerStatus,
+  type TorrentBlockerInternalStats,
+  type TorrentBlockerStatsRange,
+  type TorrentBlockerActiveBan,
+  type ServerWithMetrics,
+} from '../api/client'
+
+interface TorrentBlockerState {
+  settings: TorrentBlockerSettings | null
+  status: TorrentBlockerStatus | null
+  internalStats: TorrentBlockerInternalStats | null
+  statsRange: TorrentBlockerStatsRange
+  activeBans: TorrentBlockerActiveBan[]
+  activeBansTotal: number
+  servers: ServerWithMetrics[]
+  isLoading: boolean
+
+  fetchSettings: () => Promise<void>
+  updateSettings: (data: Partial<TorrentBlockerSettings>) => Promise<void>
+  fetchStatus: () => Promise<void>
+  fetchInternalStats: (range?: TorrentBlockerStatsRange) => Promise<void>
+  setStatsRange: (range: TorrentBlockerStatsRange) => void
+  fetchActiveBans: (start?: number, size?: number) => Promise<void>
+  fetchServers: () => Promise<void>
+  pollNow: () => Promise<void>
+  testWebhook: (url: string, secret: string) => Promise<boolean>
+}
+
+export const useTorrentBlockerStore = create<TorrentBlockerState>((set, get) => ({
+  settings: null,
+  status: null,
+  internalStats: null,
+  statsRange: '24h',
+  activeBans: [],
+  activeBansTotal: 0,
+  servers: [],
+  isLoading: false,
+
+  fetchSettings: async () => {
+    try {
+      const { data } = await torrentBlockerApi.getSettings()
+      set({ settings: data })
+    } catch {
+      // ignore
+    }
+  },
+
+  updateSettings: async (data) => {
+    try {
+      const { data: updated } = await torrentBlockerApi.updateSettings(data)
+      set({ settings: updated })
+      toast.success('Settings saved')
+    } catch {
+      toast.error('Failed to save settings')
+    }
+  },
+
+  fetchStatus: async () => {
+    try {
+      const { data } = await torrentBlockerApi.getStatus()
+      set({ status: data })
+    } catch {
+      // ignore
+    }
+  },
+
+  fetchInternalStats: async (range) => {
+    const r = range ?? get().statsRange
+    try {
+      const { data } = await torrentBlockerApi.getInternalStats(r)
+      set({ internalStats: data, statsRange: r })
+    } catch {
+      // ignore
+    }
+  },
+
+  setStatsRange: (range) => {
+    set({ statsRange: range })
+    get().fetchInternalStats(range)
+  },
+
+  fetchActiveBans: async (start = 0, size = 50) => {
+    try {
+      const { data } = await torrentBlockerApi.getActiveBans(start, size)
+      set({ activeBans: data.records || [], activeBansTotal: data.total || 0 })
+    } catch {
+      // ignore
+    }
+  },
+
+  fetchServers: async () => {
+    try {
+      const { data } = await serversApi.list()
+      set({ servers: data.servers || [] })
+    } catch {
+      // ignore
+    }
+  },
+
+  pollNow: async () => {
+    try {
+      await torrentBlockerApi.pollNow()
+      toast.success('Poll triggered')
+    } catch {
+      toast.error('Failed to trigger poll')
+    }
+  },
+
+  testWebhook: async (url, secret) => {
+    try {
+      const { data } = await torrentBlockerApi.testWebhook(url, secret)
+      if (data.success) {
+        toast.success(`Webhook OK: ${data.message}`)
+      } else {
+        toast.error(`Webhook failed: ${data.message}`)
+      }
+      return data.success
+    } catch {
+      toast.error('Failed to test webhook')
+      return false
+    }
+  },
+}))
