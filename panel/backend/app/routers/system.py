@@ -21,6 +21,7 @@ from app.auth import verify_auth
 from app.config import get_settings
 from app.database import get_db
 from app.models import Server
+from app.services import update_channel
 
 router = APIRouter(prefix="/system", tags=["system"])
 logger = logging.getLogger(__name__)
@@ -88,17 +89,20 @@ async def get_panel_ip_endpoint(_: dict = Depends(verify_auth)):
 VERSION_FILE = Path("/app/VERSION")
 UPDATER_CONTAINER_NAME = "panel-updater"
 UPDATER_IMAGE = "docker:cli"
-GITHUB_PANEL_VERSION_URL = "https://raw.githubusercontent.com/Joliz1337/monitoring/main/panel/VERSION"
-GITHUB_NODE_VERSION_URL = "https://raw.githubusercontent.com/Joliz1337/monitoring/main/node/VERSION"
-GITHUB_CONFIGS_BASE = "https://raw.githubusercontent.com/Joliz1337/monitoring/main/configs"
-GITHUB_CONFIGS_VERSION_URL = f"{GITHUB_CONFIGS_BASE}/VERSION"
-GITHUB_NETWORK_TUNE_URL = f"{GITHUB_CONFIGS_BASE}/network-tune.sh"
-GITHUB_NETWORK_TUNE_SERVICE_URL = f"{GITHUB_CONFIGS_BASE}/network-tune.service"
-GITHUB_MULTIQUEUE_TUNE_URL = f"{GITHUB_CONFIGS_BASE}/multiqueue-tune.sh"
-GITHUB_MULTIQUEUE_TUNE_SERVICE_URL = f"{GITHUB_CONFIGS_BASE}/multiqueue-tune.service"
-GITHUB_HYBRID_TUNE_URL = f"{GITHUB_CONFIGS_BASE}/hybrid-tune.sh"
-GITHUB_HYBRID_TUNE_SERVICE_URL = f"{GITHUB_CONFIGS_BASE}/hybrid-tune.service"
-GITHUB_RENDERER_URL = f"{GITHUB_CONFIGS_BASE}/tune-sysctl.sh"
+
+
+# URL строятся на каждый запрос: базовая ветка зависит от выбранного канала
+# обновлений (main/dev) и может меняться в рантайме через настройки панели.
+def _github_panel_version_url() -> str:
+    return f"{update_channel.github_raw_base()}/panel/VERSION"
+
+
+def _github_node_version_url() -> str:
+    return f"{update_channel.github_raw_base()}/node/VERSION"
+
+
+def _github_configs_url(filename: str) -> str:
+    return f"{update_channel.github_configs_base()}/{filename}"
 
 # Node agents older than this cannot run the renderer: they would write the
 # base files verbatim, leaving literal @@TOKEN@@ lines that sysctl rejects.
@@ -107,7 +111,7 @@ MIN_NODE_VERSION_FOR_RENDER = "10.6.0"
 
 def _profiles_url(filename: str) -> str:
     """Build GitHub URL for a file under configs/profiles/."""
-    return f"{GITHUB_CONFIGS_BASE}/profiles/{filename}"
+    return _github_configs_url(f"profiles/{filename}")
 
 
 def _version_tuple(v: str) -> tuple:
@@ -155,7 +159,7 @@ async def get_latest_version_from_github() -> Optional[str]:
     """Fetch latest panel version from panel/VERSION file on GitHub"""
     try:
         client = get_external_client()
-        response = await client.get(GITHUB_PANEL_VERSION_URL, timeout=10.0)
+        response = await client.get(_github_panel_version_url(), timeout=10.0)
 
         if response.status_code == 200:
             version = response.text.strip()
@@ -171,7 +175,7 @@ async def get_latest_node_version_from_github() -> Optional[str]:
     """Fetch latest node version from node/VERSION file on GitHub"""
     try:
         client = get_external_client()
-        response = await client.get(GITHUB_NODE_VERSION_URL, timeout=10.0)
+        response = await client.get(_github_node_version_url(), timeout=10.0)
 
         if response.status_code == 200:
             version = response.text.strip()
@@ -187,7 +191,7 @@ async def get_latest_optimizations_version_from_github() -> Optional[str]:
     """Fetch latest optimizations version from configs/VERSION file on GitHub"""
     try:
         client = get_external_client()
-        response = await client.get(GITHUB_CONFIGS_VERSION_URL, timeout=10.0)
+        response = await client.get(_github_configs_url("VERSION"), timeout=10.0)
 
         if response.status_code == 200:
             version = response.text.strip()
@@ -474,9 +478,9 @@ async def get_single_node_version(
 async def run_panel_update_in_container(target_ref: str | None = None):
     """
     Run panel update in separate Docker container.
-    
+
     Args:
-        target_ref: Git reference (branch/tag/commit). Default: 'main'
+        target_ref: Git reference (branch/tag/commit). Default: выбранный канал обновлений.
     """
     global _update_status
     
@@ -501,7 +505,7 @@ async def run_panel_update_in_container(target_ref: str | None = None):
             logger.info(f"Pulling {UPDATER_IMAGE}...")
             client.images.pull(UPDATER_IMAGE)
         
-        ref_arg = target_ref if target_ref else "main"
+        ref_arg = target_ref if target_ref else update_channel.current_branch()
         logger.info(f"Starting panel update to: {ref_arg}")
         
         # Updater script:
@@ -649,19 +653,19 @@ async def trigger_panel_update(
     3. update.sh stops containers, copies files, rebuilds, restarts
     
     Args:
-        target_ref: Git reference (branch/tag/commit). Default: 'main' (latest)
-    
+        target_ref: Git reference (branch/tag/commit). Default: выбранный канал обновлений.
+
     Note: The panel will restart after update, connection will be lost temporarily.
     """
     if _update_status["in_progress"]:
         raise HTTPException(status_code=409)
-    
+
     asyncio.create_task(run_panel_update_in_container(target_ref))
-    
+
     return {
         "success": True,
         "message": "Panel update started. The panel will restart shortly.",
-        "target": target_ref or "main"
+        "target": target_ref or update_channel.current_branch()
     }
 
 
@@ -903,18 +907,18 @@ async def get_optimizations_from_github(profile: str = "vpn") -> dict:
     try:
         client = get_external_client()
         responses = await asyncio.gather(
-            client.get(GITHUB_CONFIGS_VERSION_URL, timeout=15.0),
-            client.get(GITHUB_RENDERER_URL, timeout=15.0),
+            client.get(_github_configs_url("VERSION"), timeout=15.0),
+            client.get(_github_configs_url("tune-sysctl.sh"), timeout=15.0),
             client.get(_profiles_url("common.base.conf"), timeout=15.0),
             client.get(_profiles_url(f"{profile}.base.conf"), timeout=15.0),
             client.get(_profiles_url("limits.tmpl"), timeout=15.0),
             client.get(_profiles_url("systemd-limits.tmpl"), timeout=15.0),
-            client.get(GITHUB_NETWORK_TUNE_URL, timeout=15.0),
-            client.get(GITHUB_NETWORK_TUNE_SERVICE_URL, timeout=15.0),
-            client.get(GITHUB_MULTIQUEUE_TUNE_URL, timeout=15.0),
-            client.get(GITHUB_MULTIQUEUE_TUNE_SERVICE_URL, timeout=15.0),
-            client.get(GITHUB_HYBRID_TUNE_URL, timeout=15.0),
-            client.get(GITHUB_HYBRID_TUNE_SERVICE_URL, timeout=15.0),
+            client.get(_github_configs_url("network-tune.sh"), timeout=15.0),
+            client.get(_github_configs_url("network-tune.service"), timeout=15.0),
+            client.get(_github_configs_url("multiqueue-tune.sh"), timeout=15.0),
+            client.get(_github_configs_url("multiqueue-tune.service"), timeout=15.0),
+            client.get(_github_configs_url("hybrid-tune.sh"), timeout=15.0),
+            client.get(_github_configs_url("hybrid-tune.service"), timeout=15.0),
             return_exceptions=True
         )
 

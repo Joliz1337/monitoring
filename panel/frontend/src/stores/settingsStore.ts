@@ -88,6 +88,7 @@ interface SettingsState {
   serverTimezone: string
   timeSyncEnabled: boolean
   remnawaveNginxPath: string
+  updateBranch: string
   isLoading: boolean
 
   fetchSettings: () => Promise<void>
@@ -102,6 +103,7 @@ interface SettingsState {
   setServerTimezone: (tz: string) => Promise<void>
   setTimeSyncEnabled: (enabled: boolean) => Promise<void>
   setRemnawaveNginxPath: (path: string) => Promise<void>
+  setUpdateBranch: (branch: string) => Promise<void>
   getEffectiveTimezone: () => string
   getTimezoneOffset: () => number
 }
@@ -118,6 +120,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   serverTimezone: 'Europe/Moscow',
   timeSyncEnabled: true,
   remnawaveNginxPath: '/opt/remnawave',
+  updateBranch: 'main',
   isLoading: true,
   
   fetchSettings: async () => {
@@ -135,6 +138,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         serverTimezone: data.settings.server_timezone || 'Europe/Moscow',
         timeSyncEnabled: data.settings.time_sync_enabled !== 'false',
         remnawaveNginxPath: data.settings.remnawave_nginx_path || '/opt/remnawave',
+        updateBranch: data.settings.update_branch || 'main',
         isLoading: false,
       })
     } catch {
@@ -199,6 +203,12 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   setRemnawaveNginxPath: async (path: string) => {
     set({ remnawaveNginxPath: path })
     await settingsApi.set('remnawave_nginx_path', path)
+    toast.success(i18n.t('common.saved'))
+  },
+
+  setUpdateBranch: async (branch: string) => {
+    set({ updateBranch: branch })
+    await settingsApi.set('update_branch', branch)
     toast.success(i18n.t('common.saved'))
   },
 

@@ -26,12 +26,9 @@ from app.database import async_session
 from app.models import Server, AntiDdosSettings, AlertSettings, AlertHistory, AntiDdosWhitelistSource
 from app.services.http_client import get_node_client, get_node_apply_client, get_external_client, node_auth_headers
 from app.services.net_utils import resolve_panel_ip, host_to_ip
+from app.services import update_channel
 
 logger = logging.getLogger(__name__)
-
-GITHUB_CONFIGS_BASE = "https://raw.githubusercontent.com/Joliz1337/monitoring/main/configs"
-WATCHDOG_SH_URL = f"{GITHUB_CONFIGS_BASE}/ddos-watchdog.sh"
-WATCHDOG_SERVICE_URL = f"{GITHUB_CONFIGS_BASE}/ddos-watchdog.service"
 
 FILES_CACHE_TTL = 300   # seconds
 SOURCE_CACHE_TTL = 300  # seconds — cache fetched source lists
@@ -263,9 +260,10 @@ class AntiDdosManager:
             return self._files_cache[1], self._files_cache[2]
         try:
             client = get_external_client()
+            configs_base = update_channel.github_configs_base()
             sh_resp, svc_resp = await asyncio.gather(
-                client.get(WATCHDOG_SH_URL, timeout=20.0),
-                client.get(WATCHDOG_SERVICE_URL, timeout=20.0),
+                client.get(f"{configs_base}/ddos-watchdog.sh", timeout=20.0),
+                client.get(f"{configs_base}/ddos-watchdog.service", timeout=20.0),
             )
             if sh_resp.status_code != 200 or svc_resp.status_code != 200:
                 return None

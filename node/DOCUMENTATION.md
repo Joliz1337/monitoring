@@ -139,6 +139,8 @@ node/
 | PANEL_IP | IP панели (для UFW) | задаётся при установке |
 | TRAFFIC_COLLECT_INTERVAL | Интервал сбора (сек) | 60 |
 | TRAFFIC_RETENTION_DAYS | Хранение данных (дни) | 7 |
+| MON_IMAGE_TAG | Тег Docker-образа api в `docker-compose.yml` (`image: ...:${MON_IMAGE_TAG:-latest}`); `deploy.sh` при установке пишет `dev`, если `MON_BRANCH=dev`, иначе `latest`; апдейтер (`apply-update.sh`) переписывает при обновлении на `main`/`dev` | latest |
+
 ## Порты
 
 | Порт | Доступ | Описание |
@@ -164,7 +166,7 @@ node/
 |-------|----------|----------|
 | GET | /api/version | Версия ноды |
 | GET | /api/system/versions | Объединённый endpoint: версия ноды + оптимизации |
-| POST | /api/system/update | Запуск обновления (target_ref: branch/tag/commit, по умолчанию main) |
+| POST | /api/system/update | Запуск обновления (target_ref: branch/tag/commit, по умолчанию main; при вызове через панель панель подставляет выбранный канал обновлений — main/dev) |
 | GET | /api/system/update/status | Статус обновления |
 | GET | /api/system/optimizations/version | Версия системных оптимизаций (installed + version) |
 | POST | /api/system/optimizations/apply | Применить системные оптимизации |
@@ -268,10 +270,10 @@ data: {"message": "error description"}
 
 **Механизм обновления**:
 1. API создаёт временный контейнер `monitoring-updater` (образ `docker:cli`)
-2. Контейнер клонирует свежий код из GitHub (main или указанная ветка)
-3. Запускает `update.sh` из склонированной папки
-4. `update.sh` скачивает репо и запускает **свежий** `scripts/apply-update.sh` из скачанной версии
-5. `apply-update.sh` выполняет обновление: копирование файлов и получение образов (pull/сборка) — до остановки контейнеров, затем миграции, `docker compose down` + `up`
+2. Контейнер клонирует свежий код из GitHub (main или указанная ветка — панель подставляет выбранный канал обновлений, если ref не передан явно)
+3. Запускает `update.sh` из склонированной папки, передавая исходный `TARGET_REF` 4-м аргументом
+4. `update.sh` скачивает репо и запускает **свежий** `scripts/apply-update.sh` из скачанной версии, тоже с `TARGET_REF` 4-м аргументом
+5. `apply-update.sh` выполняет обновление: копирование файлов и получение образов (pull/сборка) — до остановки контейнеров, затем миграции, `docker compose down` + `up`. Если ref — `main`/`dev`, перед `pull` в `.env` пишется `MON_IMAGE_TAG=latest|dev` (при обновлении на конкретный тег/коммит канал не меняется — используется уже сохранённое значение); если `apply-update.sh` запущен старым апдейтером без ref-аргумента — ветка вычитывается из `.git/HEAD` скачанного клона
 6. Контейнер удаляется после завершения
 
 Обновление **всегда** использует актуальную версию логики из GitHub (двойная загрузка гарантирует свежесть).

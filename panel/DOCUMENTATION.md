@@ -1,4 +1,4 @@
-# Monitoring Panel v10.34.1
+# Monitoring Panel v10.37.0
 
 Веб-панель для мониторинга серверов. Собирает метрики с нод с настраиваемым интервалом (по умолчанию 10 сек) и хранит историю локально.
 
@@ -26,6 +26,7 @@
 - **Авто-восстановление ноды** — при возвращении сервера в сеть панель автоматически сверяет состояние firewall (UFW), HAProxy-конфига, статуса HAProxy и IP Blocklist с ожидаемым; переприменяет только сбившееся (drift-detection по SHA256-хэшам); без Telegram-уведомлений
 - **Авторазвёртывание ноды** — установка ноды мониторинга прямо из вкладки «Серверы»: подключение по SSH (пароль или приватный ключ), запуск `install.sh --unattended` на целевом сервере; установка выполняется **в фоне на бэкенде** — закрытие вкладки браузера не прерывает процесс; живой лог переподключаем (GET-стрим с реплеем); опционально устанавливает WARP и ноду Remnawave с сохранёнными именованными сертификатами; **массовый деплой** — произвольное количество дополнительных целей, каждая со своим SSH и опциями; после успешного деплоя бэкенд автоматически привязывает сервер к выбранным HAProxy-профилю и/или Firewall-профилю; незавершённые задачи переживают перезагрузку страницы (восстановление через localStorage + `GET /deploy/jobs`); **поддержка Hetzner Rescue System** — при обнаружении rescue-среды `install.sh` устанавливает Ubuntu 24.04, перезагружается, панель ждёт ноду до 40 мин через поллинг и завершает деплой автоматически
 - **SOCKS5-прокси до ноды** — опциональное поле у сервера (`ip:port` или `ip:port@login:pass`): при заполнении все запросы панели к этой ноде идут через указанный прокси вместо прямого соединения — и HTTP (метрики, proxy-роутер, синхронизация блок-листов/анти-DDoS, SSE-терминал, тест подключения), и SSH при авторазвёртывании ноды
+- **Канал обновлений** — переключатель «Стабильный» (`main`) / «Dev» (`dev`) в разделе Настройки; определяет, откуда панель качает свой и нодовский код при обновлении, конфиги оптимизаций/анти-DDoS и Docker-образы (тег `:latest` для main, `:dev` для dev)
 
 ## Интервалы сбора данных
 
@@ -132,6 +133,7 @@ panel/
 │       └── services/
 │           ├── ssh_manager.py           # Пресеты безопасности SSH + proxy helper
 │           ├── net_utils.py             # Общие сетевые хелперы: is_public_range(), resolve_panel_ip(), host_to_ip()
+│           ├── update_channel.py        # Канал обновлений (main/dev): кэш ветки, GitHub-URL по каналу
 │           ├── http_client.py           # Глобальный HTTP-клиент с connection pooling
 │           ├── notes_broadcaster.py     # asyncio.Queue-based pub/sub для SSE
 │           ├── wildcard_ssl.py          # Выпуск через certbot + Cloudflare, продление, деплой на ноды, автопродление
@@ -146,14 +148,48 @@ panel/
 
 ## Деплой и образы
 
-Docker-образы автоматически билдятся **GitHub Actions** при пуше в main и публикуются в **GHCR**:
-- `ghcr.io/joliz1337/monitoring-panel-frontend:latest`
-- `ghcr.io/joliz1337/monitoring-panel-backend:latest`
-- `ghcr.io/joliz1337/monitoring-node-api:latest`
+Docker-образы автоматически билдятся **GitHub Actions** при пуше в `main` **и** в `dev`, публикуются в **GHCR** под разными тегами:
+- `ghcr.io/joliz1337/monitoring-panel-frontend:latest` (main) / `:dev` (dev)
+- `ghcr.io/joliz1337/monitoring-panel-backend:latest` (main) / `:dev` (dev)
+- `ghcr.io/joliz1337/monitoring-node-api:latest` (main) / `:dev` (dev)
 
-CI/CD: `.github/workflows/docker-publish.yml` — 3 параллельных job (node-api, panel-frontend, panel-backend) с GHA кешем.
+CI/CD: `.github/workflows/docker-publish.yml` — 3 параллельных job (node-api, panel-frontend, panel-backend) с GHA кешем; тег образа берётся из имени ветки (`env.IMAGE_TAG`, `main` → `latest`, `dev` → `dev`).
 
-Установка и обновление: `docker compose pull` → `docker compose up -d`. Если GHCR недоступен — fallback на локальный `docker compose build` из Dockerfile.
+Установка и обновление: `docker compose pull` → `docker compose up -d`. Если GHCR недоступен — fallback на локальный `docker compose build` из Dockerfile. Какой именно тег тянет `docker compose pull`, определяет `${MON_IMAGE_TAG:-latest}` в `image:` (`panel/docker-compose.yml`, `node/docker-compose.yml`) — переменная в `.env` пишется установщиком/апдейтером по каналу обновлений, см. ниже.
+
+### Канал обновлений
+
+Настройка `update_branch` (`main` — стабильный, по умолчанию; `dev`) определяет ветку GitHub, из которой панель берёт код и конфиги при обновлении и авторазвёртывании нод. Хранится в `PanelSettings` и кэшируется в памяти (`app/services/update_channel.py`) — GitHub-URL нужны в местах без сессии БД под рукой (фоновый цикл анти-DDoS, сборка команды авторазвёртывания).
+
+**Что зависит от канала:**
+- `GET /api/system/version` — сравнение версий панели/ноды/оптимизаций с `panel/VERSION`, `node/VERSION`, `configs/VERSION` из выбранной ветки
+- `POST /api/system/update` без явного `target_ref` — обновление панели на выбранную ветку (`run_panel_update_in_container`)
+- `POST /api/proxy/{id}/system/update` без явного `target_version` — обновление ноды на выбранную ветку
+- Скачивание конфигов системных оптимизаций (`GET /api/system/optimizations/*`) и файлов анти-DDoS вотчдога (`antiddos_manager.py`)
+- `install.sh`, скачиваемый при авторазвёртывании ноды (`deploy_service.py`); при dev-канале в окружение установки добавляется `MON_BRANCH=dev`, который сам `install.sh` разворачивает во все свои `raw.githubusercontent.com`-URL (клонирование репозитория, конфиги, firstboot-скрипт Hetzner Rescue) и передаёт дочернему `node/deploy.sh`
+- Тег Docker-образов, который апдейтер панели/ноды пишет в `.env` (`MON_IMAGE_TAG=latest|dev`) после обновления на ветку `main`/`dev` — обновление на конкретный тег/коммит канал не меняет
+
+Переключение канала в Настройках **не запускает обновление само по себе** — влияет только на то, откуда будет скачано следующее.
+
+**Настройки:**
+
+| Параметр | Описание | Default |
+|----------|----------|---------|
+| `update_branch` | Ветка обновлений: `main` или `dev` | `main` |
+
+**API:**
+
+| Метод | Endpoint | Описание |
+|-------|----------|----------|
+| PUT | /settings/update_branch | Сменить канал; `400` при значении, отличном от `main`/`dev` |
+
+**Файлы:**
+- `panel/backend/app/services/update_channel.py` — кэш ветки, `current_branch()`/`set_current_branch()`, `github_raw_base()`/`github_configs_base()`/`installer_url()`, `load_branch_from_db()` (вызывается в `lifespan` при старте)
+- `panel/backend/app/routers/settings.py` — валидация `update_branch` в `PUT /settings/{key}`, обновление кэша
+- `panel/backend/app/main.py` — загрузка сохранённой ветки из БД в кэш на старте
+- `panel/backend/app/routers/system.py`, `routers/proxy.py`, `services/antiddos_manager.py`, `services/deploy_service.py` — потребители (см. выше)
+- `install.sh` — переменная `MON_BRANCH` (по умолчанию `main`), экспортируется для `node/deploy.sh`
+- `panel/frontend/src/pages/Settings.tsx`, `stores/settingsStore.ts` — карточка «Канал обновлений» (кнопки Стабильный/Dev, предупреждение для dev)
 
 ## Производительность
 
@@ -348,7 +384,7 @@ PK таблицы переведён с `Integer` (int32) на `BigInteger`. П�
 | GET | /api/system/panel-ip | IP-адрес панели (резолвится из домена) |
 | GET | /api/system/version | Версии панели, нод и оптимизаций (всё в одном запросе, параллельные запросы к нодам) |
 | GET | /api/system/stats | Статистика сервера панели (CPU, RAM, диск) |
-| POST | /api/system/update | Обновление панели (target_ref: branch/tag/commit, по умолчанию main) |
+| POST | /api/system/update | Обновление панели (target_ref: branch/tag/commit, по умолчанию — выбранный канал обновлений) |
 | GET | /api/system/update/status | Статус обновления |
 | GET | /api/system/certificate | Информация о SSL сертификате панели |
 | POST | /api/system/certificate/renew?force=bool | Продление SSL сертификата (force=true для принудительного) |
@@ -357,9 +393,9 @@ PK таблицы переведён с `Integer` (int32) на `BigInteger`. П�
 
 **Механизм обновления**:
 1. API создаёт временный контейнер `panel-updater` (образ `docker:cli`)
-2. Контейнер клонирует свежий код из GitHub (main или указанная ветка)
-3. Запускает `update.sh` из склонированной папки
-4. `update.sh` останавливает контейнеры, копирует файлы, скачивает новые образы (docker compose pull), запускает
+2. Контейнер клонирует свежий код из GitHub (выбранный канал обновлений или указанная явно ветка/тег/коммит)
+3. Запускает `update.sh` из склонированной папки, передавая ref 4-м аргументом в `apply-update.sh`
+4. `apply-update.sh` останавливает контейнеры, копирует файлы; если ref — `main`/`dev`, пишет `MON_IMAGE_TAG=latest|dev` в `.env` (на другой тег/коммит канал не меняется), скачивает новые образы (docker compose pull), запускает
 5. Контейнер удаляется после завершения
 
 Проверка версий: панель скачивает `panel/VERSION`, `node/VERSION` и `configs/VERSION` файлы с GitHub и сравнивает с локальными. Все запросы к нодам выполняются параллельно через `asyncio.gather` для быстрой загрузки.

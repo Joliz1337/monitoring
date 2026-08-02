@@ -355,7 +355,7 @@ main() {
     
     if [ -f "$TMP_DIR/panel/scripts/apply-update.sh" ]; then
         chmod +x "$TMP_DIR/panel/scripts/apply-update.sh" 2>/dev/null || true
-        exec bash "$TMP_DIR/panel/scripts/apply-update.sh" "$TMP_DIR" "$PANEL_DIR" "$CURRENT_VERSION"
+        exec bash "$TMP_DIR/panel/scripts/apply-update.sh" "$TMP_DIR" "$PANEL_DIR" "$CURRENT_VERSION" "$TARGET_REF"
     else
         log_warn "Downloaded version doesn't have apply-update.sh, using inline update..."
         fallback_update

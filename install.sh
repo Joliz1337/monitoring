@@ -96,6 +96,10 @@ NC='\033[0m'
 # ==================== Paths ====================
 
 REPO_URL="https://github.com/Joliz1337/monitoring.git"
+# Ветка репозитория: main (стабильная) или dev — панель передаёт MON_BRANCH
+# при авторазвёртывании, когда выбран dev-канал обновлений.
+# export — значение нужно дочернему node/deploy.sh (пишет MON_IMAGE_TAG в .env)
+export MON_BRANCH="${MON_BRANCH:-main}"
 TMP_DIR="/tmp/monitoring-installer-$$"
 
 PANEL_DIR="/opt/monitoring-panel"
@@ -737,7 +741,7 @@ check_git() {
 
 clone_repo() {
     log_info "$(msg downloading_repo)"
-    clone_repo_with_fallback "$TMP_DIR" "main"
+    clone_repo_with_fallback "$TMP_DIR" "$MON_BRANCH"
 }
 
 cleanup_temp() {
@@ -1020,7 +1024,7 @@ install_nic_tune() {
             log_success "$service_name installed"
         fi
     else
-        local GITHUB_RAW="https://raw.githubusercontent.com/Joliz1337/monitoring/main/configs"
+        local GITHUB_RAW="https://raw.githubusercontent.com/Joliz1337/monitoring/$MON_BRANCH/configs"
 
         mkdir -p "$OPT_DIR/scripts" 2>/dev/null || true
         if timeout "$TIMEOUT_CURL" curl -fsSL --connect-timeout 30 --max-time "$TIMEOUT_CURL" \
@@ -1266,7 +1270,7 @@ profiles/limits.tmpl profiles/systemd-limits.tmpl"
     else
         log_info "Downloading optimization inputs (profile: $opt_profile)..."
 
-        local GITHUB_RAW="https://raw.githubusercontent.com/Joliz1337/monitoring/main/configs"
+        local GITHUB_RAW="https://raw.githubusercontent.com/Joliz1337/monitoring/$MON_BRANCH/configs"
 
         download_config() {
             local filename="$1"
@@ -1401,7 +1405,7 @@ install_antiddos_watchdog() {
     local CONFIG_SRC
     CONFIG_SRC=$(detect_config_src)
     local OPT_DIR="/opt/monitoring"
-    local GITHUB_RAW="https://raw.githubusercontent.com/Joliz1337/monitoring/main/configs"
+    local GITHUB_RAW="https://raw.githubusercontent.com/Joliz1337/monitoring/$MON_BRANCH/configs"
 
     mkdir -p "$OPT_DIR/scripts" "$OPT_DIR/antiddos" 2>/dev/null || true
 
@@ -3075,7 +3079,7 @@ find_ubuntu2404_image() {
 # установщик. Эти параметры доедут до новой ОС и продолжат настройку.
 collect_firstboot_env() {
     local var
-    for var in NODE_SECRET PANEL_IP MON_PROXY_URL \
+    for var in NODE_SECRET PANEL_IP MON_PROXY_URL MON_BRANCH \
                MON_INSTALL_NODE MON_INSTALL_OPTIMIZATIONS MON_INSTALL_WARP \
                MON_INSTALL_REMNAWAVE MON_NIC_MODE MON_OPT_PROFILE REMNAWAVE_CERT; do
         [ -n "${!var:-}" ] && printf '%s=%q\n' "$var" "${!var}"
@@ -3112,7 +3116,7 @@ for _ in $(seq 1 30); do
     curl -fsI https://raw.githubusercontent.com >/dev/null 2>&1 && break
     sleep 5
 done
-SCRIPT=$(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh 2>/dev/null)
+SCRIPT=$(curl -fsSL "https://raw.githubusercontent.com/Joliz1337/monitoring/${MON_BRANCH:-main}/install.sh" 2>/dev/null)
 [ -n "$SCRIPT" ] && bash -c "$SCRIPT" -- --unattended
 systemctl disable mon-firstboot.service >/dev/null 2>&1 || true
 rm -f /etc/systemd/system/mon-firstboot.service \

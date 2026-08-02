@@ -14,6 +14,7 @@ from app.services.http_client import get_node_client, node_auth_headers
 from app.database import get_db
 from app.models import Server, ServerCache, MetricsSnapshot, AggregatedMetrics
 from app.auth import verify_auth
+from app.services import update_channel
 
 logger = logging.getLogger(__name__)
 
@@ -986,10 +987,13 @@ async def trigger_node_update(
     """
     Trigger node update.
     Optional data: { "target_version": "v1.1.0" }
-    If not specified, updates to latest version.
+    If not specified, updates to the selected update channel (main/dev).
     """
     server = await get_server_by_id(server_id, db)
-    return await proxy_request(server, "/api/system/update", method="POST", json_data=data or {})
+    data = data or {}
+    if not data.get("target_version"):
+        data["target_version"] = update_channel.current_branch()
+    return await proxy_request(server, "/api/system/update", method="POST", json_data=data)
 
 
 @router.get("/{server_id}/system/update/status")

@@ -633,6 +633,15 @@ setup_env() {
         sed -i "/^API_KEY=/d" .env
     fi
 
+    # Канал обновлений: установка с dev-ветки тянет и dev-образы из GHCR
+    local image_tag="latest"
+    [ "${MON_BRANCH:-main}" = "dev" ] && image_tag="dev"
+    if grep -q "^MON_IMAGE_TAG=" .env 2>/dev/null; then
+        sed -i "s/^MON_IMAGE_TAG=.*/MON_IMAGE_TAG=$image_tag/" .env
+    else
+        echo "MON_IMAGE_TAG=$image_tag" >> .env
+    fi
+
     log_success "Environment configured"
 }
 

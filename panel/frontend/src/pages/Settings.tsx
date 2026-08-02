@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { Settings as SettingsIcon, RefreshCw, Layout, Languages, Sparkles, Check, Clock, Activity, Shield, AlertTriangle, Loader2, CheckCircle2, XCircle, Terminal, Server, Zap, Cpu, HardDrive, MemoryStick, Database, Download, Upload, Trash2, Archive, Globe, Waypoints, Save } from 'lucide-react'
+import { Settings as SettingsIcon, RefreshCw, Layout, Languages, Sparkles, Check, Clock, Activity, Shield, AlertTriangle, Loader2, CheckCircle2, XCircle, Terminal, Server, Zap, Cpu, HardDrive, MemoryStick, Database, Download, Upload, Trash2, Archive, Globe, Waypoints, Save, GitBranch, FlaskConical } from 'lucide-react'
 import { useSettingsStore, TIMEZONE_OPTIONS, TRAFFIC_PERIOD_OPTIONS, METRICS_INTERVAL_OPTIONS, HAPROXY_INTERVAL_OPTIONS } from '../stores/settingsStore'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence, LayoutGroup } from 'framer-motion'
@@ -22,10 +22,10 @@ export default function Settings() {
   const {
     refreshInterval, compactView, timezone, trafficPeriod,
     metricsCollectInterval, haproxyCollectInterval,
-    serverTimezone, timeSyncEnabled, remnawaveNginxPath,
+    serverTimezone, timeSyncEnabled, remnawaveNginxPath, updateBranch,
     fetchSettings, setRefreshInterval, setCompactView, setTimezone, setTrafficPeriod,
     setMetricsCollectInterval, setHaproxyCollectInterval,
-    setServerTimezone, setTimeSyncEnabled, setRemnawaveNginxPath
+    setServerTimezone, setTimeSyncEnabled, setRemnawaveNginxPath, setUpdateBranch
   } = useSettingsStore()
   const { t, i18n } = useTranslation()
   
@@ -1113,6 +1113,70 @@ export default function Settings() {
             </motion.button>
           </div>
           <p className="text-xs text-dark-500 mt-2">{t('settings.remnawave_path_hint')}</p>
+        </motion.div>
+
+        {/* Update channel */}
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }} className="card group hover:border-dark-700 transition-all">
+          <div className="flex items-center gap-3 mb-5">
+            <motion.div
+              className="w-11 h-11 rounded-xl bg-gradient-to-br from-accent-500/20 to-accent-600/20
+                         flex items-center justify-center border border-accent-500/20
+                         group-hover:shadow-lg group-hover:shadow-accent-500/10 transition-shadow"
+              whileHover={{ rotate: 10, scale: 1.05 }}
+            >
+              <GitBranch className="w-5 h-5 text-accent-500" />
+            </motion.div>
+            <div>
+              <h2 className="font-semibold text-dark-100">{t('settings.update_channel')}</h2>
+              <p className="text-sm text-dark-500">{t('settings.update_channel_desc')}</p>
+            </div>
+          </div>
+
+          <div className="flex gap-3">
+            {[
+              { value: 'main', label: t('settings.update_channel_stable'), icon: Shield },
+              { value: 'dev', label: t('settings.update_channel_dev'), icon: FlaskConical },
+            ].map((channel) => (
+              <motion.button
+                key={channel.value}
+                onClick={() => updateBranch !== channel.value && setUpdateBranch(channel.value)}
+                className={`relative flex-1 px-4 py-3 rounded-xl text-sm font-medium transition-all ${
+                  updateBranch === channel.value
+                    ? 'bg-gradient-to-r from-accent-500 to-accent-600 text-dark-950 shadow-lg shadow-accent-500/20'
+                    : 'bg-dark-800/60 text-dark-300 hover:bg-dark-700 border border-dark-700/50'
+                }`}
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
+              >
+                <span className="flex items-center justify-center gap-2">
+                  <channel.icon className="w-4 h-4" />
+                  {channel.label}
+                  <AnimatePresence>
+                    {updateBranch === channel.value && (
+                      <motion.span initial={{ scale: 0 }} animate={{ scale: 1 }} exit={{ scale: 0 }}>
+                        <Check className="w-4 h-4" />
+                      </motion.span>
+                    )}
+                  </AnimatePresence>
+                </span>
+              </motion.button>
+            ))}
+          </div>
+
+          <p className="text-xs text-dark-500 mt-3">{t('settings.update_channel_hint')}</p>
+          <AnimatePresence>
+            {updateBranch === 'dev' && (
+              <motion.div
+                initial={{ opacity: 0, y: -10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -10 }}
+                className="flex items-center gap-3 p-3 mt-3 rounded-xl bg-warning/10 border border-warning/20"
+              >
+                <AlertTriangle className="w-4 h-4 text-warning flex-shrink-0" />
+                <span className="text-sm text-warning">{t('settings.update_channel_dev_warning')}</span>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </motion.div>
 
         {/* Backup + SSL row */}

@@ -28,6 +28,7 @@ from app.services.torrent_blocker import start_torrent_blocker, stop_torrent_blo
 from app.services.antiddos_manager import start_antiddos_manager, stop_antiddos_manager
 from app.services.http_client import init_http_clients, close_http_clients
 from app.services.pki import load_or_create_keygen
+from app.services.update_channel import load_branch_from_db
 from app.security import SecurityMiddleware
 # Import all models to register them with Base.metadata
 from app.models import (  # noqa: F401
@@ -73,6 +74,10 @@ async def lifespan(app: FastAPI):
     app.state.pki = keygen
     await init_http_clients(keygen)
     await cleanup_expired_bans()
+
+    async with async_session() as db:
+        branch = await load_branch_from_db(db)
+    logger.info(f"Update channel: {branch}")
     
     try:
         from app.services._ext import init_ext_db

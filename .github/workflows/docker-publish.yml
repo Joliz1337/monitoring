@@ -2,11 +2,13 @@ name: Build & Publish Docker Images
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io
+  # main → :latest (стабильный канал), dev → :dev
+  IMAGE_TAG: ${{ github.ref_name == 'main' && 'latest' || github.ref_name }}
 
 permissions:
   contents: read
@@ -31,7 +33,7 @@ jobs:
           context: ./node
           file: ./node/Dockerfile
           push: true
-          tags: ${{ env.REGISTRY }}/joliz1337/monitoring-node-api:latest
+          tags: ${{ env.REGISTRY }}/joliz1337/monitoring-node-api:${{ env.IMAGE_TAG }}
           cache-from: type=gha,scope=node-api
           cache-to: type=gha,mode=max,scope=node-api
 
@@ -53,7 +55,7 @@ jobs:
           context: ./panel/frontend
           file: ./panel/frontend/Dockerfile
           push: true
-          tags: ${{ env.REGISTRY }}/joliz1337/monitoring-panel-frontend:latest
+          tags: ${{ env.REGISTRY }}/joliz1337/monitoring-panel-frontend:${{ env.IMAGE_TAG }}
           build-args: |
             NPM_REGISTRY=https://registry.npmjs.org
           cache-from: type=gha,scope=panel-frontend
@@ -77,6 +79,6 @@ jobs:
           context: ./panel
           file: ./panel/backend/Dockerfile
           push: true
-          tags: ${{ env.REGISTRY }}/joliz1337/monitoring-panel-backend:latest
+          tags: ${{ env.REGISTRY }}/joliz1337/monitoring-panel-backend:${{ env.IMAGE_TAG }}
           cache-from: type=gha,scope=panel-backend
           cache-to: type=gha,mode=max,scope=panel-backend
