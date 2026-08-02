@@ -682,6 +682,7 @@
     "update": "Update",
     "update_panel": "Update Panel",
     "update_all_nodes": "Update All Nodes",
+    "dev_channel_badge": "Dev channel: updates always available",
     "in_progress": "Updating...",
     "panel_restarting": "Panel restarting...",
     "waiting_reboot": "Waiting for panel to restart...",
