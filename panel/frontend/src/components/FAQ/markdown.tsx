@@ -36,11 +36,19 @@ const renderInline = (text: string): ReactNode[] => {
 }
 
 interface Block {
-  type: 'h1' | 'h2' | 'h3' | 'h4' | 'p' | 'ul' | 'ol' | 'code' | 'hr' | 'blockquote'
+  type: 'h1' | 'h2' | 'h3' | 'h4' | 'p' | 'ul' | 'ol' | 'code' | 'hr' | 'blockquote' | 'table'
   content?: string
   items?: string[]
   lang?: string
+  headers?: string[]
+  rows?: string[][]
 }
+
+const isTableRow = (line: string) => /^\s*\|.*\|\s*$/.test(line)
+const isTableDivider = (line: string) => /^\s*\|[\s:|-]+\|\s*$/.test(line) && line.includes('-')
+
+const parseTableCells = (line: string): string[] =>
+  line.trim().replace(/^\||\|$/g, '').split('|').map((cell) => cell.trim())
 
 const parseMarkdown = (md: string): Block[] => {
   const lines = md.replace(/\r\n/g, '\n').split('\n')
@@ -67,6 +75,18 @@ const parseMarkdown = (md: string): Block[] => {
       const level = line.match(/^(#{1,4})\s/)![1].length as 1 | 2 | 3 | 4
       blocks.push({ type: `h${level}` as Block['type'], content: line.replace(/^#{1,4}\s/, '') })
       i++
+      continue
+    }
+
+    if (isTableRow(line) && i + 1 < lines.length && isTableDivider(lines[i + 1])) {
+      const headers = parseTableCells(line)
+      i += 2
+      const rows: string[][] = []
+      while (i < lines.length && isTableRow(lines[i])) {
+        rows.push(parseTableCells(lines[i]))
+        i++
+      }
+      blocks.push({ type: 'table', headers, rows })
       continue
     }
 
@@ -120,7 +140,8 @@ const parseMarkdown = (md: string): Block[] => {
       !/^\s*[-*]\s/.test(lines[i]) &&
       !/^\s*\d+\.\s/.test(lines[i]) &&
       !lines[i].startsWith('```') &&
-      !lines[i].startsWith('>')
+      !lines[i].startsWith('>') &&
+      !isTableRow(lines[i])
     ) {
       buf.push(lines[i])
       i++
@@ -206,6 +227,33 @@ export const Markdown = ({ source }: { source: string }) => {
               >
                 {renderInline(block.content!)}
               </blockquote>
+            )
+          case 'table':
+            return (
+              <div key={idx} className="overflow-x-auto rounded-xl border border-dark-800/60">
+                <table className="w-full text-[14px] border-collapse">
+                  <thead>
+                    <tr className="bg-dark-800/40">
+                      {block.headers!.map((cell, j) => (
+                        <th key={j} className="px-3 py-2 text-left font-semibold text-dark-50 border-b border-dark-800/60">
+                          {renderInline(cell)}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {block.rows!.map((row, j) => (
+                      <tr key={j} className="border-b border-dark-800/40 last:border-0">
+                        {row.map((cell, k) => (
+                          <td key={k} className="px-3 py-2 align-top text-dark-200">
+                            {renderInline(cell)}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             )
           case 'hr':
             return <hr key={idx} className="border-dark-800/60" />
