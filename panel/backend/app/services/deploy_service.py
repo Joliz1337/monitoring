@@ -25,8 +25,8 @@ from python_socks import ProxyError as SocksProxyError
 from python_socks.async_.asyncio import Proxy as SocksProxy
 
 from app.services.http_client import parse_proxy_input, sanitize_proxy
+from app.services import update_channel
 
-INSTALLER_URL = "https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh"
 REMOTE_SCRIPT = "/tmp/mon-install.sh"
 
 # install.sh печатает этот маркер перед ребутом из Rescue System — по нему
@@ -123,6 +123,8 @@ def _build_inner_command(params: DeployParams) -> str:
         "MON_INSTALL_NODE": "1",
         "NODE_SECRET": params.node_secret,
     }
+    if update_channel.current_branch() != update_channel.STABLE_BRANCH:
+        env["MON_BRANCH"] = update_channel.current_branch()
     if params.panel_ip:
         env["PANEL_IP"] = params.panel_ip
     if params.proxy_url:
@@ -143,7 +145,7 @@ def _build_inner_command(params: DeployParams) -> str:
 
     assignments = " ".join(f"{key}={shlex.quote(value)}" for key, value in env.items())
     return (
-        f"curl -fsSL {shlex.quote(INSTALLER_URL)} -o {shlex.quote(REMOTE_SCRIPT)} && "
+        f"curl -fsSL {shlex.quote(update_channel.installer_url())} -o {shlex.quote(REMOTE_SCRIPT)} && "
         f"{assignments} bash {shlex.quote(REMOTE_SCRIPT)} --unattended"
     )
 

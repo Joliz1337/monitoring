@@ -157,6 +157,7 @@ bash install.sh --unattended
 | `NODE_SECRET` | Ключ API ноды мониторинга |
 | `PANEL_IP` | IP панели (для UFW ноды мониторинга) |
 | `REMNAWAVE_CERT` | Сертификат ноды Remnawave (не читается из /dev/tty) |
+| `MON_BRANCH` | Канал обновлений: `main` (по умолчанию) или `dev` — ветка `git clone` и всех `raw.githubusercontent.com`-URL (конфиги, firstboot-скрипт Hetzner Rescue); экспортируется для `node/deploy.sh`, который по ней выбирает тег Docker-образов (`MON_IMAGE_TAG`) |
 
 Глобальный флаг `UNATTENDED=1` — все запросы подтверждения переустановки (нода/WARP/Remnawave) автоматически принимаются. Функция `run_unattended()` выполняет компоненты в порядке: HTTP-прокси установщика → нода мониторинга → оптимизации (если `MON_INSTALL_OPTIMIZATIONS=1`) → WARP → нода Remnawave. Интерактивное меню без изменений.
 
@@ -213,7 +214,7 @@ bash install.sh --unattended
 
 Подробная документация по каждому компоненту:
 
-- [panel/DOCUMENTATION.md](panel/DOCUMENTATION.md) — веб-панель: API, БД, конфигурация, безопасность (v10.34.1)
+- [panel/DOCUMENTATION.md](panel/DOCUMENTATION.md) — веб-панель: API, БД, конфигурация, безопасность (v10.37.0)
 - [node/DOCUMENTATION.md](node/DOCUMENTATION.md) — нода-агент: API, метрики, HAProxy, трафик, Remnawave, Remnawave Nginx, Firewall Profiles, Системные оптимизации, Анти-DDoS
 
 ## Архитектура
@@ -239,10 +240,14 @@ Browser → nginx (SSL) → panel frontend (React)
 
 ## CI/CD
 
-Docker-образы собираются GitHub Actions (`.github/workflows/docker-publish.yml`) при пуше в `main` и публикуются в GHCR:
-- `ghcr.io/joliz1337/monitoring-panel-frontend:latest`
-- `ghcr.io/joliz1337/monitoring-panel-backend:latest`
-- `ghcr.io/joliz1337/monitoring-node-api:latest`
+Docker-образы собираются GitHub Actions (`.github/workflows/docker-publish.yml`) при пуше в `main` и в `dev`, публикуются в GHCR под тегом по ветке (`main` → `:latest`, `dev` → `:dev`):
+- `ghcr.io/joliz1337/monitoring-panel-frontend:latest` / `:dev`
+- `ghcr.io/joliz1337/monitoring-panel-backend:latest` / `:dev`
+- `ghcr.io/joliz1337/monitoring-node-api:latest` / `:dev`
 
-Установка и обновление: `docker compose pull` → `docker compose up -d`.
+Установка и обновление: `docker compose pull` → `docker compose up -d`; какой тег тянуть, задаёт `MON_IMAGE_TAG` в `.env` (`latest` по умолчанию).
+
+## Канал обновлений
+
+Настройка **«Канал обновлений»** в панели (Настройки → Стабильный/Dev) переключает, из какой ветки GitHub (`main`/`dev`) панель качает свой и нодовский код, конфиги оптимизаций/анти-DDoS и Docker-образы. Ветка репозитория `dev` — активная разработка, `main` — стабильные релизы (слияние из `dev`). Подробности контракта — в [panel/DOCUMENTATION.md](panel/DOCUMENTATION.md#канал-обновлений).
 

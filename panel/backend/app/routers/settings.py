@@ -10,6 +10,7 @@ from typing import Optional
 from app.database import get_db
 from app.models import PanelSettings
 from app.auth import verify_auth
+from app.services import update_channel
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
@@ -28,6 +29,8 @@ DEFAULT_SETTINGS = {
     "time_sync_enabled": "true",
     # Путь поиска установок Remnawave на нодах
     "remnawave_nginx_path": "/opt/remnawave",
+    # Канал обновлений панели и нод: main (стабильный) или dev
+    "update_branch": update_channel.STABLE_BRANCH,
 }
 
 
@@ -89,7 +92,13 @@ async def update_setting(
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
+    if key == "update_branch" and data.value not in update_channel.ALLOWED_BRANCHES:
+        raise HTTPException(status_code=400, detail="Invalid update branch")
+
     await set_setting(key, data.value, db)
+
+    if key == "update_branch":
+        update_channel.set_current_branch(data.value)
 
     if key == "server_timezone":
         from app.services.time_sync import get_time_sync_service

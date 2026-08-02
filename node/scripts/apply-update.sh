@@ -167,9 +167,15 @@ DOCKER_PULL_RETRY_DELAY=15
 TMP_DIR="$1"
 NODE_DIR="$2"
 CURRENT_VERSION="$3"
+# Ветка/реф обновления: явный 4-й аргумент от апдейтера; если запуск пришёл от
+# старой версии без аргумента — вычитываем ветку из .git/HEAD скачанного клона
+TARGET_REF="${4:-}"
+if [ -z "$TARGET_REF" ] && [ -f "$TMP_DIR/.git/HEAD" ]; then
+    TARGET_REF=$(sed -n 's|^ref: refs/heads/||p' "$TMP_DIR/.git/HEAD" | head -1)
+fi
 
 if [ -z "$TMP_DIR" ] || [ -z "$NODE_DIR" ]; then
-    log_error "Usage: apply-update.sh <tmp_dir> <node_dir> [current_version]"
+    log_error "Usage: apply-update.sh <tmp_dir> <node_dir> [current_version] [target_ref]"
     exit 1
 fi
 
@@ -559,6 +565,22 @@ fi
 if [ -f "$NODE_DIR/.env.backup" ]; then
     mv "$NODE_DIR/.env.backup" "$NODE_DIR/.env"
     log_success "Configuration restored"
+fi
+
+# Канал → тег образов GHCR: ветка dev тянет :dev, main — :latest.
+# Обновление на тег/коммит канал не меняет — действующий MON_IMAGE_TAG остаётся.
+case "$TARGET_REF" in
+    dev)  IMAGE_TAG="dev" ;;
+    main) IMAGE_TAG="latest" ;;
+    *)    IMAGE_TAG="" ;;
+esac
+if [ -n "$IMAGE_TAG" ] && [ -f "$NODE_DIR/.env" ]; then
+    if grep -q '^MON_IMAGE_TAG=' "$NODE_DIR/.env"; then
+        sed -i "s|^MON_IMAGE_TAG=.*|MON_IMAGE_TAG=$IMAGE_TAG|" "$NODE_DIR/.env"
+    else
+        echo "MON_IMAGE_TAG=$IMAGE_TAG" >> "$NODE_DIR/.env"
+    fi
+    log_info "Docker image tag: $IMAGE_TAG"
 fi
 
 # Make scripts executable
