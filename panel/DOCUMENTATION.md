@@ -1,4 +1,4 @@
-# Monitoring Panel v10.38.4
+# Monitoring Panel v10.38.5
 
 Веб-панель для мониторинга серверов. Собирает метрики с нод с настраиваемым интервалом (по умолчанию 10 сек) и хранит историю локально.
 
@@ -1178,7 +1178,7 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 **GZipMiddlewareNoSSE** в `main.py` пропускает пути `/ssh-security/bulk/` без gzip-буферизации.
 
 **Frontend:**
-- `panel/frontend/src/pages/SSHSecurity.tsx` — два режима в шапке: «Обзор» и «Настройка»; разделены состояния `activeServerId` (просмотр/правка) и `selectedServerIds` (множество для bulk-применения)
+- `panel/frontend/src/pages/SSHSecurity.tsx` — два режима в шапке: «Обзор» и «Настройка»; разделены состояния `activeServerId` (просмотр/правка) и `selectedServerIds` (множество для bulk-применения); `fetchServers` загружает только серверы с `is_active = true` (как на странице «Массовые операции») — отключённый мониторинг сервера убирает его из обзор-таблицы и из селектора bulk-операций
 - `panel/frontend/src/components/ssh/ServerSelector.tsx` — мультивыбор серверов: поиск, «выбрать все/снять», группировка по папкам со сворачиванием, чекбоксы с indeterminate
 - `panel/frontend/src/components/ssh/BulkProgressPanel.tsx` — live-список прогресса: статус ✓/✗ по серверу, разбивка по шагам с текстом ошибок, прогресс-бар
 - `panel/frontend/src/components/ssh/SSHOverviewTable.tsx` — обзор-таблица состояния SSH всех серверов (порт, метод авторизации, fail2ban, кол-во ключей, доступность ноды); данные через `/bulk/status`

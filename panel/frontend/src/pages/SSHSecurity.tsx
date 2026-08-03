@@ -373,7 +373,7 @@ export default function SSHSecurity() {
   const fetchServers = useCallback(async () => {
     try {
       const response = await serversApi.list()
-      const list = response.data.servers
+      const list = response.data.servers.filter(s => s.is_active)
       setServers(list)
       if (list.length > 0) {
         setActiveServerId(prev => prev ?? list[0].id)
