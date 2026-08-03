@@ -1216,8 +1216,7 @@ function SettingsTab() {
                       </div>
 
                       {key === 'anomaly_ip_enabled' && form.anomaly_ip_enabled && (
-                        <div>
-                          <div className="grid grid-cols-3 gap-2">
+                        <div className="grid grid-cols-3 gap-2">
                             <div>
                               <label className="block text-[11px] text-dark-500 mb-1">{t('remnawave.anomalyIpMargin')}</label>
                               <input type="number" value={form.anomaly_ip_margin} min={0} max={100}
@@ -1236,18 +1235,16 @@ function SettingsTab() {
                                 onChange={e => { const v = parseInt(e.target.value); updateField('anomaly_asn_margin', Number.isNaN(v) ? 0 : v) }}
                                 className="input" />
                             </div>
-                          </div>
-                          <p className="text-dark-500 text-xs mt-1">{t('remnawave.anomalyIpParamsHint')}</p>
                         </div>
                       )}
 
                       {key === 'anomaly_ua_enabled' && form.anomaly_ua_enabled && (
                         <div>
+                          <label className="block text-[11px] text-dark-500 mb-1">{t('remnawave.anomalyUaPatternsLabel')}</label>
                           <textarea value={form.anomaly_ua_patterns}
                             onChange={e => updateField('anomaly_ua_patterns', e.target.value)}
                             rows={6} spellCheck={false}
                             className="input font-mono text-xs min-h-[120px] resize-y" />
-                          <p className="text-dark-500 text-xs mt-1">{t('remnawave.anomalyUaPatternsHint')}</p>
                         </div>
                       )}
                     </div>

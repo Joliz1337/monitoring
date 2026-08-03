@@ -1189,8 +1189,7 @@
     "anomalyIpMargin": "IP margin",
     "anomalyIpConfirm": "Confirmations",
     "anomalyAsnMargin": "ASN margin",
-    "anomalyIpParamsHint": "Anomaly — when IPs exceed the device limit + IP margin, after N consecutive confirmations, and only if unique providers (ASN) exceed the limit + ASN margin",
-    "anomalyUaPatternsHint": "Known clients registry: one line — a regex pattern for the start of the User-Agent. A UA matching none of the lines counts as an anomaly. Clear the field and save to restore the built-in list."
+    "anomalyUaPatternsLabel": "Known clients (one per line)"
   },
   "alerts": {
     "title": "Alerts",

@@ -15,7 +15,7 @@ Integration with the Remnawave panel: connection statistics, user devices and an
 - **By address** — connections from unusual addresses, which looks like a shared subscription.
 - **By traffic** — consumption above a threshold, confirmed several times in a row so a one-off spike doesn't raise a false alarm.
 
-Each check has its own toggle, and thresholds are adjustable: IP and ASN margin above the device limit, consecutive confirmations, and the known-clients registry for the User-Agent check. Notifications go to Telegram: either through the shared alerts bot or a dedicated one if configured.
+Each check has its own toggle, and its thresholds and the known-apps list are adjustable — details in the "Device anomalies" help article. Notifications go to Telegram: either through the shared alerts bot or a dedicated one if configured.
 
 ## Good to know
 
