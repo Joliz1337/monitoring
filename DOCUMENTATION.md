@@ -33,7 +33,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/in
 - **1** — Установить панель
 - **2** — Установить ноду
 - **7** — Применить системные оптимизации (с выбором режима NIC)
-- **9** — Установить Remnawave ноду (без домена/SSL); контейнер `remnanode` запускается с `cap_add: NET_ADMIN` для управления сетевыми интерфейсами
+- **9** — Установить Remnawave ноду (без домена/SSL); контейнер `remnanode` запускается с `cap_add: NET_ADMIN` для управления сетевыми интерфейсами; генерируемый `docker-compose.yml` монтирует хостовый `/etc/letsencrypt:/etc/letsencrypt:ro` в сервис `remnawave-nginx`, чтобы контейнер видел сертификаты, выпущенные на хосте
 
 Вкладка панели **«Анти-DDoS»** (иконка Siren в меню) — многослойная защита от DDoS-атак на нодах, см. раздел ниже.
 
@@ -214,7 +214,7 @@ bash install.sh --unattended
 
 Подробная документация по каждому компоненту:
 
-- [panel/DOCUMENTATION.md](panel/DOCUMENTATION.md) — веб-панель: API, БД, конфигурация, безопасность (v10.38.0)
+- [panel/DOCUMENTATION.md](panel/DOCUMENTATION.md) — веб-панель: API, БД, конфигурация, безопасность (v10.38.2)
 - [node/DOCUMENTATION.md](node/DOCUMENTATION.md) — нода-агент: API, метрики, HAProxy, трафик, Remnawave, Remnawave Nginx, Firewall Profiles, Системные оптимизации, Анти-DDoS
 
 ## Архитектура
