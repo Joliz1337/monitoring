@@ -107,7 +107,9 @@ export default function SystemOptimizations() {
           drift: Boolean(opt.drift), driftDetail: opt.drift_detail ?? null,
           nicInfo: existing?.nicInfo ?? null,
           nicInfoLoading: existing?.nicInfoLoading ?? false,
-          nodeOutdated: !hasNicMode,
+          // Отсутствие nic_mode = старый агент, но только если нода реально ответила:
+          // для недоступной ноды бэкенд отдаёт пустые optimizations без nic_mode
+          nodeOutdated: data.status === 'online' && !hasNicMode,
         })
         return next
       })
@@ -323,7 +325,8 @@ export default function SystemOptimizations() {
   const unassigned = nodesList.filter(n => n.loadState === 'loaded' && n.status === 'online' && !n.installed)
   const vpnNodes = nodesList.filter(n => n.installed && (n.optProfile === 'vpn' || !n.optProfile))
   const panelNodes = nodesList.filter(n => n.installed && n.optProfile === 'panel')
-  const loadingOrOffline = nodesList.filter(n => (n.loadState !== 'loaded' || n.status === 'offline') && !n.installed)
+  // Недоступные ноды (ошибка подключения) не показываем вовсе — про их оптимизации ничего не известно
+  const stillLoading = nodesList.filter(n => (n.loadState === 'pending' || n.loadState === 'loading') && !n.installed)
   const updatableCount = nodesList.filter(
     n => n.loadState === 'loaded' && n.status === 'online' && n.installed && needsUpdate(n)
   ).length
@@ -847,16 +850,16 @@ export default function SystemOptimizations() {
       ) : (
         <>
           {/* Unassigned nodes — top */}
-          {(unassigned.length > 0 || loadingOrOffline.length > 0) && (
+          {(unassigned.length > 0 || stillLoading.length > 0) && (
             <div className="mb-6">
               <h2 className="text-sm font-semibold text-dark-400 mb-3 flex items-center gap-2">
                 <ServerIcon className="w-4 h-4" />
                 {t('sys_opt.unassigned')}
-                <span className="text-dark-500 font-normal">({unassigned.length + loadingOrOffline.length})</span>
+                <span className="text-dark-500 font-normal">({unassigned.length + stillLoading.length})</span>
               </h2>
               <div className="space-y-2">
                 {unassigned.map(n => renderUnassignedCard(n))}
-                {loadingOrOffline.map(n => renderNodeCard(n))}
+                {stillLoading.map(n => renderNodeCard(n))}
               </div>
             </div>
           )}
