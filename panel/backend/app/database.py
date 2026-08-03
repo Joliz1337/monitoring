@@ -1647,7 +1647,10 @@ async def _migrate_remnawave_anomaly_settings(conn):
         "anomaly_hwid_enabled": "BOOLEAN DEFAULT TRUE",
         "anomaly_ua_enabled": "BOOLEAN DEFAULT TRUE",
         "anomaly_devdata_enabled": "BOOLEAN DEFAULT TRUE",
-        "anomaly_whitelist": "TEXT",
+        "anomaly_ip_margin": "INTEGER DEFAULT 2",
+        "anomaly_ip_confirm_count": "INTEGER DEFAULT 5",
+        "anomaly_asn_margin": "INTEGER DEFAULT 0",
+        "anomaly_ua_patterns": "TEXT",
     }
     for col_name, col_type in new_cols.items():
         if col_name not in existing:
@@ -1656,6 +1659,14 @@ async def _migrate_remnawave_anomaly_settings(conn):
                 logger.info(f"Added column: remnawave_settings.{col_name}")
             except Exception as e:
                 logger.debug(f"Column add skipped {col_name}: {e}")
+
+    # anomaly_whitelist существовал только в одной dev-сборке — вычищаем
+    if "anomaly_whitelist" in existing:
+        try:
+            await conn.execute(text('ALTER TABLE remnawave_settings DROP COLUMN "anomaly_whitelist"'))
+            logger.info("Dropped column remnawave_settings.anomaly_whitelist")
+        except Exception as e:
+            logger.debug(f"anomaly_whitelist drop skipped: {e}")
 
 
 async def _migrate_remnawave_ephemeral_ips(conn):

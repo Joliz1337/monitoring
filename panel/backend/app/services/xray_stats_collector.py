@@ -24,7 +24,7 @@ from app.models import RemnawaveSettings, XrayStats, RemnawaveUserCache, Remnawa
 from app.services.remnawave_api import get_remnawave_api, RemnawaveAPIError
 from app.services.asn_lookup import lookup_ips_cached, group_ips_by_asn, effective_ip_count, enrich_with_names
 from app.services import ip_anomaly_state
-from app.services.anomaly_whitelist import AnomalyWhitelist
+from app.services.known_clients import build_ua_pattern
 
 logger = logging.getLogger(__name__)
 
@@ -32,21 +32,6 @@ UPSERT_BATCH_SIZE = 500
 USER_CACHE_BATCH_SIZE = 100
 HWID_BATCH_SIZE = 200
 IP_POLL_CONCURRENCY = 3
-
-KNOWN_UA_PATTERN = re.compile(
-    r'^(v2raytun/(ios|android|windows)'
-    r'|Clash-Meta/Prizrak-Box'
-    r'|Happ/'
-    r'|FlClash ?X/'
-    r'|INCY/'
-    r'|HiddifyNext/'
-    r'|Hiddify/'
-    r'|Flowvy/'
-    r'|prizrak-box/'
-    r'|koala-clash/'
-    r')',
-    re.IGNORECASE,
-)
 
 VERSION_PATTERN = re.compile(r'\d')
 
@@ -606,7 +591,6 @@ class XrayStatsCollector:
         ignore_ip = self._parse_id_list(settings.anomaly_ignore_ip)
         ignore_hwid = self._parse_id_list(settings.anomaly_ignore_hwid)
         ignored_all = await self._get_ignored_user_ids()
-        whitelist = AnomalyWhitelist.parse(settings.anomaly_whitelist)
         now = datetime.now(timezone.utc).replace(tzinfo=None)
 
         # Пер-тип тумблеры: NULL (строка до миграции) трактуется как включено
@@ -614,6 +598,12 @@ class XrayStatsCollector:
         hwid_check_on = settings.anomaly_hwid_enabled is not False
         ua_check_on = settings.anomaly_ua_enabled is not False
         devdata_check_on = settings.anomaly_devdata_enabled is not False
+
+        # Настраиваемые пороги проверок; NULL — дефолт как до появления настроек
+        ip_margin = settings.anomaly_ip_margin if settings.anomaly_ip_margin is not None else 2
+        ip_confirm = settings.anomaly_ip_confirm_count or 5
+        asn_margin = settings.anomaly_asn_margin if settings.anomaly_asn_margin is not None else 0
+        ua_pattern = build_ua_pattern(settings.anomaly_ua_patterns)
 
         async with async_session() as db:
             ip_rows = (await db.execute(
@@ -649,9 +639,8 @@ class XrayStatsCollector:
         # Детальный список IP больше НЕ грузим целиком — только по подтверждённым
         # аномальным пользователям (см. ниже), иначе это вся таблица XrayStats в памяти.
         COOLDOWN_SECONDS = 86400
-        IP_CONFIRM_THRESHOLD = 5
 
-        # 1) IP > лимит (после 5 подтверждений подряд). Показанные IP запоминаются:
+        # 1) IP > лимит + запас (после N подтверждений подряд). Показанные IP запоминаются:
         #    повторное уведомление — только при новых IP, со счётчиком «N-е срабатывание»
         #    и reply на предыдущее уведомление этого пользователя.
         current_anomaly_emails: set[int] = set()
@@ -661,11 +650,9 @@ class XrayStatsCollector:
             cached = by_email.get(email)
             if not cached or cached.status != 'ACTIVE':
                 continue
-            if whitelist.matches("ip", cached.username, email):
-                continue
             if not cached.hwid_device_limit or cached.hwid_device_limit <= 0:
                 continue
-            if ip_count <= cached.hwid_device_limit + 2:
+            if ip_count <= cached.hwid_device_limit + ip_margin:
                 continue
 
             current_anomaly_emails.add(email)
@@ -673,7 +660,7 @@ class XrayStatsCollector:
             streak += 1
             self._ip_anomaly_streak[email] = (streak, ip_count)
 
-            if streak < IP_CONFIRM_THRESHOLD:
+            if streak < ip_confirm:
                 continue
 
             async with async_session() as db:
@@ -699,10 +686,11 @@ class XrayStatsCollector:
             asn_map = await lookup_ips_cached(list(current_ips)) if current_ips else {}
             unique_asn_count = effective_ip_count(group_ips_by_asn(asn_map))
 
-            if unique_asn_count <= cached.hwid_device_limit:
+            if unique_asn_count <= cached.hwid_device_limit + asn_margin:
                 logger.info(
                     f"IP anomaly suppressed by ASN: {cached.username or email} "
-                    f"has {ip_count} IPs but {unique_asn_count} unique ASNs (limit: {cached.hwid_device_limit})"
+                    f"has {ip_count} IPs but {unique_asn_count} unique ASNs "
+                    f"(limit: {cached.hwid_device_limit} + margin: {asn_margin})"
                 )
                 continue
 
@@ -762,8 +750,6 @@ class XrayStatsCollector:
                 continue
             if cached.email in ignored_all or cached.email in ignore_hwid:
                 continue
-            if whitelist.matches("hwid", cached.username, cached.email):
-                continue
             if not cached.hwid_device_limit or cached.hwid_device_limit <= 0:
                 continue
             if device_count <= cached.hwid_device_limit:
@@ -784,9 +770,8 @@ class XrayStatsCollector:
             if cached.email in ignored_all or cached.email in ignore_hwid:
                 continue
 
-            # Проверка UA
-            if (ua_check_on and user_agent and not KNOWN_UA_PATTERN.search(user_agent)
-                    and not whitelist.matches("ua", cached.username, cached.email)):
+            # Проверка UA по настраиваемому реестру известных клиентов
+            if ua_check_on and user_agent and not ua_pattern.search(user_agent):
                 key = f"ua:{cached.email}"
                 last = self._anomaly_last_notified.get(key)
                 if not last or (now - last).total_seconds() >= COOLDOWN_SECONDS:
@@ -805,7 +790,7 @@ class XrayStatsCollector:
                     )
 
             # Проверка данных устройства: платформа, версия, модель — не пустые, версия в цифрах
-            if not devdata_check_on or whitelist.matches("devdata", cached.username, cached.email):
+            if not devdata_check_on:
                 continue
             problems = []
             if not platform or not platform.strip():
@@ -849,7 +834,6 @@ class XrayStatsCollector:
             return
 
         ignored = await self._get_ignored_user_ids()
-        whitelist = AnomalyWhitelist.parse(settings.anomaly_whitelist)
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         COOLDOWN_SECONDS = 86400
 
@@ -878,8 +862,6 @@ class XrayStatsCollector:
         active_emails: set[int] = set()
         for email, current_bytes in current_snapshot.items():
             if email in ignored:
-                continue
-            if whitelist.matches("traffic", username_map.get(email), email):
                 continue
 
             prev_bytes = self._traffic_snapshot.get(email)

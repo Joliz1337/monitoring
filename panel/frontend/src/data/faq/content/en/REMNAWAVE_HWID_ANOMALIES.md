@@ -15,6 +15,7 @@ One device under many accounts, or an account hopping between devices, points to
 
 - The device identifier comes from the client app, and not all clients report it the same way: reinstalling the app or updating the OS can look like a new device.
 - Matching devices within a family or one office are normal, so judge by scale: ten accounts on one device and two are entirely different stories.
-- The traffic threshold and confirmation count are configurable: raising them cuts the noise from one-off spikes.
+- All check thresholds are adjustable: IP and ASN margin above the device limit, consecutive confirmations, the traffic threshold. Raising them cuts the noise from one-off spikes.
+- The known-clients registry for the User-Agent check is editable: add your client and its signatures stop counting as anomalies.
 - Checks you don't need can be switched off individually in settings — the rest keep working.
-- False positives for specific accounts are removed via the ignore list or the whitelist by name mask (e.g. `vip-*`).
+- False positives for specific accounts are removed by adding them to the ignore list.

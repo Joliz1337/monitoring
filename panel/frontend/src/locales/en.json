@@ -1186,8 +1186,11 @@
     "anomalyTypeHwid": "HWID exceeds limit (auto-clear)",
     "anomalyTypeUa": "Unknown User-Agent",
     "anomalyTypeDevdata": "Invalid device data",
-    "anomalyWhitelist": "Anomaly whitelist",
-    "anomalyWhitelistHint": "One rule per line — a glob pattern for username or user ID: * — any characters, ? — a single character, [0-9] — a character from a set.\nA prefix limits the rule to one check: ip:, hwid:, ua:, devdata:, traffic:. Without a prefix it applies to all. Text after # is a comment."
+    "anomalyIpMargin": "IP margin",
+    "anomalyIpConfirm": "Confirmations",
+    "anomalyAsnMargin": "ASN margin",
+    "anomalyIpParamsHint": "Anomaly — when IPs exceed the device limit + IP margin, after N consecutive confirmations, and only if unique providers (ASN) exceed the limit + ASN margin",
+    "anomalyUaPatternsHint": "Known clients registry: one line — a regex pattern for the start of the User-Agent. A UA matching none of the lines counts as an anomaly. Clear the field and save to restore the built-in list."
   },
   "alerts": {
     "title": "Alerts",

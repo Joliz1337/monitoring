@@ -15,11 +15,11 @@ Integration with the Remnawave panel: connection statistics, user devices and an
 - **By address** — connections from unusual addresses, which looks like a shared subscription.
 - **By traffic** — consumption above a threshold, confirmed several times in a row so a one-off spike doesn't raise a false alarm.
 
-Each check has its own toggle. Notifications go to Telegram: either through the shared alerts bot or a dedicated one if configured.
+Each check has its own toggle, and thresholds are adjustable: IP and ASN margin above the device limit, consecutive confirmations, and the known-clients registry for the User-Agent check. Notifications go to Telegram: either through the shared alerts bot or a dedicated one if configured.
 
 ## Good to know
 
 - The user list is cached and refreshed roughly every half hour; connection statistics are rebuilt on their own interval and fully replaced — it's a snapshot of "now", not accumulated history.
 - Empty statistics? Verify the API address and token with the connection test button.
-- Users who shouldn't raise anomalies (your test accounts, shared subscriptions) go into the ignore list one by one, or into the whitelist by name mask: `vip-*` excludes from all checks, `ip: reseller-[0-9]*` from just one; masks understand `*`, `?` and bracketed character sets.
+- Users who shouldn't raise anomalies (your test accounts, shared subscriptions) belong in the ignore list.
 - This page only observes: torrent bans are handled by the blocker page.
