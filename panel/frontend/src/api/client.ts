@@ -1057,6 +1057,11 @@ export interface RemnawaveSettings {
   collection_interval: number
   ignored_user_ids: number[]
   anomaly_enabled: boolean
+  anomaly_ip_enabled: boolean
+  anomaly_hwid_enabled: boolean
+  anomaly_ua_enabled: boolean
+  anomaly_devdata_enabled: boolean
+  anomaly_whitelist: string
   anomaly_use_custom_bot: boolean
   anomaly_tg_bot_token: string | null
   anomaly_tg_chat_id: string | null

@@ -24,6 +24,7 @@ from app.models import RemnawaveSettings, XrayStats, RemnawaveUserCache, Remnawa
 from app.services.remnawave_api import get_remnawave_api, RemnawaveAPIError
 from app.services.asn_lookup import lookup_ips_cached, group_ips_by_asn, effective_ip_count, enrich_with_names
 from app.services import ip_anomaly_state
+from app.services.anomaly_whitelist import AnomalyWhitelist
 
 logger = logging.getLogger(__name__)
 
@@ -605,24 +606,31 @@ class XrayStatsCollector:
         ignore_ip = self._parse_id_list(settings.anomaly_ignore_ip)
         ignore_hwid = self._parse_id_list(settings.anomaly_ignore_hwid)
         ignored_all = await self._get_ignored_user_ids()
+        whitelist = AnomalyWhitelist.parse(settings.anomaly_whitelist)
         now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+        # Пер-тип тумблеры: NULL (строка до миграции) трактуется как включено
+        ip_check_on = settings.anomaly_ip_enabled is not False
+        hwid_check_on = settings.anomaly_hwid_enabled is not False
+        ua_check_on = settings.anomaly_ua_enabled is not False
+        devdata_check_on = settings.anomaly_devdata_enabled is not False
 
         async with async_session() as db:
             ip_rows = (await db.execute(
                 select(XrayStats.email, sql_func.count(sql_func.distinct(XrayStats.source_ip)).label("cnt"))
                 .group_by(XrayStats.email)
-            )).all()
+            )).all() if ip_check_on else []
 
             hwid_rows = (await db.execute(
                 select(RemnawaveHwidDevice.user_uuid, sql_func.count().label("cnt"))
                 .group_by(RemnawaveHwidDevice.user_uuid)
-            )).all()
+            )).all() if hwid_check_on else []
 
             device_rows = (await db.execute(
                 select(RemnawaveHwidDevice.user_uuid, RemnawaveHwidDevice.user_agent,
                        RemnawaveHwidDevice.platform, RemnawaveHwidDevice.device_model,
                        RemnawaveHwidDevice.os_version, RemnawaveHwidDevice.hwid)
-            )).all()
+            )).all() if (ua_check_on or devdata_check_on) else []
 
             # Только нужные 5 колонок, а не весь ORM-объект: на крупной инсталляции
             # RemnawaveUserCache — десятки-сотни тысяч строк (Row даёт доступ по имени).
@@ -652,6 +660,8 @@ class XrayStatsCollector:
                 continue
             cached = by_email.get(email)
             if not cached or cached.status != 'ACTIVE':
+                continue
+            if whitelist.matches("ip", cached.username, email):
                 continue
             if not cached.hwid_device_limit or cached.hwid_device_limit <= 0:
                 continue
@@ -752,6 +762,8 @@ class XrayStatsCollector:
                 continue
             if cached.email in ignored_all or cached.email in ignore_hwid:
                 continue
+            if whitelist.matches("hwid", cached.username, cached.email):
+                continue
             if not cached.hwid_device_limit or cached.hwid_device_limit <= 0:
                 continue
             if device_count <= cached.hwid_device_limit:
@@ -773,7 +785,8 @@ class XrayStatsCollector:
                 continue
 
             # Проверка UA
-            if user_agent and not KNOWN_UA_PATTERN.search(user_agent):
+            if (ua_check_on and user_agent and not KNOWN_UA_PATTERN.search(user_agent)
+                    and not whitelist.matches("ua", cached.username, cached.email)):
                 key = f"ua:{cached.email}"
                 last = self._anomaly_last_notified.get(key)
                 if not last or (now - last).total_seconds() >= COOLDOWN_SECONDS:
@@ -792,6 +805,8 @@ class XrayStatsCollector:
                     )
 
             # Проверка данных устройства: платформа, версия, модель — не пустые, версия в цифрах
+            if not devdata_check_on or whitelist.matches("devdata", cached.username, cached.email):
+                continue
             problems = []
             if not platform or not platform.strip():
                 problems.append("платформа: пусто")
@@ -834,6 +849,7 @@ class XrayStatsCollector:
             return
 
         ignored = await self._get_ignored_user_ids()
+        whitelist = AnomalyWhitelist.parse(settings.anomaly_whitelist)
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         COOLDOWN_SECONDS = 86400
 
@@ -862,6 +878,8 @@ class XrayStatsCollector:
         active_emails: set[int] = set()
         for email, current_bytes in current_snapshot.items():
             if email in ignored:
+                continue
+            if whitelist.matches("traffic", username_map.get(email), email):
                 continue
 
             prev_bytes = self._traffic_snapshot.get(email)

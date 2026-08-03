@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import verify_auth
 from app.database import get_db, async_session
 from app.models import RemnawaveSettings, XrayStats, RemnawaveUserCache, RemnawaveHwidDevice
+from app.services.anomaly_whitelist import AnomalyWhitelist, validate_rules
 from app.services.remnawave_api import get_remnawave_api
 from app.services.xray_stats_collector import get_xray_stats_collector
 
@@ -32,6 +33,11 @@ class UpdateSettingsRequest(BaseModel):
     enabled: Optional[bool] = None
     collection_interval: Optional[int] = Field(None, ge=60, le=900)
     anomaly_enabled: Optional[bool] = None
+    anomaly_ip_enabled: Optional[bool] = None
+    anomaly_hwid_enabled: Optional[bool] = None
+    anomaly_ua_enabled: Optional[bool] = None
+    anomaly_devdata_enabled: Optional[bool] = None
+    anomaly_whitelist: Optional[str] = Field(None, max_length=20000)
     anomaly_use_custom_bot: Optional[bool] = None
     anomaly_tg_bot_token: Optional[str] = Field(None, max_length=200)
     anomaly_tg_chat_id: Optional[str] = Field(None, max_length=100)
@@ -80,6 +86,11 @@ async def get_settings(db: AsyncSession = Depends(get_db), _: dict = Depends(ver
         "collection_interval": s.collection_interval,
         "ignored_user_ids": _parse_ignored_user_ids(s.ignored_user_ids),
         "anomaly_enabled": s.anomaly_enabled or False,
+        "anomaly_ip_enabled": s.anomaly_ip_enabled is not False,
+        "anomaly_hwid_enabled": s.anomaly_hwid_enabled is not False,
+        "anomaly_ua_enabled": s.anomaly_ua_enabled is not False,
+        "anomaly_devdata_enabled": s.anomaly_devdata_enabled is not False,
+        "anomaly_whitelist": s.anomaly_whitelist or "",
         "anomaly_use_custom_bot": s.anomaly_use_custom_bot or False,
         "anomaly_tg_bot_token": "***" if s.anomaly_tg_bot_token else None,
         "anomaly_tg_chat_id": s.anomaly_tg_chat_id,
@@ -93,6 +104,11 @@ async def get_settings(db: AsyncSession = Depends(get_db), _: dict = Depends(ver
 
 @router.put("/settings")
 async def update_settings(request: UpdateSettingsRequest, db: AsyncSession = Depends(get_db), _: dict = Depends(verify_auth)):
+    if request.anomaly_whitelist is not None:
+        errors = validate_rules(request.anomaly_whitelist)
+        if errors:
+            raise HTTPException(status_code=400, detail="Белый список: " + "; ".join(errors))
+
     result = await db.execute(select(RemnawaveSettings).limit(1))
     s = result.scalar_one_or_none()
     if not s:
@@ -100,7 +116,9 @@ async def update_settings(request: UpdateSettingsRequest, db: AsyncSession = Dep
         db.add(s)
 
     for field_name in ("api_url", "api_token", "cookie_secret", "enabled", "collection_interval",
-                       "anomaly_enabled", "anomaly_use_custom_bot",
+                       "anomaly_enabled", "anomaly_ip_enabled", "anomaly_hwid_enabled",
+                       "anomaly_ua_enabled", "anomaly_devdata_enabled", "anomaly_whitelist",
+                       "anomaly_use_custom_bot",
                        "anomaly_tg_bot_token", "anomaly_tg_chat_id",
                        "traffic_anomaly_enabled", "traffic_threshold_gb", "traffic_confirm_count"):
         val = getattr(request, field_name)
@@ -571,6 +589,13 @@ async def get_anomalies(
     ignore_ip = set(_parse_ignored_user_ids(s.anomaly_ignore_ip if s else None))
     ignore_hwid = set(_parse_ignored_user_ids(s.anomaly_ignore_hwid if s else None))
     ignore_all = set(_parse_ignored_user_ids(s.ignored_user_ids if s else None))
+    whitelist = AnomalyWhitelist.parse(s.anomaly_whitelist if s else None)
+
+    # Пер-тип тумблеры: NULL (строка до миграции) трактуется как включено
+    ip_check_on = not s or s.anomaly_ip_enabled is not False
+    hwid_check_on = not s or s.anomaly_hwid_enabled is not False
+    ua_check_on = not s or s.anomaly_ua_enabled is not False
+    devdata_check_on = not s or s.anomaly_devdata_enabled is not False
 
     # HWID устройств на пользователя (по uuid)
     hwid_counts_q = (
@@ -580,7 +605,7 @@ async def get_anomalies(
         )
         .group_by(RemnawaveHwidDevice.user_uuid)
     )
-    hwid_rows = (await db.execute(hwid_counts_q)).all()
+    hwid_rows = (await db.execute(hwid_counts_q)).all() if hwid_check_on else []
     hwid_by_uuid: dict[str, int] = {row[0]: row[1] for row in hwid_rows}
 
     # Все устройства для проверки UA и данных
@@ -592,7 +617,7 @@ async def get_anomalies(
         RemnawaveHwidDevice.device_model,
         RemnawaveHwidDevice.os_version,
     )
-    all_devices = (await db.execute(all_devices_q)).all()
+    all_devices = (await db.execute(all_devices_q)).all() if (ua_check_on or devdata_check_on) else []
 
     # Кэш пользователей
     cache_result = await db.execute(select(RemnawaveUserCache))
@@ -604,7 +629,7 @@ async def get_anomalies(
 
     # 1) IP > лимит — только подтверждённые (streak >= 5 из коллектора)
     collector = get_xray_stats_collector()
-    ip_streaks = collector.get_ip_anomaly_streaks()
+    ip_streaks = collector.get_ip_anomaly_streaks() if ip_check_on else {}
     IP_CONFIRM_THRESHOLD = 5
 
     for email, (streak, ip_count) in ip_streaks.items():
@@ -614,6 +639,8 @@ async def get_anomalies(
             continue
         cached = cache_by_email.get(email)
         if not cached or cached.status != 'ACTIVE':
+            continue
+        if whitelist.matches("ip", cached.username, email):
             continue
         limit_val = cached.hwid_device_limit
         if limit_val is None or limit_val <= 0:
@@ -635,6 +662,8 @@ async def get_anomalies(
         if not cached or cached.status != 'ACTIVE':
             continue
         if cached.email in ignore_all or cached.email in ignore_hwid:
+            continue
+        if whitelist.matches("hwid", cached.username, cached.email):
             continue
         limit_val = cached.hwid_device_limit
         if limit_val is None or limit_val <= 0:
@@ -660,7 +689,8 @@ async def get_anomalies(
         if cached.email in ignore_all or cached.email in ignore_hwid:
             continue
 
-        if user_agent and not KNOWN_UA_PATTERN.search(user_agent):
+        if (ua_check_on and user_agent and not KNOWN_UA_PATTERN.search(user_agent)
+                and not whitelist.matches("ua", cached.username, cached.email)):
             anomalies.append({
                 "type": "unknown_user_agent",
                 "severity": "low",
@@ -672,6 +702,8 @@ async def get_anomalies(
                 "detail": f"{platform or '?'} / {device_model or '?'}: {user_agent[:80]}",
             })
 
+        if not devdata_check_on or whitelist.matches("devdata", cached.username, cached.email):
+            continue
         problems = []
         if not platform or not platform.strip():
             problems.append("платформа: пусто")
@@ -704,6 +736,8 @@ async def get_anomalies(
             continue
         cached = cache_by_email.get(email)
         if not cached or cached.status != 'ACTIVE':
+            continue
+        if whitelist.matches("traffic", cached.username, email):
             continue
         anomalies.append({
             "type": "traffic_exceeds_limit",

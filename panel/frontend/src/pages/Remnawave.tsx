@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import {
   Radio, Settings, Users, BarChart3, Check, X,
   Search, Play, Server, Trash2, Eye, EyeOff, ChevronDown, ChevronUp,
-  Loader2, Smartphone, Globe, ArrowUp, ArrowDown, AlertTriangle, Shield, ExternalLink
+  Loader2, Smartphone, Globe, ArrowUp, ArrowDown, AlertTriangle, Shield, ExternalLink, Filter
 } from 'lucide-react'
 import { remnawaveApi } from '../api/client'
 import type { RemnawaveApiNode, RemnawaveHwidDevice, RemnawaveAnomaly } from '../api/client'
@@ -971,6 +971,9 @@ function SettingsTab() {
   const [form, setForm] = useState({
     api_url: '', api_token: '', cookie_secret: '', enabled: false, collection_interval: 300,
     anomaly_enabled: false, anomaly_use_custom_bot: false,
+    anomaly_ip_enabled: true, anomaly_hwid_enabled: true,
+    anomaly_ua_enabled: true, anomaly_devdata_enabled: true,
+    anomaly_whitelist: '',
     anomaly_tg_bot_token: '', anomaly_tg_chat_id: '',
     traffic_anomaly_enabled: false, traffic_threshold_gb: 30, traffic_confirm_count: 2,
   })
@@ -1001,6 +1004,11 @@ function SettingsTab() {
         collection_interval: s.collection_interval,
         anomaly_enabled: s.anomaly_enabled || false,
         anomaly_use_custom_bot: s.anomaly_use_custom_bot || false,
+        anomaly_ip_enabled: s.anomaly_ip_enabled ?? true,
+        anomaly_hwid_enabled: s.anomaly_hwid_enabled ?? true,
+        anomaly_ua_enabled: s.anomaly_ua_enabled ?? true,
+        anomaly_devdata_enabled: s.anomaly_devdata_enabled ?? true,
+        anomaly_whitelist: s.anomaly_whitelist || '',
         anomaly_tg_bot_token: '',
         anomaly_tg_chat_id: s.anomaly_tg_chat_id || '',
         traffic_anomaly_enabled: s.traffic_anomaly_enabled || false,
@@ -1022,14 +1030,17 @@ function SettingsTab() {
       const data: any = {}
       for (const key of dirty) {
         const val = form[key as keyof typeof form]
-        if (typeof val === 'string' && val === '') continue
+        // Белый список можно сохранить пустым (очистка), остальные строки — нет
+        if (typeof val === 'string' && val === '' && key !== 'anomaly_whitelist') continue
         data[key] = val
       }
       if (Object.keys(data).length === 0) return setSaving(false)
       await remnawaveApi.updateSettings(data)
       toast.success(t('remnawave.settingsSaved'))
       await fetchSettings()
-    } catch { toast.error('Error') } finally { setSaving(false) }
+    } catch (e: any) {
+      toast.error(typeof e?.response?.data?.detail === 'string' ? e.response.data.detail : 'Error')
+    } finally { setSaving(false) }
   }
 
   const handleTest = async () => {
@@ -1178,6 +1189,30 @@ function SettingsTab() {
                 </button>
               </div>
 
+              {form.anomaly_enabled && (
+                <div className="space-y-3 pl-3 border-l-2 border-dark-700">
+                  <p className="text-dark-500 text-xs">{t('remnawave.anomalyTypesTitle')}</p>
+                  {([
+                    ['anomaly_ip_enabled', 'remnawave.anomalyTypeIp'],
+                    ['anomaly_hwid_enabled', 'remnawave.anomalyTypeHwid'],
+                    ['anomaly_ua_enabled', 'remnawave.anomalyTypeUa'],
+                    ['anomaly_devdata_enabled', 'remnawave.anomalyTypeDevdata'],
+                  ] as const).map(([key, label]) => (
+                    <div key={key} className="flex items-center justify-between">
+                      <span className="text-dark-300 text-sm">{t(label)}</span>
+                      <button onClick={() => updateField(key, !form[key])}
+                        className={`w-11 h-6 rounded-full transition-colors relative shrink-0 ${form[key] ? 'bg-accent-500' : 'bg-dark-600'}`}>
+                        <motion.div
+                          className="w-5 h-5 bg-white rounded-full absolute top-0.5 shadow-sm"
+                          animate={{ x: form[key] ? 22 : 2 }}
+                          transition={{ type: 'spring', stiffness: 500, damping: 30 }}
+                        />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
               <div className="flex items-center justify-between">
                 <div>
                   <span className="text-dark-300 text-sm">{t('remnawave.useCustomBot')}</span>
@@ -1247,6 +1282,17 @@ function SettingsTab() {
                   className="input" />
                 <p className="text-dark-500 text-xs mt-1">{t('remnawave.trafficConfirmCountHint')}</p>
               </div>
+            </div>
+          </Section>
+
+          <Section title={t('remnawave.anomalyWhitelist')} icon={<Filter className="w-4 h-4" />}>
+            <div className="space-y-2">
+              <textarea value={form.anomaly_whitelist}
+                onChange={e => updateField('anomaly_whitelist', e.target.value)}
+                placeholder={'vip-*\nip: reseller-[0-9]*\ntraffic: 4521'}
+                rows={6} spellCheck={false}
+                className="input font-mono text-xs min-h-[130px] resize-y" />
+              <p className="text-dark-500 text-xs whitespace-pre-line">{t('remnawave.anomalyWhitelistHint')}</p>
             </div>
           </Section>
       </div>

@@ -299,6 +299,11 @@ class RemnawaveSettings(Base):
 
     # Anomaly detection
     anomaly_enabled = Column(Boolean, default=False)
+    anomaly_ip_enabled = Column(Boolean, default=True)       # IP > лимит устройств
+    anomaly_hwid_enabled = Column(Boolean, default=True)     # HWID > лимит (авто-очистка)
+    anomaly_ua_enabled = Column(Boolean, default=True)       # неизвестный User-Agent
+    anomaly_devdata_enabled = Column(Boolean, default=True)  # невалидные данные устройства
+    anomaly_whitelist = Column(Text, nullable=True)          # glob-правила, по одному на строку
     anomaly_use_custom_bot = Column(Boolean, default=False)
     anomaly_tg_bot_token = Column(String(200), nullable=True)
     anomaly_tg_chat_id = Column(String(100), nullable=True)

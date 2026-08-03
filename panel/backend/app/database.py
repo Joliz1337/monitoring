@@ -1643,6 +1643,11 @@ async def _migrate_remnawave_anomaly_settings(conn):
         "traffic_anomaly_enabled": "BOOLEAN DEFAULT FALSE",
         "traffic_threshold_gb": "FLOAT DEFAULT 30.0",
         "traffic_confirm_count": "INTEGER DEFAULT 2",
+        "anomaly_ip_enabled": "BOOLEAN DEFAULT TRUE",
+        "anomaly_hwid_enabled": "BOOLEAN DEFAULT TRUE",
+        "anomaly_ua_enabled": "BOOLEAN DEFAULT TRUE",
+        "anomaly_devdata_enabled": "BOOLEAN DEFAULT TRUE",
+        "anomaly_whitelist": "TEXT",
     }
     for col_name, col_type in new_cols.items():
         if col_name not in existing:

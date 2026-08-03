@@ -1183,7 +1183,14 @@
     "trafficThreshold": "Порог (ГБ за 30 мин)",
     "trafficThresholdHint": "Превышение этого объёма за 30 мин — один триггер",
     "trafficConfirmCount": "Подтверждений подряд",
-    "trafficConfirmCountHint": "Сколько подряд превышений для уведомления"
+    "trafficConfirmCountHint": "Сколько подряд превышений для уведомления",
+    "anomalyTypesTitle": "Типы проверок",
+    "anomalyTypeIp": "IP превышает лимит",
+    "anomalyTypeHwid": "HWID превышает лимит (авто-очистка)",
+    "anomalyTypeUa": "Неизвестный User-Agent",
+    "anomalyTypeDevdata": "Невалидные данные устройства",
+    "anomalyWhitelist": "Белый список аномалий",
+    "anomalyWhitelistHint": "Одно правило на строку — glob-паттерн имени или ID пользователя: * — любые символы, ? — один символ, [0-9] — символ из набора.\nПрефикс ограничивает правило одной проверкой: ip:, hwid:, ua:, devdata:, traffic:. Без префикса действует на все. Текст после # — комментарий."
   },
   "alerts": {
     "title": "Уведомления",

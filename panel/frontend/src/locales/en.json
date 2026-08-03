@@ -1180,7 +1180,14 @@
     "trafficThreshold": "Threshold (GB per 30 min)",
     "trafficThresholdHint": "Exceeding this in 30 min counts as one trigger",
     "trafficConfirmCount": "Consecutive triggers",
-    "trafficConfirmCountHint": "How many consecutive cycles before notification"
+    "trafficConfirmCountHint": "How many consecutive cycles before notification",
+    "anomalyTypesTitle": "Check types",
+    "anomalyTypeIp": "IP exceeds limit",
+    "anomalyTypeHwid": "HWID exceeds limit (auto-clear)",
+    "anomalyTypeUa": "Unknown User-Agent",
+    "anomalyTypeDevdata": "Invalid device data",
+    "anomalyWhitelist": "Anomaly whitelist",
+    "anomalyWhitelistHint": "One rule per line — a glob pattern for username or user ID: * — any characters, ? — a single character, [0-9] — a character from a set.\nA prefix limits the rule to one check: ip:, hwid:, ua:, devdata:, traffic:. Without a prefix it applies to all. Text after # is a comment."
   },
   "alerts": {
     "title": "Alerts",
