@@ -128,13 +128,28 @@ def _ndjson(obj: dict) -> bytes:
 
 def _stream_ndjson(servers: list[Server], worker, log_action: str | None = None) -> StreamingResponse:
     """Стримит NDJSON: start → result по каждой ноде (по мере готовности) → done."""
+    async def safe_worker(server):
+        # Граница стрима: необработанное исключение одной ноды не должно
+        # обрывать соединение — иначе остальные строки навсегда зависают в «загрузке»
+        try:
+            return await worker(server)
+        except Exception as e:
+            logger.exception("ssh_stream_worker_failed", extra={"server_id": server.id})
+            return {
+                "server_id": server.id,
+                "server_name": server.name,
+                "success": False,
+                "reachable": False,
+                "error": str(e) or e.__class__.__name__,
+            }
+
     async def generate():
         yield _ndjson({
             "type": "start",
             "total": len(servers),
             "servers": [{"server_id": s.id, "server_name": s.name} for s in servers],
         })
-        tasks = [asyncio.create_task(worker(s)) for s in servers]
+        tasks = [asyncio.create_task(safe_worker(s)) for s in servers]
         results: list[dict] = []
         try:
             for completed in asyncio.as_completed(tasks):

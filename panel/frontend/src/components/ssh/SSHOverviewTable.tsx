@@ -57,7 +57,12 @@ export function SSHOverviewTable({ servers, onOpenServer }: SSHOverviewTableProp
       )
     } catch (e) {
       if (!controller.signal.aborted && !(e instanceof StreamUnauthorizedError)) {
-        setError(e instanceof Error ? e.message : String(e))
+        const message = e instanceof Error ? e.message : String(e)
+        setError(message)
+        // Поток оборвался — не оставлять недополученные строки в вечной «загрузке»
+        setRows(prev => prev.map(r =>
+          r.state === 'loading' ? { ...r, state: 'offline' as const, error: message } : r,
+        ))
       }
     } finally {
       setLoading(false)

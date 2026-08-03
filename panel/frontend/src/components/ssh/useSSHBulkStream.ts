@@ -57,7 +57,7 @@ export function useSSHBulkStream() {
           ...state,
           rows: state.rows.map(r =>
             r.server_id === ev.server_id
-              ? { ...r, state: ev.success ? 'success' : 'error', steps: ev.steps }
+              ? { ...r, state: ev.success ? 'success' : 'error', steps: ev.steps ?? [] }
               : r,
           ),
         }
@@ -75,7 +75,12 @@ export function useSSHBulkStream() {
         setProgress(state)
         return state
       }
-      state = { ...state, error: e instanceof Error ? e.message : String(e) }
+      // Поток оборвался — серверы без результата помечаем ошибкой, а не вечным «running»
+      state = {
+        ...state,
+        error: e instanceof Error ? e.message : String(e),
+        rows: state.rows.map(r => (r.state === 'running' ? { ...r, state: 'error' as const } : r)),
+      }
     }
 
     state = { ...state, active: false }

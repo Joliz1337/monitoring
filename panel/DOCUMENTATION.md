@@ -1,4 +1,4 @@
-# Monitoring Panel v10.38.2
+# Monitoring Panel v10.38.4
 
 Веб-панель для мониторинга серверов. Собирает метрики с нод с настраиваемым интервалом (по умолчанию 10 сек) и хранит историю локально.
 
@@ -1162,6 +1162,8 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 ```
 
 Результаты поступают по мере завершения через `asyncio.as_completed` — порядок не гарантирован. При отмене (клиент оборвал соединение) висящие задачи отменяются. Каждый шаг (`ssh_config`, `fail2ban`, `key`, `password`) пишется отдельной записью с полями `success`, `message`, `error`, `warnings`.
+
+**Устойчивость стрима к транспортным ошибкам** — воркер каждой ноды в `_stream_ndjson()` обёрнут в `safe_worker`: любое необработанное исключение (в т.ч. нетипичные транспортные сбои httpx — `ReadError`, `RemoteProtocolError`, `ProxyError`, характерные для нод за SOCKS5-прокси) логируется (`ssh_stream_worker_failed`) и превращается в обычную NDJSON-запись `result` с `success:false`/`error`, а не рвёт весь поток. `ssh_manager.proxy_to_node()` со своей стороны маппит все прочие транспортные ошибки httpx через `httpx.HTTPError` в `ConnectionError` (с именем ноды) и невалидный JSON ответа — в `RuntimeError`; порядок обработки: `TimeoutException` → `ConnectError` → `HTTPStatusError` → `HTTPError` → `ValueError`. Frontend (`SSHOverviewTable.tsx`, `useSSHBulkStream.ts`) на случай, если поток всё же оборвётся раньше времени, помечает недогруженные строки в состоянии «загрузка»/«running» как недоступные с текстом ошибки — вместо вечного спиннера.
 
 **Встроенные пресеты безопасности:**
 - `recommended` — вход только root по паролю: `permit_root_login: yes`, `password_authentication: true`, `pubkey_authentication: false`, `allow_users: [root]`, fail2ban с мягкими настройками
