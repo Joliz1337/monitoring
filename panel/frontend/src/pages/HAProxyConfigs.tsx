@@ -104,14 +104,22 @@ function BackendServerRow({
     <div className="p-3 bg-dark-900/40 rounded-lg border border-dark-700/40 space-y-2">
       <div className="flex items-center gap-2">
         <div className="flex-1 grid grid-cols-4 gap-2">
-          <input type="text" value={srv.name} onChange={e => upd({ name: e.target.value })}
-            placeholder="srv1" className={inp} title={t('balancer.server_name')} />
-          <input type="text" value={srv.address} onChange={e => upd({ address: e.target.value })}
-            placeholder="1.2.3.4" className={inp} title={t('balancer.address')} />
-          <input type="number" value={srv.port || ''} onChange={e => upd({ port: parseInt(e.target.value) || 0 })}
-            placeholder="8080" className={inp} title={t('haproxy.target_port')} />
-          <input type="number" value={srv.weight ?? 1} onChange={e => upd({ weight: parseInt(e.target.value) || 1 })}
-            placeholder="1" className={inp} title={t('balancer.weight')} min={1} max={256} />
+          <Tooltip label={t('balancer.server_name')}>
+            <input type="text" value={srv.name} onChange={e => upd({ name: e.target.value })}
+              placeholder="srv1" className={inp} />
+          </Tooltip>
+          <Tooltip label={t('balancer.address')}>
+            <input type="text" value={srv.address} onChange={e => upd({ address: e.target.value })}
+              placeholder="1.2.3.4" className={inp} />
+          </Tooltip>
+          <Tooltip label={t('haproxy.target_port')}>
+            <input type="number" value={srv.port || ''} onChange={e => upd({ port: parseInt(e.target.value) || 0 })}
+              placeholder="8080" className={inp} />
+          </Tooltip>
+          <Tooltip label={t('balancer.weight')}>
+            <input type="number" value={srv.weight ?? 1} onChange={e => upd({ weight: parseInt(e.target.value) || 1 })}
+              placeholder="1" className={inp} min={1} max={256} />
+          </Tooltip>
         </div>
         <button type="button" onClick={() => setExpanded(e => !e)}
           className="p-1 text-dark-400 hover:text-dark-200 transition-colors">
@@ -514,11 +522,12 @@ function RuleForm({
                 <span className="text-xs text-dark-400 font-medium">{t('balancer.servers')}</span>
                 <div className="flex items-center gap-3">
                   {form.servers.length > 1 && (
-                    <button type="button" onClick={autoWeights}
-                      className="flex items-center gap-1 text-xs text-dark-400 hover:text-dark-200 transition-colors"
-                      title={t('balancer.auto_weight')}>
-                      <Cpu className="w-3 h-3" /> {t('balancer.auto_weight')}
-                    </button>
+                    <Tooltip label={t('balancer.auto_weight')}>
+                      <button type="button" onClick={autoWeights}
+                        className="flex items-center gap-1 text-xs text-dark-400 hover:text-dark-200 transition-colors">
+                        <Cpu className="w-3 h-3" /> {t('balancer.auto_weight')}
+                      </button>
+                    </Tooltip>
                   )}
                   <button type="button" onClick={addServer}
                     className="flex items-center gap-1 text-xs text-accent-400 hover:text-accent-300 transition-colors">

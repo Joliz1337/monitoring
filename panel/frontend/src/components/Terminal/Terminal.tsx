@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useTranslation } from 'react-i18next'
+import { Tooltip } from '../ui/Tooltip'
 import {
   Terminal as TerminalIcon,
   Play,
@@ -443,13 +444,14 @@ export default function Terminal({ serverId }: TerminalProps) {
                         className="input w-full font-mono text-sm pr-10"
                       />
                       {history.length > 0 && (
-                        <button
-                          onClick={() => setShowHistory(!showHistory)}
-                          className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 hover:bg-dark-700 rounded-lg text-dark-400 hover:text-dark-200 transition-colors"
-                          title={t('terminal.history')}
-                        >
-                          <History className="w-4 h-4" />
-                        </button>
+                        <Tooltip label={t('terminal.history')}>
+                          <button
+                            onClick={() => setShowHistory(!showHistory)}
+                            className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 hover:bg-dark-700 rounded-lg text-dark-400 hover:text-dark-200 transition-colors"
+                          >
+                            <History className="w-4 h-4" />
+                          </button>
+                        </Tooltip>
                       )}
                     </div>
 
@@ -509,19 +511,20 @@ export default function Terminal({ serverId }: TerminalProps) {
                 {/* Options row */}
                 <div className="flex flex-wrap items-center gap-3">
                   {/* Script mode toggle */}
-                  <button
-                    onClick={toggleScriptMode}
-                    disabled={isRunning}
-                    className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs transition-all ${
-                      scriptMode
-                        ? 'bg-accent-500/20 text-accent-400 border border-accent-500/30'
-                        : 'text-dark-400 hover:text-dark-200 hover:bg-dark-700'
-                    }`}
-                    title={t('terminal.script_mode')}
-                  >
-                    <FileCode2 className="w-3.5 h-3.5" />
-                    {t('terminal.script_mode')}
-                  </button>
+                  <Tooltip label={t('terminal.script_mode')}>
+                    <button
+                      onClick={toggleScriptMode}
+                      disabled={isRunning}
+                      className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs transition-all ${
+                        scriptMode
+                          ? 'bg-accent-500/20 text-accent-400 border border-accent-500/30'
+                          : 'text-dark-400 hover:text-dark-200 hover:bg-dark-700'
+                      }`}
+                    >
+                      <FileCode2 className="w-3.5 h-3.5" />
+                      {t('terminal.script_mode')}
+                    </button>
+                  </Tooltip>
 
                   {/* Timeout selector */}
                   <div className="flex items-center gap-2">

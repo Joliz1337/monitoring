@@ -1378,13 +1378,17 @@ export default function SSHSecurity() {
                                 key={key.fingerprint}
                                 className="grid grid-cols-[1fr_80px_1fr_40px] gap-3 items-center p-3 bg-dark-800/50 rounded-lg border border-dark-700/50"
                               >
-                                <code className="text-xs text-dark-200 font-mono truncate" title={key.fingerprint}>
-                                  {key.fingerprint}
-                                </code>
+                                <Tooltip label={key.fingerprint} maxWidth={360}>
+                                  <code className="text-xs text-dark-200 font-mono truncate">
+                                    {key.fingerprint}
+                                  </code>
+                                </Tooltip>
                                 <span className="text-xs text-dark-400">{key.type}</span>
-                                <span className="text-xs text-dark-400 truncate" title={key.comment}>
-                                  {key.comment || '—'}
-                                </span>
+                                <Tooltip label={key.comment}>
+                                  <span className="text-xs text-dark-400 truncate">
+                                    {key.comment || '—'}
+                                  </span>
+                                </Tooltip>
                                 <Tooltip label={t('common.delete')}>
                                   <button
                                     onClick={() => handleRemoveKey(key.fingerprint)}

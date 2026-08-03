@@ -26,6 +26,7 @@ import ProgressBar from '../ui/ProgressBar'
 import { formatBytes, formatBitsPerSecLocalized, formatUptime, formatTimeAgo, extractHost } from '../../utils/format'
 import { useTranslation } from 'react-i18next'
 import { CopyableIp } from '../ui/CopyableIp'
+import { Tooltip } from '../ui/Tooltip'
 import type { DetailLevel } from '../../stores/settingsStore'
 
 interface ServerTraffic {
@@ -246,9 +247,11 @@ function ServerCardView({
             {metrics && (
               <div className="hidden sm:flex items-center gap-6 text-sm">
                 {server.status === 'offline' && (
-                  <div className="flex items-center gap-1 px-1.5 py-0.5 bg-warning/15 border border-warning/25 rounded text-[10px] text-warning" title={t('cache.cached')}>
-                    <Database className="w-2.5 h-2.5" />
-                  </div>
+                  <Tooltip label={t('cache.cached')}>
+                    <div className="flex items-center gap-1 px-1.5 py-0.5 bg-warning/15 border border-warning/25 rounded text-[10px] text-warning">
+                      <Database className="w-2.5 h-2.5" />
+                    </div>
+                  </Tooltip>
                 )}
                 <div className="flex items-center gap-2 text-dark-400">
                   <Cpu className="w-4 h-4" />
@@ -279,11 +282,13 @@ function ServerCardView({
                     ) : (
                       <ShieldCheck className="w-4 h-4" />
                     )}
-                    <span className="font-mono text-xs truncate" title={metrics.certificates.closest_expiry.domain}>
-                      {metrics.certificates.closest_expiry.domain} ({metrics.certificates.closest_expiry.expired
-                        ? t('server_card.cert_expired')
-                        : t('server_card.cert_days', { days: metrics.certificates.closest_expiry.days_left })})
-                    </span>
+                    <Tooltip label={metrics.certificates.closest_expiry.domain}>
+                      <span className="font-mono text-xs truncate">
+                        {metrics.certificates.closest_expiry.domain} ({metrics.certificates.closest_expiry.expired
+                          ? t('server_card.cert_expired')
+                          : t('server_card.cert_days', { days: metrics.certificates.closest_expiry.days_left })})
+                      </span>
+                    </Tooltip>
                   </div>
                 ) : (
                   <div className="flex items-center gap-2 text-dark-500">
@@ -349,19 +354,20 @@ function ServerCardView({
           </div>
           <div className="flex items-center gap-2">
             {server.status === 'offline' && metrics && (
-              <div
-                className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-warning/15 border border-warning/25 rounded text-[10px] text-warning"
-                title={server.last_seen ? t('cache.last_update', { time: formatTimeAgo(server.last_seen) }) : t('cache.cached')}
-              >
-                <Database className="w-2.5 h-2.5" />
-                <span className="font-medium">{t('cache.cached')}</span>
-              </div>
+              <Tooltip label={server.last_seen ? t('cache.last_update', { time: formatTimeAgo(server.last_seen) }) : t('cache.cached')}>
+                <div className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-warning/15 border border-warning/25 rounded text-[10px] text-warning">
+                  <Database className="w-2.5 h-2.5" />
+                  <span className="font-medium">{t('cache.cached')}</span>
+                </div>
+              </Tooltip>
             )}
             {server.antiddos_emergency_mode && (
-              <div className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-red-500/15 border border-red-500/25 text-[10px] text-red-400" title={t('anti_ddos.mode_emergency')}>
-                <ShieldAlert className="w-2.5 h-2.5" />
-                <span className="font-medium">{t('anti_ddos.mode_emergency')}</span>
-              </div>
+              <Tooltip label={t('anti_ddos.mode_emergency')}>
+                <div className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-red-500/15 border border-red-500/25 text-[10px] text-red-400">
+                  <ShieldAlert className="w-2.5 h-2.5" />
+                  <span className="font-medium">{t('anti_ddos.mode_emergency')}</span>
+                </div>
+              </Tooltip>
             )}
             <StatusBadge status={server.status} />
           </div>
@@ -440,16 +446,18 @@ function ServerCardView({
                     <Clock className="w-3.5 h-3.5" />
                     <span>{formatUptime(metrics.system.uptime_seconds)}</span>
                   </div>
-                  <div className="flex items-center gap-1.5" title={t('server_card.load_avg_tooltip', { cores: metrics.cpu.cores_logical })}>
-                    <Activity className="w-3.5 h-3.5" />
-                    <span className="font-mono">
-                      <span className={getLoadAvgColor(metrics.cpu.load_avg_1, metrics.cpu.cores_logical)}>{metrics.cpu.load_avg_1.toFixed(2)}</span>
-                      {' / '}
-                      <span className={getLoadAvgColor(metrics.cpu.load_avg_5, metrics.cpu.cores_logical)}>{metrics.cpu.load_avg_5.toFixed(2)}</span>
-                      {' / '}
-                      <span className={getLoadAvgColor(metrics.cpu.load_avg_15, metrics.cpu.cores_logical)}>{metrics.cpu.load_avg_15.toFixed(2)}</span>
-                    </span>
-                  </div>
+                  <Tooltip label={t('server_card.load_avg_tooltip', { cores: metrics.cpu.cores_logical })}>
+                    <div className="flex items-center gap-1.5">
+                      <Activity className="w-3.5 h-3.5" />
+                      <span className="font-mono">
+                        <span className={getLoadAvgColor(metrics.cpu.load_avg_1, metrics.cpu.cores_logical)}>{metrics.cpu.load_avg_1.toFixed(2)}</span>
+                        {' / '}
+                        <span className={getLoadAvgColor(metrics.cpu.load_avg_5, metrics.cpu.cores_logical)}>{metrics.cpu.load_avg_5.toFixed(2)}</span>
+                        {' / '}
+                        <span className={getLoadAvgColor(metrics.cpu.load_avg_15, metrics.cpu.cores_logical)}>{metrics.cpu.load_avg_15.toFixed(2)}</span>
+                      </span>
+                    </div>
+                  </Tooltip>
                   {metrics.certificates?.closest_expiry ? (
                     <div className={`flex items-center gap-1 ${
                       metrics.certificates.closest_expiry.expired
@@ -459,14 +467,16 @@ function ServerCardView({
                           : 'text-success'
                     }`}>
                       <ShieldCheck className="w-3.5 h-3.5 flex-shrink-0" />
-                      <span className="truncate" title={metrics.certificates.closest_expiry.domain}>
-                        {metrics.certificates.closest_expiry.expired
-                          ? t('server_card.cert_expired_domain', { domain: metrics.certificates.closest_expiry.domain })
-                          : t('server_card.cert_days_domain', {
-                              domain: metrics.certificates.closest_expiry.domain,
-                              days: metrics.certificates.closest_expiry.days_left
-                            })}
-                      </span>
+                      <Tooltip label={metrics.certificates.closest_expiry.domain}>
+                        <span className="truncate">
+                          {metrics.certificates.closest_expiry.expired
+                            ? t('server_card.cert_expired_domain', { domain: metrics.certificates.closest_expiry.domain })
+                            : t('server_card.cert_days_domain', {
+                                domain: metrics.certificates.closest_expiry.domain,
+                                days: metrics.certificates.closest_expiry.days_left
+                              })}
+                        </span>
+                      </Tooltip>
                     </div>
                   ) : (
                     <div className="flex items-center gap-1 text-dark-500">
@@ -554,16 +564,18 @@ function ServerCardView({
                     <Clock className="w-3.5 h-3.5" />
                     <span>{formatUptime(metrics.system.uptime_seconds)}</span>
                   </div>
-                  <div className="flex items-center gap-1.5" title={t('server_card.load_avg_tooltip', { cores: metrics.cpu.cores_logical })}>
-                    <Activity className="w-3.5 h-3.5" />
-                    <span className="font-mono">
-                      <span className={getLoadAvgColor(metrics.cpu.load_avg_1, metrics.cpu.cores_logical)}>{metrics.cpu.load_avg_1.toFixed(2)}</span>
-                      {' / '}
-                      <span className={getLoadAvgColor(metrics.cpu.load_avg_5, metrics.cpu.cores_logical)}>{metrics.cpu.load_avg_5.toFixed(2)}</span>
-                      {' / '}
-                      <span className={getLoadAvgColor(metrics.cpu.load_avg_15, metrics.cpu.cores_logical)}>{metrics.cpu.load_avg_15.toFixed(2)}</span>
-                    </span>
-                  </div>
+                  <Tooltip label={t('server_card.load_avg_tooltip', { cores: metrics.cpu.cores_logical })}>
+                    <div className="flex items-center gap-1.5">
+                      <Activity className="w-3.5 h-3.5" />
+                      <span className="font-mono">
+                        <span className={getLoadAvgColor(metrics.cpu.load_avg_1, metrics.cpu.cores_logical)}>{metrics.cpu.load_avg_1.toFixed(2)}</span>
+                        {' / '}
+                        <span className={getLoadAvgColor(metrics.cpu.load_avg_5, metrics.cpu.cores_logical)}>{metrics.cpu.load_avg_5.toFixed(2)}</span>
+                        {' / '}
+                        <span className={getLoadAvgColor(metrics.cpu.load_avg_15, metrics.cpu.cores_logical)}>{metrics.cpu.load_avg_15.toFixed(2)}</span>
+                      </span>
+                    </div>
+                  </Tooltip>
                   {metrics.certificates?.closest_expiry ? (
                     <div className={`flex items-center gap-1 ${
                       metrics.certificates.closest_expiry.expired
@@ -573,14 +585,16 @@ function ServerCardView({
                           : 'text-success'
                     }`}>
                       <ShieldCheck className="w-3.5 h-3.5 flex-shrink-0" />
-                      <span className="truncate" title={metrics.certificates.closest_expiry.domain}>
-                        {metrics.certificates.closest_expiry.expired
-                          ? t('server_card.cert_expired_domain', { domain: metrics.certificates.closest_expiry.domain })
-                          : t('server_card.cert_days_domain', {
-                              domain: metrics.certificates.closest_expiry.domain,
-                              days: metrics.certificates.closest_expiry.days_left
-                            })}
-                      </span>
+                      <Tooltip label={metrics.certificates.closest_expiry.domain}>
+                        <span className="truncate">
+                          {metrics.certificates.closest_expiry.expired
+                            ? t('server_card.cert_expired_domain', { domain: metrics.certificates.closest_expiry.domain })
+                            : t('server_card.cert_days_domain', {
+                                domain: metrics.certificates.closest_expiry.domain,
+                                days: metrics.certificates.closest_expiry.days_left
+                              })}
+                        </span>
+                      </Tooltip>
                     </div>
                   ) : (
                     <div className="flex items-center gap-1 text-dark-500">

@@ -973,9 +973,11 @@ function ProjectCard({ server, index, t, formatDateTime, sortable, onExtend, onT
                 </span>
               ) : null}
               {server.billing_type === 'yandex_cloud' && server.yc_last_error && (
-                <span className="text-red-400 text-[10px] truncate max-w-[150px]" title={server.yc_last_error}>
-                  API error
-                </span>
+                <Tooltip label={server.yc_last_error} maxWidth={320}>
+                  <span className="text-red-400 text-[10px] truncate max-w-[150px]">
+                    API error
+                  </span>
+                </Tooltip>
               )}
               {server.notes && (
                 <span className="truncate max-w-[200px]">{server.notes}</span>

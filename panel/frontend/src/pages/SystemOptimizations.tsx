@@ -443,12 +443,11 @@ export default function SystemOptimizations() {
             )}
 
             {!isNodeLoading && node.status === 'online' && updateAvailable && !isBusy && !result && (
-              <span
-                className="px-2 py-0.5 text-[10px] font-medium bg-accent-500/20 text-accent-400 rounded-full"
-                title={node.driftDetail ?? undefined}
-              >
-                {node.drift ? t('sys_opt.host_changed') : t('sys_opt.update_available')}
-              </span>
+              <Tooltip label={node.driftDetail} maxWidth={320}>
+                <span className="px-2 py-0.5 text-[10px] font-medium bg-accent-500/20 text-accent-400 rounded-full">
+                  {node.drift ? t('sys_opt.host_changed') : t('sys_opt.update_available')}
+                </span>
+              </Tooltip>
             )}
 
             {!isNodeLoading && node.status === 'online' && !updateAvailable && node.installed && !isBusy && !result && (

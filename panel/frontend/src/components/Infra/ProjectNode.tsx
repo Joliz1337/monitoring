@@ -2,6 +2,7 @@ import { useState, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { ChevronRight, ChevronDown, FolderOpen, Plus, Edit2, Trash2, Check, X, Activity } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
+import { Tooltip } from '../ui/Tooltip'
 import { toast } from 'sonner'
 import InfraServerRow from './InfraServerRow'
 import ServerSearchDropdown from './ServerSearchDropdown'
@@ -103,21 +104,27 @@ export default function ProjectNode({
 
         {!editing && (
           <div className="flex items-center gap-0.5 ml-auto opacity-0 group-hover:opacity-100 transition-opacity">
-            <button onClick={() => setShowSearch(!showSearch)} className="p-1 rounded hover:bg-dark-700 text-dark-400 hover:text-primary" title={t('infra.add_server')}>
-              <Plus className="w-3.5 h-3.5" />
-            </button>
-            <button onClick={() => { setEditName(project.name); setEditing(true) }} className="p-1 rounded hover:bg-dark-700 text-dark-400 hover:text-dark-200" title={t('common.edit')}>
-              <Edit2 className="w-3.5 h-3.5" />
-            </button>
+            <Tooltip label={t('infra.add_server')}>
+              <button onClick={() => setShowSearch(!showSearch)} className="p-1 rounded hover:bg-dark-700 text-dark-400 hover:text-primary">
+                <Plus className="w-3.5 h-3.5" />
+              </button>
+            </Tooltip>
+            <Tooltip label={t('common.edit')}>
+              <button onClick={() => { setEditName(project.name); setEditing(true) }} className="p-1 rounded hover:bg-dark-700 text-dark-400 hover:text-dark-200">
+                <Edit2 className="w-3.5 h-3.5" />
+              </button>
+            </Tooltip>
             {deleteConfirm ? (
               <div className="flex items-center gap-0.5">
                 <button onClick={handleDelete} className="p-1 rounded hover:bg-dark-700 text-danger"><Check className="w-3.5 h-3.5" /></button>
                 <button onClick={() => setDeleteConfirm(false)} className="p-1 rounded hover:bg-dark-700 text-dark-400"><X className="w-3.5 h-3.5" /></button>
               </div>
             ) : (
-              <button onClick={() => setDeleteConfirm(true)} className="p-1 rounded hover:bg-dark-700 text-dark-400 hover:text-danger" title={t('common.delete')}>
-                <Trash2 className="w-3.5 h-3.5" />
-              </button>
+              <Tooltip label={t('common.delete')}>
+                <button onClick={() => setDeleteConfirm(true)} className="p-1 rounded hover:bg-dark-700 text-dark-400 hover:text-danger">
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              </Tooltip>
             )}
           </div>
         )}

@@ -18,6 +18,7 @@ import {
 import { useTranslation } from 'react-i18next'
 import { systemApi, VersionBaseInfo, SingleNodeVersion } from '../api/client'
 import { Skeleton } from '../components/ui/Skeleton'
+import { Tooltip } from '../components/ui/Tooltip'
 import { FAQIcon } from '../components/FAQ'
 import { useSettingsStore } from '../stores/settingsStore'
 
@@ -419,13 +420,13 @@ export default function Updates() {
           </motion.button>
 
           {canUpdateEverything && (
+            <Tooltip label={t('updates.update_everything_hint')} maxWidth={320}>
             <motion.button
               onClick={handleUpdateEverything}
               disabled={updatingEverything || updatingAll || updatingPanel || updatingNodes.size > 0}
               className="btn btn-primary"
               whileHover={{ scale: 1.02 }}
               whileTap={{ scale: 0.98 }}
-              title={t('updates.update_everything_hint')}
             >
               {updatingEverything ? (
                 <Loader2 className="w-4 h-4 animate-spin" />
@@ -434,6 +435,7 @@ export default function Updates() {
               )}
               {updatingEverything ? t('updates.updating_everything') : t('updates.update_everything')}
             </motion.button>
+            </Tooltip>
           )}
         </div>
       </motion.div>

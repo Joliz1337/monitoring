@@ -3,6 +3,7 @@ import { Cpu, MemoryStick, ArrowDownToLine, ArrowUpFromLine } from 'lucide-react
 import { useTranslation } from 'react-i18next'
 import type { ServerWithMetrics } from '../../stores/serversStore'
 import { formatBytes, formatBitsPerSecLocalized } from '../../utils/format'
+import { Tooltip } from '../ui/Tooltip'
 
 interface StatTileProps {
   icon: React.ReactNode
@@ -20,10 +21,12 @@ function StatTile({ icon, iconBg, label, value, sub }: StatTileProps) {
       </div>
       <div className="min-w-0 flex-1">
         <div className="text-xs text-dark-400">{label}</div>
-        <div className="text-sm font-mono text-dark-100 truncate" title={sub ? `${value} · ${sub}` : value}>
-          {value}
-          {sub && <span className="text-dark-500"> · {sub}</span>}
-        </div>
+        <Tooltip label={sub ? `${value} · ${sub}` : value}>
+          <div className="text-sm font-mono text-dark-100 truncate">
+            {value}
+            {sub && <span className="text-dark-500"> · {sub}</span>}
+          </div>
+        </Tooltip>
       </div>
     </div>
   )

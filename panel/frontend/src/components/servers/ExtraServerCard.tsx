@@ -14,6 +14,7 @@ import {
   PlusCircle,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
+import { Tooltip } from '../ui/Tooltip'
 import DeployTargetFields, { type DeployFormData } from './DeployTargetFields'
 import type { RemnawaveCertProfile, HAProxyConfigProfile, FirewallProfile } from '../../api/client'
 
@@ -110,15 +111,16 @@ export default function ExtraServerCard({
             </span>
           )}
         </div>
-        <button
-          type="button"
-          onClick={onRemove}
-          disabled={disabled}
-          className="p-1.5 rounded-lg text-dark-400 hover:bg-danger/10 hover:text-danger transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-          title={t('servers.deploy_extra_remove')}
-        >
-          <Trash2 className="w-4 h-4" />
-        </button>
+        <Tooltip label={t('servers.deploy_extra_remove')}>
+          <button
+            type="button"
+            onClick={onRemove}
+            disabled={disabled}
+            className="p-1.5 rounded-lg text-dark-400 hover:bg-danger/10 hover:text-danger transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <Trash2 className="w-4 h-4" />
+          </button>
+        </Tooltip>
       </div>
 
       <div className="p-4 space-y-4">

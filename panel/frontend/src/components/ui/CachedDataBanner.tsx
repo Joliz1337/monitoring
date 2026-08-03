@@ -2,6 +2,7 @@ import { motion } from 'framer-motion'
 import { Database, Clock, WifiOff } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { formatTimeAgo } from '../../utils/format'
+import { Tooltip } from './Tooltip'
 
 interface CachedDataBannerProps {
   cachedAt: Date | null
@@ -69,14 +70,15 @@ export function CachedIndicator({ cachedAt, className = '' }: { cachedAt?: Date 
   const { t } = useTranslation()
 
   return (
-    <motion.div
-      initial={{ opacity: 0, scale: 0.8 }}
-      animate={{ opacity: 1, scale: 1 }}
-      className={`inline-flex items-center gap-1 px-1.5 py-0.5 bg-warning/15 border border-warning/25 rounded text-[10px] text-warning ${className}`}
-      title={cachedAt ? t('cache.last_update', { time: formatTimeAgo(cachedAt) }) : t('cache.cached')}
-    >
-      <Database className="w-2.5 h-2.5" />
-      <span className="font-medium">{t('cache.cached')}</span>
-    </motion.div>
+    <Tooltip label={cachedAt ? t('cache.last_update', { time: formatTimeAgo(cachedAt) }) : t('cache.cached')}>
+      <motion.div
+        initial={{ opacity: 0, scale: 0.8 }}
+        animate={{ opacity: 1, scale: 1 }}
+        className={`inline-flex items-center gap-1 px-1.5 py-0.5 bg-warning/15 border border-warning/25 rounded text-[10px] text-warning ${className}`}
+      >
+        <Database className="w-2.5 h-2.5" />
+        <span className="font-medium">{t('cache.cached')}</span>
+      </motion.div>
+    </Tooltip>
   )
 }
