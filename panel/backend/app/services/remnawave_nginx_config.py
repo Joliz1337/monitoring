@@ -15,6 +15,12 @@
 Правила (location-блоки) живут между маркерами и парсятся обратно из
 конфига; опции схемы (CDN, PP и т.д.) хранятся в JSON-колонке профиля
 и из конфига не парсятся.
+
+Политика ошибок: наружу уходит либо ответ сайта-заглушки, либо ничего.
+Всё, что подделать нельзя, — страницы ошибок самого nginx — превращается
+в обрыв соединения (444), а всё, что заглушка может отдать за настоящий
+сайт (чужой путь, не-gRPC запрос по gRPC-локации, упавший Xray), уходит
+на неё проксированием.
 """
 
 import ipaddress
@@ -31,6 +37,22 @@ LOCATIONS_END_MARKER = "# === LOCATIONS END ==="
 # безопасный минимум, который работает даже на самом маленьком сервере
 # и на нодах со старым агентом, который подстановки ещё не умеет.
 AUTO_MARKER = "# auto: node"
+
+# Коды, которые nginx генерирует сам (битый запрос, HTTP на TLS-порт, упавший
+# апстрим и т.п.). Отдать их клиенту — значит показать страницу с подписью
+# nginx там, где обычный сайт отдал бы свою; воспроизвести чужую страницу
+# ошибки нечем, поэтому соединение рвётся.
+# Ошибки самого сайта-заглушки при этом доходят до клиента нетронутыми:
+# proxy_intercept_errors по умолчанию выключен, и его нельзя включать —
+# иначе 404 заглушки превратился бы в обрыв и маскировка сломалась бы.
+NGINX_OWN_ERROR_CODES = (
+    "400 403 404 405 408 411 413 414 416 421 429 "
+    "494 495 496 497 500 501 502 503 504 505"
+)
+
+# Внутренний код для «пришёл не gRPC» — error_page уводит такой запрос
+# на заглушку, наружу он никогда не выходит
+NOT_GRPC_CODE = 418
 
 # Публикуемые диапазоны Cloudflare (cloudflare.com/ips) — для кнопки
 # «Cloudflare по умолчанию» на фронте и подсказки в API
@@ -196,20 +218,35 @@ def validate_options(options: ProfileOptions) -> None:
 
 
 def _grpc_block(rule: GrpcRule, ip_var: str, has_fallback: bool) -> str:
-    # Упавший Xray отдаёт клиенту сайт вместо 502 — маскировка не рвётся
-    error_page = "            error_page 502 503 504 = @fallback;\n" if has_fallback else ""
+    """Блок живёт между маркерами и попадает в том числе в конфиги с ручными
+    правками, поэтому ссылаться отсюда можно только на @fallback — её наличие
+    известно по опциям, а @drop может не существовать.
+
+    Проверка Content-Type однострочная намеренно: закрывающая скобка на своей
+    строке обрезала бы тело location при обратном разборе правил.
+    """
+    not_grpc = 'if ($content_type !~* "^application/grpc")'
+    if has_fallback:
+        # Случайный браузер по этому пути и упавший Xray одинаково получают
+        # заглушку: снаружи путь неотличим от несуществующей страницы сайта
+        guard = (
+            f"            error_page {NOT_GRPC_CODE} 502 503 504 = @fallback;\n"
+            f"            {not_grpc} {{ return {NOT_GRPC_CODE}; }}\n"
+        )
+    else:
+        guard = f"            {not_grpc} {{ return 444; }}\n"
     return f"""        # rule: {rule.name} type=grpc
         location ^~ /{rule.service_path} {{
-            grpc_pass grpc://127.0.0.1:{rule.port};
+{guard}            grpc_pass grpc://127.0.0.1:{rule.port};
             grpc_set_header Host $host;
             grpc_set_header X-Forwarded-For {ip_var};
             grpc_read_timeout 1h;
             grpc_send_timeout 1h;
-{error_page}            access_log off;
+            access_log off;
         }}"""
 
 
-def _proxy_headers(ip_var: str, indent: str = "            ", with_drop: bool = False) -> str:
+def _proxy_headers(ip_var: str, indent: str = "            ") -> str:
     """HTTP/1.1 + проброс WebSocket: на HTTP/1.0 (дефолт proxy_pass) часть
     сайтов отвечает иначе, keepalive не работает, а Upgrade не проходит.
 
@@ -226,10 +263,6 @@ def _proxy_headers(ip_var: str, indent: str = "            ", with_drop: bool = 
         "proxy_set_header Connection $connection_upgrade;",
         "proxy_pass_header Server;",
     ]
-    if with_drop:
-        # Заглушка недоступна — рвём соединение вместо страницы ошибки nginx:
-        # обычные сайты 502 от nginx не отдают, это выдало бы прокси
-        lines.append("error_page 502 503 504 = @drop;")
     return "\n".join(f"{indent}{line}" for line in lines)
 
 
@@ -253,7 +286,7 @@ def _render_locations(grpc_rules: list[GrpcRule], proxy_rules: list[ProxyRule],
 def _fallback_locations(options: "ProfileOptions") -> str:
     """Живут вне маркеров: весь не попавший в правила трафик и ошибки Xray
     уходят на обычный сайт."""
-    headers = _proxy_headers(options.client_ip_var, with_drop=True)
+    headers = _proxy_headers(options.client_ip_var)
     return f"""
         location / {{
             proxy_pass {options.fallback_url};
@@ -263,10 +296,6 @@ def _fallback_locations(options: "ProfileOptions") -> str:
         location @fallback {{
             proxy_pass {options.fallback_url};
 {headers}
-        }}
-
-        location @drop {{
-            return 444;
         }}"""
 
 
@@ -322,10 +351,19 @@ def generate_full_config(options: ProfileOptions, grpc_rules: list[GrpcRule],
 """)
 
     if options.reject_default_server:
-        http_parts.append("""    server {
+        # ssl_reject_handshake рвёт только TLS-рукопожатие. Обычный HTTP на 443
+        # рукопожатия не начинает и доходит до обработки запроса — без своего
+        # error_page этот блок отдал бы фирменную 400-ю страницу nginx
+        http_parts.append(f"""    server {{
         listen 443 ssl default_server;
         ssl_reject_handshake on;
-    }
+
+        error_page {NGINX_OWN_ERROR_CODES} = @drop;
+
+        location @drop {{
+            return 444;
+        }}
+    }}
 """)
 
     pp_listen = (f"        listen {options.proxy_protocol_port} ssl proxy_protocol;\n"
@@ -346,6 +384,12 @@ def generate_full_config(options: ProfileOptions, grpc_rules: list[GrpcRule],
 
         ssl_certificate     {options.ssl_cert_path};
         ssl_certificate_key {options.ssl_key_path};
+
+        error_page {NGINX_OWN_ERROR_CODES} = @drop;
+
+        location @drop {{
+            return 444;
+        }}
 
 {pp_realip}        {LOCATIONS_START_MARKER}
 {locations}
@@ -386,6 +430,10 @@ http {{
         default upgrade;
         ""      close;
     }}
+
+    # Ошибка, возникшая уже при обработке error_page, тоже должна доходить
+    # до @drop: иначе мёртвая заглушка на gRPC-пути отдала бы 502 от nginx
+    recursive_error_pages on;
 
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_ecdh_curve X25519:prime256v1:secp384r1;

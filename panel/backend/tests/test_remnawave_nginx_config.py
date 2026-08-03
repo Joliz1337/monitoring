@@ -132,7 +132,7 @@ class ContentTests(unittest.TestCase):
             ProfileOptions(fallback_url="https://example.com"), GRPC_RULES, [],
         )
         self.assertIn("proxy_pass https://example.com;", config)
-        self.assertIn("error_page 502 503 504 = @fallback;", config)
+        self.assertIn("error_page 418 502 503 504 = @fallback;", config)
         self.assertIn("location @fallback {", config)
         self.assertIn("location / {", config)
 
@@ -166,20 +166,59 @@ class ContentTests(unittest.TestCase):
         self.assertNotIn("add_header", config)
         self.assertIn("proxy_pass_header Server;", config)
 
-    def test_dead_fallback_drops_connection(self):
+    def test_nginx_own_errors_drop_connection(self):
+        """Страницу ошибки с подписью nginx клиент не должен увидеть никогда —
+        ни при битом запросе, ни при HTTP на TLS-порт (497), ни при мёртвой
+        заглушке (502)."""
         config = generate_full_config(
             ProfileOptions(fallback_url="https://1.2.3.4:8445"), GRPC_RULES, [],
         )
-        self.assertIn("error_page 502 503 504 = @drop;", config)
+        error_page = next(l for l in config.splitlines() if "= @drop;" in l)
+        for code in ("400", "404", "497", "502", "503", "504"):
+            self.assertIn(code, error_page, f"код {code} должен уходить в разрыв")
         self.assertIn("location @drop {", config)
         self.assertIn("return 444;", config)
 
-    def test_rules_do_not_reference_drop_without_fallback(self):
-        """@drop генерируется только вместе с fallback — правило внутри
-        маркеров не должно на неё ссылаться, иначе импортированный конфиг
-        без этой локации не пройдёт проверку nginx."""
-        config = generate_full_config(ProfileOptions(), GRPC_RULES, PROXY_RULES)
-        self.assertNotIn("@drop", config)
+    def test_default_server_also_drops_plain_http(self):
+        """ssl_reject_handshake рвёт только TLS: обычный HTTP на 443 доходит
+        до обработки запроса, и default-блоку тоже нужен свой @drop."""
+        config = generate_full_config(
+            ProfileOptions(reject_default_server=True), GRPC_RULES, [],
+        )
+        default_block = config[config.find("ssl_reject_handshake on;"):]
+        default_block = default_block[:default_block.find("\n    server {")]
+        self.assertIn("= @drop;", default_block)
+        self.assertIn("return 444;", default_block)
+
+    def test_upstream_errors_are_not_intercepted(self):
+        """404 самой заглушки обязан дойти до клиента как есть — иначе
+        обрыв на несуществующей странице выдал бы прокси."""
+        config = generate_full_config(
+            ProfileOptions(fallback_url="https://1.2.3.4:8445"), GRPC_RULES, [],
+        )
+        self.assertNotIn("proxy_intercept_errors", config)
+
+    def test_drop_exists_whenever_referenced(self):
+        """Правила внутри маркеров не должны ссылаться на @drop: их вставляют
+        и в конфиги с ручными правками, где этой локации может не быть."""
+        for options in (ProfileOptions(), ProfileOptions(fallback_url="https://example.com")):
+            config = generate_full_config(options, GRPC_RULES, [])
+            start = config.find("# === LOCATIONS START ===")
+            end = config.find("# === LOCATIONS END ===")
+            self.assertNotIn("@drop", config[start:end])
+            self.assertIn("location @drop {", config)
+
+    def test_non_grpc_request_on_grpc_path_goes_to_fallback(self):
+        """Браузер или сканер по gRPC-пути должен получить сайт, а не ответ
+        Xray: путь выглядит как обычная несуществующая страница."""
+        config = generate_full_config(
+            ProfileOptions(fallback_url="https://example.com"), GRPC_RULES, [],
+        )
+        self.assertIn('if ($content_type !~* "^application/grpc") { return 418; }', config)
+
+    def test_non_grpc_request_drops_without_fallback(self):
+        config = generate_full_config(ProfileOptions(), GRPC_RULES, [])
+        self.assertIn('if ($content_type !~* "^application/grpc") { return 444; }', config)
 
     def test_proxy_locations_use_http11_and_websocket(self):
         config = generate_full_config(
