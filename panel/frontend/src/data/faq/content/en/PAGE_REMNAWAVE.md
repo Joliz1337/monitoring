@@ -25,7 +25,16 @@ Each check has its own on/off toggle; the rest keep working. IP check settings:
 - **Confirmations** — how many times in a row the excess must repeat before a notification arrives. A single random spike won't raise an alarm.
 - **ASN margin** — the same, but for providers. Home Wi-Fi plus mobile data for one person is already two providers, which is normal. A notification comes only when providers exceed the device limit plus this margin.
 
-**Known clients** — the list of apps considered normal. A connection from an app not on the list triggers the "Unknown User-Agent" alarm. Add your own app as a single line, e.g. `MyApp/`. Clear the field and save to restore the standard list.
+**Known clients** — the list of apps considered normal. Every device introduces itself with a User-Agent string, e.g. `Happ/1.6.2 iPhone`. The panel compares the start of that string against each line of the list — if none matches, the "Unknown User-Agent" alarm fires.
+
+The rules are simple, one line — one app:
+
+- a line matches from the start: `Happ/` covers `Happ/1.6.2`, `Happ/2.0` and any other version;
+- `*` stands for any number of characters: `*https*` allows "https" anywhere in the string, `v2raytun/*` — any platform;
+- `?` stands for exactly one character;
+- letter case doesn't matter.
+
+Add your own app as a single line like `MyApp/`. Clear the field and save to restore the standard list.
 
 ## Good to know
 

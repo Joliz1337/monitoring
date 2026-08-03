@@ -1,4 +1,4 @@
-# Monitoring Panel v10.41.2
+# Monitoring Panel v10.42.0
 
 Веб-панель для мониторинга серверов. Собирает метрики с нод с настраиваемым интервалом (по умолчанию 10 сек) и хранит историю локально.
 
@@ -976,9 +976,9 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 - `anomaly_ip_margin` (default 2) — запас сверх `hwid_device_limit`, после которого IP-аномалия считается превышением.
 - `anomaly_ip_confirm_count` (default 5) — сколько подряд обнаружений превышения нужно для отправки уведомления в Telegram (было `IP_CONFIRM_THRESHOLD = 5`).
 - `anomaly_asn_margin` (default 0) — уведомление об IP-аномалии подавляется, если число уникальных ASN (провайдеров) среди текущих IP пользователя не превышает `hwid_device_limit + anomaly_asn_margin`: много IP от одного оператора мобильной связи (CGNAT) — не аномалия.
-- `anomaly_ua_patterns` (Text, nullable) — реестр известных VPN-клиентов для проверки User-Agent, одна строка — один regex-фрагмент (сопоставляется с начала UA, регистронезависимо). NULL/пустое значение — используется встроенный список `DEFAULT_UA_PATTERNS`.
+- `anomaly_ua_patterns` (Text, nullable) — реестр известных VPN-клиентов для проверки User-Agent, одна строка — одна маска (сопоставляется с начала UA, регистронезависимо). NULL/пустое значение — используется встроенный список `DEFAULT_UA_PATTERNS`.
 
-Сервис `panel/backend/app/services/known_clients.py`: `DEFAULT_UA_PATTERNS` — единственный источник встроенного списка (v2raytun, Happ, Hiddify и т.д.; раньше дублировался как `KNOWN_UA_PATTERN` в роутере и коллекторе); `default_ua_text()` — список как текст для предзаполнения формы; `validate_ua_patterns(raw) -> list[str]` — ошибки компиляции regex с номерами строк (используется при `PUT /api/remnawave/settings`, ошибка → HTTP 400); `build_ua_pattern(raw) -> re.Pattern` — компилирует объединяющий паттерн `^(?:...|...)` с `IGNORECASE`; пустой ввод или испорченное содержимое БД откатываются на встроенный список, детектор не падает.
+Сервис `panel/backend/app/services/known_clients.py`: реестр — маски, а не regex: `*` — любое количество символов, `?` — ровно один, остальное — буквально (`_mask_to_regex()`: `re.escape` + замена `\*`→`.*`, `\?`→`.`). `DEFAULT_UA_PATTERNS` — единственный источник встроенного списка (v2raytun, Happ, Hiddify и т.д.); `default_ua_text()` — список как текст для предзаполнения формы; `build_ua_pattern(raw) -> re.Pattern` — компилирует объединяющий паттерн `^(?:...|...)` с `IGNORECASE`; пустой ввод откатывается на встроенный список. Отдельной валидации формата нет — маска не может быть синтаксически некорректной, поэтому `PUT /api/remnawave/settings` больше не возвращает HTTP 400 за содержимое реестра.
 
 **Подтверждение IP аномалий**: уведомление в Telegram отправляется только после `anomaly_ip_confirm_count` подряд обнаружений превышения. Если IP-count упал ниже лимита — streak (`_ip_anomaly_streak`) сбрасывается. Защита от ложных срабатываний при кратковременных всплесках.
 
@@ -1001,7 +1001,7 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 - Status filter по умолчанию: `ACTIVE`
 - Toggle "Использовать другого Telegram бота" в настройках аномалий; поля token/chat_id показываются только при включённом toggle
 - При включённом мастер-тумблере `anomaly_enabled` — 4 суб-тумблера пер-тип проверок (IP/HWID/UA/данные устройства)
-- Под тумблером «IP превышает лимит» — три числовых поля (запас IP, число подтверждений, запас ASN); под тумблером «Неизвестный User-Agent» — короткий label «Известные клиенты (по одному на строку)» и textarea реестра (моноширинный шрифт); ошибка валидации regex с бэкенда (HTTP 400) показывается в toast; очистка textarea и сохранение возвращает встроенный список клиентов. Объяснение параметров простым языком — в FAQ вкладки «Настройки» (обзорная статья `PAGE_REMNAWAVE.md`, раздел «Настройки проверок»), не в подсказках под полями
+- Под тумблером «IP превышает лимит» — три числовых поля (запас IP, число подтверждений, запас ASN); под тумблером «Неизвестный User-Agent» — короткий label «Известные клиенты (по одному на строку)» и textarea реестра масок (моноширинный шрифт); очистка textarea и сохранение возвращает встроенный список клиентов. Объяснение параметров простым языком — в FAQ вкладки «Настройки» (обзорная статья `PAGE_REMNAWAVE.md`, раздел «Настройки проверок»), не в подсказках под полями
 - Кнопка игнора аномалии — контекстная: `ip_exceeds_limit` → «Игнор IP», остальные типы → «Игнор HWID»
 - Вкладка Settings: двухколоночный grid (lg-брейкпоинт). Левая колонка: API / Collection / Anomaly Notifications. Правая колонка: Traffic Anomaly Triggers (порог в ГБ + confirm count). Save, Ignored Users, списки игнора и Danger Zone — на всю ширину под grid. Секции Ignored Users / Ignore IP / Ignore HWID вынесены в трёхколоночный grid. Ограничение ширины (max-w-5xl/max-w-3xl) снято — контент растянут на всю ширину. Поле поиска и IP-фильтр расширены (max-w-sm убран).
 - Все строки локализованы через i18n (ru.json / en.json)
@@ -1010,7 +1010,7 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 - `panel/backend/app/routers/remnawave.py` — API роутер
 - `panel/backend/app/services/xray_stats_collector.py` — сбор IP через Remnawave Panel API + HWID-синхронизация; IP-блок `_check_anomalies` переписан: счётчик/новые IP/reply-threading/анти-спам; хендлер `handle_rw_reset` для callback `rw_reset:ip:{email}`; оптимизация памяти при анализе аномалий (см. ниже); пер-тип тумблеры пропускают соответствующий SQL-запрос, если проверка выключена
 - `panel/backend/app/services/ip_anomaly_state.py` — репозиторий состояния IP-аномалий (`get_or_create`, `record_notification`, `reset`), JSON-хелперы (`parse_ips`, `dump_ips`), `seconds_since_last`
-- `panel/backend/app/services/known_clients.py` — реестр известных VPN-клиентов для проверки User-Agent: `DEFAULT_UA_PATTERNS`, `default_ua_text()`, `validate_ua_patterns(raw)`, `build_ua_pattern(raw)`
+- `panel/backend/app/services/known_clients.py` — реестр известных VPN-клиентов для проверки User-Agent на масках (`*`/`?`, не regex): `DEFAULT_UA_PATTERNS`, `default_ua_text()`, `build_ua_pattern(raw)`
 - `panel/backend/app/services/remnawave_api.py` — клиент: `get_all_nodes()`, `poll_users_ips()`, `get_all_hwid_devices_paginated()`
 - `panel/backend/app/services/telegram_bot.py` — приватный `_send() -> Message | None` с поддержкой `reply_to_message_id`; `send_message` сохраняет bool-контракт; `send_message_returning_id() -> int | None`
 - `panel/backend/app/models.py` — модель `RemnawaveIpAnomalyState`

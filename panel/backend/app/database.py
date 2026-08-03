@@ -1660,6 +1660,16 @@ async def _migrate_remnawave_anomaly_settings(conn):
             except Exception as e:
                 logger.debug(f"Column add skipped {col_name}: {e}")
 
+    # Реестр UA переведён с regex-фрагментов на простые маски (*/?) — сохранённый
+    # текст старого regex-формата вернул бы ложные тревоги, сбрасываем на встроенный
+    try:
+        await conn.execute(text(
+            "UPDATE remnawave_settings SET anomaly_ua_patterns = NULL "
+            "WHERE anomaly_ua_patterns LIKE '%(ios|android|windows)%'"
+        ))
+    except Exception as e:
+        logger.debug(f"anomaly_ua_patterns reset skipped: {e}")
+
     # anomaly_whitelist существовал только в одной dev-сборке — вычищаем
     if "anomaly_whitelist" in existing:
         try:

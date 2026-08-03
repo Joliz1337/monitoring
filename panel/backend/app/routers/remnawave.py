@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import verify_auth
 from app.database import get_db, async_session
 from app.models import RemnawaveSettings, XrayStats, RemnawaveUserCache, RemnawaveHwidDevice
-from app.services.known_clients import build_ua_pattern, default_ua_text, validate_ua_patterns
+from app.services.known_clients import build_ua_pattern, default_ua_text
 from app.services.remnawave_api import get_remnawave_api
 from app.services.xray_stats_collector import get_xray_stats_collector
 
@@ -110,11 +110,6 @@ async def get_settings(db: AsyncSession = Depends(get_db), _: dict = Depends(ver
 
 @router.put("/settings")
 async def update_settings(request: UpdateSettingsRequest, db: AsyncSession = Depends(get_db), _: dict = Depends(verify_auth)):
-    if request.anomaly_ua_patterns is not None:
-        errors = validate_ua_patterns(request.anomaly_ua_patterns)
-        if errors:
-            raise HTTPException(status_code=400, detail="Известные клиенты: " + "; ".join(errors))
-
     result = await db.execute(select(RemnawaveSettings).limit(1))
     s = result.scalar_one_or_none()
     if not s:
