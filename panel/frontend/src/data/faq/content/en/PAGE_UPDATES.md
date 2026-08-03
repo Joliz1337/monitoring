@@ -6,6 +6,7 @@ Panel and node versions in one place, updates in one click.
 
 - See the installed and available panel version, update it with an automatic restart.
 - See every node's version and update any of them — one by one or all at once.
+- Update everything with one button: the panel starts updating all nodes, then updates itself — the page reloads automatically.
 - Force a check for new versions.
 
 ## Update order

@@ -13,6 +13,7 @@ import {
   AlertTriangle,
   Clock,
   Check,
+  Rocket,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { systemApi, VersionBaseInfo, SingleNodeVersion } from '../api/client'
@@ -76,6 +77,7 @@ export default function Updates() {
   const [updatingPanel, setUpdatingPanel] = useState(false)
   const [updatingNodes, setUpdatingNodes] = useState<Set<number>>(new Set())
   const [updatingAll, setUpdatingAll] = useState(false)
+  const [updatingEverything, setUpdatingEverything] = useState(false)
 
   const [updateResults, setUpdateResults] = useState<Record<string, { success: boolean; message: string }>>({})
 
@@ -187,11 +189,11 @@ export default function Updates() {
     const id = setInterval(() => {
       const isIdle = Date.now() - lastActivityRef.current > IDLE_THRESHOLD
       const isVisible = !document.hidden
-      const isBusy = updatingPanel || updatingNodes.size > 0 || updatingAll || isChecking
+      const isBusy = updatingPanel || updatingNodes.size > 0 || updatingAll || updatingEverything || isChecking
       if (isIdle && isVisible && !isBusy) fetchBase()
     }, AUTO_REFRESH_INTERVAL)
     return () => clearInterval(id)
-  }, [fetchBase, updatingPanel, updatingNodes, updatingAll, isChecking])
+  }, [fetchBase, updatingPanel, updatingNodes, updatingAll, updatingEverything, isChecking])
 
   const handleRefresh = useCallback(() => {
     abortRef.current = true
@@ -290,17 +292,43 @@ export default function Updates() {
     }
   }
 
+  const collectNodeUpdateTargets = () =>
+    Array.from(nodes.values()).filter(n =>
+      n.loadState === 'loaded' && n.status === 'online' && (isDevChannel || getNodeNeedsUpdate(n))
+    )
+
   const handleUpdateAllNodes = async () => {
     if (updatingAll || !baseInfo) return
 
     setUpdatingAll(true)
-    const targets = Array.from(nodes.values()).filter(n =>
-      n.loadState === 'loaded' && n.status === 'online' && (isDevChannel || getNodeNeedsUpdate(n))
-    )
-
-    await Promise.all(targets.map(n => handleUpdateNode(n.id, n.name)))
-
+    await Promise.all(collectNodeUpdateTargets().map(n => handleUpdateNode(n.id, n.name)))
     setUpdatingAll(false)
+  }
+
+  // «Обновить всё»: сначала рассылаются запуски обновления на все подходящие ноды
+  // (каждая обновляет себя сама, результат отдельной ноды не блокирует процесс),
+  // и как только все запросы отправлены — панель запускает обновление самой себя.
+  const handleUpdateEverything = async () => {
+    if (updatingEverything || updatingAll || updatingPanel || !baseInfo) return
+
+    setUpdatingEverything(true)
+    try {
+      const targets = collectNodeUpdateTargets()
+      if (targets.length > 0) {
+        toast.info(t('updates.everything_nodes_started', { count: targets.length }))
+        setUpdatingAll(true)
+        await Promise.all(targets.map(n => handleUpdateNode(n.id, n.name)))
+        setUpdatingAll(false)
+      }
+
+      if (panelCanUpdate) {
+        await handleUpdatePanel()
+      } else {
+        toast.success(t('updates.everything_panel_skipped'))
+      }
+    } finally {
+      setUpdatingEverything(false)
+    }
   }
 
   const getNodeNeedsUpdate = (node: NodeState): boolean => {
@@ -317,6 +345,8 @@ export default function Updates() {
   ).length
   // На dev-канале кнопка «Обновить все» доступна для всех онлайн-нод
   const updateAllCount = isDevChannel ? onlineNodesCount : nodesNeedUpdate
+  const panelCanUpdate = isDevChannel || !!baseInfo?.panel.update_available
+  const canUpdateEverything = updateAllCount > 0 || panelCanUpdate
 
   const allNodesLoaded = loadedNodes.every(n => n.loadState === 'loaded' || n.loadState === 'error')
 
@@ -376,16 +406,36 @@ export default function Updates() {
           </motion.p>
         </div>
 
-        <motion.button
-          onClick={handleRefresh}
-          className="btn btn-secondary"
-          whileHover={{ scale: 1.02 }}
-          whileTap={{ scale: 0.98 }}
-          disabled={loading || isChecking}
-        >
-          <RefreshCw className={`w-4 h-4 ${isChecking ? 'animate-spin' : ''}`} />
-          {isChecking ? t('updates.checking') : t('common.refresh')}
-        </motion.button>
+        <div className="flex items-center gap-3">
+          <motion.button
+            onClick={handleRefresh}
+            className="btn btn-secondary"
+            whileHover={{ scale: 1.02 }}
+            whileTap={{ scale: 0.98 }}
+            disabled={loading || isChecking}
+          >
+            <RefreshCw className={`w-4 h-4 ${isChecking ? 'animate-spin' : ''}`} />
+            {isChecking ? t('updates.checking') : t('common.refresh')}
+          </motion.button>
+
+          {canUpdateEverything && (
+            <motion.button
+              onClick={handleUpdateEverything}
+              disabled={updatingEverything || updatingAll || updatingPanel || updatingNodes.size > 0}
+              className="btn btn-primary"
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.98 }}
+              title={t('updates.update_everything_hint')}
+            >
+              {updatingEverything ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Rocket className="w-4 h-4" />
+              )}
+              {updatingEverything ? t('updates.updating_everything') : t('updates.update_everything')}
+            </motion.button>
+          )}
+        </div>
       </motion.div>
 
       {/* Error */}
