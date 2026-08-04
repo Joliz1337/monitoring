@@ -4,7 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import {
   Bell, Bot, Send, CheckCircle2, XCircle, Loader2,
   ChevronDown, ChevronRight, Trash2, Server, ShieldOff,
-  Cpu, MemoryStick, Network, Cable, Power, Activity,
+  Cpu, MemoryStick, Network, Cable, Power, Activity, Layers,
   RefreshCw, Clock, X,
 } from 'lucide-react'
 import { toast } from 'sonner'
@@ -13,7 +13,7 @@ import { formatBitsPerSec } from '../utils/format'
 import { Tooltip } from '../components/ui/Tooltip'
 import { FAQIcon, type FAQScreen } from '../components/FAQ'
 
-type TriggerSection = 'offline' | 'cpu' | 'ram' | 'network' | 'load_avg' | 'tcp'
+type TriggerSection = 'offline' | 'cpu' | 'ram' | 'network' | 'load_avg' | 'conntrack' | 'tcp'
 
 export default function Alerts() {
   const { t } = useTranslation()
@@ -166,6 +166,7 @@ export default function Alerts() {
       tcp_synrecv_spike: t('alerts.type_tcp_synrecv_spike'),
       tcp_finwait_spike: t('alerts.type_tcp_finwait_spike'),
       load_avg_high: t('alerts.type_load_avg_high'),
+      conntrack_high: t('alerts.type_conntrack_high'),
     }
     return map[t_] || t_
   }
@@ -432,6 +433,24 @@ export default function Alerts() {
           />
         </TriggerBlock>
 
+        {/* Conntrack */}
+        <TriggerBlock
+          title={t('alerts.trigger_conntrack')}
+          icon={<Layers className="w-4 h-4" />}
+          enabled={settings.conntrack_enabled}
+          onToggle={v => save({ conntrack_enabled: v })}
+          expanded={expanded.has('conntrack')}
+          onExpand={() => toggle('conntrack')}
+        >
+          <SliderRow label={t('alerts.conntrack_threshold')} value={settings.conntrack_threshold} min={50} max={100} step={5} format={v => `${v}%`} onSave={v => save({ conntrack_threshold: v })} />
+          <TriggerIgnoreList
+            ids={settings.conntrack_excluded_server_ids}
+            allServers={allServers}
+            onSave={ids => save({ conntrack_excluded_server_ids: ids })}
+            t={t}
+          />
+        </TriggerBlock>
+
         {/* TCP */}
         <TriggerBlock
           title={t('alerts.trigger_tcp')}
@@ -564,6 +583,7 @@ export default function Alerts() {
               <option value="tcp_synrecv_spike">{t('alerts.type_tcp_synrecv_spike')}</option>
               <option value="tcp_finwait_spike">{t('alerts.type_tcp_finwait_spike')}</option>
               <option value="load_avg_high">{t('alerts.type_load_avg_high')}</option>
+              <option value="conntrack_high">{t('alerts.type_conntrack_high')}</option>
             </select>
             <button
               onClick={handleClearHistory}

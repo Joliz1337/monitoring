@@ -555,6 +555,10 @@ class AlertSettings(Base):
     load_avg_threshold_offset = Column(Float, default=1.0)
     load_avg_sustained_checks = Column(Integer, default=3)
 
+    # Conntrack (заполнение таблицы соединений ядра, % от nf_conntrack_max)
+    conntrack_enabled = Column(Boolean, default=True)
+    conntrack_threshold = Column(Float, default=80.0)
+
     # Excluded servers (JSON array of server IDs)
     excluded_server_ids = Column(Text, nullable=True)
 
@@ -565,6 +569,7 @@ class AlertSettings(Base):
     network_excluded_server_ids = Column(Text, nullable=True)
     tcp_excluded_server_ids = Column(Text, nullable=True)
     load_avg_excluded_server_ids = Column(Text, nullable=True)
+    conntrack_excluded_server_ids = Column(Text, nullable=True)
 
 
 class AlertHistory(Base):

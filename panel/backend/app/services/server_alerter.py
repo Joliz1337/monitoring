@@ -241,6 +241,7 @@ class ServerAlerter:
             "network": self._parse_id_list(settings.network_excluded_server_ids),
             "tcp": self._parse_id_list(settings.tcp_excluded_server_ids),
             "load_avg": self._parse_id_list(settings.load_avg_excluded_server_ids),
+            "conntrack": self._parse_id_list(settings.conntrack_excluded_server_ids),
         }
 
         async with async_session() as db:
@@ -596,7 +597,11 @@ class ServerAlerter:
             )
 
         fill = ad.get("conntrack_fill_pct")
-        if isinstance(fill, (int, float)) and fill > 80 and self._cooldown_ok(
+        conntrack_ignored = srv.id in self._trigger_excluded.get("conntrack", set())
+        threshold = settings.conntrack_threshold or 80.0
+        if settings.conntrack_enabled and not conntrack_ignored and isinstance(
+            fill, (int, float)
+        ) and fill > threshold and self._cooldown_ok(
             state, "conntrack_high", now, cooldown
         ):
             state.last_alert["conntrack_high"] = now

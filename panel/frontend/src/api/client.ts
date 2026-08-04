@@ -1292,6 +1292,8 @@ export interface AlertSettingsData {
   load_avg_enabled: boolean
   load_avg_threshold_offset: number
   load_avg_sustained_checks: number
+  conntrack_enabled: boolean
+  conntrack_threshold: number
   excluded_server_ids: number[]
   offline_excluded_server_ids: number[]
   cpu_excluded_server_ids: number[]
@@ -1299,6 +1301,7 @@ export interface AlertSettingsData {
   network_excluded_server_ids: number[]
   tcp_excluded_server_ids: number[]
   load_avg_excluded_server_ids: number[]
+  conntrack_excluded_server_ids: number[]
 }
 
 export interface AlertHistoryItem {
