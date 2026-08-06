@@ -171,7 +171,7 @@ CI/CD: `.github/workflows/docker-publish.yml` — 3 параллельных job
 
 Переключение канала в Настройках **не запускает обновление само по себе** — влияет только на то, откуда будет скачано следующее.
 
-**Страница «Обновления» на dev-канале:** на ветке `dev` версия в `panel/VERSION`/`node/VERSION` между пушами не обязательно меняется, поэтому сравнение «текущая == последняя на GitHub» там ненадёжно как признак «нечего обновлять». При `update_branch = dev` (`Updates.tsx`, читает `updateBranch` из `settingsStore` через `fetchSettings()` при монтировании) кнопки разблокированы независимо от результата сравнения версий: «Обновить панель» и «Обновить» у каждой онлайн-ноды активны всегда; «Обновить все ноды» показывается для всех онлайн-нод (не только тех, что отстают по версии) и обновляет их все разом; в шапке страницы появляется бейдж «Dev-канал: обновление доступно всегда» (`updates.dev_channel_badge`). Офлайн-ноды по-прежнему исключены. Изменение только фронтенд — бэкенд не ограничивал повторное обновление ни на одном канале.
+**Страница «Обновления» на dev-канале:** на ветке `dev` версия в `panel/VERSION`/`node/VERSION` между пушами не обязательно меняется, поэтому сравнение «текущая == последняя на GitHub» там ненадёжно как признак «нечего обновлять». При `update_branch = dev` (`Updates.tsx`, читает `updateBranch` из `settingsStore` через `fetchSettings()` при монтировании) кнопки разблокированы независимо от результата сравнения версий: «Обновить панель» и «Обновить» у каждой онлайн-ноды активны всегда; «Обновить все ноды» показывается для всех онлайн-нод (не только тех, что отстают по версии) и обновляет их все разом; в шапке страницы появляется бейдж «Dev-канал: обновление доступно всегда» (`updates.dev_channel_badge`). Офлайн-ноды исключены. Логика целиком на фронтенде — бэкенд не ограничивает повторное обновление ни на одном канале.
 
 **Настройки:**
 
@@ -216,9 +216,7 @@ Lifecycle управляется через `lifespan` в `main.py`. Выбор 
 - `read=10.0` сек — нагруженные ноды могут отвечать дольше 5 сек
 - `http2=False` на всех клиентах к нодам — HTTP/2 state machine при попытке отправки в уже закрытое nginx соединение вызывает фатальную ошибку (`ConnectionInputs.SEND_HEADERS in state CLOSED`), HTTP/1.1 делает переподключение автоматически
 
-**Корень проблемы с offline-нодами:** несовпадение `keepalive_expiry` клиента (ранее 120 сек) с `keepalive_timeout` nginx нод (65 сек) + `http2=True` давало фатальные h2-ошибки → срабатывал circuit breaker (3 сбоя → 30 сек skip) → `last_seen` уходил за порог offline (60 сек) → панель показывала ноду offline. Устранено в v10.4.1.
-
-**Жёсткий таймаут сбора метрик (`FETCH_HARD_TIMEOUT`):** фоновый цикл коллектора опрашивает все ноды одним `asyncio.gather` — зависший запрос к одной ноде способен заморозить его целиком, и тогда `last_seen` перестаёт обновляться сразу у всех серверов, все они уходят в offline по порогу, хотя реально работают. Такое зависание не покрывается httpx-таймаутами (connect/read/write/pool): у ноды за SOCKS5-прокси TCP-сессия до прокси устанавливается (ESTABLISHED), но само SOCKS5-рукопожатие может зависнуть навсегда — это отдельная фаза, вне зоны действия httpx. `metrics_collector.py` — `_fetch_server_metrics` оборачивает `_fetch_metrics(server)` в `asyncio.wait_for(..., FETCH_HARD_TIMEOUT)` (20 сек — с запасом над суммой httpx-таймаутов 2+2+10+2=16с, не режет легитимно медленные ответы); по истечении — warning в лог и обычная ошибка `Connection timeout` (504), которую circuit breaker считает рядовой неудачей ноды, а `wait_for` отменяет зависшую корутину и закрывает застрявшее соединение. Устранено в v10.28.2.
+**Жёсткий таймаут сбора метрик (`FETCH_HARD_TIMEOUT`):** фоновый цикл коллектора опрашивает все ноды одним `asyncio.gather` — зависший запрос к одной ноде способен заморозить его целиком, и тогда `last_seen` перестаёт обновляться сразу у всех серверов, все они уходят в offline по порогу, хотя реально работают. Такое зависание не покрывается httpx-таймаутами (connect/read/write/pool): у ноды за SOCKS5-прокси TCP-сессия до прокси устанавливается (ESTABLISHED), но само SOCKS5-рукопожатие может зависнуть навсегда — это отдельная фаза, вне зоны действия httpx. `metrics_collector.py` — `_fetch_server_metrics` оборачивает `_fetch_metrics(server)` в `asyncio.wait_for(..., FETCH_HARD_TIMEOUT)` (20 сек — с запасом над суммой httpx-таймаутов 2+2+10+2=16с, не режет легитимно медленные ответы); по истечении — warning в лог и обычная ошибка `Connection timeout` (504), которую circuit breaker считает рядовой неудачей ноды, а `wait_for` отменяет зависшую корутину и закрывает застрявшее соединение.
 
 **Параллелизм Torrent Blocker:** `torrent_blocker.py` при каждом цикле рассылает POST-запросы на ноды. Константа `SEND_CONCURRENCY = 30` ограничивает число одновременных запросов через `asyncio.Semaphore(30)` — без лимита 100+ одновременных запросов забивали keepalive-пул и роняли параллельный поток метрик пачками ошибок. Отдельная константа `WEBHOOK_CONCURRENCY = 20` ограничивает параллельные POST-запросы вебхуков через внешний клиент (`get_external_client`).
 
@@ -228,29 +226,29 @@ Lifecycle управляется через `lifespan` в `main.py`. Выбор 
 
 `panel/frontend/src/hooks/useAutoRefresh.ts` — хук для периодического обновления данных на страницах. Поддерживает паузу при скрытой вкладке (Page Visibility API).
 
-Баг с двойным fetch при открытии страницы устранён: visibility effect пропускает первый mount через `mountedRef`, чтобы не дублировать запрос, который уже выполнил `useEffect` компонента при инициализации.
+Visibility effect пропускает первый mount через `mountedRef` — иначе запрос дублировал бы тот, что уже выполнил `useEffect` компонента при инициализации.
 
-### Frontend: анимации (CSS вместо framer-motion)
+### Frontend: анимации (CSS)
 
-Массовые анимации переведены с framer-motion на CSS keyframes/transitions. framer-motion вычисляет каждый кадр в JS на main thread; CSS-анимации исполняются на GPU compositor без JS-нагрузки.
+Массовые анимации — CSS keyframes/transitions: они исполняются на GPU compositor без JS-нагрузки, тогда как JS-анимации (framer-motion) вычисляют каждый кадр на main thread.
 
-**Затронутые компоненты:**
+**Компоненты:**
 
-- `panel/frontend/src/index.css` — CSS-классы: `.btn-scale` (hover/tap), `.live-mode-pulse`, `.status-ping`, `.status-ping-delay`, `.status-blink`, `.card-enter` (entrance с inline `animation-delay`), `.metric-enter`, `.fade-in`, `.pb-track/.pb-fill/.pb-fill-shimmer/.pb-fill-pulse` (прогресс-бар), `.cpu-core-fill` (ядра CPU, `transition: width`), `.loading-blob/.loading-logo-wobble/.loading-text-pulse` (LoadingScreen), `.icon-float` (empty state). Из `.card` убран `backdrop-blur-md` (заменён на непрозрачный фон `bg-dark-900/80`) — backdrop-blur пересчитывается GPU на каждый кадр под слоем при N карточках.
+- `panel/frontend/src/index.css` — CSS-классы: `.btn-scale` (hover/tap), `.live-mode-pulse`, `.status-ping`, `.status-ping-delay`, `.status-blink`, `.card-enter` (entrance с inline `animation-delay`), `.metric-enter`, `.fade-in`, `.pb-track/.pb-fill/.pb-fill-shimmer/.pb-fill-pulse` (прогресс-бар), `.cpu-core-fill` (ядра CPU, `transition: width`), `.loading-blob/.loading-logo-wobble/.loading-text-pulse` (LoadingScreen), `.icon-float` (empty state). `.card` использует непрозрачный фон `bg-dark-900/80` без `backdrop-blur-md` — backdrop-blur пересчитывается GPU на каждый кадр под слоем при N карточках.
 
-- `panel/frontend/src/components/ui/ProgressBar.tsx` — переписан без framer-motion; ширина обновляется через `transition: width`, анимированный режим — через CSS pseudo-элементы shimmer/pulse.
+- `panel/frontend/src/components/ui/ProgressBar.tsx` — ширина обновляется через `transition: width`, анимированный режим — через CSS pseudo-элементы shimmer/pulse.
 
-- `panel/frontend/src/components/ui/Skeleton.tsx` — переписан без framer-motion; использует CSS `.skeleton` shimmer-эффект.
+- `panel/frontend/src/components/ui/Skeleton.tsx` — использует CSS `.skeleton` shimmer-эффект.
 
-- `panel/frontend/src/components/ui/StatusBadge.tsx` — переписан без framer-motion; online-ореол → CSS `.status-ping` + `.status-ping-delay`, offline-blink → `.status-blink`, loading-спин → `.icon-spin`. Устраняет 2–3 infinite JS-анимации на каждый online-сервер (60+ при 30 серверах).
+- `panel/frontend/src/components/ui/StatusBadge.tsx` — online-ореол — CSS `.status-ping` + `.status-ping-delay`, offline-blink — `.status-blink`, loading-спин — `.icon-spin`; это избавляет от 2–3 infinite JS-анимаций на каждый online-сервер (60+ при 30 серверах).
 
-- `panel/frontend/src/components/Dashboard/ServerCard.tsx` — убраны motion.div entrance/hover variants, заменены на `.card-enter` с `animation-delay` (capped на индексе 20); ядра CPU через `.cpu-core-fill` вместо motion.div (критично: 16 JS-анимаций на обновление метрик при 16-ядерном сервере); `memo` comparator заменён с `JSON.stringify` на цепочку прямых сравнений примитивов.
+- `panel/frontend/src/components/Dashboard/ServerCard.tsx` — entrance/hover — `.card-enter` с `animation-delay` (capped на индексе 20); ядра CPU — `.cpu-core-fill` (критично: JS-анимация означала бы 16 анимаций на обновление метрик при 16-ядерном сервере); `memo` comparator — цепочка прямых сравнений примитивов (без `JSON.stringify`).
 
-- `panel/frontend/src/pages/Dashboard.tsx` — staggered entrance-анимации заголовка убраны; motion.button → `<button>` + `.btn-scale`; live-mode бейдж `animate opacity Infinity` → `.live-mode-pulse`; AnimatePresence mode="wait" вокруг loading/empty/servers удалён; motion-обёртки оставлены только там где JS-анимация неизбежна (collapsible folder height, ModalOverlay); убраны `backdrop-blur-sm` на toggle-группах header.
+- `panel/frontend/src/pages/Dashboard.tsx` — кнопки — `<button>` + `.btn-scale`; live-mode бейдж — `.live-mode-pulse`; motion-обёртки используются только там, где JS-анимация неизбежна (collapsible folder height, ModalOverlay); toggle-группы header без `backdrop-blur-sm`.
 
-- `panel/frontend/src/App.tsx` — LoadingScreen полностью переписан без framer-motion: `blur(80px)` → `blur(48px)` через `.loading-blob` (нагрузка на GPU квадратична по радиусу), 3 кольца спиннера → CSS `.icon-spin` с `animation-duration` через inline style.
+- `panel/frontend/src/App.tsx` — LoadingScreen на чистом CSS: фоновые пятна — `.loading-blob` с `blur(48px)` (нагрузка на GPU квадратична по радиусу блюра), 3 кольца спиннера — CSS `.icon-spin` с `animation-duration` через inline style.
 
-**Результат:** при 30 online-серверах устранено ~200+ постоянных JS-таймеров framer-motion на main thread (StatusBadge ×2 = 60, ProgressBar ×3–6 на карточку = 100+, live-mode = 1 и др.). Все infinite-анимации идут через CSS на GPU compositor.
+**Итог:** все infinite-анимации идут через CSS на GPU compositor; JS-анимации стоили бы при 30 online-серверах ~200+ постоянных таймеров на main thread (StatusBadge ×2 = 60, ProgressBar ×3–6 на карточку = 100+, live-mode = 1 и др.).
 
 ### nginx keepalive и TCP-оптимизации
 
@@ -261,7 +259,7 @@ Lifecycle управляется через `lifespan` в `main.py`. Выбор 
 - Общий лимит тела запроса: `client_max_body_size 10m`
 - Отдельный location `= /api/backup/restore`: `client_max_body_size 100m`, `proxy_send_timeout 120s`, `proxy_read_timeout 120s` — для импорта бэкапов размером до 100 MB
 
-`panel/frontend/nginx.conf`: TCP-оптимизации включены; WebSocket-заголовки (Upgrade/Connection upgrade) убраны из API-проксирования.
+`panel/frontend/nginx.conf`: TCP-оптимизации включены; API-проксирование идёт без WebSocket-заголовков (Upgrade/Connection upgrade).
 
 ### Docker ресурсные лимиты
 
@@ -304,47 +302,47 @@ Lifecycle управляется через `lifespan` в `main.py`. Выбор 
 
 **`aggregated_metrics` — уникальный констрейнт:**
 
-Добавлен `UniqueConstraint('server_id', 'period_type', 'timestamp', name='uq_aggregated_metrics')`. Без него `ON CONFLICT DO NOTHING` в часовой/дневной агрегации был no-op — при каждом рестарте панели в пределах периода создавались дубль-строки и графики за 7/30/365 дней двоились. Миграция `_migrate_aggregated_metrics_unique` дедуплицирует существующие строки, добавляет UNIQUE и удаляет ставший избыточным индекс `idx_aggregated_server_period`. Выполняется при старте через `init_db`, идемпотентна.
+Таблица имеет `UniqueConstraint('server_id', 'period_type', 'timestamp', name='uq_aggregated_metrics')`. Без него `ON CONFLICT DO NOTHING` в часовой/дневной агрегации был бы no-op — при каждом рестарте панели в пределах периода создавались бы дубль-строки и графики за 7/30/365 дней двоились. Миграция `_migrate_aggregated_metrics_unique` дедуплицирует существующие строки, добавляет UNIQUE и удаляет избыточный индекс `idx_aggregated_server_period`. Выполняется при старте через `init_db`, идемпотентна.
 
-**`metrics_snapshots.id` → `BigInteger`:**
+**`metrics_snapshots.id` — `BigInteger`:**
 
-PK таблицы переведён с `Integer` (int32) на `BigInteger`. При 500 нодах с интервалом метрик 10 сек int4-serial исчерпывался бы менее чем за 2 года. Миграция `_migrate_bigint_pk_ids` выполняет `ALTER COLUMN id TYPE BIGINT` только если текущий тип `int4` (идемпотентна, безопасна на свежей БД). Выполняется при старте, пока таблица ещё небольшая.
+PK таблицы — `BigInteger` (не int32). При 500 нодах с интервалом метрик 10 сек int4-serial исчерпывался бы менее чем за 2 года. Миграция `_migrate_bigint_pk_ids` выполняет `ALTER COLUMN id TYPE BIGINT` только если текущий тип `int4` (идемпотентна, безопасна на свежей БД). Выполняется при старте, пока таблица ещё небольшая.
 
 **`firewall_profile_sync.py` — изоляция сессий при fan-out:**
 
-`_sync_single_server` теперь открывает собственную короткую сессию через `async_session_maker()` и коммитит результат немедленно — по образцу `haproxy_profile_sync`. Ранее единственный `AsyncSession` передавался во все параллельные таски через `asyncio.gather`, что вызывало `InterfaceError / already in progress` (AsyncSession не поддерживает конкурентную работу). Общая сессия используется только для чтения серверов и пометки `pending` с немедленным commit.
+`_sync_single_server` открывает собственную короткую сессию через `async_session_maker()` и коммитит результат немедленно — по образцу `haproxy_profile_sync`: `AsyncSession` не поддерживает конкурентную работу, общий объект сессии в параллельных тасках `asyncio.gather` давал бы `InterfaceError / already in progress`. Общая сессия используется только для чтения серверов и пометки `pending` с немедленным commit.
 
 **`billing_checker.py` — короткие сессии:**
 
-Настройки и список ID billing-серверов теперь читаются в одной короткой сессии, которая закрывается до начала HTTP-вызовов к Yandex Cloud и Telegram. Каждый сервер обрабатывается в отдельной короткой сессии. Устраняет idle-in-transaction на время внешних HTTP-запросов (раньше одна сессия держалась открытой на весь последовательный обход). YC-результаты теперь сохраняются даже когда `paid_until` пустой.
+Настройки и список ID billing-серверов читаются в одной короткой сессии, которая закрывается до начала HTTP-вызовов к Yandex Cloud и Telegram. Каждый сервер обрабатывается в отдельной короткой сессии — сессия не висит idle-in-transaction на время внешних HTTP-запросов. YC-результаты сохраняются даже когда `paid_until` пустой.
 
 ### Масштабируемость: снижение пиков ОЗУ при анализе аномалий (v10.14.5)
 
 **`xray_stats_collector.py` — проекция `RemnawaveUserCache`:**
 
-В методе `_check_anomalies` таблица `RemnawaveUserCache` теперь читается через проекцию пяти нужных колонок (`email`, `uuid`, `status`, `hwid_device_limit`, `username`) с доступом к результатам по имени через `Row`. Ранее загружались полные ORM-объекты (`select(RemnawaveUserCache).scalars().all()`) — при десятках-сотнях тысяч пользователей это создавало значительный пик ОЗУ каждые ~5 минут (цикл анализа аномалий).
+В методе `_check_anomalies` таблица `RemnawaveUserCache` читается через проекцию пяти нужных колонок (`email`, `uuid`, `status`, `hwid_device_limit`, `username`) с доступом к результатам по имени через `Row` — загрузка полных ORM-объектов (`select(RemnawaveUserCache).scalars().all()`) при десятках-сотнях тысяч пользователей создавала бы значительный пик ОЗУ каждые ~5 минут (цикл анализа аномалий).
 
 **`xray_stats_collector.py` — ленивая загрузка IP-адресов:**
 
-Детальный список IP из таблицы `xray_stats` теперь загружается **по требованию только для пользователей с подтверждённой аномалией** — точечным запросом `WHERE email = :email` по индексированному полю. Ранее вся таблица пар `email → source_ip` загружалась в память для всех пользователей сразу (`ips_by_email`). Пики ОЗУ при анализе аномалий больше не масштабируются с размером таблицы `xray_stats`.
+Детальный список IP из таблицы `xray_stats` загружается **по требованию только для пользователей с подтверждённой аномалией** — точечным запросом `WHERE email = :email` по индексированному полю. Загрузка всей таблицы пар `email → source_ip` в память для всех пользователей сразу масштабировала бы пики ОЗУ при анализе аномалий с размером таблицы `xray_stats`.
 
 ### Масштабируемость: корректная агрегация трафика и чистка индексов (v10.14.7)
 
-**`metrics_collector.py` — исправление множителя в `_aggregate_hourly`:**
+**`metrics_collector.py` — множитель интервала в `_aggregate_hourly`:**
 
-В часовой агрегации трафика (`total_rx_bytes`, `total_tx_bytes`) множитель интервала сбора метрик был жёстко захардкожен как `× 10` (соответствовало дефолтному интервалу 10 сек). Теперь реальный интервал передаётся через bind-параметр `:interval` из `self._collect_interval`. При изменении оператором интервала сбора метрик агрегированный суммарный трафик в часовых/дневных/годовых графиках больше не будет кратно ошибочен.
+В часовой агрегации трафика (`total_rx_bytes`, `total_tx_bytes`) реальный интервал сбора метрик передаётся через bind-параметр `:interval` из `self._collect_interval` — захардкоженный множитель при изменении оператором интервала сбора делал бы агрегированный суммарный трафик в часовых/дневных/годовых графиках кратно ошибочным.
 
 **`routers/servers.py` — проекция колонок в `GET /servers/migration-status`:**
 
-Эндпоинт проверки статуса миграции сертификатов ранее загружал полные ORM-объекты `Server`, включая тяжёлые TEXT-колонки (`last_metrics` и др.). Теперь читается проекция двух колонок (`uses_shared_cert`, `pki_enabled`) — только те поля, которые реально использует `classify_server`.
+Эндпоинт проверки статуса миграции сертификатов читает проекцию двух колонок (`uses_shared_cert`, `pki_enabled`) — только те поля, которые реально использует `classify_server`, без тяжёлых TEXT-колонок `Server` (`last_metrics` и др.).
 
-**`models.py` / `database.py` — удаление избыточных индексов:**
+**`models.py` / `database.py` — избыточные индексы:**
 
-Три индекса признаны балластом и удалены:
+Три индекса — балласт, модели их не создают:
 - `idx_xray_stats_email` — email является ведущей колонкой составного PK `(email, source_ip)`, который уже покрывает любые запросы по email.
 - `idx_blocklist_direction` и `idx_blocklist_list_type` — кардинальность 2 (два возможных значения); планировщик PostgreSQL игнорирует такие индексы в пользу seq-scan, при этом они замедляют массовые INSERT/UPDATE при загрузке авто-списков.
 
-Удаление выполняется идемпотентной миграцией `_migrate_drop_redundant_indexes` (`DROP INDEX IF EXISTS`) при старте через `init_db`. На существующих БД индексы дропаются; на свежих — модели их уже не создают.
+На существующих БД эти индексы дропаются идемпотентной миграцией `_migrate_drop_redundant_indexes` (`DROP INDEX IF EXISTS`) при старте через `init_db`.
 
 ## Конфигурация (.env)
 
@@ -402,7 +400,7 @@ PK таблицы переведён с `Integer` (int32) на `BigInteger`. П�
 
 Проверка версий: панель скачивает `panel/VERSION`, `node/VERSION` и `configs/VERSION` файлы с GitHub и сравнивает с локальными. Все запросы к нодам выполняются параллельно через `asyncio.gather` для быстрой загрузки.
 
-**Кнопка «Обновить всё»** (`Updates.tsx`): показывается в шапке страницы, когда есть что обновлять — либо есть ноды с доступным обновлением (на dev-канале — любые онлайн-ноды, см. выше), либо панель может обновиться (`update_available` или dev-канал). Оркестрация целиком на фронтенде, нового API нет: сначала параллельно запускаются обновления всех подходящих нод (та же выборка целей, что у «Обновить все ноды» — вынесена в общий хелпер `collectNodeUpdateTargets()`, используется обеими кнопками); результат отдельной ноды не блокирует процесс. Как только все запросы на ноды отправлены — панель запускает обновление самой себя (`handleUpdatePanel`, дальше см. автоперезагрузку ниже). Порядок «ноды → панель» осознанный: после старта обновления панели бэкенд уходит в перезапуск, и рассылать команды нодам уже некому. Если панель уже актуальна и канал стабильный — обновляются только ноды, показывается тост `updates.everything_panel_skipped`. Кнопка блокируется во время любых текущих обновлений (`updatingEverything`/`updatingAll`/`updatingPanel`/`updatingNodes`).
+**Кнопка «Обновить всё»** (`Updates.tsx`): показывается в шапке страницы, когда есть что обновлять — либо есть ноды с доступным обновлением (на dev-канале — любые онлайн-ноды, см. выше), либо панель может обновиться (`update_available` или dev-канал). Оркестрация целиком на фронтенде, отдельного API нет: сначала параллельно запускаются обновления всех подходящих нод (та же выборка целей, что у «Обновить все ноды» — вынесена в общий хелпер `collectNodeUpdateTargets()`, используется обеими кнопками); результат отдельной ноды не блокирует процесс. Как только все запросы на ноды отправлены — панель запускает обновление самой себя (`handleUpdatePanel`, дальше см. автоперезагрузку ниже). Порядок «ноды → панель» осознанный: после старта обновления панели бэкенд уходит в перезапуск, и рассылать команды нодам уже некому. Если панель уже актуальна и канал стабильный — обновляются только ноды, показывается тост `updates.everything_panel_skipped`. Кнопка блокируется во время любых текущих обновлений (`updatingEverything`/`updatingAll`/`updatingPanel`/`updatingNodes`).
 
 **Автоматическая перезагрузка страницы после обновления панели** (`Updates.tsx`):
 
@@ -434,13 +432,13 @@ PK таблицы переведён с `Integer` (int32) на `BigInteger`. П�
 - Бейдж «CPU: Nя / Nп» — физические ядра / логические потоки
 - Бейдж «Хост изменился» (`sys_opt.host_changed`, подсказка из `drift_detail` в `title`) вместо обычного «Доступно обновление» — показывается, когда `GET /api/system/versions` ноды вернул `optimizations.drift: true`: MemTotal/nproc хоста разошлись с тем, из чего был вычислен текущий конфиг (типично — ресайз VPS). Дрейф чинится сам на следующей перезагрузке (`ExecStartPre` рендерера), бейдж лишь предупреждает раньше. `drift` учитывается в `update_available` наравне с отставанием версии — попадает и в счётчик кнопки «Обновить все», и в одиночное «Применить».
 
-**Группа «Без оптимизаций»:** показывает только реально неназначенные онлайн-ноды (`installed === false`, `status === 'online'`) и ноды, которые ещё грузятся (скелетоны, `stillLoading`). Недоступная нода (ошибка подключения панель→нода) в эту группу не попадает вообще — её реальное состояние оптимизаций неизвестно, и раньше она зря висела там с текстом «Не установлено».
+**Группа «Без оптимизаций»:** показывает только реально неназначенные онлайн-ноды (`installed === false`, `status === 'online'`) и ноды, которые ещё грузятся (скелетоны, `stillLoading`). Недоступная нода (ошибка подключения панель→нода) в эту группу не попадает вообще — её реальное состояние оптимизаций неизвестно.
 
-**Бейдж «Обновите ноду» (`nodeOutdated`):** ставится только нодам, которые реально ответили (`status === 'online'`) и не прислали `nic_mode` в `optimizations` — это признак старого агента. Для недоступной ноды бэкенд (`GET /api/system/nodes/{id}/version`) тоже отдаёт `optimizations` без `nic_mode`, но это не значит, что агент устарел — просто нода не ответила; поэтому условие `status === 'online'` обязательно, иначе бейдж вешался на недоступные ноды по ошибке.
+**Бейдж «Обновите ноду» (`nodeOutdated`):** ставится только нодам, которые реально ответили (`status === 'online'`) и не прислали `nic_mode` в `optimizations` — это признак старого агента. Для недоступной ноды бэкенд (`GET /api/system/nodes/{id}/version`) тоже отдаёт `optimizations` без `nic_mode`, но это не значит, что агент устарел — просто нода не ответила; поэтому условие `status === 'online'` обязательно, иначе бейдж вешался бы на недоступные ноды по ошибке.
 
 **Кнопка «Обновить все (N)»:**
 
-Показывается в шапке страницы, только если есть N нод с доступным обновлением конфига оптимизаций (версия отстаёт от `latest_version` **или** есть дрейф хоста). По клику массово переприменяет оптимизации на этих нодах через существующий per-node эндпоинт `POST /api/proxy/{id}/system/optimizations/apply` — нового bulk-эндпоинта на бэкенде нет, обход клиентский, пулом по 6 нод одновременно, с той же per-node индикацией прогресса/результата, что и одиночное «Применить». Каждая нода сохраняет свой текущий профиль (vpn/panel) и текущий режим NIC (rps/multiqueue/hybrid); нода с режимом NIC «none» получает безопасный дефолт `rps`.
+Показывается в шапке страницы, только если есть N нод с доступным обновлением конфига оптимизаций (версия отстаёт от `latest_version` **или** есть дрейф хоста). По клику массово переприменяет оптимизации на этих нодах через существующий per-node эндпоинт `POST /api/proxy/{id}/system/optimizations/apply` — отдельного bulk-эндпоинта на бэкенде нет, обход клиентский, пулом по 6 нод одновременно, с той же per-node индикацией прогресса/результата, что и одиночное «Применить». Каждая нода сохраняет свой текущий профиль (vpn/panel) и текущий режим NIC (rps/multiqueue/hybrid); нода с режимом NIC «none» получает безопасный дефолт `rps`.
 
 **Интерфейс `NicInfo` (`panel/frontend/src/api/client.ts`):**
 ```typescript
@@ -487,11 +485,11 @@ interface NicInfo {
 
 Поле `proxy_url` в `ServerCreate`/`ServerUpdate` и во всех ответах (`GET /servers`, `GET /servers/{id}`, `POST /servers`) — см. «SOCKS5-прокси до ноды» ниже.
 
-`GET /servers` без `include_metrics` (лёгкий путь, не кэшируется) тоже возвращает поле `status` (`online`/`offline`/`loading`) — раньше оно отдавалось только вместе с метриками. Оба пути используют общий `resolve_status()` из `app/services/server_status.py` (см. «Массовые действия (Bulk Actions)» ниже — тот же модуль лежит в основе пропуска офлайн-нод в bulk-операциях).
+`GET /servers` без `include_metrics` (лёгкий путь, не кэшируется) тоже возвращает поле `status` (`online`/`offline`/`loading`). Оба пути используют общий `resolve_status()` из `app/services/server_status.py` (см. «Массовые действия (Bulk Actions)» ниже — тот же модуль лежит в основе пропуска офлайн-нод в bulk-операциях).
 
 ### SOCKS5-прокси до ноды
 
-Опциональное поле сервера `proxy_url`: при заполнении **все** запросы панели к этой ноде идут через указанный SOCKS5-прокси вместо прямого соединения — и HTTP (сбор метрик, proxy-роутер `/api/proxy/{id}/...`, sync-сервисы IP Blocklist/Анти-DDoS, SSE-терминал, тест подключения), и SSH-подключение при авторазвёртывании ноды. Единый способ обслуживать ноду, находящуюся за NAT/файрволом, — до установки и после. По образцу аналогичной функции в Remnawave. Для HTTP-трафика новых зависимостей не потребовалось — `httpx[socks,http2]` уже был в `requirements.txt`; для SSH добавлена зависимость `python-socks==2.8.2` (async SOCKS5-клиент, нужен именно для `asyncssh` — у него нет встроенной поддержки SOCKS).
+Опциональное поле сервера `proxy_url`: при заполнении **все** запросы панели к этой ноде идут через указанный SOCKS5-прокси вместо прямого соединения — и HTTP (сбор метрик, proxy-роутер `/api/proxy/{id}/...`, sync-сервисы IP Blocklist/Анти-DDoS, SSE-терминал, тест подключения), и SSH-подключение при авторазвёртывании ноды. Единый способ обслуживать ноду, находящуюся за NAT/файрволом, — до установки и после. По образцу аналогичной функции в Remnawave. Для HTTP-трафика используется `httpx[socks,http2]` (уже в `requirements.txt`); для SSH — зависимость `python-socks==2.8.2` (async SOCKS5-клиент, нужен именно для `asyncssh` — у него нет встроенной поддержки SOCKS).
 
 **Формат ввода:** `ip:port` или `ip:port@login:pass` (пароль может содержать `:`/`@`/любые непробельные символы). Пустая строка = прокси выключен. `validate_proxy_input()` в `http_client.py` проверяет формат (regex, порт 1–65535) на уровне Pydantic-валидатора `ServerCreate`/`ServerUpdate` и `DeployRequest.socks5_proxy` (SSH-деплой); та же проверка дублируется на фронте (`PROXY_RE`) для мгновенной обратной связи.
 
@@ -499,7 +497,7 @@ interface NicInfo {
 - `parse_proxy_input(raw) -> (host, port, login, password)` — единый разбор формата `ip:port[@login:pass]`; переиспользуется и HTTP-клиентом, и SSH-деплоем (`deploy_service.py`)
 - `_proxy_raw_to_url()` — строит `socks5://login:pass@ip:port` через `parse_proxy_input()`; логин/пароль percent-квотируются (`urllib.parse.quote`), поэтому спецсимволы в пароле безопасны
 - `_get_proxy_client(raw, mtls, apply)` — ленивое создание и кэширование `httpx.AsyncClient(proxy=...)` в module-level `_proxy_clients` по ключу (строка прокси, mtls, apply); mTLS SSL-контекст переиспользуется из module-global `_mtls_ctx` (сохраняется в `init_http_clients()`), не пересоздаётся на каждый прокси
-- `get_node_client(server)` / `get_node_apply_client(server)` — при наличии `server.proxy_url` прозрачно возвращают прокси-клиент вместо обычного mTLS/legacy; сигнатуры функций не изменились, поэтому все существующие вызовы по кодовой базе (~30 точек) получили поддержку прокси автоматически, без правок в вызывающем коде
+- `get_node_client(server)` / `get_node_apply_client(server)` — при наличии `server.proxy_url` прозрачно возвращают прокси-клиент вместо обычного mTLS/legacy; все вызовы по кодовой базе (~30 точек) получают поддержку прокси через эти две функции, без специальной логики в вызывающем коде
 - `close_http_clients()` закрывает и очищает кэш прокси-клиентов (важно для Backup & Restore: восстановление бэкапа делает `close_http_clients()` + `init_http_clients()`, старый mTLS-контекст не должен пережить рестарт)
 - `sanitize_proxy()` — маскирует креды до `host:port` в логах
 - Смена/удаление прокси у сервера действует со следующего запроса без рестарта панели; в `PUT /api/servers/{id}` смена `proxy_url` считается `node_changed` (триггерит пере-синк IP Blocklist на ноду, как смена `url`/`api_key`)
@@ -513,10 +511,10 @@ interface NicInfo {
 
 **Ограничения:**
 - IPv6-адрес прокси форматом ввода не поддерживается
-- Недоступный прокси при HTTP-запросах: нода отображается offline с `last_error = "Proxy connection error"` — `metrics_collector.py` перехватывает `httpx.ProxyError` отдельно от `ConnectError` (новый `ErrorTypes.PROXY_ERROR`), чтобы оператор отличал мёртвый прокси от мёртвой ноды; текст SOCKS-ошибки в лог не пишется (может содержать креды)
+- Недоступный прокси при HTTP-запросах: нода отображается offline с `last_error = "Proxy connection error"` — `metrics_collector.py` перехватывает `httpx.ProxyError` отдельно от `ConnectError` (`ErrorTypes.PROXY_ERROR`), чтобы оператор отличал мёртвый прокси от мёртвой ноды; текст SOCKS-ошибки в лог не пишется (может содержать креды)
 
 **Frontend:**
-- `pages/Servers.tsx` — поле «SOCKS5-прокси» видно в форме добавления сервера всегда, включая режим SSH-деплоя (раньше скрывалось); `buildDeployBody` передаёт `socks5_proxy`; `validateDeployForm` проверяет формат прокси (`PROXY_RE`) и для основного сервера, и для каждой дополнительной цели массового деплоя; поле также есть в inline-форме редактирования сервера и в retry-деплое
+- `pages/Servers.tsx` — поле «SOCKS5-прокси» видно в форме добавления сервера всегда, включая режим SSH-деплоя; `buildDeployBody` передаёт `socks5_proxy`; `validateDeployForm` проверяет формат прокси (`PROXY_RE`) и для основного сервера, и для каждой дополнительной цели массового деплоя; поле также есть в inline-форме редактирования сервера и в retry-деплое
 - `components/servers/ExtraServerCard.tsx` — у каждой дополнительной цели массового деплоя своё поле «SOCKS5-прокси» (`ExtraTarget.proxy`)
 
 **Файлы:**
@@ -558,10 +556,10 @@ interface NicInfo {
 
 **Frontend:**
 - `components/Dashboard/FleetSummary.tsx` — агрегация целиком на клиенте, один `useMemo`-проход по `servers`; учитываются только серверы с `is_active && status === 'online' && metrics` (offline-серверы с кэшированными метриками исключаются, чтобы не завышать сумму устаревшими данными). CPU — процент, взвешенный по числу логических ядер (`cpu.cores_logical`) каждого сервера, а не простое среднее, плюс суммарное число логических ядер флота. RAM — сумма занято/всего в байтах + процент. Скорость — сумма `network.total.rx_bytes_per_sec`/`tx_bytes_per_sec`. Если нет ни одного подходящего сервера, компонент возвращает `null` (панель скрывается).
-- Переиспользует существующие `formatBytes`/`formatBitsPerSecLocalized` (`utils/format.ts`) и i18n-ключи `common.cpu/ram/download/upload` — новых зависимостей не добавлено.
-- Число ядер (`sub` у CPU-плитки) выводится через плюральные ключи i18next v4 `common.cores_count_one/few/many/other` (ru) и `common.cores_count_one/other` (en) вместо статичного `common.cores` — корректное склонение «1 ядро», «2 ядра», «5 ядер».
+- Переиспользует существующие `formatBytes`/`formatBitsPerSecLocalized` (`utils/format.ts`) и i18n-ключи `common.cpu/ram/download/upload` — без дополнительных зависимостей.
+- Число ядер (`sub` у CPU-плитки) выводится через плюральные ключи i18next v4 `common.cores_count_one/few/many/other` (ru) и `common.cores_count_one/other` (en) — корректное склонение «1 ядро», «2 ядра», «5 ядер».
 - `Dashboard.tsx` передаёт компоненту стабильную ссылку на `servers` из `serversStore` (не локальную `dragServers`-копию, используемую на время drag), поэтому drag-and-drop карточек не вызывает лишних ререндеров сводки; сам компонент обёрнут в `memo`.
-- Бэкенд не менялся — данные уже приходили в `GET /api/servers?include_metrics=true`.
+- Бэкенд не участвует — данные уже приходят в `GET /api/servers?include_metrics=true`.
 
 **Файлы:**
 - `panel/frontend/src/components/Dashboard/FleetSummary.tsx`
@@ -628,7 +626,7 @@ interface NicInfo {
 - `panel/frontend/src/components/Infra/ServerSearchDropdown.tsx` — поиск по имени/IP при привязке сервера
 - `panel/frontend/src/pages/Servers.tsx` — InfraTree вставлен выше списка серверов, переключён на `fetchServersWithMetrics`; URL ноды обёрнут в `<CopyableIp>` (показывает полный URL, копирует только хост)
 
-**i18n:** ключи пространства имён `infra` добавлены в `en.json` и `ru.json`.
+**i18n:** ключи пространства имён `infra` — в `en.json` и `ru.json`.
 
 **Отключение мониторинга сервера:**
 
@@ -665,7 +663,7 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 
 
 
-**Load Average:** нода собирает `load_avg_1`, `load_avg_5`, `load_avg_15` из `/proc/loadavg`. На dashboard (стандартный и подробный вид) Load Average отображается в футере карточки с иконкой Activity. На странице `ServerDetails.tsx` — в строке Uptime (`LA: X.XX / X.XX / X.XX`), в секции System Information и в виде графика Load Average History рядом с Network Traffic (цвет `#f59e0b`). Поле `load_avg_1` добавлено в интерфейс `HistoryData`.
+**Load Average:** нода собирает `load_avg_1`, `load_avg_5`, `load_avg_15` из `/proc/loadavg`. На dashboard (стандартный и подробный вид) Load Average отображается в футере карточки с иконкой Activity. На странице `ServerDetails.tsx` — в строке Uptime (`LA: X.XX / X.XX / X.XX`), в секции System Information и в виде графика Load Average History рядом с Network Traffic (цвет `#f59e0b`). Поле `load_avg_1` есть в интерфейсе `HistoryData`.
 
 ### HAProxy
 
@@ -682,7 +680,7 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 
 **Перезагрузка конфига vs перезапуск процесса:**
 
-Кнопка «Перезагрузить» на странице `HAProxy.tsx` — выпадающее меню с двумя действиями: «Перезагрузить конфиг» (`handleReload` → `reload`, плавно, без разрыва активных соединений) и «Перезагрузить процесс» (`handleRestart` → `restart`, полный `systemctl restart`, активные соединения разрываются). Оба эндпоинта существовали и раньше; до этой доработки со страницы вызывался только `reload`, `restart` был доступен исключительно через bulk-эндпоинт `/bulk/haproxy/restart`. Оверлей загрузки карточки действий общий для обеих операций (`actionLoading === 'reload' | 'restart'`).
+Кнопка «Перезагрузить» на странице `HAProxy.tsx` — выпадающее меню с двумя действиями: «Перезагрузить конфиг» (`handleReload` → `reload`, плавно, без разрыва активных соединений) и «Перезагрузить процесс» (`handleRestart` → `restart`, полный `systemctl restart`, активные соединения разрываются). Оверлей загрузки карточки действий общий для обеих операций (`actionLoading === 'reload' | 'restart'`).
 
 **Проброс ошибок через прокси:**
 
@@ -699,7 +697,7 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 
 **Нормализация конфига при применении шаблона (`patchSendProxy` в `HAProxy.tsx`):**
 
-Кнопка «Применить стандартный шаблон» в UI не только перегенерирует обёртку конфига (global/defaults/resolvers), но и нормализует строки `server` в правилах. Функция `patchSendProxy` обходит все строки с `send-proxy` и дописывает `check-send-proxy`, если его ещё нет. Это гарантирует корректность существующих конфигов, созданных до введения обязательного `check-send-proxy`.
+Кнопка «Применить стандартный шаблон» в UI не только перегенерирует обёртку конфига (global/defaults/resolvers), но и нормализует строки `server` в правилах. Функция `patchSendProxy` обходит все строки с `send-proxy` и дописывает `check-send-proxy`, если его ещё нет. Это гарантирует корректность конфигов, в которых `send-proxy` записан без `check-send-proxy`.
 - `target_ssl: bool` — SSL при подключении к target (только для HTTPS-правил)
 - `cert_domain` — домен Let's Encrypt сертификата (только для HTTPS-правил)
 - `use_wildcard: bool` — при `True` система ищет сертификат по родительскому домену вместо точного совпадения. Например, для `sub.example.com` будет использован сертификат `example.com` (wildcard `*.example.com`). Применяется только для HTTPS-правил.
@@ -710,13 +708,13 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 
 Логика в `panel/backend/app/services/haproxy_config.py` и `node/app/services/haproxy_manager.py` при `use_wildcard=True` заменяет домен сертификата на родительский перед генерацией строки `crt` в конфиге HAProxy.
 
-**Базовый шаблон конфига — память под нагруженными нодами (v10.24.0):**
+**Базовый шаблон конфига — память под нагруженными нодами:**
 
-По итогам инцидента на нагруженной ноде (одно правило держало ~115k сессий HAProxy, из которых ~99k — мёртвые туннели от клиентов за NAT/ТСПУ, обрывающихся без FIN; каждая держала 32 КБ буфера вплоть до `timeout tunnel`, суммарно HAProxy съедал ~4 ГБ RSS) базовый шаблон (`generate_base_config()` в `haproxy_config.py`, тот же шаблон дублируется в `node/app/services/haproxy_manager.py`) изменён: `tune.bufsize` 32768 → 16384, `timeout tunnel` 2h → 1h, добавлены интервалы TCP keepalive (`clitcpka-idle 60s`/`-intvl 10s`/`-cnt 3`, аналогично `srvtcpka-*`) — мёртвое соединение детектится ядром за ~1.5 минуты вместо часов ожидания `timeout tunnel`.
+Базовый шаблон (`generate_base_config()` в `haproxy_config.py`, тот же шаблон дублируется в `node/app/services/haproxy_manager.py`) использует `tune.bufsize 16384`, `timeout tunnel 1h` и интервалы TCP keepalive (`clitcpka-idle 60s`/`-intvl 10s`/`-cnt 3`, аналогично `srvtcpka-*`) — мёртвое соединение детектится ядром за ~1.5 минуты, а не висит часами до `timeout tunnel`. Обоснование — инцидент на нагруженной ноде: одно правило держало ~115k сессий HAProxy, из которых ~99k — мёртвые туннели от клиентов за NAT/ТСПУ, обрывающихся без FIN; каждая сессия держала буфер вплоть до `timeout tunnel`, суммарно HAProxy съедал ~4 ГБ RSS.
 
 Панельный шаблон **не** содержит `maxconn` в секции `global` — один профиль применяется на серверы с разной RAM, поэтому потолок соединений вычисляет и подставляет сама нода при `apply_config()` (см. «Лимит соединений (maxconn)» в [node/DOCUMENTATION.md](../node/DOCUMENTATION.md#haproxy)).
 
-Существующие профили получают новый шаблон через кнопку «Перегенерировать конфиг» (`POST /haproxy-profiles/{id}/regenerate-config`) — новые профили создаются с ним сразу.
+Существующие профили получают актуальный базовый шаблон через кнопку «Перегенерировать конфиг» (`POST /haproxy-profiles/{id}/regenerate-config`) — новые профили создаются с ним сразу.
 
 ### Сертификаты
 
@@ -822,7 +820,7 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 
 **Поле `list_type` в правилах:**
 
-В таблице `blocklist_rules` добавлена колонка `list_type VARCHAR(10)` (значения `"block"` / `"allow"`, дефолт `"block"`) с индексом `idx_blocklist_list_type`. Позволяет хранить блок- и allow-правила в одной таблице.
+Колонка `list_type VARCHAR(10)` в таблице `blocklist_rules` (значения `"block"` / `"allow"`, дефолт `"block"`) позволяет хранить блок- и allow-правила в одной таблице.
 
 **Глобальные правила:**
 
@@ -871,34 +869,34 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 | POST | /api/blocklist/sync/{id} | Синхронизировать одну ноду (блок + allowlist, оба направления) |
 | GET | /api/blocklist/sync/status | Статус последней синхронизации (результат по серверам, включая allow) |
 
-Синхронизация теперь включает как блок-список, так и allowlist — `_sync_one_server` отправляет оба типа для обоих направлений. При синхронизации на ноду со старым API (404 на `/api/ipset/allowlist/sync`) allowlist пропускается gracefully.
+Синхронизация включает как блок-список, так и allowlist — `_sync_one_server` отправляет оба типа для обоих направлений. При синхронизации на ноду со старым API (404 на `/api/ipset/allowlist/sync`) allowlist пропускается gracefully.
 
 **Hot-apply**: все изменения правил (добавление/удаление глобальных, серверных правил, переключение источников) автоматически запускают синхронизацию в фоне через BackgroundTasks.
 
-**Frontend (Blocklist.tsx):** select сервера без ограничения ширины (убран max-w-xs). Четырёхвкладочный интерфейс:
+**Frontend (Blocklist.tsx):** select сервера без ограничения ширины. Четырёхвкладочный интерфейс:
 - **Global** — форма добавления правила слева, список правил справа
 - **Servers** — выбор сервера + форма добавления слева, список правил сервера справа
 - **Sources** — список источников слева, форма добавления источника + настройки справа; под формой добавления — подсказка о лимите ноды (`blocklist.sources_limit_hint`: 1 000 000 записей на направление, ~10 МБ ОЗУ на ноду на каждые 100 000 записей); в карточке источника с `ip_count >= 500 000` (`LARGE_SOURCE_WARN_THRESHOLD`) — предупреждение с оценкой памяти (`blocklist.large_source_ram`, МБ = `ip_count / 10 000`)
 - **Белый список** (иконка ShieldCheck) — форма добавления (in/out/both) слева, двухколоночный список IN/OUT справа; переиспользует компонент `RulesList`
 
-**Параллельная синхронизация**: `sync_all_nodes()` использует `asyncio.gather` — все серверы синхронизируются одновременно. Таймаут на ноду растёт с размером списка (`_sync_timeout()` = 20с базово + 1с на каждые 40k IP; бюджет `_sync_one_server_safe` считается из размеров списков обоих направлений) — фиксированные 30с обрубали синк на середине для списков в сотни тысяч и миллионы записей. Если сервер не отвечает — он получает статус ошибки, остальные не блокируются.
+**Параллельная синхронизация**: `sync_all_nodes()` использует `asyncio.gather` — все серверы синхронизируются одновременно. Таймаут на ноду растёт с размером списка (`_sync_timeout()` = 20с базово + 1с на каждые 40k IP; бюджет `_sync_one_server_safe` считается из размеров списков обоих направлений) — фиксированный таймаут обрубал бы синк на середине для списков в сотни тысяч и миллионы записей. Если сервер не отвечает — он получает статус ошибки, остальные не блокируются.
 
-**Производительность полного синка (инцидент — блокировка event loop панели):** при добавлении крупного автоисточника (десятки-сотни тысяч записей) наивная схема «дедупликация объединённого списка заново для каждого сервера» съедала минуты CPU в event loop — все HTTP-запросы к панели получали 499, UI показывал сервера «выключенными». Фикс:
+**Производительность полного синка (защита event loop панели):** наивная схема «дедупликация объединённого списка заново для каждого сервера» на крупном автоисточнике (десятки-сотни тысяч записей) съедала бы минуты CPU в event loop — все HTTP-запросы к панели получали бы 499, UI показывал бы сервера «выключенными». Поэтому:
 - `build_shared_lists()` — общие для всех серверов списки (глобальные block-правила + авто-источники + allow) считаются **один раз на прогон синка**, а не на каждый сервер; тяжёлая дедупликация — в `asyncio.to_thread`.
 - `_sync_one_server(server, shared)` получает готовый общий список и добавляет к нему только серверные правила (обычно единицы записей).
-- Парсинг скачанного списка (`parse_list_content`) в `fetch_github_list()` тоже вынесен в `asyncio.to_thread` — без этого разбор 90k+ строк занимал десятки секунд в event loop.
-- `sync_all_nodes()` теперь под `asyncio.Lock` (`_sync_lock`): если ручной синк и автообновление запускаются одновременно, второй ждёт первого вместо параллельного дублирования всей работы.
+- Парсинг скачанного списка (`parse_list_content`) в `fetch_github_list()` тоже вынесен в `asyncio.to_thread` — без этого разбор 90k+ строк занимал бы десятки секунд в event loop.
+- `sync_all_nodes()` выполняется под `asyncio.Lock` (`_sync_lock`): если ручной синк и автообновление запускаются одновременно, второй ждёт первого вместо параллельного дублирования всей работы.
 
-**OOM панели на списках в миллионы IP (инцидент):** источник с ~4 млн IP вызывал рост памяти бэкенда до ~5 ГБ за ~3 минуты после старта — OOM-killer убивал uvicorn, начинался бесконечный цикл рестартов (заодно спамились offline-алерты в Telegram, так как in-memory состояние алертера обнулялось на каждом рестарте). Пиковая память на списке в 4 млн IP снижена с ~5 ГБ до ~1–1.2 ГБ:
-- Тело запроса `POST /api/ipset/sync` (JSON) собирается **один раз на направление** в `build_shared_lists()` (`_build_sync_body()`, поле `"body"` в `shared`) и переиспользуется всеми нодами без своих правил через `content=` — раньше httpx с `json=` собирал собственную копию тела (~70 МБ на списке в 4 млн IP) на каждую ноду одновременно, это был главный источник OOM. `sync_to_node()` теперь принимает готовое тело (`server, body: bytes, ip_count`) вместо списка IP.
-- Копия списка на каждую ноду больше не собирается; отдельное тело строится только для нод со своими per-server правилами, под семафором `_extra_body_sem` (не больше 2 одновременно).
-- Новый `_merge_deduplicated()` — слияние уже нормализованных списков без повторной нормализации: старый `deduplicate_ips()` заново гонял 4 млн строк через `_normalize_ip`, создавая вторую копию каждой записи (~500 МБ).
-- Двойное скачивание убрано: фоновый цикл автообновления (`_update_loop`) больше не вызывает `clear_cache()` перед `sync_all_nodes()` — `refresh_all_sources()` уже кладёт свежие списки в кэш; метод `clear_cache` удалён как неиспользуемый.
+**Память на списках в миллионы IP:** пиковая память бэкенда на списке в 4 млн IP — ~1–1.2 ГБ. Без перечисленных ниже мер она достигала бы ~5 ГБ за ~3 минуты после старта — OOM-killer убивал бы uvicorn с бесконечным циклом рестартов (и спамом offline-алертов в Telegram, так как in-memory состояние алертера обнуляется на каждом рестарте):
+- Тело запроса `POST /api/ipset/sync` (JSON) собирается **один раз на направление** в `build_shared_lists()` (`_build_sync_body()`, поле `"body"` в `shared`) и переиспользуется всеми нодами без своих правил через `content=` — сборка httpx с `json=` собственной копии тела (~70 МБ на списке в 4 млн IP) на каждую ноду одновременно была бы главным источником OOM. `sync_to_node()` принимает готовое тело (`server, body: bytes, ip_count`), а не список IP.
+- Копия списка на каждую ноду не собирается; отдельное тело строится только для нод со своими per-server правилами, под семафором `_extra_body_sem` (не больше 2 одновременно).
+- `_merge_deduplicated()` сливает уже нормализованные списки без повторной нормализации — повторный прогон 4 млн строк через `_normalize_ip` создавал бы вторую копию каждой записи (~500 МБ).
+- Фоновый цикл автообновления (`_update_loop`) не скачивает списки повторно перед `sync_all_nodes()` — `refresh_all_sources()` уже кладёт свежие списки в кэш.
 - `fetch_github_list()` качает списки потоково (`client.stream`) с потолком `MAX_LIST_BYTES = 256 МБ` — источник большего размера отклоняется с ошибкой вместо попытки загрузить его в память целиком.
-- `calculate_hash()` считает хэш инкрементально по элементам вместо `'\n'.join()` всего списка (экономия ~120 МБ транзиентной памяти); вынесен в `asyncio.to_thread`.
-- Кэш скачанных списков (`_cache`) больше не хранит протухшие записи бесконечно — `_get_cached`/`_set_cache` вычищают записи старше `CACHE_TTL` при каждом обращении; раньше список отключённого источника продолжал висеть в памяти навсегда.
+- `calculate_hash()` считает хэш инкрементально по элементам (`'\n'.join()` всего списка стоил бы ~120 МБ транзиентной памяти); вынесен в `asyncio.to_thread`.
+- `_get_cached`/`_set_cache` вычищают из кэша скачанных списков (`_cache`) записи старше `CACHE_TTL` при каждом обращении — иначе список отключённого источника висел бы в памяти навсегда.
 
-**Известное ограничение:** на ноде ipset-сет создаётся с `maxelem 1000000` (см. [node/DOCUMENTATION.md](../node/DOCUMENTATION.md#ipset-blocklist)) — список крупнее 1 млн записей нода принять не сможет, `ipset restore` завершится ошибкой. Само ограничение не устранено (это физический потолок ноды), но панель больше не пытается вслепую его пробить: см. «Лимит размера источника» выше — источники и общий список теперь обрезаются по `NODE_MAX_IPSET_ENTRIES` заранее, с явной ошибкой и предупреждением в UI вместо падения синка на ноде.
+**Известное ограничение:** на ноде ipset-сет создаётся с `maxelem 1000000` (см. [node/DOCUMENTATION.md](../node/DOCUMENTATION.md#ipset-blocklist)) — список крупнее 1 млн записей нода принять не сможет, `ipset restore` завершится ошибкой. Это физический потолок ноды; панель не пытается вслепую его пробить: см. «Лимит размера источника» выше — источники и общий список обрезаются по `NODE_MAX_IPSET_ENTRIES` заранее, с явной ошибкой и предупреждением в UI вместо падения синка на ноде.
 
 **Дефолтные списки (включены по умолчанию, направление: входящие):**
 - AntiScanner: `https://raw.githubusercontent.com/shadow-netlab/traffic-guard-lists/refs/heads/main/public/antiscanner.list`
@@ -938,7 +936,7 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 
 - **xray_stats** — `PK(email, source_ip)` → count, last_seen (эфемерные данные: полностью заменяются каждый цикл сбора через DELETE ALL + INSERT)
 - **remnawave_user_cache** — кэш пользователей (обновляется каждые 30 минут); поля `sub_last_user_agent` и `sub_last_opened_at` удалены в Remnawave Panel 2.7.0
-- **remnawave_settings** — настройки подключения; поле `anomaly_use_custom_bot` (Boolean) — использовать отдельного бота для аномалий или бот из AlertSettings; поля `traffic_threshold_gb` (Float, default 30.0) и `traffic_confirm_count` (Integer, default 2) — настройки детектора трафик-аномалий; `anomaly_enabled` (Boolean, default FALSE) — мастер-переключатель всех проверок аномалий; `anomaly_ip_enabled`/`anomaly_hwid_enabled`/`anomaly_ua_enabled`/`anomaly_devdata_enabled` (Boolean, default TRUE) — пер-тип переключатели четырёх проверок ниже, NULL (строка до миграции) трактуется как включено; настраиваемые параметры проверок (раньше были захардкожены в бэкенде) — `anomaly_ip_margin` (Integer, default 2), `anomaly_ip_confirm_count` (Integer, default 5), `anomaly_asn_margin` (Integer, default 0), `anomaly_ua_patterns` (Text, nullable — NULL/пусто = встроенный список известных клиентов), см. ниже
+- **remnawave_settings** — настройки подключения; поле `anomaly_use_custom_bot` (Boolean) — использовать отдельного бота для аномалий или бот из AlertSettings; поля `traffic_threshold_gb` (Float, default 30.0) и `traffic_confirm_count` (Integer, default 2) — настройки детектора трафик-аномалий; `anomaly_enabled` (Boolean, default FALSE) — мастер-переключатель всех проверок аномалий; `anomaly_ip_enabled`/`anomaly_hwid_enabled`/`anomaly_ua_enabled`/`anomaly_devdata_enabled` (Boolean, default TRUE) — пер-тип переключатели четырёх проверок ниже, NULL (строка до миграции) трактуется как включено; настраиваемые параметры проверок — `anomaly_ip_margin` (Integer, default 2), `anomaly_ip_confirm_count` (Integer, default 5), `anomaly_asn_margin` (Integer, default 0), `anomaly_ua_patterns` (Text, nullable — NULL/пусто = встроенный список известных клиентов), см. ниже
 - **remnawave_hwid_devices** — HWID-устройства из Remnawave API (user_uuid, hwid, platform, created_at)
 - **remnawave_ip_anomaly_state** — персистентное состояние IP-аномалии по пользователю (email, trigger_count, known_ips JSON, last_notified_at, last_message_id, last_chat_id); создаётся автоматически через `Base.metadata.create_all`, отдельная миграция не требуется
 
@@ -951,9 +949,9 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 6. После обновления кэша вызывается `_check_traffic_anomalies()` — снимок `used_traffic_bytes` для всех ACTIVE пользователей сравнивается с предыдущим, delta > порога увеличивает streak
 7. Аномалии проверяются только для ACTIVE пользователей (фильтрация по `status == 'ACTIVE'` в коллекторе и в роутере `/api/remnawave/anomalies`)
 
-**Эфемерные IP:** данные IP не накапливаются. Каждый цикл сбора полностью заменяет таблицу `xray_stats`. Период-фильтр на эндпоинтах отсутствует — данные всегда актуальные. Автоочистка (`_cleanup_loop`) больше не затрагивает `xray_stats`.
+**Эфемерные IP:** данные IP не накапливаются. Каждый цикл сбора полностью заменяет таблицу `xray_stats`. Период-фильтр на эндпоинтах отсутствует — данные всегда актуальные. Автоочистка (`_cleanup_loop`) не затрагивает `xray_stats`.
 
-**Совместимость с Remnawave Panel 2.8.0:** `GET /api/hwid/devices` возвращает поле `userId` (числовой id пользователя) вместо `userUuid`. `_sync_hwid_devices()` резолвит uuid через кэш `remnawave_user_cache` (колонка `email` хранит числовой id Remnawave) с fallback на `userUuid` для более старых версий Remnawave; если часть устройств не удалось смаппить (кэш ещё не прогрет) — warning в лог. Поле `trafficLimitBytes` в схеме пользователя изменено с `integer` на `number` — приводится к `int` статическим хелпером `_as_int()` перед записью в BIGINT-колонку `traffic_limit_bytes`.
+**Совместимость с Remnawave Panel 2.8.0:** `GET /api/hwid/devices` возвращает поле `userId` (числовой id пользователя) вместо `userUuid`. `_sync_hwid_devices()` резолвит uuid через кэш `remnawave_user_cache` (колонка `email` хранит числовой id Remnawave) с fallback на `userUuid` для более старых версий Remnawave; если часть устройств не удалось смаппить (кэш ещё не прогрет) — warning в лог. Поле `trafficLimitBytes` в схеме пользователя — `number` (не `integer`), приводится к `int` статическим хелпером `_as_int()` перед записью в BIGINT-колонку `traffic_limit_bytes`.
 
 **Telegram-бот для аномалий:** если `anomaly_use_custom_bot=False` (по умолчанию), используется bot_token и chat_id из `AlertSettings`. Если `True` — используются отдельные поля в `RemnawaveSettings`.
 
@@ -969,16 +967,16 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 | `invalid_device_data` | На HWID-устройстве пусто платформа/модель, либо версия ОС без цифр (`VERSION_PATTERN`) | [Игнор HWID] | `anomaly_devdata_enabled` |
 | `traffic_exceeds_limit` | Потребление трафика за 30 минут > `traffic_threshold_gb` ГБ N раз подряд | нет кнопки | `traffic_anomaly_enabled` (отдельный, не входит в четвёрку ниже) |
 
-**Пер-тип переключатели**: `anomaly_enabled` остался мастер-переключателем (при выключении не проверяется ничего). Первые четыре типа из таблицы дополнительно управляются отдельными Boolean-полями `anomaly_ip_enabled`/`anomaly_hwid_enabled`/`anomaly_ua_enabled`/`anomaly_devdata_enabled` (default TRUE, NULL трактуется как включено — обратная совместимость со строками до миграции). Выключенный тип не проверяется ни в коллекторе (`xray_stats_collector._check_anomalies` — соответствующий SQL-запрос вообще пропускается), ни в эндпоинте `GET /api/remnawave/anomalies`. Трафик-детектор как имел свой независимый `traffic_anomaly_enabled`, так и не участвует в этой четвёрке.
+**Пер-тип переключатели**: `anomaly_enabled` — мастер-переключатель (при выключении не проверяется ничего). Первые четыре типа из таблицы дополнительно управляются отдельными Boolean-полями `anomaly_ip_enabled`/`anomaly_hwid_enabled`/`anomaly_ua_enabled`/`anomaly_devdata_enabled` (default TRUE, NULL трактуется как включено — обратная совместимость со строками до миграции). Выключенный тип не проверяется ни в коллекторе (`xray_stats_collector._check_anomalies` — соответствующий SQL-запрос вообще пропускается), ни в эндпоинте `GET /api/remnawave/anomalies`. Трафик-детектор имеет свой независимый `traffic_anomaly_enabled` и не участвует в этой четвёрке.
 
-**Настраиваемые параметры проверок**: пороги, раньше захардкоженные в бэкенде константами, вынесены в поля `remnawave_settings` и редактируются на странице Remnawave → Settings:
+**Настраиваемые параметры проверок**: пороги проверок хранятся в полях `remnawave_settings` и редактируются на странице Remnawave → Settings:
 
 - `anomaly_ip_margin` (default 2) — запас сверх `hwid_device_limit`, после которого IP-аномалия считается превышением.
-- `anomaly_ip_confirm_count` (default 5) — сколько подряд обнаружений превышения нужно для отправки уведомления в Telegram (было `IP_CONFIRM_THRESHOLD = 5`).
+- `anomaly_ip_confirm_count` (default 5) — сколько подряд обнаружений превышения нужно для отправки уведомления в Telegram.
 - `anomaly_asn_margin` (default 0) — уведомление об IP-аномалии подавляется, если число уникальных ASN (провайдеров) среди текущих IP пользователя не превышает `hwid_device_limit + anomaly_asn_margin`: много IP от одного оператора мобильной связи (CGNAT) — не аномалия.
 - `anomaly_ua_patterns` (Text, nullable) — реестр известных VPN-клиентов для проверки User-Agent, одна строка — одна маска (сопоставляется с начала UA, регистронезависимо). NULL/пустое значение — используется встроенный список `DEFAULT_UA_PATTERNS`.
 
-Сервис `panel/backend/app/services/known_clients.py`: реестр — маски, а не regex: `*` — любое количество символов, `?` — ровно один, остальное — буквально (`_mask_to_regex()`: `re.escape` + замена `\*`→`.*`, `\?`→`.`). `DEFAULT_UA_PATTERNS` — единственный источник встроенного списка (v2raytun, Happ, Hiddify и т.д.); `default_ua_text()` — список как текст для предзаполнения формы; `build_ua_pattern(raw) -> re.Pattern` — компилирует объединяющий паттерн `^(?:...|...)` с `IGNORECASE`; пустой ввод откатывается на встроенный список. Отдельной валидации формата нет — маска не может быть синтаксически некорректной, поэтому `PUT /api/remnawave/settings` больше не возвращает HTTP 400 за содержимое реестра.
+Сервис `panel/backend/app/services/known_clients.py`: реестр — маски: `*` — любое количество символов, `?` — ровно один, остальное — буквально (`_mask_to_regex()`: `re.escape` + замена `\*`→`.*`, `\?`→`.`). `DEFAULT_UA_PATTERNS` — единственный источник встроенного списка (v2raytun, Happ, Hiddify и т.д.); `default_ua_text()` — список как текст для предзаполнения формы; `build_ua_pattern(raw) -> re.Pattern` — компилирует объединяющий паттерн `^(?:...|...)` с `IGNORECASE`; пустой ввод откатывается на встроенный список. Отдельной валидации формата нет — маска не может быть синтаксически некорректной, поэтому `PUT /api/remnawave/settings` не возвращает HTTP 400 за содержимое реестра.
 
 **Подтверждение IP аномалий**: уведомление в Telegram отправляется только после `anomaly_ip_confirm_count` подряд обнаружений превышения. Если IP-count упал ниже лимита — streak (`_ip_anomaly_streak`) сбрасывается. Защита от ложных срабатываний при кратковременных всплесках.
 
@@ -991,26 +989,26 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 - Фильтр по статусу: `ACTIVE`, `DISABLED`, `LIMITED`, `EXPIRED`; дефолт: `ACTIVE`
 - Фильтр по IP: подзапрос на `xray_stats.source_ip`
 
-**Ноды в настройках:** раздел управления нодами удалён. Ноды получаются автоматически из Remnawave Panel API.
+**Ноды в настройках:** раздела управления нодами нет — ноды получаются автоматически из Remnawave Panel API.
 
 **Frontend:**
 - Страница Remnawave: 4 карточки в overview — Users, IPs, Devices, Nodes Online
-- Вкладка Anomalies: 5 карточек в summary (добавлена карточка `traffic_exceeds`)
+- Вкладка Anomalies: 5 карточек в summary (включая `traffic_exceeds`)
 - HWID-устройства пользователя показываются в деталях пользователя
-- PeriodSelector убран из Overview и Users (данные всегда актуальные)
+- Overview и Users без PeriodSelector (данные всегда актуальные)
 - Status filter по умолчанию: `ACTIVE`
 - Toggle "Использовать другого Telegram бота" в настройках аномалий; поля token/chat_id показываются только при включённом toggle
 - При включённом мастер-тумблере `anomaly_enabled` — 4 суб-тумблера пер-тип проверок (IP/HWID/UA/данные устройства)
 - Под тумблером «IP превышает лимит» — три числовых поля (запас IP, число подтверждений, запас ASN); под тумблером «Неизвестный User-Agent» — короткий label «Известные клиенты (по одному на строку)» и textarea реестра масок (моноширинный шрифт); очистка textarea и сохранение возвращает встроенный список клиентов. Объяснение параметров простым языком — в FAQ вкладки «Настройки» (обзорная статья `PAGE_REMNAWAVE.md`, раздел «Настройки проверок»), не в подсказках под полями
 - Кнопка игнора аномалии — контекстная: `ip_exceeds_limit` → «Игнор IP», остальные типы → «Игнор HWID»
-- Вкладка Settings: двухколоночный grid (lg-брейкпоинт). Левая колонка: API / Collection / Anomaly Notifications. Правая колонка: Traffic Anomaly Triggers (порог в ГБ + confirm count). Save, Ignored Users, списки игнора и Danger Zone — на всю ширину под grid. Секции Ignored Users / Ignore IP / Ignore HWID вынесены в трёхколоночный grid. Ограничение ширины (max-w-5xl/max-w-3xl) снято — контент растянут на всю ширину. Поле поиска и IP-фильтр расширены (max-w-sm убран).
+- Вкладка Settings: двухколоночный grid (lg-брейкпоинт). Левая колонка: API / Collection / Anomaly Notifications. Правая колонка: Traffic Anomaly Triggers (порог в ГБ + confirm count). Save, Ignored Users, списки игнора и Danger Zone — на всю ширину под grid. Секции Ignored Users / Ignore IP / Ignore HWID — в трёхколоночном grid. Контент растянут на всю ширину без ограничения (max-w-5xl/max-w-3xl); поле поиска и IP-фильтр — без ограничения max-w-sm.
 - Все строки локализованы через i18n (ru.json / en.json)
 
 **Файлы:**
 - `panel/backend/app/routers/remnawave.py` — API роутер
-- `panel/backend/app/services/xray_stats_collector.py` — сбор IP через Remnawave Panel API + HWID-синхронизация; IP-блок `_check_anomalies` переписан: счётчик/новые IP/reply-threading/анти-спам; хендлер `handle_rw_reset` для callback `rw_reset:ip:{email}`; оптимизация памяти при анализе аномалий (см. ниже); пер-тип тумблеры пропускают соответствующий SQL-запрос, если проверка выключена
+- `panel/backend/app/services/xray_stats_collector.py` — сбор IP через Remnawave Panel API + HWID-синхронизация; IP-блок `_check_anomalies`: счётчик/новые IP/reply-threading/анти-спам; хендлер `handle_rw_reset` для callback `rw_reset:ip:{email}`; оптимизация памяти при анализе аномалий (см. ниже); пер-тип тумблеры пропускают соответствующий SQL-запрос, если проверка выключена
 - `panel/backend/app/services/ip_anomaly_state.py` — репозиторий состояния IP-аномалий (`get_or_create`, `record_notification`, `reset`), JSON-хелперы (`parse_ips`, `dump_ips`), `seconds_since_last`
-- `panel/backend/app/services/known_clients.py` — реестр известных VPN-клиентов для проверки User-Agent на масках (`*`/`?`, не regex): `DEFAULT_UA_PATTERNS`, `default_ua_text()`, `build_ua_pattern(raw)`
+- `panel/backend/app/services/known_clients.py` — реестр известных VPN-клиентов для проверки User-Agent на масках (`*`/`?`): `DEFAULT_UA_PATTERNS`, `default_ua_text()`, `build_ua_pattern(raw)`
 - `panel/backend/app/services/remnawave_api.py` — клиент: `get_all_nodes()`, `poll_users_ips()`, `get_all_hwid_devices_paginated()`
 - `panel/backend/app/services/telegram_bot.py` — приватный `_send() -> Message | None` с поддержкой `reply_to_message_id`; `send_message` сохраняет bool-контракт; `send_message_returning_id() -> int | None`
 - `panel/backend/app/models.py` — модель `RemnawaveIpAnomalyState`
@@ -1025,14 +1023,14 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 **Логика:**
 - **Offline**: сервер считается недоступным после N последовательных неответов (default 3). Уведомление о восстановлении.
 - **CPU/RAM**: критический порог (default 90%) — алерт при длительном превышении. Адаптивное EMA-отслеживание скачков.
-- **Network**: спайк/падение трафика относительно EMA baseline. Скорость (`_calc_net_speed`) считается от Δбайт счётчиков к `collected_at` — моменту сбора метрик коллектором (тот же таймстемп, что и на дашборде, см. «Метрики»), а не к тику самого алертера; иначе несовпадение шкал времени искажало скорость и давало ложные сетевые алерты.
+- **Network**: спайк/падение трафика относительно EMA baseline. Скорость (`_calc_net_speed`) считается от Δбайт счётчиков к `collected_at` — моменту сбора метрик коллектором (тот же таймстемп, что и на дашборде, см. «Метрики»), а не к тику самого алертера; иначе несовпадение шкал времени искажало бы скорость и давало ложные сетевые алерты.
 - **TCP**: отслеживание Established, Listen, Time Wait, Close Wait, SYN Sent, SYN Recv, FIN Wait по отдельности.
 - **Anti-DDoS** (`_check_antiddos`, поле `antiddos` из метрик ноды — см. [node/DOCUMENTATION.md](../node/DOCUMENTATION.md#метрики)): `antiddos_stuck` — аварийный режим держится дольше 30 минут (critical, либо настоящая затяжная атака, либо заниженный порог); `antiddos_flap` — 3 и более авто-срабатываний watchdog за час (warning, порог не подходит нормальному трафику хоста). Нода уже шлёт Telegram-уведомление при самом входе в аварийный режим (`antiddos_manager._send_alert`) — этот блок добавляет то, чего там не было: длительность, повторяемость и общий cooldown/дедупликацию с остальными алертами.
-- **Conntrack** (`conntrack_high`, тумблер `conntrack_enabled` default TRUE) — заполнение conntrack-таблицы выше настраиваемого `conntrack_threshold` (Float, default 80.0, % от `nf_conntrack_max`; слайдер в UI 50-100% с шагом 5). Раньше порог 80% был захардкожен в коде и проверка не отключалась — теперь как у остальных триггеров есть свой тумблер и свой список исключённых серверов (`conntrack_excluded_server_ids`).
+- **Conntrack** (`conntrack_high`, тумблер `conntrack_enabled` default TRUE) — заполнение conntrack-таблицы выше настраиваемого `conntrack_threshold` (Float, default 80.0, % от `nf_conntrack_max`; слайдер в UI 50-100% с шагом 5). Как у остальных триггеров — свой тумблер и свой список исключённых серверов (`conntrack_excluded_server_ids`).
 - **Cooldown**: между повторными алертами одного типа/сервера (default 30 мин).
 - **Excluded servers**: серверы из списка исключений (`excluded_server_ids` в AlertSettings) полностью пропускаются при проверке.
 
-**Состояние переживает рестарт бэкенда**: `_restore_state_from_history()` вызывается один раз перед первой проверкой в `_loop()` и восстанавливает in-memory состояние (`ServerAlertState`) из таблицы `alert_history` за последние 24 часа — по одной последней записи на пару (server_id, alert_type) через `group by`. Кулдауны (`state.last_alert`) пересчитываются из `created_at` в шкалу `time.time()`; флаг `was_offline` восстанавливается, если последнее событие offline/recovery по серверу — это offline (свежее recovery). Без этого восстановления рестарт бэкенда (например, crash-loop) обнулял состояние, и каждый рестарт заново слал offline-алерты по уже лежащим серверам. Ошибки восстановления не фатальны — алертер стартует и с пустым состоянием.
+**Состояние переживает рестарт бэкенда**: `_restore_state_from_history()` вызывается один раз перед первой проверкой в `_loop()` и восстанавливает in-memory состояние (`ServerAlertState`) из таблицы `alert_history` за последние 24 часа — по одной последней записи на пару (server_id, alert_type) через `group by`. Кулдауны (`state.last_alert`) пересчитываются из `created_at` в шкалу `time.time()`; флаг `was_offline` восстанавливается, если последнее событие offline/recovery по серверу — это offline (свежее recovery). Без этого восстановления рестарт бэкенда (например, crash-loop) обнулял бы состояние, и каждый рестарт заново слал бы offline-алерты по уже лежащим серверам. Ошибки восстановления не фатальны — алертер стартует и с пустым состоянием.
 
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
@@ -1070,7 +1068,7 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 | GET | /api/billing/settings | Настройки уведомлений |
 | PUT | /api/billing/settings | Обновить настройки |
 
-**Отображение остатка времени:** API отдаёт `days_left` с точностью до 2 знаков (`round(days_left, 2)`, раньше был 1 знак — шаг ~2.4 часа). Frontend `formatDays()` в `Billing.tsx` показывает дни и часы вместе (`12д 5ч`); если часов не осталось — только `12д`; если остаток меньше суток — только `5ч`; «Истёк» без изменений. Единицы локализованы через `billing.short_days`/`billing.short_hours` в `ru.json`/`en.json`.
+**Отображение остатка времени:** API отдаёт `days_left` с точностью до 2 знаков (`round(days_left, 2)`). Frontend `formatDays()` в `Billing.tsx` показывает дни и часы вместе (`12д 5ч`); если часов не осталось — только `12д`; если остаток меньше суток — только `5ч`; при истёкшем сроке — «Истёк». Единицы локализованы через `billing.short_days`/`billing.short_hours` в `ru.json`/`en.json`.
 
 **Yandex Cloud — детали:**
 - Баланс получается через `GET https://billing.api.cloud.yandex.net/billing/v1/billingAccounts/{id}`
@@ -1079,14 +1077,14 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 - Фоновая синхронизация запускается автоматически через `billing_checker.py`
 - Frontend: оранжевая иконка Cloud, кнопка "Обновить", поля для токена/billing account ID/порога
 
-**Схема BillingServer (новые поля для YC):**
+**Схема BillingServer (поля YC):**
 `yc_iam_token`, `yc_billing_account_id`, `yc_balance_threshold`, `yc_daily_cost`, `yc_last_sync_at`, `yc_last_error`
 
 **Файлы:**
 - `panel/backend/app/routers/billing.py` — API роутер
 - `panel/backend/app/services/billing_checker.py` — фоновая проверка сроков + Telegram + синхронизация YC
 - `panel/backend/app/services/yandex_billing.py` — клиент Yandex Cloud Billing API (баланс, EMA потребления, дней осталось)
-- `panel/backend/app/models.py` — `BillingServer` (6 новых полей), `BillingSettings`
+- `panel/backend/app/models.py` — `BillingServer` (включая поля YC), `BillingSettings`
 - `panel/backend/app/database.py` — миграция `_migrate_yandex_cloud_billing()`
 - `panel/frontend/src/pages/Billing.tsx` — вкладка оплаты (AddModal, EditModal, ProjectCard с поддержкой YC)
 - `panel/frontend/src/api/client.ts` — интерфейс `BillingServerData` и API методы
@@ -1334,7 +1332,7 @@ NODE_SECRET содержит долгоживущие PKI-сертификаты
 
 **Сценарий работы:** оператор вводит IP сервера Hetzner в Rescue System и SSH-данные (root + пароль из письма Hetzner). Панель устанавливает Ubuntu 24.04, сервер перезагружается, панель ждёт ноду до 40 минут. После появления ноды автоматически создаётся запись сервера и применяются постустановочные шаги. SSH-доступ в новой ОС сохраняется таким же, как в Rescue System (installimage переносит учётные данные).
 
-**Новые константы в `deploy_job_manager.py`:**
+**Константы в `deploy_job_manager.py`:**
 - `RESCUE_REBOOT_MARKER = "MON_RESCUE_OS_INSTALLED_REBOOTING"` — маркер в stdout `install.sh` перед `reboot`
 - `RESCUE_ONLINE_TIMEOUT = 2400` — максимальное ожидание ноды после ребута (40 мин)
 - `RESCUE_POLL_INTERVAL = 10` — интервал опроса `GET /api/version` ноды (сек)
@@ -1359,7 +1357,7 @@ Frontend сохраняет незавершённые job_id в `localStorage` 
 **Регистрация роутера:** `server_deploy.router` зарегистрирован в `main.py` до `servers.router`, чтобы статичные пути (`/servers/deploy`, `/servers/remnawave-certs`) матчились раньше параметрического `GET /servers/{id}`.
 
 **Frontend (`panel/frontend/src/pages/Servers.tsx`):**
-- Чекбокс «Автоустановка ноды по SSH» в форме добавления сервера; при выключенном — сервер добавляется как раньше через `POST /api/servers`
+- Чекбокс «Автоустановка ноды по SSH» в форме добавления сервера; при выключенном — сервер добавляется обычным способом через `POST /api/servers`
 - SSH-поля: порт, логин, пароль или приватный ключ + passphrase
 - Чекбоксы компонентов: **Системные оптимизации**, WARP, Remnawave, HTTP-прокси
 - При включении оптимизаций: переключатель профиля и переключатель NIC-режима
@@ -1381,23 +1379,23 @@ Frontend сохраняет незавершённые job_id в `localStorage` 
 **NDJSON-утилиты (`panel/frontend/src/utils/ndjsonStream.ts`):**
 - `streamNdjson(url, body, onEvent)` — POST-стрим (SSH bulk-операции)
 - `streamNdjsonGet(url, onEvent)` — GET-стрим (подписка на лог задачи деплоя)
-- `readNdjsonResponse` — общая логика чтения, вынесена из обеих функций
+- `readNdjsonResponse` — общая логика чтения для обеих функций
 
-**Новые компоненты:**
+**Компоненты:**
 - `panel/frontend/src/components/servers/DeployTargetFields.tsx` — переиспользуемые поля SSH/опций/прокси/Remnawave/SSH-пресета/смены пароля; блок «Привязать к профилям» (HAProxy + Firewall); экспортирует `DEPLOY_DEFAULTS` и тип `DeployFormData`
 - `panel/frontend/src/components/servers/ExtraServerCard.tsx` — карточка дополнительной цели; поле `jobId?` в типе `ExtraTarget`
 
 **i18n:** ключи `deploy_add_extra`, `deploy_btn_multi`, `deploy_success_multi`, `deploy_failed_multi`, `deploy_primary`, `deploy_extra_default_name`, `deploy_extra_ok`, `deploy_extra_failed`, `deploy_extra_retry`, `deploy_extra_remove`, `deploy_bindings`, `deploy_haproxy_profile`, `deploy_firewall_profile`, `deploy_profile_none` в `ru.json` и `en.json`.
 
 **Зависимости:**
-- `asyncssh` добавлен в `panel/backend/requirements.txt`
+- `asyncssh` (`panel/backend/requirements.txt`)
 
 **Файлы:**
 - `panel/backend/app/services/deploy_job_manager.py` — `DeployJobManager`: singleton, in-memory буфер лога, pub/sub, `_create_server`, `_post_install`, `_bind_profiles`; `PostDeployOptions` dataclass; `get_deploy_job_manager()`
 - `panel/backend/app/services/deploy_service.py` — SSH-подключение через `asyncssh`, скачивание и запуск `install.sh --unattended`, построчный стриминг лога; автодетект и смена просроченного пароля root через PTY (`_run_install_once`, `_change_expired_password`, `_generate_strong_password`)
 - `panel/backend/app/routers/server_deploy.py` — роутер (prefix `/servers`): `POST /deploy`, `GET /deploy/jobs`, `GET /deploy/{job_id}/stream`, remnawave-certs CRUD
 - `panel/backend/app/models.py` — модель `RemnawaveCertProfile` (таблица `remnawave_cert_profiles`)
-- `panel/backend/app/main.py` — `GZipMiddlewareNoSSE` расширен: bypass для `/servers/deploy/.../stream`
+- `panel/backend/app/main.py` — `GZipMiddlewareNoSSE`: bypass для `/servers/deploy/.../stream`
 - `panel/frontend/src/pages/Servers.tsx` — job-модель деплоя, `restoreDeployJobs`, `AUTO_HIDE_MS`
 - `panel/frontend/src/utils/ndjsonStream.ts` — `streamNdjson`, `streamNdjsonGet`, `readNdjsonResponse`
 - `panel/frontend/src/api/client.ts` — `serversApi.startDeploy()`, `serversApi.listDeployJobs()`, `serverDeployJobStreamUrl(jobId)`, интерфейс `DeployJobInfo`
@@ -1422,11 +1420,11 @@ Frontend сохраняет незавершённые job_id в `localStorage` 
 1. `psql -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"` — полный сброс схемы через `docker exec`
 2. `pg_restore --no-owner` — восстановление в чистую схему
 
-Такой подход гарантирует отсутствие конфликтов FK-ограничений при восстановлении (ранее `pg_restore --clean --if-exists --single-transaction` падал при наличии зависимых таблиц, например `aggregated_metrics → servers`).
+Такой подход гарантирует отсутствие конфликтов FK-ограничений при восстановлении — `pg_restore --clean --if-exists --single-transaction` падает при наличии зависимых таблиц (например `aggregated_metrics → servers`).
 
 **Ограничения загрузки (nginx):**
 - Общий лимит запросов: `client_max_body_size 10m`
-- Эндпоинт `/api/backup/restore` имеет отдельный location-блок с `client_max_body_size 100m` и увеличенными таймаутами (`proxy_send_timeout 120s`, `proxy_read_timeout 120s`) — исправляет ошибку 413 при импорте бэкапов > 10 MB
+- Эндпоинт `/api/backup/restore` имеет отдельный location-блок с `client_max_body_size 100m` и увеличенными таймаутами (`proxy_send_timeout 120s`, `proxy_read_timeout 120s`) — без него импорт бэкапов > 10 MB падал бы с ошибкой 413
 
 **Файлы:**
 - `panel/backend/app/routers/backup.py` — API роутер
@@ -1468,7 +1466,7 @@ Frontend сохраняет незавершённые job_id в `localStorage` 
 - `last_deployed_at` — время последнего деплоя на ноды
 - `status` — текущий статус (issued, deploying, error, etc.)
 
-**Новые поля модели `Server`:**
+**Поля модели `Server`:**
 - `wildcard_ssl_enabled` — деплоить ли wildcard SSL на этот сервер
 - `wildcard_ssl_deploy_path` — путь на хосте для записи файлов (например `/etc/nginx/ssl/`)
 - `wildcard_ssl_reload_cmd` — команда перезагрузки сервиса после деплоя (например `systemctl reload nginx`)
@@ -1496,10 +1494,10 @@ Frontend сохраняет незавершённые job_id в `localStorage` 
 | PUT | /api/wildcard-ssl/servers/{server_id} | Настроить деплой для сервера (путь, reload_cmd, enabled) |
 
 **docker-compose.yml:**
-Volume `/etc/letsencrypt` изменён с `:ro` на `:rw` — backend записывает выпущенные сертификаты.
+Volume `/etc/letsencrypt` смонтирован с `:rw` — backend записывает выпущенные сертификаты.
 
 **Зависимости (requirements.txt):**
-Добавлены `certbot` и `certbot-dns-cloudflare`.
+`certbot` и `certbot-dns-cloudflare`.
 
 **Frontend (`panel/frontend/src/pages/WildcardSSL.tsx`):**
 - Выпуск нового сертификата (ввод домена, запуск certbot)
@@ -1511,7 +1509,7 @@ Volume `/etc/letsencrypt` изменён с `:ro` на `:rw` — backend зап�
 **Файлы:**
 - `panel/backend/app/services/wildcard_ssl.py` — бизнес-логика: выпуск, продление, деплой, автопродление, Telegram-уведомления о сбоях
 - `panel/backend/app/routers/wildcard_ssl.py` — API роутер
-- `panel/backend/app/models.py` — модель `WildcardCertificate`, новые поля `Server`
+- `panel/backend/app/models.py` — модель `WildcardCertificate`, поля `Server`
 - `panel/backend/app/database.py` — миграция `_migrate_wildcard_ssl`
 - `panel/backend/app/main.py` — подключение роутера, start/stop автопродления в lifespan
 - `panel/frontend/src/pages/WildcardSSL.tsx` — страница управления
@@ -1605,7 +1603,7 @@ Replace-атомарно: полное состояние ноды = состо�
 - Навигация: пункт «Firewall профили» с иконкой Flame после HAProxy Configs
 
 **Файлы:**
-- `panel/backend/app/models.py` — модели `FirewallProfile`, `FirewallSyncLog`; новые поля `Server`
+- `panel/backend/app/models.py` — модели `FirewallProfile`, `FirewallSyncLog`; поля `Server`
 - `panel/backend/app/database.py` — миграция `firewall_profile_columns`; FK `firewall_sync_log_server_id_fkey` в `_ensure_fk_constraints`
 - `panel/backend/app/routers/firewall_profiles.py` — API роутер (prefix `/firewall-profiles`)
 - `panel/backend/app/services/firewall_profile_sync.py` — `compute_rules_hash`, `sync_profile_to_servers`
@@ -1635,7 +1633,7 @@ Replace-атомарно: полное состояние ноды = состо�
 
 **Мастер-переключатель автодетекта (`AntiDdosSettings.enabled`, в UI подписан «Автодетект атак»):** `PUT /antiddos/settings` при реальном изменении `enabled` запускает в фоне (`asyncio.create_task`, не блокируя ответ клиенту) `manager.apply_master_state(enabled)` → вызывает **только** `set_watchdog_all(enabled)`, включая/выключая watchdog (автодетект) на всех активных нодах. Аварийный режим мастером не трогается ни при включении, ни при выключении — это отдельный независимый контрол (глобальные кнопки «Включить/Выключить на всех» + per-node тумблер «Аварийный», см. «On-demand действия» и Frontend ниже).
 
-Раньше выключение мастера также снимало аварийный режим на всех нодах (`set_emergency_all(False)`, затем `set_watchdog_all(False)`) — один тумблер управлял двумя разными вещами, и обычное выключение автодетекта неожиданно сбрасывало ручной пин оператора. Теперь `apply_master_state` переключает ровно одну вещь (watchdog): ручной пин аварийного режима не сбрасывается при выключении автодетекта, и наоборот. Метод `AntiDdosManager.set_watchdog_all(enabled)` (fan-out `set_node_watchdog` под семафором `HTTP_CONCURRENCY`) используется и мастером, и per-node тумблером «Автодетект»; `set_emergency_all(enabled)` теперь вызывается только on-demand — кнопками «Включить/Выключить на всех».
+`apply_master_state` переключает ровно одну вещь (watchdog): ручной пин аварийного режима не сбрасывается при выключении автодетекта, и наоборот — если бы один тумблер управлял двумя разными вещами, обычное выключение автодетекта неожиданно сбрасывало бы ручной пин оператора. Метод `AntiDdosManager.set_watchdog_all(enabled)` (fan-out `set_node_watchdog` под семафором `HTTP_CONCURRENCY`) используется и мастером, и per-node тумблером «Автодетект»; `set_emergency_all(enabled)` вызывается только on-demand — кнопками «Включить/Выключить на всех».
 
 **Автоустановка/обновление watchdog (`_maybe_auto_install`, вызывается из status poll):** `install.sh` ставит watchdog напрямую только при установке свежей ноды, без участия панели. На уже развёрнутых нодах это не работает — `node/scripts/apply-update.sh` (обновление агента) watchdog не ставит, его rsync исключает `configs/`, репозиторных конфигов рядом с нодой нет. Поэтому для всего существующего парка нод этот цикл панели — единственный путь получить watchdog и подхватить новую версию скрипта (`WATCHDOG_VERSION`), а не backstop на редкий случай.
 
@@ -1647,7 +1645,7 @@ Replace-атомарно: полное состояние ноды = состо�
 
 `AntiDdosSettings` (`antiddos_settings`, singleton — одна запись): `enabled`, `whitelist_push_interval` (сек, default 3600), `status_poll_interval` (сек, default 60), `watchdog_default_enabled` (используется при установке watchdog на новую ноду), `user_cidrs` (JSON-массив ручных IP/CIDR — подсети CDN и т.п.), `last_push_at`/`last_push_status`/`last_push_count`.
 
-Новые поля `Server` (миграция добавляет колонки идемпотентно, рядом с `firewall_profile_columns`): `antiddos_emergency_mode` (bool), `antiddos_source` (`auto`/`manual`/`none`), `antiddos_since`, `antiddos_reason`, `antiddos_watchdog` (bool), `antiddos_last_sync_at`. Поле `antiddos_emergency_mode` также отдаётся в сериализации `GET /api/servers`.
+Поля `Server` (миграция добавляет колонки идемпотентно, рядом с `firewall_profile_columns`): `antiddos_emergency_mode` (bool), `antiddos_source` (`auto`/`manual`/`none`), `antiddos_since`, `antiddos_reason`, `antiddos_watchdog` (bool), `antiddos_last_sync_at`. Поле `antiddos_emergency_mode` также отдаётся в сериализации `GET /api/servers`.
 
 `AntiDdosWhitelistSource` (`antiddos_whitelist_sources`) — авто-источники whitelist по URL: `id`, `name`, `url` (unique), `enabled`, `last_updated`, `ip_count`, `error_message`. Таблица создаётся автоматически через `Base.metadata.create_all` (модель импортирована в `main.py`), отдельной идемпотентной миграции не требует.
 
@@ -1657,7 +1655,7 @@ Whitelist можно наполнять из внешних списков по 
 
 - `_fetch_source(url)` — GET через `_external_client` с кэшем `SOURCE_CACHE_TTL=300` сек, чтобы повторные обращения (ручной рефреш вскоре после планового push) не долбили внешний сервер.
 - `fetch_all_source_ips(db)` — обходит `enabled`-источники, мёржит извлечённые IP в общий набор и обновляет по каждому источнику `last_updated`/`ip_count`/`error_message` (ошибка сети или парсинга не прерывает обход остальных источников).
-- `build_whitelist()` — итоговый whitelist теперь равен объединению всех трёх частей: авто (ноды + панель) + `user_cidrs` (ручные) + IP из `fetch_all_source_ips`.
+- `build_whitelist()` — итоговый whitelist равен объединению всех трёх частей: авто (ноды + панель) + `user_cidrs` (ручные) + IP из `fetch_all_source_ips`.
 - `refresh_sources_and_push()` — сбрасывает кэш источников и форсирует рассылку whitelist на ноды; используется кнопкой «Обновить сейчас» и автоматически при add/toggle/delete источника.
 
 **API (`panel/backend/app/routers/antiddos.py`, prefix `/antiddos`, требует авторизации панели):**
@@ -1678,16 +1676,16 @@ Whitelist можно наполнять из внешних списков по 
 
 При add/toggle/delete/refresh источника панель запускает фоновую рассылку обновлённого whitelist на ноды (`asyncio.create_task` + `run_bg`), аналогично остальным fan-out действиям — запрос не блокируется на обход нод.
 
-**Асинхронные (fire-and-forget) глобальные fan-out действия:** обход всех нод для `emergency-all` / `whitelist/push` / `install-all` может занимать десятки секунд (парк из десятков нод, per-node таймаут до 45 сек, часть нод может быть недоступна). Раньше обход выполнялся синхронно внутри HTTP-запроса — nginx/браузер обрывали соединение по таймауту (499 в логах), а раскатка на ноды после разрыва останавливалась на середине: часть нод успевала получить аварийный режим (`source=manual`), и так как ручной пин watchdog не снимает автоматически, нода оставалась «в аварийном режиме» без реальной атаки.
+**Асинхронные (fire-and-forget) глобальные fan-out действия:** обход всех нод для `emergency-all` / `whitelist/push` / `install-all` может занимать десятки секунд (парк из десятков нод, per-node таймаут до 45 сек, часть нод может быть недоступна). Синхронный обход внутри HTTP-запроса не годится: nginx/браузер обрывали бы соединение по таймауту (499 в логах), а раскатка на ноды после разрыва останавливалась бы на середине — часть нод успевала бы получить аварийный режим (`source=manual`) и, так как ручной пин watchdog не снимает автоматически, оставалась бы «в аварийном режиме» без реальной атаки.
 
-Все три эндпоинта теперь запускают обход через `asyncio.create_task(mgr.run_bg(...))` и отвечают немедленно `{"success": true, "started": true}` — обход на нодах продолжается независимо от того, закрыл ли клиент соединение. `AntiDdosManager.run_bg(coro)` — обёртка fire-and-forget с логированием исключений, чтобы упавшая нода или оборванный клиент не роняли фоновую задачу. Прогресс раскатки виден в статусе нод (`GET /antiddos/status`) по мере опроса.
+Все три эндпоинта запускают обход через `asyncio.create_task(mgr.run_bg(...))` и отвечают немедленно `{"success": true, "started": true}` — обход на нодах продолжается независимо от того, закрыл ли клиент соединение. `AntiDdosManager.run_bg(coro)` — обёртка fire-and-forget с логированием исключений, чтобы упавшая нода или оборванный клиент не роняли фоновую задачу. Прогресс раскатки виден в статусе нод (`GET /antiddos/status`) по мере опроса.
 
 Остаточное поведение: если конкретная нода была недоступна именно в момент общего «выключить на всех», её аварийный режим (ручной пин) не снимется в этом обходе — это ожидаемо, ручной пин намеренно не снимается автоматически watchdog'ом. Снять точечно тумблером на карточке ноды либо повторить общее действие.
 
 **Per-node проксируемые эндпоинты (`panel/backend/app/routers/proxy.py`, prefix `/proxy/{server_id}/antiddos`):** `GET /status` (плюс сохраняет результат в БД), `POST /emergency` (ручной пин — watchdog его не снимет), `POST /watchdog`, `POST /install`. Эти per-node эндпоинты выполняются синхронно (один сервер, короткий таймаут) — асинхронными сделаны только три глобальных fan-out эндпоинта выше.
 
 **Frontend (`panel/frontend/src/pages/AntiDdos.tsx`):** страница «Анти-DDoS» (пункт меню с иконкой `Siren`, route `/{uid}/anti-ddos`), три вкладки:
-- **Управление** — три независимых контрола, разнесённых по секциям: (1) мастер-тумблер «Автодетект атак» вверху карточки — вкл/выкл watchdog на всех нодах разом; (2) секция «Аварийный режим вручную (на всех нодах)» за визуальным разделителем — кнопки «Включить на всех» / «Выключить на всех» (`POST /antiddos/emergency-all`); (3) список нод со статусом (дежурный/аварийный, источник, причина) и per-node тумблерами «Автодетект» и «Аварийный». Рассылка whitelist — отдельной кнопкой в своей секции. Кнопки ручной установки watchdog в интерфейсе нет — установка полностью автоматическая (zero-touch фоновым опросом, см. выше); эндпоинты `POST /antiddos/install-all` и `POST /proxy/{id}/antiddos/install` остались в API и используются автоустановкой. Версия watchdog-скрипта нодой отдаётся (`GET /api/antiddos/status` → `version`), но панель использует её только внутри `_maybe_auto_install` для сравнения — в UI не выводится.
+- **Управление** — три независимых контрола, разнесённых по секциям: (1) мастер-тумблер «Автодетект атак» вверху карточки — вкл/выкл watchdog на всех нодах разом; (2) секция «Аварийный режим вручную (на всех нодах)» за визуальным разделителем — кнопки «Включить на всех» / «Выключить на всех» (`POST /antiddos/emergency-all`); (3) список нод со статусом (дежурный/аварийный, источник, причина) и per-node тумблерами «Автодетект» и «Аварийный». Рассылка whitelist — отдельной кнопкой в своей секции. Кнопки ручной установки watchdog в интерфейсе нет — установка полностью автоматическая (zero-touch фоновым опросом, см. выше); эндпоинты `POST /antiddos/install-all` и `POST /proxy/{id}/antiddos/install` есть в API и используются автоустановкой. Версия watchdog-скрипта нодой отдаётся (`GET /api/antiddos/status` → `version`), но панель использует её только внутри `_maybe_auto_install` для сравнения — в UI не выводится.
 - **Белый список** — редактирование ручной части whitelist (`user_cidrs`), кнопка форс-пуша на ноды; секция «Авто-источники (списки по URL)» — форма добавления (название + URL), список источников с числом извлечённых IP, текстом ошибки (если есть), тумблером `enabled` и удалением, кнопка «Обновить сейчас» (`POST /antiddos/sources/refresh`).
 - **Как это работает** — статичное объяснение трёхслойной модели для оператора.
 
@@ -1697,7 +1695,7 @@ Whitelist можно наполнять из внешних списков по 
 - `panel/backend/app/services/antiddos_manager.py` — `AntiDdosManager`: два фоновых цикла, whitelist-сборка, авто-источники (`_extract_ips`, `_fetch_source`, `fetch_all_source_ips`, `refresh_sources_and_push`), on-demand действия, алерты
 - `panel/backend/app/routers/antiddos.py` — API роутер (prefix `/antiddos`), включая CRUD источников whitelist
 - `panel/backend/app/routers/proxy.py` — per-node роуты `/proxy/{id}/antiddos/*`
-- `panel/backend/app/models.py` — модели `AntiDdosSettings`, `AntiDdosWhitelistSource`, новые поля `Server`
+- `panel/backend/app/models.py` — модели `AntiDdosSettings`, `AntiDdosWhitelistSource`, поля `Server`
 - `panel/backend/app/database.py` — идемпотентная миграция `antiddos_*` колонок на `servers`
 - `panel/backend/app/main.py` — регистрация роутера, `start_antiddos_manager`/`stop_antiddos_manager` в lifespan
 - `panel/frontend/src/pages/AntiDdos.tsx` — страница управления, секция авто-источников в «Белом списке»
@@ -1825,7 +1823,7 @@ Whitelist можно наполнять из внешних списков по 
 - `panel/backend/app/services/haproxy_validator.py` — `validate_config(config_content)`: запуск `haproxy -c -f`, замена путей `crt` на dummy-сертификат
 - `panel/backend/app/services/haproxy_profile_sync.py` — `is_server_online`, `_sync_single_server` (отдельная DB-сессия, принимает `ensure_started`), `SyncResult` (`status: success|failed|queued`), `retry_pending_haproxy_syncs` (с `ensure_started=True`), `stop_haproxy_on_server` (POST `/api/haproxy/stop`, graceful при офлайн)
 - `panel/backend/app/services/metrics_collector.py` — фоновый цикл `_haproxy_pending_sync_loop` (интервал `HAPROXY_RETRY_INTERVAL=30` сек)
-- `panel/backend/Dockerfile` — добавлен пакет `haproxy` для локальной валидации
+- `panel/backend/Dockerfile` — пакет `haproxy` для локальной валидации
 - `panel/frontend/src/pages/HAProxyConfigs.tsx` — страница управления; индикаторы online/offline; `SyncStatusBadge`; кнопка «Проверить конфиг»
 - `panel/frontend/src/api/client.ts` — `haproxyProfilesApi.validateConfig()`, `HAProxyServerStatus.online`, `HAProxySyncResult.status`
 - `panel/frontend/src/App.tsx` — роут `haproxy-configs`
@@ -1845,7 +1843,7 @@ Whitelist можно наполнять из внешних списков по 
 
 **Автоперевод install.sh-установок на полный конфиг.** Установки Remnawave через пункт меню 9 монтируют `nginx.conf` как фрагмент http-контекста, а не как отдельный файл — профиль панели генерирует **полный** `nginx.conf`, и без перевода монтирования применение на такой ноде падало бы (`nginx -t` не проходит вложенный `http{}`). При первом apply нода сама переводит монтирование и пересоздаёт контейнер `remnawave-nginx` (детали — node/DOCUMENTATION.md); ответ ноды несёт флаг `remounted`, `remnawave_nginx_sync._sync_single_server` логирует перевод в лог синхронизации. Побочный эффект — маскировочный server-блок с unix-сокетом из старого фрагмента пропадает вместе с ним. В форме привязки сервера (`RemnawaveNginx.tsx`) есть предупреждающий блок об этом (i18n-ключ `remnawave_nginx.link_replaces_config_warning`).
 
-**Проверка путей сертификатов перед применением.** Панель рендерит опцию «Пути сертификатов» как есть — обычно `/etc/letsencrypt/live/{{DOMAIN}}/{fullchain,privkey}.pem`, но `docker-compose.yml`, который генерировал `install.sh` для установки Remnawave, не монтировал `/etc/letsencrypt` в контейнер `remnawave-nginx`: `nginx -t` внутри контейнера не видел существующий на хосте сертификат и падал с малопонятной `cannot load certificate ... BIO_new_file() failed`. Теперь перед валидацией/применением нода сама проверяет, что файлы сертификатов физически существуют на хосте (в т.ч. по кастомным путям из опций профиля), и, если каталог сертификата не примонтирован в `docker-compose.yml`, сама дописывает туда bind-mount и пересоздаёт контейнер — оператору не нужно монтировать каталоги вручную. Ошибка панели/оператору теперь человекочитаемая («Сертификат не найден на хосте: ...») вместо сырого вывода `nginx -t`. Это тот же транзакционный путь (backup → патч compose и конфига → пересоздание → откат при неудаче), что и у перевода монтирования выше — оба случая пересборки compose обобщены в один механизм на ноде (детали и список функций — node/DOCUMENTATION.md).
+**Проверка путей сертификатов перед применением.** Панель рендерит опцию «Пути сертификатов» как есть — обычно `/etc/letsencrypt/live/{{DOMAIN}}/{fullchain,privkey}.pem`, но `docker-compose.yml`, который генерирует `install.sh` для установки Remnawave, не монтирует `/etc/letsencrypt` в контейнер `remnawave-nginx`: `nginx -t` внутри контейнера не увидел бы существующий на хосте сертификат и упал бы с малопонятной `cannot load certificate ... BIO_new_file() failed`. Поэтому перед валидацией/применением нода сама проверяет, что файлы сертификатов физически существуют на хосте (в т.ч. по кастомным путям из опций профиля), и, если каталог сертификата не примонтирован в `docker-compose.yml`, сама дописывает туда bind-mount и пересоздаёт контейнер — оператору не нужно монтировать каталоги вручную. Ошибка панели/оператору — человекочитаемая («Сертификат не найден на хосте: ...») вместо сырого вывода `nginx -t`. Это тот же транзакционный путь (backup → патч compose и конфига → пересоздание → откат при неудаче), что и у перевода монтирования выше — оба случая пересборки compose обобщены в один механизм на ноде (детали и список функций — node/DOCUMENTATION.md).
 
 **Drift-детекция по фактически записанному файлу.** `Server.remnawave_nginx_node_hash` — хэш контента, который нода реально записала на диск (с подставленными лимитами), в отличие от `remnawave_nginx_config_hash` (хэш того, что панель отправила). `recovery_reconciler._reconcile_remnawave_nginx` при переходе ноды offline→online сравнивает sha256 текущего конфига ноды с `remnawave_nginx_node_hash`; если он ещё не заполнен (старая запись/старый агент) — откат на прежнее сравнение с отправленным контентом, один лишний ресинк проставит эталон. `remnawave_nginx_config_hash` по-прежнему решает, отличается ли профиль от того, что должно быть привязано к ноде (is_synced/pending) — за это отвечает не он. При отвязке сервера от профиля `remnawave_nginx_node_hash` очищается вместе с `remnawave_nginx_config_hash`.
 
@@ -1868,16 +1866,16 @@ Whitelist можно наполнять из внешних списков по 
 
 **Тюнинг базового шаблона под большое число VPN-подключений:** `worker_rlimit_nofile 65536`, `worker_connections 8192`, `ssl_session_cache shared:SSL:20m` — безопасные дефолты, работающие на любом сервере и на нодах со старым агентом; каждая из трёх строк помечена маркером `# auto: node` (константа `AUTO_MARKER`) — нода при каждом применении пересчитывает их под своё MemTotal/nofile (см. node/DOCUMENTATION.md, «Автоподстановка host-специфичных лимитов»), пока оператор вручную не уберёт маркер. Плюс `client_max_body_size 0` (gRPC-транспорт Xray — бесконечный поток в теле запроса; любой ненулевой лимит рвёт соединение, известный баг nginx с HTTP/2-стримингом), `keepalive_requests 10000`, `map $http_upgrade $connection_upgrade` и `reset_timedout_connection on;` в http-контексте.
 
-**Proxy- и fallback-локации проксируют по HTTP/1.1 с поддержкой WebSocket.** Общий хелпер `_proxy_headers()` добавляет `proxy_http_version 1.1;`, `proxy_set_header Upgrade $http_upgrade;`, `proxy_set_header Connection $connection_upgrade;`, `X-Forwarded-Proto`, `X-Forwarded-For` во все proxy- и fallback-локации. Раньше location-блоки работали по дефолтному для nginx HTTP/1.0 без keepalive к апстриму и без проброса `Upgrade` — часть сайтов-заглушек за `fallback_url` отвечала иначе, WebSocket-эндпоинты не работали, на каждый запрос к апстриму открывалось новое соединение.
+**Proxy- и fallback-локации проксируют по HTTP/1.1 с поддержкой WebSocket.** Общий хелпер `_proxy_headers()` добавляет `proxy_http_version 1.1;`, `proxy_set_header Upgrade $http_upgrade;`, `proxy_set_header Connection $connection_upgrade;`, `X-Forwarded-Proto`, `X-Forwarded-For` во все proxy- и fallback-локации. Без этого location-блоки работали бы по дефолтному для nginx HTTP/1.0 без keepalive к апстриму и без проброса `Upgrade` — часть сайтов-заглушек за `fallback_url` отвечала бы иначе, WebSocket-эндпоинты не работали бы, на каждый запрос к апстриму открывалось бы новое соединение.
 
 **Маскировка: ответ ноды неотличим от прямого обращения к сайту-заглушке.** Сравнение ответа через ноду с прямым ответом заглушки — самый простой способ вычислить, что перед сайтом что-то стоит. Единая политика ответов: наружу уходит либо ответ сайта-заглушки, либо ничего (обрыв соединения) — третьего не дано.
-- Панель не добавляет в ответ ни одного собственного HTTP-заголовка — `add_header Strict-Transport-Security` полностью убран из генерируемого server-блока (раньше HSTS удваивался: свой от `add_header` плюс проксированный от заглушки).
-- Все proxy- и fallback-локации получили `proxy_pass_header Server;` — по умолчанию nginx скрывает `Server` апстрима и подставляет свой, из-за чего ответ отличался бы от оригинального.
-- **Собственные страницы ошибок nginx никогда не доходят до клиента.** Константа `NGINX_OWN_ERROR_CODES` (`400 403 404 405 408 411 413 414 416 421 429 494 495 496 497 500 501 502 503 504 505`) — все коды, которые nginx может сгенерировать сам (битый запрос, HTTP-запрос на HTTPS-порт — это 497, упавший апстрим и т.п.). В server-блоке 443 и отдельно в блоке `reject_default_server` (`ssl_reject_handshake` рвёт только само TLS-рукопожатие — обычный HTTP на 443 рукопожатия не начинает и доходит до обработки запроса, поэтому ему нужен свой `error_page`) добавлены `error_page <коды> = @drop;` и `location @drop { return 444; }` — вместо страницы с подписью nginx клиент получает обрыв соединения. `location @drop` теперь генерируется всегда, а не только вместе с `fallback_url` (параметр `with_drop` у `_proxy_headers()` убран — роль `error_page 502 503 504 = @drop;` в самих fallback-локациях больше не нужна, её полностью закрывает серверный `error_page`). `recursive_error_pages on;` в http-блоке — чтобы ошибка, возникшая уже при обработке error_page (например, мёртвая заглушка на gRPC-пути), тоже дошла до `@drop`, а не отдала голый 502 от nginx.
+- Панель не добавляет в ответ ни одного собственного HTTP-заголовка — генерируемый server-блок не содержит `add_header Strict-Transport-Security`: собственный HSTS удваивал бы заголовок (свой от `add_header` плюс проксированный от заглушки).
+- Все proxy- и fallback-локации содержат `proxy_pass_header Server;` — по умолчанию nginx скрывает `Server` апстрима и подставляет свой, из-за чего ответ отличался бы от оригинального.
+- **Собственные страницы ошибок nginx никогда не доходят до клиента.** Константа `NGINX_OWN_ERROR_CODES` (`400 403 404 405 408 411 413 414 416 421 429 494 495 496 497 500 501 502 503 504 505`) — все коды, которые nginx может сгенерировать сам (битый запрос, HTTP-запрос на HTTPS-порт — это 497, упавший апстрим и т.п.). В server-блоке 443 и отдельно в блоке `reject_default_server` (`ssl_reject_handshake` рвёт только само TLS-рукопожатие — обычный HTTP на 443 рукопожатия не начинает и доходит до обработки запроса, поэтому ему нужен свой `error_page`) генерируются `error_page <коды> = @drop;` и `location @drop { return 444; }` — вместо страницы с подписью nginx клиент получает обрыв соединения. `location @drop` генерируется всегда, а не только вместе с `fallback_url`; `error_page 502 503 504 = @drop;` в самих fallback-локациях не нужен — его роль полностью закрывает серверный `error_page`. `recursive_error_pages on;` в http-блоке — чтобы ошибка, возникшая уже при обработке error_page (например, мёртвая заглушка на gRPC-пути), тоже дошла до `@drop`, а не отдала голый 502 от nginx.
 - Ошибки самого сайта-заглушки при этом доходят до клиента без изменений — `proxy_intercept_errors` намеренно не включается: иначе, например, 404 заглушки превратился бы в обрыв соединения, и маскировка сломалась бы в обратную сторону.
 - **gRPC-локации проверяют Content-Type.** `if ($content_type !~* "^application/grpc")` — не-gRPC запрос по gRPC-пути (браузер, сканер) при заданном `fallback_url` уходит на заглушку через внутренний код 418 (`error_page 418 502 503 504 = @fallback;`, наружу 418 никогда не выходит), без fallback — сразу `return 444;` (не `@drop`: сгенерированное правило может попасть в чужой импортированный конфиг без этой именованной локации, и ссылка на несуществующий `@drop` не прошла бы `nginx -t`). Проверка написана в одну строку намеренно — закрывающая скобка на отдельной строке обрезала бы тело location при обратном разборе правил (`parse_rules_from_config`).
 
-Новая политика ошибок применяется к уже привязанным серверам только после «Вставить шаблон» (`POST /remnawave-nginx-profiles/{id}/regenerate-config`) или после изменения любой опции профиля (`PUT /{id}/options` пересобирает конфиг целиком) — правка отдельных правил идёт через `splice_rules` и трогает только секцию между маркерами LOCATIONS, серверный `error_page` при этом не меняется.
+Политика ошибок применяется к уже привязанным серверам только после «Вставить шаблон» (`POST /remnawave-nginx-profiles/{id}/regenerate-config`) или после изменения любой опции профиля (`PUT /{id}/options` пересобирает конфиг целиком) — правка отдельных правил идёт через `splice_rules` и трогает только секцию между маркерами LOCATIONS, серверный `error_page` при этом не меняется.
 
 Маскировка не абсолютна — что всё ещё может выдать адрес заглушки: собственные `Location`-редиректы заглушки, абсолютные ссылки в её HTML, `Set-Cookie` с её доменом, CSP с перечислением чужих доменов. Тумблер «Отклонять чужой SNI» (`reject_default_server`) — отдельная мера, отсекает соединения без корректного SNI ещё на уровне TLS, до того как запрос дойдёт до fallback.
 
@@ -1889,7 +1887,7 @@ Whitelist можно наполнять из внешних списков по 
 
 `remnawave_nginx_sync_logs`: `server_id` (FK CASCADE), `profile_id` (FK SET NULL), `status` (success/failed/skipped), `message`, `config_hash`.
 
-Новые колонки `Server`: `active_remnawave_nginx_profile_id` (FK SET NULL), `remnawave_nginx_domain`, `remnawave_nginx_config_hash` (хэш отрендеренного контента, отправленного панелью), `remnawave_nginx_node_hash` (хэш контента, фактически записанного нодой — с подставленными host-специфичными лимитами, используется drift-детекцией), `remnawave_nginx_last_sync_at`, `remnawave_nginx_sync_status`, `remnawave_nginx_detected`.
+Колонки `Server`: `active_remnawave_nginx_profile_id` (FK SET NULL), `remnawave_nginx_domain`, `remnawave_nginx_config_hash` (хэш отрендеренного контента, отправленного панелью), `remnawave_nginx_node_hash` (хэш контента, фактически записанного нодой — с подставленными host-специфичными лимитами, используется drift-детекцией), `remnawave_nginx_last_sync_at`, `remnawave_nginx_sync_status`, `remnawave_nginx_detected`.
 
 **Фоновые интеграции:**
 - `_check_xray_on_all_servers` (цикл ~120 сек, `metrics_collector.py`) дополнительно вызывает `GET /api/remnawave/nginx/discover` на каждой ноде и пишет `Server.remnawave_nginx_detected` — панель знает, есть ли установка Remnawave, ещё до того, как оператор привяжет профиль
@@ -1923,7 +1921,7 @@ Whitelist можно наполнять из внешних списков по 
 | GET | /remnawave-nginx-profiles/cloudflare-ranges | Диапазоны Cloudflare по умолчанию для схемы CDN |
 | GET | /remnawave-nginx-profiles/available-servers | Серверы доступные для привязки (+`detected`, +`domain`) |
 
-**Валидация на стороне панели:** `remnawave_nginx_validator.py` — pre-flight `nginx -t -q -c` (пакет `nginx` добавлен в `panel/backend/Dockerfile`), по образцу `haproxy_validator.py`: `{{DOMAIN}}` подменяется на `validate.invalid`, пути `ssl_certificate`/`ssl_certificate_key`/`ssl_client_certificate`/`ssl_trusted_certificate` — на dummy self-signed сертификат; если бинарь `nginx` недоступен — валидация мягко пропускается. Это диагностика на глаз для UI; авторитетная валидация всегда происходит на ноде перед apply (см. node/DOCUMENTATION.md).
+**Валидация на стороне панели:** `remnawave_nginx_validator.py` — pre-flight `nginx -t -q -c` (пакет `nginx` в `panel/backend/Dockerfile`), по образцу `haproxy_validator.py`: `{{DOMAIN}}` подменяется на `validate.invalid`, пути `ssl_certificate`/`ssl_certificate_key`/`ssl_client_certificate`/`ssl_trusted_certificate` — на dummy self-signed сертификат; если бинарь `nginx` недоступен — валидация мягко пропускается. Это диагностика на глаз для UI; авторитетная валидация всегда происходит на ноде перед apply (см. node/DOCUMENTATION.md).
 
 **Frontend (`panel/frontend/src/pages/RemnawaveNginx.tsx`):**
 - По образцу `HAProxyConfigs.tsx`: аккордеон профилей → детальная панель с поллингом статусов серверов (3 сек)
@@ -1938,7 +1936,7 @@ Whitelist можно наполнять из внешних списков по 
 **Прокси-эндпоинты (`routers/proxy.py`):** `GET /{server_id}/remnawave-nginx/{discover,status,config,logs}`, `POST /{server_id}/remnawave-nginx/{reload,restart}` — путь установки берётся из панельной настройки `remnawave_nginx_path`.
 
 **Файлы:**
-- `panel/backend/app/models.py` — `RemnawaveNginxProfile`, `RemnawaveNginxSyncLog`; новые колонки `Server`
+- `panel/backend/app/models.py` — `RemnawaveNginxProfile`, `RemnawaveNginxSyncLog`; колонки `Server`
 - `panel/backend/app/database.py` — идемпотентный ALTER-блок `remnawave_nginx_columns` в `run_migrations()`
 - `panel/backend/app/services/remnawave_nginx_config.py` — генератор/парсер: `GrpcRule`, `ProxyRule`, `ProfileOptions`, `generate_full_config`, `parse_rules_from_config`, `splice_rules`, `render_for_server`, `detect_domain`/`replace_domain_with_placeholder`, `validate_rule`/`validate_rules`/`validate_options`, `CLOUDFLARE_RANGES`
 - `panel/backend/tests/test_remnawave_nginx_config.py` — 34 unittest-теста: round-trip generate↔parse для всех схем (включая fallback), сохранение ручных правок при splice, контент gRPC/CDN/PROXY protocol/fallback, error_page и локации fallback, рендер домена, валидации (в т.ч. `0.0.0.0/0`/`::/0` в CDN-диапазонах допустимы, PP без IP → `0.0.0.0/0`, конфликт fallback с proxy-правилом `path="/"`, некорректный fallback URL), три host-специфичные строки помечены `# auto: node`, `client_max_body_size 0`, HTTP/1.1 + WebSocket-заголовки в proxy/fallback-локациях, ответ без `add_header` и с `proxy_pass_header Server`, обрыв соединения при мёртвой заглушке и при собственных кодах ошибок nginx (включая HTTP-запрос на 443 у `reject_default_server`), ошибки заглушки не перехватываются (`proxy_intercept_errors` выключен), правила без fallback не ссылаются на `@drop`, не-gRPC запрос по gRPC-пути уходит на fallback (код 418) либо обрывается без него, `@drop` присутствует всегда, когда на неё есть ссылка
@@ -2004,7 +2002,7 @@ SSE-события: `note_update` — `{"content": "...", "version": N}`, `tasks
 - `panel/frontend/src/api/client.ts` — `notesApi`: интерфейс `SharedTask`, методы task CRUD
 - `panel/frontend/src/stores/notesStore.ts` — состояние и CRUD задач, парсер SSE для двух типов событий
 - `panel/frontend/src/components/Notes/NotesDrawer.tsx` — вкладки Блокнот/Задачи, список задач с чекбоксами, форма добавления, выполненные задачи внизу со strikethrough
-- `panel/frontend/src/components/Layout/Layout.tsx` — плавающий amber-таб на правом крае экрана (вместо кнопки в сайдбаре) + рендер NotesDrawer
+- `panel/frontend/src/components/Layout/Layout.tsx` — плавающий amber-таб на правом крае экрана + рендер NotesDrawer
 - `panel/frontend/src/locales/en.json`, `ru.json` — ключи `tab_notes`, `tab_tasks`, `task_placeholder`, `no_tasks`, `done`
 
 ### Выполнение команд на нодах
@@ -2147,7 +2145,7 @@ SSE-события: `note_update` — `{"content": "...", "version": N}`, `tasks
 
 Ответ: `{records: [{ip, banned_at, expires_at}], total}`.
 
-Эндпоинты `GET /torrent-blocker/reports` и `DELETE /torrent-blocker/truncate` (отчёты Remnawave) сохранены в API, но из UI больше не используются.
+Эндпоинты `GET /torrent-blocker/reports` и `DELETE /torrent-blocker/truncate` (отчёты Remnawave) есть в API, но из UI не используются.
 
 **Ключевые файлы:**
 

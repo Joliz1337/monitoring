@@ -44,7 +44,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/in
 - Удаляет `/usr/sbin/policy-rc.d` только если флаг `POLICY_RC_D_OWNED=1` — не трогает pre-existing файл
 - Сбрасывает флаг в 0
 
-Прямые вызовы `systemctl start docker` внутри `ensure_docker_running` работают без изменений — гард не влияет на прямые вызовы systemctl.
+Прямые вызовы `systemctl start docker` внутри `ensure_docker_running` гард не затрагивает — он влияет только на maintainer-скрипты пакетов.
 
 ## HAProxy
 
@@ -64,14 +64,14 @@ HAProxy работает как **нативный systemd сервис** на �
 
 `_compute_maxconn()` (`haproxy_manager.py`): `MAXCONN_PER_RAM_MB = 10` соединений на МБ RAM — худший случай 2×16 КБ буфера (клиент+сервер) на соединение даёт HAProxy занять не больше ~40% памяти хоста. Дополнительно ограничен реальным лимитом дескрипторов HAProxy: `(NOFILE_LIMIT − 1024) // 3` (~2 fd на соединение с запасом). Итог зажат в `[MAXCONN_MIN = 10000, MAXCONN_MAX = 500000]`.
 
-`_read_nofile_limit()` читает `NOFILE_LIMIT` из `/opt/monitoring/configs/tuning-facts.env` — раньше `_compute_maxconn()` читал `/proc/sys/fs/nr_open`, потолок того, что процесс *может* установить, а не фактический `RLIMIT_NOFILE` HAProxy. При `nr_open=2097152` и лимите юнита 65536 функция возвращала до 500000, и HAProxy со `strict-limits` (дефолт с 2.5) отказывался стартовать. Рендерер (`tune-sysctl.sh`) утверждает всю цепочку файловых дескрипторов численно и пишет drop-in `LimitNOFILE` для `haproxy.service` — см. «Системные оптимизации» ниже.
+`_read_nofile_limit()` читает `NOFILE_LIMIT` из `/opt/monitoring/configs/tuning-facts.env` — это фактический `RLIMIT_NOFILE` HAProxy, в отличие от `/proc/sys/fs/nr_open` (потолок того, что процесс *может* установить): расчёт от `nr_open=2097152` при лимите юнита 65536 дал бы `maxconn` до 500000, и HAProxy со `strict-limits` (дефолт с 2.5) отказался бы стартовать. Рендерер (`tune-sysctl.sh`) утверждает всю цепочку файловых дескрипторов численно и пишет drop-in `LimitNOFILE` для `haproxy.service` — см. «Системные оптимизации» ниже.
 
 **Таймауты и TCP keepalive — детект мёртвых туннелей:**
 
-По итогам инцидента на нагруженной ноде (HAProxy съедал ~4 ГБ RSS: одно правило держало ~115k сессий, из которых ~99k — мёртвые туннели без FIN от клиентов за NAT/ТСПУ, типично для мобильных клиентов; каждая держала 32 КБ буфера вплоть до `timeout tunnel`) базовый шаблон конфига (`_generate_base_config()` на ноде, зеркалируется `generate_base_config()` в `panel/backend/app/services/haproxy_config.py`) изменён:
-- `tune.bufsize` 32768 → 16384 (вдвое меньше памяти на соединение)
-- `timeout tunnel` 2h → 1h
-- Добавлены интервалы TCP keepalive: `clitcpka-idle 60s`, `clitcpka-intvl 10s`, `clitcpka-cnt 3` и аналогично `srvtcpka-*`. Раньше были только `option clitcpka`/`option srvtcpka` без интервалов — ядро использовало дефолт (обычно 2ч+); теперь мёртвое соединение детектится ядром за ~1.5 минуты вместо часов ожидания `timeout tunnel`.
+Мёртвые туннели без FIN от клиентов за NAT/ТСПУ (типично для мобильных клиентов) держали бы буферы вплоть до `timeout tunnel` и раздували бы память HAProxy, поэтому базовый шаблон конфига (`_generate_base_config()` на ноде, зеркалируется `generate_base_config()` в `panel/backend/app/services/haproxy_config.py`) задаёт:
+- `tune.bufsize 16384` — вдвое меньше памяти на соединение, чем дефолтные 32768
+- `timeout tunnel 1h`
+- Интервалы TCP keepalive: `clitcpka-idle 60s`, `clitcpka-intvl 10s`, `clitcpka-cnt 3` и аналогично `srvtcpka-*` — без явных интервалов ядро использовало бы свой дефолт (обычно 2ч+), с ними мёртвое соединение детектится ядром за ~1.5 минуты вместо часов ожидания `timeout tunnel`.
 
 Существующий шаблон в уже применённых конфигах обновляется через «Перегенерировать конфиг» на странице профиля в панели или через `POST /api/haproxy/config/apply` с новым содержимым — сама по себе установка/обновление ноды конфиг не трогает.
 
@@ -118,7 +118,7 @@ node/
 │       ├── ssl_manager.py          # Деплой wildcard сертификатов: запись на хост, бэкап, откат, валидация
 │       ├── firewall_manager.py     # UFW: apply_profile, backup/restore, compute_rules_hash, get_full_state
 │       ├── antiddos_manager.py     # Тонкая обёртка над ddos-watchdog.sh (nsenter): enable/disable emergency, watchdog, whitelist sync
-│       ├── host_files.py           # read_host_file()/write_host_file()/read_host_file_exact() — общая работа с файлами на хосте через nsenter+base64, вынесены из routers/system.py
+│       ├── host_files.py           # read_host_file()/write_host_file()/read_host_file_exact() — общая работа с файлами на хосте через nsenter+base64
 │       └── remnawave_nginx_manager.py  # RemnawaveNginxManager: discover, get_config, status, logs, validate_content, apply_config, reload, restart
 ├── scripts/
 │   └── apply-update.sh   # Логика обновления (запускается из свежего репо)
@@ -186,7 +186,7 @@ node/
     }
 }
 ```
-Панель использует этот endpoint для получения всей информации о ноде одним запросом вместо двух.
+Панель использует этот endpoint для получения всей информации о ноде одним запросом.
 
 **Выполнение команд на хосте**:
 
@@ -282,9 +282,9 @@ data: {"message": "error description"}
 
 Порядок обновления — «сначала скачать, потом рестартовать»: rsync файлов и `docker compose pull` выполняются **до** остановки контейнеров, нода продолжает работать на старой версии всё время скачивания; `docker compose down` + `up` — только после успешного получения образов, даунтайм сокращается до секунд рестарта. Если pull и fallback-сборка не удались — обновление отменяется **без остановки контейнеров**, нода остаётся на старой версии.
 
-- Бюджет pull: `DOCKER_PULL_TIMEOUT` 1800с на попытку (переопределяется env) × 3 попытки — docker переиспользует уже скачанные слои между попытками; таймаут fallback-сборки 900с. Причина: на нодах с очень медленной сетью слой образа может качаться 10-15+ минут (наблюдалось 755с), старый порядок down→pull с таймаутом 240с оставлял ноду offline.
-- Если `docker compose up -d` упал на ожидании healthy у api (`depends_on`), оставив nginx в статусе `Created`, контейнеры поднимаются напрямую: `docker compose start` → `docker start monitoring-api monitoring-nginx`; тот же прямой старт добавлен в recovery-trap.
-- Ожидание updater-контейнера в node-API (`system.py`): `container.wait` 600с → `UPDATER_WAIT_TIMEOUT = 7200` (2 часа) — раньше при обновлении дольше 10 минут статус ошибочно становился «failed», а повторный запуск обновления убивал ещё работающий updater. Вступает в силу после первого обновления образа node-api; сам новый порядок работает для всех нод сразу — `apply-update.sh` скачивается свежим при каждом обновлении.
+- Бюджет pull: `DOCKER_PULL_TIMEOUT` 1800с на попытку (переопределяется env) × 3 попытки — docker переиспользует уже скачанные слои между попытками; таймаут fallback-сборки 900с. Причина: на нодах с очень медленной сетью слой образа может качаться 10-15+ минут (наблюдалось 755с) — меньший бюджет обрывал бы обновление на середине.
+- Если `docker compose up -d` упал на ожидании healthy у api (`depends_on`), оставив nginx в статусе `Created`, контейнеры поднимаются напрямую: `docker compose start` → `docker start monitoring-api monitoring-nginx`; тот же прямой старт выполняется и в recovery-trap.
+- Ожидание updater-контейнера в node-API (`system.py`): `container.wait` с таймаутом `UPDATER_WAIT_TIMEOUT = 7200` (2 часа) — при коротком таймауте обновление дольше него ошибочно помечалось бы «failed», а повторный запуск убивал бы ещё работающий updater.
 - rsync при работающих контейнерах безопасен: замена файлов идёт через rename (новый inode), bind-mounts запущенных контейнеров видят старые файлы до рестарта.
 
 ### Метрики
@@ -366,7 +366,7 @@ data: {"message": "error description"}
 
 **Критический инвариант: `nginx.conf` — single-file bind-mount.** Docker Compose монтирует конфиг в контейнер `remnawave-nginx` как один файл, не каталог. Любая запись или откат обязаны идти **in-place** (перезапись содержимого существующего inode) — `mv`/`rename` заменили бы файл новым inode, который перестал бы быть тем же смонтированным файлом внутри контейнера, и nginx продолжил бы читать старое содержимое до пересоздания контейнера. `RemnawaveNginxManager` (`remnawave_nginx_manager.py`) и общий `write_host_file()` (`host_files.py`) соблюдают это на каждом шаге.
 
-**Точное чтение файлов (`read_host_file_exact`) — обязательно для nginx.conf и docker-compose.yml.** Общий `read_host_file()` (`host_files.py`) делает `.strip()` над результатом `HostExecutor.execute()` (`host_executor.py`) — для построчного парсинга в `system.py` это безобидно, но для nginx.conf теряло завершающий перевод строки в двух местах: откат после неудачного apply писал контент без финального `\n` (функционально верно, но не байт-в-байт исходный файл), а хэш, который нода отдаёт в `GET /api/remnawave/nginx/config` и `/nginx/status`, никогда не совпал бы с эталоном `Server.remnawave_nginx_node_hash` (считается от записанного контента) — reconciler видел бы мнимый drift и делал лишний ресинк при каждом переходе ноды offline→online. `read_host_file_exact(path)` (`host_files.py`) переносит содержимое через `base64 -w0` и декодирует — у base64 нет пробельных краёв, `.strip()` его не портит; пустой файл возвращается как `""`, ошибка чтения — `None`. Используется во всех чтениях nginx.conf и docker-compose.yml (`discover`, `get_config`, `status`, `_compose_nofile`, `_prepare_remount`, `apply_config`); `read_host_file()` остаётся только для `system.py`.
+**Точное чтение файлов (`read_host_file_exact`) — обязательно для nginx.conf и docker-compose.yml.** Общий `read_host_file()` (`host_files.py`) делает `.strip()` над результатом `HostExecutor.execute()` (`host_executor.py`) — для построчного парсинга в `system.py` это безобидно, но для nginx.conf терялся бы завершающий перевод строки в двух местах: откат после неудачного apply записал бы контент без финального `\n` (функционально верно, но не байт-в-байт исходный файл), а хэш, который нода отдаёт в `GET /api/remnawave/nginx/config` и `/nginx/status`, никогда не совпал бы с эталоном `Server.remnawave_nginx_node_hash` (считается от записанного контента) — reconciler видел бы мнимый drift и делал лишний ресинк при каждом переходе ноды offline→online. Поэтому `read_host_file_exact(path)` (`host_files.py`) переносит содержимое через `base64 -w0` и декодирует — у base64 нет пробельных краёв, `.strip()` его не портит; пустой файл возвращается как `""`, ошибка чтения — `None`. Используется во всех чтениях nginx.conf и docker-compose.yml (`discover`, `get_config`, `status`, `_compose_nofile`, `_prepare_compose_patch`, `apply_config`); `read_host_file()` остаётся только для `system.py`.
 
 **Транзакция `apply_config()`:**
 1. Backup текущего файла (`cp` на `.bak`)
@@ -387,26 +387,26 @@ data: {"message": "error description"}
 - `compute_host_limits(compose_nofile)` — `worker_rlimit_nofile` = `DOCKER_NOFILE` (иначе `NOFILE_LIMIT`) из `/opt/monitoring/configs/tuning-facts.env`; при недоступности facts — `ulimits.nofile.soft` из docker-compose.yml установки, иначе 65536. `worker_connections` = nofile/4 (2 файловых дескриптора на проксируемое соединение с запасом), clamp `[1024, 65536]`. `ssl_session_cache` = MemTotal_MB/100 МБ, clamp `[10, 100]`.
 - `patch_host_limits(content, limits)` — идемпотентная regex-замена значения только у строк с `AUTO_MARKER`.
 - `RemnawaveNginxManager.apply_host_limits(path, content)` вызывается и в `apply_config()` (до вычисления хэша и записи), и в `validate_content()` — валидация и реальное применение видят один и тот же итоговый контент.
-- Причина: жёсткий ulimit контейнера `remnawave-nginx` задаётся `DOCKER_NOFILE` из фактов рендерера (`clamp(pow2_floor(MemMB*64), 65536, 2097152)`) — статический `worker_rlimit_nofile 131072` на 1-ГБ ноде давал `setrlimit(...) failed (EPERM)` и молча оставлял старый лимит, а на 8–16 ГБ занижал потолок вместо использования доступного.
+- Причина: жёсткий ulimit контейнера `remnawave-nginx` задаётся `DOCKER_NOFILE` из фактов рендерера (`clamp(pow2_floor(MemMB*64), 65536, 2097152)`) — статический `worker_rlimit_nofile` (например 131072) на 1-ГБ ноде давал бы `setrlimit(...) failed (EPERM)` и молча оставлял бы старый лимит, а на 8–16 ГБ занижал бы потолок вместо использования доступного.
 
-**Автоперевод install.sh-установок с фрагментного монтирования на полный конфиг.** Установки Remnawave через пункт меню 9 монтируют `nginx.conf` как фрагмент http-контекста (`./nginx.conf:/etc/nginx/conf.d/default.conf:ro` в docker-compose.yml установки) — внутри лежит кусок конфига (`map`, `ssl_*`, маскировочный `server` с `listen unix:/dev/shm/nginx.sock ssl proxy_protocol default_server`), без обёртки `worker_*`/`events`/`http`. Профиль панели генерирует **полный** `nginx.conf` — на такой ноде `nginx -t` падал бы (`http{}` внутри `http{}`), apply откатывался, сервер уходил в failed. При первом применении профиля нода сама переводит установку на полный конфиг.
+**Автоперевод install.sh-установок с фрагментного монтирования на полный конфиг.** Установки Remnawave через пункт меню 9 монтируют `nginx.conf` как фрагмент http-контекста (`./nginx.conf:/etc/nginx/conf.d/default.conf:ro` в docker-compose.yml установки) — внутри лежит кусок конфига (`map`, `ssl_*`, маскировочный `server` с `listen unix:/dev/shm/nginx.sock ssl proxy_protocol default_server`), без обёртки `worker_*`/`events`/`http`. Профиль панели генерирует **полный** `nginx.conf` — на такой ноде `nginx -t` падал бы (`http{}` внутри `http{}`), apply откатывался бы, сервер уходил бы в failed. При первом применении профиля нода сама переводит установку на полный конфиг.
 
 - `FULL_CONFIG_MOUNT = "/etc/nginx/nginx.conf"` — целевая точка монтирования.
 - `compose_mount_target(compose)` — читает текущую точку монтирования `nginx.conf` из docker-compose.yml установки.
 - `patch_compose_mount(compose)` — переводит её на `FULL_CONFIG_MOUNT`; regex не трогает остальные тома и суффикс `:ro`; возвращает `None`, если менять нечего (конфиг уже полный или монтирования нет).
 - Побочный эффект перевода: маскировочный server-блок с unix-сокетом из старого фрагмента исчезает вместе с ним — если он используется, оператор переносит его в профиль через raw-редактор панели.
 
-**Проверка и автомонтирование путей сертификатов.** Профиль панели рендерит пути `ssl_certificate`/`ssl_certificate_key` как есть (обычно `/etc/letsencrypt/live/{{DOMAIN}}/...`), но `docker-compose.yml`, который генерировал `install.sh` для установки Remnawave, не монтировал `/etc/letsencrypt` в контейнер `remnawave-nginx` — `nginx -t` внутри контейнера не видел существующий на хосте сертификат и падал с малопонятной `cannot load certificate ... BIO_new_file() failed`. Теперь свежие установки получают маунт сразу (`install.sh` дописывает `- /etc/letsencrypt:/etc/letsencrypt:ro` в volumes сервиса), а для существующих нода сама обнаруживает и чинит нехватку при первом apply:
+**Проверка и автомонтирование путей сертификатов.** Профиль панели рендерит пути `ssl_certificate`/`ssl_certificate_key` как есть (обычно `/etc/letsencrypt/live/{{DOMAIN}}/...`), но если `docker-compose.yml` установки Remnawave не монтирует `/etc/letsencrypt` в контейнер `remnawave-nginx` — `nginx -t` внутри контейнера не видит существующий на хосте сертификат и падает с малопонятной `cannot load certificate ... BIO_new_file() failed`. Свежие установки получают маунт сразу (`install.sh` дописывает `- /etc/letsencrypt:/etc/letsencrypt:ro` в volumes сервиса), а на установках без маунта нода сама обнаруживает и чинит нехватку при первом apply:
 
 - `config_cert_files(content)` — извлекает пути `ssl_certificate`/`ssl_certificate_key` из конфига (без дублей, только «безопасные» пути через `_SAFE_PATH_RE`).
 - `host_path_for_cert(cert_file, compose, install_path)` — путь из конфига — это путь **внутри контейнера**; функция маппит его на хостовый путь через существующие тома docker-compose.yml (относительный источник `./ssl` разворачивается в `{install_path}/ssl`), если маунта нет — возвращает путь как есть (значит на хосте он лежит по тому же пути).
-- `missing_certs_on_host(path, content)` — по хостовым путям проверяет существование файлов на хосте (`[ -e ... ]` через `HostExecutor`); если файла нет, `validate_content()`/`apply_config()` возвращают понятную ошибку «Сертификат не найден на хосте: `<путь>`. Выпустите сертификат ... или исправьте пути в опциях профиля» **до** запуска `nginx -t` — это самая частая причина отказа, и раньше оператор видел только сырой вывод nginx.
+- `missing_certs_on_host(path, content)` — по хостовым путям проверяет существование файлов на хосте (`[ -e ... ]` через `HostExecutor`); если файла нет, `validate_content()`/`apply_config()` возвращают понятную ошибку «Сертификат не найден на хосте: `<путь>`. Выпустите сертификат ... или исправьте пути в опциях профиля» **до** запуска `nginx -t` — это самая частая причина отказа, и понятная ошибка избавляет оператора от разбора сырого вывода nginx.
 - `cert_mount_dir(cert_file)` / `is_covered_by_mounts(path, targets)` / `compose_mount_targets(compose)` / `missing_cert_mounts(compose, cert_files)` — вычисляют, какие каталоги сертификатов (включая кастомные пути из опций профиля) не покрыты ни одним volume сервиса `remnawave-nginx`. Для путей под `/etc/letsencrypt` монтируется весь корень (`LETSENCRYPT_ROOT`), а не подкаталог `live/{domain}` — файлы там являются симлинками в `../../archive`, и узкий маунт дал бы контейнеру битые ссылки.
 - `patch_compose_volumes(compose, dirs)` — дописывает найденные каталоги как `- <dir>:<dir>:ro` в volumes сервиса `remnawave-nginx`; точка вставки — строка монтирования `./nginx.conf`, единственная однозначно принадлежащая этому сервису (у `remnanode` её нет), поэтому `remnanode` не затрагивается.
 - `_certs_not_visible_in_container(cert_files)` — отдельно от «compose не содержит нужный volume» обнаруживается «устаревший» контейнер: compose уже пропатчен (текущим или предыдущим apply), но контейнер создан **до** этого и физически не видит маунт — сверяется через `docker inspect -f '{{range .Mounts}}{{.Destination}}...'`.
 - `explain_validation_error(output)` — к ошибкам `nginx -t` с `cannot load certificate`/`BIO_new_file` дописывает `CERT_HINT`: подсказку, что nginx ищет файл внутри контейнера, а не на хосте, и что контейнер, созданный до добавления volume, нужно пересоздать вручную (`docker compose up -d --force-recreate remnawave-nginx`) — на случай, если автопатч почему-то не сработал.
 
-**Единый транзакционный путь пересборки compose (`_prepare_compose_patch`/`_apply_with_recreate`).** Механизм перевода фрагментного монтирования на полный конфиг и механизм автомонтирования сертификатов решают разные проблемы, но оба требуют одного и того же: правку `docker-compose.yml` и пересоздание контейнера. Раньше это было два отдельных пути (`_prepare_remount`/`_apply_with_remount`) — они обобщены в один:
+**Единый транзакционный путь пересборки compose (`_prepare_compose_patch`/`_apply_with_recreate`).** Механизм перевода фрагментного монтирования на полный конфиг и механизм автомонтирования сертификатов решают разные проблемы, но оба требуют одного и того же — правки `docker-compose.yml` и пересоздания контейнера — поэтому реализованы одним общим путём:
 
 - `_prepare_compose_patch(path, cert_files)` — считает нужный патч compose: сначала `patch_compose_mount` (перевод точки монтирования), затем `missing_cert_mounts`/`patch_compose_volumes` поверх уже переведённого compose; возвращает `None`, если менять нечего, иначе `{path, current, patched, remounted, added_volumes}`.
 - В `apply_config()` пересоздание запускается, если `_prepare_compose_patch` вернул патч **или** compose уже в порядке, но `_certs_not_visible_in_container` нашла невидимые контейнеру сертификаты у уже работающего контейнера.
@@ -416,9 +416,9 @@ data: {"message": "error description"}
 
 **Файлы:**
 - `node/app/services/remnawave_nginx_manager.py` — `RemnawaveNginxManager` (синглтон через `get_remnawave_nginx_manager()`): `discover`, `get_config`, `status`, `logs`, `validate_content`, `apply_config`, `apply_host_limits`, `missing_certs_on_host`, `reload`, `restart`; модульные `compute_host_limits()`, `patch_host_limits()`, `compose_mount_target()`, `patch_compose_mount()`, `config_cert_files()`, `cert_mount_dir()`, `is_covered_by_mounts()`, `compose_mount_targets()`, `missing_cert_mounts()`, `patch_compose_volumes()`, `host_path_for_cert()`, `explain_validation_error()`, `AUTO_MARKER`, `FULL_CONFIG_MOUNT`, `LETSENCRYPT_ROOT`, `CERT_HINT`
-- `node/app/services/host_files.py` — `read_host_file()`/`write_host_file()`/`read_host_file_exact()`, вынесены из `routers/system.py` (переиспользуются и системными оптимизациями, и этим модулем)
+- `node/app/services/host_files.py` — `read_host_file()`/`write_host_file()`/`read_host_file_exact()`, общий модуль: переиспользуется и системными оптимизациями (`routers/system.py`), и этим модулем
 - `node/app/models/remnawave_nginx.py` — Pydantic-модели ответов/запросов, включая `NginxApplyResponse.remounted`
-- `node/app/routers/remnawave.py` — API роутер (расширен, раньше был только `GET /status`)
+- `node/app/routers/remnawave.py` — API роутер
 - `node/nginx/nginx.conf` — `location /api/remnawave/` с таймаутом 120с (apply может включать `docker compose up`)
 - `node/tests/test_remnawave_nginx_limits.py` — тесты автоподстановки лимитов (подстановка только помеченных строк, идемпотентность, ручные правки без маркера не затираются, разумность вычисленных значений) плюс класс `ComposeMountTests` — определение фрагментного/полного монтирования, патч фрагмент→полный с сохранением прочих томов, отсутствие патча для уже полного конфига и для compose без монтирования
 - `node/tests/test_remnawave_nginx_cert_mounts.py` — тесты на чистых функциях: извлечение путей сертификатов без дублей и с отсевом небезопасных путей, вычисление каталога монтирования (весь корень для `/etc/letsencrypt`, родительский каталог для кастомных путей), недостающие маунты (в т.ч. что уже смонтированный `/etc/letsencrypt` и относительный `./ssl` покрывают вложенные пути, совпадение по компоненту пути, а не по префиксу строки), вставка volume ровно в сервис `remnawave-nginx` без затрагивания `remnanode` и идемпотентно, маппинг путь-в-контейнере → путь-на-хосте (относительный и абсолютный источник маунта, немонтированный путь остаётся собой), подсказка `CERT_HINT` добавляется только к ошибкам про сертификат
@@ -454,7 +454,7 @@ data: {"message": "error description"}
 - `ips` — массив IP/CIDR для белого списка
 - `direction` — `"in"` или `"out"`
 
-**Поля в `GET /api/ipset/status`** — добавлены `incoming.allow_count` и `outgoing.allow_count` (количество записей в allowlist).
+**Поля в `GET /api/ipset/status`** — `incoming.allow_count` и `outgoing.allow_count` (количество записей в allowlist).
 
 `POST /api/ipset/sync` и `/bulk-add` дополнительно отдают `skipped_non_public` — сколько записей отброшено как приватные/служебные (см. «Защита от приватных диапазонов» выше).
 
@@ -466,7 +466,7 @@ data: {"message": "error description"}
 - При старте ноды: постоянные правила восстанавливаются, временный список пустой, allowlist загружается из персиста
 - Массовые операции (`sync`, `bulk_add`, `bulk_remove`, `sync_allow`, загрузка permanent/allow из `blocklist.json` при старте) применяются одним вызовом `ipset -exist restore` вместо по-IP `ipset add`/`del` — десятки тысяч записей применяются за доли секунды; мутации сериализованы `threading.Lock`
 - Счётчики в `GET /api/ipset/status` читаются из заголовка `ipset list -t` (`Number of entries`), без выгрузки всего сета
-- Лимит записей: сет создаётся с `maxelem 1000000` — список крупнее 1 млн записей нода принять не сможет, `ipset restore` завершится ошибкой (физический потолок ноды, не устранён). Панель знает про этот лимит (константа `NODE_MAX_IPSET_ENTRIES`) и обрезает по нему источники и общий список ещё до отправки на ноду — источники сверх лимита помечаются ошибкой и исключаются из синка вместо попытки прогнать их через `ipset restore`, см. [panel/DOCUMENTATION.md](../panel/DOCUMENTATION.md#ip-blocklist)
+- Лимит записей: сет создаётся с `maxelem 1000000` — список крупнее 1 млн записей нода принять не сможет, `ipset restore` завершится ошибкой (физический потолок ноды). Панель знает про этот лимит (константа `NODE_MAX_IPSET_ENTRIES`) и обрезает по нему источники и общий список ещё до отправки на ноду — источники сверх лимита помечаются ошибкой и исключаются из синка вместо попытки прогнать их через `ipset restore`, см. [panel/DOCUMENTATION.md](../panel/DOCUMENTATION.md#ip-blocklist)
 
 ### SSH Security
 
@@ -550,7 +550,7 @@ data: {"message": "error description"}
 
 **Идемпотентность `add_advanced_rule()`:**
 
-Метод `add_advanced_rule()` получил параметр `skip_duplicate_check: bool = False`. Перед запуском ufw вызывает `_rule_already_present(port, protocol, action, from_ip, direction)` — проверяет активные правила через `list_rules`. Если идентичное правило уже существует и `skip_duplicate_check=False`, команда ufw не выполняется, возвращается `(True, "Rule already exists: ...", None)`. Результат success=True сохраняется намеренно: вызывающий код (например haproxy_manager) проверяет только флаг успеха.
+Метод `add_advanced_rule()` принимает параметр `skip_duplicate_check: bool = False`. Перед запуском ufw вызывает `_rule_already_present(port, protocol, action, from_ip, direction)` — проверяет активные правила через `list_rules`. Если идентичное правило уже существует и `skip_duplicate_check=False`, команда ufw не выполняется, возвращается `(True, "Rule already exists: ...", None)`. Результат success=True сохраняется намеренно: вызывающий код (например haproxy_manager) проверяет только флаг успеха.
 
 `_apply_rules_list()` (путь apply_profile) вызывает `add_advanced_rule` с `skip_duplicate_check=True` — правила добавляются на чистый UFW после reset, лишние проверки `ufw status` не нужны.
 
@@ -602,18 +602,18 @@ data: {"message": "error description"}
 2. ACCEPT по whitelist (`antiddos_allow`, ipset `hash:net`)
 3. ACCEPT established/related соединений
 4. ACCEPT SSH (порт автоопределяется, см. ниже), nginx mTLS API (9100) и внутренний uvicorn-API ноды (7500) — никогда не дропаются
-5. На автоопределённые клиентские порты — **SYNPROXY** (проверка TCP-рукопожатия до создания conntrack-записи, гасит SYN-флуд со спуфнутых IP; best-effort — если `xt_SYNPROXY`/`nf_synproxy_core` недоступны, шаг пропускается). `--wscale`/`--mss` больше не захардкожены (было `7`/`1460` — зажимало окно проксируемых соединений в 8 МБ и было неверно на туннелированном пути) — вычисляются `tune-sysctl.sh` из реальных `rmem_max` и MTU хоста
+5. На автоопределённые клиентские порты — **SYNPROXY** (проверка TCP-рукопожатия до создания conntrack-записи, гасит SYN-флуд со спуфнутых IP; best-effort — если `xt_SYNPROXY`/`nf_synproxy_core` недоступны, шаг пропускается). `--wscale`/`--mss` вычисляются `tune-sysctl.sh` из реальных `rmem_max` и MTU хоста — захардкоженные значения зажимали бы окно проксируемых соединений и были бы неверны на туннелированном пути
 6. DROP INVALID (эффективно вместе с `nf_conntrack_tcp_loose=0` из системных оптимизаций)
 7. Не-SYN пакеты в состоянии NEW — DROP
 8. hashlimit на клиентские порты — лимит новых соединений/сек с одного IP
 
-Raw-правила `--notrack` (снимают SYN с трекинга до SYNPROXY) ставятся **последними** и только если правило SYNPROXY принято в каждой группе портов; при частичном отказе снимаются. **До `WATCHDOG_VERSION` 2.0.0 DROP INVALID стоял до SYNPROXY** — SYN снимался с трекинга в raw-таблице, поэтому завершающий handshake ACK клиента отслеживался, не находил записи conntrack, становился INVALID и терялся на этом правиле, до SYNPROXY не доходя никогда. При `nf_conntrack_tcp_loose=0` это был полный блэкхол новых соединений на всё время аварийного режима — ровно тогда, когда нода должна принимать легитимных клиентов. `synproxy_available()` также раньше проверяла только доступность raw-таблицы, а не существование таргета SYNPROXY — на ядре без `xt_SYNPROXY` правила `--notrack` ставились, `-j SYNPROXY` молча падал, и получался тот же блэкхол без единой строки в логе. Теперь проверяются обе половины в одноразовой цепочке, плюс `tcp_timestamps=1` (SYNPROXY кодирует wscale/MSS/SACK в timestamp).
+Raw-правила `--notrack` (снимают SYN с трекинга до SYNPROXY) ставятся **последними** и только если правило SYNPROXY принято в каждой группе портов; при частичном отказе снимаются. Порядок «SYNPROXY раньше DROP INVALID» критичен: стоящий первым DROP INVALID терял бы завершающий handshake ACK клиента — SYN снят с трекинга в raw-таблице, ACK не находит записи conntrack и становится INVALID, до SYNPROXY не доходя никогда; при `nf_conntrack_tcp_loose=0` это полный блэкхол новых соединений на всё время аварийного режима — ровно тогда, когда нода должна принимать легитимных клиентов. `synproxy_available()` проверяет в одноразовой цепочке обе половины — доступность raw-таблицы **и** существование таргета SYNPROXY (проверка одной raw-таблицы пропустила бы ядро без `xt_SYNPROXY`: правила `--notrack` встали бы, `-j SYNPROXY` молча упал бы — тот же блэкхол без единой строки в логе), плюс `tcp_timestamps=1` (SYNPROXY кодирует wscale/MSS/SACK в timestamp).
 
-**`connlimit` убран полностью.** `xt_connlimit` обходит conntrack-бакет источника на каждом NEW-пакете — дорожает ровно во время атаки — а `--connlimit-above 100` на `/32` карает CGNAT-адреса операторов и любого клиента без Mux. Скорость ограничивает hashlimit, стоячее количество — conntrack-таймауты.
+**`connlimit` не используется.** `xt_connlimit` обходит conntrack-бакет источника на каждом NEW-пакете — дорожает ровно во время атаки — а лимит вида `--connlimit-above 100` на `/32` карал бы CGNAT-адреса операторов и любого клиента без Mux. Скорость ограничивает hashlimit, стоячее количество — conntrack-таймауты.
 
-**Разбивка портов на группы (`build_chain`):** `iptables -m multiport --dports` принимает не более 15 портов на правило. Busy Xray-нода может слушать 30+ клиентских инбаундов, поэтому `detect_client_ports` разбивается на группы по ≤15 портов, и для каждой группы генерируется свой набор правил SYNPROXY/hashlimit. Хэш-таблица hashlimit теперь **одна общая** на все группы (`--hashlimit-name ad_emg`) с настраиваемой `--hashlimit-srcmask` (`HASHLIMIT_SRCMASK`, по умолчанию 32) — раньше уникальное имя таблицы на группу (`antiddos1`, `antiddos2`, ...) умножало эффективный лимит на число групп (нода с 60 портами получала 4×`NEWRATE` и вчетверо больше памяти htable).
+**Разбивка портов на группы (`build_chain`):** `iptables -m multiport --dports` принимает не более 15 портов на правило. Busy Xray-нода может слушать 30+ клиентских инбаундов, поэтому `detect_client_ports` разбивается на группы по ≤15 портов, и для каждой группы генерируется свой набор правил SYNPROXY/hashlimit. Хэш-таблица hashlimit **одна общая** на все группы (`--hashlimit-name ad_emg`) с настраиваемой `--hashlimit-srcmask` (`HASHLIMIT_SRCMASK`, по умолчанию 32) — отдельная таблица на группу умножала бы эффективный лимит на число групп (нода с 60 портами получила бы 4×`NEWRATE` и вчетверо больше памяти htable).
 
-**Автоопределение SSH-порта (`detect_ssh_ports()`):** раньше SSH в never-drop был захардкожен как порт 22 — на ноде с нестандартным SSH-портом реальный порт не получал бы ACCEPT и мог попасть под hashlimit клиентских портов, а хардкод-22 просто вешал бы бесполезное правило. Порт(ы) определяются из трёх источников и объединяются: директива `Port` в `/etc/ssh/sshd_config` и `/etc/ssh/sshd_config.d/*.conf`; `ListenStream=` в systemd socket-активации (`ssh.socket` и override'ы — дефолт Ubuntu 24); живые sshd-листенеры через `ss -H -tlnp` (грепом по `sshd`). Если ни один источник не дал результата — откат на 22. `effective_never_drop()` объединяет статические management-порты (`NEVER_DROP_PORTS="9100 7500"`) с автоопределёнными SSH-портами (дедуп) — используется и при исключении клиентских портов (`detect_client_ports`), и при генерации ACCEPT-правил (`build_chain`).
+**Автоопределение SSH-порта (`detect_ssh_ports()`):** захардкоженный порт 22 в never-drop оставил бы ноду с нестандартным SSH-портом без ACCEPT для реального порта — тот попал бы под hashlimit клиентских портов. Порт(ы) определяются из трёх источников и объединяются: директива `Port` в `/etc/ssh/sshd_config` и `/etc/ssh/sshd_config.d/*.conf`; `ListenStream=` в systemd socket-активации (`ssh.socket` и override'ы — дефолт Ubuntu 24); живые sshd-листенеры через `ss -H -tlnp` (грепом по `sshd`). Если ни один источник не дал результата — откат на 22. `effective_never_drop()` объединяет статические management-порты (`NEVER_DROP_PORTS="9100 7500"`) с автоопределёнными SSH-портами (дедуп) — используется и при исключении клиентских портов (`detect_client_ports`), и при генерации ACCEPT-правил (`build_chain`).
 
 Джамп ставится только на время активного режима — в дежурном режиме никаких дополнительных правил и накладных расходов.
 
@@ -621,7 +621,7 @@ Raw-правила `--notrack` (снимают SYN с трекинга до SYNP
 - Сигналы читаются из `/proc` каждые ~10 сек: рост `insert_failed` conntrack (реальные дропы), заполнение conntrack-таблицы (%, слабый намёк), рост `SyncookiesSent` за цикл, pps при малом среднем размере пакета, softirq% (суммарно и по самому загруженному ядру отдельно), дропы из `/proc/net/softnet_stat` и `ListenDrops`/`ListenOverflows` из `/proc/net/netstat` — оба сильные сигналы, специфичнее чем pps: первый прямо означает «ядро теряет пакеты» (именно это делает осмысленным сниженный `netdev_max_backlog`), второй — переполнение очереди accept
 - Сильный сигнал (резкий рост SyncookiesSent, `insert_failed`, дропы softnet/listen) включает аварийный режим немедленно; слабые сигналы — только после устойчивого удержания ~45 сек (защита от ложных срабатываний на вечернем пике)
 - **Conntrack — сигнал по реальным дропам, не по заполнению.** «Заполнение ≥ порога» само по себе — только слабый намёк при near-exhaustion (`CONNTRACK_PCT=90`); реальный сигнал атаки — рост `insert_failed` (`nf_conntrack: table full, dropping packet`), суммированного по всем CPU из `/proc/net/stat/nf_conntrack`, дельта ≥ `CONNTRACK_DROP_DELTA` (=50/цикл). Если на ноде часто держится высокое заполнение conntrack без реальных дропов — это признак отсутствия sysctl-оптимизаций; вкладка «Оптимизации» поднимает `conntrack_max` и заполнение падает до единиц процентов.
-- **Пороги — не абсолютные константы.** `tune-sysctl.sh` пишет их в `/opt/monitoring/antiddos/config.auto` по факту CPU/RAM хоста; порядок подключения — дефолты скрипта → `config.auto` → `/opt/monitoring/antiddos/config` (последним, выигрывает оператор). `SOFTIRQ_PCT` получил обратную коррекцию: `/proc/stat` даёт уже нормализованный по CPU агрегат, поэтому 50% на 2 ядрах — это одно занятое ядро (штатный вечерний пик), а на 64 ядрах — 32 ядра в softirq (катастрофа); малым хостам (`CPUS≤4`) порог выше (`SOFTIRQ_PCT=70`), а не ниже.
+- **Пороги — не абсолютные константы.** `tune-sysctl.sh` пишет их в `/opt/monitoring/antiddos/config.auto` по факту CPU/RAM хоста; порядок подключения — дефолты скрипта → `config.auto` → `/opt/monitoring/antiddos/config` (последним, выигрывает оператор). `SOFTIRQ_PCT` корректируется по числу ядер в «обратную» сторону: `/proc/stat` даёт уже нормализованный по CPU агрегат, поэтому 50% на 2 ядрах — это одно занятое ядро (штатный вечерний пик), а на 64 ядрах — 32 ядра в softirq (катастрофа); малым хостам (`CPUS≤4`) порог выше (`SOFTIRQ_PCT=70`), а не ниже.
 - Автовыключение — после ~15 мин без сигналов
 - Ручной пин (`source=manual`, включённый через `POST /api/antiddos/emergency`) автоматика не снимает — выключить может только явный вызов `POST /api/antiddos/emergency {enabled: false}`
 - Выключение автодетекта (`watchdog=off`, через `POST /api/antiddos/watchdog {enabled: false}`) в цикле `loop` снимает активный **авто**-аварийный режим (`disable_mode`) — нода возвращается в дежурный режим. Ручные пины (`source=manual`) обрабатываются раньше в цикле и этим не затрагиваются.
@@ -660,21 +660,19 @@ Raw-правила `--notrack` (снимают SYN с трекинга до SYNP
 - `prime_cpu_baseline()` — блокирующий стартовый замер (~0.25с) per-CPU, вызывается из `lifespan` (`node/app/main.py`) через `asyncio.to_thread` до приёма запросов: первый же запрос метрик после старта получает реальные значения вместо мусора нулевого интервала.
 - `_sample_per_cpu()` — пересэмплирование `psutil.cpu_percent` не чаще `CPU_SAMPLE_MIN_INTERVAL = 0.5`с под `threading.Lock`; более ранним или конкурентным запросам (`get_cpu_info` выполняется в тред-пуле) отдаётся последний валидный замер вместо укороченного гонкой интервала между двумя близкими по времени запросами.
 
-Заменяет прежнюю эвристику «`warmup_calls < 2` + ровно одно ядро ≥99%», которая ловила только точный паттерн старта и подменяла его нулями (тоже неадекватным значением), и не защищала от того же класса мусора при конкурентных запросах метрик в рантайме.
-
 ### Async трафик и iptables
 
 `node/app/services/traffic_collector.py`:
-- Все `subprocess.run()` заменены на `asyncio.create_subprocess_exec()`
+- Subprocess-вызовы идут через `asyncio.create_subprocess_exec()`, без блокирующего `subprocess.run()`
 - Чтение `/proc/net/dev` выполняется через `asyncio.to_thread()`
-- Все iptables-методы каскадно асинхронизированы
+- Все iptables-методы асинхронные
 
-### IPSet: пакетное применение вместо per-IP вызовов (инцидент с зависанием API)
+### IPSet: пакетное применение одним `ipset restore`
 
-Прежняя реализация `ipset_manager.py` делала 2 subprocess-вызова `ipset` на каждую запись (`add`/`del`). На списке в десятки тысяч записей применение занимало десятки минут — и всё это время блокировало event loop, так как `routers/ipset.py` был `async def`, а `subprocess.run()` внутри синхронный: зависал не только запрос синхронизации, а **все** эндпоинты node-API (nginx отдавал 504 на любой запрос к ноде).
+Per-IP применение (2 subprocess-вызова `ipset add`/`del` на запись) на списке в десятки тысяч записей заняло бы десятки минут, поэтому:
 
 - `ipset_manager.py`: все массовые операции (`sync`, `bulk_add`, `bulk_remove`, `sync_allow`, загрузка permanent/allow-списков из `blocklist.json` при старте) собирают diff и применяют его одним вызовом `ipset -exist restore` (`_run_ipset_restore()`) — весь diff применяется за доли секунды независимо от размера списка.
-- `routers/ipset.py`: все эндпоинты переведены с `async def` на `def` — FastAPI выполняет синхронные хендлеры в threadpool, поэтому длинная блокирующая операция больше не держит event loop и не замораживает остальные эндпоинты ноды.
+- `routers/ipset.py`: все эндпоинты — синхронные `def`, FastAPI выполняет их в threadpool, поэтому длинная блокирующая операция не держит event loop и не замораживает остальные эндпоинты ноды (в `async def`-хендлере синхронный subprocess завесил бы **все** эндпоинты node-API — nginx отдавал бы 504 на любой запрос к ноде).
 - Мутации ipset-сетов сериализованы `threading.Lock` (`_mutate_lock`) — параллельный sync с панели и ручной bulk-add не перемешивают diff-ы.
 
 ### SQLite PRAGMA оптимизации
@@ -689,21 +687,21 @@ Raw-правила `--notrack` (снимают SYN с трекинга до SYNP
 
 Установка/обновление ноды **не** применяет и не меняет оптимизации сама по себе — только через UI панели (раздел **Обновления**) или главный установщик (`monitoring` → пункт 7). После первого применения рендерер сам повторно накатывает значения на **каждой загрузке** хоста (`ExecStartPre` активного `*-tune.service`) — ресайз VPS подхватывается без повторного клика в панели.
 
-Категории тюнинга: IPv6 (отключение), BBR + fq_codel, TCP/UDP-буферы, Busy Polling, TCP ECN, очереди (`somaxconn`/`netdev_max_backlog`), TCP performance (fastopen, no slow start after idle, MTU probing), TIME-WAIT (tw_reuse), syncookies/rp_filter/ICMP-protection, conntrack, лимиты файловых дескрипторов. Все размерные значения из этого списка вычисляются из MemTotal/nproc/MTU/скорости линка хоста единым рендерером `tune-sysctl.sh` (`configs/`, версия формулы отдельная от `configs/VERSION` — `FORMULA_VERSION`, сейчас `1.0.0`) — не хардкод и не флат-число для любого сервера, как было раньше.
+Категории тюнинга: IPv6 (отключение), BBR + fq_codel, TCP/UDP-буферы, Busy Polling, TCP ECN, очереди (`somaxconn`/`netdev_max_backlog`), TCP performance (fastopen, no slow start after idle, MTU probing), TIME-WAIT (tw_reuse), syncookies/rp_filter/ICMP-protection, conntrack, лимиты файловых дескрипторов. Все размерные значения из этого списка вычисляются из MemTotal/nproc/MTU/скорости линка хоста единым рендерером `tune-sysctl.sh` (`configs/`, версия формулы отдельная от `configs/VERSION` — `FORMULA_VERSION`, сейчас `1.0.0`) — не хардкод и не флат-число, одинаковое для любого сервера.
 
 ### Контракт с панелью
 
-`POST /api/system/optimizations/apply` (`ApplyOptimizationsRequest`) везёт **входные данные** рендерера — сам `tune-sysctl.sh`, `profiles/common.base.conf`, `profiles/<профиль>.base.conf`, `limits.tmpl`, `systemd-limits.tmpl` (+ опционально содержимое NIC-скриптов) — а не готовый sysctl.conf: панель не знает MemTotal ноды, поэтому один отрендеренный файл не может подойти и на 4 ГБ, и на 248 ГБ. Нода пишет входные файлы на хост в `/opt/monitoring/scripts/` и `/opt/monitoring/configs/profiles/` через `write_host_file()` (запись через `nsenter` + base64, не heredoc — старый `cat > path << 'EOFCONFIG'` обрезал файл, если строка контента совпадала с `EOFCONFIG`), затем сама вызывает `tune-sysctl.sh render <профиль>` и возвращает результат верификации в ответе. Панель отправляет этот контракт только нодам версии ≥ `10.6.0` — см. [panel/DOCUMENTATION.md](../panel/DOCUMENTATION.md). Мёртвый эндпоинт `GET /system/optimizations/configs` (описывал контракт до рендерера, вызовов не было) удалён.
+`POST /api/system/optimizations/apply` (`ApplyOptimizationsRequest`) везёт **входные данные** рендерера — сам `tune-sysctl.sh`, `profiles/common.base.conf`, `profiles/<профиль>.base.conf`, `limits.tmpl`, `systemd-limits.tmpl` (+ опционально содержимое NIC-скриптов) — а не готовый sysctl.conf: панель не знает MemTotal ноды, поэтому один отрендеренный файл не может подойти и на 4 ГБ, и на 248 ГБ. Нода пишет входные файлы на хост в `/opt/monitoring/scripts/` и `/opt/monitoring/configs/profiles/` через `write_host_file()` (запись через `nsenter` + base64, не heredoc — heredoc обрезал бы файл, если строка контента совпадёт с делимитером), затем сама вызывает `tune-sysctl.sh render <профиль>` и возвращает результат верификации в ответе. Панель отправляет этот контракт только нодам версии ≥ `10.6.0` — см. [panel/DOCUMENTATION.md](../panel/DOCUMENTATION.md).
 
 ### Верификация и дрейф
 
-`verify_sysctl_values()` читает ожидания из `/opt/monitoring/configs/tuning-facts.json`, который пишет рендерер (`expected_from_facts()`: computed+static минус ключи, которыми в рантайме владеет Xray), а не из захардкоженной таблицы — раньше `EXPECTED_SYSCTL_VALUES` работала только потому, что все её ключи случайно совпадали в обоих профилях. Все значения читаются одним `nsenter`-вызовом вместо процесса на ключ; многозначные ключи нормализуются (`sysctl -n net.ipv4.tcp_mem` отдаёт поля через таб, файл — через пробел); hashsize conntrack проверяется порогом из facts, а не точным равенством. `rp_filter` и `disable_ipv6` исключены из проверки — Xray переписывает их в рантайме при поднятии WireGuard-аутбаунда.
+`verify_sysctl_values()` читает ожидания из `/opt/monitoring/configs/tuning-facts.json`, который пишет рендерер (`expected_from_facts()`: computed+static минус ключи, которыми в рантайме владеет Xray), а не из захардкоженной таблицы. Все значения читаются одним `nsenter`-вызовом вместо процесса на ключ; многозначные ключи нормализуются (`sysctl -n net.ipv4.tcp_mem` отдаёт поля через таб, файл — через пробел); hashsize conntrack проверяется порогом из facts, а не точным равенством. `rp_filter` и `disable_ipv6` исключены из проверки — Xray переписывает их в рантайме при поднятии WireGuard-аутбаунда.
 
 Поскольку значения выводятся из MemTotal/nproc, у ресайзнутого VPS файл на диске может совпадать с текущей версией `configs/VERSION` и при этом быть неверным. `read_tuning_drift()` пересчитывает хеш живых фактов хоста и сравнивает с хешем, записанным при последнем рендере; `GET /api/system/versions` отдаёт `optimizations.drift`/`drift_detail`/`formula_version` — так панель узнаёт о дрейфе раньше, чем сработает следующий загрузочный ре-рендер.
 
 ### Цепочка файловых дескрипторов
 
-Рендерер утверждает её численно и отказывается писать при нарушении: `nginx worker_rlimit_nofile ≤ container nofile ≤ NOFILE_LIMIT == limits.conf nofile == DefaultLimitNOFILE ≤ fs.nr_open == fs.file-max`, и `haproxy maxconn ≤ (RLIMIT_NOFILE HAProxy − 1024) / 3` (см. «Лимит соединений (maxconn)» в разделе HAProxy выше). `fs.nr_open` поднимается **до** записи `limits.conf` — иначе PAM ломается о значение выше текущего `nr_open`. `node/docker-compose.yml` получил явные `ulimits: nofile 65536` для обоих сервисов (раньше не было вообще — наследовалось ~1073741816 от dockerd) и монтирование `/opt/monitoring:ro`, чтобы контейнер видел `tuning-facts.env`/`.json`.
+Рендерер утверждает её численно и отказывается писать при нарушении: `nginx worker_rlimit_nofile ≤ container nofile ≤ NOFILE_LIMIT == limits.conf nofile == DefaultLimitNOFILE ≤ fs.nr_open == fs.file-max`, и `haproxy maxconn ≤ (RLIMIT_NOFILE HAProxy − 1024) / 3` (см. «Лимит соединений (maxconn)» в разделе HAProxy выше). `fs.nr_open` поднимается **до** записи `limits.conf` — иначе PAM ломается о значение выше текущего `nr_open`. `node/docker-compose.yml` задаёт явные `ulimits: nofile 65536` для обоих сервисов (без явного лимита наследовалось бы ~1073741816 от dockerd) и монтирует `/opt/monitoring:ro`, чтобы контейнер видел `tuning-facts.env`/`.json`.
 
 **Тесты:** `node/tests/test_verify_sysctl.py` — 14 тестов на stdlib `unittest` (подхватываются и pytest): нормализация значений, сборка ожидаемого набора из facts, порог hashsize, отсутствующий/битый facts-файл, чтение всех ключей одним вызовом. `configs/tests/render-matrix.sh` — 252 комбинации размеров хоста × профилей на стороне самого рендерера, см. корневой [DOCUMENTATION.md](../DOCUMENTATION.md).
 
@@ -731,7 +729,7 @@ systemctl restart network-tune
 journalctl -u network-tune
 ```
 
-`net.core.rps_sock_flow_entries` теперь задаётся только рендерером — раньше `network-tune.sh`/`multiqueue-tune.sh`/`hybrid-tune.sh` пересчитывали её заново при каждой загрузке и переписывали значение поверх файла. `rps_flow_cnt` на каждой очереди обязан быть степенью двойки (`pow2_floor(entries / rx_queues)`) — иначе ядро молча отклоняет RFS; источник `entries` — `tuning-facts.env`.
+`net.core.rps_sock_flow_entries` задаётся только рендерером — NIC-скрипты (`network-tune.sh`/`multiqueue-tune.sh`/`hybrid-tune.sh`) её не трогают. `rps_flow_cnt` на каждой очереди обязан быть степенью двойки (`pow2_floor(entries / rx_queues)`) — иначе ядро молча отклоняет RFS; источник `entries` — `tuning-facts.env`.
 
 **Примечание**: Настройки универсальны для любых машин (от 1GB RAM до 128GB+). При проблемах с сетью во время установки/обновления IPv6 отключается автоматически.
 
@@ -743,7 +741,7 @@ journalctl -u network-tune
 - **Автопродления нет.** Сертификат, выпущенный со страницы HAProxy, истекает через 90 дней, если не продлить его вручную (кнопка «Продлить» на той же странице). Wildcard-сертификаты это не затрагивает — у них отдельный механизм на стороне панели.
 - HAProxy останавливается на время выпуска/продления **только если** какое-то правило слушает порт 80 — certbot в режиме standalone требует этот порт свободным. Правила на 443 и остальных портах при продлении не рвутся.
 
-> Нода больше не устанавливает `/etc/cron.d/certbot-renew`. Тот крон каждую ночь в 03:00 безусловно делал `systemctl stop haproxy` перед `certbot renew`, обрывая все туннели на всех портах — при том, что certbot продлевает только сертификаты, истекающие в течение 30 дней, то есть 29 ночей из 30 останавливал HAProxy впустую. Старый крон и скрипт `/opt/monitoring-node/renew-certs.sh` удаляются автоматически при обновлении агента.
+> При обновлении агент автоматически удаляет с хоста legacy-файлы `/etc/cron.d/certbot-renew` и `/opt/monitoring-node/renew-certs.sh`, если они там есть: этот крон каждую ночь безусловно делал `systemctl stop haproxy` перед `certbot renew`, обрывая все туннели на всех портах.
 
 ## Команды
 
