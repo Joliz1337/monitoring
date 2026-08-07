@@ -749,7 +749,9 @@ cleanup_temp() {
 }
 
 install_cli() {
-    local script_content='#!/bin/bash
+    local script_content
+    script_content=$(cat <<'MON_CLI_EOF'
+#!/bin/bash
 # Monitoring System Manager — auto-update via GitHub
 
 if [ -f /etc/monitoring/proxy.conf ]; then
@@ -764,18 +766,32 @@ fi
 GITHUB_URL="https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh"
 TIMEOUT=120
 
-SCRIPT_CONTENT=$(timeout "$TIMEOUT" curl -fsSL --connect-timeout 30 --max-time "$TIMEOUT" "$GITHUB_URL" 2>/dev/null)
-if [ -n "$SCRIPT_CONTENT" ]; then
-    exec bash -c "$SCRIPT_CONTENT" -- "$@"
+# Установщик больше 128 КБ — лимита ядра на длину одного аргумента (MAX_ARG_STRLEN),
+# поэтому передать его текстом в bash -c нельзя: exec упадёт с E2BIG.
+TMP_INSTALLER="$(mktemp /tmp/mon-installer.XXXXXX)"
+trap "rm -f $TMP_INSTALLER" EXIT
+
+if timeout "$TIMEOUT" curl -fsSL --connect-timeout 30 --max-time "$TIMEOUT" -o "$TMP_INSTALLER" "$GITHUB_URL" 2>/dev/null && [ -s "$TMP_INSTALLER" ]; then
+    INSTALLER="$TMP_INSTALLER"
 elif [ -f "/opt/monitoring-panel/install.sh" ]; then
-    exec bash "/opt/monitoring-panel/install.sh" "$@"
+    INSTALLER="/opt/monitoring-panel/install.sh"
 elif [ -f "/opt/monitoring-node/install.sh" ]; then
-    exec bash "/opt/monitoring-node/install.sh" "$@"
+    INSTALLER="/opt/monitoring-node/install.sh"
 else
     echo "Failed to download installer from GitHub and no local copy found"
     exit 1
-fi'
-    
+fi
+
+bash "$INSTALLER" "$@"
+MON_CLI_EOF
+)
+
+    # Файл переписывается только при расхождении: так установщик чинит устаревший
+    # mon на уже установленных серверах, но не шумит сообщением на каждом запуске
+    if [ "$(cat "$BIN_PATH" 2>/dev/null)" = "$script_content" ]; then
+        return 0
+    fi
+
     if safe_write_file "$BIN_PATH" "$script_content"; then
         chmod +x "$BIN_PATH" 2>/dev/null || true
         [ -f "/usr/local/bin/monitoring" ] && rm -f "/usr/local/bin/monitoring" 2>/dev/null || true
@@ -3117,8 +3133,10 @@ for _ in $(seq 1 30); do
     curl -fsI https://raw.githubusercontent.com >/dev/null 2>&1 && break
     sleep 5
 done
-SCRIPT=$(curl -fsSL "https://raw.githubusercontent.com/Joliz1337/monitoring/${MON_BRANCH:-main}/install.sh" 2>/dev/null)
-[ -n "$SCRIPT" ] && bash -c "$SCRIPT" -- --unattended
+INSTALLER=$(mktemp /tmp/mon-installer.XXXXXX)
+curl -fsSL "https://raw.githubusercontent.com/Joliz1337/monitoring/${MON_BRANCH:-main}/install.sh" -o "$INSTALLER" 2>/dev/null
+[ -s "$INSTALLER" ] && bash "$INSTALLER" --unattended
+rm -f "$INSTALLER"
 systemctl disable mon-firstboot.service >/dev/null 2>&1 || true
 rm -f /etc/systemd/system/mon-firstboot.service \
       /etc/systemd/system/multi-user.target.wants/mon-firstboot.service \
@@ -3361,10 +3379,8 @@ HELPEOF
         select_language
     fi
     
-    # Ensure CLI command exists on every run
-    if [ ! -f "$BIN_PATH" ]; then
-        install_cli
-    fi
+    # Ensure CLI command exists and is up to date on every run
+    install_cli
     
     while true; do
         # Reset cwd — previous install/remove may have deleted current directory
