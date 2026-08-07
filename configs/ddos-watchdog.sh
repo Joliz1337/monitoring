@@ -18,7 +18,7 @@ set -u
 
 # Bumped when the script logic changes — the panel compares this against what a
 # node reports and auto-reinstalls on drift, so updates roll out without clicks.
-WATCHDOG_VERSION="2.1.0"
+WATCHDOG_VERSION="2.2.0"
 
 STATE_DIR="/opt/monitoring/antiddos"
 STATE_FILE="$STATE_DIR/state.json"
@@ -58,6 +58,7 @@ SMALL_PKT_BYTES=200         # …combined with avg packet < this → flood-of-ti
 SOFTIRQ_PCT=50              # aggregate softirq CPU% → weak signal
 SOFTIRQ_PCT_PERCPU=90       # busiest single CPU in softirq → weak signal
 SOFTNET_DROP_DELTA=200      # /proc/net/softnet_stat drops per cycle → STRONG
+SOFTNET_HOLD_CYCLES=2       # ...но только если держится столько циклов подряд
 LISTEN_OVERFLOW_DELTA=400   # ListenOverflows per cycle → weak, см. read_listen_overflows
 WEAK_HOLD=45               # weak signals must persist this long (s) before enabling
 HYSTERESIS=900              # auto-disable after this many seconds with no signal
@@ -73,8 +74,18 @@ SYNPROXY_MSS=1460
 # able to leave the box unreachable until someone notices.
 SELF_CONFIRM_FAILS=3
 
-[ -r "$AUTO_CONFIG_FILE" ] && . "$AUTO_CONFIG_FILE"
-[ -r "$CONFIG_FILE" ] && . "$CONFIG_FILE"
+# Перечитывается КАЖДЫЙ цикл, а не только при старте. tune-sysctl.sh считает
+# пороги под конкретное железо и пишет config.auto уже после того, как сервис
+# поднялся — при разовом чтении вотчдог месяцами держит в памяти дефолты выше и
+# ничем этого не показывает: на 8-ядерной ноде порог остаётся 200 вместо 800,
+# и аварийный режим включается на всплеске, который панель считает штатным.
+load_config() {
+    [ -r "$AUTO_CONFIG_FILE" ] && . "$AUTO_CONFIG_FILE"
+    [ -r "$CONFIG_FILE" ] && . "$CONFIG_FILE"
+    return 0
+}
+
+load_config
 
 log() { echo "[antiddos] $*" >&2; }
 
@@ -434,17 +445,23 @@ read_insert_failed() {
     echo "$total"
 }
 
-# Packets the kernel dropped off the per-CPU backlog queue. This is the direct
-# measurement of "we are losing traffic in softirq" rather than the pps proxy,
-# and it is exactly what the reduced netdev_max_backlog makes meaningful.
-# /proc/net/softnet_stat is one hex row per CPU; column 2 is `dropped`.
-read_softnet_drops() {
-    local f="/proc/net/softnet_stat" total=0 h
-    [ -r "$f" ] || { echo 0; return 0; }
-    while read -r h; do
-        [[ "$h" =~ ^[0-9a-fA-F]+$ ]] && total=$(( total + 0x$h ))
-    done < <(awk '{print $2}' "$f")
-    echo "$total"
+# Пакеты, выброшенные с per-CPU очереди backlog, и отдельно — счётчик flow_limit.
+# /proc/net/softnet_stat — по hex-строке на CPU; колонка 2 — dropped,
+# колонка 11 — flow_limit_count. Печатает «дропы flow_limit» одной строкой.
+#
+# Разделять их обязательно. flow_limit — наш собственный ограничитель, он
+# включается вместе с RPS и режет поток, занявший больше половины истории
+# очереди; его срабатывания ядро тоже считает в dropped. На одноочередной карте
+# один быстрый клиент даёт сотни таких дропов за цикл при совершенно здоровой
+# ноде, и без вычитания это неотличимо от флуда.
+read_softnet_counters() {
+    local f="/proc/net/softnet_stat" drops=0 flow=0 d fl
+    [ -r "$f" ] || { echo "0 0"; return 0; }
+    while read -r d fl; do
+        [[ "$d" =~ ^[0-9a-fA-F]+$ ]] && drops=$(( drops + 0x$d ))
+        [[ "$fl" =~ ^[0-9a-fA-F]+$ ]] && flow=$(( flow + 0x$fl ))
+    done < <(awk '{ f = "0"; if (NF >= 11) f = $11; print $2, f }' "$f")
+    echo "$drops $flow"
 }
 
 # Переполнение очереди accept — единственный специфичный признак того, что
@@ -561,16 +578,31 @@ sample_signals() {
         SIG_REASON="${SIG_REASON:+$SIG_REASON, }pps ${pps}, avg ${avg}B"
     fi
 
-    # softnet drops — STRONG: we are already losing packets in the kernel
-    local cur_sn prev_sn dsn
-    cur_sn=$(read_softnet_drops)
-    prev_sn=$(read_prev softnet)
-    save_prev softnet "$cur_sn"
-    dsn=$(( cur_sn - prev_sn ))
+    # softnet drops — STRONG, но с двумя оговорками.
+    # Во-первых, из дельты вычитается flow_limit: это наше собственное
+    # торможение жирного потока, а не потеря трафика от перегрузки.
+    # Во-вторых, сигнал обязан продержаться SOFTNET_HOLD_CYCLES циклов подряд —
+    # одиночный микровсплеск в пару сотен пакетов на фоне сотен тысяч
+    # обработанных за тот же цикл не повод ставить правила в INPUT, а настоящий
+    # флуд живёт заведомо дольше одного цикла.
+    local cur_sn cur_fl prev_sn prev_fl dsn dfl sn_hits
+    read cur_sn cur_fl < <(read_softnet_counters)
+    prev_sn=$(read_prev softnet); prev_fl=$(read_prev softnetflow)
+    save_prev softnet "$cur_sn"; save_prev softnetflow "$cur_fl"
+    dsn=$(( cur_sn - prev_sn )); dfl=$(( cur_fl - prev_fl ))
+    [ "$dfl" -lt 0 ] && dfl=0
+    dsn=$(( dsn - dfl ))
     [ "$dsn" -lt 0 ] && dsn=0
     if [ "$dsn" -ge "$SOFTNET_DROP_DELTA" ] 2>/dev/null; then
-        SIG_STRONG=1
-        SIG_REASON="${SIG_REASON:+$SIG_REASON, }softnet drops +${dsn}/cycle"
+        sn_hits=$(read_prev softnethits)
+        sn_hits=$(( ${sn_hits:-0} + 1 ))
+        save_prev softnethits "$sn_hits"
+        if [ "$sn_hits" -ge "$SOFTNET_HOLD_CYCLES" ] 2>/dev/null; then
+            SIG_STRONG=1
+            SIG_REASON="${SIG_REASON:+$SIG_REASON, }softnet drops +${dsn}/cycle"
+        fi
+    else
+        save_prev softnethits 0
     fi
 
     # Переполнение очереди accept — WEAK, а не STRONG: всплеск на один цикл
@@ -624,6 +656,7 @@ run_loop() {
     sleep "$INTERVAL"
 
     while true; do
+        load_config
         read_state
         sample_signals
 
