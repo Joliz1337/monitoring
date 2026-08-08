@@ -151,19 +151,42 @@ class SnapshotTests(SamplerTestCase):
             [{"port": 80, **PORT_80}, {"port": 8080, **PORT_8080}],
         )
 
-    def test_tracked_port_with_no_traffic_reports_zero(self):
-        # A port whose rules exist but never matched has no line in the dump;
-        # dropping it from the snapshot would look like the port stopped being
-        # tracked rather than being idle.
+    def test_idle_port_reports_zero(self):
+        # `iptables-save -c` prints every rule, including ones that never
+        # matched, as [0:0] — so an idle port is present in the dump and must be
+        # reported as a real zero.
+        idle_dump = IPTABLES_SAVE_DUMP.replace(
+            "COMMIT\n",
+            "[0:0] -A TRAFFIC_ACCOUNTING_IN -p tcp -m tcp --dport 9999\n"
+            "[0:0] -A TRAFFIC_ACCOUNTING_OUT -p tcp -m tcp --sport 9999\n"
+            "COMMIT\n",
+        )
+        sampler, _ = self.make_sampler(tracked=[80, 9999], dump=idle_dump)
+
+        async def scenario():
+            await sampler.init()
+            complete = await sampler._sample()
+            return sampler.snapshot(), complete
+
+        (ports, _, _), complete = asyncio.run(scenario())
+        self.assertTrue(complete)
+        self.assertEqual(ports[1], {"port": 9999, "rx_bytes": 0, "tx_bytes": 0})
+
+    def test_port_without_accounting_rules_is_omitted_not_zeroed(self):
+        # Правила учёта сносит `ufw --force reset` при синке firewall-профиля.
+        # Ноль в этот момент неотличим от честной тишины: панель приняла бы шаг
+        # счётчика назад за сброс и молча потеряла бы накопленную дельту.
         sampler, _ = self.make_sampler(tracked=[80, 9999], dump=IPTABLES_SAVE_DUMP)
 
         async def scenario():
             await sampler.init()
-            await sampler._sample()
-            return sampler.snapshot()
+            complete = await sampler._sample()
+            return sampler.snapshot(), complete
 
-        ports, _, _ = asyncio.run(scenario())
-        self.assertEqual(ports[1], {"port": 9999, "rx_bytes": 0, "tx_bytes": 0})
+        (ports, available, _), complete = asyncio.run(scenario())
+        self.assertFalse(complete)
+        self.assertTrue(available)
+        self.assertEqual([p["port"] for p in ports], [80])
 
     def test_snapshot_never_shells_out(self):
         """/api/metrics calls snapshot() on every poll.

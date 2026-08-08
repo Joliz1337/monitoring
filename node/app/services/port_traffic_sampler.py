@@ -178,7 +178,15 @@ class PortTrafficSampler:
                     async with self._lock:
                         await self._ensure_chains()
                     chains_checked_at = time.monotonic()
-                await self._sample()
+                if not await self._sample():
+                    # Правила учёта пропали (обычно их сносит `ufw --force reset`
+                    # при синке firewall-профиля) — восстанавливаем сразу, не
+                    # дожидаясь плановой перепроверки: всё это время порт не
+                    # измеряется, и панель видит разрыв вместо тишины
+                    async with self._lock:
+                        await self._ensure_chains()
+                    chains_checked_at = time.monotonic()
+                    await self._sample()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -186,27 +194,38 @@ class PortTrafficSampler:
 
             await asyncio.sleep(self._interval)
 
-    async def _sample(self) -> None:
+    async def _sample(self) -> bool:
+        """Снять счётчики. False — у части портов не нашлось правил учёта."""
         if not self._tracked:
             self._ports = []
             self._sampled_at = time.time()
-            return
+            return True
 
         returncode, dump = await self._exec(["iptables-save", "-c", "-t", "filter"])
         if returncode != 0:
             self._available = False
             logger.warning("iptables-save failed (rc=%s), port counters are stale", returncode)
-            return
+            return True
 
         counters = parse_port_counters(dump)
+        # Отсутствие порта в дампе — это «правила снесены», а не «трафика не было»:
+        # у только что добавленного порта правило есть и показывает честный ноль.
+        # Отдать здесь ноль означало бы шаг счётчика назад — панель списала бы его
+        # на сброс и молча потеряла бы накопленную дельту.
+        missing = [port for port in self._tracked if port not in counters]
+        if missing:
+            logger.warning("Traffic accounting rules are missing for ports %s", missing)
+
         # Список пересобирается целиком: его читают из другого треда, и подмена
         # ссылки атомарна, а правка на месте отдала бы полуобновлённые данные
         self._ports = [
-            {"port": port, **counters.get(port, ZERO_COUNTER)}
+            {"port": port, **counters[port]}
             for port in self._tracked
+            if port in counters
         ]
         self._sampled_at = time.time()
         self._available = True
+        return not missing
 
     async def _ensure_chains(self) -> None:
         """Поднять цепочки учёта и врезать их в INPUT/OUTPUT. Вызывать под self._lock.

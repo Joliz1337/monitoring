@@ -226,6 +226,20 @@ export default function Blocklist() {
       try {
         const resp = await blocklistApi.getSyncStatus()
         const data = resp.data
+        // Отменённый синк не доходит до нод, поэтому servers остаётся пустым —
+        // без отдельной ветки тост просто исчез бы, ничего не сказав оператору
+        if (!data.in_progress && data.error) {
+          clearInterval(poll)
+          setSyncToasts(prev =>
+            prev.map(st => st.id === id
+              ? { ...st, status: 'error' as const, message: t('blocklist.sync_cancelled', { reason: data.error }) }
+              : st)
+          )
+          setTimeout(() => {
+            setSyncToasts(prev => prev.filter(st => st.id !== id))
+          }, 15000)
+          return
+        }
         if (!data.in_progress && data.servers && Object.keys(data.servers).length > 0) {
           clearInterval(poll)
 

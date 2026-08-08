@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from app.services.host_files import write_host_file_sync
+
 logger = logging.getLogger(__name__)
 
 BACKUP_DIR = "/etc/monitoring"
@@ -542,22 +544,13 @@ class FirewallManager:
             return False
 
     def _write_host_file(self, path: str, content: str) -> bool:
-        if self._use_nsenter:
-            cmd = ["nsenter", "-t", "1", "-m", "-u", "-n", "-i", "--", "tee", path]
-            try:
-                subprocess.run(
-                    cmd, input=content, capture_output=True, text=True, timeout=10, check=False,
-                )
-                return True
-            except Exception as e:
-                logger.error(f"Failed to write {path}: {e}")
-                return False
-        try:
-            Path(path).write_text(content)
-            return True
-        except Exception as e:
-            logger.error(f"Failed to write {path}: {e}")
-            return False
+        """Записать файл на хост общим writer'ом.
+
+        Собственная реализация через `tee` возвращала успех не глядя на код
+        возврата: бэкап состояния UFW «создавался» даже когда файла не
+        появлялось, и откат после неудачного apply откатывать было нечем.
+        """
+        return write_host_file_sync(path, content)
 
     def _read_host_file(self, path: str) -> Optional[str]:
         if self._use_nsenter:

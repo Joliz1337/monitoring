@@ -706,6 +706,8 @@ export interface SyncStatus {
   in_progress: boolean
   timestamp: string | null
   servers: Record<string, SyncServerResult>
+  // Синк отменён целиком, до нод дело не дошло — например недоступен источник
+  error?: string | null
 }
 
 export const blocklistApi = {

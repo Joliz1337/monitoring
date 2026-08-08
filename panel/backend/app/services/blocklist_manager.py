@@ -53,6 +53,21 @@ DEFAULT_SOURCES = [
 ]
 
 
+class BlocklistSourceUnavailableError(Exception):
+    """Источник блок-листа не скачался, и прежней копии его содержимого нет.
+
+    Синк заменяет набор на ноде целиком, поэтому «пропустить недоступный
+    источник» означало бы разблокировать все его адреса на всём парке —
+    и отчитаться при этом успехом.
+    """
+
+    def __init__(self, source_name: str, url: str, reason: str):
+        self.source_name = source_name
+        self.url = url
+        self.reason = reason
+        super().__init__(f"Blocklist source '{source_name}' is unavailable: {reason}")
+
+
 class BlocklistManager:
     # Fan-out по нодам ограничен семафорами, поэтому нагрузка на БД и общий HTTP-пул
     # остаётся постоянной независимо от числа серверов — сервера синкаются волнами.
@@ -63,6 +78,11 @@ class BlocklistManager:
         self._running = False
         self._update_task: Optional[asyncio.Task] = None
         self._cache: dict[str, tuple[float, list[str]]] = {}
+        # Последнее удачное содержимое каждого источника — переживает истечение
+        # кэша и служит подменой на время сбоя скачивания. Чистится по факту
+        # состава включённых источников, иначе список отключённого висел бы в
+        # памяти навсегда — на миллионах адресов это сотни мегабайт.
+        self._last_good: dict[str, list[str]] = {}
         self._last_sync: Optional[dict] = None
         self._sync_in_progress = False
         self._db_sem = asyncio.Semaphore(self.DB_CONCURRENCY)
@@ -176,6 +196,7 @@ class BlocklistManager:
             # иначе event loop замирает на десятки секунд
             ips = await asyncio.to_thread(self.parse_list_content, content)
             self._set_cache(url, ips)
+            self._last_good[url] = ips
             return True, ips, ""
         except httpx.TimeoutException:
             return False, [], "Timeout"
@@ -276,7 +297,15 @@ class BlocklistManager:
         for source in sources:
             success, ips, error = await self.fetch_github_list(source.url)
             if not success:
-                continue
+                # Прежняя копия лучше, чем усечённый список: она хотя бы
+                # соответствует реальности вчерашнего дня.
+                ips = self._last_good.get(source.url)
+                if ips is None:
+                    raise BlocklistSourceUnavailableError(source.name, source.url, error)
+                logger.warning(
+                    f"Source '{source.name}' unreachable ({error}) — "
+                    f"using last known good copy of {len(ips)} entries"
+                )
             if len(ips) > NODE_MAX_IPSET_ENTRIES:
                 logger.warning(
                     f"Source '{source.name}' skipped: {len(ips)} IPs exceeds "
@@ -285,6 +314,15 @@ class BlocklistManager:
                 continue
             all_ips.extend(ips)
         return all_ips
+
+    async def _prune_last_good(self, db: AsyncSession) -> None:
+        """Оставить в подменном хранилище только включённые сейчас источники."""
+        result = await db.execute(
+            select(BlocklistSource.url).where(BlocklistSource.enabled == True)
+        )
+        enabled = {row[0] for row in result.all()}
+        for url in [u for u in self._last_good if u not in enabled]:
+            del self._last_good[url]
     
     @staticmethod
     def _merge_deduplicated(manual_ips: list[str], auto_ips: list[str]) -> tuple[list[str], set[str], int]:
@@ -329,6 +367,7 @@ class BlocklistManager:
         в памяти десятки тел по ~70 МБ одновременно — OOM панели на списке в 4 млн IP."""
         shared = {}
         async with async_session() as db:
+            await self._prune_last_good(db)
             for direction in ("in", "out"):
                 global_ips = await self.get_global_rules(db, direction)
                 auto_ips = await self.get_auto_list_ips(db, direction)
@@ -541,20 +580,21 @@ class BlocklistManager:
                 "out": {"success": False, "message": str(e), "ip_count": 0},
             }
 
-    def _store_sync_result(self, results: dict):
+    def _store_sync_result(self, results: dict, error: Optional[str] = None):
         self._last_sync = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "servers": results,
             "in_progress": False,
+            "error": error,
         }
         self._sync_in_progress = False
 
     def get_sync_status(self) -> dict:
         if self._sync_in_progress:
-            return {"in_progress": True, "timestamp": None, "servers": {}}
+            return {"in_progress": True, "timestamp": None, "servers": {}, "error": None}
         if self._last_sync:
             return self._last_sync
-        return {"in_progress": False, "timestamp": None, "servers": {}}
+        return {"in_progress": False, "timestamp": None, "servers": {}, "error": None}
 
     async def sync_all_nodes(self) -> dict:
         """Sync blocklists to all active nodes in parallel (both directions).
@@ -564,6 +604,7 @@ class BlocklistManager:
         async with self._sync_lock:
             self._sync_in_progress = True
             results = {}
+            error = None
             try:
                 async with async_session() as db:
                     result = await db.execute(
@@ -581,10 +622,15 @@ class BlocklistManager:
 
                 for sr in done:
                     results[sr["server_id"]] = sr
+            except BlocklistSourceUnavailableError as e:
+                # Ноды не трогаем вовсе: неполный список снял бы блокировки.
+                error = str(e)
+                logger.error(f"sync_all_nodes cancelled: {error}")
             except Exception as e:
+                error = str(e)
                 logger.error(f"sync_all_nodes failed: {e}")
             finally:
-                self._store_sync_result(results)
+                self._store_sync_result(results, error)
             return results
 
     async def sync_single_node_by_id(self, server_id: int) -> dict:
@@ -607,6 +653,11 @@ class BlocklistManager:
             prev[sr["server_id"]] = sr
             self._store_sync_result(prev)
             return sr
+        except BlocklistSourceUnavailableError as e:
+            logger.error(f"sync_single_node_by_id cancelled: {e}")
+            prev = self._last_sync.get("servers", {}) if self._last_sync else {}
+            self._store_sync_result(prev, str(e))
+            return {}
         except Exception as e:
             logger.error(f"sync_single_node_by_id failed: {e}")
             self._sync_in_progress = False

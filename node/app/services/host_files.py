@@ -62,8 +62,8 @@ def _permissions_are_safe(actual: str, wanted: str) -> bool:
     )
 
 
-async def write_host_file(path: str, content: str, mode: Optional[str] = None) -> bool:
-    """Write a file to the host filesystem via nsenter.
+def _write_command(path: str, content: str, mode: Optional[str]) -> str:
+    """Команда записи файла на хост.
 
     Uses base64 rather than a heredoc: the old `cat > path << 'EOFCONFIG'` form
     terminated early if any content line happened to equal EOFCONFIG, silently
@@ -73,26 +73,27 @@ async def write_host_file(path: str, content: str, mode: Optional[str] = None) -
     Пишет строго in-place (`> path`): inode сохраняется, что критично для
     файлов, смонтированных в контейнеры как single-file bind-mount.
     """
-    executor = get_host_executor()
     encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
-
     cmd = (
         f"mkdir -p $(dirname {path}) && "
         f"printf '%s' '{encoded}' | base64 -d > {path}"
     )
-    if mode:
-        # Права даёт umask при создании файла, а chmod лишь доводит их на уже
-        # существующем: отдельный chmod после записи оставлял бы приватный ключ
-        # читаемым всем в промежутке между двумя шагами. Провал самого chmod не
-        # фатален — есть ФС, где права фиксированы и chmod запрещён (pmxcfs), а
-        # запись при этом проходит; итог оценивается по фактическим правам.
-        cmd = (
-            f"umask {_umask_for(mode)} && {cmd} || exit 1; "
-            f"chmod {mode} {path} 2>/dev/null; "
-            f"stat -c '%a' {path}"
-        )
+    if not mode:
+        return cmd
 
-    result = await executor.execute(cmd, timeout=20, shell="bash")
+    # Права даёт umask при создании файла, а chmod лишь доводит их на уже
+    # существующем: отдельный chmod после записи оставлял бы приватный ключ
+    # читаемым всем в промежутке между двумя шагами. Провал самого chmod не
+    # фатален — есть ФС, где права фиксированы и chmod запрещён (pmxcfs), а
+    # запись при этом проходит; итог оценивается по фактическим правам.
+    return (
+        f"umask {_umask_for(mode)} && {cmd} || exit 1; "
+        f"chmod {mode} {path} 2>/dev/null; "
+        f"stat -c '%a' {path}"
+    )
+
+
+def _write_succeeded(result, path: str, mode: Optional[str]) -> bool:
     if not (result.success and result.exit_code == 0):
         # Вызывающие получают только bool, поэтому причина (нет места, read-only fs,
         # отказ nsenter) видна лишь отсюда — без этой строки она терялась совсем.
@@ -107,3 +108,23 @@ async def write_host_file(path: str, content: str, mode: Optional[str] = None) -
         return False
 
     return True
+
+
+async def write_host_file(path: str, content: str, mode: Optional[str] = None) -> bool:
+    """Write a file to the host filesystem via nsenter."""
+    result = await get_host_executor().execute(
+        _write_command(path, content, mode), timeout=20, shell="bash"
+    )
+    return _write_succeeded(result, path, mode)
+
+
+def write_host_file_sync(path: str, content: str, mode: Optional[str] = None) -> bool:
+    """Синхронный вариант для менеджеров, целиком живущих в тред-пуле.
+
+    Оборачивать асинхронную версию в asyncio.run() нельзя: вызывающий может
+    оказаться и в потоке, и в самом event loop, а во втором случае это падение.
+    """
+    result = get_host_executor().execute_sync(
+        _write_command(path, content, mode), timeout=20, shell="bash"
+    )
+    return _write_succeeded(result, path, mode)
