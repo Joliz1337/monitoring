@@ -204,22 +204,10 @@ async def run_migrations(conn):
         except Exception:
             pass
     
-    # Add retention settings columns to remnawave_settings
-    retention_columns = [
-        ("visit_stats_retention_days", "INTEGER DEFAULT 365"),
-        ("ip_stats_retention_days", "INTEGER DEFAULT 90"),
-        ("ip_destination_retention_days", "INTEGER DEFAULT 90"),
-        ("hourly_stats_retention_days", "INTEGER DEFAULT 365"),
-    ]
-    
-    for col_name, col_type in retention_columns:
-        if remnawave_settings_columns and col_name not in remnawave_settings_columns:
-            try:
-                await conn.execute(text(f'ALTER TABLE remnawave_settings ADD COLUMN "{col_name}" {col_type}'))
-                logger.info(f"Added column: remnawave_settings.{col_name}")
-            except Exception:
-                pass
-    
+    # Пер-раздельных retention-колонок здесь больше не заводится: их удаляет
+    # _migrate_simplify_remnawave в том же init_db(), и пара «добавить → удалить»
+    # выполнялась восемью ALTER TABLE при каждом старте панели.
+
     # Add direction column to blocklist_rules
     result = await conn.execute(text("""
         SELECT column_name FROM information_schema.columns 
@@ -1485,7 +1473,7 @@ async def _migrate_simplify_remnawave(conn):
             except Exception:
                 pass
 
-    # --- Step 3: Drop per-раздел retention columns from remnawave_settings ---
+    # --- Step 3: удалить пер-раздельные retention-колонки remnawave_settings ---
     # Сводной колонки retention_days здесь больше не появляется: следом идущая
     # _migrate_remnawave_ephemeral_ips её удаляет, и пара «добавить → удалить»
     # выполнялась двумя лишними ALTER TABLE при каждом старте панели.
