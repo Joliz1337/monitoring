@@ -182,7 +182,9 @@ export default function MultiLineChart({
         horizontalAlign: 'left',
         labels: { colors: '#8e8ea0' },
       },
-      annotations: gapRanges.length > 0 ? { xaxis: gapRanges } : undefined,
+      // Пустой массив, а не undefined: updateOptions делает поверхностное присваивание
+      // для не-объектных значений и стёр бы весь блок annotations вместе с images/texts
+      annotations: { xaxis: gapRanges },
       tooltip: {
         theme: 'dark',
         shared: true,

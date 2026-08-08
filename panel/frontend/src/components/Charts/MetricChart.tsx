@@ -156,7 +156,9 @@ export default function MetricChart({
             val == null || Number.isNaN(val) ? '' : `${val.toFixed(1)}${unit}`,
         },
       },
-      annotations: gapRanges.length > 0 ? { xaxis: gapRanges } : undefined,
+      // Пустой массив, а не undefined: updateOptions делает поверхностное присваивание
+      // для не-объектных значений и стёр бы весь блок annotations вместе с images/texts
+      annotations: { xaxis: gapRanges },
       tooltip: {
         theme: 'dark',
         x: {
