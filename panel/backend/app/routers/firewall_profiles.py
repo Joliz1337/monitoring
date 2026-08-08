@@ -6,7 +6,7 @@ from typing import Optional, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select, update, func
+from sqlalchemy import select, update, func, bindparam
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import verify_auth
@@ -177,12 +177,19 @@ async def get_available_servers(db: AsyncSession = Depends(get_db), _=Depends(ve
 
 @router.post("/reorder")
 async def reorder_profiles(data: ReorderRequest, db: AsyncSession = Depends(get_db), _=Depends(verify_auth)):
-    for i, pid in enumerate(data.profile_ids):
-        await db.execute(
-            update(FirewallProfile)
-            .where(FirewallProfile.id == pid)
-            .values(position=i)
-        )
+    if not data.profile_ids:
+        return {"success": True}
+
+    # Один executemany вместо UPDATE на каждый профиль. Через connection(), а не
+    # session.execute(): ORM-путь bulk-by-PK требует id внутри values, нам нужен
+    # WHERE по bindparam.
+    conn = await db.connection()
+    await conn.execute(
+        update(FirewallProfile)
+        .where(FirewallProfile.id == bindparam("pid"))
+        .values(position=bindparam("pos")),
+        [{"pid": pid, "pos": i} for i, pid in enumerate(data.profile_ids)],
+    )
     await db.commit()
     return {"success": True}
 

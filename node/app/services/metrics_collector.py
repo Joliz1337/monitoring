@@ -4,17 +4,20 @@ All speed calculations are done on the panel side.
 
 import asyncio
 import json
+import logging
 import os
 import socket
 import platform
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 import psutil
 
 from app.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 
 class MetricsCollector:
@@ -105,8 +108,12 @@ class MetricsCollector:
                         {"label": e.label or f"core_{i}", "current": e.current, "high": e.high, "critical": e.critical}
                         for i, e in enumerate(entries)
                     ]
-        except (AttributeError, Exception):
-            pass
+        # Широкий перехват здесь осознанный: температуры — необязательная косметика,
+        # а бэкенды psutil для hwmon/ipmi на экзотическом железе бросают что угодно.
+        # Любое исключение отсюда поднялось бы в /api/metrics, а это единственный
+        # эндпоинт, по которому панель определяет живость ноды — сервер ушёл бы в offline.
+        except Exception as e:
+            logger.debug(f"Temperature sensors unavailable: {e}")
         
         model = "Unknown"
         cpuinfo = self._read_host_file("/proc/cpuinfo")
@@ -217,8 +224,8 @@ class MetricsCollector:
                         'tx_errors': int(values[10]),
                         'tx_drops': int(values[11]),
                     }
-        except Exception:
-            pass
+        except (OSError, ValueError) as e:
+            logger.warning(f"Failed to read {net_dev_path}, network counters will be zero: {e}")
         return result
     
     # Virtual/bridge/tunnel interfaces whose traffic is already counted on physical interfaces
@@ -244,8 +251,8 @@ class MetricsCollector:
                     content = slaves_file.read_text().strip()
                     if content:
                         slaves.update(content.split())
-        except Exception:
-            pass
+        except OSError as e:
+            logger.debug(f"Failed to enumerate bond slaves, totals may double-count: {e}")
         return slaves
 
     def get_network_info(self) -> dict:
@@ -406,7 +413,7 @@ class MetricsCollector:
         
         # Read TCP (IPv4 + IPv6)
         for tcp_file in ['/proc/net/tcp', '/proc/net/tcp6']:
-            host_path = Path(self.settings.host_proc) / tcp_file.lstrip('/proc/')
+            host_path = Path(self.settings.host_proc) / tcp_file.removeprefix('/proc/')
             try:
                 if host_path.exists():
                     content = host_path.read_text()
@@ -432,20 +439,20 @@ class MetricsCollector:
                                 tcp_stats['fin_wait'] += 1
                             else:
                                 tcp_stats['other'] += 1
-            except Exception:
-                pass
-        
+            except OSError as e:
+                logger.warning(f"Failed to read {host_path}, TCP connection counters are incomplete: {e}")
+
         # Read UDP (IPv4 + IPv6)
         for udp_file in ['/proc/net/udp', '/proc/net/udp6']:
-            host_path = Path(self.settings.host_proc) / udp_file.lstrip('/proc/')
+            host_path = Path(self.settings.host_proc) / udp_file.removeprefix('/proc/')
             try:
                 if host_path.exists():
                     content = host_path.read_text()
                     lines = content.strip().split('\n')[1:]  # Skip header
                     udp_stats['total'] += len(lines)
-            except Exception:
-                pass
-        
+            except OSError as e:
+                logger.warning(f"Failed to read {host_path}, UDP connection counters are incomplete: {e}")
+
         return {
             'tcp': tcp_stats,
             'udp': udp_stats,
@@ -535,9 +542,7 @@ class MetricsCollector:
     def _get_timezone_info(self) -> dict:
         """Get server timezone information"""
         now = datetime.now()
-        utc_now = datetime.now(timezone.utc)
-        
-        # Calculate offset in seconds
+
         local_offset = now.astimezone().utcoffset()
         offset_seconds = int(local_offset.total_seconds()) if local_offset else 0
         offset_hours = offset_seconds / 3600
@@ -585,8 +590,7 @@ class MetricsCollector:
                 }
             }
         except Exception as e:
-            import logging
-            logging.getLogger(__name__).error(f"Failed to get certificates info: {e}")
+            logger.error(f"Failed to get certificates info: {e}")
             return {"count": 0, "closest_expiry": None}
     
     def _read_proc_int(self, path: str, default=None):

@@ -4,7 +4,7 @@ import ipaddress
 import time
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from sqlalchemy import select, update, desc
+from sqlalchemy import select, update, desc, bindparam
 from sqlalchemy.ext.asyncio import AsyncSession
 import re
 from urllib.parse import urlparse
@@ -770,10 +770,22 @@ async def reorder_servers(
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    for position, server_id in enumerate(data.server_ids):
-        await db.execute(
-            update(Server).where(Server.id == server_id).values(position=position)
-        )
+    if not data.server_ids:
+        return {"success": True, "message": "Servers reordered"}
+
+    # Один executemany вместо UPDATE на каждый сервер. Через connection(), а не
+    # session.execute(): ORM-путь bulk-by-PK требует id внутри values, нам нужен
+    # WHERE по bindparam.
+    conn = await db.connection()
+    await conn.execute(
+        update(Server)
+        .where(Server.id == bindparam("sid"))
+        .values(position=bindparam("pos")),
+        [
+            {"sid": server_id, "pos": position}
+            for position, server_id in enumerate(data.server_ids)
+        ],
+    )
 
     await db.commit()
     _invalidate_list_cache()

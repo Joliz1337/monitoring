@@ -121,10 +121,25 @@ load_proxy() {
 }
 load_proxy
 
+# ==================== PostgreSQL Tuning ====================
+
+# Расчёт настроек PostgreSQL вынесен в общий scripts/pg-tune.sh, чтобы формулы
+# не расходились с установщиком. Скрипт исполняется из свежего клона, рядом лежит
+# и pg-tune.sh; отсутствие файла не должно ронять обновление.
+PG_TUNE_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/pg-tune.sh"
+if [ -f "$PG_TUNE_LIB" ]; then
+    . "$PG_TUNE_LIB"
+else
+    tune_postgres_env() { :; }
+fi
+
 # ==================== Configuration ====================
 
-# Timeouts (in seconds)
-DOCKER_PULL_TIMEOUT="${DOCKER_PULL_TIMEOUT:-600}"
+# Таймаут одной попытки pull. Панель на это время уже остановлена, поэтому запас
+# меньше, чем у ноды (там pull идёт до остановки контейнеров).
+DOCKER_PULL_TIMEOUT="${DOCKER_PULL_TIMEOUT:-240}"
+DOCKER_PULL_RETRIES=5
+DOCKER_PULL_RETRY_DELAY=10
 
 # Arguments
 TMP_DIR="$1"
@@ -222,6 +237,8 @@ EOF
     fi
 fi
 
+tune_postgres_env "$PANEL_DIR/.env"
+
 # Regenerate nginx config
 log_info "Regenerating nginx configuration..."
 if [ -f "$PANEL_DIR/scripts/generate-nginx-config.sh" ]; then
@@ -269,7 +286,8 @@ cd "$PANEL_DIR"
 
 set +e
 # Pull ready images from GHCR (normal flow)
-if ! spin_retry 240 5 10 "Pulling Docker images" docker compose pull 2>/dev/null; then
+if ! spin_retry "$DOCKER_PULL_TIMEOUT" "$DOCKER_PULL_RETRIES" "$DOCKER_PULL_RETRY_DELAY" \
+    "Pulling Docker images" docker compose pull 2>/dev/null; then
     log_warn "Failed to pull from registry, building locally..."
     spin "Pulling base images" bash -c \
         'docker compose pull --ignore-buildable 2>/dev/null || true'

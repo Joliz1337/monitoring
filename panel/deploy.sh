@@ -840,6 +840,15 @@ setup_cert_renewal_cron() {
     print_status "Auto-renewal cron job added (daily at 3 AM)"
 }
 
+# Расчёт настроек PostgreSQL живёт в общем scripts/pg-tune.sh — тот же файл
+# подключает апдейтер, чтобы формулы на свежей установке и после обновления
+# не разъезжались.
+if [ -f "$SCRIPT_DIR/scripts/pg-tune.sh" ]; then
+    . "$SCRIPT_DIR/scripts/pg-tune.sh"
+else
+    tune_postgres_env() { :; }
+fi
+
 generate_env() {
     if [ -f .env ]; then
         print_warning ".env file exists. Checking configuration..."
@@ -1067,6 +1076,7 @@ main() {
     setup_cert_renewal_cron
     
     generate_env
+    tune_postgres_env .env
     source .env 2>/dev/null || true
     generate_nginx_config || exit 1
     

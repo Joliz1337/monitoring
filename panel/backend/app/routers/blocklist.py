@@ -195,6 +195,31 @@ async def add_global_rule(
     }
 
 
+# Порция адресов на один IN-запрос: asyncpg не принимает больше 32767
+# bind-параметров, а массовая загрузка списка бывает и на десятки тысяч строк.
+EXISTING_LOOKUP_CHUNK = 5000
+
+
+async def _find_existing_global_ips(
+    db: AsyncSession, ip_cidrs: list[str], direction: str, list_type: str
+) -> set[str]:
+    """Какие из адресов уже есть среди глобальных правил этого направления и типа."""
+    existing: set[str] = set()
+    for start in range(0, len(ip_cidrs), EXISTING_LOOKUP_CHUNK):
+        result = await db.execute(
+            select(BlocklistRule.ip_cidr).where(
+                and_(
+                    BlocklistRule.ip_cidr.in_(ip_cidrs[start:start + EXISTING_LOOKUP_CHUNK]),
+                    BlocklistRule.server_id.is_(None),
+                    BlocklistRule.direction == direction,
+                    BlocklistRule.list_type == list_type
+                )
+            )
+        )
+        existing.update(row[0] for row in result)
+    return existing
+
+
 @router.post("/global/bulk")
 async def add_global_rules_bulk(
     request: BulkAddRequest,
@@ -205,9 +230,10 @@ async def add_global_rules_bulk(
     """Add multiple global blocklist rules. Auto-syncs."""
     manager = get_blocklist_manager()
 
-    added = 0
     skipped = 0
     invalid = []
+    candidates: list[str] = []
+    seen: set[str] = set()
 
     for ip in request.ips:
         if not manager._validate_ip_cidr(ip):
@@ -220,30 +246,37 @@ async def add_global_rules_bulk(
             invalid.append(ip)
             continue
 
-        result = await db.execute(
-            select(BlocklistRule).where(
-                and_(
-                    BlocklistRule.ip_cidr == normalized,
-                    BlocklistRule.server_id.is_(None),
-                    BlocklistRule.direction == request.direction,
-                    BlocklistRule.list_type == request.list_type
-                )
-            )
-        )
-        if result.scalar_one_or_none():
+        if normalized in seen:
             skipped += 1
             continue
 
-        rule = BlocklistRule(
-            ip_cidr=normalized,
-            server_id=None,
-            is_permanent=True if request.list_type == "allow" else request.is_permanent,
-            direction=request.direction,
-            list_type=request.list_type,
-            source="manual"
+        seen.add(normalized)
+        candidates.append(normalized)
+
+    existing = await _find_existing_global_ips(
+        db, candidates, request.direction, request.list_type
+    )
+    fresh = [ip for ip in candidates if ip not in existing]
+    skipped += len(candidates) - len(fresh)
+    added = len(fresh)
+
+    if fresh:
+        # allow (белый список) не имеет временного режима — всегда постоянное
+        is_permanent = True if request.list_type == "allow" else request.is_permanent
+        await db.execute(
+            BlocklistRule.__table__.insert(),
+            [
+                {
+                    "ip_cidr": ip,
+                    "server_id": None,
+                    "is_permanent": is_permanent,
+                    "direction": request.direction,
+                    "list_type": request.list_type,
+                    "source": "manual",
+                }
+                for ip in fresh
+            ],
         )
-        db.add(rule)
-        added += 1
 
     await db.commit()
 

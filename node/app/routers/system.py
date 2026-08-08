@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +19,10 @@ from docker.errors import DockerException, ImageNotFound, NotFound as DockerNotF
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+# docker-SDK общается с сокетом через requests: истёкший container.wait(timeout=...)
+# прилетает его ReadTimeout, а не asyncio.TimeoutError, и обрыв сокета — тоже
+# requests-ошибка, которую DockerException не покрывает
+from requests.exceptions import ReadTimeout, RequestException
 
 from app.services.host_executor import get_host_executor, MAX_TIMEOUT, DEFAULT_TIMEOUT
 from app.services.host_files import read_host_file, write_host_file
@@ -42,6 +47,10 @@ _update_status = {
     "last_update_time": None
 }
 
+# Ссылка на живую таску апдейтера: create_task её не удерживает, и незавершённую
+# корутину может собрать GC вместе с обновлением
+_update_task: Optional[asyncio.Task] = None
+
 
 def get_current_version() -> str:
     """Read current version from VERSION file"""
@@ -59,15 +68,6 @@ def get_docker_client():
         raise
 
 
-@router.get("/version")
-async def get_version():
-    """Get current node version"""
-    return {
-        "version": get_current_version(),
-        "component": "node"
-    }
-
-
 class ReplaceCertRequest(BaseModel):
     cert_pem: str
     key_pem: str
@@ -80,21 +80,21 @@ def _atomic_write(path: Path, data: str, mode: int) -> None:
     os.replace(tmp, path)
 
 
-def _reload_nginx_container() -> None:
+async def _reload_nginx_container() -> None:
     """SIGHUP в nginx-контейнер — graceful reload без остановки соединений."""
-    client = get_docker_client()
+    client = await asyncio.to_thread(get_docker_client)
     try:
-        container = client.containers.get(NGINX_CONTAINER_NAME)
+        container = await asyncio.to_thread(client.containers.get, NGINX_CONTAINER_NAME)
     except DockerNotFound:
         # nginx может работать на хосте (легаси-инсталляции) — пробуем nsenter
-        result = get_host_executor().execute_sync("nginx -s reload", timeout=10)
+        result = await get_host_executor().execute("nginx -s reload", timeout=10)
         if not result.success:
             raise HTTPException(
                 status_code=500,
                 detail=f"nginx reload failed: {result.stderr or result.error}",
             )
         return
-    container.kill(signal="SIGHUP")
+    await asyncio.to_thread(container.kill, signal="SIGHUP")
 
 
 @router.post("/replace-node-cert")
@@ -151,9 +151,9 @@ async def replace_node_cert(payload: ReplaceCertRequest):
 
     try:
         if cert_path.exists():
-            shutil.copy2(cert_path, cert_bak)
+            await asyncio.to_thread(shutil.copy2, cert_path, cert_bak)
         if key_path.exists():
-            shutil.copy2(key_path, key_bak)
+            await asyncio.to_thread(shutil.copy2, key_path, key_bak)
 
         _atomic_write(cert_path, payload.cert_pem, 0o644)
         _atomic_write(key_path, payload.key_pem, 0o600)
@@ -162,18 +162,22 @@ async def replace_node_cert(payload: ReplaceCertRequest):
         raise HTTPException(status_code=500, detail=f"write failed: {exc}") from exc
 
     try:
-        _reload_nginx_container()
+        await _reload_nginx_container()
     except Exception as exc:
         logger.error(f"nginx reload failed, rolling back: {exc}")
         if cert_bak.exists():
-            shutil.copy2(cert_bak, cert_path)
+            await asyncio.to_thread(shutil.copy2, cert_bak, cert_path)
         if key_bak.exists():
-            shutil.copy2(key_bak, key_path)
+            await asyncio.to_thread(shutil.copy2, key_bak, key_path)
+        detail = f"nginx reload failed: {exc}"
         try:
-            _reload_nginx_container()
-        except Exception:
-            pass
-        raise HTTPException(status_code=500, detail=f"nginx reload failed: {exc}") from exc
+            await _reload_nginx_container()
+        except Exception as rollback_exc:
+            # Файлы вернули, но nginx остался на новых — молчать нельзя,
+            # иначе панель считает ноду живой, а mTLS уже не поднимается
+            logger.error(f"nginx reload after rollback failed too: {rollback_exc}")
+            detail += f"; rollback reload failed: {rollback_exc}"
+        raise HTTPException(status_code=500, detail=detail) from exc
 
     cert_bak.unlink(missing_ok=True)
     key_bak.unlink(missing_ok=True)
@@ -188,30 +192,33 @@ async def run_update_in_container(target_ref: str | None = None, proxy: str | No
     Args:
         target_ref: Git reference (commit hash, tag, or branch). Default: 'main'
         proxy: HTTP proxy for git (e.g., http://127.0.0.1:3128)
+
+    Флаг in_progress выставляет вызывающий эндпоинт — до create_task, иначе два
+    быстрых запроса успевают пройти проверку раньше старта первого апдейтера.
+    Каждый вызов docker-SDK синхронный и уходит в поток: pull образа на медленной
+    сети занимает десятки минут, а вставший event loop уронил бы и /health, по
+    которому docker-healthcheck перезапускает контейнер.
     """
-    global _update_status
-    
-    _update_status["in_progress"] = True
-    _update_status["last_error"] = None
-    
     try:
-        client = get_docker_client()
-        
+        client = await asyncio.to_thread(get_docker_client)
+
         # Remove old updater container if exists
         try:
-            old_container = client.containers.get(UPDATER_CONTAINER_NAME)
-            old_container.remove(force=True)
+            old_container = await asyncio.to_thread(
+                client.containers.get, UPDATER_CONTAINER_NAME
+            )
+            await asyncio.to_thread(old_container.remove, force=True)
             logger.info("Removed old updater container")
-        except docker.errors.NotFound:
+        except DockerNotFound:
             pass
-        
+
         # Pull docker:cli image if needed
         try:
-            client.images.get(UPDATER_IMAGE)
+            await asyncio.to_thread(client.images.get, UPDATER_IMAGE)
         except ImageNotFound:
             logger.info(f"Pulling {UPDATER_IMAGE}...")
-            client.images.pull(UPDATER_IMAGE)
-        
+            await asyncio.to_thread(client.images.pull, UPDATER_IMAGE)
+
         ref_arg = target_ref if target_ref else "main"
         proxy_info = f" (via proxy: {proxy})" if proxy else ""
         logger.info(f"Starting update to: {ref_arg}{proxy_info}")
@@ -321,7 +328,8 @@ echo "[SUCCESS] Update completed!"
                 "UPDATE_PROXY": proxy,
             }
         
-        container = client.containers.run(
+        container = await asyncio.to_thread(
+            client.containers.run,
             image=UPDATER_IMAGE,
             command=["sh", "-c", updater_script],
             name=UPDATER_CONTAINER_NAME,
@@ -336,17 +344,15 @@ echo "[SUCCESS] Update completed!"
             detach=True,
             remove=False,
         )
-        
+
         logger.info(f"Updater started: {container.id[:12]}")
-        
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: container.wait(timeout=UPDATER_WAIT_TIMEOUT)
-        )
-        
+
+        result = await asyncio.to_thread(container.wait, timeout=UPDATER_WAIT_TIMEOUT)
+
         exit_code = result.get("StatusCode", -1)
-        logs = container.logs().decode("utf-8", errors="replace")
-        
+        raw_logs = await asyncio.to_thread(container.logs)
+        logs = raw_logs.decode("utf-8", errors="replace")
+
         if exit_code == 0:
             _update_status["last_result"] = "success"
             _update_status["last_update_time"] = datetime.now().isoformat()
@@ -358,11 +364,11 @@ echo "[SUCCESS] Update completed!"
         
         # Cleanup
         try:
-            container.remove(force=True)
-        except Exception:
-            pass
-            
-    except asyncio.TimeoutError:
+            await asyncio.to_thread(container.remove, force=True)
+        except (DockerException, RequestException) as e:
+            logger.warning(f"Failed to remove updater container: {e}")
+
+    except ReadTimeout:
         _update_status["last_result"] = "failed"
         _update_status["last_error"] = f"Update timed out ({UPDATER_WAIT_TIMEOUT // 60} minutes)"
         logger.error("Update timed out")
@@ -402,17 +408,21 @@ async def trigger_update(data: UpdateRequest = None):
         target_version: Git reference (branch/tag/commit). Default: 'main' (latest)
         proxy: HTTP proxy for git clone (e.g., http://127.0.0.1:3128)
     """
+    global _update_task
+
     if _update_status["in_progress"]:
         raise HTTPException(
             status_code=409,
             detail="Update already in progress"
         )
-    
+
     target_ref = data.target_version if data else None
     proxy = data.proxy if data else None
-    
-    asyncio.create_task(run_update_in_container(target_ref, proxy))
-    
+
+    _update_status["in_progress"] = True
+    _update_status["last_error"] = None
+    _update_task = asyncio.create_task(run_update_in_container(target_ref, proxy))
+
     return {
         "success": True,
         "message": "Update started",
@@ -426,12 +436,14 @@ async def get_update_status():
     """Get current update status"""
     container_running = False
     try:
-        client = get_docker_client()
-        container = client.containers.get(UPDATER_CONTAINER_NAME)
+        client = await asyncio.to_thread(get_docker_client)
+        container = await asyncio.to_thread(client.containers.get, UPDATER_CONTAINER_NAME)
         container_running = container.status == "running"
-    except Exception:
+    except DockerNotFound:
         pass
-    
+    except (DockerException, RequestException) as e:
+        logger.warning(f"Failed to check updater container state: {e}")
+
     return {
         "in_progress": _update_status["in_progress"] or container_running,
         "last_result": _update_status["last_result"],
@@ -1450,9 +1462,22 @@ async def remove_optimizations():
 
 # ==================== Time Synchronization ====================
 
+ZONEINFO_DIR = "/usr/share/zoneinfo"
+# Имя зоны уходит в shell-строку, исполняемую на хосте от root, поэтому набор
+# символов сведён к тому, что реально встречается в именах IANA (Europe/Moscow,
+# America/Argentina/Buenos_Aires, Etc/GMT+5). Точки в наборе нет — подняться из
+# каталога зон через «..» нельзя.
+TIMEZONE_PATTERN = r"^[A-Za-z0-9_+/-]+$"
+
 
 class TimeSyncRequest(BaseModel):
-    timezone: str = Field(..., min_length=1, max_length=100, description="IANA timezone (e.g. Europe/Moscow)")
+    timezone: str = Field(
+        ...,
+        min_length=1,
+        max_length=100,
+        pattern=TIMEZONE_PATTERN,
+        description="IANA timezone (e.g. Europe/Moscow)",
+    )
 
 
 class TimeSyncResponse(BaseModel):
@@ -1465,6 +1490,13 @@ class TimeSyncResponse(BaseModel):
     errors: list[str] = []
 
 
+async def timezone_exists_on_host(executor, timezone_name: str) -> bool:
+    """Формат имени зоны ещё не значит, что зона есть на хосте — сверяем с tzdata."""
+    zone_file = shlex.quote(f"{ZONEINFO_DIR}/{timezone_name}")
+    result = await executor.execute(f"test -f {zone_file}", timeout=5)
+    return result.exit_code == 0
+
+
 @router.post("/time-sync", response_model=TimeSyncResponse)
 async def time_sync(request: TimeSyncRequest):
     """
@@ -1473,11 +1505,18 @@ async def time_sync(request: TimeSyncRequest):
     Uses timedatectl + systemd-timesyncd (preinstalled on Ubuntu 24).
     """
     executor = get_host_executor()
+
+    if not await timezone_exists_on_host(executor, request.timezone):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown timezone: {request.timezone}",
+        )
+
     errors: list[str] = []
 
     # 1. Set timezone
     tz_result = await executor.execute(
-        f"timedatectl set-timezone {request.timezone}",
+        f"timedatectl set-timezone {shlex.quote(request.timezone)}",
         timeout=15, shell="bash"
     )
     timezone_set = tz_result.success and tz_result.exit_code == 0

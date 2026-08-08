@@ -5,7 +5,7 @@ Collection flow (ephemeral — each cycle replaces all data):
 1. GET /api/nodes → filter connected & enabled
 2. POST /api/ip-control/fetch-users-ips/{nodeUuid} → jobId per node
 3. Poll results → merge all (user_id, ip) pairs, filter ACTIVE users
-4. DELETE all old IPs → INSERT fresh snapshot
+4. DELETE old IPs → INSERT fresh snapshot
 """
 
 import asyncio
@@ -281,6 +281,12 @@ class XrayStatsCollector:
         """Заменяет все IP-данные актуальным снимком (DELETE + INSERT)."""
         async with self._db_write_lock:
             async with async_session() as db:
+                # Именно DELETE, не TRUNCATE. TRUNCATE берёт ACCESS EXCLUSIVE и держит
+                # его до конца вставки, а вставший в очередь эксклюзивный лок в
+                # PostgreSQL блокирует и всех читателей, пришедших после него — страница
+                # Remnawave вставала бы на всё время цикла. DELETE работает по MVCC и
+                # читателей не трогает; мёртвые кортежи разбирает autovacuum, пороги для
+                # этой таблицы занижены в _migrate_db_optimizations.
                 await db.execute(delete(XrayStats))
 
                 items = list(merged.items())

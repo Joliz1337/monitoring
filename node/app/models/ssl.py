@@ -21,9 +21,3 @@ class WildcardDeployResponse(BaseModel):
     reload_result: Optional[dict] = None
 
 
-class WildcardStatusResponse(BaseModel):
-    deployed: bool
-    domain: Optional[str] = None
-    expiry_date: Optional[str] = None
-    days_left: Optional[int] = None
-    cert_path: Optional[str] = None

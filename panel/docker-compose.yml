@@ -4,8 +4,42 @@ services:
     container_name: panel-postgres
     restart: unless-stopped
     # max_connections поднят выше потолка пула бэкенда (pool_size 40 + max_overflow 80 = 120),
-    # чтобы фоновые синки не упирались в "too many clients already" при fan-out по нодам
-    command: ["postgres", "-c", "max_connections=200"]
+    # чтобы фоновые синки не упирались в "too many clients already" при fan-out по нодам.
+    #
+    # Размеры памяти считаются от RAM конкретного хоста при установке/обновлении
+    # (deploy.sh и scripts/apply-update.sh кладут их в .env). Значения по умолчанию
+    # здесь — потолок для VPS на 2 ГБ: этот файл перезаписывается при каждом
+    # обновлении у всех, и слишком жадный shared_buffers не дал бы postgres стартовать.
+    command:
+      - postgres
+      - -c
+      - max_connections=200
+      - -c
+      - shared_buffers=${POSTGRES_SHARED_BUFFERS:-128MB}
+      - -c
+      - effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-512MB}
+      - -c
+      - work_mem=${POSTGRES_WORK_MEM:-4MB}
+      - -c
+      - maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-64MB}
+      - -c
+      - max_wal_size=${POSTGRES_MAX_WAL_SIZE:-1GB}
+      - -c
+      - checkpoint_completion_target=0.9
+      # Метрики пишутся каждые 10 секунд, таблицы истории постоянно в мусоре:
+      # дефолтные пороги (20% таблицы, naptime 60s) пускают автовакуум слишком
+      # поздно, а дефолтный cost_limit растягивает его на часы
+      - -c
+      - autovacuum_naptime=30s
+      - -c
+      - autovacuum_vacuum_scale_factor=0.05
+      - -c
+      - autovacuum_analyze_scale_factor=0.02
+      - -c
+      - autovacuum_vacuum_cost_limit=1000
+    # Параллельные запросы берут рабочую память из /dev/shm, а Docker по умолчанию
+    # даёт контейнеру только 64 МБ — этого не хватает при поднятом work_mem
+    shm_size: 256mb
     environment:
       - POSTGRES_USER=${POSTGRES_USER:-panel}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-panel_secret}

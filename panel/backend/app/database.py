@@ -1577,9 +1577,9 @@ async def _migrate_simplify_remnawave(conn):
         try:
             best_val = "LEAST(COALESCE(visit_stats_retention_days, 7), COALESCE(ip_stats_retention_days, 7))"
             if 'visit_stats_retention_days' in settings_cols:
-                await conn.execute(text(f"""
-                    ALTER TABLE remnawave_settings ADD COLUMN retention_days INTEGER DEFAULT 7
-                """))
+                await conn.execute(text(
+                    "ALTER TABLE remnawave_settings ADD COLUMN retention_days INTEGER DEFAULT 7"
+                ))
                 await conn.execute(text(f"""
                     UPDATE remnawave_settings SET retention_days = {best_val}
                 """))
@@ -1905,6 +1905,51 @@ async def _migrate_drop_redundant_indexes(conn):
             logger.warning(f"Dropping index {idx}: {e}")
 
 
+async def _migrate_db_optimizations(conn):
+    """Индексы под реальные запросы панели + снятие дубля с горячего пути вставки метрик.
+
+    Каждый DDL идёт отдельным запросом со своей защитой: init_db() вызывается на старте
+    без try/except, поэтому выпущенное отсюда исключение вообще не дало бы бэкенду
+    подняться, а сбой одного индекса не должен отменять остальные. IF NOT EXISTS /
+    IF EXISTS делают повторный запуск no-op.
+    """
+    statements = [
+        # Последний снапшот сервера — max(id) с GROUP BY server_id; idx_metrics_server_time
+        # упорядочен по timestamp и для max(id) планировщику бесполезен
+        "CREATE INDEX IF NOT EXISTS idx_metrics_server_latest ON metrics_snapshots (server_id, id)",
+        # Чистка протухшего кеша ASN выполняется перед каждым разрешением IP
+        "CREATE INDEX IF NOT EXISTS idx_asn_cache_cached_at ON asn_cache (cached_at)",
+        # Удаление устройств, не попавших в синхронизацию, и сортировка списка в API
+        "CREATE INDEX IF NOT EXISTS idx_hwid_devices_synced_at ON remnawave_hwid_devices (synced_at)",
+        # Чистка кеша пользователей Remnawave старше недели
+        "CREATE INDEX IF NOT EXISTS idx_rw_user_cache_updated_at ON remnawave_user_cache (updated_at)",
+        # Пагинация истории алертов: фильтр по серверу или типу + сортировка по дате
+        "CREATE INDEX IF NOT EXISTS idx_alert_history_server_created ON alert_history (server_id, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_alert_history_type_created ON alert_history (alert_type, created_at)",
+        # Журналы синка читаются только в разрезе профиля
+        "CREATE INDEX IF NOT EXISTS idx_sync_log_profile ON haproxy_sync_log (profile_id)",
+        "CREATE INDEX IF NOT EXISTS idx_rw_nginx_sync_log_profile ON remnawave_nginx_sync_log (profile_id)",
+        "CREATE INDEX IF NOT EXISTS idx_fw_sync_log_profile ON firewall_sync_log (profile_id)",
+        # server_id полностью покрыт составными индексами выше, а его одиночный индекс
+        # оплачивался на вставке метрик каждые 10 секунд по всем нодам
+        "DROP INDEX IF EXISTS ix_metrics_snapshots_server_id",
+        # xray_stats переписывается целиком каждый цикл сбора, то есть за час даёт
+        # больше мёртвых кортежей, чем строк в самой таблице. Дефолтный порог
+        # autovacuum (20% + 50 строк) на таком профиле просыпается слишком поздно,
+        # а брать TRUNCATE вместо DELETE нельзя — эксклюзивный лок вставал бы
+        # поперёк читателей страницы Remnawave
+        "ALTER TABLE xray_stats SET ("
+        " autovacuum_vacuum_scale_factor = 0.02,"
+        " autovacuum_vacuum_threshold = 1000,"
+        " autovacuum_analyze_scale_factor = 0.05)",
+    ]
+    for sql in statements:
+        try:
+            await conn.execute(text(sql))
+        except Exception as e:
+            logger.warning(f"DB optimization DDL skipped ({sql}): {e}")
+
+
 async def init_db():
     """Initialize database: create tables, run migrations."""
     async with engine.begin() as conn:
@@ -1926,6 +1971,7 @@ async def init_db():
         await _migrate_aggregated_metrics_unique(conn)
         await _migrate_bigint_pk_ids(conn)
         await _migrate_drop_redundant_indexes(conn)
+        await _migrate_db_optimizations(conn)
 
     await _warmup_pool()
 

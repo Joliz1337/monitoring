@@ -40,4 +40,6 @@ RUN echo "Build: ${CACHE_BUST:-none}" > /dev/null
 
 EXPOSE 7500
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "7500"]
+# network_mode: host — на 0.0.0.0 API без собственной аутентификации торчал бы
+# наружу в обход mTLS-nginx; единственный потребитель порта 7500 — сам хост
+CMD ["uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "7500"]

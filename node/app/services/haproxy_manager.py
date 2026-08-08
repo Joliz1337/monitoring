@@ -6,10 +6,15 @@ import logging
 import re
 import shutil
 import subprocess
+import tempfile
 import time
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from uuid import uuid4
 
 import psutil
 
@@ -24,6 +29,22 @@ RULES_END_MARKER = "# === RULES END ==="
 MAXCONN_PER_RAM_MB = 10
 MAXCONN_MIN = 10000
 MAXCONN_MAX = 500000
+
+OPENSSL_TIMEOUT_SEC = 10
+CERTBOT_ISSUE_TIMEOUT_SEC = 120
+CERTBOT_RENEW_TIMEOUT_SEC = 300
+
+# Срок сертификата меняется раз в месяцы, а get_cert_info вызывается на каждом
+# опросе метрик по каждому домену — без кэша это форк openssl на домен раз в
+# несколько секунд. Сбрасывается при выпуске/продлении/загрузке/удалении.
+CERT_INFO_CACHE_TTL_SEC = 3600.0
+
+# Домен подставляется в путь /etc/letsencrypt/live/<domain>/: пустые метки
+# запрещены, поэтому «..» и ведущая точка не пройдут — иначе это запись за
+# пределы каталога сертификатов. Конец строки — \Z, а не $: перед завершающим
+# переводом строки $ совпадает, и «example.com\n» прошёл бы проверку.
+_DOMAIN_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+CERT_DOMAIN_RE = re.compile(rf"^{_DOMAIN_LABEL}(?:\.{_DOMAIN_LABEL})*\Z")
 
 
 @dataclass
@@ -86,6 +107,14 @@ class HAProxyRule:
     balancer_options: Optional[BalancerOptions] = None
 
 
+@dataclass
+class CertbotResult:
+    returncode: int
+    stdout: str
+    stderr: str
+    timed_out: bool = False
+
+
 class HAProxyManager:
     """Manages HAProxy configuration via native systemd service"""
     
@@ -98,7 +127,8 @@ class HAProxyManager:
         self._status_cache: Optional[dict] = None
         self._status_cache_time: float = 0
         self._status_cache_ttl: float = 5.0  # 5 seconds
-    
+        self._cert_info_cache: dict[str, tuple[float, dict]] = {}
+
     @staticmethod
     def _is_domain(target: str) -> bool:
         try:
@@ -142,18 +172,29 @@ class HAProxyManager:
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         self.config_path.write_text(content, encoding='utf-8')
     
-    def _backup_config(self):
-        """Create backup of current config"""
+    @contextmanager
+    def _config_rollback(self) -> Iterator[Callable[[], None]]:
+        """Снимок конфига на время правки; отдаёт функцию отката и удаляет снимок
+        на выходе.
+
+        Имя снимка уникально: с общим haproxy.cfg.bak откат одной операции
+        подхватывал снимок другой, шедшей параллельно, и возвращал конфиг к
+        чужому состоянию."""
+        backup_path: Optional[Path] = None
         if self.config_path.exists():
-            backup_path = Path(f"{self.config_path}.bak")
+            backup_path = self.config_path.with_name(f"{self.config_path.name}.{uuid4().hex}.bak")
             shutil.copy(self.config_path, backup_path)
-    
-    def _restore_config(self):
-        """Restore config from backup"""
-        backup_path = Path(f"{self.config_path}.bak")
-        if backup_path.exists():
-            shutil.copy(backup_path, self.config_path)
-    
+
+        def rollback() -> None:
+            if backup_path and backup_path.exists():
+                shutil.copy(backup_path, self.config_path)
+
+        try:
+            yield rollback
+        finally:
+            if backup_path:
+                backup_path.unlink(missing_ok=True)
+
     def _read_nofile_limit(self) -> int:
         """HAProxy's real RLIMIT_NOFILE ceiling, from the tuning facts file.
 
@@ -254,34 +295,6 @@ resolvers mydns
 {RULES_START_MARKER}
 {RULES_END_MARKER}
 """
-    
-    def regenerate_config(self, preserve_rules: bool = True) -> tuple[bool, str]:
-        """Regenerate HAProxy config preserving rules"""
-        rules_content = ""
-        
-        if preserve_rules and self.config_path.exists():
-            content = self._read_config()
-            match = re.search(
-                rf'{re.escape(RULES_START_MARKER)}(.*?){re.escape(RULES_END_MARKER)}',
-                content, re.DOTALL
-            )
-            if match:
-                rules_content = match.group(1)
-        
-        self._backup_config()
-        new_config = self._generate_base_config()
-        
-        if rules_content.strip():
-            rules_content = self._patch_dns_resolvers(rules_content)
-            new_config = new_config.replace(
-                RULES_END_MARKER,
-                rules_content.rstrip() + '\n' + RULES_END_MARKER
-            )
-        
-        self._write_config(new_config)
-        logger.info("Config regenerated")
-        
-        return True, "Config regenerated"
     
     def init_config(self) -> tuple[bool, str]:
         """Initialize base HAProxy config if not exists"""
@@ -512,7 +525,7 @@ resolvers mydns
                 # Get logs to understand why it failed
                 logs = self.get_logs(tail=20)
                 logger.error(f"HAProxy failed to start. Logs: {logs}")
-                return False, f"HAProxy failed to start. Check logs for details."
+                return False, "HAProxy failed to start. Check logs for details."
         
         error_msg = result.stderr or result.stdout or "Start failed"
         logger.error(f"HAProxy start failed: {error_msg}")
@@ -805,6 +818,7 @@ resolvers mydns
             content = fullchain.read_text() + privkey.read_text()
             combined.write_text(content)
             combined.chmod(0o600)
+            self._invalidate_cert_info(cert_dir)
             logger.info(f"Created/updated combined cert for {domain} at {combined}")
             return combined
         except Exception as e:
@@ -825,48 +839,48 @@ resolvers mydns
         if not 1 <= rule.target_port <= 65535:
             return False, "Invalid target port"
         
-        self._backup_config()
-        content = self._read_config()
-        
-        if not content:
-            # No config exists - initialize with base config
-            self.init_config()
+        with self._config_rollback() as rollback:
             content = self._read_config()
-        elif RULES_START_MARKER not in content:
-            # Config exists but doesn't have our markers - add them at the end
-            logger.info("Adding rule markers to existing config")
-            content = content.rstrip() + f"\n\n{RULES_START_MARKER}\n{RULES_END_MARKER}\n"
-            self._write_config(content)
-        
-        # Ensure resolvers section exists for domain targets
-        if self._is_domain(rule.target_ip) and 'resolvers mydns' not in content:
-            resolvers_block = (
-                "\nresolvers mydns\n"
-                "    nameserver dns1 1.1.1.1:53\n"
-                "    nameserver dns2 8.8.8.8:53\n"
-                "    resolve_retries 3\n"
-                "    timeout resolve 1s\n"
-                "    timeout retry 1s\n"
-                "    hold valid 60s\n"
-                "    hold nx 10s\n"
-                "    hold other 10s\n"
-            )
-            content = content.replace(RULES_START_MARKER, resolvers_block + "\n" + RULES_START_MARKER)
-            self._write_config(content)
-        
-        frontend_name = f"{rule.rule_type}_{rule.name}"
-        backend_name = f"backend_{rule.rule_type}_{rule.name}"
 
-        resolver_opts = " resolvers mydns resolve-prefer ipv4 init-addr none" if self._is_domain(rule.target_ip) else ""
-        accept_proxy_opt = " accept-proxy" if rule.accept_proxy else ""
+            if not content:
+                # No config exists - initialize with base config
+                self.init_config()
+                content = self._read_config()
+            elif RULES_START_MARKER not in content:
+                # Config exists but doesn't have our markers - add them at the end
+                logger.info("Adding rule markers to existing config")
+                content = content.rstrip() + f"\n\n{RULES_START_MARKER}\n{RULES_END_MARKER}\n"
+                self._write_config(content)
 
-        if rule.rule_type == "tcp":
-            server_opts = ""
-            if rule.send_proxy:
-                server_opts += " send-proxy check-send-proxy"
-            server_opts += " check inter 5s fall 3 rise 2"
+            # Ensure resolvers section exists for domain targets
+            if self._is_domain(rule.target_ip) and 'resolvers mydns' not in content:
+                resolvers_block = (
+                    "\nresolvers mydns\n"
+                    "    nameserver dns1 1.1.1.1:53\n"
+                    "    nameserver dns2 8.8.8.8:53\n"
+                    "    resolve_retries 3\n"
+                    "    timeout resolve 1s\n"
+                    "    timeout retry 1s\n"
+                    "    hold valid 60s\n"
+                    "    hold nx 10s\n"
+                    "    hold other 10s\n"
+                )
+                content = content.replace(RULES_START_MARKER, resolvers_block + "\n" + RULES_START_MARKER)
+                self._write_config(content)
 
-            new_block = f"""
+            frontend_name = f"{rule.rule_type}_{rule.name}"
+            backend_name = f"backend_{rule.rule_type}_{rule.name}"
+
+            resolver_opts = " resolvers mydns resolve-prefer ipv4 init-addr none" if self._is_domain(rule.target_ip) else ""
+            accept_proxy_opt = " accept-proxy" if rule.accept_proxy else ""
+
+            if rule.rule_type == "tcp":
+                server_opts = ""
+                if rule.send_proxy:
+                    server_opts += " send-proxy check-send-proxy"
+                server_opts += " check inter 5s fall 3 rise 2"
+
+                new_block = f"""
 frontend {frontend_name}
     bind *:{rule.listen_port}{accept_proxy_opt}
     mode tcp
@@ -877,30 +891,29 @@ backend {backend_name}
     option tcp-check
     server srv1 {rule.target_ip}:{rule.target_port}{resolver_opts}{server_opts}
 """
-        else:
-            if not rule.cert_domain:
-                self._restore_config()
-                return False, "Certificate domain required for HTTPS"
+            else:
+                if not rule.cert_domain:
+                    rollback()
+                    return False, "Certificate domain required for HTTPS"
 
-            resolved_domain = self._resolve_cert_domain(rule.cert_domain, rule.use_wildcard)
+                resolved_domain = self._resolve_cert_domain(rule.cert_domain, rule.use_wildcard)
 
-            cert_path = self._get_cert_path(resolved_domain)
-            if not cert_path.exists():
-                created = self._create_combined_cert(resolved_domain)
-                if not created:
-                    if rule.use_wildcard:
-                        self._restore_config()
-                        return False, f"Wildcard certificate for {resolved_domain} not found (looked in {self.certs_dir / resolved_domain})"
-                    self._restore_config()
-                    return False, f"Certificate for {rule.cert_domain} not found"
-                cert_path = created
+                cert_path = self._get_cert_path(resolved_domain)
+                if not cert_path.exists():
+                    created = self._create_combined_cert(resolved_domain)
+                    if not created:
+                        rollback()
+                        if rule.use_wildcard:
+                            return False, f"Wildcard certificate for {resolved_domain} not found (looked in {self.certs_dir / resolved_domain})"
+                        return False, f"Certificate for {rule.cert_domain} not found"
+                    cert_path = created
 
-            server_line = f"server srv1 {rule.target_ip}:{rule.target_port}"
-            if rule.target_ssl:
-                server_line += f" ssl verify none sni str({rule.target_ip})"
-            server_line += resolver_opts
+                server_line = f"server srv1 {rule.target_ip}:{rule.target_port}"
+                if rule.target_ssl:
+                    server_line += f" ssl verify none sni str({rule.target_ip})"
+                server_line += resolver_opts
 
-            new_block = f"""
+                new_block = f"""
 frontend {frontend_name}
     bind *:{rule.listen_port} ssl crt {cert_path}{accept_proxy_opt}
     mode http
@@ -913,61 +926,61 @@ backend {backend_name}
     http-request set-header X-Forwarded-For %[src]
     {server_line}
 """
-        
-        content = content.replace(RULES_END_MARKER, new_block + RULES_END_MARKER)
-        self._write_config(content)
-        
-        is_valid, error = self.check_config()
-        if not is_valid:
-            self._restore_config()
-            return False, f"Config validation failed: {error}"
-        
-        # Reload with auto_start=False - don't fail if service not running
-        success, reload_msg = self.reload(auto_start=False)
-        if not success:
-            self._restore_config()
-            return False, f"Reload failed: {reload_msg}"
-        
+
+            content = content.replace(RULES_END_MARKER, new_block + RULES_END_MARKER)
+            self._write_config(content)
+
+            is_valid, error = self.check_config()
+            if not is_valid:
+                rollback()
+                return False, f"Config validation failed: {error}"
+
+            # Reload with auto_start=False - don't fail if service not running
+            success, reload_msg = self.reload(auto_start=False)
+            if not success:
+                rollback()
+                return False, f"Reload failed: {reload_msg}"
+
         # Return message based on reload result
         if "not running" in reload_msg or "stopped" in reload_msg:
             return True, f"Rule created ({reload_msg})"
         return True, "Rule created"
-    
+
     def delete_rule(self, name: str) -> tuple[bool, str]:
         """Delete rule from config"""
         rule = self.get_rule(name)
         if not rule:
             return False, f"Rule '{name}' not found"
-        
-        self._backup_config()
-        content = self._read_config()
-        
-        frontend_name = f"{rule.rule_type}_{name}"
-        backend_name = f"backend_{rule.rule_type}_{name}"
-        
-        content = re.sub(
-            rf'^frontend\s+{re.escape(frontend_name)}\s*\n.*?(?=^frontend|^backend|{re.escape(RULES_END_MARKER)})',
-            '', content, flags=re.MULTILINE | re.DOTALL
-        )
-        content = re.sub(
-            rf'^backend\s+{re.escape(backend_name)}\s*\n.*?(?=^frontend|^backend|{re.escape(RULES_END_MARKER)})',
-            '', content, flags=re.MULTILINE | re.DOTALL
-        )
-        content = re.sub(r'\n{3,}', '\n\n', content)
-        
-        self._write_config(content)
-        
-        is_valid, error = self.check_config()
-        if not is_valid:
-            self._restore_config()
-            return False, f"Config validation failed: {error}"
-        
-        # Reload with auto_start=False - don't fail if service not running
-        success, reload_msg = self.reload(auto_start=False)
-        if not success:
-            self._restore_config()
-            return False, f"Reload failed: {reload_msg}"
-        
+
+        with self._config_rollback() as rollback:
+            content = self._read_config()
+
+            frontend_name = f"{rule.rule_type}_{name}"
+            backend_name = f"backend_{rule.rule_type}_{name}"
+
+            content = re.sub(
+                rf'^frontend\s+{re.escape(frontend_name)}\s*\n.*?(?=^frontend|^backend|{re.escape(RULES_END_MARKER)})',
+                '', content, flags=re.MULTILINE | re.DOTALL
+            )
+            content = re.sub(
+                rf'^backend\s+{re.escape(backend_name)}\s*\n.*?(?=^frontend|^backend|{re.escape(RULES_END_MARKER)})',
+                '', content, flags=re.MULTILINE | re.DOTALL
+            )
+            content = re.sub(r'\n{3,}', '\n\n', content)
+
+            self._write_config(content)
+
+            is_valid, error = self.check_config()
+            if not is_valid:
+                rollback()
+                return False, f"Config validation failed: {error}"
+
+            # Reload with auto_start=False - don't fail if service not running
+            success, reload_msg = self.reload(auto_start=False)
+            if not success:
+                rollback()
+                return False, f"Reload failed: {reload_msg}"
+
         # Return message based on reload result
         if "not running" in reload_msg or "stopped" in reload_msg:
             return True, f"Rule deleted ({reload_msg})"
@@ -1022,58 +1035,58 @@ backend {backend_name}
             return True, f"Rule recreated with new type: {new_type}"
         
         # Simple field updates (no type change) - use regex replacement
-        self._backup_config()
-        content = self._read_config()
-        
-        frontend_name = f"{rule.rule_type}_{name}"
-        backend_name = f"backend_{rule.rule_type}_{name}"
-        
-        if "listen_port" in updates:
-            port = updates["listen_port"]
-            if not 1 <= port <= 65535:
-                return False, "Invalid listen port"
-            content = re.sub(
-                rf'(frontend\s+{re.escape(frontend_name)}.*?bind\s+\*:)\d+',
-                rf'\g<1>{port}', content, flags=re.DOTALL
-            )
-        
-        if "target_ip" in updates:
-            ip = updates["target_ip"]
-            content = re.sub(
-                rf'(backend\s+{re.escape(backend_name)}.*?server\s+\S+\s+)\S+:(\d+)',
-                rf'\g<1>{ip}:\2', content, flags=re.DOTALL
-            )
-        
-        if "target_port" in updates:
-            port = updates["target_port"]
-            if not 1 <= port <= 65535:
-                return False, "Invalid target port"
-            content = re.sub(
-                rf'(backend\s+{re.escape(backend_name)}.*?server\s+\S+\s+\S+:)\d+',
-                rf'\g<1>{port}', content, flags=re.DOTALL
-            )
+        with self._config_rollback() as rollback:
+            content = self._read_config()
 
-        # Нормализация: send-proxy без check-send-proxy
-        if new_send_proxy:
-            lines = content.split('\n')
-            for i, line in enumerate(lines):
-                if 'send-proxy' in line and 'check-send-proxy' not in line:
-                    lines[i] = line.replace('send-proxy', 'send-proxy check-send-proxy')
-            content = '\n'.join(lines)
+            frontend_name = f"{rule.rule_type}_{name}"
+            backend_name = f"backend_{rule.rule_type}_{name}"
 
-        self._write_config(content)
-        
-        is_valid, error = self.check_config()
-        if not is_valid:
-            self._restore_config()
-            return False, f"Config validation failed: {error}"
-        
-        # Reload with auto_start=False - don't fail if service not running
-        success, reload_msg = self.reload(auto_start=False)
-        if not success:
-            self._restore_config()
-            return False, f"Reload failed: {reload_msg}"
-        
+            if "listen_port" in updates:
+                port = updates["listen_port"]
+                if not 1 <= port <= 65535:
+                    return False, "Invalid listen port"
+                content = re.sub(
+                    rf'(frontend\s+{re.escape(frontend_name)}.*?bind\s+\*:)\d+',
+                    rf'\g<1>{port}', content, flags=re.DOTALL
+                )
+
+            if "target_ip" in updates:
+                ip = updates["target_ip"]
+                content = re.sub(
+                    rf'(backend\s+{re.escape(backend_name)}.*?server\s+\S+\s+)\S+:(\d+)',
+                    rf'\g<1>{ip}:\2', content, flags=re.DOTALL
+                )
+
+            if "target_port" in updates:
+                port = updates["target_port"]
+                if not 1 <= port <= 65535:
+                    return False, "Invalid target port"
+                content = re.sub(
+                    rf'(backend\s+{re.escape(backend_name)}.*?server\s+\S+\s+\S+:)\d+',
+                    rf'\g<1>{port}', content, flags=re.DOTALL
+                )
+
+            # Нормализация: send-proxy без check-send-proxy
+            if new_send_proxy:
+                lines = content.split('\n')
+                for i, line in enumerate(lines):
+                    if 'send-proxy' in line and 'check-send-proxy' not in line:
+                        lines[i] = line.replace('send-proxy', 'send-proxy check-send-proxy')
+                content = '\n'.join(lines)
+
+            self._write_config(content)
+
+            is_valid, error = self.check_config()
+            if not is_valid:
+                rollback()
+                return False, f"Config validation failed: {error}"
+
+            # Reload with auto_start=False - don't fail if service not running
+            success, reload_msg = self.reload(auto_start=False)
+            if not success:
+                rollback()
+                return False, f"Reload failed: {reload_msg}"
+
         # Return message based on reload result
         if "not running" in reload_msg or "stopped" in reload_msg:
             return True, f"Rule updated ({reload_msg})"
@@ -1093,35 +1106,35 @@ backend {backend_name}
 
         Returns: (success, message, reloaded)
         """
-        self._backup_config()
+        with self._config_rollback() as rollback:
+            try:
+                config_content = self._patch_dns_resolvers(config_content)
+                config_content = self._ensure_global_maxconn(config_content)
+                self._write_config(config_content)
+            except Exception as e:
+                rollback()
+                return False, f"Failed to write config: {e}", False
 
-        try:
-            config_content = self._patch_dns_resolvers(config_content)
-            config_content = self._ensure_global_maxconn(config_content)
-            self._write_config(config_content)
-        except Exception as e:
-            return False, f"Failed to write config: {e}", False
+            # Validate config
+            is_valid, error = self.check_config()
+            if not is_valid:
+                rollback()
+                return False, f"Config validation failed: {error}", False
 
-        # Validate config
-        is_valid, error = self.check_config()
-        if not is_valid:
-            self._restore_config()
-            return False, f"Config validation failed: {error}", False
+            if not reload_after:
+                return True, "Config applied (reload skipped)", False
 
-        if reload_after:
             # ensure_started=True поднимает остановленный сервис (start + enable),
             # иначе только reload работающего, а остановленный остаётся лежать
             success, reload_msg = self.reload(auto_start=ensure_started)
             if not success:
-                self._restore_config()
+                rollback()
                 return False, f"Reload failed: {reload_msg}", False
-            
-            # Check if HAProxy was actually reloaded or just config saved
-            if "not running" in reload_msg or "stopped" in reload_msg:
-                return True, f"Config applied ({reload_msg})", False
-            return True, "Config applied and reloaded", True
-        
-        return True, "Config applied (reload skipped)", False
+
+        # Check if HAProxy was actually reloaded or just config saved
+        if "not running" in reload_msg or "stopped" in reload_msg:
+            return True, f"Config applied ({reload_msg})", False
+        return True, "Config applied and reloaded", True
     
     def get_available_certs(self) -> list[str]:
         """Get list of available certificates from /etc/letsencrypt/live/"""
@@ -1138,31 +1151,40 @@ backend {backend_name}
         
         return sorted(certs)
     
+    def _invalidate_cert_info(self, cert_dir: Path) -> None:
+        self._cert_info_cache.pop(str(cert_dir / "fullchain.pem"), None)
+
     def get_cert_info(self, domain: str) -> Optional[dict]:
         """Get certificate information including expiry date and file paths"""
         # Find actual cert directory (handles suffixes like -0001)
         cert_dir = self._find_cert_dir(domain)
         if not cert_dir:
             cert_dir = self.certs_dir / domain
-        
+
         cert_file = cert_dir / "fullchain.pem"
-        
+
         if not cert_file.exists():
+            self._invalidate_cert_info(cert_dir)
             return None
-        
+
+        cached_at, cached_info = self._cert_info_cache.get(str(cert_file), (0.0, {}))
+        if cached_info and time.time() - cached_at < CERT_INFO_CACHE_TTL_SEC:
+            # Каталог мог быть найден по имени с суффиксом (-0001), а спрашивали
+            # про базовый домен — отвечаем тем именем, о котором спросили
+            return {**cached_info, "domain": domain}
+
         try:
             result = subprocess.run(
                 ["openssl", "x509", "-enddate", "-noout", "-in", str(cert_file)],
-                capture_output=True, text=True
+                capture_output=True, text=True, timeout=OPENSSL_TIMEOUT_SEC
             )
             if result.returncode == 0:
-                from datetime import datetime
                 date_str = result.stdout.strip().split("=")[1]
                 expiry = datetime.strptime(date_str, "%b %d %H:%M:%S %Y %Z")
                 days_left = (expiry - datetime.now()).days
-                
+
                 combined = cert_dir / "combined.pem"
-                
+
                 files = {
                     "pem": str(combined) if combined.exists() else None,
                     "key": str(cert_dir / "privkey.pem") if (cert_dir / "privkey.pem").exists() else None,
@@ -1170,8 +1192,8 @@ backend {backend_name}
                     "fullchain": str(cert_file),
                     "chain": str(cert_dir / "chain.pem") if (cert_dir / "chain.pem").exists() else None,
                 }
-                
-                return {
+
+                info = {
                     "domain": domain,
                     "expiry_date": expiry.isoformat(),
                     "days_left": days_left,
@@ -1180,11 +1202,13 @@ backend {backend_name}
                     "cert_path": str(cert_dir),
                     "files": files
                 }
+                self._cert_info_cache[str(cert_file)] = (time.time(), info)
+                return info
         except Exception as e:
             logger.error(f"Error getting cert info for {domain}: {e}")
-        
+
         return None
-    
+
     def _find_cert_dir(self, domain: str) -> Optional[Path]:
         """Find certificate directory for domain (handles -0001 suffixes and symlinks)"""
         # First try exact match
@@ -1203,207 +1227,198 @@ backend {backend_name}
         
         return None
     
+    async def _run_certbot(self, cmd: list[str], timeout_sec: int) -> CertbotResult:
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_sec)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+            return CertbotResult(returncode=-1, stdout="", stderr="", timed_out=True)
+
+        return CertbotResult(
+            returncode=process.returncode,
+            stdout=stdout.decode('utf-8', errors='replace') if stdout else "",
+            stderr=stderr.decode('utf-8', errors='replace') if stderr else "",
+        )
+
+    def _release_port_80(self) -> tuple[bool, Optional[str]]:
+        """Освободить 80-й порт под проверку certbot: открыть его в firewall и
+        остановить HAProxy, но только если какое-то правило действительно этот
+        порт слушает — безусловная остановка рвала бы установленные туннели на
+        всех остальных портах на всё время выпуска сертификата.
+
+        Возвращает (нужно ли поднимать HAProxy обратно, ошибку остановки)."""
+        from app.services.firewall_manager import get_firewall_manager
+
+        port_opened, fw_msg, _ = get_firewall_manager().add_rule(80, "tcp")
+        if port_opened:
+            logger.info("Firewall: port 80 opened for certbot")
+        else:
+            logger.warning(f"Could not open port 80: {fw_msg}")
+
+        if not self.is_running():
+            return False, None
+
+        if not any(r.listen_port == 80 for r in self.parse_rules()):
+            return False, None
+
+        stopped, msg = self._temporary_stop()
+        if not stopped:
+            return False, msg
+
+        logger.info("Stopped HAProxy for certbot (a rule binds port 80)")
+        return True, None
+
+    def _reclaim_port_80(self, resume_haproxy: bool) -> None:
+        if not resume_haproxy:
+            return
+
+        started, msg = self._temporary_start()
+        if started:
+            logger.info("HAProxy restarted after certbot")
+        else:
+            logger.error(f"Failed to restart HAProxy: {msg}")
+
     async def generate_certificate(
-        self, 
-        domain: str, 
+        self,
+        domain: str,
         email: str = None,
         method: str = "standalone"
     ) -> tuple[bool, str, Optional[str]]:
         """Generate Let's Encrypt certificate using certbot (async)
-        
+
         Returns: (success, message, error_log)
         """
-        from app.services.firewall_manager import get_firewall_manager
-        
         if not shutil.which("certbot"):
             return False, "certbot not installed in container", None
-        
+
         # Build certbot command
         cmd = ["certbot", "certonly", "--non-interactive", "--agree-tos"]
-        
+
         if email:
             cmd.extend(["--email", email])
         else:
             cmd.append("--register-unsafely-without-email")
-        
+
         if method == "standalone":
-            # Open port 80 in firewall for domain validation
-            firewall = get_firewall_manager()
-            port_opened, fw_msg, fw_error = firewall.add_rule(80, "tcp")
-            if port_opened:
-                logger.info(f"Firewall: port 80 opened for certificate generation")
-            else:
-                logger.warning(f"Could not open port 80: {fw_msg}")
-            
-            was_running = self.is_running()
-            
-            rules = self.parse_rules()
-            uses_port_80 = any(r.listen_port == 80 for r in rules)
-            
-            if uses_port_80 and was_running:
-                success, msg = self._temporary_stop()
-                if success:
-                    logger.info("Stopped HAProxy for certificate generation")
-                else:
-                    return False, f"Failed to stop HAProxy: {msg}", None
-            
+            resume_haproxy, stop_error = self._release_port_80()
+            if stop_error:
+                return False, f"Failed to stop HAProxy: {stop_error}", None
+
             cmd.extend(["--standalone", "-d", domain])
             error_log = None
-            
+
             try:
-                # Use async subprocess to avoid blocking event loop
-                process = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
-                )
-                
-                try:
-                    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=120)
-                    stdout_str = stdout.decode('utf-8', errors='replace') if stdout else ""
-                    stderr_str = stderr.decode('utf-8', errors='replace') if stderr else ""
-                    returncode = process.returncode
-                except asyncio.TimeoutError:
-                    process.kill()
-                    await process.wait()
-                    return False, "Certificate generation timed out (120s)", f"Command: {' '.join(cmd)}\n\nError: Timeout"
-                
-                if returncode == 0:
+                result = await self._run_certbot(cmd, CERTBOT_ISSUE_TIMEOUT_SEC)
+
+                if result.timed_out:
+                    message = f"Certificate generation timed out ({CERTBOT_ISSUE_TIMEOUT_SEC}s)"
+                    error_log = f"Command: {' '.join(cmd)}\n\nError: Timeout"
+                    success = False
+                elif result.returncode == 0:
                     # Find the actual cert directory (may have -0001 suffix)
                     cert_dir = self._find_cert_dir(domain)
                     if cert_dir:
-                        actual_domain = cert_dir.name
-                        self._create_combined_cert(actual_domain)
+                        self._create_combined_cert(cert_dir.name)
                         message = f"Certificate for {domain} generated successfully"
                         logger.info(message)
                         success = True
                     else:
-                        message = f"Certificate created but directory not found"
+                        message = "Certificate created but directory not found"
                         error_log = f"Looked in: {self.certs_dir}"
                         success = False
                 else:
-                    message = stderr_str or stdout_str or "Unknown error"
-                    error_log = f"Command: {' '.join(cmd)}\n\nExit code: {returncode}\n\nStdout:\n{stdout_str}\n\nStderr:\n{stderr_str}"
+                    message = result.stderr or result.stdout or "Unknown error"
+                    error_log = (
+                        f"Command: {' '.join(cmd)}\n\nExit code: {result.returncode}\n\n"
+                        f"Stdout:\n{result.stdout}\n\nStderr:\n{result.stderr}"
+                    )
                     logger.error(f"Certbot failed: {message}")
                     success = False
-                
+
             except Exception as e:
                 message = str(e)
                 error_log = f"Command: {' '.join(cmd)}\n\nException: {str(e)}"
                 success = False
             finally:
-                if uses_port_80 and was_running:
-                    start_success, start_msg = self._temporary_start()
-                    if start_success:
-                        logger.info("HAProxy restarted after certificate generation")
-                    else:
-                        logger.error(f"Failed to restart HAProxy: {start_msg}")
-            
+                self._reclaim_port_80(resume_haproxy)
+
             return success, message, error_log
-        
+
         elif method == "webroot":
             webroot_path = "/var/www/html"
             cmd.extend(["--webroot", "-w", webroot_path, "-d", domain])
-            
+
             try:
-                # Use async subprocess to avoid blocking event loop
-                process = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
-                )
-                
-                try:
-                    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=120)
-                    stdout_str = stdout.decode('utf-8', errors='replace') if stdout else ""
-                    stderr_str = stderr.decode('utf-8', errors='replace') if stderr else ""
-                    returncode = process.returncode
-                except asyncio.TimeoutError:
-                    process.kill()
-                    await process.wait()
-                    return False, "Certificate generation timed out (120s)", f"Command: {' '.join(cmd)}\n\nError: Timeout"
-                
-                if returncode == 0:
+                result = await self._run_certbot(cmd, CERTBOT_ISSUE_TIMEOUT_SEC)
+
+                if result.timed_out:
+                    return (
+                        False,
+                        f"Certificate generation timed out ({CERTBOT_ISSUE_TIMEOUT_SEC}s)",
+                        f"Command: {' '.join(cmd)}\n\nError: Timeout",
+                    )
+
+                if result.returncode == 0:
                     cert_dir = self._find_cert_dir(domain)
                     if cert_dir:
                         self._create_combined_cert(cert_dir.name)
                     return True, f"Certificate for {domain} generated successfully", None
-                else:
-                    error_log = f"Command: {' '.join(cmd)}\n\nExit code: {returncode}\n\nStdout:\n{stdout_str}\n\nStderr:\n{stderr_str}"
-                    return False, stderr_str or stdout_str or "Unknown error", error_log
-                    
+
+                error_log = (
+                    f"Command: {' '.join(cmd)}\n\nExit code: {result.returncode}\n\n"
+                    f"Stdout:\n{result.stdout}\n\nStderr:\n{result.stderr}"
+                )
+                return False, result.stderr or result.stdout or "Unknown error", error_log
+
             except Exception as e:
                 error_log = f"Command: {' '.join(cmd)}\n\nException: {str(e)}"
                 return False, str(e), error_log
-        
+
         else:
             return False, f"Unknown method: {method}. Use 'standalone' or 'webroot'", None
-    
+
     async def renew_certificates(self) -> tuple[bool, str, list[str]]:
         """Renew all Let's Encrypt certificates (async)"""
-        from app.services.firewall_manager import get_firewall_manager
-        
         if not shutil.which("certbot"):
             return False, "certbot not installed", []
-        
+
         logger.info("Starting renewal of all certificates")
-        
-        # Open port 80 in firewall for domain validation
-        firewall = get_firewall_manager()
-        port_opened, fw_msg, fw_error = firewall.add_rule(80, "tcp")
-        if port_opened:
-            logger.info("Firewall: port 80 opened for certificate renewal")
-        else:
-            logger.warning(f"Could not open port 80: {fw_msg}")
-        
-        # Only stop HAProxy if it actually holds port 80 — certbot standalone needs
-        # that port free. Stopping it unconditionally kills every established tunnel
-        # on every other port (443 etc.) for the whole duration of the renewal.
-        was_running = self.is_running()
-        rules = self.parse_rules()
-        uses_port_80 = any(r.listen_port == 80 for r in rules)
 
-        if uses_port_80 and was_running:
-            success, msg = self._temporary_stop()
-            if success:
-                logger.info("Stopped HAProxy for certificate renewal (a rule binds port 80)")
-            else:
-                logger.warning(f"Could not stop HAProxy: {msg}")
+        resume_haproxy, stop_error = self._release_port_80()
+        if stop_error:
+            logger.warning(f"Could not stop HAProxy: {stop_error}")
 
+        renewed = []
         try:
             logger.info("Running certbot renew --non-interactive")
-            
-            # Use async subprocess to avoid blocking event loop
-            process = await asyncio.create_subprocess_exec(
-                "certbot", "renew", "--non-interactive",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+
+            result = await self._run_certbot(
+                ["certbot", "renew", "--non-interactive"], CERTBOT_RENEW_TIMEOUT_SEC
             )
-            
-            try:
-                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=300)
-                stdout_str = stdout.decode('utf-8', errors='replace') if stdout else ""
-                stderr_str = stderr.decode('utf-8', errors='replace') if stderr else ""
-                returncode = process.returncode
-            except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
+
+            if result.timed_out:
                 logger.error("Certificate renewal timed out")
-                return False, "Renewal timed out (300s)", []
-            
-            logger.info(f"Certbot finished with exit code {returncode}")
-            if stdout_str:
-                logger.debug(f"Certbot stdout: {stdout_str[:500]}")
-            if stderr_str:
-                logger.debug(f"Certbot stderr: {stderr_str[:500]}")
-            
-            renewed = []
+                return False, f"Renewal timed out ({CERTBOT_RENEW_TIMEOUT_SEC}s)", []
+
+            logger.info(f"Certbot finished with exit code {result.returncode}")
+            if result.stdout:
+                logger.debug(f"Certbot stdout: {result.stdout[:500]}")
+            if result.stderr:
+                logger.debug(f"Certbot stderr: {result.stderr[:500]}")
+
             failed = []
-            
+
             # Update combined certs for ALL available certificates
             available_certs = self.get_available_certs()
             logger.info(f"Updating combined certificates for {len(available_certs)} domains: {available_certs}")
-            
+
             for domain in available_certs:
                 logger.info(f"Processing certificate for {domain}")
                 if self._create_combined_cert(domain):
@@ -1411,34 +1426,29 @@ backend {backend_name}
                 else:
                     failed.append(domain)
                     logger.warning(f"Failed to update combined cert for {domain}")
-            
-            if returncode == 0:
+
+            if result.returncode == 0:
                 message = f"Renewal completed. Updated: {len(renewed)}, Failed: {len(failed)}"
                 success = True
                 logger.info(f"Renewal completed, updated {len(renewed)} certificates, failed {len(failed)}")
             else:
-                message = stderr_str or stdout_str or "Renewal failed"
+                message = result.stderr or result.stdout or "Renewal failed"
                 success = False
                 logger.error(f"Renewal failed: {message[:200]}")
-                
+
         except Exception as e:
             message = str(e)
             success = False
             renewed = []
             logger.exception("Exception during certificate renewal")
         finally:
-            if uses_port_80 and was_running:
-                start_success, start_msg = self._temporary_start()
-                if start_success:
-                    logger.info("HAProxy restarted after certificate renewal")
-                else:
-                    logger.error(f"Failed to restart HAProxy: {start_msg}")
+            self._reclaim_port_80(resume_haproxy)
 
         if renewed:
             self.reload(auto_start=False)
-        
+
         return success, message, renewed
-    
+
     async def renew_certificate(self, domain: str) -> tuple[bool, str, Optional[str]]:
         """
         Renew specific Let's Encrypt certificate (async)
@@ -1448,37 +1458,19 @@ backend {backend_name}
         
         Returns: (success, message, output_log)
         """
-        from app.services.firewall_manager import get_firewall_manager
-        
         if not shutil.which("certbot"):
             return False, "certbot not installed", None
-        
+
         # Check if certificate exists
         cert_dir = self._find_cert_dir(domain)
         if not cert_dir:
             return False, f"Certificate for {domain} not found", None
-        
-        logger.info(f"Starting certificate renewal for {domain} (cert_dir: {cert_dir.name})")
-        
-        # Open port 80 in firewall for domain validation (same as generate)
-        firewall = get_firewall_manager()
-        port_opened, fw_msg, fw_error = firewall.add_rule(80, "tcp")
-        if port_opened:
-            logger.info("Firewall: port 80 opened for certificate renewal")
-        else:
-            logger.warning(f"Could not open port 80: {fw_msg}")
-        
-        # Only stop HAProxy if it actually holds port 80 — see renew_certificates().
-        was_running = self.is_running()
-        rules = self.parse_rules()
-        uses_port_80 = any(r.listen_port == 80 for r in rules)
 
-        if uses_port_80 and was_running:
-            success, msg = self._temporary_stop()
-            if success:
-                logger.info("Stopped HAProxy for certificate renewal (a rule binds port 80)")
-            else:
-                logger.warning(f"Could not stop HAProxy: {msg}")
+        logger.info(f"Starting certificate renewal for {domain} (cert_dir: {cert_dir.name})")
+
+        resume_haproxy, stop_error = self._release_port_80()
+        if stop_error:
+            logger.warning(f"Could not stop HAProxy: {stop_error}")
 
         output_log = ""
         try:
@@ -1495,34 +1487,29 @@ backend {backend_name}
             ]
             
             logger.info(f"Running certbot command: {' '.join(cmd)}")
-            
-            # Use async subprocess to avoid blocking event loop
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            
-            try:
-                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=300)
-                stdout_str = stdout.decode('utf-8', errors='replace') if stdout else ""
-                stderr_str = stderr.decode('utf-8', errors='replace') if stderr else ""
-                returncode = process.returncode
-            except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
+
+            result = await self._run_certbot(cmd, CERTBOT_RENEW_TIMEOUT_SEC)
+
+            if result.timed_out:
                 logger.error(f"Certificate renewal timed out for {domain}")
-                return False, "Certificate renewal timed out (300s)", f"Command: {' '.join(cmd)}\n\nError: Timeout"
-            
-            output_log = f"Command: {' '.join(cmd)}\n\nExit code: {returncode}\n\nStdout:\n{stdout_str}\n\nStderr:\n{stderr_str}"
-            
-            logger.info(f"Certbot finished with exit code {returncode}")
-            if stdout_str:
-                logger.debug(f"Certbot stdout: {stdout_str[:500]}")
-            if stderr_str:
-                logger.debug(f"Certbot stderr: {stderr_str[:500]}")
-            
-            if returncode == 0:
+                return (
+                    False,
+                    f"Certificate renewal timed out ({CERTBOT_RENEW_TIMEOUT_SEC}s)",
+                    f"Command: {' '.join(cmd)}\n\nError: Timeout",
+                )
+
+            output_log = (
+                f"Command: {' '.join(cmd)}\n\nExit code: {result.returncode}\n\n"
+                f"Stdout:\n{result.stdout}\n\nStderr:\n{result.stderr}"
+            )
+
+            logger.info(f"Certbot finished with exit code {result.returncode}")
+            if result.stdout:
+                logger.debug(f"Certbot stdout: {result.stdout[:500]}")
+            if result.stderr:
+                logger.debug(f"Certbot stderr: {result.stderr[:500]}")
+
+            if result.returncode == 0:
                 # Find the cert directory (may have suffix like -0001) and update combined cert
                 renewed_cert_dir = self._find_cert_dir(domain)
                 if renewed_cert_dir:
@@ -1535,40 +1522,22 @@ backend {backend_name}
                     success = False
                     logger.error(message)
             else:
-                message = stderr_str or stdout_str or "Renewal failed"
+                message = result.stderr or result.stdout or "Renewal failed"
                 success = False
                 logger.error(f"Certificate renewal failed for {domain}: {message[:200]}")
-                
+
         except Exception as e:
             message = str(e)
             output_log = f"Exception: {str(e)}"
             success = False
             logger.exception(f"Exception during certificate renewal for {domain}")
         finally:
-            if uses_port_80 and was_running:
-                start_success, start_msg = self._temporary_start()
-                if start_success:
-                    logger.info("HAProxy restarted after certificate renewal")
-                else:
-                    logger.error(f"Failed to restart HAProxy: {start_msg}")
+            self._reclaim_port_80(resume_haproxy)
 
         if success:
             self.reload(auto_start=False)
         
         return success, message, output_log
-    
-    def update_combined_certs(self) -> list[str]:
-        """Update all combined certificates from Let's Encrypt"""
-        updated = []
-        for domain in self.get_available_certs():
-            if self._create_combined_cert(domain):
-                updated.append(domain)
-        
-        if updated:
-            # Reload only if HAProxy is running
-            self.reload(auto_start=False)
-        
-        return updated
     
     def get_all_certs_info(self) -> list[dict]:
         """Get information about all available certificates"""
@@ -1620,7 +1589,8 @@ backend {backend_name}
             if cert_dir.exists() and not any(cert_dir.iterdir()):
                 cert_dir.rmdir()
                 deleted_files.append(str(cert_dir))
-            
+
+            self._invalidate_cert_info(cert_dir)
             logger.info(f"Deleted certificate for {domain}")
         except PermissionError:
             errors.append(f"No permission to delete: {cert_dir}")
@@ -1642,10 +1612,10 @@ backend {backend_name}
         key_content: str
     ) -> tuple[bool, str]:
         """Upload custom certificate to /etc/letsencrypt/live/{domain}/"""
-        
-        if not domain or not re.match(r'^[a-zA-Z0-9.-]+$', domain):
+
+        if not CERT_DOMAIN_RE.match(domain):
             return False, "Invalid domain name"
-        
+
         if not cert_content or not key_content:
             return False, "Certificate and key content required"
         
@@ -1664,33 +1634,35 @@ backend {backend_name}
         
         try:
             # Validate certificate before saving
-            import tempfile
             with tempfile.NamedTemporaryFile(mode='w', suffix='.pem', delete=False) as tmp:
                 tmp.write(cert_content)
                 tmp_path = tmp.name
-            
-            result = subprocess.run(
-                ["openssl", "x509", "-noout", "-in", tmp_path],
-                capture_output=True, text=True
-            )
-            Path(tmp_path).unlink()
-            
+
+            try:
+                result = subprocess.run(
+                    ["openssl", "x509", "-noout", "-in", tmp_path],
+                    capture_output=True, text=True, timeout=OPENSSL_TIMEOUT_SEC
+                )
+            finally:
+                Path(tmp_path).unlink(missing_ok=True)
+
             if result.returncode != 0:
                 return False, "Invalid certificate: OpenSSL validation failed"
-            
+
             # Save certificate (as fullchain)
             fullchain_file.write_text(cert_content.strip() + "\n")
             fullchain_file.chmod(0o644)
-            
+
             # Save private key
             privkey_file.write_text(key_content.strip() + "\n")
             privkey_file.chmod(0o600)
-            
+
             # Create combined .pem for HAProxy
             combined_content = cert_content.strip() + "\n" + key_content.strip() + "\n"
             combined_file.write_text(combined_content)
             combined_file.chmod(0o600)
-            
+
+            self._invalidate_cert_info(cert_dir)
             logger.info(f"Uploaded certificate for {domain}")
             return True, f"Certificate for {domain} uploaded successfully"
             

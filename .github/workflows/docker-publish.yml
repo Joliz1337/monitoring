@@ -15,7 +15,43 @@ permissions:
   packages: write
 
 jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Матрица рендерера — чистый bash, Python-окружение ей не нужно,
+      # факты хоста подменяются через MON_FACT_*, выходы уходят в MON_RENDER_ROOT
+      - name: Configs renderer matrix
+        run: bash configs/tests/render-matrix.sh
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'  # как в node/Dockerfile
+          cache: pip
+          cache-dependency-path: node/requirements.txt
+
+      # Сами тесты — голый unittest, но модули под тестом импортируют
+      # fastapi/pydantic/docker/cryptography, поэтому рантайм агента нужен целиком
+      - name: Install node agent dependencies
+        run: pip install -r node/requirements.txt
+
+      - name: Node tests
+        working-directory: node
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'  # как в panel/backend/Dockerfile
+
+      # Генератор nginx-конфига обходится стандартной библиотекой, так что
+      # requirements панели (certbot, grpcio, asyncssh) здесь не ставятся
+      - name: Panel backend tests
+        working-directory: panel/backend
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+
   node-api:
+    needs: tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -38,6 +74,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=node-api
 
   panel-frontend:
+    needs: tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -62,6 +99,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=panel-frontend
 
   panel-backend:
+    needs: tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

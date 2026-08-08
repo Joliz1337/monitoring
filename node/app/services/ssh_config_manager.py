@@ -1,9 +1,11 @@
 import logging
-import os
 import re
 import subprocess
+import threading
 import time
+from pathlib import Path
 from typing import Optional
+from uuid import uuid4
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +57,17 @@ INT_KEYS = {
 }
 
 
+def _unique_tmp_path(prefix: str) -> str:
+    """Уникальный путь во временном каталоге ХОСТА.
+
+    tempfile здесь не подходит: команды идут через nsenter, файл создался бы
+    в ФС контейнера, а не там, куда пишет tee. Фиксированное имя позволяло бы
+    параллельному запросу подменить содержимое между валидацией sshd -t
+    и mv в /etc/ssh/sshd_config.
+    """
+    return f"/tmp/{prefix}.{uuid4().hex[:12]}"
+
+
 class SSHConfigManager:
 
     def __init__(self):
@@ -73,16 +86,15 @@ class SSHConfigManager:
     # ── Environment Detection ──
 
     def _detect_container(self) -> bool:
-        if os.path.exists("/.dockerenv"):
+        if Path("/.dockerenv").exists():
             return True
         try:
-            with open("/proc/1/cgroup", "r") as f:
-                content = f.read()
-                if "docker" in content or "containerd" in content or "kubepods" in content:
-                    return True
-        except Exception:
-            pass
-        return False
+            cgroup = Path("/proc/1/cgroup").read_text()
+        except OSError:
+            # Файла может не быть (cgroup v2 в ряде окружений) — это не ошибка,
+            # просто значит, что признаков контейнера тут не найти
+            return False
+        return any(marker in cgroup for marker in ("docker", "containerd", "kubepods"))
 
     def _detect_os(self) -> dict:
         info = {"distro": "unknown", "version": "", "pkg_manager": "apt"}
@@ -270,7 +282,7 @@ class SSHConfigManager:
         self._run_cmd(["chown", "root:root", "/run/sshd"])
 
     def test_sshd_config(self, config: dict) -> tuple[bool, list[str]]:
-        tmp_path = "/tmp/sshd_config_test"
+        tmp_path = _unique_tmp_path("sshd_config_test")
         try:
             current_config = self.read_sshd_config()
             merged = {**current_config, **config}
@@ -608,7 +620,7 @@ class SSHConfigManager:
 
         # Собираем новый конфиг
         new_content = self._build_sshd_content(merged)
-        tmp_path = "/tmp/sshd_config_new"
+        tmp_path = _unique_tmp_path("sshd_config_new")
 
         self._run_cmd(["tee", tmp_path], input_data=new_content)
 
@@ -1138,10 +1150,15 @@ class SSHConfigManager:
 
 
 _manager: Optional[SSHConfigManager] = None
+# Роутер создаёт менеджера из тред-пула (asyncio.to_thread), поэтому лок
+# именно threading: иначе два первых запроса запустили бы детект окружения дважды
+_manager_lock = threading.Lock()
 
 
 def get_ssh_config_manager() -> SSHConfigManager:
     global _manager
     if _manager is None:
-        _manager = SSHConfigManager()
+        with _manager_lock:
+            if _manager is None:
+                _manager = SSHConfigManager()
     return _manager

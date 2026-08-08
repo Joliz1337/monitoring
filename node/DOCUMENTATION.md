@@ -14,7 +14,7 @@ API агент для сбора метрик сервера, отслежива
 - **Remnawave Nginx** — обнаружение установки Remnawave на хосте (`/opt/remnawave` по умолчанию), приём и атомарное применение nginx.conf от панели (backup → in-place запись → `nginx -t` → reload, откат при ошибке), автоподстановка host-специфичных лимитов (`worker_rlimit_nofile`/`worker_connections`/`ssl_session_cache`) под MemTotal/nofile самой ноды, проверка существования сертификатов на хосте с автомонтированием недостающих каталогов в контейнер, валидация конфига через живой или одноразовый контейнер, reload/restart сервиса
 - **Синхронизация времени** — установка IANA timezone через `timedatectl`, включение NTP и принудительная синхронизация через `systemd-timesyncd`
 - **SSH Security** — управление SSH-безопасностью сервера: настройки sshd, fail2ban, SSH-ключи
-- **Wildcard SSL** — приём и деплой wildcard сертификатов от панели: запись файлов на хост, бэкап, откат при ошибке reload, валидация PEM через openssl
+- **Wildcard SSL** — приём и деплой wildcard сертификатов, выпущенных панелью: разбор и валидация PEM, запись файлов на хост, бэкап, откат при ошибке reload
 - **Firewall Profiles** — атомарное применение UFW-профилей от панели: backup → reset → apply → enable, авторолбэк при ошибке, node-API-port-guard (порт 9100), drift-детекция по SHA256-хэшу
 - **Анти-DDoS** — многослойная защита: дежурный режим без лимитов, аварийный режим (SYNPROXY + hashlimit в отдельной iptables-цепочке `ANTIDDOS`, пороги авто-масштабируются по CPU/RAM хоста), автодетект атаки по сигналам из `/proc` (watchdog), whitelist на ipset, переживающий ребут и недоступность панели, self-check доступности ноды во время аварийного режима
 - **Системные оптимизации** — sysctl/лимиты/HAProxy `maxconn` вычисляются на самой ноде из её MemTotal/nproc единым рендерером (`tune-sysctl.sh`), а не приходят готовыми от панели; авто-ре-рендер при каждой загрузке подхватывает ресайз VPS
@@ -108,9 +108,8 @@ node/
 ├── app/
 │   ├── main.py           # FastAPI приложение
 │   ├── config.py         # Pydantic Settings
-│   ├── auth.py           # API Key авторизация
 │   ├── models/
-│   │   ├── ssl.py        # Pydantic модели: WildcardDeployRequest/Response, WildcardStatusResponse
+│   │   ├── ssl.py        # Pydantic модели: WildcardDeployRequest/Response
 │   │   ├── firewall_profile.py  # Pydantic модели: ProfileRule, ProfileApplyRequest/Response, ProfileStateResponse
 │   │   └── remnawave_nginx.py   # Pydantic модели: NginxDiscoverResponse, NginxConfigResponse, NginxStatusResponse, NginxValidateRequest/Response, NginxApplyRequest/Response, NginxActionResponse
 │   ├── routers/          # API эндпоинты (metrics, haproxy, traffic, ssh, ssl, firewall, antiddos, remnawave и др.)
@@ -134,7 +133,6 @@ node/
 
 | Параметр | Описание | Default |
 |----------|----------|---------|
-| API_KEY | Ключ авторизации | auto |
 | NODE_NAME | Имя ноды | node-01 |
 | PANEL_IP | IP панели (для UFW) | задаётся при установке |
 | TRAFFIC_COLLECT_INTERVAL | Интервал сбора (сек) | 60 |
@@ -151,12 +149,10 @@ node/
 
 ## Безопасность
 
-- **API Key авторизация** (заголовок `X-API-Key`)
-- **Rate limiting**: 100 запросов/минуту
-- **Anti-brute force**: 10 попыток = бан на 1 час
+- **mTLS**: nginx на порту 9100 требует клиентский сертификат, подписанный панельным CA (`ssl_verify_client on`); без валидного сертификата соединение обрывается на TLS-handshake, до HTTP — приложение вообще не видит запрос
+- **Внутренний API изолирован**: uvicorn слушает только `127.0.0.1:7500` (`Dockerfile`), а не `0.0.0.0` — порт не проброшен наружу даже с `network_mode: host`, единственный путь на ноду снаружи — nginx с mTLS на 9100. Роутеры зарегистрированы без auth-зависимости именно поэтому: авторизация происходит раньше, на уровне TLS-хендшейка nginx
 - **TLS 1.2/1.3** с сильными шифрами
 - **UFW**: порт 9100 доступен только с IP панели
-- **Connection drop**: все ошибки авторизации (401/403/429) приводят к разрыву соединения без HTTP-ответа — атакующий не получает никакой информации
 
 ## API
 
@@ -175,6 +171,8 @@ node/
 | POST | /api/system/execute | Выполнить команду на хосте |
 | POST | /api/system/execute-stream | Выполнить команду с потоковым выводом (SSE) |
 | POST | /api/system/time-sync | Установить часовой пояс и синхронизировать NTP |
+
+**`POST /api/system/time-sync`** — значение `timezone` идёт в shell-команду (`timedatectl set-timezone ...`), исполняемую на хосте от root через `nsenter`, поэтому проверяется трижды: формат ограничен паттерном `^[A-Za-z0-9_+/-]+$` (`TIMEZONE_PATTERN`, набор символов IANA-имён без точки — «..» из каталога зон не выйти), сама подстановка идёт через `shlex.quote`, и до выполнения `timezone_exists_on_host()` сверяет имя с реальным файлом в `/usr/share/zoneinfo` на хосте (`test -f`), а не только с форматом.
 
 **Объединённый endpoint версий** (`/api/system/versions`):
 ```json
@@ -286,17 +284,13 @@ data: {"message": "error description"}
 - Если `docker compose up -d` упал на ожидании healthy у api (`depends_on`), оставив nginx в статусе `Created`, контейнеры поднимаются напрямую: `docker compose start` → `docker start monitoring-api monitoring-nginx`; тот же прямой старт выполняется и в recovery-trap.
 - Ожидание updater-контейнера в node-API (`system.py`): `container.wait` с таймаутом `UPDATER_WAIT_TIMEOUT = 7200` (2 часа) — при коротком таймауте обновление дольше него ошибочно помечалось бы «failed», а повторный запуск убивал бы ещё работающий updater.
 - rsync при работающих контейнерах безопасен: замена файлов идёт через rename (новый inode), bind-mounts запущенных контейнеров видят старые файлы до рестарта.
+- Каждый вызов Docker SDK (`get_docker_client`, `containers.get/run/wait/logs/remove`, `images.pull`) выполняется через `asyncio.to_thread` — SDK синхронный и общается с сокетом через `requests`; без обёртки pull образа на медленной сети (десятки минут) держал бы event loop и ронял бы `/health` посреди обновления. Флаг `in_progress` роутер выставляет **до** `asyncio.create_task`, а не внутри задачи — иначе два быстрых подряд запроса на обновление успевали бы пройти проверку раньше старта первого апдейтера.
 
 ### Метрики
 
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
 | GET | /api/metrics | Все метрики |
-| GET | /api/metrics/cpu | CPU |
-| GET | /api/metrics/memory | RAM |
-| GET | /api/metrics/disk | Диски |
-| GET | /api/metrics/network | Сеть |
-| GET | /api/metrics/processes | Процессы |
 | GET | /health | Health check |
 
 **Поле `antiddos` в `/api/metrics` (модель `AntiDdosInfo`, `AllMetrics.antiddos`):** режим, источник, время перехода в аварийный режим, состояние watchdog, заполнение conntrack, `insert_failed`, `SyncookiesSent`, дропы из `/proc/net/softnet_stat`, `ListenDrops`/`ListenOverflows`. Метод `MetricsCollector.get_antiddos_info()` (`metrics_collector.py`) читает `/proc` напрямую из смонтированного `/host/proc` — без `nsenter`, дешевле на каждый опрос метрик, в отличие от `antiddos_manager.py`, который дёргает `ddos-watchdog.sh` через nsenter только для управляющих команд. Хелперы: `_read_proc_int()`, `_read_hex_column_sum()` (суммирование по CPU из `/proc/net/stat/nf_conntrack`), `_read_netstat_counters()`.
@@ -332,7 +326,12 @@ data: {"message": "error description"}
 При ошибке `/start`, `/stop`, `/reload`, `/restart` возвращают `HTTP 500` с полем `detail`, содержащим реальную причину от менеджера (например: `"Restart failed: ..."`, `"Config validation failed: ..."`, `"HAProxy is not installed"`, `"Failed to stop: ..."`). Панель транслирует это сообщение в результатах массовых действий по каждому серверу.
 | GET | /api/haproxy/config | Получить конфиг |
 | POST | /api/haproxy/config/apply | Применить конфиг; тело `ConfigApplyRequest`: `config_content`, `ensure_started: bool = False` — при `True` поднимает остановленный HAProxy через `reload(auto_start=True)` |
-| GET | /api/haproxy/logs | Логи (journalctl, tail=100) |
+
+Изменения конфига (создание/обновление/удаление правила, apply) на роутере сериализованы общим `asyncio.Lock` (`_config_lock`) — панель шлёт такие запросы пачками (bulk-действия), а методы менеджера уходят в тред-пул, без лока параллельные правки затирали бы друг друга. На стороне менеджера снимок для отката (`_config_rollback()`) пишется в файл с уникальным именем (`haproxy.cfg.<uuid>.bak`) вместо общего `haproxy.cfg.bak` — общее имя означало бы, что откат одной операции подхватывает снимок другой, идущей параллельно, и возвращает конфиг к чужому состоянию.
+
+Поля `target_ip`/`cert_domain`/`target_port` валидируются регулярками (`TARGET_HOST_PATTERN`, `DOMAIN_PATTERN`/`OPTIONAL_DOMAIN_PATTERN` в `models/haproxy.py`) — оба значения подставляются прямо в текст `haproxy.cfg`, а домен сертификата ещё и в путь к файлу сертификата; белый список символов отсекает пробелы, переводы строк и `../` до того, как значение попадёт в конфиг или путь.
+
+Выпуск/продление сертификата через certbot ограничены таймаутом (`CERTBOT_ISSUE_TIMEOUT_SEC = 120`, `CERTBOT_RENEW_TIMEOUT_SEC = 300`): без него зависший certbot держал бы запрос, а при последовательных вызовах — и конфиг-лок бесконечно. `get_cert_info()` кэширует результат `openssl x509 -enddate` на час (`CERT_INFO_CACHE_TTL_SEC`) и вызывает `openssl` с таймаутом (`OPENSSL_TIMEOUT_SEC = 10`) — без кэша это форк `openssl` на каждый домен при каждом опросе метрик; кэш инвалидируется при выпуске/продлении/загрузке/удалении сертификата.
 
 ### Сертификаты
 
@@ -497,9 +496,11 @@ data: {"message": "error description"}
 - Запрет отключить все методы аутентификации одновременно
 - При смене порта — UFW правило открывается автоматически
 
+`SSHConfigManager` целиком синхронный (subprocess-вызовы) и перенастройка sshd занимает минуты (ожидание порта, стоп/старт службы, установка fail2ban) — роутер выполняет каждый вызов через `asyncio.to_thread`, иначе один такой запрос замораживал бы event loop вместе с `/health`, и docker-healthcheck убивал бы контейнер посреди перенастройки. Изменения sshd-конфига и ключей сериализованы `asyncio.Lock` (`_sshd_lock`) — параллельное применение чередовало бы бэкап, подмену конфига и рестарт службы, а параллельное удаление ключа между проверкой «authorized_keys не пуст» и применением отрезало бы доступ к серверу; fail2ban-операции — отдельным `_fail2ban_lock` (apt-get и restart fail2ban не переживают параллельного запуска). Временные файлы (`test_sshd_config`/`write_sshd_config`) получают уникальное имя (`_unique_tmp_path`, суффикс `uuid4`) вместо фиксированного — иначе параллельный запрос мог подменить содержимое между валидацией `sshd -t` и `mv` в `/etc/ssh/sshd_config`.
+
 **Файлы:**
 - `node/app/services/ssh_config_manager.py` — работа с sshd_config, fail2ban, authorized_keys
-- `node/app/routers/ssh.py` — API эндпоинты
+- `node/app/routers/ssh.py` — API эндпоинты, `asyncio.to_thread` + локи (см. выше)
 
 ### Wildcard SSL
 
@@ -508,20 +509,22 @@ data: {"message": "error description"}
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
 | POST | /api/ssl/wildcard/deploy | Принять и задеплоить wildcard сертификат |
-| GET | /api/ssl/wildcard/status | Статус последнего деплоя |
 
 **`POST /api/ssl/wildcard/deploy`** — принимает `WildcardDeployRequest`:
-- `cert_pem` — содержимое fullchain.pem
-- `key_pem` — содержимое privkey.pem
-- `deploy_path` — путь на хосте для записи файлов
-- `reload_cmd` — команда перезагрузки сервиса (например `systemctl reload nginx`)
+- `fullchain_pem` — содержимое fullchain.pem
+- `privkey_pem` — содержимое privkey.pem
+- `deploy_path` — каталог на хосте для записи файлов; имена задаются `fullchain_filename`/`privkey_filename`, либо путь целиком — через `custom_fullchain_path`/`custom_privkey_path`
+- `reload_command` — команда перезагрузки сервиса (например `systemctl reload nginx`)
 
 Алгоритм деплоя:
-1. Валидация сертификата через `openssl x509 -noout` и ключа через `openssl rsa -noout`
-2. Бэкап текущих файлов по `deploy_path` (если существуют)
-3. Запись новых файлов на хост через `nsenter`
-4. Выполнение `reload_cmd`
-5. Откат из бэкапа при ошибке reload
+1. Валидация сертификата через `cryptography` (`x509.load_pem_x509_certificate`) — разбор PEM происходит в процессе агента, без похода на хост
+2. Целевые пути (`deploy_path`/кастомные `custom_fullchain_path`/`custom_privkey_path`) проверяются регуляркой `_SAFE_PATH_RE` (абсолютный путь, только буквы/цифры/`._/-`) перед подстановкой в shell-команды на хосте (`shlex.quote` дополнительно на каждый аргумент)
+3. Бэкап текущих файлов по целевым путям (если существуют)
+4. Запись новых файлов на хост через `write_host_file()` (nsenter + base64)
+5. Выполнение `reload_command` (ограничен `MAX_RELOAD_COMMAND_LEN = 512` символов)
+6. Откат из бэкапа при ошибке reload
+
+PEM разбирается в процессе агента через `cryptography` (`x509.load_pem_x509_certificate`), а не внешним `openssl`: агент живёт в контейнере, а команды исполняет через `nsenter` в неймспейсах хоста, поэтому любая проверка через временный файл сверяла бы файл, которого на хосте нет. Из разобранного сертификата берутся CN и срок действия — они уходят в лог деплоя.
 
 **Файлы:**
 - `node/app/models/ssl.py` — Pydantic модели
@@ -580,7 +583,7 @@ data: {"message": "error description"}
 - `node/app/models/firewall_profile.py` — Pydantic модели
 - `node/app/services/firewall_manager.py` — `FirewallManager`: `apply_profile`, `_ensure_ufw`, `_ufw_available`, `_install_ufw`, `_run_host`, `_backup_state`, `_restore_state`, `compute_rules_hash`, `get_full_state`, `_rule_already_present`, `_normalize_from`
 - `node/app/routers/firewall_profile.py` — API роутер (prefix `/api/firewall`)
-- `node/app/main.py` — регистрация роутера с `verify_api_key`
+- `node/app/main.py` — регистрация роутера (без auth-зависимости — mTLS терминируется на nginx, см. «Безопасность» выше)
 
 ### Анти-DDoS
 
@@ -595,7 +598,6 @@ data: {"message": "error description"}
 | POST | /api/antiddos/watchdog | Включить/выключить автодетект (сервис watchdog продолжает работать, но не трогает правила) |
 | POST | /api/antiddos/whitelist/sync | Полная замена ipset-набора `antiddos_allow` (принимает `ips: string[]`) |
 | POST | /api/antiddos/install | Установить/обновить `ddos-watchdog.sh` + systemd-сервис на хосте, включить (`daemon-reload` → `enable` → `restart`) |
-| GET | /api/antiddos/client-ports | Автоопределённые клиентские TCP-порты (слушающие, кроме SSH (автоопределяется), 9100, 7500) |
 
 **Аварийный режим (цепочка `ANTIDDOS`, джамп из INPUT только пока активен), порядок правил документированной схемой netfilter:**
 1. DROP/ACCEPT по temp-блоклисту (`blocklist_temp`, если ipset-набор существует)

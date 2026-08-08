@@ -13,6 +13,7 @@ import re
 from dataclasses import dataclass
 
 from app.services.host_executor import get_host_executor
+from app.services.host_files import write_host_file
 
 logger = logging.getLogger(__name__)
 
@@ -64,13 +65,6 @@ class AntiDdosManager:
         result = await self._executor.execute(f"test -x {WATCHDOG_SCRIPT}", timeout=5)
         return result.exit_code == 0
 
-    async def _write_host_file(self, path: str, content: str) -> bool:
-        result = await self._executor.execute(
-            f"mkdir -p $(dirname {path}) && cat > {path} << 'EOFADDOS'\n{content}\nEOFADDOS",
-            timeout=10, shell="bash",
-        )
-        return result.success and result.exit_code == 0
-
     async def install(self, script_content: str, service_content: str,
                       enable_watchdog: bool = True) -> tuple[bool, str]:
         """Install ddos-watchdog.sh + service on the host and start it.
@@ -79,10 +73,9 @@ class AntiDdosManager:
         runs independently of Docker/panel. Watchdog auto-detection is on by
         default; the emergency ruleset stays dormant until a signal fires.
         """
-        if not await self._write_host_file(WATCHDOG_SCRIPT, script_content):
+        if not await write_host_file(WATCHDOG_SCRIPT, script_content, mode="755"):
             return False, "failed to write watchdog script"
-        await self._executor.execute(f"chmod +x {WATCHDOG_SCRIPT}", timeout=5)
-        if not await self._write_host_file(WATCHDOG_SERVICE_PATH, service_content):
+        if not await write_host_file(WATCHDOG_SERVICE_PATH, service_content, mode="644"):
             return False, "failed to write watchdog service"
 
         await self._executor.execute("systemctl daemon-reload", timeout=10)

@@ -125,7 +125,7 @@ class MetricsSnapshot(Base):
 
     # BigInteger: при 500 нодах int4-serial переполнился бы за ~1.5 года
     id = Column(BigInteger, primary_key=True)
-    server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), nullable=False, index=True)
+    server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), nullable=False)
     timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
     
     # CPU
@@ -173,6 +173,12 @@ class MetricsSnapshot(Base):
     
     __table_args__ = (
         Index('idx_metrics_server_time', 'server_id', 'timestamp'),
+        # Последний снапшот сервера ищется как max(id) с GROUP BY server_id —
+        # индекс по timestamp для этого не подходит, нужен порядок по id.
+        Index('idx_metrics_server_latest', 'server_id', 'id'),
+        # Одиночного индекса на server_id нет намеренно: он ведущая колонка обоих
+        # составных, а вставка идёт каждые 10 секунд по всем нодам — самый горячий
+        # путь записи в проекте, лишний индекс на нём дороже всего.
     )
 
 
@@ -333,6 +339,12 @@ class RemnawaveHwidDevice(Base):
     updated_at = Column(DateTime(timezone=True), nullable=True)
     synced_at = Column(DateTime(timezone=True), server_default=func.now())
 
+    __table_args__ = (
+        # synced_at несёт двойную нагрузку: по нему удаляются устройства, не попавшие
+        # в последнюю синхронизацию, и по нему же сортируется список устройств в API
+        Index('idx_hwid_devices_synced_at', 'synced_at'),
+    )
+
 
 class XrayStats(Base):
     """Пользователь -> IP: отслеживание одновременных подключений."""
@@ -387,6 +399,11 @@ class RemnawaveUserCache(Base):
     tag = Column(String(100), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=True)
     updated_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        # Кеш чистится удалением записей старше недели по updated_at
+        Index('idx_rw_user_cache_updated_at', 'updated_at'),
+    )
 
 
 # ==================== Torrent Blocker ====================
@@ -590,6 +607,10 @@ class AlertHistory(Base):
         Index('idx_alert_history_server', 'server_id'),
         Index('idx_alert_history_type', 'alert_type'),
         Index('idx_alert_history_created', 'created_at'),
+        # История листается страницами: фильтр по серверу либо по типу плюс
+        # сортировка по дате — одиночные индексы дают сортировку на выборке
+        Index('idx_alert_history_server_created', 'server_id', 'created_at'),
+        Index('idx_alert_history_type_created', 'alert_type', 'created_at'),
     )
 
 
@@ -728,6 +749,8 @@ class HAProxySyncLog(Base):
     __table_args__ = (
         Index('idx_sync_log_server', 'server_id'),
         Index('idx_sync_log_created', 'created_at'),
+        # Журнал читается только в разрезе профиля
+        Index('idx_sync_log_profile', 'profile_id'),
     )
 
 
@@ -763,6 +786,7 @@ class RemnawaveNginxSyncLog(Base):
     __table_args__ = (
         Index('idx_rw_nginx_sync_log_server', 'server_id'),
         Index('idx_rw_nginx_sync_log_created', 'created_at'),
+        Index('idx_rw_nginx_sync_log_profile', 'profile_id'),
     )
 
 
@@ -796,6 +820,7 @@ class FirewallSyncLog(Base):
     __table_args__ = (
         Index('idx_fw_sync_log_server', 'server_id'),
         Index('idx_fw_sync_log_created', 'created_at'),
+        Index('idx_fw_sync_log_profile', 'profile_id'),
     )
 
 
@@ -809,6 +834,12 @@ class ASNCache(Base):
     prefix = Column(String(50), nullable=True)
     holder = Column(String(200), nullable=True)
     cached_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        # Протухшие записи вычищаются на каждом lookup_ips — без индекса это
+        # seq scan всего кеша перед каждым разрешением ASN
+        Index('idx_asn_cache_cached_at', 'cached_at'),
+    )
 
 
 # ==================== Wildcard SSL ====================

@@ -12,13 +12,12 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
-from sqlalchemy import select, delete, update, bindparam
+from sqlalchemy import select, delete, update, bindparam, ColumnElement
 from app.services.http_client import get_node_client, node_auth_headers
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import async_session
+from app.database import async_session, Base
 from app.models import Server, ServerCache, MetricsSnapshot, AggregatedMetrics, PanelSettings
-from sqlalchemy import func as sql_func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 logger = logging.getLogger(__name__)
@@ -61,6 +60,8 @@ class MetricsCollector:
     HTTP_CONCURRENCY = 50  # max parallel HTTP requests to nodes
     DB_CONCURRENCY = 10    # max parallel DB sessions
     CLEANUP_INTERVAL = 300 # cleanup every 5 minutes, not every cycle
+    CLEANUP_CHUNK_ROWS = 50_000  # строк за один DELETE ретеншена
+    CLEANUP_MAX_CHUNKS = 20      # потолок проходов за вызов, хвост уйдёт в следующий
 
     CB_FAILURE_THRESHOLD = 3   # после стольких подряд неудач нода уходит в skip
     CB_SKIP_CYCLES = 3         # пропускать N циклов перед повторной попыткой
@@ -501,39 +502,68 @@ class MetricsCollector:
             "per_cpu_percent": json.dumps(per_cpu) if per_cpu else None,
         }
     
+    async def _delete_in_chunks(
+        self, db: AsyncSession, model: type[Base], *conditions: ColumnElement[bool]
+    ) -> int:
+        """Удаляет подходящие строки порциями, коммитя каждый проход.
+
+        Один DELETE на миллионы строк держал бы длинную транзакцию и всплеск WAL
+        прямо внутри цикла сбора метрик. Потолок проходов не даёт очистке залипнуть
+        на одном вызове — необработанный хвост уйдёт в следующий.
+        """
+        deleted = 0
+        for _ in range(self.CLEANUP_MAX_CHUNKS):
+            chunk = (
+                select(model.id)
+                .where(*conditions)
+                .limit(self.CLEANUP_CHUNK_ROWS)
+                .scalar_subquery()
+            )
+            result = await db.execute(
+                delete(model)
+                .where(model.id.in_(chunk))
+                .execution_options(synchronize_session=False)
+            )
+            await db.commit()
+            deleted += result.rowcount
+            if result.rowcount < self.CLEANUP_CHUNK_ROWS:
+                return deleted
+
+        logger.info(
+            f"Retention cleanup of {model.__tablename__} hit the chunk cap: "
+            f"{deleted} rows removed, rest deferred to next run"
+        )
+        return deleted
+
     async def _cleanup_old_data(self, db: AsyncSession):
         """Remove data older than retention periods.
-        
+
         Note: We use naive UTC datetime for consistent comparisons across platforms.
         """
         now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
-        
+
         # Cleanup raw data (24 hours)
         raw_cutoff = now_utc - timedelta(hours=self._raw_retention_hours)
-        await db.execute(
-            delete(MetricsSnapshot).where(MetricsSnapshot.timestamp < raw_cutoff)
+        await self._delete_in_chunks(
+            db, MetricsSnapshot, MetricsSnapshot.timestamp < raw_cutoff
         )
-        
+
         # Cleanup hourly aggregated data (30 days)
         hourly_cutoff = now_utc - timedelta(days=self._hourly_retention_days)
-        await db.execute(
-            delete(AggregatedMetrics).where(
-                AggregatedMetrics.period_type == 'hour',
-                AggregatedMetrics.timestamp < hourly_cutoff
-            )
+        await self._delete_in_chunks(
+            db, AggregatedMetrics,
+            AggregatedMetrics.period_type == 'hour',
+            AggregatedMetrics.timestamp < hourly_cutoff,
         )
-        
+
         # Cleanup daily aggregated data (365 days)
         daily_cutoff = now_utc - timedelta(days=self._daily_retention_days)
-        await db.execute(
-            delete(AggregatedMetrics).where(
-                AggregatedMetrics.period_type == 'day',
-                AggregatedMetrics.timestamp < daily_cutoff
-            )
+        await self._delete_in_chunks(
+            db, AggregatedMetrics,
+            AggregatedMetrics.period_type == 'day',
+            AggregatedMetrics.timestamp < daily_cutoff,
         )
-        
-        await db.commit()
-    
+
     async def _aggregation_loop(self):
         """Background loop for data aggregation"""
         while self._running:

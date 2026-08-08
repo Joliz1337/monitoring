@@ -4,6 +4,29 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+# target_ip и cert_domain подставляются прямо в текст haproxy.cfg, а домен
+# сертификата ещё и в путь к файлу. Опасны здесь пробел и перевод строки
+# (произвольная директива в конфиге) плюс «..» и слэш (выход за каталог
+# сертификатов); всё остальное сужать нельзя, иначе отвалятся адреса, которые
+# HAProxy принимает штатно.
+# Метка DNS-имени; подчёркивание разрешено — оно обычно во внутренних зонах.
+# Без look-ahead: pydantic компилирует pattern движком regex из Rust, который
+# его не поддерживает.
+_LABEL = r"[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?"
+
+# Домен сертификата уходит в путь, поэтому только метки и точки между ними:
+# пустых меток нет — значит не пройдут ни «..», ни ведущая точка, ни слэш.
+DOMAIN_PATTERN = rf"^{_LABEL}(?:\.{_LABEL})*$"
+# То же, но допускает пустую строку: у tcp-правил домена нет, и клиенты
+# присылают «» наравне с null.
+OPTIONAL_DOMAIN_PATTERN = rf"^(?:{_LABEL}(?:\.{_LABEL})*)?$"
+# Адрес бэкенда в путь не попадает, так что здесь хватает белого списка
+# символов: он покрывает hostname, IPv4 и все формы IPv6 — сжатую, в скобках,
+# с zone id, IPv4-mapped, — и при этом отсекает пробелы, кавычки, «;» и «#»,
+# которыми дописывают директиву. Пусто — у балансировщиков адрес задают
+# серверы бэкенда.
+TARGET_HOST_PATTERN = r"^[A-Za-z0-9._:%\[\]-]*$"
+
 
 class BackendServerModel(BaseModel):
     name: str
@@ -49,9 +72,9 @@ class HAProxyRuleBase(BaseModel):
     """Base rule model"""
     rule_type: str = Field(..., pattern="^(tcp|https)$", description="Rule type: tcp or https")
     listen_port: int = Field(..., ge=1, le=65535, description="Port to listen on")
-    target_ip: str = Field("", description="Target IP or hostname")
+    target_ip: str = Field("", pattern=TARGET_HOST_PATTERN, max_length=253, description="Target IP or hostname")
     target_port: int = Field(0, ge=0, le=65535, description="Target port")
-    cert_domain: Optional[str] = Field(None, description="Certificate domain (required for https)")
+    cert_domain: Optional[str] = Field(None, pattern=OPTIONAL_DOMAIN_PATTERN, max_length=253, description="Certificate domain (required for https)")
     target_ssl: bool = Field(False, description="Use SSL when connecting to target server")
     send_proxy: bool = Field(False, description="Enable PROXY protocol to backend")
     accept_proxy: bool = Field(False, description="Accept PROXY protocol on frontend bind")
@@ -70,9 +93,9 @@ class HAProxyRuleUpdate(BaseModel):
     """Model for updating a rule"""
     rule_type: Optional[str] = Field(None, pattern="^(tcp|https)$", description="Rule type: tcp or https")
     listen_port: Optional[int] = Field(None, ge=1, le=65535)
-    target_ip: Optional[str] = Field(None)
+    target_ip: Optional[str] = Field(None, pattern=TARGET_HOST_PATTERN, max_length=253)
     target_port: Optional[int] = Field(None, ge=0, le=65535)
-    cert_domain: Optional[str] = Field(None, description="Certificate domain (required for https)")
+    cert_domain: Optional[str] = Field(None, pattern=OPTIONAL_DOMAIN_PATTERN, max_length=253, description="Certificate domain (required for https)")
     target_ssl: Optional[bool] = Field(None, description="Use SSL when connecting to target server")
     send_proxy: Optional[bool] = Field(None, description="Enable PROXY protocol to backend")
     accept_proxy: Optional[bool] = Field(None, description="Accept PROXY protocol on frontend bind")
@@ -182,12 +205,6 @@ class CertificateRenewResponse(BaseModel):
     renewed_domains: list[str]
 
 
-class CertificateUpdateResponse(BaseModel):
-    """Combined certificate update result"""
-    updated_domains: list[str]
-    count: int
-
-
 class AllCertificatesResponse(BaseModel):
     """All certificates with details"""
     certificates: list[dict]
@@ -203,7 +220,7 @@ class CertificateDeleteResponse(BaseModel):
 
 class CertificateUploadRequest(BaseModel):
     """Request to upload custom certificate"""
-    domain: str = Field(..., min_length=1, max_length=253, description="Domain name")
+    domain: str = Field(..., pattern=DOMAIN_PATTERN, max_length=253, description="Domain name")
     cert_content: str = Field(..., min_length=1, description="Certificate content (PEM format)")
     key_content: str = Field(..., min_length=1, description="Private key content (PEM format)")
 

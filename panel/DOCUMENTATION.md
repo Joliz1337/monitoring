@@ -1,4 +1,4 @@
-# Monitoring Panel v10.43.0
+# Monitoring Panel v10.44.0
 
 Веб-панель для мониторинга серверов. Собирает метрики с нод с настраиваемым интервалом (по умолчанию 10 сек) и хранит историю локально.
 
@@ -141,6 +141,10 @@ panel/
 │           ├── recovery_reconciler.py   # Авто-восстановление ноды после offline→online: drift-detection + переприменение firewall/haproxy/blocklist
 │           └── bulk_job_manager.py      # In-memory реестр фоновых массовых операций (по образцу deploy_job_manager)
 ├── nginx/             # Reverse proxy с SSL
+├── scripts/
+│   ├── apply-update.sh          # Обновление панели, запускается из свежего клона (см. «Механизм обновления»)
+│   ├── generate-nginx-config.sh # Рендер nginx.conf панели
+│   └── pg-tune.sh                # Расчёт PostgreSQL-настроек из RAM хоста; подключается deploy.sh и apply-update.sh (см. «База данных»)
 ├── docker-compose.yml # Образы из GHCR + fallback build
 ├── deploy.sh          # Установка: docker compose pull + up
 └── VERSION            # Версия панели (единственный источник)
@@ -153,7 +157,7 @@ Docker-образы автоматически билдятся **GitHub Actions
 - `ghcr.io/joliz1337/monitoring-panel-backend:latest` (main) / `:dev` (dev)
 - `ghcr.io/joliz1337/monitoring-node-api:latest` (main) / `:dev` (dev)
 
-CI/CD: `.github/workflows/docker-publish.yml` — 3 параллельных job (node-api, panel-frontend, panel-backend) с GHA кешем; тег образа берётся из имени ветки (`env.IMAGE_TAG`, `main` → `latest`, `dev` → `dev`).
+CI/CD: `.github/workflows/docker-publish.yml` — job `tests` (матрица рендерера `configs/tests/render-matrix.sh`, `python -m unittest` для `node/tests` и `panel/backend/tests`) запускается первым; 3 параллельных job сборки образов (node-api, panel-frontend, panel-backend) с GHA кешем зависят от него (`needs: tests`) и не запускаются, если тесты упали. Тег образа берётся из имени ветки (`env.IMAGE_TAG`, `main` → `latest`, `dev` → `dev`).
 
 Установка и обновление: `docker compose pull` → `docker compose up -d`. Если GHCR недоступен — fallback на локальный `docker compose build` из Dockerfile. Какой именно тег тянет `docker compose pull`, определяет `${MON_IMAGE_TAG:-latest}` в `image:` (`panel/docker-compose.yml`, `node/docker-compose.yml`) — переменная в `.env` пишется установщиком/апдейтером по каналу обновлений, см. ниже.
 
@@ -281,6 +285,36 @@ Visibility effect пропускает первый mount через `mountedRef
 - Batch upsert (ON CONFLICT) — 10-100x быстрее записи статистики
 - Надёжность и масштабируемость
 
+### Тюнинг под RAM хоста
+
+Дефолты образа `postgres` (`shared_buffers=128MB` и т.п.) рассчитаны на игрушечную базу, а сюда каждые 10 секунд пишутся метрики со всех нод — на дедике с большим объёмом RAM это оставляло бы почти всю память неиспользованной, при этом плоская константа, комфортная для дедика, не дала бы postgres стартовать на VPS с 2 ГБ.
+
+`panel/scripts/pg-tune.sh` (функция `tune_postgres_env`) при установке (`deploy.sh`) и при каждом обновлении (`scripts/apply-update.sh`) считает по `/proc/meminfo` хоста и дописывает в `.env`, только если ключа там ещё нет (значения, заданные оператором вручную, не трогаются):
+
+| Переменная | Формула (RAM хоста в МБ) | Диапазон |
+|------------|--------------------------|----------|
+| `POSTGRES_SHARED_BUFFERS` | RAM / 4 | 128–8192 МБ (выше буферный кэш не окупается — чекпоинты дорожают, страницы и так задублированы в page cache ОС) |
+| `POSTGRES_EFFECTIVE_CACHE_SIZE` | RAM × 3/5 | 512–196608 МБ |
+| `POSTGRES_WORK_MEM` | RAM / 512 | 4–64 МБ (память на сортировку, а не на соединение; пул бэкенда — до 120 коннектов, щедрый `work_mem` на маленьком хосте даёт кратный перерасход) |
+| `POSTGRES_MAINTENANCE_WORK_MEM` | RAM / 20 | 64–2048 МБ |
+| `POSTGRES_MAX_WAL_SIZE` | RAM / 8 | 1024–4096 МБ |
+
+Общий скрипт для установщика и апдейтера — иначе формулы на свежей установке и после обновления могли бы разъехаться. Значения подставляются в `command:` контейнера `postgres` (`panel/docker-compose.yml`) через `${POSTGRES_SHARED_BUFFERS:-128MB}` и т.п. — файл перезаписывается при каждом обновлении у всех, поэтому дефолт-заглушка держится на потолке для 2-ГБ VPS. Там же — `checkpoint_completion_target=0.9` и агрессивнее дефолта пороги автовакуума (`autovacuum_naptime=30s`, `autovacuum_vacuum_scale_factor=0.05`, `autovacuum_analyze_scale_factor=0.02`, `autovacuum_vacuum_cost_limit=1000`): таблицы истории метрик постоянно в мусоре, дефолтные пороги (20% таблицы, naptime 60s) и cost_limit пускают автовакуум слишком поздно и растягивают его на часы. `shm_size: 256mb` на контейнере postgres — параллельные запросы берут рабочую память из `/dev/shm`, а дефолтные докеровские 64 МБ не хватает при поднятом `work_mem`.
+
+### Индексы и autovacuum под фактические запросы
+
+Кроме `idx_metrics_server_time` (`server_id`, `timestamp`), заведены точечные индексы под конкретные запросы панели: `idx_metrics_server_latest` (`server_id`, `id`) — под поиск последнего снапшота сервера (`max(id)` с `GROUP BY server_id`, для чего индекс по `timestamp` планировщику бесполезен); `idx_asn_cache_cached_at` — под чистку протухшего ASN-кэша перед каждым резолвом IP; `idx_hwid_devices_synced_at` — под удаление устройств, не попавших в синхронизацию, и сортировку списка в API; `idx_rw_user_cache_updated_at` — под чистку кэша пользователей Remnawave старше недели; `idx_alert_history_server_created` и `idx_alert_history_type_created` — под пагинацию истории алертов (фильтр по серверу или типу + сортировка по дате); `idx_sync_log_profile`, `idx_rw_nginx_sync_log_profile`, `idx_fw_sync_log_profile` — журналы синхронизации читаются только в разрезе профиля. Одиночного индекса на `metrics_snapshots.server_id` нет намеренно: он полностью покрыт составными `idx_metrics_server_time`/`idx_metrics_server_latest`, а оплачивался бы на вставке метрик каждые 10 секунд по всем нодам — самом горячем пути записи в проекте.
+
+У `xray_stats` занижены пороги автовакуума (`autovacuum_vacuum_scale_factor=0.02`, `autovacuum_vacuum_threshold=1000`, `autovacuum_analyze_scale_factor=0.05`) — таблица переписывается целиком (`DELETE` + `INSERT`) каждый цикл сбора Remnawave-статистики, то есть за час даёт больше мёртвых кортежей, чем строк в самой таблице, а дефолтный порог (20% + 50 строк) просыпается слишком поздно. `TRUNCATE` вместо `DELETE` не используется: он берёт `ACCESS EXCLUSIVE`-лок, который встал бы поперёк читателей страницы Remnawave на всё время цикла.
+
+Все индексы и `ALTER TABLE ... SET (autovacuum_...)` заведены отдельной идемпотентной миграцией `_migrate_db_optimizations` — каждый DDL в своём `try/except`, сбой одного не отменяет остальные.
+
+### Массовые операции: устранение N+1
+
+Reorder-эндпоинты (серверы, HAProxy-профили, Firewall-профили, Remnawave Nginx-профили) переставляют весь список одним `executemany` через `bindparam` и `conn.execute()` — не `session.execute()`: ORM-путь bulk-by-PK требует id внутри `values`, а здесь нужен `WHERE` по bind-параметру. `POST /api/blocklist/global/bulk` проверяет существование адресов пачками по 5000 (`asyncpg` не принимает больше 32767 bind-параметров на запрос) и вставляет все новые записи одним bulk `INSERT`, без запроса на каждый IP.
+
+Ретеншен метрик (`_cleanup_old_data`) удаляет устаревшие строки порциями по 50 000 (`CLEANUP_CHUNK_ROWS`), коммитя каждый проход, с потолком 20 проходов за вызов (`CLEANUP_MAX_CHUNKS`) — необработанный хвост уходит в следующий запуск. Один `DELETE` на миллионы строк держал бы длинную транзакцию и всплеск WAL прямо внутри цикла сбора метрик.
+
 ### Миграции и FK-ограничения
 
 `database.py` содержит функцию `run_migrations()`, которая запускается при каждом старте приложения в режиме `AUTOCOMMIT` (каждый DDL в своей транзакции — неудачный ALTER TABLE не ломает остальные).
@@ -356,6 +390,7 @@ PK таблицы — `BigInteger` (не int32). При 500 нодах с инт
 | POSTGRES_USER | Пользователь PostgreSQL | panel |
 | POSTGRES_PASSWORD | Пароль PostgreSQL | auto |
 | POSTGRES_DB | Имя базы данных | panel |
+| POSTGRES_SHARED_BUFFERS, POSTGRES_EFFECTIVE_CACHE_SIZE, POSTGRES_WORK_MEM, POSTGRES_MAINTENANCE_WORK_MEM, POSTGRES_MAX_WAL_SIZE | Память PostgreSQL — считаются из RAM хоста скриптом `scripts/pg-tune.sh` при установке/обновлении, см. «База данных» | авто (по RAM хоста) |
 
 ## Порты
 

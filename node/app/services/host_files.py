@@ -1,9 +1,12 @@
 """Чтение и запись файлов хоста через nsenter."""
 
 import base64
+import logging
 from typing import Optional
 
 from app.services.host_executor import get_host_executor
+
+logger = logging.getLogger(__name__)
 
 
 async def read_host_file(path: str) -> Optional[str]:
@@ -57,4 +60,10 @@ async def write_host_file(path: str, content: str, mode: Optional[str] = None) -
         cmd += f" && chmod {mode} {path}"
 
     result = await executor.execute(cmd, timeout=20, shell="bash")
-    return result.success and result.exit_code == 0
+    if result.success and result.exit_code == 0:
+        return True
+
+    # Вызывающие получают только bool, поэтому причина (нет места, read-only fs,
+    # отказ nsenter) видна лишь отсюда — без этой строки она терялась совсем.
+    logger.error(f"Host file write failed: {path}: {result.stderr.strip() or 'exit code ' + str(result.exit_code)}")
+    return False

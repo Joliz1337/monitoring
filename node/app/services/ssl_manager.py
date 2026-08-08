@@ -1,13 +1,36 @@
 import logging
-import tempfile
+import re
+import shlex
 from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Optional
 
-from app.models.ssl import WildcardDeployRequest, WildcardDeployResponse, WildcardStatusResponse
+from cryptography import x509
+from cryptography.x509.oid import NameOID
+
+from app.models.ssl import WildcardDeployRequest, WildcardDeployResponse
 from app.services.host_executor import get_host_executor
+from app.services.host_files import write_host_file
 
 logger = logging.getLogger(__name__)
+
+# Пути приходят от панели и подставляются в shell-команды nsenter. Помимо
+# shlex.quote при подстановке отсекаем всё, что не похоже на обычный
+# абсолютный путь: в двойных кавычках shell всё равно раскрыл бы $(...).
+_SAFE_PATH_RE = re.compile(r"^/[A-Za-z0-9._/-]+$")
+
+DEFAULT_FULLCHAIN_NAME = "fullchain.pem"
+DEFAULT_PRIVKEY_NAME = "privkey.pem"
+
+# reload_command исполняется на хосте как есть — панель доверенная, но длина
+# ограничена, чтобы опечатка в её настройках не ушла в exec целой простынёй.
+MAX_RELOAD_COMMAND_LEN = 512
+
+
+def _describe_certificate(cert: x509.Certificate) -> str:
+    common_names = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+    subject = common_names[0].value if common_names else "no CN"
+    return f"{subject}, valid until {cert.not_valid_after_utc:%Y-%m-%d}"
 
 
 class SSLManager:
@@ -20,12 +43,20 @@ class SSLManager:
         if err:
             return WildcardDeployResponse(success=False, message=err)
 
-        valid, verr = await self._validate_pem(request.fullchain_pem)
-        if not valid:
-            return WildcardDeployResponse(success=False, message=f"Invalid certificate: {verr}")
+        reload_command = request.reload_command.strip()
+        if len(reload_command) > MAX_RELOAD_COMMAND_LEN:
+            return WildcardDeployResponse(
+                success=False,
+                message=f"reload_command is longer than {MAX_RELOAD_COMMAND_LEN} characters",
+            )
+
+        try:
+            certificate = x509.load_pem_x509_certificate(request.fullchain_pem.encode("utf-8"))
+        except ValueError as exc:
+            return WildcardDeployResponse(success=False, message=f"Invalid certificate: {exc}")
 
         for path in {str(PurePosixPath(fullchain_path).parent), str(PurePosixPath(privkey_path).parent)}:
-            mk = await self._executor.execute(f'mkdir -p "{path}"', timeout=10)
+            mk = await self._executor.execute(f"mkdir -p {shlex.quote(path)}", timeout=10)
             if not mk.success:
                 return WildcardDeployResponse(
                     success=False,
@@ -47,8 +78,9 @@ class SSLManager:
             )
 
         reload_result = None
-        if request.reload_command.strip():
-            reload = await self._executor.execute(request.reload_command, timeout=30)
+        if reload_command:
+            logger.warning(f"Running panel-supplied reload command on host: {reload_command}")
+            reload = await self._executor.execute(reload_command, timeout=30)
             reload_result = {
                 "exit_code": reload.exit_code,
                 "stdout": reload.stdout,
@@ -69,9 +101,12 @@ class SSLManager:
                     message=f"Reload command failed: {reload.stderr}",
                     reload_result=reload_result
                 )
-            logger.info(f"Reload command succeeded: {request.reload_command}")
+            logger.info("Reload command succeeded")
 
-        logger.info(f"Wildcard certificate deployed: {fullchain_path}, {privkey_path}")
+        logger.info(
+            f"Wildcard certificate deployed ({_describe_certificate(certificate)}): "
+            f"{fullchain_path}, {privkey_path}"
+        )
         return WildcardDeployResponse(
             success=True,
             message="Certificate deployed successfully",
@@ -83,27 +118,35 @@ class SSLManager:
         self, request: WildcardDeployRequest
     ) -> tuple[str, str, Optional[str]]:
         if request.custom_fullchain_path and request.custom_privkey_path:
-            fullchain = request.custom_fullchain_path.strip()
-            privkey = request.custom_privkey_path.strip()
-            if not fullchain.startswith("/") or not privkey.startswith("/"):
-                return "", "", "Custom paths must be absolute"
-            return fullchain, privkey, None
+            return self._validated_pair(
+                request.custom_fullchain_path.strip(),
+                request.custom_privkey_path.strip(),
+            )
 
-        if not request.deploy_path.strip():
+        base = request.deploy_path.strip().rstrip("/")
+        if not base:
             return "", "", "deploy_path is required when custom paths are not set"
 
-        base = request.deploy_path.rstrip("/")
-        if not base.startswith("/"):
-            return "", "", "deploy_path must be absolute"
-        fullchain_name = (request.fullchain_filename or "fullchain.pem").strip() or "fullchain.pem"
-        privkey_name = (request.privkey_filename or "privkey.pem").strip() or "privkey.pem"
-        return f"{base}/{fullchain_name}", f"{base}/{privkey_name}", None
+        fullchain_name = (request.fullchain_filename or "").strip() or DEFAULT_FULLCHAIN_NAME
+        privkey_name = (request.privkey_filename or "").strip() or DEFAULT_PRIVKEY_NAME
+        return self._validated_pair(f"{base}/{fullchain_name}", f"{base}/{privkey_name}")
+
+    @staticmethod
+    def _validated_pair(fullchain: str, privkey: str) -> tuple[str, str, Optional[str]]:
+        for path in (fullchain, privkey):
+            if not _SAFE_PATH_RE.match(path):
+                return "", "", (
+                    f"Unsafe target path {path!r}: expected an absolute path "
+                    "without spaces or shell metacharacters"
+                )
+        return fullchain, privkey, None
 
     async def _backup_existing(
         self, fullchain_path: str, privkey_path: str
     ) -> Optional[str]:
         check = await self._executor.execute(
-            f'test -f "{fullchain_path}" && echo "f"; test -f "{privkey_path}" && echo "k"; true',
+            f'test -f {shlex.quote(fullchain_path)} && echo "f"; '
+            f'test -f {shlex.quote(privkey_path)} && echo "k"; true',
             timeout=5
         )
         has_full = "f" in check.stdout
@@ -113,11 +156,11 @@ class SSLManager:
 
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_dir = f"{PurePosixPath(fullchain_path).parent}/backup_{ts}"
-        cmds = [f'mkdir -p "{backup_dir}"']
+        cmds = [f"mkdir -p {shlex.quote(backup_dir)}"]
         if has_full:
-            cmds.append(f'cp "{fullchain_path}" "{backup_dir}/"')
+            cmds.append(f"cp {shlex.quote(fullchain_path)} {shlex.quote(backup_dir)}/")
         if has_key:
-            cmds.append(f'cp "{privkey_path}" "{backup_dir}/"')
+            cmds.append(f"cp {shlex.quote(privkey_path)} {shlex.quote(backup_dir)}/")
 
         bk = await self._executor.execute(" && ".join(cmds), timeout=10)
         if not bk.success:
@@ -126,60 +169,6 @@ class SSLManager:
         logger.info(f"Backed up existing certs to {backup_dir}")
         return backup_dir
 
-    async def get_status(self, deploy_path: str) -> WildcardStatusResponse:
-        deploy_path = deploy_path.rstrip("/")
-        cert_file = f"{deploy_path}/fullchain.pem"
-
-        check = await self._executor.execute(f'test -f "{cert_file}" && echo "exists"', timeout=5)
-        if "exists" not in check.stdout:
-            return WildcardStatusResponse(deployed=False, cert_path=deploy_path)
-
-        result = await self._executor.execute(
-            f'openssl x509 -enddate -subject -noout -in "{cert_file}"',
-            timeout=10
-        )
-        if not result.success:
-            return WildcardStatusResponse(deployed=True, cert_path=deploy_path)
-
-        domain = None
-        expiry_date = None
-        days_left = None
-
-        for line in result.stdout.strip().split("\n"):
-            if line.startswith("notAfter="):
-                try:
-                    expiry_str = line.replace("notAfter=", "")
-                    expiry = datetime.strptime(expiry_str, "%b %d %H:%M:%S %Y %Z")
-                    expiry_date = expiry.isoformat()
-                    days_left = (expiry - datetime.utcnow()).days
-                except ValueError:
-                    pass
-            elif "CN" in line:
-                cn_part = line.split("CN")[-1].strip().lstrip("=").strip()
-                if cn_part:
-                    domain = cn_part
-
-        return WildcardStatusResponse(
-            deployed=True,
-            domain=domain,
-            expiry_date=expiry_date,
-            days_left=days_left,
-            cert_path=deploy_path
-        )
-
-    async def _validate_pem(self, pem_content: str) -> tuple[bool, str]:
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".pem", delete=False) as f:
-            f.write(pem_content)
-            tmp_path = f.name
-
-        result = await self._executor.execute(
-            f'openssl x509 -noout -in "{tmp_path}" 2>&1; rm -f "{tmp_path}"',
-            timeout=10
-        )
-        if result.exit_code != 0:
-            return False, result.stdout + result.stderr
-        return True, ""
-
     async def _write_cert_files(
         self,
         fullchain_path: str,
@@ -187,22 +176,14 @@ class SSLManager:
         fullchain: str,
         privkey: str,
     ) -> tuple[bool, str]:
+        # Права выставляются тем же вызовом, что и запись: отдельный chmod оставлял бы
+        # приватный ключ читаемым всем на время между двумя командами.
         for filepath, content, mode in [
             (fullchain_path, fullchain, "644"),
             (privkey_path, privkey, "600"),
         ]:
-            write_cmd = f"cat > '{filepath}' << 'CERTEOF'\n{content}\nCERTEOF"
-            result = await self._executor.execute(write_cmd, timeout=10, shell="bash")
-            if not result.success:
-                return False, f"{filepath}: {result.stderr}"
-
-            chmod = await self._executor.execute(
-                f"chmod {mode} '{filepath}'", timeout=5, shell="bash"
-            )
-            if not chmod.success:
-                logger.warning(
-                    f"chmod {mode} {filepath} failed (ignored, filesystem may not support it): {chmod.stderr.strip()}"
-                )
+            if not await write_host_file(filepath, content, mode=mode):
+                return False, f"{filepath} (причина в логах ноды)"
 
         return True, ""
 
@@ -210,13 +191,11 @@ class SSLManager:
         self, backup_path: str, fullchain_path: str, privkey_path: str
     ) -> None:
         logger.warning(f"Rolling back from {backup_path}")
-        fullchain_name = PurePosixPath(fullchain_path).name
-        privkey_name = PurePosixPath(privkey_path).name
-        await self._executor.execute(
-            f'cp "{backup_path}/{fullchain_name}" "{fullchain_path}" 2>/dev/null; '
-            f'cp "{backup_path}/{privkey_name}" "{privkey_path}" 2>/dev/null; true',
-            timeout=10
-        )
+        restores = []
+        for path in (fullchain_path, privkey_path):
+            saved = f"{backup_path}/{PurePosixPath(path).name}"
+            restores.append(f"cp {shlex.quote(saved)} {shlex.quote(path)} 2>/dev/null")
+        await self._executor.execute("; ".join(restores) + "; true", timeout=10)
 
 
 _ssl_manager: Optional[SSLManager] = None

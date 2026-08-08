@@ -225,7 +225,7 @@ bash install.sh --unattended
 
 Подробная документация по каждому компоненту:
 
-- [panel/DOCUMENTATION.md](panel/DOCUMENTATION.md) — веб-панель: API, БД, конфигурация, безопасность (v10.43.0)
+- [panel/DOCUMENTATION.md](panel/DOCUMENTATION.md) — веб-панель: API, БД, конфигурация, безопасность (v10.44.0)
 - [node/DOCUMENTATION.md](node/DOCUMENTATION.md) — нода-агент: API, метрики, HAProxy, трафик, Remnawave, Remnawave Nginx, Firewall Profiles, Системные оптимизации, Анти-DDoS
 
 ## Архитектура
@@ -247,11 +247,13 @@ Browser → nginx (SSL) → panel frontend (React)
 
 Бэкенд использует SQLAlchemy async pool (`pool_size=40`, `max_overflow=80`). Ключевой паттерн масштабируемости: сессия БД закрывается (`await db.commit()`) **до** любых сетевых запросов к нодам — медленные или зависшие ноды не удерживают коннекты пула. Неограниченные fan-out по нодам ограничены `asyncio.Semaphore`. PostgreSQL настроен на `max_connections=200` (задаётся в `panel/docker-compose.yml`).
 
+Память PostgreSQL (`shared_buffers`, `effective_cache_size`, `work_mem`, `maintenance_work_mem`, `max_wal_size`) считается из RAM хоста при установке и обновлении общим `panel/scripts/pg-tune.sh` — дефолты образа (`shared_buffers=128MB`) рассчитаны на игрушечную базу, а сюда каждые 10 секунд пишутся метрики со всех нод; подробности — в [panel/DOCUMENTATION.md](panel/DOCUMENTATION.md#база-данных).
+
 Следующий архитектурный шаг при дальнейшем росте (когда bounded-семафоров и `max_connections=200` станет мало) — PgBouncer в режиме transaction pooling. На текущем масштабе не требуется.
 
 ## CI/CD
 
-Docker-образы собираются GitHub Actions (`.github/workflows/docker-publish.yml`) при пуше в `main` и в `dev`, публикуются в GHCR под тегом по ветке (`main` → `:latest`, `dev` → `:dev`):
+Docker-образы собираются GitHub Actions (`.github/workflows/docker-publish.yml`) при пуше в `main` и в `dev`, публикуются в GHCR под тегом по ветке (`main` → `:latest`, `dev` → `:dev`). Job `tests` (матрица рендерера `configs/tests/render-matrix.sh`, юнит-тесты ноды и панели) выполняется первым и гейтит сборку всех трёх образов (`needs: tests`) — образ не публикуется, если тесты не прошли:
 - `ghcr.io/joliz1337/monitoring-panel-frontend:latest` / `:dev`
 - `ghcr.io/joliz1337/monitoring-panel-backend:latest` / `:dev`
 - `ghcr.io/joliz1337/monitoring-node-api:latest` / `:dev`
