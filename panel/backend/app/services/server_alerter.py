@@ -7,11 +7,11 @@ from urllib.parse import urlparse
 from typing import Optional
 
 from sqlalchemy import select, delete, func
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import async_session
 from app.models import Server, AlertSettings, AlertHistory
 from app.services.http_client import get_node_client, node_auth_headers
+from app.services.traffic_ingest import get_traffic_ingest
 
 ALERT_HISTORY_RETENTION_DAYS = 30
 
@@ -45,11 +45,6 @@ class ServerAlertState:
         self.ema_tcp_synsent: float = 0.0
         self.ema_tcp_synrecv: float = 0.0
         self.ema_tcp_finwait: float = 0.0
-
-        self.prev_net_rx: float = 0.0
-        self.prev_net_tx: float = 0.0
-        self.prev_time: float = 0.0
-        self.net_initialized: bool = False
 
         self.load_avg_fail_count: int = 0
 
@@ -298,17 +293,20 @@ class ServerAlerter:
 
         cpu_val = self._extract_cpu(metrics)
         ram_val = self._extract_ram(metrics)
-        raw_rx, raw_tx = self._extract_network(metrics)
         tcp = self._extract_tcp(metrics)
 
-        net_rx_speed, net_tx_speed = self._calc_net_speed(
-            state, raw_rx, raw_tx, metrics.get("collected_at")
+        # Скорость сети берём у учёта трафика: он единственный владелец дельт по
+        # счётчикам интерфейсов. Своя вторая формула расходилась с историей после
+        # ребута ноды — сброс счётчика там и здесь трактовался по-разному.
+        speeds = get_traffic_ingest().speed_for(
+            srv.id, metrics.get("collected_at") or time.time()
         )
 
         state.update_ema("ema_cpu", cpu_val)
         state.update_ema("ema_ram", ram_val)
-        state.update_ema("ema_net_rx", net_rx_speed)
-        state.update_ema("ema_net_tx", net_tx_speed)
+        if speeds is not None:
+            state.update_ema("ema_net_rx", speeds.rx_bytes_per_sec)
+            state.update_ema("ema_net_tx", speeds.tx_bytes_per_sec)
         state.update_ema("ema_tcp_established", tcp.get("established", 0))
         state.update_ema("ema_tcp_listen", tcp.get("listen", 0))
         state.update_ema("ema_tcp_timewait", tcp.get("time_wait", 0))
@@ -356,10 +354,10 @@ class ServerAlerter:
             )
 
         # --- Network ---
-        if settings.network_enabled and srv.id not in tex["network"]:
+        if settings.network_enabled and speeds is not None and srv.id not in tex["network"]:
             await self._check_deviation_both(
                 srv, state, settings, now, cooldown,
-                current_val=net_rx_speed + net_tx_speed,
+                current_val=speeds.rx_bytes_per_sec + speeds.tx_bytes_per_sec,
                 ema_val=state.ema_net_rx + state.ema_net_tx,
                 spike_pct=settings.network_spike_percent,
                 drop_pct=settings.network_drop_percent,
@@ -971,47 +969,6 @@ class ServerAlerter:
         mem = metrics.get("memory", {})
         ram = mem.get("ram", {})
         return ram.get("percent", 0) or 0
-
-    @staticmethod
-    def _extract_network(metrics: dict) -> tuple[float, float]:
-        """Extract raw cumulative byte counters (NOT speed)."""
-        net = metrics.get("network", {})
-        total = net.get("total", {})
-        return total.get("rx_bytes", 0) or 0, total.get("tx_bytes", 0) or 0
-
-    @staticmethod
-    def _calc_net_speed(
-        state: "ServerAlertState",
-        raw_rx: float,
-        raw_tx: float,
-        collected_at: Optional[float] = None,
-    ) -> tuple[float, float]:
-        """Calculate bytes/sec from consecutive cumulative counter readings.
-
-        collected_at — момент получения метрик коллектором: счётчики двигаются
-        в темпе опроса нод, а не тиков алертера, поэтому дельту байт делим на
-        интервал между выборками, иначе скорость искажается и даёт ложные алерты.
-        """
-        current_time = collected_at or time.time()
-        rx_speed = 0.0
-        tx_speed = 0.0
-
-        if state.net_initialized and state.prev_time > 0:
-            dt = current_time - state.prev_time
-            if dt > 0.5:
-                rx_diff = raw_rx - state.prev_net_rx
-                tx_diff = raw_tx - state.prev_net_tx
-                if rx_diff >= 0:
-                    rx_speed = rx_diff / dt
-                if tx_diff >= 0:
-                    tx_speed = tx_diff / dt
-
-        state.prev_net_rx = raw_rx
-        state.prev_net_tx = raw_tx
-        state.prev_time = current_time
-        state.net_initialized = True
-
-        return rx_speed, tx_speed
 
     @staticmethod
     def _extract_tcp(metrics: dict) -> dict:

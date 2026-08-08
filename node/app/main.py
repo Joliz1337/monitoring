@@ -15,7 +15,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from app.config import get_settings
 from app.routers import haproxy, metrics, traffic, system, ipset, remnawave, ssh, ssl, firewall_profile, antiddos
 from app.services.metrics_collector import get_collector as get_metrics_collector
-from app.services.traffic_collector import get_traffic_collector
+from app.services.port_traffic_sampler import get_port_traffic_sampler
 from app.services.ipset_manager import get_ipset_manager
 
 logging.basicConfig(
@@ -39,13 +39,13 @@ async def lifespan(app: FastAPI):
     success, msg = haproxy_manager.full_init()
     logger.info(f"HAProxy initialization: {msg}")
 
-    traffic_collector = get_traffic_collector()
+    port_sampler = get_port_traffic_sampler()
     try:
-        await traffic_collector.init()
-        await traffic_collector.start()
-        logger.info("Traffic collector started")
+        await port_sampler.init()
+        await port_sampler.start()
+        logger.info("Port traffic sampler started")
     except Exception as e:
-        logger.error(f"Traffic collector init failed, traffic will not be collected: {e}", exc_info=True)
+        logger.error(f"Port traffic sampler init failed, per-port counters stay empty: {e}", exc_info=True)
 
     ipset_manager = get_ipset_manager()
     try:
@@ -58,9 +58,9 @@ async def lifespan(app: FastAPI):
     yield
 
     try:
-        await traffic_collector.stop()
+        await port_sampler.stop()
     except Exception as e:
-        logger.error(f"Traffic collector stop failed: {e}", exc_info=True)
+        logger.error(f"Port traffic sampler stop failed: {e}", exc_info=True)
     logger.info("Shutdown complete")
 
 

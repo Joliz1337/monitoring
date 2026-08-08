@@ -15,11 +15,12 @@ class Settings(BaseSettings):
     # Node identity
     node_name: str = "node-01"
     
-    # Traffic tracking
+    # Traffic
+    # История трафика теперь живёт в панели; файл БД остаётся только для
+    # разового экспорта легаси-данных, накопленных прежними версиями ноды
     traffic_db_path: str = "/var/lib/monitoring/traffic.db"
-    traffic_collect_interval: int = 60  # seconds between collections
-    traffic_retention_days: int = 90  # how long to keep detailed data
-    
+    port_sample_interval: int = 30  # seconds between iptables port counter samples
+
     # Host proc path (mounted from host)
     host_proc: str = "/host/proc"
 

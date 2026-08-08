@@ -27,10 +27,8 @@ interface ServersState {
   fetchServersWithMetrics: () => Promise<void>
   fetchServerMetrics: (serverId: number) => Promise<void>
   fetchServerLiveMetrics: (serverId: number) => Promise<void>
-  fetchServerTraffic: (serverId: number, days?: number) => Promise<void>
   fetchAllMetrics: () => Promise<void>
   fetchAllLiveMetrics: () => Promise<void>
-  fetchAllTraffic: (days?: number) => Promise<void>
   addServer: (data: { name: string; url: string; proxy_url?: string | null }) => Promise<{ success: boolean; error?: string }>
   updateServer: (id: number, data: Partial<Server>) => Promise<void>
   toggleServer: (id: number, isActive: boolean) => Promise<void>
@@ -195,44 +193,6 @@ export const useServersStore = create<ServersState>((set, get) => ({
   fetchAllLiveMetrics: async () => {
     const { servers, fetchServerLiveMetrics } = get()
     await Promise.all(servers.map(s => fetchServerLiveMetrics(s.id)))
-  },
-  
-  fetchServerTraffic: async (serverId: number, days: number = 30) => {
-    const { servers } = get()
-    const serverIndex = servers.findIndex(s => s.id === serverId)
-    if (serverIndex === -1) return
-    
-    try {
-      const { data } = await proxyApi.getTrafficSummary(serverId, days)
-      set({
-        servers: servers.map(s => 
-          s.id === serverId 
-            ? { 
-                ...s, 
-                traffic: {
-                  rx_bytes: data.total.rx_bytes,
-                  tx_bytes: data.total.tx_bytes,
-                  days: data.days
-                }
-              }
-            : s
-        ),
-      })
-    } catch {
-      // Traffic data not available - ignore silently
-      set({
-        servers: servers.map(s => 
-          s.id === serverId 
-            ? { ...s, traffic: null }
-            : s
-        ),
-      })
-    }
-  },
-  
-  fetchAllTraffic: async (days: number = 30) => {
-    const { servers, fetchServerTraffic } = get()
-    await Promise.all(servers.map(s => fetchServerTraffic(s.id, days)))
   },
   
   addServer: async (data) => {

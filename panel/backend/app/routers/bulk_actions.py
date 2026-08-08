@@ -10,6 +10,10 @@ import logging
 
 from app.database import get_db
 from app.models import Server
+from app.services.traffic_import import (
+    MIN_NODE_VERSION_FOR_TRAFFIC_V2,
+    node_supports_traffic_v2,
+)
 from app.auth import verify_auth
 from app.services.bulk_job_manager import BulkExecutor, get_bulk_job_manager, run_bulk
 from app.services.server_status import get_offline_threshold, resolve_status
@@ -201,6 +205,15 @@ def haproxy_service_executor(op: str) -> BulkExecutor:
 
 def traffic_port_add_executor(port: int) -> BulkExecutor:
     async def run(server: Server) -> BulkResult:
+        # Тот же гейт, что и на одиночном эндпоинте: на старом агенте правило в iptables
+        # появилось бы, а счётчики панель читать не умеет — учёт молча не работал бы.
+        if not node_supports_traffic_v2(server.node_version):
+            return BulkResult(
+                server_id=server.id,
+                server_name=server.name,
+                success=False,
+                message=f"Agent {server.node_version or 'unknown'} is older than {MIN_NODE_VERSION_FOR_TRAFFIC_V2}",
+            )
         success, result = await proxy_request_safe(
             server, "/api/traffic/ports/add", method="POST", json_data={"port": port}
         )

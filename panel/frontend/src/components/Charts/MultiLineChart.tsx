@@ -2,11 +2,17 @@ import { useMemo } from 'react'
 import ReactApexChart from 'react-apexcharts'
 import { ApexOptions } from 'apexcharts'
 import { useTranslation } from 'react-i18next'
-import { downsampleLTTB, smoothDataDEMA, calculateMultiSeriesYMax, MAX_CHART_POINTS } from '../../utils/chartUtils'
+import {
+  processSeriesWithGaps,
+  calculateMultiSeriesYMax,
+  buildGapAnnotations,
+  parseTimestamp,
+  ChartGap,
+} from '../../utils/chartUtils'
 
 interface Series {
   name: string
-  data: Array<{ timestamp: string; value: number }>
+  data: Array<{ timestamp: string; value: number | null }>
   color?: string
 }
 
@@ -18,7 +24,11 @@ interface MultiLineChartProps {
   formatValue?: (val: number) => string
   period?: string
   smoothing?: number // Smoothing factor 0-1 (0 = no smoothing, 1 = max smoothing)
+  gaps?: ChartGap[] // Periods without data, highlighted on the x-axis
 }
+
+// Stable identity keeps the useMemo below from recomputing on every render
+const NO_GAPS: ChartGap[] = []
 
 const DEFAULT_COLORS = [
   '#22d3ee', // cyan
@@ -33,44 +43,6 @@ const DEFAULT_COLORS = [
 const MONTHS: Record<string, string[]> = {
   ru: ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'],
   en: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
-}
-
-/**
- * Parse timestamp string to Unix milliseconds
- * Handles various formats: ISO with Z, ISO with offset, naive datetime, date-only, hour-only
- */
-function parseTimestamp(timestamp: string): number {
-  // ISO format with explicit timezone (Z or +/-offset)
-  if (timestamp.includes('Z') || timestamp.includes('+') || /T.*-\d{2}:\d{2}$/.test(timestamp)) {
-    return new Date(timestamp).getTime()
-  }
-  
-  // ISO-like format without timezone (treat as UTC)
-  if (timestamp.includes('T')) {
-    return new Date(timestamp + 'Z').getTime()
-  }
-  
-  // Traffic API formats: "YYYY-MM-DD HH:00" or "YYYY-MM-DD" or "YYYY-MM"
-  // Replace space with T and add Z to treat as UTC
-  const normalized = timestamp.replace(' ', 'T')
-  
-  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(normalized)) {
-    // "2024-01-12 10:00" -> "2024-01-12T10:00Z"
-    return new Date(normalized + ':00Z').getTime()
-  }
-  
-  if (/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
-    // "2024-01-12" -> start of day UTC
-    return new Date(normalized + 'T00:00:00Z').getTime()
-  }
-  
-  if (/^\d{4}-\d{2}$/.test(normalized)) {
-    // "2024-01" -> start of month UTC
-    return new Date(normalized + '-01T00:00:00Z').getTime()
-  }
-  
-  // Fallback: let browser parse it
-  return new Date(timestamp).getTime()
 }
 
 function formatDateLocalized(date: Date, format: string, lang: string): string {
@@ -119,35 +91,38 @@ export default function MultiLineChart({
   formatValue,
   period = '1h',
   smoothing = 0.35, // Default smoothing factor for pleasant curves
+  gaps = NO_GAPS,
 }: MultiLineChartProps) {
   const { t, i18n } = useTranslation()
-  
+
   const { chartSeries, options } = useMemo(() => {
     const lang = i18n.language || 'en'
-    
-    // Convert, smooth and downsample each series
-    const processedSeries = series.map((s) => {
-      const rawData = s.data.map(d => ({
-        x: parseTimestamp(d.timestamp),
-        y: d.value,
-      }))
-      // Apply smoothing to reduce sharp spikes (DEMA for lag-free smoothing)
-      const smoothedData = smoothing > 0 ? smoothDataDEMA(rawData, smoothing) : rawData
-      // Apply LTTB downsampling
-      return downsampleLTTB(smoothedData, MAX_CHART_POINTS)
-    })
-    
+    const noDataLabel = t('common.no_data')
+
+    // Smoothing and downsampling run per continuous segment, gaps stay null
+    const processedSeries = series.map(s =>
+      processSeriesWithGaps(
+        s.data.map(d => ({ x: parseTimestamp(d.timestamp), y: d.value })),
+        { smoothing },
+      ),
+    )
+
     const chartSeries = series.map((s, i) => ({
       name: s.name,
       data: processedSeries[i],
     }))
-    
-    // Calculate dynamic Y-max for all series
+
     const dynamicYMax = calculateMultiSeriesYMax(processedSeries)
-    
+
+    const lastTimestamp = processedSeries.reduce((latest, points) => {
+      const lastPoint = points[points.length - 1]
+      return lastPoint && lastPoint.x > latest ? lastPoint.x : latest
+    }, 0)
+    const gapRanges = lastTimestamp > 0 ? buildGapAnnotations(gaps, lastTimestamp) : []
+
     const colors = series.map((s, i) => s.color || DEFAULT_COLORS[i % DEFAULT_COLORS.length])
     const dateFormat = getDateTimeFormat(period)
-    
+
     const options: ApexOptions = {
       chart: {
         type: 'area',
@@ -196,7 +171,10 @@ export default function MultiLineChart({
         max: dynamicYMax,
         labels: {
           style: { colors: '#8e8ea0', fontSize: '11px' },
-          formatter: (val) => formatValue ? formatValue(val) : `${val.toFixed(1)}${unit}`,
+          formatter: (val: number | null | undefined) => {
+            if (val == null || Number.isNaN(val)) return ''
+            return formatValue ? formatValue(val) : `${val.toFixed(1)}${unit}`
+          },
         },
       },
       legend: {
@@ -204,6 +182,7 @@ export default function MultiLineChart({
         horizontalAlign: 'left',
         labels: { colors: '#8e8ea0' },
       },
+      annotations: gapRanges.length > 0 ? { xaxis: gapRanges } : undefined,
       tooltip: {
         theme: 'dark',
         shared: true,
@@ -212,15 +191,19 @@ export default function MultiLineChart({
           formatter: (value) => formatDateLocalized(new Date(value), dateFormat.tooltip, lang),
         },
         y: {
-          formatter: (val) => formatValue ? formatValue(val || 0) : `${val?.toFixed(2) || 0}${unit}`,
+          // Apex passes null for gap points - showing 0 there would fake a metric
+          formatter: (val: number | null | undefined) => {
+            if (val == null || Number.isNaN(val)) return noDataLabel
+            return formatValue ? formatValue(val) : `${val.toFixed(2)}${unit}`
+          },
         },
       },
     }
-    
+
     return { chartSeries, options }
-  }, [series, unit, stacked, formatValue, period, smoothing, i18n.language])
-  
-  if (series.every(s => s.data.length === 0)) {
+  }, [series, unit, stacked, formatValue, period, smoothing, gaps, i18n.language, t])
+
+  if (series.every(s => s.data.every(d => d.value === null))) {
     return (
       <div className="flex items-center justify-center h-48 text-dark-500">
         {t('common.no_data')}

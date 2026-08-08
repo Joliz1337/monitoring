@@ -2,9 +2,9 @@ import asyncio
 import hashlib
 import ipaddress
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from sqlalchemy import select, update, desc, bindparam
+from sqlalchemy import select, update, desc, bindparam, func
 from sqlalchemy.ext.asyncio import AsyncSession
 import re
 from urllib.parse import urlparse
@@ -15,7 +15,7 @@ import json
 from app.services.http_client import get_node_client, node_auth_headers, validate_proxy_input
 
 from app.database import get_db
-from app.models import Server, ServerCache, MetricsSnapshot
+from app.models import Server, MetricsSnapshot, ServerTraffic
 from app.auth import verify_auth
 from app.services.blocklist_manager import get_blocklist_manager
 from app.services.server_status import get_offline_threshold, resolve_status
@@ -204,6 +204,42 @@ async def get_latest_snapshots_bulk(server_ids: list[int], db: AsyncSession) -> 
     return {s.server_id: s for s in snapshots}
 
 
+# Окно трафика на карточке сервера — то же, что по умолчанию на странице трафика.
+TRAFFIC_CARD_DAYS = 30
+
+
+async def get_traffic_totals_bulk(
+    server_ids: list[int],
+    db: AsyncSession,
+    days: int = TRAFFIC_CARD_DAYS,
+) -> dict[int, dict]:
+    """Суммарный трафик за окно по всем серверам одним GROUP BY.
+
+    Суточные бакеты вместо часовых: на 30 днях это ~30 строк на сервер против ~720,
+    а карточке сервера точность до часа не нужна.
+    """
+    if not server_ids:
+        return {}
+
+    since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days)
+    result = await db.execute(
+        select(
+            ServerTraffic.server_id,
+            func.sum(ServerTraffic.rx_bytes),
+            func.sum(ServerTraffic.tx_bytes),
+        )
+        .where(ServerTraffic.server_id.in_(server_ids))
+        .where(ServerTraffic.period_type == "day")
+        .where(ServerTraffic.scope == "total")
+        .where(ServerTraffic.bucket >= since)
+        .group_by(ServerTraffic.server_id)
+    )
+    return {
+        server_id: {"rx_bytes": int(rx or 0), "tx_bytes": int(tx or 0), "days": days}
+        for server_id, rx, tx in result.all()
+    }
+
+
 def _clean_url(v: str) -> str:
     """Валидация URL ноды: формат + отсечка loopback/link-local/multicast."""
     v = re.sub(r'[^\x20-\x7E]', '', v).strip().rstrip('/')
@@ -351,17 +387,12 @@ async def _build_servers_list(db: AsyncSession, include_metrics: bool) -> dict:
     servers = result.scalars().all()
     
     snapshots_map = {}
-    cache_map: dict[int, ServerCache] = {}
+    traffic_map: dict[int, dict] = {}
     offline_threshold = await get_offline_threshold(db)
     if include_metrics:
         server_ids = [s.id for s in servers]
         snapshots_map = await get_latest_snapshots_bulk(server_ids, db)
-
-        if server_ids:
-            cache_result = await db.execute(
-                select(ServerCache).where(ServerCache.server_id.in_(server_ids))
-            )
-            cache_map = {c.server_id: c for c in cache_result.scalars().all()}
+        traffic_map = await get_traffic_totals_bulk(server_ids, db)
 
     servers_data = []
     for s in servers:
@@ -397,22 +428,10 @@ async def _build_servers_list(db: AsyncSession, include_metrics: bool) -> dict:
         else:
             server_info["status"] = resolve_status(s, offline_threshold)
         
-        # Traffic data from server_cache table
-        cache = cache_map.get(s.id)
-        if include_metrics and cache and cache.last_traffic_data:
-            try:
-                traffic_data = json.loads(cache.last_traffic_data)
-                summary = traffic_data.get("summary", {})
-                total = summary.get("total", {})
-                if total:
-                    server_info["traffic"] = {
-                        "rx_bytes": total.get("rx_bytes", 0),
-                        "tx_bytes": total.get("tx_bytes", 0),
-                        "days": total.get("days", 30)
-                    }
-            except json.JSONDecodeError:
-                pass
-        
+        traffic = traffic_map.get(s.id)
+        if traffic:
+            server_info["traffic"] = traffic
+
         servers_data.append(server_info)
     
     return {

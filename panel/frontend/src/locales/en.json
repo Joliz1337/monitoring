@@ -667,7 +667,13 @@
     "failed_remove_port": "Failed to remove port",
     "network_speed": "Network Speed",
     "port_added": "Port {{port}} added to tracking",
-    "port_removed": "Port {{port}} removed from tracking"
+    "port_removed": "Port {{port}} removed from tracking",
+    "unsupported_title": "Traffic accounting moved to the panel",
+    "unsupported_hint": "Update the node agent to {{min}} (currently {{current}})",
+    "unsupported_version_unknown": "version unknown",
+    "unsupported_action": "Go to updates",
+    "import_in_progress": "Migrating history from the node — it will appear shortly",
+    "gaps_note": "Node unreachable periods: {{count}}. Traffic there is spread evenly, not measured"
   },
   "updates": {
     "title": "Updates",

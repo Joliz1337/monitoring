@@ -119,9 +119,19 @@ class NetworkTotal(BaseModel):
     tx_peak_per_sec: float = 0.0
 
 
+class NetworkPortCounter(BaseModel):
+    port: int
+    rx_bytes: int = 0
+    tx_bytes: int = 0
+
+
 class NetworkInfo(BaseModel):
     interfaces: list[NetworkInterface]
     total: NetworkTotal
+    # Кумулятивные счётчики цепочек учёта: дельты и историю считает панель
+    ports: list[NetworkPortCounter] = Field(default_factory=list)
+    ports_available: bool = False
+    ports_sampled_at: Optional[float] = None
 
 
 class ProcessInfo(BaseModel):
@@ -187,6 +197,9 @@ class SystemInfo(BaseModel):
     connections_detailed: Optional[ConnectionsDetailed] = None
     server_name: str
     timezone: Optional[TimezoneInfo] = None
+    # Меняется только с перезагрузкой хоста — по нему панель точно отличает
+    # ребут от отрицательной дельты счётчика
+    boot_id: Optional[str] = None
 
 
 class CertificateExpiry(BaseModel):
@@ -237,6 +250,7 @@ class AllMetrics(BaseModel):
     system: SystemInfo
     certificates: Optional[CertificatesInfo] = None
     antiddos: Optional[AntiDdosInfo] = None
+    agent_version: Optional[str] = None
 
 
 class MetricsHistoryPoint(BaseModel):

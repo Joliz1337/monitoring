@@ -15,6 +15,10 @@ from app.database import get_db
 from app.models import Server, ServerCache, MetricsSnapshot, AggregatedMetrics
 from app.auth import verify_auth
 from app.services import update_channel
+from app.services.traffic_import import (
+    MIN_NODE_VERSION_FOR_TRAFFIC_V2,
+    node_supports_traffic_v2,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,20 +52,23 @@ async def get_server_by_id(server_id: int, db: AsyncSession) -> Server:
     return server
 
 
-async def _get_traffic_cache(server_id: int, db: AsyncSession, key: str):
-    """Fallback to cached traffic data when node is unreachable."""
-    result = await db.execute(
-        select(ServerCache).where(ServerCache.server_id == server_id)
+def _require_traffic_v2(server: Server) -> None:
+    """Гейт версии для правил учёта портов.
+
+    Счётчики цепочек iptables читает панель, а отдаёт их только агент 10.13.0+.
+    На старом агенте правило добавилось бы в firewall, но в историю не попало бы
+    ничего — молча выключенный учёт хуже явного отказа.
+    """
+    if node_supports_traffic_v2(server.node_version):
+        return
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            f"Node agent {server.node_version or 'unknown'} is too old for port traffic "
+            f"accounting (needs >= {MIN_NODE_VERSION_FOR_TRAFFIC_V2}). "
+            "Update the node agent first."
+        ),
     )
-    cache = result.scalar_one_or_none()
-    if cache and cache.last_traffic_data:
-        try:
-            data = json.loads(cache.last_traffic_data)
-            if key in data:
-                return data[key]
-        except (json.JSONDecodeError, TypeError):
-            pass
-    raise HTTPException(status_code=503)
 
 
 def enrich_metrics_with_speeds(metrics: dict, snapshot: MetricsSnapshot) -> dict:
@@ -451,28 +458,6 @@ async def get_haproxy_cached(
     raise HTTPException(status_code=503)
 
 
-@router.get("/{server_id}/traffic/cached")
-async def get_traffic_cached(
-    server_id: int,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """Get cached Traffic data from server_cache table."""
-    await get_server_by_id(server_id, db)
-    
-    result = await db.execute(
-        select(ServerCache).where(ServerCache.server_id == server_id)
-    )
-    cache = result.scalar_one_or_none()
-    if cache and cache.last_traffic_data:
-        try:
-            return json.loads(cache.last_traffic_data)
-        except json.JSONDecodeError:
-            pass
-    
-    raise HTTPException(status_code=503)
-
-
 @router.get("/{server_id}/haproxy/status")
 async def get_haproxy_status(
     server_id: int,
@@ -809,123 +794,8 @@ async def get_system_info(
 
 
 # ==================== Traffic Tracking ====================
-
-@router.get("/{server_id}/traffic/summary")
-async def get_traffic_summary(
-    server_id: int,
-    days: int = Query(default=30, ge=1, le=90),
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    server = await get_server_by_id(server_id, db)
-    try:
-        return await proxy_request(server, "/api/traffic/summary", params={"days": days})
-    except HTTPException as e:
-        if e.status_code >= 500:
-            return await _get_traffic_cache(server.id, db, "summary")
-        raise
-
-
-@router.get("/{server_id}/traffic/hourly")
-async def get_hourly_traffic(
-    server_id: int,
-    hours: int = Query(default=24, ge=1, le=168),
-    interface: Optional[str] = None,
-    port: Optional[int] = None,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    server = await get_server_by_id(server_id, db)
-    params = {"hours": hours}
-    if interface:
-        params["interface"] = interface
-    if port:
-        params["port"] = port
-    try:
-        return await proxy_request(server, "/api/traffic/hourly", params=params)
-    except HTTPException as e:
-        if e.status_code >= 500:
-            return await _get_traffic_cache(server.id, db, "hourly")
-        raise
-
-
-@router.get("/{server_id}/traffic/daily")
-async def get_daily_traffic(
-    server_id: int,
-    days: int = Query(default=30, ge=1, le=90),
-    interface: Optional[str] = None,
-    port: Optional[int] = None,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    server = await get_server_by_id(server_id, db)
-    params = {"days": days}
-    if interface:
-        params["interface"] = interface
-    if port:
-        params["port"] = port
-    try:
-        return await proxy_request(server, "/api/traffic/daily", params=params)
-    except HTTPException as e:
-        if e.status_code >= 500:
-            return await _get_traffic_cache(server.id, db, "daily")
-        raise
-
-
-@router.get("/{server_id}/traffic/monthly")
-async def get_monthly_traffic(
-    server_id: int,
-    months: int = Query(default=12, ge=1, le=24),
-    interface: Optional[str] = None,
-    port: Optional[int] = None,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    server = await get_server_by_id(server_id, db)
-    params = {"months": months}
-    if interface:
-        params["interface"] = interface
-    if port:
-        params["port"] = port
-    try:
-        return await proxy_request(server, "/api/traffic/monthly", params=params)
-    except HTTPException as e:
-        if e.status_code >= 500:
-            return await _get_traffic_cache(server.id, db, "monthly")
-        raise
-
-
-@router.get("/{server_id}/traffic/ports")
-async def get_ports_traffic(
-    server_id: int,
-    days: int = Query(default=30, ge=1, le=90),
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    server = await get_server_by_id(server_id, db)
-    try:
-        return await proxy_request(server, "/api/traffic/ports", params={"days": days})
-    except HTTPException as e:
-        if e.status_code >= 500:
-            return await _get_traffic_cache(server.id, db, "ports")
-        raise
-
-
-@router.get("/{server_id}/traffic/interfaces")
-async def get_interfaces_traffic(
-    server_id: int,
-    days: int = Query(default=30, ge=1, le=90),
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    server = await get_server_by_id(server_id, db)
-    try:
-        return await proxy_request(server, "/api/traffic/interfaces", params={"days": days})
-    except HTTPException as e:
-        if e.status_code >= 500:
-            return await _get_traffic_cache(server.id, db, "interfaces")
-        raise
-
+# История трафика живёт в PostgreSQL панели и отдаётся роутером /api/traffic.
+# Здесь остаётся только управление правилами учёта портов в iptables ноды.
 
 @router.get("/{server_id}/traffic/ports/tracked")
 async def get_tracked_ports(
@@ -934,12 +804,7 @@ async def get_tracked_ports(
     _: dict = Depends(verify_auth)
 ):
     server = await get_server_by_id(server_id, db)
-    try:
-        return await proxy_request(server, "/api/traffic/ports/tracked")
-    except HTTPException as e:
-        if e.status_code >= 500:
-            return await _get_traffic_cache(server.id, db, "tracked_ports")
-        raise
+    return await proxy_request(server, "/api/traffic/ports/tracked")
 
 
 @router.post("/{server_id}/traffic/ports/add")
@@ -950,6 +815,7 @@ async def add_tracked_port(
     _: dict = Depends(verify_auth)
 ):
     server = await get_server_by_id(server_id, db)
+    _require_traffic_v2(server)
     return await proxy_request(server, "/api/traffic/ports/add", method="POST", json_data=data)
 
 
@@ -960,6 +826,8 @@ async def remove_tracked_port(
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
+    # Удаление намеренно без гейта версии: правило могли создать до обновления агента,
+    # и запрет снять его оставил бы оператора с мусором в iptables без способа убрать.
     server = await get_server_by_id(server_id, db)
     return await proxy_request(server, "/api/traffic/ports/remove", method="POST", json_data=data)
 

@@ -871,14 +871,6 @@ check_endpoints() {
         echo -e "${RED}FAIL${NC}"
     fi
 
-    echo -n "  /api/traffic/current: "
-    response=$(timeout "$TIMEOUT_HEALTH_CHECK" curl -sk -H "X-API-Key: $api_key" "$base_url/api/traffic/current" 2>/dev/null || echo "")
-    if echo "$response" | grep -q '"interfaces"'; then
-        echo -e "${GREEN}OK${NC}"
-    else
-        echo -e "${RED}FAIL${NC}"
-    fi
-
     echo ""
 }
 

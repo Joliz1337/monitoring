@@ -670,7 +670,13 @@
     "failed_remove_port": "Не удалось удалить порт",
     "network_speed": "Скорость сети",
     "port_added": "Порт {{port}} добавлен в отслеживание",
-    "port_removed": "Порт {{port}} удалён из отслеживания"
+    "port_removed": "Порт {{port}} удалён из отслеживания",
+    "unsupported_title": "Учёт трафика перенесён в панель",
+    "unsupported_hint": "Обновите агент ноды до {{min}} (сейчас {{current}})",
+    "unsupported_version_unknown": "версия неизвестна",
+    "unsupported_action": "Перейти к обновлениям",
+    "import_in_progress": "Историю с ноды переносим — скоро появится",
+    "gaps_note": "Периоды недоступности ноды: {{count}}. Трафик за это время распределён равномерно, а не измерен"
   },
   "updates": {
     "title": "Обновления",

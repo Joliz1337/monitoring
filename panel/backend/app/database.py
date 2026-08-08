@@ -1950,6 +1950,62 @@ async def _migrate_db_optimizations(conn):
             logger.warning(f"DB optimization DDL skipped ({sql}): {e}")
 
 
+async def _migrate_traffic_v2(conn):
+    """Учёт трафика на панели: колонки в servers и storage-параметры горячих таблиц.
+
+    Сами таблицы создаёт create_all, здесь только то, что ему недоступно.
+    fillfactor: обновляемые rx_bytes/tx_bytes/covered_seconds не входят ни в один
+    индекс, поэтому UPDATE идут по HOT-пути — но лишь пока на странице есть место
+    под новую версию строки, иначе каждый флаш плодит страницы и раздувает индексы.
+    Целиком под try — исключение отсюда не дало бы бэкенду подняться вообще.
+    """
+    try:
+        result = await conn.execute(text("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name = 'servers'
+        """))
+        columns = {row[0] for row in result.fetchall()}
+
+        traffic_columns = [
+            ("node_version", "VARCHAR(20)"),
+            ("tracked_ports", "TEXT"),
+        ]
+        for col_name, col_type in traffic_columns:
+            if not columns or col_name in columns:
+                continue
+            try:
+                await conn.execute(text(f'ALTER TABLE servers ADD COLUMN "{col_name}" {col_type}'))
+                logger.info(f"Added column: servers.{col_name}")
+            except Exception as e:
+                if "already exists" not in str(e).lower():
+                    logger.warning(f"Could not add servers.{col_name}: {e}")
+
+        storage_params = {
+            "server_traffic": (
+                "fillfactor=80",
+                "autovacuum_vacuum_scale_factor=0.05",
+                "autovacuum_vacuum_threshold=5000",
+            ),
+            "server_traffic_counters": ("fillfactor=70",),
+        }
+        for table, options in storage_params.items():
+            try:
+                # ALTER TABLE SET берёт ACCESS EXCLUSIVE, поэтому на каждом старте
+                # панели его дёргать не стоит — сверяемся с уже записанными опциями
+                res = await conn.execute(text(
+                    "SELECT COALESCE(reloptions, '{}') FROM pg_class WHERE oid = to_regclass(:t)"
+                ), {"t": table})
+                row = res.first()
+                if not row or set(options) <= set(row[0]):
+                    continue
+                await conn.execute(text(f"ALTER TABLE {table} SET ({', '.join(options)})"))
+                logger.info(f"{table}: storage parameters applied")
+            except Exception as e:
+                logger.warning(f"Storage parameters for {table}: {e}")
+    except Exception as e:
+        logger.warning(f"traffic v2 migration: {e}")
+
+
 async def init_db():
     """Initialize database: create tables, run migrations."""
     async with engine.begin() as conn:
@@ -1972,6 +2028,7 @@ async def init_db():
         await _migrate_bigint_pk_ids(conn)
         await _migrate_drop_redundant_indexes(conn)
         await _migrate_db_optimizations(conn)
+        await _migrate_traffic_v2(conn)
 
     await _warmup_pool()
 

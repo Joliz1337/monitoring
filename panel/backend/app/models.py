@@ -102,6 +102,11 @@ class Server(Base):
     remnawave_nginx_sync_status = Column(String(20), nullable=True)  # synced | pending | failed
     remnawave_nginx_detected = Column(Boolean, default=False, server_default="false", nullable=False)
 
+    # Учёт трафика: версия агента решает, умеет ли нода отдавать счётчики портов,
+    # tracked_ports — JSON-список портов, за которыми нода их ведёт
+    node_version = Column(String(20), nullable=True)
+    tracked_ports = Column(Text, nullable=True)
+
 
 class ServerCache(Base):
     """Отдельная таблица для тяжёлых JSON-кешей, часто обновляемых фоновыми задачами.
@@ -857,3 +862,87 @@ class WildcardCertificate(Base):
     last_renewed = Column(DateTime(timezone=True), nullable=True)
     auto_renew = Column(Boolean, default=True, server_default="true")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+# ==================== Traffic Accounting ====================
+
+class ServerTraffic(Base):
+    """История трафика сервера по часам и суткам (панель считает её сама).
+
+    scope_key — сентинел "" вместо NULL и отдельная колонка-дискриминатор scope:
+    в UNIQUE-индексе PostgreSQL значения NULL не конфликтуют между собой, поэтому
+    UPSERT по ключу с NULL никогда не срабатывал бы и таблица росла бы дублями.
+    """
+    __tablename__ = "server_traffic"
+
+    id = Column(BigInteger, primary_key=True)
+    server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), nullable=False)
+    period_type = Column(String(5), nullable=False)   # hour | day
+    scope = Column(String(6), nullable=False)         # total | iface | port
+    scope_key = Column(String(32), nullable=False, default="", server_default="")  # "" | eth0 | 443
+    bucket = Column(DateTime, nullable=False)         # naive UTC, усечён до часа или суток
+    rx_bytes = Column(BigInteger, nullable=False, default=0, server_default="0")
+    tx_bytes = Column(BigInteger, nullable=False, default=0, server_default="0")
+    covered_seconds = Column(Integer, nullable=False, default=0, server_default="0")
+    source = Column(String(6), nullable=False, default="live", server_default="live")  # live | legacy
+
+    __table_args__ = (
+        UniqueConstraint(
+            'server_id', 'period_type', 'scope', 'bucket', 'scope_key',
+            name='uq_server_traffic',
+        ),
+        Index('idx_server_traffic_cleanup', 'period_type', 'bucket'),
+    )
+
+
+class ServerTrafficCounter(Base):
+    """Последнее кумулятивное значение счётчика — база для вычисления дельты.
+
+    boot_id и boot_at нужны для детекта перезагрузки ноды: после неё счётчики
+    интерфейсов начинаются с нуля, и разница со старым значением была бы мусором.
+    """
+    __tablename__ = "server_traffic_counters"
+
+    server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), primary_key=True)
+    scope = Column(String(6), primary_key=True)
+    scope_key = Column(String(32), primary_key=True)
+    rx_value = Column(BigInteger, nullable=False)
+    tx_value = Column(BigInteger, nullable=False)
+    observed_at = Column(DateTime, nullable=False)
+    boot_id = Column(String(40), nullable=True)
+    boot_at = Column(DateTime, nullable=True)
+
+
+class TrafficImportState(Base):
+    """Состояние переноса легаси-истории трафика с ноды в базу панели."""
+    __tablename__ = "traffic_import_state"
+
+    server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), primary_key=True)
+    # pending | node_too_old | imported | purged | empty | failed
+    status = Column(String(12), nullable=False, default="pending", server_default="pending")
+    node_version = Column(String(20), nullable=True)
+    fingerprint = Column(String(64), nullable=True)
+    rows_imported = Column(Integer, default=0, server_default="0")
+    imported_at = Column(DateTime, nullable=True)
+    purged_at = Column(DateTime, nullable=True)
+    attempts = Column(Integer, default=0, server_default="0")
+    next_attempt_at = Column(DateTime, nullable=True)
+    last_error = Column(String(500), nullable=True)
+
+
+class ServerDowntime(Base):
+    """Интервалы простоя: недоступность ноды и остановки самой панели.
+
+    Без них провал в истории трафика не отличить от нулевого трафика.
+    """
+    __tablename__ = "server_downtime"
+
+    id = Column(BigInteger, primary_key=True)
+    server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), nullable=False)
+    started_at = Column(DateTime, nullable=False)
+    ended_at = Column(DateTime, nullable=True)  # NULL — простой длится сейчас
+    kind = Column(String(8), nullable=False)    # node | panel
+
+    __table_args__ = (
+        Index('idx_server_downtime_lookup', 'server_id', 'started_at'),
+    )

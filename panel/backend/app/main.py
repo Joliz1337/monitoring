@@ -15,7 +15,7 @@ logging.basicConfig(
 
 from app.database import init_db, async_session
 from app.config import get_settings
-from app.routers import servers, server_deploy, auth_router, proxy, settings as settings_router, system, bulk_actions, blocklist, remnawave, alerts, billing, backup, ssh_security, infra, notes, wildcard_ssl, haproxy_profiles, torrent_blocker, firewall_profiles, antiddos, remnawave_nginx_profiles
+from app.routers import servers, server_deploy, auth_router, proxy, settings as settings_router, system, bulk_actions, blocklist, remnawave, alerts, billing, backup, ssh_security, infra, notes, wildcard_ssl, haproxy_profiles, torrent_blocker, firewall_profiles, antiddos, remnawave_nginx_profiles, traffic
 from app.services.metrics_collector import start_collector, stop_collector
 from app.services.blocklist_manager import get_blocklist_manager
 from app.services.xray_stats_collector import start_xray_stats_collector, stop_xray_stats_collector
@@ -26,6 +26,7 @@ from app.services.time_sync import start_time_sync, stop_time_sync
 from app.services.wildcard_ssl import start_wildcard_ssl_manager, stop_wildcard_ssl_manager
 from app.services.torrent_blocker import start_torrent_blocker, stop_torrent_blocker
 from app.services.antiddos_manager import start_antiddos_manager, stop_antiddos_manager
+from app.services.traffic_import import start_traffic_import, stop_traffic_import
 from app.services.http_client import init_http_clients, close_http_clients
 from app.services.pki import load_or_create_keygen
 from app.services.update_channel import load_branch_from_db
@@ -107,6 +108,13 @@ async def lifespan(app: FastAPI):
     await start_torrent_blocker()
     await start_antiddos_manager()
 
+    # Перенос легаси-истории трафика — разовая фоновая задача: панель обязана
+    # подняться, даже если она не стартовала.
+    try:
+        await start_traffic_import()
+    except Exception as e:
+        logger.error(f"Legacy traffic importer failed to start: {e}")
+
     # Cache warming runs in background — doesn't block /health
     warmup_task = asyncio.create_task(_deferred_startup())
     
@@ -114,6 +122,7 @@ async def lifespan(app: FastAPI):
     
     warmup_task.cancel()
     await close_http_clients()
+    await stop_traffic_import()
     await stop_antiddos_manager()
     await stop_torrent_blocker()
     await stop_wildcard_ssl_manager()
@@ -202,6 +211,7 @@ app.include_router(firewall_profiles.router)
 app.include_router(torrent_blocker.router)
 app.include_router(antiddos.router)
 app.include_router(remnawave_nginx_profiles.router)
+app.include_router(traffic.router)
 
 try:
     from app.routers._internal import router as ext_router

@@ -325,25 +325,6 @@ export interface CertificateGenerateResponse {
   error_log?: string
 }
 
-export interface TrafficDataPoint {
-  hour?: string
-  date?: string
-  month?: string
-  rx_bytes: number
-  tx_bytes: number
-}
-
-export interface TrafficData {
-  hours?: number
-  days?: number
-  months?: number
-  interface?: string
-  port?: number
-  data: TrafficDataPoint[]
-  total_rx: number
-  total_tx: number
-}
-
 export interface TrafficSummary {
   days: number
   total: {
@@ -364,27 +345,51 @@ export interface TrafficSummary {
   tracked_ports: number[]
 }
 
-export interface PortsTraffic {
-  days: number
-  tracked_ports: number[]
-  data: Array<{
-    port: number
-    rx_bytes: number
-    tx_bytes: number
-  }>
-  total_rx: number
-  total_tx: number
+export type TrafficImportStatus =
+  | 'pending'
+  | 'node_too_old'
+  | 'imported'
+  | 'purged'
+  | 'empty'
+  | 'failed'
+
+export interface TrafficStatus {
+  supported: boolean
+  node_version: string | null
+  min_version: string
+  import: {
+    status: TrafficImportStatus
+    imported_at: string | null
+  }
+  first_data_at: string | null
 }
 
-export interface InterfacesTraffic {
-  days: number
-  data: Array<{
-    interface: string
-    rx_bytes: number
-    tx_bytes: number
-  }>
-  total_rx: number
-  total_tx: number
+export type TrafficScope = 'total' | 'iface' | 'port'
+
+// rx/tx = null означает бакет без покрытия — нода была недоступна, разрыв в ряду
+export interface TrafficSeriesPoint {
+  timestamp: string
+  rx: number | null
+  tx: number | null
+}
+
+export interface TrafficGap {
+  from: string
+  to: string
+}
+
+export interface TrafficSeries {
+  period: string
+  scope: TrafficScope
+  key: string
+  points: TrafficSeriesPoint[]
+  gaps: TrafficGap[]
+}
+
+export interface ServerTrafficTotals {
+  server_id: number
+  rx_bytes: number
+  tx_bytes: number
 }
 
 export const authApi = {
@@ -502,10 +507,6 @@ export const proxyApi = {
   getHAProxyCached: (serverId: number) => 
     api.get<{ status?: HAProxyStatus; rules?: { count: number; rules: HAProxyRule[] }; certs?: { certificates: Certificate[]; count: number }; firewall?: { rules: FirewallRule[]; count: number; active: boolean }; cached_at?: string }>(`/proxy/${serverId}/haproxy/cached`),
   
-  // Cached Traffic data (summary, tracked_ports) - updated every 30s
-  getTrafficCached: (serverId: number) =>
-    api.get<{ summary?: TrafficSummary; tracked_ports?: { tracked_ports: number[] }; cached_at?: string }>(`/proxy/${serverId}/traffic/cached`),
-  
   getHAProxyStatus: (serverId: number) => api.get<HAProxyStatus>(`/proxy/${serverId}/haproxy/status`),
   getHAProxyRules: (serverId: number) => 
     api.get<{ count: number; rules: HAProxyRule[] }>(`/proxy/${serverId}/haproxy/rules`),
@@ -573,19 +574,7 @@ export const proxyApi = {
   getSystemInfo: (serverId: number) =>
     api.get<SystemInfo>(`/proxy/${serverId}/haproxy/system/info`),
   
-  // Traffic tracking
-  getTrafficSummary: (serverId: number, days: number = 30) =>
-    api.get<TrafficSummary>(`/proxy/${serverId}/traffic/summary`, { params: { days } }),
-  getHourlyTraffic: (serverId: number, params?: { hours?: number; interface?: string; port?: number }) =>
-    api.get<TrafficData>(`/proxy/${serverId}/traffic/hourly`, { params }),
-  getDailyTraffic: (serverId: number, params?: { days?: number; interface?: string; port?: number }) =>
-    api.get<TrafficData>(`/proxy/${serverId}/traffic/daily`, { params }),
-  getMonthlyTraffic: (serverId: number, params?: { months?: number; interface?: string; port?: number }) =>
-    api.get<TrafficData>(`/proxy/${serverId}/traffic/monthly`, { params }),
-  getPortsTraffic: (serverId: number, days: number = 30) =>
-    api.get<PortsTraffic>(`/proxy/${serverId}/traffic/ports`, { params: { days } }),
-  getInterfacesTraffic: (serverId: number, days: number = 30) =>
-    api.get<InterfacesTraffic>(`/proxy/${serverId}/traffic/interfaces`, { params: { days } }),
+  // Управление правилами учёта трафика в iptables ноды
   getTrackedPorts: (serverId: number) =>
     api.get<{ tracked_ports: number[] }>(`/proxy/${serverId}/traffic/ports/tracked`),
   addTrackedPort: (serverId: number, port: number) =>
@@ -603,6 +592,17 @@ export const proxyApi = {
   
   // Get SSE URL for streaming command execution
   getExecuteStreamUrl: (serverId: number) => `/api/proxy/${serverId}/system/execute-stream`,
+}
+
+// История трафика хранится в PostgreSQL панели — эти запросы не ходят на ноды
+// и работают, пока нода офлайн
+export const trafficApi = {
+  getStatus: (serverId: number) =>
+    api.get<TrafficStatus>(`/traffic/${serverId}/status`),
+  getSummary: (serverId: number, days: number = 30) =>
+    api.get<TrafficSummary>(`/traffic/${serverId}/summary`, { params: { days } }),
+  getSeries: (serverId: number, params: { period: string; scope?: TrafficScope; key?: string }) =>
+    api.get<TrafficSeries>(`/traffic/${serverId}/series`, { params }),
 }
 
 export interface ExecuteRequest {

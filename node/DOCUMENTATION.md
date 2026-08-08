@@ -5,7 +5,7 @@ API агент для сбора метрик сервера, отслежива
 ## Возможности
 
 - **Метрики** — CPU, RAM, диск, сеть, процессы
-- **Трафик** — история по интерфейсам и портам (SQLite + iptables)
+- **Трафик** — кумулятивные счётчики по интерфейсам и по портам (собственные цепочки iptables) в составе метрик; историю из них считает и хранит панель
 - **HAProxy** — управление нативным systemd сервисом, конфигом, правилами, сертификатами
 - **Firewall** — управление UFW через API
 - **IPSet Blocklist** — блокировка IP/CIDR через ipset (постоянный и временный списки), отказ от приватных/служебных диапазонов, массовое применение одним `ipset restore`
@@ -118,11 +118,12 @@ node/
 │       ├── firewall_manager.py     # UFW: apply_profile, backup/restore, compute_rules_hash, get_full_state
 │       ├── antiddos_manager.py     # Тонкая обёртка над ddos-watchdog.sh (nsenter): enable/disable emergency, watchdog, whitelist sync
 │       ├── host_files.py           # read_host_file()/write_host_file()/read_host_file_exact() — общая работа с файлами на хосте через nsenter+base64
+│       ├── port_traffic_sampler.py # Цепочки учёта TRAFFIC_ACCOUNTING, фоновый съём счётчиков портов, список отслеживаемых портов
+│       ├── legacy_traffic_store.py # Read-only доступ к старой SQLite трафика и её удаление по команде панели
 │       └── remnawave_nginx_manager.py  # RemnawaveNginxManager: discover, get_config, status, logs, validate_content, apply_config, reload, restart
 ├── scripts/
 │   └── apply-update.sh   # Логика обновления (запускается из свежего репо)
-├── tests/
-│   └── test_verify_sysctl.py  # Юнит-тесты верификации тюнинга (stdlib unittest)
+├── tests/                # Юнит-тесты на stdlib unittest (перечислены в разделах ниже)
 ├── nginx/                # Reverse proxy с SSL
 ├── docker-compose.yml
 ├── update.sh             # Скачивает репо и запускает apply-update.sh
@@ -135,8 +136,8 @@ node/
 |----------|----------|---------|
 | NODE_NAME | Имя ноды | node-01 |
 | PANEL_IP | IP панели (для UFW) | задаётся при установке |
-| TRAFFIC_COLLECT_INTERVAL | Интервал сбора (сек) | 60 |
-| TRAFFIC_RETENTION_DAYS | Хранение данных (дни) | 7 |
+| PORT_SAMPLE_INTERVAL | Интервал съёма счётчиков портов из iptables (сек) | 30 |
+| TRAFFIC_DB_PATH | Файл легаси-БД трафика; в его каталоге лежит и `traffic_config.json` со списком отслеживаемых портов | /var/lib/monitoring/traffic.db |
 | MON_IMAGE_TAG | Тег Docker-образа api в `docker-compose.yml` (`image: ...:${MON_IMAGE_TAG:-latest}`); `deploy.sh` при установке пишет `dev`, если `MON_BRANCH=dev`, иначе `latest`; апдейтер (`apply-update.sh`) переписывает при обновлении на `main`/`dev` | latest |
 
 ## Порты
@@ -293,21 +294,53 @@ data: {"message": "error description"}
 | GET | /api/metrics | Все метрики |
 | GET | /health | Health check |
 
+**Всё для учёта трафика едет одним ответом `/api/metrics`** — отдельного опроса нода не требует, панель и так дёргает метрики каждые несколько секунд, а лишний запрос на каждую ноду умножался бы на размер парка:
+
+- `network.interfaces[].rx_bytes`/`tx_bytes` и `network.total` — кумулятивные счётчики интерфейсов из `/proc/net/dev`.
+- `network.ports[]` — кумулятивные счётчики цепочек учёта по портам: `{port, rx_bytes, tx_bytes}`. Рядом `network.ports_available` (доступен ли iptables на хосте) и `network.ports_sampled_at` (unix-время последнего замера — по нему панель отличает свежий снимок от повторно прочитанного).
+- `system.boot_id` — `/proc/sys/kernel/random/boot_id`, меняется только с перезагрузкой хоста. По нему панель точно отличает ребут от сбоя счётчика: после ребута счётчики начинаются с нуля, и разница со старым значением была бы мусором.
+- `agent_version` — версия агента. Панель по ней решает, поддерживает ли нода новый учёт трафика.
+
+Дельты, скорости и историю из этих значений считает панель — см. [panel/DOCUMENTATION.md](../panel/DOCUMENTATION.md#traffic).
+
 **Поле `antiddos` в `/api/metrics` (модель `AntiDdosInfo`, `AllMetrics.antiddos`):** режим, источник, время перехода в аварийный режим, состояние watchdog, заполнение conntrack, `insert_failed`, `SyncookiesSent`, дропы из `/proc/net/softnet_stat`, `ListenDrops`/`ListenOverflows`. Метод `MetricsCollector.get_antiddos_info()` (`metrics_collector.py`) читает `/proc` напрямую из смонтированного `/host/proc` — без `nsenter`, дешевле на каждый опрос метрик, в отличие от `antiddos_manager.py`, который дёргает `ddos-watchdog.sh` через nsenter только для управляющих команд. Хелперы: `_read_proc_int()`, `_read_hex_column_sum()` (суммирование по CPU из `/proc/net/stat/nf_conntrack`), `_read_netstat_counters()`.
 
 ### Traffic
 
+Историю трафика ведёт панель. Нода не хранит ни бакетов, ни агрегатов: сырые кумулятивные счётчики уезжают в составе `GET /api/metrics` (см. «Метрики» выше), а этот роутер только управляет тем, за какими портами счётчики ведутся, и отдаёт легаси-историю на перенос.
+
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
-| GET | /api/traffic/summary | Сводка (days=1-90) |
-| GET | /api/traffic/hourly | Почасовая (hours=1-168) |
-| GET | /api/traffic/daily | Дневная (days=1-90) |
-| GET | /api/traffic/monthly | Месячная (months=1-24) |
-| GET | /api/traffic/ports | Трафик по портам |
-| GET | /api/traffic/interfaces | Трафик по интерфейсам |
 | GET | /api/traffic/ports/tracked | Отслеживаемые порты |
-| POST | /api/traffic/ports/add | Добавить порт |
-| POST | /api/traffic/ports/remove | Удалить порт |
+| POST | /api/traffic/ports/add | Добавить порт в учёт |
+| POST | /api/traffic/ports/remove | Убрать порт из учёта |
+| GET | /api/traffic/legacy/export | Дневные итоги легаси-БД для одноразового импорта в панель (`max_days`, максимум 400) |
+| POST | /api/traffic/legacy/purge | Удалить легаси-БД после успешного импорта |
+
+**Счётчики по портам (`port_traffic_sampler.py`).** Учёт держится на двух собственных цепочках — `TRAFFIC_ACCOUNTING_IN` (вджамплена в `INPUT`) и `TRAFFIC_ACCOUNTING_OUT` (в `OUTPUT`). На каждый отслеживаемый порт в них добавляется по правилу-счётчику для tcp и udp: `--dport` во входящей цепочке, `--sport` в исходящей.
+
+- Замер выполняет фоновая задача с интервалом `port_sample_interval` (30 с), а обработчик метрик только копирует готовый снимок из памяти. У `/api/metrics` жёсткий бюджет (nginx ноды — `proxy_read_timeout 10s`, столько же read timeout у панели), а дамп iptables под конкурентной блокировкой xtables съедает его целиком: медленно отвечающая нода для панели неотличима от упавшей.
+- Дамп читается как `iptables-save -c` и разбирается по токенам правила (`--dport 80`). В выводе `iptables -L` подстрока `dpt:80` совпадает и внутри `dpt:8080`, из-за чего трафик 8080-го приписывался бы 80-му.
+- Изменяющие команды идут с `iptables -w 5`: без ожидания блокировки команда падает, как только ufw или ipset держат xtables, и правило теряется молча.
+- Цепочки перепроверяются раз в 10 минут (`CHAIN_RECHECK_INTERVAL_SEC`) — `ufw --force reset` при применении Firewall Profile сносит их целиком.
+- Добавление и удаление порта выполняют внеочередной замер под тем же локом, что и фоновый: иначе более старый дамп лёг бы последним, панель увидела бы шаг счётчика назад, списала бы это на сброс и молча потеряла дельту за окно.
+- Список отслеживаемых портов хранится в `traffic_config.json` рядом с файлом легаси-БД и переживает рестарт контейнера.
+- Если iptables на хосте недоступен, `network.ports_available` равен `false`, а список счётчиков пуст — учёт по портам выключен, остальные метрики не страдают.
+
+**Легаси-история (`legacy_traffic_store.py`).** На части нод лежит SQLite-файл с историей, накопленной до переноса учёта в панель. Доступ к ней строго на чтение: панель один раз забирает дневные итоги через `/legacy/export` и после успешного импорта подтверждает удаление через `/legacy/purge`. Сама нода файл не удаляет ни при каких обстоятельствах — иначе стал бы важен порядок обновления, и обновившаяся первой нода стёрла бы историю, которую панель ещё не забрала.
+
+- Выгрузка идёт с `SUM` и `GROUP BY` по суткам, а не построчно: в легаси-схеме `UNIQUE`-ключ допускает NULL, поэтому UPSERT в ней не срабатывал и на один и тот же день лежит множество строк — построчное чтение отдало бы тысячи мусорных точек вместо дневных итогов.
+- Нечитаемая БД отдаётся как `503`, а не как пустая выгрузка: панель не должна принять сбой чтения за «истории нет» и разрешить удаление. Подключение открывается в режиме `mode=ro`, при неудаче — повторно с `immutable=1` (БД, оставшаяся с включённым WAL без файла `-shm`, read-only подключением не открывается).
+- `purge` удаляет БД вместе с `-wal`/`-shm` и оставляет тумбстоун `legacy_purged.json`, поэтому повторный вызов — no-op. `traffic_config.json` не трогается: это конфигурация правил iptables, а не история.
+
+Витрины `GET /api/traffic/{hourly,daily,monthly,summary,ports,interfaces}` читают ту же легаси-БД, тоже только на чтение, и ничего в неё не пишут. Они существуют потому, что «Обновить всё» обновляет сначала ноды и только потом панель: в этом окне новая нода отвечает старой панели, а фолбэк на кэш у той срабатывает только по 5xx — на 404 страница трафика покраснела бы. По той же причине любая недоступность БД отдаётся здесь пустым набором, а не ошибкой.
+
+**Файлы:**
+- `node/app/services/port_traffic_sampler.py` — цепочки учёта, фоновый замер, `snapshot()` для сбора метрик, добавление/удаление портов
+- `node/app/services/legacy_traffic_store.py` — read-only витрины и экспорт легаси-БД, `purge()` с тумбстоуном
+- `node/app/routers/traffic.py` — API роутер
+- `node/tests/test_port_counters.py` — разбор дампа `iptables-save` (80 не забирает трафик 8080, направление по имени цепочки, чужие цепочки и правила с диапазоном портов игнорируются), `snapshot()` не ходит в subprocess и отдаёт копию, поведение без iptables, валидация границ порта и round-trip списка портов через `traffic_config.json`
+- `node/tests/test_legacy_export.py` — схлопывание дублей в дневные итоги, окно и потолок строк выгрузки, БД без таблицы и отсутствующий файл, подключение отказывает в записи и не меняет строки, `purge` оставляет `traffic_config.json`, пишет тумбстоун и идемпотентен
 
 ### HAProxy
 
@@ -422,7 +455,7 @@ data: {"message": "error description"}
 - `node/tests/test_remnawave_nginx_limits.py` — тесты автоподстановки лимитов (подстановка только помеченных строк, идемпотентность, ручные правки без маркера не затираются, разумность вычисленных значений) плюс класс `ComposeMountTests` — определение фрагментного/полного монтирования, патч фрагмент→полный с сохранением прочих томов, отсутствие патча для уже полного конфига и для compose без монтирования
 - `node/tests/test_remnawave_nginx_cert_mounts.py` — тесты на чистых функциях: извлечение путей сертификатов без дублей и с отсевом небезопасных путей, вычисление каталога монтирования (весь корень для `/etc/letsencrypt`, родительский каталог для кастомных путей), недостающие маунты (в т.ч. что уже смонтированный `/etc/letsencrypt` и относительный `./ssl` покрывают вложенные пути, совпадение по компоненту пути, а не по префиксу строки), вставка volume ровно в сервис `remnawave-nginx` без затрагивания `remnanode` и идемпотентно, маппинг путь-в-контейнере → путь-на-хосте (относительный и абсолютный источник маунта, немонтированный путь остаётся собой), подсказка `CERT_HINT` добавляется только к ошибкам про сертификат
 - `node/tests/test_host_files.py` — `read_host_file()` теряет завершающий перевод строки, `read_host_file_exact()` возвращает контент байт-в-байт, отсутствующий файл даёт `None`
-- Всего тестов ноды — 44 (`python -m unittest discover -s node/tests`)
+- Всего тестов ноды — 73 (`python -m unittest discover -s node/tests`)
 
 ### IPSet Blocklist
 
@@ -663,12 +696,9 @@ Raw-правила `--notrack` (снимают SYN с трекинга до SYNP
 - `prime_cpu_baseline()` — блокирующий стартовый замер (~0.25с) per-CPU, вызывается из `lifespan` (`node/app/main.py`) через `asyncio.to_thread` до приёма запросов: первый же запрос метрик после старта получает реальные значения вместо мусора нулевого интервала.
 - `_sample_per_cpu()` — пересэмплирование `psutil.cpu_percent` не чаще `CPU_SAMPLE_MIN_INTERVAL = 0.5`с под `threading.Lock`; более ранним или конкурентным запросам (`get_cpu_info` выполняется в тред-пуле) отдаётся последний валидный замер вместо укороченного гонкой интервала между двумя близкими по времени запросами.
 
-### Async трафик и iptables
+### Счётчики портов: iptables вне пути запроса метрик
 
-`node/app/services/traffic_collector.py`:
-- Subprocess-вызовы идут через `asyncio.create_subprocess_exec()`, без блокирующего `subprocess.run()`
-- Чтение `/proc/net/dev` выполняется через `asyncio.to_thread()`
-- Все iptables-методы асинхронные
+`node/app/services/port_traffic_sampler.py` вынесен из обработчика `/api/metrics` целиком: фоновая задача раз в 30 секунд снимает дамп счётчиков, а `snapshot()` синхронно отдаёт копию последнего результата без единого системного вызова. Дамп iptables ждёт блокировку xtables (её держат ufw и ipset), и внутри запроса метрик это ожидание съедало бы весь бюджет ответа — панель считала бы ноду упавшей. Все вызовы `iptables`/`iptables-save` идут через `asyncio.create_subprocess_exec()` с таймаутом `COMMAND_TIMEOUT_SEC = 20`, без блокирующего `subprocess.run()`.
 
 ### IPSet: пакетное применение одним `ipset restore`
 
@@ -677,14 +707,6 @@ Per-IP применение (2 subprocess-вызова `ipset add`/`del` на з
 - `ipset_manager.py`: все массовые операции (`sync`, `bulk_add`, `bulk_remove`, `sync_allow`, загрузка permanent/allow-списков из `blocklist.json` при старте) собирают diff и применяют его одним вызовом `ipset -exist restore` (`_run_ipset_restore()`) — весь diff применяется за доли секунды независимо от размера списка.
 - `routers/ipset.py`: все эндпоинты — синхронные `def`, FastAPI выполняет их в threadpool, поэтому длинная блокирующая операция не держит event loop и не замораживает остальные эндпоинты ноды (в `async def`-хендлере синхронный subprocess завесил бы **все** эндпоинты node-API — nginx отдавал бы 504 на любой запрос к ноде).
 - Мутации ipset-сетов сериализованы `threading.Lock` (`_mutate_lock`) — параллельный sync с панели и ручной bulk-add не перемешивают diff-ы.
-
-### SQLite PRAGMA оптимизации
-
-В `traffic_collector.py` при открытии соединения применяются:
-- `synchronous=NORMAL` — меньше fsync без риска потери данных при нормальном завершении
-- `cache_size=-65536` — 64 MB page cache в памяти
-- `temp_store=MEMORY` — временные таблицы в RAM
-- `mmap_size=268435456` — 256 MB memory-mapped I/O
 
 ## Системные оптимизации
 

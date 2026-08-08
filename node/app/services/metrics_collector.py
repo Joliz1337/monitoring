@@ -12,10 +12,12 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 import psutil
 
 from app.config import get_settings
+from app.services.port_traffic_sampler import get_port_traffic_sampler
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +47,13 @@ class MetricsCollector:
         self._system_cache: dict = {}
         self._system_cache_time: float = 0
         self._system_cache_ttl: float = 5.0  # 5 seconds
-    
+        # boot_id не меняется в пределах жизни хоста — читаем лениво один раз
+        self._boot_id: Optional[str] = None
+        # Роутер системы уже читает /app/VERSION, а NODE_VERSION из app.main
+        # импортировать нельзя — main сам импортирует этот модуль
+        from app.routers.system import get_current_version
+        self._agent_version: str = get_current_version()
+
     def _read_host_file(self, path: str) -> str:
         """Read file from host filesystem"""
         host_path = Path(self.settings.host_proc).parent / path.lstrip('/')
@@ -337,12 +345,31 @@ class MetricsCollector:
             "rx_bytes_per_sec": 0.0,
             "tx_bytes_per_sec": 0.0
         }
-        
+
+        ports, ports_available, ports_sampled_at = self._port_counters()
+
         return {
             "interfaces": interfaces,
-            "total": total
+            "total": total,
+            "ports": ports,
+            "ports_available": ports_available,
+            "ports_sampled_at": ports_sampled_at,
         }
-    
+
+    @staticmethod
+    def _port_counters() -> tuple[list[dict], bool, Optional[float]]:
+        """Снимок счётчиков по портам — уже в памяти, его наполняет фоновый семплер.
+
+        Перехват широкий по той же причине, что и у температур: /api/metrics —
+        единственный признак живости ноды, и учёт по портам не стоит того,
+        чтобы из-за него сервер уходил в offline.
+        """
+        try:
+            return get_port_traffic_sampler().snapshot()
+        except Exception as e:
+            logger.error(f"Port traffic snapshot unavailable: {e}")
+            return [], False, None
+
     def get_processes_info(self, top_n: int = 10) -> dict:
         """Get process statistics and top processes with caching to avoid blocking"""
         current_time = time.time()
@@ -514,7 +541,8 @@ class MetricsCollector:
             "connections": connections,
             "connections_detailed": conn_stats,
             "server_name": self.settings.node_name,
-            "timezone": self._get_timezone_info()
+            "timezone": self._get_timezone_info(),
+            "boot_id": self._get_boot_id(),
         }
         
         # Cache the result
@@ -523,6 +551,14 @@ class MetricsCollector:
         
         return result
     
+    def _get_boot_id(self) -> Optional[str]:
+        """Идентификатор загрузки ядра — по нему панель отличает ребут от сбоя счётчика."""
+        # Пустой результат не кэшируем: одна осечка на старте контейнера иначе навсегда
+        # лишила бы панель точного признака ребута и оставила только эвристику по аптайму.
+        if not self._boot_id:
+            self._boot_id = self._read_host_file("/proc/sys/kernel/random/boot_id").strip()
+        return self._boot_id or None
+
     def _format_uptime(self, seconds: float) -> str:
         """Format uptime in human readable format"""
         days = int(seconds // 86400)
@@ -735,6 +771,7 @@ class MetricsCollector:
             "system": system,
             "certificates": certs,
             "antiddos": antiddos,
+            "agent_version": self._agent_version,
         }
 
 
