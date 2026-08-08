@@ -27,17 +27,17 @@ class MetricsCollector:
     Speed calculations are done on the panel side.
     """
     
-    # psutil.cpu_percent(interval=None) меряет от предыдущего вызова; на интервалах
-    # порядка миллисекунд гранулярность jiffies (~10мс) даёт мусор вида
-    # «одно ядро 100%, остальные 0» — не пересэмплируем чаще этого порога
-    CPU_SAMPLE_MIN_INTERVAL = 0.5
+    # Минимум натиканного счётчиками /proc/stat, при котором замер осмыслен.
+    # Тик ядра — 10 мс, и на дельте в единицы тиков доля busy вырождается
+    # в 0 или 100 («одно ядро 100%, остальные 0»).
+    CPU_MIN_TICKS_SECONDS = 0.2
+    # Длительность стартового замера — с запасом над порогом выше
+    CPU_PRIME_SECONDS = 0.3
 
     def __init__(self):
         self.settings = get_settings()
-        # Initialize CPU baseline for non-blocking calls
-        psutil.cpu_percent(percpu=True)
-        self._last_cpu_percent: list = [0.0] * (psutil.cpu_count() or 1)
-        self._last_cpu_sample_at: float = time.monotonic()
+        self._prev_cpu_times: list = psutil.cpu_times(percpu=True)
+        self._last_cpu_percent: list = [0.0] * len(self._prev_cpu_times)
         self._cpu_lock = threading.Lock()
         # Process cache to avoid blocking
         self._processes_cache: list = []
@@ -65,27 +65,54 @@ class MetricsCollector:
         return ""
     
     def prime_cpu_baseline(self):
-        """Стартовый блокирующий замер (~0.25с) при запуске ноды: первый запрос
-        метрик сразу получает реальные значения per-CPU, а не нули/мусор
-        нулевого интервала."""
+        """Стартовый блокирующий замер при запуске ноды: первый запрос метрик
+        сразу получает реальные значения per-CPU, а не нули пустого baseline."""
+        before = psutil.cpu_times(percpu=True)
+        time.sleep(self.CPU_PRIME_SECONDS)
+        after = psutil.cpu_times(percpu=True)
         with self._cpu_lock:
-            self._last_cpu_percent = psutil.cpu_percent(interval=0.25, percpu=True)
-            self._last_cpu_sample_at = time.monotonic()
+            self._prev_cpu_times = after
+            percents = self._per_cpu_from(before, after)
+            if percents is not None:
+                self._last_cpu_percent = percents
+
+    @classmethod
+    def _per_cpu_from(cls, before: list, after: list) -> Optional[list]:
+        """Занятость каждого ядра по дельте счётчиков, либо None при слишком
+        короткой дельте — тогда считать нечего и звать не за чем."""
+        if not after or len(after) != len(before):
+            return None
+
+        percents = []
+        for prev, cur in zip(before, after):
+            total = sum(cur) - sum(prev)
+            if total < cls.CPU_MIN_TICKS_SECONDS:
+                return None
+            busy = total - (cur.idle - prev.idle)
+            percents.append(round(min(max(busy, 0.0) / total * 100, 100.0), 1))
+        return percents
 
     def _sample_per_cpu(self) -> list:
-        """Per-CPU % с защитой от слишком коротких интервалов замера.
+        """Per-CPU % по дельте /proc/stat, с отбраковкой вырожденного интервала.
 
-        Состояние psutil глобально на процесс, а запросы метрик идут из тред-пула:
-        без лока и порога два близких запроса укорачивают интервал друг друга
-        до миллисекунд и получают мусор. Ранним запросам отдаём последний
-        валидный замер."""
+        Порог берётся из самих счётчиков, а не из настенных часов: запросы метрик
+        идут из тред-пула, и поток может простоять между взглядом на часы и чтением
+        /proc/stat — сторож по времени тогда пропускает замер, у которого реального
+        интервала нет. Пока тиков мало, baseline не сдвигается и отдаётся последний
+        валидный замер: следующий запрос померит от него же, уже на длинной дельте."""
         with self._cpu_lock:
-            now = time.monotonic()
-            if now - self._last_cpu_sample_at >= self.CPU_SAMPLE_MIN_INTERVAL:
-                sampled = psutil.cpu_percent(interval=None, percpu=True)
-                if sampled:
-                    self._last_cpu_percent = sampled
-                    self._last_cpu_sample_at = now
+            current = psutil.cpu_times(percpu=True)
+
+            if len(current) != len(self._prev_cpu_times):
+                # Число ядер сменилось (ресайз VPS) — старый baseline несопоставим
+                self._prev_cpu_times = current
+                self._last_cpu_percent = [0.0] * len(current)
+                return self._last_cpu_percent
+
+            percents = self._per_cpu_from(self._prev_cpu_times, current)
+            if percents is not None:
+                self._prev_cpu_times = current
+                self._last_cpu_percent = percents
             return self._last_cpu_percent
 
     def get_cpu_info(self) -> dict:
