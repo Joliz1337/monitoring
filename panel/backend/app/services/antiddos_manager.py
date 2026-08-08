@@ -93,11 +93,11 @@ class AntiDdosManager:
 
         servers = (await db.execute(select(Server).where(Server.is_active == True))).scalars().all()  # noqa: E712
         for srv in servers:
-            ip = host_to_ip(urlparse(srv.url).hostname or "")
+            ip = await host_to_ip(urlparse(srv.url).hostname or "")
             if ip:
                 ips.add(ip)
 
-        panel_ip = resolve_panel_ip()
+        panel_ip = await resolve_panel_ip()
         if panel_ip:
             ips.add(panel_ip)
 

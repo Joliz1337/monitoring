@@ -1,5 +1,6 @@
 """Общие сетевые хелперы: резолв IP панели/нод и проверка публичности диапазона."""
 
+import asyncio
 import ipaddress
 import socket
 from typing import Optional
@@ -28,18 +29,33 @@ def is_public_range(ip_cidr: str) -> bool:
     return not any(net.overlaps(bad) for bad in NON_PUBLIC_NETS)
 
 
-def resolve_panel_ip() -> Optional[str]:
+async def resolve_host(host: str) -> Optional[str]:
+    """DNS-резолв без блокировки цикла.
+
+    socket.gethostbyname синхронный: недоступный резолвер держит его до
+    системного таймаута, а вызывают его в цикле по всем нодам — на времени
+    сборки whitelist это остановило бы всю панель.
+    """
+    if not host:
+        return None
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(
+            host, None, family=socket.AF_INET, type=socket.SOCK_STREAM
+        )
+    except (socket.gaierror, OSError):
+        return None
+    return infos[0][4][0] if infos else None
+
+
+async def resolve_panel_ip() -> Optional[str]:
     """IP панели по её домену из настроек (None, если домен не задан/не резолвится)."""
     domain = get_settings().domain
     if not domain:
         return None
-    try:
-        return socket.gethostbyname(domain)
-    except (socket.gaierror, OSError):
-        return None
+    return await resolve_host(domain)
 
 
-def host_to_ip(host: str) -> Optional[str]:
+async def host_to_ip(host: str) -> Optional[str]:
     """IP из host (уже IP — вернуть как есть, иначе DNS-резолв)."""
     if not host:
         return None
@@ -48,7 +64,4 @@ def host_to_ip(host: str) -> Optional[str]:
         return host
     except ValueError:
         pass
-    try:
-        return socket.gethostbyname(host)
-    except (socket.gaierror, OSError):
-        return None
+    return await resolve_host(host)

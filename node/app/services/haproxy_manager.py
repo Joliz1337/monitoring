@@ -1307,7 +1307,7 @@ backend {backend_name}
             cmd.append("--register-unsafely-without-email")
 
         if method == "standalone":
-            resume_haproxy, stop_error = self._release_port_80()
+            resume_haproxy, stop_error = await asyncio.to_thread(self._release_port_80)
             if stop_error:
                 return False, f"Failed to stop HAProxy: {stop_error}", None
 
@@ -1323,9 +1323,9 @@ backend {backend_name}
                     success = False
                 elif result.returncode == 0:
                     # Find the actual cert directory (may have -0001 suffix)
-                    cert_dir = self._find_cert_dir(domain)
+                    cert_dir = await asyncio.to_thread(self._find_cert_dir, domain)
                     if cert_dir:
-                        self._create_combined_cert(cert_dir.name)
+                        await asyncio.to_thread(self._create_combined_cert, cert_dir.name)
                         message = f"Certificate for {domain} generated successfully"
                         logger.info(message)
                         success = True
@@ -1347,7 +1347,7 @@ backend {backend_name}
                 error_log = f"Command: {' '.join(cmd)}\n\nException: {str(e)}"
                 success = False
             finally:
-                self._reclaim_port_80(resume_haproxy)
+                await asyncio.to_thread(self._reclaim_port_80, resume_haproxy)
 
             return success, message, error_log
 
@@ -1366,9 +1366,9 @@ backend {backend_name}
                     )
 
                 if result.returncode == 0:
-                    cert_dir = self._find_cert_dir(domain)
+                    cert_dir = await asyncio.to_thread(self._find_cert_dir, domain)
                     if cert_dir:
-                        self._create_combined_cert(cert_dir.name)
+                        await asyncio.to_thread(self._create_combined_cert, cert_dir.name)
                     return True, f"Certificate for {domain} generated successfully", None
 
                 error_log = (
@@ -1391,7 +1391,7 @@ backend {backend_name}
 
         logger.info("Starting renewal of all certificates")
 
-        resume_haproxy, stop_error = self._release_port_80()
+        resume_haproxy, stop_error = await asyncio.to_thread(self._release_port_80)
         if stop_error:
             logger.warning(f"Could not stop HAProxy: {stop_error}")
 
@@ -1416,12 +1416,12 @@ backend {backend_name}
             failed = []
 
             # Update combined certs for ALL available certificates
-            available_certs = self.get_available_certs()
+            available_certs = await asyncio.to_thread(self.get_available_certs)
             logger.info(f"Updating combined certificates for {len(available_certs)} domains: {available_certs}")
 
             for domain in available_certs:
                 logger.info(f"Processing certificate for {domain}")
-                if self._create_combined_cert(domain):
+                if await asyncio.to_thread(self._create_combined_cert, domain):
                     renewed.append(domain)
                 else:
                     failed.append(domain)
@@ -1442,10 +1442,10 @@ backend {backend_name}
             renewed = []
             logger.exception("Exception during certificate renewal")
         finally:
-            self._reclaim_port_80(resume_haproxy)
+            await asyncio.to_thread(self._reclaim_port_80, resume_haproxy)
 
         if renewed:
-            self.reload(auto_start=False)
+            await asyncio.to_thread(self.reload, auto_start=False)
 
         return success, message, renewed
 
@@ -1462,13 +1462,13 @@ backend {backend_name}
             return False, "certbot not installed", None
 
         # Check if certificate exists
-        cert_dir = self._find_cert_dir(domain)
+        cert_dir = await asyncio.to_thread(self._find_cert_dir, domain)
         if not cert_dir:
             return False, f"Certificate for {domain} not found", None
 
         logger.info(f"Starting certificate renewal for {domain} (cert_dir: {cert_dir.name})")
 
-        resume_haproxy, stop_error = self._release_port_80()
+        resume_haproxy, stop_error = await asyncio.to_thread(self._release_port_80)
         if stop_error:
             logger.warning(f"Could not stop HAProxy: {stop_error}")
 
@@ -1511,9 +1511,9 @@ backend {backend_name}
 
             if result.returncode == 0:
                 # Find the cert directory (may have suffix like -0001) and update combined cert
-                renewed_cert_dir = self._find_cert_dir(domain)
+                renewed_cert_dir = await asyncio.to_thread(self._find_cert_dir, domain)
                 if renewed_cert_dir:
-                    self._create_combined_cert(renewed_cert_dir.name)
+                    await asyncio.to_thread(self._create_combined_cert, renewed_cert_dir.name)
                     message = f"Certificate for {domain} renewed successfully"
                     success = True
                     logger.info(message)
@@ -1532,10 +1532,10 @@ backend {backend_name}
             success = False
             logger.exception(f"Exception during certificate renewal for {domain}")
         finally:
-            self._reclaim_port_80(resume_haproxy)
+            await asyncio.to_thread(self._reclaim_port_80, resume_haproxy)
 
         if success:
-            self.reload(auto_start=False)
+            await asyncio.to_thread(self.reload, auto_start=False)
         
         return success, message, output_log
     

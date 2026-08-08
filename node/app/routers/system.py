@@ -205,8 +205,8 @@ async def run_update_in_container(target_ref: str | None = None, proxy: str | No
     Флаг in_progress выставляет вызывающий эндпоинт — до create_task, иначе два
     быстрых запроса успевают пройти проверку раньше старта первого апдейтера.
     Каждый вызов docker-SDK синхронный и уходит в поток: pull образа на медленной
-    сети занимает десятки минут, а вставший event loop уронил бы и /health, по
-    которому docker-healthcheck перезапускает контейнер.
+    сети занимает десятки минут, а вставший event loop уронил бы и /health —
+    панель на всё это время сочла бы ноду офлайн и подняла алерт.
     """
     try:
         client = await asyncio.to_thread(get_docker_client)

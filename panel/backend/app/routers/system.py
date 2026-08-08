@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import socket
 import subprocess
 import time
 from datetime import datetime
@@ -22,6 +21,7 @@ from app.config import get_settings
 from app.database import get_db
 from app.models import Server
 from app.services import update_channel
+from app.services.net_utils import resolve_host
 
 router = APIRouter(prefix="/system", tags=["system"])
 logger = logging.getLogger(__name__)
@@ -67,26 +67,24 @@ def invalidate_node_cache(server_id: int) -> None:
     invalidate_node_nic_info_cache(server_id)
 
 
-def get_panel_ip() -> str | None:
+async def get_panel_ip() -> str | None:
     """Get panel's IP address by resolving the configured domain"""
     settings = get_settings()
     domain = settings.domain
-    
+
     if not domain:
         return None
-    
-    try:
-        ip = socket.gethostbyname(domain)
-        return ip
-    except socket.gaierror:
+
+    ip = await resolve_host(domain)
+    if ip is None:
         logger.warning(f"Failed to resolve domain: {domain}")
-        return None
+    return ip
 
 
 @router.get("/panel-ip")
 async def get_panel_ip_endpoint(_: dict = Depends(verify_auth)):
     """Get panel's IP address"""
-    ip = get_panel_ip()
+    ip = await get_panel_ip()
     settings = get_settings()
     return {
         "ip": ip,
@@ -495,22 +493,24 @@ async def run_panel_update_in_container(target_ref: str | None = None):
     _update_status["last_error"] = None
     
     try:
-        client = get_docker_client()
-        
+        client = await asyncio.to_thread(get_docker_client)
+
         # Remove old updater container if exists
         try:
-            old_container = client.containers.get(UPDATER_CONTAINER_NAME)
-            old_container.remove(force=True)
+            old_container = await asyncio.to_thread(
+                client.containers.get, UPDATER_CONTAINER_NAME
+            )
+            await asyncio.to_thread(old_container.remove, force=True)
             logger.info("Removed old updater container")
         except docker.errors.NotFound:
             pass
-        
+
         # Pull docker:cli image if needed
         try:
-            client.images.get(UPDATER_IMAGE)
+            await asyncio.to_thread(client.images.get, UPDATER_IMAGE)
         except ImageNotFound:
             logger.info(f"Pulling {UPDATER_IMAGE}...")
-            client.images.pull(UPDATER_IMAGE)
+            await asyncio.to_thread(client.images.pull, UPDATER_IMAGE)
         
         ref_arg = target_ref if target_ref else update_channel.current_branch()
         logger.info(f"Starting panel update to: {ref_arg}")
@@ -585,7 +585,8 @@ rm -rf $TMP_CLONE
 echo "[SUCCESS] Panel update completed!"
 """
         
-        container = client.containers.run(
+        container = await asyncio.to_thread(
+            client.containers.run,
             image=UPDATER_IMAGE,
             command=["sh", "-c", updater_script],
             name=UPDATER_CONTAINER_NAME,
@@ -603,13 +604,10 @@ echo "[SUCCESS] Panel update completed!"
         logger.info(f"Panel updater started: {container.id[:12]}")
         
         # Wait for completion (10 min timeout)
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: container.wait(timeout=600)
-        )
-        
+        result = await asyncio.to_thread(container.wait, timeout=600)
+
         exit_code = result.get("StatusCode", -1)
-        logs = container.logs().decode("utf-8", errors="replace")
+        logs = (await asyncio.to_thread(container.logs)).decode("utf-8", errors="replace")
         
         if exit_code == 0:
             _update_status["last_result"] = "success"
@@ -622,7 +620,7 @@ echo "[SUCCESS] Panel update completed!"
         
         # Cleanup
         try:
-            container.remove(force=True)
+            await asyncio.to_thread(container.remove, force=True)
         except Exception:
             pass
             
@@ -681,8 +679,10 @@ async def get_update_status(_: dict = Depends(verify_auth)):
     """Get current panel update status"""
     container_running = False
     try:
-        client = get_docker_client()
-        container = client.containers.get(UPDATER_CONTAINER_NAME)
+        client = await asyncio.to_thread(get_docker_client)
+        container = await asyncio.to_thread(
+            client.containers.get, UPDATER_CONTAINER_NAME
+        )
         container_running = container.status == "running"
     except Exception:
         pass
@@ -1067,6 +1067,26 @@ async def get_optimizations_version_info(
 
 # ==================== Panel Server Statistics ====================
 
+CPU_SAMPLE_INTERVAL_SEC = 0.5
+
+
+def _collect_host_stats() -> tuple:
+    var_disk = None
+    try:
+        var_disk = psutil.disk_usage('/var')
+    except Exception:
+        pass
+    return (
+        psutil.cpu_percent(interval=CPU_SAMPLE_INTERVAL_SEC),
+        psutil.cpu_count(),
+        psutil.getloadavg(),
+        psutil.virtual_memory(),
+        psutil.swap_memory(),
+        psutil.disk_usage('/'),
+        var_disk,
+    )
+
+
 @router.get("/stats")
 async def get_panel_server_stats(_: dict = Depends(verify_auth)):
     """
@@ -1076,25 +1096,13 @@ async def get_panel_server_stats(_: dict = Depends(verify_auth)):
     - Disk usage for main partition
     """
     try:
-        # CPU
-        cpu_percent = psutil.cpu_percent(interval=0.5)
-        cpu_count = psutil.cpu_count()
-        load_avg = psutil.getloadavg()
-        
-        # Memory
-        memory = psutil.virtual_memory()
-        swap = psutil.swap_memory()
-        
-        # Disk - get root partition (/)
-        disk = psutil.disk_usage('/')
-        
-        # Additional disk info for /var (where PostgreSQL data usually is)
-        var_disk = None
-        try:
-            var_disk = psutil.disk_usage('/var')
-        except Exception:
-            pass
-        
+        # cpu_percent(interval=...) спит ровно столько же, сколько измеряет,
+        # а остальное читает /proc и /sys — весь блок уходит в поток целиком
+        (
+            cpu_percent, cpu_count, load_avg,
+            memory, swap, disk, var_disk,
+        ) = await asyncio.to_thread(_collect_host_stats)
+
         return {
             "cpu": {
                 "percent": cpu_percent,

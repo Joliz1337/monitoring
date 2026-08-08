@@ -319,12 +319,13 @@ async def get_certificate_info(domain: str):
 async def generate_certificate(request: CertificateGenerateRequest):
     """Generate new Let's Encrypt certificate using certbot"""
     manager = get_haproxy_manager()
-    
-    success, message, error_log = await manager.generate_certificate(
-        domain=request.domain,
-        email=request.email,
-        method=request.method
-    )
+
+    async with _config_lock:
+        success, message, error_log = await manager.generate_certificate(
+            domain=request.domain,
+            email=request.email,
+            method=request.method
+        )
 
     if not success:
         return CertificateGenerateResponseExtended(
@@ -347,8 +348,9 @@ async def renew_certificates():
     """Renew all Let's Encrypt certificates"""
     logger.info("API: Received request to renew all certificates")
     manager = get_haproxy_manager()
-    
-    success, message, renewed = await manager.renew_certificates()
+
+    async with _config_lock:
+        success, message, renewed = await manager.renew_certificates()
     
     logger.info(f"API: Certificate renewal completed - success={success}, renewed={len(renewed)}")
     return CertificateRenewResponse(
@@ -363,8 +365,9 @@ async def renew_single_certificate(domain: str):
     """Renew specific Let's Encrypt certificate"""
     logger.info(f"API: Received request to renew certificate for {domain}")
     manager = get_haproxy_manager()
-    
-    success, message, output_log = await manager.renew_certificate(domain)
+
+    async with _config_lock:
+        success, message, output_log = await manager.renew_certificate(domain)
     
     logger.info(f"API: Certificate renewal for {domain} completed - success={success}")
     return CertificateRenewSingleResponse(
@@ -379,7 +382,8 @@ async def renew_single_certificate(domain: str):
 async def delete_certificate(domain: str):
     """Delete certificate for a domain"""
     manager = get_haproxy_manager()
-    success, message = await asyncio.to_thread(manager.delete_certificate, domain)
+    async with _config_lock:
+        success, message = await asyncio.to_thread(manager.delete_certificate, domain)
 
     if not success:
         raise HTTPException(status_code=400, detail=message)
@@ -395,13 +399,14 @@ async def delete_certificate(domain: str):
 async def upload_certificate(request: CertificateUploadRequest):
     """Upload custom certificate (cert + key)"""
     manager = get_haproxy_manager()
-    
-    success, message = await asyncio.to_thread(
-        manager.upload_certificate,
-        domain=request.domain,
-        cert_content=request.cert_content,
-        key_content=request.key_content
-    )
+
+    async with _config_lock:
+        success, message = await asyncio.to_thread(
+            manager.upload_certificate,
+            domain=request.domain,
+            cert_content=request.cert_content,
+            key_content=request.key_content
+        )
 
     if not success:
         raise HTTPException(status_code=400, detail=message)

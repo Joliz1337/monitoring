@@ -20,7 +20,7 @@ from app.auth import verify_auth
 from app.services.blocklist_manager import get_blocklist_manager
 from app.services.server_status import get_offline_threshold, resolve_status
 from app.services.time_sync import get_time_sync_service
-import socket
+from app.services.net_utils import resolve_panel_ip
 from app.config import get_settings
 from app.services.pki import build_installer_token
 from app.services.migration import (
@@ -28,15 +28,6 @@ from app.services.migration import (
     push_shared_cert_to_node,
 )
 
-
-def _resolve_panel_ip() -> str | None:
-    domain = get_settings().domain
-    if not domain:
-        return None
-    try:
-        return socket.gethostbyname(domain)
-    except socket.gaierror:
-        return None
 
 RUSSIAN_MONTHS = {
     "января": 1, "янв": 1,
@@ -451,7 +442,7 @@ async def get_installer_token(
     В payload вшит IP панели — deploy.sh ноды берёт его автоматически для UFW.
     """
     keygen = request.app.state.pki
-    return {"token": build_installer_token(keygen, panel_ip=_resolve_panel_ip())}
+    return {"token": build_installer_token(keygen, panel_ip=await resolve_panel_ip())}
 
 
 @router.get("/migration-status")
@@ -634,7 +625,7 @@ async def migrate_server(
     # legacy
     return {
         "status": "manual",
-        "token": build_installer_token(keygen, panel_ip=_resolve_panel_ip()),
+        "token": build_installer_token(keygen, panel_ip=await resolve_panel_ip()),
     }
 
 
@@ -718,7 +709,7 @@ async def migrate_all_servers(
         "auto_migrated": auto_migrated,
         "failed": failed,
         "manual_required": [{"id": s.id, "name": s.name} for s in manual_targets],
-        "token": build_installer_token(keygen, panel_ip=_resolve_panel_ip()) if manual_targets else None,
+        "token": build_installer_token(keygen, panel_ip=await resolve_panel_ip()) if manual_targets else None,
     }
 
 
