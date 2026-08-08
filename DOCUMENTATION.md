@@ -225,7 +225,7 @@ bash install.sh --unattended
 
 Подробная документация по каждому компоненту:
 
-- [panel/DOCUMENTATION.md](panel/DOCUMENTATION.md) — веб-панель: API, БД, конфигурация, безопасность (v10.44.0)
+- [panel/DOCUMENTATION.md](panel/DOCUMENTATION.md) — веб-панель: API, БД, конфигурация, безопасность (v10.51.0)
 - [node/DOCUMENTATION.md](node/DOCUMENTATION.md) — нода-агент: API, метрики, HAProxy, трафик, Remnawave, Remnawave Nginx, Firewall Profiles, Системные оптимизации, Анти-DDoS
 
 ## Архитектура
@@ -263,10 +263,12 @@ Browser → nginx (SSL) → panel frontend (React)
 
 ## CI/CD
 
-Docker-образы собираются GitHub Actions (`.github/workflows/docker-publish.yml`) при пуше в `main` и в `dev`, публикуются в GHCR под тегом по ветке (`main` → `:latest`, `dev` → `:dev`). Job `tests` (матрица рендерера `configs/tests/render-matrix.sh`, юнит-тесты ноды и панели) выполняется первым и гейтит сборку всех трёх образов (`needs: tests`) — образ не публикуется, если тесты не прошли:
-- `ghcr.io/joliz1337/monitoring-panel-frontend:latest` / `:dev`
-- `ghcr.io/joliz1337/monitoring-panel-backend:latest` / `:dev`
-- `ghcr.io/joliz1337/monitoring-node-api:latest` / `:dev`
+Docker-образы собираются GitHub Actions (`.github/workflows/docker-publish.yml`) при пуше в `main` и в `dev`, публикуются в GHCR под двумя тегами сразу — подвижным тегом канала (`main` → `:latest`, `dev` → `:dev`) и неподвижным тегом версии из `panel/VERSION`/`node/VERSION`. Job `tests` (матрица рендерера `configs/tests/render-matrix.sh`, юнит-тесты ноды и панели) выполняется первым и гейтит сборку всех трёх образов (`needs: tests`) — образ не публикуется, если тесты не прошли:
+- `ghcr.io/joliz1337/monitoring-panel-frontend:latest` / `:dev` / `:<версия>`
+- `ghcr.io/joliz1337/monitoring-panel-backend:latest` / `:dev` / `:<версия>`
+- `ghcr.io/joliz1337/monitoring-node-api:latest` / `:dev` / `:<версия>`
+
+Тег версии нужен для отката: обновление на конкретный тег/коммит (а не на ветку) переключает `MON_IMAGE_TAG` на образ с этим тегом версии, если он есть в реестре — иначе `docker compose pull` притащил бы тот же подвижный `:latest`/`:dev`, то есть версию, от которой откатываются.
 
 Установка и обновление: `docker compose pull` → `docker compose up -d`; какой тег тянуть, задаёт `MON_IMAGE_TAG` в `.env` (`latest` по умолчанию).
 

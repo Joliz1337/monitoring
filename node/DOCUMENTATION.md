@@ -175,6 +175,8 @@ node/
 
 **`POST /api/system/time-sync`** — значение `timezone` идёт в shell-команду (`timedatectl set-timezone ...`), исполняемую на хосте от root через `nsenter`, поэтому проверяется трижды: формат ограничен паттерном `^[A-Za-z0-9_+/-]+$` (`TIMEZONE_PATTERN`, набор символов IANA-имён без точки — «..» из каталога зон не выйти), сама подстановка идёт через `shlex.quote`, и до выполнения `timezone_exists_on_host()` сверяет имя с реальным файлом в `/usr/share/zoneinfo` на хосте (`test -f`), а не только с форматом.
 
+**`POST /api/system/update`** — оба параметра тела (`UpdateRequest`) валидируются паттерном на входе, потому что уходят в shell-команды апдейтера: `target_version` (branch/tag/commit) — `GIT_REF_PATTERN = ^[A-Za-z0-9][A-Za-z0-9._/-]*$`, `proxy` (HTTP-прокси для git) — `PROXY_URL_PATTERN = ^[a-z][a-z0-9+.-]*://[A-Za-z0-9._%+:@/-]+$`. Тесты — `node/tests/test_update_ref_validation.py`.
+
 **Объединённый endpoint версий** (`/api/system/versions`):
 ```json
 {
@@ -322,7 +324,7 @@ data: {"message": "error description"}
 - Замер выполняет фоновая задача с интервалом `port_sample_interval` (30 с), а обработчик метрик только копирует готовый снимок из памяти. У `/api/metrics` жёсткий бюджет (nginx ноды — `proxy_read_timeout 10s`, столько же read timeout у панели), а дамп iptables под конкурентной блокировкой xtables съедает его целиком: медленно отвечающая нода для панели неотличима от упавшей.
 - Дамп читается как `iptables-save -c` и разбирается по токенам правила (`--dport 80`). В выводе `iptables -L` подстрока `dpt:80` совпадает и внутри `dpt:8080`, из-за чего трафик 8080-го приписывался бы 80-му.
 - Изменяющие команды идут с `iptables -w 5`: без ожидания блокировки команда падает, как только ufw или ipset держат xtables, и правило теряется молча.
-- Цепочки перепроверяются раз в 10 минут (`CHAIN_RECHECK_INTERVAL_SEC`) — `ufw --force reset` при применении Firewall Profile сносит их целиком.
+- Цепочки перепроверяются раз в 10 минут (`CHAIN_RECHECK_INTERVAL_SEC`) — `ufw --force reset` при применении Firewall Profile сносит их целиком. Если очередной замер (`_sample()`) не находит правило для отслеживаемого порта — это сами правила пропали, а не «трафика не было»: порт выпадает из снимка вместо ложного нуля (отдать ноль означало бы шаг счётчика назад, который панель списала бы на сброс и потеряла бы накопленную дельту), а цикл сразу, не дожидаясь плановой десятиминутной перепроверки, поднимает цепочки заново и переснимает счётчики.
 - Добавление и удаление порта выполняют внеочередной замер под тем же локом, что и фоновый: иначе более старый дамп лёг бы последним, панель увидела бы шаг счётчика назад, списала бы это на сброс и молча потеряла дельту за окно.
 - Список отслеживаемых портов хранится в `traffic_config.json` рядом с файлом легаси-БД и переживает рестарт контейнера.
 - Если iptables на хосте недоступен, `network.ports_available` равен `false`, а список счётчиков пуст — учёт по портам выключен, остальные метрики не страдают.
@@ -360,11 +362,13 @@ data: {"message": "error description"}
 | GET | /api/haproxy/config | Получить конфиг |
 | POST | /api/haproxy/config/apply | Применить конфиг; тело `ConfigApplyRequest`: `config_content`, `ensure_started: bool = False` — при `True` поднимает остановленный HAProxy через `reload(auto_start=True)` |
 
-Изменения конфига (создание/обновление/удаление правила, apply) на роутере сериализованы общим `asyncio.Lock` (`_config_lock`) — панель шлёт такие запросы пачками (bulk-действия), а методы менеджера уходят в тред-пул, без лока параллельные правки затирали бы друг друга. На стороне менеджера снимок для отката (`_config_rollback()`) пишется в файл с уникальным именем (`haproxy.cfg.<uuid>.bak`) вместо общего `haproxy.cfg.bak` — общее имя означало бы, что откат одной операции подхватывает снимок другой, идущей параллельно, и возвращает конфиг к чужому состоянию.
+Изменения конфига (создание/обновление/удаление правила, apply) **и** сертификатные эндпоинты (generate, renew всех/одного, delete, upload) на роутере сериализованы общим `asyncio.Lock` (`_config_lock`) — панель шлёт такие запросы пачками (bulk-действия), а методы менеджера уходят в тред-пул, без лока параллельные правки затирали бы друг друга. На стороне менеджера снимок для отката (`_config_rollback()`) пишется в файл с уникальным именем (`haproxy.cfg.<uuid>.bak`) вместо общего `haproxy.cfg.bak` — общее имя означало бы, что откат одной операции подхватывает снимок другой, идущей параллельно, и возвращает конфиг к чужому состоянию.
 
 Поля `target_ip`/`cert_domain`/`target_port` валидируются регулярками (`TARGET_HOST_PATTERN`, `DOMAIN_PATTERN`/`OPTIONAL_DOMAIN_PATTERN` в `models/haproxy.py`) — оба значения подставляются прямо в текст `haproxy.cfg`, а домен сертификата ещё и в путь к файлу сертификата; белый список символов отсекает пробелы, переводы строк и `../` до того, как значение попадёт в конфиг или путь.
 
 Выпуск/продление сертификата через certbot ограничены таймаутом (`CERTBOT_ISSUE_TIMEOUT_SEC = 120`, `CERTBOT_RENEW_TIMEOUT_SEC = 300`): без него зависший certbot держал бы запрос, а при последовательных вызовах — и конфиг-лок бесконечно. `get_cert_info()` кэширует результат `openssl x509 -enddate` на час (`CERT_INFO_CACHE_TTL_SEC`) и вызывает `openssl` с таймаутом (`OPENSSL_TIMEOUT_SEC = 10`) — без кэша это форк `openssl` на каждый домен при каждом опросе метрик; кэш инвалидируется при выпуске/продлении/загрузке/удалении сертификата.
+
+Блокирующие шаги выпуска/продления (`_release_port_80`/`_reclaim_port_80`, поиск каталога сертификата, сборка combined-файла, чтение списка доступных сертификатов, `reload`) в `generate_certificate`/`renew_certificates`/`renew_certificate` выполняются через `asyncio.to_thread` — без этого certbot и файловые операции держали бы event loop роутера на всё время выпуска, замораживая `/health` и весь остальной API ноды.
 
 ### Сертификаты
 
@@ -448,14 +452,17 @@ data: {"message": "error description"}
 
 **Файлы:**
 - `node/app/services/remnawave_nginx_manager.py` — `RemnawaveNginxManager` (синглтон через `get_remnawave_nginx_manager()`): `discover`, `get_config`, `status`, `logs`, `validate_content`, `apply_config`, `apply_host_limits`, `missing_certs_on_host`, `reload`, `restart`; модульные `compute_host_limits()`, `patch_host_limits()`, `compose_mount_target()`, `patch_compose_mount()`, `config_cert_files()`, `cert_mount_dir()`, `is_covered_by_mounts()`, `compose_mount_targets()`, `missing_cert_mounts()`, `patch_compose_volumes()`, `host_path_for_cert()`, `explain_validation_error()`, `AUTO_MARKER`, `FULL_CONFIG_MOUNT`, `LETSENCRYPT_ROOT`, `CERT_HINT`
-- `node/app/services/host_files.py` — `read_host_file()`/`write_host_file()`/`read_host_file_exact()`, общий модуль: переиспользуется и системными оптимизациями (`routers/system.py`), и этим модулем
+- `node/app/services/host_files.py` — `read_host_file()`/`read_host_file_exact()`/`write_host_file()` и его синхронный близнец `write_host_file_sync()` для менеджеров, целиком живущих в тред-пуле (обе версии строят команду и оценивают результат общими `_write_command()`/`_write_succeeded()`); общий модуль: переиспользуется системными оптимизациями (`routers/system.py`), файрволом и этим модулем
 - `node/app/models/remnawave_nginx.py` — Pydantic-модели ответов/запросов, включая `NginxApplyResponse.remounted`
 - `node/app/routers/remnawave.py` — API роутер
 - `node/nginx/nginx.conf` — `location /api/remnawave/` с таймаутом 120с (apply может включать `docker compose up`)
 - `node/tests/test_remnawave_nginx_limits.py` — тесты автоподстановки лимитов (подстановка только помеченных строк, идемпотентность, ручные правки без маркера не затираются, разумность вычисленных значений) плюс класс `ComposeMountTests` — определение фрагментного/полного монтирования, патч фрагмент→полный с сохранением прочих томов, отсутствие патча для уже полного конфига и для compose без монтирования
 - `node/tests/test_remnawave_nginx_cert_mounts.py` — тесты на чистых функциях: извлечение путей сертификатов без дублей и с отсевом небезопасных путей, вычисление каталога монтирования (весь корень для `/etc/letsencrypt`, родительский каталог для кастомных путей), недостающие маунты (в т.ч. что уже смонтированный `/etc/letsencrypt` и относительный `./ssl` покрывают вложенные пути, совпадение по компоненту пути, а не по префиксу строки), вставка volume ровно в сервис `remnawave-nginx` без затрагивания `remnanode` и идемпотентно, маппинг путь-в-контейнере → путь-на-хосте (относительный и абсолютный источник маунта, немонтированный путь остаётся собой), подсказка `CERT_HINT` добавляется только к ошибкам про сертификат
 - `node/tests/test_host_files.py` — `read_host_file()` теряет завершающий перевод строки, `read_host_file_exact()` возвращает контент байт-в-байт, отсутствующий файл даёт `None`; класс `WriteWithModeTests` — права выставляются `umask`'ом до записи содержимого, отказ `chmod` на файловой системе с фиксированными правами не проваливает запись при попадании в границы (владелец не меньше, «прочие» не больше запрошенного), world-readable итог и итог без бита исполнения у владельца считаются провалом, точное совпадение режима — успех, запись без `mode` не трогает umask/chmod
-- Всего тестов ноды — 80 (`python -m unittest discover -s node/tests`)
+- `node/tests/test_haproxy_parsing.py` — чистые части `haproxy_manager`: разбор server-строк со всеми опциями (`send-proxy-v2` не выставляет заодно `send-proxy`), подстановка `resolvers` только доменным таргетам и только один раз, разбор опций балансировщика, распознавание правил в конфиге (балансировщик против одиночного таргета, backend без frontend игнорируется), расчёт `maxconn` от RAM с потолком по лимиту дескрипторов, вставка `maxconn` в `global` без затирания явного значения
+- `node/tests/test_sshd_config.py` — сборка `sshd_config`: закомментированные директивы не оживают, содержимое `Match`-блоков копируется дословно, недостающие ключи встают перед первым `Match`, повторный прогон ничего не меняет; разбор конфига по правилу первого вхождения, преобразование значений туда-обратно, разбор секции fail2ban и единиц времени бана
+- `node/tests/test_update_ref_validation.py` — валидация ссылки обновления и адреса прокси: пропускает ветки, теги версий и хеши коммитов (путь отката), отклоняет метасимволы shell и ведущий дефис
+- Всего тестов ноды — 142 (`python -m unittest discover -s node/tests`)
 
 ### IPSet Blocklist
 
@@ -496,8 +503,9 @@ data: {"message": "error description"}
 - Правила allowlist: `-I INPUT 1 ... -j ACCEPT` / `-I OUTPUT 1 ... -j ACCEPT` (позиция 1, выше DROP)
 - Все постоянные правила сохраняются в `/var/lib/monitoring/blocklist.json` (ключи `in_allow`, `out_allow` для белого списка)
 - При старте ноды: постоянные правила восстанавливаются, временный список пустой, allowlist загружается из персиста
-- Массовые операции (`sync`, `bulk_add`, `bulk_remove`, `sync_allow`, загрузка permanent/allow из `blocklist.json` при старте) применяются одним вызовом `ipset -exist restore` вместо по-IP `ipset add`/`del` — десятки тысяч записей применяются за доли секунды; мутации сериализованы `threading.Lock`
+- Массовые операции (`sync`, `bulk_add`, `bulk_remove`, `sync_allow`, загрузка permanent/allow из `blocklist.json` при старте) применяются одним вызовом `ipset -exist restore` вместо по-IP `ipset add`/`del` — десятки тысяч записей применяются за доли секунды; мутации сериализованы `threading.Lock` (`_mutate_lock`), взятым во всех операциях записи: `add_ip`/`remove_ip`/`clear_set`/`set_timeout`/`sync`/`sync_allow`/`bulk_add`/`bulk_remove` — параллельные запросы с панели не перемешивают друг другу diff
 - Счётчики в `GET /api/ipset/status` читаются из заголовка `ipset list -t` (`Number of entries`), без выгрузки всего сета
+- `_list_members(set_name)` различает «сет пуст» и «не смог прочитать» — при ошибке `ipset list` возвращает `None`, а не пустой список: `sync`/`sync_allow` в этом случае отказывают с ошибкой вместо того, чтобы посчитать diff от пустой базы и удалить всё; сохранение состояния на диск (`_save_config`) при `None` от любого из сохраняемых сетов отменяется целиком — частичный снимок стёр бы блокировки, которые ipset прямо сейчас держит. Сама запись идёт через временный файл + `os.replace` (не прямой `open(..., 'w')`) — обрыв на середине не оставляет битый JSON, который иначе читался бы только при следующем старте
 - Лимит записей: сет создаётся с `maxelem 1000000` — список крупнее 1 млн записей нода принять не сможет, `ipset restore` завершится ошибкой (физический потолок ноды). Панель знает про этот лимит (константа `NODE_MAX_IPSET_ENTRIES`) и обрезает по нему источники и общий список ещё до отправки на ноду — источники сверх лимита помечаются ошибкой и исключаются из синка вместо попытки прогнать их через `ipset restore`, см. [panel/DOCUMENTATION.md](../panel/DOCUMENTATION.md#ip-blocklist)
 
 ### SSH Security
@@ -528,6 +536,8 @@ data: {"message": "error description"}
 - Автовосстановление из последнего бэкапа если sshd не запустился
 - Запрет отключить все методы аутентификации одновременно
 - При смене порта — UFW правило открывается автоматически
+
+Перед применением новых настроек `_clean_sshd_config_d()` вычищает из `sshd_config.d/*.conf` ключи, которые будет задавать основной конфиг (sshd берёт первое вхождение директивы, а файлы из `sshd_config.d` подключаются через `Include` раньше основного конфига — без вычистки заданное там значение молча перебивало бы применённое), и возвращает прежнее содержимое изменённых файлов. На любом пути отказа (`sshd -t` не проходит, sshd не поднялся после `reload`/`restart`, сбой на промежуточном шаге) `_rollback()` восстанавливает не только сам `sshd_config` из бэкапа, но и эти drop-in файлы (`_restore_dropins()`) — откат делает конфиг полностью таким, каким он был до попытки, а не только его основную часть.
 
 `SSHConfigManager` целиком синхронный (subprocess-вызовы) и перенастройка sshd занимает минуты (ожидание порта, стоп/старт службы, установка fail2ban) — роутер выполняет каждый вызов через `asyncio.to_thread`, иначе один такой запрос замораживал бы event loop вместе с `/health`, и docker-healthcheck убивал бы контейнер посреди перенастройки. Изменения sshd-конфига и ключей сериализованы `asyncio.Lock` (`_sshd_lock`) — параллельное применение чередовало бы бэкап, подмену конфига и рестарт службы, а параллельное удаление ключа между проверкой «authorized_keys не пуст» и применением отрезало бы доступ к серверу; fail2ban-операции — отдельным `_fail2ban_lock` (apt-get и restart fail2ban не переживают параллельного запуска). Временные файлы (`test_sshd_config`/`write_sshd_config`) получают уникальное имя (`_unique_tmp_path`, суффикс `uuid4`) вместо фиксированного — иначе параллельный запрос мог подменить содержимое между валидацией `sshd -t` и `mv` в `/etc/ssh/sshd_config`.
 
@@ -609,7 +619,7 @@ PEM разбирается в процессе агента через `cryptogr
 
 **Бэкапы UFW:**
 
-Хранятся в `/etc/monitoring/ufw_backup_<timestamp>.json` на хост-системе (через nsenter). При превышении `MAX_BACKUPS=5` старые удаляются.
+Хранятся в `/etc/monitoring/ufw_backup_<timestamp>.json` на хост-системе (через nsenter). При превышении `MAX_BACKUPS=5` старые удаляются. Запись файла идёт через общий `write_host_file_sync()` (`app/services/host_files.py`) — его результат отражает реальный код возврата записи на хосте, а не факт запуска команды; `_backup_state()` возвращает `None`, если бэкап физически не появился на диске, и в этом случае `apply_profile` не продолжает применение (откатывать после сбойного apply было бы нечем).
 
 **Автоустановка UFW:**
 
@@ -618,8 +628,12 @@ PEM разбирается в процессе агента через `cryptogr
 **Файлы:**
 - `node/app/models/firewall_profile.py` — Pydantic модели
 - `node/app/services/firewall_manager.py` — `FirewallManager`: `apply_profile`, `_ensure_ufw`, `_ufw_available`, `_install_ufw`, `_run_host`, `_backup_state`, `_restore_state`, `compute_rules_hash`, `get_full_state`, `_rule_already_present`, `_normalize_from`
+- `node/app/services/container_detect.py` — `running_in_container()`: единственное определение работы в контейнере на ноде (см. ниже)
+- `node/app/services/host_files.py` — `write_host_file_sync()`: синхронная запись файла на хост с проверкой реального результата
 - `node/app/routers/firewall_profile.py` — API роутер (prefix `/api/firewall`)
 - `node/app/main.py` — регистрация роутера (без auth-зависимости — mTLS терминируется на nginx, см. «Безопасность» выше)
+
+**Определение работы в контейнере.** `running_in_container()` (`app/services/container_detect.py`) — единая точка правды, используемая `firewall_manager.py`, `ipset_manager.py`, `ssh_config_manager.py` и `host_executor.py`: проверяет `/.dockerenv`, а при его отсутствии (containerd, поды Kubernetes) ищет маркеры `docker`/`containerd`/`kubepods` в `/proc/1/cgroup`. До объединения существовало четыре независимые копии этой проверки, и одна из них (в sshd-менеджере) знала про containerd/kubepods, а остальные — только про `/.dockerenv`: на таком хосте sshd-менеджер шёл к хосту через `nsenter`, а файрвол и блокировки продолжали работать внутри контейнера, где нужных им правил и цепочек попросту нет.
 
 ### Анти-DDoS
 
@@ -732,6 +746,8 @@ Per-IP применение (2 subprocess-вызова `ipset add`/`del` на з
 Рендерер утверждает её численно и отказывается писать при нарушении: `nginx worker_rlimit_nofile ≤ container nofile ≤ NOFILE_LIMIT == limits.conf nofile == DefaultLimitNOFILE ≤ fs.nr_open == fs.file-max`, и `haproxy maxconn ≤ (RLIMIT_NOFILE HAProxy − 1024) / 3` (см. «Лимит соединений (maxconn)» в разделе HAProxy выше). `fs.nr_open` поднимается **до** записи `limits.conf` — иначе PAM ломается о значение выше текущего `nr_open`. `node/docker-compose.yml` задаёт явные `ulimits: nofile 65536` для обоих сервисов (без явного лимита наследовалось бы ~1073741816 от dockerd) и монтирует `/opt/monitoring:ro`, чтобы контейнер видел `tuning-facts.env`/`.json`.
 
 **Тесты:** `node/tests/test_verify_sysctl.py` — 14 тестов на stdlib `unittest` (подхватываются и pytest): нормализация значений, сборка ожидаемого набора из facts, порог hashsize, отсутствующий/битый facts-файл, чтение всех ключей одним вызовом. `configs/tests/render-matrix.sh` — 252 комбинации размеров хоста × профилей на стороне самого рендерера, см. корневой [DOCUMENTATION.md](../DOCUMENTATION.md).
+
+**Файлы:** верификация и вычистка конфликтующих sysctl/limits-конфигов вынесены из `node/app/routers/system.py` в отдельный `node/app/services/sysctl_verify.py` (`expected_from_facts`, `_normalize_sysctl_value`, `verify_sysctl_values`, `cleanup_conflicting_configs`, `_is_system_sysctl`) — это единственный кусок роутера, у которого были собственные тесты, поэтому вынос сервисного слоя проверяем ими же.
 
 ### RPS/RFS Network Tuning
 
