@@ -8,7 +8,6 @@ import hashlib
 import ipaddress
 import json
 import logging
-import os
 import re
 import subprocess
 import time
@@ -16,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from app.services.container_detect import running_in_container
 from app.services.host_files import write_host_file_sync
 
 logger = logging.getLogger(__name__)
@@ -56,22 +56,8 @@ class FirewallManager:
     """Manages UFW firewall rules via nsenter (for Docker with pid: host)"""
     
     def __init__(self):
-        self._use_nsenter = self._check_nsenter_needed()
-    
-    def _check_nsenter_needed(self) -> bool:
-        """Check if we're in a container and need nsenter"""
-        # Check if running in Docker
-        if os.path.exists('/.dockerenv'):
-            return True
-        # Check cgroup
-        try:
-            with open('/proc/1/cgroup', 'r') as f:
-                if 'docker' in f.read():
-                    return True
-        except Exception:
-            pass
-        return False
-    
+        self._use_nsenter = running_in_container()
+
     def _run_ufw(self, args: list[str], check: bool = True) -> tuple[bool, str, str]:
         """Run ufw command on host and return success, stdout, stderr"""
         if self._use_nsenter:

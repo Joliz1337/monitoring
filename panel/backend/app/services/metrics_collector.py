@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
-from sqlalchemy import select, delete, update, bindparam, ColumnElement
+from sqlalchemy import select, delete, update, bindparam, func, ColumnElement
 from app.services.http_client import get_node_client, node_auth_headers
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -76,8 +76,12 @@ class MetricsCollector:
     RECONCILE_CONCURRENCY = 5     # одновременных восстановлений оживших нод
 
     DOWNTIME_KIND_NODE = "node"
+    DOWNTIME_KIND_PANEL = "panel"
     # Открытый интервал простоя старше суток — след падения самой панели, а не живого простоя.
     ORPHANED_DOWNTIME_AFTER = timedelta(days=1)
+    # Ниже этого перерыва в сборе интервал не заводим: обычный рестарт панели
+    # укладывается в секунды, а дельту счётчиков за него нода донесёт сама.
+    PANEL_GAP_THRESHOLD = timedelta(minutes=5)
 
     MIN_SPEED_INTERVAL_SECONDS = 0.5  # ниже этого dt деление даёт шум, а не скорость
     NODE_VERSION_MAX_LEN = 20         # ширина servers.node_version
@@ -185,6 +189,7 @@ class MetricsCollector:
         
         # Load settings before starting
         await self._load_settings()
+        await self._record_panel_gap()
         await self._close_orphaned_downtime()
         await self._load_open_downtime()
         # start() читает счётчики из БД и поднимает собственный цикл флаша. Единичный сбой
@@ -487,6 +492,50 @@ class MetricsCollector:
         except Exception as e:
             logger.error(f"Failed to record downtime intervals: {e}")
 
+    async def _record_panel_gap(self):
+        """Отметить перерыв, когда метрики не собирала сама панель.
+
+        Простой ноды видно по её молчанию, а простой панели не видно ниоткуда:
+        сбора просто не было. Без отметки такой перерыв на графике трафика
+        выглядит как обычный провал наблюдения, и оператор ищет проблему на
+        сервере, которого не было. Граница берётся по последнему снятому
+        снапшоту — момент, до которого сбор точно шёл; он же переживает падение
+        панели, в отличие от записи «на выходе».
+        """
+        now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+        try:
+            async with async_session() as db:
+                last_seen = (await db.execute(select(func.max(MetricsSnapshot.timestamp)))).scalar()
+                if last_seen is None:
+                    return
+
+                gap_start = self._to_naive_utc(last_seen)
+                if now_utc - gap_start < self.PANEL_GAP_THRESHOLD:
+                    return
+
+                server_ids = (
+                    await db.execute(select(Server.id).where(Server.is_active == True))
+                ).scalars().all()
+                if not server_ids:
+                    return
+
+                db.add_all([
+                    ServerDowntime(
+                        server_id=sid,
+                        started_at=gap_start,
+                        ended_at=now_utc,
+                        kind=self.DOWNTIME_KIND_PANEL,
+                    )
+                    for sid in server_ids
+                ])
+                await db.commit()
+                logger.info(
+                    f"Recorded panel collection gap {gap_start} → {now_utc} "
+                    f"for {len(server_ids)} server(s)"
+                )
+        except Exception as e:
+            logger.error(f"Failed to record panel collection gap: {e}")
+
     async def _load_open_downtime(self):
         """Незакрытые интервалы простоя из прошлого запуска панели.
 
@@ -617,8 +666,6 @@ class MetricsCollector:
             "swap_percent": swap.get("percent", 0),
             "net_rx_bytes_per_sec": net_rx_speed,
             "net_tx_bytes_per_sec": net_tx_speed,
-            "net_rx_bytes": network.get("rx_bytes", 0),
-            "net_tx_bytes": network.get("tx_bytes", 0),
             "disk_percent": disk_percent,
             "disk_read_bytes_per_sec": disk_read_speed,
             "disk_write_bytes_per_sec": disk_write_speed,

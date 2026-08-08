@@ -781,18 +781,6 @@ async def disable_firewall(
     return await proxy_request(server, "/api/haproxy/firewall/disable", method="POST")
 
 
-# ==================== System Optimization ====================
-
-@router.get("/{server_id}/haproxy/system/info")
-async def get_system_info(
-    server_id: int,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    server = await get_server_by_id(server_id, db)
-    return await proxy_request(server, "/api/haproxy/system/info")
-
-
 # ==================== Traffic Tracking ====================
 # История трафика живёт в PostgreSQL панели и отдаётся роутером /api/traffic.
 # Здесь остаётся только управление правилами учёта портов в iptables ноды.

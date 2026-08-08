@@ -295,33 +295,9 @@ export interface FirewallRule {
   ipv6: boolean
 }
 
-export interface FirewallStatus {
-  active: boolean
-  default_incoming: string
-  default_outgoing: string
-  logging: string
-  error?: string
-}
-
 export interface FirewallActionResponse {
   success: boolean
   message: string
-  error_log?: string
-}
-
-export interface SystemInfo {
-  cpu_cores: number
-  ram_mb: number
-  maxconn: number
-  nbthread: number
-  ulimit_nofile: number
-  optimizations_applied: boolean
-}
-
-export interface CertificateGenerateResponse {
-  success: boolean
-  message: string
-  domain: string
   error_log?: string
 }
 
@@ -386,12 +362,6 @@ export interface TrafficSeries {
   gaps: TrafficGap[]
 }
 
-export interface ServerTrafficTotals {
-  server_id: number
-  rx_bytes: number
-  tx_bytes: number
-}
-
 export const authApi = {
   login: (password: string) => api.post('/auth/login', { password }),
   logout: () => api.post('/auth/logout'),
@@ -452,12 +422,6 @@ export const serversApi = {
       legacy: number
       needs_migration: number
     }>('/servers/migration-status'),
-  migrateOne: (id: number) =>
-    api.post<
-      | { status: 'already_shared' }
-      | { status: 'auto'; success: boolean }
-      | { status: 'manual'; token: string }
-    >(`/servers/${id}/migrate`),
   confirmMigration: (id: number) =>
     api.post<{ success: boolean }>(`/servers/${id}/confirm-migration`),
   migrateAll: () =>
@@ -510,34 +474,19 @@ export const proxyApi = {
   getHAProxyStatus: (serverId: number) => api.get<HAProxyStatus>(`/proxy/${serverId}/haproxy/status`),
   getHAProxyRules: (serverId: number) => 
     api.get<{ count: number; rules: HAProxyRule[] }>(`/proxy/${serverId}/haproxy/rules`),
-  createHAProxyRule: (serverId: number, rule: Omit<HAProxyRule, 'name'> & { name: string }) =>
-    api.post(`/proxy/${serverId}/haproxy/rules`, rule),
-  updateHAProxyRule: (serverId: number, name: string, data: Partial<HAProxyRule>) =>
-    api.put(`/proxy/${serverId}/haproxy/rules/${name}`, data),
-  deleteHAProxyRule: (serverId: number, name: string) =>
-    api.delete(`/proxy/${serverId}/haproxy/rules/${name}`),
   reloadHAProxy: (serverId: number) => api.post(`/proxy/${serverId}/haproxy/reload`),
   restartHAProxy: (serverId: number) => api.post(`/proxy/${serverId}/haproxy/restart`),
   startHAProxy: (serverId: number) => api.post(`/proxy/${serverId}/haproxy/start`),
   stopHAProxy: (serverId: number) => api.post(`/proxy/${serverId}/haproxy/stop`),
-  applyHAProxyConfig: (serverId: number, configContent: string, reloadAfter: boolean = true) =>
-    api.post<{ success: boolean; message: string; config_valid: boolean; reloaded: boolean }>(
-      `/proxy/${serverId}/haproxy/config/apply`,
-      { config_content: configContent, reload_after: reloadAfter }
-    ),
   getHAProxyConfig: (serverId: number) =>
     api.get<{ content: string; path: string }>(`/proxy/${serverId}/haproxy/config`),
   
   getHAProxyCerts: (serverId: number) => 
     api.get<{ certificates: string[] }>(`/proxy/${serverId}/haproxy/certs`),
-  getHAProxyCert: (serverId: number, domain: string) =>
-    api.get<Certificate>(`/proxy/${serverId}/haproxy/certs/${domain}`),
   getAllCerts: (serverId: number) =>
     api.get<{ certificates: Certificate[]; count: number }>(`/proxy/${serverId}/haproxy/certs/all`),
   generateCert: (serverId: number, data: { domain: string; email?: string; method?: string }) =>
     api.post(`/proxy/${serverId}/haproxy/certs/generate`, data),
-  renewCerts: (serverId: number) => 
-    api.post<{ success: boolean; message: string; renewed_domains: string[] }>(`/proxy/${serverId}/haproxy/certs/renew`),
   renewSingleCert: (serverId: number, domain: string) => 
     api.post<{ success: boolean; message: string; domain: string; output_log?: string }>(`/proxy/${serverId}/haproxy/certs/${domain}/renew`),
   deleteCert: (serverId: number, domain: string) =>
@@ -546,14 +495,8 @@ export const proxyApi = {
     api.post(`/proxy/${serverId}/haproxy/certs/upload`, data),
   
   // Firewall management
-  getFirewallStatus: (serverId: number) =>
-    api.get<FirewallStatus>(`/proxy/${serverId}/haproxy/firewall/status`),
   getFirewallRules: (serverId: number) =>
     api.get<{ rules: FirewallRule[]; count: number; active: boolean }>(`/proxy/${serverId}/haproxy/firewall/rules`),
-  allowPort: (serverId: number, port: number, protocol: string = 'tcp') =>
-    api.post<FirewallActionResponse>(`/proxy/${serverId}/haproxy/firewall/allow`, { port, protocol }),
-  denyPort: (serverId: number, port: number, protocol: string = 'tcp') =>
-    api.post<FirewallActionResponse>(`/proxy/${serverId}/haproxy/firewall/deny`, { port, protocol }),
   addFirewallRule: (serverId: number, data: {
     port: number
     protocol: string
@@ -561,8 +504,6 @@ export const proxyApi = {
     from_ip?: string | null
     direction: 'in' | 'out'
   }) => api.post<FirewallActionResponse>(`/proxy/${serverId}/haproxy/firewall/rule`, data),
-  deleteFirewallRule: (serverId: number, port: number, protocol: string = 'tcp') =>
-    api.delete<FirewallActionResponse>(`/proxy/${serverId}/haproxy/firewall/${port}?protocol=${protocol}`),
   deleteFirewallRuleByNumber: (serverId: number, ruleNumber: number) =>
     api.delete<FirewallActionResponse>(`/proxy/${serverId}/haproxy/firewall/rule/${ruleNumber}`),
   enableFirewall: (serverId: number) =>
@@ -570,13 +511,7 @@ export const proxyApi = {
   disableFirewall: (serverId: number) =>
     api.post<FirewallActionResponse>(`/proxy/${serverId}/haproxy/firewall/disable`),
   
-  // System info
-  getSystemInfo: (serverId: number) =>
-    api.get<SystemInfo>(`/proxy/${serverId}/haproxy/system/info`),
-  
   // Управление правилами учёта трафика в iptables ноды
-  getTrackedPorts: (serverId: number) =>
-    api.get<{ tracked_ports: number[] }>(`/proxy/${serverId}/traffic/ports/tracked`),
   addTrackedPort: (serverId: number, port: number) =>
     api.post<{ success: boolean; message: string }>(`/proxy/${serverId}/traffic/ports/add`, { port }),
   removeTrackedPort: (serverId: number, port: number) =>
@@ -603,12 +538,6 @@ export const trafficApi = {
     api.get<TrafficSummary>(`/traffic/${serverId}/summary`, { params: { days } }),
   getSeries: (serverId: number, params: { period: string; scope?: TrafficScope; key?: string }) =>
     api.get<TrafficSeries>(`/traffic/${serverId}/series`, { params }),
-}
-
-export interface ExecuteRequest {
-  command: string
-  timeout?: number
-  shell?: 'sh' | 'bash'
 }
 
 export interface ExecuteResponse {
@@ -714,8 +643,6 @@ export const blocklistApi = {
   // Global rules
   getGlobal: (direction: BlocklistDirection = 'in', list_type: BlocklistListType = 'block') =>
     api.get<{ count: number; direction: string; list_type: string; rules: BlocklistRule[] }>('/blocklist/global', { params: { direction, list_type } }),
-  addGlobal: (data: { ip_cidr: string; is_permanent?: boolean; direction?: BlocklistDirection; list_type?: BlocklistListType; comment?: string }) =>
-    api.post('/blocklist/global', data),
   addGlobalBulk: (ips: string[], is_permanent: boolean = true, direction: BlocklistDirection = 'in', list_type: BlocklistListType = 'block') =>
     api.post('/blocklist/global/bulk', { ips, is_permanent, direction, list_type }),
   deleteGlobal: (id: number) => api.delete(`/blocklist/global/${id}`),
@@ -729,8 +656,6 @@ export const blocklistApi = {
     api.post(`/blocklist/server/${serverId}`, data),
   deleteServer: (serverId: number, ruleId: number) =>
     api.delete(`/blocklist/server/${serverId}/${ruleId}`),
-  getServerStatus: (serverId: number) =>
-    api.get(`/blocklist/server/${serverId}/status`),
   
   // Sources
   getSources: (direction?: BlocklistDirection) =>
@@ -748,7 +673,6 @@ export const blocklistApi = {
   updateSettings: (data: { temp_timeout?: number; auto_update_enabled?: boolean; auto_update_interval?: number }) =>
     api.put('/blocklist/settings', data),
   sync: () => api.post<{ success: boolean; results: Record<string, SyncServerResult> }>('/blocklist/sync'),
-  syncServer: (serverId: number) => api.post<SyncServerResult>(`/blocklist/sync/${serverId}`),
   getSyncStatus: () => api.get<SyncStatus>('/blocklist/sync/status'),
   
 }
@@ -949,19 +873,14 @@ export const systemApi = {
   getPanelIp: () => api.get<PanelIpInfo>('/system/panel-ip'),
   getVersionBase: () => api.get<VersionBaseInfo>('/system/version/base'),
   getNodeVersionById: (nodeId: number) => api.get<SingleNodeVersion>(`/system/nodes/${nodeId}/version`, { timeout: 15000 }),
-  updatePanel: (targetVersion?: string) => 
-    api.post<UpdateResponse>('/system/update', targetVersion ? { target_version: targetVersion } : {}),
-  getUpdateStatus: () => api.get<UpdateStatus>('/system/update/status'),
+  updatePanel: (targetRef?: string) =>
+    api.post<UpdateResponse>('/system/update', undefined, targetRef ? { params: { target_ref: targetRef } } : undefined),
   
   // Node updates via proxy
-  getNodeVersion: (serverId: number) => 
-    api.get<{ version: string; component: string; node_name: string }>(`/proxy/${serverId}/system/version`),
   updateNode: (serverId: number, targetVersion?: string) =>
     api.post<UpdateResponse>(`/proxy/${serverId}/system/update`, { 
       ...(targetVersion && { target_version: targetVersion })
     }),
-  getNodeUpdateStatus: (serverId: number) =>
-    api.get<UpdateStatus>(`/proxy/${serverId}/system/update/status`),
   
   // Panel SSL certificate
   getCertificate: () => api.get<PanelCertificateInfo>('/system/certificate'),
@@ -1028,8 +947,6 @@ export const antiDdosApi = {
     api.post<{ success: boolean; nodes: number; ok: number }>('/antiddos/emergency-all', { enabled }),
   pushWhitelist: () =>
     api.post<{ success: boolean; whitelist_size: number; nodes: number; ok: number }>('/antiddos/whitelist/push'),
-  installAll: () =>
-    api.post<{ success: boolean; nodes: number; ok: number }>('/antiddos/install-all'),
 
   // per-node (proxy)
   setNodeEmergency: (serverId: number, enabled: boolean) =>
@@ -1038,8 +955,6 @@ export const antiDdosApi = {
     api.post(`/proxy/${serverId}/antiddos/watchdog`, { enabled }),
   getNodeStatus: (serverId: number) =>
     api.get(`/proxy/${serverId}/antiddos/status`, { timeout: 20000 }),
-  installNode: (serverId: number) =>
-    api.post(`/proxy/${serverId}/antiddos/install`, {}, { timeout: 70000 }),
 
   // whitelist auto-source lists
   getSources: () => api.get<{ sources: AntiDdosSource[] }>('/antiddos/sources'),
@@ -1176,14 +1091,6 @@ export interface RemnawaveAnomaliesResponse {
   minutes: number
 }
 
-export interface RemnawaveCachedUser {
-  email: number
-  uuid: string | null
-  username: string | null
-  telegram_id: number | null
-  status: string | null
-}
-
 export const remnawaveApi = {
   getSettings: () => api.get<RemnawaveSettings>('/remnawave/settings'),
   updateSettings: (data: Partial<RemnawaveSettings>) =>
@@ -1204,8 +1111,6 @@ export const remnawaveApi = {
     api.get<RemnawaveAnomaliesResponse>('/remnawave/anomalies', { params: { minutes } }),
   addAnomalyIgnore: (userId: number, listType: 'ip' | 'hwid' | 'all') =>
     api.post<{ success: boolean }>('/remnawave/anomalies/ignore', { user_id: userId, list_type: listType }),
-  removeAnomalyIgnore: (userId: number, listType: 'ip' | 'hwid' | 'all') =>
-    api.delete<{ success: boolean }>('/remnawave/anomalies/ignore', { data: { user_id: userId, list_type: listType } }),
 
   getIgnoreLists: () =>
     api.get<{ all: IgnoredUser[]; ip: IgnoredUser[]; hwid: IgnoredUser[] }>('/remnawave/ignore-lists'),
@@ -1214,12 +1119,6 @@ export const remnawaveApi = {
 
   getNodes: () => api.get<RemnawaveNodesResponse>('/remnawave/nodes'),
 
-  getDevices: (params?: { limit?: number; offset?: number; search?: string; platform?: string }) =>
-    api.get<{ devices: RemnawaveHwidDevice[]; total: number; offset: number; limit: number }>('/remnawave/devices', { params }),
-  getUserDevices: (userUuid: string) =>
-    api.get<{ devices: RemnawaveHwidDevice[]; count: number }>(`/remnawave/devices/user/${userUuid}`),
-  syncDevices: () =>
-    api.post<{ success: boolean; error?: string }>('/remnawave/devices/sync'),
 
   getSummary: () =>
     api.get<RemnawaveSummary>('/remnawave/stats/summary'),
@@ -1234,12 +1133,6 @@ export const remnawaveApi = {
   clearUserAllIps: (email: number) =>
     api.delete<{ success: boolean; deleted_records: number; message: string }>(`/remnawave/stats/user/${email}/ips`),
 
-  getUsers: (params?: { search?: string; limit?: number }) =>
-    api.get<{ count: number; users: RemnawaveCachedUser[] }>('/remnawave/users', { params }),
-  refreshUserCache: () =>
-    api.post<{ success: boolean; count: number; error: string | null }>('/remnawave/users/refresh'),
-  getUserCacheStatus: () =>
-    api.get<{ last_update: string | null; updating: boolean; update_interval: number }>('/remnawave/users/cache-status'),
 }
 
 // Server Alerts
@@ -1562,8 +1455,6 @@ export const sshSecurityApi = {
     api.get<{ config: SSHConfig }>(`/ssh-security/server/${serverId}/config`),
   updateConfig: (serverId: number, config: Partial<SSHConfig>) =>
     api.post<{ success: boolean; message: string; warnings: string[] }>(`/ssh-security/server/${serverId}/config`, config),
-  testConfig: (serverId: number, config: Partial<SSHConfig>) =>
-    api.post<{ valid: boolean; errors: string[] }>(`/ssh-security/server/${serverId}/config/test`, config),
 
   getFail2ban: (serverId: number) =>
     api.get<Fail2banConfig>(`/ssh-security/server/${serverId}/fail2ban/status`),
@@ -1878,8 +1769,6 @@ export const haproxyProfilesApi = {
     api.put<{ success: boolean; id: number }>(`/haproxy-profiles/${id}`, data),
   deleteProfile: (id: number) =>
     api.delete(`/haproxy-profiles/${id}`),
-  reorderProfiles: (profile_ids: number[]) =>
-    api.post('/haproxy-profiles/reorder', { profile_ids }),
   linkServer: (profileId: number, serverId: number) =>
     api.post(`/haproxy-profiles/${profileId}/servers/${serverId}`),
   unlinkServer: (profileId: number, serverId: number) =>
@@ -2059,8 +1948,6 @@ export const remnawaveNginxApi = {
   // Per-node (через прокси-роутер)
   getNodeStatus: (serverId: number) =>
     api.get<RemnawaveNginxNodeStatus>(`/proxy/${serverId}/remnawave-nginx/status`),
-  reloadNode: (serverId: number) =>
-    api.post(`/proxy/${serverId}/remnawave-nginx/reload`, undefined, { timeout: 70000 }),
   restartNode: (serverId: number) =>
     api.post(`/proxy/${serverId}/remnawave-nginx/restart`, undefined, { timeout: 130000 }),
 }

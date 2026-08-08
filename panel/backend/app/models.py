@@ -120,7 +120,6 @@ class ServerCache(Base):
     
     server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), primary_key=True)
     last_haproxy_data = Column(Text, nullable=True)
-    last_traffic_data = Column(Text, nullable=True)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
 
@@ -150,10 +149,6 @@ class MetricsSnapshot(Base):
     # Network speed (bytes per second) - calculated by panel
     net_rx_bytes_per_sec = Column(Float, default=0)
     net_tx_bytes_per_sec = Column(Float, default=0)
-    
-    # Network total bytes (cumulative from node)
-    net_rx_bytes = Column(BigInteger)
-    net_tx_bytes = Column(BigInteger)
     
     # Disk
     disk_percent = Column(Float)

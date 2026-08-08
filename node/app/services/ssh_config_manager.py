@@ -3,9 +3,10 @@ import re
 import subprocess
 import threading
 import time
-from pathlib import Path
 from typing import Optional
 from uuid import uuid4
+
+from app.services.container_detect import running_in_container
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +72,7 @@ def _unique_tmp_path(prefix: str) -> str:
 class SSHConfigManager:
 
     def __init__(self):
-        self._use_nsenter = self._detect_container()
+        self._use_nsenter = running_in_container()
         self._os_info = self._detect_os()
         self._ssh_service = self._detect_ssh_service()
         logger.info(
@@ -84,17 +85,6 @@ class SSHConfigManager:
         )
 
     # ── Environment Detection ──
-
-    def _detect_container(self) -> bool:
-        if Path("/.dockerenv").exists():
-            return True
-        try:
-            cgroup = Path("/proc/1/cgroup").read_text()
-        except OSError:
-            # Файла может не быть (cgroup v2 в ряде окружений) — это не ошибка,
-            # просто значит, что признаков контейнера тут не найти
-            return False
-        return any(marker in cgroup for marker in ("docker", "containerd", "kubepods"))
 
     def _detect_os(self) -> dict:
         info = {"distro": "unknown", "version": "", "pkg_manager": "apt"}

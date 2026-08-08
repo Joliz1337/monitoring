@@ -29,6 +29,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from app.services.container_detect import running_in_container
+
 logger = logging.getLogger(__name__)
 
 PERSISTENT_FILE = "/var/lib/monitoring/blocklist.json"
@@ -99,23 +101,12 @@ class IpsetManager:
     """Manages ipset blocklists via nsenter (for Docker with pid: host)"""
     
     def __init__(self):
-        self._use_nsenter = self._check_nsenter_needed()
+        self._use_nsenter = running_in_container()
         self._temp_timeout = DEFAULT_TIMEOUT
         self._initialized = False
         # Мутации сетов сериализуются: эндпоинты выполняются в threadpool,
         # параллельные sync с панели не должны перемешивать diff-ы.
         self._mutate_lock = threading.Lock()
-    
-    def _check_nsenter_needed(self) -> bool:
-        if os.path.exists('/.dockerenv'):
-            return True
-        try:
-            with open('/proc/1/cgroup', 'r') as f:
-                if 'docker' in f.read():
-                    return True
-        except Exception:
-            pass
-        return False
     
     def _run_cmd(self, cmd: list[str], timeout: int = 30) -> tuple[bool, str, str]:
         if self._use_nsenter:
