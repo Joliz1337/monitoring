@@ -43,9 +43,21 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'  # как в panel/backend/Dockerfile
+          cache: pip
+          cache-dependency-path: panel/backend/requirements.txt
 
-      # Генератор nginx-конфига обходится стандартной библиотекой, так что
-      # requirements панели (certbot, grpcio, asyncssh) здесь не ставятся
+      # Ставим рантайм целиком, как в Dockerfile панели. Без него тесты учёта трафика
+      # не падают, а молча пропускаются по SkipTest — и джоб зеленеет, проверив только
+      # генератор nginx-конфига. Тихо пропущенный тест хуже отсутствующего.
+      - name: Install panel backend dependencies
+        run: pip install -r panel/backend/requirements.txt
+
+      # Страховка от тихого пропуска: тесты трафика умеют объявлять SkipTest, когда
+      # рантайма нет, поэтому импорт их модулей проверяем отдельно и жёстко
+      - name: Panel traffic modules importable
+        working-directory: panel/backend
+        run: python -c "import app.services.traffic_ingest, app.services.traffic_import, app.routers.traffic"
+
       - name: Panel backend tests
         working-directory: panel/backend
         run: python -m unittest discover -s tests -p "test_*.py" -v
