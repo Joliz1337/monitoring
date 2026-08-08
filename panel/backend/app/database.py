@@ -1566,43 +1566,23 @@ async def _migrate_simplify_remnawave(conn):
             except Exception:
                 pass
 
-    # --- Step 3: Add retention_days column to remnawave_settings ---
+    # --- Step 3: Drop per-раздел retention columns from remnawave_settings ---
+    # Сводной колонки retention_days здесь больше не появляется: следом идущая
+    # _migrate_remnawave_ephemeral_ips её удаляет, и пара «добавить → удалить»
+    # выполнялась двумя лишними ALTER TABLE при каждом старте панели.
     result = await conn.execute(text("""
         SELECT column_name FROM information_schema.columns
         WHERE table_name = 'remnawave_settings'
     """))
     settings_cols = {row[0] for row in result.fetchall()}
 
-    if settings_cols and 'retention_days' not in settings_cols:
-        try:
-            best_val = "LEAST(COALESCE(visit_stats_retention_days, 7), COALESCE(ip_stats_retention_days, 7))"
-            if 'visit_stats_retention_days' in settings_cols:
-                await conn.execute(text(
-                    "ALTER TABLE remnawave_settings ADD COLUMN retention_days INTEGER DEFAULT 7"
-                ))
-                await conn.execute(text(f"""
-                    UPDATE remnawave_settings SET retention_days = {best_val}
-                """))
-            else:
-                await conn.execute(text("ALTER TABLE remnawave_settings ADD COLUMN retention_days INTEGER DEFAULT 7"))
-        except Exception:
-            pass
-
-    # Drop old retention columns
     for col in ('visit_stats_retention_days', 'ip_stats_retention_days',
                 'ip_destination_retention_days', 'hourly_stats_retention_days'):
-        if settings_cols and col in settings_cols:
+        if col in settings_cols:
             try:
                 await conn.execute(text(f'ALTER TABLE remnawave_settings DROP COLUMN IF EXISTS "{col}"'))
             except Exception:
                 pass
-
-    # Migrate old default 90 -> 7
-    if settings_cols and 'retention_days' in settings_cols:
-        try:
-            await conn.execute(text("UPDATE remnawave_settings SET retention_days = 7 WHERE retention_days = 90"))
-        except Exception:
-            pass
 
     # Drop leftover indexes from old schema
     old_indexes = [

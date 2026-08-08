@@ -1,4 +1,5 @@
 import asyncio
+import importlib
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -68,6 +69,23 @@ async def _deferred_startup():
     logger.info("Deferred startup tasks completed")
 
 
+async def _init_optional_module(module_name: str, entrypoint: str) -> None:
+    """Опциональные модули: отсутствие — штатная ситуация, а вот сбой инициализации
+    установленного молча выключал бы функциональность без единой строки в логе."""
+    from app.database import engine
+
+    try:
+        module = importlib.import_module(module_name)
+    except ImportError:
+        logger.debug(f"Optional module {module_name} is not installed")
+        return
+
+    try:
+        await getattr(module, entrypoint)(engine)
+    except Exception as e:
+        logger.error(f"Optional module {module_name} failed to initialize: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
@@ -80,20 +98,9 @@ async def lifespan(app: FastAPI):
         branch = await load_branch_from_db(db)
     logger.info(f"Update channel: {branch}")
     
-    try:
-        from app.services._ext import init_ext_db
-        from app.database import engine
-        await init_ext_db(engine)
-    except Exception:
-        pass
+    await _init_optional_module("app.services._ext", "init_ext_db")
+    await _init_optional_module("app.services._yc", "init_yc_db")
 
-    try:
-        from app.services._yc import init_yc_db
-        from app.database import engine
-        await init_yc_db(engine)
-    except Exception:
-        pass
-    
     await start_telegram_bot_service()
     await start_collector()
 

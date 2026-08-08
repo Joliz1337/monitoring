@@ -201,12 +201,25 @@ if [ -f "$PANEL_DIR/backend/.env.backup" ]; then
     log_success "backend/.env restored"
 fi
 
+# Тег версии из скачанного чекаута, если такой образ есть в реестре.
+# Пустой ответ означает «оставить действующий тег» — тогда pull промахнётся мимо
+# нужной версии и сработает локальная сборка ниже, которая соберёт ровно этот код.
+resolve_pinned_tag() {
+    local version="$1"
+    [ -n "$version" ] && [ "$version" != "unknown" ] || return 0
+    timeout 30 docker manifest inspect \
+        "ghcr.io/joliz1337/monitoring-panel-backend:$version" >/dev/null 2>&1 || return 0
+    printf '%s' "$version"
+}
+
 # Канал → тег образов GHCR: ветка dev тянет :dev, main — :latest.
-# Обновление на тег/коммит канал не меняет — действующий MON_IMAGE_TAG остаётся.
+# Обновление на тег/коммит — это путь отката, и канал он не меняет. Но и оставить
+# действующий :latest нельзя: pull притащил бы ровно ту версию, от которой
+# откатываются, потому что код живёт в образе, а не в чекауте на диске.
 case "$TARGET_REF" in
     dev)  IMAGE_TAG="dev" ;;
     main) IMAGE_TAG="latest" ;;
-    *)    IMAGE_TAG="" ;;
+    *)    IMAGE_TAG=$(resolve_pinned_tag "$NEW_VERSION") ;;
 esac
 if [ -n "$IMAGE_TAG" ] && [ -f "$PANEL_DIR/.env" ]; then
     if grep -q '^MON_IMAGE_TAG=' "$PANEL_DIR/.env"; then

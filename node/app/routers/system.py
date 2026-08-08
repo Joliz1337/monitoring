@@ -40,6 +40,15 @@ UPDATER_IMAGE = "docker:cli"
 # занимает десятки минут (наблюдалось 755с на слой) — ждём до 2 часов
 UPDATER_WAIT_TIMEOUT = 7200
 
+# Оба значения подставляются в текст shell-скрипта, который апдейтер исполняет на
+# хосте через nsenter — то есть это прямой путь к произвольной команде от root.
+# Наборы символов подобраны так, что shell не найдёт в них ни метасимвола, ни
+# пробела: адрес прокси уходит в git-аргументы неквотированным (там нужно
+# словоделение), а ссылка квотирована, но ведущий символ у неё всё равно
+# алфавитно-цифровой, иначе git принял бы её за опцию вида --upload-pack=.
+GIT_REF_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._/-]*$"
+PROXY_URL_PATTERN = r"^[a-z][a-z0-9+.-]*://[A-Za-z0-9._%+:@/-]+$"
+
 _update_status = {
     "in_progress": False,
     "last_result": None,
@@ -255,17 +264,17 @@ CLONE_SUCCESS=0
 if [ -n "$GIT_PROXY_ARGS" ]; then
     echo "[INFO] Using proxy for git: {proxy}"
     echo "[INFO] Trying GitHub via proxy (60s timeout)..."
-    if timeout 60 git $GIT_PROXY_ARGS clone --depth 1 --branch {ref_arg} "https://github.com/Joliz1337/monitoring.git" $TMP_CLONE 2>&1; then
+    if timeout 60 git $GIT_PROXY_ARGS clone --depth 1 --branch "{ref_arg}" "https://github.com/Joliz1337/monitoring.git" $TMP_CLONE 2>&1; then
         CLONE_SUCCESS=1
     fi
 else
     echo "[INFO] Trying GitHub (30s timeout)..."
-    if timeout 30 git clone --depth 1 --branch {ref_arg} "https://github.com/Joliz1337/monitoring.git" $TMP_CLONE 2>&1; then
+    if timeout 30 git clone --depth 1 --branch "{ref_arg}" "https://github.com/Joliz1337/monitoring.git" $TMP_CLONE 2>&1; then
         CLONE_SUCCESS=1
     else
         rm -rf $TMP_CLONE
         echo "[WARN] GitHub timeout/error, trying mirror (ghfast.top)..."
-        if timeout 120 git clone --depth 1 --branch {ref_arg} "$GITHUB_MIRROR/https://github.com/Joliz1337/monitoring.git" $TMP_CLONE 2>&1; then
+        if timeout 120 git clone --depth 1 --branch "{ref_arg}" "$GITHUB_MIRROR/https://github.com/Joliz1337/monitoring.git" $TMP_CLONE 2>&1; then
             CLONE_SUCCESS=1
         fi
     fi
@@ -300,7 +309,7 @@ nsenter -t 1 -m -u -n -i -p -- chmod +x /tmp/monitoring-staging/node/scripts/app
 
 echo "[INFO] Running update on host via nsenter..."
 set +e
-nsenter -t 1 -m -u -n -i -p -- bash /tmp/monitoring-staging/node/scripts/apply-update.sh /tmp/monitoring-staging /opt/monitoring-node "$CURRENT_VERSION" {ref_arg}
+nsenter -t 1 -m -u -n -i -p -- bash /tmp/monitoring-staging/node/scripts/apply-update.sh /tmp/monitoring-staging /opt/monitoring-node "$CURRENT_VERSION" "{ref_arg}"
 UPDATE_RC=$?
 set -e
 
@@ -390,8 +399,18 @@ echo "[SUCCESS] Update completed!"
 
 class UpdateRequest(BaseModel):
     """Request model for node update"""
-    target_version: Optional[str] = Field(None, description="Git reference (branch/tag/commit). Default: 'main'")
-    proxy: Optional[str] = Field(None, description="HTTP proxy for downloads (e.g., http://127.0.0.1:3128)")
+    target_version: Optional[str] = Field(
+        None,
+        max_length=100,
+        pattern=GIT_REF_PATTERN,
+        description="Git reference (branch/tag/commit). Default: 'main'",
+    )
+    proxy: Optional[str] = Field(
+        None,
+        max_length=255,
+        pattern=PROXY_URL_PATTERN,
+        description="HTTP proxy for downloads (e.g., http://127.0.0.1:3128)",
+    )
 
 
 @router.post("/update")

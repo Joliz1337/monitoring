@@ -13,7 +13,7 @@ import docker
 import psutil
 from app.services.http_client import get_node_client, get_external_client, node_auth_headers
 from docker.errors import DockerException, ImageNotFound
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,6 +28,13 @@ logger = logging.getLogger(__name__)
 
 NODE_VERSIONS_CACHE_TTL_SEC = 30.0
 NODE_NIC_INFO_CACHE_TTL_SEC = 20.0
+
+# Ссылка подставляется в текст shell-скрипта, который апдейтер исполняет в
+# privileged-контейнере с docker.sock — то есть это прямой путь к произвольной
+# команде на хосте панели. В наборе символов нет ни метасимвола shell, ни пробела;
+# ведущий символ алфавитно-цифровой, иначе ссылка сошла бы у git за опцию вида
+# --upload-pack=. Кавычки в самом скрипте — второй рубеж, не замена проверке.
+GIT_REF_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._/-]*$"
 
 _node_versions_cache: dict[int, tuple[float, Optional[dict]]] = {}
 _node_versions_locks: dict[int, asyncio.Lock] = {}
@@ -553,12 +560,12 @@ rm -rf $TMP_CLONE
 CLONE_SUCCESS=0
 
 echo "[INFO] Trying GitHub (30s timeout)..."
-if timeout 30 git clone --depth 1 --branch {ref_arg} "https://github.com/Joliz1337/monitoring.git" $TMP_CLONE 2>&1; then
+if timeout 30 git clone --depth 1 --branch "{ref_arg}" "https://github.com/Joliz1337/monitoring.git" $TMP_CLONE 2>&1; then
     CLONE_SUCCESS=1
 else
     rm -rf $TMP_CLONE
     echo "[WARN] GitHub timeout/error, trying mirror (ghfast.top)..."
-    if timeout 120 git clone --depth 1 --branch {ref_arg} "$GITHUB_MIRROR/https://github.com/Joliz1337/monitoring.git" $TMP_CLONE 2>&1; then
+    if timeout 120 git clone --depth 1 --branch "{ref_arg}" "$GITHUB_MIRROR/https://github.com/Joliz1337/monitoring.git" $TMP_CLONE 2>&1; then
         CLONE_SUCCESS=1
     fi
 fi
@@ -570,7 +577,7 @@ fi
 
 echo "[INFO] Running update script..."
 chmod +x $TMP_CLONE/panel/update.sh
-bash $TMP_CLONE/panel/update.sh {ref_arg}
+bash $TMP_CLONE/panel/update.sh "{ref_arg}"
 
 echo "[INFO] Cleanup..."
 rm -rf $TMP_CLONE
@@ -641,7 +648,7 @@ echo "[SUCCESS] Panel update completed!"
 
 @router.post("/update")
 async def trigger_panel_update(
-    target_ref: str | None = None,
+    target_ref: str | None = Query(None, max_length=100, pattern=GIT_REF_PATTERN),
     _: dict = Depends(verify_auth)
 ):
     """
