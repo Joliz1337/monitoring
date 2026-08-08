@@ -224,8 +224,10 @@ try:
     from app.routers._internal import router as ext_router
     if ext_router.routes:
         app.include_router(ext_router, prefix="/_int", tags=["internal"])
-except Exception:
-    pass
+except ImportError:
+    logger.debug("Optional router app.routers._internal is not installed")
+except Exception as e:
+    logger.error(f"Optional router app.routers._internal failed to load: {e}")
 
 
 @app.get("/health")

@@ -8,7 +8,7 @@ from sqlalchemy import select, update, desc, bindparam, func
 from sqlalchemy.ext.asyncio import AsyncSession
 import re
 from urllib.parse import urlparse
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator
 from typing import Optional
 import httpx
 import json
@@ -308,8 +308,7 @@ class ServerResponse(BaseModel):
     position: int
     is_active: bool
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 # Кэш тяжёлого ответа /servers?include_metrics=true. Метрики меняются раз в цикл
