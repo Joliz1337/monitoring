@@ -2094,6 +2094,8 @@ export interface FirewallProfile {
   synced_servers_count: number
   node_port_allowed: boolean
   node_api_port: number
+  ssh_port_allowed: boolean
+  ssh_default_port: number
   created_at: string | null
   updated_at: string | null
 }

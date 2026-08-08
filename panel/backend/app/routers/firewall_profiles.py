@@ -43,7 +43,7 @@ DefaultPolicy = Literal["allow", "deny", "reject"]
 class ProfileCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
     description: Optional[str] = None
-    rules: Optional[list[FirewallRuleData]] = None  # None => дефолт SSH 22/tcp
+    rules: Optional[list[FirewallRuleData]] = None  # None => DEFAULT_RULES
     default_incoming: DefaultPolicy = "deny"
     default_outgoing: DefaultPolicy = "allow"
 
@@ -67,10 +67,13 @@ class CloneRequest(BaseModel):
 # ==================== Helpers ====================
 
 NODE_API_PORT = 9100
+SSH_DEFAULT_PORT = 22
 
 DEFAULT_RULES: list[dict] = [
     {"port": NODE_API_PORT, "protocol": "tcp", "action": "allow",
      "from_ip": None, "direction": "in", "comment": "Monitoring node API"},
+    {"port": SSH_DEFAULT_PORT, "protocol": "tcp", "action": "allow",
+     "from_ip": None, "direction": "in", "comment": "SSH"},
 ]
 
 
@@ -95,19 +98,36 @@ def _rule_identity(rule: dict) -> tuple:
     )
 
 
-def _has_node_port_allow(rules: list[dict], default_in: str) -> bool:
-    """Гарантирует, что панель не потеряет связь с нодой после применения."""
+def _has_port_allow(rules: list[dict], default_in: str, port: int) -> bool:
     if (default_in or "deny").lower() == "allow":
         return True
     for r in rules:
         if (
-            int(r.get("port", 0)) == NODE_API_PORT
+            int(r.get("port", 0)) == port
             and (r.get("protocol") or "tcp").lower() in ("tcp", "any")
             and (r.get("action") or "").lower() == "allow"
             and (r.get("direction") or "in").lower() == "in"
         ):
             return True
     return False
+
+
+def _has_node_port_allow(rules: list[dict], default_in: str) -> bool:
+    """Гарантирует, что панель не потеряет связь с нодой после применения."""
+    return _has_port_allow(rules, default_in, NODE_API_PORT)
+
+
+def _has_ssh_allow(rules: list[dict], default_in: str) -> bool:
+    """Профиль без allow на SSH отрезает администратора от сервера.
+
+    Применение идёт как `ufw --force reset` → default deny → правила → enable,
+    и все команды при этом отрабатывают успешно — откатывать нечего, а нода
+    остаётся на связи через 9100, так что панель ничего не замечает. Проверка
+    идёт по порту 22: реальный SSH-порт ноды панели неизвестен, поэтому это
+    предупреждение, а не запрет — на нестандартном порту оператор снимает его
+    сам, добавив правило на свой порт.
+    """
+    return _has_port_allow(rules, default_in, SSH_DEFAULT_PORT)
 
 
 async def _get_profile(profile_id: int, db: AsyncSession) -> FirewallProfile:
@@ -121,18 +141,21 @@ async def _get_profile(profile_id: int, db: AsyncSession) -> FirewallProfile:
 
 
 def _profile_to_dict(profile: FirewallProfile, *, linked: int = 0, synced: int = 0) -> dict:
+    rules = _serialize_rules(profile)
     return {
         "id": profile.id,
         "name": profile.name,
         "description": profile.description,
-        "rules": _serialize_rules(profile),
+        "rules": rules,
         "default_incoming": profile.default_incoming,
         "default_outgoing": profile.default_outgoing,
         "position": profile.position,
         "linked_servers_count": linked,
         "synced_servers_count": synced,
-        "node_port_allowed": _has_node_port_allow(_serialize_rules(profile), profile.default_incoming),
+        "node_port_allowed": _has_node_port_allow(rules, profile.default_incoming),
         "node_api_port": NODE_API_PORT,
+        "ssh_port_allowed": _has_ssh_allow(rules, profile.default_incoming),
+        "ssh_default_port": SSH_DEFAULT_PORT,
         "created_at": profile.created_at.isoformat() if profile.created_at else None,
         "updated_at": profile.updated_at.isoformat() if profile.updated_at else None,
     }

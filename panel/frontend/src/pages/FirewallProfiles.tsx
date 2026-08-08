@@ -66,18 +66,35 @@ const POLICY_LABELS: Record<FirewallDefaultPolicy, string> = {
   reject: 'отклонить (reject)',
 }
 
-function computeNodePortAllowed(
+function computePortAllowed(
   rules: FirewallProfileRuleData[],
   defaultIn: FirewallDefaultPolicy,
-  nodePort: number,
+  port: number,
 ): boolean {
   if (defaultIn === 'allow') return true
   return rules.some(r =>
-    r.port === nodePort
+    r.port === port
     && (r.protocol === 'tcp' || r.protocol === 'any')
     && r.action === 'allow'
     && r.direction === 'in',
   )
+}
+
+const SSH_WARNING = 'Нет правила allow для SSH — применение профиля отрежет доступ к серверу'
+
+// Оба флага считает и бэкенд, но правки правил применяются оптимистично,
+// без перезагрузки профиля — иначе предупреждения отставали бы на один шаг
+function withGuardFlags(
+  profile: FirewallProfileWithServers,
+  rules: FirewallProfileRuleData[],
+  defaultIn: FirewallDefaultPolicy,
+): FirewallProfileWithServers {
+  return {
+    ...profile,
+    rules,
+    node_port_allowed: computePortAllowed(rules, defaultIn, profile.node_api_port),
+    ssh_port_allowed: computePortAllowed(rules, defaultIn, profile.ssh_default_port),
+  }
 }
 
 const EMPTY_RULE: FirewallProfileRuleData = {
@@ -428,6 +445,13 @@ function ProfileListItem({
                 </span>
               </Tooltip>
             )}
+            {!profile.ssh_port_allowed && (
+              <Tooltip label={SSH_WARNING}>
+                <span className="shrink-0 text-red-400">
+                  <ShieldAlert className="w-3.5 h-3.5" />
+                </span>
+              </Tooltip>
+            )}
           </div>
           {profile.description && (
             <div className="text-xs text-dark-500 truncate mt-0.5">{profile.description}</div>
@@ -623,6 +647,15 @@ function RulesTab({
 
   return (
     <div className="space-y-4">
+      {!profile.ssh_port_allowed && (
+        <div className="flex items-start gap-3 p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-red-300">
+          <AlertTriangle className="w-5 h-5 shrink-0 mt-0.5" />
+          <div className="text-sm">
+            Нет правила allow для SSH ({profile.ssh_default_port}/tcp). Применение сбрасывает ufw и включает запрет входящих — доступ к серверу пропадёт, и вернуть его можно будет только через консоль хостера. Добавьте правило на свой SSH-порт: если он не {profile.ssh_default_port}, предупреждение останется, и это нормально.
+          </div>
+        </div>
+      )}
+
       {!profile.node_port_allowed && (
         <div className="flex items-start gap-3 p-3 rounded-xl bg-yellow-500/10 border border-yellow-500/30 text-yellow-300">
           <AlertTriangle className="w-5 h-5 shrink-0 mt-0.5" />
@@ -1230,7 +1263,19 @@ function ProfileDetail({
     }
   }
 
+  // Профиль без SSH-правила отрезает доступ необратимо, и ошибки при этом не
+  // происходит — ufw честно применяет то, что ему дали. Единственная точка,
+  // где это ещё можно остановить, — здесь
+  const confirmSshLockout = (target: string): boolean => {
+    if (!profile || profile.ssh_port_allowed) return true
+    return confirm(
+      `${SSH_WARNING}.\n\nПрофиль "${profile.name}" не разрешает входящие на ${profile.ssh_default_port}/tcp. ` +
+      `Если SSH слушает именно этот порт, после применения ${target} останется доступен только через консоль хостера.\n\nПродолжить?`
+    )
+  }
+
   const handleSyncAll = async () => {
+    if (!confirmSshLockout('все привязанные серверы')) return
     setSyncing(true)
     try {
       const res = await firewallProfilesApi.syncAll(profileId, forceSync)
@@ -1249,6 +1294,8 @@ function ProfileDetail({
   }
 
   const handleSyncOne = async (serverId: number) => {
+    const target = profile?.servers.find(s => s.server_id === serverId)?.server_name ?? 'сервер'
+    if (!confirmSshLockout(target)) return
     setSyncingServerId(serverId)
     try {
       const res = await firewallProfilesApi.syncOne(profileId, serverId, forceSync)
@@ -1287,9 +1334,8 @@ function ProfileDetail({
 
   const handleDefaultChange = async (patch: { default_incoming?: FirewallDefaultPolicy; default_outgoing?: FirewallDefaultPolicy }) => {
     if (!profile) return
-    const merged: FirewallProfileWithServers = { ...profile, ...patch }
-    merged.node_port_allowed = computeNodePortAllowed(merged.rules, merged.default_incoming, merged.node_api_port)
-    setProfile(merged)
+    const patched: FirewallProfileWithServers = { ...profile, ...patch }
+    setProfile(withGuardFlags(patched, patched.rules, patched.default_incoming))
     try {
       await firewallProfilesApi.update(profileId, patch)
       onProfileChanged()
@@ -1303,11 +1349,7 @@ function ProfileDetail({
     try {
       const res = await firewallProfilesApi.addRule(profileId, rule)
       toast.success('Правило добавлено')
-      setProfile(prev => prev ? {
-        ...prev,
-        rules: res.data.rules,
-        node_port_allowed: computeNodePortAllowed(res.data.rules, prev.default_incoming, prev.node_api_port),
-      } : prev)
+      setProfile(prev => prev ? withGuardFlags(prev, res.data.rules, prev.default_incoming) : prev)
       onProfileChanged()
     } catch (err) {
       toast.error(extractErrorMessage(err, 'Не удалось добавить правило'))
@@ -1318,11 +1360,7 @@ function ProfileDetail({
     try {
       const res = await firewallProfilesApi.updateRule(profileId, index, rule)
       toast.success('Правило обновлено')
-      setProfile(prev => prev ? {
-        ...prev,
-        rules: res.data.rules,
-        node_port_allowed: computeNodePortAllowed(res.data.rules, prev.default_incoming, prev.node_api_port),
-      } : prev)
+      setProfile(prev => prev ? withGuardFlags(prev, res.data.rules, prev.default_incoming) : prev)
       onProfileChanged()
     } catch (err) {
       toast.error(extractErrorMessage(err, 'Не удалось обновить правило'))
@@ -1333,11 +1371,7 @@ function ProfileDetail({
     try {
       const res = await firewallProfilesApi.deleteRule(profileId, index)
       toast.success('Правило удалено')
-      setProfile(prev => prev ? {
-        ...prev,
-        rules: res.data.rules,
-        node_port_allowed: computeNodePortAllowed(res.data.rules, prev.default_incoming, prev.node_api_port),
-      } : prev)
+      setProfile(prev => prev ? withGuardFlags(prev, res.data.rules, prev.default_incoming) : prev)
       onProfileChanged()
     } catch (err) {
       toast.error(extractErrorMessage(err, 'Не удалось удалить правило'))
