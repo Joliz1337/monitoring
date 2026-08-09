@@ -6,6 +6,7 @@ import ipaddress
 import json
 import logging
 import re
+import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -18,6 +19,7 @@ from sqlalchemy import select
 logger = logging.getLogger(__name__)
 
 NODE_SECRET_VERSION = 1
+DEDICATED_NODE_CN_PREFIX = "node-"
 _CURVE = ec.SECP256R1()
 _SIGN_HASH = hashes.SHA256()
 
@@ -236,17 +238,45 @@ def generate_node_cert(
     node_name: str,
     san_hosts: list[str] | None = None,
     validity_days: int = 1095,
+    allow_client_auth: bool = True,
 ) -> tuple[str, str]:
     """Серверный сертификат ноды (serverAuth + SAN с IP/DNS)."""
+    eku = [ExtendedKeyUsageOID.SERVER_AUTH]
+    if allow_client_auth:
+        eku.append(ExtendedKeyUsageOID.CLIENT_AUTH)
     san = _build_san(node_name, san_hosts)
     return _sign_leaf(
         ca_cert_pem,
         ca_key_pem,
         node_name,
         validity_days,
-        [ExtendedKeyUsageOID.SERVER_AUTH, ExtendedKeyUsageOID.CLIENT_AUTH],
+        eku,
         san=san,
     )
+
+
+def generate_dedicated_node_cert(
+    ca_cert_pem: str,
+    ca_key_pem: str,
+    validity_days: int,
+) -> tuple[str, str, str]:
+    """Сертификат под один конкретный сервер: свой CN и никакого clientAuth.
+
+    nginx ноды принимает любой клиентский сертификат, подписанный нашим CA, так что
+    сертификат с clientAuth годился бы и на то, чтобы представиться панелью для всех
+    остальных нод. Ключ, который отдают владельцу чужого сервера, такого права иметь
+    не должен — отсюда serverAuth в одиночку.
+    """
+    common_name = f"{DEDICATED_NODE_CN_PREFIX}{secrets.token_hex(6)}"
+    cert_pem, key_pem = generate_node_cert(
+        ca_cert_pem,
+        ca_key_pem,
+        common_name,
+        san_hosts=None,
+        validity_days=validity_days,
+        allow_client_auth=False,
+    )
+    return common_name, cert_pem, key_pem
 
 
 def pack_node_secret(
@@ -302,6 +332,11 @@ def fingerprint_sha256(cert_pem: str) -> str:
     cert = _load_cert(cert_pem)
     digest = cert.fingerprint(hashes.SHA256())
     return ":".join(f"{b:02X}" for b in digest)
+
+
+def cert_expires_at(cert_pem: str) -> datetime:
+    """Дата окончания действия сертификата (aware UTC)."""
+    return _load_cert(cert_pem).not_valid_after_utc
 
 
 SHARED_NODE_CN = "shared-node"

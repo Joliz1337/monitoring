@@ -7,8 +7,11 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
+# Именно starlette-версия: fastapi.UploadFile — её наследник, и парсер формы
+# отдаёт базовый класс, который isinstance по наследнику не признаёт
+from starlette.datastructures import UploadFile
 
 from app.auth import verify_auth
 from app.config import get_settings
@@ -294,21 +297,30 @@ async def delete_backup(filename: str, _: dict = Depends(verify_auth)):
 @router.post("/restore")
 async def restore_backup(
     request: Request,
-    file: UploadFile = File(...),
     _: dict = Depends(verify_auth),
 ):
+    """Форму разбираем вручную, а не через `UploadFile = File(...)`.
+
+    FastAPI вычитывает тело запроса до того, как отработают зависимости: с
+    объявленным body-параметром аноним успевал бы залить дамп целиком и только
+    потом получить 401 — эндпоинт открыт снаружи и лимит размера на нём поднят.
+    """
     if _operation_status["state"] != "idle":
         raise HTTPException(409, "Another backup operation is in progress")
 
-    if not file.filename or not file.filename.endswith(".dump"):
-        raise HTTPException(400, "Only .dump files are accepted")
+    async with request.form() as form:
+        upload = form.get("file")
+        if not isinstance(upload, UploadFile) or not (upload.filename or "").endswith(".dump"):
+            raise HTTPException(400, "Only .dump files are accepted")
 
-    data = await file.read()
+        filename = upload.filename
+        data = await upload.read()
+
     if len(data) < 16:
         raise HTTPException(400, "File is too small to be a valid backup")
 
-    _claim_operation("restoring", file.filename)
-    asyncio.create_task(_restore_backup_task(data, file.filename, app=request.app))
+    _claim_operation("restoring", filename)
+    asyncio.create_task(_restore_backup_task(data, filename, app=request.app))
     return {"success": True, "message": "Restore started"}
 
 

@@ -456,6 +456,23 @@ export const serversApi = {
     api.delete<{ success: boolean }>(`/servers/remnawave-certs/${id}`),
 }
 
+export interface NodeInstallKey {
+  id: number
+  name: string
+  fingerprint: string
+  expires_at: string
+  created_at: string
+  token: string
+  install_command: string
+}
+
+export const installKeysApi = {
+  list: () => api.get<{ keys: NodeInstallKey[] }>('/install-keys'),
+  create: (name: string, validityDays: number) =>
+    api.post<NodeInstallKey>('/install-keys', { name, validity_days: validityDays }),
+  delete: (id: number) => api.delete<{ success: boolean }>(`/install-keys/${id}`),
+}
+
 export const proxyApi = {
   // Returns cached metrics from panel's database (collected by background worker)
   getMetrics: (serverId: number) => api.get<ServerMetrics>(`/proxy/${serverId}/metrics`),

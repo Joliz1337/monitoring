@@ -47,6 +47,7 @@ import { FAQIcon } from '../components/FAQ'
 import MigrationBanner from '../components/MigrationBanner'
 import DeployTargetFields, { DEPLOY_DEFAULTS, type DeployFormData } from '../components/servers/DeployTargetFields'
 import ExtraServerCard, { type ExtraTarget, type DeployStatus } from '../components/servers/ExtraServerCard'
+import InstallKeysPanel from '../components/servers/InstallKeysPanel'
 
 interface ServerFormData {
   name: string
@@ -859,6 +860,8 @@ export default function Servers() {
                 </div>
               )}
             </div>
+
+            <InstallKeysPanel />
 
             <form onSubmit={handleSubmit} className="space-y-5" autoComplete="off" data-form-type="other">
               <div>

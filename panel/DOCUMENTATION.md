@@ -1,4 +1,4 @@
-# Monitoring Panel v10.51.0
+# Monitoring Panel v10.52.0
 
 Веб-панель для мониторинга серверов. Собирает метрики с нод с настраиваемым интервалом (по умолчанию 10 сек) и хранит историю локально.
 
@@ -426,13 +426,16 @@ PK таблицы — `BigInteger` (не int32). При 500 нодах с инт
 ## Безопасность
 
 - **Секретный URL**: панель доступна только по `domain.com/{PANEL_UID}` — любой другой путь разрывает соединение (nginx return 444)
-- **Двойная проверка UID**: на уровне nginx + на уровне API (timing-safe сравнение)
+- **Двойная проверка UID**: на уровне nginx + на уровне API (timing-safe сравнение); неверный UID считается неудачной попыткой наравне с паролем (см. Anti-brute force)
 - **JWT в httpOnly cookie** (secure, samesite=strict)
-- **Anti-brute force**: 5 попыток = бан на 15 минут
+- **Anti-brute force**: 5 попыток (неверный пароль **или** неверный UID) = бан на 15 минут. Бан хранится в двух местах: в памяти бэкенда (`SecurityManager`) и в таблице `failed_logins` — рестарт контейнера сбрасывает только память, запись в БД остаётся действовать
 - **TLS 1.2/1.3** с сильными шифрами
-- **Rate limiting**: 60 req/min для неавторизованных
+- **Rate limiting на уровне nginx**: `limit_req_zone` — 30 запросов/мин с одного IP (зона `auth_limit`) на `/api/auth/login` и `/api/auth/validate-uid` (`burst=10`) и на `/api/backup/restore` (`burst=5`); превышение лимита отдаёт 444 ещё на уровне nginx, до бэкенда запрос не доходит
+- **Определение реального IP клиента** (`app/security.py`, `get_client_ip()`) — единственная функция во всём бэкенде, отвечающая за это (используется и `SecurityManager`, и `auth.py`, и роутерами). Заголовкам `X-Real-IP`/`X-Forwarded-For` доверяем, только если прямой TCP-пир — адрес из заранее заданного списка внутренних сетей (`TRUSTED_PROXY_NETWORKS`: loopback, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `::1/128`, `fc00::/7`, `fe80::/10`). Список задан явно, а не через `ipaddress.is_private()` — та относит к приватным ещё и CGNAT (`100.64.0.0/10`) и IPv6-документационные диапазоны, то есть адреса настоящих клиентов, которым доверять нельзя. Источник IP берётся по приоритету: `X-Real-IP` (nginx ставит из `$remote_addr`, клиент подделать не может) → последний элемент цепочки `X-Forwarded-For` (его дописал сам nginx) → адрес TCP-пира. Значение обязано парситься как валидный IP, иначе — откат на адрес пира. Тот же список сетей продублирован в `--forwarded-allow-ips` uvicorn (`backend/Dockerfile`) — иначе `--proxy-headers` не разбирал бы заголовки от bridge-адреса контейнера nginx (порт 8000 наружу не опубликован). Тесты — `panel/backend/tests/test_client_ip.py` (10)
 - **Connection drop**: все ошибки авторизации (401/403/429) и неверный UID/путь приводят к разрыву соединения без HTTP-ответа — атакующий не получает никакой информации
 - **HTTP запросы**: разрываются без редиректа на HTTPS
+- **`GET /health`**: доступен только с внутренних адресов (allow-список nginx: `127.0.0.1`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) — используется скриптами обновления. Публичный алиас `/api/health` закрыт на уровне nginx (`return 444`): без этого `location /api/` проксировал бы его на корень бэкенда в обход allow-списка, отдавая `{"status":"ok"}` всему интернету
+- **Восстановление из бэкапа** (`POST /api/backup/restore`): тело до 2 ГБ (`client_max_body_size 2g`, `proxy_request_buffering off` — тело сразу передаётся бэкенду, а не буферизуется на диске nginx). Роутер разбирает форму вручную (`request.form()`), а не через `UploadFile = File(...)`: FastAPI иначе вычитывал бы тело до запуска зависимостей, и неавторизованный запрос успевал бы залить файл целиком и только потом получить 401
 
 ## API
 
@@ -514,11 +517,10 @@ interface NicInfo {
 
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
-| POST | /api/auth/validate-uid | Проверка UID (drop connection при неверном) |
+| POST | /api/auth/validate-uid | Проверка UID — неверный считается неудачной попыткой наравне с паролем (бан после 5 подряд), drop connection |
 | POST | /api/auth/login | Вход |
 | POST | /api/auth/logout | Выход |
 | GET | /api/auth/check | Проверка сессии |
-| GET | /api/auth/ban-status | Статус бана текущего IP (для диагностики) |
 | POST | /api/auth/clear-ban | Сбросить бан текущего IP (требует авторизации) |
 | DELETE | /api/auth/clear-all-bans | Сбросить все IP баны (требует авторизации) |
 
@@ -530,6 +532,7 @@ interface NicInfo {
 | POST | /api/servers | Добавить сервер |
 | PUT | /api/servers/{id} | Обновить (включая is_active для вкл/выкл мониторинга) |
 | DELETE | /api/servers/{id} | Удалить |
+| GET | /api/servers/installer-token | Общий NODE_SECRET на весь парк (см. «Ключ установки ноды под один сервер» ниже) |
 | POST | /api/servers/{id}/test | Тест подключения |
 | POST | /api/servers/deploy | Запустить авторазвёртывание ноды (возвращает `{"job_id": "..."}`) |
 | GET | /api/servers/deploy/jobs | Список активных и недавно завершённых задач деплоя |
@@ -545,6 +548,60 @@ interface NicInfo {
 Поле `proxy_url` в `ServerCreate`/`ServerUpdate` и во всех ответах (`GET /servers`, `GET /servers/{id}`, `POST /servers`) — см. «SOCKS5-прокси до ноды» ниже.
 
 `GET /servers` без `include_metrics` (лёгкий путь, не кэшируется) тоже возвращает поле `status` (`online`/`offline`/`loading`). Оба пути используют общий `resolve_status()` из `app/services/server_status.py` (см. «Массовые действия (Bulk Actions)» ниже — тот же модуль лежит в основе пропуска офлайн-нод в bulk-операциях).
+
+### Ключ установки ноды под один сервер
+
+Общий **Installer Token** (`GET /api/servers/installer-token`) один на весь парк: внутри лежит приватный ключ shared-сертификата ноды (CN `shared-node`) с `ExtendedKeyUsage = serverAuth + clientAuth`. Nginx ноды проверяет только подпись CA (`ssl_verify_client on`, без сверки CN) — значит обладатель общего токена технически может предъявить его как клиентский сертификат и представиться панелью перед любой другой нодой. Отдавать этот токен владельцу арендованного сервера, к которому нет доступа, нельзя.
+
+Для таких случаев в форме добавления сервера есть блок **«Ключ под один сервер»**. Под каждую выдачу выпускается собственный сертификат с CN `node-<12 hex>` и **без `clientAuth`** — годится только на роль ноды, представиться панелью с ним невозможно.
+
+**PKI (`panel/backend/app/services/pki.py`):**
+- `generate_node_cert(..., allow_client_auth: bool = True)` — общий shared-сертификат по-прежнему выпускается с `clientAuth`; персональные ключи получают `allow_client_auth=False`
+- `generate_dedicated_node_cert(ca_cert_pem, ca_key_pem, validity_days) -> (common_name, cert_pem, key_pem)` — CN вида `node-<12 hex>` (`DEDICATED_NODE_CN_PREFIX` + `secrets.token_hex(6)`; запас против коллизии по `unique`-колонке `common_name`), EKU только `serverAuth`
+- `cert_expires_at(cert_pem) -> datetime` — дата окончания действия сертификата
+
+**Сервис (`panel/backend/app/services/node_install_keys.py`):**
+- `create_install_key`/`list_install_keys`/`delete_install_key` — CRUD по таблице `node_install_keys`
+- `build_key_token(keygen, key, panel_ip)` — тот же формат NODE_SECRET, что и у общего токена (`pack_node_secret`, `v=1`, base64url от JSON `ca`/`crt`/`key`/`panel_ip`); собирается на лету из PEM в БД, не хранится готовым
+- `build_install_command(token)` — one-liner `bash <(curl -fsSL <installer_url>) <token>`
+- `MIN_VALIDITY_DAYS = 1`, `MAX_VALIDITY_DAYS = 1095`, `DEFAULT_VALIDITY_DAYS = 90`
+
+**Схема БД:** `NodeInstallKey` / `node_install_keys` — `id`, `name`, `common_name` (unique), `cert_pem`, `key_pem`, `fingerprint`, `expires_at`, `created_at`. Таблица создаётся через `Base.metadata.create_all` в `init_db()`, отдельной миграции нет.
+
+**API (`panel/backend/app/routers/node_install_keys.py`, prefix `/install-keys`, всё под `verify_auth`):**
+
+| Метод | Endpoint | Описание |
+|-------|----------|----------|
+| GET | /api/install-keys | Список выданных ключей — токен и команда установки собираются в ответе на лету |
+| POST | /api/install-keys | Выпустить ключ (`name`, `validity_days` 1–1095, по умолчанию 90) |
+| DELETE | /api/install-keys/{key_id} | Удалить запись из списка |
+
+Ответ несёт готовый `token` (NODE_SECRET) и `install_command`, собранные из PEM в БД + актуального `resolve_panel_ip()` и текущего канала обновлений (`installer_url()`) — IP панели и канал обновлений в них всегда свежие, даже у ключа, выпущенного давно.
+
+**Свойства:**
+- Формат ключа не отличается от общего токена — `install.sh`, `node/deploy.sh` и код ноды принимают его как обычный NODE_SECRET без каких-либо доработок.
+- Отзыва нет: удаление ключа в панели убирает только запись из списка, уже установленную ноду это не отключает. Единственный рычаг ограничения — срок действия сертификата: по его истечении TLS-рукопожатие с панелью перестаёт проходить.
+- Запись `Server` при выпуске или использовании ключа не создаётся автоматически — оператор добавляет сервер как обычно, отдельно от выпуска ключа.
+
+**Frontend:**
+- `components/servers/InstallKeysPanel.tsx` — сворачиваемый блок в форме добавления сервера (`Servers.tsx`, сразу под блоком общего Installer Token): выпуск (имя + срок 30/90/365/1095 дней), список выданных с индикацией истечения (≤14 дней — предупреждение, ≤0 — истёк), раздельное копирование команды установки и токена, удаление с подтверждением повторным нажатием (окно 3 секунды)
+- `api/client.ts` — `installKeysApi` (`list`/`create`/`delete`), интерфейс `NodeInstallKey`
+- `locales/ru.json`, `en.json` — ключи `servers.install_keys_*`
+- FAQ: `data/faq/content/{ru,en}/PAGE_SERVERS.md` — секция «Ключ под один сервер»
+
+**Тесты:** `panel/backend/tests/test_install_key_cert.py` (6) — отсутствие `clientAuth` у персонального сертификата, сохранение `clientAuth` у общего, подпись CA, уникальность CN между выдачами, влияние `validity_days` на срок действия, совместимость с форматом токена `v=1`.
+
+**Файлы:**
+- `panel/backend/app/services/pki.py`
+- `panel/backend/app/services/node_install_keys.py`
+- `panel/backend/app/routers/node_install_keys.py`
+- `panel/backend/app/models.py` (`NodeInstallKey`)
+- `panel/backend/app/main.py` (регистрация роутера)
+- `panel/frontend/src/components/servers/InstallKeysPanel.tsx`
+- `panel/frontend/src/pages/Servers.tsx`
+- `panel/frontend/src/api/client.ts`
+- `panel/frontend/src/locales/ru.json`, `en.json`
+- `panel/frontend/src/data/faq/content/ru/PAGE_SERVERS.md`, `en/PAGE_SERVERS.md`
 
 ### SOCKS5-прокси до ноды
 
@@ -2285,20 +2342,29 @@ SSE-события: `note_update` — `{"content": "...", "version": N}`, `tasks
 ### Проблема: "Login failed" при правильном пароле
 
 Возможные причины:
-1. **IP забанен** — после 5 неудачных попыток IP банится на 15 минут
+1. **IP забанен** — после 5 неудачных попыток (пароль или UID) IP банится на 15 минут; бан живёт и в памяти бэкенда, и в таблице `failed_logins`
 2. **Пробелы в пароле** — при копировании из .env могут попасть пробелы
 
 **Решение:**
 ```bash
-# Проверить статус бана (без авторизации)
-curl https://domain.com/api/auth/ban-status
-
 # Посмотреть логи бэкенда для диагностики
 docker compose logs -f backend | grep -E "(Auth failure|banned|Login)"
 
-# Перезапустить контейнеры (сбросит баны в памяти, но не в БД)
+# Посмотреть баны в БД напрямую (POSTGRES_USER/POSTGRES_DB — из .env, по умолчанию panel/panel;
+# banned_until — unix-время)
+docker compose exec postgres psql -U panel -d panel -c \
+  "SELECT ip_address, attempts, to_timestamp(banned_until) AS banned_until FROM failed_logins;"
+
+# Снять бан конкретного IP из БД вручную
+docker compose exec postgres psql -U panel -d panel -c \
+  "DELETE FROM failed_logins WHERE ip_address = '<ip>';"
+
+# Перезапустить контейнеры (сбросит баны в памяти, но не в БД — запись в failed_logins
+# продолжит действовать, пока не истечёт срок или её не удалить)
 docker compose restart backend
 ```
+
+Если есть доступ в панель с другого IP, бан можно снять и авторизованными эндпоинтами: `POST /api/auth/clear-ban` (сбрасывает бан текущего IP запроса, память + БД) и `DELETE /api/auth/clear-all-bans` (сбрасывает все баны сразу).
 
 ### Проблема: Выкидывает из панели
 

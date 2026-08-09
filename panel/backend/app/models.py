@@ -17,6 +17,26 @@ class PKIKeygen(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
+class NodeInstallKey(Base):
+    """Ключ установки под один конкретный сервер — для нод, к которым нет доступа.
+
+    Общий NODE_SECRET несёт приватный ключ сертификата, одинакового для всего парка:
+    отдать его владельцу арендованного сервера — значит отдать доступ ко всем нодам.
+    Здесь под каждую выдачу выпускается собственный сертификат без clientAuth, и
+    сгореть он может только вместе с этим одним сервером.
+    """
+    __tablename__ = "node_install_keys"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(200), nullable=False)
+    common_name = Column(String(120), nullable=False, unique=True)
+    cert_pem = Column(Text, nullable=False)
+    key_pem = Column(Text, nullable=False)
+    fingerprint = Column(String(100), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
 class RemnawaveCertProfile(Base):
     """Сохранённый сертификат (SECRET_KEY) ноды Remnawave — переиспользуется при автоустановке."""
     __tablename__ = "remnawave_cert_profiles"

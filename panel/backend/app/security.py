@@ -6,6 +6,7 @@ Attackers get no feedback - just a dropped connection.
 """
 
 import asyncio
+import ipaddress
 import logging
 import time
 from collections import defaultdict
@@ -17,6 +18,64 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 logger = logging.getLogger(__name__)
+
+
+# Сети, из которых к бэкенду может прийти собственный nginx панели, — список
+# перечислен явно, а не через `is_private`: тот считает своими ещё и CGNAT
+# (100.64.0.0/10), и документационные диапазоны, то есть адреса настоящих клиентов.
+# Должен совпадать с --forwarded-allow-ips в backend/Dockerfile.
+TRUSTED_PROXY_NETWORKS = tuple(
+    ipaddress.ip_network(cidr)
+    for cidr in (
+        "127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+        "::1/128", "fc00::/7", "fe80::/10",
+    )
+)
+
+
+def _parse_ip(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    try:
+        addr = ipaddress.ip_address(value)
+    except ValueError:
+        return None
+    if addr.version == 6 and addr.ipv4_mapped:
+        return addr.ipv4_mapped
+    return addr
+
+
+def _is_internal_peer(host: str) -> bool:
+    addr = _parse_ip(host)
+    if addr is None:
+        return False
+    return any(addr.version == net.version and addr in net for net in TRUSTED_PROXY_NETWORKS)
+
+
+def get_client_ip(request: Request) -> str:
+    """Реальный IP клиента за nginx панели.
+
+    Прямой пир — контейнер nginx из bridge-сети Docker (172.x), а не 127.0.0.1,
+    поэтому доверие включается по признаку внутреннего адреса. Порядок источников
+    принципиален: X-Real-IP nginx ставит из `$remote_addr` и клиент его перебить
+    не может, а X-Forwarded-For приходит списком, где первый элемент — то, что
+    прислал сам клиент. Из XFF поэтому берётся последний элемент — его дописал
+    наш nginx. Схлопывание всех клиентов в один адрес nginx означало бы, что пять
+    неверных паролей от кого угодно банят вход всем сразу.
+    """
+    direct = request.client.host if request.client else "unknown"
+    if not _is_internal_peer(direct):
+        return direct
+
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    candidates = (
+        request.headers.get("X-Real-IP", ""),
+        forwarded.rsplit(",", 1)[-1],
+    )
+    for candidate in candidates:
+        value = candidate.strip()
+        if _parse_ip(value):
+            return value
+
+    return direct
 
 
 class ConnectionDrop(Exception):
@@ -49,18 +108,6 @@ class SecurityManager:
         self._lock = asyncio.Lock()
         self._last_cleanup = time.time()
     
-    def _get_client_ip(self, request: Request) -> str:
-        """Извлечь IP клиента. X-Forwarded-For доверяем только от локального nginx."""
-        direct = request.client.host if request.client else "unknown"
-        if direct in ("127.0.0.1", "::1"):
-            forwarded = request.headers.get("X-Forwarded-For")
-            if forwarded:
-                return forwarded.split(",")[0].strip()
-            real_ip = request.headers.get("X-Real-IP")
-            if real_ip:
-                return real_ip
-        return direct
-    
     async def _cleanup_old_records(self):
         """Remove expired records"""
         now = time.time()
@@ -92,7 +139,7 @@ class SecurityManager:
         """Check request - raises ConnectionDrop if IP is banned."""
         await self._cleanup_old_records()
         
-        ip = self._get_client_ip(request)
+        ip = get_client_ip(request)
         
         # Banned IP - drop connection
         if self.is_banned(ip):
@@ -122,22 +169,6 @@ class SecurityManager:
                 self._records[ip].banned_until = 0
                 logger.info(f"Auth success from {ip}, cleared ban and failures")
     
-    async def ban_ip(self, ip: str, duration: int = None):
-        """Manually ban IP"""
-        async with self._lock:
-            self._records[ip].banned_until = time.time() + (duration or self.ban_duration)
-            logger.info(f"IP {ip} manually banned")
-    
-    async def unban_ip(self, ip: str) -> bool:
-        """Manually unban IP"""
-        async with self._lock:
-            if ip in self._records:
-                self._records[ip].banned_until = 0
-                self._records[ip].failed_attempts = 0
-                return True
-            return False
-
-
 # Global instance
 _security: Optional[SecurityManager] = None
 
@@ -158,35 +189,20 @@ def get_security_manager() -> SecurityManager:
 class SecurityMiddleware(BaseHTTPMiddleware):
     """
     Middleware that drops connections for banned IPs and failed login attempts.
-    
+
     - Drops connections from banned IPs
-    - Records failed login attempts and bans IPs after too many failures
-    - Returns 444 (no response) for login failures to give attackers no info
+    - Returns 444 (no response) on ConnectionDrop to give attackers no info
     """
-    
-    PUBLIC_PATHS = {"/health", "/auth/login"}
-    
+
     async def dispatch(self, request: Request, call_next):
         security = get_security_manager()
-        
+
         try:
             await security.check_request(request)
+            return await call_next(request)
         except ConnectionDrop:
             # Return empty response and close connection
             return Response(status_code=444, content=b"")
-        
-        try:
-            response = await call_next(request)
-        except ConnectionDrop:
-            return Response(status_code=444, content=b"")
-        
-        if response.status_code in (401, 403) and request.url.path.endswith("/auth/login"):
-            ip = security._get_client_ip(request)
-            await security.record_auth_failure(ip)
-            logger.warning(f"Auth failure from {ip}: {request.url.path}")
-            return Response(status_code=444, content=b"")
-        
-        return response
 
 
 def drop_connection():
