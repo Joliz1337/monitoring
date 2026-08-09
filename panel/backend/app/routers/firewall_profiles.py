@@ -161,8 +161,14 @@ def _profile_to_dict(profile: FirewallProfile, *, linked: int = 0, synced: int =
     }
 
 
-async def _bg_sync_profile(profile_id: int, force: bool = False):
-    """Фоновая синхронизация профиля на все привязанные серверы."""
+async def _bg_sync_profile(
+    profile_id: int,
+    force: bool = False,
+    server_ids: list[int] | None = None,
+):
+    """Фоновая синхронизация профиля. Без server_ids — на все привязанные серверы,
+    с ними — только на указанные (привязка одного сервера не трогает остальные:
+    apply на ноде идёт через `ufw --force reset`, то есть не бесплатен)."""
     async with async_session_maker() as db:
         try:
             result = await db.execute(
@@ -170,7 +176,7 @@ async def _bg_sync_profile(profile_id: int, force: bool = False):
             )
             profile = result.scalar_one_or_none()
             if profile:
-                await sync_profile_to_servers(profile, db, force=force)
+                await sync_profile_to_servers(profile, db, server_ids=server_ids, force=force)
         except Exception as e:
             logger.error("Background firewall sync failed for profile %s: %s", profile_id, e)
 
@@ -527,7 +533,7 @@ async def link_server(
     server.firewall_sync_status = "pending"
     await db.commit()
 
-    bg.add_task(_bg_sync_profile, profile_id)
+    bg.add_task(_bg_sync_profile, profile_id, server_ids=[server_id])
     return {"success": True}
 
 

@@ -1671,6 +1671,8 @@ Volume `/etc/letsencrypt` смонтирован с `:rw` — backend запис
 4. Нода атомарно заменяет состояние UFW (backup → reset → apply → enable), при ошибке — авторолбэк из бэкапа
 5. Результат записывается в `firewall_sync_logs`; статус и хэш обновляются в модели `Server`
 
+**Область раскатки при привязке сервера:** `_bg_sync_profile(profile_id, server_ids=None)` — общий фоновый хелпер для всех фоновых синков профиля. Привязка сервера к профилю (`POST /{id}/servers/{server_id}`, а также автопривязка после деплоя нового сервера в `deploy_job_manager.py`) вызывает его с `server_ids=[server_id]` — раскатывается только добавленный сервер, остальные привязанные ноды не трогаются. Явный `POST /{id}/sync` (кнопки «Синхронизировать всё» / «Синхронизировать») и изменение самого профиля (правила, политики по умолчанию) вызывают его без `server_ids` — раскатка на все привязанные серверы. Область синка важна потому, что `apply_profile` на ноде всегда выполняет `ufw --force reset` без сравнения хэшей — UFW пересобирается с нуля при каждом вызове.
+
 **Хранение правил:**
 
 Правила хранятся в одной колонке `rules_json TEXT` в виде JSON-массива. Никаких отдельных таблиц для правил. Поля правила (v1): `port`, `protocol` (tcp/udp/any), `action` (allow/deny), `from_ip` (IP/CIDR/null), `direction` (in/out), `comment`.
@@ -1948,7 +1950,7 @@ Whitelist можно наполнять из внешних списков по 
 
 **Авто-запуск и авто-остановка HAProxy при изменении привязки:**
 
-- **Привязка сервера** (`POST /{id}/servers/{server_id}`) — запускает фоновую задачу `_bg_sync_server_start`: раскатывает конфиг только на привязываемый сервер с флагом `ensure_started=True`. Если HAProxy был остановлен — он запускается автоматически (`reload(auto_start=True)`) и включается в autostart. Механизм прокидывается через `ConfigApplyRequest.ensure_started` → `haproxy_manager.apply_config()`. Ожившие офлайн-ноды в `retry_pending_haproxy_syncs` также вызываются с `ensure_started=True`.
+- **Привязка сервера** (`POST /{id}/servers/{server_id}`) — запускает фоновую задачу `_bg_sync_server_start`: раскатывает конфиг только на привязываемый сервер с флагом `ensure_started=True`. Если HAProxy был остановлен — он запускается автоматически (`reload(auto_start=True)`) и включается в autostart. Механизм прокидывается через `ConfigApplyRequest.ensure_started` → `haproxy_manager.apply_config()`. Ожившие офлайн-ноды в `retry_pending_haproxy_syncs` также вызываются с `ensure_started=True`. Автопривязка после автодеплоя нового сервера (`DeployJobManager._bind_profiles` в `deploy_job_manager.py`) вызывает тот же `_bg_sync_server_start(profile_id, server_id)` — раскатка только на новый сервер, остальные привязанные к профилю ноды не трогаются.
 - **Отвязка сервера** (`DELETE /{id}/servers/{server_id}`) — запускает фоновую задачу `_bg_stop_haproxy`: вызывает `stop_haproxy_on_server(server)`, который шлёт `POST /api/haproxy/stop` на ноду. Офлайн-сервер пропускается; ошибки связи логируются без падения. В UI — диалог подтверждения с предупреждением об остановке HAProxy (ключ `haproxy_configs.unlink_confirm`).
 
 **Управление запуском HAProxy в разделе "Привязанные серверы":**
