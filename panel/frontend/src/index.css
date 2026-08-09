@@ -136,14 +136,6 @@ body {
 }
 
 /* ========== GRADIENT BACKGROUNDS ========== */
-.gradient-mesh {
-  background: 
-    radial-gradient(ellipse at 0% 0%, rgba(34, 211, 238, 0.08) 0px, transparent 50%),
-    radial-gradient(ellipse at 100% 100%, rgba(16, 185, 129, 0.06) 0px, transparent 50%),
-    radial-gradient(ellipse at 50% 50%, rgba(139, 92, 246, 0.04) 0px, transparent 50%),
-    radial-gradient(ellipse at 100% 0%, rgba(239, 68, 68, 0.04) 0px, transparent 50%);
-}
-
 .gradient-overlay {
   position: relative;
 }
@@ -186,10 +178,6 @@ body {
 }
 
 /* ========== GLOWING EFFECTS ========== */
-.glow-accent {
-  box-shadow: 0 0 20px rgba(34, 211, 238, 0.3), 0 0 40px rgba(34, 211, 238, 0.1);
-}
-
 .glow-success {
   box-shadow: 0 0 15px rgba(16, 185, 129, 0.4);
 }
@@ -198,19 +186,7 @@ body {
   box-shadow: 0 0 15px rgba(239, 68, 68, 0.4);
 }
 
-.glow-warning {
-  box-shadow: 0 0 15px rgba(245, 158, 11, 0.4);
-}
-
 /* ========== PROGRESS BAR STYLES ========== */
-.progress-bar-container {
-  position: relative;
-  height: 6px;
-  background: rgba(64, 65, 79, 0.5);
-  border-radius: 3px;
-  overflow: hidden;
-}
-
 .progress-bar-fill {
   height: 100%;
   border-radius: 3px;
@@ -279,20 +255,6 @@ body {
   to { transform: rotate(360deg); }
 }
 
-/* ========== STAGGERED ANIMATIONS ========== */
-.stagger-item {
-  opacity: 0;
-  transform: translateY(20px);
-  animation: staggerIn 0.5s ease forwards;
-}
-
-@keyframes staggerIn {
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
 /* ========== STATUS DOT ANIMATION ========== */
 .status-dot {
   position: relative;
@@ -315,11 +277,6 @@ body {
 @keyframes status-pulse {
   0%, 100% { transform: scale(1); opacity: 1; }
   50% { transform: scale(2); opacity: 0; }
-}
-
-.status-dot-offline {
-  background: #ef4444;
-  box-shadow: 0 0 8px rgba(239, 68, 68, 0.6);
 }
 
 /* ========== CARD HOVER EFFECTS ========== */
@@ -384,13 +341,6 @@ body {
 /* ========== TEXT GRADIENT ========== */
 .text-gradient {
   background: linear-gradient(135deg, #22d3ee 0%, #10b981 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
-}
-
-.text-gradient-accent {
-  background: linear-gradient(135deg, #22d3ee 0%, #a855f7 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
@@ -476,14 +426,6 @@ body {
   opacity: 1;
 }
 
-/* ========== GRID PATTERN ========== */
-.grid-pattern {
-  background-image: 
-    linear-gradient(rgba(34, 211, 238, 0.03) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(34, 211, 238, 0.03) 1px, transparent 1px);
-  background-size: 50px 50px;
-}
-
 /* ========== NOISE TEXTURE ========== */
 .noise {
   position: relative;
@@ -496,20 +438,6 @@ body {
   background: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E");
   opacity: 0.02;
   pointer-events: none;
-}
-
-/* ========== TRANSITION CLASSES ========== */
-.transition-smooth {
-  transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.transition-bounce {
-  transition: all 0.5s cubic-bezier(0.68, -0.55, 0.265, 1.55);
-}
-
-/* ========== FOCUS STATES ========== */
-.focus-ring {
-  @apply focus:outline-none focus:ring-2 focus:ring-accent-500/40 focus:ring-offset-2 focus:ring-offset-dark-950;
 }
 
 /* ========== NUMBER COUNTER ANIMATION ========== */
@@ -557,38 +485,6 @@ body {
   box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5),
               0 0 40px rgba(34, 211, 238, 0.1);
   border-color: rgba(34, 211, 238, 0.3);
-}
-
-/* ========== CHART ANIMATIONS ========== */
-.chart-enter {
-  animation: chart-fade-in 0.6s ease forwards;
-}
-
-@keyframes chart-fade-in {
-  from {
-    opacity: 0;
-    transform: translateY(10px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-/* ========== DROPDOWN MENU ========== */
-.dropdown-enter {
-  animation: dropdown-in 0.2s ease;
-}
-
-@keyframes dropdown-in {
-  from {
-    opacity: 0;
-    transform: translateY(-8px) scale(0.96);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-  }
 }
 
 /* ========== PAGE ENTER ANIMATION ========== */
