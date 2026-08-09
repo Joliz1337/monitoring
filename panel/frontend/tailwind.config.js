@@ -41,9 +41,6 @@ export default {
         sans: ['Outfit', 'system-ui', 'sans-serif'],
         mono: ['JetBrains Mono', 'monospace'],
       },
-      backdropBlur: {
-        xs: '2px',
-      },
     },
   },
   plugins: [],

@@ -246,7 +246,7 @@ Visibility effect пропускает первый mount через `mountedRef
 
 **Компоненты:**
 
-- `panel/frontend/src/index.css` — CSS-классы: `.btn-scale` (hover/tap), `.live-mode-pulse`, `.status-ping`, `.status-ping-delay`, `.status-blink`, `.card-enter` (entrance с inline `animation-delay`), `.metric-enter`, `.fade-in`, `.pb-track/.pb-fill/.pb-fill-shimmer/.pb-fill-pulse` (прогресс-бар), `.cpu-core-fill` (ядра CPU, `transition: width`), `.loading-blob/.loading-logo-wobble/.loading-text-pulse` (LoadingScreen), `.icon-float` (empty state). `.card` использует непрозрачный фон `bg-dark-900/80` без `backdrop-blur-md` — backdrop-blur пересчитывается GPU на каждый кадр под слоем при N карточках.
+- `panel/frontend/src/index.css` — CSS-классы: `.btn-scale` (hover/tap), `.live-mode-pulse`, `.status-ping`, `.status-ping-delay`, `.status-blink`, `.card-enter` (entrance с inline `animation-delay`), `.fade-in`, `.pb-track/.pb-fill/.pb-fill-shimmer/.pb-fill-pulse` (прогресс-бар), `.cpu-core-fill` (ядра CPU, `transition: width`), `.loading-blob/.loading-logo-wobble/.loading-text-pulse` (LoadingScreen), `.icon-float` (empty state). `.card` использует непрозрачный фон `bg-dark-900/80` без `backdrop-blur-md` — backdrop-blur пересчитывается GPU на каждый кадр под слоем при N карточках.
 
 - `panel/frontend/src/components/ui/ProgressBar.tsx` — ширина обновляется через `transition: width`, анимированный режим — через CSS pseudo-элементы shimmer/pulse.
 
