@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from app.database import async_session
 from app.models import FirewallProfile, HAProxyConfigProfile, RemnawaveNginxProfile, Server, ServerCache
@@ -24,6 +25,11 @@ from app.services.haproxy_profile_sync import (
     sync_profile_to_servers as sync_haproxy_profile,
 )
 from app.services.http_client import get_node_client, node_auth_headers
+from app.services.node_sync_queue import (
+    KIND_BLOCKLIST,
+    KIND_FIREWALL_PROFILE,
+    clear as clear_pending_sync,
+)
 from app.services.remnawave_nginx_sync import (
     get_remnawave_nginx_path,
     render_profile_for_server,
@@ -34,6 +40,10 @@ logger = logging.getLogger(__name__)
 
 NODE_FETCH_TIMEOUT = 15.0
 HAPROXY_START_TIMEOUT = 30.0
+
+# Итоги, после которых нода уже в ожидаемом состоянии: применили, оно и так совпало,
+# либо применять нечего.
+RECONCILED_STATES = {"in_sync", "reapplied", "no_profile"}
 
 
 @dataclass
@@ -212,6 +222,7 @@ async def reconcile_recovered_server(server_id: int, semaphore: asyncio.Semaphor
     """Сверяет и восстанавливает состояние ноды, которая только что перешла offline → online."""
     report = RecoveryReport(server_id=server_id)
     server_name = str(server_id)
+    started_at = datetime.now(timezone.utc)
 
     async with semaphore:
         async with async_session() as db:
@@ -228,6 +239,15 @@ async def reconcile_recovered_server(server_id: int, semaphore: asyncio.Semaphor
         report.haproxy_run = await _reconcile_haproxy_running(server_id, pre_death_running)
         report.remnawave_nginx = await _reconcile_remnawave_nginx(server_id)
         report.blocklist = await _reconcile_blocklist(server_id)
+
+        # То, что уже приведено к ожидаемому, снимаем с очереди отложенных синков —
+        # иначе её воркер повторит ту же работу через полминуты.
+        settled = []
+        if report.firewall in RECONCILED_STATES:
+            settled.append(KIND_FIREWALL_PROFILE)
+        if report.blocklist == "synced":
+            settled.append(KIND_BLOCKLIST)
+        await clear_pending_sync(server_id, settled, started_at)
 
     logger.info(
         "recovery_reconcile_done server=%s(%s) firewall=%s haproxy_cfg=%s haproxy_run=%s remnawave_nginx=%s blocklist=%s",

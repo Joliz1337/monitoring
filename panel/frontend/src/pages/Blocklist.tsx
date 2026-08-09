@@ -243,11 +243,16 @@ export default function Blocklist() {
         if (!data.in_progress && data.servers && Object.keys(data.servers).length > 0) {
           clearInterval(poll)
 
-          const failedServers = Object.values(data.servers).filter(s => !s.success)
+          // Офлайн-нода — не сбой: её долг записан в очередь и закроется сам
+          const queuedServers = Object.values(data.servers).filter(s => s.queued)
+          const failedServers = Object.values(data.servers).filter(s => !s.success && !s.queued)
 
           if (failedServers.length === 0) {
+            const message = queuedServers.length > 0
+              ? t('blocklist.sync_queued', { servers: queuedServers.map(s => s.server_name).join(', ') })
+              : t('blocklist.sync_success')
             setSyncToasts(prev =>
-              prev.map(st => st.id === id ? { ...st, status: 'success' as const, message: t('blocklist.sync_success') } : st)
+              prev.map(st => st.id === id ? { ...st, status: 'success' as const, message } : st)
             )
           } else {
             const names = failedServers.map(s => s.server_name).join(', ')

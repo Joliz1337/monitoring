@@ -26,6 +26,7 @@ from app.services.time_sync import start_time_sync, stop_time_sync
 from app.services.wildcard_ssl import start_wildcard_ssl_manager, stop_wildcard_ssl_manager
 from app.services.torrent_blocker import start_torrent_blocker, stop_torrent_blocker
 from app.services.antiddos_manager import start_antiddos_manager, stop_antiddos_manager
+from app.services.node_sync_queue import start_node_sync_queue, stop_node_sync_queue
 from app.services.traffic_import import start_traffic_import, stop_traffic_import
 from app.services.http_client import init_http_clients, close_http_clients
 from app.services.pki import load_or_create_keygen
@@ -101,6 +102,8 @@ async def lifespan(app: FastAPI):
     await start_wildcard_ssl_manager()
     await start_torrent_blocker()
     await start_antiddos_manager()
+    # Долги перед нодами лежат в базе — очередь подхватывает их и после перезапуска панели.
+    await start_node_sync_queue()
 
     # Перенос легаси-истории трафика — разовая фоновая задача: панель обязана
     # подняться, даже если она не стартовала.
@@ -113,6 +116,7 @@ async def lifespan(app: FastAPI):
 
     await close_http_clients()
     await stop_traffic_import()
+    await stop_node_sync_queue()
     await stop_antiddos_manager()
     await stop_torrent_blocker()
     await stop_wildcard_ssl_manager()

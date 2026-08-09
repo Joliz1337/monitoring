@@ -19,8 +19,10 @@ import httpx
 from sqlalchemy import select, and_
 from urllib.parse import urlparse
 
+from app.services.haproxy_profile_sync import is_server_online
 from app.services.http_client import get_node_client, get_external_client, node_auth_headers
 from app.services.net_utils import is_public_range, resolve_panel_ip, host_to_ip
+from app.services.node_sync_queue import KIND_BLOCKLIST, enqueue
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import async_session
@@ -36,6 +38,7 @@ NODE_MAX_IPSET_ENTRIES = 1_000_000  # maxelem ipset на нодах — боль
 SYNC_BASE_TIMEOUT = 20.0
 ALLOW_SYNC_TIMEOUT = 20.0
 SYNC_TIMEOUT_IPS_PER_SEC = 40_000  # +1 сек к таймауту синка на каждые 40k IP
+QUEUED_MESSAGE = "Сервер офлайн — синхронизация отложена до восстановления"
 
 DEFAULT_SOURCES = [
     {
@@ -594,6 +597,27 @@ class BlocklistManager:
             return self._last_sync
         return {"in_progress": False, "timestamp": None, "servers": {}, "error": None}
 
+    @staticmethod
+    def _queued_result(server: Server) -> dict:
+        """Результат для офлайн-ноды: список ей не отправлен, долг записан в очередь."""
+        skipped = {"success": False, "message": QUEUED_MESSAGE, "ip_count": 0}
+        return {
+            "server_id": server.id,
+            "server_name": server.name,
+            "success": False,
+            "queued": True,
+            "in": dict(skipped),
+            "out": dict(skipped),
+        }
+
+    async def _queue_offline(self, servers: list[Server]) -> dict:
+        """Отложить синк офлайн-нодам: HTTP к ним всё равно упрётся в таймаут,
+        а очередь доставит список сама, как только они вернутся в сеть."""
+        if not servers:
+            return {}
+        await enqueue([s.id for s in servers], KIND_BLOCKLIST, QUEUED_MESSAGE)
+        return {s.id: self._queued_result(s) for s in servers}
+
     async def sync_all_nodes(self) -> dict:
         """Sync blocklists to all active nodes in parallel (both directions).
 
@@ -614,12 +638,22 @@ class BlocklistManager:
                     self._store_sync_result({})
                     return {}
 
-                shared = await self.build_shared_lists()
-                tasks = [self._sync_one_server_safe(s, shared) for s in servers]
-                done = await asyncio.gather(*tasks)
+                online = [s for s in servers if is_server_online(s)]
+                results.update(await self._queue_offline(
+                    [s for s in servers if not is_server_online(s)]
+                ))
 
-                for sr in done:
-                    results[sr["server_id"]] = sr
+                if online:
+                    shared = await self.build_shared_lists()
+                    tasks = [self._sync_one_server_safe(s, shared) for s in online]
+                    done = await asyncio.gather(*tasks)
+
+                    for sr in done:
+                        results[sr["server_id"]] = sr
+
+                    # Живая нода тоже могла не принять список (таймаут, ошибка ноды) —
+                    # без очереди эта потеря так и осталась бы незамеченной.
+                    await self._enqueue_failed(done)
             except BlocklistSourceUnavailableError as e:
                 # Ноды не трогаем вовсе: неполный список снял бы блокировки.
                 error = str(e)
@@ -630,6 +664,65 @@ class BlocklistManager:
             finally:
                 self._store_sync_result(results, error)
             return results
+
+    async def _enqueue_failed(self, results: list[dict]) -> None:
+        failed = [sr["server_id"] for sr in results if not sr.get("success")]
+        if failed:
+            await enqueue(failed, KIND_BLOCKLIST, "Нода не приняла блок-лист")
+
+    async def sync_nodes_by_ids(self, server_ids: list[int]) -> dict[int, Optional[str]]:
+        """Досинхронизировать перечисленные ноды (исполнитель очереди отложенных синков).
+
+        Общие списки собираются один раз на весь набор: на миллионах адресов тело
+        синка весит десятки мегабайт, и пересборка под каждую ноду была бы дороже
+        самой отправки. Возвращает по ноде None при успехе или текст ошибки.
+        """
+        async with async_session() as db:
+            servers = list((await db.execute(
+                select(Server).where(
+                    Server.id.in_(server_ids),
+                    Server.is_active == True  # noqa: E712
+                )
+            )).scalars().all())
+
+        # Удалённый или выключенный сервер — долг закрыт, ждать его нечего.
+        results: dict[int, Optional[str]] = {
+            sid: None for sid in server_ids if sid not in {s.id for s in servers}
+        }
+        if not servers:
+            return results
+
+        try:
+            shared = await self.build_shared_lists()
+        except BlocklistSourceUnavailableError as e:
+            # Неполный список снял бы блокировки — ждём восстановления источника.
+            return {**results, **{s.id: str(e) for s in servers}}
+
+        done = await asyncio.gather(*[self._sync_one_server_safe(s, shared) for s in servers])
+        for sr in done:
+            results[sr["server_id"]] = None if sr.get("success") else self._first_error(sr)
+        self._merge_sync_results({sr["server_id"]: sr for sr in done})
+        return results
+
+    @staticmethod
+    def _first_error(server_result: dict) -> str:
+        for direction in ("in", "out"):
+            message = server_result.get(direction, {}).get("message")
+            if message and not server_result[direction].get("success", True):
+                return message
+        return "Sync failed"
+
+    def _merge_sync_results(self, results: dict) -> None:
+        """Влить результаты частичного синка в общий статус, не сбрасывая флаг
+        параллельно идущего полного синка."""
+        servers = self._last_sync.get("servers", {}) if self._last_sync else {}
+        servers.update(results)
+        self._last_sync = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "servers": servers,
+            "in_progress": False,
+            "error": None,
+        }
 
     async def sync_single_node_by_id(self, server_id: int) -> dict:
         """Sync one server by ID (both directions). Returns per-server result."""
@@ -645,8 +738,18 @@ class BlocklistManager:
                 self._sync_in_progress = False
                 return {}
 
+            if not is_server_online(server):
+                sr = self._queued_result(server)
+                await enqueue([server.id], KIND_BLOCKLIST, QUEUED_MESSAGE)
+                prev = self._last_sync.get("servers", {}) if self._last_sync else {}
+                prev[server_id] = sr
+                self._store_sync_result(prev)
+                return sr
+
             shared = await self.build_shared_lists()
             sr = await self._sync_one_server_safe(server, shared)
+            if not sr.get("success"):
+                await enqueue([server_id], KIND_BLOCKLIST, "Нода не приняла блок-лист")
             prev = self._last_sync.get("servers", {}) if self._last_sync else {}
             prev[sr["server_id"]] = sr
             self._store_sync_result(prev)

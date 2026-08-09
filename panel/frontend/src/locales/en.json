@@ -1019,6 +1019,7 @@
     "sync_applying": "Applying rules to servers...",
     "sync_success": "Rules applied successfully",
     "sync_error": "Error applying rules on: {{servers}}",
+    "sync_queued": "Rules applied. Offline servers will receive them once back online: {{servers}}",
     "sync_cancelled": "Sync cancelled, servers left unchanged: {{reason}}",
     "loading_rules": "Loading..."
   },

@@ -143,6 +143,28 @@ class ServerCache(Base):
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
 
+class NodePendingSync(Base):
+    """Долг перед нодой: что применить на ней, когда она вернётся в сеть.
+
+    Пока сервер офлайн, отправлять ему блок-лист, whitelist или правила firewall
+    некуда — запрос упрётся в таймаут, а изменение пропадёт: панель нигде не помнит,
+    что нода его не получила. Строка здесь и есть эта память, и живёт она в базе,
+    поэтому перезапуск панели очередь не теряет.
+
+    Хранится вид работы, а не готовая команда: исполнитель собирает актуальное
+    желаемое состояние в момент отправки. Иначе за неделю простоя накопились бы
+    устаревшие payload'ы, которые пришлось бы применять по порядку.
+    """
+    __tablename__ = "node_pending_sync"
+
+    server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), primary_key=True)
+    kind = Column(String(40), primary_key=True)
+    requested_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    next_attempt_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    attempts = Column(Integer, default=0, server_default="0", nullable=False)
+    last_error = Column(String(500), nullable=True)
+
+
 class MetricsSnapshot(Base):
     """Хранит историю метрик для каждого сервера (сбор на панели)"""
     __tablename__ = "metrics_snapshots"

@@ -571,6 +571,7 @@ async def sync_all(
                 "success": r.success,
                 "message": r.message,
                 "rolled_back": r.rolled_back,
+                "queued": r.queued,
             }
             for r in results
         ]
@@ -596,6 +597,7 @@ async def sync_one(
         "success": r.success,
         "message": r.message,
         "rolled_back": r.rolled_back,
+        "queued": r.queued,
     }
 
 

@@ -636,6 +636,8 @@ export interface SyncServerResult {
   server_id: number
   server_name: string
   success: boolean
+  // Сервер был офлайн: список ему не отправлен, панель применит его сама при возвращении ноды в сеть
+  queued?: boolean
   in: { success: boolean; message: string; ip_count: number; added?: number; removed?: number }
   out: { success: boolean; message: string; ip_count: number; added?: number; removed?: number }
 }
@@ -2022,6 +2024,8 @@ export interface FirewallSyncResult {
   success: boolean
   message: string
   rolled_back: boolean
+  // Сервер был офлайн: профиль не отправлен, панель раскатает его при возвращении ноды в сеть
+  queued?: boolean
 }
 
 export interface FirewallSyncLogEntry {

@@ -24,8 +24,10 @@ from sqlalchemy import select
 
 from app.database import async_session
 from app.models import Server, AntiDdosSettings, AlertSettings, AlertHistory, AntiDdosWhitelistSource
+from app.services.haproxy_profile_sync import is_server_online
 from app.services.http_client import get_node_client, get_node_apply_client, get_external_client, node_auth_headers
 from app.services.net_utils import resolve_panel_ip, host_to_ip
+from app.services.node_sync_queue import KIND_ANTIDDOS_WHITELIST, enqueue
 from app.services import update_channel
 
 logger = logging.getLogger(__name__)
@@ -323,6 +325,20 @@ class AntiDdosManager:
                     (await db.execute(select(Server).where(Server.is_active == True))).scalars().all()  # noqa: E712
                 )
 
+    async def _push_to_servers(self, servers: list[Server], ips: list[str]) -> dict[int, Optional[str]]:
+        """Разослать готовый whitelist живым нодам. По ноде — None при успехе или
+        текст ошибки."""
+        async def _one(srv: Server) -> tuple[int, Optional[str]]:
+            async with self._http_sem:
+                ok, msg = await self.sync_whitelist_to_node(srv, ips)
+                return srv.id, None if ok else msg
+
+        results = await asyncio.gather(*[_one(s) for s in servers], return_exceptions=True)
+        out: dict[int, Optional[str]] = {}
+        for srv, result in zip(servers, results):
+            out[srv.id] = str(result) if isinstance(result, BaseException) else result[1]
+        return out
+
     async def push_whitelist_all(self) -> dict:
         async with self._db_sem:
             async with async_session() as db:
@@ -331,13 +347,16 @@ class AntiDdosManager:
                     (await db.execute(select(Server).where(Server.is_active == True))).scalars().all()  # noqa: E712
                 )
 
-        async def _one(srv: Server):
-            async with self._http_sem:
-                ok, msg = await self.sync_whitelist_to_node(srv, ips)
-                return {"server_id": srv.id, "success": ok, "message": msg}
+        # Офлайн-ноде набор отправить некуда: запрос упрётся в таймаут, а изменение
+        # пропадёт. Очередь доставит его сама, когда нода вернётся в сеть.
+        online = [s for s in servers if is_server_online(s)]
+        offline = [s for s in servers if not is_server_online(s)]
 
-        results = await asyncio.gather(*[_one(s) for s in servers], return_exceptions=True)
-        ok_count = sum(1 for r in results if isinstance(r, dict) and r.get("success"))
+        errors = await self._push_to_servers(online, ips)
+        ok_count = sum(1 for error in errors.values() if error is None)
+
+        deferred = [sid for sid, error in errors.items() if error is not None] + [s.id for s in offline]
+        await enqueue(deferred, KIND_ANTIDDOS_WHITELIST, "whitelist не доставлен")
 
         async with async_session() as db:
             settings = await self.get_or_create_settings(db)
@@ -346,7 +365,30 @@ class AntiDdosManager:
             settings.last_push_count = len(ips)
             await db.commit()
 
-        return {"whitelist_size": len(ips), "nodes": len(servers), "ok": ok_count}
+        return {
+            "whitelist_size": len(ips),
+            "nodes": len(servers),
+            "ok": ok_count,
+            "queued": len(deferred),
+        }
+
+    async def push_whitelist_to_servers(self, server_ids: list[int]) -> dict[int, Optional[str]]:
+        """Досинхронизировать whitelist перечисленным нодам (исполнитель очереди)."""
+        async with self._db_sem:
+            async with async_session() as db:
+                ips = await self.build_whitelist(db)
+                servers = list((await db.execute(
+                    select(Server).where(
+                        Server.id.in_(server_ids),
+                        Server.is_active == True  # noqa: E712
+                    )
+                )).scalars().all())
+
+        # Удалённый или выключенный сервер — долг закрыт.
+        found = {s.id for s in servers}
+        results: dict[int, Optional[str]] = {sid: None for sid in server_ids if sid not in found}
+        results.update(await self._push_to_servers(servers, ips))
+        return results
 
     async def set_emergency_all(self, enabled: bool) -> dict:
         servers = await self._active_servers()

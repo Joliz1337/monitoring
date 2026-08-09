@@ -1281,9 +1281,12 @@ function ProfileDetail({
       const res = await firewallProfilesApi.syncAll(profileId, forceSync)
       const results = res.data.results
       const ok = results.filter(r => r.success).length
-      const fail = results.length - ok
-      if (fail === 0) toast.success(`Синхронизация успешна: ${ok}/${results.length}`)
-      else toast.warning(`Синхронизация: ${ok} успешно, ${fail} с ошибками`)
+      // Офлайн-сервер не сбой: профиль встал в очередь и раскатается сам при его возвращении
+      const queued = results.filter(r => r.queued).length
+      const fail = results.length - ok - queued
+      const queuedNote = queued > 0 ? `, ${queued} отложено (офлайн)` : ''
+      if (fail === 0) toast.success(`Синхронизация успешна: ${ok}/${results.length}${queuedNote}`)
+      else toast.warning(`Синхронизация: ${ok} успешно, ${fail} с ошибками${queuedNote}`)
       await fetchProfile()
       onProfileChanged()
     } catch (err) {
@@ -1300,6 +1303,7 @@ function ProfileDetail({
     try {
       const res = await firewallProfilesApi.syncOne(profileId, serverId, forceSync)
       if (res.data.success) toast.success(`${res.data.server_name}: ${res.data.message}`)
+      else if (res.data.queued) toast.warning(`${res.data.server_name}: ${res.data.message}`)
       else toast.error(`${res.data.server_name}: ${res.data.message}`)
       await fetchProfile()
       onProfileChanged()
