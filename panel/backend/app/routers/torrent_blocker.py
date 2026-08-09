@@ -2,15 +2,14 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import verify_auth
 from app.database import get_db
-from app.models import TorrentBlockerBan, TorrentBlockerSettings, RemnawaveSettings
-from app.services.remnawave_api import RemnawaveAPI, RemnawaveAPIError
+from app.models import TorrentBlockerBan, TorrentBlockerSettings
 from app.services.torrent_blocker import get_torrent_blocker_service
 
 router = APIRouter(prefix="/torrent-blocker", tags=["torrent-blocker"])
@@ -182,14 +181,6 @@ async def get_active_bans(
     return {"records": records, "total": int(total)}
 
 
-async def _get_rw_api(db: AsyncSession) -> RemnawaveAPI:
-    result = await db.execute(select(RemnawaveSettings).limit(1))
-    rw = result.scalar_one_or_none()
-    if not rw or not rw.api_url or not rw.api_token:
-        raise HTTPException(status_code=400, detail="Remnawave API not configured")
-    return RemnawaveAPI(rw.api_url, rw.api_token, rw.cookie_secret)
-
-
 RANGE_CONFIG: dict[str, tuple[timedelta, timedelta, str]] = {
     "24h": (timedelta(hours=24), timedelta(hours=1), "hour"),
     "7d":  (timedelta(days=7),   timedelta(days=1),  "day"),
@@ -247,34 +238,3 @@ async def get_internal_stats(
         "buckets": series,
     }
 
-
-@router.get("/reports")
-async def get_reports(
-    start: int = 0,
-    size: int = 50,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth),
-):
-    api = await _get_rw_api(db)
-    try:
-        data = await api.get_torrent_blocker_reports(start=start, size=size)
-        return data
-    except RemnawaveAPIError as e:
-        raise HTTPException(status_code=502, detail=e.message)
-    finally:
-        await api.close()
-
-
-@router.delete("/truncate")
-async def truncate_reports(
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth),
-):
-    api = await _get_rw_api(db)
-    try:
-        data = await api.truncate_torrent_blocker_reports()
-        return {"message": "Reports truncated", "data": data}
-    except RemnawaveAPIError as e:
-        raise HTTPException(status_code=502, detail=e.message)
-    finally:
-        await api.close()

@@ -3,13 +3,13 @@ import logging
 import time
 from typing import Optional
 
-from aiogram import Bot, Dispatcher, Router, F
+from aiogram import Bot, Dispatcher, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramRetryAfter
 from aiogram.filters import Command
 from aiogram.types import (
-    CallbackQuery, Message, Update,
+    Message,
     InlineKeyboardMarkup, InlineKeyboardButton, ReplyParameters,
 )
 

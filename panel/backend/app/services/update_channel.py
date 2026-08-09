@@ -23,9 +23,7 @@ _current_branch = STABLE_BRANCH
 
 
 class InvalidBranchError(ValueError):
-    def __init__(self, branch: str):
-        self.branch = branch
-        super().__init__(f"Invalid update branch: {branch!r}")
+    """Недопустимое имя ветки канала обновлений."""
 
 
 def current_branch() -> str:

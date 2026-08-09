@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 class LegacyMigrationRequired(Exception):
-    """Поднимается для legacy-нод — миграция возможна только через переустановку."""
+    """Legacy-ноду нельзя перевести на общий сертификат программно — нужна переустановка."""
 
 
 async def push_shared_cert_to_node(server: Server, keygen: PKIKeygenData) -> None:

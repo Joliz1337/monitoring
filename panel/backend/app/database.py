@@ -50,8 +50,6 @@ async def run_migrations(conn):
             ("last_error", "VARCHAR(500)"),
             ("error_code", "INTEGER"),
             ("last_metrics", "TEXT"),
-            ("last_haproxy_data", "TEXT"),
-            ("last_traffic_data", "TEXT"),
             ("has_xray_node", "BOOLEAN DEFAULT FALSE"),
             ("proxy_url", "VARCHAR(255)"),
         ]

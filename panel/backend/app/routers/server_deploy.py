@@ -17,7 +17,6 @@ from sqlalchemy.exc import IntegrityError
 from typing import Optional
 
 from app.auth import verify_auth
-from app.config import get_settings
 from app.database import async_session_maker, get_db
 from app.models import RemnawaveCertProfile
 from app.services.deploy_job_manager import PostDeployOptions, get_deploy_job_manager

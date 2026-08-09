@@ -111,7 +111,7 @@ node/
 │   ├── models/
 │   │   ├── ssl.py        # Pydantic модели: WildcardDeployRequest/Response
 │   │   ├── firewall_profile.py  # Pydantic модели: ProfileRule, ProfileApplyRequest/Response, ProfileStateResponse
-│   │   └── remnawave_nginx.py   # Pydantic модели: NginxDiscoverResponse, NginxConfigResponse, NginxStatusResponse, NginxValidateRequest/Response, NginxApplyRequest/Response, NginxActionResponse
+│   │   └── remnawave_nginx.py   # Pydantic модели: NginxDiscoverResponse, NginxConfigResponse, NginxStatusResponse, NginxApplyRequest/Response, NginxActionResponse
 │   ├── routers/          # API эндпоинты (metrics, haproxy, traffic, ssh, ssl, firewall, antiddos, remnawave и др.)
 │   └── services/         # Сбор метрик, HAProxy, трафик, SSH менеджер
 │       ├── ssl_manager.py          # Деплой wildcard сертификатов: запись на хост, бэкап, откат, валидация
@@ -138,6 +138,7 @@ node/
 | PANEL_IP | IP панели (для UFW) | задаётся при установке |
 | PORT_SAMPLE_INTERVAL | Интервал съёма счётчиков портов из iptables (сек) | 30 |
 | TRAFFIC_DB_PATH | Файл легаси-БД трафика; в его каталоге лежит и `traffic_config.json` со списком отслеживаемых портов | /var/lib/monitoring/traffic.db |
+| HOST_PROC | Каталог `/proc` хоста, примонтированный в контейнер | /host/proc |
 | MON_IMAGE_TAG | Тег Docker-образа api в `docker-compose.yml` (`image: ...:${MON_IMAGE_TAG:-latest}`); `deploy.sh` при установке пишет `dev`, если `MON_BRANCH=dev`, иначе `latest`; апдейтер (`apply-update.sh`) переписывает при обновлении на `main`/`dev` | latest |
 
 ## Порты
@@ -393,8 +394,7 @@ data: {"message": "error description"}
 | GET | /api/remnawave/nginx/config?path= | Получить содержимое nginx.conf с хоста |
 | GET | /api/remnawave/nginx/status?path= | Лёгкий статус: состояние контейнера + хэш конфига |
 | GET | /api/remnawave/nginx/logs?tail= | Логи контейнера `remnawave-nginx` (`docker logs`) |
-| POST | /api/remnawave/nginx/validate | Проверить кандидат-конфиг (`nginx -t`) без применения |
-| POST | /api/remnawave/nginx/config/apply | Применить конфиг: `{path, content, reload_after, restart, ensure_started}` |
+| POST | /api/remnawave/nginx/config/apply | Применить конфиг: `{path, content, reload_after, restart, ensure_started}` — валидация (`nginx -t`) встроена в применение, отдельного эндпоинта для неё нет |
 | POST | /api/remnawave/nginx/reload | `nginx -s reload` с pre-check `nginx -t` |
 | POST | /api/remnawave/nginx/restart | `docker restart remnawave-nginx` |
 
@@ -462,7 +462,7 @@ data: {"message": "error description"}
 - `node/tests/test_haproxy_parsing.py` — чистые части `haproxy_manager`: разбор server-строк со всеми опциями (`send-proxy-v2` не выставляет заодно `send-proxy`), подстановка `resolvers` только доменным таргетам и только один раз, разбор опций балансировщика, распознавание правил в конфиге (балансировщик против одиночного таргета, backend без frontend игнорируется), расчёт `maxconn` от RAM с потолком по лимиту дескрипторов, вставка `maxconn` в `global` без затирания явного значения
 - `node/tests/test_sshd_config.py` — сборка `sshd_config`: закомментированные директивы не оживают, содержимое `Match`-блоков копируется дословно, недостающие ключи встают перед первым `Match`, повторный прогон ничего не меняет; разбор конфига по правилу первого вхождения, преобразование значений туда-обратно, разбор секции fail2ban и единиц времени бана
 - `node/tests/test_update_ref_validation.py` — валидация ссылки обновления и адреса прокси: пропускает ветки, теги версий и хеши коммитов (путь отката), отклоняет метасимволы shell и ведущий дефис
-- Всего тестов ноды — 149 (`python -m unittest discover -s node/tests`)
+- Всего тестов ноды — 112 (`python -m unittest discover -s node/tests`)
 
 ### IPSet Blocklist
 

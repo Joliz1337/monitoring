@@ -224,8 +224,6 @@ class BlocklistManager:
     
     async def get_blocklist_settings(self, db: AsyncSession) -> dict:
         settings = {}
-        timeout = await self.get_setting("blocklist_temp_timeout", db)
-        settings["temp_timeout"] = int(timeout) if timeout else DEFAULT_TIMEOUT
         auto_update = await self.get_setting("blocklist_auto_update_enabled", db)
         settings["auto_update_enabled"] = auto_update != "false" if auto_update else True
         interval = await self.get_setting("blocklist_auto_update_interval", db)

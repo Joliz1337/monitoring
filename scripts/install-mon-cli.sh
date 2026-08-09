@@ -1,9 +1,10 @@
 #!/bin/bash
 # Creates /usr/local/bin/mon so the command works without full installer run.
-# Usage: sudo bash scripts/install-mon-cli.sh
+# Usage: sudo bash scripts/install-mon-cli.sh [main|dev]
 
 set -e
 BIN_PATH="/usr/local/bin/mon"
+BRANCH="${1:-${MON_BRANCH:-main}}"
 
 if [ "$EUID" -ne 0 ]; then
     echo "Run as root: sudo bash $0"
@@ -22,7 +23,7 @@ if [ -f /etc/monitoring/proxy.conf ]; then
     fi
 fi
 
-GITHUB_URL="https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh"
+GITHUB_URL="https://raw.githubusercontent.com/Joliz1337/monitoring/@@BRANCH@@/install.sh"
 TIMEOUT=120
 
 # Установщик больше 128 КБ — лимита ядра на длину одного аргумента (MAX_ARG_STRLEN),
@@ -43,7 +44,7 @@ fi
 
 bash "$INSTALLER" "$@"'
 
-echo "$script_content" > "$BIN_PATH"
+echo "${script_content//@@BRANCH@@/$BRANCH}" > "$BIN_PATH"
 chmod +x "$BIN_PATH"
 rm -f /usr/local/bin/monitoring 2>/dev/null || true
-echo "Command 'mon' installed at $BIN_PATH. Run: mon"
+echo "Command 'mon' installed at $BIN_PATH (branch: $BRANCH). Run: mon"

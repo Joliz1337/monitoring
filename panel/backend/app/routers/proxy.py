@@ -478,51 +478,6 @@ async def get_haproxy_rules(
     return await proxy_request(server, "/api/haproxy/rules")
 
 
-@router.get("/{server_id}/haproxy/rules/{name}")
-async def get_haproxy_rule(
-    server_id: int,
-    name: str,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    server = await get_server_by_id(server_id, db)
-    return await proxy_request(server, f"/api/haproxy/rules/{name}")
-
-
-@router.post("/{server_id}/haproxy/rules")
-async def create_haproxy_rule(
-    server_id: int,
-    rule: dict,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    server = await get_server_by_id(server_id, db)
-    return await proxy_request(server, "/api/haproxy/rules", method="POST", json_data=rule)
-
-
-@router.put("/{server_id}/haproxy/rules/{name}")
-async def update_haproxy_rule(
-    server_id: int,
-    name: str,
-    rule: dict,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    server = await get_server_by_id(server_id, db)
-    return await proxy_request(server, f"/api/haproxy/rules/{name}", method="PUT", json_data=rule)
-
-
-@router.delete("/{server_id}/haproxy/rules/{name}")
-async def delete_haproxy_rule(
-    server_id: int,
-    name: str,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    server = await get_server_by_id(server_id, db)
-    return await proxy_request(server, f"/api/haproxy/rules/{name}", method="DELETE")
-
-
 @router.post("/{server_id}/haproxy/reload")
 async def reload_haproxy(
     server_id: int,
@@ -563,16 +518,6 @@ async def stop_haproxy(
     return await proxy_request(server, "/api/haproxy/stop", method="POST")
 
 
-@router.post("/{server_id}/haproxy/validate")
-async def validate_haproxy(
-    server_id: int,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    server = await get_server_by_id(server_id, db)
-    return await proxy_request(server, "/api/haproxy/validate", method="POST")
-
-
 @router.get("/{server_id}/haproxy/config")
 async def get_haproxy_config(
     server_id: int,
@@ -581,18 +526,6 @@ async def get_haproxy_config(
 ):
     server = await get_server_by_id(server_id, db)
     return await proxy_request(server, "/api/haproxy/config")
-
-
-@router.post("/{server_id}/haproxy/config/apply")
-async def apply_haproxy_config(
-    server_id: int,
-    data: dict,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """Apply HAProxy config from panel (node just saves and reloads)"""
-    server = await get_server_by_id(server_id, db)
-    return await proxy_request(server, "/api/haproxy/config/apply", method="POST", json_data=data)
 
 
 @router.get("/{server_id}/haproxy/certs")
@@ -615,17 +548,6 @@ async def get_all_certs(
     return await proxy_request(server, "/api/haproxy/certs/all")
 
 
-@router.get("/{server_id}/haproxy/certs/{domain}")
-async def get_haproxy_cert(
-    server_id: int,
-    domain: str,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    server = await get_server_by_id(server_id, db)
-    return await proxy_request(server, f"/api/haproxy/certs/{domain}")
-
-
 @router.post("/{server_id}/haproxy/certs/generate")
 async def generate_cert(
     server_id: int,
@@ -636,17 +558,6 @@ async def generate_cert(
     server = await get_server_by_id(server_id, db)
     # Certificate generation can take 2-3 minutes
     return await proxy_request(server, "/api/haproxy/certs/generate", method="POST", json_data=data, timeout=300.0)
-
-
-@router.post("/{server_id}/haproxy/certs/renew")
-async def renew_certs(
-    server_id: int,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    server = await get_server_by_id(server_id, db)
-    # Certificate renewal can take 2+ minutes per certificate
-    return await proxy_request(server, "/api/haproxy/certs/renew", method="POST", timeout=300.0)
 
 
 @router.post("/{server_id}/haproxy/certs/{domain}/renew")
@@ -685,16 +596,6 @@ async def upload_cert(
 
 # ==================== Firewall Management ====================
 
-@router.get("/{server_id}/haproxy/firewall/status")
-async def get_firewall_status(
-    server_id: int,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    server = await get_server_by_id(server_id, db)
-    return await proxy_request(server, "/api/haproxy/firewall/status")
-
-
 @router.get("/{server_id}/haproxy/firewall/rules")
 async def get_firewall_rules(
     server_id: int,
@@ -703,28 +604,6 @@ async def get_firewall_rules(
 ):
     server = await get_server_by_id(server_id, db)
     return await proxy_request(server, "/api/haproxy/firewall/rules")
-
-
-@router.post("/{server_id}/haproxy/firewall/allow")
-async def allow_port(
-    server_id: int,
-    data: dict,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    server = await get_server_by_id(server_id, db)
-    return await proxy_request(server, "/api/haproxy/firewall/allow", method="POST", json_data=data)
-
-
-@router.post("/{server_id}/haproxy/firewall/deny")
-async def deny_port(
-    server_id: int,
-    data: dict,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    server = await get_server_by_id(server_id, db)
-    return await proxy_request(server, "/api/haproxy/firewall/deny", method="POST", json_data=data)
 
 
 @router.post("/{server_id}/haproxy/firewall/rule")
@@ -747,18 +626,6 @@ async def delete_firewall_rule_by_number(
 ):
     server = await get_server_by_id(server_id, db)
     return await proxy_request(server, f"/api/haproxy/firewall/rule/{rule_number}", method="DELETE")
-
-
-@router.delete("/{server_id}/haproxy/firewall/{port}")
-async def delete_firewall_rule(
-    server_id: int,
-    port: int,
-    protocol: str = Query(default="tcp"),
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    server = await get_server_by_id(server_id, db)
-    return await proxy_request(server, f"/api/haproxy/firewall/{port}", method="DELETE", params={"protocol": protocol})
 
 
 @router.post("/{server_id}/haproxy/firewall/enable")
@@ -784,16 +651,6 @@ async def disable_firewall(
 # ==================== Traffic Tracking ====================
 # История трафика живёт в PostgreSQL панели и отдаётся роутером /api/traffic.
 # Здесь остаётся только управление правилами учёта портов в iptables ноды.
-
-@router.get("/{server_id}/traffic/ports/tracked")
-async def get_tracked_ports(
-    server_id: int,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    server = await get_server_by_id(server_id, db)
-    return await proxy_request(server, "/api/traffic/ports/tracked")
-
 
 @router.post("/{server_id}/traffic/ports/add")
 async def add_tracked_port(
@@ -822,17 +679,6 @@ async def remove_tracked_port(
 
 # ==================== System / Updates ====================
 
-@router.get("/{server_id}/system/version")
-async def get_node_version(
-    server_id: int,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """Get node version information"""
-    server = await get_server_by_id(server_id, db)
-    return await proxy_request(server, "/api/version")
-
-
 @router.post("/{server_id}/system/update")
 async def trigger_node_update(
     server_id: int,
@@ -850,17 +696,6 @@ async def trigger_node_update(
     if not data.get("target_version"):
         data["target_version"] = update_channel.current_branch()
     return await proxy_request(server, "/api/system/update", method="POST", json_data=data)
-
-
-@router.get("/{server_id}/system/update/status")
-async def get_node_update_status(
-    server_id: int,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """Get node update status"""
-    server = await get_server_by_id(server_id, db)
-    return await proxy_request(server, "/api/system/update/status")
 
 
 @router.post("/{server_id}/system/execute")
@@ -973,17 +808,6 @@ async def execute_command_stream_on_node(
 
 
 # ==================== System Optimizations ====================
-
-@router.get("/{server_id}/system/optimizations/version")
-async def get_node_optimizations_version(
-    server_id: int,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """Get node system optimizations version"""
-    server = await get_server_by_id(server_id, db)
-    return await proxy_request(server, "/api/system/optimizations/version")
-
 
 @router.get("/{server_id}/system/nic-info")
 async def get_node_nic_info(
@@ -1116,23 +940,6 @@ async def remove_node_optimizations(
 
 # ==================== Anti-DDoS (per-node) ====================
 
-@router.get("/{server_id}/antiddos/status")
-async def get_node_antiddos_status(
-    server_id: int,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """Live emergency state from a node (also persisted to Server.antiddos_*)."""
-    from app.services.antiddos_manager import get_antiddos_manager
-    server = await get_server_by_id(server_id, db)
-    manager = get_antiddos_manager()
-    status = await manager.get_node_status(server)
-    if status is None:
-        raise HTTPException(status_code=502, detail="Node unreachable or antiddos not installed")
-    await manager._store_status(server_id, status)
-    return status
-
-
 @router.post("/{server_id}/antiddos/emergency")
 async def set_node_antiddos_emergency(
     server_id: int,
@@ -1194,18 +1001,6 @@ async def _remnawave_nginx_path(db: AsyncSession) -> str:
     return await get_remnawave_nginx_path(db)
 
 
-@router.get("/{server_id}/remnawave-nginx/discover")
-async def discover_remnawave_nginx(
-    server_id: int,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """Проверка установки Remnawave на ноде по настроенному пути."""
-    path = await _remnawave_nginx_path(db)
-    server = await get_server_by_id(server_id, db)
-    return await proxy_request(server, "/api/remnawave/nginx/discover", params={"path": path})
-
-
 @router.get("/{server_id}/remnawave-nginx/status")
 async def get_remnawave_nginx_status(
     server_id: int,
@@ -1216,39 +1011,6 @@ async def get_remnawave_nginx_status(
     path = await _remnawave_nginx_path(db)
     server = await get_server_by_id(server_id, db)
     return await proxy_request(server, "/api/remnawave/nginx/status", params={"path": path})
-
-
-@router.get("/{server_id}/remnawave-nginx/config")
-async def get_remnawave_nginx_config(
-    server_id: int,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """Текущий nginx.conf Remnawave с ноды."""
-    path = await _remnawave_nginx_path(db)
-    server = await get_server_by_id(server_id, db)
-    return await proxy_request(server, "/api/remnawave/nginx/config", params={"path": path})
-
-
-@router.get("/{server_id}/remnawave-nginx/logs")
-async def get_remnawave_nginx_logs(
-    server_id: int,
-    tail: int = 100,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    server = await get_server_by_id(server_id, db)
-    return await proxy_request(server, "/api/remnawave/nginx/logs", params={"tail": tail})
-
-
-@router.post("/{server_id}/remnawave-nginx/reload")
-async def reload_remnawave_nginx(
-    server_id: int,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    server = await get_server_by_id(server_id, db)
-    return await proxy_request(server, "/api/remnawave/nginx/reload", method="POST", timeout=60.0)
 
 
 @router.post("/{server_id}/remnawave-nginx/restart")
@@ -1262,109 +1024,3 @@ async def restart_remnawave_nginx(
 
 
 # ==================== IPSet Management ====================
-
-@router.get("/{server_id}/ipset/status")
-async def get_ipset_status(
-    server_id: int,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """Get ipset status from node"""
-    server = await get_server_by_id(server_id, db)
-    return await proxy_request(server, "/api/ipset/status")
-
-
-@router.get("/{server_id}/ipset/list/{set_type}")
-async def get_ipset_list(
-    server_id: int,
-    set_type: str,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """Get IPs from ipset list (permanent or temp)"""
-    server = await get_server_by_id(server_id, db)
-    return await proxy_request(server, f"/api/ipset/list/{set_type}")
-
-
-@router.post("/{server_id}/ipset/add")
-async def add_to_ipset(
-    server_id: int,
-    data: dict,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """Add IP/CIDR to ipset"""
-    server = await get_server_by_id(server_id, db)
-    return await proxy_request(server, "/api/ipset/add", method="POST", json_data=data)
-
-
-@router.post("/{server_id}/ipset/bulk-add")
-async def bulk_add_to_ipset(
-    server_id: int,
-    data: dict,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """Add multiple IPs to ipset"""
-    server = await get_server_by_id(server_id, db)
-    return await proxy_request(server, "/api/ipset/bulk-add", method="POST", json_data=data, timeout=120.0)
-
-
-@router.delete("/{server_id}/ipset/remove")
-async def remove_from_ipset(
-    server_id: int,
-    data: dict,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """Remove IP/CIDR from ipset"""
-    server = await get_server_by_id(server_id, db)
-    return await proxy_request(server, "/api/ipset/remove", method="DELETE", json_data=data)
-
-
-@router.post("/{server_id}/ipset/bulk-remove")
-async def bulk_remove_from_ipset(
-    server_id: int,
-    data: dict,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """Remove multiple IPs from ipset"""
-    server = await get_server_by_id(server_id, db)
-    return await proxy_request(server, "/api/ipset/bulk-remove", method="POST", json_data=data, timeout=120.0)
-
-
-@router.post("/{server_id}/ipset/clear/{set_type}")
-async def clear_ipset(
-    server_id: int,
-    set_type: str,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """Clear all IPs from ipset list"""
-    server = await get_server_by_id(server_id, db)
-    return await proxy_request(server, f"/api/ipset/clear/{set_type}", method="POST")
-
-
-@router.put("/{server_id}/ipset/timeout")
-async def set_ipset_timeout(
-    server_id: int,
-    data: dict,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """Set timeout for temp ipset list"""
-    server = await get_server_by_id(server_id, db)
-    return await proxy_request(server, "/api/ipset/timeout", method="PUT", json_data=data)
-
-
-@router.post("/{server_id}/ipset/sync")
-async def sync_ipset(
-    server_id: int,
-    data: dict,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """Sync (replace) entire ipset list"""
-    server = await get_server_by_id(server_id, db)
-    return await proxy_request(server, "/api/ipset/sync", method="POST", json_data=data, timeout=120.0)

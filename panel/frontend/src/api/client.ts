@@ -407,7 +407,6 @@ export const serversApi = {
     api.get<{ count: number; servers: ServerWithMetrics[] }>('/servers', {
       params: includeMetrics ? { include_metrics: true } : undefined
     }),
-  get: (id: number) => api.get<Server>(`/servers/${id}`),
   create: (data: { name: string; url: string; proxy_url?: string | null }) =>
     api.post<{
       success: boolean
@@ -600,7 +599,6 @@ export interface TimeSyncStatus {
 
 export const settingsApi = {
   getAll: () => api.get<{ settings: Record<string, string> }>('/settings'),
-  get: (key: string) => api.get<{ key: string; value: string }>(`/settings/${key}`),
   set: (key: string, value: string) => api.put(`/settings/${key}`, { value }),
   timeSyncRun: () => api.post<{ success: boolean }>('/settings/time-sync/run'),
   timeSyncStatus: () => api.get<TimeSyncStatus>('/settings/time-sync/status'),
@@ -632,12 +630,6 @@ export interface BlocklistSource {
   last_updated: string | null
   ip_count: number
   error_message: string | null
-}
-
-export interface BlocklistSettings {
-  temp_timeout: number
-  auto_update_enabled: boolean
-  auto_update_interval: number
 }
 
 export interface SyncServerResult {
@@ -685,11 +677,7 @@ export const blocklistApi = {
   refreshSource: (id: number) => api.post(`/blocklist/sources/${id}/refresh`),
   refreshAll: () => api.post('/blocklist/sources/refresh-all'),
   
-  // Settings & sync
-  getSettings: () => api.get<{ settings: BlocklistSettings }>('/blocklist/settings'),
-  updateSettings: (data: { temp_timeout?: number; auto_update_enabled?: boolean; auto_update_interval?: number }) =>
-    api.put('/blocklist/settings', data),
-  sync: () => api.post<{ success: boolean; results: Record<string, SyncServerResult> }>('/blocklist/sync'),
+  // Sync status
   getSyncStatus: () => api.get<SyncStatus>('/blocklist/sync/status'),
   
 }
@@ -970,8 +958,6 @@ export const antiDdosApi = {
     api.post(`/proxy/${serverId}/antiddos/emergency`, { enabled }),
   setNodeWatchdog: (serverId: number, enabled: boolean) =>
     api.post(`/proxy/${serverId}/antiddos/watchdog`, { enabled }),
-  getNodeStatus: (serverId: number) =>
-    api.get(`/proxy/${serverId}/antiddos/status`, { timeout: 20000 }),
 
   // whitelist auto-source lists
   getSources: () => api.get<{ sources: AntiDdosSource[] }>('/antiddos/sources'),
@@ -1617,8 +1603,6 @@ export interface WildcardDeployResult {
 export const wildcardSSLApi = {
   getCertificates: () =>
     api.get<{ certificates: WildcardCertificate[] }>('/wildcard-ssl/certificates'),
-  getCertificate: (id: number) =>
-    api.get<WildcardCertificate>(`/wildcard-ssl/certificates/${id}`),
   issueCertificate: (data: { domain: string; email?: string }) =>
     api.post<{ success: boolean; message: string }>('/wildcard-ssl/certificates/issue', data),
   getIssueStatus: () =>

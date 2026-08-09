@@ -1,4 +1,4 @@
-# Monitoring Panel v10.52.0
+# Monitoring Panel v10.53.0
 
 Веб-панель для мониторинга серверов. Собирает метрики с нод с настраиваемым интервалом (по умолчанию 10 сек) и хранит историю локально.
 
@@ -35,7 +35,7 @@
 | Параметр | По умолчанию | Рекомендуемый | Описание |
 |----------|--------------|---------------|----------|
 | Сбор метрик | 10 сек | 10-15 сек | CPU, RAM, диск, сеть |
-| HAProxy | 60 сек | 60 сек | Правила, сертификаты |
+| HAProxy | 300 сек | 300 сек | Правила, сертификаты (данные меняются редко) |
 
 Изменения применяются автоматически в течение 30 секунд.
 
@@ -169,7 +169,7 @@ CI/CD: `.github/workflows/docker-publish.yml` — job `tests` (матрица р
 Настройка `update_branch` (`main` — стабильный, по умолчанию; `dev`) определяет ветку GitHub, из которой панель берёт код и конфиги при обновлении и авторазвёртывании нод. Хранится в `PanelSettings` и кэшируется в памяти (`app/services/update_channel.py`) — GitHub-URL нужны в местах без сессии БД под рукой (фоновый цикл анти-DDoS, сборка команды авторазвёртывания).
 
 **Что зависит от канала:**
-- `GET /api/system/version` — сравнение версий панели/ноды/оптимизаций с `panel/VERSION`, `node/VERSION`, `configs/VERSION` из выбранной ветки
+- `GET /api/system/version/base` + `GET /api/system/nodes/{id}/version` — сравнение версий панели/ноды/оптимизаций с `panel/VERSION`, `node/VERSION`, `configs/VERSION` из выбранной ветки
 - `POST /api/system/update` без явного `target_ref` — обновление панели на выбранную ветку (`run_panel_update_in_container`)
 - `POST /api/proxy/{id}/system/update` без явного `target_version` — обновление ноды на выбранную ветку
 - Скачивание конфигов системных оптимизаций (`GET /api/system/optimizations/*`) и файлов анти-DDoS вотчдога (`antiddos_manager.py`)
@@ -444,10 +444,10 @@ PK таблицы — `BigInteger` (не int32). При 500 нодах с инт
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
 | GET | /api/system/panel-ip | IP-адрес панели (резолвится из домена) |
-| GET | /api/system/version | Версии панели, нод и оптимизаций (всё в одном запросе, параллельные запросы к нодам) |
+| GET | /api/system/version/base | Панель + GitHub-версии + список нод из БД, без запросов к нодам (мгновенный ответ) |
+| GET | /api/system/nodes/{id}/version | Версия и статус одной ноды (SSH/сетевой запрос к ней) — фронт догружает поштучно после `version/base` |
 | GET | /api/system/stats | Статистика сервера панели (CPU, RAM, диск) |
 | POST | /api/system/update | Обновление панели (target_ref: branch/tag/commit, по умолчанию — выбранный канал обновлений) |
-| GET | /api/system/update/status | Статус обновления |
 | GET | /api/system/certificate | Информация о SSL сертификате панели |
 | POST | /api/system/certificate/renew?force=bool | Продление SSL сертификата (force=true для принудительного) |
 | GET | /api/system/certificate/renew/status | Статус продления сертификата |
@@ -521,8 +521,6 @@ interface NicInfo {
 | POST | /api/auth/login | Вход |
 | POST | /api/auth/logout | Выход |
 | GET | /api/auth/check | Проверка сессии |
-| POST | /api/auth/clear-ban | Сбросить бан текущего IP (требует авторизации) |
-| DELETE | /api/auth/clear-all-bans | Сбросить все IP баны (требует авторизации) |
 
 ### Серверы
 
@@ -545,7 +543,7 @@ interface NicInfo {
 | POST | /api/servers/folders/rename | Переименовать папку (`old_name` → `new_name`) |
 | DELETE | /api/servers/folders/{folder_name} | Расформировать папку (серверы остаются, `folder` очищается) |
 
-Поле `proxy_url` в `ServerCreate`/`ServerUpdate` и во всех ответах (`GET /servers`, `GET /servers/{id}`, `POST /servers`) — см. «SOCKS5-прокси до ноды» ниже.
+Поле `proxy_url` в `ServerCreate`/`ServerUpdate` и во всех ответах (`GET /servers`, `POST /servers`) — см. «SOCKS5-прокси до ноды» ниже.
 
 `GET /servers` без `include_metrics` (лёгкий путь, не кэшируется) тоже возвращает поле `status` (`online`/`offline`/`loading`). Оба пути используют общий `resolve_status()` из `app/services/server_status.py` (см. «Массовые действия (Bulk Actions)» ниже — тот же модуль лежит в основе пропуска офлайн-нод в bulk-операциях).
 
@@ -786,9 +784,7 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
 | GET | /api/proxy/{id}/haproxy/status | Статус |
-| GET | /api/proxy/{id}/haproxy/rules | Список правил |
-| POST | /api/proxy/{id}/haproxy/rules | Создать правило |
-| DELETE | /api/proxy/{id}/haproxy/rules/{name} | Удалить правило |
+| GET | /api/proxy/{id}/haproxy/rules | Список правил (только чтение — CRUD правил идёт через HAProxy Configs, см. ниже) |
 | POST | /api/proxy/{id}/haproxy/start | Запустить |
 | POST | /api/proxy/{id}/haproxy/stop | Остановить |
 | POST | /api/proxy/{id}/haproxy/reload | Перезагрузить конфиг (graceful, `systemctl reload`) |
@@ -857,7 +853,6 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
-| GET | /api/proxy/{id}/traffic/ports/tracked | Отслеживаемые порты |
 | POST | /api/proxy/{id}/traffic/ports/add | Добавить порт в учёт |
 | POST | /api/proxy/{id}/traffic/ports/remove | Убрать порт из учёта |
 
@@ -904,41 +899,15 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 
 ### Массовые действия (Bulk Actions)
 
-Действия над несколькими серверами одновременно, два режима вызова с общими per-server executor-функциями (`app/routers/bulk_actions.py`):
+Действия над несколькими серверами одновременно выполняются исключительно как **фоновые задачи** (`app/routers/bulk_actions.py`): запрос стартует задачу на бэкенде и сразу возвращает `job_id`, дальше фронт опрашивает прогресс отдельным запросом — выполнение продолжается независимо от соединения с фронтом и не упирается в таймаут одного HTTP-запроса (axios), даже на большом парке нод.
 
-- **Синхронные эндпоинты** — ответ (`list[BulkResult]`) приходит сразу в теле HTTP-запроса.
-- **Фоновые задачи** (`POST /api/bulk/jobs`) — выполнение продолжается на бэкенде независимо от соединения с фронтом; фронт опрашивает прогресс отдельным запросом. Нужны для операций, которые могут занять дольше, чем терпит один HTTP-запрос (таймаут axios), особенно на большом парке нод.
-
-Оба режима идут через `run_bulk(servers, executor)` (`app/services/bulk_job_manager.py`) — конкурентность запросов к нодам ограничена `asyncio.Semaphore(NODE_CONCURRENCY=20)`; сбой на одной ноде не прерывает остальные (записывается как результат с `success: false`).
+Задача выполняется через `run_bulk(servers, executor)` (`app/services/bulk_job_manager.py`) — конкурентность запросов к нодам ограничена `asyncio.Semaphore(NODE_CONCURRENCY=20)`; сбой на одной ноде не прерывает остальные (записывается как результат с `success: false`).
 
 `get_servers_by_ids()` выбирает только активные серверы (`Server.id.in_(ids), Server.is_active.is_(True)`) — деактивированный сервер не участвует в bulk-операции, даже если его id передан в запросе явно.
 
-Обёртка `skip_offline(executor, threshold)` перед вызовом executor'а проверяет статус ноды через `resolve_status()` (`app/services/server_status.py`, тот же модуль, что и в «Серверы» выше) — если нода офлайн по данным метрик-коллектора, executor не вызывается вовсе: результат `"Node is offline — skipped"` возвращается мгновенно вместо ожидания сетевого таймаута (до 30с на ноду). Применяется единообразно во всех синхронных эндпоинтах (через общий helper `run_bulk_for_ids(server_ids, executor, db)` — выборка активных серверов, `404` если пусто, `run_bulk` со `skip_offline`) и в фоновых задачах `POST /bulk/jobs`.
+Обёртка `skip_offline(executor, threshold)` перед вызовом executor'а проверяет статус ноды через `resolve_status()` (`app/services/server_status.py`, тот же модуль, что и в «Серверы» выше) — если нода офлайн по данным метрик-коллектора, executor не вызывается вовсе: результат `"Node is offline — skipped"` возвращается мгновенно вместо ожидания сетевого таймаута (до 30с на ноду).
 
-**Синхронные эндпоинты:**
-
-| Метод | Endpoint | Описание |
-|-------|----------|----------|
-| POST | /api/bulk/haproxy/start | Запустить HAProxy на выбранных серверах |
-| POST | /api/bulk/haproxy/stop | Остановить HAProxy на выбранных серверах |
-| POST | /api/bulk/haproxy/restart | Перезапустить HAProxy на выбранных серверах |
-| POST | /api/bulk/haproxy/rules | Создать HAProxy правило на выбранных серверах |
-| DELETE | /api/bulk/haproxy/rules | Удалить по listen_port + target_ip + target_port |
-| POST | /api/bulk/haproxy/config | Заменить конфиг HAProxy на выбранных серверах |
-| POST | /api/bulk/haproxy/config/find-replace | Найти и заменить строку в конфиге HAProxy на выбранных серверах |
-| POST | /api/bulk/traffic/ports | Добавить отслеживаемый порт |
-| DELETE | /api/bulk/traffic/ports | Удалить отслеживаемый порт |
-| POST | /api/bulk/firewall/rules | Создать правило firewall |
-| DELETE | /api/bulk/firewall/rules | Удалить правило по порту |
-| POST | /api/bulk/terminal/execute | Выполнить команду на выбранных серверах |
-
-Все принимают `server_ids: list[int]` и возвращают результат по каждому серверу сразу в ответе. При удалении выполняется проверка наличия правила перед удалением.
-
-**Массовый терминал** (`/bulk/terminal/execute`): принимает `command`, `timeout` (1-600), `shell` (sh/bash). Возвращает расширенный результат с `stdout`, `stderr`, `exit_code`, `execution_time_ms`.
-
-**Массовая замена конфига HAProxy** (`/bulk/haproxy/config`): принимает `config_content` и `reload_after` (default true). Полностью заменяет конфиг HAProxy на выбранных серверах и опционально перезагружает сервис.
-
-**Фоновые задачи (`app/services/bulk_job_manager.py`):**
+**Эндпоинты (`app/services/bulk_job_manager.py`):**
 
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
@@ -946,13 +915,13 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 | GET | /api/bulk/jobs | Активные и недавно завершённые задачи (для восстановления на фронте): `{jobs: [{job_id, action, status, total, done}]}` |
 | GET | /api/bulk/jobs/{job_id} | Прогресс и результаты: `{job_id, action, status, total, done, results}` |
 
-Доступные `action` (enum `BulkJobAction`): `haproxy_start`, `haproxy_stop`, `haproxy_restart`, `traffic_port_add`, `traffic_port_remove`, `firewall_rule_add`, `firewall_rule_delete`, `terminal_execute`. `params` валидируются pydantic-моделью, специфичной для action (`build_job_executor()`) — несовпадение полей даёт `422`. Массовая замена/find-replace конфига HAProxy в job-модель не вошли — остались только синхронными эндпоинтами.
+Доступные `action` (enum `BulkJobAction`): `haproxy_start`, `haproxy_stop`, `haproxy_restart`, `traffic_port_add`, `traffic_port_remove`, `firewall_rule_add`, `firewall_rule_delete`, `terminal_execute`. `params` валидируются pydantic-моделью, специфичной для action (`build_job_executor()`) — несовпадение полей даёт `422`. Массовое создание/удаление HAProxy-правил напрямую и массовая замена конфига HAProxy через Bulk Actions не предусмотрены — для этого используются профили в HAProxy Configs (см. ниже).
 
 `BulkJobManager` — in-memory реестр (`_jobs: dict[str, BulkJob]`), без БД:
 - `start()` создаёт `asyncio.create_task` и сразу возвращает `job_id`
 - `BulkJob` (dataclass): `id`, `action`, `total`, `status` (`running`/`completed`), `done`, `results: list[dict]`, `started_at`, `finished_at`, `task`
 - Завершённые задачи хранятся `FINISHED_TTL_SECONDS = 600` сек — фронт успевает переподключиться и посмотреть результат после перезагрузки страницы
-- Executor-функции (`haproxy_service_executor`, `traffic_port_add_executor`, `traffic_port_remove_executor`, `firewall_rule_add_executor`, `firewall_rule_delete_executor`, `terminal_execute_executor`) — module-level фабрики в `bulk_actions.py`, общие для синхронных эндпоинтов и фоновых задач
+- Executor-функции (`haproxy_service_executor`, `traffic_port_add_executor`, `traffic_port_remove_executor`, `firewall_rule_add_executor`, `firewall_rule_delete_executor`, `terminal_execute_executor`) — module-level фабрики в `bulk_actions.py`
 
 **Ограничение:** задачи живут в памяти процесса backend — перезапуск контейнера теряет их вместе с результатами; фронт получает `404` при опросе несуществующего `job_id`.
 
@@ -980,7 +949,7 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 
 **Белый список (allowlist):**
 
-Доверенные IP/CIDR, которые **всегда** проходят через ноду вне зависимости от любых блокировок. ACCEPT-правило для allowlist вставляется на позицию 1 в цепочке iptables — выше всех DROP. Только глобальная область (per-server allowlist не поддерживается). Всегда permanent — временного режима нет.
+Доверенные IP/CIDR, которые **всегда** проходят через ноду вне зависимости от любых блокировок. ACCEPT-правило для allowlist вставляется на позицию 1 в цепочке iptables — выше всех DROP. Только глобальная область (per-server allowlist не поддерживается).
 
 Список, рассылаемый на ноды (`get_allow_ips_global()`), собирается из ручных allow-правил (`list_type="allow"`) **плюс** автоматически IP панели (резолв домена) и IP всех активных нод — управляющий трафик панель↔нода никогда не попадёт под DROP, даже если в источнике блок-листа окажется мусор.
 
@@ -993,11 +962,10 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
 | GET | /api/blocklist/global?direction=in\|out&list_type=block\|allow | Глобальные правила (фильтр по направлению и типу) |
-| POST | /api/blocklist/global | Добавить правило (`direction`, `list_type` в теле) |
-| POST | /api/blocklist/global/bulk | Массовое добавление (`direction`, `list_type` в теле) |
+| POST | /api/blocklist/global/bulk | Массовое добавление правил (`direction`, `list_type` в теле) |
 | DELETE | /api/blocklist/global/{id} | Удалить правило |
 
-Для `list_type="allow"` панель принудительно устанавливает `is_permanent=True`. Уникальность проверяется с учётом `list_type` — один и тот же IP может быть одновременно в блок-списке и белом списке (разные типы). Добавление и bulk-добавление правила с `list_type="block"` и приватным/зарезервированным диапазоном отклоняется (`HTTP 400` для одиночного, попадает в `invalid` для bulk) — см. «Защита от приватных диапазонов» выше.
+Уникальность проверяется с учётом `list_type` — один и тот же IP может быть одновременно в блок-списке и белом списке (разные типы). Добавление правила с `list_type="block"` и приватным/зарезервированным диапазоном отклоняется (попадает в `invalid` в ответе) — см. «Защита от приватных диапазонов» выше. Все правила блок-листа постоянные — временного режима с автоистечением нет.
 
 **Правила по серверам:**
 
@@ -1006,7 +974,6 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 | GET | /api/blocklist/server/{id}?direction=in\|out | Правила сервера (фильтр по направлению, только block) |
 | POST | /api/blocklist/server/{id} | Добавить правило для сервера (direction в теле) |
 | DELETE | /api/blocklist/server/{id}/{rule_id} | Удалить правило |
-| GET | /api/blocklist/server/{id}/status | Статус ipset на ноде (оба направления, включая allow_count) |
 
 Правила сервера — всегда `list_type="block"`; добавление с приватным/зарезервированным диапазоном отклоняется `HTTP 400`, как и для глобальных block-правил.
 
@@ -1025,17 +992,13 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 
 **Лимит размера источника:** нода принимает не больше `NODE_MAX_IPSET_ENTRIES = 1_000_000` записей на ipset-сет (соответствует `maxelem` на ноде, см. [node/DOCUMENTATION.md](../node/DOCUMENTATION.md#ipset-blocklist)). `refresh_source()` при скачивании источника крупнее лимита не отбрасывает его молча: `ip_count` и `last_updated` обновляются, но источник получает `error_message` (`"N IPs exceeds node limit of 1,000,000 — excluded from sync"`) и полностью исключается из синка. `get_auto_list_ips()` пропускает такие источники с warning-логом. При сборке общего списка (`_merge_deduplicated()` в `build_shared_lists()`) итог тоже обрезается по этому лимиту — ручные глобальные правила добавляются первыми и под обрезку не попадают, перебор логируется warning'ом.
 
-**Настройки и синхронизация:**
+**Синхронизация:**
 
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
-| GET | /api/blocklist/settings | Текущие настройки (включая глобальный порог детекции) |
-| PUT | /api/blocklist/settings | Обновить настройки |
-| POST | /api/blocklist/sync | Синхронизировать все ноды (параллельно, блок + allowlist, оба направления) |
-| POST | /api/blocklist/sync/{id} | Синхронизировать одну ноду (блок + allowlist, оба направления) |
 | GET | /api/blocklist/sync/status | Статус последней синхронизации (результат по серверам, включая allow; поле `error` — причина отмены всего синка, если была) |
 
-Синхронизация включает как блок-список, так и allowlist — `_sync_one_server` отправляет оба типа для обоих направлений. При синхронизации на ноду со старым API (404 на `/api/ipset/allowlist/sync`) allowlist пропускается gracefully.
+Ручных эндпоинтов запуска синхронизации в API нет — синк запускается автоматически (hot-apply при изменении правил/источников, суточное автообновление источников, синк при создании и активации сервера); `GET /sync/status` только показывает результат последнего прогона. Синхронизация включает как блок-список, так и allowlist — `_sync_one_server` отправляет оба типа для обоих направлений. При синхронизации на ноду со старым API (404 на `/api/ipset/allowlist/sync`) allowlist пропускается gracefully.
 
 **Сбой скачивания источника не разблокирует его адреса.** Синк заменяет набор ноды целиком, поэтому пропуск недоступного источника означал бы отправить на ноды список без него — то есть разблокировать все его адреса на всём парке. Вместо этого: `_last_good` хранит последнюю удачно скачанную копию каждого включённого источника; при сбое скачивания в синк идёт она с warning-логом, а не пустой список. Если удачной копии ещё не было вовсе (источник добавили только что, и первое же скачивание провалилось) — `BlocklistSourceUnavailableError` отменяет весь прогон синка, ни одна нода не трогается, причина попадает в `error` из `GET /api/blocklist/sync/status`. `_last_good` чистится по составу текущих включённых источников (`_prune_last_good`) — запись отключённого источника не висит в памяти навсегда.
 
@@ -1094,11 +1057,6 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 | GET | /api/remnawave/stats/user/{email} | IP-адреса пользователя и его HWID-устройства |
 | DELETE | /api/remnawave/stats/clear | Очистить всю статистику |
 | DELETE | /api/remnawave/stats/user/{email}/ips | Очистить IP пользователя |
-| GET | /api/remnawave/users | Кэш пользователей |
-| POST | /api/remnawave/users/refresh | Обновить кэш |
-| GET | /api/remnawave/users/cache-status | Статус кэша |
-| GET | /api/remnawave/devices | Список HWID-устройств (с фильтром по user_uuid) |
-| GET | /api/remnawave/devices/user/{uuid} | HWID-устройства конкретного пользователя |
 
 **Схема БД:**
 
@@ -1658,7 +1616,6 @@ Frontend сохраняет незавершённые job_id в `localStorage` 
 |-------|----------|----------|
 | GET | /api/wildcard-ssl/certificates | Список сертификатов |
 | POST | /api/wildcard-ssl/certificates | Выпустить новый сертификат |
-| GET | /api/wildcard-ssl/certificates/{id} | Детали сертификата |
 | DELETE | /api/wildcard-ssl/certificates/{id} | Удалить сертификат |
 | POST | /api/wildcard-ssl/certificates/{id}/renew | Продлить сертификат |
 | POST | /api/wildcard-ssl/certificates/{id}/deploy | Задеплоить на серверы |
@@ -1750,7 +1707,6 @@ Replace-атомарно: полное состояние ноды = состо�
 | POST | /firewall-profiles | Создать профиль |
 | PUT | /firewall-profiles/{id} | Обновить профиль |
 | DELETE | /firewall-profiles/{id} | Удалить профиль |
-| GET | /firewall-profiles/{id}/rules | Правила профиля |
 | POST | /firewall-profiles/{id}/rules | Добавить правило (HTTP 409 при дубликате) |
 | PUT | /firewall-profiles/{id}/rules/{index} | Обновить правило по индексу (HTTP 409 если правило станет дубликатом) |
 | DELETE | /firewall-profiles/{id}/rules/{index} | Удалить правило по индексу |
@@ -1859,7 +1815,7 @@ Whitelist можно наполнять из внешних списков по 
 
 Остаточное поведение: если конкретная нода была недоступна именно в момент общего «выключить на всех», её аварийный режим (ручной пин) не снимется в этом обходе — это ожидаемо, ручной пин намеренно не снимается автоматически watchdog'ом. Снять точечно тумблером на карточке ноды либо повторить общее действие.
 
-**Per-node проксируемые эндпоинты (`panel/backend/app/routers/proxy.py`, prefix `/proxy/{server_id}/antiddos`):** `GET /status` (плюс сохраняет результат в БД), `POST /emergency` (ручной пин — watchdog его не снимет), `POST /watchdog`, `POST /install`. Эти per-node эндпоинты выполняются синхронно (один сервер, короткий таймаут) — асинхронными сделаны только три глобальных fan-out эндпоинта выше.
+**Per-node проксируемые эндпоинты (`panel/backend/app/routers/proxy.py`, prefix `/proxy/{server_id}/antiddos`):** `POST /emergency` (ручной пин — watchdog его не снимет), `POST /watchdog`, `POST /install`. Эти per-node эндпоинты выполняются синхронно (один сервер, короткий таймаут) — асинхронными сделаны только три глобальных fan-out эндпоинта выше. Статус конкретной ноды отдельным запросом не запрашивается — панель показывает то, что накопил фоновый status poll (`GET /antiddos/status`, см. выше).
 
 **Frontend (`panel/frontend/src/pages/AntiDdos.tsx`):** страница «Анти-DDoS» (пункт меню с иконкой `Siren`, route `/{uid}/anti-ddos`), три вкладки:
 - **Управление** — три независимых контрола, разнесённых по секциям: (1) мастер-тумблер «Автодетект атак» вверху карточки — вкл/выкл watchdog на всех нодах разом; (2) секция «Аварийный режим вручную (на всех нодах)» за визуальным разделителем — кнопки «Включить на всех» / «Выключить на всех» (`POST /antiddos/emergency-all`); (3) список нод со статусом (дежурный/аварийный, источник, причина) и per-node тумблерами «Автодетект» и «Аварийный». Рассылка whitelist — отдельной кнопкой в своей секции. Кнопки ручной установки watchdog в интерфейсе нет — установка полностью автоматическая (zero-touch фоновым опросом, см. выше); эндпоинты `POST /antiddos/install-all` и `POST /proxy/{id}/antiddos/install` есть в API и используются автоустановкой. Версия watchdog-скрипта нодой отдаётся (`GET /api/antiddos/status` → `version`), но панель использует её только внутри `_maybe_auto_install` для сравнения — в UI не выводится.
@@ -2110,7 +2066,7 @@ Whitelist можно наполнять из внешних списков по 
 - Route `/{uid}/remnawave-nginx`, пункт меню «Remnawave Nginx» (иконка Waypoints, после Remnawave)
 - Настройка **Путь установок Remnawave** (`remnawave_nginx_path`, по умолчанию `/opt/remnawave`) — карточка в разделе Настройки, применяется ко всем нодам как единый путь discover/apply
 
-**Прокси-эндпоинты (`routers/proxy.py`):** `GET /{server_id}/remnawave-nginx/{discover,status,config,logs}`, `POST /{server_id}/remnawave-nginx/{reload,restart}` — путь установки берётся из панельной настройки `remnawave_nginx_path`.
+**Прокси-эндпоинты (`routers/proxy.py`):** `GET /{server_id}/remnawave-nginx/status`, `POST /{server_id}/remnawave-nginx/restart` — путь установки берётся из панельной настройки `remnawave_nginx_path`. Обнаружение установки (`discover`), чтение конфига и импорт с ноды идут не через этот generic-проброс, а напрямую из специализированной бизнес-логики (`_check_xray_on_all_servers`, `import-from-node`) — вызывают ноду своим HTTP-клиентом.
 
 **Файлы:**
 - `panel/backend/app/models.py` — `RemnawaveNginxProfile`, `RemnawaveNginxSyncLog`; колонки `Server`
@@ -2322,8 +2278,6 @@ SSE-события: `note_update` — `{"content": "...", "version": N}`, `tasks
 
 Ответ: `{records: [{ip, banned_at, expires_at}], total}`.
 
-Эндпоинты `GET /torrent-blocker/reports` и `DELETE /torrent-blocker/truncate` (отчёты Remnawave) есть в API, но из UI не используются.
-
 **Ключевые файлы:**
 
 - `panel/backend/app/models.py` — модель `TorrentBlockerSettings`: колонки `webhook_*`
@@ -2363,8 +2317,6 @@ docker compose exec postgres psql -U panel -d panel -c \
 # продолжит действовать, пока не истечёт срок или её не удалить)
 docker compose restart backend
 ```
-
-Если есть доступ в панель с другого IP, бан можно снять и авторизованными эндпоинтами: `POST /api/auth/clear-ban` (сбрасывает бан текущего IP запроса, память + БД) и `DELETE /api/auth/clear-all-bans` (сбрасывает все баны сразу).
 
 ### Проблема: Выкидывает из панели
 

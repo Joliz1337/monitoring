@@ -1,4 +1,3 @@
-import asyncio
 import importlib
 import logging
 import time
@@ -32,18 +31,11 @@ from app.services.http_client import init_http_clients, close_http_clients
 from app.services.pki import load_or_create_keygen
 from app.services.update_channel import load_branch_from_db
 from app.security import SecurityMiddleware
-# Import all models to register them with Base.metadata
-from app.models import (  # noqa: F401
-    Server, ServerCache, MetricsSnapshot, AggregatedMetrics, PanelSettings, FailedLogin,
-    BlocklistRule, BlocklistSource, RemnawaveSettings, RemnawaveHwidDevice,
-    XrayStats, RemnawaveUserCache, AlertSettings, AlertHistory,
-    BillingServer, BillingSettings,
-    InfraAccount, InfraProject, InfraProjectServer,
-    SharedNote, SharedTask, WildcardCertificate,
-    HAProxyConfigProfile, HAProxySyncLog,
-    RemnawaveNginxProfile, RemnawaveNginxSyncLog,
-    TorrentBlockerSettings, PKIKeygen, NodeInstallKey, AntiDdosSettings, AntiDdosWhitelistSource,
-)
+# Импорт модуля целиком регистрирует ВСЕ модели в Base.metadata до create_all.
+# Поимённый список приходилось дополнять руками, и он успел отстать на десяток
+# таблиц — те создавались только потому, что их подтягивали импорты роутеров.
+from app import models  # noqa: F401
+from app.models import FailedLogin
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -62,11 +54,6 @@ async def cleanup_expired_bans():
                 logger.info(f"Cleaned up {result.rowcount} expired IP bans from database")
     except Exception as e:
         logger.error(f"Error cleaning up expired bans: {e}")
-
-
-async def _deferred_startup():
-    """Non-critical tasks that run after server is ready."""
-    logger.info("Deferred startup tasks completed")
 
 
 async def _init_optional_module(module_name: str, entrypoint: str) -> None:
@@ -122,12 +109,8 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Legacy traffic importer failed to start: {e}")
 
-    # Cache warming runs in background — doesn't block /health
-    warmup_task = asyncio.create_task(_deferred_startup())
-    
     yield
-    
-    warmup_task.cancel()
+
     await close_http_clients()
     await stop_traffic_import()
     await stop_antiddos_manager()
@@ -196,8 +179,8 @@ class GZipMiddlewareNoSSE:
 app.add_middleware(GZipMiddlewareNoSSE)
 
 app.include_router(auth_router.router)
-# server_deploy раньше servers: статичные пути /servers/remnawave-certs и /servers/deploy
-# должны матчиться до параметрического GET /servers/{server_id}
+# server_deploy раньше servers: DELETE /servers/remnawave-certs/{id} и /servers/deploy
+# должны матчиться до параметрических /servers/{server_id}
 app.include_router(server_deploy.router)
 app.include_router(servers.router)
 app.include_router(node_install_keys.router)

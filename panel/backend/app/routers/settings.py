@@ -16,14 +16,15 @@ router = APIRouter(prefix="/settings", tags=["settings"])
 
 DEFAULT_SETTINGS = {
     "refresh_interval": "5",
-    "theme": "dark",
     "compact_view": "false",
-    "blocklist_temp_timeout": "600",
     "blocklist_auto_update_enabled": "true",
     "blocklist_auto_update_interval": "86400",
     # Collector intervals (in seconds)
     "metrics_collect_interval": "10",  # Recommended: 10-15s
-    "haproxy_collect_interval": "60",  # Recommended: 60s
+    # Значение обязано совпадать с DEFAULT_HAPROXY_INTERVAL коллектора: пока
+    # строки в panel_settings нет, коллектор работает со своим значением, а
+    # панель показывала бы отсюда другое.
+    "haproxy_collect_interval": "300",
     # Time synchronization
     "server_timezone": "Europe/Moscow",
     "time_sync_enabled": "true",
@@ -73,16 +74,6 @@ async def get_all_settings(
     
     settings = {**DEFAULT_SETTINGS, **db_settings}
     return {"settings": settings}
-
-
-@router.get("/{key}")
-async def get_single_setting(
-    key: str,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    value = await get_setting(key, db)
-    return {"key": key, "value": value}
 
 
 @router.put("/{key}")

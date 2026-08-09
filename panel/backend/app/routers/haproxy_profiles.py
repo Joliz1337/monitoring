@@ -2,7 +2,7 @@ import asyncio
 import socket
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
-from sqlalchemy import select, update, func, and_, bindparam
+from sqlalchemy import select, update, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 from typing import Optional
@@ -208,25 +208,6 @@ async def validate_profile_config(data: ValidateRequest, _=Depends(verify_auth))
     """Проверяет конфиг HAProxy на панели через `haproxy -c` до раскатки на серверы."""
     valid, message = await validate_config(data.config_content)
     return {"valid": valid, "message": message}
-
-
-@router.post("/reorder")
-async def reorder_profiles(data: ReorderRequest, db: AsyncSession = Depends(get_db), _=Depends(verify_auth)):
-    if not data.profile_ids:
-        return {"success": True}
-
-    # Один executemany вместо UPDATE на каждый профиль. Через connection(), а не
-    # session.execute(): ORM-путь bulk-by-PK требует id внутри values, нам нужен
-    # WHERE по bindparam.
-    conn = await db.connection()
-    await conn.execute(
-        update(HAProxyConfigProfile)
-        .where(HAProxyConfigProfile.id == bindparam("pid"))
-        .values(position=bindparam("pos")),
-        [{"pid": pid, "pos": i} for i, pid in enumerate(data.profile_ids)],
-    )
-    await db.commit()
-    return {"success": True}
 
 
 # ==================== CRUD ====================

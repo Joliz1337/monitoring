@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from sqlalchemy import select, update
+from sqlalchemy import select
 
 from app.database import async_session
 from app.models import WildcardCertificate, Server, PanelSettings, AlertSettings
@@ -65,7 +65,6 @@ class WildcardSSLManager:
     # ─── Issue ───
 
     async def issue_certificate(self, base_domain: str, email: str, cf_token: str) -> tuple[bool, str]:
-        global _issue_status
         _issue_status["in_progress"] = True
         _issue_status["last_error"] = None
         _issue_status["output"] = None
@@ -479,17 +478,6 @@ class WildcardSSLManager:
             select(PanelSettings).where(PanelSettings.key == key)
         )).scalar_one_or_none()
         return row.value if row else None
-
-    @staticmethod
-    async def _set_setting(db, key: str, value: str):
-        row = (await db.execute(
-            select(PanelSettings).where(PanelSettings.key == key)
-        )).scalar_one_or_none()
-        if row:
-            row.value = value
-        else:
-            db.add(PanelSettings(key=key, value=value))
-
 
 # ─── Singleton ───
 

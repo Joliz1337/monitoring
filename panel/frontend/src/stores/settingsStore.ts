@@ -105,7 +105,6 @@ interface SettingsState {
   setRemnawaveNginxPath: (path: string) => Promise<void>
   setUpdateBranch: (branch: string) => Promise<void>
   getEffectiveTimezone: () => string
-  getTimezoneOffset: () => number
 }
 
 export const useSettingsStore = create<SettingsState>((set, get) => ({
@@ -220,21 +219,4 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     return timezone
   },
   
-  getTimezoneOffset: () => {
-    const { timezone } = get()
-    if (timezone === 'auto') {
-      return -new Date().getTimezoneOffset() * 60
-    }
-    const option = TIMEZONE_OPTIONS.find(o => o.value === timezone)
-    if (option) {
-      const match = option.offset.match(/([+-])(\d{2}):(\d{2})/)
-      if (match) {
-        const sign = match[1] === '+' ? 1 : -1
-        const hours = parseInt(match[2])
-        const minutes = parseInt(match[3])
-        return sign * (hours * 3600 + minutes * 60)
-      }
-    }
-    return 3 * 3600 // Default to Moscow (+03:00)
-  },
 }))

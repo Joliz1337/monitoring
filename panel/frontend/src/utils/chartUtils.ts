@@ -357,38 +357,6 @@ function collectFiniteValues(seriesData: ChartPointWithGap[][]): number[] {
 }
 
 /**
- * Calculate dynamic Y-axis maximum with padding
- * Prevents scale from jumping on data updates
- *
- * @param data - Array of chart points, gaps are ignored
- * @param minMax - Minimum maximum value (e.g., 100 for percentages)
- * @returns Calculated maximum with padding
- */
-export function calculateDynamicYMax(data: ChartPointWithGap[], minMax?: number): number | undefined {
-  const values = collectFiniteValues([data])
-
-  if (values.length === 0) return minMax
-
-  const maxValue = Math.max(...values)
-
-  if (maxValue === 0) return minMax
-  
-  // Add padding to prevent scale from touching the line
-  const paddedMax = maxValue * Y_AXIS_PADDING
-  
-  // Round up to a nice number for cleaner axis labels
-  const magnitude = Math.pow(10, Math.floor(Math.log10(paddedMax)))
-  const rounded = Math.ceil(paddedMax / magnitude) * magnitude
-  
-  // Return the larger of calculated max or minimum required max
-  if (minMax !== undefined) {
-    return Math.max(rounded, minMax)
-  }
-  
-  return rounded
-}
-
-/**
  * Calculate dynamic Y-axis maximum for multiple series
  *
  * @param seriesData - Array of series, each containing array of points; gaps are ignored

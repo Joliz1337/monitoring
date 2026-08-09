@@ -95,7 +95,6 @@ NC='\033[0m'
 
 # ==================== Paths ====================
 
-REPO_URL="https://github.com/Joliz1337/monitoring.git"
 # Ветка репозитория: main (стабильная) или dev — панель передаёт MON_BRANCH
 # при авторазвёртывании, когда выбран dev-канал обновлений.
 # export — значение нужно дочернему node/deploy.sh (пишет MON_IMAGE_TAG в .env)
@@ -136,10 +135,7 @@ declare -A MSG_EN
 declare -A MSG_RU
 
 # English messages
-MSG_EN[select_language]="Select language / Выберите язык:"
-MSG_EN[installing_git]="Installing git..."
 MSG_EN[downloading_repo]="Downloading repository..."
-MSG_EN[repo_downloaded]="Repository downloaded"
 MSG_EN[menu_title]="Monitoring System Installer"
 MSG_EN[menu_install_panel]="Install panel"
 MSG_EN[menu_install_node]="Install node"
@@ -180,7 +176,6 @@ MSG_EN[run_monitoring]="You can now run: mon"
 MSG_EN[menu_optimize_system]="System optimizations (BBR, sysctl, limits)"
 MSG_EN[optimizing_system]="Applying system optimizations..."
 MSG_EN[optimizations_applied]="System optimizations applied!"
-MSG_EN[optimizations_status]="Optimizations"
 MSG_EN[applied]="applied"
 MSG_EN[not_applied]="not applied"
 MSG_EN[opt_select_mode]="Select NIC queue mode:"
@@ -203,18 +198,13 @@ MSG_EN[opt_profile_select]="Select optimization profile:"
 MSG_EN[opt_profile_vpn]="VPN (high-traffic relay, 50k+ clients)"
 MSG_EN[opt_profile_panel]="Universal (panels, bots, monitoring, websites)"
 MSG_EN[opt_installing_configs]="Installing optimization configs"
-MSG_EN[opt_downloading_configs]="Downloading optimization configs"
-MSG_EN[opt_applying_sysctl]="Applying sysctl settings..."
-MSG_EN[opt_sysctl_done]="sysctl settings applied"
 MSG_EN[opt_verifying]="Verifying optimizations..."
 MSG_EN[opt_verified_ok]="All optimizations verified successfully"
-MSG_EN[opt_bbr_inactive]="BBR not active (kernel may not support it)"
 MSG_EN[opt_cleaning_conflicts]="Cleaning up conflicting system configs..."
 MSG_EN[checking_requirements]="Checking system requirements..."
 MSG_EN[requirements_ok]="System requirements OK"
 MSG_EN[disk_space_low]="Low disk space"
 MSG_EN[memory_low]="Low memory"
-MSG_EN[input_timeout]="Input timeout, using default"
 MSG_EN[menu_configure_proxy]="Configure proxy"
 MSG_EN[proxy_status]="Proxy"
 MSG_EN[proxy_enabled]="enabled"
@@ -274,7 +264,6 @@ MSG_EN[remnawave_template_error]="Failed to download/apply template"
 MSG_EN[remnawave_docker_installing]="Installing Docker..."
 MSG_EN[remnawave_docker_error]="Failed to install Docker"
 MSG_EN[remnawave_starting]="Starting Remnawave containers..."
-MSG_EN[remnawave_started]="Remnawave containers started"
 MSG_EN[rescue_detected]="Hetzner Rescue System detected"
 MSG_EN[rescue_intro]="No OS is installed yet. A clean Ubuntu 24.04 will be installed to disk."
 MSG_EN[rescue_target]="Target drive(s)"
@@ -296,10 +285,7 @@ MSG_EN[rescue_reboot_note]="The SSH host key will change and the server boots in
 MSG_EN[rescue_rebooting]="Rebooting into the new system in 5 seconds..."
 
 # Russian messages
-MSG_RU[select_language]="Select language / Выберите язык:"
-MSG_RU[installing_git]="Установка git..."
 MSG_RU[downloading_repo]="Скачивание репозитория..."
-MSG_RU[repo_downloaded]="Репозиторий скачан"
 MSG_RU[menu_title]="Установщик системы мониторинга"
 MSG_RU[menu_install_panel]="Установить панель"
 MSG_RU[menu_install_node]="Установить ноду"
@@ -340,7 +326,6 @@ MSG_RU[run_monitoring]="Теперь можно запускать: mon"
 MSG_RU[menu_optimize_system]="Системные оптимизации (BBR, sysctl, limits)"
 MSG_RU[optimizing_system]="Применение системных оптимизаций..."
 MSG_RU[optimizations_applied]="Системные оптимизации применены!"
-MSG_RU[optimizations_status]="Оптимизации"
 MSG_RU[applied]="применены"
 MSG_RU[not_applied]="не применены"
 MSG_RU[opt_select_mode]="Выберите режим сетевой карты:"
@@ -363,18 +348,13 @@ MSG_RU[opt_profile_select]="Выберите профиль оптимизаци
 MSG_RU[opt_profile_vpn]="VPN (высоконагруженный релей, 50k+ клиентов)"
 MSG_RU[opt_profile_panel]="Универсальный (панели, боты, мониторинг, сайты)"
 MSG_RU[opt_installing_configs]="Установка конфигов оптимизации"
-MSG_RU[opt_downloading_configs]="Загрузка конфигов оптимизации"
-MSG_RU[opt_applying_sysctl]="Применение параметров sysctl..."
-MSG_RU[opt_sysctl_done]="Параметры sysctl применены"
 MSG_RU[opt_verifying]="Проверка оптимизаций..."
 MSG_RU[opt_verified_ok]="Все оптимизации успешно проверены"
-MSG_RU[opt_bbr_inactive]="BBR не активен (ядро может не поддерживать)"
 MSG_RU[opt_cleaning_conflicts]="Очистка конфликтующих системных конфигов..."
 MSG_RU[checking_requirements]="Проверка системных требований..."
 MSG_RU[requirements_ok]="Системные требования выполнены"
 MSG_RU[disk_space_low]="Мало места на диске"
 MSG_RU[memory_low]="Мало оперативной памяти"
-MSG_RU[input_timeout]="Тайм-аут ввода, используется значение по умолчанию"
 MSG_RU[menu_configure_proxy]="Настроить прокси"
 MSG_RU[proxy_status]="Прокси"
 MSG_RU[proxy_enabled]="настроен"
@@ -434,7 +414,6 @@ MSG_RU[remnawave_template_error]="Не удалось загрузить/при�
 MSG_RU[remnawave_docker_installing]="Установка Docker..."
 MSG_RU[remnawave_docker_error]="Не удалось установить Docker"
 MSG_RU[remnawave_starting]="Запуск контейнеров Remnawave..."
-MSG_RU[remnawave_started]="Контейнеры Remnawave запущены"
 MSG_RU[rescue_detected]="Обнаружена Hetzner Rescue System"
 MSG_RU[rescue_intro]="ОС ещё не установлена. На диск будет установлена чистая Ubuntu 24.04."
 MSG_RU[rescue_target]="Целевой диск(и)"
@@ -763,7 +742,7 @@ if [ -f /etc/monitoring/proxy.conf ]; then
     fi
 fi
 
-GITHUB_URL="https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh"
+GITHUB_URL="https://raw.githubusercontent.com/Joliz1337/monitoring/@@BRANCH@@/install.sh"
 TIMEOUT=120
 
 # Установщик больше 128 КБ — лимита ядра на длину одного аргумента (MAX_ARG_STRLEN),
@@ -785,6 +764,11 @@ fi
 bash "$INSTALLER" "$@"
 MON_CLI_EOF
 )
+
+    # Ветку подставляем после heredoc: сам heredoc закавычен, чтобы не раскрывались
+    # переменные самой обёртки. Без подстановки сервер, поставленный с dev-канала,
+    # тянул бы установщик из main.
+    script_content=${script_content//@@BRANCH@@/$MON_BRANCH}
 
     # Файл переписывается только при расхождении: так установщик чинит устаревший
     # mon на уже установленных серверах, но не шумит сообщением на каждом запуске
@@ -813,7 +797,7 @@ copy_installer() {
 # ==================== System Optimizations ====================
 
 cleanup_conflicting_configs() {
-    log_info "Cleaning up conflicting system configs..."
+    log_info "$(msg opt_cleaning_conflicts)"
     
     # ---- sysctl.d: remove ALL non-system configs except ours ----
     # System files: 10-* (Ubuntu), 99-sysctl.conf (symlink), 99-cloudimg-* (cloud-init), README.*
@@ -1269,7 +1253,7 @@ apply_system_optimizations() {
 profiles/limits.tmpl profiles/systemd-limits.tmpl"
 
     if [ -n "$CONFIG_SRC" ] && [ -f "$CONFIG_SRC/tune-sysctl.sh" ]; then
-        log_info "Installing optimization inputs (profile: $opt_profile)..."
+        log_info "$(msg opt_installing_configs) (profile: $opt_profile)..."
         local f
         for f in $RENDER_INPUTS; do
             if [ ! -f "$CONFIG_SRC/$f" ]; then
@@ -1369,26 +1353,21 @@ profiles/limits.tmpl profiles/systemd-limits.tmpl"
     # stale. This replaces the old two-item check whose hashsize expectation was
     # hardcoded here as 524288/32768 and, differently, as a flat 524288 in the
     # node agent — which false-failed on every panel+hybrid node.
-    log_info "Verifying optimizations..."
+    log_info "$(msg opt_verifying)"
     local verify_out
     if verify_out=$("$OPT_DIR/scripts/tune-sysctl.sh" verify 2>/dev/null); then
-        log_success "All optimizations verified successfully"
+        log_success "$(msg opt_verified_ok)"
     else
         log_warn "Some values did not take effect: $verify_out"
         log_warn "See $OPT_DIR/configs/tuning-facts.json for what was expected"
     fi
 
     log_success "$(msg optimizations_applied)"
-}
 
-check_optimizations_status() {
-    if [ -f /etc/sysctl.d/99-vless-tuning.conf ]; then
-        local profile="vpn"
-        [ -f /opt/monitoring/configs/OPT_PROFILE ] && profile=$(cat /opt/monitoring/configs/OPT_PROFILE 2>/dev/null || echo "vpn")
-        echo "$(msg applied) ($profile)"
-    else
-        echo "$(msg not_applied)"
-    fi
+    # Вотчдог ставится здесь, а не у вызывающих: иначе оператор, применивший
+    # оптимизации пунктом меню, оставался бы без анти-DDoS — а именно ради
+    # «свежая нода не остаётся без защиты» вотчдог и ставится при установке.
+    install_antiddos_watchdog || log_warn "Anti-DDoS watchdog step failed"
 }
 
 # ==================== Proxy Functions ====================
@@ -1442,12 +1421,23 @@ install_antiddos_watchdog() {
     fi
     chmod +x "$OPT_DIR/scripts/ddos-watchdog.sh" 2>/dev/null || true
 
-    # Seed the allowlist before the first start. Without this a fresh node has an
-    # empty allow set until the panel's periodic whitelist push arrives, so an
-    # attack detected in that window would rate-limit the panel itself.
+    # Затравка на время до первого пуша whitelist от панели. Постоянный список
+    # собирает и раз в час рассылает панель (IP всех нод + свой + ручные CIDR),
+    # а при установке ноды из панели пуш идёт сразу после установки. Затравка
+    # закрывает только окно у ноды, поставленной руками: панель о ней ещё не
+    # знает. Доступ самой панели затравка не спасает и не обязана — порт 9100
+    # у вотчдога в never-drop, ACCEPT на него стоит раньше любого DROP;
+    # whitelist влияет на клиентские порты.
     if [ ! -f "$OPT_DIR/antiddos/whitelist.json" ]; then
+        # PANEL_IP приходит из env только в неинтерактивном сценарии: ноду ставит
+        # дочерний node/deploy.sh, и обратно в установщик переменная не возвращается.
+        # Поэтому при пустом значении читаем её из .env уже установленной ноды.
+        local panel_ip="${PANEL_IP:-}"
+        if [ -z "$panel_ip" ] && [ -f "$NODE_DIR/.env" ]; then
+            panel_ip=$(grep '^PANEL_IP=' "$NODE_DIR/.env" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'")
+        fi
         local seed="\"127.0.0.0/8\""
-        [ -n "${PANEL_IP:-}" ] && seed="$seed, \"$PANEL_IP\""
+        [ -n "$panel_ip" ] && seed="$seed, \"$panel_ip\""
         echo "[$seed]" > "$OPT_DIR/antiddos/whitelist.json" 2>/dev/null || true
         chmod 644 "$OPT_DIR/antiddos/whitelist.json" 2>/dev/null || true
     fi
@@ -1887,7 +1877,7 @@ install_node() {
     }
     copy_installer "$NODE_DIR"
     cd "$NODE_DIR" || return 1
-    chmod +x deploy.sh update.sh generate-ssl.sh >/dev/null 2>&1 || true
+    chmod +x deploy.sh update.sh >/dev/null 2>&1 || true
     
     ./deploy.sh || {
         log_error "Node deploy failed"
@@ -3031,8 +3021,6 @@ PROXYEOF
         fi
         apply_system_optimizations "${MON_OPT_PROFILE:-vpn}" "$nic_mode" \
             || log_warn "System optimizations step failed"
-        install_antiddos_watchdog \
-            || log_warn "Anti-DDoS watchdog step failed"
     fi
 
     cleanup_temp

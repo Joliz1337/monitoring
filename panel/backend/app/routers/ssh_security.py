@@ -1,7 +1,6 @@
 import asyncio
 import json
 import logging
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -225,17 +224,6 @@ async def update_ssh_config(
 ):
     server = await _get_server(server_id, db)
     return await _safe_proxy(server, "POST", "/api/ssh/config", config)
-
-
-@router.post("/server/{server_id}/config/test")
-async def test_ssh_config(
-    server_id: int,
-    config: dict,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth),
-):
-    server = await _get_server(server_id, db)
-    return await _safe_proxy(server, "POST", "/api/ssh/config/test", config)
 
 
 # === Fail2ban ===

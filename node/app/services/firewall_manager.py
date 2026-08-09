@@ -365,17 +365,6 @@ class FirewallManager:
 
         return rules
     
-    def check_port_open(self, port: int, protocol: str = "tcp") -> bool:
-        """Check if specific port is open"""
-        rules = self.list_rules()
-        
-        for rule in rules:
-            if rule.port == port and rule.action == "ALLOW":
-                if protocol == "any" or rule.protocol == "any" or rule.protocol == protocol:
-                    return True
-
-        return False
-
     @staticmethod
     def _normalize_from(value: Optional[str]) -> str:
         """Приводит источник к каноничному виду: пусто/any/anywhere → 'anywhere'."""
@@ -467,17 +456,6 @@ class FirewallManager:
             logger.error(f"Failed to disable UFW: {stderr}")
             return False, f"Failed to disable firewall: {stderr or stdout}", error_log
     
-    def reset(self) -> tuple[bool, str, Optional[str]]:
-        """Reset UFW to default settings (disable and remove all rules)"""
-        success, stdout, stderr = self._run_ufw(["--force", "reset"])
-        
-        if success:
-            logger.info("UFW firewall reset to defaults")
-            return True, "Firewall reset to defaults", None
-        else:
-            error_log = f"Command: ufw --force reset\nStdout: {stdout}\nStderr: {stderr}"
-            return False, f"Failed to reset firewall: {stderr or stdout}", error_log
-
     # ==================== Profile application ====================
 
     @staticmethod

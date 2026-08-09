@@ -13,7 +13,7 @@ from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, field_validator
-from sqlalchemy import bindparam, func, select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import verify_auth
@@ -269,25 +269,6 @@ async def import_from_node(
     if detected:
         content = replace_domain_with_placeholder(content, detected)
     return {"content": content, "detected_domain": detected, "has_markers": has_markers(content)}
-
-
-@router.post("/reorder")
-async def reorder_profiles(data: ReorderRequest, db: AsyncSession = Depends(get_db), _=Depends(verify_auth)):
-    if not data.profile_ids:
-        return {"success": True}
-
-    # Один executemany вместо UPDATE на каждый профиль. Через connection(), а не
-    # session.execute(): ORM-путь bulk-by-PK требует id внутри values, нам нужен
-    # WHERE по bindparam.
-    conn = await db.connection()
-    await conn.execute(
-        update(RemnawaveNginxProfile)
-        .where(RemnawaveNginxProfile.id == bindparam("pid"))
-        .values(position=bindparam("pos")),
-        [{"pid": pid, "pos": i} for i, pid in enumerate(data.profile_ids)],
-    )
-    await db.commit()
-    return {"success": True}
 
 
 # ==================== CRUD ====================

@@ -4,11 +4,11 @@ import ipaddress
 import time
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from sqlalchemy import select, update, desc, bindparam, func
+from sqlalchemy import select, update, bindparam, func
 from sqlalchemy.ext.asyncio import AsyncSession
 import re
 from urllib.parse import urlparse
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, field_validator
 from typing import Optional
 import httpx
 import json
@@ -21,7 +21,6 @@ from app.services.blocklist_manager import get_blocklist_manager
 from app.services.server_status import get_offline_threshold, resolve_status
 from app.services.time_sync import get_time_sync_service
 from app.services.net_utils import resolve_panel_ip
-from app.config import get_settings
 from app.services.pki import build_installer_token
 from app.services.migration import (
     classify_server,
@@ -165,17 +164,6 @@ def enrich_metrics_with_speeds(metrics: dict, snapshot: MetricsSnapshot) -> dict
     return metrics
 
 
-async def get_latest_snapshot(server_id: int, db: AsyncSession) -> Optional[MetricsSnapshot]:
-    """Get the most recent metrics snapshot for a server."""
-    result = await db.execute(
-        select(MetricsSnapshot)
-        .where(MetricsSnapshot.server_id == server_id)
-        .order_by(desc(MetricsSnapshot.timestamp))
-        .limit(1)
-    )
-    return result.scalar_one_or_none()
-
-
 async def get_latest_snapshots_bulk(server_ids: list[int], db: AsyncSession) -> dict[int, MetricsSnapshot]:
     """Get the most recent metrics snapshot for multiple servers in one query.
     
@@ -299,16 +287,6 @@ class MoveServersToFolder(BaseModel):
 class RenameServerFolder(BaseModel):
     old_name: str
     new_name: str
-
-
-class ServerResponse(BaseModel):
-    id: int
-    name: str
-    url: str
-    position: int
-    is_active: bool
-
-    model_config = ConfigDict(from_attributes=True)
 
 
 # Кэш тяжёлого ответа /servers?include_metrics=true. Метрики меняются раз в цикл
@@ -555,77 +533,6 @@ async def delete_server_folder(
     await db.commit()
     _invalidate_list_cache()
     return {"success": True, "unfoldered": len(servers)}
-
-
-@router.get("/{server_id}")
-async def get_server(
-    server_id: int,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    result = await db.execute(select(Server).where(Server.id == server_id))
-    server = result.scalar_one_or_none()
-
-    if not server:
-        raise HTTPException(status_code=404)
-
-    return {
-        "id": server.id,
-        "name": server.name,
-        "url": server.url,
-        "proxy_url": server.proxy_url,
-        "position": server.position,
-        "is_active": server.is_active,
-        "folder": server.folder,
-        "last_seen": to_iso_utc(server.last_seen),
-        "last_error": server.last_error,
-        "error_code": server.error_code,
-        "pki_enabled": bool(server.pki_enabled),
-        "uses_shared_cert": bool(server.uses_shared_cert),
-        "auth_kind": classify_server(server),
-    }
-
-
-@router.post("/{server_id}/migrate")
-async def migrate_server(
-    server_id: int,
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth),
-):
-    """Перевести ноду на shared cert.
-
-    pki_enabled (per-server) → автоматически через push новой пары cert/key.
-    legacy (api_key) → возвращаем installer token, оператор переустанавливает ноду
-    и затем подтверждает через `/confirm-migration`.
-    """
-    result = await db.execute(select(Server).where(Server.id == server_id))
-    server = result.scalar_one_or_none()
-    if not server:
-        raise HTTPException(status_code=404)
-
-    if server.uses_shared_cert:
-        return {"status": "already_shared"}
-
-    keygen = request.app.state.pki
-
-    if server.pki_enabled:
-        try:
-            await push_shared_cert_to_node(server, keygen)
-        except httpx.HTTPError as exc:
-            raise HTTPException(
-                status_code=502,
-                detail=f"Node refused cert replacement: {exc}",
-            ) from exc
-        server.uses_shared_cert = True
-        await db.commit()
-        return {"status": "auto", "success": True}
-
-    # legacy
-    return {
-        "status": "manual",
-        "token": build_installer_token(keygen, panel_ip=await resolve_panel_ip()),
-    }
 
 
 @router.post("/{server_id}/confirm-migration")

@@ -109,26 +109,32 @@ spin() {
 
     "$@" >"$logf" 2>&1 &
     local pid=$!
-    local i=0
 
-    while kill -0 "$pid" 2>/dev/null; do
-        local e=$(( $(date +%s) - t0 ))
-        local m=$((e / 60)) s=$((e % 60))
-        if [ $m -gt 0 ]; then
-            printf "\r  \033[0;36m%s\033[0m %s \033[1;33m[%dm %02ds]\033[0m  " \
-                "${chars:$((i % 10)):1}" "$desc" "$m" "$s"
-        else
-            printf "\r  \033[0;36m%s\033[0m %s \033[1;33m[%ds]\033[0m  " \
-                "${chars:$((i % 10)):1}" "$desc" "$s"
-        fi
-        i=$((i + 1))
-        sleep 0.12 2>/dev/null || sleep 1
-    done
+    # Анимированный спиннер — только в реальном терминале. Вне TTY (запуск
+    # по SSH из панели) \r-перерисовка превращается в мусор, поэтому только ждём.
+    if [ -t 1 ]; then
+        local i=0
+        while kill -0 "$pid" 2>/dev/null; do
+            local e=$(( $(date +%s) - t0 ))
+            local m=$((e / 60)) s=$((e % 60))
+            if [ $m -gt 0 ]; then
+                printf "\r  \033[0;36m%s\033[0m %s \033[1;33m[%dm %02ds]\033[0m  " \
+                    "${chars:$((i % 10)):1}" "$desc" "$m" "$s"
+            else
+                printf "\r  \033[0;36m%s\033[0m %s \033[1;33m[%ds]\033[0m  " \
+                    "${chars:$((i % 10)):1}" "$desc" "$s"
+            fi
+            i=$((i + 1))
+            sleep 0.12 2>/dev/null || sleep 1
+        done
+    else
+        echo "  • ${desc}..."
+    fi
 
     wait "$pid" 2>/dev/null
     local rc=$?
     local e=$(( $(date +%s) - t0 ))
-    printf "\r\033[2K"
+    [ -t 1 ] && printf "\r\033[2K"
 
     if [ $rc -eq 0 ]; then
         echo -e "  ${GREEN}✓${NC} ${desc} ${CYAN}(${e}s)${NC}"
@@ -244,66 +250,6 @@ backup_config() {
     fi
 }
 
-restore_config() {
-    if [ -f "$NODE_DIR/.env.backup" ]; then
-        mv "$NODE_DIR/.env.backup" "$NODE_DIR/.env" 2>/dev/null || true
-    fi
-}
-
-# ==================== Fallback Update ====================
-
-fallback_update() {
-    local new_version="unknown"
-    if [ -f "$TMP_DIR/node/VERSION" ]; then
-        new_version=$(cat "$TMP_DIR/node/VERSION" 2>/dev/null || echo "unknown")
-    fi
-    log_info "New version: $new_version"
-
-    cd "$NODE_DIR" || return 1
-
-    # Контейнеры не трогаем, пока новые файлы и образы не готовы:
-    # на медленной сети скачивание занимает десятки минут, нода остаётся онлайн
-    log_info "Copying new files..."
-    if ! rsync -av --delete \
-        --exclude='.env' \
-        --exclude='.env.backup' \
-        --exclude='nginx/ssl' \
-        "$TMP_DIR/node/" "$NODE_DIR/" 2>/dev/null; then
-        log_error "Failed to copy files"
-        restore_config
-        return 1
-    fi
-
-    restore_config
-    chmod +x "$NODE_DIR"/*.sh 2>/dev/null || true
-
-    # Pull ready images from GHCR (normal flow)
-    if ! spin_retry "$TIMEOUT_DOCKER_PULL" 3 15 "Pulling Docker images" docker compose pull; then
-        log_warn "Failed to pull from registry, building locally..."
-        spin "Pulling base images" bash -c \
-            'docker compose pull --ignore-buildable 2>/dev/null || true'
-        spin_retry 900 2 10 "Building images from source" docker compose build || {
-            log_error "Failed to get new images — update cancelled, node keeps running old version"
-            return 1
-        }
-    fi
-
-    spin "Stopping containers" \
-        timeout "$TIMEOUT_DOCKER_COMPOSE_DOWN" docker compose down --timeout 30 2>/dev/null || true
-
-    # up -d ждёт healthy у api и может выйти с ошибкой, оставив nginx в Created —
-    # тогда поднимаем контейнеры напрямую
-    if ! spin "Starting containers" docker compose up -d; then
-        log_warn "compose up failed, starting containers directly..."
-        docker compose start 2>/dev/null || docker start monitoring-api monitoring-nginx || {
-            log_error "Failed to start containers"
-            return 1
-        }
-    fi
-
-    log_success "=== Update Complete ==="
-    log_info "Version: $CURRENT_VERSION → $new_version"
-}
 
 # ==================== Main ====================
 
@@ -343,8 +289,8 @@ main() {
         chmod +x "$TMP_DIR/node/scripts/apply-update.sh" 2>/dev/null || true
         exec bash "$TMP_DIR/node/scripts/apply-update.sh" "$TMP_DIR" "$NODE_DIR" "$CURRENT_VERSION" "$TARGET_REF"
     else
-        log_warn "Downloaded version doesn't have apply-update.sh, using inline update..."
-        fallback_update
+        log_error "Downloaded repository has no node/scripts/apply-update.sh — clone is incomplete"
+        exit 1
     fi
 }
 

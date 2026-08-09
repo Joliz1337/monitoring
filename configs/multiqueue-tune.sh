@@ -20,15 +20,6 @@ FACTS_ENV="/opt/monitoring/configs/tuning-facts.env"
 # shellcheck source=/dev/null
 [ -r "$FACTS_ENV" ] && . "$FACTS_ENV"
 
-# The kernel silently rejects a non-power-of-two rps_flow_cnt. The old code did a
-# plain division, so on a 40-queue NIC RFS was quietly disabled.
-pow2_floor() {
-    local n=${1:-0} p=1
-    [ "$n" -lt 1 ] && { echo 1; return; }
-    while [ $((p * 2)) -le "$n" ]; do p=$((p * 2)); done
-    echo "$p"
-}
-
 # flow_limit needs a CPU bitmap, which cannot be set from a .conf file, so this
 # one value legitimately stays here. Its companion net.core.flow_limit_table_len
 # IS in the rendered sysctl file; without both, a single flood flow can occupy an

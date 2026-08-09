@@ -20,14 +20,15 @@ LOCK_FD=200
 
 # ==================== Timeouts Configuration ====================
 
-TIMEOUT_USER_INPUT=300
 TIMEOUT_APT_UPDATE=120
 TIMEOUT_APT_INSTALL=300
-TIMEOUT_CURL=60
 TIMEOUT_DOCKER_COMPOSE_DOWN=120
-TIMEOUT_DOCKER_PULL=300
 TIMEOUT_SYSTEMCTL=60
 TIMEOUT_HEALTH_CHECK=5
+
+# Агент слушает только петлю (network_mode: host), снаружи ноду закрывает
+# nginx с mTLS — самопроверки установщика идут напрямую во внутренний API.
+INTERNAL_API="http://127.0.0.1:7500"
 
 MAX_RETRIES=3
 RETRY_DELAY=5
@@ -193,27 +194,6 @@ suppress_needrestart() {
         echo '$nrconf{restart} = "l";' > /etc/needrestart/conf.d/no-prompt.conf 2>/dev/null || true
     fi
     pkill -9 needrestart 2>/dev/null || true
-}
-
-safe_write_file() {
-    local file="$1"
-    local content="$2"
-    local backup="${file}.bak.$(date +%Y%m%d_%H%M%S)"
-    
-    if [ -f "$file" ]; then
-        cp "$file" "$backup" 2>/dev/null || true
-    fi
-    
-    mkdir -p "$(dirname "$file")" 2>/dev/null || true
-    
-    if echo "$content" > "$file" 2>/dev/null; then
-        return 0
-    else
-        if [ -f "$backup" ]; then
-            mv "$backup" "$file" 2>/dev/null || true
-        fi
-        return 1
-    fi
 }
 
 # ==================== Proxy Support ====================
@@ -823,7 +803,7 @@ wait_for_services() {
     local attempt=1
 
     while [ $attempt -le $max_attempts ]; do
-        if timeout "$TIMEOUT_HEALTH_CHECK" curl -sk https://localhost:9100/health > /dev/null 2>&1; then
+        if timeout "$TIMEOUT_HEALTH_CHECK" curl -sf "$INTERNAL_API/health" > /dev/null 2>&1; then
             log_success "Services are ready"
             return 0
         fi
@@ -837,16 +817,12 @@ wait_for_services() {
 
 check_endpoints() {
     log_info "Checking API endpoints..."
-    
-    local api_key
-    api_key=$(grep "^API_KEY=" .env 2>/dev/null | cut -d '=' -f2 || echo "")
-    local base_url="https://localhost:9100"
 
     echo ""
-    
+
     echo -n "  /health: "
     local response
-    response=$(timeout "$TIMEOUT_HEALTH_CHECK" curl -sk "$base_url/health" 2>/dev/null || echo "")
+    response=$(timeout "$TIMEOUT_HEALTH_CHECK" curl -sf "$INTERNAL_API/health" 2>/dev/null || echo "")
     if echo "$response" | grep -q '"status":"ok"'; then
         echo -e "${GREEN}OK${NC}"
     else
@@ -854,7 +830,7 @@ check_endpoints() {
     fi
 
     echo -n "  /api/metrics: "
-    response=$(timeout "$TIMEOUT_HEALTH_CHECK" curl -sk -H "X-API-Key: $api_key" "$base_url/api/metrics" 2>/dev/null || echo "")
+    response=$(timeout "$TIMEOUT_HEALTH_CHECK" curl -sf "$INTERNAL_API/api/metrics" 2>/dev/null || echo "")
     if echo "$response" | grep -q '"cpu"'; then
         echo -e "${GREEN}OK${NC}"
     else
@@ -862,11 +838,21 @@ check_endpoints() {
     fi
 
     echo -n "  /api/haproxy/status: "
-    response=$(timeout "$TIMEOUT_HEALTH_CHECK" curl -sk -H "X-API-Key: $api_key" "$base_url/api/haproxy/status" 2>/dev/null || echo "")
+    response=$(timeout "$TIMEOUT_HEALTH_CHECK" curl -sf "$INTERNAL_API/api/haproxy/status" 2>/dev/null || echo "")
     if echo "$response" | grep -q '"running":true'; then
         echo -e "${GREEN}OK (running)${NC}"
     elif echo "$response" | grep -q '"running":false'; then
         echo -e "${YELLOW}OK (stopped)${NC}"
+    else
+        echo -e "${RED}FAIL${NC}"
+    fi
+
+    # Снаружи ноду видно только через nginx с mTLS, а клиентский сертификат
+    # лежит на панели — с самой ноды полноценный запрос не сделать,
+    # поэтому проверяется только то, что порт принимает соединения.
+    echo -n "  nginx :9100 (mTLS): "
+    if timeout "$TIMEOUT_HEALTH_CHECK" bash -c "</dev/tcp/127.0.0.1/9100" 2>/dev/null; then
+        echo -e "${GREEN}OK${NC}"
     else
         echo -e "${RED}FAIL${NC}"
     fi

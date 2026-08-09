@@ -23,32 +23,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/bulk", tags=["bulk"])
 
 
-class BulkHAProxyRuleCreate(BaseModel):
-    server_ids: list[int]
-    name: str
-    rule_type: str = "tcp"
-    listen_port: int
-    target_ip: str
-    target_port: int
-    cert_domain: Optional[str] = None
-    target_ssl: bool = False
-    send_proxy: bool = False
-    accept_proxy: bool = False
-
-
-class BulkHAProxyRuleDelete(BaseModel):
-    server_ids: list[int]
-    listen_port: int
-    target_ip: str
-    target_port: int
-
-
 class TrafficPortParams(BaseModel):
     port: int
-
-
-class BulkTrafficPort(TrafficPortParams):
-    server_ids: list[int]
 
 
 class FirewallRuleParams(BaseModel):
@@ -59,26 +35,14 @@ class FirewallRuleParams(BaseModel):
     direction: str = "in"
 
 
-class BulkFirewallRuleCreate(FirewallRuleParams):
-    server_ids: list[int]
-
-
 class FirewallRuleDeleteParams(BaseModel):
     port: int
-
-
-class BulkFirewallRuleDelete(FirewallRuleDeleteParams):
-    server_ids: list[int]
 
 
 class TerminalExecuteParams(BaseModel):
     command: str
     timeout: int = 30
     shell: str = "sh"
-
-
-class BulkTerminalExecute(TerminalExecuteParams):
-    server_ids: list[int]
 
 
 class BulkResult(BaseModel):
@@ -466,315 +430,14 @@ async def get_bulk_job(job_id: str, _: dict = Depends(verify_auth)):
 
 # ==================== HAProxy Service ====================
 
-class BulkHAProxyService(BaseModel):
-    server_ids: list[int]
-
-
-@router.post("/haproxy/start", response_model=list[BulkResult])
-async def bulk_start_haproxy(
-    data: BulkHAProxyService,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """Start HAProxy on multiple servers."""
-    return await run_bulk_for_ids(data.server_ids, haproxy_service_executor("start"), db)
-
-
-@router.post("/haproxy/stop", response_model=list[BulkResult])
-async def bulk_stop_haproxy(
-    data: BulkHAProxyService,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """Stop HAProxy on multiple servers."""
-    return await run_bulk_for_ids(data.server_ids, haproxy_service_executor("stop"), db)
-
-
-@router.post("/haproxy/restart", response_model=list[BulkResult])
-async def bulk_restart_haproxy(
-    data: BulkHAProxyService,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    return await run_bulk_for_ids(data.server_ids, haproxy_service_executor("restart"), db)
-
-
 # ==================== HAProxy Rules ====================
-
-@router.post("/haproxy/rules", response_model=list[BulkResult])
-async def bulk_create_haproxy_rule(
-    data: BulkHAProxyRuleCreate,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """Create HAProxy rule on multiple servers."""
-    rule_data = {
-        "name": data.name,
-        "rule_type": data.rule_type,
-        "listen_port": data.listen_port,
-        "target_ip": data.target_ip,
-        "target_port": data.target_port,
-        "cert_domain": data.cert_domain,
-        "target_ssl": data.target_ssl,
-        "send_proxy": data.send_proxy,
-        "accept_proxy": data.accept_proxy,
-    }
-
-    async def create_rule(server: Server) -> BulkResult:
-        success, result = await proxy_request_safe(
-            server, "/api/haproxy/rules", method="POST", json_data=rule_data
-        )
-        return BulkResult(
-            server_id=server.id,
-            server_name=server.name,
-            success=success,
-            message="Rule created" if success else str(result)
-        )
-
-    return await run_bulk_for_ids(data.server_ids, create_rule, db)
-
-
-@router.delete("/haproxy/rules", response_model=list[BulkResult])
-async def bulk_delete_haproxy_rule(
-    data: BulkHAProxyRuleDelete,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """Delete HAProxy rule by listen_port + target_ip + target_port on multiple servers."""
-    async def delete_rule(server: Server) -> BulkResult:
-        # First, get all rules to find the matching one
-        success, rules_result = await proxy_request_safe(server, "/api/haproxy/rules")
-
-        if not success:
-            return BulkResult(
-                server_id=server.id,
-                server_name=server.name,
-                success=False,
-                message=f"Failed to get rules: {rules_result}"
-            )
-
-        # Find matching rule
-        rules = rules_result.get("rules", [])
-        matching_rule = None
-        for rule in rules:
-            if (rule.get("listen_port") == data.listen_port and
-                rule.get("target_ip") == data.target_ip and
-                rule.get("target_port") == data.target_port):
-                matching_rule = rule
-                break
-
-        if not matching_rule:
-            return BulkResult(
-                server_id=server.id,
-                server_name=server.name,
-                success=False,
-                message=f"Rule not found (port {data.listen_port} -> {data.target_ip}:{data.target_port})"
-            )
-
-        # Delete the rule
-        rule_name = matching_rule.get("name")
-        success, result = await proxy_request_safe(
-            server, f"/api/haproxy/rules/{rule_name}", method="DELETE"
-        )
-
-        return BulkResult(
-            server_id=server.id,
-            server_name=server.name,
-            success=success,
-            message=f"Rule '{rule_name}' deleted" if success else str(result)
-        )
-
-    return await run_bulk_for_ids(data.server_ids, delete_rule, db)
-
 
 # ==================== Traffic Ports ====================
 
-@router.post("/traffic/ports", response_model=list[BulkResult])
-async def bulk_add_tracked_port(
-    data: BulkTrafficPort,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """Add tracked port on multiple servers."""
-    return await run_bulk_for_ids(data.server_ids, traffic_port_add_executor(data.port), db)
-
-
-@router.delete("/traffic/ports", response_model=list[BulkResult])
-async def bulk_remove_tracked_port(
-    data: BulkTrafficPort,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """Remove tracked port from multiple servers."""
-    return await run_bulk_for_ids(data.server_ids, traffic_port_remove_executor(data.port), db)
-
-
 # ==================== Firewall Rules ====================
-
-@router.post("/firewall/rules", response_model=list[BulkResult])
-async def bulk_add_firewall_rule(
-    data: BulkFirewallRuleCreate,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """Add firewall rule on multiple servers."""
-    return await run_bulk_for_ids(data.server_ids, firewall_rule_add_executor(data), db)
-
-
-@router.delete("/firewall/rules", response_model=list[BulkResult])
-async def bulk_delete_firewall_rule(
-    data: BulkFirewallRuleDelete,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """Delete firewall rule by port on multiple servers."""
-    return await run_bulk_for_ids(data.server_ids, firewall_rule_delete_executor(data.port), db)
-
 
 # ==================== Terminal ====================
 
-@router.post("/terminal/execute", response_model=list[BulkTerminalResult])
-async def bulk_execute_command(
-    data: BulkTerminalExecute,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    return await run_bulk_for_ids(data.server_ids, terminal_execute_executor(data), db)
-
-
 # ==================== HAProxy Config ====================
 
-class BulkHAProxyConfig(BaseModel):
-    server_ids: list[int]
-    config_content: str
-    reload_after: bool = True
-
-
-@router.post("/haproxy/config", response_model=list[BulkResult])
-async def bulk_apply_haproxy_config(
-    data: BulkHAProxyConfig,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    config_data = {
-        "config_content": data.config_content,
-        "reload_after": data.reload_after,
-    }
-
-    async def apply_config(server: Server) -> BulkResult:
-        success, result = await proxy_request_safe(
-            server, "/api/haproxy/config/apply", method="POST",
-            json_data=config_data, timeout=30.0
-        )
-
-        if success and isinstance(result, dict):
-            if result.get("success"):
-                msg = result.get("message", "Config applied")
-                if result.get("reloaded"):
-                    msg += " (reloaded)"
-                return BulkResult(
-                    server_id=server.id,
-                    server_name=server.name,
-                    success=True,
-                    message=msg,
-                )
-            return BulkResult(
-                server_id=server.id,
-                server_name=server.name,
-                success=False,
-                message=result.get("message", "Config validation failed"),
-            )
-
-        return BulkResult(
-            server_id=server.id,
-            server_name=server.name,
-            success=False,
-            message=str(result),
-        )
-
-    return await run_bulk_for_ids(data.server_ids, apply_config, db)
-
-
 # ==================== HAProxy Config Find & Replace ====================
-
-class BulkHAProxyFindReplace(BaseModel):
-    server_ids: list[int]
-    search: str
-    replace: str
-    reload_after: bool = True
-
-
-@router.post("/haproxy/config/find-replace", response_model=list[BulkResult])
-async def bulk_find_replace_haproxy_config(
-    data: BulkHAProxyFindReplace,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    if not data.search:
-        raise HTTPException(status_code=400, detail="Search string cannot be empty")
-
-    async def find_replace_on_server(server: Server) -> BulkResult:
-        success, config_result = await proxy_request_safe(
-            server, "/api/haproxy/config"
-        )
-
-        if not success:
-            return BulkResult(
-                server_id=server.id,
-                server_name=server.name,
-                success=False,
-                message=f"Failed to get config: {config_result}",
-            )
-
-        config_content = config_result.get("content", "") if isinstance(config_result, dict) else ""
-        if not config_content:
-            return BulkResult(
-                server_id=server.id,
-                server_name=server.name,
-                success=False,
-                message="Empty config received",
-            )
-
-        count = config_content.count(data.search)
-        if count == 0:
-            return BulkResult(
-                server_id=server.id,
-                server_name=server.name,
-                success=True,
-                message="No matches found — config unchanged",
-            )
-
-        new_config = config_content.replace(data.search, data.replace)
-
-        apply_success, apply_result = await proxy_request_safe(
-            server, "/api/haproxy/config/apply", method="POST",
-            json_data={"config_content": new_config, "reload_after": data.reload_after},
-            timeout=30.0,
-        )
-
-        if apply_success and isinstance(apply_result, dict):
-            if apply_result.get("success"):
-                msg = f"Replaced {count} occurrence(s)"
-                if apply_result.get("reloaded"):
-                    msg += " (reloaded)"
-                return BulkResult(
-                    server_id=server.id,
-                    server_name=server.name,
-                    success=True,
-                    message=msg,
-                )
-            return BulkResult(
-                server_id=server.id,
-                server_name=server.name,
-                success=False,
-                message=apply_result.get("message", "Config validation failed"),
-            )
-
-        return BulkResult(
-            server_id=server.id,
-            server_name=server.name,
-            success=False,
-            message=str(apply_result),
-        )
-
-    return await run_bulk_for_ids(data.server_ids, find_replace_on_server, db)

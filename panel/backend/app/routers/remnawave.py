@@ -14,7 +14,7 @@ from sqlalchemy import select, func as sql_func, and_, or_, delete, cast, String
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import verify_auth
-from app.database import get_db, async_session
+from app.database import get_db
 from app.models import RemnawaveSettings, XrayStats, RemnawaveUserCache, RemnawaveHwidDevice
 from app.services.known_clients import build_ua_pattern, default_ua_text
 from app.services.remnawave_api import get_remnawave_api
@@ -213,12 +213,6 @@ async def get_status(_: dict = Depends(verify_auth)):
     return collector.get_status()
 
 
-@router.post("/devices/sync")
-async def sync_hwid_devices(_: dict = Depends(verify_auth)):
-    collector = get_xray_stats_collector()
-    return await collector.sync_hwid_now()
-
-
 @router.post("/collect")
 async def collect_now(_: dict = Depends(verify_auth)):
     collector = get_xray_stats_collector()
@@ -259,81 +253,6 @@ async def get_nodes(db: AsyncSession = Depends(get_db), _: dict = Depends(verify
 
 
 # === HWID Devices ===
-
-@router.get("/devices")
-async def get_devices(
-    limit: int = Query(50, ge=1, le=500),
-    offset: int = Query(0, ge=0),
-    search: Optional[str] = None,
-    platform: Optional[str] = None,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth),
-):
-    conditions = []
-    if search:
-        like_pat = f"%{search.lower()}%"
-        user_uuids = select(RemnawaveUserCache.uuid).where(
-            or_(
-                sql_func.lower(RemnawaveUserCache.username).ilike(like_pat),
-                cast(RemnawaveUserCache.email, String).ilike(like_pat),
-            )
-        )
-        conditions.append(RemnawaveHwidDevice.user_uuid.in_(user_uuids))
-    if platform:
-        conditions.append(sql_func.lower(RemnawaveHwidDevice.platform).ilike(f"%{platform.lower()}%"))
-
-    base_q = select(RemnawaveHwidDevice)
-    if conditions:
-        base_q = base_q.where(and_(*conditions))
-
-    count_q = select(sql_func.count()).select_from(base_q.subquery())
-    total = (await db.execute(count_q)).scalar() or 0
-
-    data_q = base_q.order_by(RemnawaveHwidDevice.synced_at.desc()).offset(offset).limit(limit)
-    rows = (await db.execute(data_q)).scalars().all()
-
-    user_uuids_set = {d.user_uuid for d in rows}
-    cache_result = await db.execute(
-        select(RemnawaveUserCache).where(RemnawaveUserCache.uuid.in_(list(user_uuids_set)))
-    ) if user_uuids_set else None
-    cache_map = {u.uuid: u for u in cache_result.scalars().all()} if cache_result else {}
-
-    devices = []
-    for d in rows:
-        cached = cache_map.get(d.user_uuid)
-        devices.append({
-            "hwid": d.hwid,
-            "user_uuid": d.user_uuid,
-            "username": cached.username if cached else None,
-            "platform": d.platform,
-            "os_version": d.os_version,
-            "device_model": d.device_model,
-            "created_at": d.created_at.isoformat() if d.created_at else None,
-        })
-
-    return {"devices": devices, "total": total, "offset": offset, "limit": limit}
-
-
-@router.get("/devices/user/{user_uuid}")
-async def get_user_devices(user_uuid: str, db: AsyncSession = Depends(get_db), _: dict = Depends(verify_auth)):
-    result = await db.execute(
-        select(RemnawaveHwidDevice)
-        .where(RemnawaveHwidDevice.user_uuid == user_uuid)
-        .order_by(RemnawaveHwidDevice.created_at.desc())
-    )
-    devices = [
-        {
-            "hwid": d.hwid,
-            "platform": d.platform,
-            "os_version": d.os_version,
-            "device_model": d.device_model,
-            "user_agent": d.user_agent,
-            "created_at": d.created_at.isoformat() if d.created_at else None,
-        }
-        for d in result.scalars().all()
-    ]
-    return {"devices": devices, "count": len(devices)}
-
 
 # === Stats ===
 
@@ -544,13 +463,6 @@ async def clear_user_all_ips(email: int, db: AsyncSession = Depends(get_db), _: 
     result = await db.execute(delete(XrayStats).where(XrayStats.email == email))
     await db.commit()
     return {"success": True, "email": email, "deleted_records": result.rowcount}
-
-
-@router.delete("/stats/client-ips/clear")
-async def clear_all_client_ips(db: AsyncSession = Depends(get_db), _: dict = Depends(verify_auth)):
-    result = await db.execute(delete(XrayStats))
-    await db.commit()
-    return {"success": True, "deleted_records": result.rowcount}
 
 
 # === Anomalies ===
@@ -784,24 +696,6 @@ async def add_anomaly_ignore(request: AnomalyIgnoreRequest, db: AsyncSession = D
     return {"success": True}
 
 
-@router.delete("/anomalies/ignore")
-async def remove_anomaly_ignore(request: AnomalyIgnoreRequest, db: AsyncSession = Depends(get_db), _: dict = Depends(verify_auth)):
-    result = await db.execute(select(RemnawaveSettings).limit(1))
-    s = result.scalar_one_or_none()
-    if not s:
-        raise HTTPException(404)
-
-    if request.list_type in ("ip", "all"):
-        s.anomaly_ignore_ip = _modify_id_list(s.anomaly_ignore_ip, request.user_id, "remove")
-    if request.list_type in ("hwid", "all"):
-        s.anomaly_ignore_hwid = _modify_id_list(s.anomaly_ignore_hwid, request.user_id, "remove")
-    if request.list_type == "all":
-        s.ignored_user_ids = _modify_id_list(s.ignored_user_ids, request.user_id, "remove")
-
-    await db.commit()
-    return {"success": True}
-
-
 # === Ignore Lists ===
 
 @router.get("/ignore-lists")
@@ -852,32 +746,3 @@ async def remove_from_ignore_list(list_type: str, user_id: int, db: AsyncSession
 
 
 # === User Cache ===
-
-@router.get("/users")
-async def get_users(search: Optional[str] = None, limit: int = Query(100, ge=1, le=1000), db: AsyncSession = Depends(get_db), _: dict = Depends(verify_auth)):
-    q = select(RemnawaveUserCache)
-    if search:
-        q = q.where(
-            (RemnawaveUserCache.username.ilike(f"%{search}%")) |
-            (RemnawaveUserCache.email == int(search) if search.isdigit() else False)
-        )
-    q = q.order_by(RemnawaveUserCache.username).limit(limit)
-    result = await db.execute(q)
-    users = [
-        {"email": u.email, "uuid": u.uuid, "username": u.username, "telegram_id": u.telegram_id, "status": u.status}
-        for u in result.scalars().all()
-    ]
-    count_result = await db.execute(select(sql_func.count()).select_from(RemnawaveUserCache))
-    return {"count": count_result.scalar() or 0, "users": users}
-
-
-@router.post("/users/refresh")
-async def refresh_users(_: dict = Depends(verify_auth)):
-    collector = get_xray_stats_collector()
-    return await collector.refresh_user_cache_now()
-
-
-@router.get("/users/cache-status")
-async def get_cache_status(_: dict = Depends(verify_auth)):
-    collector = get_xray_stats_collector()
-    return collector.get_user_cache_status()

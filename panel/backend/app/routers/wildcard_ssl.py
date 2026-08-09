@@ -4,10 +4,9 @@ from typing import Optional
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import verify_auth
-from app.database import async_session, get_db
+from app.database import async_session
 from app.models import WildcardCertificate, Server, PanelSettings
 from app.services.wildcard_ssl import get_wildcard_ssl_manager, get_issue_status
 
@@ -50,17 +49,6 @@ async def list_certificates(_: dict = Depends(verify_auth)):
         return {
             "certificates": [_cert_to_dict(c) for c in rows]
         }
-
-
-@router.get("/certificates/{cert_id}")
-async def get_certificate(cert_id: int, _: dict = Depends(verify_auth)):
-    async with async_session() as db:
-        cert = (await db.execute(
-            select(WildcardCertificate).where(WildcardCertificate.id == cert_id)
-        )).scalar_one_or_none()
-        if not cert:
-            raise HTTPException(status_code=404)
-        return _cert_to_dict(cert)
 
 
 @router.post("/certificates/issue")

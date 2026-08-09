@@ -255,8 +255,8 @@ frontend {frontend_name}
 
         # HTTP заголовки для HTTPS
         if rule.rule_type == "https":
-            lines.append(f"    http-request set-header X-Forwarded-Proto https")
-            lines.append(f"    http-request set-header X-Forwarded-For %[src]")
+            lines.append("    http-request set-header X-Forwarded-Proto https")
+            lines.append("    http-request set-header X-Forwarded-For %[src]")
 
         # Серверы
         for srv in rule.servers:

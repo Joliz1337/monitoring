@@ -618,7 +618,6 @@ class MetricsCollector:
         cpu = metrics.get("cpu", {})
         memory = metrics.get("memory", {}).get("ram", {})
         swap = metrics.get("memory", {}).get("swap", {})
-        network = metrics.get("network", {}).get("total", {})
         disk = metrics.get("disk", {})
         processes = metrics.get("processes", {})
         system = metrics.get("system", {})

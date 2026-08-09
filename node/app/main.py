@@ -114,12 +114,3 @@ async def api_version():
         "component": "node",
         "node_name": settings.node_name
     }
-
-
-@app.get("/")
-async def root():
-    return {
-        "name": "Server Monitoring Agent",
-        "version": NODE_VERSION,
-        "server_name": settings.node_name
-    }

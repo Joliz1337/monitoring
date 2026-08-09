@@ -96,7 +96,6 @@ export default function HAProxy() {
   const [configPath, setConfigPath] = useState('')
   const [configLoading, setConfigLoading] = useState(false)
   const [configError, setConfigError] = useState<string | null>(null)
-  const [configSuccess, setConfigSuccess] = useState<string | null>(null)
   const [configModalMouseDownOnOverlay, setConfigModalMouseDownOnOverlay] = useState(false)
   
   // Firewall states
@@ -678,7 +677,6 @@ export default function HAProxy() {
     setShowConfigModal(true)
     setConfigLoading(true)
     setConfigError(null)
-    setConfigSuccess(null)
     
     try {
       const res = await proxyApi.getHAProxyConfig(Number(serverId))
@@ -1790,17 +1788,6 @@ export default function HAProxy() {
                           >
                             <AlertTriangle className="w-4 h-4 flex-shrink-0" />
                             {configError}
-                          </motion.div>
-                        )}
-                        {configSuccess && (
-                          <motion.div
-                            className="mt-3 p-3 bg-success/10 border border-success/20 rounded-xl text-success text-sm flex items-center gap-2"
-                            initial={{ opacity: 0, y: -10 }}
-                            animate={{ opacity: 1, y: 0 }}
-                            exit={{ opacity: 0, y: -10 }}
-                          >
-                            <CheckCircle2 className="w-4 h-4 flex-shrink-0" />
-                            {configSuccess}
                           </motion.div>
                         )}
                       </AnimatePresence>

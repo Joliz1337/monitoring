@@ -107,26 +107,32 @@ spin() {
 
     "$@" >"$logf" 2>&1 &
     local pid=$!
-    local i=0
 
-    while kill -0 "$pid" 2>/dev/null; do
-        local e=$(( $(date +%s) - t0 ))
-        local m=$((e / 60)) s=$((e % 60))
-        if [ $m -gt 0 ]; then
-            printf "\r  \033[0;36m%s\033[0m %s \033[1;33m[%dm %02ds]\033[0m  " \
-                "${chars:$((i % 10)):1}" "$desc" "$m" "$s"
-        else
-            printf "\r  \033[0;36m%s\033[0m %s \033[1;33m[%ds]\033[0m  " \
-                "${chars:$((i % 10)):1}" "$desc" "$s"
-        fi
-        i=$((i + 1))
-        sleep 0.12 2>/dev/null || sleep 1
-    done
+    # Анимированный спиннер — только в реальном терминале. Вне TTY (запуск
+    # по SSH из панели) \r-перерисовка превращается в мусор, поэтому только ждём.
+    if [ -t 1 ]; then
+        local i=0
+        while kill -0 "$pid" 2>/dev/null; do
+            local e=$(( $(date +%s) - t0 ))
+            local m=$((e / 60)) s=$((e % 60))
+            if [ $m -gt 0 ]; then
+                printf "\r  \033[0;36m%s\033[0m %s \033[1;33m[%dm %02ds]\033[0m  " \
+                    "${chars:$((i % 10)):1}" "$desc" "$m" "$s"
+            else
+                printf "\r  \033[0;36m%s\033[0m %s \033[1;33m[%ds]\033[0m  " \
+                    "${chars:$((i % 10)):1}" "$desc" "$s"
+            fi
+            i=$((i + 1))
+            sleep 0.12 2>/dev/null || sleep 1
+        done
+    else
+        echo "  • ${desc}..."
+    fi
 
     wait "$pid" 2>/dev/null
     local rc=$?
     local e=$(( $(date +%s) - t0 ))
-    printf "\r\033[2K"
+    [ -t 1 ] && printf "\r\033[2K"
 
     if [ $rc -eq 0 ]; then
         echo -e "  ${GREEN}✓${NC} ${desc} ${CYAN}(${e}s)${NC}"
@@ -250,74 +256,6 @@ backup_config() {
     fi
 }
 
-restore_config() {
-    if [ -f "$PANEL_DIR/.env.backup" ]; then
-        mv "$PANEL_DIR/.env.backup" "$PANEL_DIR/.env" 2>/dev/null || true
-    fi
-    
-    if [ -f "$PANEL_DIR/backend/.env.backup" ]; then
-        mv "$PANEL_DIR/backend/.env.backup" "$PANEL_DIR/backend/.env" 2>/dev/null || true
-    fi
-}
-
-# ==================== Fallback Update ====================
-
-fallback_update() {
-    local new_version="unknown"
-    if [ -f "$TMP_DIR/panel/VERSION" ]; then
-        new_version=$(cat "$TMP_DIR/panel/VERSION" 2>/dev/null || echo "unknown")
-    fi
-    log_info "New version: $new_version"
-    
-    cd "$PANEL_DIR" || return 1
-    spin "Stopping containers" \
-        timeout "$TIMEOUT_DOCKER_COMPOSE_DOWN" docker compose down --timeout 30 2>/dev/null || true
-
-    log_info "Copying new files..."
-    if ! rsync -av --delete \
-        --exclude='.env' \
-        --exclude='.env.backup' \
-        --exclude='backend/.env' \
-        --exclude='backend/.env.backup' \
-        --exclude='backend/data' \
-        --exclude='nginx/nginx.conf' \
-        "$TMP_DIR/panel/" "$PANEL_DIR/" 2>/dev/null; then
-        log_error "Failed to copy files"
-        restore_config
-        return 1
-    fi
-
-    restore_config
-
-    if [ -f "$PANEL_DIR/.env" ]; then
-        source "$PANEL_DIR/.env" 2>/dev/null || true
-        if [ -n "$DOMAIN" ] && [ -f "$PANEL_DIR/nginx/nginx.conf.template" ]; then
-            export DOMAIN PANEL_UID
-            envsubst '${DOMAIN} ${PANEL_UID}' < "$PANEL_DIR/nginx/nginx.conf.template" > "$PANEL_DIR/nginx/nginx.conf"
-        fi
-    fi
-
-    chmod +x "$PANEL_DIR"/*.sh 2>/dev/null || true
-
-    # Pull ready images from GHCR (normal flow)
-    if ! spin_retry 240 5 10 "Pulling Docker images" docker compose pull 2>/dev/null; then
-        log_warn "Failed to pull from registry, building locally..."
-        spin "Pulling base images" bash -c \
-            'docker compose pull --ignore-buildable 2>/dev/null || true'
-        spin_retry 600 2 10 "Building images from source" docker compose build || {
-            log_error "Failed to build images"
-            return 1
-        }
-    fi
-
-    spin "Starting containers" docker compose up -d || {
-        log_error "Failed to start containers"
-        return 1
-    }
-
-    log_success "=== Update Complete ==="
-    log_info "Version: $CURRENT_VERSION → $new_version"
-}
 
 # ==================== Main ====================
 
@@ -357,8 +295,8 @@ main() {
         chmod +x "$TMP_DIR/panel/scripts/apply-update.sh" 2>/dev/null || true
         exec bash "$TMP_DIR/panel/scripts/apply-update.sh" "$TMP_DIR" "$PANEL_DIR" "$CURRENT_VERSION" "$TARGET_REF"
     else
-        log_warn "Downloaded version doesn't have apply-update.sh, using inline update..."
-        fallback_update
+        log_error "Downloaded repository has no panel/scripts/apply-update.sh — clone is incomplete"
+        exit 1
     fi
 }
 

@@ -191,13 +191,6 @@ class CertificateGenerateRequest(BaseModel):
     method: str = Field("standalone", pattern="^(standalone|webroot)$")
 
 
-class CertificateGenerateResponse(BaseModel):
-    """Certificate generation result"""
-    success: bool
-    message: str
-    domain: str
-
-
 class CertificateRenewResponse(BaseModel):
     """Certificate renewal result"""
     success: bool
@@ -274,11 +267,6 @@ class FirewallAdvancedActionRequest(BaseModel):
     action: str = Field("allow", pattern="^(allow|deny)$", description="Action: allow or deny")
     from_ip: Optional[str] = Field(None, description="Source IP (None = Anywhere)")
     direction: str = Field("in", pattern="^(in|out)$", description="Direction: in or out")
-
-
-class FirewallDeleteByNumberRequest(BaseModel):
-    """Request to delete firewall rule by number"""
-    rule_number: int = Field(..., ge=1, description="Rule number from UFW status")
 
 
 class FirewallActionResponse(BaseModel):

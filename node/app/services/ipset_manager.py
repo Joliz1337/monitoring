@@ -655,9 +655,6 @@ class IpsetManager:
 
     # ── allow list operations (always permanent, no timeout) ──
 
-    def list_allow_ips(self, direction: str = "in") -> list[str]:
-        return self._list_members(self._get_allow_cfg(direction)["set"]) or []
-
     def sync_allow(self, ips: list[str], direction: str = "in") -> tuple[bool, str, dict]:
         set_name = self._get_allow_cfg(direction)["set"]
 
