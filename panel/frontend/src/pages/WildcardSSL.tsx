@@ -5,6 +5,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
 import { wildcardSSLApi, WildcardCertificate, WildcardSSLSettings, WildcardServerConfig } from '../api/client'
 import { FAQIcon } from '../components/FAQ'
+import CertificateMaterials from '../components/wildcard/CertificateMaterials'
 
 const DEFAULT_DEPLOY_PATH = '/etc/letsencrypt/live'
 const DEFAULT_FULLCHAIN_NAME = 'fullchain.pem'
@@ -647,6 +648,12 @@ export default function WildcardSSL() {
                 </div>
               </div>
             </div>
+
+            {/* key по времени выпуска: после продления компонент пересоздаётся и не отдаёт старый PEM */}
+            <CertificateMaterials
+              key={cert.last_renewed || cert.issued_at || cert.id}
+              certId={cert.id}
+            />
           </div>
         ) : (
           <form onSubmit={handleIssue} className="space-y-4">

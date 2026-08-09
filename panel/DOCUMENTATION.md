@@ -1,4 +1,4 @@
-# Monitoring Panel v10.55.0
+# Monitoring Panel v10.56.0
 
 Веб-панель для мониторинга серверов. Собирает метрики с нод с настраиваемым интервалом (по умолчанию 10 сек) и хранит историю локально.
 
@@ -17,7 +17,7 @@
 - **SSH Security** — управление SSH-безопасностью серверов: настройки sshd, fail2ban, SSH-ключи с пресетами безопасности и bulk-применением
 - **Infrastructure Tree** — двухуровневая иерархия серверов на странице Servers: Аккаунт (облачный email) → Проект (кластер) → Серверы; дерево встроено в существующую страницу, сворачивается, состояние сохраняется в localStorage
 - **Shared Notes & Tasks** — совместный блокнот и список задач с синхронизацией в реальном времени через SSE; открывается через плавающий жёлтый таб на правом крае экрана (amber-500); две вкладки: «Блокнот» и «Задачи»
-- **Wildcard SSL** — выпуск wildcard сертификатов через certbot + Cloudflare DNS challenge, продление, деплой на ноды через API порта 9100; фоновое автопродление каждые 24ч с Telegram-уведомлениями при сбое; настройка пути деплоя и reload-команды для каждого сервера
+- **Wildcard SSL** — выпуск wildcard сертификатов через certbot + Cloudflare DNS challenge, продление, деплой на ноды через API порта 9100; фоновое автопродление каждые 24ч с Telegram-уведомлениями при сбое; настройка пути деплоя и reload-команды для каждого сервера; просмотр и копирование/скачивание PEM-материалов сертификата (fullchain/cert/chain/privkey) для ручного переноса в CDN и сторонние панели
 - **HAProxy Configs** — централизованные профили конфигурации HAProxy с массовой раскаткой на серверы: CRUD профилей и правил, балансировщик нагрузки, привязка серверов, history синхронизаций; запуск HAProxy per-server и bulk-запуск всех остановленных нод одним кликом; **авто-запуск при привязке** (start + enable autostart) и **авто-остановка при отвязке** (stop + disable autostart) сервера
 - **Remnawave Nginx** — централизованные профили конфигурации nginx перед Remnawave-нодой (каталог на хосте, по умолчанию `/opt/remnawave`), как HAProxy Configs: конструктор правил (gRPC-локации, произвольные proxy-локации), raw-редактор с pre-flight валидацией `nginx -t`, четыре схемы передачи реального IP клиента в Xray (напрямую, за CDN, за HAProxy по PROXY protocol, универсальная), привязка серверов с доменом на каждый (шаблон конфига хранит `{{DOMAIN}}`), sync с drift-детекцией по хэшу отрендеренного контента, retry для офлайн-нод, импорт существующего конфига с ноды
 - **Firewall Profiles** — шаблоны UFW с массовой раскаткой на серверы: CRUD профилей, привязка 1 сервер ↔ 1 активный профиль, history синхронизаций, node-API-port-guard (защита связи панели с нодой через порт 9100), drift-детекция по SHA256-хэшу; вкладка «Серверы» — поиск по имени/адресу, группировка доступных серверов по папкам со сворачиванием, скрытие занятых серверов с переключателем «Показать занятые»
@@ -107,6 +107,7 @@ panel/
 │       ├── utils/format.ts              # Утилиты форматирования; экспортируемая функция extractHost(url) — извлекает хост (IP/домен) из URL ноды
 │       ├── pages/SSHSecurity.tsx        # SSH Security Management UI
 │       ├── pages/WildcardSSL.tsx        # Wildcard SSL: выпуск/продление/деплой + настройки Cloudflare и серверов
+│       ├── components/wildcard/CertificateMaterials.tsx  # Раскрывающийся блок PEM-материалов сертификата: копирование/скачивание, приватный ключ скрыт под кнопкой «Показать»
 │       ├── pages/FirewallProfiles.tsx   # Firewall Profiles: двухколоночный layout (список + детали с табами Rules/Servers/Log)
 │       ├── pages/Servers.tsx            # Список серверов + InfraTree
 │       ├── components/ui/Skeleton.tsx   # Skeleton-лоадеры (Skeleton, ServerCardSkeleton, MetricCardSkeleton, ChartSkeleton)
@@ -1593,11 +1594,14 @@ Frontend сохраняет незавершённые job_id в `localStorage` 
 - `renew_certificate` определяет актуальное имя линии через `_find_cert_lineage`, передаёт его в certbot, и после продления сверяет, что новый срок действительно позже старого. Если срок не сдвинулся — возвращается ошибка вместо тихого «успеха».
 
 **Схема БД (`wildcard_certificates`):**
-- `id`, `domain` — домен для сертификата (например `*.example.com`)
-- `cert_path`, `key_path` — пути к файлам в `/etc/letsencrypt/live/`
-- `expires_at` — дата истечения
-- `last_deployed_at` — время последнего деплоя на ноды
-- `status` — текущий статус (issued, deploying, error, etc.)
+- `id`, `domain` — полный домен сертификата (например `*.example.com`), `base_domain` — базовый домен без звёздочки (ключ группировки, используется в именах файлов при скачивании PEM-материалов)
+- `fullchain_pem`, `privkey_pem` — само содержимое сертификата и приватного ключа хранится в базе целиком, а не как путь к файлу на диске
+- `expiry_date` — дата истечения
+- `issued_at`, `last_renewed` — время выпуска и последнего продления
+- `auto_renew` — участвует ли сертификат в фоновом автопродлении
+
+**PEM-материалы сертификата:**
+`GET /certificates/{id}/pem` отдаёт четыре PEM-блока для ручной загрузки в CDN и сторонние панели: `fullchain_pem` — как есть в БД; `cert_pem` и `chain_pem` — результат разбора `fullchain_pem` на отдельные `-----BEGIN CERTIFICATE-----...END-----` блоки регуляркой `PEM_CERT_BLOCK` (первый блок — сертификат домена, остальные — цепочка промежуточных CA). Часть CDN принимает сертификат и цепочку только раздельными полями, поэтому резка сделана на стороне панели. Выдача материала логируется (`logger.info`).
 
 **Поля модели `Server`:**
 - `wildcard_ssl_enabled` — деплоить ли wildcard SSL на этот сервер
@@ -1616,12 +1620,16 @@ Frontend сохраняет незавершённые job_id в `localStorage` 
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
 | GET | /api/wildcard-ssl/certificates | Список сертификатов |
-| POST | /api/wildcard-ssl/certificates | Выпустить новый сертификат |
-| DELETE | /api/wildcard-ssl/certificates/{id} | Удалить сертификат |
+| POST | /api/wildcard-ssl/certificates/issue | Выпустить новый сертификат (фоновая задача) |
+| GET | /api/wildcard-ssl/issue-status | Статус текущего выпуска (in_progress/last_result/last_error/output) |
 | POST | /api/wildcard-ssl/certificates/{id}/renew | Продлить сертификат |
-| POST | /api/wildcard-ssl/certificates/{id}/deploy | Задеплоить на серверы |
-| GET | /api/wildcard-ssl/settings/cloudflare | Настройки Cloudflare |
-| PUT | /api/wildcard-ssl/settings/cloudflare | Обновить настройки Cloudflare |
+| GET | /api/wildcard-ssl/certificates/{id}/pem | PEM-материалы сертификата (fullchain/cert/chain/privkey) |
+| DELETE | /api/wildcard-ssl/certificates/{id} | Удалить сертификат |
+| POST | /api/wildcard-ssl/certificates/{id}/deploy | Задеплоить на все серверы |
+| POST | /api/wildcard-ssl/certificates/{id}/deploy/{server_id} | Задеплоить на конкретный сервер |
+| GET | /api/wildcard-ssl/settings | Настройки Cloudflare (токен маскирован) |
+| GET | /api/wildcard-ssl/settings/token | Токен Cloudflare в открытом виде |
+| PUT | /api/wildcard-ssl/settings | Обновить настройки Cloudflare |
 | GET | /api/wildcard-ssl/servers | Конфигурация деплоя по серверам |
 | PUT | /api/wildcard-ssl/servers/{server_id} | Настроить деплой для сервера (путь, reload_cmd, enabled) |
 
@@ -1637,6 +1645,7 @@ Volume `/etc/letsencrypt` смонтирован с `:rw` — backend запис
 - Настройки Cloudflare (API token, email)
 - Конфигурация каждого сервера: включить деплой, путь, reload-команда
 - При частичном сбое «Раскидать по серверам» — toast с числом успешных/всего и списком упавших нод с причинами (ключ локализации `wildcard_ssl.deploy_partial`)
+- **Файлы сертификата** (`components/wildcard/CertificateMaterials.tsx`) — раскрывающийся блок в карточке сертификата с четырьмя PEM-файлами (fullchain.pem, cert.pem, chain.pem, privkey.pem): кнопки «Копировать» и «Скачать» у каждого (скачивается как `<base_domain>-<имя файла>`); приватный ключ по умолчанию скрыт размытием и предупреждением, показывается по кнопке «Показать»; данные грузятся лениво при первом раскрытии через `GET /certificates/{id}/pem`; компонент пересоздаётся (`key` по `last_renewed`/`issued_at`) после продления, чтобы не показать закэшированный старый PEM
 
 **Файлы:**
 - `panel/backend/app/services/wildcard_ssl.py` — бизнес-логика: выпуск, продление, деплой, автопродление, Telegram-уведомления о сбоях
@@ -1645,7 +1654,8 @@ Volume `/etc/letsencrypt` смонтирован с `:rw` — backend запис
 - `panel/backend/app/database.py` — миграция `_migrate_wildcard_ssl`
 - `panel/backend/app/main.py` — подключение роутера, start/stop автопродления в lifespan
 - `panel/frontend/src/pages/WildcardSSL.tsx` — страница управления
-- `panel/frontend/src/api/client.ts` — `wildcardSSLApi` с интерфейсами
+- `panel/frontend/src/components/wildcard/CertificateMaterials.tsx` — блок просмотра/копирования/скачивания PEM-материалов
+- `panel/frontend/src/api/client.ts` — `wildcardSSLApi` с интерфейсами, включая `WildcardCertificateMaterial`
 - `panel/frontend/src/App.tsx` — роут `/wildcard-ssl`
 - `panel/frontend/src/components/Layout/Layout.tsx` — пункт навигации «Wildcard SSL»
 - `panel/frontend/src/locales/en.json`, `ru.json` — i18n ключи пространства имён `wildcard_ssl`

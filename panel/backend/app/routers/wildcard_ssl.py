@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
@@ -13,6 +14,10 @@ from app.services.wildcard_ssl import get_wildcard_ssl_manager, get_issue_status
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/wildcard-ssl", tags=["wildcard-ssl"])
+
+PEM_CERT_BLOCK = re.compile(
+    r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", re.DOTALL
+)
 
 
 # ─── Schemas ───
@@ -89,6 +94,37 @@ async def renew_certificate(cert_id: int, _: dict = Depends(verify_auth)):
     if not ok:
         raise HTTPException(status_code=400, detail=msg)
     return {"success": True, "message": msg}
+
+
+@router.get("/certificates/{cert_id}/pem")
+async def get_certificate_pem(cert_id: int, _: dict = Depends(verify_auth)):
+    """Материалы сертификата для ручного переноса в CDN и сторонние панели."""
+    async with async_session() as db:
+        cert = (await db.execute(
+            select(WildcardCertificate).where(WildcardCertificate.id == cert_id)
+        )).scalar_one_or_none()
+        if not cert:
+            raise HTTPException(status_code=404)
+        domain = cert.domain
+        base_domain = cert.base_domain
+        fullchain = cert.fullchain_pem or ""
+        privkey = cert.privkey_pem or ""
+
+    # Первый блок fullchain — сертификат домена, остальные — промежуточные CA.
+    # Часть CDN принимает их только раздельно, поэтому режем на стороне панели.
+    blocks = [b.strip() for b in PEM_CERT_BLOCK.findall(fullchain)]
+    leaf = f"{blocks[0]}\n" if blocks else ""
+    chain = "\n".join(blocks[1:]) + "\n" if len(blocks) > 1 else ""
+
+    logger.info(f"Wildcard certificate material exported: {domain}")
+    return {
+        "domain": domain,
+        "base_domain": base_domain,
+        "fullchain_pem": fullchain,
+        "cert_pem": leaf,
+        "chain_pem": chain,
+        "privkey_pem": privkey,
+    }
 
 
 @router.delete("/certificates/{cert_id}")

@@ -1573,6 +1573,15 @@ export interface WildcardCertificate {
   auto_renew: boolean
 }
 
+export interface WildcardCertificateMaterial {
+  domain: string
+  base_domain: string
+  fullchain_pem: string
+  cert_pem: string
+  chain_pem: string
+  privkey_pem: string
+}
+
 export interface WildcardSSLSettings {
   cloudflare_api_token: string
   cloudflare_api_token_set: boolean
@@ -1611,6 +1620,8 @@ export const wildcardSSLApi = {
     api.get<{ in_progress: boolean; last_result: string | null; last_error: string | null; output: string | null }>('/wildcard-ssl/issue-status'),
   renewCertificate: (id: number) =>
     api.post<{ success: boolean; message: string }>(`/wildcard-ssl/certificates/${id}/renew`),
+  getCertificatePem: (id: number) =>
+    api.get<WildcardCertificateMaterial>(`/wildcard-ssl/certificates/${id}/pem`),
   deleteCertificate: (id: number) =>
     api.delete(`/wildcard-ssl/certificates/${id}`),
   deployToAll: (id: number) =>

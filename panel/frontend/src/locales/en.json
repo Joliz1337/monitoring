@@ -1459,7 +1459,19 @@
     "dns_note": "DNS validation may take 1-2 minutes",
     "no_servers": "No active servers",
     "servers_hint": "Enable a server, set the folder and command — the certificate will be copied automatically",
-    "issue_prereq": "Configure the Cloudflare API Token below before issuing"
+    "issue_prereq": "Configure the Cloudflare API Token below before issuing",
+    "materials_title": "Certificate files",
+    "materials_hint": "for manual upload to CDNs and third-party panels",
+    "materials_error": "Failed to load certificate files",
+    "pem_fullchain_hint": "Domain certificate together with intermediates — for nginx, HAProxy and most CDNs",
+    "pem_cert_hint": "Domain certificate only — when certificate and chain are uploaded as separate fields",
+    "pem_chain_hint": "Intermediate certificates (CA bundle)",
+    "pem_privkey_hint": "Private key — transfer over a secure channel only",
+    "pem_download": "Download",
+    "pem_reveal": "Show",
+    "pem_hide": "Hide",
+    "pem_empty": "Empty block — the certificate has no such part",
+    "pem_secret_warning": "The private key gives full control over the domain. Never publish it or send it through messengers"
   },
   "haproxy_configs": {
     "title": "HAProxy Configs",
