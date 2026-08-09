@@ -8,11 +8,43 @@ Based on reference implementation from vpn_v2/services/remnawave_api.py
 import asyncio
 import logging
 import ssl
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import aiohttp
 
 logger = logging.getLogger(__name__)
+
+
+def _sum_totals(rows: list) -> int:
+    total = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            total += int(float(row.get("total") or 0))
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
+def sum_usage_bytes(payload: dict) -> Optional[int]:
+    """Байты из ответа bandwidth-stats; None — форма ответа незнакомая.
+
+    Две версии эндпоинта отдают разное: legacy — плоский список записей
+    «нода × дата», новый — объект с рядами по нодам.
+    """
+    if not isinstance(payload, dict):
+        return None
+
+    response = payload.get("response")
+    if isinstance(response, list):
+        return _sum_totals(response)
+    if isinstance(response, dict):
+        rows = response.get("series") or response.get("topNodes")
+        if isinstance(rows, list):
+            return _sum_totals(rows)
+    return None
 
 
 class RemnawaveAPIError(Exception):
@@ -362,6 +394,37 @@ class RemnawaveAPI:
             logger.debug(f"Fetched {len(all_users)}/{total} users from Remnawave")
 
         return all_users
+
+    async def get_user_traffic_bytes(self, user_uuid: str, hours: int = 24) -> Optional[int]:
+        """Расход трафика пользователя за последние `hours` часов, байты (None — данных нет).
+
+        Путь эндпоинта менялся между версиями Remnawave, поэтому пробуем оба:
+        сначала legacy с плоским списком, затем сгруппированный по нодам. У второго
+        гранулярность суточная, окно получается шире запрошенного — это оценка сверху,
+        она может только не подавить уведомление, но не подавит лишнего.
+        """
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(hours=hours)
+        iso = "%Y-%m-%dT%H:%M:%SZ"
+
+        attempts = (
+            (f"/api/bandwidth-stats/users/{user_uuid}/legacy",
+             {"start": start.strftime(iso), "end": end.strftime(iso)}),
+            (f"/api/bandwidth-stats/users/{user_uuid}",
+             {"start": start.strftime("%Y-%m-%d"), "end": end.strftime("%Y-%m-%d"), "topNodesLimit": 100}),
+        )
+
+        for endpoint, params in attempts:
+            try:
+                used = sum_usage_bytes(await self._request("GET", endpoint, params=params, retries=2))
+            except RemnawaveAPIError as e:
+                logger.warning(f"Bandwidth stats unavailable ({endpoint}): {e}")
+                continue
+            if used is not None:
+                return used
+            logger.warning(f"Bandwidth stats returned unknown format: {endpoint}")
+
+        return None
 
     # ── Torrent Blocker ──
 

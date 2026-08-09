@@ -1099,6 +1099,8 @@
     "anomalyIpMargin": "Запас IP",
     "anomalyIpConfirm": "Подтверждений",
     "anomalyAsnMargin": "Запас ASN",
+    "anomalySmartTitle": "Умное определение",
+    "anomalySmartTrafficGb": "ГБ в сутки",
     "anomalyUaPatternsLabel": "Известные клиенты (по одному на строку)"
   },
   "alerts": {

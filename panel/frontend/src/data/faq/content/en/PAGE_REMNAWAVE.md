@@ -24,6 +24,7 @@ Each check has its own on/off toggle; the rest keep working. IP check settings:
 - **IP margin** — how many extra addresses are forgiven. Device limit 3, margin 2 — the alarm starts at 6 addresses.
 - **Confirmations** — how many times in a row the excess must repeat before a notification arrives. A single random spike won't raise an alarm.
 - **ASN margin** — the same, but for providers. Home Wi-Fi plus mobile data for one person is already two providers, which is normal. A notification comes only when providers exceed the device limit plus this margin.
+- **Smart detection** — before raising an alarm the panel checks how much the user downloaded over the last day. Below the threshold there is no alarm: someone travelling changes addresses and providers, but one person doesn't pull that much traffic, while a subscription shared by several people does. The threshold sits right next to it, 20 GB per day by default. Turn it off and notifications come purely by the number of addresses, as before.
 
 **Known clients** — the list of apps considered normal. Every device introduces itself with a User-Agent string, e.g. `Happ/1.6.2 iPhone`. The panel compares the start of that string against each line of the list — if none matches, the "Unknown User-Agent" alarm fires.
 

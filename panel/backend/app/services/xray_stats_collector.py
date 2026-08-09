@@ -609,6 +609,9 @@ class XrayStatsCollector:
         ip_margin = settings.anomaly_ip_margin if settings.anomaly_ip_margin is not None else 2
         ip_confirm = settings.anomaly_ip_confirm_count or 5
         asn_margin = settings.anomaly_asn_margin if settings.anomaly_asn_margin is not None else 0
+        smart_check_on = settings.anomaly_ip_smart_enabled is not False
+        smart_traffic_gb = settings.anomaly_ip_smart_traffic_gb if settings.anomaly_ip_smart_traffic_gb is not None else 20.0
+        smart_traffic_bytes = int(smart_traffic_gb * 1024 ** 3)
         ua_pattern = build_ua_pattern(settings.anomaly_ua_patterns)
 
         async with async_session() as db:
@@ -687,6 +690,19 @@ class XrayStatsCollector:
                 continue
             if since is not None and since < (settings.anomaly_cooldown or 0):
                 continue
+
+            # Умное определение: разъездной пользователь меняет адреса, но столько
+            # трафика в одиночку не выкачивает — раздача подписки выкачивает.
+            # Стоит раньше ASN-блока: тут один запрос, там резолв всех IP через RIPE.
+            if smart_check_on and cached.uuid:
+                used_bytes = await self._user_daily_traffic(settings, cached.uuid)
+                if used_bytes is not None and used_bytes < smart_traffic_bytes:
+                    logger.info(
+                        f"IP anomaly suppressed by traffic: {cached.username or email} "
+                        f"has {ip_count} IPs but {round(used_bytes / 1024 ** 3, 2)} GB "
+                        f"per day (threshold: {smart_traffic_gb} GB)"
+                    )
+                    continue
 
             # ASN-проверка: группируем все текущие IP по провайдеру
             asn_map = await lookup_ips_cached(list(current_ips)) if current_ips else {}
@@ -919,6 +935,17 @@ class XrayStatsCollector:
     def get_ip_anomaly_streaks(self) -> dict[int, tuple[int, int]]:
         """email -> (streak_count, ip_count)"""
         return dict(self._ip_anomaly_streak)
+
+    async def _user_daily_traffic(self, settings: RemnawaveSettings, user_uuid: str) -> int | None:
+        """Расход трафика пользователя за сутки; None — данные недоступны (уведомление тогда шлём)."""
+        api = get_remnawave_api(settings.api_url, settings.api_token, settings.cookie_secret)
+        try:
+            return await api.get_user_traffic_bytes(user_uuid)
+        except Exception as e:
+            logger.warning(f"Traffic check failed for {user_uuid}: {e}")
+            return None
+        finally:
+            await api.close()
 
     async def _auto_clear_hwid(self, settings: RemnawaveSettings, user_uuid: str, username: str | None, email: int, current: int, limit: int):
         """Авто-очистка HWID устройств при превышении лимита."""

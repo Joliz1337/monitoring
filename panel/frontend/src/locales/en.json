@@ -1097,6 +1097,8 @@
     "anomalyIpMargin": "IP margin",
     "anomalyIpConfirm": "Confirmations",
     "anomalyAsnMargin": "ASN margin",
+    "anomalySmartTitle": "Smart detection",
+    "anomalySmartTrafficGb": "GB per day",
     "anomalyUaPatternsLabel": "Known clients (one per line)"
   },
   "alerts": {
