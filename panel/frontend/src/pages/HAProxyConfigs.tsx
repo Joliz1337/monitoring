@@ -204,7 +204,10 @@ function BalancerSettingsSection({
     <div className="space-y-3">
       {/* Algorithm */}
       <div>
-        <label className="block text-xs text-dark-400 mb-1">{t('balancer.algorithm')}</label>
+        <label className="flex items-center gap-1 text-xs text-dark-400 mb-1">
+          {t('balancer.algorithm')}
+          <FAQIcon screen="HAPROXY_CONFIGS_BALANCER" size="sm" />
+        </label>
         <select value={opts.algorithm} onChange={e => upd({ algorithm: e.target.value })} className={inp}>
           {ALGORITHMS.map(a => (
             <option key={a} value={a}>{t(`balancer.alg.${a.replace('-', '_')}`)}</option>
@@ -235,7 +238,10 @@ function BalancerSettingsSection({
         <div className="space-y-3 pl-2 border-l-2 border-dark-700/40">
           {/* Health check */}
           <div>
-            <label className="block text-xs text-dark-400 mb-1">{t('balancer.health_check_type')}</label>
+            <label className="flex items-center gap-1 text-xs text-dark-400 mb-1">
+              {t('balancer.health_check_type')}
+              <FAQIcon screen="HAPROXY_CONFIGS_HEALTHCHECK" size="sm" />
+            </label>
             <select value={opts.health_check_type ?? ''} onChange={e => upd({ health_check_type: e.target.value || undefined })} className={inp}>
               <option value="">—</option>
               <option value="tcp-check">{t('balancer.tcp_check')}</option>
@@ -266,7 +272,10 @@ function BalancerSettingsSection({
 
           {/* Sticky sessions */}
           <div>
-            <label className="block text-xs text-dark-400 mb-1">{t('balancer.sticky')}</label>
+            <label className="flex items-center gap-1 text-xs text-dark-400 mb-1">
+              {t('balancer.sticky')}
+              <FAQIcon screen="HAPROXY_CONFIGS_STICKY" size="sm" />
+            </label>
             <select value={opts.sticky_type ?? ''} onChange={e => upd({ sticky_type: e.target.value || undefined })} className={inp}>
               <option value="">{t('balancer.sticky_none')}</option>
               <option value="cookie">{t('balancer.sticky_cookie')}</option>

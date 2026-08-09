@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useTranslation } from 'react-i18next'
 import { Tooltip } from '../ui/Tooltip'
+import { FAQIcon } from '../FAQ'
 import {
   Terminal as TerminalIcon,
   Play,
@@ -342,40 +343,43 @@ export default function Terminal({ serverId }: TerminalProps) {
       animate={{ opacity: 1, y: 0 }}
     >
       {/* Header */}
-      <button
-        onClick={() => setIsExpanded(!isExpanded)}
-        className="w-full flex items-center justify-between text-left"
-      >
-        <div className="flex items-center gap-3">
-          <TerminalIcon className="w-5 h-5 text-accent-500" />
-          <span className="font-semibold text-dark-100">{t('terminal.title')}</span>
-          {lastResult && (
-            <motion.div
-              initial={{ opacity: 0, scale: 0.8 }}
-              animate={{ opacity: 1, scale: 1 }}
-              className={`flex items-center gap-1.5 px-2 py-0.5 rounded-lg text-xs ${
-                lastResult.success
-                  ? 'bg-success/10 text-success'
-                  : 'bg-danger/10 text-danger'
-              }`}
-            >
-              {lastResult.success ? (
-                <CheckCircle2 className="w-3 h-3" />
-              ) : (
-                <XCircle className="w-3 h-3" />
-              )}
-              <span>exit {lastResult.exitCode}</span>
-              <span className="text-dark-500">({lastResult.time}ms)</span>
-            </motion.div>
-          )}
-        </div>
-        <motion.div
-          animate={{ rotate: isExpanded ? 180 : 0 }}
-          transition={{ duration: 0.2 }}
+      <div className="flex items-center gap-2">
+        <button
+          onClick={() => setIsExpanded(!isExpanded)}
+          className="flex-1 flex items-center justify-between text-left"
         >
-          <ChevronDown className="w-5 h-5 text-dark-400" />
-        </motion.div>
-      </button>
+          <div className="flex items-center gap-3">
+            <TerminalIcon className="w-5 h-5 text-accent-500" />
+            <span className="font-semibold text-dark-100">{t('terminal.title')}</span>
+            {lastResult && (
+              <motion.div
+                initial={{ opacity: 0, scale: 0.8 }}
+                animate={{ opacity: 1, scale: 1 }}
+                className={`flex items-center gap-1.5 px-2 py-0.5 rounded-lg text-xs ${
+                  lastResult.success
+                    ? 'bg-success/10 text-success'
+                    : 'bg-danger/10 text-danger'
+                }`}
+              >
+                {lastResult.success ? (
+                  <CheckCircle2 className="w-3 h-3" />
+                ) : (
+                  <XCircle className="w-3 h-3" />
+                )}
+                <span>exit {lastResult.exitCode}</span>
+                <span className="text-dark-500">({lastResult.time}ms)</span>
+              </motion.div>
+            )}
+          </div>
+          <motion.div
+            animate={{ rotate: isExpanded ? 180 : 0 }}
+            transition={{ duration: 0.2 }}
+          >
+            <ChevronDown className="w-5 h-5 text-dark-400" />
+          </motion.div>
+        </button>
+        <FAQIcon screen="SERVER_DETAILS_TERMINAL" size="sm" />
+      </div>
 
       <AnimatePresence>
         {isExpanded && (

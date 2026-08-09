@@ -516,6 +516,7 @@ export default function SystemOptimizations() {
                           <div className="px-3 py-1.5 text-[10px] text-dark-500 border-b border-dark-700 flex items-center gap-1">
                             <button onClick={() => setProfileChoice(null)} className="text-accent-400 hover:underline">&larr;</button>
                             {profileChoice === 'vpn' ? t('sys_opt.profile_vpn') : t('sys_opt.profile_panel')}
+                            <FAQIcon screen="SYS_OPT_NIC_MODE" size="sm" />
                           </div>
                           {mqSupported && (
                             <button
@@ -710,6 +711,7 @@ export default function SystemOptimizations() {
                           <div className="px-3 py-1.5 text-[10px] text-dark-500 border-b border-dark-700 flex items-center gap-1">
                             <button onClick={() => setProfileChoice(null)} className="text-accent-400 hover:underline">&larr;</button>
                             {profileChoice === 'vpn' ? t('sys_opt.profile_vpn') : t('sys_opt.profile_panel')}
+                            <FAQIcon screen="SYS_OPT_NIC_MODE" size="sm" />
                           </div>
                           {mqSupported && (
                             <button
@@ -871,6 +873,7 @@ export default function SystemOptimizations() {
               <h2 className="text-sm font-semibold text-dark-300 mb-3 flex items-center gap-2">
                 <Shield className="w-4 h-4 text-accent-400" />
                 {t('sys_opt.vpn_nodes')}
+                <FAQIcon screen="SYS_OPT_PROFILE" size="sm" />
                 <span className="text-dark-500 font-normal">({vpnNodes.length})</span>
               </h2>
               {vpnNodes.length === 0 ? (
@@ -889,6 +892,7 @@ export default function SystemOptimizations() {
               <h2 className="text-sm font-semibold text-dark-300 mb-3 flex items-center gap-2">
                 <Monitor className="w-4 h-4 text-emerald-400" />
                 {t('sys_opt.panel_nodes')}
+                <FAQIcon screen="SYS_OPT_PROFILE" size="sm" />
                 <span className="text-dark-500 font-normal">({panelNodes.length})</span>
               </h2>
               {panelNodes.length === 0 ? (

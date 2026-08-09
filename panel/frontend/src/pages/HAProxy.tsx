@@ -1135,6 +1135,7 @@ export default function HAProxy() {
                   <span className="text-sm text-dark-500">({certs.length})</span>
                 </button>
                 <div className="flex items-center gap-2">
+                  <FAQIcon screen="HAPROXY_SSL" />
                   <motion.button
                     onClick={() => {
                       setShowCertForm('generate')
@@ -1841,6 +1842,7 @@ export default function HAProxy() {
                   <span className="text-sm text-dark-500">({filteredFirewallRules.length})</span>
                 </button>
                 <div className="flex items-center gap-2">
+                  <FAQIcon screen="HAPROXY_FIREWALL" />
                   {firewallActive ? (
                     <motion.button
                       onClick={handleDisableFirewall}

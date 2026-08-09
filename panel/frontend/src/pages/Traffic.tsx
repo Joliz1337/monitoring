@@ -404,6 +404,7 @@ export default function Traffic() {
                 <h3 className="font-semibold text-dark-100 mb-4 flex items-center gap-2">
                   <Wifi className="w-4 h-4 text-accent-500" />
                   {t('traffic.tcp_connections')}
+                  <FAQIcon screen="TRAFFIC_TCP_STATES" size="sm" />
                   <span className="ml-auto text-lg font-mono text-accent-400">
                     {metrics.system.connections_detailed.tcp.total}
                   </span>
@@ -593,6 +594,7 @@ export default function Traffic() {
             <h3 className="font-semibold text-dark-100 mb-4 flex items-center gap-2">
               <Server className="w-4 h-4 text-accent-500" />
               {t('traffic.port_tracking')}
+              <FAQIcon screen="TRAFFIC_PORT_TRACKING" size="sm" />
             </h3>
 
             {/* Учёт по портам читает счётчики iptables, их отдаёт только агент 10.13.0+.

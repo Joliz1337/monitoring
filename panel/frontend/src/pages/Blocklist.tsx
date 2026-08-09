@@ -1018,8 +1018,9 @@ export default function Blocklist() {
           >
             {/* Add Source Form */}
             <div className="card">
-              <h3 className="text-lg font-semibold text-dark-100 mb-4">
+              <h3 className="text-lg font-semibold text-dark-100 mb-4 flex items-center gap-2">
                 {t('blocklist.add_source')}
+                <FAQIcon screen="BLOCKLIST_SOURCES" size="sm" />
               </h3>
 
               <div className="space-y-3">

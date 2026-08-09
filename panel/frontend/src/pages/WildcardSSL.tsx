@@ -599,6 +599,7 @@ export default function WildcardSSL() {
         <div className="flex items-center gap-2 mb-4">
           <Globe className="w-5 h-5 text-accent-400" />
           <h2 className="text-lg font-semibold text-dark-100">{t('wildcard_ssl.certificate')}</h2>
+          <FAQIcon screen="WILDCARD_SSL_ACME" size="sm" />
         </div>
 
         {certLoading ? (
