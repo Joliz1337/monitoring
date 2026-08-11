@@ -51,7 +51,7 @@ Instead of listing words you can take a ready-made set: `monitoring` — view tr
 
 An unknown word is silently skipped: a typo never opens more than intended, but it won't give you what you meant either — `readonly,haproxi` leaves just `readonly`, while `redonly` closes everything. The `:ro` suffix only works with the words from the table; `monitoring`, `readonly` and `full` must never carry it. The **Test** button on the server card shows what the node actually understood.
 
-The file is read once, when the agent container is created, so `docker compose restart` keeps the old settings. After editing: `cd /opt/monitoring-node && docker compose up -d --force-recreate api`. Updating the node never overwrites the line, but rolling the agent back to a version before 10.21 ignores it and opens everything up again.
+After editing, reload the line: `cd /opt/monitoring-node && docker compose restart api`. Updating the node never overwrites it.
 
 Five things can never be closed: metrics, the health check, the agent version, updates and certificate rotation. Otherwise the panel would treat the node as dead, fire false "server offline" alerts and be unable to update it — you'd have to restore the permissions by hand over SSH. Metrics therefore always flow in full: load, disks, per-port counters, certificate expiry and the anti-DDoS state stay visible even for closed sections. The flip side: if you close `antiddos` and the watchdog turns emergency mode on, you can no longer turn it off from the panel — only on the server.
 

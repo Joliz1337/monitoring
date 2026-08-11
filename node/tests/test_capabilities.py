@@ -15,6 +15,7 @@ import json
 import os
 import sys
 import unittest
+from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -30,6 +31,7 @@ from app.capabilities import (  # noqa: E402
     domain_for_path,
     normalize_path,
     parse_capabilities,
+    read_env_file,
 )
 
 
@@ -321,6 +323,43 @@ class MapConsistencyTests(unittest.TestCase):
         for path in ALWAYS_ALLOWED:
             with self.subTest(path=path):
                 self.assertNotIn(path, DOMAIN_PREFIXES)
+
+
+class EnvFileTests(unittest.TestCase):
+    """Права читаются из .env, а не из переменной окружения контейнера: та
+    фиксируется при его создании, и правка требовала бы пересоздания."""
+
+    def _write(self, text):
+        import tempfile
+        path = Path(tempfile.mkdtemp()) / ".env"
+        path.write_text(text, encoding="utf-8")
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        return path
+
+    def test_value_is_read(self):
+        path = self._write("NODE_SECRET=x\nNODE_CAPABILITIES=readonly,haproxy\n")
+        self.assertEqual(read_env_file(path), "readonly,haproxy")
+
+    def test_quotes_and_spaces_stripped(self):
+        path = self._write('NODE_CAPABILITIES = "readonly" \n')
+        self.assertEqual(read_env_file(path), "readonly")
+
+    def test_empty_value_is_not_none(self):
+        """Пустая строка означает «всё открыто» и обязана отличаться от
+        отсутствия файла, иначе откроется fallback на переменную окружения."""
+        path = self._write("NODE_CAPABILITIES=\n")
+        self.assertEqual(read_env_file(path), "")
+
+    def test_commented_line_ignored(self):
+        path = self._write("#NODE_CAPABILITIES=readonly\nNODE_NAME=n1\n")
+        self.assertIsNone(read_env_file(path))
+
+    def test_missing_key_returns_none(self):
+        path = self._write("NODE_NAME=n1\n")
+        self.assertIsNone(read_env_file(path))
+
+    def test_missing_file_returns_none(self):
+        self.assertIsNone(read_env_file(Path("/nonexistent/.env")))
 
 
 if __name__ == "__main__":

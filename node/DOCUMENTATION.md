@@ -165,7 +165,7 @@ node/
 | TRAFFIC_DB_PATH | Файл легаси-БД трафика; в его каталоге лежит и `traffic_config.json` со списком отслеживаемых портов | /var/lib/monitoring/traffic.db |
 | HOST_PROC | Каталог `/proc` хоста, примонтированный в контейнер | /host/proc |
 | MON_IMAGE_TAG | Тег Docker-образа api в `docker-compose.yml` (`image: ...:${MON_IMAGE_TAG:-latest}`); `deploy.sh` при установке пишет `dev`, если `MON_BRANCH=dev`, иначе `latest`; апдейтер (`apply-update.sh`) переписывает при обновлении на `main`/`dev` | latest |
-| NODE_CAPABILITIES | Ограничение прав панели по доменам API, см. «Права доступа панели (NODE_CAPABILITIES)» ниже. Значение читается при создании контейнера — после правки нужен `docker compose up -d --force-recreate api` | пусто (полный доступ) |
+| NODE_CAPABILITIES | Ограничение прав панели по доменам API, см. «Права доступа панели (NODE_CAPABILITIES)» ниже. Файл `.env` смонтирован в контейнер и перечитывается при каждом старте процесса — после правки достаточно `docker compose restart api` | пусто (полный доступ) |
 
 ## Порты
 
@@ -187,6 +187,8 @@ node/
 
 Владелец ноды может сузить то, что панель может делать через API, строкой `NODE_CAPABILITIES` в `/opt/monitoring-node/.env`. Пустая строка или отсутствие переменной — полный доступ, то есть поведение всех нод, поставленных до появления механизма, не меняется.
 
+Агент читает строку прямо из смонтированного файла `.env` при старте процесса (значение кэшируется на время жизни процесса) — правку применяет обычный `docker compose restart api`, пересоздавать контейнер не нужно. Если сам файл не смонтирован в контейнер (нода с `docker-compose.yml` без этой строки в volumes) — агент откатывается на переменную окружения контейнера, как и раньше; в этом случае правка по-прежнему требует пересоздания (`docker compose up -d --force-recreate api`).
+
 **Грамматика.** Десять доменов, по одному на смысловой раздел API: `traffic haproxy firewall ipset ssh ssl antiddos remnawave system exec`. Слово без суффикса даёт домену чтение и запись (`rw`), с суффиксом `:ro` — только чтение. Три готовых пресета разворачиваются в набор доменов: `full` (все `rw`, то же самое, что пустая строка, но явно), `readonly` (все `ro`), `monitoring` (`traffic:ro` + `system:ro` — минимум для отображения ноды на дашборде). Слова можно комбинировать: уровень домена только повышается, порядок токенов не важен — `readonly,haproxy` и `haproxy,readonly` дают одно и то же (всё `ro`, кроме `haproxy: rw`). Регистр не важен, разделители — запятая, пробел или таб, кавычки по краям строки снимаются. Токен `metrics` принимается молча, но ни на что не влияет — метрики закрыть нельзя (см. always-allowed ниже), а слово в строке прав — не опечатка оператора. Незнакомое слово не роняет ноду и не блокирует остальную строку: оно игнорируется, попадает в `capabilities_unknown` (публикуется панели) и даёт один `WARNING` в лог ноды.
 
 Пример: `NODE_CAPABILITIES=readonly,haproxy,exec:ro` — вся нода в режиме чтения, кроме HAProxy (полный доступ). У домена `exec` нет читающих эндпоинтов — оба его пути (`/api/system/execute`, `/api/system/execute-stream`) принимают только POST, поэтому `exec:ro` на практике закрывает терминал целиком, а не переводит его в режим просмотра.
@@ -206,17 +208,18 @@ node/
 **Fail-open во всём, что не касается самого запрета.** Разбор `NODE_CAPABILITIES` не может уронить приложение: `get_policy()` ловит любое исключение и отдаёт неограниченную политику — недоступный агент чинится только по SSH, а лишний открытый домен на ноде с битым конфигом менее опасен, чем нода, переставшая отвечать вовсе. Тот же принцип в самой проверке: путь вне известных доменов не режется никем, а домен без явного значения в разобранной строке получает `no` только на стороне ноды — на стороне панели (см. `panel/backend/app/services/node_capabilities.py`) отсутствующий ключ в чужой карте, наоборот, трактуется как разрешение, потому что панель может знать домен, которого не знает старая нода.
 
 **Файлы:**
-- `node/app/capabilities.py` — `Domain`/`Access` (Enum), `DOMAIN_PREFIXES`, `ALWAYS_ALLOWED`, `READ_ONLY_WRITES`, `PRESETS`, `domain_for_path()`, `parse_capabilities()`, `CapabilityPolicy` (`check()`/`published()`/`denial_body()`), `DenyLog`, `CapabilityMiddleware`, `get_policy()` (`lru_cache`). Не импортирует ничего из `app.*` на верхнем уровне — панель грузит этот файл напрямую через `importlib`, чтобы структурно сверить свою карту путей с ним (см. MirrorTest в panel/DOCUMENTATION.md)
-- `node/app/config.py` — поле `node_capabilities: str = ""` (строкой, не списком — `pydantic-settings` парсит «сложные» типы окружения как JSON и упал бы на обычной строке с запятыми)
+- `node/app/capabilities.py` — `Domain`/`Access` (Enum), `DOMAIN_PREFIXES`, `ALWAYS_ALLOWED`, `READ_ONLY_WRITES`, `PRESETS`, `domain_for_path()`, `parse_capabilities()`, `CapabilityPolicy` (`check()`/`published()`/`denial_body()`), `DenyLog`, `CapabilityMiddleware`, `ENV_FILE`/`ENV_KEY`, `read_env_file()` (построчный разбор смонтированного `.env` в обход pydantic — тот отдал бы приоритет переменной окружения, зафиксированной при создании контейнера), `get_policy()` (`lru_cache`, откат на `app.config.get_settings().node_capabilities`, если `.env` не смонтирован). Не импортирует ничего из `app.*` на верхнем уровне — панель грузит этот файл напрямую через `importlib`, чтобы структурно сверить свою карту путей с ним (см. MirrorTest в panel/DOCUMENTATION.md)
+- `node/app/config.py` — поле `node_capabilities: str = ""` (строкой, не списком — `pydantic-settings` парсит «сложные» типы окружения как JSON и упал бы на обычной строке с запятыми); значение используется только как запасной путь в `get_policy()`
 - `node/app/main.py` — `CAPABILITY_POLICY = get_policy()`, условная регистрация `CapabilityMiddleware`, поля `capabilities`/`capabilities_unknown` в `GET /api/version`, лог политики в `lifespan`
 - `node/app/models/metrics.py` — `AllMetrics.capabilities: Optional[dict[str, str]] = None`
 - `node/app/services/metrics_collector.py` — карта считается один раз при создании синглтона и отдаётся в каждом ответе `/api/metrics`
 - `node/app/routers/system.py` — `capabilities`/`capabilities_unknown` в `GET /api/system/versions`
-- `node/.env.example` — блок с грамматикой и напоминанием про `--force-recreate`
+- `node/docker-compose.yml` — сервис `api` монтирует `./.env:/app/.env:ro`, чтобы `read_env_file()` видел правки без пересоздания контейнера
+- `node/.env.example` — блок с грамматикой NODE_CAPABILITIES
 - `node/deploy.sh` — `MON_NODE_CAPABILITIES` в `setup_env()`, валидация форматом `^[A-Za-z0-9:, ]+$`
 - `node/scripts/apply-update.sh` — дописывает пустую строку `NODE_CAPABILITIES=` в уже существующий `.env`, если её там нет; значение, заданное админом, не трогает
 - `install.sh` — валидация `MON_NODE_CAPABILITIES` в `run_unattended()`, переменная в `collect_firstboot_env()` (иначе провижининг через Hetzner Rescue теряет ограничение после ребута), описание в `--help`
-- `node/tests/test_capabilities.py` — 33 теста: грамматика разбора, форма публикуемой карты, неизвестные токены, резолв путей (включая `RouteCoverageTests` — все маршруты приложения обязаны быть либо в always-allowed, либо резолвиться в домен), always-allowed, уровни доступа, поведение middleware, троттлинг `DenyLog`
+- `node/tests/test_capabilities.py` — 39 тестов: грамматика разбора, форма публикуемой карты, неизвестные токены, резолв путей (включая `RouteCoverageTests` — все маршруты приложения обязаны быть либо в always-allowed, либо резолвиться в домен), always-allowed, уровни доступа, поведение middleware, троттлинг `DenyLog`, чтение `.env`-файла (`EnvFileTests` — значение читается, кавычки/пробелы снимаются, пустая строка отличается от отсутствия, закомментированная строка игнорируется, отсутствующий ключ и отсутствующий файл дают `None`)
 
 ## API
 
@@ -524,7 +527,7 @@ data: {"message": "error description"}
 - `node/tests/test_haproxy_parsing.py` — чистые части `haproxy_manager`: разбор server-строк со всеми опциями (`send-proxy-v2` не выставляет заодно `send-proxy`), подстановка `resolvers` только доменным таргетам и только один раз, разбор опций балансировщика, распознавание правил в конфиге (балансировщик против одиночного таргета, backend без frontend игнорируется), расчёт `maxconn` от RAM с потолком по лимиту дескрипторов, вставка `maxconn` в `global` без затирания явного значения
 - `node/tests/test_sshd_config.py` — сборка `sshd_config`: закомментированные директивы не оживают, содержимое `Match`-блоков копируется дословно, недостающие ключи встают перед первым `Match`, повторный прогон ничего не меняет; разбор конфига по правилу первого вхождения, преобразование значений туда-обратно, разбор секции fail2ban и единиц времени бана
 - `node/tests/test_update_ref_validation.py` — валидация ссылки обновления и адреса прокси: пропускает ветки, теги версий и хеши коммитов (путь отката), отклоняет метасимволы shell и ведущий дефис
-- Всего тестов ноды — 223 (`python -m unittest discover -s node/tests`)
+- Всего тестов ноды — 229 (`python -m unittest discover -s node/tests`)
 
 ### IPSet Blocklist
 

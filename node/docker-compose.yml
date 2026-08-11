@@ -39,6 +39,10 @@ services:
     pid: host
     network_mode: host
     volumes:
+      # Значения из env_file фиксируются при создании контейнера и переживают
+      # restart. Тот же файл смонтирован, чтобы права из NODE_CAPABILITIES
+      # перечитывались обычным `docker compose restart api`.
+      - ./.env:/app/.env:ro
       # Host system access for metrics
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro

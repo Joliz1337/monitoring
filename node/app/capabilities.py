@@ -14,9 +14,17 @@ import time
 from dataclasses import dataclass
 from enum import Enum
 from functools import lru_cache
+from pathlib import Path
 from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
+
+# .env хоста, смонтированный в контейнер. Читается напрямую, а не через pydantic:
+# значение из `env_file` docker compose становится переменной окружения, которая
+# фиксируется в момент СОЗДАНИЯ контейнера и переживает `restart`, да ещё и имеет
+# в pydantic приоритет над файлом. Чтение файла делает обычный рестарт достаточным.
+ENV_FILE = Path("/app/.env")
+ENV_KEY = "NODE_CAPABILITIES"
 
 
 class Domain(str, Enum):
@@ -304,12 +312,34 @@ class CapabilityMiddleware:
         await send({"type": "http.response.body", "body": body})
 
 
+def read_env_file(path: Path = ENV_FILE) -> Optional[str]:
+    """Значение NODE_CAPABILITIES прямо из .env. None — файла или строки нет."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("#"):
+            continue
+        key, sep, value = line.partition("=")
+        if sep and key.strip() == ENV_KEY:
+            return value.strip().strip("\"'")
+    return None
+
+
 @lru_cache(maxsize=1)
 def get_policy() -> CapabilityPolicy:
     try:
-        from app.config import get_settings
+        raw = read_env_file()
+        if raw is None:
+            # Файл не смонтирован (нода прежней версии) — работаем от переменной,
+            # как раньше: тогда правка требует пересоздания контейнера.
+            from app.config import get_settings
 
-        return parse_capabilities(get_settings().node_capabilities)
+            raw = get_settings().node_capabilities
+        return parse_capabilities(raw)
     except Exception:
         # Исключение отсюда не дало бы приложению подняться, а нода без API
         # чинится только по SSH — открытый агент лучше недоступного.
