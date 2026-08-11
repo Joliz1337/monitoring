@@ -277,7 +277,14 @@ def render_block(haproxy_cpus: list[int], indent: str) -> str:
 
 
 def apply(content: str, cpu_count: int) -> str:
-    """Подставляет nbthread/cpu-map под маркер `# cpu-affinity (...)`.
+    """Вписывает nbthread/cpu-map в секцию global.
+
+    Выключателем служит настройка в панели, а не наличие маркера в конфиге:
+    конфиги на давно работающих нодах созданы прежним шаблоном, и требование
+    маркера означало бы, что включённый тумблер на них молча не делает ничего.
+    Поэтому без маркера значения вписываются в начало `global` — так же, как
+    это делает `_ensure_global_maxconn`. Маркер остаётся способом переопределить
+    поведение на отдельной ноде: задать сетевые ядра списком или указать `off`.
 
     Ранее сгенерированный блок всегда вырезается и считается заново — иначе смена
     тарифа (другое число ядер) или переезд IRQ оставили бы устаревшую привязку.
@@ -290,16 +297,23 @@ def apply(content: str, cpu_count: int) -> str:
         return content
 
     match = MARKER_RE.search(content)
-    if not match:
-        return content
+    value = match.group(2) if match else "auto"
 
-    app_cpus = resolve_app_cpus(match.group(2), cpu_count)
+    app_cpus = resolve_app_cpus(value, cpu_count)
     if not app_cpus:
         return content
 
+    if match:
+        indent, insert_at = match.group(1), match.end() + 1
+    else:
+        global_match = re.search(r"^global[ \t]*\n", content, re.MULTILINE)
+        if not global_match:
+            logger.warning("cpu-affinity: no global section in the config, skipping")
+            return content
+        indent, insert_at = "    ", global_match.end()
+
     logger.info("cpu-affinity: HAProxy pinned to CPUs %s", app_cpus)
-    insert_at = match.end() + 1
-    return content[:insert_at] + render_block(app_cpus, match.group(1)) + content[insert_at:]
+    return content[:insert_at] + render_block(app_cpus, indent) + content[insert_at:]
 
 
 async def _container_cpuset(executor, name: str) -> str | None:

@@ -164,9 +164,31 @@ class RenderTests(unittest.TestCase):
         self.assertIn("cpu-map", enabled)
         self.assertEqual(self._apply(enabled, enabled=False), BASE_CONFIG)
 
-    def test_no_marker_means_no_change(self):
+    def test_config_without_marker_still_gets_pinned(self):
+        """Конфиги на давно работающих нодах созданы прежним шаблоном и маркера
+        не содержат — требование маркера означало бы, что включённый тумблер там
+        молча не делает ничего."""
         content = "global\n    maxconn 1000\n\ndefaults\n    mode tcp\n"
+        result = self._apply(content)
+        self.assertIn("nbthread 6", result)
+        self.assertIn("cpu-map 1/1 2", result)
+        # Вставка идёт внутрь global, а не перед ним и не в defaults
+        self.assertTrue(result.startswith("global\n"))
+        self.assertLess(result.index("nbthread"), result.index("maxconn 1000"))
+
+    def test_config_without_global_section_untouched(self):
+        content = "defaults\n    mode tcp\n"
         self.assertEqual(self._apply(content), content)
+
+    def test_marker_off_wins_over_enabled_setting(self):
+        """Маркер остаётся способом отключить привязку на отдельной ноде."""
+        content = BASE_CONFIG.replace("(auto)", "(off)")
+        self.assertEqual(self._apply(content), content)
+
+    def test_markerless_config_is_idempotent(self):
+        content = "global\n    maxconn 1000\n\ndefaults\n    mode tcp\n"
+        once = self._apply(content)
+        self.assertEqual(self._apply(once), once)
 
     def test_block_inserted_under_marker(self):
         result = self._apply(BASE_CONFIG)
