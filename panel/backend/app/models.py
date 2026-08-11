@@ -17,6 +17,26 @@ class PKIKeygen(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
+class NodeInstallKey(Base):
+    """Ключ установки под один конкретный сервер — для нод, к которым нет доступа.
+
+    Общий NODE_SECRET несёт приватный ключ сертификата, одинакового для всего парка:
+    отдать его владельцу арендованного сервера — значит отдать доступ ко всем нодам.
+    Здесь под каждую выдачу выпускается собственный сертификат без clientAuth, и
+    сгореть он может только вместе с этим одним сервером.
+    """
+    __tablename__ = "node_install_keys"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(200), nullable=False)
+    common_name = Column(String(120), nullable=False, unique=True)
+    cert_pem = Column(Text, nullable=False)
+    key_pem = Column(Text, nullable=False)
+    fingerprint = Column(String(100), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
 class RemnawaveCertProfile(Base):
     """Сохранённый сертификат (SECRET_KEY) ноды Remnawave — переиспользуется при автоустановке."""
     __tablename__ = "remnawave_cert_profiles"
@@ -102,6 +122,15 @@ class Server(Base):
     remnawave_nginx_sync_status = Column(String(20), nullable=True)  # synced | pending | failed
     remnawave_nginx_detected = Column(Boolean, default=False, server_default="false", nullable=False)
 
+    # Учёт трафика: версия агента решает, умеет ли нода отдавать счётчики портов,
+    # tracked_ports — JSON-список портов, за которыми нода их ведёт
+    node_version = Column(String(20), nullable=True)
+    tracked_ports = Column(Text, nullable=True)
+
+    # Карта прав, которую нода прислала о себе (NODE_CAPABILITIES в её .env).
+    # NULL — ограничений нет; по ней панель решает, идти ли к ноде вообще.
+    node_capabilities = Column(Text, nullable=True)
+
 
 class ServerCache(Base):
     """Отдельная таблица для тяжёлых JSON-кешей, часто обновляемых фоновыми задачами.
@@ -115,8 +144,29 @@ class ServerCache(Base):
     
     server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), primary_key=True)
     last_haproxy_data = Column(Text, nullable=True)
-    last_traffic_data = Column(Text, nullable=True)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+class NodePendingSync(Base):
+    """Долг перед нодой: что применить на ней, когда она вернётся в сеть.
+
+    Пока сервер офлайн, отправлять ему блок-лист, whitelist или правила firewall
+    некуда — запрос упрётся в таймаут, а изменение пропадёт: панель нигде не помнит,
+    что нода его не получила. Строка здесь и есть эта память, и живёт она в базе,
+    поэтому перезапуск панели очередь не теряет.
+
+    Хранится вид работы, а не готовая команда: исполнитель собирает актуальное
+    желаемое состояние в момент отправки. Иначе за неделю простоя накопились бы
+    устаревшие payload'ы, которые пришлось бы применять по порядку.
+    """
+    __tablename__ = "node_pending_sync"
+
+    server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), primary_key=True)
+    kind = Column(String(40), primary_key=True)
+    requested_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    next_attempt_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    attempts = Column(Integer, default=0, server_default="0", nullable=False)
+    last_error = Column(String(500), nullable=True)
 
 
 class MetricsSnapshot(Base):
@@ -125,7 +175,7 @@ class MetricsSnapshot(Base):
 
     # BigInteger: при 500 нодах int4-serial переполнился бы за ~1.5 года
     id = Column(BigInteger, primary_key=True)
-    server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), nullable=False, index=True)
+    server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), nullable=False)
     timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
     
     # CPU
@@ -145,10 +195,6 @@ class MetricsSnapshot(Base):
     # Network speed (bytes per second) - calculated by panel
     net_rx_bytes_per_sec = Column(Float, default=0)
     net_tx_bytes_per_sec = Column(Float, default=0)
-    
-    # Network total bytes (cumulative from node)
-    net_rx_bytes = Column(BigInteger)
-    net_tx_bytes = Column(BigInteger)
     
     # Disk
     disk_percent = Column(Float)
@@ -173,6 +219,12 @@ class MetricsSnapshot(Base):
     
     __table_args__ = (
         Index('idx_metrics_server_time', 'server_id', 'timestamp'),
+        # Последний снапшот сервера ищется как max(id) с GROUP BY server_id —
+        # индекс по timestamp для этого не подходит, нужен порядок по id.
+        Index('idx_metrics_server_latest', 'server_id', 'id'),
+        # Одиночного индекса на server_id нет намеренно: он ведущая колонка обоих
+        # составных, а вставка идёт каждые 10 секунд по всем нодам — самый горячий
+        # путь записи в проекте, лишний индекс на нём дороже всего.
     )
 
 
@@ -299,6 +351,16 @@ class RemnawaveSettings(Base):
 
     # Anomaly detection
     anomaly_enabled = Column(Boolean, default=False)
+    anomaly_ip_enabled = Column(Boolean, default=True)       # IP > лимит устройств
+    anomaly_hwid_enabled = Column(Boolean, default=True)     # HWID > лимит (авто-очистка)
+    anomaly_ua_enabled = Column(Boolean, default=True)       # неизвестный User-Agent
+    anomaly_devdata_enabled = Column(Boolean, default=True)  # невалидные данные устройства
+    anomaly_ip_margin = Column(Integer, default=2)           # аномалия когда IP > лимит + запас
+    anomaly_ip_confirm_count = Column(Integer, default=5)    # подтверждений подряд до уведомления
+    anomaly_asn_margin = Column(Integer, default=0)          # уведомление только если ASN > лимит + запас
+    anomaly_ip_smart_enabled = Column(Boolean, default=True)     # умное определение: сверять с расходом трафика
+    anomaly_ip_smart_traffic_gb = Column(Float, default=20.0)    # меньше этого за сутки — не уведомлять
+    anomaly_ua_patterns = Column(Text, nullable=True)        # реестр известных UA; NULL = встроенный
     anomaly_use_custom_bot = Column(Boolean, default=False)
     anomaly_tg_bot_token = Column(String(200), nullable=True)
     anomaly_tg_chat_id = Column(String(100), nullable=True)
@@ -324,6 +386,12 @@ class RemnawaveHwidDevice(Base):
     created_at = Column(DateTime(timezone=True), nullable=True)
     updated_at = Column(DateTime(timezone=True), nullable=True)
     synced_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        # synced_at несёт двойную нагрузку: по нему удаляются устройства, не попавшие
+        # в последнюю синхронизацию, и по нему же сортируется список устройств в API
+        Index('idx_hwid_devices_synced_at', 'synced_at'),
+    )
 
 
 class XrayStats(Base):
@@ -379,6 +447,11 @@ class RemnawaveUserCache(Base):
     tag = Column(String(100), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=True)
     updated_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        # Кеш чистится удалением записей старше недели по updated_at
+        Index('idx_rw_user_cache_updated_at', 'updated_at'),
+    )
 
 
 # ==================== Torrent Blocker ====================
@@ -547,6 +620,10 @@ class AlertSettings(Base):
     load_avg_threshold_offset = Column(Float, default=1.0)
     load_avg_sustained_checks = Column(Integer, default=3)
 
+    # Conntrack (заполнение таблицы соединений ядра, % от nf_conntrack_max)
+    conntrack_enabled = Column(Boolean, default=True)
+    conntrack_threshold = Column(Float, default=80.0)
+
     # Excluded servers (JSON array of server IDs)
     excluded_server_ids = Column(Text, nullable=True)
 
@@ -557,6 +634,7 @@ class AlertSettings(Base):
     network_excluded_server_ids = Column(Text, nullable=True)
     tcp_excluded_server_ids = Column(Text, nullable=True)
     load_avg_excluded_server_ids = Column(Text, nullable=True)
+    conntrack_excluded_server_ids = Column(Text, nullable=True)
 
 
 class AlertHistory(Base):
@@ -577,6 +655,10 @@ class AlertHistory(Base):
         Index('idx_alert_history_server', 'server_id'),
         Index('idx_alert_history_type', 'alert_type'),
         Index('idx_alert_history_created', 'created_at'),
+        # История листается страницами: фильтр по серверу либо по типу плюс
+        # сортировка по дате — одиночные индексы дают сортировку на выборке
+        Index('idx_alert_history_server_created', 'server_id', 'created_at'),
+        Index('idx_alert_history_type_created', 'alert_type', 'created_at'),
     )
 
 
@@ -715,6 +797,8 @@ class HAProxySyncLog(Base):
     __table_args__ = (
         Index('idx_sync_log_server', 'server_id'),
         Index('idx_sync_log_created', 'created_at'),
+        # Журнал читается только в разрезе профиля
+        Index('idx_sync_log_profile', 'profile_id'),
     )
 
 
@@ -750,6 +834,7 @@ class RemnawaveNginxSyncLog(Base):
     __table_args__ = (
         Index('idx_rw_nginx_sync_log_server', 'server_id'),
         Index('idx_rw_nginx_sync_log_created', 'created_at'),
+        Index('idx_rw_nginx_sync_log_profile', 'profile_id'),
     )
 
 
@@ -783,6 +868,7 @@ class FirewallSyncLog(Base):
     __table_args__ = (
         Index('idx_fw_sync_log_server', 'server_id'),
         Index('idx_fw_sync_log_created', 'created_at'),
+        Index('idx_fw_sync_log_profile', 'profile_id'),
     )
 
 
@@ -796,6 +882,12 @@ class ASNCache(Base):
     prefix = Column(String(50), nullable=True)
     holder = Column(String(200), nullable=True)
     cached_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        # Протухшие записи вычищаются на каждом lookup_ips — без индекса это
+        # seq scan всего кеша перед каждым разрешением ASN
+        Index('idx_asn_cache_cached_at', 'cached_at'),
+    )
 
 
 # ==================== Wildcard SSL ====================
@@ -813,3 +905,87 @@ class WildcardCertificate(Base):
     last_renewed = Column(DateTime(timezone=True), nullable=True)
     auto_renew = Column(Boolean, default=True, server_default="true")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+# ==================== Traffic Accounting ====================
+
+class ServerTraffic(Base):
+    """История трафика сервера по часам и суткам (панель считает её сама).
+
+    scope_key — сентинел "" вместо NULL и отдельная колонка-дискриминатор scope:
+    в UNIQUE-индексе PostgreSQL значения NULL не конфликтуют между собой, поэтому
+    UPSERT по ключу с NULL никогда не срабатывал бы и таблица росла бы дублями.
+    """
+    __tablename__ = "server_traffic"
+
+    id = Column(BigInteger, primary_key=True)
+    server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), nullable=False)
+    period_type = Column(String(5), nullable=False)   # hour | day
+    scope = Column(String(6), nullable=False)         # total | iface | port
+    scope_key = Column(String(32), nullable=False, default="", server_default="")  # "" | eth0 | 443
+    bucket = Column(DateTime, nullable=False)         # naive UTC, усечён до часа или суток
+    rx_bytes = Column(BigInteger, nullable=False, default=0, server_default="0")
+    tx_bytes = Column(BigInteger, nullable=False, default=0, server_default="0")
+    covered_seconds = Column(Integer, nullable=False, default=0, server_default="0")
+    source = Column(String(6), nullable=False, default="live", server_default="live")  # live | legacy
+
+    __table_args__ = (
+        UniqueConstraint(
+            'server_id', 'period_type', 'scope', 'bucket', 'scope_key',
+            name='uq_server_traffic',
+        ),
+        Index('idx_server_traffic_cleanup', 'period_type', 'bucket'),
+    )
+
+
+class ServerTrafficCounter(Base):
+    """Последнее кумулятивное значение счётчика — база для вычисления дельты.
+
+    boot_id и boot_at нужны для детекта перезагрузки ноды: после неё счётчики
+    интерфейсов начинаются с нуля, и разница со старым значением была бы мусором.
+    """
+    __tablename__ = "server_traffic_counters"
+
+    server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), primary_key=True)
+    scope = Column(String(6), primary_key=True)
+    scope_key = Column(String(32), primary_key=True)
+    rx_value = Column(BigInteger, nullable=False)
+    tx_value = Column(BigInteger, nullable=False)
+    observed_at = Column(DateTime, nullable=False)
+    boot_id = Column(String(40), nullable=True)
+    boot_at = Column(DateTime, nullable=True)
+
+
+class TrafficImportState(Base):
+    """Состояние переноса легаси-истории трафика с ноды в базу панели."""
+    __tablename__ = "traffic_import_state"
+
+    server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), primary_key=True)
+    # pending | node_too_old | imported | purged | empty | failed
+    status = Column(String(12), nullable=False, default="pending", server_default="pending")
+    node_version = Column(String(20), nullable=True)
+    fingerprint = Column(String(64), nullable=True)
+    rows_imported = Column(Integer, default=0, server_default="0")
+    imported_at = Column(DateTime, nullable=True)
+    purged_at = Column(DateTime, nullable=True)
+    attempts = Column(Integer, default=0, server_default="0")
+    next_attempt_at = Column(DateTime, nullable=True)
+    last_error = Column(String(500), nullable=True)
+
+
+class ServerDowntime(Base):
+    """Интервалы простоя: недоступность ноды и остановки самой панели.
+
+    Без них провал в истории трафика не отличить от нулевого трафика.
+    """
+    __tablename__ = "server_downtime"
+
+    id = Column(BigInteger, primary_key=True)
+    server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), nullable=False)
+    started_at = Column(DateTime, nullable=False)
+    ended_at = Column(DateTime, nullable=True)  # NULL — простой длится сейчас
+    kind = Column(String(8), nullable=False)    # node | panel
+
+    __table_args__ = (
+        Index('idx_server_downtime_lookup', 'server_id', 'started_at'),
+    )

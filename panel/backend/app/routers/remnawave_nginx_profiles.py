@@ -171,14 +171,18 @@ async def _mark_drifted_pending(db: AsyncSession, profile: RemnawaveNginxProfile
             Server.is_active.is_(True),
         )
     )
+    drifted_ids: list[int] = []
     for server in result.scalars().all():
         rendered, error = render_profile_for_server(profile.config_content, server)
         expected = compute_config_hash(rendered) if not error else None
-        if server.remnawave_nginx_config_hash != expected or expected is None:
-            await db.execute(
-                update(Server).where(Server.id == server.id)
-                .values(remnawave_nginx_sync_status="pending")
-            )
+        if expected is None or server.remnawave_nginx_config_hash != expected:
+            drifted_ids.append(server.id)
+
+    if drifted_ids:
+        await db.execute(
+            update(Server).where(Server.id.in_(drifted_ids))
+            .values(remnawave_nginx_sync_status="pending")
+        )
 
 
 async def _save_config_and_sync(
@@ -265,18 +269,6 @@ async def import_from_node(
     if detected:
         content = replace_domain_with_placeholder(content, detected)
     return {"content": content, "detected_domain": detected, "has_markers": has_markers(content)}
-
-
-@router.post("/reorder")
-async def reorder_profiles(data: ReorderRequest, db: AsyncSession = Depends(get_db), _=Depends(verify_auth)):
-    for i, pid in enumerate(data.profile_ids):
-        await db.execute(
-            update(RemnawaveNginxProfile)
-            .where(RemnawaveNginxProfile.id == pid)
-            .values(position=i)
-        )
-    await db.commit()
-    return {"success": True}
 
 
 # ==================== CRUD ====================

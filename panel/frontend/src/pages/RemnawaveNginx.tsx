@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
+import { useNodeCapabilities } from '../hooks/useNodeCapabilities'
 import { Waypoints, Plus, RefreshCw, Trash2, Server, ChevronDown, ChevronRight, Edit3, Link2, Unlink, Loader2, CheckCircle2, XCircle, AlertCircle, Clock, History, X, Code, Save, AlertTriangle, Activity, Globe, Lock, RotateCw, Download, Settings2, Power } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -377,9 +378,12 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
   const [configModalMouseDown, setConfigModalMouseDown] = useState(false)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const prevSyncedRef = useRef<string>('')
+  const { allows } = useNodeCapabilities()
 
   const fetchNodeStatuses = useCallback(async (servers: { server_id: number; online: boolean }[]) => {
-    const online = servers.filter(s => s.online)
+    // Опрос идёт каждые три секунды: закрытая нода иначе давала бы двадцать
+    // отказов в минуту на пустом месте
+    const online = servers.filter(s => s.online && allows(s.server_id, 'remnawave'))
     const results = await Promise.allSettled(online.map(s => remnawaveNginxApi.getNodeStatus(s.server_id)))
     setNodeStatuses(prev => {
       const next = { ...prev }
@@ -389,7 +393,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
       })
       return next
     })
-  }, [])
+  }, [allows])
 
   const fetchServersStatus = useCallback(async () => {
     try {

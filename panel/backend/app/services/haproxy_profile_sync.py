@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import async_session_maker
 from app.models import Server, HAProxyConfigProfile, HAProxySyncLog
 from app.services.http_client import get_node_client, node_auth_headers
+from app.services.node_capabilities import Capability, denied_message, server_allows
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,7 @@ class SyncResult:
     server_name: str
     success: bool
     message: str
-    status: str = "failed"  # success | failed | queued
+    status: str = "failed"  # success | failed | queued | denied
 
 
 def compute_config_hash(config_content: str) -> str:
@@ -157,6 +158,17 @@ async def sync_profile_to_servers(
     if not servers:
         return []
 
+    # Закрытый раздел — не «ожидает раскатки»: pending заставил бы
+    # retry_pending_haproxy_syncs дёргать ноду каждые полминуты вечно
+    denied = [s for s in servers if not server_allows(s, Capability.HAPROXY, write=True)]
+    if denied:
+        await db.execute(
+            update(Server).where(Server.id.in_([s.id for s in denied]))
+            .values(haproxy_sync_status="denied")
+        )
+        await db.commit()
+        servers = [s for s in servers if s not in denied]
+
     online = [s for s in servers if is_server_online(s)]
     offline = [s for s in servers if not is_server_online(s)]
 
@@ -176,6 +188,10 @@ async def sync_profile_to_servers(
         SyncResult(s.id, s.name, True, "Уже синхронизирован", status="success")
         for s in offline_synced
     ]
+    results.extend(
+        SyncResult(s.id, s.name, False, denied_message(Capability.HAPROXY, True), status="denied")
+        for s in denied
+    )
 
     offline_results = await asyncio.gather(
         *[_queue_offline_server(s, profile.id, config_hash) for s in offline_pending]
@@ -233,6 +249,9 @@ async def stop_haproxy_on_server(server: Server) -> bool:
     """
     if not is_server_online(server):
         logger.info("HAProxy stop пропущен — сервер %s офлайн", server.name)
+        return False
+    if not server_allows(server, Capability.HAPROXY, write=True):
+        logger.info("HAProxy stop пропущен — раздел закрыт на ноде %s", server.name)
         return False
 
     url = f"{server.url}/api/haproxy/stop"

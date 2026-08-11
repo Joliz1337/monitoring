@@ -30,6 +30,7 @@ import { useState } from 'react'
 import { useExtStore } from '../../stores/_extStore'
 import { useNotesStore } from '../../stores/notesStore'
 import { useTranslation } from 'react-i18next'
+import { Tooltip } from '../ui/Tooltip'
 import NotesDrawer from '../Notes/NotesDrawer'
 import { FAQDrawer } from '../FAQ'
 
@@ -278,20 +279,21 @@ export default function Layout() {
       {/* Notes floating tab — right edge */}
       <AnimatePresence>
         {!notesOpen && (
-          <motion.button
-            initial={{ x: 20, opacity: 0 }}
-            animate={{ x: 0, opacity: 1 }}
-            exit={{ x: 20, opacity: 0 }}
-            onClick={toggleNotes}
-            className="fixed right-0 top-1/2 -translate-y-1/2 z-40
-                       bg-amber-500/90 hover:bg-amber-400 text-dark-900
-                       rounded-l-lg py-3 px-1.5 shadow-lg shadow-amber-500/20
-                       transition-colors cursor-pointer"
-            whileHover={{ x: -2 }}
-            title={t('notes.title')}
-          >
-            <StickyNote className="w-4 h-4" />
-          </motion.button>
+          <Tooltip label={t('notes.title')} position="left">
+            <motion.button
+              initial={{ x: 20, opacity: 0 }}
+              animate={{ x: 0, opacity: 1 }}
+              exit={{ x: 20, opacity: 0 }}
+              onClick={toggleNotes}
+              className="fixed right-0 top-1/2 -translate-y-1/2 z-40
+                         bg-amber-500/90 hover:bg-amber-400 text-dark-900
+                         rounded-l-lg py-3 px-1.5 shadow-lg shadow-amber-500/20
+                         transition-colors cursor-pointer"
+              whileHover={{ x: -2 }}
+            >
+              <StickyNote className="w-4 h-4" />
+            </motion.button>
+          </Tooltip>
         )}
       </AnimatePresence>
 

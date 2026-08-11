@@ -1,4 +1,4 @@
-import asyncio
+import importlib
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -15,7 +15,7 @@ logging.basicConfig(
 
 from app.database import init_db, async_session
 from app.config import get_settings
-from app.routers import servers, server_deploy, auth_router, proxy, settings as settings_router, system, bulk_actions, blocklist, remnawave, alerts, billing, backup, ssh_security, infra, notes, wildcard_ssl, haproxy_profiles, torrent_blocker, firewall_profiles, antiddos, remnawave_nginx_profiles
+from app.routers import servers, server_deploy, node_install_keys, auth_router, proxy, settings as settings_router, system, bulk_actions, blocklist, remnawave, alerts, billing, backup, ssh_security, infra, notes, wildcard_ssl, haproxy_profiles, torrent_blocker, firewall_profiles, antiddos, remnawave_nginx_profiles, traffic
 from app.services.metrics_collector import start_collector, stop_collector
 from app.services.blocklist_manager import get_blocklist_manager
 from app.services.xray_stats_collector import start_xray_stats_collector, stop_xray_stats_collector
@@ -26,22 +26,17 @@ from app.services.time_sync import start_time_sync, stop_time_sync
 from app.services.wildcard_ssl import start_wildcard_ssl_manager, stop_wildcard_ssl_manager
 from app.services.torrent_blocker import start_torrent_blocker, stop_torrent_blocker
 from app.services.antiddos_manager import start_antiddos_manager, stop_antiddos_manager
+from app.services.node_sync_queue import start_node_sync_queue, stop_node_sync_queue
+from app.services.traffic_import import start_traffic_import, stop_traffic_import
 from app.services.http_client import init_http_clients, close_http_clients
 from app.services.pki import load_or_create_keygen
 from app.services.update_channel import load_branch_from_db
 from app.security import SecurityMiddleware
-# Import all models to register them with Base.metadata
-from app.models import (  # noqa: F401
-    Server, ServerCache, MetricsSnapshot, AggregatedMetrics, PanelSettings, FailedLogin,
-    BlocklistRule, BlocklistSource, RemnawaveSettings, RemnawaveHwidDevice,
-    XrayStats, RemnawaveUserCache, AlertSettings, AlertHistory,
-    BillingServer, BillingSettings,
-    InfraAccount, InfraProject, InfraProjectServer,
-    SharedNote, SharedTask, WildcardCertificate,
-    HAProxyConfigProfile, HAProxySyncLog,
-    RemnawaveNginxProfile, RemnawaveNginxSyncLog,
-    TorrentBlockerSettings, PKIKeygen, AntiDdosSettings, AntiDdosWhitelistSource,
-)
+# Импорт модуля целиком регистрирует ВСЕ модели в Base.metadata до create_all.
+# Поимённый список приходилось дополнять руками, и он успел отстать на десяток
+# таблиц — те создавались только потому, что их подтягивали импорты роутеров.
+from app import models  # noqa: F401
+from app.models import FailedLogin
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -62,9 +57,21 @@ async def cleanup_expired_bans():
         logger.error(f"Error cleaning up expired bans: {e}")
 
 
-async def _deferred_startup():
-    """Non-critical tasks that run after server is ready."""
-    logger.info("Deferred startup tasks completed")
+async def _init_optional_module(module_name: str, entrypoint: str) -> None:
+    """Опциональные модули: отсутствие — штатная ситуация, а вот сбой инициализации
+    установленного молча выключал бы функциональность без единой строки в логе."""
+    from app.database import engine
+
+    try:
+        module = importlib.import_module(module_name)
+    except ImportError:
+        logger.debug(f"Optional module {module_name} is not installed")
+        return
+
+    try:
+        await getattr(module, entrypoint)(engine)
+    except Exception as e:
+        logger.error(f"Optional module {module_name} failed to initialize: {e}")
 
 
 @asynccontextmanager
@@ -79,20 +86,9 @@ async def lifespan(app: FastAPI):
         branch = await load_branch_from_db(db)
     logger.info(f"Update channel: {branch}")
     
-    try:
-        from app.services._ext import init_ext_db
-        from app.database import engine
-        await init_ext_db(engine)
-    except Exception:
-        pass
+    await _init_optional_module("app.services._ext", "init_ext_db")
+    await _init_optional_module("app.services._yc", "init_yc_db")
 
-    try:
-        from app.services._yc import init_yc_db
-        from app.database import engine
-        await init_yc_db(engine)
-    except Exception:
-        pass
-    
     await start_telegram_bot_service()
     await start_collector()
 
@@ -106,14 +102,21 @@ async def lifespan(app: FastAPI):
     await start_wildcard_ssl_manager()
     await start_torrent_blocker()
     await start_antiddos_manager()
+    # Долги перед нодами лежат в базе — очередь подхватывает их и после перезапуска панели.
+    await start_node_sync_queue()
 
-    # Cache warming runs in background — doesn't block /health
-    warmup_task = asyncio.create_task(_deferred_startup())
-    
+    # Перенос легаси-истории трафика — разовая фоновая задача: панель обязана
+    # подняться, даже если она не стартовала.
+    try:
+        await start_traffic_import()
+    except Exception as e:
+        logger.error(f"Legacy traffic importer failed to start: {e}")
+
     yield
-    
-    warmup_task.cancel()
+
     await close_http_clients()
+    await stop_traffic_import()
+    await stop_node_sync_queue()
     await stop_antiddos_manager()
     await stop_torrent_blocker()
     await stop_wildcard_ssl_manager()
@@ -180,10 +183,11 @@ class GZipMiddlewareNoSSE:
 app.add_middleware(GZipMiddlewareNoSSE)
 
 app.include_router(auth_router.router)
-# server_deploy раньше servers: статичные пути /servers/remnawave-certs и /servers/deploy
-# должны матчиться до параметрического GET /servers/{server_id}
+# server_deploy раньше servers: DELETE /servers/remnawave-certs/{id} и /servers/deploy
+# должны матчиться до параметрических /servers/{server_id}
 app.include_router(server_deploy.router)
 app.include_router(servers.router)
+app.include_router(node_install_keys.router)
 app.include_router(proxy.router)
 app.include_router(settings_router.router)
 app.include_router(system.router)
@@ -202,13 +206,16 @@ app.include_router(firewall_profiles.router)
 app.include_router(torrent_blocker.router)
 app.include_router(antiddos.router)
 app.include_router(remnawave_nginx_profiles.router)
+app.include_router(traffic.router)
 
 try:
     from app.routers._internal import router as ext_router
     if ext_router.routes:
         app.include_router(ext_router, prefix="/_int", tags=["internal"])
-except Exception:
-    pass
+except ImportError:
+    logger.debug("Optional router app.routers._internal is not installed")
+except Exception as e:
+    logger.error(f"Optional router app.routers._internal failed to load: {e}")
 
 
 @app.get("/health")

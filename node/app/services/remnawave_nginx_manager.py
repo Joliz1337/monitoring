@@ -41,6 +41,23 @@ _COMPOSE_NOFILE_RE = re.compile(r"^\s*soft:\s*(\d+)\s*$", re.MULTILINE)
 _COMPOSE_MOUNT_RE = re.compile(
     r"""^(?P<head>[ \t]*-[ \t]*['"]?\./nginx\.conf:)(?P<target>[^\s'":#]+)""", re.MULTILINE
 )
+_SSL_FILE_RE = re.compile(
+    r"^[ \t]*ssl_certificate(?:_key)?[ \t]+([^;\s]+)[ \t]*;", re.MULTILINE
+)
+_VOLUME_LINE_RE = re.compile(
+    r"""^[ \t]*-[ \t]*['"]?((?:/|\./)[^:\s'"]*):(/[^:\s'"]+)""", re.MULTILINE
+)
+
+# live/-пути letsencrypt — симлинки в ../../archive: узкий маунт каталога
+# домена дал бы контейнеру битые ссылки, поэтому монтируется весь корень
+LETSENCRYPT_ROOT = "/etc/letsencrypt"
+
+CERT_HINT = (
+    "Подсказка: nginx ищет сертификат внутри контейнера remnawave-nginx, а не на хосте. "
+    "Если файл на хосте есть — каталог не примонтирован в контейнер; нода добавляет "
+    "volume в docker-compose.yml автоматически, но контейнер, созданный до этого, "
+    "нужно пересоздать: docker compose up -d --force-recreate remnawave-nginx"
+)
 
 # Профиль панели — полный nginx.conf. Установки из install.sh монтируют
 # nginx.conf фрагментом http-контекста, туда полный конфиг не подходит
@@ -180,6 +197,84 @@ def patch_compose_mount(compose: str) -> Optional[str]:
     return compose[: match.start("target")] + FULL_CONFIG_MOUNT + compose[match.end("target"):]
 
 
+def config_cert_files(content: str) -> list[str]:
+    """Пути ssl_certificate/ssl_certificate_key из конфига (без дублей)."""
+    files: list[str] = []
+    for match in _SSL_FILE_RE.finditer(content):
+        path = match.group(1)
+        if _SAFE_PATH_RE.match(path) and path not in files:
+            files.append(path)
+    return files
+
+
+def cert_mount_dir(cert_file: str) -> str:
+    if cert_file.startswith(LETSENCRYPT_ROOT + "/"):
+        return LETSENCRYPT_ROOT
+    return cert_file.rsplit("/", 1)[0] or "/"
+
+
+def is_covered_by_mounts(path: str, mount_targets: list[str]) -> bool:
+    return any(
+        path == target or path.startswith(target.rstrip("/") + "/")
+        for target in mount_targets
+        if target and target != "/"
+    )
+
+
+def compose_mount_targets(compose: str) -> list[str]:
+    return [dst for _, dst in _VOLUME_LINE_RE.findall(compose)]
+
+
+def missing_cert_mounts(compose: str, cert_files: list[str]) -> list[str]:
+    """Каталоги сертификатов, не покрытые ни одним volume в compose."""
+    targets = compose_mount_targets(compose)
+    dirs: list[str] = []
+    for cert_file in cert_files:
+        if is_covered_by_mounts(cert_file, targets):
+            continue
+        mount_dir = cert_mount_dir(cert_file)
+        if mount_dir != "/" and mount_dir not in dirs:
+            dirs.append(mount_dir)
+    return dirs
+
+
+def patch_compose_volumes(compose: str, dirs: list[str]) -> Optional[str]:
+    """Дописывает bind-mount'ы каталогов сертификатов в volumes nginx-сервиса.
+
+    Точка вставки — строка монтирования ./nginx.conf: единственная, однозначно
+    принадлежащая сервису remnawave-nginx (у remnanode её нет).
+    """
+    if not dirs:
+        return None
+    match = _COMPOSE_MOUNT_RE.search(compose)
+    if not match:
+        return None
+    indent = re.match(r"[ \t]*", match.group("head")).group(0)
+    line_end = compose.find("\n", match.start())
+    if line_end == -1:
+        line_end = len(compose)
+    inserted = "".join(f"\n{indent}- {d}:{d}:ro" for d in dirs)
+    return compose[:line_end] + inserted + compose[line_end:]
+
+
+def host_path_for_cert(cert_file: str, compose: str, install_path: str) -> str:
+    """Путь файла на хосте: путь из конфига — это путь в контейнере, и если его
+    покрывает существующий volume, файл на хосте лежит в источнике маунта."""
+    for src, dst in _VOLUME_LINE_RE.findall(compose or ""):
+        target = dst.rstrip("/")
+        if cert_file == target or cert_file.startswith(target + "/"):
+            if src.startswith("./"):
+                src = f"{install_path}/{src[2:]}"
+            return src.rstrip("/") + cert_file[len(target):]
+    return cert_file
+
+
+def explain_validation_error(output: str) -> str:
+    if "cannot load certificate" in output or "BIO_new_file" in output:
+        return f"{output}\n{CERT_HINT}"
+    return output
+
+
 def patch_host_limits(content: str, limits: dict) -> str:
     """Подставляет вычисленные лимиты в строки с маркером `# auto: node`."""
     def replace(match: re.Match) -> str:
@@ -310,19 +405,50 @@ class RemnawaveNginxManager:
         limits = compute_host_limits(await self._compose_nofile(path))
         return patch_host_limits(content, limits)
 
-    async def validate_content(self, path: str, content: str) -> tuple[bool, str]:
+    async def missing_certs_on_host(self, path: str, content: str) -> list[str]:
+        """Файлы сертификатов из конфига, которых нет на хосте (хостовые пути)."""
+        cert_files = config_cert_files(content)
+        if not cert_files:
+            return []
+        compose = await read_host_file_exact(f"{path}/docker-compose.yml") or ""
+        host_files = [host_path_for_cert(f, compose, path) for f in cert_files]
+        checks = "; ".join(
+            f"[ -e {shlex.quote(f)} ] || echo {shlex.quote(f)}" for f in host_files
+        )
+        result = await get_host_executor().execute(checks, timeout=10, shell="bash")
+        if not result.success:
+            return []
+        reported = set(result.stdout.split())
+        return [f for f in host_files if f in reported]
+
+    @staticmethod
+    def _missing_certs_message(missing: list[str]) -> str:
+        return (
+            "Сертификат не найден на хосте: " + ", ".join(missing) +
+            ". Выпустите сертификат (например certbot'ом) или исправьте пути "
+            "в опциях профиля; для битого симлинка letsencrypt проверьте каталог archive"
+        )
+
+    async def validate_content(self, path: str, content: str,
+                               force_one_off: bool = False) -> tuple[bool, str]:
         """Проверка кандидата nginx -t без записи в рабочий файл.
 
+        Сначала — существование сертификатов на хосте: ошибка «файла нет»
+        человеко-читаема и не зависит от того, примонтирован ли каталог.
         В живом контейнере кандидат кладётся в /tmp через stdin (docker cp
         недоступен: путь хоста не существует в ФС контейнера агента).
-        Без живого контейнера — одноразовый контейнер с реальными
-        сертификатами (letsencrypt + ssl каталог установки).
+        Без живого контейнера (или при force_one_off, когда живому не хватает
+        маунтов) — одноразовый контейнер с каталогами сертификатов.
         """
         path = validate_install_path(path)
         content = await self.apply_host_limits(path, content)
-        container = await self.container_status()
 
-        if container["running"]:
+        missing = await self.missing_certs_on_host(path, content)
+        if missing:
+            return False, self._missing_certs_message(missing)
+
+        container = await self.container_status()
+        if container["running"] and not force_one_off:
             candidate = f"/tmp/nginx.conf{CANDIDATE_SUFFIX}"
             upload = await _docker(
                 "exec", "-i", NGINX_CONTAINER, "sh", "-c", f"cat > {candidate}",
@@ -335,18 +461,32 @@ class RemnawaveNginxManager:
                 timeout=_VALIDATE_TIMEOUT,
             )
             await _docker("exec", NGINX_CONTAINER, "rm", "-f", candidate)
-            return check.success, check.output
+            if check.success:
+                return True, check.output
+            return False, explain_validation_error(check.output)
 
         image = container["image"] or FALLBACK_NGINX_IMAGE
-        check = await _docker(
-            "run", "--rm", "-i",
-            "-v", "/etc/letsencrypt:/etc/letsencrypt:ro",
+        mounts = [
+            "-v", f"{LETSENCRYPT_ROOT}:{LETSENCRYPT_ROOT}:ro",
             "-v", f"{path}/ssl:/etc/nginx/ssl:ro",
+        ]
+        covered = [LETSENCRYPT_ROOT, "/etc/nginx/ssl"]
+        for cert_file in config_cert_files(content):
+            if is_covered_by_mounts(cert_file, covered):
+                continue
+            mount_dir = cert_mount_dir(cert_file)
+            if mount_dir != "/":
+                covered.append(mount_dir)
+                mounts += ["-v", f"{mount_dir}:{mount_dir}:ro"]
+        check = await _docker(
+            "run", "--rm", "-i", *mounts,
             "--entrypoint", "sh", image,
             "-c", "cat > /tmp/candidate.conf && nginx -t -c /tmp/candidate.conf",
             timeout=_VALIDATE_TIMEOUT, stdin_data=content,
         )
-        return check.success, check.output
+        if check.success:
+            return True, check.output
+        return False, explain_validation_error(check.output)
 
     async def apply_config(self, path: str, content: str, reload_after: bool = True,
                            restart: bool = False, ensure_started: bool = False) -> dict:
@@ -369,14 +509,27 @@ class RemnawaveNginxManager:
         # его же панель хранит как эталон для drift-детекции.
         content = await self.apply_host_limits(path, content)
         new_hash = config_sha256(content)
-        container = await self.container_status()
 
-        # Установка из install.sh монтирует nginx.conf фрагментом http-контекста:
-        # полный конфиг профиля туда не подходит, монтирование переводится на
-        # главный конфиг — это требует пересоздания контейнера, а не reload.
-        remount = await self._prepare_remount(path)
-        if remount is not None:
-            return await self._apply_with_remount(path, conf, current, content, new_hash, remount)
+        missing = await self.missing_certs_on_host(path, content)
+        if missing:
+            return self._apply_result(False, self._missing_certs_message(missing), validated=False)
+
+        container = await self.container_status()
+        cert_files = config_cert_files(content)
+
+        # Пересоздание контейнера нужно в двух случаях: compose требует правки
+        # (фрагментное монтирование nginx.conf из install.sh и/или недостающие
+        # тома каталогов сертификатов) либо compose уже в порядке, но контейнер
+        # создан до добавления томов и сертификатов не видит.
+        compose_patch = await self._prepare_compose_patch(path, cert_files)
+        needs_recreate = compose_patch is not None
+        if not needs_recreate and container["running"]:
+            needs_recreate = bool(await self._certs_not_visible_in_container(cert_files))
+        if needs_recreate:
+            start = container["running"] or ensure_started
+            return await self._apply_with_recreate(
+                path, conf, current, content, new_hash, compose_patch, start
+            )
 
         if not container["running"]:
             # Валидируем одноразовым контейнером ДО записи: живого nginx,
@@ -404,8 +557,11 @@ class RemnawaveNginxManager:
         check = await _docker("exec", NGINX_CONTAINER, "nginx", "-t", timeout=_VALIDATE_TIMEOUT)
         if not check.success:
             await self._rollback(conf, current)
-            return self._apply_result(False, f"Конфиг не прошёл проверку, откат: {check.output}",
-                                      validated=False)
+            return self._apply_result(
+                False,
+                f"Конфиг не прошёл проверку, откат: {explain_validation_error(check.output)}",
+                validated=False,
+            )
 
         if not reload_after:
             return self._apply_result(True, "Конфиг применён (reload пропущен)",
@@ -425,50 +581,104 @@ class RemnawaveNginxManager:
         return self._apply_result(True, f"Конфиг применён, nginx {verb}",
                                   validated=True, reloaded=True, hash_=new_hash)
 
-    async def _prepare_remount(self, path: str) -> Optional[dict]:
-        """(compose_path, current, patched) если монтирование нужно перевести."""
+    async def _prepare_compose_patch(self, path: str, cert_files: list[str]) -> Optional[dict]:
+        """Патч docker-compose.yml установки, если он нужен: перевод фрагментного
+        монтирования на полный nginx.conf и/или недостающие тома каталогов
+        сертификатов. None — менять нечего."""
         compose_path = f"{path}/docker-compose.yml"
         compose = await read_host_file_exact(compose_path)
         if not compose:
             return None
+
         patched = patch_compose_mount(compose)
+        remounted = patched is not None
         if patched is None:
+            patched = compose
+
+        added_volumes = missing_cert_mounts(patched, cert_files)
+        with_volumes = patch_compose_volumes(patched, added_volumes)
+        if with_volumes is not None:
+            patched = with_volumes
+        else:
+            added_volumes = []
+
+        if patched == compose:
             return None
-        return {"path": compose_path, "current": compose, "patched": patched}
+        return {
+            "path": compose_path, "current": compose, "patched": patched,
+            "remounted": remounted, "added_volumes": added_volumes,
+        }
 
-    async def _apply_with_remount(self, path: str, conf: str, current_conf: str,
-                                  content: str, new_hash: str, remount: dict) -> dict:
-        """Перевод фрагментной установки на полный конфиг.
+    async def _certs_not_visible_in_container(self, cert_files: list[str]) -> list[str]:
+        """Сертификаты вне маунтов работающего контейнера: compose уже содержит
+        нужные тома, но контейнер создан раньше и их не подхватил."""
+        if not cert_files:
+            return []
+        result = await _docker(
+            "inspect", "-f", "{{range .Mounts}}{{.Destination}}\n{{end}}", NGINX_CONTAINER,
+            timeout=10,
+        )
+        if not result.success:
+            return []
+        targets = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        return [f for f in cert_files if not is_covered_by_mounts(f, targets)]
 
-        Кандидат проверяется ДО правки compose (nginx -t -c проверяет его именно
-        как главный конфиг), затем меняются compose и nginx.conf, и контейнер
-        пересоздаётся — смена точки монтирования иначе не подхватится.
+    async def _apply_with_recreate(self, path: str, conf: str, current_conf: str,
+                                   content: str, new_hash: str,
+                                   compose_patch: Optional[dict], start: bool) -> dict:
+        """Применение, требующее пересоздания контейнера.
+
+        Кандидат проверяется одноразовым контейнером ДО правок: живому nginx
+        может не хватать маунтов сертификатов, а nginx -t -c проверяет кандидата
+        именно как главный конфиг. Затем пишутся compose (если патчился)
+        и nginx.conf, контейнер пересоздаётся — иначе смена точки монтирования
+        или новые тома не подхватятся.
         """
-        valid, output = await self.validate_content(path, content)
+        valid, output = await self.validate_content(path, content, force_one_off=True)
         if not valid:
             return self._apply_result(False, f"Конфиг не прошёл проверку: {output}", validated=False)
 
-        if not await self._write_with_backup(remount["path"], remount["current"], remount["patched"]):
-            return self._apply_result(False, "Не удалось обновить docker-compose.yml установки")
+        if compose_patch is not None:
+            if not await self._write_with_backup(
+                compose_patch["path"], compose_patch["current"], compose_patch["patched"]
+            ):
+                return self._apply_result(False, "Не удалось обновить docker-compose.yml установки")
         if not await self._write_with_backup(conf, current_conf, content):
-            await write_host_file(remount["path"], remount["current"])
+            if compose_patch is not None:
+                await write_host_file(compose_patch["path"], compose_patch["current"])
             return self._apply_result(False, "Не удалось записать конфиг на хост")
+
+        remounted = bool(compose_patch and compose_patch["remounted"])
+        changes = []
+        if remounted:
+            changes.append("монтирование переведено на полный nginx.conf")
+        if compose_patch and compose_patch["added_volumes"]:
+            changes.append(
+                "в docker-compose.yml добавлены тома сертификатов: "
+                + ", ".join(compose_patch["added_volumes"])
+            )
+
+        if not start:
+            detail = "; ".join(changes) or "контейнер подхватит изменения при запуске"
+            return self._apply_result(True, f"Конфиг применён ({detail}; контейнер не запущен)",
+                                      validated=True, hash_=new_hash, remounted=remounted)
 
         recreated, msg = await self._compose_up(path, force_recreate=True)
         check = await _docker("exec", NGINX_CONTAINER, "nginx", "-t", timeout=_VALIDATE_TIMEOUT)
         if not recreated or not check.success:
-            await write_host_file(remount["path"], remount["current"])
+            if compose_patch is not None:
+                await write_host_file(compose_patch["path"], compose_patch["current"])
             await self._rollback(conf, current_conf)
             await self._compose_up(path, force_recreate=True)
-            detail = msg if not recreated else check.output
-            return self._apply_result(False, f"Не удалось перевести nginx на полный конфиг, откат: {detail}",
-                                      validated=True)
+            detail = msg if not recreated else explain_validation_error(check.output)
+            return self._apply_result(
+                False, f"Не удалось пересоздать контейнер с новым конфигом, откат: {detail}",
+                validated=True,
+            )
 
-        return self._apply_result(
-            True,
-            "Конфиг применён; монтирование переведено на полный nginx.conf, контейнер пересоздан",
-            validated=True, reloaded=True, hash_=new_hash, remounted=True,
-        )
+        changes.append("контейнер пересоздан")
+        return self._apply_result(True, "Конфиг применён; " + "; ".join(changes),
+                                  validated=True, reloaded=True, hash_=new_hash, remounted=remounted)
 
     async def reload(self) -> tuple[bool, str]:
         container = await self.container_status()

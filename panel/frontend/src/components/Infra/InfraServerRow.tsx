@@ -2,6 +2,7 @@ import { motion } from 'framer-motion'
 import { X } from 'lucide-react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
+import { Tooltip } from '../ui/Tooltip'
 import { formatPercent, formatBitsPerSec } from '../../utils/format'
 import type { ServerMetrics } from '../../api/client'
 
@@ -73,13 +74,14 @@ export default function InfraServerRow({ server, onRemove }: InfraServerRowProps
 
       {/* Remove button */}
       {onRemove && (
-        <button
-          className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-dark-600 text-dark-400 hover:text-danger transition-all"
-          onClick={e => { e.stopPropagation(); onRemove() }}
-          title={t('infra.remove_server')}
-        >
-          <X className="w-3.5 h-3.5" />
-        </button>
+        <Tooltip label={t('infra.remove_server')}>
+          <button
+            className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-dark-600 text-dark-400 hover:text-danger transition-all"
+            onClick={e => { e.stopPropagation(); onRemove() }}
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </Tooltip>
       )}
     </motion.div>
   )

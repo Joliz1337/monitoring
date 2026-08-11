@@ -94,13 +94,17 @@ class HAProxyConfigGenerator:
 
         Без maxconn в global: профиль применяется на серверы с разной RAM,
         поэтому потолок соединений вычисляет и подставляет нода при применении
-        (HAProxyManager._ensure_global_maxconn)."""
+        (HAProxyManager._ensure_global_maxconn). По той же причине число ядер
+        задано маркером `# cpu-affinity (auto)`, а не готовым cpu-map: какие ядра
+        заняты прерываниями сетевой карты, знает только сама нода."""
         return f"""global
     stats socket /var/run/haproxy.sock mode 660 level admin expose-fd listeners
     no log
     tune.bufsize 16384
     tune.maxpollevents 1024
     tune.recv_enough 16384
+    hard-stop-after 1h
+    # cpu-affinity (auto)
 
 defaults
     mode tcp
@@ -255,8 +259,8 @@ frontend {frontend_name}
 
         # HTTP заголовки для HTTPS
         if rule.rule_type == "https":
-            lines.append(f"    http-request set-header X-Forwarded-Proto https")
-            lines.append(f"    http-request set-header X-Forwarded-For %[src]")
+            lines.append("    http-request set-header X-Forwarded-Proto https")
+            lines.append("    http-request set-header X-Forwarded-For %[src]")
 
         # Серверы
         for srv in rule.servers:

@@ -515,6 +515,8 @@ export default function Dashboard() {
             )}
           </div>
 
+          <FAQIcon screen="DASHBOARD_FOLDERS" size="sm" />
+
           <Tooltip label={t('dashboard.create_folder')}>
             <button
               onClick={() => setModalState({ kind: 'create-folder' })}

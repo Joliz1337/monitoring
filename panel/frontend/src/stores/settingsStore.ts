@@ -89,6 +89,7 @@ interface SettingsState {
   timeSyncEnabled: boolean
   remnawaveNginxPath: string
   updateBranch: string
+  cpuAffinityEnabled: boolean
   isLoading: boolean
 
   fetchSettings: () => Promise<void>
@@ -104,8 +105,8 @@ interface SettingsState {
   setTimeSyncEnabled: (enabled: boolean) => Promise<void>
   setRemnawaveNginxPath: (path: string) => Promise<void>
   setUpdateBranch: (branch: string) => Promise<void>
+  setCpuAffinityEnabled: (enabled: boolean) => Promise<void>
   getEffectiveTimezone: () => string
-  getTimezoneOffset: () => number
 }
 
 export const useSettingsStore = create<SettingsState>((set, get) => ({
@@ -121,6 +122,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   timeSyncEnabled: true,
   remnawaveNginxPath: '/opt/remnawave',
   updateBranch: 'main',
+  cpuAffinityEnabled: false,
   isLoading: true,
   
   fetchSettings: async () => {
@@ -139,6 +141,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         timeSyncEnabled: data.settings.time_sync_enabled !== 'false',
         remnawaveNginxPath: data.settings.remnawave_nginx_path || '/opt/remnawave',
         updateBranch: data.settings.update_branch || 'main',
+        cpuAffinityEnabled: data.settings.cpu_affinity_enabled === 'true',
         isLoading: false,
       })
     } catch {
@@ -212,6 +215,12 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     toast.success(i18n.t('common.saved'))
   },
 
+  setCpuAffinityEnabled: async (enabled: boolean) => {
+    set({ cpuAffinityEnabled: enabled })
+    await settingsApi.set('cpu_affinity_enabled', enabled.toString())
+    toast.success(i18n.t('common.saved'))
+  },
+
   getEffectiveTimezone: () => {
     const { timezone } = get()
     if (timezone === 'auto') {
@@ -220,21 +229,4 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     return timezone
   },
   
-  getTimezoneOffset: () => {
-    const { timezone } = get()
-    if (timezone === 'auto') {
-      return -new Date().getTimezoneOffset() * 60
-    }
-    const option = TIMEZONE_OPTIONS.find(o => o.value === timezone)
-    if (option) {
-      const match = option.offset.match(/([+-])(\d{2}):(\d{2})/)
-      if (match) {
-        const sign = match[1] === '+' ? 1 : -1
-        const hours = parseInt(match[2])
-        const minutes = parseInt(match[3])
-        return sign * (hours * 3600 + minutes * 60)
-      }
-    }
-    return 3 * 3600 // Default to Moscow (+03:00)
-  },
 }))

@@ -29,6 +29,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from app.services.container_detect import running_in_container
+
 logger = logging.getLogger(__name__)
 
 PERSISTENT_FILE = "/var/lib/monitoring/blocklist.json"
@@ -99,23 +101,12 @@ class IpsetManager:
     """Manages ipset blocklists via nsenter (for Docker with pid: host)"""
     
     def __init__(self):
-        self._use_nsenter = self._check_nsenter_needed()
+        self._use_nsenter = running_in_container()
         self._temp_timeout = DEFAULT_TIMEOUT
         self._initialized = False
         # Мутации сетов сериализуются: эндпоинты выполняются в threadpool,
         # параллельные sync с панели не должны перемешивать diff-ы.
         self._mutate_lock = threading.Lock()
-    
-    def _check_nsenter_needed(self) -> bool:
-        if os.path.exists('/.dockerenv'):
-            return True
-        try:
-            with open('/proc/1/cgroup', 'r') as f:
-                if 'docker' in f.read():
-                    return True
-        except Exception:
-            pass
-        return False
     
     def _run_cmd(self, cmd: list[str], timeout: int = 30) -> tuple[bool, str, str]:
         if self._use_nsenter:
@@ -338,17 +329,35 @@ class IpsetManager:
             logger.warning(f"Failed to load config: {e}")
     
     def _save_config(self):
+        """Сохранить снимок сетов на диск — из него список восстанавливается после ребута.
+
+        Сет, который не удалось прочитать, отменяет запись целиком: частичный
+        снимок стёр бы блокировки, которые ipset прямо сейчас держит.
+        """
+        sources = {
+            'in_permanent': self._resolve_set(True, "in"),
+            'out_permanent': self._resolve_set(True, "out"),
+            'in_allow': self._get_allow_cfg("in")["set"],
+            'out_allow': self._get_allow_cfg("out")["set"],
+        }
+        data: dict = {'temp_timeout': self._temp_timeout}
+        for key, set_name in sources.items():
+            members = self._list_members(set_name)
+            if members is None:
+                logger.error(f"Skipped saving blocklist: {set_name} is unreadable")
+                return
+            data[key] = members
+
         try:
-            data = {
-                'in_permanent': self.list_ips(permanent=True, direction="in"),
-                'out_permanent': self.list_ips(permanent=True, direction="out"),
-                'in_allow': self.list_allow_ips(direction="in"),
-                'out_allow': self.list_allow_ips(direction="out"),
-                'temp_timeout': self._temp_timeout,
-            }
             Path(PERSISTENT_FILE).parent.mkdir(parents=True, exist_ok=True)
-            with open(PERSISTENT_FILE, 'w') as f:
+            # Через временный файл: обрыв на середине записи оставлял бы битый
+            # JSON, а он читается только при старте — поломка всплыла бы ребутом
+            tmp_path = f"{PERSISTENT_FILE}.tmp"
+            with open(tmp_path, 'w') as f:
                 json.dump(data, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, PERSISTENT_FILE)
             logger.debug("Saved config to file")
         except Exception as e:
             logger.error(f"Failed to save config: {e}")
@@ -422,50 +431,58 @@ class IpsetManager:
 
         set_name = self._resolve_set(permanent, direction)
 
-        if self._ip_in_set(ip, set_name):
-            return True, f"{ip} already in {set_name}"
+        with self._mutate_lock:
+            if self._ip_in_set(ip, set_name):
+                return True, f"{ip} already in {set_name}"
 
-        args = ["add", set_name, ip]
-        if not permanent:
-            effective_timeout = timeout if timeout is not None else self._temp_timeout
-            args.extend(["timeout", str(effective_timeout)])
-        
-        success, stdout, stderr = self._run_ipset(args)
-        if success:
-            logger.info(f"Added {ip} to {set_name}")
-            if permanent and save:
-                self._save_config()
-            return True, f"Added {ip} to {set_name}"
-        if "already added" in stderr.lower() or "already in set" in stderr.lower():
-            return True, f"{ip} already in {set_name}"
-        logger.error(f"Failed to add {ip} to {set_name}: {stderr}")
-        return False, f"Failed to add: {stderr}"
-    
+            args = ["add", set_name, ip]
+            if not permanent:
+                effective_timeout = timeout if timeout is not None else self._temp_timeout
+                args.extend(["timeout", str(effective_timeout)])
+
+            success, stdout, stderr = self._run_ipset(args)
+            if success:
+                logger.info(f"Added {ip} to {set_name}")
+                if permanent and save:
+                    self._save_config()
+                return True, f"Added {ip} to {set_name}"
+            if "already added" in stderr.lower() or "already in set" in stderr.lower():
+                return True, f"{ip} already in {set_name}"
+            logger.error(f"Failed to add {ip} to {set_name}: {stderr}")
+            return False, f"Failed to add: {stderr}"
+
     def remove_ip(self, ip: str, permanent: bool = True, direction: str = "in") -> tuple[bool, str]:
         ip = self._normalize_ip(ip)
         if not self._validate_ip_cidr(ip):
             return False, f"Invalid IP/CIDR: {ip}"
-        
+
         set_name = self._resolve_set(permanent, direction)
-        success, stdout, stderr = self._run_ipset(["del", set_name, ip])
-        
-        if success:
-            logger.info(f"Removed {ip} from {set_name}")
-            if permanent:
-                self._save_config()
-            return True, f"Removed {ip} from {set_name}"
-        if "not in set" in stderr.lower() or "element is missing" in stderr.lower():
-            return True, f"{ip} was not in {set_name}"
-        logger.error(f"Failed to remove {ip} from {set_name}: {stderr}")
-        return False, f"Failed to remove: {stderr}"
+
+        with self._mutate_lock:
+            success, stdout, stderr = self._run_ipset(["del", set_name, ip])
+
+            if success:
+                logger.info(f"Removed {ip} from {set_name}")
+                if permanent:
+                    self._save_config()
+                return True, f"Removed {ip} from {set_name}"
+            if "not in set" in stderr.lower() or "element is missing" in stderr.lower():
+                return True, f"{ip} was not in {set_name}"
+            logger.error(f"Failed to remove {ip} from {set_name}: {stderr}")
+            return False, f"Failed to remove: {stderr}"
     
-    def list_ips(self, permanent: bool = True, direction: str = "in") -> list[str]:
-        set_name = self._resolve_set(permanent, direction)
+    def _list_members(self, set_name: str) -> Optional[list[str]]:
+        """Содержимое сета, либо None если прочитать не удалось.
+
+        Разница принципиальна: `ipset list` на сете в сотни тысяч записей
+        упирается в таймаут, а «пусто» вместо «не смог» затирало сохранённый
+        блок-лист на диске и подсовывало синку пустую базу для diff-а.
+        """
         success, stdout, stderr = self._run_ipset(["list", set_name])
         if not success:
             logger.error(f"Failed to list {set_name}: {stderr}")
-            return []
-        
+            return None
+
         ips = []
         in_members = False
         for line in stdout.split('\n'):
@@ -478,46 +495,56 @@ class IpsetManager:
                 if parts:
                     ips.append(parts[0])
         return ips
+
+    def list_ips(self, permanent: bool = True, direction: str = "in") -> list[str]:
+        return self._list_members(self._resolve_set(permanent, direction)) or []
     
     def clear_set(self, permanent: bool = True, direction: str = "in") -> tuple[bool, str]:
         set_name = self._resolve_set(permanent, direction)
-        success, stdout, stderr = self._run_ipset(["flush", set_name])
-        if success:
-            logger.info(f"Cleared {set_name}")
-            if permanent:
-                self._save_config()
-            return True, f"Cleared {set_name}"
-        logger.error(f"Failed to clear {set_name}: {stderr}")
-        return False, f"Failed to clear: {stderr}"
-    
+        with self._mutate_lock:
+            success, stdout, stderr = self._run_ipset(["flush", set_name])
+            if success:
+                logger.info(f"Cleared {set_name}")
+                if permanent:
+                    self._save_config()
+                return True, f"Cleared {set_name}"
+            logger.error(f"Failed to clear {set_name}: {stderr}")
+            return False, f"Failed to clear: {stderr}"
+
     def set_timeout(self, seconds: int) -> tuple[bool, str]:
         if seconds < 1 or seconds > 86400 * 30:
             return False, "Invalid timeout (1 - 2592000 seconds)"
-        
+
         old_timeout = self._temp_timeout
-        self._temp_timeout = seconds
-        
-        # Recreate temp sets for both directions
-        for direction, cfg in _DIR_CONFIG.items():
-            temp_set = cfg["temp"]
-            self._remove_iptables_rule(temp_set, direction)
-            self._run_ipset(["destroy", temp_set])
-            
-            success, msg = self._create_set(temp_set, with_timeout=True)
-            if not success:
-                self._temp_timeout = old_timeout
-                self._create_set(temp_set, with_timeout=True)
-                self._add_iptables_rule(temp_set, direction)
-                return False, f"Failed to recreate {direction} temp set: {msg}"
-            
-            success, msg = self._add_iptables_rule(temp_set, direction)
-            if not success:
-                return False, f"Failed to re-add iptables rule for {direction} temp: {msg}"
 
-            # temp-DROP всплыл в позицию 1 — вернуть ACCEPT белого списка выше него
-            self._ensure_allow_rule_priority(direction)
+        # Под общим локом: между destroy и повторным add-ом iptables-правила
+        # временные блокировки не действуют, и параллельный синк в этот момент
+        # работал бы по уже уничтоженному сету
+        with self._mutate_lock:
+            self._temp_timeout = seconds
 
-        self._save_config()
+            # Recreate temp sets for both directions
+            for direction, cfg in _DIR_CONFIG.items():
+                temp_set = cfg["temp"]
+                self._remove_iptables_rule(temp_set, direction)
+                self._run_ipset(["destroy", temp_set])
+
+                success, msg = self._create_set(temp_set, with_timeout=True)
+                if not success:
+                    self._temp_timeout = old_timeout
+                    self._create_set(temp_set, with_timeout=True)
+                    self._add_iptables_rule(temp_set, direction)
+                    self._ensure_allow_rule_priority(direction)
+                    return False, f"Failed to recreate {direction} temp set: {msg}"
+
+                success, msg = self._add_iptables_rule(temp_set, direction)
+                if not success:
+                    return False, f"Failed to re-add iptables rule for {direction} temp: {msg}"
+
+                # temp-DROP всплыл в позицию 1 — вернуть ACCEPT белого списка выше него
+                self._ensure_allow_rule_priority(direction)
+
+            self._save_config()
         logger.info(f"Changed temp timeout to {seconds}s")
         return True, f"Timeout changed to {seconds} seconds"
     
@@ -595,7 +622,11 @@ class IpsetManager:
         new_ips, invalid_ips, skipped_non_public = self._prepare_block_ips(ips)
 
         with self._mutate_lock:
-            current_ips = set(self.list_ips(permanent=permanent, direction=direction))
+            members = self._list_members(set_name)
+            if members is None:
+                # Пустая база дала бы to_remove = ∅ и молча разошлась бы с панелью
+                return False, f"Cannot read current contents of {set_name}", {}
+            current_ips = set(members)
 
             to_add = new_ips - current_ips
             to_remove = current_ips - new_ips
@@ -624,26 +655,6 @@ class IpsetManager:
 
     # ── allow list operations (always permanent, no timeout) ──
 
-    def list_allow_ips(self, direction: str = "in") -> list[str]:
-        set_name = self._get_allow_cfg(direction)["set"]
-        success, stdout, stderr = self._run_ipset(["list", set_name])
-        if not success:
-            logger.error(f"Failed to list {set_name}: {stderr}")
-            return []
-
-        ips = []
-        in_members = False
-        for line in stdout.split('\n'):
-            line = line.strip()
-            if line.startswith('Members:'):
-                in_members = True
-                continue
-            if in_members and line:
-                parts = line.split()
-                if parts:
-                    ips.append(parts[0])
-        return ips
-
     def sync_allow(self, ips: list[str], direction: str = "in") -> tuple[bool, str, dict]:
         set_name = self._get_allow_cfg(direction)["set"]
 
@@ -657,7 +668,10 @@ class IpsetManager:
                 invalid_ips.append(ip)
 
         with self._mutate_lock:
-            current_ips = set(self.list_allow_ips(direction=direction))
+            members = self._list_members(set_name)
+            if members is None:
+                return False, f"Cannot read current contents of {set_name}", {}
+            current_ips = set(members)
             to_add = normalized_ips - current_ips
             to_remove = current_ips - normalized_ips
 

@@ -8,7 +8,6 @@ POST /servers/deploy — запускает фоновую задачу уста
 import ipaddress
 import json
 import logging
-import socket
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -18,28 +17,18 @@ from sqlalchemy.exc import IntegrityError
 from typing import Optional
 
 from app.auth import verify_auth
-from app.config import get_settings
 from app.database import async_session_maker, get_db
 from app.models import RemnawaveCertProfile
 from app.services.deploy_job_manager import PostDeployOptions, get_deploy_job_manager
 from app.services.deploy_service import DeployParams
 from app.services.http_client import validate_proxy_input
+from app.services.net_utils import resolve_panel_ip
 from app.services.pki import build_installer_token
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/servers", tags=["deploy"])
-
-
-def _resolve_panel_ip() -> Optional[str]:
-    domain = get_settings().domain
-    if not domain:
-        return None
-    try:
-        return socket.gethostbyname(domain)
-    except socket.gaierror:
-        return None
 
 
 def _validate_host(raw: str) -> str:
@@ -233,7 +222,7 @@ async def deploy_server(
     if req.new_root_password is not None and len(req.new_root_password) < 8:
         raise HTTPException(400, "Пароль root: минимум 8 символов")
 
-    panel_ip = _resolve_panel_ip()
+    panel_ip = await resolve_panel_ip()
     node_secret = build_installer_token(request.app.state.pki, panel_ip=panel_ip)
     server_url = f"https://{host}:{req.monitoring_port}"
 

@@ -1,4 +1,6 @@
 import { useEffect, useState, useCallback, useMemo } from 'react'
+import NodeRestrictedNotice from '../components/servers/NodeRestrictedNotice'
+import { nodeAllows } from '../utils/nodeCapabilities'
 import { KeyRound, Shield, Lock, Loader2, Trash2, Plus, AlertTriangle, ChevronDown, ChevronUp, Info, Copy, RefreshCw, Save, Eye, EyeOff, LayoutGrid, SlidersHorizontal } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -314,6 +316,7 @@ export default function SSHSecurity() {
 
   const [servers, setServers] = useState<ServerType[]>([])
   const [activeServerId, setActiveServerId] = useState<number | null>(null)
+  const sshAllowed = nodeAllows(servers.find(s => s.id === activeServerId), 'ssh', 'read')
   const [selectedServerIds, setSelectedServerIds] = useState<number[]>([])
 
   const [mode, setMode] = useState<PageMode>('manage')
@@ -373,7 +376,7 @@ export default function SSHSecurity() {
   const fetchServers = useCallback(async () => {
     try {
       const response = await serversApi.list()
-      const list = response.data.servers
+      const list = response.data.servers.filter(s => s.is_active)
       setServers(list)
       if (list.length > 0) {
         setActiveServerId(prev => prev ?? list[0].id)
@@ -386,6 +389,14 @@ export default function SSHSecurity() {
 
   const fetchServerData = useCallback(async (serverId: number) => {
     setNodeUnsupported(false)
+    // В закрытую ноду не идём вовсе: четыре запроса за гарантированным отказом
+    if (!nodeAllows(servers.find(s => s.id === serverId), 'ssh', 'read')) {
+      setSshConfig(null)
+      setFail2ban(null)
+      setSshKeys([])
+      setStatus(null)
+      return
+    }
     try {
       const [configRes, fail2banRes, keysRes, statusRes] = await Promise.all([
         sshSecurityApi.getConfig(serverId),
@@ -420,7 +431,7 @@ export default function SSHSecurity() {
       }
     } catch (err: any) {
       const statusCode = err.response?.status
-      if (statusCode === 501 || statusCode === 503) {
+      if (statusCode === 409 || statusCode === 501 || statusCode === 503) {
         setNodeUnsupported(true)
         setSshConfig(null)
         setFail2ban(null)
@@ -430,7 +441,7 @@ export default function SSHSecurity() {
         toast.error(t('ssh_security.config_failed'))
       }
     }
-  }, [t])
+  }, [servers, t])
 
   const fetchBannedIps = useCallback(async (serverId: number) => {
     try {
@@ -860,8 +871,13 @@ export default function SSHSecurity() {
               )}
             </div>
 
+            {/* Раздел закрыт владельцем ноды — это не поломка и не старый агент */}
+            {activeServerId && !sshAllowed && (
+              <NodeRestrictedNotice server={servers.find(s => s.id === activeServerId)} compact />
+            )}
+
             {/* Node unsupported message */}
-            {nodeUnsupported && activeServerId && (
+            {nodeUnsupported && sshAllowed && activeServerId && (
               <div className="flex items-start gap-4 p-5 bg-orange-500/10 border border-orange-500/20 rounded-xl">
                 <AlertTriangle className="w-6 h-6 text-orange-400 mt-0.5 shrink-0" />
                 <div>
@@ -872,7 +888,7 @@ export default function SSHSecurity() {
             )}
 
             {/* Presets */}
-            {presets && activeServerId && !nodeUnsupported && (
+            {presets && activeServerId && sshAllowed && !nodeUnsupported && (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <PresetCard
                   type="recommended"
@@ -927,7 +943,7 @@ export default function SSHSecurity() {
             )}
 
             {/* Save custom preset */}
-            {activeServerId && !nodeUnsupported && mergedConfig && (
+            {activeServerId && sshAllowed && !nodeUnsupported && mergedConfig && (
               <div className="flex items-center gap-3">
                 <input
                   type="text"
@@ -951,7 +967,7 @@ export default function SSHSecurity() {
             )}
 
             {/* Tabs */}
-            {activeServerId && !nodeUnsupported && (
+            {activeServerId && sshAllowed && !nodeUnsupported && (
               <div className="flex gap-2 border-b border-dark-700 pb-2">
                 {(['ssh', 'fail2ban', 'keys'] as const).map(tab => (
                   <button
@@ -970,7 +986,7 @@ export default function SSHSecurity() {
             )}
 
             {/* Tab Content */}
-            {activeServerId && !nodeUnsupported && (
+            {activeServerId && sshAllowed && !nodeUnsupported && (
               <AnimatePresence mode="wait">
                 {/* SSH Settings Tab */}
                 {activeTab === 'ssh' && mergedConfig && (
@@ -1378,13 +1394,17 @@ export default function SSHSecurity() {
                                 key={key.fingerprint}
                                 className="grid grid-cols-[1fr_80px_1fr_40px] gap-3 items-center p-3 bg-dark-800/50 rounded-lg border border-dark-700/50"
                               >
-                                <code className="text-xs text-dark-200 font-mono truncate" title={key.fingerprint}>
-                                  {key.fingerprint}
-                                </code>
+                                <Tooltip label={key.fingerprint} maxWidth={360}>
+                                  <code className="text-xs text-dark-200 font-mono truncate">
+                                    {key.fingerprint}
+                                  </code>
+                                </Tooltip>
                                 <span className="text-xs text-dark-400">{key.type}</span>
-                                <span className="text-xs text-dark-400 truncate" title={key.comment}>
-                                  {key.comment || '—'}
-                                </span>
+                                <Tooltip label={key.comment}>
+                                  <span className="text-xs text-dark-400 truncate">
+                                    {key.comment || '—'}
+                                  </span>
+                                </Tooltip>
                                 <Tooltip label={t('common.delete')}>
                                   <button
                                     onClick={() => handleRemoveKey(key.fingerprint)}

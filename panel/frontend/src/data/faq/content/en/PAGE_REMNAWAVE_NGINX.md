@@ -45,6 +45,8 @@ Not allowed: duplicate rule names or paths; a rule with path `/` while fallback 
 
 **Certificate paths** — with a wildcard certificate remove `{{DOMAIN}}` from them: the directory is named after the base domain (`/etc/letsencrypt/live/example.com/`), not after the node's subdomain. Keep the placeholder only when each node has its own separate certificate.
 
+The certificate itself must already exist on the node — before applying, the node checks the files on the host and returns a clear error if they are missing, instead of raw `nginx -t` output. No need to mount the certificate directory into the container manually: if the directory (including custom paths) is not mounted yet, the node adds the volume to the installation's `docker-compose.yml` itself and recreates the container.
+
 ## Node domain
 
 Set when linking and substituted for `{{DOMAIN}}` — in `server_name` and, if the placeholder is left there, in the certificate paths. Use the domain clients actually connect to on that node.

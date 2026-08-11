@@ -4,20 +4,21 @@ All auth failures result in connection drop - no HTTP error responses.
 This gives attackers zero information about what went wrong.
 """
 
+import logging
 import secrets
 import time
 import jwt
 from datetime import datetime, timedelta, timezone
-from fastapi import HTTPException, Request, Response, Depends
+from fastapi import HTTPException, Request, Response
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.database import get_db
 from app.models import FailedLogin
-from app.security import drop_connection, get_security_manager
+from app.security import drop_connection, get_client_ip, get_security_manager
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
 async def check_ip_banned(ip: str, db: AsyncSession) -> bool:
@@ -91,21 +92,20 @@ def verify_token(token: str) -> dict | None:
         return None
 
 
-def get_client_ip(request: Request) -> str:
-    """Извлечь реальный IP клиента.
+async def ensure_not_banned(ip: str, db: AsyncSession):
+    """Бан живёт в памяти и в БД: память теряет его при рестарте, БД — переживает."""
+    memory_banned = get_security_manager().is_banned(ip)
+    db_banned = await check_ip_banned(ip, db)
 
-    X-Forwarded-For / X-Real-IP доверяем только если запрос пришёл
-    от локального nginx (127.0.0.1) — внешний подмены не сможет.
-    """
-    direct = request.client.host if request.client else "unknown"
-    if direct in ("127.0.0.1", "::1"):
-        forwarded = request.headers.get("X-Forwarded-For")
-        if forwarded:
-            return forwarded.split(",")[0].strip()
-        real_ip = request.headers.get("X-Real-IP")
-        if real_ip:
-            return real_ip
-    return direct
+    if memory_banned or db_banned:
+        logger.warning(f"Request blocked for {ip}: memory_banned={memory_banned}, db_banned={db_banned}")
+        drop_connection()
+
+
+async def register_auth_failure(ip: str, db: AsyncSession):
+    """Неудачная попытка входа или подбор UID — считаем в обоих хранилищах бана."""
+    await record_failed_attempt(ip, db)
+    await get_security_manager().record_auth_failure(ip)
 
 
 async def verify_auth(request: Request):
@@ -131,32 +131,20 @@ async def verify_auth(request: Request):
 
 async def login(password: str, request: Request, response: Response, db: AsyncSession) -> dict:
     """Login - drops connection on any failure"""
-    import logging
-    logger = logging.getLogger(__name__)
-    
     ip = get_client_ip(request)
-    security = get_security_manager()
-    
-    # Check ban in both memory and database
-    memory_banned = security.is_banned(ip)
-    db_banned = await check_ip_banned(ip, db)
-    
-    if memory_banned or db_banned:
-        logger.warning(f"Login blocked for {ip}: memory_banned={memory_banned}, db_banned={db_banned}")
-        drop_connection()
-    
+    await ensure_not_banned(ip, db)
+
     # Timing-safe password comparison
     if not secrets.compare_digest(password, settings.panel_password):
-        logger.warning(f"Invalid password from {ip}, password length: {len(password)}")
-        await record_failed_attempt(ip, db)
-        await security.record_auth_failure(ip)
+        logger.warning(f"Invalid password from {ip}")
+        await register_auth_failure(ip, db)
         drop_connection()
-    
+
     # Success - clear failed attempts
     logger.info(f"Successful login from {ip}")
     await clear_failed_attempts(ip, db)
-    await security.record_auth_success(ip)
-    
+    await get_security_manager().record_auth_success(ip)
+
     token = create_token({"sub": "panel_user", "ip": ip})
     
     response.set_cookie(

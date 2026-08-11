@@ -81,9 +81,3 @@ async def install_watchdog(request: InstallRequest):
     )
     status = await get_antiddos_manager().get_status()
     return {"success": ok, "message": msg, "status": _status_dict(status)}
-
-
-@router.get("/client-ports")
-async def get_client_ports():
-    ports = await get_antiddos_manager().get_client_ports()
-    return {"ports": ports}

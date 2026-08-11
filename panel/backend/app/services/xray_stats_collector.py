@@ -5,7 +5,7 @@ Collection flow (ephemeral — each cycle replaces all data):
 1. GET /api/nodes → filter connected & enabled
 2. POST /api/ip-control/fetch-users-ips/{nodeUuid} → jobId per node
 3. Poll results → merge all (user_id, ip) pairs, filter ACTIVE users
-4. DELETE all old IPs → INSERT fresh snapshot
+4. DELETE old IPs → INSERT fresh snapshot
 """
 
 import asyncio
@@ -24,6 +24,7 @@ from app.models import RemnawaveSettings, XrayStats, RemnawaveUserCache, Remnawa
 from app.services.remnawave_api import get_remnawave_api, RemnawaveAPIError
 from app.services.asn_lookup import lookup_ips_cached, group_ips_by_asn, effective_ip_count, enrich_with_names
 from app.services import ip_anomaly_state
+from app.services.known_clients import build_ua_pattern
 
 logger = logging.getLogger(__name__)
 
@@ -31,21 +32,6 @@ UPSERT_BATCH_SIZE = 500
 USER_CACHE_BATCH_SIZE = 100
 HWID_BATCH_SIZE = 200
 IP_POLL_CONCURRENCY = 3
-
-KNOWN_UA_PATTERN = re.compile(
-    r'^(v2raytun/(ios|android|windows)'
-    r'|Clash-Meta/Prizrak-Box'
-    r'|Happ/'
-    r'|FlClash ?X/'
-    r'|INCY/'
-    r'|HiddifyNext/'
-    r'|Hiddify/'
-    r'|Flowvy/'
-    r'|prizrak-box/'
-    r'|koala-clash/'
-    r')',
-    re.IGNORECASE,
-)
 
 VERSION_PATTERN = re.compile(r'\d')
 
@@ -295,6 +281,12 @@ class XrayStatsCollector:
         """Заменяет все IP-данные актуальным снимком (DELETE + INSERT)."""
         async with self._db_write_lock:
             async with async_session() as db:
+                # Именно DELETE, не TRUNCATE. TRUNCATE берёт ACCESS EXCLUSIVE и держит
+                # его до конца вставки, а вставший в очередь эксклюзивный лок в
+                # PostgreSQL блокирует и всех читателей, пришедших после него — страница
+                # Remnawave вставала бы на всё время цикла. DELETE работает по MVCC и
+                # читателей не трогает; мёртвые кортежи разбирает autovacuum, пороги для
+                # этой таблицы занижены в _migrate_db_optimizations.
                 await db.execute(delete(XrayStats))
 
                 items = list(merged.items())
@@ -607,22 +599,37 @@ class XrayStatsCollector:
         ignored_all = await self._get_ignored_user_ids()
         now = datetime.now(timezone.utc).replace(tzinfo=None)
 
+        # Пер-тип тумблеры: NULL (строка до миграции) трактуется как включено
+        ip_check_on = settings.anomaly_ip_enabled is not False
+        hwid_check_on = settings.anomaly_hwid_enabled is not False
+        ua_check_on = settings.anomaly_ua_enabled is not False
+        devdata_check_on = settings.anomaly_devdata_enabled is not False
+
+        # Настраиваемые пороги проверок; NULL — дефолт как до появления настроек
+        ip_margin = settings.anomaly_ip_margin if settings.anomaly_ip_margin is not None else 2
+        ip_confirm = settings.anomaly_ip_confirm_count or 5
+        asn_margin = settings.anomaly_asn_margin if settings.anomaly_asn_margin is not None else 0
+        smart_check_on = settings.anomaly_ip_smart_enabled is not False
+        smart_traffic_gb = settings.anomaly_ip_smart_traffic_gb if settings.anomaly_ip_smart_traffic_gb is not None else 20.0
+        smart_traffic_bytes = int(smart_traffic_gb * 1024 ** 3)
+        ua_pattern = build_ua_pattern(settings.anomaly_ua_patterns)
+
         async with async_session() as db:
             ip_rows = (await db.execute(
                 select(XrayStats.email, sql_func.count(sql_func.distinct(XrayStats.source_ip)).label("cnt"))
                 .group_by(XrayStats.email)
-            )).all()
+            )).all() if ip_check_on else []
 
             hwid_rows = (await db.execute(
                 select(RemnawaveHwidDevice.user_uuid, sql_func.count().label("cnt"))
                 .group_by(RemnawaveHwidDevice.user_uuid)
-            )).all()
+            )).all() if hwid_check_on else []
 
             device_rows = (await db.execute(
                 select(RemnawaveHwidDevice.user_uuid, RemnawaveHwidDevice.user_agent,
                        RemnawaveHwidDevice.platform, RemnawaveHwidDevice.device_model,
                        RemnawaveHwidDevice.os_version, RemnawaveHwidDevice.hwid)
-            )).all()
+            )).all() if (ua_check_on or devdata_check_on) else []
 
             # Только нужные 5 колонок, а не весь ORM-объект: на крупной инсталляции
             # RemnawaveUserCache — десятки-сотни тысяч строк (Row даёт доступ по имени).
@@ -641,9 +648,8 @@ class XrayStatsCollector:
         # Детальный список IP больше НЕ грузим целиком — только по подтверждённым
         # аномальным пользователям (см. ниже), иначе это вся таблица XrayStats в памяти.
         COOLDOWN_SECONDS = 86400
-        IP_CONFIRM_THRESHOLD = 5
 
-        # 1) IP > лимит (после 5 подтверждений подряд). Показанные IP запоминаются:
+        # 1) IP > лимит + запас (после N подтверждений подряд). Показанные IP запоминаются:
         #    повторное уведомление — только при новых IP, со счётчиком «N-е срабатывание»
         #    и reply на предыдущее уведомление этого пользователя.
         current_anomaly_emails: set[int] = set()
@@ -655,7 +661,7 @@ class XrayStatsCollector:
                 continue
             if not cached.hwid_device_limit or cached.hwid_device_limit <= 0:
                 continue
-            if ip_count <= cached.hwid_device_limit + 2:
+            if ip_count <= cached.hwid_device_limit + ip_margin:
                 continue
 
             current_anomaly_emails.add(email)
@@ -663,7 +669,7 @@ class XrayStatsCollector:
             streak += 1
             self._ip_anomaly_streak[email] = (streak, ip_count)
 
-            if streak < IP_CONFIRM_THRESHOLD:
+            if streak < ip_confirm:
                 continue
 
             async with async_session() as db:
@@ -685,14 +691,28 @@ class XrayStatsCollector:
             if since is not None and since < (settings.anomaly_cooldown or 0):
                 continue
 
+            # Умное определение: разъездной пользователь меняет адреса, но столько
+            # трафика в одиночку не выкачивает — раздача подписки выкачивает.
+            # Стоит раньше ASN-блока: тут один запрос, там резолв всех IP через RIPE.
+            if smart_check_on and cached.uuid:
+                used_bytes = await self._user_daily_traffic(settings, cached.uuid)
+                if used_bytes is not None and used_bytes < smart_traffic_bytes:
+                    logger.info(
+                        f"IP anomaly suppressed by traffic: {cached.username or email} "
+                        f"has {ip_count} IPs but {round(used_bytes / 1024 ** 3, 2)} GB "
+                        f"per day (threshold: {smart_traffic_gb} GB)"
+                    )
+                    continue
+
             # ASN-проверка: группируем все текущие IP по провайдеру
             asn_map = await lookup_ips_cached(list(current_ips)) if current_ips else {}
             unique_asn_count = effective_ip_count(group_ips_by_asn(asn_map))
 
-            if unique_asn_count <= cached.hwid_device_limit:
+            if unique_asn_count <= cached.hwid_device_limit + asn_margin:
                 logger.info(
                     f"IP anomaly suppressed by ASN: {cached.username or email} "
-                    f"has {ip_count} IPs but {unique_asn_count} unique ASNs (limit: {cached.hwid_device_limit})"
+                    f"has {ip_count} IPs but {unique_asn_count} unique ASNs "
+                    f"(limit: {cached.hwid_device_limit} + margin: {asn_margin})"
                 )
                 continue
 
@@ -772,8 +792,8 @@ class XrayStatsCollector:
             if cached.email in ignored_all or cached.email in ignore_hwid:
                 continue
 
-            # Проверка UA
-            if user_agent and not KNOWN_UA_PATTERN.search(user_agent):
+            # Проверка UA по настраиваемому реестру известных клиентов
+            if ua_check_on and user_agent and not ua_pattern.search(user_agent):
                 key = f"ua:{cached.email}"
                 last = self._anomaly_last_notified.get(key)
                 if not last or (now - last).total_seconds() >= COOLDOWN_SECONDS:
@@ -792,6 +812,8 @@ class XrayStatsCollector:
                     )
 
             # Проверка данных устройства: платформа, версия, модель — не пустые, версия в цифрах
+            if not devdata_check_on:
+                continue
             problems = []
             if not platform or not platform.strip():
                 problems.append("платформа: пусто")
@@ -913,6 +935,17 @@ class XrayStatsCollector:
     def get_ip_anomaly_streaks(self) -> dict[int, tuple[int, int]]:
         """email -> (streak_count, ip_count)"""
         return dict(self._ip_anomaly_streak)
+
+    async def _user_daily_traffic(self, settings: RemnawaveSettings, user_uuid: str) -> int | None:
+        """Расход трафика пользователя за сутки; None — данные недоступны (уведомление тогда шлём)."""
+        api = get_remnawave_api(settings.api_url, settings.api_token, settings.cookie_secret)
+        try:
+            return await api.get_user_traffic_bytes(user_uuid)
+        except Exception as e:
+            logger.warning(f"Traffic check failed for {user_uuid}: {e}")
+            return None
+        finally:
+            await api.close()
 
     async def _auto_clear_hwid(self, settings: RemnawaveSettings, user_uuid: str, username: str | None, email: int, current: int, limit: int):
         """Авто-очистка HWID устройств при превышении лимита."""

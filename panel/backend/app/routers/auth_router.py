@@ -1,16 +1,18 @@
 import secrets
-import time
 
 from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import delete
 from pydantic import BaseModel
 
 from app.database import get_db
-from app.auth import login, verify_auth, get_client_ip, clear_failed_attempts
+from app.auth import (
+    ensure_not_banned,
+    login,
+    register_auth_failure,
+    verify_auth,
+)
 from app.config import get_settings
-from app.security import drop_connection, get_security_manager
-from app.models import FailedLogin
+from app.security import drop_connection, get_client_ip
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 settings = get_settings()
@@ -25,11 +27,23 @@ class ValidateUidRequest(BaseModel):
 
 
 @router.post("/validate-uid")
-async def validate_uid(data: ValidateUidRequest):
-    """Validate panel UID - timing-safe comparison, drops connection on invalid"""
-    is_valid = secrets.compare_digest(data.uid, settings.panel_uid)
-    if not is_valid:
+async def validate_uid(
+    data: ValidateUidRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db)
+):
+    """Validate panel UID - timing-safe comparison, drops connection on invalid.
+
+    Неудачные попытки считаются наравне с паролем: без этого UID перебирался бы
+    бесконечно — drop connection сам по себе перебор не замедляет.
+    """
+    ip = get_client_ip(request)
+    await ensure_not_banned(ip, db)
+
+    if not secrets.compare_digest(data.uid, settings.panel_uid):
+        await register_auth_failure(ip, db)
         drop_connection()
+
     return {"valid": True}
 
 
@@ -54,83 +68,3 @@ async def auth_logout(response: Response):
 async def check_auth(_: dict = Depends(verify_auth)):
     return {"authenticated": True}
 
-
-@router.post("/clear-ban")
-async def clear_ban(
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """Clear ban for current IP (requires authentication)"""
-    ip = get_client_ip(request)
-    security = get_security_manager()
-    
-    # Clear from memory
-    await security.unban_ip(ip)
-    
-    # Clear from database
-    await clear_failed_attempts(ip, db)
-    
-    return {"success": True, "message": f"Cleared ban for IP {ip}"}
-
-
-@router.delete("/clear-all-bans")
-async def clear_all_bans(
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """Clear all IP bans (requires authentication)"""
-    security = get_security_manager()
-    
-    # Clear all from memory
-    async with security._lock:
-        security._records.clear()
-    
-    # Clear all from database
-    await db.execute(delete(FailedLogin))
-    await db.commit()
-    
-    return {"success": True, "message": "Cleared all IP bans"}
-
-
-@router.get("/ban-status")
-async def ban_status(
-    request: Request,
-    db: AsyncSession = Depends(get_db)
-):
-    """Check ban status for current IP (no auth required for debugging)"""
-    from sqlalchemy import select
-    
-    ip = get_client_ip(request)
-    security = get_security_manager()
-    
-    # Check memory
-    memory_banned = security.is_banned(ip)
-    memory_record = security._records.get(ip)
-    memory_info = None
-    if memory_record:
-        memory_info = {
-            "failed_attempts": memory_record.failed_attempts,
-            "banned_until": memory_record.banned_until,
-            "remaining_seconds": max(0, int(memory_record.banned_until - time.time())) if memory_record.banned_until else 0
-        }
-    
-    # Check database
-    result = await db.execute(
-        select(FailedLogin).where(FailedLogin.ip_address == ip)
-    )
-    db_record = result.scalar_one_or_none()
-    db_info = None
-    if db_record:
-        db_info = {
-            "attempts": db_record.attempts,
-            "banned_until": db_record.banned_until,
-            "remaining_seconds": max(0, int(db_record.banned_until - time.time())) if db_record.banned_until else 0
-        }
-    
-    return {
-        "ip": ip,
-        "memory_banned": memory_banned,
-        "memory_info": memory_info,
-        "db_info": db_info
-    }

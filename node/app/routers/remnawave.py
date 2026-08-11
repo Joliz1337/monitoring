@@ -16,8 +16,6 @@ from app.models.remnawave_nginx import (
     NginxConfigResponse,
     NginxDiscoverResponse,
     NginxStatusResponse,
-    NginxValidateRequest,
-    NginxValidateResponse,
 )
 from app.services.remnawave_nginx_manager import (
     DEFAULT_INSTALL_PATH,
@@ -83,17 +81,6 @@ async def nginx_status(path: str = PathParam):
 async def nginx_logs(tail: int = Query(default=100, ge=1, le=1000)):
     logs = await get_remnawave_nginx_manager().logs(tail)
     return {"logs": logs}
-
-
-@router.post("/nginx/validate", response_model=NginxValidateResponse)
-async def nginx_validate(request: NginxValidateRequest):
-    try:
-        valid, output = await get_remnawave_nginx_manager().validate_content(
-            request.path, request.content
-        )
-    except InvalidInstallPathError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    return NginxValidateResponse(valid=valid, output=output)
 
 
 @router.post("/nginx/config/apply", response_model=NginxApplyResponse)

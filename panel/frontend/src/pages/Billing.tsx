@@ -36,7 +36,7 @@ import { toast } from 'sonner'
 import { billingApi, BillingServerData, BillingSettingsData } from '../api/client'
 import { useSettingsStore } from '../stores/settingsStore'
 import { Tooltip } from '../components/ui/Tooltip'
-import { FAQIcon } from '../components/FAQ'
+import { FAQIcon, type FAQScreen } from '../components/FAQ'
 
 type ModalState =
   | { kind: 'none' }
@@ -973,9 +973,11 @@ function ProjectCard({ server, index, t, formatDateTime, sortable, onExtend, onT
                 </span>
               ) : null}
               {server.billing_type === 'yandex_cloud' && server.yc_last_error && (
-                <span className="text-red-400 text-[10px] truncate max-w-[150px]" title={server.yc_last_error}>
-                  API error
-                </span>
+                <Tooltip label={server.yc_last_error} maxWidth={320}>
+                  <span className="text-red-400 text-[10px] truncate max-w-[150px]">
+                    API error
+                  </span>
+                </Tooltip>
               )}
               {server.notes && (
                 <span className="truncate max-w-[200px]">{server.notes}</span>
@@ -1209,7 +1211,7 @@ function AddModal({ t, folders, onClose, onCreated }: {
 
           {billingType === 'monthly' ? (
             <>
-              <Field label={t('billing.paid_until')}>
+              <Field label={t('billing.paid_until')} faqScreen="BILLING_QUOTA">
                 <div className="flex gap-2 mb-2">
                   <button
                     onClick={() => setMonthlyMode('days')}
@@ -1306,7 +1308,7 @@ function AddModal({ t, folders, onClose, onCreated }: {
             </>
           ) : (
             <>
-              <Field label={t('billing.daily_cost')}>
+              <Field label={t('billing.daily_cost')} faqScreen="BILLING_QUOTA">
                 <input
                   type="number"
                   step="0.01"
@@ -1465,7 +1467,7 @@ function EditModal({ t, server, folders, onClose, onSaved }: {
           </Field>
 
           {server.billing_type === 'monthly' && (
-            <Field label={t('billing.paid_until')}>
+            <Field label={t('billing.paid_until')} faqScreen="BILLING_QUOTA">
               <input
                 type="text"
                 value={paidUntil}
@@ -1480,7 +1482,7 @@ function EditModal({ t, server, folders, onClose, onSaved }: {
 
           {server.billing_type === 'resource' && (
             <>
-              <Field label={t('billing.daily_cost')}>
+              <Field label={t('billing.daily_cost')} faqScreen="BILLING_QUOTA">
                 <input
                   type="number"
                   step="0.01"
@@ -2066,10 +2068,17 @@ function BillingUnfolderDropZone({ isOver, hasServers, hasFolders, children }: {
 /*  Small helpers                                                      */
 /* ------------------------------------------------------------------ */
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function Field({ label, children, faqScreen }: {
+  label: string
+  children: React.ReactNode
+  faqScreen?: FAQScreen
+}) {
   return (
     <div className="space-y-1.5">
-      <label className="text-sm text-dark-300">{label}</label>
+      <label className="text-sm text-dark-300 flex items-center gap-1">
+        {label}
+        {faqScreen && <FAQIcon screen={faqScreen} size="sm" />}
+      </label>
       {children}
     </div>
   )

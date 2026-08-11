@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from app.database import async_session
 from app.models import FirewallProfile, HAProxyConfigProfile, RemnawaveNginxProfile, Server, ServerCache
@@ -24,6 +25,12 @@ from app.services.haproxy_profile_sync import (
     sync_profile_to_servers as sync_haproxy_profile,
 )
 from app.services.http_client import get_node_client, node_auth_headers
+from app.services.node_capabilities import Capability, server_allows
+from app.services.node_sync_queue import (
+    KIND_BLOCKLIST,
+    KIND_FIREWALL_PROFILE,
+    clear as clear_pending_sync,
+)
 from app.services.remnawave_nginx_sync import (
     get_remnawave_nginx_path,
     render_profile_for_server,
@@ -34,6 +41,12 @@ logger = logging.getLogger(__name__)
 
 NODE_FETCH_TIMEOUT = 15.0
 HAPROXY_START_TIMEOUT = 30.0
+
+# Итоги, после которых нода уже в ожидаемом состоянии: применили, оно и так совпало,
+# либо применять нечего.
+# denied — тоже «делать больше нечего»: раздел закрыт на самой ноде,
+# и долг в очереди только копился бы
+RECONCILED_STATES = {"in_sync", "reapplied", "no_profile", "denied"}
 
 
 @dataclass
@@ -104,6 +117,8 @@ async def _reconcile_firewall(server_id: int) -> str:
         server = await db.get(Server, server_id)
         if not server or not server.active_firewall_profile_id:
             return "no_profile"
+        if not server_allows(server, Capability.FIREWALL, write=True):
+            return "denied"
         profile = await db.get(FirewallProfile, server.active_firewall_profile_id)
         if not profile:
             return "no_profile"
@@ -130,6 +145,8 @@ async def _reconcile_haproxy_config(server_id: int) -> str:
         server = await db.get(Server, server_id)
         if not server or not server.active_haproxy_profile_id:
             return "no_profile"
+        if not server_allows(server, Capability.HAPROXY, write=True):
+            return "denied"
         profile = await db.get(HAProxyConfigProfile, server.active_haproxy_profile_id)
         if not profile:
             return "no_profile"
@@ -155,6 +172,8 @@ async def _reconcile_haproxy_running(server_id: int, pre_death_running: bool | N
         server = await db.get(Server, server_id)
         if not server:
             return "skipped"
+        if not server_allows(server, Capability.HAPROXY, write=True):
+            return "denied"
 
     status = await _node_get(server, "/api/haproxy/status")
     if status is None:
@@ -174,6 +193,8 @@ async def _reconcile_remnawave_nginx(server_id: int) -> str:
         server = await db.get(Server, server_id)
         if not server or not server.active_remnawave_nginx_profile_id:
             return "no_profile"
+        if not server_allows(server, Capability.REMNAWAVE, write=True):
+            return "denied"
         profile = await db.get(RemnawaveNginxProfile, server.active_remnawave_nginx_profile_id)
         if not profile:
             return "no_profile"
@@ -205,6 +226,8 @@ async def _reconcile_remnawave_nginx(server_id: int) -> str:
 
 async def _reconcile_blocklist(server_id: int) -> str:
     result = await get_blocklist_manager().sync_single_node_by_id(server_id)
+    if result and result.get("denied"):
+        return "denied"
     return "synced" if result and result.get("success") else "sync_failed"
 
 
@@ -212,6 +235,7 @@ async def reconcile_recovered_server(server_id: int, semaphore: asyncio.Semaphor
     """Сверяет и восстанавливает состояние ноды, которая только что перешла offline → online."""
     report = RecoveryReport(server_id=server_id)
     server_name = str(server_id)
+    started_at = datetime.now(timezone.utc)
 
     async with semaphore:
         async with async_session() as db:
@@ -228,6 +252,15 @@ async def reconcile_recovered_server(server_id: int, semaphore: asyncio.Semaphor
         report.haproxy_run = await _reconcile_haproxy_running(server_id, pre_death_running)
         report.remnawave_nginx = await _reconcile_remnawave_nginx(server_id)
         report.blocklist = await _reconcile_blocklist(server_id)
+
+        # То, что уже приведено к ожидаемому, снимаем с очереди отложенных синков —
+        # иначе её воркер повторит ту же работу через полминуты.
+        settled = []
+        if report.firewall in RECONCILED_STATES:
+            settled.append(KIND_FIREWALL_PROFILE)
+        if report.blocklist in ("synced", "denied"):
+            settled.append(KIND_BLOCKLIST)
+        await clear_pending_sync(server_id, settled, started_at)
 
     logger.info(
         "recovery_reconcile_done server=%s(%s) firewall=%s haproxy_cfg=%s haproxy_run=%s remnawave_nginx=%s blocklist=%s",

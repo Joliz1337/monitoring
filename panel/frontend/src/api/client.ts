@@ -90,6 +90,20 @@ api.get = function <T = unknown>(url: string, config?: AxiosRequestConfig): Prom
   return promise
 } as typeof api.get
 
+// Разделы API ноды, которые её владелец может закрыть через NODE_CAPABILITIES.
+// Порядок задаёт и порядок перечисления в подсказках интерфейса.
+export const NODE_CAPABILITY_DOMAINS = [
+  'traffic', 'haproxy', 'firewall', 'ipset', 'ssh',
+  'ssl', 'antiddos', 'remnawave', 'system', 'exec',
+] as const
+export type NodeCapabilityDomain = (typeof NODE_CAPABILITY_DOMAINS)[number]
+
+export const CAP_MODE = { FULL: 'rw', READ: 'ro', NONE: 'no' } as const
+export type NodeCapabilityMode = (typeof CAP_MODE)[keyof typeof CAP_MODE]
+
+/** null — нода без ограничений (в том числе любая нода старой версии) */
+export type NodeCapabilities = Partial<Record<NodeCapabilityDomain, NodeCapabilityMode>>
+
 export interface Server {
   id: number
   name: string
@@ -106,6 +120,7 @@ export interface Server {
   uses_shared_cert?: boolean
   auth_kind?: 'shared' | 'per_server' | 'legacy'
   antiddos_emergency_mode?: boolean
+  node_capabilities?: NodeCapabilities | null
 }
 
 export interface TimezoneInfo {
@@ -295,53 +310,10 @@ export interface FirewallRule {
   ipv6: boolean
 }
 
-export interface FirewallStatus {
-  active: boolean
-  default_incoming: string
-  default_outgoing: string
-  logging: string
-  error?: string
-}
-
 export interface FirewallActionResponse {
   success: boolean
   message: string
   error_log?: string
-}
-
-export interface SystemInfo {
-  cpu_cores: number
-  ram_mb: number
-  maxconn: number
-  nbthread: number
-  ulimit_nofile: number
-  optimizations_applied: boolean
-}
-
-export interface CertificateGenerateResponse {
-  success: boolean
-  message: string
-  domain: string
-  error_log?: string
-}
-
-export interface TrafficDataPoint {
-  hour?: string
-  date?: string
-  month?: string
-  rx_bytes: number
-  tx_bytes: number
-}
-
-export interface TrafficData {
-  hours?: number
-  days?: number
-  months?: number
-  interface?: string
-  port?: number
-  data: TrafficDataPoint[]
-  total_rx: number
-  total_tx: number
 }
 
 export interface TrafficSummary {
@@ -364,27 +336,45 @@ export interface TrafficSummary {
   tracked_ports: number[]
 }
 
-export interface PortsTraffic {
-  days: number
-  tracked_ports: number[]
-  data: Array<{
-    port: number
-    rx_bytes: number
-    tx_bytes: number
-  }>
-  total_rx: number
-  total_tx: number
+export type TrafficImportStatus =
+  | 'pending'
+  | 'node_too_old'
+  | 'imported'
+  | 'purged'
+  | 'empty'
+  | 'failed'
+
+export interface TrafficStatus {
+  supported: boolean
+  node_version: string | null
+  min_version: string
+  import: {
+    status: TrafficImportStatus
+    imported_at: string | null
+  }
+  first_data_at: string | null
 }
 
-export interface InterfacesTraffic {
-  days: number
-  data: Array<{
-    interface: string
-    rx_bytes: number
-    tx_bytes: number
-  }>
-  total_rx: number
-  total_tx: number
+export type TrafficScope = 'total' | 'iface' | 'port'
+
+// rx/tx = null означает бакет без покрытия — нода была недоступна, разрыв в ряду
+export interface TrafficSeriesPoint {
+  timestamp: string
+  rx: number | null
+  tx: number | null
+}
+
+export interface TrafficGap {
+  from: string
+  to: string
+}
+
+export interface TrafficSeries {
+  period: string
+  scope: TrafficScope
+  key: string
+  points: TrafficSeriesPoint[]
+  gaps: TrafficGap[]
 }
 
 export const authApi = {
@@ -432,7 +422,6 @@ export const serversApi = {
     api.get<{ count: number; servers: ServerWithMetrics[] }>('/servers', {
       params: includeMetrics ? { include_metrics: true } : undefined
     }),
-  get: (id: number) => api.get<Server>(`/servers/${id}`),
   create: (data: { name: string; url: string; proxy_url?: string | null }) =>
     api.post<{
       success: boolean
@@ -447,12 +436,6 @@ export const serversApi = {
       legacy: number
       needs_migration: number
     }>('/servers/migration-status'),
-  migrateOne: (id: number) =>
-    api.post<
-      | { status: 'already_shared' }
-      | { status: 'auto'; success: boolean }
-      | { status: 'manual'; token: string }
-    >(`/servers/${id}/migrate`),
   confirmMigration: (id: number) =>
     api.post<{ success: boolean }>(`/servers/${id}/confirm-migration`),
   migrateAll: () =>
@@ -487,6 +470,23 @@ export const serversApi = {
     api.delete<{ success: boolean }>(`/servers/remnawave-certs/${id}`),
 }
 
+export interface NodeInstallKey {
+  id: number
+  name: string
+  fingerprint: string
+  expires_at: string
+  created_at: string
+  token: string
+  install_command: string
+}
+
+export const installKeysApi = {
+  list: () => api.get<{ keys: NodeInstallKey[] }>('/install-keys'),
+  create: (name: string, validityDays: number) =>
+    api.post<NodeInstallKey>('/install-keys', { name, validity_days: validityDays }),
+  delete: (id: number) => api.delete<{ success: boolean }>(`/install-keys/${id}`),
+}
+
 export const proxyApi = {
   // Returns cached metrics from panel's database (collected by background worker)
   getMetrics: (serverId: number) => api.get<ServerMetrics>(`/proxy/${serverId}/metrics`),
@@ -502,41 +502,22 @@ export const proxyApi = {
   getHAProxyCached: (serverId: number) => 
     api.get<{ status?: HAProxyStatus; rules?: { count: number; rules: HAProxyRule[] }; certs?: { certificates: Certificate[]; count: number }; firewall?: { rules: FirewallRule[]; count: number; active: boolean }; cached_at?: string }>(`/proxy/${serverId}/haproxy/cached`),
   
-  // Cached Traffic data (summary, tracked_ports) - updated every 30s
-  getTrafficCached: (serverId: number) =>
-    api.get<{ summary?: TrafficSummary; tracked_ports?: { tracked_ports: number[] }; cached_at?: string }>(`/proxy/${serverId}/traffic/cached`),
-  
   getHAProxyStatus: (serverId: number) => api.get<HAProxyStatus>(`/proxy/${serverId}/haproxy/status`),
   getHAProxyRules: (serverId: number) => 
     api.get<{ count: number; rules: HAProxyRule[] }>(`/proxy/${serverId}/haproxy/rules`),
-  createHAProxyRule: (serverId: number, rule: Omit<HAProxyRule, 'name'> & { name: string }) =>
-    api.post(`/proxy/${serverId}/haproxy/rules`, rule),
-  updateHAProxyRule: (serverId: number, name: string, data: Partial<HAProxyRule>) =>
-    api.put(`/proxy/${serverId}/haproxy/rules/${name}`, data),
-  deleteHAProxyRule: (serverId: number, name: string) =>
-    api.delete(`/proxy/${serverId}/haproxy/rules/${name}`),
   reloadHAProxy: (serverId: number) => api.post(`/proxy/${serverId}/haproxy/reload`),
   restartHAProxy: (serverId: number) => api.post(`/proxy/${serverId}/haproxy/restart`),
   startHAProxy: (serverId: number) => api.post(`/proxy/${serverId}/haproxy/start`),
   stopHAProxy: (serverId: number) => api.post(`/proxy/${serverId}/haproxy/stop`),
-  applyHAProxyConfig: (serverId: number, configContent: string, reloadAfter: boolean = true) =>
-    api.post<{ success: boolean; message: string; config_valid: boolean; reloaded: boolean }>(
-      `/proxy/${serverId}/haproxy/config/apply`,
-      { config_content: configContent, reload_after: reloadAfter }
-    ),
   getHAProxyConfig: (serverId: number) =>
     api.get<{ content: string; path: string }>(`/proxy/${serverId}/haproxy/config`),
   
   getHAProxyCerts: (serverId: number) => 
     api.get<{ certificates: string[] }>(`/proxy/${serverId}/haproxy/certs`),
-  getHAProxyCert: (serverId: number, domain: string) =>
-    api.get<Certificate>(`/proxy/${serverId}/haproxy/certs/${domain}`),
   getAllCerts: (serverId: number) =>
     api.get<{ certificates: Certificate[]; count: number }>(`/proxy/${serverId}/haproxy/certs/all`),
   generateCert: (serverId: number, data: { domain: string; email?: string; method?: string }) =>
     api.post(`/proxy/${serverId}/haproxy/certs/generate`, data),
-  renewCerts: (serverId: number) => 
-    api.post<{ success: boolean; message: string; renewed_domains: string[] }>(`/proxy/${serverId}/haproxy/certs/renew`),
   renewSingleCert: (serverId: number, domain: string) => 
     api.post<{ success: boolean; message: string; domain: string; output_log?: string }>(`/proxy/${serverId}/haproxy/certs/${domain}/renew`),
   deleteCert: (serverId: number, domain: string) =>
@@ -545,14 +526,8 @@ export const proxyApi = {
     api.post(`/proxy/${serverId}/haproxy/certs/upload`, data),
   
   // Firewall management
-  getFirewallStatus: (serverId: number) =>
-    api.get<FirewallStatus>(`/proxy/${serverId}/haproxy/firewall/status`),
   getFirewallRules: (serverId: number) =>
     api.get<{ rules: FirewallRule[]; count: number; active: boolean }>(`/proxy/${serverId}/haproxy/firewall/rules`),
-  allowPort: (serverId: number, port: number, protocol: string = 'tcp') =>
-    api.post<FirewallActionResponse>(`/proxy/${serverId}/haproxy/firewall/allow`, { port, protocol }),
-  denyPort: (serverId: number, port: number, protocol: string = 'tcp') =>
-    api.post<FirewallActionResponse>(`/proxy/${serverId}/haproxy/firewall/deny`, { port, protocol }),
   addFirewallRule: (serverId: number, data: {
     port: number
     protocol: string
@@ -560,8 +535,6 @@ export const proxyApi = {
     from_ip?: string | null
     direction: 'in' | 'out'
   }) => api.post<FirewallActionResponse>(`/proxy/${serverId}/haproxy/firewall/rule`, data),
-  deleteFirewallRule: (serverId: number, port: number, protocol: string = 'tcp') =>
-    api.delete<FirewallActionResponse>(`/proxy/${serverId}/haproxy/firewall/${port}?protocol=${protocol}`),
   deleteFirewallRuleByNumber: (serverId: number, ruleNumber: number) =>
     api.delete<FirewallActionResponse>(`/proxy/${serverId}/haproxy/firewall/rule/${ruleNumber}`),
   enableFirewall: (serverId: number) =>
@@ -569,25 +542,7 @@ export const proxyApi = {
   disableFirewall: (serverId: number) =>
     api.post<FirewallActionResponse>(`/proxy/${serverId}/haproxy/firewall/disable`),
   
-  // System info
-  getSystemInfo: (serverId: number) =>
-    api.get<SystemInfo>(`/proxy/${serverId}/haproxy/system/info`),
-  
-  // Traffic tracking
-  getTrafficSummary: (serverId: number, days: number = 30) =>
-    api.get<TrafficSummary>(`/proxy/${serverId}/traffic/summary`, { params: { days } }),
-  getHourlyTraffic: (serverId: number, params?: { hours?: number; interface?: string; port?: number }) =>
-    api.get<TrafficData>(`/proxy/${serverId}/traffic/hourly`, { params }),
-  getDailyTraffic: (serverId: number, params?: { days?: number; interface?: string; port?: number }) =>
-    api.get<TrafficData>(`/proxy/${serverId}/traffic/daily`, { params }),
-  getMonthlyTraffic: (serverId: number, params?: { months?: number; interface?: string; port?: number }) =>
-    api.get<TrafficData>(`/proxy/${serverId}/traffic/monthly`, { params }),
-  getPortsTraffic: (serverId: number, days: number = 30) =>
-    api.get<PortsTraffic>(`/proxy/${serverId}/traffic/ports`, { params: { days } }),
-  getInterfacesTraffic: (serverId: number, days: number = 30) =>
-    api.get<InterfacesTraffic>(`/proxy/${serverId}/traffic/interfaces`, { params: { days } }),
-  getTrackedPorts: (serverId: number) =>
-    api.get<{ tracked_ports: number[] }>(`/proxy/${serverId}/traffic/ports/tracked`),
+  // Управление правилами учёта трафика в iptables ноды
   addTrackedPort: (serverId: number, port: number) =>
     api.post<{ success: boolean; message: string }>(`/proxy/${serverId}/traffic/ports/add`, { port }),
   removeTrackedPort: (serverId: number, port: number) =>
@@ -605,10 +560,15 @@ export const proxyApi = {
   getExecuteStreamUrl: (serverId: number) => `/api/proxy/${serverId}/system/execute-stream`,
 }
 
-export interface ExecuteRequest {
-  command: string
-  timeout?: number
-  shell?: 'sh' | 'bash'
+// История трафика хранится в PostgreSQL панели — эти запросы не ходят на ноды
+// и работают, пока нода офлайн
+export const trafficApi = {
+  getStatus: (serverId: number) =>
+    api.get<TrafficStatus>(`/traffic/${serverId}/status`),
+  getSummary: (serverId: number, days: number = 30) =>
+    api.get<TrafficSummary>(`/traffic/${serverId}/summary`, { params: { days } }),
+  getSeries: (serverId: number, params: { period: string; scope?: TrafficScope; key?: string }) =>
+    api.get<TrafficSeries>(`/traffic/${serverId}/series`, { params }),
 }
 
 export interface ExecuteResponse {
@@ -654,7 +614,6 @@ export interface TimeSyncStatus {
 
 export const settingsApi = {
   getAll: () => api.get<{ settings: Record<string, string> }>('/settings'),
-  get: (key: string) => api.get<{ key: string; value: string }>(`/settings/${key}`),
   set: (key: string, value: string) => api.put(`/settings/${key}`, { value }),
   timeSyncRun: () => api.post<{ success: boolean }>('/settings/time-sync/run'),
   timeSyncStatus: () => api.get<TimeSyncStatus>('/settings/time-sync/status'),
@@ -688,16 +647,12 @@ export interface BlocklistSource {
   error_message: string | null
 }
 
-export interface BlocklistSettings {
-  temp_timeout: number
-  auto_update_enabled: boolean
-  auto_update_interval: number
-}
-
 export interface SyncServerResult {
   server_id: number
   server_name: string
   success: boolean
+  // Сервер был офлайн: список ему не отправлен, панель применит его сама при возвращении ноды в сеть
+  queued?: boolean
   in: { success: boolean; message: string; ip_count: number; added?: number; removed?: number }
   out: { success: boolean; message: string; ip_count: number; added?: number; removed?: number }
 }
@@ -706,14 +661,14 @@ export interface SyncStatus {
   in_progress: boolean
   timestamp: string | null
   servers: Record<string, SyncServerResult>
+  // Синк отменён целиком, до нод дело не дошло — например недоступен источник
+  error?: string | null
 }
 
 export const blocklistApi = {
   // Global rules
   getGlobal: (direction: BlocklistDirection = 'in', list_type: BlocklistListType = 'block') =>
     api.get<{ count: number; direction: string; list_type: string; rules: BlocklistRule[] }>('/blocklist/global', { params: { direction, list_type } }),
-  addGlobal: (data: { ip_cidr: string; is_permanent?: boolean; direction?: BlocklistDirection; list_type?: BlocklistListType; comment?: string }) =>
-    api.post('/blocklist/global', data),
   addGlobalBulk: (ips: string[], is_permanent: boolean = true, direction: BlocklistDirection = 'in', list_type: BlocklistListType = 'block') =>
     api.post('/blocklist/global/bulk', { ips, is_permanent, direction, list_type }),
   deleteGlobal: (id: number) => api.delete(`/blocklist/global/${id}`),
@@ -727,8 +682,6 @@ export const blocklistApi = {
     api.post(`/blocklist/server/${serverId}`, data),
   deleteServer: (serverId: number, ruleId: number) =>
     api.delete(`/blocklist/server/${serverId}/${ruleId}`),
-  getServerStatus: (serverId: number) =>
-    api.get(`/blocklist/server/${serverId}/status`),
   
   // Sources
   getSources: (direction?: BlocklistDirection) =>
@@ -741,12 +694,7 @@ export const blocklistApi = {
   refreshSource: (id: number) => api.post(`/blocklist/sources/${id}/refresh`),
   refreshAll: () => api.post('/blocklist/sources/refresh-all'),
   
-  // Settings & sync
-  getSettings: () => api.get<{ settings: BlocklistSettings }>('/blocklist/settings'),
-  updateSettings: (data: { temp_timeout?: number; auto_update_enabled?: boolean; auto_update_interval?: number }) =>
-    api.put('/blocklist/settings', data),
-  sync: () => api.post<{ success: boolean; results: Record<string, SyncServerResult> }>('/blocklist/sync'),
-  syncServer: (serverId: number) => api.post<SyncServerResult>(`/blocklist/sync/${serverId}`),
+  // Sync status
   getSyncStatus: () => api.get<SyncStatus>('/blocklist/sync/status'),
   
 }
@@ -947,19 +895,14 @@ export const systemApi = {
   getPanelIp: () => api.get<PanelIpInfo>('/system/panel-ip'),
   getVersionBase: () => api.get<VersionBaseInfo>('/system/version/base'),
   getNodeVersionById: (nodeId: number) => api.get<SingleNodeVersion>(`/system/nodes/${nodeId}/version`, { timeout: 15000 }),
-  updatePanel: (targetVersion?: string) => 
-    api.post<UpdateResponse>('/system/update', targetVersion ? { target_version: targetVersion } : {}),
-  getUpdateStatus: () => api.get<UpdateStatus>('/system/update/status'),
+  updatePanel: (targetRef?: string) =>
+    api.post<UpdateResponse>('/system/update', undefined, targetRef ? { params: { target_ref: targetRef } } : undefined),
   
   // Node updates via proxy
-  getNodeVersion: (serverId: number) => 
-    api.get<{ version: string; component: string; node_name: string }>(`/proxy/${serverId}/system/version`),
   updateNode: (serverId: number, targetVersion?: string) =>
     api.post<UpdateResponse>(`/proxy/${serverId}/system/update`, { 
       ...(targetVersion && { target_version: targetVersion })
     }),
-  getNodeUpdateStatus: (serverId: number) =>
-    api.get<UpdateStatus>(`/proxy/${serverId}/system/update/status`),
   
   // Panel SSL certificate
   getCertificate: () => api.get<PanelCertificateInfo>('/system/certificate'),
@@ -1026,18 +969,12 @@ export const antiDdosApi = {
     api.post<{ success: boolean; nodes: number; ok: number }>('/antiddos/emergency-all', { enabled }),
   pushWhitelist: () =>
     api.post<{ success: boolean; whitelist_size: number; nodes: number; ok: number }>('/antiddos/whitelist/push'),
-  installAll: () =>
-    api.post<{ success: boolean; nodes: number; ok: number }>('/antiddos/install-all'),
 
   // per-node (proxy)
   setNodeEmergency: (serverId: number, enabled: boolean) =>
     api.post(`/proxy/${serverId}/antiddos/emergency`, { enabled }),
   setNodeWatchdog: (serverId: number, enabled: boolean) =>
     api.post(`/proxy/${serverId}/antiddos/watchdog`, { enabled }),
-  getNodeStatus: (serverId: number) =>
-    api.get(`/proxy/${serverId}/antiddos/status`, { timeout: 20000 }),
-  installNode: (serverId: number) =>
-    api.post(`/proxy/${serverId}/antiddos/install`, {}, { timeout: 70000 }),
 
   // whitelist auto-source lists
   getSources: () => api.get<{ sources: AntiDdosSource[] }>('/antiddos/sources'),
@@ -1057,6 +994,16 @@ export interface RemnawaveSettings {
   collection_interval: number
   ignored_user_ids: number[]
   anomaly_enabled: boolean
+  anomaly_ip_enabled: boolean
+  anomaly_hwid_enabled: boolean
+  anomaly_ua_enabled: boolean
+  anomaly_devdata_enabled: boolean
+  anomaly_ip_margin: number
+  anomaly_ip_confirm_count: number
+  anomaly_asn_margin: number
+  anomaly_ip_smart_enabled: boolean
+  anomaly_ip_smart_traffic_gb: number
+  anomaly_ua_patterns: string
   anomaly_use_custom_bot: boolean
   anomaly_tg_bot_token: string | null
   anomaly_tg_chat_id: string | null
@@ -1166,14 +1113,6 @@ export interface RemnawaveAnomaliesResponse {
   minutes: number
 }
 
-export interface RemnawaveCachedUser {
-  email: number
-  uuid: string | null
-  username: string | null
-  telegram_id: number | null
-  status: string | null
-}
-
 export const remnawaveApi = {
   getSettings: () => api.get<RemnawaveSettings>('/remnawave/settings'),
   updateSettings: (data: Partial<RemnawaveSettings>) =>
@@ -1194,8 +1133,6 @@ export const remnawaveApi = {
     api.get<RemnawaveAnomaliesResponse>('/remnawave/anomalies', { params: { minutes } }),
   addAnomalyIgnore: (userId: number, listType: 'ip' | 'hwid' | 'all') =>
     api.post<{ success: boolean }>('/remnawave/anomalies/ignore', { user_id: userId, list_type: listType }),
-  removeAnomalyIgnore: (userId: number, listType: 'ip' | 'hwid' | 'all') =>
-    api.delete<{ success: boolean }>('/remnawave/anomalies/ignore', { data: { user_id: userId, list_type: listType } }),
 
   getIgnoreLists: () =>
     api.get<{ all: IgnoredUser[]; ip: IgnoredUser[]; hwid: IgnoredUser[] }>('/remnawave/ignore-lists'),
@@ -1204,12 +1141,6 @@ export const remnawaveApi = {
 
   getNodes: () => api.get<RemnawaveNodesResponse>('/remnawave/nodes'),
 
-  getDevices: (params?: { limit?: number; offset?: number; search?: string; platform?: string }) =>
-    api.get<{ devices: RemnawaveHwidDevice[]; total: number; offset: number; limit: number }>('/remnawave/devices', { params }),
-  getUserDevices: (userUuid: string) =>
-    api.get<{ devices: RemnawaveHwidDevice[]; count: number }>(`/remnawave/devices/user/${userUuid}`),
-  syncDevices: () =>
-    api.post<{ success: boolean; error?: string }>('/remnawave/devices/sync'),
 
   getSummary: () =>
     api.get<RemnawaveSummary>('/remnawave/stats/summary'),
@@ -1224,12 +1155,6 @@ export const remnawaveApi = {
   clearUserAllIps: (email: number) =>
     api.delete<{ success: boolean; deleted_records: number; message: string }>(`/remnawave/stats/user/${email}/ips`),
 
-  getUsers: (params?: { search?: string; limit?: number }) =>
-    api.get<{ count: number; users: RemnawaveCachedUser[] }>('/remnawave/users', { params }),
-  refreshUserCache: () =>
-    api.post<{ success: boolean; count: number; error: string | null }>('/remnawave/users/refresh'),
-  getUserCacheStatus: () =>
-    api.get<{ last_update: string | null; updating: boolean; update_interval: number }>('/remnawave/users/cache-status'),
 }
 
 // Server Alerts
@@ -1284,6 +1209,8 @@ export interface AlertSettingsData {
   load_avg_enabled: boolean
   load_avg_threshold_offset: number
   load_avg_sustained_checks: number
+  conntrack_enabled: boolean
+  conntrack_threshold: number
   excluded_server_ids: number[]
   offline_excluded_server_ids: number[]
   cpu_excluded_server_ids: number[]
@@ -1291,6 +1218,7 @@ export interface AlertSettingsData {
   network_excluded_server_ids: number[]
   tcp_excluded_server_ids: number[]
   load_avg_excluded_server_ids: number[]
+  conntrack_excluded_server_ids: number[]
 }
 
 export interface AlertHistoryItem {
@@ -1549,8 +1477,6 @@ export const sshSecurityApi = {
     api.get<{ config: SSHConfig }>(`/ssh-security/server/${serverId}/config`),
   updateConfig: (serverId: number, config: Partial<SSHConfig>) =>
     api.post<{ success: boolean; message: string; warnings: string[] }>(`/ssh-security/server/${serverId}/config`, config),
-  testConfig: (serverId: number, config: Partial<SSHConfig>) =>
-    api.post<{ valid: boolean; errors: string[] }>(`/ssh-security/server/${serverId}/config/test`, config),
 
   getFail2ban: (serverId: number) =>
     api.get<Fail2banConfig>(`/ssh-security/server/${serverId}/fail2ban/status`),
@@ -1664,6 +1590,15 @@ export interface WildcardCertificate {
   auto_renew: boolean
 }
 
+export interface WildcardCertificateMaterial {
+  domain: string
+  base_domain: string
+  fullchain_pem: string
+  cert_pem: string
+  chain_pem: string
+  privkey_pem: string
+}
+
 export interface WildcardSSLSettings {
   cloudflare_api_token: string
   cloudflare_api_token_set: boolean
@@ -1696,14 +1631,14 @@ export interface WildcardDeployResult {
 export const wildcardSSLApi = {
   getCertificates: () =>
     api.get<{ certificates: WildcardCertificate[] }>('/wildcard-ssl/certificates'),
-  getCertificate: (id: number) =>
-    api.get<WildcardCertificate>(`/wildcard-ssl/certificates/${id}`),
   issueCertificate: (data: { domain: string; email?: string }) =>
     api.post<{ success: boolean; message: string }>('/wildcard-ssl/certificates/issue', data),
   getIssueStatus: () =>
     api.get<{ in_progress: boolean; last_result: string | null; last_error: string | null; output: string | null }>('/wildcard-ssl/issue-status'),
   renewCertificate: (id: number) =>
     api.post<{ success: boolean; message: string }>(`/wildcard-ssl/certificates/${id}/renew`),
+  getCertificatePem: (id: number) =>
+    api.get<WildcardCertificateMaterial>(`/wildcard-ssl/certificates/${id}/pem`),
   deleteCertificate: (id: number) =>
     api.delete(`/wildcard-ssl/certificates/${id}`),
   deployToAll: (id: number) =>
@@ -1741,7 +1676,7 @@ export interface HAProxyConfigProfile {
 export interface HAProxyProfileServer {
   server_id: number
   server_name: string
-  sync_status: 'synced' | 'pending' | 'failed' | null
+  sync_status: 'synced' | 'pending' | 'failed' | 'denied' | null
   config_hash: string | null
   is_synced: boolean
   last_sync_at: string | null
@@ -1782,7 +1717,7 @@ export interface HAProxyServerStatus {
   server_name: string
   server_url: string
   online: boolean
-  sync_status: 'synced' | 'pending' | 'failed' | null
+  sync_status: 'synced' | 'pending' | 'failed' | 'denied' | null
   config_hash: string | null
   last_sync_at: string | null
   haproxy_running: boolean | null
@@ -1865,8 +1800,6 @@ export const haproxyProfilesApi = {
     api.put<{ success: boolean; id: number }>(`/haproxy-profiles/${id}`, data),
   deleteProfile: (id: number) =>
     api.delete(`/haproxy-profiles/${id}`),
-  reorderProfiles: (profile_ids: number[]) =>
-    api.post('/haproxy-profiles/reorder', { profile_ids }),
   linkServer: (profileId: number, serverId: number) =>
     api.post(`/haproxy-profiles/${profileId}/servers/${serverId}`),
   unlinkServer: (profileId: number, serverId: number) =>
@@ -1928,7 +1861,7 @@ export interface RemnawaveNginxProfileServer {
   server_id: number
   server_name: string
   domain: string | null
-  sync_status: 'synced' | 'pending' | 'failed' | null
+  sync_status: 'synced' | 'pending' | 'failed' | 'denied' | null
   config_hash: string | null
   is_synced: boolean
   detected: boolean
@@ -1987,7 +1920,7 @@ export interface RemnawaveNginxServerStatus {
   server_name: string
   online: boolean
   domain: string | null
-  sync_status: 'synced' | 'pending' | 'failed' | null
+  sync_status: 'synced' | 'pending' | 'failed' | 'denied' | null
   is_synced: boolean
   detected: boolean
   last_sync_at: string | null
@@ -2046,8 +1979,6 @@ export const remnawaveNginxApi = {
   // Per-node (через прокси-роутер)
   getNodeStatus: (serverId: number) =>
     api.get<RemnawaveNginxNodeStatus>(`/proxy/${serverId}/remnawave-nginx/status`),
-  reloadNode: (serverId: number) =>
-    api.post(`/proxy/${serverId}/remnawave-nginx/reload`, undefined, { timeout: 70000 }),
   restartNode: (serverId: number) =>
     api.post(`/proxy/${serverId}/remnawave-nginx/restart`, undefined, { timeout: 130000 }),
 }
@@ -2058,7 +1989,7 @@ export type FirewallRuleProtocol = 'tcp' | 'udp' | 'any'
 export type FirewallRuleAction = 'allow' | 'deny'
 export type FirewallRuleDirection = 'in' | 'out'
 export type FirewallDefaultPolicy = 'allow' | 'deny' | 'reject'
-export type FirewallSyncStatus = 'synced' | 'pending' | 'failed' | 'rolled_back' | null
+export type FirewallSyncStatus = 'synced' | 'pending' | 'failed' | 'rolled_back' | 'denied' | null
 
 export interface FirewallProfileRuleData {
   port: number
@@ -2081,6 +2012,8 @@ export interface FirewallProfile {
   synced_servers_count: number
   node_port_allowed: boolean
   node_api_port: number
+  ssh_port_allowed: boolean
+  ssh_default_port: number
   created_at: string | null
   updated_at: string | null
 }
@@ -2106,6 +2039,8 @@ export interface FirewallSyncResult {
   success: boolean
   message: string
   rolled_back: boolean
+  // Сервер был офлайн: профиль не отправлен, панель раскатает его при возвращении ноды в сеть
+  queued?: boolean
 }
 
 export interface FirewallSyncLogEntry {

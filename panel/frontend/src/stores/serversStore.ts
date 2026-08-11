@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { toast } from 'sonner'
-import { serversApi, proxyApi, Server, ServerMetrics } from '../api/client'
+import { serversApi, Server, ServerMetrics } from '../api/client'
 
 interface ServerTraffic {
   rx_bytes: number
@@ -25,12 +25,6 @@ interface ServersState {
   
   fetchServers: () => Promise<void>
   fetchServersWithMetrics: () => Promise<void>
-  fetchServerMetrics: (serverId: number) => Promise<void>
-  fetchServerLiveMetrics: (serverId: number) => Promise<void>
-  fetchServerTraffic: (serverId: number, days?: number) => Promise<void>
-  fetchAllMetrics: () => Promise<void>
-  fetchAllLiveMetrics: () => Promise<void>
-  fetchAllTraffic: (days?: number) => Promise<void>
   addServer: (data: { name: string; url: string; proxy_url?: string | null }) => Promise<{ success: boolean; error?: string }>
   updateServer: (id: number, data: Partial<Server>) => Promise<void>
   toggleServer: (id: number, isActive: boolean) => Promise<void>
@@ -92,147 +86,6 @@ export const useServersStore = create<ServersState>((set, get) => ({
       const err = error as { message?: string }
       set({ error: err.message || 'Failed to fetch servers', isLoading: false })
     }
-  },
-  
-  fetchServerMetrics: async (serverId: number) => {
-    const { servers } = get()
-    const serverIndex = servers.findIndex(s => s.id === serverId)
-    if (serverIndex === -1) return
-    
-    try {
-      const { data } = await proxyApi.getMetrics(serverId)
-      set({
-        servers: servers.map(s => 
-          s.id === serverId 
-            ? { 
-                ...s, 
-                metrics: data, 
-                status: 'online' as const, 
-                lastUpdated: new Date(),
-                last_error: null,
-                error_code: null
-              }
-            : s
-        ),
-      })
-    } catch (err: unknown) {
-      const error = err as { response?: { status: number; data?: { detail?: string } } }
-      const errorCode = error.response?.status || 500
-      let errorMessage = error.response?.data?.detail || 'Connection failed'
-      
-      // Translate common errors
-      if (errorCode === 504) errorMessage = 'Connection timeout'
-      else if (errorCode === 502) errorMessage = 'Connection refused'
-      
-      set({
-        servers: servers.map(s => 
-          s.id === serverId 
-            ? { 
-                ...s, 
-                metrics: null, 
-                status: 'offline' as const, 
-                lastUpdated: new Date(),
-                last_error: errorMessage,
-                error_code: errorCode
-              }
-            : s
-        ),
-      })
-    }
-  },
-  
-  fetchAllMetrics: async () => {
-    const { servers, fetchServerMetrics } = get()
-    await Promise.all(servers.map(s => fetchServerMetrics(s.id)))
-  },
-  
-  fetchServerLiveMetrics: async (serverId: number) => {
-    const { servers } = get()
-    const serverIndex = servers.findIndex(s => s.id === serverId)
-    if (serverIndex === -1) return
-    
-    try {
-      const { data } = await proxyApi.getLiveMetrics(serverId)
-      set({
-        servers: servers.map(s => 
-          s.id === serverId 
-            ? { 
-                ...s, 
-                metrics: data, 
-                status: 'online' as const, 
-                lastUpdated: new Date(),
-                last_error: null,
-                error_code: null
-              }
-            : s
-        ),
-      })
-    } catch (err: unknown) {
-      const error = err as { response?: { status: number; data?: { detail?: string } } }
-      const errorCode = error.response?.status || 500
-      let errorMessage = error.response?.data?.detail || 'Connection failed'
-      
-      if (errorCode === 504) errorMessage = 'Connection timeout'
-      else if (errorCode === 502) errorMessage = 'Connection refused'
-      
-      set({
-        servers: servers.map(s => 
-          s.id === serverId 
-            ? { 
-                ...s, 
-                metrics: null, 
-                status: 'offline' as const, 
-                lastUpdated: new Date(),
-                last_error: errorMessage,
-                error_code: errorCode
-              }
-            : s
-        ),
-      })
-    }
-  },
-  
-  fetchAllLiveMetrics: async () => {
-    const { servers, fetchServerLiveMetrics } = get()
-    await Promise.all(servers.map(s => fetchServerLiveMetrics(s.id)))
-  },
-  
-  fetchServerTraffic: async (serverId: number, days: number = 30) => {
-    const { servers } = get()
-    const serverIndex = servers.findIndex(s => s.id === serverId)
-    if (serverIndex === -1) return
-    
-    try {
-      const { data } = await proxyApi.getTrafficSummary(serverId, days)
-      set({
-        servers: servers.map(s => 
-          s.id === serverId 
-            ? { 
-                ...s, 
-                traffic: {
-                  rx_bytes: data.total.rx_bytes,
-                  tx_bytes: data.total.tx_bytes,
-                  days: data.days
-                }
-              }
-            : s
-        ),
-      })
-    } catch {
-      // Traffic data not available - ignore silently
-      set({
-        servers: servers.map(s => 
-          s.id === serverId 
-            ? { ...s, traffic: null }
-            : s
-        ),
-      })
-    }
-  },
-  
-  fetchAllTraffic: async (days: number = 30) => {
-    const { servers, fetchServerTraffic } = get()
-    await Promise.all(servers.map(s => fetchServerTraffic(s.id, days)))
   },
   
   addServer: async (data) => {

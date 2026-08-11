@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,9 +19,20 @@ from docker.errors import DockerException, ImageNotFound, NotFound as DockerNotF
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+# docker-SDK общается с сокетом через requests: истёкший container.wait(timeout=...)
+# прилетает его ReadTimeout, а не asyncio.TimeoutError, и обрыв сокета — тоже
+# requests-ошибка, которую DockerException не покрывает
+from requests.exceptions import ReadTimeout, RequestException
 
+from app.capabilities import get_policy
+from app.services import cpu_affinity
 from app.services.host_executor import get_host_executor, MAX_TIMEOUT, DEFAULT_TIMEOUT
 from app.services.host_files import read_host_file, write_host_file
+from app.services.sysctl_verify import (
+    TUNING_FACTS_PATH,
+    cleanup_conflicting_configs,
+    verify_sysctl_values,
+)
 
 NGINX_SSL_DIR = Path("/opt/monitoring-node/nginx/ssl")
 NGINX_CONTAINER_NAME = "monitoring-nginx"
@@ -35,12 +47,25 @@ UPDATER_IMAGE = "docker:cli"
 # занимает десятки минут (наблюдалось 755с на слой) — ждём до 2 часов
 UPDATER_WAIT_TIMEOUT = 7200
 
+# Оба значения подставляются в текст shell-скрипта, который апдейтер исполняет на
+# хосте через nsenter — то есть это прямой путь к произвольной команде от root.
+# Наборы символов подобраны так, что shell не найдёт в них ни метасимвола, ни
+# пробела: адрес прокси уходит в git-аргументы неквотированным (там нужно
+# словоделение), а ссылка квотирована, но ведущий символ у неё всё равно
+# алфавитно-цифровой, иначе git принял бы её за опцию вида --upload-pack=.
+GIT_REF_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._/-]*$"
+PROXY_URL_PATTERN = r"^[a-z][a-z0-9+.-]*://[A-Za-z0-9._%+:@/-]+$"
+
 _update_status = {
     "in_progress": False,
     "last_result": None,
     "last_error": None,
     "last_update_time": None
 }
+
+# Ссылка на живую таску апдейтера: create_task её не удерживает, и незавершённую
+# корутину может собрать GC вместе с обновлением
+_update_task: Optional[asyncio.Task] = None
 
 
 def get_current_version() -> str:
@@ -59,15 +84,6 @@ def get_docker_client():
         raise
 
 
-@router.get("/version")
-async def get_version():
-    """Get current node version"""
-    return {
-        "version": get_current_version(),
-        "component": "node"
-    }
-
-
 class ReplaceCertRequest(BaseModel):
     cert_pem: str
     key_pem: str
@@ -80,21 +96,21 @@ def _atomic_write(path: Path, data: str, mode: int) -> None:
     os.replace(tmp, path)
 
 
-def _reload_nginx_container() -> None:
+async def _reload_nginx_container() -> None:
     """SIGHUP в nginx-контейнер — graceful reload без остановки соединений."""
-    client = get_docker_client()
+    client = await asyncio.to_thread(get_docker_client)
     try:
-        container = client.containers.get(NGINX_CONTAINER_NAME)
+        container = await asyncio.to_thread(client.containers.get, NGINX_CONTAINER_NAME)
     except DockerNotFound:
         # nginx может работать на хосте (легаси-инсталляции) — пробуем nsenter
-        result = get_host_executor().execute_sync("nginx -s reload", timeout=10)
+        result = await get_host_executor().execute("nginx -s reload", timeout=10)
         if not result.success:
             raise HTTPException(
                 status_code=500,
                 detail=f"nginx reload failed: {result.stderr or result.error}",
             )
         return
-    container.kill(signal="SIGHUP")
+    await asyncio.to_thread(container.kill, signal="SIGHUP")
 
 
 @router.post("/replace-node-cert")
@@ -151,9 +167,9 @@ async def replace_node_cert(payload: ReplaceCertRequest):
 
     try:
         if cert_path.exists():
-            shutil.copy2(cert_path, cert_bak)
+            await asyncio.to_thread(shutil.copy2, cert_path, cert_bak)
         if key_path.exists():
-            shutil.copy2(key_path, key_bak)
+            await asyncio.to_thread(shutil.copy2, key_path, key_bak)
 
         _atomic_write(cert_path, payload.cert_pem, 0o644)
         _atomic_write(key_path, payload.key_pem, 0o600)
@@ -162,18 +178,22 @@ async def replace_node_cert(payload: ReplaceCertRequest):
         raise HTTPException(status_code=500, detail=f"write failed: {exc}") from exc
 
     try:
-        _reload_nginx_container()
+        await _reload_nginx_container()
     except Exception as exc:
         logger.error(f"nginx reload failed, rolling back: {exc}")
         if cert_bak.exists():
-            shutil.copy2(cert_bak, cert_path)
+            await asyncio.to_thread(shutil.copy2, cert_bak, cert_path)
         if key_bak.exists():
-            shutil.copy2(key_bak, key_path)
+            await asyncio.to_thread(shutil.copy2, key_bak, key_path)
+        detail = f"nginx reload failed: {exc}"
         try:
-            _reload_nginx_container()
-        except Exception:
-            pass
-        raise HTTPException(status_code=500, detail=f"nginx reload failed: {exc}") from exc
+            await _reload_nginx_container()
+        except Exception as rollback_exc:
+            # Файлы вернули, но nginx остался на новых — молчать нельзя,
+            # иначе панель считает ноду живой, а mTLS уже не поднимается
+            logger.error(f"nginx reload after rollback failed too: {rollback_exc}")
+            detail += f"; rollback reload failed: {rollback_exc}"
+        raise HTTPException(status_code=500, detail=detail) from exc
 
     cert_bak.unlink(missing_ok=True)
     key_bak.unlink(missing_ok=True)
@@ -188,30 +208,33 @@ async def run_update_in_container(target_ref: str | None = None, proxy: str | No
     Args:
         target_ref: Git reference (commit hash, tag, or branch). Default: 'main'
         proxy: HTTP proxy for git (e.g., http://127.0.0.1:3128)
+
+    Флаг in_progress выставляет вызывающий эндпоинт — до create_task, иначе два
+    быстрых запроса успевают пройти проверку раньше старта первого апдейтера.
+    Каждый вызов docker-SDK синхронный и уходит в поток: pull образа на медленной
+    сети занимает десятки минут, а вставший event loop уронил бы и /health —
+    панель на всё это время сочла бы ноду офлайн и подняла алерт.
     """
-    global _update_status
-    
-    _update_status["in_progress"] = True
-    _update_status["last_error"] = None
-    
     try:
-        client = get_docker_client()
-        
+        client = await asyncio.to_thread(get_docker_client)
+
         # Remove old updater container if exists
         try:
-            old_container = client.containers.get(UPDATER_CONTAINER_NAME)
-            old_container.remove(force=True)
+            old_container = await asyncio.to_thread(
+                client.containers.get, UPDATER_CONTAINER_NAME
+            )
+            await asyncio.to_thread(old_container.remove, force=True)
             logger.info("Removed old updater container")
-        except docker.errors.NotFound:
+        except DockerNotFound:
             pass
-        
+
         # Pull docker:cli image if needed
         try:
-            client.images.get(UPDATER_IMAGE)
+            await asyncio.to_thread(client.images.get, UPDATER_IMAGE)
         except ImageNotFound:
             logger.info(f"Pulling {UPDATER_IMAGE}...")
-            client.images.pull(UPDATER_IMAGE)
-        
+            await asyncio.to_thread(client.images.pull, UPDATER_IMAGE)
+
         ref_arg = target_ref if target_ref else "main"
         proxy_info = f" (via proxy: {proxy})" if proxy else ""
         logger.info(f"Starting update to: {ref_arg}{proxy_info}")
@@ -248,17 +271,17 @@ CLONE_SUCCESS=0
 if [ -n "$GIT_PROXY_ARGS" ]; then
     echo "[INFO] Using proxy for git: {proxy}"
     echo "[INFO] Trying GitHub via proxy (60s timeout)..."
-    if timeout 60 git $GIT_PROXY_ARGS clone --depth 1 --branch {ref_arg} "https://github.com/Joliz1337/monitoring.git" $TMP_CLONE 2>&1; then
+    if timeout 60 git $GIT_PROXY_ARGS clone --depth 1 --branch "{ref_arg}" "https://github.com/Joliz1337/monitoring.git" $TMP_CLONE 2>&1; then
         CLONE_SUCCESS=1
     fi
 else
     echo "[INFO] Trying GitHub (30s timeout)..."
-    if timeout 30 git clone --depth 1 --branch {ref_arg} "https://github.com/Joliz1337/monitoring.git" $TMP_CLONE 2>&1; then
+    if timeout 30 git clone --depth 1 --branch "{ref_arg}" "https://github.com/Joliz1337/monitoring.git" $TMP_CLONE 2>&1; then
         CLONE_SUCCESS=1
     else
         rm -rf $TMP_CLONE
         echo "[WARN] GitHub timeout/error, trying mirror (ghfast.top)..."
-        if timeout 120 git clone --depth 1 --branch {ref_arg} "$GITHUB_MIRROR/https://github.com/Joliz1337/monitoring.git" $TMP_CLONE 2>&1; then
+        if timeout 120 git clone --depth 1 --branch "{ref_arg}" "$GITHUB_MIRROR/https://github.com/Joliz1337/monitoring.git" $TMP_CLONE 2>&1; then
             CLONE_SUCCESS=1
         fi
     fi
@@ -293,7 +316,7 @@ nsenter -t 1 -m -u -n -i -p -- chmod +x /tmp/monitoring-staging/node/scripts/app
 
 echo "[INFO] Running update on host via nsenter..."
 set +e
-nsenter -t 1 -m -u -n -i -p -- bash /tmp/monitoring-staging/node/scripts/apply-update.sh /tmp/monitoring-staging /opt/monitoring-node "$CURRENT_VERSION" {ref_arg}
+nsenter -t 1 -m -u -n -i -p -- bash /tmp/monitoring-staging/node/scripts/apply-update.sh /tmp/monitoring-staging /opt/monitoring-node "$CURRENT_VERSION" "{ref_arg}"
 UPDATE_RC=$?
 set -e
 
@@ -321,7 +344,8 @@ echo "[SUCCESS] Update completed!"
                 "UPDATE_PROXY": proxy,
             }
         
-        container = client.containers.run(
+        container = await asyncio.to_thread(
+            client.containers.run,
             image=UPDATER_IMAGE,
             command=["sh", "-c", updater_script],
             name=UPDATER_CONTAINER_NAME,
@@ -336,17 +360,15 @@ echo "[SUCCESS] Update completed!"
             detach=True,
             remove=False,
         )
-        
+
         logger.info(f"Updater started: {container.id[:12]}")
-        
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: container.wait(timeout=UPDATER_WAIT_TIMEOUT)
-        )
-        
+
+        result = await asyncio.to_thread(container.wait, timeout=UPDATER_WAIT_TIMEOUT)
+
         exit_code = result.get("StatusCode", -1)
-        logs = container.logs().decode("utf-8", errors="replace")
-        
+        raw_logs = await asyncio.to_thread(container.logs)
+        logs = raw_logs.decode("utf-8", errors="replace")
+
         if exit_code == 0:
             _update_status["last_result"] = "success"
             _update_status["last_update_time"] = datetime.now().isoformat()
@@ -358,11 +380,11 @@ echo "[SUCCESS] Update completed!"
         
         # Cleanup
         try:
-            container.remove(force=True)
-        except Exception:
-            pass
-            
-    except asyncio.TimeoutError:
+            await asyncio.to_thread(container.remove, force=True)
+        except (DockerException, RequestException) as e:
+            logger.warning(f"Failed to remove updater container: {e}")
+
+    except ReadTimeout:
         _update_status["last_result"] = "failed"
         _update_status["last_error"] = f"Update timed out ({UPDATER_WAIT_TIMEOUT // 60} minutes)"
         logger.error("Update timed out")
@@ -384,8 +406,18 @@ echo "[SUCCESS] Update completed!"
 
 class UpdateRequest(BaseModel):
     """Request model for node update"""
-    target_version: Optional[str] = Field(None, description="Git reference (branch/tag/commit). Default: 'main'")
-    proxy: Optional[str] = Field(None, description="HTTP proxy for downloads (e.g., http://127.0.0.1:3128)")
+    target_version: Optional[str] = Field(
+        None,
+        max_length=100,
+        pattern=GIT_REF_PATTERN,
+        description="Git reference (branch/tag/commit). Default: 'main'",
+    )
+    proxy: Optional[str] = Field(
+        None,
+        max_length=255,
+        pattern=PROXY_URL_PATTERN,
+        description="HTTP proxy for downloads (e.g., http://127.0.0.1:3128)",
+    )
 
 
 @router.post("/update")
@@ -402,17 +434,21 @@ async def trigger_update(data: UpdateRequest = None):
         target_version: Git reference (branch/tag/commit). Default: 'main' (latest)
         proxy: HTTP proxy for git clone (e.g., http://127.0.0.1:3128)
     """
+    global _update_task
+
     if _update_status["in_progress"]:
         raise HTTPException(
             status_code=409,
             detail="Update already in progress"
         )
-    
+
     target_ref = data.target_version if data else None
     proxy = data.proxy if data else None
-    
-    asyncio.create_task(run_update_in_container(target_ref, proxy))
-    
+
+    _update_status["in_progress"] = True
+    _update_status["last_error"] = None
+    _update_task = asyncio.create_task(run_update_in_container(target_ref, proxy))
+
     return {
         "success": True,
         "message": "Update started",
@@ -426,12 +462,14 @@ async def get_update_status():
     """Get current update status"""
     container_running = False
     try:
-        client = get_docker_client()
-        container = client.containers.get(UPDATER_CONTAINER_NAME)
+        client = await asyncio.to_thread(get_docker_client)
+        container = await asyncio.to_thread(client.containers.get, UPDATER_CONTAINER_NAME)
         container_running = container.status == "running"
-    except Exception:
+    except DockerNotFound:
         pass
-    
+    except (DockerException, RequestException) as e:
+        logger.warning(f"Failed to check updater container state: {e}")
+
     return {
         "in_progress": _update_status["in_progress"] or container_running,
         "last_result": _update_status["last_result"],
@@ -562,7 +600,6 @@ PROFILES_DIR = "/opt/monitoring/configs/profiles"
 COMMON_BASE_PATH = f"{PROFILES_DIR}/common.base.conf"
 LIMITS_TMPL_PATH = f"{PROFILES_DIR}/limits.tmpl"
 SYSTEMD_LIMITS_TMPL_PATH = f"{PROFILES_DIR}/systemd-limits.tmpl"
-TUNING_FACTS_PATH = "/opt/monitoring/configs/tuning-facts.json"
 TUNING_FACTS_ENV_PATH = "/opt/monitoring/configs/tuning-facts.env"
 HAPROXY_LIMITS_DROPIN_PATH = "/etc/systemd/system/haproxy.service.d/limits.conf"
 MODPROBE_CONNTRACK_PATH = "/etc/modprobe.d/nf_conntrack.conf"
@@ -571,21 +608,6 @@ SYSCTL_PREV_PATH = f"{SYSCTL_CONFIG_PATH}.prev"
 
 # Обязано совпадать с MEM_QUANTUM_KB в configs/tune-sysctl.sh.
 MEM_QUANTUM_KB = 16384
-
-# Keys excluded from verification even though we set them, because another
-# writer legitimately changes them at runtime:
-#   rp_filter    — Xray's WireGuard outbound writes all/rp_filter=0 when a
-#                  tunnel comes up; the next render sets it back to 2.
-#   disable_ipv6 — same story (all/disable_ipv6=0).
-# Asserting on these produced a permanent false failure on any node with an
-# active WireGuard outbound.
-VERIFY_EXCLUDED_KEYS = {
-    "net.ipv4.conf.all.rp_filter",
-    "net.ipv4.conf.default.rp_filter",
-    "net.ipv6.conf.all.disable_ipv6",
-    "net.ipv6.conf.default.disable_ipv6",
-    "net.ipv6.conf.lo.disable_ipv6",
-}
 
 
 async def read_optimizations_version() -> Optional[str]:
@@ -812,9 +834,12 @@ async def get_all_versions():
     )
 
     opt_installed = sysctl_content is not None
+    policy = get_policy()
 
     return {
         "node_version": node_version if node_version != "unknown" else None,
+        "capabilities": policy.published(),
+        "capabilities_unknown": list(policy.unknown_tokens),
         "optimizations": {
             "installed": opt_installed,
             "version": opt_version,
@@ -871,6 +896,10 @@ class ApplyOptimizationsRequest(BaseModel):
     multiqueue_tune_service_content: Optional[str] = Field(None, description="Multiqueue tune service (HW)")
     hybrid_tune_content: Optional[str] = Field(None, description="Hybrid tune script (HW+RPS)")
     hybrid_tune_service_content: Optional[str] = Field(None, description="Hybrid tune service (HW+RPS)")
+    cpu_affinity: bool = Field(
+        False,
+        description="Развести приложения и сетевые прерывания по разным ядрам",
+    )
     nic_mode: Literal["rps", "multiqueue", "hybrid"] = Field(
         "rps", description="NIC tuning mode: rps, multiqueue, or hybrid"
     )
@@ -911,209 +940,6 @@ async def clamp_remnawave_ulimits(nofile_limit: int) -> Optional[str]:
     return None
 
 
-def expected_from_facts(facts: dict) -> dict:
-    """Build the key->value set to assert on, from a parsed tuning-facts.json.
-
-    Pure function, kept separate so the merge/exclusion rules are testable
-    without a host executor. `static` wins over `computed` on a collision:
-    static values are read back out of the rendered file, so they reflect what
-    was actually written.
-    """
-    unsupported = set(facts.get("unsupported_keys") or [])
-    expected = {}
-    expected.update(facts.get("computed") or {})
-    expected.update(facts.get("static") or {})
-    return {
-        k: v for k, v in expected.items()
-        if k not in unsupported and k not in VERIFY_EXCLUDED_KEYS
-    }
-
-
-def _normalize_sysctl_value(value: str) -> str:
-    """Collapse whitespace so a tab-separated kernel value compares equal.
-
-    `sysctl -n net.ipv4.tcp_mem` returns its three fields TAB-separated while the
-    config file uses single spaces. The previous exact-string comparison would
-    have failed on tcp_mem, tcp_rmem, tcp_wmem, udp_mem and ip_local_port_range
-    the moment any of them was added to the checked set.
-    """
-    return " ".join((value or "").split())
-
-
-async def verify_sysctl_values(executor) -> dict:
-    """Verify live kernel values against the facts file the renderer wrote.
-
-    Expectations are per-host and computed, so they cannot be hardcoded here:
-    the old flat table only worked because every key in it happened to have the
-    same value in both profiles. Reading the facts file also means the node and
-    install.sh agree by construction instead of by two copies of a constant.
-    """
-    verification = {"success": True, "checked": {}, "failed": []}
-
-    raw = await read_host_file(TUNING_FACTS_PATH)
-    if not raw:
-        verification["success"] = False
-        verification["failed"].append(
-            "tuning-facts.json missing — this node predates the renderer; re-apply optimizations"
-        )
-        return verification
-
-    try:
-        facts = json.loads(raw)
-    except (ValueError, TypeError) as e:
-        verification["success"] = False
-        verification["failed"].append(f"tuning-facts.json is not valid JSON: {e}")
-        return verification
-
-    expected = expected_from_facts(facts)
-
-    if not expected:
-        verification["success"] = False
-        verification["failed"].append("tuning-facts.json contains no verifiable keys")
-        return verification
-
-    # One nsenter round-trip for every key instead of one per key: at ~28 keys
-    # the old loop spawned 28 processes on each apply.
-    keys = sorted(expected)
-    script = "; ".join(
-        f"printf '%s=%s\\n' {k} \"$(sysctl -n {k} 2>/dev/null || echo MISSING)\""
-        for k in keys
-    )
-    result = await executor.execute(script, timeout=30, shell="bash")
-
-    actual_values = {}
-    if result.success and result.exit_code == 0:
-        for line in (result.stdout or "").splitlines():
-            if "=" not in line:
-                continue
-            key, _, value = line.partition("=")
-            actual_values[key.strip()] = value.strip()
-    else:
-        verification["success"] = False
-        verification["failed"].append("failed to read live sysctl values")
-        return verification
-
-    for key in keys:
-        want = _normalize_sysctl_value(expected[key])
-        got = _normalize_sysctl_value(actual_values.get(key, "MISSING"))
-        verification["checked"][key] = {"expected": want, "actual": got}
-        if want != got:
-            verification["failed"].append(f"{key}: expected {want}, got {got}")
-            verification["success"] = False
-
-    # Threshold, not equality: the module may already carry a larger table, and
-    # the expected size is profile- and RAM-dependent. install.sh reads the same
-    # number from the same file, which is what removes the old disagreement
-    # (524288/32768 there vs a flat 524288 here, false-failing panel+hybrid).
-    want_hashsize = (facts.get("derived") or {}).get("conntrack_hashsize")
-    if want_hashsize:
-        res = await executor.execute(
-            "cat /sys/module/nf_conntrack/parameters/hashsize", timeout=5
-        )
-        if res.success and res.exit_code == 0:
-            try:
-                hashsize = int((res.stdout or "0").strip())
-            except ValueError:
-                hashsize = 0
-            verification["checked"]["conntrack_hashsize"] = {
-                "expected": f">={want_hashsize}", "actual": str(hashsize)
-            }
-            if hashsize < int(want_hashsize):
-                verification["failed"].append(
-                    f"conntrack_hashsize: expected >={want_hashsize}, got {hashsize}"
-                )
-                verification["success"] = False
-
-    verification["checked_count"] = len(verification["checked"])
-    return verification
-
-
-SYSTEM_SYSCTL_PATTERNS = {"10-", "99-sysctl.conf", "99-cloudimg-", "README"}
-OUR_SYSCTL_CONFIG = "99-vless-tuning.conf"
-THIRD_PARTY_SERVICES = [
-    "3x-ui-tuning", "xray-tuning", "marzban-tuning",
-    "network-optimize", "sysctl-tuning", "tcp-tuning", "tcp-bbr",
-]
-THIRD_PARTY_SCRIPTS = [
-    "/usr/local/bin/network-tuning.sh", "/usr/local/bin/tcp-tuning.sh",
-    "/usr/local/bin/sysctl-tuning.sh", "/opt/3x-ui/tuning.sh", "/opt/marzban/tuning.sh",
-]
-
-
-def _is_system_sysctl(filename: str) -> bool:
-    return any(filename.startswith(p) for p in SYSTEM_SYSCTL_PATTERNS) or filename == OUR_SYSCTL_CONFIG
-
-
-async def cleanup_conflicting_configs(executor) -> list[str]:
-    """Remove ALL non-system sysctl/limits configs and third-party tuning services"""
-    cleaned = []
-    
-    # ---- sysctl.d: remove all non-system configs ----
-    ls_result = await executor.execute("ls /etc/sysctl.d/ 2>/dev/null", timeout=5)
-    if ls_result.success and ls_result.stdout:
-        for fname in ls_result.stdout.strip().split("\n"):
-            fname = fname.strip()
-            if not fname.endswith(".conf"):
-                continue
-            if _is_system_sysctl(fname):
-                continue
-            await executor.execute(f"rm -f /etc/sysctl.d/{fname}", timeout=5)
-            cleaned.append(f"sysctl.d/{fname}")
-    
-    # ---- /etc/sysctl.conf: remove all active parameter lines ----
-    result = await executor.execute(
-        r"sed -i '/^net\./d; /^fs\./d; /^vm\./d; /^kernel\./d; /^precedence/d' /etc/sysctl.conf",
-        timeout=5,
-    )
-    if result.success and result.exit_code == 0:
-        cleaned.append("sysctl.conf (cleaned)")
-    
-    # ---- limits.d: remove all non-system configs ----
-    ls_result = await executor.execute("ls /etc/security/limits.d/ 2>/dev/null", timeout=5)
-    if ls_result.success and ls_result.stdout:
-        for fname in ls_result.stdout.strip().split("\n"):
-            fname = fname.strip()
-            if not fname.endswith(".conf") or fname == "99-nofile.conf":
-                continue
-            await executor.execute(f"rm -f /etc/security/limits.d/{fname}", timeout=5)
-            cleaned.append(f"limits.d/{fname}")
-    
-    # ---- /etc/security/limits.conf: clean custom nofile/nproc/memlock lines ----
-    await executor.execute(
-        r"sed -i '/^\*.*nofile/d; /^root.*nofile/d; /^\*.*nproc/d; /^root.*nproc/d; "
-        r"/^\*.*memlock/d; /^root.*memlock/d' /etc/security/limits.conf",
-        timeout=5,
-    )
-    
-    # ---- Stop/disable third-party tuning services ----
-    for svc in THIRD_PARTY_SERVICES:
-        check = await executor.execute(f"systemctl is-enabled {svc}.service 2>/dev/null", timeout=5)
-        if check.exit_code == 0:
-            await executor.execute(f"systemctl stop {svc}.service", timeout=10)
-            await executor.execute(f"systemctl disable {svc}.service", timeout=10)
-            cleaned.append(f"service:{svc}")
-    
-    # ---- Remove third-party tuning scripts ----
-    for script in THIRD_PARTY_SCRIPTS:
-        check = await executor.execute(f"test -f {script}", timeout=3)
-        if check.exit_code == 0:
-            await executor.execute(f"rm -f {script}", timeout=5)
-            cleaned.append(f"script:{script}")
-    
-    # ---- Clean crontab entries that apply sysctl ----
-    cron_check = await executor.execute(
-        "crontab -l 2>/dev/null | grep -qE 'sysctl|network-tun|tcp-tun'", timeout=5
-    )
-    if cron_check.exit_code == 0:
-        await executor.execute(
-            "crontab -l 2>/dev/null | grep -vE 'sysctl|network-tun|tcp-tun' | crontab -",
-            timeout=5,
-        )
-        cleaned.append("crontab (cleaned)")
-    
-    return cleaned
-
-
 async def remove_rps_mode(executor) -> list[str]:
     """Stop and remove RPS/software NIC tuning files."""
     removed = []
@@ -1151,6 +977,57 @@ async def remove_hybrid_mode(executor) -> list[str]:
             await executor.execute(f"rm -f {path}", timeout=5)
             removed.append(path)
     return removed
+
+
+class CpuAffinityRequest(BaseModel):
+    enabled: bool = Field(..., description="Включить развод по ядрам")
+
+
+def _cpu_affinity_state() -> dict:
+    cpu_count = os.cpu_count() or 1
+    enabled = cpu_affinity.is_enabled()
+    network_cpus = sorted(cpu_affinity.detect_network_cpus())
+    app_cpus = cpu_affinity.resolve_app_cpus("auto", cpu_count) if enabled else None
+    return {
+        "enabled": enabled,
+        "cpu_count": cpu_count,
+        "network_cpus": network_cpus,
+        "app_cpus": app_cpus or [],
+        "applicable": bool(app_cpus),
+        "containers": cpu_affinity.container_names(),
+    }
+
+
+@router.get("/cpu-affinity")
+async def get_cpu_affinity():
+    """Текущее состояние развода по ядрам и что нода на себе определила."""
+    return _cpu_affinity_state()
+
+
+@router.post("/cpu-affinity")
+async def set_cpu_affinity(request: CpuAffinityRequest):
+    """Переключает развод по ядрам без полного применения оптимизаций.
+
+    Настройка глобальная, а полный apply на каждой ноде занимает минуты — поэтому
+    у переключателя своя лёгкая ручка. Контейнеры приводятся к новой привязке
+    сразу, HAProxy — при ближайшем применении конфига.
+    """
+    written = await write_host_file(
+        str(cpu_affinity.STATE_FILE),
+        cpu_affinity.render_state(request.enabled),
+        mode="644",
+    )
+    if not written:
+        raise HTTPException(status_code=500, detail="Failed to write cpu-affinity state")
+
+    executor = get_host_executor()
+    cpu_count = os.cpu_count() or 1
+    if request.enabled:
+        changed = await cpu_affinity.sync_containers(executor, cpu_count)
+    else:
+        changed = await cpu_affinity.reset_containers(executor)
+
+    return {**_cpu_affinity_state(), "containers_changed": changed}
 
 
 @router.post("/optimizations/apply")
@@ -1195,6 +1072,11 @@ async def apply_optimizations(request: ApplyOptimizationsRequest):
     # 2. Profile marker must exist before the renderer runs: the boot-time
     #    ExecStartPre has no argument and reads the profile from this file.
     await write_host_file(OPT_PROFILE_PATH, request.opt_profile + "\n", mode="644")
+    await write_host_file(
+        str(cpu_affinity.STATE_FILE),
+        cpu_affinity.render_state(request.cpu_affinity),
+        mode="644",
+    )
     if request.version:
         await write_host_file(OPTIMIZATIONS_VERSION_PATH, request.version + "\n", mode="644")
 
@@ -1450,9 +1332,22 @@ async def remove_optimizations():
 
 # ==================== Time Synchronization ====================
 
+ZONEINFO_DIR = "/usr/share/zoneinfo"
+# Имя зоны уходит в shell-строку, исполняемую на хосте от root, поэтому набор
+# символов сведён к тому, что реально встречается в именах IANA (Europe/Moscow,
+# America/Argentina/Buenos_Aires, Etc/GMT+5). Точки в наборе нет — подняться из
+# каталога зон через «..» нельзя.
+TIMEZONE_PATTERN = r"^[A-Za-z0-9_+/-]+$"
+
 
 class TimeSyncRequest(BaseModel):
-    timezone: str = Field(..., min_length=1, max_length=100, description="IANA timezone (e.g. Europe/Moscow)")
+    timezone: str = Field(
+        ...,
+        min_length=1,
+        max_length=100,
+        pattern=TIMEZONE_PATTERN,
+        description="IANA timezone (e.g. Europe/Moscow)",
+    )
 
 
 class TimeSyncResponse(BaseModel):
@@ -1465,6 +1360,13 @@ class TimeSyncResponse(BaseModel):
     errors: list[str] = []
 
 
+async def timezone_exists_on_host(executor, timezone_name: str) -> bool:
+    """Формат имени зоны ещё не значит, что зона есть на хосте — сверяем с tzdata."""
+    zone_file = shlex.quote(f"{ZONEINFO_DIR}/{timezone_name}")
+    result = await executor.execute(f"test -f {zone_file}", timeout=5)
+    return result.exit_code == 0
+
+
 @router.post("/time-sync", response_model=TimeSyncResponse)
 async def time_sync(request: TimeSyncRequest):
     """
@@ -1473,11 +1375,18 @@ async def time_sync(request: TimeSyncRequest):
     Uses timedatectl + systemd-timesyncd (preinstalled on Ubuntu 24).
     """
     executor = get_host_executor()
+
+    if not await timezone_exists_on_host(executor, request.timezone):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown timezone: {request.timezone}",
+        )
+
     errors: list[str] = []
 
     # 1. Set timezone
     tz_result = await executor.execute(
-        f"timedatectl set-timezone {request.timezone}",
+        f"timedatectl set-timezone {shlex.quote(request.timezone)}",
         timeout=15, shell="bash"
     )
     timezone_set = tz_result.success and tz_result.exit_code == 0

@@ -4,17 +4,22 @@ All speed calculations are done on the panel side.
 
 import asyncio
 import json
+import logging
 import os
 import socket
 import platform
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 import psutil
 
 from app.config import get_settings
+from app.services.port_traffic_sampler import get_port_traffic_sampler
+
+logger = logging.getLogger(__name__)
 
 
 class MetricsCollector:
@@ -22,17 +27,17 @@ class MetricsCollector:
     Speed calculations are done on the panel side.
     """
     
-    # psutil.cpu_percent(interval=None) меряет от предыдущего вызова; на интервалах
-    # порядка миллисекунд гранулярность jiffies (~10мс) даёт мусор вида
-    # «одно ядро 100%, остальные 0» — не пересэмплируем чаще этого порога
-    CPU_SAMPLE_MIN_INTERVAL = 0.5
+    # Минимум натиканного счётчиками /proc/stat, при котором замер осмыслен.
+    # Тик ядра — 10 мс, и на дельте в единицы тиков доля busy вырождается
+    # в 0 или 100 («одно ядро 100%, остальные 0»).
+    CPU_MIN_TICKS_SECONDS = 0.2
+    # Длительность стартового замера — с запасом над порогом выше
+    CPU_PRIME_SECONDS = 0.3
 
     def __init__(self):
         self.settings = get_settings()
-        # Initialize CPU baseline for non-blocking calls
-        psutil.cpu_percent(percpu=True)
-        self._last_cpu_percent: list = [0.0] * (psutil.cpu_count() or 1)
-        self._last_cpu_sample_at: float = time.monotonic()
+        self._prev_cpu_times: list = psutil.cpu_times(percpu=True)
+        self._last_cpu_percent: list = [0.0] * len(self._prev_cpu_times)
         self._cpu_lock = threading.Lock()
         # Process cache to avoid blocking
         self._processes_cache: list = []
@@ -42,7 +47,17 @@ class MetricsCollector:
         self._system_cache: dict = {}
         self._system_cache_time: float = 0
         self._system_cache_ttl: float = 5.0  # 5 seconds
-    
+        # boot_id не меняется в пределах жизни хоста — читаем лениво один раз
+        self._boot_id: Optional[str] = None
+        # Роутер системы уже читает /app/VERSION, а NODE_VERSION из app.main
+        # импортировать нельзя — main сам импортирует этот модуль
+        from app.routers.system import get_current_version
+        self._agent_version: str = get_current_version()
+        # Права в пределах процесса не меняются — собирать карту заново на
+        # каждый опрос (а он раз в 10 секунд) незачем
+        from app.capabilities import get_policy
+        self._capabilities: Optional[dict] = get_policy().published()
+
     def _read_host_file(self, path: str) -> str:
         """Read file from host filesystem"""
         host_path = Path(self.settings.host_proc).parent / path.lstrip('/')
@@ -54,27 +69,54 @@ class MetricsCollector:
         return ""
     
     def prime_cpu_baseline(self):
-        """Стартовый блокирующий замер (~0.25с) при запуске ноды: первый запрос
-        метрик сразу получает реальные значения per-CPU, а не нули/мусор
-        нулевого интервала."""
+        """Стартовый блокирующий замер при запуске ноды: первый запрос метрик
+        сразу получает реальные значения per-CPU, а не нули пустого baseline."""
+        before = psutil.cpu_times(percpu=True)
+        time.sleep(self.CPU_PRIME_SECONDS)
+        after = psutil.cpu_times(percpu=True)
         with self._cpu_lock:
-            self._last_cpu_percent = psutil.cpu_percent(interval=0.25, percpu=True)
-            self._last_cpu_sample_at = time.monotonic()
+            self._prev_cpu_times = after
+            percents = self._per_cpu_from(before, after)
+            if percents is not None:
+                self._last_cpu_percent = percents
+
+    @classmethod
+    def _per_cpu_from(cls, before: list, after: list) -> Optional[list]:
+        """Занятость каждого ядра по дельте счётчиков, либо None при слишком
+        короткой дельте — тогда считать нечего и звать не за чем."""
+        if not after or len(after) != len(before):
+            return None
+
+        percents = []
+        for prev, cur in zip(before, after):
+            total = sum(cur) - sum(prev)
+            if total < cls.CPU_MIN_TICKS_SECONDS:
+                return None
+            busy = total - (cur.idle - prev.idle)
+            percents.append(round(min(max(busy, 0.0) / total * 100, 100.0), 1))
+        return percents
 
     def _sample_per_cpu(self) -> list:
-        """Per-CPU % с защитой от слишком коротких интервалов замера.
+        """Per-CPU % по дельте /proc/stat, с отбраковкой вырожденного интервала.
 
-        Состояние psutil глобально на процесс, а запросы метрик идут из тред-пула:
-        без лока и порога два близких запроса укорачивают интервал друг друга
-        до миллисекунд и получают мусор. Ранним запросам отдаём последний
-        валидный замер."""
+        Порог берётся из самих счётчиков, а не из настенных часов: запросы метрик
+        идут из тред-пула, и поток может простоять между взглядом на часы и чтением
+        /proc/stat — сторож по времени тогда пропускает замер, у которого реального
+        интервала нет. Пока тиков мало, baseline не сдвигается и отдаётся последний
+        валидный замер: следующий запрос померит от него же, уже на длинной дельте."""
         with self._cpu_lock:
-            now = time.monotonic()
-            if now - self._last_cpu_sample_at >= self.CPU_SAMPLE_MIN_INTERVAL:
-                sampled = psutil.cpu_percent(interval=None, percpu=True)
-                if sampled:
-                    self._last_cpu_percent = sampled
-                    self._last_cpu_sample_at = now
+            current = psutil.cpu_times(percpu=True)
+
+            if len(current) != len(self._prev_cpu_times):
+                # Число ядер сменилось (ресайз VPS) — старый baseline несопоставим
+                self._prev_cpu_times = current
+                self._last_cpu_percent = [0.0] * len(current)
+                return self._last_cpu_percent
+
+            percents = self._per_cpu_from(self._prev_cpu_times, current)
+            if percents is not None:
+                self._prev_cpu_times = current
+                self._last_cpu_percent = percents
             return self._last_cpu_percent
 
     def get_cpu_info(self) -> dict:
@@ -105,8 +147,12 @@ class MetricsCollector:
                         {"label": e.label or f"core_{i}", "current": e.current, "high": e.high, "critical": e.critical}
                         for i, e in enumerate(entries)
                     ]
-        except (AttributeError, Exception):
-            pass
+        # Широкий перехват здесь осознанный: температуры — необязательная косметика,
+        # а бэкенды psutil для hwmon/ipmi на экзотическом железе бросают что угодно.
+        # Любое исключение отсюда поднялось бы в /api/metrics, а это единственный
+        # эндпоинт, по которому панель определяет живость ноды — сервер ушёл бы в offline.
+        except Exception as e:
+            logger.debug(f"Temperature sensors unavailable: {e}")
         
         model = "Unknown"
         cpuinfo = self._read_host_file("/proc/cpuinfo")
@@ -217,8 +263,8 @@ class MetricsCollector:
                         'tx_errors': int(values[10]),
                         'tx_drops': int(values[11]),
                     }
-        except Exception:
-            pass
+        except (OSError, ValueError) as e:
+            logger.warning(f"Failed to read {net_dev_path}, network counters will be zero: {e}")
         return result
     
     # Virtual/bridge/tunnel interfaces whose traffic is already counted on physical interfaces
@@ -244,8 +290,8 @@ class MetricsCollector:
                     content = slaves_file.read_text().strip()
                     if content:
                         slaves.update(content.split())
-        except Exception:
-            pass
+        except OSError as e:
+            logger.debug(f"Failed to enumerate bond slaves, totals may double-count: {e}")
         return slaves
 
     def get_network_info(self) -> dict:
@@ -330,12 +376,31 @@ class MetricsCollector:
             "rx_bytes_per_sec": 0.0,
             "tx_bytes_per_sec": 0.0
         }
-        
+
+        ports, ports_available, ports_sampled_at = self._port_counters()
+
         return {
             "interfaces": interfaces,
-            "total": total
+            "total": total,
+            "ports": ports,
+            "ports_available": ports_available,
+            "ports_sampled_at": ports_sampled_at,
         }
-    
+
+    @staticmethod
+    def _port_counters() -> tuple[list[dict], bool, Optional[float]]:
+        """Снимок счётчиков по портам — уже в памяти, его наполняет фоновый семплер.
+
+        Перехват широкий по той же причине, что и у температур: /api/metrics —
+        единственный признак живости ноды, и учёт по портам не стоит того,
+        чтобы из-за него сервер уходил в offline.
+        """
+        try:
+            return get_port_traffic_sampler().snapshot()
+        except Exception as e:
+            logger.error(f"Port traffic snapshot unavailable: {e}")
+            return [], False, None
+
     def get_processes_info(self, top_n: int = 10) -> dict:
         """Get process statistics and top processes with caching to avoid blocking"""
         current_time = time.time()
@@ -406,7 +471,7 @@ class MetricsCollector:
         
         # Read TCP (IPv4 + IPv6)
         for tcp_file in ['/proc/net/tcp', '/proc/net/tcp6']:
-            host_path = Path(self.settings.host_proc) / tcp_file.lstrip('/proc/')
+            host_path = Path(self.settings.host_proc) / tcp_file.removeprefix('/proc/')
             try:
                 if host_path.exists():
                     content = host_path.read_text()
@@ -432,20 +497,20 @@ class MetricsCollector:
                                 tcp_stats['fin_wait'] += 1
                             else:
                                 tcp_stats['other'] += 1
-            except Exception:
-                pass
-        
+            except OSError as e:
+                logger.warning(f"Failed to read {host_path}, TCP connection counters are incomplete: {e}")
+
         # Read UDP (IPv4 + IPv6)
         for udp_file in ['/proc/net/udp', '/proc/net/udp6']:
-            host_path = Path(self.settings.host_proc) / udp_file.lstrip('/proc/')
+            host_path = Path(self.settings.host_proc) / udp_file.removeprefix('/proc/')
             try:
                 if host_path.exists():
                     content = host_path.read_text()
                     lines = content.strip().split('\n')[1:]  # Skip header
                     udp_stats['total'] += len(lines)
-            except Exception:
-                pass
-        
+            except OSError as e:
+                logger.warning(f"Failed to read {host_path}, UDP connection counters are incomplete: {e}")
+
         return {
             'tcp': tcp_stats,
             'udp': udp_stats,
@@ -507,7 +572,8 @@ class MetricsCollector:
             "connections": connections,
             "connections_detailed": conn_stats,
             "server_name": self.settings.node_name,
-            "timezone": self._get_timezone_info()
+            "timezone": self._get_timezone_info(),
+            "boot_id": self._get_boot_id(),
         }
         
         # Cache the result
@@ -516,6 +582,14 @@ class MetricsCollector:
         
         return result
     
+    def _get_boot_id(self) -> Optional[str]:
+        """Идентификатор загрузки ядра — по нему панель отличает ребут от сбоя счётчика."""
+        # Пустой результат не кэшируем: одна осечка на старте контейнера иначе навсегда
+        # лишила бы панель точного признака ребута и оставила только эвристику по аптайму.
+        if not self._boot_id:
+            self._boot_id = self._read_host_file("/proc/sys/kernel/random/boot_id").strip()
+        return self._boot_id or None
+
     def _format_uptime(self, seconds: float) -> str:
         """Format uptime in human readable format"""
         days = int(seconds // 86400)
@@ -535,9 +609,7 @@ class MetricsCollector:
     def _get_timezone_info(self) -> dict:
         """Get server timezone information"""
         now = datetime.now()
-        utc_now = datetime.now(timezone.utc)
-        
-        # Calculate offset in seconds
+
         local_offset = now.astimezone().utcoffset()
         offset_seconds = int(local_offset.total_seconds()) if local_offset else 0
         offset_hours = offset_seconds / 3600
@@ -585,8 +657,7 @@ class MetricsCollector:
                 }
             }
         except Exception as e:
-            import logging
-            logging.getLogger(__name__).error(f"Failed to get certificates info: {e}")
+            logger.error(f"Failed to get certificates info: {e}")
             return {"count": 0, "closest_expiry": None}
     
     def _read_proc_int(self, path: str, default=None):
@@ -731,6 +802,8 @@ class MetricsCollector:
             "system": system,
             "certificates": certs,
             "antiddos": antiddos,
+            "agent_version": self._agent_version,
+            "capabilities": self._capabilities,
         }
 
 

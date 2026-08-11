@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import socket
 import subprocess
 import time
 from datetime import datetime
@@ -13,7 +12,7 @@ import docker
 import psutil
 from app.services.http_client import get_node_client, get_external_client, node_auth_headers
 from docker.errors import DockerException, ImageNotFound
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,12 +21,20 @@ from app.config import get_settings
 from app.database import get_db
 from app.models import Server
 from app.services import update_channel
+from app.services.net_utils import resolve_host
 
 router = APIRouter(prefix="/system", tags=["system"])
 logger = logging.getLogger(__name__)
 
 NODE_VERSIONS_CACHE_TTL_SEC = 30.0
 NODE_NIC_INFO_CACHE_TTL_SEC = 20.0
+
+# Ссылка подставляется в текст shell-скрипта, который апдейтер исполняет в
+# privileged-контейнере с docker.sock — то есть это прямой путь к произвольной
+# команде на хосте панели. В наборе символов нет ни метасимвола shell, ни пробела;
+# ведущий символ алфавитно-цифровой, иначе ссылка сошла бы у git за опцию вида
+# --upload-pack=. Кавычки в самом скрипте — второй рубеж, не замена проверке.
+GIT_REF_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._/-]*$"
 
 _node_versions_cache: dict[int, tuple[float, Optional[dict]]] = {}
 _node_versions_locks: dict[int, asyncio.Lock] = {}
@@ -60,26 +67,24 @@ def invalidate_node_cache(server_id: int) -> None:
     invalidate_node_nic_info_cache(server_id)
 
 
-def get_panel_ip() -> str | None:
+async def get_panel_ip() -> str | None:
     """Get panel's IP address by resolving the configured domain"""
     settings = get_settings()
     domain = settings.domain
-    
+
     if not domain:
         return None
-    
-    try:
-        ip = socket.gethostbyname(domain)
-        return ip
-    except socket.gaierror:
+
+    ip = await resolve_host(domain)
+    if ip is None:
         logger.warning(f"Failed to resolve domain: {domain}")
-        return None
+    return ip
 
 
 @router.get("/panel-ip")
 async def get_panel_ip_endpoint(_: dict = Depends(verify_auth)):
     """Get panel's IP address"""
-    ip = get_panel_ip()
+    ip = await get_panel_ip()
     settings = get_settings()
     return {
         "ip": ip,
@@ -287,13 +292,6 @@ async def get_cached_nic_info(server_id: int, fetcher) -> Any:
         return data
 
 
-async def get_node_version(server: Server) -> Optional[str]:
-    result = await get_node_all_versions(server)
-    if result:
-        return result.get("node_version")
-    return None
-
-
 def get_docker_client():
     """Get Docker client via socket"""
     try:
@@ -301,103 +299,6 @@ def get_docker_client():
     except DockerException as e:
         logger.error(f"Failed to connect to Docker: {e}")
         raise
-
-
-@router.get("/version")
-async def get_version_info(
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """
-    Get comprehensive version information:
-    - Current panel version and latest available
-    - Latest available node version from GitHub
-    - Latest optimizations version from GitHub
-    - Versions of all connected nodes (including optimizations)
-    
-    All node requests are made in parallel for faster response.
-    """
-    current_version = get_current_version()
-    
-    # Get all servers from DB
-    result = await db.execute(
-        select(Server).where(Server.is_active == True).order_by(Server.position)
-    )
-    servers = result.scalars().all()
-    
-    # Fetch GitHub versions and all node versions in parallel
-    async def fetch_node_data(server: Server) -> dict:
-        """Fetch version data from a single node"""
-        versions_data = await get_node_all_versions(server)
-        
-        # Determine online/offline based on whether we got a response
-        is_online = versions_data is not None
-        
-        return {
-            "id": server.id,
-            "name": server.name,
-            "url": server.url,
-            "version": versions_data.get("node_version") if versions_data else None,
-            "status": "online" if is_online else "offline",
-            "optimizations": versions_data.get("optimizations", {"installed": False, "version": None}) if versions_data else {"installed": False, "version": None}
-        }
-    
-    # Execute all requests in parallel
-    github_panel_task = get_latest_version_from_github()
-    github_node_task = get_latest_node_version_from_github()
-    github_opt_task = get_latest_optimizations_version_from_github()
-    node_tasks = [fetch_node_data(server) for server in servers]
-    
-    # Gather all results
-    results = await asyncio.gather(
-        github_panel_task,
-        github_node_task,
-        github_opt_task,
-        *node_tasks,
-        return_exceptions=True
-    )
-    
-    # Parse results
-    latest_version = results[0] if not isinstance(results[0], Exception) else None
-    latest_node_version = results[1] if not isinstance(results[1], Exception) else None
-    latest_opt_version = results[2] if not isinstance(results[2], Exception) else None
-    
-    # Process node results
-    nodes_versions = []
-    for i, node_result in enumerate(results[3:]):
-        if isinstance(node_result, Exception):
-            server = servers[i]
-            nodes_versions.append({
-                "id": server.id,
-                "name": server.name,
-                "url": server.url,
-                "version": None,
-                "status": "offline",
-                "optimizations": {"installed": False, "version": None}
-            })
-        else:
-            nodes_versions.append(node_result)
-    
-    # Check if panel update is available
-    panel_update_available = False
-    if latest_version and current_version != "unknown":
-        panel_update_available = latest_version != current_version
-    
-    return {
-        "panel": {
-            "version": current_version,
-            "latest_version": latest_version,
-            "update_available": panel_update_available
-        },
-        "node": {
-            "latest_version": latest_node_version
-        },
-        "optimizations": {
-            "latest_version": latest_opt_version
-        },
-        "nodes": nodes_versions,
-        "update_in_progress": _update_status["in_progress"]
-    }
 
 
 @router.get("/version/base")
@@ -482,28 +383,29 @@ async def run_panel_update_in_container(target_ref: str | None = None):
     Args:
         target_ref: Git reference (branch/tag/commit). Default: выбранный канал обновлений.
     """
-    global _update_status
     
     _update_status["in_progress"] = True
     _update_status["last_error"] = None
     
     try:
-        client = get_docker_client()
-        
+        client = await asyncio.to_thread(get_docker_client)
+
         # Remove old updater container if exists
         try:
-            old_container = client.containers.get(UPDATER_CONTAINER_NAME)
-            old_container.remove(force=True)
+            old_container = await asyncio.to_thread(
+                client.containers.get, UPDATER_CONTAINER_NAME
+            )
+            await asyncio.to_thread(old_container.remove, force=True)
             logger.info("Removed old updater container")
         except docker.errors.NotFound:
             pass
-        
+
         # Pull docker:cli image if needed
         try:
-            client.images.get(UPDATER_IMAGE)
+            await asyncio.to_thread(client.images.get, UPDATER_IMAGE)
         except ImageNotFound:
             logger.info(f"Pulling {UPDATER_IMAGE}...")
-            client.images.pull(UPDATER_IMAGE)
+            await asyncio.to_thread(client.images.pull, UPDATER_IMAGE)
         
         ref_arg = target_ref if target_ref else update_channel.current_branch()
         logger.info(f"Starting panel update to: {ref_arg}")
@@ -553,12 +455,12 @@ rm -rf $TMP_CLONE
 CLONE_SUCCESS=0
 
 echo "[INFO] Trying GitHub (30s timeout)..."
-if timeout 30 git clone --depth 1 --branch {ref_arg} "https://github.com/Joliz1337/monitoring.git" $TMP_CLONE 2>&1; then
+if timeout 30 git clone --depth 1 --branch "{ref_arg}" "https://github.com/Joliz1337/monitoring.git" $TMP_CLONE 2>&1; then
     CLONE_SUCCESS=1
 else
     rm -rf $TMP_CLONE
     echo "[WARN] GitHub timeout/error, trying mirror (ghfast.top)..."
-    if timeout 120 git clone --depth 1 --branch {ref_arg} "$GITHUB_MIRROR/https://github.com/Joliz1337/monitoring.git" $TMP_CLONE 2>&1; then
+    if timeout 120 git clone --depth 1 --branch "{ref_arg}" "$GITHUB_MIRROR/https://github.com/Joliz1337/monitoring.git" $TMP_CLONE 2>&1; then
         CLONE_SUCCESS=1
     fi
 fi
@@ -570,7 +472,7 @@ fi
 
 echo "[INFO] Running update script..."
 chmod +x $TMP_CLONE/panel/update.sh
-bash $TMP_CLONE/panel/update.sh {ref_arg}
+bash $TMP_CLONE/panel/update.sh "{ref_arg}"
 
 echo "[INFO] Cleanup..."
 rm -rf $TMP_CLONE
@@ -578,7 +480,8 @@ rm -rf $TMP_CLONE
 echo "[SUCCESS] Panel update completed!"
 """
         
-        container = client.containers.run(
+        container = await asyncio.to_thread(
+            client.containers.run,
             image=UPDATER_IMAGE,
             command=["sh", "-c", updater_script],
             name=UPDATER_CONTAINER_NAME,
@@ -596,13 +499,10 @@ echo "[SUCCESS] Panel update completed!"
         logger.info(f"Panel updater started: {container.id[:12]}")
         
         # Wait for completion (10 min timeout)
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: container.wait(timeout=600)
-        )
-        
+        result = await asyncio.to_thread(container.wait, timeout=600)
+
         exit_code = result.get("StatusCode", -1)
-        logs = container.logs().decode("utf-8", errors="replace")
+        logs = (await asyncio.to_thread(container.logs)).decode("utf-8", errors="replace")
         
         if exit_code == 0:
             _update_status["last_result"] = "success"
@@ -615,7 +515,7 @@ echo "[SUCCESS] Panel update completed!"
         
         # Cleanup
         try:
-            container.remove(force=True)
+            await asyncio.to_thread(container.remove, force=True)
         except Exception:
             pass
             
@@ -641,7 +541,7 @@ echo "[SUCCESS] Panel update completed!"
 
 @router.post("/update")
 async def trigger_panel_update(
-    target_ref: str | None = None,
+    target_ref: str | None = Query(None, max_length=100, pattern=GIT_REF_PATTERN),
     _: dict = Depends(verify_auth)
 ):
     """
@@ -666,25 +566,6 @@ async def trigger_panel_update(
         "success": True,
         "message": "Panel update started. The panel will restart shortly.",
         "target": target_ref or update_channel.current_branch()
-    }
-
-
-@router.get("/update/status")
-async def get_update_status(_: dict = Depends(verify_auth)):
-    """Get current panel update status"""
-    container_running = False
-    try:
-        client = get_docker_client()
-        container = client.containers.get(UPDATER_CONTAINER_NAME)
-        container_running = container.status == "running"
-    except Exception:
-        pass
-    
-    return {
-        "in_progress": _update_status["in_progress"] or container_running,
-        "last_result": _update_status["last_result"],
-        "last_error": _update_status["last_error"],
-        "last_update_time": _update_status.get("last_update_time")
     }
 
 
@@ -759,7 +640,6 @@ async def get_certificate_info(_: dict = Depends(verify_auth)):
 
 async def run_certificate_renewal(force: bool = False):
     """Execute certificate renewal script in background"""
-    global _cert_renewal_status
     
     _cert_renewal_status["in_progress"] = True
     _cert_renewal_status["last_error"] = None
@@ -949,109 +829,6 @@ async def get_optimizations_from_github(profile: str = "vpn") -> dict:
     return result
 
 
-@router.get("/optimizations/version")
-async def get_optimizations_version_info(
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """
-    Get system optimizations version information:
-    - Latest version from GitHub
-    - Versions installed on all nodes
-    
-    Note: This data is also available in /system/version endpoint.
-    All node requests are made in parallel for faster response.
-    """
-    # Get all servers from DB
-    result = await db.execute(
-        select(Server).where(Server.is_active == True).order_by(Server.position)
-    )
-    servers = result.scalars().all()
-    
-    async def fetch_node_opt_data(server: Server) -> dict:
-        """Fetch optimizations data from a single node"""
-        versions_data = await get_node_all_versions(server)
-        is_online = versions_data is not None
-        
-        opt_data = versions_data.get("optimizations", {}) if versions_data else {}
-        installed = opt_data.get("installed", False)
-        node_version = opt_data.get("version")
-
-        return {
-            "id": server.id,
-            "name": server.name,
-            "installed": installed,
-            "version": node_version,
-            "status": "online" if is_online else "offline",
-            # drift: this host's RAM/CPU no longer match what its config was
-            # rendered from. VERSION cannot express that — the values are
-            # per-host — so it is reported separately and folded into
-            # update_available below.
-            "drift": bool(opt_data.get("drift", False)),
-            "drift_detail": opt_data.get("drift_detail"),
-            "_online": is_online  # internal flag for update_available calculation
-        }
-    
-    # Execute all requests in parallel
-    github_task = get_latest_optimizations_version_from_github()
-    node_tasks = [fetch_node_opt_data(server) for server in servers]
-    
-    results = await asyncio.gather(
-        github_task,
-        *node_tasks,
-        return_exceptions=True
-    )
-    
-    latest_version = results[0] if not isinstance(results[0], Exception) else None
-    
-    nodes_info = []
-    for i, node_result in enumerate(results[1:]):
-        if isinstance(node_result, Exception):
-            server = servers[i]
-            nodes_info.append({
-                "id": server.id,
-                "name": server.name,
-                "installed": False,
-                "version": None,
-                "status": "offline",
-                "update_available": False
-            })
-        else:
-            # Calculate update_available
-            installed = node_result.get("installed", False)
-            node_version = node_result.get("version")
-            is_online = node_result.get("_online", False)
-            
-            drift = node_result.get("drift", False)
-
-            update_available = False
-            if is_online:
-                if installed and node_version and latest_version:
-                    update_available = node_version != latest_version
-                elif not installed:
-                    update_available = True
-                # A resized VPS needs a re-render even when VERSION matches:
-                # every size-dependent sysctl was computed from the OLD RAM/CPU.
-                if installed and drift:
-                    update_available = True
-
-            nodes_info.append({
-                "id": node_result["id"],
-                "name": node_result["name"],
-                "installed": installed,
-                "version": node_version,
-                "status": node_result["status"],
-                "drift": drift,
-                "drift_detail": node_result.get("drift_detail"),
-                "update_available": update_available
-            })
-    
-    return {
-        "latest_version": latest_version,
-        "nodes": nodes_info
-    }
-
-
 # NOTE: GET /optimizations/configs used to exist here and returned the finished
 # sysctl/limits contents. It had no callers (the apply flow in proxy.py calls
 # get_optimizations_from_github directly) and its response shape described the
@@ -1059,6 +836,26 @@ async def get_optimizations_version_info(
 
 
 # ==================== Panel Server Statistics ====================
+
+CPU_SAMPLE_INTERVAL_SEC = 0.5
+
+
+def _collect_host_stats() -> tuple:
+    var_disk = None
+    try:
+        var_disk = psutil.disk_usage('/var')
+    except Exception:
+        pass
+    return (
+        psutil.cpu_percent(interval=CPU_SAMPLE_INTERVAL_SEC),
+        psutil.cpu_count(),
+        psutil.getloadavg(),
+        psutil.virtual_memory(),
+        psutil.swap_memory(),
+        psutil.disk_usage('/'),
+        var_disk,
+    )
+
 
 @router.get("/stats")
 async def get_panel_server_stats(_: dict = Depends(verify_auth)):
@@ -1069,25 +866,13 @@ async def get_panel_server_stats(_: dict = Depends(verify_auth)):
     - Disk usage for main partition
     """
     try:
-        # CPU
-        cpu_percent = psutil.cpu_percent(interval=0.5)
-        cpu_count = psutil.cpu_count()
-        load_avg = psutil.getloadavg()
-        
-        # Memory
-        memory = psutil.virtual_memory()
-        swap = psutil.swap_memory()
-        
-        # Disk - get root partition (/)
-        disk = psutil.disk_usage('/')
-        
-        # Additional disk info for /var (where PostgreSQL data usually is)
-        var_disk = None
-        try:
-            var_disk = psutil.disk_usage('/var')
-        except Exception:
-            pass
-        
+        # cpu_percent(interval=...) спит ровно столько же, сколько измеряет,
+        # а остальное читает /proc и /sys — весь блок уходит в поток целиком
+        (
+            cpu_percent, cpu_count, load_avg,
+            memory, swap, disk, var_disk,
+        ) = await asyncio.to_thread(_collect_host_stats)
+
         return {
             "cpu": {
                 "percent": cpu_percent,

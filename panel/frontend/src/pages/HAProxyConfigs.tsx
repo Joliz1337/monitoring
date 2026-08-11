@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { FileCode2, Plus, Play, RefreshCw, Trash2, Server, ChevronDown, ChevronRight, Edit3, Link2, Unlink, Loader2, CheckCircle2, XCircle, AlertCircle, Clock, History, X, Code, Save, AlertTriangle, Activity, Scale, Cpu } from 'lucide-react'
+import { FileCode2, Plus, Play, RefreshCw, Trash2, Server, ChevronDown, ChevronRight, Edit3, Link2, Unlink, Loader2, CheckCircle2, XCircle, AlertCircle, Clock, History, X, Code, Save, AlertTriangle, Activity, Scale, Cpu, Lock } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
@@ -38,6 +38,7 @@ function SyncStatusBadge({ status, online }: { status: string | null; online?: b
     synced: { color: 'text-green-400 bg-green-500/10 border-green-500/20', icon: <CheckCircle2 className="w-3 h-3" />, label: t('haproxy_configs.synced') },
     pending: { color: 'text-yellow-400 bg-yellow-500/10 border-yellow-500/20', icon: <Clock className="w-3 h-3" />, label: t('haproxy_configs.pending') },
     failed: { color: 'text-red-400 bg-red-500/10 border-red-500/20', icon: <XCircle className="w-3 h-3" />, label: t('haproxy_configs.failed') },
+    denied: { color: 'text-purple bg-purple/10 border-purple/20', icon: <Lock className="w-3 h-3" />, label: t('node_caps.status_denied') },
   }
   const s = map[status] || map.pending
   return (
@@ -104,14 +105,22 @@ function BackendServerRow({
     <div className="p-3 bg-dark-900/40 rounded-lg border border-dark-700/40 space-y-2">
       <div className="flex items-center gap-2">
         <div className="flex-1 grid grid-cols-4 gap-2">
-          <input type="text" value={srv.name} onChange={e => upd({ name: e.target.value })}
-            placeholder="srv1" className={inp} title={t('balancer.server_name')} />
-          <input type="text" value={srv.address} onChange={e => upd({ address: e.target.value })}
-            placeholder="1.2.3.4" className={inp} title={t('balancer.address')} />
-          <input type="number" value={srv.port || ''} onChange={e => upd({ port: parseInt(e.target.value) || 0 })}
-            placeholder="8080" className={inp} title={t('haproxy.target_port')} />
-          <input type="number" value={srv.weight ?? 1} onChange={e => upd({ weight: parseInt(e.target.value) || 1 })}
-            placeholder="1" className={inp} title={t('balancer.weight')} min={1} max={256} />
+          <Tooltip label={t('balancer.server_name')}>
+            <input type="text" value={srv.name} onChange={e => upd({ name: e.target.value })}
+              placeholder="srv1" className={inp} />
+          </Tooltip>
+          <Tooltip label={t('balancer.address')}>
+            <input type="text" value={srv.address} onChange={e => upd({ address: e.target.value })}
+              placeholder="1.2.3.4" className={inp} />
+          </Tooltip>
+          <Tooltip label={t('haproxy.target_port')}>
+            <input type="number" value={srv.port || ''} onChange={e => upd({ port: parseInt(e.target.value) || 0 })}
+              placeholder="8080" className={inp} />
+          </Tooltip>
+          <Tooltip label={t('balancer.weight')}>
+            <input type="number" value={srv.weight ?? 1} onChange={e => upd({ weight: parseInt(e.target.value) || 1 })}
+              placeholder="1" className={inp} min={1} max={256} />
+          </Tooltip>
         </div>
         <button type="button" onClick={() => setExpanded(e => !e)}
           className="p-1 text-dark-400 hover:text-dark-200 transition-colors">
@@ -196,7 +205,10 @@ function BalancerSettingsSection({
     <div className="space-y-3">
       {/* Algorithm */}
       <div>
-        <label className="block text-xs text-dark-400 mb-1">{t('balancer.algorithm')}</label>
+        <label className="flex items-center gap-1 text-xs text-dark-400 mb-1">
+          {t('balancer.algorithm')}
+          <FAQIcon screen="HAPROXY_CONFIGS_BALANCER" size="sm" />
+        </label>
         <select value={opts.algorithm} onChange={e => upd({ algorithm: e.target.value })} className={inp}>
           {ALGORITHMS.map(a => (
             <option key={a} value={a}>{t(`balancer.alg.${a.replace('-', '_')}`)}</option>
@@ -227,7 +239,10 @@ function BalancerSettingsSection({
         <div className="space-y-3 pl-2 border-l-2 border-dark-700/40">
           {/* Health check */}
           <div>
-            <label className="block text-xs text-dark-400 mb-1">{t('balancer.health_check_type')}</label>
+            <label className="flex items-center gap-1 text-xs text-dark-400 mb-1">
+              {t('balancer.health_check_type')}
+              <FAQIcon screen="HAPROXY_CONFIGS_HEALTHCHECK" size="sm" />
+            </label>
             <select value={opts.health_check_type ?? ''} onChange={e => upd({ health_check_type: e.target.value || undefined })} className={inp}>
               <option value="">—</option>
               <option value="tcp-check">{t('balancer.tcp_check')}</option>
@@ -258,7 +273,10 @@ function BalancerSettingsSection({
 
           {/* Sticky sessions */}
           <div>
-            <label className="block text-xs text-dark-400 mb-1">{t('balancer.sticky')}</label>
+            <label className="flex items-center gap-1 text-xs text-dark-400 mb-1">
+              {t('balancer.sticky')}
+              <FAQIcon screen="HAPROXY_CONFIGS_STICKY" size="sm" />
+            </label>
             <select value={opts.sticky_type ?? ''} onChange={e => upd({ sticky_type: e.target.value || undefined })} className={inp}>
               <option value="">{t('balancer.sticky_none')}</option>
               <option value="cookie">{t('balancer.sticky_cookie')}</option>
@@ -514,11 +532,12 @@ function RuleForm({
                 <span className="text-xs text-dark-400 font-medium">{t('balancer.servers')}</span>
                 <div className="flex items-center gap-3">
                   {form.servers.length > 1 && (
-                    <button type="button" onClick={autoWeights}
-                      className="flex items-center gap-1 text-xs text-dark-400 hover:text-dark-200 transition-colors"
-                      title={t('balancer.auto_weight')}>
-                      <Cpu className="w-3 h-3" /> {t('balancer.auto_weight')}
-                    </button>
+                    <Tooltip label={t('balancer.auto_weight')}>
+                      <button type="button" onClick={autoWeights}
+                        className="flex items-center gap-1 text-xs text-dark-400 hover:text-dark-200 transition-colors">
+                        <Cpu className="w-3 h-3" /> {t('balancer.auto_weight')}
+                      </button>
+                    </Tooltip>
                   )}
                   <button type="button" onClick={addServer}
                     className="flex items-center gap-1 text-xs text-accent-400 hover:text-accent-300 transition-colors">

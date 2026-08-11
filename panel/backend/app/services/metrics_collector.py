@@ -1,7 +1,7 @@
 """
 Background metrics collector for the panel.
 Polls all servers every N seconds and stores metrics in local DB.
-Calculates network/disk speeds based on byte differences.
+Disk speeds are derived here; network speed and traffic history belong to traffic_ingest.
 """
 
 import asyncio
@@ -12,20 +12,28 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
-from sqlalchemy import select, delete, update, bindparam
+from sqlalchemy import select, delete, update, bindparam, func, ColumnElement
 from app.services.http_client import get_node_client, node_auth_headers
+from app.services.node_capabilities import (
+    Capability,
+    normalize_map as normalize_capabilities_map,
+    server_allows,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import async_session
-from app.models import Server, ServerCache, MetricsSnapshot, AggregatedMetrics, PanelSettings
-from sqlalchemy import func as sql_func
+from app.database import async_session, Base
+from app.models import (
+    Server, ServerCache, MetricsSnapshot, AggregatedMetrics, PanelSettings,
+    ServerDowntime, ServerTraffic,
+)
+from app.services.traffic_ingest import get_traffic_ingest
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 logger = logging.getLogger(__name__)
 
 # Default intervals (used if settings not in DB)
 DEFAULT_METRICS_INTERVAL = 10  # seconds (recommended: 10-15s)
-DEFAULT_HAPROXY_INTERVAL = 300  # seconds (5 minutes - HAProxy/Traffic data changes rarely)
+DEFAULT_HAPROXY_INTERVAL = 300  # seconds (5 minutes - HAProxy data changes rarely)
 
 
 class ErrorTypes:
@@ -38,16 +46,18 @@ class ErrorTypes:
     UNKNOWN = "Unknown error"
 
 
-class ServerMetricsState:
-    """Tracks previous values for speed calculation per server"""
-    
+class DiskIoState:
+    """Предыдущая выборка дисковых счётчиков — база для расчёта скорости.
+
+    Сетевые счётчики здесь не хранятся: их база лежит в PostgreSQL (traffic_ingest),
+    иначе рестарт панели терял бы её и первый цикл после старта давал нули.
+    Для дисков историческая точность не нужна, память переживает цикл.
+    """
+
     def __init__(self):
-        self.prev_net_rx: int = 0
-        self.prev_net_tx: int = 0
-        self.prev_disk_read: int = 0
-        self.prev_disk_write: int = 0
-        self.prev_time: float = 0
-        self.initialized: bool = False
+        self.prev_read: int = 0
+        self.prev_write: int = 0
+        self.prev_time: float = 0.0
 
 
 class MetricsCollector:
@@ -61,12 +71,35 @@ class MetricsCollector:
     HTTP_CONCURRENCY = 50  # max parallel HTTP requests to nodes
     DB_CONCURRENCY = 10    # max parallel DB sessions
     CLEANUP_INTERVAL = 300 # cleanup every 5 minutes, not every cycle
+    CLEANUP_CHUNK_ROWS = 50_000  # строк за один DELETE ретеншена
+    CLEANUP_MAX_CHUNKS = 20      # потолок проходов за вызов, хвост уйдёт в следующий
 
     CB_FAILURE_THRESHOLD = 3   # после стольких подряд неудач нода уходит в skip
     CB_SKIP_CYCLES = 3         # пропускать N циклов перед повторной попыткой
 
     DOWN_THRESHOLD_SECONDS = 120  # сколько молчания считаем "definitively offline" для recovery
     RECONCILE_CONCURRENCY = 5     # одновременных восстановлений оживших нод
+
+    DOWNTIME_KIND_NODE = "node"
+    DOWNTIME_KIND_PANEL = "panel"
+    # Открытый интервал простоя старше суток — след падения самой панели, а не живого простоя.
+    ORPHANED_DOWNTIME_AFTER = timedelta(days=1)
+    # Ниже этого перерыва в сборе интервал не заводим: обычный рестарт панели
+    # укладывается в секунды, а дельту счётчиков за него нода донесёт сама.
+    PANEL_GAP_THRESHOLD = timedelta(minutes=5)
+
+    MIN_SPEED_INTERVAL_SECONDS = 0.5  # ниже этого dt деление даёт шум, а не скорость
+    NODE_VERSION_MAX_LEN = 20         # ширина servers.node_version
+
+    # Правила файрвола живут под префиксом haproxy, но закрываются своим доменом
+    HAPROXY_ENDPOINTS = (
+        ("/api/haproxy/status", "status", Capability.HAPROXY),
+        ("/api/haproxy/rules", "rules", Capability.HAPROXY),
+        ("/api/haproxy/certs/all", "certs", Capability.HAPROXY),
+        ("/api/haproxy/firewall/rules", "firewall", Capability.FIREWALL),
+    )
+    HAPROXY_FETCH_TIMEOUT = 15.0
+    HAPROXY_FAST_FETCH_TIMEOUT = 10.0
 
     # Жёсткий потолок на весь запрос метрик, поверх httpx-таймаутов (2+2+10+2=16s).
     # httpx не покрывает SOCKS5-рукопожатие: запрос через прокси может повиснуть навсегда,
@@ -82,16 +115,17 @@ class MetricsCollector:
         self._xray_check_task: Optional[asyncio.Task] = None
         self._active_cache_task: Optional[asyncio.Task] = None
         self._haproxy_retry_task: Optional[asyncio.Task] = None
-        self._server_states: dict[int, ServerMetricsState] = {}
+        self._disk_states: dict[int, DiskIoState] = {}
         self._collect_interval = DEFAULT_METRICS_INTERVAL
         self._haproxy_interval = DEFAULT_HAPROXY_INTERVAL
-        self._traffic_period_days = 30
-        
+
         self._active_servers: dict[int, float] = {}
         
         self._raw_retention_hours = 24
         self._hourly_retention_days = 30
         self._daily_retention_days = 365
+        self._traffic_hour_retention_days = 14
+        self._traffic_day_retention_days = 400
         
         now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
         self._last_hourly_aggregation: datetime = now_utc - timedelta(hours=2)
@@ -106,6 +140,9 @@ class MetricsCollector:
 
         # Наблюдаемый переход offline → online для авто-восстановления состояния ноды.
         self._down_servers: set[int] = set()
+        # Сервера с незакрытым интервалом простоя. Отдельно от _down_servers: интервал
+        # мог открыть прошлый запуск панели, и закрыть его должен первый же удачный опрос.
+        self._open_downtime: set[int] = set()
         self._reconcile_inflight: set[int] = set()
         self._reconcile_sem = asyncio.Semaphore(self.RECONCILE_CONCURRENCY)
 
@@ -120,7 +157,7 @@ class MetricsCollector:
                 result = await db.execute(
                     select(PanelSettings).where(
                         PanelSettings.key.in_([
-                            'metrics_collect_interval', 'haproxy_collect_interval', 'traffic_period'
+                            'metrics_collect_interval', 'haproxy_collect_interval'
                         ])
                     )
                 )
@@ -139,11 +176,6 @@ class MetricsCollector:
                         if new_interval != self._haproxy_interval:
                             logger.info(f"HAProxy interval changed: {self._haproxy_interval}s -> {new_interval}s")
                             self._haproxy_interval = new_interval
-                
-                if 'traffic_period' in settings:
-                    new_period = int(settings['traffic_period'])
-                    if 1 <= new_period <= 365:
-                        self._traffic_period_days = new_period
         except Exception as e:
             logger.debug(f"Failed to load collector settings: {e}")
     
@@ -163,7 +195,17 @@ class MetricsCollector:
         
         # Load settings before starting
         await self._load_settings()
-        
+        await self._record_panel_gap()
+        await self._close_orphaned_downtime()
+        await self._load_open_downtime()
+        # start() читает счётчики из БД и поднимает собственный цикл флаша. Единичный сбой
+        # БД здесь не должен ронять подъём панели: start_collector() в lifespan вызывается
+        # без try/except, и исключение отсюда остановило бы весь бэкенд.
+        try:
+            await get_traffic_ingest().start()
+        except Exception as e:
+            logger.error(f"Traffic ingest failed to start: {e}")
+
         self._running = True
         self._task = asyncio.create_task(self._collection_loop())
         self._aggregation_task = asyncio.create_task(self._aggregation_loop())
@@ -173,7 +215,7 @@ class MetricsCollector:
         self._active_cache_task = asyncio.create_task(self._active_haproxy_cache_loop())
         self._haproxy_retry_task = asyncio.create_task(self._haproxy_pending_sync_loop())
         logger.info(f"Metrics collector started (interval: {self._collect_interval}s, haproxy: {self._haproxy_interval}s)")
-    
+
     async def stop(self):
         """Stop background collection"""
         self._running = False
@@ -184,8 +226,10 @@ class MetricsCollector:
                     await task
                 except asyncio.CancelledError:
                     pass
+        # Финальный flush уже после остановки цикла сбора — иначе он гнался бы с observe().
+        await get_traffic_ingest().stop()
         logger.info("Metrics collector stopped")
-    
+
     async def _collection_loop(self):
         """Main collection loop"""
         while self._running:
@@ -215,6 +259,9 @@ class MetricsCollector:
         snapshots = []
         server_updates = []
         recovered_ids: list[int] = []
+        newly_down: list[tuple[int, datetime]] = []
+        downtime_over: list[int] = []
+        caps_changed: list[int] = []
 
         for server, result in zip(servers, results):
             if isinstance(result, Exception):
@@ -226,27 +273,44 @@ class MetricsCollector:
                 if server.id in self._down_servers:
                     self._down_servers.discard(server.id)
                     recovered_ids.append(server.id)
+                if server.id in self._open_downtime:
+                    self._open_downtime.discard(server.id)
+                    downtime_over.append(server.id)
                 snapshot_data = self._build_snapshot(server.id, metrics, now_utc)
                 if snapshot_data:
                     snapshots.append(snapshot_data)
+                node_version = metrics.get("agent_version")
+                tracked_ports = self._tracked_ports_json(metrics)
+                caps_present, capabilities = self._capabilities_json(metrics)
+                if not caps_present:
+                    capabilities = server.node_capabilities
+                elif capabilities != server.node_capabilities:
+                    caps_changed.append(server.id)
                 server_updates.append({
                     "id": server.id,
                     "last_seen": now_utc,
                     "last_error": None,
                     "error_code": None,
-                    "last_metrics": json.dumps(metrics)
+                    "last_metrics": json.dumps(metrics),
+                    # Старые ноды этих полей не присылают — пишем обратно то, что уже в базе.
+                    "node_version": node_version[:self.NODE_VERSION_MAX_LEN] if node_version else server.node_version,
+                    "tracked_ports": tracked_ports if tracked_ports is not None else server.tracked_ports,
+                    "node_capabilities": capabilities,
                 })
             elif error_info:
                 # Помечаем "definitively offline" только если раньше нода была живой и давно молчит.
-                if server.last_seen is not None and \
+                if server.id not in self._down_servers and server.last_seen is not None and \
                         self._seconds_since(server.last_seen, now_utc) >= self.DOWN_THRESHOLD_SECONDS:
                     self._down_servers.add(server.id)
+                    if server.id not in self._open_downtime:
+                        self._open_downtime.add(server.id)
+                        newly_down.append((server.id, self._to_naive_utc(server.last_seen)))
                 server_updates.append({
                     "id": server.id,
                     "last_error": error_info["message"],
                     "error_code": error_info["code"]
                 })
-        
+
         if snapshots or server_updates:
             success_updates = [u for u in server_updates if "last_seen" in u]
             error_updates = [u for u in server_updates if "last_seen" not in u]
@@ -268,6 +332,9 @@ class MetricsCollector:
                             "last_error": upd["last_error"],
                             "error_code": upd["error_code"],
                             "last_metrics": upd["last_metrics"],
+                            "node_version": upd["node_version"],
+                            "tracked_ports": upd["tracked_ports"],
+                            "node_capabilities": upd["node_capabilities"],
                         }
                         for upd in success_updates
                     ]
@@ -279,6 +346,9 @@ class MetricsCollector:
                             last_error=bindparam("last_error"),
                             error_code=bindparam("error_code"),
                             last_metrics=bindparam("last_metrics"),
+                            node_version=bindparam("node_version"),
+                            tracked_ports=bindparam("tracked_ports"),
+                            node_capabilities=bindparam("node_capabilities"),
                         ),
                         success_params,
                     )
@@ -304,9 +374,17 @@ class MetricsCollector:
 
                 await db.commit()
 
+        if newly_down or downtime_over:
+            await self._record_downtime(newly_down, downtime_over, now_utc)
+
         # Восстановление состояния оживших нод — last_seen уже закоммичен (сервер считается online).
         for sid in recovered_ids:
             asyncio.create_task(self._launch_reconcile(sid))
+
+        # Права поменялись: снимаем долги, ставшие неисполнимыми, и заново
+        # раскатываем то, что теперь снова разрешено.
+        if caps_changed:
+            asyncio.create_task(self._handle_capability_change(caps_changed))
 
         # Cleanup throttled — only every CLEANUP_INTERVAL seconds
         now = time.time()
@@ -380,13 +458,170 @@ class MetricsCollector:
             return None, {"message": f"{ErrorTypes.UNKNOWN}: {str(e)[:100]}", "code": 500}
     
     @staticmethod
-    def _seconds_since(last_seen: datetime, now_utc_naive: datetime) -> float:
-        """Возраст last_seen в секундах. last_seen может прийти tz-aware из PostgreSQL —
-        приводим к naive UTC, иначе вычитание aware/naive бросит TypeError."""
-        ls = last_seen
-        if ls.tzinfo is not None:
-            ls = ls.astimezone(timezone.utc).replace(tzinfo=None)
-        return (now_utc_naive - ls).total_seconds()
+    def _to_naive_utc(value: datetime) -> datetime:
+        """Колонки timestamptz приходят из PostgreSQL tz-aware, а весь коллектор считает
+        в naive UTC — вычитание aware из naive иначе бросает TypeError."""
+        if value.tzinfo is None:
+            return value
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+    def _seconds_since(self, last_seen: datetime, now_utc_naive: datetime) -> float:
+        """Возраст last_seen в секундах."""
+        return (now_utc_naive - self._to_naive_utc(last_seen)).total_seconds()
+
+    @staticmethod
+    def _tracked_ports_json(metrics: dict) -> Optional[str]:
+        """Список портов, за которыми нода считает трафик. None — старая нода без поля."""
+        ports = (metrics.get("network") or {}).get("ports")
+        if not isinstance(ports, list):
+            return None
+        return json.dumps([p["port"] for p in ports if isinstance(p, dict) and "port" in p])
+
+    @staticmethod
+    def _capabilities_json(metrics: dict) -> tuple[bool, Optional[str]]:
+        """(нода прислала поле, карта прав). Отсутствие поля — старый агент.
+
+        Отличать «поля нет» от «в поле null» обязательно: иначе снятое на ноде
+        ограничение осталось бы в базе навсегда.
+        """
+        if "capabilities" not in metrics:
+            return False, None
+        return True, normalize_capabilities_map(metrics.get("capabilities"))
+
+    async def _record_downtime(
+        self, newly_down: list[tuple[int, datetime]], downtime_over: list[int], now_utc: datetime
+    ):
+        """Границы наблюдаемых простоев нод.
+
+        alert_history для этого не годится: она пишется только при включённых алертах
+        и под кулдауном, то есть дырявая по построению, а провал в истории трафика
+        без интервала простоя не отличить от честного нуля.
+        """
+        try:
+            async with async_session() as db:
+                if newly_down:
+                    db.add_all([
+                        ServerDowntime(
+                            server_id=sid,
+                            started_at=started_at,
+                            kind=self.DOWNTIME_KIND_NODE,
+                        )
+                        for sid, started_at in newly_down
+                    ])
+
+                if downtime_over:
+                    await db.execute(
+                        update(ServerDowntime)
+                        .where(
+                            ServerDowntime.server_id.in_(downtime_over),
+                            ServerDowntime.ended_at.is_(None),
+                        )
+                        .values(ended_at=now_utc)
+                    )
+
+                await db.commit()
+        except Exception as e:
+            logger.error(f"Failed to record downtime intervals: {e}")
+
+    async def _record_panel_gap(self):
+        """Отметить перерыв, когда метрики не собирала сама панель.
+
+        Простой ноды видно по её молчанию, а простой панели не видно ниоткуда:
+        сбора просто не было. Без отметки такой перерыв на графике трафика
+        выглядит как обычный провал наблюдения, и оператор ищет проблему на
+        сервере, которого не было. Граница берётся по последнему снятому
+        снапшоту — момент, до которого сбор точно шёл; он же переживает падение
+        панели, в отличие от записи «на выходе».
+        """
+        now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+        try:
+            async with async_session() as db:
+                last_seen = (await db.execute(select(func.max(MetricsSnapshot.timestamp)))).scalar()
+                if last_seen is None:
+                    return
+
+                gap_start = self._to_naive_utc(last_seen)
+                if now_utc - gap_start < self.PANEL_GAP_THRESHOLD:
+                    return
+
+                server_ids = (
+                    await db.execute(select(Server.id).where(Server.is_active == True))
+                ).scalars().all()
+                if not server_ids:
+                    return
+
+                db.add_all([
+                    ServerDowntime(
+                        server_id=sid,
+                        started_at=gap_start,
+                        ended_at=now_utc,
+                        kind=self.DOWNTIME_KIND_PANEL,
+                    )
+                    for sid in server_ids
+                ])
+                await db.commit()
+                logger.info(
+                    f"Recorded panel collection gap {gap_start} → {now_utc} "
+                    f"for {len(server_ids)} server(s)"
+                )
+        except Exception as e:
+            logger.error(f"Failed to record panel collection gap: {e}")
+
+    async def _load_open_downtime(self):
+        """Незакрытые интервалы простоя из прошлого запуска панели.
+
+        Без них перезапуск панели терял бы знание об открытом интервале: нода
+        ответила бы, а закрывать было бы нечего, и простой остался бы бесконечным.
+        """
+        try:
+            async with async_session() as db:
+                result = await db.execute(
+                    select(ServerDowntime.server_id).where(ServerDowntime.ended_at.is_(None))
+                )
+                self._open_downtime = set(result.scalars().all())
+        except Exception as e:
+            logger.error(f"Failed to load open downtime intervals: {e}")
+
+    async def _close_orphaned_downtime(self):
+        """Закрывает интервалы, осиротевшие после падения самой панели.
+
+        Признак сироты — открытый интервал старше суток у ноды, которая с тех пор
+        отвечала: границей берём last_seen, последний момент, когда нода точно была
+        жива. Если last_seen не сдвинулся с начала интервала, нода лежит до сих пор
+        и интервал остаётся открытым.
+        """
+        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - self.ORPHANED_DOWNTIME_AFTER
+        try:
+            async with async_session() as db:
+                orphans = (
+                    await db.execute(
+                        select(ServerDowntime.id, ServerDowntime.started_at, Server.last_seen)
+                        .join(Server, Server.id == ServerDowntime.server_id)
+                        .where(
+                            ServerDowntime.ended_at.is_(None),
+                            ServerDowntime.started_at < cutoff,
+                            Server.last_seen.is_not(None),
+                        )
+                    )
+                ).all()
+
+                closed = 0
+                for downtime_id, started_at, last_seen in orphans:
+                    ended_at = self._to_naive_utc(last_seen)
+                    if ended_at <= self._to_naive_utc(started_at):
+                        continue
+                    await db.execute(
+                        update(ServerDowntime)
+                        .where(ServerDowntime.id == downtime_id)
+                        .values(ended_at=ended_at)
+                    )
+                    closed += 1
+
+                if closed:
+                    await db.commit()
+                    logger.info(f"Closed {closed} orphaned downtime interval(s) left by a panel restart")
+        except Exception as e:
+            logger.error(f"Failed to close orphaned downtime intervals: {e}")
 
     async def _launch_reconcile(self, server_id: int):
         """Восстанавливает привязанное состояние ноды после наблюдаемого down→up.
@@ -402,6 +637,21 @@ class MetricsCollector:
         finally:
             self._reconcile_inflight.discard(server_id)
 
+    async def _handle_capability_change(self, server_ids: list[int]):
+        """Права ноды изменились: чистим очередь и досинхронизируем открывшееся.
+
+        Реконсилер идемпотентен и дедуплицирован, поэтому годится для обеих
+        сторон изменения: и когда раздел закрыли, и когда открыли обратно.
+        """
+        try:
+            from app.services.node_sync_queue import drop_forbidden
+            await drop_forbidden(server_ids)
+        except Exception as e:
+            logger.error(f"Failed to drop forbidden sync debts for {server_ids}: {e}")
+
+        for server_id in server_ids:
+            await self._launch_reconcile(server_id)
+
     def _build_snapshot(self, server_id: int, metrics: dict, now_utc: datetime) -> Optional[dict]:
         """Build a snapshot dict for batch insert. Returns None if data invalid."""
         # Счётчики байт сняты в момент ответа конкретной ноды, поэтому и dt считаем
@@ -410,54 +660,31 @@ class MetricsCollector:
         # цикла (зависшая нода → circuit breaker) скорость завышалась до ~x2
         # или занижалась до ~x0.5 на один цикл у всех нод сразу.
         current_time = metrics.get("collected_at") or time.time()
-        
-        if server_id not in self._server_states:
-            self._server_states[server_id] = ServerMetricsState()
-        
-        state = self._server_states[server_id]
-        
+
         cpu = metrics.get("cpu", {})
         memory = metrics.get("memory", {}).get("ram", {})
         swap = metrics.get("memory", {}).get("swap", {})
-        network = metrics.get("network", {}).get("total", {})
         disk = metrics.get("disk", {})
         processes = metrics.get("processes", {})
         system = metrics.get("system", {})
-        
-        net_rx = network.get("rx_bytes", 0)
-        net_tx = network.get("tx_bytes", 0)
+
+        # Скорость сети берём у учёта трафика: счётчик и формула дельты должны быть
+        # одни на всю панель, иначе график скорости разойдётся с историей трафика.
+        # Ответ ноды приходит сюда как есть, а снапшоты всей флотилии собираются
+        # одним проходом — исключение на одной ноде не должно ронять остальные.
+        try:
+            speeds = get_traffic_ingest().observe(server_id, metrics, current_time)
+            net_rx_speed, net_tx_speed = speeds.rx_bytes_per_sec, speeds.tx_bytes_per_sec
+        except Exception as e:
+            logger.warning(f"Traffic observe failed for server {server_id}: {e}")
+            net_rx_speed, net_tx_speed = 0.0, 0.0
+
         disk_read = sum(d.get("read_bytes", 0) for d in disk.get("io", {}).values())
         disk_write = sum(d.get("write_bytes", 0) for d in disk.get("io", {}).values())
-        
-        net_rx_speed = 0.0
-        net_tx_speed = 0.0
-        disk_read_speed = 0.0
-        disk_write_speed = 0.0
-        
-        if state.initialized and state.prev_time > 0:
-            dt = current_time - state.prev_time
-            if dt > 0.5:
-                rx_diff = net_rx - state.prev_net_rx
-                tx_diff = net_tx - state.prev_net_tx
-                if rx_diff >= 0:
-                    net_rx_speed = rx_diff / dt
-                if tx_diff >= 0:
-                    net_tx_speed = tx_diff / dt
-                
-                read_diff = disk_read - state.prev_disk_read
-                write_diff = disk_write - state.prev_disk_write
-                if read_diff >= 0:
-                    disk_read_speed = read_diff / dt
-                if write_diff >= 0:
-                    disk_write_speed = write_diff / dt
-        
-        state.prev_net_rx = net_rx
-        state.prev_net_tx = net_tx
-        state.prev_disk_read = disk_read
-        state.prev_disk_write = disk_write
-        state.prev_time = current_time
-        state.initialized = True
-        
+        disk_read_speed, disk_write_speed = self._disk_speeds(
+            server_id, disk_read, disk_write, current_time
+        )
+
         disk_percent = 0.0
         partitions = disk.get("partitions", [])
         if partitions:
@@ -484,8 +711,6 @@ class MetricsCollector:
             "swap_percent": swap.get("percent", 0),
             "net_rx_bytes_per_sec": net_rx_speed,
             "net_tx_bytes_per_sec": net_tx_speed,
-            "net_rx_bytes": net_rx,
-            "net_tx_bytes": net_tx,
             "disk_percent": disk_percent,
             "disk_read_bytes_per_sec": disk_read_speed,
             "disk_write_bytes_per_sec": disk_write_speed,
@@ -500,40 +725,116 @@ class MetricsCollector:
             "tcp_fin_wait": tcp_states.get("fin_wait"),
             "per_cpu_percent": json.dumps(per_cpu) if per_cpu else None,
         }
-    
+
+    def _disk_speeds(
+        self, server_id: int, read_bytes: int, write_bytes: int, sampled_at: float
+    ) -> tuple[float, float]:
+        """Скорость чтения/записи по разнице с предыдущей выборкой этой же ноды."""
+        state = self._disk_states.get(server_id)
+        if state is None:
+            state = DiskIoState()
+            self._disk_states[server_id] = state
+
+        read_speed = 0.0
+        write_speed = 0.0
+        dt = sampled_at - state.prev_time
+        if state.prev_time > 0 and dt > self.MIN_SPEED_INTERVAL_SECONDS:
+            read_diff = read_bytes - state.prev_read
+            write_diff = write_bytes - state.prev_write
+            if read_diff >= 0:
+                read_speed = read_diff / dt
+            if write_diff >= 0:
+                write_speed = write_diff / dt
+
+        state.prev_read = read_bytes
+        state.prev_write = write_bytes
+        state.prev_time = sampled_at
+        return read_speed, write_speed
+
+    async def _delete_in_chunks(
+        self, db: AsyncSession, model: type[Base], *conditions: ColumnElement[bool]
+    ) -> int:
+        """Удаляет подходящие строки порциями, коммитя каждый проход.
+
+        Один DELETE на миллионы строк держал бы длинную транзакцию и всплеск WAL
+        прямо внутри цикла сбора метрик. Потолок проходов не даёт очистке залипнуть
+        на одном вызове — необработанный хвост уйдёт в следующий.
+        """
+        deleted = 0
+        for _ in range(self.CLEANUP_MAX_CHUNKS):
+            chunk = (
+                select(model.id)
+                .where(*conditions)
+                .limit(self.CLEANUP_CHUNK_ROWS)
+                .scalar_subquery()
+            )
+            result = await db.execute(
+                delete(model)
+                .where(model.id.in_(chunk))
+                .execution_options(synchronize_session=False)
+            )
+            await db.commit()
+            deleted += result.rowcount
+            if result.rowcount < self.CLEANUP_CHUNK_ROWS:
+                return deleted
+
+        logger.info(
+            f"Retention cleanup of {model.__tablename__} hit the chunk cap: "
+            f"{deleted} rows removed, rest deferred to next run"
+        )
+        return deleted
+
     async def _cleanup_old_data(self, db: AsyncSession):
         """Remove data older than retention periods.
-        
+
         Note: We use naive UTC datetime for consistent comparisons across platforms.
         """
         now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
-        
+
         # Cleanup raw data (24 hours)
         raw_cutoff = now_utc - timedelta(hours=self._raw_retention_hours)
-        await db.execute(
-            delete(MetricsSnapshot).where(MetricsSnapshot.timestamp < raw_cutoff)
+        await self._delete_in_chunks(
+            db, MetricsSnapshot, MetricsSnapshot.timestamp < raw_cutoff
         )
-        
+
         # Cleanup hourly aggregated data (30 days)
         hourly_cutoff = now_utc - timedelta(days=self._hourly_retention_days)
-        await db.execute(
-            delete(AggregatedMetrics).where(
-                AggregatedMetrics.period_type == 'hour',
-                AggregatedMetrics.timestamp < hourly_cutoff
-            )
+        await self._delete_in_chunks(
+            db, AggregatedMetrics,
+            AggregatedMetrics.period_type == 'hour',
+            AggregatedMetrics.timestamp < hourly_cutoff,
         )
-        
+
         # Cleanup daily aggregated data (365 days)
         daily_cutoff = now_utc - timedelta(days=self._daily_retention_days)
-        await db.execute(
-            delete(AggregatedMetrics).where(
-                AggregatedMetrics.period_type == 'day',
-                AggregatedMetrics.timestamp < daily_cutoff
-            )
+        await self._delete_in_chunks(
+            db, AggregatedMetrics,
+            AggregatedMetrics.period_type == 'day',
+            AggregatedMetrics.timestamp < daily_cutoff,
         )
-        
-        await db.commit()
-    
+
+        # История трафика. Часовые бакеты нужны только графикам за сутки и неделю,
+        # поэтому живут две недели; суточные держим дольше годового окна графиков,
+        # чтобы ретеншн не съел только что импортированную легаси-историю.
+        await self._delete_in_chunks(
+            db, ServerTraffic,
+            ServerTraffic.period_type == 'hour',
+            ServerTraffic.bucket < now_utc - timedelta(days=self._traffic_hour_retention_days),
+        )
+        await self._delete_in_chunks(
+            db, ServerTraffic,
+            ServerTraffic.period_type == 'day',
+            ServerTraffic.bucket < now_utc - timedelta(days=self._traffic_day_retention_days),
+        )
+
+        # Закрытые интервалы простоя нужны ровно для разрывов на графиках, дальше горизонта
+        # часовых данных они не читаются. Открытые не трогаем — простой может длиться.
+        await self._delete_in_chunks(
+            db, ServerDowntime,
+            ServerDowntime.ended_at.isnot(None),
+            ServerDowntime.ended_at < now_utc - timedelta(days=self._traffic_day_retention_days),
+        )
+
     async def _aggregation_loop(self):
         """Background loop for data aggregation"""
         while self._running:
@@ -544,6 +845,10 @@ class MetricsCollector:
                 
                 # Hourly aggregation (run at the start of each hour)
                 if now - self._last_hourly_aggregation >= timedelta(hours=1):
+                    # Хвост дельт закрывшегося часа ещё лежит в аккумуляторе: без флаша
+                    # агрегация прочитала бы бакет неполным, а ON CONFLICT DO NOTHING
+                    # потом уже не исправил бы строку.
+                    await get_traffic_ingest().flush()
                     async with async_session() as db:
                         await self._aggregate_hourly(db)
                     self._last_hourly_aggregation = now.replace(minute=0, second=0, microsecond=0)
@@ -558,17 +863,16 @@ class MetricsCollector:
                 logger.error(f"Aggregation error: {e}")
     
     async def _haproxy_cache_loop(self):
-        """Background loop for caching HAProxy and Traffic data"""
+        """Background loop for caching HAProxy data"""
         while self._running:
             try:
                 await asyncio.sleep(self._haproxy_interval)
-                await self._cache_haproxy_traffic_data()
+                await self._cache_haproxy_data()
             except Exception as e:
-                logger.error(f"HAProxy/Traffic cache error: {e}")
-    
+                logger.error(f"HAProxy cache error: {e}")
+
     async def _active_haproxy_cache_loop(self):
-        """Fast refresh loop (every 5s) for servers with recent client activity.
-        Only fetches HAProxy data (no traffic) to keep it lightweight."""
+        """Fast refresh loop (every 5s) for servers with recent client activity."""
         while self._running:
             try:
                 await asyncio.sleep(self.ACTIVE_REFRESH_INTERVAL)
@@ -590,43 +894,61 @@ class MetricsCollector:
                     servers = result.scalars().all()
                 
                 if servers:
-                    tasks = [self._cache_server_haproxy_only(s) for s in servers]
+                    tasks = [
+                        self._cache_server_haproxy(s, self.HAPROXY_FAST_FETCH_TIMEOUT)
+                        for s in servers
+                    ]
                     await asyncio.gather(*tasks, return_exceptions=True)
             except Exception as e:
                 logger.error(f"Active HAProxy cache error: {e}")
-    
-    async def _cache_server_haproxy_only(self, server: Server):
-        """Lightweight HAProxy-only cache refresh (no traffic data)"""
+
+    async def _cache_haproxy_data(self):
+        """Cache HAProxy status/rules/certs/firewall for all servers"""
+        async with async_session() as db:
+            result = await db.execute(
+                select(Server).where(Server.is_active == True)
+            )
+            servers = result.scalars().all()
+
+        # Each server uses its own session
+        tasks = [self._cache_server_haproxy(server, self.HAPROXY_FETCH_TIMEOUT) for server in servers]
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _cache_server_haproxy(self, server: Server, timeout: float):
+        """Cache HAProxy data for a single server into server_cache table."""
+        # Отбор до создания клиента: у ноды с закрытым haproxy этот цикл иначе
+        # каждые 5 минут собирал бы четыре гарантированных отказа
+        endpoints = [
+            (endpoint, key) for endpoint, key, capability in self.HAPROXY_ENDPOINTS
+            if server_allows(server, capability, write=False)
+        ]
+        if not endpoints:
+            return
+
         try:
             async with self._http_sem:
                 client = get_node_client(server)
                 headers = node_auth_headers(server)
                 haproxy_data = {}
 
-                for endpoint, key in [
-                    ("/api/haproxy/status", "status"),
-                    ("/api/haproxy/rules", "rules"),
-                    ("/api/haproxy/certs/all", "certs"),
-                    ("/api/haproxy/firewall/rules", "firewall"),
-                ]:
+                for endpoint, key in endpoints:
                     try:
-                        res = await client.get(f"{server.url}{endpoint}", headers=headers, timeout=10.0)
+                        res = await client.get(f"{server.url}{endpoint}", headers=headers, timeout=timeout)
                         if res.status_code == 200:
                             haproxy_data[key] = res.json()
                     except Exception:
                         pass
 
-                if not haproxy_data:
-                    return
-            
-            # Load existing cache from server_cache table
+            if not haproxy_data:
+                return
+
             async with self._db_sem:
                 async with async_session() as db:
                     result = await db.execute(
                         select(ServerCache).where(ServerCache.server_id == server.id)
                     )
                     cache_row = result.scalar_one_or_none()
-                    
+
                     existing = {}
                     if cache_row and cache_row.last_haproxy_data:
                         try:
@@ -635,7 +957,7 @@ class MetricsCollector:
                             pass
                     existing.update(haproxy_data)
                     existing["cached_at"] = datetime.now(timezone.utc).isoformat()
-                    
+
                     haproxy_json = json.dumps(existing)
                     stmt = pg_insert(ServerCache).values(
                         server_id=server.id,
@@ -648,114 +970,8 @@ class MetricsCollector:
                     await db.execute(stmt)
                     await db.commit()
         except Exception as e:
-            logger.debug(f"Failed to fast-refresh HAProxy for {server.name}: {e}")
-    
-    async def _cache_haproxy_traffic_data(self):
-        """Cache HAProxy status/rules/certs and Traffic summary for all servers"""
-        async with async_session() as db:
-            result = await db.execute(
-                select(Server).where(Server.is_active == True)
-            )
-            servers = result.scalars().all()
-        
-        # Each server uses its own session
-        tasks = [self._cache_server_haproxy_traffic(server) for server in servers]
-        await asyncio.gather(*tasks, return_exceptions=True)
-    
-    async def _cache_server_haproxy_traffic(self, server: Server):
-        """Cache HAProxy and Traffic data for a single server into server_cache table."""
-        try:
-            haproxy_data = {}
-            traffic_data = {}
-            
-            async with self._http_sem:
-                client = get_node_client(server)
-                headers = node_auth_headers(server)
+            logger.debug(f"Failed to cache HAProxy for {server.name}: {e}")
 
-                for endpoint, key in [
-                    ("/api/haproxy/status", "status"),
-                    ("/api/haproxy/rules", "rules"),
-                    ("/api/haproxy/certs/all", "certs"),
-                    ("/api/haproxy/firewall/rules", "firewall"),
-                ]:
-                    try:
-                        res = await client.get(f"{server.url}{endpoint}", headers=headers, timeout=15.0)
-                        if res.status_code == 200:
-                            haproxy_data[key] = res.json()
-                    except Exception:
-                        pass
-
-                for endpoint, key, params in [
-                    ("/api/traffic/summary", "summary", {"days": self._traffic_period_days}),
-                    ("/api/traffic/ports/tracked", "tracked_ports", {}),
-                    ("/api/traffic/hourly", "hourly", {"hours": 24}),
-                    ("/api/traffic/daily", "daily", {"days": self._traffic_period_days}),
-                    ("/api/traffic/monthly", "monthly", {"months": 12}),
-                ]:
-                    try:
-                        res = await client.get(
-                            f"{server.url}{endpoint}", headers=headers, params=params, timeout=15.0,
-                        )
-                        if res.status_code == 200:
-                            traffic_data[key] = res.json()
-                    except Exception:
-                        pass
-            
-            if not haproxy_data and not traffic_data:
-                return
-            
-            async with self._db_sem:
-                async with async_session() as db:
-                    result = await db.execute(
-                        select(ServerCache).where(ServerCache.server_id == server.id)
-                    )
-                    cache_row = result.scalar_one_or_none()
-                    
-                    haproxy_json = None
-                    traffic_json = None
-                    
-                    if haproxy_data:
-                        existing = {}
-                        if cache_row and cache_row.last_haproxy_data:
-                            try:
-                                existing = json.loads(cache_row.last_haproxy_data)
-                            except (json.JSONDecodeError, TypeError):
-                                pass
-                        existing.update(haproxy_data)
-                        existing["cached_at"] = datetime.now(timezone.utc).isoformat()
-                        haproxy_json = json.dumps(existing)
-                    
-                    if traffic_data:
-                        existing = {}
-                        if cache_row and cache_row.last_traffic_data:
-                            try:
-                                existing = json.loads(cache_row.last_traffic_data)
-                            except (json.JSONDecodeError, TypeError):
-                                pass
-                        existing.update(traffic_data)
-                        existing["cached_at"] = datetime.now(timezone.utc).isoformat()
-                        traffic_json = json.dumps(existing)
-                    
-                    values = {"server_id": server.id}
-                    set_clause = {}
-                    if haproxy_json:
-                        values["last_haproxy_data"] = haproxy_json
-                        set_clause["last_haproxy_data"] = haproxy_json
-                    if traffic_json:
-                        values["last_traffic_data"] = traffic_json
-                        set_clause["last_traffic_data"] = traffic_json
-                    
-                    stmt = pg_insert(ServerCache).values(**values)
-                    stmt = stmt.on_conflict_do_update(
-                        index_elements=['server_id'],
-                        set_=set_clause
-                    )
-                    await db.execute(stmt)
-                    await db.commit()
-                    
-        except Exception as e:
-            logger.debug(f"Failed to cache HAProxy/Traffic for {server.name}: {e}")
-    
     async def _haproxy_pending_sync_loop(self):
         """Досинхронизирует ожившие ноды с отложенной раскаткой конфигов (offline → online):
         HAProxy-профили и nginx-профили Remnawave в одном цикле."""
@@ -806,6 +1022,11 @@ class MetricsCollector:
             return
 
         async def _probe(server: Server) -> tuple[int, bool, bool]:
+            # Нода закрыла раздел — оставляем как есть: обнулив, панель погасила бы
+            # бейджи Remnawave, будто ноды с ним и не было
+            if not server_allows(server, Capability.REMNAWAVE, write=False):
+                return server.id, server.has_xray_node, server.remnawave_nginx_detected
+
             async with self._http_sem:
                 available = False
                 detected = False
@@ -863,13 +1084,20 @@ class MetricsCollector:
                 logger.warning(f"Failed to batch update xray/remnawave detection: {e}")
     
     async def _aggregate_hourly(self, db: AsyncSession):
-        """Aggregate raw metrics to hourly summaries — single SQL for all servers."""
+        """Aggregate raw metrics to hourly summaries — single SQL for all servers.
+
+        Суммарный трафик берётся готовым из server_traffic, а не интегрированием
+        скорости по снапшотам: интеграл занижал бы час с пропущенными циклами
+        и врал бы задним числом при смене metrics_collect_interval. LEFT JOIN даёт
+        не больше одной строки на сервер (uq_server_traffic), поэтому MAX() —
+        просто способ вытащить её значение в группе.
+        """
         from sqlalchemy import text
-        
+
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         hour_end = now.replace(minute=0, second=0, microsecond=0)
         hour_start = hour_end - timedelta(hours=1)
-        
+
         await db.execute(text("""
             INSERT INTO aggregated_metrics (
                 server_id, timestamp, period_type,
@@ -882,22 +1110,27 @@ class MetricsCollector:
                 avg_tcp_fin_wait, data_points
             )
             SELECT
-                server_id, :hour_start, 'hour',
-                AVG(cpu_usage), MAX(cpu_usage), AVG(load_avg_1),
-                AVG(memory_percent), MAX(memory_percent), AVG(disk_percent),
-                COALESCE(SUM(net_rx_bytes_per_sec * :interval), 0)::BIGINT,
-                COALESCE(SUM(net_tx_bytes_per_sec * :interval), 0)::BIGINT,
-                AVG(net_rx_bytes_per_sec), AVG(net_tx_bytes_per_sec),
-                AVG(disk_read_bytes_per_sec), AVG(disk_write_bytes_per_sec),
-                AVG(tcp_established), AVG(tcp_listen), AVG(tcp_time_wait),
-                AVG(tcp_close_wait), AVG(tcp_syn_sent), AVG(tcp_syn_recv),
-                AVG(tcp_fin_wait), COUNT(*)
-            FROM metrics_snapshots
-            WHERE timestamp >= :hour_start AND timestamp < :hour_end
-            GROUP BY server_id
+                m.server_id, :hour_start, 'hour',
+                AVG(m.cpu_usage), MAX(m.cpu_usage), AVG(m.load_avg_1),
+                AVG(m.memory_percent), MAX(m.memory_percent), AVG(m.disk_percent),
+                COALESCE(MAX(t.rx_bytes), 0), COALESCE(MAX(t.tx_bytes), 0),
+                AVG(m.net_rx_bytes_per_sec), AVG(m.net_tx_bytes_per_sec),
+                AVG(m.disk_read_bytes_per_sec), AVG(m.disk_write_bytes_per_sec),
+                AVG(m.tcp_established), AVG(m.tcp_listen), AVG(m.tcp_time_wait),
+                AVG(m.tcp_close_wait), AVG(m.tcp_syn_sent), AVG(m.tcp_syn_recv),
+                AVG(m.tcp_fin_wait), COUNT(*)
+            FROM metrics_snapshots m
+            LEFT JOIN server_traffic t
+                   ON t.server_id = m.server_id
+                  AND t.period_type = 'hour'
+                  AND t.scope = 'total'
+                  AND t.scope_key = ''
+                  AND t.bucket = :hour_start
+            WHERE m.timestamp >= :hour_start AND m.timestamp < :hour_end
+            GROUP BY m.server_id
             ON CONFLICT DO NOTHING
-        """), {"hour_start": hour_start, "hour_end": hour_end, "interval": self._collect_interval})
-        
+        """), {"hour_start": hour_start, "hour_end": hour_end})
+
         await db.commit()
         logger.info(f"Hourly aggregation completed for {hour_start}")
     

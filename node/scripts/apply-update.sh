@@ -70,26 +70,32 @@ spin() {
 
     "$@" >"$logf" 2>&1 &
     local pid=$!
-    local i=0
 
-    while kill -0 "$pid" 2>/dev/null; do
-        local e=$(( $(date +%s) - t0 ))
-        local m=$((e / 60)) s=$((e % 60))
-        if [ $m -gt 0 ]; then
-            printf "\r  \033[0;36m%s\033[0m %s \033[1;33m[%dm %02ds]\033[0m  " \
-                "${chars:$((i % 10)):1}" "$desc" "$m" "$s"
-        else
-            printf "\r  \033[0;36m%s\033[0m %s \033[1;33m[%ds]\033[0m  " \
-                "${chars:$((i % 10)):1}" "$desc" "$s"
-        fi
-        i=$((i + 1))
-        sleep 0.12 2>/dev/null || sleep 1
-    done
+    # Анимированный спиннер — только в реальном терминале. Вне TTY (запуск
+    # по SSH из панели) \r-перерисовка превращается в мусор, поэтому только ждём.
+    if [ -t 1 ]; then
+        local i=0
+        while kill -0 "$pid" 2>/dev/null; do
+            local e=$(( $(date +%s) - t0 ))
+            local m=$((e / 60)) s=$((e % 60))
+            if [ $m -gt 0 ]; then
+                printf "\r  \033[0;36m%s\033[0m %s \033[1;33m[%dm %02ds]\033[0m  " \
+                    "${chars:$((i % 10)):1}" "$desc" "$m" "$s"
+            else
+                printf "\r  \033[0;36m%s\033[0m %s \033[1;33m[%ds]\033[0m  " \
+                    "${chars:$((i % 10)):1}" "$desc" "$s"
+            fi
+            i=$((i + 1))
+            sleep 0.12 2>/dev/null || sleep 1
+        done
+    else
+        echo "  • ${desc}..."
+    fi
 
     wait "$pid" 2>/dev/null
     local rc=$?
     local e=$(( $(date +%s) - t0 ))
-    printf "\r\033[2K"
+    [ -t 1 ] && printf "\r\033[2K"
 
     if [ $rc -eq 0 ]; then
         echo -e "  ${GREEN}✓${NC} ${desc} ${CYAN}(${e}s)${NC}"
@@ -567,12 +573,25 @@ if [ -f "$NODE_DIR/.env.backup" ]; then
     log_success "Configuration restored"
 fi
 
+# Тег версии из скачанного чекаута, если такой образ есть в реестре.
+# Пустой ответ означает «оставить действующий тег» — тогда pull промахнётся мимо
+# нужной версии и сработает локальная сборка ниже, которая соберёт ровно этот код.
+resolve_pinned_tag() {
+    local version="$1"
+    [ -n "$version" ] && [ "$version" != "unknown" ] || return 0
+    timeout 30 docker manifest inspect \
+        "ghcr.io/joliz1337/monitoring-node-api:$version" >/dev/null 2>&1 || return 0
+    printf '%s' "$version"
+}
+
 # Канал → тег образов GHCR: ветка dev тянет :dev, main — :latest.
-# Обновление на тег/коммит канал не меняет — действующий MON_IMAGE_TAG остаётся.
+# Обновление на тег/коммит — это путь отката, и канал он не меняет. Но и оставить
+# действующий :latest нельзя: pull притащил бы ровно ту версию, от которой
+# откатываются, потому что код живёт в образе, а не в чекауте на диске.
 case "$TARGET_REF" in
     dev)  IMAGE_TAG="dev" ;;
     main) IMAGE_TAG="latest" ;;
-    *)    IMAGE_TAG="" ;;
+    *)    IMAGE_TAG=$(resolve_pinned_tag "$NEW_VERSION") ;;
 esac
 if [ -n "$IMAGE_TAG" ] && [ -f "$NODE_DIR/.env" ]; then
     if grep -q '^MON_IMAGE_TAG=' "$NODE_DIR/.env"; then
@@ -581,6 +600,16 @@ if [ -n "$IMAGE_TAG" ] && [ -f "$NODE_DIR/.env" ]; then
         echo "MON_IMAGE_TAG=$IMAGE_TAG" >> "$NODE_DIR/.env"
     fi
     log_info "Docker image tag: $IMAGE_TAG"
+fi
+
+# Права панели на ноде: строку заводим пустой, чтобы владелец сервера увидел её
+# в .env и знал, что настройка есть. Существующее значение не трогаем никогда.
+if [ -f "$NODE_DIR/.env" ] && ! grep -q '^NODE_CAPABILITIES=' "$NODE_DIR/.env"; then
+    {
+        echo ""
+        echo "# Что из API доступно панели. Пусто — всё. Подробности в .env.example"
+        echo "NODE_CAPABILITIES="
+    } >> "$NODE_DIR/.env"
 fi
 
 # Make scripts executable

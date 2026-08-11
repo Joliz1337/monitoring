@@ -47,26 +47,32 @@ spin() {
 
     "$@" >"$logf" 2>&1 &
     local pid=$!
-    local i=0
 
-    while kill -0 "$pid" 2>/dev/null; do
-        local e=$(( $(date +%s) - t0 ))
-        local m=$((e / 60)) s=$((e % 60))
-        if [ $m -gt 0 ]; then
-            printf "\r  \033[0;36m%s\033[0m %s \033[1;33m[%dm %02ds]\033[0m  " \
-                "${chars:$((i % 10)):1}" "$desc" "$m" "$s"
-        else
-            printf "\r  \033[0;36m%s\033[0m %s \033[1;33m[%ds]\033[0m  " \
-                "${chars:$((i % 10)):1}" "$desc" "$s"
-        fi
-        i=$((i + 1))
-        sleep 0.12 2>/dev/null || sleep 1
-    done
+    # Анимированный спиннер — только в реальном терминале. Вне TTY (запуск
+    # по SSH из панели) \r-перерисовка превращается в мусор, поэтому только ждём.
+    if [ -t 1 ]; then
+        local i=0
+        while kill -0 "$pid" 2>/dev/null; do
+            local e=$(( $(date +%s) - t0 ))
+            local m=$((e / 60)) s=$((e % 60))
+            if [ $m -gt 0 ]; then
+                printf "\r  \033[0;36m%s\033[0m %s \033[1;33m[%dm %02ds]\033[0m  " \
+                    "${chars:$((i % 10)):1}" "$desc" "$m" "$s"
+            else
+                printf "\r  \033[0;36m%s\033[0m %s \033[1;33m[%ds]\033[0m  " \
+                    "${chars:$((i % 10)):1}" "$desc" "$s"
+            fi
+            i=$((i + 1))
+            sleep 0.12 2>/dev/null || sleep 1
+        done
+    else
+        echo "  • ${desc}..."
+    fi
 
     wait "$pid" 2>/dev/null
     local rc=$?
     local e=$(( $(date +%s) - t0 ))
-    printf "\r\033[2K"
+    [ -t 1 ] && printf "\r\033[2K"
 
     if [ $rc -eq 0 ]; then
         echo -e "  ${GREEN}✓${NC} ${desc} ${CYAN}(${e}s)${NC}"
@@ -121,10 +127,25 @@ load_proxy() {
 }
 load_proxy
 
+# ==================== PostgreSQL Tuning ====================
+
+# Расчёт настроек PostgreSQL вынесен в общий scripts/pg-tune.sh, чтобы формулы
+# не расходились с установщиком. Скрипт исполняется из свежего клона, рядом лежит
+# и pg-tune.sh; отсутствие файла не должно ронять обновление.
+PG_TUNE_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/pg-tune.sh"
+if [ -f "$PG_TUNE_LIB" ]; then
+    . "$PG_TUNE_LIB"
+else
+    tune_postgres_env() { :; }
+fi
+
 # ==================== Configuration ====================
 
-# Timeouts (in seconds)
-DOCKER_PULL_TIMEOUT="${DOCKER_PULL_TIMEOUT:-600}"
+# Таймаут одной попытки pull. Панель на это время уже остановлена, поэтому запас
+# меньше, чем у ноды (там pull идёт до остановки контейнеров).
+DOCKER_PULL_TIMEOUT="${DOCKER_PULL_TIMEOUT:-240}"
+DOCKER_PULL_RETRIES=5
+DOCKER_PULL_RETRY_DELAY=10
 
 # Arguments
 TMP_DIR="$1"
@@ -186,12 +207,25 @@ if [ -f "$PANEL_DIR/backend/.env.backup" ]; then
     log_success "backend/.env restored"
 fi
 
+# Тег версии из скачанного чекаута, если такой образ есть в реестре.
+# Пустой ответ означает «оставить действующий тег» — тогда pull промахнётся мимо
+# нужной версии и сработает локальная сборка ниже, которая соберёт ровно этот код.
+resolve_pinned_tag() {
+    local version="$1"
+    [ -n "$version" ] && [ "$version" != "unknown" ] || return 0
+    timeout 30 docker manifest inspect \
+        "ghcr.io/joliz1337/monitoring-panel-backend:$version" >/dev/null 2>&1 || return 0
+    printf '%s' "$version"
+}
+
 # Канал → тег образов GHCR: ветка dev тянет :dev, main — :latest.
-# Обновление на тег/коммит канал не меняет — действующий MON_IMAGE_TAG остаётся.
+# Обновление на тег/коммит — это путь отката, и канал он не меняет. Но и оставить
+# действующий :latest нельзя: pull притащил бы ровно ту версию, от которой
+# откатываются, потому что код живёт в образе, а не в чекауте на диске.
 case "$TARGET_REF" in
     dev)  IMAGE_TAG="dev" ;;
     main) IMAGE_TAG="latest" ;;
-    *)    IMAGE_TAG="" ;;
+    *)    IMAGE_TAG=$(resolve_pinned_tag "$NEW_VERSION") ;;
 esac
 if [ -n "$IMAGE_TAG" ] && [ -f "$PANEL_DIR/.env" ]; then
     if grep -q '^MON_IMAGE_TAG=' "$PANEL_DIR/.env"; then
@@ -221,6 +255,8 @@ EOF
         log_success "PostgreSQL configuration added"
     fi
 fi
+
+tune_postgres_env "$PANEL_DIR/.env"
 
 # Regenerate nginx config
 log_info "Regenerating nginx configuration..."
@@ -269,7 +305,8 @@ cd "$PANEL_DIR"
 
 set +e
 # Pull ready images from GHCR (normal flow)
-if ! spin_retry 240 5 10 "Pulling Docker images" docker compose pull 2>/dev/null; then
+if ! spin_retry "$DOCKER_PULL_TIMEOUT" "$DOCKER_PULL_RETRIES" "$DOCKER_PULL_RETRY_DELAY" \
+    "Pulling Docker images" docker compose pull 2>/dev/null; then
     log_warn "Failed to pull from registry, building locally..."
     spin "Pulling base images" bash -c \
         'docker compose pull --ignore-buildable 2>/dev/null || true'

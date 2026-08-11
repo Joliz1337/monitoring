@@ -1,6 +1,7 @@
 import { Terminal, KeyRound, Save, Loader2, Plus, X, Network, Shield } from 'lucide-react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useTranslation } from 'react-i18next'
+import { Tooltip } from '../ui/Tooltip'
 import type { RemnawaveCertProfile, HAProxyConfigProfile, FirewallProfile } from '../../api/client'
 
 export interface DeployFormData {
@@ -295,14 +296,15 @@ export default function DeployTargetFields({
                       >
                         {p.name}
                       </button>
-                      <button
-                        type="button"
-                        onClick={() => onDeleteCert(p.id)}
-                        className="px-1.5 py-1.5 text-dark-500 hover:text-danger hover:bg-danger/10 transition-colors"
-                        title={t('common.delete')}
-                      >
-                        <X className="w-3 h-3" />
-                      </button>
+                      <Tooltip label={t('common.delete')}>
+                        <button
+                          type="button"
+                          onClick={() => onDeleteCert(p.id)}
+                          className="px-1.5 py-1.5 text-dark-500 hover:text-danger hover:bg-danger/10 transition-colors"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </Tooltip>
                     </div>
                   )
                 })}

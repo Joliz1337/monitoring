@@ -23,6 +23,7 @@ import {
   Rocket,
   Terminal,
   PlusCircle,
+  Lock,
 } from 'lucide-react'
 import { useServersStore } from '../stores/serversStore'
 import { useTranslation } from 'react-i18next'
@@ -43,10 +44,12 @@ import InfraTree from '../components/Infra/InfraTree'
 import { Tooltip } from '../components/ui/Tooltip'
 import { CopyableIp } from '../components/ui/CopyableIp'
 import { extractHost } from '../utils/format'
+import { describeAllowedDomains, nodeIsRestricted } from '../utils/nodeCapabilities'
 import { FAQIcon } from '../components/FAQ'
 import MigrationBanner from '../components/MigrationBanner'
 import DeployTargetFields, { DEPLOY_DEFAULTS, type DeployFormData } from '../components/servers/DeployTargetFields'
 import ExtraServerCard, { type ExtraTarget, type DeployStatus } from '../components/servers/ExtraServerCard'
+import InstallKeysPanel from '../components/servers/InstallKeysPanel'
 
 interface ServerFormData {
   name: string
@@ -860,6 +863,8 @@ export default function Servers() {
               )}
             </div>
 
+            <InstallKeysPanel />
+
             <form onSubmit={handleSubmit} className="space-y-5" autoComplete="off" data-form-type="other">
               <div>
                 <label className="block text-sm text-dark-300 mb-2 flex items-center gap-2">
@@ -1177,6 +1182,25 @@ export default function Servers() {
                                     : 'bg-danger'
                             }`}
                           />
+                          {nodeIsRestricted(server) && (
+                            <Tooltip
+                              maxWidth={320}
+                              label={
+                                <span>
+                                  {t('node_caps.badge_tooltip_title')}
+                                  <br />
+                                  {t('node_caps.allowed', { allowed: describeAllowedDomains(server, t) })}
+                                  <br />
+                                  {t('node_caps.where')}
+                                </span>
+                              }
+                            >
+                              <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-purple/10 text-purple text-[10px] font-medium flex-shrink-0">
+                                <Lock className="w-3 h-3" />
+                                {t('servers.restricted_badge')}
+                              </span>
+                            </Tooltip>
+                          )}
                           {server.uses_shared_cert ? (
                             <Tooltip label={t('servers.shared_cert_tooltip')}>
                               <ShieldCheck className="w-3.5 h-3.5 text-success flex-shrink-0" />

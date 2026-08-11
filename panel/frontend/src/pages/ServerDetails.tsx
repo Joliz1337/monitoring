@@ -35,6 +35,8 @@ import ProcessTable from '../components/Processes/ProcessTable'
 import CpuCoresChart from '../components/Charts/CpuCoresChart'
 import CpuCoresHistoryChart from '../components/Charts/CpuCoresHistoryChart'
 import Terminal from '../components/Terminal/Terminal'
+import NodeRestrictedNotice from '../components/servers/NodeRestrictedNotice'
+import { nodeAllows } from '../utils/nodeCapabilities'
 import { formatBytes, formatUptime, formatPercent, createBitsFormatter, formatTimeAgo } from '../utils/format'
 import { useCachedData, createServerCacheKey } from '../hooks/useCachedData'
 import CachedDataBanner from '../components/ui/CachedDataBanner'
@@ -104,6 +106,7 @@ export default function ServerDetails() {
   historyRef.current = history
   
   const server = servers.find(s => s.id === Number(serverId))
+  const execAllowed = nodeAllows(server, 'exec', 'write')
   
   const handleFetchError = useCallback((err: unknown) => {
     const cached = loadFromCache()
@@ -220,7 +223,7 @@ export default function ServerDetails() {
   }
   
   const handlePowerAction = async () => {
-    if (!serverId || !powerAction) return
+    if (!serverId || !powerAction || !execAllowed) return
     
     setIsPowerActionLoading(true)
     setPowerActionError(null)
@@ -397,23 +400,25 @@ export default function ServerDetails() {
             </motion.button>
           </Tooltip>
 
-          {/* Power control buttons */}
-          <Tooltip label={t('server_details.reboot')}>
+          {/* Power control buttons — идут через терминал ноды, поэтому тот же домен */}
+          <Tooltip label={execAllowed ? t('server_details.reboot') : t('node_caps.exec_blocked')}>
             <motion.button
               onClick={() => setPowerAction('reboot')}
-              className="btn btn-secondary"
-              whileHover={{ scale: 1.02 }}
-              whileTap={{ scale: 0.98 }}
+              disabled={!execAllowed}
+              className={`btn btn-secondary ${execAllowed ? '' : 'opacity-40 cursor-not-allowed'}`}
+              whileHover={{ scale: execAllowed ? 1.02 : 1 }}
+              whileTap={{ scale: execAllowed ? 0.98 : 1 }}
             >
               <RotateCcw className="w-4 h-4" />
             </motion.button>
           </Tooltip>
-          <Tooltip label={t('server_details.shutdown')}>
+          <Tooltip label={execAllowed ? t('server_details.shutdown') : t('node_caps.exec_blocked')}>
             <motion.button
               onClick={() => setPowerAction('shutdown')}
-              className="btn btn-secondary text-danger hover:bg-danger/10"
-              whileHover={{ scale: 1.02 }}
-              whileTap={{ scale: 0.98 }}
+              disabled={!execAllowed}
+              className={`btn btn-secondary text-danger hover:bg-danger/10 ${execAllowed ? '' : 'opacity-40 cursor-not-allowed'}`}
+              whileHover={{ scale: execAllowed ? 1.02 : 1 }}
+              whileTap={{ scale: execAllowed ? 0.98 : 1 }}
             >
               <Power className="w-4 h-4" />
             </motion.button>
@@ -535,7 +540,8 @@ export default function ServerDetails() {
                 >
                   {formatUptime(metrics.system.uptime_seconds)}
                 </motion.div>
-                <p className="text-sm mt-2 flex items-center gap-2 font-medium font-mono" title={t('server_card.load_avg_tooltip', { cores: metrics.cpu.cores_logical })}>
+                <Tooltip label={t('server_card.load_avg_tooltip', { cores: metrics.cpu.cores_logical })}>
+                <p className="text-sm mt-2 flex items-center gap-2 font-medium font-mono">
                   <Activity className="w-4 h-4 text-dark-400" />
                   <span className="text-dark-400">LA:</span>
                   <span className={getLoadAvgColor(metrics.cpu.load_avg_1, metrics.cpu.cores_logical)}>{metrics.cpu.load_avg_1.toFixed(2)}</span>
@@ -544,6 +550,7 @@ export default function ServerDetails() {
                   <span className="text-dark-500">/</span>
                   <span className={getLoadAvgColor(metrics.cpu.load_avg_15, metrics.cpu.cores_logical)}>{metrics.cpu.load_avg_15.toFixed(2)}</span>
                 </p>
+                </Tooltip>
                 <p className="text-sm text-dark-400 mt-1 flex items-center gap-2 font-medium">
                   <Layers className="w-4 h-4" />
                   {metrics.processes.total} proc • TCP: {metrics.system.connections_detailed?.tcp.total ?? metrics.system.connections.established} • UDP: {metrics.system.connections_detailed?.udp.total ?? 0}
@@ -679,12 +686,12 @@ export default function ServerDetails() {
                   <InfoRow label={t('server_details.kernel')} value={metrics.system.kernel} mono />
                   <InfoRow label={t('server_details.architecture')} value={metrics.system.architecture} />
                   <InfoRow label={t('server_details.cpu_model')} value={metrics.cpu.model} />
+                  <Tooltip label={t('server_card.load_avg_tooltip', { cores: metrics.cpu.cores_logical })}>
                   <motion.div
                     className="flex justify-between items-start gap-4"
                     initial={{ opacity: 0, x: -10 }}
                     animate={{ opacity: 1, x: 0 }}
                     transition={{ duration: 0.3 }}
-                    title={t('server_card.load_avg_tooltip', { cores: metrics.cpu.cores_logical })}
                   >
                     <span className="text-dark-400 flex-shrink-0">{t('server_details.load_average')}</span>
                     <span className="font-mono text-right">
@@ -695,6 +702,7 @@ export default function ServerDetails() {
                       <span className={getLoadAvgColor(metrics.cpu.load_avg_15, metrics.cpu.cores_logical)}>{metrics.cpu.load_avg_15.toFixed(2)}</span>
                     </span>
                   </motion.div>
+                  </Tooltip>
                   {metrics.timezone && (
                     <InfoRow 
                       label={t('server_details.timezone')} 
@@ -728,7 +736,9 @@ export default function ServerDetails() {
             
             {/* Terminal section */}
             <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }} className="mt-6">
-              <Terminal serverId={Number(serverId)} />
+              {execAllowed
+                ? <Terminal serverId={Number(serverId)} />
+                : <NodeRestrictedNotice server={server} compact />}
             </motion.div>
           </motion.div>
         )}

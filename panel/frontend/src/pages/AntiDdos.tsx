@@ -1,10 +1,11 @@
 import { useEffect, useState, useCallback } from 'react'
+import { useNodeCapabilities } from '../hooks/useNodeCapabilities'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
 import {
   Siren, ShieldAlert, ShieldCheck, Settings as SettingsIcon, ListChecks,
-  BookOpen, Loader2, RefreshCw, Trash2, Save, Radar, Globe, Plus,
+  BookOpen, Loader2, RefreshCw, Trash2, Save, Radar, Globe, Plus, Lock,
 } from 'lucide-react'
 import {
   antiDdosApi, type AntiDdosSettings, type AntiDdosStatus, type NodeAntiDdosState,
@@ -49,6 +50,7 @@ export default function AntiDdos() {
   const [settings, setSettings] = useState<AntiDdosSettings | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState<string | null>(null)
+  const { allows } = useNodeCapabilities()
   const [cidrText, setCidrText] = useState('')
   const [sources, setSources] = useState<AntiDdosSource[]>([])
   const [srcName, setSrcName] = useState('')
@@ -249,12 +251,20 @@ export default function AntiDdos() {
                 {(status?.nodes ?? []).length === 0 && (
                   <div className="p-6 text-center text-sm text-dark-500">{t('anti_ddos.no_nodes')}</div>
                 )}
-                {(status?.nodes ?? []).map(node => (
+                {(status?.nodes ?? []).map(node => {
+                  const nodeAllowed = allows(node.server_id, 'antiddos', 'write')
+                  return (
                   <div key={node.server_id} className="p-4 flex items-center justify-between gap-4">
                     <div className="min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
                         <span className="font-medium truncate">{node.server_name}</span>
                         <ModeBadge node={node} />
+                        {!nodeAllowed && (
+                          <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-purple/10 text-purple text-[10px] font-medium">
+                            <Lock className="w-3 h-3" />
+                            {t('node_caps.row_blocked')}
+                          </span>
+                        )}
                       </div>
                       {node.emergency_mode && node.reason && (
                         <p className="text-xs text-dark-400 mt-1 truncate">{t('anti_ddos.reason')}: {node.reason}</p>
@@ -264,15 +274,16 @@ export default function AntiDdos() {
                       <div className="flex items-center gap-2">
                         <Radar className="w-3.5 h-3.5 text-dark-400" />
                         <span className="text-xs text-dark-400">{t('anti_ddos.watchdog')}</span>
-                        <Toggle on={node.watchdog} onClick={() => toggleNodeWatchdog(node)} disabled={busy === `wd-${node.server_id}`} />
+                        <Toggle on={node.watchdog} onClick={() => toggleNodeWatchdog(node)} disabled={!nodeAllowed || busy === `wd-${node.server_id}`} />
                       </div>
                       <div className="flex items-center gap-2">
                         <span className="text-xs text-dark-400">{t('anti_ddos.emergency')}</span>
-                        <Toggle on={node.emergency_mode} onClick={() => toggleNodeEmergency(node)} disabled={busy === `emg-${node.server_id}`} />
+                        <Toggle on={node.emergency_mode} onClick={() => toggleNodeEmergency(node)} disabled={!nodeAllowed || busy === `emg-${node.server_id}`} />
                       </div>
                     </div>
                   </div>
-                ))}
+                  )
+                })}
               </div>
             </div>
           )}

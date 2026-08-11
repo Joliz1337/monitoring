@@ -1,6 +1,7 @@
 import { useState, useMemo } from 'react'
 import { ChevronUp, ChevronDown, Search, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
+import { Tooltip } from '../ui/Tooltip'
 import { motion, AnimatePresence } from 'framer-motion'
 
 interface Process {
@@ -199,9 +200,11 @@ export default function ProcessTable({ processes, className = '' }: ProcessTable
                     <td className="py-2 px-2 font-mono text-dark-500 text-sm">
                       {proc.pid}
                     </td>
-                    <td className="py-2 px-2 text-dark-200 truncate max-w-[150px] text-sm" title={proc.name}>
-                      {proc.name}
-                    </td>
+                    <Tooltip label={proc.name}>
+                      <td className="py-2 px-2 text-dark-200 truncate max-w-[150px] text-sm">
+                        {proc.name}
+                      </td>
+                    </Tooltip>
                     <td className="py-2 px-2 text-right font-mono text-sm">
                       <span className={
                         sortField === 'cpu_percent'

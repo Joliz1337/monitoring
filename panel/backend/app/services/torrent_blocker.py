@@ -19,6 +19,7 @@ from app.models import (
     TorrentBlockerSettings,
 )
 from app.services.http_client import get_external_client, get_node_client, node_auth_headers
+from app.services.node_capabilities import Capability, server_allows
 from app.services.remnawave_api import RemnawaveAPI, RemnawaveAPIError
 
 logger = logging.getLogger(__name__)
@@ -256,11 +257,15 @@ class TorrentBlockerService:
         # весь цикл (gather ждёт всех). Живость — по свежести last_seen от сборщика метрик.
         cutoff = datetime.now(timezone.utc) - timedelta(seconds=LIVE_THRESHOLD_SECONDS)
         candidates = [s for s in servers if s.id not in excluded_ids]
-        targets = [s for s in candidates if self._is_node_live(s, cutoff)]
+        live = [s for s in candidates if self._is_node_live(s, cutoff)]
+        targets = [s for s in live if server_allows(s, Capability.IPSET, write=True)]
 
-        skipped_dead = len(candidates) - len(targets)
+        skipped_dead = len(candidates) - len(live)
         if skipped_dead:
             logger.info(f"Torrent blocker: skipping {skipped_dead} offline node(s)")
+        skipped_denied = len(live) - len(targets)
+        if skipped_denied:
+            logger.info(f"Torrent blocker: skipping {skipped_denied} node(s) with IP blocking closed")
         if not targets:
             logger.warning("No live target nodes for torrent blocker bans")
             return {}

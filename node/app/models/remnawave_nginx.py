@@ -32,16 +32,6 @@ class NginxStatusResponse(BaseModel):
     config_hash: Optional[str] = None
 
 
-class NginxValidateRequest(BaseModel):
-    path: str = Field(..., min_length=1)
-    content: str = Field(..., min_length=1)
-
-
-class NginxValidateResponse(BaseModel):
-    valid: bool
-    output: str
-
-
 class NginxApplyRequest(BaseModel):
     path: str = Field(..., min_length=1)
     content: str = Field(..., min_length=1)

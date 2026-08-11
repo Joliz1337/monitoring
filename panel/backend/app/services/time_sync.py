@@ -1,7 +1,8 @@
 import asyncio
 import json
 import logging
-import time
+import re
+import shlex
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -14,12 +15,34 @@ from sqlalchemy import select
 from app.database import async_session
 from app.models import Server, PanelSettings
 from app.services.http_client import get_node_client, node_auth_headers
+from app.services.node_capabilities import Capability, denied_message, server_allows
 
 logger = logging.getLogger(__name__)
 
 SYNC_INTERVAL = 86400  # 24 hours
 SYNC_CONTAINER_NAME = "panel-time-sync"
 SYNC_CONTAINER_IMAGE = "docker:cli"
+
+DEFAULT_TIMEZONE = "Europe/Moscow"
+TIMEZONE_MAX_LEN = 100
+# Значение уходит в скрипт, который исполняется через nsenter в неймспейсах хоста
+# панели, то есть от root. Набор символов тот же, что у валидатора на ноде: точки в
+# нём нет намеренно — из /usr/share/zoneinfo через «..» не подняться.
+TIMEZONE_PATTERN = re.compile(r"^[A-Za-z0-9_+/-]+$")
+
+
+def safe_timezone(tz: Optional[str]) -> str:
+    """Отсеять непригодное значение до того, как оно попадёт в команду на хосте.
+
+    Настройку правит администратор, но доверять ей на слово нельзя: она приходит из
+    БД, а цена ошибки здесь — выполнение произвольной команды от root.
+    """
+    candidate = (tz or "").strip()
+    if candidate and len(candidate) <= TIMEZONE_MAX_LEN and TIMEZONE_PATTERN.fullmatch(candidate):
+        return candidate
+    if candidate:
+        logger.warning(f"Rejected timezone {candidate!r}, falling back to {DEFAULT_TIMEZONE}")
+    return DEFAULT_TIMEZONE
 
 
 class TimeSyncService:
@@ -90,7 +113,7 @@ class TimeSyncService:
         self._sync_in_progress = True
 
         try:
-            tz = tz or await self._get_setting("server_timezone") or "Europe/Moscow"
+            tz = safe_timezone(tz or await self._get_setting("server_timezone"))
 
             async with async_session() as db:
                 result = await db.execute(
@@ -138,7 +161,7 @@ class TimeSyncService:
 
     async def sync_single_server(self, server_id: int, tz: Optional[str] = None):
         try:
-            tz = tz or await self._get_setting("server_timezone") or "Europe/Moscow"
+            tz = safe_timezone(tz or await self._get_setting("server_timezone"))
 
             async with async_session() as db:
                 result = await db.execute(
@@ -156,6 +179,9 @@ class TimeSyncService:
 
     # ------------------------------------------------------------------
     async def _sync_node(self, server: Server, tz: str) -> dict:
+        if not server_allows(server, Capability.SYSTEM, write=True):
+            return {"success": False, "denied": True,
+                    "error": denied_message(Capability.SYSTEM, True)}
         try:
             client = get_node_client(server)
             response = await client.post(
@@ -218,7 +244,7 @@ class TimeSyncService:
         script = f"""#!/bin/sh
 set -e
 command -v nsenter >/dev/null 2>&1 || apk add --no-cache util-linux-misc >/dev/null 2>&1 || apk add --no-cache util-linux >/dev/null 2>&1
-nsenter -t 1 -m -u -n -i -p -- timedatectl set-timezone {tz}
+nsenter -t 1 -m -u -n -i -p -- timedatectl set-timezone {shlex.quote(tz)}
 nsenter -t 1 -m -u -n -i -p -- timedatectl set-ntp true
 nsenter -t 1 -m -u -n -i -p -- systemctl restart systemd-timesyncd 2>/dev/null || true
 sleep 2

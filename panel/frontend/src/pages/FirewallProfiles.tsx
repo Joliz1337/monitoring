@@ -27,7 +27,9 @@ import {
   ChevronDown,
   Eye,
   EyeOff,
+  Lock,
 } from 'lucide-react'
+import { Tooltip } from '../components/ui/Tooltip'
 import {
   firewallProfilesApi,
   FirewallProfile,
@@ -65,18 +67,35 @@ const POLICY_LABELS: Record<FirewallDefaultPolicy, string> = {
   reject: 'отклонить (reject)',
 }
 
-function computeNodePortAllowed(
+function computePortAllowed(
   rules: FirewallProfileRuleData[],
   defaultIn: FirewallDefaultPolicy,
-  nodePort: number,
+  port: number,
 ): boolean {
   if (defaultIn === 'allow') return true
   return rules.some(r =>
-    r.port === nodePort
+    r.port === port
     && (r.protocol === 'tcp' || r.protocol === 'any')
     && r.action === 'allow'
     && r.direction === 'in',
   )
+}
+
+const SSH_WARNING = 'Нет правила allow для SSH — применение профиля отрежет доступ к серверу'
+
+// Оба флага считает и бэкенд, но правки правил применяются оптимистично,
+// без перезагрузки профиля — иначе предупреждения отставали бы на один шаг
+function withGuardFlags(
+  profile: FirewallProfileWithServers,
+  rules: FirewallProfileRuleData[],
+  defaultIn: FirewallDefaultPolicy,
+): FirewallProfileWithServers {
+  return {
+    ...profile,
+    rules,
+    node_port_allowed: computePortAllowed(rules, defaultIn, profile.node_api_port),
+    ssh_port_allowed: computePortAllowed(rules, defaultIn, profile.ssh_default_port),
+  }
 }
 
 const EMPTY_RULE: FirewallProfileRuleData = {
@@ -125,6 +144,11 @@ function syncStatusBadge(status: FirewallSyncStatus | null) {
       color: 'text-dark-300 bg-dark-700/40 border-dark-600/40',
       label: 'Расхождение',
       icon: <AlertTriangle className="w-3 h-3" />,
+    },
+    denied: {
+      color: 'text-purple bg-purple/10 border-purple/20',
+      label: 'Закрыто на ноде',
+      icon: <Lock className="w-3 h-3" />,
     },
   }
   const s = status ? map[status] : null
@@ -421,9 +445,18 @@ function ProfileListItem({
             <Flame className={`w-4 h-4 shrink-0 ${selected ? 'text-accent-400' : 'text-dark-400'}`} />
             <span className={`text-sm font-medium truncate ${selected ? 'text-dark-100' : 'text-dark-200'}`}>{profile.name}</span>
             {!profile.node_port_allowed && (
-              <span title={`Нет правила allow для порта API ноды (${profile.node_api_port}/tcp)`} className="shrink-0 text-yellow-400">
-                <ShieldAlert className="w-3.5 h-3.5" />
-              </span>
+              <Tooltip label={`Нет правила allow для порта API ноды (${profile.node_api_port}/tcp)`}>
+                <span className="shrink-0 text-yellow-400">
+                  <ShieldAlert className="w-3.5 h-3.5" />
+                </span>
+              </Tooltip>
+            )}
+            {!profile.ssh_port_allowed && (
+              <Tooltip label={SSH_WARNING}>
+                <span className="shrink-0 text-red-400">
+                  <ShieldAlert className="w-3.5 h-3.5" />
+                </span>
+              </Tooltip>
             )}
           </div>
           {profile.description && (
@@ -435,7 +468,9 @@ function ProfileListItem({
             <Server className="w-3 h-3" /> {synced}/{linked}
           </span>
           {hasUnsync && (
-            <span className="w-2 h-2 rounded-full bg-yellow-400" title="Есть несинхронизированные серверы" />
+            <Tooltip label="Есть несинхронизированные серверы">
+              <span className="w-2 h-2 rounded-full bg-yellow-400" />
+            </Tooltip>
           )}
         </div>
       </div>
@@ -514,45 +549,52 @@ function ProfileHeader({
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <h2 className="text-xl font-bold text-dark-100 truncate">{profile.name}</h2>
-          <button
-            onClick={() => setEditing(true)}
-            className="p-1.5 rounded-lg text-dark-400 hover:text-dark-200 hover:bg-dark-800 transition-colors"
-            title="Редактировать"
-          >
-            <Edit3 className="w-3.5 h-3.5" />
-          </button>
+          <Tooltip label="Редактировать">
+            <button
+              onClick={() => setEditing(true)}
+              className="p-1.5 rounded-lg text-dark-400 hover:text-dark-200 hover:bg-dark-800 transition-colors"
+            >
+              <Edit3 className="w-3.5 h-3.5" />
+            </button>
+          </Tooltip>
         </div>
         <p className="text-sm text-dark-400 mt-1">{profile.description || 'Без описания'}</p>
       </div>
       <div className="flex items-center gap-2 flex-wrap">
+        <Tooltip
+          label="Применить даже если в правилах нет allow для порта API ноды (9100/tcp). Опасно — можно потерять связь с сервером. Включайте только когда default_incoming = allow или вы точно знаете, что 9100 разрешён иным способом."
+          maxWidth={340}
+        >
         <label
           className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs cursor-pointer transition-colors ${
             forceSync
               ? 'text-orange-300 bg-orange-500/10 border border-orange-500/30 hover:border-orange-500/50'
               : 'text-dark-300 bg-dark-800/50 border border-dark-700/50 hover:border-dark-600'
           }`}
-          title="Применить даже если в правилах нет allow для порта API ноды (9100/tcp). Опасно — можно потерять связь с сервером. Включайте только когда default_incoming = allow или вы точно знаете, что 9100 разрешён иным способом."
         >
           <input type="checkbox" checked={forceSync} onChange={e => onForceChange(e.target.checked)} className="accent-orange-500" />
           {forceSync && <AlertTriangle className="w-3 h-3" />}
           Принудительно
         </label>
-        <button
-          onClick={onSyncAll}
-          disabled={syncing || profile.servers.length === 0}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-accent-600 hover:bg-accent-500 text-white transition-colors disabled:opacity-50"
-          title="Раскатать профиль на все привязанные серверы"
-        >
-          {syncing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
-          Синхронизировать все
-        </button>
-        <button
-          onClick={onClone}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-dark-300 hover:text-dark-100 bg-dark-800/50 hover:bg-dark-700/50 border border-dark-700/50 transition-colors"
-          title="Создать копию профиля со всеми правилами"
-        >
-          <Copy className="w-3.5 h-3.5" /> Клонировать
-        </button>
+        </Tooltip>
+        <Tooltip label="Раскатать профиль на все привязанные серверы">
+          <button
+            onClick={onSyncAll}
+            disabled={syncing || profile.servers.length === 0}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-accent-600 hover:bg-accent-500 text-white transition-colors disabled:opacity-50"
+          >
+            {syncing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+            Синхронизировать все
+          </button>
+        </Tooltip>
+        <Tooltip label="Создать копию профиля со всеми правилами">
+          <button
+            onClick={onClone}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-dark-300 hover:text-dark-100 bg-dark-800/50 hover:bg-dark-700/50 border border-dark-700/50 transition-colors"
+          >
+            <Copy className="w-3.5 h-3.5" /> Клонировать
+          </button>
+        </Tooltip>
         <button
           onClick={onDelete}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-red-400 hover:text-red-300 bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 transition-colors"
@@ -611,6 +653,15 @@ function RulesTab({
 
   return (
     <div className="space-y-4">
+      {!profile.ssh_port_allowed && (
+        <div className="flex items-start gap-3 p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-red-300">
+          <AlertTriangle className="w-5 h-5 shrink-0 mt-0.5" />
+          <div className="text-sm">
+            Нет правила allow для SSH ({profile.ssh_default_port}/tcp). Применение сбрасывает ufw и включает запрет входящих — доступ к серверу пропадёт, и вернуть его можно будет только через консоль хостера. Добавьте правило на свой SSH-порт: если он не {profile.ssh_default_port}, предупреждение останется, и это нормально.
+          </div>
+        </div>
+      )}
+
       {!profile.node_port_allowed && (
         <div className="flex items-start gap-3 p-3 rounded-xl bg-yellow-500/10 border border-yellow-500/30 text-yellow-300">
           <AlertTriangle className="w-5 h-5 shrink-0 mt-0.5" />
@@ -699,22 +750,24 @@ function RulesTab({
                       <td className="px-3 py-2 text-dark-400 truncate max-w-xs">{rule.comment || '—'}</td>
                       <td className="px-3 py-2">
                         <div className="flex items-center justify-end gap-1">
-                          <button
-                            onClick={() => { setEditingIndex(index); setShowForm(false) }}
-                            className="p-1.5 rounded-lg text-dark-400 hover:text-dark-200 hover:bg-dark-700/50 transition-colors"
-                            title="Редактировать"
-                          >
-                            <Edit3 className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            onClick={() => {
-                              if (confirm('Удалить правило?')) void onDeleteRule(index)
-                            }}
-                            className="p-1.5 rounded-lg text-dark-400 hover:text-red-400 hover:bg-red-500/10 transition-colors"
-                            title="Удалить"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
+                          <Tooltip label="Редактировать">
+                            <button
+                              onClick={() => { setEditingIndex(index); setShowForm(false) }}
+                              className="p-1.5 rounded-lg text-dark-400 hover:text-dark-200 hover:bg-dark-700/50 transition-colors"
+                            >
+                              <Edit3 className="w-3.5 h-3.5" />
+                            </button>
+                          </Tooltip>
+                          <Tooltip label="Удалить">
+                            <button
+                              onClick={() => {
+                                if (confirm('Удалить правило?')) void onDeleteRule(index)
+                              }}
+                              className="p-1.5 rounded-lg text-dark-400 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </Tooltip>
                         </div>
                       </td>
                     </tr>
@@ -955,23 +1008,25 @@ function ServersTab({
                   <span className="hidden sm:inline text-xs text-dark-500 mr-2">
                     {srv.last_sync_at ? `Синхр: ${formatDateTime(srv.last_sync_at)}` : 'Не синхронизирован'}
                   </span>
-                  <button
-                    onClick={() => onSyncOne(srv.server_id)}
-                    disabled={syncingServerId === srv.server_id}
-                    className="p-1.5 rounded-lg text-dark-400 hover:text-accent-400 hover:bg-accent-500/10 transition-colors disabled:opacity-50"
-                    title={forceSync ? 'Принудительная синхронизация' : 'Синхронизировать'}
-                  >
-                    {syncingServerId === srv.server_id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
-                  </button>
-                  <button
-                    onClick={() => {
-                      if (confirm(`Отвязать ${srv.server_name}? Правила на ноде НЕ откатываются.`)) onUnlink(srv.server_id)
-                    }}
-                    className="p-1.5 rounded-lg text-dark-400 hover:text-red-400 hover:bg-red-500/10 transition-colors"
-                    title="Отвязать"
-                  >
-                    <Unlink className="w-3.5 h-3.5" />
-                  </button>
+                  <Tooltip label={forceSync ? 'Принудительная синхронизация' : 'Синхронизировать'}>
+                    <button
+                      onClick={() => onSyncOne(srv.server_id)}
+                      disabled={syncingServerId === srv.server_id}
+                      className="p-1.5 rounded-lg text-dark-400 hover:text-accent-400 hover:bg-accent-500/10 transition-colors disabled:opacity-50"
+                    >
+                      {syncingServerId === srv.server_id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                    </button>
+                  </Tooltip>
+                  <Tooltip label="Отвязать">
+                    <button
+                      onClick={() => {
+                        if (confirm(`Отвязать ${srv.server_name}? Правила на ноде НЕ откатываются.`)) onUnlink(srv.server_id)
+                      }}
+                      className="p-1.5 rounded-lg text-dark-400 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+                    >
+                      <Unlink className="w-3.5 h-3.5" />
+                    </button>
+                  </Tooltip>
                 </div>
               </div>
             ))}
@@ -983,18 +1038,19 @@ function ServersTab({
         <div className="flex items-center justify-between gap-2 mb-3">
           <h3 className="text-sm font-medium text-dark-200">Добавить серверы</h3>
           {hiddenBusy > 0 && (
-            <button
-              onClick={() => setShowBusy(v => !v)}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs whitespace-nowrap border transition-colors ${
-                showBusy
-                  ? 'text-accent-400 bg-accent-500/10 border-accent-500/30'
-                  : 'text-dark-400 bg-dark-900/40 border-dark-800 hover:text-dark-200'
-              }`}
-              title="Серверы, привязанные к другим профилям"
-            >
-              {showBusy ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-              {showBusy ? 'Скрыть занятые' : `Показать занятые (${hiddenBusy})`}
-            </button>
+            <Tooltip label="Серверы, привязанные к другим профилям">
+              <button
+                onClick={() => setShowBusy(v => !v)}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs whitespace-nowrap border transition-colors ${
+                  showBusy
+                    ? 'text-accent-400 bg-accent-500/10 border-accent-500/30'
+                    : 'text-dark-400 bg-dark-900/40 border-dark-800 hover:text-dark-200'
+                }`}
+              >
+                {showBusy ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                {showBusy ? 'Скрыть занятые' : `Показать занятые (${hiddenBusy})`}
+              </button>
+            </Tooltip>
           )}
         </div>
         {noCandidates ? (
@@ -1213,15 +1269,30 @@ function ProfileDetail({
     }
   }
 
+  // Профиль без SSH-правила отрезает доступ необратимо, и ошибки при этом не
+  // происходит — ufw честно применяет то, что ему дали. Единственная точка,
+  // где это ещё можно остановить, — здесь
+  const confirmSshLockout = (target: string): boolean => {
+    if (!profile || profile.ssh_port_allowed) return true
+    return confirm(
+      `${SSH_WARNING}.\n\nПрофиль "${profile.name}" не разрешает входящие на ${profile.ssh_default_port}/tcp. ` +
+      `Если SSH слушает именно этот порт, после применения ${target} останется доступен только через консоль хостера.\n\nПродолжить?`
+    )
+  }
+
   const handleSyncAll = async () => {
+    if (!confirmSshLockout('все привязанные серверы')) return
     setSyncing(true)
     try {
       const res = await firewallProfilesApi.syncAll(profileId, forceSync)
       const results = res.data.results
       const ok = results.filter(r => r.success).length
-      const fail = results.length - ok
-      if (fail === 0) toast.success(`Синхронизация успешна: ${ok}/${results.length}`)
-      else toast.warning(`Синхронизация: ${ok} успешно, ${fail} с ошибками`)
+      // Офлайн-сервер не сбой: профиль встал в очередь и раскатается сам при его возвращении
+      const queued = results.filter(r => r.queued).length
+      const fail = results.length - ok - queued
+      const queuedNote = queued > 0 ? `, ${queued} отложено (офлайн)` : ''
+      if (fail === 0) toast.success(`Синхронизация успешна: ${ok}/${results.length}${queuedNote}`)
+      else toast.warning(`Синхронизация: ${ok} успешно, ${fail} с ошибками${queuedNote}`)
       await fetchProfile()
       onProfileChanged()
     } catch (err) {
@@ -1232,10 +1303,13 @@ function ProfileDetail({
   }
 
   const handleSyncOne = async (serverId: number) => {
+    const target = profile?.servers.find(s => s.server_id === serverId)?.server_name ?? 'сервер'
+    if (!confirmSshLockout(target)) return
     setSyncingServerId(serverId)
     try {
       const res = await firewallProfilesApi.syncOne(profileId, serverId, forceSync)
       if (res.data.success) toast.success(`${res.data.server_name}: ${res.data.message}`)
+      else if (res.data.queued) toast.warning(`${res.data.server_name}: ${res.data.message}`)
       else toast.error(`${res.data.server_name}: ${res.data.message}`)
       await fetchProfile()
       onProfileChanged()
@@ -1270,9 +1344,8 @@ function ProfileDetail({
 
   const handleDefaultChange = async (patch: { default_incoming?: FirewallDefaultPolicy; default_outgoing?: FirewallDefaultPolicy }) => {
     if (!profile) return
-    const merged: FirewallProfileWithServers = { ...profile, ...patch }
-    merged.node_port_allowed = computeNodePortAllowed(merged.rules, merged.default_incoming, merged.node_api_port)
-    setProfile(merged)
+    const patched: FirewallProfileWithServers = { ...profile, ...patch }
+    setProfile(withGuardFlags(patched, patched.rules, patched.default_incoming))
     try {
       await firewallProfilesApi.update(profileId, patch)
       onProfileChanged()
@@ -1286,11 +1359,7 @@ function ProfileDetail({
     try {
       const res = await firewallProfilesApi.addRule(profileId, rule)
       toast.success('Правило добавлено')
-      setProfile(prev => prev ? {
-        ...prev,
-        rules: res.data.rules,
-        node_port_allowed: computeNodePortAllowed(res.data.rules, prev.default_incoming, prev.node_api_port),
-      } : prev)
+      setProfile(prev => prev ? withGuardFlags(prev, res.data.rules, prev.default_incoming) : prev)
       onProfileChanged()
     } catch (err) {
       toast.error(extractErrorMessage(err, 'Не удалось добавить правило'))
@@ -1301,11 +1370,7 @@ function ProfileDetail({
     try {
       const res = await firewallProfilesApi.updateRule(profileId, index, rule)
       toast.success('Правило обновлено')
-      setProfile(prev => prev ? {
-        ...prev,
-        rules: res.data.rules,
-        node_port_allowed: computeNodePortAllowed(res.data.rules, prev.default_incoming, prev.node_api_port),
-      } : prev)
+      setProfile(prev => prev ? withGuardFlags(prev, res.data.rules, prev.default_incoming) : prev)
       onProfileChanged()
     } catch (err) {
       toast.error(extractErrorMessage(err, 'Не удалось обновить правило'))
@@ -1316,11 +1381,7 @@ function ProfileDetail({
     try {
       const res = await firewallProfilesApi.deleteRule(profileId, index)
       toast.success('Правило удалено')
-      setProfile(prev => prev ? {
-        ...prev,
-        rules: res.data.rules,
-        node_port_allowed: computeNodePortAllowed(res.data.rules, prev.default_incoming, prev.node_api_port),
-      } : prev)
+      setProfile(prev => prev ? withGuardFlags(prev, res.data.rules, prev.default_incoming) : prev)
       onProfileChanged()
     } catch (err) {
       toast.error(extractErrorMessage(err, 'Не удалось удалить правило'))

@@ -59,7 +59,6 @@ export default function CpuCoresChart({ perCpuPercent, className = '' }: CpuCore
           <div
             key={core.id}
             className="relative group"
-            title={`${t('cpu_chart.core')} ${core.id}: ${core.percent}%`}
           >
             {/* Bar background */}
             <div className={`${barHeight} bg-dark-800 rounded overflow-hidden`}>

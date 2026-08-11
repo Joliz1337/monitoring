@@ -7,8 +7,11 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
+# Именно starlette-версия: fastapi.UploadFile — её наследник, и парсер формы
+# отдаёт базовый класс, который isinstance по наследнику не признаёт
+from starlette.datastructures import UploadFile
 
 from app.auth import verify_auth
 from app.config import get_settings
@@ -109,18 +112,21 @@ def _run_pg_restore(data: bytes) -> str | None:
         input=data, capture_output=True, timeout=600,
     )
 
+    # Единственный надёжный признак провала — код возврата: свою диагностику
+    # pg_restore печатает с префиксом «pg_restore:», и отсев строк по имени
+    # программы вычищал бы ровно то, ради чего сообщение и читают. Схема к этому
+    # моменту уже уничтожена DROP SCHEMA, поэтому «успех» вместо ошибки означает
+    # молча опустевшую базу.
     errors = []
-    for r in (r1, r3):
+    for phase, r in (("pre-data+data", r1), ("post-data", r3)):
         if r.returncode == 0:
             continue
         stderr = r.stderr.decode(errors="replace").strip()
-        non_warning = [
-            ln for ln in stderr.splitlines()
-            if "WARNING" not in ln and "pg_restore" not in ln.split(":")[0]
-        ]
-        if non_warning:
-            errors.append(stderr)
-    return "\n".join(errors) if errors else None
+        meaningful = "\n".join(ln for ln in stderr.splitlines() if "WARNING" not in ln)
+        errors.append(
+            f"pg_restore {phase}: exit code {r.returncode}\n{meaningful or stderr or 'no output'}"
+        )
+    return "\n\n".join(errors) if errors else None
 
 
 def _ensure_dir():
@@ -157,6 +163,18 @@ def _cleanup_old_backups():
         meta.unlink(missing_ok=True)
 
 
+def _claim_operation(state: str, filename: str | None):
+    """Занять слот операции.
+
+    Между проверкой и захватом не должно быть ни одного await: пока статус
+    выставлялся внутри фоновой задачи, два запроса подряд успевали пройти
+    проверку до старта первой и запускали два параллельных DROP SCHEMA.
+    """
+    if _operation_status["state"] != "idle":
+        raise HTTPException(409, "Another backup operation is in progress")
+    _set_status(state, filename)
+
+
 def _set_status(state: str, filename: str | None = None, error: str | None = None):
     _operation_status["state"] = state
     _operation_status["filename"] = filename
@@ -168,12 +186,8 @@ def _set_status(state: str, filename: str | None = None, error: str | None = Non
         _operation_status["completed_at"] = datetime.now(timezone.utc).isoformat()
 
 
-async def _create_backup_task():
+async def _create_backup_task(filename: str):
     _ensure_dir()
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    filename = f"backup_{ts}.dump"
-    _set_status("creating", filename)
-
     try:
         data, err = await asyncio.get_event_loop().run_in_executor(None, _run_pg_dump)
         if err or not data:
@@ -205,7 +219,6 @@ async def _reload_pki(app) -> None:
 
 
 async def _restore_backup_task(data: bytes, filename: str, app=None):
-    _set_status("restoring", filename)
     try:
         err = await asyncio.get_event_loop().run_in_executor(
             None, _run_pg_restore, data
@@ -225,10 +238,11 @@ async def _restore_backup_task(data: bytes, filename: str, app=None):
 
 @router.post("/create")
 async def create_backup(_: dict = Depends(verify_auth)):
-    if _operation_status["state"] != "idle":
-        raise HTTPException(409, "Another backup operation is in progress")
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    filename = f"backup_{ts}.dump"
 
-    asyncio.create_task(_create_backup_task())
+    _claim_operation("creating", filename)
+    asyncio.create_task(_create_backup_task(filename))
     return {"success": True, "message": "Backup creation started"}
 
 
@@ -283,20 +297,30 @@ async def delete_backup(filename: str, _: dict = Depends(verify_auth)):
 @router.post("/restore")
 async def restore_backup(
     request: Request,
-    file: UploadFile = File(...),
     _: dict = Depends(verify_auth),
 ):
+    """Форму разбираем вручную, а не через `UploadFile = File(...)`.
+
+    FastAPI вычитывает тело запроса до того, как отработают зависимости: с
+    объявленным body-параметром аноним успевал бы залить дамп целиком и только
+    потом получить 401 — эндпоинт открыт снаружи и лимит размера на нём поднят.
+    """
     if _operation_status["state"] != "idle":
         raise HTTPException(409, "Another backup operation is in progress")
 
-    if not file.filename or not file.filename.endswith(".dump"):
-        raise HTTPException(400, "Only .dump files are accepted")
+    async with request.form() as form:
+        upload = form.get("file")
+        if not isinstance(upload, UploadFile) or not (upload.filename or "").endswith(".dump"):
+            raise HTTPException(400, "Only .dump files are accepted")
 
-    data = await file.read()
+        filename = upload.filename
+        data = await upload.read()
+
     if len(data) < 16:
         raise HTTPException(400, "File is too small to be a valid backup")
 
-    asyncio.create_task(_restore_backup_task(data, file.filename, app=request.app))
+    _claim_operation("restoring", filename)
+    asyncio.create_task(_restore_backup_task(data, filename, app=request.app))
     return {"success": True, "message": "Restore started"}
 
 

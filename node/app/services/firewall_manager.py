@@ -8,13 +8,15 @@ import hashlib
 import ipaddress
 import json
 import logging
-import os
 import re
 import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+
+from app.services.container_detect import running_in_container
+from app.services.host_files import write_host_file_sync
 
 logger = logging.getLogger(__name__)
 
@@ -54,22 +56,8 @@ class FirewallManager:
     """Manages UFW firewall rules via nsenter (for Docker with pid: host)"""
     
     def __init__(self):
-        self._use_nsenter = self._check_nsenter_needed()
-    
-    def _check_nsenter_needed(self) -> bool:
-        """Check if we're in a container and need nsenter"""
-        # Check if running in Docker
-        if os.path.exists('/.dockerenv'):
-            return True
-        # Check cgroup
-        try:
-            with open('/proc/1/cgroup', 'r') as f:
-                if 'docker' in f.read():
-                    return True
-        except Exception:
-            pass
-        return False
-    
+        self._use_nsenter = running_in_container()
+
     def _run_ufw(self, args: list[str], check: bool = True) -> tuple[bool, str, str]:
         """Run ufw command on host and return success, stdout, stderr"""
         if self._use_nsenter:
@@ -377,17 +365,6 @@ class FirewallManager:
 
         return rules
     
-    def check_port_open(self, port: int, protocol: str = "tcp") -> bool:
-        """Check if specific port is open"""
-        rules = self.list_rules()
-        
-        for rule in rules:
-            if rule.port == port and rule.action == "ALLOW":
-                if protocol == "any" or rule.protocol == "any" or rule.protocol == protocol:
-                    return True
-
-        return False
-
     @staticmethod
     def _normalize_from(value: Optional[str]) -> str:
         """Приводит источник к каноничному виду: пусто/any/anywhere → 'anywhere'."""
@@ -479,17 +456,6 @@ class FirewallManager:
             logger.error(f"Failed to disable UFW: {stderr}")
             return False, f"Failed to disable firewall: {stderr or stdout}", error_log
     
-    def reset(self) -> tuple[bool, str, Optional[str]]:
-        """Reset UFW to default settings (disable and remove all rules)"""
-        success, stdout, stderr = self._run_ufw(["--force", "reset"])
-        
-        if success:
-            logger.info("UFW firewall reset to defaults")
-            return True, "Firewall reset to defaults", None
-        else:
-            error_log = f"Command: ufw --force reset\nStdout: {stdout}\nStderr: {stderr}"
-            return False, f"Failed to reset firewall: {stderr or stdout}", error_log
-
     # ==================== Profile application ====================
 
     @staticmethod
@@ -542,22 +508,13 @@ class FirewallManager:
             return False
 
     def _write_host_file(self, path: str, content: str) -> bool:
-        if self._use_nsenter:
-            cmd = ["nsenter", "-t", "1", "-m", "-u", "-n", "-i", "--", "tee", path]
-            try:
-                subprocess.run(
-                    cmd, input=content, capture_output=True, text=True, timeout=10, check=False,
-                )
-                return True
-            except Exception as e:
-                logger.error(f"Failed to write {path}: {e}")
-                return False
-        try:
-            Path(path).write_text(content)
-            return True
-        except Exception as e:
-            logger.error(f"Failed to write {path}: {e}")
-            return False
+        """Записать файл на хост общим writer'ом.
+
+        Собственная реализация через `tee` возвращала успех не глядя на код
+        возврата: бэкап состояния UFW «создавался» даже когда файла не
+        появлялось, и откат после неудачного apply откатывать было нечем.
+        """
+        return write_host_file_sync(path, content)
 
     def _read_host_file(self, path: str) -> Optional[str]:
         if self._use_nsenter:

@@ -1,7 +1,6 @@
 import asyncio
 import json
 import logging
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -12,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import verify_auth
 from app.database import get_db
 from app.models import Server, PanelSettings
+from app.services.node_capabilities import NodeCapabilityError, denial_headers
 from app.services.ssh_manager import proxy_to_node, RECOMMENDED_PRESET, MAXIMUM_PRESET
 
 logger = logging.getLogger(__name__)
@@ -67,6 +67,13 @@ async def _get_server(server_id: int, db: AsyncSession) -> Server:
 async def _safe_proxy(server, method: str, path: str, json_data: dict | None = None) -> dict:
     try:
         return await proxy_to_node(server, method, path, json_data)
+    except NodeCapabilityError as e:
+        # 409, а не 503: раздел закрыт владельцем ноды, связь при этом в порядке
+        raise HTTPException(
+            status_code=409,
+            detail=str(e),
+            headers=denial_headers(e.capability, e.write),
+        )
     except LookupError as e:
         raise HTTPException(status_code=501, detail=str(e))
     except (ConnectionError, TimeoutError, RuntimeError) as e:
@@ -97,10 +104,11 @@ async def _apply_steps(server, steps: list[Step]) -> dict:
             if res.get("warnings"):
                 entry["warnings"] = res["warnings"]
             done.append(entry)
-        except (ConnectionError, TimeoutError, LookupError, RuntimeError) as e:
+        except (ConnectionError, TimeoutError, LookupError, RuntimeError,
+                NodeCapabilityError) as e:
             done.append({"step": name, "success": False, "error": str(e)})
-            # Недоступность/таймаут/устаревшая нода — остальные шаги обречены
-            if isinstance(e, (ConnectionError, TimeoutError, LookupError)):
+            # Недоступность/таймаут/устаревшая нода/закрытый раздел — остальные шаги обречены
+            if isinstance(e, (ConnectionError, TimeoutError, LookupError, NodeCapabilityError)):
                 break
     return {
         "server_id": server.id,
@@ -115,6 +123,9 @@ async def _fetch_ssh_status(server) -> dict:
     try:
         status = await proxy_to_node(server, "GET", "/api/ssh/status", timeout=15.0)
         return {"server_id": server.id, "server_name": server.name, "reachable": True, "status": status}
+    except NodeCapabilityError as e:
+        return {"server_id": server.id, "server_name": server.name, "reachable": False,
+                "denied": True, "error": str(e)}
     except LookupError as e:
         return {"server_id": server.id, "server_name": server.name, "reachable": False,
                 "outdated": True, "error": str(e)}
@@ -128,13 +139,28 @@ def _ndjson(obj: dict) -> bytes:
 
 def _stream_ndjson(servers: list[Server], worker, log_action: str | None = None) -> StreamingResponse:
     """Стримит NDJSON: start → result по каждой ноде (по мере готовности) → done."""
+    async def safe_worker(server):
+        # Граница стрима: необработанное исключение одной ноды не должно
+        # обрывать соединение — иначе остальные строки навсегда зависают в «загрузке»
+        try:
+            return await worker(server)
+        except Exception as e:
+            logger.exception("ssh_stream_worker_failed", extra={"server_id": server.id})
+            return {
+                "server_id": server.id,
+                "server_name": server.name,
+                "success": False,
+                "reachable": False,
+                "error": str(e) or e.__class__.__name__,
+            }
+
     async def generate():
         yield _ndjson({
             "type": "start",
             "total": len(servers),
             "servers": [{"server_id": s.id, "server_name": s.name} for s in servers],
         })
-        tasks = [asyncio.create_task(worker(s)) for s in servers]
+        tasks = [asyncio.create_task(safe_worker(s)) for s in servers]
         results: list[dict] = []
         try:
             for completed in asyncio.as_completed(tasks):
@@ -210,17 +236,6 @@ async def update_ssh_config(
 ):
     server = await _get_server(server_id, db)
     return await _safe_proxy(server, "POST", "/api/ssh/config", config)
-
-
-@router.post("/server/{server_id}/config/test")
-async def test_ssh_config(
-    server_id: int,
-    config: dict,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth),
-):
-    server = await _get_server(server_id, db)
-    return await _safe_proxy(server, "POST", "/api/ssh/config/test", config)
 
 
 # === Fail2ban ===

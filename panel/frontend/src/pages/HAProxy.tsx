@@ -32,6 +32,8 @@ import {
 } from 'lucide-react'
 import { proxyApi, HAProxyRule, HAProxyStatus, Certificate, FirewallRule, haproxyProfilesApi } from '../api/client'
 import { useServersStore } from '../stores/serversStore'
+import NodeRestrictedNotice from '../components/servers/NodeRestrictedNotice'
+import { nodeAllows } from '../utils/nodeCapabilities'
 import { useAutoRefresh } from '../hooks/useAutoRefresh'
 import { useCachedData, createServerCacheKey } from '../hooks/useCachedData'
 import CachedDataBanner from '../components/ui/CachedDataBanner'
@@ -96,7 +98,6 @@ export default function HAProxy() {
   const [configPath, setConfigPath] = useState('')
   const [configLoading, setConfigLoading] = useState(false)
   const [configError, setConfigError] = useState<string | null>(null)
-  const [configSuccess, setConfigSuccess] = useState<string | null>(null)
   const [configModalMouseDownOnOverlay, setConfigModalMouseDownOnOverlay] = useState(false)
   
   // Firewall states
@@ -126,6 +127,11 @@ export default function HAProxy() {
   }
   
   const server = servers.find(s => s.id === Number(serverId))
+  // Правила UFW живут под тем же префиксом /api/haproxy, но закрываются своим
+  // доменом: балансировщик и файрвол разрешают по отдельности
+  const haproxyReadable = nodeAllows(server, 'haproxy', 'read')
+  const haproxyWritable = nodeAllows(server, 'haproxy', 'write')
+  const firewallReadable = nodeAllows(server, 'firewall', 'read')
 
   // HAProxy config profile info
   const [profileInfo, setProfileInfo] = useState<{ name: string; id: number } | null>(null)
@@ -221,11 +227,11 @@ export default function HAProxy() {
     
     try {
       const [statusRes, rulesRes, certsRes, fwRes, allCertsRes] = await Promise.all([
-        proxyApi.getHAProxyStatus(Number(serverId)).catch(() => null),
-        proxyApi.getHAProxyRules(Number(serverId)).catch(() => null),
-        proxyApi.getHAProxyCerts(Number(serverId)).catch(() => null),
-        proxyApi.getFirewallRules(Number(serverId)).catch(() => null),
-        proxyApi.getAllCerts(Number(serverId)).catch(() => null),
+        haproxyReadable ? proxyApi.getHAProxyStatus(Number(serverId)).catch(() => null) : null,
+        haproxyReadable ? proxyApi.getHAProxyRules(Number(serverId)).catch(() => null) : null,
+        haproxyReadable ? proxyApi.getHAProxyCerts(Number(serverId)).catch(() => null) : null,
+        firewallReadable ? proxyApi.getFirewallRules(Number(serverId)).catch(() => null) : null,
+        haproxyReadable ? proxyApi.getAllCerts(Number(serverId)).catch(() => null) : null,
       ])
       
       const hasAnyData = statusRes || rulesRes || certsRes || fwRes || allCertsRes
@@ -316,6 +322,7 @@ export default function HAProxy() {
   }, [])
 
   const handleReload = async () => {
+    if (!haproxyWritable) return
     setActionLoading('reload')
     try {
       await proxyApi.reloadHAProxy(Number(serverId))
@@ -328,6 +335,7 @@ export default function HAProxy() {
   }
 
   const handleRestart = async () => {
+    if (!haproxyWritable) return
     setActionLoading('restart')
     try {
       await proxyApi.restartHAProxy(Number(serverId))
@@ -340,6 +348,7 @@ export default function HAProxy() {
   }
   
   const handleRenewCerts = async () => {
+    if (!haproxyWritable) return
     if (certs.length === 0) return
     
     setActionLoading('renew')
@@ -400,6 +409,7 @@ export default function HAProxy() {
   }
   
   const handleRenewSingleCert = async (domain: string) => {
+    if (!haproxyWritable) return
     setActionLoading(`renew-${domain}`)
     setRenewLog(null)
     setRenewLogExpanded(false)
@@ -437,6 +447,7 @@ export default function HAProxy() {
   }
   
   const handleStartHAProxy = async () => {
+    if (!haproxyWritable) return
     setActionLoading('start')
     try {
       await proxyApi.startHAProxy(Number(serverId))
@@ -451,6 +462,7 @@ export default function HAProxy() {
   }
   
   const handleStopHAProxy = async () => {
+    if (!haproxyWritable) return
     if (!confirm(t('haproxy.confirm_stop'))) return
     setActionLoading('stop')
     try {
@@ -466,6 +478,7 @@ export default function HAProxy() {
   }
   
   const handleGenerateCert = async (e: FormEvent) => {
+    if (!haproxyWritable) return
     e.preventDefault()
     setCertFormError('')
     setCertErrorLog(null)
@@ -511,6 +524,7 @@ export default function HAProxy() {
   }
   
   const handleUploadCert = async (e: FormEvent) => {
+    if (!haproxyWritable) return
     e.preventDefault()
     setCertFormError('')
     setActionLoading('upload-cert')
@@ -539,6 +553,7 @@ export default function HAProxy() {
   }
   
   const handleDeleteCert = async (domain: string) => {
+    if (!haproxyWritable) return
     if (!confirm(t('haproxy.confirm_delete_cert', { domain }))) return
     setActionLoading(`delete-cert-${domain}`)
     try {
@@ -678,7 +693,6 @@ export default function HAProxy() {
     setShowConfigModal(true)
     setConfigLoading(true)
     setConfigError(null)
-    setConfigSuccess(null)
     
     try {
       const res = await proxyApi.getHAProxyConfig(Number(serverId))
@@ -815,6 +829,10 @@ export default function HAProxy() {
             </motion.div>
             <p className="text-dark-400">{error}</p>
           </motion.div>
+        ) : !haproxyReadable && !firewallReadable ? (
+          <motion.div key="restricted">
+            <NodeRestrictedNotice server={server} />
+          </motion.div>
         ) : (
           <motion.div key="content">
             {/* Cached data indicator */}
@@ -824,6 +842,9 @@ export default function HAProxy() {
               )}
             </AnimatePresence>
             
+            {!haproxyReadable && <NodeRestrictedNotice server={server} compact />}
+
+            {haproxyReadable && <>
             {/* Status Cards */}
             <motion.div 
               className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6"
@@ -1137,6 +1158,7 @@ export default function HAProxy() {
                   <span className="text-sm text-dark-500">({certs.length})</span>
                 </button>
                 <div className="flex items-center gap-2">
+                  <FAQIcon screen="HAPROXY_SSL" />
                   <motion.button
                     onClick={() => {
                       setShowCertForm('generate')
@@ -1745,8 +1767,9 @@ export default function HAProxy() {
                           <Code className="w-5 h-5 text-accent-500" />
                         </div>
                         <div>
-                          <h2 className="text-lg font-semibold text-dark-100">
+                          <h2 className="flex items-center gap-1 text-lg font-semibold text-dark-100">
                             {t('haproxy.config_editor')}
+                            <FAQIcon screen="HAPROXY_CPU_AFFINITY" size="sm" />
                           </h2>
                           {configPath && (
                             <p className="text-xs text-dark-500 font-mono">{configPath}</p>
@@ -1792,17 +1815,6 @@ export default function HAProxy() {
                             {configError}
                           </motion.div>
                         )}
-                        {configSuccess && (
-                          <motion.div
-                            className="mt-3 p-3 bg-success/10 border border-success/20 rounded-xl text-success text-sm flex items-center gap-2"
-                            initial={{ opacity: 0, y: -10 }}
-                            animate={{ opacity: 1, y: 0 }}
-                            exit={{ opacity: 0, y: -10 }}
-                          >
-                            <CheckCircle2 className="w-4 h-4 flex-shrink-0" />
-                            {configSuccess}
-                          </motion.div>
-                        )}
                       </AnimatePresence>
                     </div>
                     
@@ -1822,6 +1834,8 @@ export default function HAProxy() {
               )}
             </AnimatePresence>
             
+            </>}
+
             {/* Firewall Rules */}
             <motion.div 
               className="card mt-6"
@@ -1854,6 +1868,7 @@ export default function HAProxy() {
                   <span className="text-sm text-dark-500">({filteredFirewallRules.length})</span>
                 </button>
                 <div className="flex items-center gap-2">
+                  <FAQIcon screen="HAPROXY_FIREWALL" />
                   {firewallActive ? (
                     <motion.button
                       onClick={handleDisableFirewall}

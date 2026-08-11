@@ -78,6 +78,9 @@ class AlertSettingsUpdate(BaseModel):
     load_avg_threshold_offset: Optional[float] = None
     load_avg_sustained_checks: Optional[int] = None
 
+    conntrack_enabled: Optional[bool] = None
+    conntrack_threshold: Optional[float] = None
+
     excluded_server_ids: Optional[list[int]] = None
 
     offline_excluded_server_ids: Optional[list[int]] = None
@@ -86,6 +89,7 @@ class AlertSettingsUpdate(BaseModel):
     network_excluded_server_ids: Optional[list[int]] = None
     tcp_excluded_server_ids: Optional[list[int]] = None
     load_avg_excluded_server_ids: Optional[list[int]] = None
+    conntrack_excluded_server_ids: Optional[list[int]] = None
 
 
 class TelegramTestRequest(BaseModel):
@@ -145,6 +149,8 @@ def _settings_to_dict(s: AlertSettings) -> dict:
         "load_avg_enabled": s.load_avg_enabled,
         "load_avg_threshold_offset": s.load_avg_threshold_offset,
         "load_avg_sustained_checks": s.load_avg_sustained_checks,
+        "conntrack_enabled": s.conntrack_enabled,
+        "conntrack_threshold": s.conntrack_threshold,
         "excluded_server_ids": json.loads(s.excluded_server_ids) if s.excluded_server_ids else [],
         "offline_excluded_server_ids": json.loads(s.offline_excluded_server_ids) if s.offline_excluded_server_ids else [],
         "cpu_excluded_server_ids": json.loads(s.cpu_excluded_server_ids) if s.cpu_excluded_server_ids else [],
@@ -152,6 +158,7 @@ def _settings_to_dict(s: AlertSettings) -> dict:
         "network_excluded_server_ids": json.loads(s.network_excluded_server_ids) if s.network_excluded_server_ids else [],
         "tcp_excluded_server_ids": json.loads(s.tcp_excluded_server_ids) if s.tcp_excluded_server_ids else [],
         "load_avg_excluded_server_ids": json.loads(s.load_avg_excluded_server_ids) if s.load_avg_excluded_server_ids else [],
+        "conntrack_excluded_server_ids": json.loads(s.conntrack_excluded_server_ids) if s.conntrack_excluded_server_ids else [],
     }
 
 
@@ -183,7 +190,7 @@ async def update_alert_settings(
         "excluded_server_ids", "offline_excluded_server_ids",
         "cpu_excluded_server_ids", "ram_excluded_server_ids",
         "network_excluded_server_ids", "tcp_excluded_server_ids",
-        "load_avg_excluded_server_ids",
+        "load_avg_excluded_server_ids", "conntrack_excluded_server_ids",
     }
     update_data = data.model_dump(exclude_unset=True)
     for key, value in update_data.items():

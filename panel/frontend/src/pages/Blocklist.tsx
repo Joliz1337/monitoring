@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react'
-import { Shield, ShieldCheck, Plus, Trash2, RefreshCw, Server, Globe, List, Loader2, ExternalLink, AlertCircle, Check, X, ArrowDownToLine, ArrowUpFromLine, CheckCircle2, XCircle, ChevronDown } from 'lucide-react'
+import { nodeAllows } from '../utils/nodeCapabilities'
+import { Shield, ShieldCheck, Plus, Trash2, RefreshCw, Server, Globe, List, Loader2, ExternalLink, AlertCircle, Check, X, ArrowDownToLine, ArrowUpFromLine, CheckCircle2, XCircle, ChevronDown, Lock } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
@@ -226,14 +227,33 @@ export default function Blocklist() {
       try {
         const resp = await blocklistApi.getSyncStatus()
         const data = resp.data
+        // Отменённый синк не доходит до нод, поэтому servers остаётся пустым —
+        // без отдельной ветки тост просто исчез бы, ничего не сказав оператору
+        if (!data.in_progress && data.error) {
+          clearInterval(poll)
+          setSyncToasts(prev =>
+            prev.map(st => st.id === id
+              ? { ...st, status: 'error' as const, message: t('blocklist.sync_cancelled', { reason: data.error }) }
+              : st)
+          )
+          setTimeout(() => {
+            setSyncToasts(prev => prev.filter(st => st.id !== id))
+          }, 15000)
+          return
+        }
         if (!data.in_progress && data.servers && Object.keys(data.servers).length > 0) {
           clearInterval(poll)
 
-          const failedServers = Object.values(data.servers).filter(s => !s.success)
+          // Офлайн-нода — не сбой: её долг записан в очередь и закроется сам
+          const queuedServers = Object.values(data.servers).filter(s => s.queued)
+          const failedServers = Object.values(data.servers).filter(s => !s.success && !s.queued)
 
           if (failedServers.length === 0) {
+            const message = queuedServers.length > 0
+              ? t('blocklist.sync_queued', { servers: queuedServers.map(s => s.server_name).join(', ') })
+              : t('blocklist.sync_success')
             setSyncToasts(prev =>
-              prev.map(st => st.id === id ? { ...st, status: 'success' as const, message: t('blocklist.sync_success') } : st)
+              prev.map(st => st.id === id ? { ...st, status: 'success' as const, message } : st)
             )
           } else {
             const names = failedServers.map(s => s.server_name).join(', ')
@@ -894,6 +914,12 @@ export default function Blocklist() {
                         <div className="flex items-center gap-2.5 min-w-0">
                           <Server className="w-4 h-4 text-accent-400 shrink-0" />
                           <span className="font-semibold text-dark-100 truncate">{server.name}</span>
+                          {!nodeAllows(server, 'ipset', 'write') && (
+                            <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-purple/10 text-purple text-[10px] font-medium shrink-0">
+                              <Lock className="w-3 h-3" />
+                              {t('node_caps.row_blocked')}
+                            </span>
+                          )}
                         </div>
                         <div className="flex items-center gap-2 shrink-0">
                           {data?.loaded && (
@@ -1004,8 +1030,9 @@ export default function Blocklist() {
           >
             {/* Add Source Form */}
             <div className="card">
-              <h3 className="text-lg font-semibold text-dark-100 mb-4">
+              <h3 className="text-lg font-semibold text-dark-100 mb-4 flex items-center gap-2">
                 {t('blocklist.add_source')}
+                <FAQIcon screen="BLOCKLIST_SOURCES" size="sm" />
               </h3>
 
               <div className="space-y-3">

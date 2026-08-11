@@ -1,12 +1,28 @@
 """SSH management router"""
 
+import asyncio
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from typing import Optional
 
-from app.services.ssh_config_manager import get_ssh_config_manager
+from app.services.ssh_config_manager import SSHConfigManager, get_ssh_config_manager
 
 router = APIRouter(prefix="/api/ssh", tags=["ssh"])
+
+# Перенастройка sshd занимает минуты (ожидание порта, стоп/старт службы,
+# установка fail2ban), а менеджер целиком синхронный. Без тред-пула один такой
+# запрос заморозил бы event loop вместе с /health, и панель на всё это время
+# сочла бы ноду офлайн: открылся бы интервал простоя и ушёл бы алерт.
+
+# Два параллельных применения чередовали бы бэкап, подмену конфига и рестарт
+# службы. Ключи под тем же локом: write_sshd_config перед отключением парольного
+# входа проверяет, что authorized_keys не пуст — параллельное удаление ключа
+# между проверкой и применением отрезало бы доступ к серверу.
+_sshd_lock = asyncio.Lock()
+
+# apt-get (dpkg-lock) и restart fail2ban не переживают параллельного запуска.
+_fail2ban_lock = asyncio.Lock()
 
 
 class SSHConfigUpdate(BaseModel):
@@ -50,24 +66,30 @@ class ChangePasswordRequest(BaseModel):
     password: str = Field(..., min_length=8)
 
 
+async def _get_manager() -> SSHConfigManager:
+    """__init__ менеджера сам по себе делает около десятка subprocess-вызовов."""
+    return await asyncio.to_thread(get_ssh_config_manager)
+
+
 # --- SSH Config ---
 
 @router.get("/config")
 async def get_config():
-    manager = get_ssh_config_manager()
-    config = manager.read_sshd_config()
+    manager = await _get_manager()
+    config = await asyncio.to_thread(manager.read_sshd_config)
     return {"config": config}
 
 
 @router.post("/config")
 async def apply_config(request: SSHConfigUpdate):
-    manager = get_ssh_config_manager()
     updates = request.model_dump(exclude_none=True)
-
     if not updates:
         raise HTTPException(status_code=400, detail="No settings provided")
 
-    success, message, warnings = manager.write_sshd_config(updates)
+    manager = await _get_manager()
+    async with _sshd_lock:
+        success, message, warnings = await asyncio.to_thread(manager.write_sshd_config, updates)
+
     if not success:
         raise HTTPException(status_code=400, detail=message)
 
@@ -76,13 +98,14 @@ async def apply_config(request: SSHConfigUpdate):
 
 @router.post("/config/test")
 async def test_config(request: SSHConfigUpdate):
-    manager = get_ssh_config_manager()
     updates = request.model_dump(exclude_none=True)
-
     if not updates:
         raise HTTPException(status_code=400, detail="No settings provided")
 
-    valid, errors = manager.test_sshd_config(updates)
+    manager = await _get_manager()
+    async with _sshd_lock:
+        valid, errors = await asyncio.to_thread(manager.test_sshd_config, updates)
+
     return {"valid": valid, "errors": errors}
 
 
@@ -90,19 +113,20 @@ async def test_config(request: SSHConfigUpdate):
 
 @router.get("/fail2ban/status")
 async def get_fail2ban_status():
-    manager = get_ssh_config_manager()
-    return manager.read_fail2ban_config()
+    manager = await _get_manager()
+    return await asyncio.to_thread(manager.read_fail2ban_config)
 
 
 @router.post("/fail2ban/config")
 async def update_fail2ban_config(request: Fail2banConfigUpdate):
-    manager = get_ssh_config_manager()
     updates = request.model_dump(exclude_none=True)
-
     if not updates:
         raise HTTPException(status_code=400, detail="No settings provided")
 
-    success, message = manager.write_fail2ban_config(updates)
+    manager = await _get_manager()
+    async with _fail2ban_lock:
+        success, message = await asyncio.to_thread(manager.write_fail2ban_config, updates)
+
     if not success:
         raise HTTPException(status_code=400, detail=message)
 
@@ -111,15 +135,15 @@ async def update_fail2ban_config(request: Fail2banConfigUpdate):
 
 @router.get("/fail2ban/banned")
 async def get_banned_ips():
-    manager = get_ssh_config_manager()
-    banned = manager.get_fail2ban_banned()
+    manager = await _get_manager()
+    banned = await asyncio.to_thread(manager.get_fail2ban_banned)
     return {"count": len(banned), "ips": banned}
 
 
 @router.post("/fail2ban/unban")
 async def unban_ip(request: UnbanRequest):
-    manager = get_ssh_config_manager()
-    success, message = manager.unban_ip(request.ip)
+    manager = await _get_manager()
+    success, message = await asyncio.to_thread(manager.unban_ip, request.ip)
     if not success:
         raise HTTPException(status_code=400, detail=message)
 
@@ -128,8 +152,8 @@ async def unban_ip(request: UnbanRequest):
 
 @router.post("/fail2ban/unban-all")
 async def unban_all():
-    manager = get_ssh_config_manager()
-    success, message = manager.unban_all()
+    manager = await _get_manager()
+    success, message = await asyncio.to_thread(manager.unban_all)
     if not success:
         raise HTTPException(status_code=500, detail=message)
 
@@ -140,15 +164,19 @@ async def unban_all():
 
 @router.get("/keys")
 async def list_keys(user: str = "root"):
-    manager = get_ssh_config_manager()
-    keys = manager.list_authorized_keys(user)
+    manager = await _get_manager()
+    keys = await asyncio.to_thread(manager.list_authorized_keys, user)
     return {"user": user, "count": len(keys), "keys": keys}
 
 
 @router.post("/keys")
 async def add_key(request: SSHKeyAdd):
-    manager = get_ssh_config_manager()
-    success, message, fingerprint = manager.add_authorized_key(request.user, request.public_key)
+    manager = await _get_manager()
+    async with _sshd_lock:
+        success, message, fingerprint = await asyncio.to_thread(
+            manager.add_authorized_key, request.user, request.public_key,
+        )
+
     if not success:
         raise HTTPException(status_code=400, detail=message)
 
@@ -157,8 +185,12 @@ async def add_key(request: SSHKeyAdd):
 
 @router.delete("/keys")
 async def remove_key(request: SSHKeyRemove):
-    manager = get_ssh_config_manager()
-    success, message = manager.remove_authorized_key(request.user, request.fingerprint)
+    manager = await _get_manager()
+    async with _sshd_lock:
+        success, message = await asyncio.to_thread(
+            manager.remove_authorized_key, request.user, request.fingerprint,
+        )
+
     if not success:
         raise HTTPException(status_code=400, detail=message)
 
@@ -169,8 +201,10 @@ async def remove_key(request: SSHKeyRemove):
 
 @router.post("/password")
 async def change_password(request: ChangePasswordRequest):
-    manager = get_ssh_config_manager()
-    success, message = manager.change_password(request.user, request.password)
+    manager = await _get_manager()
+    success, message = await asyncio.to_thread(
+        manager.change_password, request.user, request.password,
+    )
     if not success:
         raise HTTPException(status_code=400, detail=message)
 
@@ -181,6 +215,5 @@ async def change_password(request: ChangePasswordRequest):
 
 @router.get("/status")
 async def get_status():
-    manager = get_ssh_config_manager()
-    status = manager.get_status()
-    return status
+    manager = await _get_manager()
+    return await asyncio.to_thread(manager.get_status)

@@ -363,7 +363,6 @@ async def enrich_with_names(asn_map: dict[str, ASNInfo]) -> None:
                 updated_ips.append((ip, holder))
 
     # Обновляем memory cache
-    now = time.time()
     for ip, holder in updated_ips:
         entry = _memory_cache.get(ip)
         if entry:

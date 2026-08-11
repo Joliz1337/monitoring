@@ -19,7 +19,6 @@ interface TorrentBlockerState {
   activeBans: TorrentBlockerActiveBan[]
   activeBansTotal: number
   servers: ServerWithMetrics[]
-  isLoading: boolean
 
   fetchSettings: () => Promise<void>
   updateSettings: (data: Partial<TorrentBlockerSettings>) => Promise<void>
@@ -40,7 +39,6 @@ export const useTorrentBlockerStore = create<TorrentBlockerState>((set, get) => 
   activeBans: [],
   activeBansTotal: 0,
   servers: [],
-  isLoading: false,
 
   fetchSettings: async () => {
     try {

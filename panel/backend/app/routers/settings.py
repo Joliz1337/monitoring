@@ -14,16 +14,19 @@ from app.services import update_channel
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
+CPU_AFFINITY_KEY = "cpu_affinity_enabled"
+
 DEFAULT_SETTINGS = {
     "refresh_interval": "5",
-    "theme": "dark",
     "compact_view": "false",
-    "blocklist_temp_timeout": "600",
     "blocklist_auto_update_enabled": "true",
     "blocklist_auto_update_interval": "86400",
     # Collector intervals (in seconds)
     "metrics_collect_interval": "10",  # Recommended: 10-15s
-    "haproxy_collect_interval": "60",  # Recommended: 60s
+    # Значение обязано совпадать с DEFAULT_HAPROXY_INTERVAL коллектора: пока
+    # строки в panel_settings нет, коллектор работает со своим значением, а
+    # панель показывала бы отсюда другое.
+    "haproxy_collect_interval": "300",
     # Time synchronization
     "server_timezone": "Europe/Moscow",
     "time_sync_enabled": "true",
@@ -31,6 +34,10 @@ DEFAULT_SETTINGS = {
     "remnawave_nginx_path": "/opt/remnawave",
     # Канал обновлений панели и нод: main (стабильный) или dev
     "update_branch": update_channel.STABLE_BRANCH,
+    # Развод рабочих нагрузок и сетевых прерываний по разным ядрам. Выключено по
+    # умолчанию: выигрыш зависит от того, во что упирается конкретная нода, а
+    # ядро под сеть забирается у приложения целиком.
+    CPU_AFFINITY_KEY: "false",
 }
 
 
@@ -46,6 +53,10 @@ async def get_setting(key: str, db: AsyncSession) -> Optional[str]:
     if setting:
         return setting.value
     return DEFAULT_SETTINGS.get(key)
+
+
+async def cpu_affinity_enabled(db: AsyncSession) -> bool:
+    return (await get_setting(CPU_AFFINITY_KEY, db) or "").lower() == "true"
 
 
 async def set_setting(key: str, value: str, db: AsyncSession):
@@ -75,16 +86,6 @@ async def get_all_settings(
     return {"settings": settings}
 
 
-@router.get("/{key}")
-async def get_single_setting(
-    key: str,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    value = await get_setting(key, db)
-    return {"key": key, "value": value}
-
-
 @router.put("/{key}")
 async def update_setting(
     key: str,
@@ -103,6 +104,10 @@ async def update_setting(
     if key == "server_timezone":
         from app.services.time_sync import get_time_sync_service
         asyncio.ensure_future(get_time_sync_service().sync_all_servers(data.value))
+
+    if key == CPU_AFFINITY_KEY:
+        from app.services.cpu_affinity_sync import push_to_all_nodes
+        asyncio.ensure_future(push_to_all_nodes(data.value.lower() == "true"))
 
     return {"success": True, "key": key, "value": data.value}
 

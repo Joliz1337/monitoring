@@ -24,8 +24,11 @@ from sqlalchemy import select
 
 from app.database import async_session
 from app.models import Server, AntiDdosSettings, AlertSettings, AlertHistory, AntiDdosWhitelistSource
+from app.services.haproxy_profile_sync import is_server_online
 from app.services.http_client import get_node_client, get_node_apply_client, get_external_client, node_auth_headers
+from app.services.node_capabilities import Capability, denied_message, server_allows
 from app.services.net_utils import resolve_panel_ip, host_to_ip
+from app.services.node_sync_queue import KIND_ANTIDDOS_WHITELIST, enqueue
 from app.services import update_channel
 
 logger = logging.getLogger(__name__)
@@ -93,11 +96,11 @@ class AntiDdosManager:
 
         servers = (await db.execute(select(Server).where(Server.is_active == True))).scalars().all()  # noqa: E712
         for srv in servers:
-            ip = host_to_ip(urlparse(srv.url).hostname or "")
+            ip = await host_to_ip(urlparse(srv.url).hostname or "")
             if ip:
                 ips.add(ip)
 
-        panel_ip = resolve_panel_ip()
+        panel_ip = await resolve_panel_ip()
         if panel_ip:
             ips.add(panel_ip)
 
@@ -188,6 +191,10 @@ class AntiDdosManager:
     # ── node calls ─────────────────────────────────────────────────────────
 
     async def sync_whitelist_to_node(self, server: Server, ips: list[str], timeout: float = 30.0) -> tuple[bool, str]:
+        # Как и с нодой без эндпоинта: не ошибка, а «доставлять некуда».
+        # Иначе push_whitelist_all запишет в очередь долг, который не закроется.
+        if not server_allows(server, Capability.ANTIDDOS, write=True):
+            return True, "node closed the anti-DDoS section"
         try:
             client = get_node_client(server)
             resp = await client.post(
@@ -207,6 +214,8 @@ class AntiDdosManager:
             return False, str(e)
 
     async def get_node_status(self, server: Server, timeout: float = 15.0) -> Optional[dict]:
+        if not server_allows(server, Capability.ANTIDDOS, write=False):
+            return None
         try:
             client = get_node_client(server)
             resp = await client.get(
@@ -221,6 +230,8 @@ class AntiDdosManager:
             return None
 
     async def set_node_emergency(self, server: Server, enabled: bool, timeout: float = 45.0) -> tuple[bool, str, Optional[dict]]:
+        if not server_allows(server, Capability.ANTIDDOS, write=True):
+            return False, denied_message(Capability.ANTIDDOS, True), None
         try:
             client = get_node_apply_client(server)
             resp = await client.post(
@@ -239,6 +250,8 @@ class AntiDdosManager:
             return False, str(e), None
 
     async def set_node_watchdog(self, server: Server, enabled: bool, timeout: float = 20.0) -> tuple[bool, str]:
+        if not server_allows(server, Capability.ANTIDDOS, write=True):
+            return False, denied_message(Capability.ANTIDDOS, True)
         try:
             client = get_node_client(server)
             resp = await client.post(
@@ -281,6 +294,8 @@ class AntiDdosManager:
         return match.group(1) if match else None
 
     async def install_to_node(self, server: Server, timeout: float = 60.0) -> tuple[bool, str]:
+        if not server_allows(server, Capability.ANTIDDOS, write=True):
+            return False, denied_message(Capability.ANTIDDOS, True)
         files = await self._fetch_watchdog_files()
         if not files:
             return False, "could not fetch watchdog files from GitHub"
@@ -323,6 +338,20 @@ class AntiDdosManager:
                     (await db.execute(select(Server).where(Server.is_active == True))).scalars().all()  # noqa: E712
                 )
 
+    async def _push_to_servers(self, servers: list[Server], ips: list[str]) -> dict[int, Optional[str]]:
+        """Разослать готовый whitelist живым нодам. По ноде — None при успехе или
+        текст ошибки."""
+        async def _one(srv: Server) -> tuple[int, Optional[str]]:
+            async with self._http_sem:
+                ok, msg = await self.sync_whitelist_to_node(srv, ips)
+                return srv.id, None if ok else msg
+
+        results = await asyncio.gather(*[_one(s) for s in servers], return_exceptions=True)
+        out: dict[int, Optional[str]] = {}
+        for srv, result in zip(servers, results):
+            out[srv.id] = str(result) if isinstance(result, BaseException) else result[1]
+        return out
+
     async def push_whitelist_all(self) -> dict:
         async with self._db_sem:
             async with async_session() as db:
@@ -331,13 +360,18 @@ class AntiDdosManager:
                     (await db.execute(select(Server).where(Server.is_active == True))).scalars().all()  # noqa: E712
                 )
 
-        async def _one(srv: Server):
-            async with self._http_sem:
-                ok, msg = await self.sync_whitelist_to_node(srv, ips)
-                return {"server_id": srv.id, "success": ok, "message": msg}
+        # Офлайн-ноде набор отправить некуда: запрос упрётся в таймаут, а изменение
+        # пропадёт. Очередь доставит его сама, когда нода вернётся в сеть.
+        # Закрывшие раздел не участвуют ни в отправке, ни в очереди
+        servers = [s for s in servers if server_allows(s, Capability.ANTIDDOS, write=True)]
+        online = [s for s in servers if is_server_online(s)]
+        offline = [s for s in servers if not is_server_online(s)]
 
-        results = await asyncio.gather(*[_one(s) for s in servers], return_exceptions=True)
-        ok_count = sum(1 for r in results if isinstance(r, dict) and r.get("success"))
+        errors = await self._push_to_servers(online, ips)
+        ok_count = sum(1 for error in errors.values() if error is None)
+
+        deferred = [sid for sid, error in errors.items() if error is not None] + [s.id for s in offline]
+        await enqueue(deferred, KIND_ANTIDDOS_WHITELIST, "whitelist не доставлен")
 
         async with async_session() as db:
             settings = await self.get_or_create_settings(db)
@@ -346,10 +380,38 @@ class AntiDdosManager:
             settings.last_push_count = len(ips)
             await db.commit()
 
-        return {"whitelist_size": len(ips), "nodes": len(servers), "ok": ok_count}
+        return {
+            "whitelist_size": len(ips),
+            "nodes": len(servers),
+            "ok": ok_count,
+            "queued": len(deferred),
+        }
+
+    async def push_whitelist_to_servers(self, server_ids: list[int]) -> dict[int, Optional[str]]:
+        """Досинхронизировать whitelist перечисленным нодам (исполнитель очереди)."""
+        async with self._db_sem:
+            async with async_session() as db:
+                ips = await self.build_whitelist(db)
+                servers = list((await db.execute(
+                    select(Server).where(
+                        Server.id.in_(server_ids),
+                        Server.is_active == True  # noqa: E712
+                    )
+                )).scalars().all())
+
+        # Удалённый или выключенный сервер — долг закрыт.
+        found = {s.id for s in servers}
+        results: dict[int, Optional[str]] = {sid: None for sid in server_ids if sid not in found}
+        results.update(await self._push_to_servers(servers, ips))
+        return results
+
+    @staticmethod
+    def _allowed_for_write(servers: list[Server]) -> list[Server]:
+        return [s for s in servers if server_allows(s, Capability.ANTIDDOS, write=True)]
 
     async def set_emergency_all(self, enabled: bool) -> dict:
-        servers = await self._active_servers()
+        # Закрывшие раздел не считаем ни в «сколько нод», ни в «сколько удалось»
+        servers = self._allowed_for_write(await self._active_servers())
 
         async def _one(srv: Server):
             async with self._http_sem:
@@ -363,7 +425,7 @@ class AntiDdosManager:
         return {"nodes": len(servers), "ok": ok_count}
 
     async def set_watchdog_all(self, enabled: bool) -> dict:
-        servers = await self._active_servers()
+        servers = self._allowed_for_write(await self._active_servers())
 
         async def _one(srv: Server):
             async with self._http_sem:
@@ -459,6 +521,11 @@ class AntiDdosManager:
         version — the panel installs/updates it itself. No admin action, no per-node
         clicking. A per-node cooldown keeps a failing install from retrying every poll.
         """
+        # Проверка до cooldown: закрытая нода иначе получала бы попытку установки
+        # каждые десять минут и до конца времён
+        if not server_allows(server, Capability.ANTIDDOS, write=True):
+            return status
+
         installed = status.get("installed", False)
         version = status.get("version") or ""
         needs = (not installed) or (expected_version and version and version != expected_version)

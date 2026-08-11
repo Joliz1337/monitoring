@@ -2,6 +2,12 @@ import logging
 
 import httpx
 from app.services.http_client import get_node_apply_client, get_node_client, node_auth_headers
+from app.services.node_capabilities import (
+    Capability,
+    NodeCapabilityError,
+    learn_from_denial,
+    server_allows_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +63,10 @@ async def proxy_to_node(
     timeout: float = 30.0,
     use_apply_client: bool = False,
 ) -> dict:
+    allowed, capability, write = server_allows_path(server, path, method)
+    if not allowed:
+        raise NodeCapabilityError(capability, write)
+
     client = get_node_apply_client(server) if use_apply_client else get_node_client(server)
     url = f"{server.url}{path}"
     headers = node_auth_headers(server)
@@ -71,16 +81,32 @@ async def proxy_to_node(
         )
         response.raise_for_status()
         return response.json()
-    except httpx.ConnectError:
-        raise ConnectionError(f"Node {server.name} unreachable")
     except httpx.TimeoutException:
         raise TimeoutError(f"Node {server.name} request timed out")
+    except httpx.ConnectError:
+        raise ConnectionError(f"Node {server.name} unreachable")
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404:
             raise LookupError(f"Node {server.name} does not support SSH management (update required)")
+        if e.response.status_code == 403:
+            # Права сменили только что: запоминаем и говорим правду вместо
+            # «нода недоступна», которой стал бы обычный RuntimeError
+            body = None
+            try:
+                body = e.response.json()
+            except Exception:
+                pass
+            await learn_from_denial(server.id, 403, body)
+            raise NodeCapabilityError(Capability.SSH, method.upper() not in ("GET", "HEAD"))
         detail = ""
         try:
             detail = e.response.json().get("detail", "")
         except Exception:
             pass
         raise RuntimeError(detail or f"Node {server.name} returned {e.response.status_code}")
+    except httpx.HTTPError as e:
+        # ReadError/RemoteProtocolError/ProxyError и прочие транспортные сбои
+        # (типичны для нод за SOCKS-прокси) — иначе они убивают NDJSON-стрим целиком
+        raise ConnectionError(f"Node {server.name}: {str(e) or e.__class__.__name__}")
+    except ValueError:
+        raise RuntimeError(f"Node {server.name} returned invalid JSON")

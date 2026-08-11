@@ -1,4 +1,5 @@
 import { useState, useEffect, useLayoutEffect, useCallback, useRef } from 'react'
+import { useNodeCapabilities } from '../hooks/useNodeCapabilities'
 import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
 import {
@@ -23,6 +24,7 @@ import { systemApi, VersionBaseInfo, SingleNodeVersion, NicInfo } from '../api/c
 import { Skeleton } from '../components/ui/Skeleton'
 import { FAQIcon } from '../components/FAQ'
 import { Tooltip } from '../components/ui/Tooltip'
+import { useSettingsStore } from '../stores/settingsStore'
 
 type LoadState = 'pending' | 'loading' | 'loaded' | 'error'
 
@@ -48,11 +50,13 @@ interface NodeState {
 
 export default function SystemOptimizations() {
   const { t } = useTranslation()
+  const { cpuAffinityEnabled, setCpuAffinityEnabled, fetchSettings } = useSettingsStore()
 
   const [baseInfo, setBaseInfo] = useState<VersionBaseInfo | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [nodes, setNodes] = useState<Map<number, NodeState>>(new Map())
+  const { allows } = useNodeCapabilities()
   const [isChecking, setIsChecking] = useState(false)
 
   const [applyingNodes, setApplyingNodes] = useState<Set<number>>(new Set())
@@ -107,7 +111,9 @@ export default function SystemOptimizations() {
           drift: Boolean(opt.drift), driftDetail: opt.drift_detail ?? null,
           nicInfo: existing?.nicInfo ?? null,
           nicInfoLoading: existing?.nicInfoLoading ?? false,
-          nodeOutdated: !hasNicMode,
+          // Отсутствие nic_mode = старый агент, но только если нода реально ответила:
+          // для недоступной ноды бэкенд отдаёт пустые optimizations без nic_mode
+          nodeOutdated: data.status === 'online' && !hasNicMode,
         })
         return next
       })
@@ -197,8 +203,9 @@ export default function SystemOptimizations() {
 
   useEffect(() => {
     fetchBase()
+    fetchSettings()
     return () => { abortRef.current = true }
-  }, [fetchBase])
+  }, [fetchBase, fetchSettings])
 
   const handleRefresh = useCallback(() => {
     abortRef.current = true
@@ -323,7 +330,8 @@ export default function SystemOptimizations() {
   const unassigned = nodesList.filter(n => n.loadState === 'loaded' && n.status === 'online' && !n.installed)
   const vpnNodes = nodesList.filter(n => n.installed && (n.optProfile === 'vpn' || !n.optProfile))
   const panelNodes = nodesList.filter(n => n.installed && n.optProfile === 'panel')
-  const loadingOrOffline = nodesList.filter(n => (n.loadState !== 'loaded' || n.status === 'offline') && !n.installed)
+  // Недоступные ноды (ошибка подключения) не показываем вовсе — про их оптимизации ничего не известно
+  const stillLoading = nodesList.filter(n => (n.loadState === 'pending' || n.loadState === 'loading') && !n.installed)
   const updatableCount = nodesList.filter(
     n => n.loadState === 'loaded' && n.status === 'online' && n.installed && needsUpdate(n)
   ).length
@@ -366,6 +374,7 @@ export default function SystemOptimizations() {
     const showModeDropdown = modeDropdown === node.id
     const showConfirmRemove = confirmRemove === node.id
     const mqSupported = node.nicInfo?.multiqueue_supported ?? false
+    const optAllowed = allows(node.id, 'system', 'write')
     const currentProfile = node.optProfile || 'vpn'
     const hasOpenDropdown = showModeDropdown || showConfirmRemove
 
@@ -443,12 +452,11 @@ export default function SystemOptimizations() {
             )}
 
             {!isNodeLoading && node.status === 'online' && updateAvailable && !isBusy && !result && (
-              <span
-                className="px-2 py-0.5 text-[10px] font-medium bg-accent-500/20 text-accent-400 rounded-full"
-                title={node.driftDetail ?? undefined}
-              >
-                {node.drift ? t('sys_opt.host_changed') : t('sys_opt.update_available')}
-              </span>
+              <Tooltip label={node.driftDetail} maxWidth={320}>
+                <span className="px-2 py-0.5 text-[10px] font-medium bg-accent-500/20 text-accent-400 rounded-full">
+                  {node.drift ? t('sys_opt.host_changed') : t('sys_opt.update_available')}
+                </span>
+              </Tooltip>
             )}
 
             {!isNodeLoading && node.status === 'online' && !updateAvailable && node.installed && !isBusy && !result && (
@@ -461,7 +469,7 @@ export default function SystemOptimizations() {
                 <motion.button
                   ref={(el) => { if (el) applyTriggerRefs.current.set(node.id, el) }}
                   onClick={() => { setProfileChoice(null); setModeDropdown(showModeDropdown ? null : node.id) }}
-                  disabled={isBusy}
+                  disabled={isBusy || !optAllowed}
                   className="btn btn-secondary text-xs px-2.5 py-1.5"
                   whileHover={{ scale: 1.05 }}
                   whileTap={{ scale: 0.95 }}
@@ -514,6 +522,7 @@ export default function SystemOptimizations() {
                           <div className="px-3 py-1.5 text-[10px] text-dark-500 border-b border-dark-700 flex items-center gap-1">
                             <button onClick={() => setProfileChoice(null)} className="text-accent-400 hover:underline">&larr;</button>
                             {profileChoice === 'vpn' ? t('sys_opt.profile_vpn') : t('sys_opt.profile_panel')}
+                            <FAQIcon screen="SYS_OPT_NIC_MODE" size="sm" />
                           </div>
                           {mqSupported && (
                             <button
@@ -572,7 +581,7 @@ export default function SystemOptimizations() {
                 <motion.button
                   ref={(el) => { if (el) removeTriggerRefs.current.set(node.id, el) }}
                   onClick={() => setConfirmRemove(showConfirmRemove ? null : node.id)}
-                  disabled={isBusy}
+                  disabled={isBusy || !optAllowed}
                   className="btn btn-secondary text-xs px-1.5 py-1.5 !text-danger hover:!bg-danger/10"
                   whileHover={{ scale: 1.05 }}
                   whileTap={{ scale: 0.95 }}
@@ -611,6 +620,7 @@ export default function SystemOptimizations() {
     const result = results[`node-${node.id}`]
     const showModeDropdown = modeDropdown === node.id
     const mqSupported = node.nicInfo?.multiqueue_supported ?? false
+    const optAllowed = allows(node.id, 'system', 'write')
 
     return (
       <motion.div
@@ -661,7 +671,7 @@ export default function SystemOptimizations() {
                     setProfileChoice(null)
                     setModeDropdown(showModeDropdown ? null : node.id)
                   }}
-                  disabled={isApplying}
+                  disabled={isApplying || !optAllowed}
                   className="btn btn-primary text-xs px-2.5 py-1.5"
                   whileHover={{ scale: 1.05 }}
                   whileTap={{ scale: 0.95 }}
@@ -708,6 +718,7 @@ export default function SystemOptimizations() {
                           <div className="px-3 py-1.5 text-[10px] text-dark-500 border-b border-dark-700 flex items-center gap-1">
                             <button onClick={() => setProfileChoice(null)} className="text-accent-400 hover:underline">&larr;</button>
                             {profileChoice === 'vpn' ? t('sys_opt.profile_vpn') : t('sys_opt.profile_panel')}
+                            <FAQIcon screen="SYS_OPT_NIC_MODE" size="sm" />
                           </div>
                           {mqSupported && (
                             <button
@@ -840,6 +851,31 @@ export default function SystemOptimizations() {
         )}
       </AnimatePresence>
 
+      {/* Развод по ядрам — глобальный переключатель */}
+      <div className="card mb-6 flex items-center justify-between gap-4">
+        <div className="min-w-0">
+          <div className="flex items-center gap-1 text-sm font-medium text-dark-200">
+            <Cpu className="w-4 h-4 text-accent-400" />
+            {t('sys_opt.cpu_affinity')}
+            <FAQIcon screen="SYS_OPT_CPU_AFFINITY" size="sm" />
+          </div>
+          <p className="text-xs text-dark-500 mt-1">{t('sys_opt.cpu_affinity_hint')}</p>
+        </div>
+        <motion.button
+          onClick={() => setCpuAffinityEnabled(!cpuAffinityEnabled)}
+          className={`relative w-11 h-6 rounded-full transition-colors flex-shrink-0 ${
+            cpuAffinityEnabled ? 'bg-accent-500' : 'bg-dark-600'
+          }`}
+          whileTap={{ scale: 0.95 }}
+        >
+          <motion.div
+            className="absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow-md"
+            animate={{ x: cpuAffinityEnabled ? 20 : 0 }}
+            transition={{ type: 'spring', stiffness: 500, damping: 30 }}
+          />
+        </motion.button>
+      </div>
+
       {nodesList.length === 0 ? (
         <div className="card text-center py-12">
           <ServerIcon className="w-12 h-12 text-dark-600 mx-auto mb-3" />
@@ -848,16 +884,16 @@ export default function SystemOptimizations() {
       ) : (
         <>
           {/* Unassigned nodes — top */}
-          {(unassigned.length > 0 || loadingOrOffline.length > 0) && (
+          {(unassigned.length > 0 || stillLoading.length > 0) && (
             <div className="mb-6">
               <h2 className="text-sm font-semibold text-dark-400 mb-3 flex items-center gap-2">
                 <ServerIcon className="w-4 h-4" />
                 {t('sys_opt.unassigned')}
-                <span className="text-dark-500 font-normal">({unassigned.length + loadingOrOffline.length})</span>
+                <span className="text-dark-500 font-normal">({unassigned.length + stillLoading.length})</span>
               </h2>
               <div className="space-y-2">
                 {unassigned.map(n => renderUnassignedCard(n))}
-                {loadingOrOffline.map(n => renderNodeCard(n))}
+                {stillLoading.map(n => renderNodeCard(n))}
               </div>
             </div>
           )}
@@ -869,6 +905,7 @@ export default function SystemOptimizations() {
               <h2 className="text-sm font-semibold text-dark-300 mb-3 flex items-center gap-2">
                 <Shield className="w-4 h-4 text-accent-400" />
                 {t('sys_opt.vpn_nodes')}
+                <FAQIcon screen="SYS_OPT_PROFILE" size="sm" />
                 <span className="text-dark-500 font-normal">({vpnNodes.length})</span>
               </h2>
               {vpnNodes.length === 0 ? (
@@ -887,6 +924,7 @@ export default function SystemOptimizations() {
               <h2 className="text-sm font-semibold text-dark-300 mb-3 flex items-center gap-2">
                 <Monitor className="w-4 h-4 text-emerald-400" />
                 {t('sys_opt.panel_nodes')}
+                <FAQIcon screen="SYS_OPT_PROFILE" size="sm" />
                 <span className="text-dark-500 font-normal">({panelNodes.length})</span>
               </h2>
               {panelNodes.length === 0 ? (

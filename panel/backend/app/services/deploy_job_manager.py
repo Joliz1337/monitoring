@@ -23,6 +23,10 @@ from app.database import async_session_maker
 from app.models import Server
 from app.services.blocklist_manager import get_blocklist_manager
 from app.services.deploy_service import DeployParams, deploy_node
+from app.services.node_capabilities import (
+    capabilities_from_version,
+    remember_capabilities,
+)
 from app.services.ssh_manager import MAXIMUM_PRESET, RECOMMENDED_PRESET, proxy_to_node
 from app.services.time_sync import get_time_sync_service
 
@@ -245,7 +249,13 @@ class DeployJobManager:
         attempt = 0
         while time.time() < deadline:
             try:
-                await proxy_to_node(server, "GET", "/api/version", timeout=10.0)
+                info = await proxy_to_node(server, "GET", "/api/version", timeout=10.0)
+                # Единственный момент, когда панель уже говорит с новой нодой, а
+                # записи о её правах ещё нет: без этого вся пост-настройка ниже
+                # упёрлась бы в пачку отказов
+                found, caps = capabilities_from_version(info)
+                if found:
+                    await remember_capabilities(server.id, caps)
                 self._emit(job, {"type": "log", "line": "[panel] Нода онлайн — продолжаю настройку"})
                 return True
             except Exception:  # noqa: BLE001 — нода ещё грузится, любой сбой = ещё не готова
@@ -341,7 +351,7 @@ class DeployJobManager:
         # Ленивый импорт — роутеры профилей зависят от своих сервисов,
         # импорт на уровне модуля создал бы цикл
         from app.routers.firewall_profiles import _bg_sync_profile as firewall_sync
-        from app.routers.haproxy_profiles import _bg_sync_profile as haproxy_sync
+        from app.routers.haproxy_profiles import _bg_sync_server_start as haproxy_sync_server
 
         if post_opts.haproxy_profile_id is not None:
             try:
@@ -352,7 +362,9 @@ class DeployJobManager:
                         server.active_haproxy_profile_id = post_opts.haproxy_profile_id
                         server.haproxy_sync_status = "pending"
                         await db.commit()
-                asyncio.ensure_future(haproxy_sync(post_opts.haproxy_profile_id))
+                asyncio.ensure_future(
+                    haproxy_sync_server(post_opts.haproxy_profile_id, server_id)
+                )
                 self._emit(job, {"type": "log", "line": "[panel] Привязан к HAProxy-профилю"})
             except Exception as exc:  # noqa: BLE001 — best-effort постшаг
                 self._emit(job, {"type": "log", "line": f"[panel] HAProxy-профиль не привязан: {exc}"})
@@ -366,7 +378,9 @@ class DeployJobManager:
                         server.active_firewall_profile_id = post_opts.firewall_profile_id
                         server.firewall_sync_status = "pending"
                         await db.commit()
-                asyncio.ensure_future(firewall_sync(post_opts.firewall_profile_id))
+                asyncio.ensure_future(
+                    firewall_sync(post_opts.firewall_profile_id, server_ids=[server_id])
+                )
                 self._emit(job, {"type": "log", "line": "[panel] Привязан к Firewall-профилю"})
             except Exception as exc:  # noqa: BLE001 — best-effort постшаг
                 self._emit(job, {"type": "log", "line": f"[panel] Firewall-профиль не привязан: {exc}"})

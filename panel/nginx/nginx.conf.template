@@ -42,6 +42,12 @@ http {
         default                  0;
     }
 
+    # Точки входа, доступные без авторизации: подбор пароля/UID и заливка дампа
+    # должны упираться в nginx, а не в счётчик банов и диск бэкенда.
+    # Отказ отдаётся 444 — тем же «молча закрыть соединение», что и остальной конфиг.
+    limit_req_zone $binary_remote_addr zone=auth_limit:10m rate=30r/m;
+    limit_req_status 444;
+
     upstream panel {
         server frontend:80;
         keepalive 16;
@@ -84,16 +90,22 @@ http {
 
         client_max_body_size 10m;
 
-        # Backup restore — no size limit
+        # Backup restore — большой, но конечный дамп.
+        # client_max_body_size 0 (без лимита) в паре с буферизацией тела давал
+        # анониму заливать на диск контейнера сколько угодно до ответа 401.
+        # proxy_request_buffering off отдаёт тело сразу бэкенду — тот проверяет
+        # авторизацию до чтения тела и рвёт неавторизованную заливку на старте.
         location = /api/backup/restore {
-            client_max_body_size 0;
+            client_max_body_size 2g;
+            proxy_request_buffering off;
+            limit_req zone=auth_limit burst=5 nodelay;
 
             proxy_pass http://backend/backup/restore;
             proxy_http_version 1.1;
             proxy_set_header Host $host;
             proxy_set_header Connection "";
             proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-For $remote_addr;
             proxy_set_header X-Forwarded-Proto $scheme;
 
             proxy_connect_timeout 60s;
@@ -120,27 +132,40 @@ http {
             proxy_http_version 1.1;
             proxy_set_header Host $host;
             proxy_set_header Connection "";
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $remote_addr;
+        }
+
+        # Тот же /health бэкенда, но через префикс /api — location /api/ проксирует
+        # на корень бэкенда и обходил бы allow-список выше, отдавая {"status":"ok"}
+        # всему интернету
+        location = /api/health {
+            return 444;
         }
 
         # Login endpoint
         location = /api/auth/login {
+            limit_req zone=auth_limit burst=10 nodelay;
+
             proxy_pass http://backend/auth/login;
             proxy_http_version 1.1;
             proxy_set_header Host $host;
             proxy_set_header Connection "";
             proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-For $remote_addr;
             proxy_set_header X-Forwarded-Proto $scheme;
         }
 
         # UID validation endpoint
         location = /api/auth/validate-uid {
+            limit_req zone=auth_limit burst=10 nodelay;
+
             proxy_pass http://backend/auth/validate-uid;
             proxy_http_version 1.1;
             proxy_set_header Host $host;
             proxy_set_header Connection "";
             proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-For $remote_addr;
             proxy_set_header X-Forwarded-Proto $scheme;
         }
 
@@ -151,7 +176,7 @@ http {
             proxy_set_header Host $host;
             proxy_set_header Connection "";
             proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-For $remote_addr;
             proxy_set_header X-Forwarded-Proto $scheme;
         }
 
@@ -162,7 +187,7 @@ http {
             proxy_set_header Host $host;
             proxy_set_header Connection "";
             proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-For $remote_addr;
             proxy_set_header X-Forwarded-Proto $scheme;
             
             proxy_connect_timeout 60s;
@@ -177,7 +202,7 @@ http {
             proxy_set_header Host $host;
             proxy_set_header Connection "";
             proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-For $remote_addr;
             proxy_set_header X-Forwarded-Proto $scheme;
             
             proxy_connect_timeout 60s;
@@ -193,7 +218,7 @@ http {
             proxy_set_header Host $host;
             proxy_set_header Connection "";
             proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-For $remote_addr;
             proxy_set_header X-Forwarded-Proto $scheme;
 
             proxy_connect_timeout 60s;
@@ -209,7 +234,7 @@ http {
             proxy_set_header Host $host;
             proxy_set_header Connection "";
             proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-For $remote_addr;
             proxy_set_header X-Forwarded-Proto $scheme;
 
             proxy_connect_timeout 60s;
@@ -224,7 +249,7 @@ http {
             proxy_set_header Host $host;
             proxy_set_header Connection "";
             proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-For $remote_addr;
             proxy_set_header X-Forwarded-Proto $scheme;
 
             proxy_buffering off;
@@ -243,7 +268,7 @@ http {
             proxy_set_header Host $host;
             proxy_set_header Connection "";
             proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-For $remote_addr;
             proxy_set_header X-Forwarded-Proto $scheme;
 
             proxy_buffering off;
@@ -262,7 +287,7 @@ http {
             proxy_set_header Host $host;
             proxy_set_header Connection "";
             proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-For $remote_addr;
             proxy_set_header X-Forwarded-Proto $scheme;
 
             proxy_buffering off;
@@ -282,7 +307,7 @@ http {
             proxy_set_header Host $host;
             proxy_set_header Connection "";
             proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-For $remote_addr;
             proxy_set_header X-Forwarded-Proto $scheme;
 
             proxy_buffering off;
@@ -299,7 +324,7 @@ http {
             proxy_set_header Host $host;
             proxy_set_header Connection "";
             proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-For $remote_addr;
             proxy_set_header X-Forwarded-Proto $scheme;
 
             proxy_connect_timeout 5s;
@@ -344,7 +369,7 @@ http {
             proxy_set_header Connection 'upgrade';
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-For $remote_addr;
             proxy_set_header X-Forwarded-Proto $scheme;
             proxy_cache_bypass $http_upgrade;
         }

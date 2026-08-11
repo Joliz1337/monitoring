@@ -2,9 +2,9 @@ import asyncio
 import hashlib
 import ipaddress
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from sqlalchemy import select, update, desc
+from sqlalchemy import select, update, bindparam, func
 from sqlalchemy.ext.asyncio import AsyncSession
 import re
 from urllib.parse import urlparse
@@ -13,30 +13,25 @@ from typing import Optional
 import httpx
 import json
 from app.services.http_client import get_node_client, node_auth_headers, validate_proxy_input
+from app.services.node_capabilities import (
+    capabilities_from_version,
+    parse as parse_capabilities,
+    remember_capabilities,
+)
 
 from app.database import get_db
-from app.models import Server, ServerCache, MetricsSnapshot
+from app.models import Server, MetricsSnapshot, ServerTraffic
 from app.auth import verify_auth
 from app.services.blocklist_manager import get_blocklist_manager
 from app.services.server_status import get_offline_threshold, resolve_status
 from app.services.time_sync import get_time_sync_service
-import socket
-from app.config import get_settings
+from app.services.net_utils import resolve_panel_ip
 from app.services.pki import build_installer_token
 from app.services.migration import (
     classify_server,
     push_shared_cert_to_node,
 )
 
-
-def _resolve_panel_ip() -> str | None:
-    domain = get_settings().domain
-    if not domain:
-        return None
-    try:
-        return socket.gethostbyname(domain)
-    except socket.gaierror:
-        return None
 
 RUSSIAN_MONTHS = {
     "января": 1, "янв": 1,
@@ -174,17 +169,6 @@ def enrich_metrics_with_speeds(metrics: dict, snapshot: MetricsSnapshot) -> dict
     return metrics
 
 
-async def get_latest_snapshot(server_id: int, db: AsyncSession) -> Optional[MetricsSnapshot]:
-    """Get the most recent metrics snapshot for a server."""
-    result = await db.execute(
-        select(MetricsSnapshot)
-        .where(MetricsSnapshot.server_id == server_id)
-        .order_by(desc(MetricsSnapshot.timestamp))
-        .limit(1)
-    )
-    return result.scalar_one_or_none()
-
-
 async def get_latest_snapshots_bulk(server_ids: list[int], db: AsyncSession) -> dict[int, MetricsSnapshot]:
     """Get the most recent metrics snapshot for multiple servers in one query.
     
@@ -202,6 +186,42 @@ async def get_latest_snapshots_bulk(server_ids: list[int], db: AsyncSession) -> 
     
     snapshots = result.scalars().all()
     return {s.server_id: s for s in snapshots}
+
+
+# Окно трафика на карточке сервера — то же, что по умолчанию на странице трафика.
+TRAFFIC_CARD_DAYS = 30
+
+
+async def get_traffic_totals_bulk(
+    server_ids: list[int],
+    db: AsyncSession,
+    days: int = TRAFFIC_CARD_DAYS,
+) -> dict[int, dict]:
+    """Суммарный трафик за окно по всем серверам одним GROUP BY.
+
+    Суточные бакеты вместо часовых: на 30 днях это ~30 строк на сервер против ~720,
+    а карточке сервера точность до часа не нужна.
+    """
+    if not server_ids:
+        return {}
+
+    since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days)
+    result = await db.execute(
+        select(
+            ServerTraffic.server_id,
+            func.sum(ServerTraffic.rx_bytes),
+            func.sum(ServerTraffic.tx_bytes),
+        )
+        .where(ServerTraffic.server_id.in_(server_ids))
+        .where(ServerTraffic.period_type == "day")
+        .where(ServerTraffic.scope == "total")
+        .where(ServerTraffic.bucket >= since)
+        .group_by(ServerTraffic.server_id)
+    )
+    return {
+        server_id: {"rx_bytes": int(rx or 0), "tx_bytes": int(tx or 0), "days": days}
+        for server_id, rx, tx in result.all()
+    }
 
 
 def _clean_url(v: str) -> str:
@@ -274,17 +294,6 @@ class RenameServerFolder(BaseModel):
     new_name: str
 
 
-class ServerResponse(BaseModel):
-    id: int
-    name: str
-    url: str
-    position: int
-    is_active: bool
-
-    class Config:
-        from_attributes = True
-
-
 # Кэш тяжёлого ответа /servers?include_metrics=true. Метрики меняются раз в цикл
 # коллектора (~10с), поэтому в пределах TTL все вкладки операторов получают готовый
 # JSON без повторных запросов к БД и пересборки. ETag даёт браузеру 304 на неизменных
@@ -351,17 +360,12 @@ async def _build_servers_list(db: AsyncSession, include_metrics: bool) -> dict:
     servers = result.scalars().all()
     
     snapshots_map = {}
-    cache_map: dict[int, ServerCache] = {}
+    traffic_map: dict[int, dict] = {}
     offline_threshold = await get_offline_threshold(db)
     if include_metrics:
         server_ids = [s.id for s in servers]
         snapshots_map = await get_latest_snapshots_bulk(server_ids, db)
-
-        if server_ids:
-            cache_result = await db.execute(
-                select(ServerCache).where(ServerCache.server_id.in_(server_ids))
-            )
-            cache_map = {c.server_id: c for c in cache_result.scalars().all()}
+        traffic_map = await get_traffic_totals_bulk(server_ids, db)
 
     servers_data = []
     for s in servers:
@@ -380,6 +384,9 @@ async def _build_servers_list(db: AsyncSession, include_metrics: bool) -> dict:
             "uses_shared_cert": bool(s.uses_shared_cert),
             "auth_kind": classify_server(s),
             "antiddos_emergency_mode": bool(s.antiddos_emergency_mode),
+            # null — нода без ограничений; интерфейс по этой карте прячет
+            # разделы, которых у неё всё равно нет
+            "node_capabilities": parse_capabilities(s.node_capabilities),
         }
 
         if include_metrics and s.last_metrics:
@@ -397,22 +404,10 @@ async def _build_servers_list(db: AsyncSession, include_metrics: bool) -> dict:
         else:
             server_info["status"] = resolve_status(s, offline_threshold)
         
-        # Traffic data from server_cache table
-        cache = cache_map.get(s.id)
-        if include_metrics and cache and cache.last_traffic_data:
-            try:
-                traffic_data = json.loads(cache.last_traffic_data)
-                summary = traffic_data.get("summary", {})
-                total = summary.get("total", {})
-                if total:
-                    server_info["traffic"] = {
-                        "rx_bytes": total.get("rx_bytes", 0),
-                        "tx_bytes": total.get("tx_bytes", 0),
-                        "days": total.get("days", 30)
-                    }
-            except json.JSONDecodeError:
-                pass
-        
+        traffic = traffic_map.get(s.id)
+        if traffic:
+            server_info["traffic"] = traffic
+
         servers_data.append(server_info)
     
     return {
@@ -432,7 +427,7 @@ async def get_installer_token(
     В payload вшит IP панели — deploy.sh ноды берёт его автоматически для UFW.
     """
     keygen = request.app.state.pki
-    return {"token": build_installer_token(keygen, panel_ip=_resolve_panel_ip())}
+    return {"token": build_installer_token(keygen, panel_ip=await resolve_panel_ip())}
 
 
 @router.get("/migration-status")
@@ -548,77 +543,6 @@ async def delete_server_folder(
     return {"success": True, "unfoldered": len(servers)}
 
 
-@router.get("/{server_id}")
-async def get_server(
-    server_id: int,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    result = await db.execute(select(Server).where(Server.id == server_id))
-    server = result.scalar_one_or_none()
-
-    if not server:
-        raise HTTPException(status_code=404)
-
-    return {
-        "id": server.id,
-        "name": server.name,
-        "url": server.url,
-        "proxy_url": server.proxy_url,
-        "position": server.position,
-        "is_active": server.is_active,
-        "folder": server.folder,
-        "last_seen": to_iso_utc(server.last_seen),
-        "last_error": server.last_error,
-        "error_code": server.error_code,
-        "pki_enabled": bool(server.pki_enabled),
-        "uses_shared_cert": bool(server.uses_shared_cert),
-        "auth_kind": classify_server(server),
-    }
-
-
-@router.post("/{server_id}/migrate")
-async def migrate_server(
-    server_id: int,
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth),
-):
-    """Перевести ноду на shared cert.
-
-    pki_enabled (per-server) → автоматически через push новой пары cert/key.
-    legacy (api_key) → возвращаем installer token, оператор переустанавливает ноду
-    и затем подтверждает через `/confirm-migration`.
-    """
-    result = await db.execute(select(Server).where(Server.id == server_id))
-    server = result.scalar_one_or_none()
-    if not server:
-        raise HTTPException(status_code=404)
-
-    if server.uses_shared_cert:
-        return {"status": "already_shared"}
-
-    keygen = request.app.state.pki
-
-    if server.pki_enabled:
-        try:
-            await push_shared_cert_to_node(server, keygen)
-        except httpx.HTTPError as exc:
-            raise HTTPException(
-                status_code=502,
-                detail=f"Node refused cert replacement: {exc}",
-            ) from exc
-        server.uses_shared_cert = True
-        await db.commit()
-        return {"status": "auto", "success": True}
-
-    # legacy
-    return {
-        "status": "manual",
-        "token": build_installer_token(keygen, panel_ip=_resolve_panel_ip()),
-    }
-
-
 @router.post("/{server_id}/confirm-migration")
 async def confirm_migration(
     server_id: int,
@@ -699,7 +623,7 @@ async def migrate_all_servers(
         "auto_migrated": auto_migrated,
         "failed": failed,
         "manual_required": [{"id": s.id, "name": s.name} for s in manual_targets],
-        "token": build_installer_token(keygen, panel_ip=_resolve_panel_ip()) if manual_targets else None,
+        "token": build_installer_token(keygen, panel_ip=await resolve_panel_ip()) if manual_targets else None,
     }
 
 
@@ -770,10 +694,22 @@ async def reorder_servers(
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    for position, server_id in enumerate(data.server_ids):
-        await db.execute(
-            update(Server).where(Server.id == server_id).values(position=position)
-        )
+    if not data.server_ids:
+        return {"success": True, "message": "Servers reordered"}
+
+    # Один executemany вместо UPDATE на каждый сервер. Через connection(), а не
+    # session.execute(): ORM-путь bulk-by-PK требует id внутри values, нам нужен
+    # WHERE по bindparam.
+    conn = await db.connection()
+    await conn.execute(
+        update(Server)
+        .where(Server.id == bindparam("sid"))
+        .values(position=bindparam("pos")),
+        [
+            {"sid": server_id, "pos": position}
+            for position, server_id in enumerate(data.server_ids)
+        ],
+    )
 
     await db.commit()
     _invalidate_list_cache()
@@ -803,11 +739,18 @@ async def test_server_connection(
 
         if response.status_code == 200:
             data = response.json()
+            # Живая проба — заодно самый быстрый способ узнать права: не ждём
+            # цикла метрик и показываем оператору непонятые ноде слова
+            found, caps = capabilities_from_version(data)
+            if found:
+                await remember_capabilities(server.id, caps)
             return {
                 "success": True,
                 "status": "online",
                 "server_name": data.get("node_name", "Unknown"),
-                "version": data.get("version")
+                "version": data.get("version"),
+                "capabilities": caps,
+                "capabilities_unknown": data.get("capabilities_unknown") or [],
             }
         else:
             return {

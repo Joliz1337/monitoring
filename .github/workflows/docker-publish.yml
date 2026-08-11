@@ -15,7 +15,55 @@ permissions:
   packages: write
 
 jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Матрица рендерера — чистый bash, Python-окружение ей не нужно,
+      # факты хоста подменяются через MON_FACT_*, выходы уходят в MON_RENDER_ROOT
+      - name: Configs renderer matrix
+        run: bash configs/tests/render-matrix.sh
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'  # как в node/Dockerfile
+          cache: pip
+          cache-dependency-path: node/requirements.txt
+
+      # Сами тесты — голый unittest, но модули под тестом импортируют
+      # fastapi/pydantic/docker/cryptography, поэтому рантайм агента нужен целиком
+      - name: Install node agent dependencies
+        run: pip install -r node/requirements.txt
+
+      - name: Node tests
+        working-directory: node
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'  # как в panel/backend/Dockerfile
+          cache: pip
+          cache-dependency-path: panel/backend/requirements.txt
+
+      # Ставим рантайм целиком, как в Dockerfile панели. Без него тесты учёта трафика
+      # не падают, а молча пропускаются по SkipTest — и джоб зеленеет, проверив только
+      # генератор nginx-конфига. Тихо пропущенный тест хуже отсутствующего.
+      - name: Install panel backend dependencies
+        run: pip install -r panel/backend/requirements.txt
+
+      # Страховка от тихого пропуска: тесты трафика умеют объявлять SkipTest, когда
+      # рантайма нет, поэтому импорт их модулей проверяем отдельно и жёстко
+      - name: Panel traffic modules importable
+        working-directory: panel/backend
+        run: python -c "import app.services.traffic_ingest, app.services.traffic_import, app.routers.traffic"
+
+      - name: Panel backend tests
+        working-directory: panel/backend
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+
   node-api:
+    needs: tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,17 +75,28 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Рядом с подвижным тегом канала публикуется тег версии: без него откат
+      # на предыдущий коммит подтягивал бы тот же :latest, то есть ту версию,
+      # от которой откатываются. На main тег версии соответствует релизу; на dev
+      # он переписывается, пока VERSION не сменили.
+      - name: Read node version
+        id: ver
+        run: echo "value=$(tr -d '[:space:]' < node/VERSION)" >> "$GITHUB_OUTPUT"
 
       - uses: docker/build-push-action@v5
         with:
           context: ./node
           file: ./node/Dockerfile
           push: true
-          tags: ${{ env.REGISTRY }}/joliz1337/monitoring-node-api:${{ env.IMAGE_TAG }}
+          tags: |
+            ${{ env.REGISTRY }}/joliz1337/monitoring-node-api:${{ env.IMAGE_TAG }}
+            ${{ env.REGISTRY }}/joliz1337/monitoring-node-api:${{ steps.ver.outputs.value }}
           cache-from: type=gha,scope=node-api
           cache-to: type=gha,mode=max,scope=node-api
 
   panel-frontend:
+    needs: tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -49,19 +108,26 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Read panel version
+        id: ver
+        run: echo "value=$(tr -d '[:space:]' < panel/VERSION)" >> "$GITHUB_OUTPUT"
 
       - uses: docker/build-push-action@v5
         with:
           context: ./panel/frontend
           file: ./panel/frontend/Dockerfile
           push: true
-          tags: ${{ env.REGISTRY }}/joliz1337/monitoring-panel-frontend:${{ env.IMAGE_TAG }}
+          tags: |
+            ${{ env.REGISTRY }}/joliz1337/monitoring-panel-frontend:${{ env.IMAGE_TAG }}
+            ${{ env.REGISTRY }}/joliz1337/monitoring-panel-frontend:${{ steps.ver.outputs.value }}
           build-args: |
             NPM_REGISTRY=https://registry.npmjs.org
           cache-from: type=gha,scope=panel-frontend
           cache-to: type=gha,mode=max,scope=panel-frontend
 
   panel-backend:
+    needs: tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -74,11 +140,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Read panel version
+        id: ver
+        run: echo "value=$(tr -d '[:space:]' < panel/VERSION)" >> "$GITHUB_OUTPUT"
+
       - uses: docker/build-push-action@v5
         with:
           context: ./panel
           file: ./panel/backend/Dockerfile
           push: true
-          tags: ${{ env.REGISTRY }}/joliz1337/monitoring-panel-backend:${{ env.IMAGE_TAG }}
+          tags: |
+            ${{ env.REGISTRY }}/joliz1337/monitoring-panel-backend:${{ env.IMAGE_TAG }}
+            ${{ env.REGISTRY }}/joliz1337/monitoring-panel-backend:${{ steps.ver.outputs.value }}
           cache-from: type=gha,scope=panel-backend
           cache-to: type=gha,mode=max,scope=panel-backend

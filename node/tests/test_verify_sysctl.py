@@ -1,4 +1,4 @@
-"""Tests for the tuning verification logic in app.routers.system.
+"""Tests for the tuning verification logic in app.services.sysctl_verify.
 
 Runnable with plain stdlib:  python -m unittest discover -s node/tests
 (pytest picks these up too — they are ordinary unittest TestCases.)
@@ -18,7 +18,7 @@ from typing import Optional
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from app.routers import system  # noqa: E402
+from app.services import sysctl_verify  # noqa: E402
 
 
 @dataclass
@@ -82,21 +82,21 @@ class TestNormalizeSysctlValue(unittest.TestCase):
         # An exact string comparison — which is what the old code did — would
         # report every multi-value key as a mismatch.
         self.assertEqual(
-            system._normalize_sysctl_value("93600\t124800\t156000"),
-            system._normalize_sysctl_value("93600 124800 156000"),
+            sysctl_verify._normalize_sysctl_value("93600\t124800\t156000"),
+            sysctl_verify._normalize_sysctl_value("93600 124800 156000"),
         )
 
     def test_collapses_runs_and_trims(self):
-        self.assertEqual(system._normalize_sysctl_value("  4096   87380\t6291456 "), "4096 87380 6291456")
+        self.assertEqual(sysctl_verify._normalize_sysctl_value("  4096   87380\t6291456 "), "4096 87380 6291456")
 
     def test_handles_empty_and_none(self):
-        self.assertEqual(system._normalize_sysctl_value(""), "")
-        self.assertEqual(system._normalize_sysctl_value(None), "")
+        self.assertEqual(sysctl_verify._normalize_sysctl_value(""), "")
+        self.assertEqual(sysctl_verify._normalize_sysctl_value(None), "")
 
 
 class TestExpectedFromFacts(unittest.TestCase):
     def test_merges_computed_and_static(self):
-        expected = system.expected_from_facts(BASE_FACTS)
+        expected = sysctl_verify.expected_from_facts(BASE_FACTS)
         self.assertIn("net.netfilter.nf_conntrack_max", expected)
         self.assertIn("net.ipv4.tcp_congestion_control", expected)
         self.assertEqual(len(expected), 5)
@@ -105,7 +105,7 @@ class TestExpectedFromFacts(unittest.TestCase):
         facts = json.loads(json.dumps(BASE_FACTS))
         facts["computed"]["net.ipv4.tcp_migrate_req"] = "1"
         facts["unsupported_keys"] = ["net.ipv4.tcp_migrate_req"]
-        expected = system.expected_from_facts(facts)
+        expected = sysctl_verify.expected_from_facts(facts)
         self.assertNotIn("net.ipv4.tcp_migrate_req", expected)
 
     def test_drops_keys_other_writers_own(self):
@@ -114,30 +114,30 @@ class TestExpectedFromFacts(unittest.TestCase):
         facts = json.loads(json.dumps(BASE_FACTS))
         facts["computed"]["net.ipv4.conf.all.rp_filter"] = "2"
         facts["computed"]["net.ipv6.conf.all.disable_ipv6"] = "1"
-        expected = system.expected_from_facts(facts)
+        expected = sysctl_verify.expected_from_facts(facts)
         self.assertNotIn("net.ipv4.conf.all.rp_filter", expected)
         self.assertNotIn("net.ipv6.conf.all.disable_ipv6", expected)
 
     def test_static_wins_over_computed(self):
         facts = json.loads(json.dumps(BASE_FACTS))
         facts["computed"]["net.ipv4.tcp_timestamps"] = "0"
-        expected = system.expected_from_facts(facts)
+        expected = sysctl_verify.expected_from_facts(facts)
         self.assertEqual(expected["net.ipv4.tcp_timestamps"], "1")
 
 
 class TestVerifySysctlValues(unittest.TestCase):
     def setUp(self):
-        self._orig_read = system.read_host_file
+        self._orig_read = sysctl_verify.read_host_file
 
     def tearDown(self):
-        system.read_host_file = self._orig_read
+        sysctl_verify.read_host_file = self._orig_read
 
     def _patch_facts(self, facts):
         async def fake_read(path):
-            if path == system.TUNING_FACTS_PATH:
+            if path == sysctl_verify.TUNING_FACTS_PATH:
                 return json.dumps(facts) if facts is not None else None
             return None
-        system.read_host_file = fake_read
+        sysctl_verify.read_host_file = fake_read
 
     def test_all_values_match(self):
         self._patch_facts(BASE_FACTS)
@@ -151,7 +151,7 @@ class TestVerifySysctlValues(unittest.TestCase):
             },
             hashsize=131072,
         )
-        result = run(system.verify_sysctl_values(ex))
+        result = run(sysctl_verify.verify_sysctl_values(ex))
         self.assertTrue(result["success"], result["failed"])
         self.assertEqual(result["failed"], [])
         self.assertEqual(result["checked_count"], 6)  # 5 keys + hashsize
@@ -170,7 +170,7 @@ class TestVerifySysctlValues(unittest.TestCase):
             },
             hashsize=131072,
         )
-        run(system.verify_sysctl_values(ex))
+        run(sysctl_verify.verify_sysctl_values(ex))
         sysctl_calls = [c for c in ex.calls if "hashsize" not in c]
         self.assertEqual(len(sysctl_calls), 1)
 
@@ -186,7 +186,7 @@ class TestVerifySysctlValues(unittest.TestCase):
             },
             hashsize=131072,
         )
-        result = run(system.verify_sysctl_values(ex))
+        result = run(sysctl_verify.verify_sysctl_values(ex))
         self.assertFalse(result["success"])
         joined = " ".join(result["failed"])
         self.assertIn("nf_conntrack_max", joined)
@@ -204,7 +204,7 @@ class TestVerifySysctlValues(unittest.TestCase):
             },
             hashsize=131072,
         )
-        result = run(system.verify_sysctl_values(ex))
+        result = run(sysctl_verify.verify_sysctl_values(ex))
         self.assertFalse(result["success"])
         self.assertTrue(any("tcp_mem" in f for f in result["failed"]))
 
@@ -218,24 +218,24 @@ class TestVerifySysctlValues(unittest.TestCase):
             "net.ipv4.tcp_congestion_control": "bbr",
             "net.ipv4.tcp_timestamps": "1",
         }
-        bigger = run(system.verify_sysctl_values(FakeExecutor(values, hashsize=262144)))
+        bigger = run(sysctl_verify.verify_sysctl_values(FakeExecutor(values, hashsize=262144)))
         self.assertTrue(bigger["success"], bigger["failed"])
 
-        smaller = run(system.verify_sysctl_values(FakeExecutor(values, hashsize=65536)))
+        smaller = run(sysctl_verify.verify_sysctl_values(FakeExecutor(values, hashsize=65536)))
         self.assertFalse(smaller["success"])
         self.assertTrue(any("hashsize" in f for f in smaller["failed"]))
 
     def test_missing_facts_file_is_the_re_apply_signal(self):
         self._patch_facts(None)
-        result = run(system.verify_sysctl_values(FakeExecutor({})))
+        result = run(sysctl_verify.verify_sysctl_values(FakeExecutor({})))
         self.assertFalse(result["success"])
         self.assertTrue(any("tuning-facts.json" in f for f in result["failed"]))
 
     def test_corrupt_facts_file_fails_cleanly(self):
         async def fake_read(path):
             return "{not json"
-        system.read_host_file = fake_read
-        result = run(system.verify_sysctl_values(FakeExecutor({})))
+        sysctl_verify.read_host_file = fake_read
+        result = run(sysctl_verify.verify_sysctl_values(FakeExecutor({})))
         self.assertFalse(result["success"])
         self.assertTrue(any("valid JSON" in f for f in result["failed"]))
 

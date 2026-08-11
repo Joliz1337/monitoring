@@ -7,10 +7,11 @@ Requires container to run with: privileged: true, pid: host
 import asyncio
 import json
 import logging
-import os
 import time
 from dataclasses import dataclass
 from typing import Optional, AsyncGenerator
+
+from app.services.container_detect import running_in_container
 
 logger = logging.getLogger(__name__)
 
@@ -37,20 +38,8 @@ class HostExecutor:
     """Executes commands on host system via nsenter (for Docker with pid: host)"""
     
     def __init__(self):
-        self._use_nsenter = self._check_nsenter_needed()
-    
-    def _check_nsenter_needed(self) -> bool:
-        """Check if we're in a container and need nsenter"""
-        if os.path.exists('/.dockerenv'):
-            return True
-        try:
-            with open('/proc/1/cgroup', 'r') as f:
-                if 'docker' in f.read():
-                    return True
-        except Exception:
-            pass
-        return False
-    
+        self._use_nsenter = running_in_container()
+
     def _prepare_command(self, command: str) -> str:
         """Wrap command with extended PATH to ensure snap/local binaries are accessible"""
         return f'export PATH="{EXTENDED_PATH}:$PATH"; {command}'

@@ -1,6 +1,5 @@
 """Pydantic models for metrics API responses"""
 
-from datetime import datetime
 from typing import Optional
 
 from pydantic import BaseModel, Field
@@ -104,8 +103,6 @@ class NetworkInterface(BaseModel):
     tx_drops: int = 0
     rx_bytes_per_sec: Optional[float] = None
     tx_bytes_per_sec: Optional[float] = None
-    rx_peak_per_sec: Optional[float] = None
-    tx_peak_per_sec: Optional[float] = None
 
 
 class NetworkTotal(BaseModel):
@@ -115,13 +112,21 @@ class NetworkTotal(BaseModel):
     tx_packets: int
     rx_bytes_per_sec: float = 0.0
     tx_bytes_per_sec: float = 0.0
-    rx_peak_per_sec: float = 0.0
-    tx_peak_per_sec: float = 0.0
+
+
+class NetworkPortCounter(BaseModel):
+    port: int
+    rx_bytes: int = 0
+    tx_bytes: int = 0
 
 
 class NetworkInfo(BaseModel):
     interfaces: list[NetworkInterface]
     total: NetworkTotal
+    # Кумулятивные счётчики цепочек учёта: дельты и историю считает панель
+    ports: list[NetworkPortCounter] = Field(default_factory=list)
+    ports_available: bool = False
+    ports_sampled_at: Optional[float] = None
 
 
 class ProcessInfo(BaseModel):
@@ -187,6 +192,9 @@ class SystemInfo(BaseModel):
     connections_detailed: Optional[ConnectionsDetailed] = None
     server_name: str
     timezone: Optional[TimezoneInfo] = None
+    # Меняется только с перезагрузкой хоста — по нему панель точно отличает
+    # ребут от отрицательной дельты счётчика
+    boot_id: Optional[str] = None
 
 
 class CertificateExpiry(BaseModel):
@@ -212,8 +220,6 @@ class AntiDdosInfo(BaseModel):
     source: str = "none"                   # none | auto | manual
     since: int = 0                         # epoch seconds of the last transition
     watchdog: str = "off"                  # is auto-detection enabled
-    version: Optional[str] = None
-    synproxy_active: bool = False
     conntrack_count: Optional[int] = None
     conntrack_max: Optional[int] = None
     conntrack_fill_pct: Optional[float] = None
@@ -222,7 +228,6 @@ class AntiDdosInfo(BaseModel):
     softnet_dropped_total: Optional[int] = None
     listen_overflows_total: Optional[int] = None   # полная очередь accept
     listen_drops_total: Optional[int] = None       # шире: включает смену сокетов
-    pkts_dropped_emergency: Optional[int] = None
 
 
 class AllMetrics(BaseModel):
@@ -237,26 +242,8 @@ class AllMetrics(BaseModel):
     system: SystemInfo
     certificates: Optional[CertificatesInfo] = None
     antiddos: Optional[AntiDdosInfo] = None
+    agent_version: Optional[str] = None
+    # Карта прав панели на этой ноде; null — ограничений нет. Поле обязано быть
+    # объявлено здесь: то, чего нет в response_model, FastAPI из ответа вырежет.
+    capabilities: Optional[dict[str, str]] = None
 
-
-class MetricsHistoryPoint(BaseModel):
-    timestamp: datetime
-    cpu_usage: Optional[float] = None
-    load_avg_1: Optional[float] = None
-    memory_used: Optional[int] = None
-    memory_available: Optional[int] = None
-    swap_used: Optional[int] = None
-    disk_read_bytes_per_sec: Optional[float] = None
-    disk_write_bytes_per_sec: Optional[float] = None
-    net_rx_bytes_per_sec: Optional[float] = None
-    net_tx_bytes_per_sec: Optional[float] = None
-    net_rx_peak_per_sec: Optional[float] = None
-    net_tx_peak_per_sec: Optional[float] = None
-    process_count: Optional[int] = None
-
-
-class MetricsHistoryResponse(BaseModel):
-    from_time: datetime
-    to_time: datetime
-    count: int
-    data: list[MetricsHistoryPoint]

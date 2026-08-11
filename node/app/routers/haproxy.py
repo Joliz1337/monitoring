@@ -12,7 +12,6 @@ from app.models.haproxy import (
     CertificateInfo,
     CertificateRenewResponse,
     CertificateRenewSingleResponse,
-    CertificateUpdateResponse,
     CertificateUploadRequest,
     CertificateUploadResponse,
     ConfigApplyRequest,
@@ -33,13 +32,18 @@ from app.models.haproxy import (
     HAProxyStatusResponse,
     HAProxyValidateResponse,
 )
-from app.services.haproxy_manager import HAProxyRule, BackendServer, BalancerOptions, get_haproxy_manager
+from app.services.haproxy_manager import HAProxyRule, get_haproxy_manager
 from app.models.haproxy import BackendServerModel, BalancerOptionsModel
 from app.services.firewall_manager import get_firewall_manager
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/haproxy", tags=["haproxy"])
+
+# Любая правка конфига — это read-modify-write со снимком для отката. Панель шлёт
+# такие запросы пачками (bulk-действия), а методы менеджера уходят в тред-пул,
+# поэтому без сериализации параллельные правки затирают друг друга.
+_config_lock = asyncio.Lock()
 
 
 def _rule_to_response(r: HAProxyRule) -> HAProxyRuleResponse:
@@ -88,14 +92,6 @@ async def get_haproxy_status():
     return await asyncio.to_thread(manager.get_status)
 
 
-@router.get("/logs")
-async def get_haproxy_logs(tail: int = 100):
-    """Get HAProxy service logs for diagnostics"""
-    manager = get_haproxy_manager()
-    logs = await asyncio.to_thread(manager.get_logs, tail=tail)
-    return {"logs": logs}
-
-
 @router.get("/rules", response_model=HAProxyRulesListResponse)
 async def list_rules():
     """Get all configured rules"""
@@ -138,7 +134,8 @@ async def create_rule(rule_data: HAProxyRuleCreate):
         use_wildcard=rule_data.use_wildcard,
     )
 
-    success, message = await asyncio.to_thread(manager.add_rule, rule)
+    async with _config_lock:
+        success, message = await asyncio.to_thread(manager.add_rule, rule)
 
     if success:
         logger.info(
@@ -161,7 +158,8 @@ async def update_rule(name: str, updates: HAProxyRuleUpdate):
     if not update_dict:
         raise HTTPException(status_code=400, detail="No fields to update")
 
-    success, message = await asyncio.to_thread(manager.update_rule, name, update_dict)
+    async with _config_lock:
+        success, message = await asyncio.to_thread(manager.update_rule, name, update_dict)
 
     if success:
         logger.info(f"HAProxy rule updated: {name} with {update_dict}")
@@ -177,10 +175,11 @@ async def delete_rule(name: str):
     """Delete routing rule"""
     manager = get_haproxy_manager()
     
-    rule = await asyncio.to_thread(manager.get_rule, name)
-    rule_type = rule.rule_type if rule else "unknown"
+    async with _config_lock:
+        rule = await asyncio.to_thread(manager.get_rule, name)
+        rule_type = rule.rule_type if rule else "unknown"
 
-    success, message = await asyncio.to_thread(manager.delete_rule, name)
+        success, message = await asyncio.to_thread(manager.delete_rule, name)
 
     if success:
         logger.info(f"HAProxy rule deleted: {name} ({rule_type})")
@@ -264,13 +263,14 @@ async def get_config():
 async def apply_config(request: ConfigApplyRequest):
     """Apply HAProxy config from panel (replaces file and optionally reloads)"""
     manager = get_haproxy_manager()
-    success, message, reloaded = await asyncio.to_thread(
-        manager.apply_config,
-        config_content=request.config_content,
-        reload_after=request.reload_after,
-        ensure_started=request.ensure_started
-    )
-    
+    async with _config_lock:
+        success, message, reloaded = await asyncio.to_thread(
+            manager.apply_config,
+            config_content=request.config_content,
+            reload_after=request.reload_after,
+            ensure_started=request.ensure_started
+        )
+
     if success:
         logger.info(f"HAProxy config applied from panel (reloaded: {reloaded})")
     
@@ -319,20 +319,14 @@ async def get_certificate_info(domain: str):
 async def generate_certificate(request: CertificateGenerateRequest):
     """Generate new Let's Encrypt certificate using certbot"""
     manager = get_haproxy_manager()
-    
-    result = await manager.generate_certificate(
-        domain=request.domain,
-        email=request.email,
-        method=request.method
-    )
-    
-    # Handle both old (2-tuple) and new (3-tuple) return format
-    if len(result) == 3:
-        success, message, error_log = result
-    else:
-        success, message = result
-        error_log = None
-    
+
+    async with _config_lock:
+        success, message, error_log = await manager.generate_certificate(
+            domain=request.domain,
+            email=request.email,
+            method=request.method
+        )
+
     if not success:
         return CertificateGenerateResponseExtended(
             success=False,
@@ -354,8 +348,9 @@ async def renew_certificates():
     """Renew all Let's Encrypt certificates"""
     logger.info("API: Received request to renew all certificates")
     manager = get_haproxy_manager()
-    
-    success, message, renewed = await manager.renew_certificates()
+
+    async with _config_lock:
+        success, message, renewed = await manager.renew_certificates()
     
     logger.info(f"API: Certificate renewal completed - success={success}, renewed={len(renewed)}")
     return CertificateRenewResponse(
@@ -370,8 +365,9 @@ async def renew_single_certificate(domain: str):
     """Renew specific Let's Encrypt certificate"""
     logger.info(f"API: Received request to renew certificate for {domain}")
     manager = get_haproxy_manager()
-    
-    success, message, output_log = await manager.renew_certificate(domain)
+
+    async with _config_lock:
+        success, message, output_log = await manager.renew_certificate(domain)
     
     logger.info(f"API: Certificate renewal for {domain} completed - success={success}")
     return CertificateRenewSingleResponse(
@@ -382,23 +378,12 @@ async def renew_single_certificate(domain: str):
     )
 
 
-@router.post("/certs/update-combined", response_model=CertificateUpdateResponse)
-async def update_combined_certificates():
-    """Update all combined certificates from Let's Encrypt originals"""
-    manager = get_haproxy_manager()
-    updated = await asyncio.to_thread(manager.update_combined_certs)
-    
-    return CertificateUpdateResponse(
-        updated_domains=updated,
-        count=len(updated)
-    )
-
-
 @router.delete("/certs/{domain}", response_model=CertificateDeleteResponse)
 async def delete_certificate(domain: str):
     """Delete certificate for a domain"""
     manager = get_haproxy_manager()
-    success, message = await asyncio.to_thread(manager.delete_certificate, domain)
+    async with _config_lock:
+        success, message = await asyncio.to_thread(manager.delete_certificate, domain)
 
     if not success:
         raise HTTPException(status_code=400, detail=message)
@@ -414,13 +399,14 @@ async def delete_certificate(domain: str):
 async def upload_certificate(request: CertificateUploadRequest):
     """Upload custom certificate (cert + key)"""
     manager = get_haproxy_manager()
-    
-    success, message = await asyncio.to_thread(
-        manager.upload_certificate,
-        domain=request.domain,
-        cert_content=request.cert_content,
-        key_content=request.key_content
-    )
+
+    async with _config_lock:
+        success, message = await asyncio.to_thread(
+            manager.upload_certificate,
+            domain=request.domain,
+            cert_content=request.cert_content,
+            key_content=request.key_content
+        )
 
     if not success:
         raise HTTPException(status_code=400, detail=message)
@@ -432,35 +418,14 @@ async def upload_certificate(request: CertificateUploadRequest):
     )
 
 
-@router.post("/config/regenerate", response_model=HAProxyActionResponse)
-async def regenerate_config(preserve_rules: bool = True):
-    """Regenerate HAProxy config (preserving rules by default)"""
-    manager = get_haproxy_manager()
-    success, message = await asyncio.to_thread(manager.regenerate_config, preserve_rules=preserve_rules)
-    
-    if not success:
-        raise HTTPException(status_code=500)
-    
-    return HAProxyActionResponse(success=success, message=message)
-
-
-@router.post("/system/full-init", response_model=HAProxyActionResponse)
-async def full_system_init():
-    """Full initialization: apply all optimizations and regenerate config"""
-    manager = get_haproxy_manager()
-    success, message = await asyncio.to_thread(manager.full_init)
-    
-    return HAProxyActionResponse(success=success, message=message)
-
-
 # ==================== Firewall Management Endpoints ====================
 
 @router.get("/firewall/status", response_model=FirewallStatusResponse)
 async def get_firewall_status():
     """Get firewall (UFW) status"""
     fw = get_firewall_manager()
-    status = fw.get_status()
-    
+    status = await asyncio.to_thread(fw.get_status)
+
     return FirewallStatusResponse(**status)
 
 
@@ -468,8 +433,9 @@ async def get_firewall_status():
 async def list_firewall_rules():
     """Get all firewall rules"""
     fw = get_firewall_manager()
-    rules = fw.list_rules()
-    
+    rules = await asyncio.to_thread(fw.list_rules)
+    active = await asyncio.to_thread(fw.is_active)
+
     return FirewallRulesResponse(
         rules=[
             FirewallRule(
@@ -484,7 +450,7 @@ async def list_firewall_rules():
             for r in rules
         ],
         count=len(rules),
-        active=fw.is_active()
+        active=active
     )
 
 
@@ -492,8 +458,10 @@ async def list_firewall_rules():
 async def allow_port(request: FirewallActionRequest):
     """Open port in firewall"""
     fw = get_firewall_manager()
-    success, message, error_log = fw.add_rule(request.port, request.protocol)
-    
+    success, message, error_log = await asyncio.to_thread(
+        fw.add_rule, request.port, request.protocol
+    )
+
     if success:
         logger.info(f"Firewall: allowed port {request.port}/{request.protocol}")
     
@@ -508,8 +476,10 @@ async def allow_port(request: FirewallActionRequest):
 async def deny_port(request: FirewallActionRequest):
     """Close port in firewall"""
     fw = get_firewall_manager()
-    success, message, error_log = fw.remove_rule(request.port, request.protocol)
-    
+    success, message, error_log = await asyncio.to_thread(
+        fw.remove_rule, request.port, request.protocol
+    )
+
     if success:
         logger.info(f"Firewall: denied port {request.port}/{request.protocol}")
     
@@ -524,8 +494,8 @@ async def deny_port(request: FirewallActionRequest):
 async def delete_firewall_rule(port: int, protocol: str = "tcp"):
     """Remove firewall rule by port"""
     fw = get_firewall_manager()
-    success, message, error_log = fw.remove_rule(port, protocol)
-    
+    success, message, error_log = await asyncio.to_thread(fw.remove_rule, port, protocol)
+
     if success:
         logger.info(f"Firewall: deleted rule for port {port}/{protocol}")
     
@@ -540,14 +510,15 @@ async def delete_firewall_rule(port: int, protocol: str = "tcp"):
 async def add_advanced_firewall_rule(request: FirewallAdvancedActionRequest):
     """Add firewall rule with full control (action, from_ip, direction)"""
     fw = get_firewall_manager()
-    success, message, error_log = fw.add_advanced_rule(
+    success, message, error_log = await asyncio.to_thread(
+        fw.add_advanced_rule,
         port=request.port,
         protocol=request.protocol,
         action=request.action,
         from_ip=request.from_ip,
         direction=request.direction
     )
-    
+
     if success:
         logger.info(f"Firewall: added advanced rule - {request.action} {request.direction} "
                    f"port {request.port}/{request.protocol} from {request.from_ip or 'Anywhere'}")
@@ -563,8 +534,8 @@ async def add_advanced_firewall_rule(request: FirewallAdvancedActionRequest):
 async def delete_firewall_rule_by_number(rule_number: int):
     """Remove firewall rule by its number"""
     fw = get_firewall_manager()
-    success, message, error_log = fw.remove_rule_by_number(rule_number)
-    
+    success, message, error_log = await asyncio.to_thread(fw.remove_rule_by_number, rule_number)
+
     if success:
         logger.info(f"Firewall: deleted rule #{rule_number}")
     
@@ -579,8 +550,8 @@ async def delete_firewall_rule_by_number(rule_number: int):
 async def enable_firewall():
     """Enable UFW firewall"""
     fw = get_firewall_manager()
-    success, message, error_log = fw.enable()
-    
+    success, message, error_log = await asyncio.to_thread(fw.enable)
+
     if success:
         logger.info("Firewall enabled via API")
     
@@ -595,8 +566,8 @@ async def enable_firewall():
 async def disable_firewall():
     """Disable UFW firewall"""
     fw = get_firewall_manager()
-    success, message, error_log = fw.disable()
-    
+    success, message, error_log = await asyncio.to_thread(fw.disable)
+
     if success:
         logger.info("Firewall disabled via API")
     

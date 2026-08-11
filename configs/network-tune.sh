@@ -125,6 +125,25 @@ configure_rps_rfs() {
     done
 }
 
+# Одна очередь — один NAPI-поток, и он же становится потолком скорости. Отложенные
+# hard-IRQ дают GRO время собрать несколько пакетов в один skb, поэтому через стек
+# и через единственное кольцо проходит меньше буферов. На карте с несколькими
+# очередями смысла нет: там нагрузка и так разложена, а задержка добавилась бы зря.
+# Ядро < 5.10 этих файлов не имеет — тогда просто пропускаем.
+GRO_FLUSH_TIMEOUT_NS=50000
+
+configure_gro_batching() {
+    local iface=$1
+    local rx_queues
+    rx_queues=$(find "/sys/class/net/$iface/queues" -maxdepth 1 -name 'rx-*' -type d 2>/dev/null | wc -l)
+    [ "${rx_queues:-0}" -le 1 ] || return 0
+
+    [ -w "/sys/class/net/$iface/napi_defer_hard_irqs" ] || return 0
+    echo 1 > "/sys/class/net/$iface/napi_defer_hard_irqs" 2>/dev/null || return 0
+    echo "$GRO_FLUSH_TIMEOUT_NS" > "/sys/class/net/$iface/gro_flush_timeout" 2>/dev/null || true
+    echo "  $iface: GRO batching (single queue, gro_flush_timeout=${GRO_FLUSH_TIMEOUT_NS}ns)" >&2
+}
+
 configure_xps() {
     local iface=$1
     local cpu_count
@@ -185,6 +204,7 @@ main() {
         configure_rps_rfs "$iface"
         configure_xps "$iface"
         configure_irq_affinity "$iface"
+        configure_gro_batching "$iface"
     done
 
     echo "=== Network Tuning Summary ==="

@@ -222,7 +222,7 @@ class BillingChecker:
         billing_label = billing_labels.get(srv.billing_type, srv.billing_type)
         lines = [
             f"{emoji} <b>Billing Alert</b>",
-            f"",
+            "",
             f"\U0001f4bb <b>{srv.name}</b> ({billing_label})",
             f"\u23f0 {status}",
         ]

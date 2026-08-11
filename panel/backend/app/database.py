@@ -50,8 +50,6 @@ async def run_migrations(conn):
             ("last_error", "VARCHAR(500)"),
             ("error_code", "INTEGER"),
             ("last_metrics", "TEXT"),
-            ("last_haproxy_data", "TEXT"),
-            ("last_traffic_data", "TEXT"),
             ("has_xray_node", "BOOLEAN DEFAULT FALSE"),
             ("proxy_url", "VARCHAR(255)"),
         ]
@@ -204,22 +202,10 @@ async def run_migrations(conn):
         except Exception:
             pass
     
-    # Add retention settings columns to remnawave_settings
-    retention_columns = [
-        ("visit_stats_retention_days", "INTEGER DEFAULT 365"),
-        ("ip_stats_retention_days", "INTEGER DEFAULT 90"),
-        ("ip_destination_retention_days", "INTEGER DEFAULT 90"),
-        ("hourly_stats_retention_days", "INTEGER DEFAULT 365"),
-    ]
-    
-    for col_name, col_type in retention_columns:
-        if remnawave_settings_columns and col_name not in remnawave_settings_columns:
-            try:
-                await conn.execute(text(f'ALTER TABLE remnawave_settings ADD COLUMN "{col_name}" {col_type}'))
-                logger.info(f"Added column: remnawave_settings.{col_name}")
-            except Exception:
-                pass
-    
+    # Пер-раздельных retention-колонок здесь больше не заводится: их удаляет
+    # _migrate_simplify_remnawave в том же init_db(), и пара «добавить → удалить»
+    # выполнялась восемью ALTER TABLE при каждом старте панели.
+
     # Add direction column to blocklist_rules
     result = await conn.execute(text("""
         SELECT column_name FROM information_schema.columns 
@@ -326,6 +312,19 @@ async def run_migrations(conn):
             ("load_avg_sustained_checks", "INTEGER DEFAULT 3"),
         ]
         for col_name, col_type in load_avg_columns:
+            if col_name not in alert_columns:
+                try:
+                    await conn.execute(text(f'ALTER TABLE alert_settings ADD COLUMN "{col_name}" {col_type}'))
+                    logger.info(f"Added column: alert_settings.{col_name}")
+                except Exception:
+                    pass
+
+        conntrack_columns = [
+            ("conntrack_enabled", "BOOLEAN DEFAULT TRUE"),
+            ("conntrack_threshold", "FLOAT DEFAULT 80.0"),
+            ("conntrack_excluded_server_ids", "TEXT"),
+        ]
+        for col_name, col_type in conntrack_columns:
             if col_name not in alert_columns:
                 try:
                     await conn.execute(text(f'ALTER TABLE alert_settings ADD COLUMN "{col_name}" {col_type}'))
@@ -1203,91 +1202,6 @@ async def _migrate_remove_surrogate_ids(conn):
                 logger.warning(f"Removing id from xray_ip_destination_stats: {e}")
 
 
-async def _migrate_ip_dest_to_host_schema(conn):
-    """Migrate xray_ip_destination_stats from 4D (server_id, email, source_ip_id, destination_id)
-    to 3D (email, source_ip_id, host) schema.
-    
-    Aggregates by host (strips port), removes server_id dimension.
-    Idempotent: skips if already migrated (host column exists, destination_id gone).
-    """
-    result = await conn.execute(text("""
-        SELECT column_name FROM information_schema.columns 
-        WHERE table_name = 'xray_ip_destination_stats'
-    """))
-    columns = {row[0] for row in result.fetchall()}
-    
-    if not columns:
-        return  # Table doesn't exist yet, will be created fresh by create_all
-    
-    has_destination_id = "destination_id" in columns
-    has_server_id = "server_id" in columns
-    has_host = "host" in columns
-    
-    # Already migrated
-    if has_host and not has_destination_id and not has_server_id:
-        return
-    
-    # Fresh table with new schema (no old columns)
-    if not has_destination_id and not has_server_id:
-        return
-    
-    logger.info("Migrating xray_ip_destination_stats to host-based schema...")
-    
-    try:
-        # Create temporary table with new schema
-        await conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS xray_ip_destination_stats_new (
-                email INTEGER NOT NULL,
-                source_ip_id INTEGER NOT NULL REFERENCES xray_source_ips(id) ON DELETE CASCADE,
-                host VARCHAR(500) NOT NULL,
-                connection_count BIGINT DEFAULT 0,
-                last_seen TIMESTAMP DEFAULT NOW(),
-                PRIMARY KEY (email, source_ip_id, host)
-            )
-        """))
-        
-        # Migrate data: aggregate by (email, source_ip_id, host), summing counts across servers
-        if has_destination_id and has_server_id:
-            await conn.execute(text("""
-                INSERT INTO xray_ip_destination_stats_new (email, source_ip_id, host, connection_count, last_seen)
-                SELECT 
-                    ids.email,
-                    ids.source_ip_id,
-                    COALESCE(d.host, regexp_replace(d.destination, ':\\d+$', '')),
-                    SUM(ids.connection_count),
-                    MAX(ids.last_seen)
-                FROM xray_ip_destination_stats ids
-                JOIN xray_destinations d ON ids.destination_id = d.id
-                GROUP BY ids.email, ids.source_ip_id, COALESCE(d.host, regexp_replace(d.destination, ':\\d+$', ''))
-                ON CONFLICT (email, source_ip_id, host) DO UPDATE SET
-                    connection_count = xray_ip_destination_stats_new.connection_count + EXCLUDED.connection_count,
-                    last_seen = GREATEST(xray_ip_destination_stats_new.last_seen, EXCLUDED.last_seen)
-            """))
-            logger.info("Data migrated to new schema")
-        
-        # Drop old table and rename new one
-        await conn.execute(text("DROP TABLE xray_ip_destination_stats"))
-        await conn.execute(text("ALTER TABLE xray_ip_destination_stats_new RENAME TO xray_ip_destination_stats"))
-        
-        # Create indexes
-        await conn.execute(text(
-            'CREATE INDEX IF NOT EXISTS "idx_ip_dest_email_ip" ON xray_ip_destination_stats (email, source_ip_id)'
-        ))
-        await conn.execute(text(
-            'CREATE INDEX IF NOT EXISTS "idx_ip_dest_host" ON xray_ip_destination_stats (host)'
-        ))
-        
-        logger.info("xray_ip_destination_stats migration to host-based schema completed")
-        
-    except Exception as e:
-        logger.error(f"Failed to migrate xray_ip_destination_stats: {e}")
-        # Cleanup temp table on failure
-        try:
-            await conn.execute(text("DROP TABLE IF EXISTS xray_ip_destination_stats_new"))
-        except Exception:
-            pass
-
-
 async def _warmup_pool():
     """Pre-create database connections to avoid cold-start delays on first requests."""
     try:
@@ -1453,15 +1367,19 @@ async def _migrate_server_cache_split(conn):
     
     logger.info("Migrating server cache data to server_cache table...")
     
-    try:
-        await conn.execute(text("""
-            INSERT INTO server_cache (server_id, last_haproxy_data, last_traffic_data)
-            SELECT id, last_haproxy_data, last_traffic_data FROM servers
-            WHERE last_haproxy_data IS NOT NULL OR last_traffic_data IS NOT NULL
-            ON CONFLICT (server_id) DO NOTHING
-        """))
-    except Exception as e:
-        logger.warning(f"Could not migrate server cache: {e}")
+    # Переносится только haproxy-кэш: last_traffic_data перестала кем-либо
+    # читаться после переезда истории трафика в PostgreSQL, и её содержимое
+    # такое же мёртвое в приёмнике, как и в источнике.
+    if has_haproxy:
+        try:
+            await conn.execute(text("""
+                INSERT INTO server_cache (server_id, last_haproxy_data)
+                SELECT id, last_haproxy_data FROM servers
+                WHERE last_haproxy_data IS NOT NULL
+                ON CONFLICT (server_id) DO NOTHING
+            """))
+        except Exception as e:
+            logger.warning(f"Could not migrate server cache: {e}")
     
     if has_haproxy:
         try:
@@ -1553,43 +1471,23 @@ async def _migrate_simplify_remnawave(conn):
             except Exception:
                 pass
 
-    # --- Step 3: Add retention_days column to remnawave_settings ---
+    # --- Step 3: удалить пер-раздельные retention-колонки remnawave_settings ---
+    # Сводной колонки retention_days здесь больше не появляется: следом идущая
+    # _migrate_remnawave_ephemeral_ips её удаляет, и пара «добавить → удалить»
+    # выполнялась двумя лишними ALTER TABLE при каждом старте панели.
     result = await conn.execute(text("""
         SELECT column_name FROM information_schema.columns
         WHERE table_name = 'remnawave_settings'
     """))
     settings_cols = {row[0] for row in result.fetchall()}
 
-    if settings_cols and 'retention_days' not in settings_cols:
-        try:
-            best_val = "LEAST(COALESCE(visit_stats_retention_days, 7), COALESCE(ip_stats_retention_days, 7))"
-            if 'visit_stats_retention_days' in settings_cols:
-                await conn.execute(text(f"""
-                    ALTER TABLE remnawave_settings ADD COLUMN retention_days INTEGER DEFAULT 7
-                """))
-                await conn.execute(text(f"""
-                    UPDATE remnawave_settings SET retention_days = {best_val}
-                """))
-            else:
-                await conn.execute(text("ALTER TABLE remnawave_settings ADD COLUMN retention_days INTEGER DEFAULT 7"))
-        except Exception:
-            pass
-
-    # Drop old retention columns
     for col in ('visit_stats_retention_days', 'ip_stats_retention_days',
                 'ip_destination_retention_days', 'hourly_stats_retention_days'):
-        if settings_cols and col in settings_cols:
+        if col in settings_cols:
             try:
                 await conn.execute(text(f'ALTER TABLE remnawave_settings DROP COLUMN IF EXISTS "{col}"'))
             except Exception:
                 pass
-
-    # Migrate old default 90 -> 7
-    if settings_cols and 'retention_days' in settings_cols:
-        try:
-            await conn.execute(text("UPDATE remnawave_settings SET retention_days = 7 WHERE retention_days = 90"))
-        except Exception:
-            pass
 
     # Drop leftover indexes from old schema
     old_indexes = [
@@ -1643,6 +1541,16 @@ async def _migrate_remnawave_anomaly_settings(conn):
         "traffic_anomaly_enabled": "BOOLEAN DEFAULT FALSE",
         "traffic_threshold_gb": "FLOAT DEFAULT 30.0",
         "traffic_confirm_count": "INTEGER DEFAULT 2",
+        "anomaly_ip_enabled": "BOOLEAN DEFAULT TRUE",
+        "anomaly_hwid_enabled": "BOOLEAN DEFAULT TRUE",
+        "anomaly_ua_enabled": "BOOLEAN DEFAULT TRUE",
+        "anomaly_devdata_enabled": "BOOLEAN DEFAULT TRUE",
+        "anomaly_ip_margin": "INTEGER DEFAULT 2",
+        "anomaly_ip_confirm_count": "INTEGER DEFAULT 5",
+        "anomaly_asn_margin": "INTEGER DEFAULT 0",
+        "anomaly_ip_smart_enabled": "BOOLEAN DEFAULT TRUE",
+        "anomaly_ip_smart_traffic_gb": "FLOAT DEFAULT 20.0",
+        "anomaly_ua_patterns": "TEXT",
     }
     for col_name, col_type in new_cols.items():
         if col_name not in existing:
@@ -1651,6 +1559,24 @@ async def _migrate_remnawave_anomaly_settings(conn):
                 logger.info(f"Added column: remnawave_settings.{col_name}")
             except Exception as e:
                 logger.debug(f"Column add skipped {col_name}: {e}")
+
+    # Реестр UA переведён с regex-фрагментов на простые маски (*/?) — сохранённый
+    # текст старого regex-формата вернул бы ложные тревоги, сбрасываем на встроенный
+    try:
+        await conn.execute(text(
+            "UPDATE remnawave_settings SET anomaly_ua_patterns = NULL "
+            "WHERE anomaly_ua_patterns LIKE '%(ios|android|windows)%'"
+        ))
+    except Exception as e:
+        logger.debug(f"anomaly_ua_patterns reset skipped: {e}")
+
+    # anomaly_whitelist существовал только в одной dev-сборке — вычищаем
+    if "anomaly_whitelist" in existing:
+        try:
+            await conn.execute(text('ALTER TABLE remnawave_settings DROP COLUMN "anomaly_whitelist"'))
+            logger.info("Dropped column remnawave_settings.anomaly_whitelist")
+        except Exception as e:
+            logger.debug(f"anomaly_whitelist drop skipped: {e}")
 
 
 async def _migrate_remnawave_ephemeral_ips(conn):
@@ -1866,6 +1792,136 @@ async def _migrate_drop_redundant_indexes(conn):
             logger.warning(f"Dropping index {idx}: {e}")
 
 
+async def _migrate_db_optimizations(conn):
+    """Индексы под реальные запросы панели + снятие дубля с горячего пути вставки метрик.
+
+    Каждый DDL идёт отдельным запросом со своей защитой: init_db() вызывается на старте
+    без try/except, поэтому выпущенное отсюда исключение вообще не дало бы бэкенду
+    подняться, а сбой одного индекса не должен отменять остальные. IF NOT EXISTS /
+    IF EXISTS делают повторный запуск no-op.
+    """
+    statements = [
+        # Последний снапшот сервера — max(id) с GROUP BY server_id; idx_metrics_server_time
+        # упорядочен по timestamp и для max(id) планировщику бесполезен
+        "CREATE INDEX IF NOT EXISTS idx_metrics_server_latest ON metrics_snapshots (server_id, id)",
+        # Чистка протухшего кеша ASN выполняется перед каждым разрешением IP
+        "CREATE INDEX IF NOT EXISTS idx_asn_cache_cached_at ON asn_cache (cached_at)",
+        # Удаление устройств, не попавших в синхронизацию, и сортировка списка в API
+        "CREATE INDEX IF NOT EXISTS idx_hwid_devices_synced_at ON remnawave_hwid_devices (synced_at)",
+        # Чистка кеша пользователей Remnawave старше недели
+        "CREATE INDEX IF NOT EXISTS idx_rw_user_cache_updated_at ON remnawave_user_cache (updated_at)",
+        # Пагинация истории алертов: фильтр по серверу или типу + сортировка по дате
+        "CREATE INDEX IF NOT EXISTS idx_alert_history_server_created ON alert_history (server_id, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_alert_history_type_created ON alert_history (alert_type, created_at)",
+        # Журналы синка читаются только в разрезе профиля
+        "CREATE INDEX IF NOT EXISTS idx_sync_log_profile ON haproxy_sync_log (profile_id)",
+        "CREATE INDEX IF NOT EXISTS idx_rw_nginx_sync_log_profile ON remnawave_nginx_sync_log (profile_id)",
+        "CREATE INDEX IF NOT EXISTS idx_fw_sync_log_profile ON firewall_sync_log (profile_id)",
+        # server_id полностью покрыт составными индексами выше, а его одиночный индекс
+        # оплачивался на вставке метрик каждые 10 секунд по всем нодам
+        "DROP INDEX IF EXISTS ix_metrics_snapshots_server_id",
+        # xray_stats переписывается целиком каждый цикл сбора, то есть за час даёт
+        # больше мёртвых кортежей, чем строк в самой таблице. Дефолтный порог
+        # autovacuum (20% + 50 строк) на таком профиле просыпается слишком поздно,
+        # а брать TRUNCATE вместо DELETE нельзя — эксклюзивный лок вставал бы
+        # поперёк читателей страницы Remnawave
+        "ALTER TABLE xray_stats SET ("
+        " autovacuum_vacuum_scale_factor = 0.02,"
+        " autovacuum_vacuum_threshold = 1000,"
+        " autovacuum_analyze_scale_factor = 0.05)",
+    ]
+    for sql in statements:
+        try:
+            await conn.execute(text(sql))
+        except Exception as e:
+            logger.warning(f"DB optimization DDL skipped ({sql}): {e}")
+
+
+async def _migrate_traffic_v2(conn):
+    """Учёт трафика на панели: колонки в servers и storage-параметры горячих таблиц.
+
+    Сами таблицы создаёт create_all, здесь только то, что ему недоступно.
+    fillfactor: обновляемые rx_bytes/tx_bytes/covered_seconds не входят ни в один
+    индекс, поэтому UPDATE идут по HOT-пути — но лишь пока на странице есть место
+    под новую версию строки, иначе каждый флаш плодит страницы и раздувает индексы.
+    Целиком под try — исключение отсюда не дало бы бэкенду подняться вообще.
+    """
+    try:
+        result = await conn.execute(text("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name = 'servers'
+        """))
+        columns = {row[0] for row in result.fetchall()}
+
+        traffic_columns = [
+            ("node_version", "VARCHAR(20)"),
+            ("tracked_ports", "TEXT"),
+        ]
+        for col_name, col_type in traffic_columns:
+            if not columns or col_name in columns:
+                continue
+            try:
+                await conn.execute(text(f'ALTER TABLE servers ADD COLUMN "{col_name}" {col_type}'))
+                logger.info(f"Added column: servers.{col_name}")
+            except Exception as e:
+                if "already exists" not in str(e).lower():
+                    logger.warning(f"Could not add servers.{col_name}: {e}")
+
+        storage_params = {
+            "server_traffic": (
+                "fillfactor=80",
+                "autovacuum_vacuum_scale_factor=0.05",
+                "autovacuum_vacuum_threshold=5000",
+            ),
+            "server_traffic_counters": ("fillfactor=70",),
+        }
+        for table, options in storage_params.items():
+            try:
+                # ALTER TABLE SET берёт ACCESS EXCLUSIVE, поэтому на каждом старте
+                # панели его дёргать не стоит — сверяемся с уже записанными опциями
+                res = await conn.execute(text(
+                    "SELECT COALESCE(reloptions, '{}') FROM pg_class WHERE oid = to_regclass(:t)"
+                ), {"t": table})
+                row = res.first()
+                if not row or set(options) <= set(row[0]):
+                    continue
+                await conn.execute(text(f"ALTER TABLE {table} SET ({', '.join(options)})"))
+                logger.info(f"{table}: storage parameters applied")
+            except Exception as e:
+                logger.warning(f"Storage parameters for {table}: {e}")
+    except Exception as e:
+        logger.warning(f"traffic v2 migration: {e}")
+
+
+async def _migrate_node_capabilities(conn):
+    """Права, которые нода выдала панели.
+
+    Единственная миграция, которой позволено остановить старт: колонку уже
+    объявляет модель, значит SQLAlchemy подставит её в каждый SELECT по servers.
+    Панель, поднявшаяся без неё, отвечала бы 500 на любой запрос о серверах —
+    внятная строка в логе полезнее.
+    """
+    result = await conn.execute(text("""
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'servers'
+    """))
+    columns = {row[0] for row in result.fetchall()}
+    if not columns or "node_capabilities" in columns:
+        return
+
+    try:
+        await conn.execute(text('ALTER TABLE servers ADD COLUMN "node_capabilities" TEXT'))
+        logger.info("Added column: servers.node_capabilities")
+    except Exception as e:
+        if "already exists" in str(e).lower():
+            return
+        logger.error(
+            "Could not add servers.node_capabilities: %s. "
+            'Run manually: ALTER TABLE servers ADD COLUMN "node_capabilities" TEXT', e
+        )
+        raise
+
+
 async def init_db():
     """Initialize database: create tables, run migrations."""
     async with engine.begin() as conn:
@@ -1887,6 +1943,9 @@ async def init_db():
         await _migrate_aggregated_metrics_unique(conn)
         await _migrate_bigint_pk_ids(conn)
         await _migrate_drop_redundant_indexes(conn)
+        await _migrate_db_optimizations(conn)
+        await _migrate_traffic_v2(conn)
+        await _migrate_node_capabilities(conn)
 
     await _warmup_pool()
 

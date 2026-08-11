@@ -109,7 +109,6 @@ async def get_server_cores(
     _=Depends(verify_auth),
 ):
     """Возвращает address → cores для backend-серверов, матчит по IP с нодами профиля."""
-    profile_id = data.profile_id
     addresses = data.addresses
     if not addresses:
         return {}
@@ -209,18 +208,6 @@ async def validate_profile_config(data: ValidateRequest, _=Depends(verify_auth))
     """Проверяет конфиг HAProxy на панели через `haproxy -c` до раскатки на серверы."""
     valid, message = await validate_config(data.config_content)
     return {"valid": valid, "message": message}
-
-
-@router.post("/reorder")
-async def reorder_profiles(data: ReorderRequest, db: AsyncSession = Depends(get_db), _=Depends(verify_auth)):
-    for i, pid in enumerate(data.profile_ids):
-        await db.execute(
-            update(HAProxyConfigProfile)
-            .where(HAProxyConfigProfile.id == pid)
-            .values(position=i)
-        )
-    await db.commit()
-    return {"success": True}
 
 
 # ==================== CRUD ====================

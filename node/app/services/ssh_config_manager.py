@@ -1,9 +1,12 @@
 import logging
-import os
 import re
 import subprocess
+import threading
 import time
 from typing import Optional
+from uuid import uuid4
+
+from app.services.container_detect import running_in_container
 
 logger = logging.getLogger(__name__)
 
@@ -55,10 +58,21 @@ INT_KEYS = {
 }
 
 
+def _unique_tmp_path(prefix: str) -> str:
+    """Уникальный путь во временном каталоге ХОСТА.
+
+    tempfile здесь не подходит: команды идут через nsenter, файл создался бы
+    в ФС контейнера, а не там, куда пишет tee. Фиксированное имя позволяло бы
+    параллельному запросу подменить содержимое между валидацией sshd -t
+    и mv в /etc/ssh/sshd_config.
+    """
+    return f"/tmp/{prefix}.{uuid4().hex[:12]}"
+
+
 class SSHConfigManager:
 
     def __init__(self):
-        self._use_nsenter = self._detect_container()
+        self._use_nsenter = running_in_container()
         self._os_info = self._detect_os()
         self._ssh_service = self._detect_ssh_service()
         logger.info(
@@ -71,18 +85,6 @@ class SSHConfigManager:
         )
 
     # ── Environment Detection ──
-
-    def _detect_container(self) -> bool:
-        if os.path.exists("/.dockerenv"):
-            return True
-        try:
-            with open("/proc/1/cgroup", "r") as f:
-                content = f.read()
-                if "docker" in content or "containerd" in content or "kubepods" in content:
-                    return True
-        except Exception:
-            pass
-        return False
 
     def _detect_os(self) -> dict:
         info = {"distro": "unknown", "version": "", "pkg_manager": "apt"}
@@ -270,7 +272,7 @@ class SSHConfigManager:
         self._run_cmd(["chown", "root:root", "/run/sshd"])
 
     def test_sshd_config(self, config: dict) -> tuple[bool, list[str]]:
-        tmp_path = "/tmp/sshd_config_test"
+        tmp_path = _unique_tmp_path("sshd_config_test")
         try:
             current_config = self.read_sshd_config()
             merged = {**current_config, **config}
@@ -288,22 +290,31 @@ class SSHConfigManager:
         finally:
             self._run_cmd(["rm", "-f", tmp_path])
 
-    def _build_sshd_content(self, full_config: dict) -> str:
+    def _keys_to_set(self, full_config: dict) -> dict[str, tuple[str, str]]:
+        """Директивы sshd_config из доменного конфига: {ключ в нижнем регистре: (ключ, значение)}."""
+        keys: dict[str, tuple[str, str]] = {}
+        for py_key, value in full_config.items():
+            sshd_key = SSHD_KEY_MAP.get(py_key)
+            if sshd_key:
+                keys[sshd_key.lower()] = (sshd_key, self._format_sshd_value(py_key, value))
+        return keys
+
+    def _build_sshd_content(self, full_config: dict, original: str | None = None) -> str:
         """Обновляет sshd_config: заменяет АКТИВНЫЕ директивы, добавляет новые.
 
         Никогда не раскомментирует закомментированные строки — это было
         источником багов, когда закомментированная опция неожиданно включалась.
         Match-блоки копируются как есть, новые ключи вставляются перед ними.
-        """
-        success, original, _ = self._run_cmd(["cat", SSHD_CONFIG_PATH])
-        if not success:
-            original = ""
 
-        keys_to_set: dict[str, tuple[str, str]] = {}
-        for py_key, value in full_config.items():
-            sshd_key = SSHD_KEY_MAP.get(py_key)
-            if sshd_key:
-                keys_to_set[sshd_key.lower()] = (sshd_key, self._format_sshd_value(py_key, value))
+        `original` передаётся явно, когда исходник уже прочитан вызывающим;
+        иначе читается с хоста.
+        """
+        if original is None:
+            success, original, _ = self._run_cmd(["cat", SSHD_CONFIG_PATH])
+            if not success:
+                original = ""
+
+        keys_to_set = self._keys_to_set(full_config)
 
         written_keys: set[str] = set()
         lines = original.splitlines()
@@ -358,7 +369,9 @@ class SSHConfigManager:
 
         return "\n".join(new_lines) + "\n"
 
-    def _clean_sshd_config_d(self, keys_to_set: dict[str, tuple[str, str]]) -> list[str]:
+    def _clean_sshd_config_d(
+        self, keys_to_set: dict[str, tuple[str, str]]
+    ) -> tuple[list[str], dict[str, str]]:
         """Удаляет конфликтующие директивы из /etc/ssh/sshd_config.d/*.conf.
 
         sshd использует first-match-wins: файлы из sshd_config.d загружаются
@@ -367,13 +380,19 @@ class SSHConfigManager:
         в основном файле будет проигнорирован.
 
         Решение: закомментировать конфликтующие строки в drop-in файлах.
+
+        Возвращает вместе со списком изменённых файлов их прежнее содержимое:
+        правка идёт до валидации (иначе `sshd -t` проверял бы не то состояние,
+        которое станет живым), поэтому откат обязан уметь вернуть и её —
+        иначе неудачное применение оставляло бы drop-in'ы изменёнными.
         """
         cleaned: list[str] = []
+        originals: dict[str, str] = {}
         managed_directives = {k for k in keys_to_set}
 
         ok, files_out, _ = self._run_shell("ls -1 /etc/ssh/sshd_config.d/*.conf 2>/dev/null")
         if not ok or not files_out:
-            return cleaned
+            return cleaned, originals
 
         for fpath in sorted(files_out.splitlines()):
             fpath = fpath.strip()
@@ -398,11 +417,20 @@ class SSHConfigManager:
 
             if modified:
                 new_content = "\n".join(new_lines) + "\n"
-                self._run_cmd(["tee", fpath], input_data=new_content)
-                cleaned.append(fpath)
-                logger.info("sshd_config_d_cleaned", extra={"file": fpath})
+                if self._run_cmd(["tee", fpath], input_data=new_content)[0]:
+                    # _run_cmd стрипает вывод cat, поэтому исходник нормализуется
+                    # так же, как результат правки — откат вернёт файл байт-в-байт
+                    originals[fpath] = "\n".join(content.splitlines()) + "\n"
+                    cleaned.append(fpath)
+                    logger.info("sshd_config_d_cleaned", extra={"file": fpath})
 
-        return cleaned
+        return cleaned, originals
+
+    def _restore_dropins(self, originals: dict[str, str] | None) -> None:
+        """Вернуть drop-in файлы к состоянию до правки."""
+        for fpath, content in (originals or {}).items():
+            self._run_cmd(["tee", fpath], input_data=content)
+            logger.info("sshd_config_d_restored", extra={"file": fpath})
 
     def _create_backup(self) -> tuple[bool, str]:
         timestamp = int(time.time())
@@ -597,18 +625,13 @@ class SSHConfigManager:
 
         # Чистим sshd_config.d/ от конфликтующих директив (cloud-init и т.п.)
         # В sshd first-match-wins, Include загружается раньше основного файла
-        keys_to_set: dict[str, tuple[str, str]] = {}
-        for py_key, value in merged.items():
-            sshd_key = SSHD_KEY_MAP.get(py_key)
-            if sshd_key:
-                keys_to_set[sshd_key.lower()] = (sshd_key, self._format_sshd_value(py_key, value))
-        cleaned_files = self._clean_sshd_config_d(keys_to_set)
+        cleaned_files, dropin_originals = self._clean_sshd_config_d(self._keys_to_set(merged))
         if cleaned_files:
             warnings.append(f"Cleaned conflicting directives from: {', '.join(cleaned_files)}")
 
         # Собираем новый конфиг
         new_content = self._build_sshd_content(merged)
-        tmp_path = "/tmp/sshd_config_new"
+        tmp_path = _unique_tmp_path("sshd_config_new")
 
         self._run_cmd(["tee", tmp_path], input_data=new_content)
 
@@ -617,6 +640,7 @@ class SSHConfigManager:
         valid, _, stderr = self._run_cmd(["sshd", "-t", "-f", tmp_path])
         if not valid:
             self._run_cmd(["rm", "-f", tmp_path])
+            self._restore_dropins(dropin_originals)
             logger.error("sshd_config_validation_failed", extra={"error": stderr})
             return False, f"Config validation failed: {stderr}", warnings
 
@@ -630,6 +654,7 @@ class SSHConfigManager:
         mv_ok, _, mv_err = self._run_cmd(["mv", tmp_path, SSHD_CONFIG_PATH])
         if not mv_ok:
             self._run_cmd(["rm", "-f", tmp_path])
+            self._restore_dropins(dropin_originals)
             return False, f"Failed to apply config: {mv_err}", warnings
 
         # Socket override при смене порта (Ubuntu 22.04+)
@@ -641,7 +666,7 @@ class SSHConfigManager:
             logger.info("socket_port_override", extra={"unit": socket_unit, "port": new_port})
             ok, socket_override_path, err = self._write_socket_port_override(socket_unit, new_port)
             if not ok:
-                self._rollback(backup_path, None)
+                self._rollback(backup_path, None, dropin_originals)
                 return False, err, warnings
 
         # Перезапуск sshd
@@ -649,7 +674,7 @@ class SSHConfigManager:
 
         if not apply_ok:
             logger.error("sshd_apply_failed", extra={"error": apply_err})
-            self._rollback(backup_path, socket_override_path)
+            self._rollback(backup_path, socket_override_path, dropin_originals)
             return False, f"apply failed, backup restored: {apply_err}", warnings
 
         # Проверка что порт слушает
@@ -662,7 +687,7 @@ class SSHConfigManager:
 
         if not port_ok:
             logger.error("sshd_not_listening", extra={"port": new_port})
-            self._rollback(backup_path, socket_override_path)
+            self._rollback(backup_path, socket_override_path, dropin_originals)
             return False, f"sshd не слушает порт {new_port} после применения, откат", warnings
 
         # Проверка что sshd реально отвечает
@@ -754,10 +779,16 @@ class SSHConfigManager:
 
         return False, override_path
 
-    def _rollback(self, backup_path: str, socket_override_path: str | None) -> None:
+    def _rollback(
+        self,
+        backup_path: str,
+        socket_override_path: str | None,
+        dropin_originals: dict[str, str] | None = None,
+    ) -> None:
         """Откат: восстанавливает бэкап и рестартит только известный сервис."""
         logger.warning("sshd_rollback", extra={"backup": backup_path})
         self._run_cmd(["cp", "-p", backup_path, SSHD_CONFIG_PATH])
+        self._restore_dropins(dropin_originals)
         if socket_override_path:
             self._run_cmd(["rm", "-f", socket_override_path])
             self._run_cmd(["systemctl", "daemon-reload"])
@@ -1138,10 +1169,15 @@ class SSHConfigManager:
 
 
 _manager: Optional[SSHConfigManager] = None
+# Роутер создаёт менеджера из тред-пула (asyncio.to_thread), поэтому лок
+# именно threading: иначе два первых запроса запустили бы детект окружения дважды
+_manager_lock = threading.Lock()
 
 
 def get_ssh_config_manager() -> SSHConfigManager:
     global _manager
     if _manager is None:
-        _manager = SSHConfigManager()
+        with _manager_lock:
+            if _manager is None:
+                _manager = SSHConfigManager()
     return _manager

@@ -8,13 +8,8 @@ export function formatBytes(bytes: number, decimals = 1): string {
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(decimals))} ${sizes[i]}`
 }
 
-export function formatBytesPerSec(bytesPerSec: number): string {
-  return `${formatBytes(bytesPerSec)}/s`
-}
-
 // Unit keys for localization
 const BITS_UNITS = ['bps', 'kbps', 'mbps', 'gbps', 'tbps'] as const
-const BYTES_UNITS = ['b_per_s', 'kb_per_s', 'mb_per_s', 'gb_per_s', 'tb_per_s'] as const
 
 // Fallback units (English-style)
 const BITS_FALLBACK = ['bit/s', 'Kbit/s', 'Mbit/s', 'Gbit/s', 'Tbit/s']
@@ -50,24 +45,6 @@ export function createBitsFormatter(t: TranslateFunction, decimals = 1) {
   return (bytesPerSec: number) => formatBitsPerSecLocalized(bytesPerSec, t, decimals)
 }
 
-export function formatBytesPerSecLocalized(
-  bytesPerSec: number,
-  t: TranslateFunction,
-  decimals = 1
-): string {
-  if (bytesPerSec === 0) return `0 ${t(`units.${BYTES_UNITS[0]}`)}`
-  
-  const k = 1024
-  const i = Math.min(Math.floor(Math.log(bytesPerSec) / Math.log(k)), BYTES_UNITS.length - 1)
-  const unit = t(`units.${BYTES_UNITS[i]}`)
-  
-  return `${parseFloat((bytesPerSec / Math.pow(k, i)).toFixed(decimals))} ${unit}`
-}
-
-export function createBytesPerSecFormatter(t: TranslateFunction, decimals = 1) {
-  return (bytesPerSec: number) => formatBytesPerSecLocalized(bytesPerSec, t, decimals)
-}
-
 export function formatUptime(seconds: number): string {
   const days = Math.floor(seconds / 86400)
   const hours = Math.floor((seconds % 86400) / 3600)
@@ -80,16 +57,6 @@ export function formatUptime(seconds: number): string {
     return `${hours}h ${minutes}m`
   }
   return `${minutes}m`
-}
-
-export function formatNumber(num: number, decimals = 1): string {
-  if (num >= 1000000) {
-    return `${(num / 1000000).toFixed(decimals)}M`
-  }
-  if (num >= 1000) {
-    return `${(num / 1000).toFixed(decimals)}K`
-  }
-  return num.toString()
 }
 
 export function formatPercent(value: number, decimals = 1): string {
@@ -135,84 +102,6 @@ export function formatTimeAgo(date: string | Date | null | undefined): string {
 }
 
 /**
- * Convert timestamp from server timezone to target timezone
- * @param timestamp - ISO timestamp string from server
- * @param serverOffsetSeconds - Server timezone offset in seconds (e.g., 10800 for +03:00)
- * @param targetOffsetSeconds - Target timezone offset in seconds
- * @returns Adjusted Date object in target timezone
- */
-export function convertTimezone(
-  timestamp: string,
-  serverOffsetSeconds: number,
-  targetOffsetSeconds: number
-): Date {
-  const date = new Date(timestamp)
-  
-  // If timestamp has no timezone info (naive datetime from server),
-  // we need to interpret it as server's local time
-  if (!timestamp.includes('Z') && !timestamp.includes('+') && !timestamp.match(/-\d{2}:\d{2}$/)) {
-    // Naive timestamp - interpret as server local time
-    // Get the UTC time by subtracting server offset
-    const utcTime = date.getTime() - serverOffsetSeconds * 1000
-    // Apply target offset to get target local time
-    return new Date(utcTime + targetOffsetSeconds * 1000)
-  }
-  
-  // If timestamp has timezone info, convert normally
-  const utcTime = date.getTime()
-  return new Date(utcTime + targetOffsetSeconds * 1000)
-}
-
-/**
- * Format timestamp for display in target timezone
- */
-export function formatTimestampInTimezone(
-  timestamp: string,
-  serverOffsetSeconds: number,
-  targetTimezone: string,
-  format: 'time' | 'datetime' | 'full' = 'datetime'
-): string {
-  try {
-    const date = new Date(timestamp)
-    
-    // For naive timestamps, adjust for server timezone first
-    let adjustedDate = date
-    if (!timestamp.includes('Z') && !timestamp.includes('+') && !timestamp.match(/-\d{2}:\d{2}$/)) {
-      const utcTime = date.getTime() - serverOffsetSeconds * 1000
-      adjustedDate = new Date(utcTime)
-    }
-    
-    const options: Intl.DateTimeFormatOptions = { timeZone: targetTimezone }
-    
-    switch (format) {
-      case 'time':
-        options.hour = '2-digit'
-        options.minute = '2-digit'
-        options.second = '2-digit'
-        break
-      case 'datetime':
-        options.month = 'short'
-        options.day = 'numeric'
-        options.hour = '2-digit'
-        options.minute = '2-digit'
-        break
-      case 'full':
-        options.year = 'numeric'
-        options.month = 'short'
-        options.day = 'numeric'
-        options.hour = '2-digit'
-        options.minute = '2-digit'
-        options.second = '2-digit'
-        break
-    }
-    
-    return adjustedDate.toLocaleString('en-US', options)
-  } catch {
-    return formatDate(timestamp)
-  }
-}
-
-/**
  * Извлекает хост (IP/домен) из URL ноды
  */
 export function extractHost(url: string): string {
@@ -222,15 +111,4 @@ export function extractHost(url: string): string {
     const match = url.match(/https?:\/\/([^:/]+)/)
     return match ? match[1] : url
   }
-}
-
-/**
- * Get timezone offset string from seconds (e.g., 10800 -> "+03:00")
- */
-export function formatTimezoneOffset(offsetSeconds: number): string {
-  const sign = offsetSeconds >= 0 ? '+' : '-'
-  const absSeconds = Math.abs(offsetSeconds)
-  const hours = Math.floor(absSeconds / 3600)
-  const minutes = Math.floor((absSeconds % 3600) / 60)
-  return `${sign}${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`
 }

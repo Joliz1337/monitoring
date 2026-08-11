@@ -6,16 +6,18 @@ Uvicorn слушает только 127.0.0.1:7500 и доверяет прош�
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.gzip import GZipMiddleware
 
+from app.capabilities import CapabilityMiddleware, get_policy
 from app.config import get_settings
 from app.routers import haproxy, metrics, traffic, system, ipset, remnawave, ssh, ssl, firewall_profile, antiddos
-from app.security import get_security_manager, SecurityMiddleware
 from app.services.metrics_collector import get_collector as get_metrics_collector
-from app.services.traffic_collector import get_traffic_collector
+from app.services.port_traffic_sampler import get_port_traffic_sampler
 from app.services.ipset_manager import get_ipset_manager
 
 logging.basicConfig(
@@ -39,32 +41,58 @@ async def lifespan(app: FastAPI):
     success, msg = haproxy_manager.full_init()
     logger.info(f"HAProxy initialization: {msg}")
 
-    traffic_collector = get_traffic_collector()
+    port_sampler = get_port_traffic_sampler()
     try:
-        await traffic_collector.init()
-        await traffic_collector.start()
-        logger.info("Traffic collector started")
+        await port_sampler.init()
+        await port_sampler.start()
+        logger.info("Port traffic sampler started")
     except Exception as e:
-        logger.warning(f"Traffic collector init failed: {e}")
+        logger.error(f"Port traffic sampler init failed, per-port counters stay empty: {e}", exc_info=True)
 
     ipset_manager = get_ipset_manager()
     try:
         success, msg = ipset_manager.init_sets()
         logger.info(f"IPSet initialization: {msg}")
     except Exception as e:
-        logger.warning(f"IPSet init failed: {e}")
+        logger.error(f"IPSet init failed, blocklist rules are not applied: {e}", exc_info=True)
+
+    from app.services import cpu_affinity
+    from app.services.host_executor import get_host_executor
+    affinity_sync = cpu_affinity.ContainerAffinitySync(
+        get_host_executor(), os.cpu_count() or 1
+    )
+    try:
+        await affinity_sync.start()
+        logger.info("CPU affinity sync started (enabled=%s)", cpu_affinity.is_enabled())
+    except Exception as e:
+        logger.error(f"CPU affinity sync start failed: {e}", exc_info=True)
+
+    if CAPABILITY_POLICY.unrestricted:
+        logger.info("Capabilities: unrestricted")
+    else:
+        logger.info(
+            "Capabilities: %s%s",
+            CAPABILITY_POLICY.published(),
+            f", unknown tokens: {list(CAPABILITY_POLICY.unknown_tokens)}"
+            if CAPABILITY_POLICY.unknown_tokens else "",
+        )
 
     logger.info("Server ready")
     yield
 
     try:
-        await traffic_collector.stop()
-    except Exception:
-        pass
+        await port_sampler.stop()
+    except Exception as e:
+        logger.error(f"Port traffic sampler stop failed: {e}", exc_info=True)
+    try:
+        await affinity_sync.stop()
+    except Exception as e:
+        logger.error(f"CPU affinity sync stop failed: {e}", exc_info=True)
     logger.info("Shutdown complete")
 
 
 settings = get_settings()
+CAPABILITY_POLICY = get_policy()
 
 app = FastAPI(
     title="Server Monitoring Agent API",
@@ -76,7 +104,11 @@ app = FastAPI(
 )
 
 app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
-app.add_middleware(SecurityMiddleware)
+
+# Ноду без ограничений слой не трогает вовсе — у подавляющего большинства
+# установок стек обработки запроса остаётся прежним.
+if not CAPABILITY_POLICY.unrestricted:
+    app.add_middleware(CapabilityMiddleware, policy=CAPABILITY_POLICY)
 
 # Роутеры без auth dependency: nginx делает mTLS до того как запрос попадает в uvicorn.
 app.include_router(metrics.router)
@@ -96,50 +128,24 @@ async def health_check():
     return {"status": "ok"}
 
 
-def get_version() -> str:
-    from pathlib import Path
+def _read_version() -> str:
     version_file = Path("/app/VERSION")
     if version_file.exists():
         return version_file.read_text().strip()
     return "unknown"
 
 
+# Файл лежит в образе и в рантайме не меняется — читаем с диска один раз,
+# чтобы async-эндпоинты ниже не ходили в файловую систему на каждый запрос
+NODE_VERSION = _read_version()
+
+
 @app.get("/api/version")
 async def api_version():
     return {
-        "version": get_version(),
+        "version": NODE_VERSION,
         "component": "node",
-        "node_name": settings.node_name
-    }
-
-
-@app.get("/")
-async def root():
-    return {
-        "name": "Server Monitoring Agent",
-        "version": get_version(),
-        "server_name": settings.node_name
-    }
-
-
-@app.get("/api/security/banned")
-async def get_banned_ips():
-    security = get_security_manager()
-    banned = security.get_banned_ips()
-    return {"count": len(banned), "banned_ips": banned}
-
-
-@app.delete("/api/security/banned/{ip}")
-async def unban_ip(ip: str):
-    security = get_security_manager()
-    success = await security.unban_ip(ip)
-    return {"success": success}
-
-
-@app.get("/api/security/config")
-async def get_security_config():
-    security = get_security_manager()
-    return {
-        "max_failed_attempts": security.max_failed_attempts,
-        "ban_duration_seconds": security.ban_duration
+        "node_name": settings.node_name,
+        "capabilities": CAPABILITY_POLICY.published(),
+        "capabilities_unknown": list(CAPABILITY_POLICY.unknown_tokens),
     }
