@@ -1,13 +1,16 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useMemo } from 'react'
 import { nodeAllows } from '../utils/nodeCapabilities'
-import { Shield, ShieldCheck, Plus, Trash2, RefreshCw, Server, Globe, List, Loader2, ExternalLink, AlertCircle, Check, X, ArrowDownToLine, ArrowUpFromLine, CheckCircle2, XCircle, ChevronDown, Lock } from 'lucide-react'
+import { Shield, ShieldCheck, Plus, Trash2, RefreshCw, Server, Globe, List, Loader2, ExternalLink, AlertCircle, Check, X, ArrowDownToLine, ArrowUpFromLine, CheckCircle2, XCircle, ChevronDown, Lock, Search } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
 import { blocklistApi, serversApi, Server as ServerType, BlocklistRule, BlocklistSource, BlocklistDirection } from '../api/client'
 import { Skeleton } from '../components/ui/Skeleton'
 import { Tooltip } from '../components/ui/Tooltip'
+import { Checkbox } from '../components/ui/Checkbox'
+import { CopyableIp } from '../components/ui/CopyableIp'
 import { FAQIcon } from '../components/FAQ'
+import { matchesIpQuery } from '../utils/ipFilter'
 
 type TabType = 'global' | 'allowlist' | 'servers' | 'sources'
 
@@ -28,39 +31,161 @@ interface ServerData {
 
 let toastIdCounter = 0
 
-function RulesList({ rules, onDelete, emptyMessage }: {
+const MAX_RENDERED_RULES = 300
+const SEARCH_VISIBLE_FROM = 10
+
+function RulesList({ rules, onDelete, onBulkDelete, emptyMessage }: {
   rules: BlocklistRule[]
   onDelete: (id: number) => void
+  onBulkDelete: (ids: number[]) => Promise<void>
   emptyMessage: string
 }) {
   const { t } = useTranslation()
+  const [query, setQuery] = useState('')
+  const [selected, setSelected] = useState<Set<number>>(new Set())
+  const [deleting, setDeleting] = useState(false)
+
+  const filtered = useMemo(() => rules.filter((rule) => matchesIpQuery(rule, query)), [rules, query])
+  const shown = filtered.slice(0, MAX_RENDERED_RULES)
+
+  // Сброс при смене фильтра — нельзя оставить выделенным то, что скрыто поиском
+  useEffect(() => { setSelected(new Set()) }, [query])
+
+  // После refetch удалённые id выпадают из выделения; при ошибке удаления оно сохраняется
+  useEffect(() => {
+    setSelected((prev) => {
+      const alive = new Set(rules.map((rule) => rule.id))
+      const next = new Set([...prev].filter((id) => alive.has(id)))
+      return next.size === prev.size ? prev : next
+    })
+  }, [rules])
+
+  const allSelected = filtered.length > 0 && filtered.every((rule) => selected.has(rule.id))
+  const someSelected = selected.size > 0 && !allSelected
+
+  const toggleAll = () => {
+    setSelected(allSelected ? new Set() : new Set(filtered.map((rule) => rule.id)))
+  }
+
+  const toggleOne = (id: number) => {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const handleBulkDelete = async () => {
+    if (selected.size === 0 || deleting) return
+    if (!confirm(t('blocklist.confirm_delete_selected', { count: selected.size }))) return
+    setDeleting(true)
+    try {
+      await onBulkDelete([...selected])
+    } finally {
+      setDeleting(false)
+    }
+  }
+
   if (rules.length === 0) {
     return <p className="text-dark-400 text-center py-6 text-sm">{emptyMessage}</p>
   }
 
   return (
-    <div className="space-y-1.5 max-h-80 overflow-y-auto">
-      {rules.map((rule) => (
-        <div
-          key={rule.id}
-          className="flex items-center justify-between px-3 py-2 bg-dark-800/50 rounded-lg border border-dark-700/50"
-        >
-          <div className="flex items-center gap-3 min-w-0">
-            <code className="text-sm text-dark-200 font-mono truncate">{rule.ip_cidr}</code>
-            {rule.comment && (
-              <span className="text-xs text-dark-500 truncate">{rule.comment}</span>
-            )}
-          </div>
-          <Tooltip label={t('common.delete')}>
-            <button
-              onClick={() => onDelete(rule.id)}
-              className="p-1 text-dark-400 hover:text-danger transition-colors shrink-0"
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-            </button>
-          </Tooltip>
+    <div className="space-y-2">
+      {rules.length >= SEARCH_VISIBLE_FROM && (
+        <div className="flex items-center gap-2 bg-dark-800 border border-dark-600 rounded-lg px-3 py-1.5">
+          <Search className="w-4 h-4 text-dark-400 shrink-0" />
+          <input
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder={t('blocklist.search_placeholder')}
+            className="bg-transparent text-sm text-dark-100 placeholder-dark-500 outline-none w-full font-mono"
+          />
+          {query && (
+            <Tooltip label={t('common.clear_search')}>
+              <button
+                onClick={() => setQuery('')}
+                className="p-0.5 text-dark-400 hover:text-dark-200 transition-colors shrink-0"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </Tooltip>
+          )}
         </div>
-      ))}
+      )}
+
+      <div className="flex items-center justify-between gap-2 min-h-[28px]">
+        <label className="flex items-center gap-2 cursor-pointer select-none">
+          <Checkbox checked={allSelected} indeterminate={someSelected} onChange={toggleAll} />
+          <span className="text-xs text-dark-400">
+            {selected.size > 0
+              ? t('blocklist.selected_count', { count: selected.size })
+              : t('blocklist.select_all')}
+          </span>
+        </label>
+        <div className="flex items-center gap-2">
+          {query.trim() && (
+            <span className="text-xs text-dark-500">{filtered.length}/{rules.length}</span>
+          )}
+          {selected.size > 0 && (
+            <button
+              onClick={handleBulkDelete}
+              disabled={deleting}
+              className="btn btn-danger text-xs py-1 px-2.5"
+            >
+              {deleting ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Trash2 className="w-3.5 h-3.5" />
+              )}
+              {t('blocklist.delete_selected', { count: selected.size })}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {filtered.length === 0 ? (
+        <div className="text-center py-6">
+          <Search className="w-8 h-8 text-dark-600 mx-auto mb-2" />
+          <p className="text-dark-400 text-sm">{t('blocklist.no_search_results')}</p>
+        </div>
+      ) : (
+        <div className="space-y-1.5 max-h-80 overflow-y-auto">
+          {shown.map((rule) => (
+            <div
+              key={rule.id}
+              className={`flex items-center justify-between px-3 py-2 rounded-lg border transition-colors ${
+                selected.has(rule.id)
+                  ? 'bg-accent-500/10 border-accent-500/30'
+                  : 'bg-dark-800/50 border-dark-700/50'
+              }`}
+            >
+              <div className="flex items-center gap-2.5 min-w-0">
+                <Checkbox checked={selected.has(rule.id)} onChange={() => toggleOne(rule.id)} />
+                <CopyableIp value={rule.ip_cidr} className="text-sm text-dark-200 font-mono truncate" />
+                {rule.comment && (
+                  <span className="text-xs text-dark-500 truncate">{rule.comment}</span>
+                )}
+              </div>
+              <Tooltip label={t('common.delete')}>
+                <button
+                  onClick={() => onDelete(rule.id)}
+                  className="p-1 text-dark-400 hover:text-danger transition-colors shrink-0"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              </Tooltip>
+            </div>
+          ))}
+          {filtered.length > MAX_RENDERED_RULES && (
+            <p className="text-xs text-dark-500 text-center py-1.5">
+              {t('blocklist.shown_of', { shown: MAX_RENDERED_RULES, total: filtered.length })}
+            </p>
+          )}
+        </div>
+      )}
     </div>
   )
 }
@@ -393,6 +518,18 @@ export default function Blocklist() {
     }
   }
 
+  const handleBulkDeleteGlobalRules = async (ruleIds: number[]) => {
+    try {
+      const response = await blocklistApi.deleteGlobalBulk(ruleIds)
+      await fetchAllGlobalRules()
+      startSyncToast()
+      toast.success(t('blocklist.deleted_count', { count: response.data.deleted }))
+    } catch (err: any) {
+      console.error('Failed to bulk delete rules:', err)
+      toast.error(t('common.action_failed'))
+    }
+  }
+
   // === Handlers: Allow List (whitelist) ===
 
   const handleAddAllowRules = async () => {
@@ -430,6 +567,18 @@ export default function Blocklist() {
       toast.success(t('common.deleted'))
     } catch (err: any) {
       console.error('Failed to delete allow rule:', err)
+      toast.error(t('common.action_failed'))
+    }
+  }
+
+  const handleBulkDeleteAllowRules = async (ruleIds: number[]) => {
+    try {
+      const response = await blocklistApi.deleteGlobalBulk(ruleIds)
+      await fetchAllAllowRules()
+      startSyncToast()
+      toast.success(t('blocklist.deleted_count', { count: response.data.deleted }))
+    } catch (err: any) {
+      console.error('Failed to bulk delete allow rules:', err)
       toast.error(t('common.action_failed'))
     }
   }
@@ -472,6 +621,18 @@ export default function Blocklist() {
       toast.success(t('common.deleted'))
     } catch (err: any) {
       console.error('Failed to delete rule:', err)
+      toast.error(t('common.action_failed'))
+    }
+  }
+
+  const handleBulkDeleteServerRules = async (serverId: number, ruleIds: number[]) => {
+    try {
+      const response = await blocklistApi.deleteServerBulk(serverId, ruleIds)
+      await fetchServerRules(serverId)
+      startSyncToast()
+      toast.success(t('blocklist.deleted_count', { count: response.data.deleted }))
+    } catch (err: any) {
+      console.error('Failed to bulk delete rules:', err)
       toast.error(t('common.action_failed'))
     }
   }
@@ -753,6 +914,7 @@ export default function Blocklist() {
                 <RulesList
                   rules={globalRulesIn}
                   onDelete={handleDeleteGlobalRule}
+                  onBulkDelete={handleBulkDeleteGlobalRules}
                   emptyMessage={t('blocklist.no_rules')}
                 />
               </div>
@@ -771,6 +933,7 @@ export default function Blocklist() {
                 <RulesList
                   rules={globalRulesOut}
                   onDelete={handleDeleteGlobalRule}
+                  onBulkDelete={handleBulkDeleteGlobalRules}
                   emptyMessage={t('blocklist.no_rules')}
                 />
               </div>
@@ -857,6 +1020,7 @@ export default function Blocklist() {
                 <RulesList
                   rules={allowRulesIn}
                   onDelete={handleDeleteAllowRule}
+                  onBulkDelete={handleBulkDeleteAllowRules}
                   emptyMessage={t('blocklist.no_allow_rules')}
                 />
               </div>
@@ -875,6 +1039,7 @@ export default function Blocklist() {
                 <RulesList
                   rules={allowRulesOut}
                   onDelete={handleDeleteAllowRule}
+                  onBulkDelete={handleBulkDeleteAllowRules}
                   emptyMessage={t('blocklist.no_allow_rules')}
                 />
               </div>
@@ -985,6 +1150,7 @@ export default function Blocklist() {
                                     <RulesList
                                       rules={data.in}
                                       onDelete={(ruleId) => handleDeleteServerRule(server.id, ruleId)}
+                                      onBulkDelete={(ruleIds) => handleBulkDeleteServerRules(server.id, ruleIds)}
                                       emptyMessage={t('blocklist.no_server_rules')}
                                     />
                                   </div>
@@ -997,6 +1163,7 @@ export default function Blocklist() {
                                     <RulesList
                                       rules={data.out}
                                       onDelete={(ruleId) => handleDeleteServerRule(server.id, ruleId)}
+                                      onBulkDelete={(ruleIds) => handleBulkDeleteServerRules(server.id, ruleIds)}
                                       emptyMessage={t('blocklist.no_server_rules')}
                                     />
                                   </div>

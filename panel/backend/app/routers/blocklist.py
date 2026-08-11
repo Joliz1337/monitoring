@@ -10,7 +10,7 @@ from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import verify_auth
@@ -68,6 +68,10 @@ class BulkAddRequest(BaseModel):
     ips: list[str] = Field(..., description="List of IP addresses or CIDR notations")
     direction: str = Field("in", pattern="^(in|out)$")
     list_type: str = Field("block", pattern="^(block|allow)$")
+
+
+class BulkDeleteRequest(BaseModel):
+    rule_ids: list[int] = Field(..., min_length=1, max_length=10000, description="Rule IDs to delete")
 
 
 class AddSourceRequest(BaseModel):
@@ -245,6 +249,38 @@ async def delete_global_rule(
     bg.add_task(manager_sync_all)
 
     return {"success": True, "message": "Rule deleted"}
+
+
+async def _bulk_delete_rules(db: AsyncSession, rule_ids: list[int], server_id: Optional[int]) -> int:
+    """Delete rules by ID within scope (global if server_id is None). Returns deleted count."""
+    scope = BlocklistRule.server_id.is_(None) if server_id is None else BlocklistRule.server_id == server_id
+    deleted = 0
+    for start in range(0, len(rule_ids), EXISTING_LOOKUP_CHUNK):
+        chunk = rule_ids[start:start + EXISTING_LOOKUP_CHUNK]
+        result = await db.execute(
+            delete(BlocklistRule).where(and_(BlocklistRule.id.in_(chunk), scope))
+        )
+        deleted += result.rowcount or 0
+    await db.commit()
+    return deleted
+
+
+@router.post("/global/bulk-delete")
+async def delete_global_rules_bulk(
+    request: BulkDeleteRequest,
+    bg: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Delete multiple global blocklist rules. One background sync per call."""
+    ids = list(dict.fromkeys(request.rule_ids))
+    deleted = await _bulk_delete_rules(db, ids, server_id=None)
+
+    if deleted > 0:
+        invalidate_all_server_rules_cache()
+        bg.add_task(manager_sync_all)
+
+    return {"success": True, "deleted": deleted, "not_found": len(ids) - deleted}
 
 
 async def manager_sync_all():
@@ -426,6 +462,29 @@ async def delete_server_rule(
     bg.add_task(manager_sync_single, server_id)
 
     return {"success": True, "message": "Rule deleted"}
+
+
+@router.post("/server/{server_id}/bulk-delete")
+async def delete_server_rules_bulk(
+    server_id: int,
+    request: BulkDeleteRequest,
+    bg: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Delete multiple server-specific rules. One background sync of that server per call."""
+    result = await db.execute(select(Server).where(Server.id == server_id))
+    if not result.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Server not found")
+
+    ids = list(dict.fromkeys(request.rule_ids))
+    deleted = await _bulk_delete_rules(db, ids, server_id=server_id)
+
+    if deleted > 0:
+        invalidate_server_rules_cache(server_id)
+        bg.add_task(manager_sync_single, server_id)
+
+    return {"success": True, "deleted": deleted, "not_found": len(ids) - deleted}
 
 
 # === Blocklist Sources ===

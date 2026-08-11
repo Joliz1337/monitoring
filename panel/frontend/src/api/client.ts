@@ -672,7 +672,9 @@ export const blocklistApi = {
   addGlobalBulk: (ips: string[], is_permanent: boolean = true, direction: BlocklistDirection = 'in', list_type: BlocklistListType = 'block') =>
     api.post('/blocklist/global/bulk', { ips, is_permanent, direction, list_type }),
   deleteGlobal: (id: number) => api.delete(`/blocklist/global/${id}`),
-  
+  deleteGlobalBulk: (rule_ids: number[]) =>
+    api.post<{ success: boolean; deleted: number; not_found: number }>('/blocklist/global/bulk-delete', { rule_ids }),
+
   // Server rules
   getServer: (serverId: number, direction: BlocklistDirection = 'in') => 
     api.get<{ server_id: number; count: number; global_count: number; direction: string; rules: BlocklistRule[] }>(
@@ -682,7 +684,9 @@ export const blocklistApi = {
     api.post(`/blocklist/server/${serverId}`, data),
   deleteServer: (serverId: number, ruleId: number) =>
     api.delete(`/blocklist/server/${serverId}/${ruleId}`),
-  
+  deleteServerBulk: (serverId: number, rule_ids: number[]) =>
+    api.post<{ success: boolean; deleted: number; not_found: number }>(`/blocklist/server/${serverId}/bulk-delete`, { rule_ids }),
+
   // Sources
   getSources: (direction?: BlocklistDirection) =>
     api.get<{ count: number; sources: BlocklistSource[] }>('/blocklist/sources', { params: direction ? { direction } : {} }),
