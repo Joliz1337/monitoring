@@ -1637,6 +1637,41 @@ async def _migrate_remnawave_ephemeral_ips(conn):
         logger.debug(f"anomaly_use_custom_bot add skipped: {e}")
 
 
+async def _migrate_hwid_user_id(conn):
+    """remnawave_hwid_devices: владелец устройства — числовой id вместо uuid.
+
+    В Remnawave 3.x uuid пользователя удалён из API целиком, поэтому связь с кэшем
+    пользователей строится по числовому id. Уже накопленные устройства переносим
+    через кэш; те, чей владелец в кэше не нашёлся, теряются — таблица наполняется
+    заново при ближайшей синхронизации (раз в 30 минут).
+    """
+    result = await conn.execute(text("""
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'remnawave_hwid_devices'
+    """))
+    columns = {row[0] for row in result.fetchall()}
+    if not columns or "user_id" in columns:
+        return
+
+    try:
+        await conn.execute(text('ALTER TABLE remnawave_hwid_devices ADD COLUMN "user_id" INTEGER'))
+        await conn.execute(text("""
+            UPDATE remnawave_hwid_devices d SET user_id = c.email
+            FROM remnawave_user_cache c WHERE c.uuid = d.user_uuid
+        """))
+        await conn.execute(text("DELETE FROM remnawave_hwid_devices WHERE user_id IS NULL"))
+        await conn.execute(text('ALTER TABLE remnawave_hwid_devices ALTER COLUMN "user_id" SET NOT NULL'))
+        await conn.execute(text(
+            'CREATE INDEX IF NOT EXISTS "ix_remnawave_hwid_devices_user_id" '
+            'ON remnawave_hwid_devices (user_id)'
+        ))
+        await conn.execute(text('ALTER TABLE remnawave_hwid_devices DROP COLUMN "user_uuid"'))
+        logger.info("Migrated remnawave_hwid_devices.user_uuid -> user_id")
+    except Exception as e:
+        logger.error(f"Could not migrate remnawave_hwid_devices to user_id: {e}")
+        raise
+
+
 async def _migrate_yandex_cloud_billing(conn):
     result = await conn.execute(text("""
         SELECT column_name FROM information_schema.columns
@@ -1938,6 +1973,7 @@ async def init_db():
         await _migrate_remnawave_api_collection(conn)
         await _migrate_remnawave_anomaly_settings(conn)
         await _migrate_remnawave_ephemeral_ips(conn)
+        await _migrate_hwid_user_id(conn)
         await _migrate_yandex_cloud_billing(conn)
         await _migrate_wildcard_ssl(conn)
         await _migrate_aggregated_metrics_unique(conn)

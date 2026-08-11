@@ -11,6 +11,7 @@
   "event": "torrent_ban_scheduled",
   "ip": "1.2.3.4",
   "user": {
+    "id": 1337,
     "uuid": "d6ac70b3-...",
     "short_uuid": "aB3xK9",
     "username": "user123",
@@ -46,7 +47,7 @@
 
 - `event` — всегда `torrent_ban_scheduled`. В тестовом запросе дополнительно приходит `"test": true`.
 - `ip` — IP-адрес, который будет забанен.
-- `user` — пользователь Remnawave: `uuid`, `short_uuid`, `username`, `telegram_id` (подтягивается из кэша пользователей, может быть `null`).
+- `user` — пользователь Remnawave: `id` (числовой идентификатор, основной), `uuid`, `short_uuid`, `username`, `telegram_id` (подтягиваются из кэша пользователей, могут быть `null`). Начиная с Remnawave 3.0 у пользователя нет uuid — в поле придёт `null`, привязывайтесь к `id`.
 - `node` — нода Remnawave, где замечен торрент: `name` и `country`.
 - `detection` — детали детекта из xray: протокол, сеть, `source`/`destination` (ip:порт), инбаунд/аутбаунд и время обнаружения.
 - `remnawave_block` — локальный бан tblocker на самой ноде Remnawave: `blocked`, `block_duration_seconds`, `will_unblock_at`. С баном панели не связан и может отличаться по длительности.

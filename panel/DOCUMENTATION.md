@@ -1,4 +1,4 @@
-# Monitoring Panel v10.58.0
+# Monitoring Panel v10.59.0
 
 Веб-панель для мониторинга серверов. Собирает метрики с нод с настраиваемым интервалом (по умолчанию 10 сек) и хранит историю локально.
 
@@ -1166,7 +1166,7 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 - **xray_stats** — `PK(email, source_ip)` → count, last_seen (эфемерные данные: полностью заменяются каждый цикл сбора через DELETE ALL + INSERT)
 - **remnawave_user_cache** — кэш пользователей (обновляется каждые 30 минут); поля `sub_last_user_agent` и `sub_last_opened_at` удалены в Remnawave Panel 2.7.0
 - **remnawave_settings** — настройки подключения; поле `anomaly_use_custom_bot` (Boolean) — использовать отдельного бота для аномалий или бот из AlertSettings; поля `traffic_threshold_gb` (Float, default 30.0) и `traffic_confirm_count` (Integer, default 2) — настройки детектора трафик-аномалий; `anomaly_enabled` (Boolean, default FALSE) — мастер-переключатель всех проверок аномалий; `anomaly_ip_enabled`/`anomaly_hwid_enabled`/`anomaly_ua_enabled`/`anomaly_devdata_enabled` (Boolean, default TRUE) — пер-тип переключатели четырёх проверок ниже, NULL (строка до миграции) трактуется как включено; настраиваемые параметры проверок — `anomaly_ip_margin` (Integer, default 2), `anomaly_ip_confirm_count` (Integer, default 5), `anomaly_asn_margin` (Integer, default 0), `anomaly_ip_smart_enabled` (Boolean, default TRUE) и `anomaly_ip_smart_traffic_gb` (Float, default 20.0) — умное определение по суточному трафику, `anomaly_ua_patterns` (Text, nullable — NULL/пусто = встроенный список известных клиентов), см. ниже
-- **remnawave_hwid_devices** — HWID-устройства из Remnawave API (user_uuid, hwid, platform, created_at)
+- **remnawave_hwid_devices** — HWID-устройства из Remnawave API (user_id, hwid, platform, created_at); `user_id` (Integer, индекс `ix_remnawave_hwid_devices_user_id`) — числовой id пользователя, единственный идентификатор владельца устройства (начиная с Remnawave 3.x uuid пользователя в API не существует вовсе)
 - **remnawave_ip_anomaly_state** — персистентное состояние IP-аномалии по пользователю (email, trigger_count, known_ips JSON, last_notified_at, last_message_id, last_chat_id); создаётся автоматически через `Base.metadata.create_all`, отдельная миграция не требуется
 
 **Принцип работы:**
@@ -1180,7 +1180,13 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 
 **Эфемерные IP:** данные IP не накапливаются. Каждый цикл сбора полностью заменяет таблицу `xray_stats`. Период-фильтр на эндпоинтах отсутствует — данные всегда актуальные. Автоочистка (`_cleanup_loop`) не затрагивает `xray_stats`.
 
-**Совместимость с Remnawave Panel 2.8.0:** `GET /api/hwid/devices` возвращает поле `userId` (числовой id пользователя) вместо `userUuid`. `_sync_hwid_devices()` резолвит uuid через кэш `remnawave_user_cache` (колонка `email` хранит числовой id Remnawave) с fallback на `userUuid` для более старых версий Remnawave; если часть устройств не удалось смаппить (кэш ещё не прогрет) — warning в лог. Поле `trafficLimitBytes` в схеме пользователя — `number` (не `integer`), приводится к `int` статическим хелпером `_as_int()` перед записью в BIGINT-колонку `traffic_limit_bytes`.
+**Поддержка версий Remnawave Panel API (2.8.x и 3.x):** клиент `remnawave_api.py` определяет версию API панели сам и кэширует её по адресу панели (модульный словарь `_api_version_by_url`, ключ — URL). Детект приоритетно идёт по `GET /api/nodes` — у ноды в 3.x есть числовое поле `id`, в 2.x его нет; если нод ещё нет, запасной признак — `GET /api/users`: в 3.x поле `uuid` у пользователя удалено из API целиком. Совсем пустая панель (ни нод, ни пользователей) считается 3.x. `get_all_nodes()` обновляет кэш версии при каждом своём вызове, поэтому отдельный запрос на детект обычно не требуется. Для путей, разошедшихся между версиями (`_versioned_request()`), 404 на предполагаемой версии не считается ошибкой — запрос повторяется по альтернативному пути, и кэш переустанавливается по факту успеха (панель могла обновиться между двумя вызовами клиента).
+
+Переехавшие в 3.x пути: `POST /api/ip-control/fetch-users-ips/{nodeUuid}` → `POST /api/connections/by-node/{nodeUuid}`; `GET /api/ip-control/fetch-users-ips/result/{jobId}` → `GET /api/connections/by-node/{jobId}`.
+
+Идентификатор пользователя в 3.x — только числовой `id` (поле `uuid` из API удалено целиком; в 2.x есть оба). Отсюда различия в клиенте: `delete_all_user_hwid_devices()` шлёт `{"userId": ...}` на 3.x и `{"userUuid": ...}` на 2.x; `get_user_traffic_bytes()` на 3.x ходит по числовому id (`/api/bandwidth-stats/users/{userId}`, суточная гранулярность — точный часовой legacy-путь в 3.x убран), на 2.x — прежняя пара попыток (точный legacy-путь по uuid, затем суточный по uuid); `truncate_torrent_blocker_reports()` ничего не возвращает — в 3.x `DELETE` отвечает `204` без тела, в 2.x — `200` с телом, которое никому не нужно.
+
+`GET /api/hwid/devices` отдаёт `userId` (числовой id, начиная с 2.8.0) вместо `userUuid` (версии старше 2.8.0). `_sync_hwid_devices()` берёт `userId` из ответа напрямую, а для более старых версий переводит `userUuid` в id через кэш `remnawave_user_cache` (колонка `email` хранит числовой id Remnawave); если ни одно устройство в цикле не удалось смаппить — синхронизация пропускается целиком (иначе следующий за вставкой DELETE вычистил бы таблицу дочиста). Поле `trafficLimitBytes` в схеме пользователя — `number` (не `integer`), приводится к `int` статическим хелпером `_as_int()` перед записью в BIGINT-колонку `traffic_limit_bytes`.
 
 **Telegram-бот для аномалий:** если `anomaly_use_custom_bot=False` (по умолчанию), используется bot_token и chat_id из `AlertSettings`. Если `True` — используются отдельные поля в `RemnawaveSettings`.
 
@@ -1239,7 +1245,7 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 - `panel/backend/app/services/xray_stats_collector.py` — сбор IP через Remnawave Panel API + HWID-синхронизация; IP-блок `_check_anomalies`: счётчик/новые IP/reply-threading/анти-спам, умное определение по трафику (`_user_daily_traffic`) перед ASN-блоком; хендлер `handle_rw_reset` для callback `rw_reset:ip:{email}`; оптимизация памяти при анализе аномалий (см. ниже); пер-тип тумблеры пропускают соответствующий SQL-запрос, если проверка выключена
 - `panel/backend/app/services/ip_anomaly_state.py` — репозиторий состояния IP-аномалий (`get_or_create`, `record_notification`, `reset`), JSON-хелперы (`parse_ips`, `dump_ips`), `seconds_since_last`
 - `panel/backend/app/services/known_clients.py` — реестр известных VPN-клиентов для проверки User-Agent на масках (`*`/`?`): `DEFAULT_UA_PATTERNS`, `default_ua_text()`, `build_ua_pattern(raw)`
-- `panel/backend/app/services/remnawave_api.py` — клиент: `get_all_nodes()`, `poll_users_ips()`, `get_all_hwid_devices_paginated()`, `get_user_traffic_bytes()` (суточный расход трафика пользователя, для умного определения IP-аномалий); модульная функция `sum_usage_bytes()` разбирает ответ bandwidth-stats API
+- `panel/backend/app/services/remnawave_api.py` — клиент: `get_all_nodes()`, `poll_users_ips()`, `get_all_hwid_devices_paginated()`, `get_user_traffic_bytes()` (суточный расход трафика пользователя, для умного определения IP-аномалий); `get_api_version()` + `_versioned_request()` — детект и кэш версии API панели (2.8.x/3.x), см. «Поддержка версий Remnawave Panel API» выше; модульная функция `sum_usage_bytes()` разбирает ответ bandwidth-stats API
 - `panel/backend/app/services/telegram_bot.py` — приватный `_send() -> Message | None` с поддержкой `reply_to_message_id`; `send_message` сохраняет bool-контракт; `send_message_returning_id() -> int | None`
 - `panel/backend/app/models.py` — модель `RemnawaveIpAnomalyState`
 - `panel/frontend/src/pages/Remnawave.tsx` — страница (overview, users, settings)
@@ -2319,7 +2325,7 @@ SSE-события: `note_update` — `{"content": "...", "version": N}`, `tasks
 **Принцип работы с вебхуком (greyperiod-бан):**
 
 1. Сервис обнаруживает IP с торрент-трафиком и формирует список `BanTarget`.
-2. Если `webhook_enabled=True` и URL задан — обогащает цели (`_enrich_targets`): дотягивает `telegram_id` и `short_uuid` из таблицы-кэша `remnawave_user_cache` по UUID пользователя.
+2. Если `webhook_enabled=True` и URL задан — обогащает цели (`_enrich_targets`): дотягивает `uuid`, `telegram_id` и `short_uuid` из таблицы-кэша `remnawave_user_cache` по числовому id пользователя (`record.userId` — есть в отчёте Remnawave одинаково и в 2.8.x, и в 3.x).
 3. Отправляет POST-вебхуки на внешний URL параллельно через `_send_webhooks` (concurrency 20, `WEBHOOK_CONCURRENCY`).
 4. Ждёт `webhook_delay_seconds` секунд — грейс-период, во время которого пользователь может остановить торрент.
 5. Банит IP на всех нодах (`_send_to_nodes`) — бан идёт через ipset, поэтому ноды с закрытым доменом `ipset` (`NODE_CAPABILITIES`) отфильтровываются заранее и в бан не участвуют.
@@ -2341,11 +2347,14 @@ SSE-события: `note_update` — `{"content": "...", "version": N}`, `tasks
 
 `detection` и `remnawave_block` заполняются из `xrayReport`/`actionReport` репорта Remnawave (`_extract_ban_targets`) — любое поле внутри них может быть `null`, если Remnawave его не передал. `remnawave_block` описывает локальный бан tblocker на самой ноде Remnawave — он не связан с баном панели (`ban_duration_seconds`/`ban_at`) и может отличаться по длительности.
 
+Кандидат на бан определяется числовым `userId` из отчёта Remnawave (поле есть одинаково в 2.8.x и в 3.x); `user.id` в вебхуке — тот же id, заполнен всегда. `user.uuid` подтягивается из кэша `remnawave_user_cache` ради совместимости с получателями вебхука, ожидающими это поле — на панели 3.x, где uuid в API не существует вовсе, придёт `null`.
+
 ```json
 {
   "event": "torrent_ban_scheduled",
   "ip": "1.2.3.4",
   "user": {
+    "id": 1337,
     "uuid": "...",
     "short_uuid": "...",
     "username": "...",

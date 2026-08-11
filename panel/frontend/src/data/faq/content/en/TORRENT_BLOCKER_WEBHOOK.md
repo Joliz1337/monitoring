@@ -11,6 +11,7 @@ Before banning, the panel sends a POST request (HTTPS only) to your service — 
   "event": "torrent_ban_scheduled",
   "ip": "1.2.3.4",
   "user": {
+    "id": 1337,
     "uuid": "d6ac70b3-...",
     "short_uuid": "aB3xK9",
     "username": "user123",
@@ -46,7 +47,7 @@ Before banning, the panel sends a POST request (HTTPS only) to your service — 
 
 - `event` — always `torrent_ban_scheduled`. A test request also carries `"test": true`.
 - `ip` — the address about to be banned.
-- `user` — the Remnawave user: `uuid`, `short_uuid`, `username`, `telegram_id` (pulled from the user cache, may be `null`).
+- `user` — the Remnawave user: `id` (the numeric identifier, primary), `uuid`, `short_uuid`, `username`, `telegram_id` (pulled from the user cache, may be `null`). Remnawave 3.0 and later has no user uuid at all — the field arrives as `null`, so bind to `id`.
 - `node` — the Remnawave node where the torrent was seen: `name` and `country`.
 - `detection` — detection details from xray: protocol, network, `source`/`destination` (ip:port), inbound/outbound and detection time.
 - `remnawave_block` — the local tblocker ban on the Remnawave node itself: `blocked`, `block_duration_seconds`, `will_unblock_at`. Unrelated to the panel's ban and may differ in length.

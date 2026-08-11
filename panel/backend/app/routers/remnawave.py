@@ -351,23 +351,21 @@ async def get_top_users(
     cache_result = await db.execute(select(RemnawaveUserCache).where(RemnawaveUserCache.email.in_(emails))) if emails else None
     cache_map = {u.email: u for u in cache_result.scalars().all()} if cache_result else {}
 
-    device_counts: dict[str, int] = {}
-    if cache_map:
-        user_uuids = [u.uuid for u in cache_map.values() if u.uuid]
-        if user_uuids:
-            dev_result = await db.execute(
-                select(
-                    RemnawaveHwidDevice.user_uuid,
-                    sql_func.count().label("cnt"),
-                ).where(RemnawaveHwidDevice.user_uuid.in_(user_uuids))
-                .group_by(RemnawaveHwidDevice.user_uuid)
-            )
-            device_counts = {row[0]: row[1] for row in dev_result.all()}
+    device_counts: dict[int, int] = {}
+    if emails:
+        dev_result = await db.execute(
+            select(
+                RemnawaveHwidDevice.user_id,
+                sql_func.count().label("cnt"),
+            ).where(RemnawaveHwidDevice.user_id.in_(emails))
+            .group_by(RemnawaveHwidDevice.user_id)
+        )
+        device_counts = {row[0]: row[1] for row in dev_result.all()}
 
     users = []
     for email, unique_ips in rows:
         cached = cache_map.get(email)
-        dev_count = device_counts.get(cached.uuid, 0) if cached and cached.uuid else 0
+        dev_count = device_counts.get(email, 0)
         users.append({
             "email": email,
             "username": cached.username if cached else None,
@@ -408,23 +406,21 @@ async def get_user_stats(
         for source_ip, last_seen in rows
     ]
 
-    devices = []
-    if cached and cached.uuid:
-        dev_result = await db.execute(
-            select(RemnawaveHwidDevice)
-            .where(RemnawaveHwidDevice.user_uuid == cached.uuid)
-            .order_by(RemnawaveHwidDevice.created_at.desc())
-        )
-        devices = [
-            {
-                "hwid": d.hwid,
-                "platform": d.platform,
-                "os_version": d.os_version,
-                "device_model": d.device_model,
-                "created_at": d.created_at.isoformat() if d.created_at else None,
-            }
-            for d in dev_result.scalars().all()
-        ]
+    dev_result = await db.execute(
+        select(RemnawaveHwidDevice)
+        .where(RemnawaveHwidDevice.user_id == email)
+        .order_by(RemnawaveHwidDevice.created_at.desc())
+    )
+    devices = [
+        {
+            "hwid": d.hwid,
+            "platform": d.platform,
+            "os_version": d.os_version,
+            "device_model": d.device_model,
+            "created_at": d.created_at.isoformat() if d.created_at else None,
+        }
+        for d in dev_result.scalars().all()
+    ]
 
     return {
         "email": email,
@@ -504,20 +500,20 @@ async def get_anomalies(
     ip_confirm = s.anomaly_ip_confirm_count if s and s.anomaly_ip_confirm_count else 5
     ua_pattern = build_ua_pattern(s.anomaly_ua_patterns if s else None)
 
-    # HWID устройств на пользователя (по uuid)
+    # HWID устройств на пользователя (по числовому id Remnawave)
     hwid_counts_q = (
         select(
-            RemnawaveHwidDevice.user_uuid,
+            RemnawaveHwidDevice.user_id,
             sql_func.count().label("device_count"),
         )
-        .group_by(RemnawaveHwidDevice.user_uuid)
+        .group_by(RemnawaveHwidDevice.user_id)
     )
     hwid_rows = (await db.execute(hwid_counts_q)).all() if hwid_check_on else []
-    hwid_by_uuid: dict[str, int] = {row[0]: row[1] for row in hwid_rows}
+    hwid_by_user_id: dict[int, int] = {row[0]: row[1] for row in hwid_rows}
 
     # Все устройства для проверки UA и данных
     all_devices_q = select(
-        RemnawaveHwidDevice.user_uuid,
+        RemnawaveHwidDevice.user_id,
         RemnawaveHwidDevice.hwid,
         RemnawaveHwidDevice.user_agent,
         RemnawaveHwidDevice.platform,
@@ -530,7 +526,6 @@ async def get_anomalies(
     cache_result = await db.execute(select(RemnawaveUserCache))
     cache_list = cache_result.scalars().all()
     cache_by_email: dict[int, any] = {u.email: u for u in cache_list}
-    cache_by_uuid: dict[str, any] = {u.uuid: u for u in cache_list if u.uuid}
 
     anomalies = []
 
@@ -561,8 +556,8 @@ async def get_anomalies(
         })
 
     # 2) HWID devices > лимит (только ACTIVE)
-    for uuid, device_count in hwid_by_uuid.items():
-        cached = cache_by_uuid.get(uuid)
+    for user_id, device_count in hwid_by_user_id.items():
+        cached = cache_by_email.get(user_id)
         if not cached or cached.status != 'ACTIVE':
             continue
         if cached.email in ignore_all or cached.email in ignore_hwid:
@@ -584,8 +579,8 @@ async def get_anomalies(
 
     # 3) Неизвестные user-agent
     # 5) Невалидные данные устройства (платформа/версия/модель)
-    for user_uuid, hwid, user_agent, platform, device_model, os_version in all_devices:
-        cached = cache_by_uuid.get(user_uuid)
+    for device_user_id, hwid, user_agent, platform, device_model, os_version in all_devices:
+        cached = cache_by_email.get(device_user_id)
         if not cached or cached.status != 'ACTIVE':
             continue
         if cached.email in ignore_all or cached.email in ignore_hwid:

@@ -15,6 +15,29 @@ import aiohttp
 
 logger = logging.getLogger(__name__)
 
+API_V2 = 2
+API_V3 = 3
+
+# Версия API панели живёт дольше клиента: клиент создаётся на один вызов,
+# а детект стоит запроса. Ключ — адрес панели, значение — API_V2/API_V3.
+_api_version_by_url: dict[str, int] = {}
+
+
+def api_version_from_nodes(nodes: list) -> Optional[int]:
+    """Версия API по ответу /api/nodes: в 3.x у ноды появилось числовое поле id."""
+    for node in nodes:
+        if isinstance(node, dict):
+            return API_V3 if "id" in node else API_V2
+    return None
+
+
+def api_version_from_users(users: list) -> Optional[int]:
+    """Версия API по ответу /api/users: в 3.x поле uuid у пользователя удалено."""
+    for user in users:
+        if isinstance(user, dict):
+            return API_V2 if "uuid" in user else API_V3
+    return None
+
 
 def _sum_totals(rows: list) -> int:
     total = 0
@@ -178,38 +201,7 @@ class RemnawaveAPI:
         
         return result
     
-    async def _request(self, method: str, endpoint: str, params: dict = None, retries: int = 3) -> dict:
-        if not self.base_url:
-            raise RemnawaveAPIError("API URL not configured")
-
-        url = f"{self.base_url}{endpoint}"
-        last_error = None
-
-        for attempt in range(retries):
-            try:
-                session = await self._get_session()
-                async with session.request(method, url, params=params) as response:
-                    response_text = await response.text()
-                    try:
-                        response_data = await response.json() if response_text else {}
-                    except Exception:
-                        response_data = {'raw_response': response_text}
-
-                    if response.status >= 400:
-                        error_msg = response_data.get('message', f'HTTP {response.status}')
-                        raise RemnawaveAPIError(error_msg, status_code=response.status)
-
-                    return response_data
-
-            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                last_error = e
-                if attempt < retries - 1:
-                    await asyncio.sleep(2 * (attempt + 1))
-                    continue
-
-        raise RemnawaveAPIError(f"Request failed: {last_error}")
-    
-    async def _request_json(self, method: str, endpoint: str, params: dict = None, json_body: dict = None, retries: int = 3) -> dict:
+    async def _request(self, method: str, endpoint: str, params: dict = None, json_body: dict = None, retries: int = 3) -> dict:
         if not self.base_url:
             raise RemnawaveAPIError("API URL not configured")
 
@@ -246,17 +238,86 @@ class RemnawaveAPI:
 
         raise RemnawaveAPIError(f"Request failed: {last_error}")
 
+    async def get_api_version(self) -> int:
+        cached = _api_version_by_url.get(self.base_url)
+        if cached:
+            return cached
+        version = await self._probe_api_version()
+        _api_version_by_url[self.base_url] = version
+        return version
+
+    async def _probe_api_version(self) -> int:
+        """Панель 3.x адресует пользователей числовым id, часть путей переехала.
+
+        Ноды выдают версию сами (в 3.x у них появился числовой id), пользователи —
+        запасной признак для установки, где нод ещё нет. Совсем пустая панель
+        считается новой: старых путей в ней всё равно нет.
+        """
+        try:
+            nodes = (await self._request("GET", "/api/nodes", retries=1)).get("response") or []
+            version = api_version_from_nodes(nodes)
+            if version:
+                return version
+        except RemnawaveAPIError as e:
+            logger.debug(f"API version probe by nodes failed: {e}")
+
+        try:
+            response = (await self._request(
+                "GET", "/api/users", params={"start": 0, "size": 1}, retries=1
+            )).get("response") or {}
+            version = api_version_from_users(response.get("users") or [])
+            if version:
+                return version
+        except RemnawaveAPIError as e:
+            logger.debug(f"API version probe by users failed: {e}")
+
+        return API_V3
+
+    async def _versioned_request(self, method: str, v3_endpoint: str, v2_endpoint: str,
+                                 params: dict = None, retries: int = 3) -> dict:
+        """Запрос по пути, который в 3.x переехал.
+
+        Кэш версии обновляется по факту успеха: панель могли обновить между вызовами,
+        и 404 на пути — единственный достоверный сигнал, что версия угадана неверно.
+        """
+        version = await self.get_api_version()
+        fallback = API_V2 if version == API_V3 else API_V3
+
+        for candidate in (version, fallback):
+            endpoint = v3_endpoint if candidate == API_V3 else v2_endpoint
+            try:
+                result = await self._request(method, endpoint, params=params, retries=retries)
+            except RemnawaveAPIError as e:
+                if e.status_code != 404 or candidate == fallback:
+                    raise
+                logger.info(f"Remnawave: {endpoint} returned 404, retrying as API v{fallback}")
+                continue
+            _api_version_by_url[self.base_url] = candidate
+            return result
+
     async def get_all_nodes(self) -> list[dict]:
         result = await self._request("GET", "/api/nodes")
-        return result.get("response", [])
+        nodes = result.get("response", [])
+        version = api_version_from_nodes(nodes)
+        if version:
+            _api_version_by_url[self.base_url] = version
+        return nodes
 
     async def fetch_users_ips(self, node_uuid: str) -> str:
         """Initiate IP fetch job for all users on a node. Returns jobId."""
-        result = await self._request_json("POST", f"/api/ip-control/fetch-users-ips/{node_uuid}")
+        result = await self._versioned_request(
+            "POST",
+            f"/api/connections/by-node/{node_uuid}",
+            f"/api/ip-control/fetch-users-ips/{node_uuid}",
+        )
         return result.get("response", {}).get("jobId", "")
 
     async def get_fetch_users_ips_result(self, job_id: str) -> dict:
-        result = await self._request("GET", f"/api/ip-control/fetch-users-ips/result/{job_id}")
+        result = await self._versioned_request(
+            "GET",
+            f"/api/connections/by-node/{job_id}",
+            f"/api/ip-control/fetch-users-ips/result/{job_id}",
+        )
         return result.get("response", {})
 
     async def poll_users_ips(self, node_uuid: str, timeout: int = 60) -> list[dict]:
@@ -286,9 +347,16 @@ class RemnawaveAPI:
 
         raise RemnawaveAPIError(f"IP fetch timeout ({timeout}s) for node {node_uuid}")
 
-    async def delete_all_user_hwid_devices(self, user_uuid: str) -> bool:
+    async def delete_all_user_hwid_devices(self, user_id: int, user_uuid: Optional[str] = None) -> bool:
         """POST /api/hwid/devices/delete-all — очистить все HWID устройства пользователя."""
-        result = await self._request_json("POST", "/api/hwid/devices/delete-all", json_body={"userUuid": user_uuid})
+        if await self.get_api_version() == API_V3:
+            body = {"userId": int(user_id)}
+        elif user_uuid:
+            body = {"userUuid": user_uuid}
+        else:
+            raise RemnawaveAPIError(f"User {user_id} has no uuid — Remnawave 2.x needs it to clear HWID devices")
+
+        result = await self._request("POST", "/api/hwid/devices/delete-all", json_body=body)
         return bool(result.get("response"))
 
     async def get_hwid_devices(self, start: int = 0, size: int = 200) -> dict:
@@ -395,24 +463,29 @@ class RemnawaveAPI:
 
         return all_users
 
-    async def get_user_traffic_bytes(self, user_uuid: str, hours: int = 24) -> Optional[int]:
+    async def get_user_traffic_bytes(self, user_id: int, user_uuid: Optional[str] = None, hours: int = 24) -> Optional[int]:
         """Расход трафика пользователя за последние `hours` часов, байты (None — данных нет).
 
-        Путь эндпоинта менялся между версиями Remnawave, поэтому пробуем оба:
-        сначала legacy с плоским списком, затем сгруппированный по нодам. У второго
-        гранулярность суточная, окно получается шире запрошенного — это оценка сверху,
-        она может только не подавить уведомление, но не подавит лишнего.
+        В 3.x эндпоинт адресуется числовым id, а legacy-путь с точным окном удалён.
+        У оставшегося гранулярность суточная, окно получается шире запрошенного — это
+        оценка сверху, она может только не подавить уведомление, но не подавит лишнего.
         """
         end = datetime.now(timezone.utc)
         start = end - timedelta(hours=hours)
         iso = "%Y-%m-%dT%H:%M:%SZ"
+        by_day = {"start": start.strftime("%Y-%m-%d"), "end": end.strftime("%Y-%m-%d"), "topNodesLimit": 100}
 
-        attempts = (
-            (f"/api/bandwidth-stats/users/{user_uuid}/legacy",
-             {"start": start.strftime(iso), "end": end.strftime(iso)}),
-            (f"/api/bandwidth-stats/users/{user_uuid}",
-             {"start": start.strftime("%Y-%m-%d"), "end": end.strftime("%Y-%m-%d"), "topNodesLimit": 100}),
-        )
+        if await self.get_api_version() == API_V3:
+            attempts = ((f"/api/bandwidth-stats/users/{int(user_id)}", by_day),)
+        elif user_uuid:
+            attempts = (
+                (f"/api/bandwidth-stats/users/{user_uuid}/legacy",
+                 {"start": start.strftime(iso), "end": end.strftime(iso)}),
+                (f"/api/bandwidth-stats/users/{user_uuid}", by_day),
+            )
+        else:
+            logger.warning(f"Bandwidth stats skipped: user {user_id} has no uuid")
+            return None
 
         for endpoint, params in attempts:
             try:
@@ -432,9 +505,9 @@ class RemnawaveAPI:
         result = await self._request("GET", "/api/node-plugins/torrent-blocker", params={"start": start, "size": size})
         return result.get("response", {})
 
-    async def truncate_torrent_blocker_reports(self) -> dict:
-        result = await self._request("DELETE", "/api/node-plugins/torrent-blocker/truncate")
-        return result.get("response", {})
+    async def truncate_torrent_blocker_reports(self) -> None:
+        """В 3.x DELETE отвечает 204 без тела, в 2.x — 200 с телом; тело никому не нужно."""
+        await self._request("DELETE", "/api/node-plugins/torrent-blocker/truncate")
 
 def get_remnawave_api(api_url: str, api_token: str, cookie_secret: Optional[str] = None) -> RemnawaveAPI:
     return RemnawaveAPI(api_url, api_token, cookie_secret)

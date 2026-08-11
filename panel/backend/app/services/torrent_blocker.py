@@ -37,6 +37,7 @@ LIVE_THRESHOLD_SECONDS = 300
 class BanTarget:
     """IP-кандидат на бан вместе с данными пользователя для вебхук-уведомления."""
     ip: str
+    user_id: Optional[int] = None
     user_uuid: Optional[str] = None
     username: Optional[str] = None
     node_name: Optional[str] = None
@@ -139,7 +140,7 @@ class TorrentBlockerService:
             node = record.get("node", {})
             targets.append(BanTarget(
                 ip=ip_str,
-                user_uuid=user.get("uuid") or None,
+                user_id=record.get("userId"),
                 username=user.get("username") or None,
                 node_name=node.get("name") or None,
                 node_country=node.get("countryCode") or None,
@@ -162,24 +163,30 @@ class TorrentBlockerService:
         return targets
 
     async def _enrich_targets(self, targets: list[BanTarget]):
-        """Подтянуть telegram_id и shortUuid пользователей из кэша Remnawave по uuid."""
-        uuids = {t.user_uuid for t in targets if t.user_uuid}
-        if not uuids:
+        """Подтянуть данные пользователей из кэша Remnawave по числовому id.
+
+        Поле `uuid` в вебхуке осталось ради совместимости с получателями: в Remnawave 3.x
+        его больше нет ни в одном ответе API, и подставить его неоткуда — там будет null.
+        """
+        user_ids = {t.user_id for t in targets if t.user_id}
+        if not user_ids:
             return
         async with async_session() as db:
             rows = (await db.execute(
                 select(
+                    RemnawaveUserCache.email,
                     RemnawaveUserCache.uuid,
                     RemnawaveUserCache.telegram_id,
                     RemnawaveUserCache.short_uuid,
                     RemnawaveUserCache.username,
-                ).where(RemnawaveUserCache.uuid.in_(uuids))
+                ).where(RemnawaveUserCache.email.in_(user_ids))
             )).all()
-        by_uuid = {row.uuid: row for row in rows}
+        by_user_id = {row.email: row for row in rows}
         for target in targets:
-            row = by_uuid.get(target.user_uuid)
+            row = by_user_id.get(target.user_id)
             if not row:
                 continue
+            target.user_uuid = row.uuid
             target.telegram_id = row.telegram_id
             target.short_uuid = target.short_uuid or row.short_uuid
             target.username = target.username or row.username
@@ -203,6 +210,7 @@ class TorrentBlockerService:
                 "event": "torrent_ban_scheduled",
                 "ip": target.ip,
                 "user": {
+                    "id": target.user_id,
                     "uuid": target.user_uuid,
                     "short_uuid": target.short_uuid,
                     "username": target.username,
@@ -450,6 +458,7 @@ class TorrentBlockerService:
             "test": True,
             "ip": "203.0.113.10",
             "user": {
+                "id": 1337,
                 "uuid": "00000000-0000-0000-0000-000000000000",
                 "short_uuid": "testshort",
                 "username": "test_user",
