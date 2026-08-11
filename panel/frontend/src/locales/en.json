@@ -43,6 +43,7 @@
     "load": "Load",
     "memory": "Memory",
     "no_data": "No data available",
+    "no_results": "Nothing found",
     "refresh_data": "Refresh data",
     "details": "Details",
     "hide": "Hide",
