@@ -12,6 +12,7 @@ Runnable with plain stdlib:  python -m unittest discover -s node/tests
 должно накапливать блоки или сохранять привязку после смены тарифа.
 """
 
+import contextlib
 import os
 import sys
 import unittest
@@ -164,9 +165,13 @@ class ResolveTests(unittest.TestCase):
 
 
 class RenderTests(unittest.TestCase):
-    def _apply(self, content, cpu_count=8, network=(0, 1), enabled=True):
+    def _apply(self, content, cpu_count=8, network=(0, 1), enabled=True, queues=1):
+        # rx_queue_count и default_interface обязаны быть замоканы: без этого тест
+        # читает /sys живой машины и на хосте с многоочередной картой уходит в отказ.
         with mock.patch.object(cpu_affinity, "detect_network_cpus", return_value=set(network)), \
              mock.patch.object(cpu_affinity, "_irqbalance_running", return_value=False), \
+             mock.patch.object(cpu_affinity, "default_interface", return_value="ens3"), \
+             mock.patch.object(cpu_affinity, "rx_queue_count", return_value=queues), \
              mock.patch.object(cpu_affinity, "is_enabled", return_value=enabled):
             return cpu_affinity.apply(content, cpu_count)
 
@@ -309,17 +314,26 @@ class _FakeExecutor:
 
 
 class ContainerTests(unittest.IsolatedAsyncioTestCase):
-    def _patches(self, enabled=True, network=(0, 1)):
-        return (
+    @contextlib.contextmanager
+    def _patched(self, enabled=True, network=(0, 1), queues=1):
+        """Полная изоляция от хоста: без моков очередей и интерфейса тест читает
+        /sys живой машины и на многоочередной карте получает отказ."""
+        patches = (
             mock.patch.object(cpu_affinity, "is_enabled", return_value=enabled),
             mock.patch.object(cpu_affinity, "detect_network_cpus", return_value=set(network)),
             mock.patch.object(cpu_affinity, "_irqbalance_running", return_value=False),
             mock.patch.object(cpu_affinity, "container_names", return_value=["remnanode"]),
+            mock.patch.object(cpu_affinity, "default_interface", return_value="ens3"),
+            mock.patch.object(cpu_affinity, "rx_queue_count", return_value=queues),
         )
+        with contextlib.ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            yield
 
     async def test_pins_container_when_cpuset_differs(self):
         ex = _FakeExecutor({"remnanode": ""})
-        with self._patches()[0], self._patches()[1], self._patches()[2], self._patches()[3]:
+        with self._patched():
             changed = await cpu_affinity.sync_containers(ex, 8)
         self.assertEqual(changed, {"remnanode": "2,3,4,5,6,7"})
         self.assertEqual(len(ex.updates), 1)
@@ -327,7 +341,7 @@ class ContainerTests(unittest.IsolatedAsyncioTestCase):
     async def test_no_update_when_already_correct(self):
         """Проверка идёт по таймеру — лишний docker update каждые 5 минут не нужен."""
         ex = _FakeExecutor({"remnanode": "2,3,4,5,6,7"})
-        with self._patches()[0], self._patches()[1], self._patches()[2], self._patches()[3]:
+        with self._patched():
             changed = await cpu_affinity.sync_containers(ex, 8)
         self.assertEqual(changed, {})
         self.assertEqual(ex.updates, [])
@@ -335,15 +349,14 @@ class ContainerTests(unittest.IsolatedAsyncioTestCase):
     async def test_missing_container_is_skipped(self):
         """На ноде без Remnawave контейнера просто нет — это не ошибка."""
         ex = _FakeExecutor({})
-        with self._patches()[0], self._patches()[1], self._patches()[2], self._patches()[3]:
+        with self._patched():
             changed = await cpu_affinity.sync_containers(ex, 8)
         self.assertEqual(changed, {})
         self.assertEqual(ex.updates, [])
 
     async def test_disabled_setting_touches_nothing(self):
         ex = _FakeExecutor({"remnanode": ""})
-        p = self._patches(enabled=False)
-        with p[0], p[1], p[2], p[3]:
+        with self._patched(enabled=False):
             changed = await cpu_affinity.sync_containers(ex, 8)
         self.assertEqual(changed, {})
         self.assertEqual(ex.updates, [])
