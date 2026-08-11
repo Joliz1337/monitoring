@@ -6,7 +6,7 @@ Worth enabling when network cards run in **software** mode — that is where the
 
 ## When to enable it
 
-The switch is global and takes effect on every server at once, but each node decides on its own whether to apply it, based on how its own card spreads interrupts. Where there is nothing to split, nothing happens: with full hardware queues, on servers with fewer than four cores, and while `irqbalance` is running the node simply leaves the configuration alone.
+The switch is global and takes effect on every server at once, but each node decides on its own whether to apply it, based on how its own card spreads interrupts. Where there is nothing to split, nothing happens: if the card has more than one queue, the load is already spread across cores by the hardware and the node leaves the configuration alone. The same goes for servers with fewer than four cores and while `irqbalance` is running.
 
 To check whether a given server needs it, run `mpstat -P ALL 1 10`: if one or two cores sit well above the rest in the `%soft` column, the setting will help; if load is even across all cores, the bottleneck is the CPU as a whole and there is nothing to gain.
 

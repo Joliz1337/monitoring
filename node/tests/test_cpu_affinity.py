@@ -111,10 +111,26 @@ class DetectionTests(unittest.TestCase):
 
 
 class ResolveTests(unittest.TestCase):
-    def _resolve(self, value, cpu_count, network=(0, 1), irqbalance=False):
+    def _resolve(self, value, cpu_count, network=(0, 1), irqbalance=False, queues=1):
         with mock.patch.object(cpu_affinity, "detect_network_cpus", return_value=set(network)), \
-             mock.patch.object(cpu_affinity, "_irqbalance_running", return_value=irqbalance):
+             mock.patch.object(cpu_affinity, "_irqbalance_running", return_value=irqbalance), \
+             mock.patch.object(cpu_affinity, "default_interface", return_value="ens3"), \
+             mock.patch.object(cpu_affinity, "rx_queue_count", return_value=queues):
             return cpu_affinity.resolve_app_cpus(value, cpu_count)
+
+    def test_hardware_queues_are_left_alone(self):
+        """Несколько очередей карта раскладывает по ядрам сама — упора в одно
+        ядро нет, разводить нечего."""
+        for queues in (2, 3, 4, 8):
+            with self.subTest(queues=queues):
+                self.assertIsNone(self._resolve("auto", 16, network=(0, 1), queues=queues))
+
+    def test_single_queue_is_the_target_case(self):
+        self.assertEqual(self._resolve("auto", 8, queues=1), [2, 3, 4, 5, 6, 7])
+
+    def test_manual_list_works_even_with_hardware_queues(self):
+        """Ручное указание — осознанное решение оператора, его не переигрываем."""
+        self.assertEqual(self._resolve("0,1", 8, queues=4), [2, 3, 4, 5, 6, 7])
 
     def test_auto_excludes_network_cpus(self):
         self.assertEqual(self._resolve("auto", 8), [2, 3, 4, 5, 6, 7])

@@ -208,6 +208,17 @@ def _parse_cpu_list(value: str) -> set[int] | None:
     return cpus
 
 
+def rx_queue_count(iface: str) -> int:
+    """Число RX-очередей интерфейса по каталогам в /sys/class/net/<if>/queues."""
+    try:
+        return sum(
+            1 for entry in (SYS_CLASS_NET / iface / "queues").iterdir()
+            if entry.name.startswith("rx-")
+        )
+    except OSError:
+        return 0
+
+
 def _irqbalance_running() -> bool:
     """Живой irqbalance перетасовывает векторы между ядрами, и любая статичная
     привязка со временем разъезжается — тогда лучше не трогать конфиг вовсе."""
@@ -229,7 +240,18 @@ def resolve_app_cpus(value: str, cpu_count: int) -> list[int] | None:
         if _irqbalance_running():
             logger.info("cpu-affinity skipped: irqbalance is running")
             return None
-        network_cpus = detect_network_cpus()
+
+        # Несколько аппаратных очередей карта раскладывает по ядрам сама, и
+        # упора в одно ядро не возникает — разводить там нечего. Проверка идёт
+        # по числу очередей, а не по доле занятых ядер: на 16-ядерном хосте три
+        # очереди занимают шесть ядер, и проверка доли пропустила бы такой хост.
+        iface = default_interface()
+        queues = rx_queue_count(iface) if iface else 0
+        if queues > 1:
+            logger.info("cpu-affinity skipped: %s has %d RX queues", iface, queues)
+            return None
+
+        network_cpus = detect_network_cpus(iface)
     else:
         network_cpus = _parse_cpu_list(value)
         if network_cpus is None:
