@@ -90,6 +90,20 @@ api.get = function <T = unknown>(url: string, config?: AxiosRequestConfig): Prom
   return promise
 } as typeof api.get
 
+// Разделы API ноды, которые её владелец может закрыть через NODE_CAPABILITIES.
+// Порядок задаёт и порядок перечисления в подсказках интерфейса.
+export const NODE_CAPABILITY_DOMAINS = [
+  'traffic', 'haproxy', 'firewall', 'ipset', 'ssh',
+  'ssl', 'antiddos', 'remnawave', 'system', 'exec',
+] as const
+export type NodeCapabilityDomain = (typeof NODE_CAPABILITY_DOMAINS)[number]
+
+export const CAP_MODE = { FULL: 'rw', READ: 'ro', NONE: 'no' } as const
+export type NodeCapabilityMode = (typeof CAP_MODE)[keyof typeof CAP_MODE]
+
+/** null — нода без ограничений (в том числе любая нода старой версии) */
+export type NodeCapabilities = Partial<Record<NodeCapabilityDomain, NodeCapabilityMode>>
+
 export interface Server {
   id: number
   name: string
@@ -106,6 +120,7 @@ export interface Server {
   uses_shared_cert?: boolean
   auth_kind?: 'shared' | 'per_server' | 'legacy'
   antiddos_emergency_mode?: boolean
+  node_capabilities?: NodeCapabilities | null
 }
 
 export interface TimezoneInfo {
@@ -1661,7 +1676,7 @@ export interface HAProxyConfigProfile {
 export interface HAProxyProfileServer {
   server_id: number
   server_name: string
-  sync_status: 'synced' | 'pending' | 'failed' | null
+  sync_status: 'synced' | 'pending' | 'failed' | 'denied' | null
   config_hash: string | null
   is_synced: boolean
   last_sync_at: string | null
@@ -1702,7 +1717,7 @@ export interface HAProxyServerStatus {
   server_name: string
   server_url: string
   online: boolean
-  sync_status: 'synced' | 'pending' | 'failed' | null
+  sync_status: 'synced' | 'pending' | 'failed' | 'denied' | null
   config_hash: string | null
   last_sync_at: string | null
   haproxy_running: boolean | null
@@ -1846,7 +1861,7 @@ export interface RemnawaveNginxProfileServer {
   server_id: number
   server_name: string
   domain: string | null
-  sync_status: 'synced' | 'pending' | 'failed' | null
+  sync_status: 'synced' | 'pending' | 'failed' | 'denied' | null
   config_hash: string | null
   is_synced: boolean
   detected: boolean
@@ -1905,7 +1920,7 @@ export interface RemnawaveNginxServerStatus {
   server_name: string
   online: boolean
   domain: string | null
-  sync_status: 'synced' | 'pending' | 'failed' | null
+  sync_status: 'synced' | 'pending' | 'failed' | 'denied' | null
   is_synced: boolean
   detected: boolean
   last_sync_at: string | null
@@ -1974,7 +1989,7 @@ export type FirewallRuleProtocol = 'tcp' | 'udp' | 'any'
 export type FirewallRuleAction = 'allow' | 'deny'
 export type FirewallRuleDirection = 'in' | 'out'
 export type FirewallDefaultPolicy = 'allow' | 'deny' | 'reject'
-export type FirewallSyncStatus = 'synced' | 'pending' | 'failed' | 'rolled_back' | null
+export type FirewallSyncStatus = 'synced' | 'pending' | 'failed' | 'rolled_back' | 'denied' | null
 
 export interface FirewallProfileRuleData {
   port: number

@@ -67,7 +67,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/in
 
 На ряде хостеров (OVH и аналогичных с port-security на свитчах) `ethtool -G` (resize ring buffers) на интерфейсах `igb`/`ixgbe`/`i40e` вызывает hard link reset, что может лишить доступа к серверу. По этой причине `ethtool -G` в tune-скриптах не используется.
 
-**Системный тюнинг — универсальный рендерер (`configs/tune-sysctl.sh`, `configs/VERSION` 5.5.0):**
+**Системный тюнинг — универсальный рендерер (`configs/tune-sysctl.sh`, `configs/VERSION` 5.6.0):**
 
 Единственный владелец всех производных чисел — `configs/tune-sysctl.sh`: он читает MemTotal/nproc/MTU/скорость линка самого хоста и пересчитывает conntrack, буферы, лимиты дескрипторов и HAProxy `maxconn` при каждом применении. Плоские константы, одинаковые для сервера на 4 ГБ и на 248 ГБ, были бы на маленьких хостах OOM-вектором (`nf_conntrack_max=2097152` ≈ 670 МБ одной только таблицы), а на больших — недокрутом (`fs.nr_open=524288` ломал бы контейнеры с бо́льшим `ulimits`).
 
@@ -83,8 +83,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/in
 
 - `configs/tune-sysctl.sh` — рендерер (см. выше)
 - `configs/profiles/common.base.conf`, `vpn.base.conf`, `panel.base.conf`, `limits.tmpl`, `systemd-limits.tmpl` — входные файлы рендерера
-- `configs/tests/render-matrix.sh` — 252 комбинации (9 размеров RAM × 7 CPU × 2 профиля × 2 page size), 275 проверок инвариантов; прав root и VM не требует — факты хоста подменяются через `MON_FACT_*`, выходы пишутся в `MON_RENDER_ROOT`
-- `configs/network-tune.sh` — программный RPS/RFS: `rps_cpus`/`rps_flow_cnt` на всех очередях (`rps_flow_cnt` — обязательно степень двойки через `pow2_floor()`, иначе ядро молча отклоняет RFS); `configure_conntrack()` только грузит модуль и поднимает hashsize из `tuning-facts.env`, если он там выше текущего — сами sysctl-значения задаёт рендерер
+- `configs/tests/render-matrix.sh` — 252 комбинации (9 размеров RAM × 7 CPU × 2 профиля × 2 page size), 293 проверки инвариантов; прав root и VM не требует — факты хоста подменяются через `MON_FACT_*`, выходы пишутся в `MON_RENDER_ROOT`
+- `configs/network-tune.sh` — программный RPS/RFS: `rps_cpus`/`rps_flow_cnt` на всех очередях (`rps_flow_cnt` — обязательно степень двойки через `pow2_floor()`, иначе ядро молча отклоняет RFS); `configure_conntrack()` только грузит модуль и поднимает hashsize из `tuning-facts.env`, если он там выше текущего — сами sysctl-значения задаёт рендерер; `configure_gro_batching()` на интерфейсах с одной RX-очередью включает `napi_defer_hard_irqs`/`gro_flush_timeout` (50 мкс) — даёт GRO собрать несколько пакетов в один skb, чтобы через единственное кольцо и стек проходило меньше буферов; на многоочередных картах и ядре < 5.10 не применяется
 - `configs/multiqueue-tune.sh` — аппаратный multiqueue: `ethtool -L combined N` (или `-L rx N tx N` для карт без combined-каналов), XPS, IRQ affinity; ring buffer resize (`ethtool -G`) не используется
 - `configs/hybrid-tune.sh` — гибридный режим: аппаратные очереди на часть ядер + RPS на остальные
 - `configs/*-tune.service` — systemd-юниты, у каждого `ExecStartPre=-.../tune-sysctl.sh render`
@@ -225,7 +225,7 @@ bash install.sh --unattended
 
 Подробная документация по каждому компоненту:
 
-- [panel/DOCUMENTATION.md](panel/DOCUMENTATION.md) — веб-панель: API, БД, конфигурация, безопасность (v10.57.0)
+- [panel/DOCUMENTATION.md](panel/DOCUMENTATION.md) — веб-панель: API, БД, конфигурация, безопасность (v10.58.0)
 - [node/DOCUMENTATION.md](node/DOCUMENTATION.md) — нода-агент: API, метрики, HAProxy, трафик, Remnawave, Remnawave Nginx, Firewall Profiles, Системные оптимизации, Анти-DDoS
 
 ## Архитектура
@@ -242,6 +242,8 @@ Browser → nginx (SSL) → panel frontend (React)
 ```
 
 Панель опрашивает ноды коллектором метрик и ходит к ним по требованию через proxy-роутер (`/api/proxy/{id}/...`). Собственной базы истории у ноды нет: она отдаёт мгновенный срез хоста и кумулятивные счётчики, а всю историю (метрики, трафик, интервалы недоступности) считает и хранит панель в PostgreSQL. На диске ноды остаются только конфигурационные файлы — списки блокировок, whitelist анти-DDoS, перечень отслеживаемых портов.
+
+Владелец ноды может сузить доступ панели к своему серверу переменной `NODE_CAPABILITIES` в `.env` ноды — по доменам API (трафик, HAProxy, firewall, ipset, SSH, SSL, анти-DDoS, Remnawave, система, терминал) и уровню (без доступа/только чтение/чтение и запись); по умолчанию доступ полный. Нода публикует свою карту прав панели, панель хранит её и не отправляет запросы, на которые заведомо получит отказ, вместо того чтобы ловить ошибку по факту. Подробности — [node/DOCUMENTATION.md](node/DOCUMENTATION.md#права-доступа-панели-node_capabilities) и [panel/DOCUMENTATION.md](panel/DOCUMENTATION.md#права-ноды-node_capabilities).
 
 ### Учёт трафика
 

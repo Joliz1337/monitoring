@@ -1,5 +1,7 @@
 import { useEffect, useState, useCallback, useRef, FormEvent } from 'react'
-import { ShieldCheck, RefreshCw, Server, Upload, Globe, Loader2, CheckCircle2, XCircle, Trash2, Eye, EyeOff, Save, Send, Info, ChevronRight, ToggleLeft, ToggleRight } from 'lucide-react'
+import { useNodeCapabilities } from '../hooks/useNodeCapabilities'
+import { nodeAllows } from '../utils/nodeCapabilities'
+import { ShieldCheck, RefreshCw, Server, Upload, Globe, Loader2, CheckCircle2, XCircle, Trash2, Eye, EyeOff, Save, Send, Info, ChevronRight, ToggleLeft, ToggleRight, Lock } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
@@ -31,6 +33,7 @@ function ServerCard({
   onExpand,
   onSave,
   onDeploy,
+  restricted,
   t,
 }: {
   srv: WildcardServerConfig
@@ -41,6 +44,7 @@ function ServerCard({
   onExpand: (id: number) => void
   onSave: (id: number, data: ServerSavePayload) => void
   onDeploy: (id: number) => void
+  restricted: boolean
   t: (key: string, opts?: any) => string
 }) {
   const [localPath, setLocalPath] = useState(srv.wildcard_ssl_deploy_path)
@@ -144,6 +148,9 @@ function ServerCard({
           }`}>
             {srv.server_name}
           </span>
+          {restricted && (
+            <Lock className="w-3.5 h-3.5 text-purple shrink-0 ml-2" />
+          )}
           <ChevronRight className={`w-4 h-4 shrink-0 transition-all duration-200 ${
             expanded ? 'rotate-90 text-accent-400' : 'text-dark-600 group-hover:text-dark-400'
           }`} />
@@ -360,6 +367,7 @@ export default function WildcardSSL() {
 
   // Servers state
   const [servers, setServers] = useState<WildcardServerConfig[]>([])
+  const { servers: allServers } = useNodeCapabilities()
   const [serversLoading, setServersLoading] = useState(true)
   const [deployingServer, setDeployingServer] = useState<number | null>(null)
   const [expandedServer, setExpandedServer] = useState<number | null>(null)
@@ -870,6 +878,7 @@ export default function WildcardSSL() {
                 onExpand={handleExpandServer}
                 onSave={handleServerSave}
                 onDeploy={handleDeployOne}
+                restricted={!nodeAllows(allServers.find(s => s.id === srv.server_id), 'ssl', 'write')}
                 t={t}
               />
             ))}

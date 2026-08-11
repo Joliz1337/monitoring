@@ -14,6 +14,11 @@ from typing import Optional
 import httpx
 from sqlalchemy import select, delete, update, bindparam, func, ColumnElement
 from app.services.http_client import get_node_client, node_auth_headers
+from app.services.node_capabilities import (
+    Capability,
+    normalize_map as normalize_capabilities_map,
+    server_allows,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import async_session, Base
@@ -86,11 +91,12 @@ class MetricsCollector:
     MIN_SPEED_INTERVAL_SECONDS = 0.5  # ниже этого dt деление даёт шум, а не скорость
     NODE_VERSION_MAX_LEN = 20         # ширина servers.node_version
 
+    # Правила файрвола живут под префиксом haproxy, но закрываются своим доменом
     HAPROXY_ENDPOINTS = (
-        ("/api/haproxy/status", "status"),
-        ("/api/haproxy/rules", "rules"),
-        ("/api/haproxy/certs/all", "certs"),
-        ("/api/haproxy/firewall/rules", "firewall"),
+        ("/api/haproxy/status", "status", Capability.HAPROXY),
+        ("/api/haproxy/rules", "rules", Capability.HAPROXY),
+        ("/api/haproxy/certs/all", "certs", Capability.HAPROXY),
+        ("/api/haproxy/firewall/rules", "firewall", Capability.FIREWALL),
     )
     HAPROXY_FETCH_TIMEOUT = 15.0
     HAPROXY_FAST_FETCH_TIMEOUT = 10.0
@@ -255,6 +261,7 @@ class MetricsCollector:
         recovered_ids: list[int] = []
         newly_down: list[tuple[int, datetime]] = []
         downtime_over: list[int] = []
+        caps_changed: list[int] = []
 
         for server, result in zip(servers, results):
             if isinstance(result, Exception):
@@ -274,6 +281,11 @@ class MetricsCollector:
                     snapshots.append(snapshot_data)
                 node_version = metrics.get("agent_version")
                 tracked_ports = self._tracked_ports_json(metrics)
+                caps_present, capabilities = self._capabilities_json(metrics)
+                if not caps_present:
+                    capabilities = server.node_capabilities
+                elif capabilities != server.node_capabilities:
+                    caps_changed.append(server.id)
                 server_updates.append({
                     "id": server.id,
                     "last_seen": now_utc,
@@ -283,6 +295,7 @@ class MetricsCollector:
                     # Старые ноды этих полей не присылают — пишем обратно то, что уже в базе.
                     "node_version": node_version[:self.NODE_VERSION_MAX_LEN] if node_version else server.node_version,
                     "tracked_ports": tracked_ports if tracked_ports is not None else server.tracked_ports,
+                    "node_capabilities": capabilities,
                 })
             elif error_info:
                 # Помечаем "definitively offline" только если раньше нода была живой и давно молчит.
@@ -321,6 +334,7 @@ class MetricsCollector:
                             "last_metrics": upd["last_metrics"],
                             "node_version": upd["node_version"],
                             "tracked_ports": upd["tracked_ports"],
+                            "node_capabilities": upd["node_capabilities"],
                         }
                         for upd in success_updates
                     ]
@@ -334,6 +348,7 @@ class MetricsCollector:
                             last_metrics=bindparam("last_metrics"),
                             node_version=bindparam("node_version"),
                             tracked_ports=bindparam("tracked_ports"),
+                            node_capabilities=bindparam("node_capabilities"),
                         ),
                         success_params,
                     )
@@ -365,6 +380,11 @@ class MetricsCollector:
         # Восстановление состояния оживших нод — last_seen уже закоммичен (сервер считается online).
         for sid in recovered_ids:
             asyncio.create_task(self._launch_reconcile(sid))
+
+        # Права поменялись: снимаем долги, ставшие неисполнимыми, и заново
+        # раскатываем то, что теперь снова разрешено.
+        if caps_changed:
+            asyncio.create_task(self._handle_capability_change(caps_changed))
 
         # Cleanup throttled — only every CLEANUP_INTERVAL seconds
         now = time.time()
@@ -456,6 +476,17 @@ class MetricsCollector:
         if not isinstance(ports, list):
             return None
         return json.dumps([p["port"] for p in ports if isinstance(p, dict) and "port" in p])
+
+    @staticmethod
+    def _capabilities_json(metrics: dict) -> tuple[bool, Optional[str]]:
+        """(нода прислала поле, карта прав). Отсутствие поля — старый агент.
+
+        Отличать «поля нет» от «в поле null» обязательно: иначе снятое на ноде
+        ограничение осталось бы в базе навсегда.
+        """
+        if "capabilities" not in metrics:
+            return False, None
+        return True, normalize_capabilities_map(metrics.get("capabilities"))
 
     async def _record_downtime(
         self, newly_down: list[tuple[int, datetime]], downtime_over: list[int], now_utc: datetime
@@ -605,6 +636,21 @@ class MetricsCollector:
             logger.error(f"Recovery reconcile failed for server {server_id}: {e}")
         finally:
             self._reconcile_inflight.discard(server_id)
+
+    async def _handle_capability_change(self, server_ids: list[int]):
+        """Права ноды изменились: чистим очередь и досинхронизируем открывшееся.
+
+        Реконсилер идемпотентен и дедуплицирован, поэтому годится для обеих
+        сторон изменения: и когда раздел закрыли, и когда открыли обратно.
+        """
+        try:
+            from app.services.node_sync_queue import drop_forbidden
+            await drop_forbidden(server_ids)
+        except Exception as e:
+            logger.error(f"Failed to drop forbidden sync debts for {server_ids}: {e}")
+
+        for server_id in server_ids:
+            await self._launch_reconcile(server_id)
 
     def _build_snapshot(self, server_id: int, metrics: dict, now_utc: datetime) -> Optional[dict]:
         """Build a snapshot dict for batch insert. Returns None if data invalid."""
@@ -870,13 +916,22 @@ class MetricsCollector:
 
     async def _cache_server_haproxy(self, server: Server, timeout: float):
         """Cache HAProxy data for a single server into server_cache table."""
+        # Отбор до создания клиента: у ноды с закрытым haproxy этот цикл иначе
+        # каждые 5 минут собирал бы четыре гарантированных отказа
+        endpoints = [
+            (endpoint, key) for endpoint, key, capability in self.HAPROXY_ENDPOINTS
+            if server_allows(server, capability, write=False)
+        ]
+        if not endpoints:
+            return
+
         try:
             async with self._http_sem:
                 client = get_node_client(server)
                 headers = node_auth_headers(server)
                 haproxy_data = {}
 
-                for endpoint, key in self.HAPROXY_ENDPOINTS:
+                for endpoint, key in endpoints:
                     try:
                         res = await client.get(f"{server.url}{endpoint}", headers=headers, timeout=timeout)
                         if res.status_code == 200:
@@ -967,6 +1022,11 @@ class MetricsCollector:
             return
 
         async def _probe(server: Server) -> tuple[int, bool, bool]:
+            # Нода закрыла раздел — оставляем как есть: обнулив, панель погасила бы
+            # бейджи Remnawave, будто ноды с ним и не было
+            if not server_allows(server, Capability.REMNAWAVE, write=False):
+                return server.id, server.has_xray_node, server.remnawave_nginx_detected
+
             async with self._http_sem:
                 available = False
                 detected = False

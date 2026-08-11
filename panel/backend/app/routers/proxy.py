@@ -15,6 +15,14 @@ from app.database import get_db
 from app.models import Server, ServerCache, MetricsSnapshot, AggregatedMetrics
 from app.auth import verify_auth
 from app.services import update_channel
+from app.services.node_capabilities import (
+    Capability,
+    denial_headers,
+    denied_message,
+    learn_from_denial,
+    server_allows,
+    server_allows_path,
+)
 from app.services.traffic_import import (
     MIN_NODE_VERSION_FOR_TRAFFIC_V2,
     node_supports_traffic_v2,
@@ -50,6 +58,33 @@ async def get_server_by_id(server_id: int, db: AsyncSession) -> Server:
     # (если есть) возьмёт коннект заново.
     await db.commit()
     return server
+
+
+def require_capability(server: Server, capability: Capability, *, write: bool) -> None:
+    """Отказать до сетевого вызова, если нода этот раздел закрыла.
+
+    409, а не 403: 403 фронт трактует как «сессия протухла», а 502/503/504
+    автоматически повторяет. Тем же кодом уже помечено «нода не в том
+    состоянии» для устаревшего агента.
+    """
+    if server_allows(server, capability, write=write):
+        return
+    raise HTTPException(
+        status_code=409,
+        detail=denied_message(capability, write),
+        headers=denial_headers(capability, write),
+    )
+
+
+def _require_endpoint(server: Server, endpoint: str, method: str) -> None:
+    allowed, capability, write = server_allows_path(server, endpoint, method)
+    if allowed:
+        return
+    raise HTTPException(
+        status_code=409,
+        detail=denied_message(capability, write),
+        headers=denial_headers(capability, write),
+    )
 
 
 def _require_traffic_v2(server: Server) -> None:
@@ -145,6 +180,8 @@ async def proxy_request(
     params: dict = None,
     timeout: float = 15.0
 ) -> dict:
+    _require_endpoint(server, endpoint, method)
+
     url = f"{server.url}{endpoint}"
     started = time.perf_counter()
 
@@ -183,11 +220,20 @@ async def proxy_request(
             return response.json()
         else:
             detail = None
+            body = None
             try:
                 body = response.json()
                 detail = body.get("detail")
             except Exception:
                 pass
+            if response.status_code == 403:
+                # Права поменяли только что, наша копия карты ещё старая:
+                # запоминаем сразу, а не ждём следующего цикла метрик
+                await learn_from_denial(server.id, response.status_code, body)
+                raise HTTPException(
+                    status_code=409,
+                    detail=detail or "Node closed this section (NODE_CAPABILITIES)",
+                )
             raise HTTPException(status_code=response.status_code, detail=detail)
     except httpx.TimeoutException:
         elapsed_ms = (time.perf_counter() - started) * 1000
@@ -765,6 +811,7 @@ async def execute_command_stream_on_node(
         shell: str - Shell to use: "sh" or "bash" (default: "sh")
     """
     server = await get_server_by_id(server_id, db)
+    require_capability(server, Capability.EXEC, write=True)
     url = f"{server.url}/api/system/execute-stream"
     request_timeout = min((data.get("timeout", 30) or 30) + 15, 620)
     
@@ -840,7 +887,11 @@ async def apply_node_optimizations(
     Accepts optional body with nic_mode: "rps" (default), "multiqueue", or "hybrid".
     """
     server = await get_server_by_id(server_id, db)
+    # До опроса версии и до нескольких запросов на GitHub: иначе за отказ,
+    # известный заранее, платили бы полуминутой ожидания
+    require_capability(server, Capability.SYSTEM, write=True)
 
+    from app.routers.settings import cpu_affinity_enabled
     from app.routers.system import (
         MIN_NODE_VERSION_FOR_RENDER,
         get_node_all_versions,
@@ -905,6 +956,7 @@ async def apply_node_optimizations(
         "nic_mode": nic_mode,
         "opt_profile": opt_profile,
         "version": github_data.get("version"),
+        "cpu_affinity": await cpu_affinity_enabled(db),
     }
 
     result = await proxy_request(
@@ -950,6 +1002,7 @@ async def set_node_antiddos_emergency(
     """Manually toggle emergency mode on a node (manual pin — watchdog won't undo it)."""
     from app.services.antiddos_manager import get_antiddos_manager
     server = await get_server_by_id(server_id, db)
+    require_capability(server, Capability.ANTIDDOS, write=True)
     enabled = bool((body or {}).get("enabled", False))
     manager = get_antiddos_manager()
     ok, msg, status = await manager.set_node_emergency(server, enabled)
@@ -968,6 +1021,7 @@ async def set_node_antiddos_watchdog(
     """Enable/disable the auto-detection watchdog on a node."""
     from app.services.antiddos_manager import get_antiddos_manager
     server = await get_server_by_id(server_id, db)
+    require_capability(server, Capability.ANTIDDOS, write=True)
     enabled = bool((body or {}).get("enabled", True))
     manager = get_antiddos_manager()
     ok, msg = await manager.set_node_watchdog(server, enabled)
@@ -986,6 +1040,7 @@ async def install_node_antiddos(
     """Install/refresh the watchdog service on a node (fetches script from GitHub)."""
     from app.services.antiddos_manager import get_antiddos_manager
     server = await get_server_by_id(server_id, db)
+    require_capability(server, Capability.ANTIDDOS, write=True)
     manager = get_antiddos_manager()
     ok, msg = await manager.install_to_node(server)
     status = await manager.get_node_status(server) if ok else None

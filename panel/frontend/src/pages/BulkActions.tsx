@@ -1,4 +1,6 @@
-import { useState, useEffect, useMemo, useRef, FormEvent } from 'react'
+import { useState, useEffect, useMemo, useRef, useCallback, FormEvent } from 'react'
+import { nodeAllows } from '../utils/nodeCapabilities'
+import type { NodeCapabilityDomain } from '../api/client'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -25,6 +27,7 @@ import {
   Search,
   Folder,
   FolderOpen,
+  Lock,
 } from 'lucide-react'
 import { serversApi, bulkApi, BulkJob, BulkJobAction, BulkResult, BulkTerminalResult, Server as ServerType } from '../api/client'
 import { Skeleton } from '../components/ui/Skeleton'
@@ -32,6 +35,15 @@ import { Checkbox } from '../components/ui/Checkbox'
 import { FAQIcon } from '../components/FAQ'
 
 type ActionType = 'haproxy_service' | 'traffic' | 'firewall' | 'terminal'
+
+// Раздел ноды, который должен быть открыт для каждой вкладки. Правила UFW
+// закрываются доменом firewall, хотя и живут по адресу /api/haproxy/firewall.
+const ACTION_DOMAIN: Record<ActionType, NodeCapabilityDomain> = {
+  haproxy_service: 'haproxy',
+  traffic: 'traffic',
+  firewall: 'firewall',
+  terminal: 'exec',
+}
 type ActionMode = 'create' | 'delete' | 'start' | 'stop' | 'restart'
 
 const TIMEOUT_OPTIONS = [
@@ -56,6 +68,15 @@ export default function BulkActions() {
   
   const [activeType, setActiveType] = useState<ActionType>('haproxy_service')
   const [activeMode, setActiveMode] = useState<ActionMode>('start')
+
+  const acceptsAction = useCallback(
+    (serverId: number) =>
+      nodeAllows(servers.find(s => s.id === serverId), ACTION_DOMAIN[activeType], 'write'),
+    [servers, activeType],
+  )
+  // Ноды, закрывшие раздел, до сети не доходят: отсекаем их на кнопке
+  const eligibleIds = selectedServerIds.filter(acceptsAction)
+  const blockedCount = selectedServerIds.length - eligibleIds.length
   
   const [results, setResults] = useState<BulkResult[]>([])
   
@@ -355,12 +376,17 @@ export default function BulkActions() {
       return
     }
 
+    if (eligibleIds.length === 0) {
+      setFormError(t('node_caps.bulk_all_blocked'))
+      return
+    }
+
     setIsExecuting(true)
-    setJobProgress({ done: 0, total: selectedServerIds.length })
+    setJobProgress({ done: 0, total: eligibleIds.length })
 
     try {
       const request = resolveJobRequest()
-      const res = await bulkApi.createJob(request.action, selectedServerIds, request.params)
+      const res = await bulkApi.createJob(request.action, eligibleIds, request.params)
       await trackJob(res.data.job_id)
     } catch (err: unknown) {
       const error = err as { response?: { data?: { detail?: string } } }
@@ -1056,10 +1082,17 @@ export default function BulkActions() {
                 </motion.div>
               )}
               
+              {blockedCount > 0 && (
+                <div className="mt-4 flex items-center gap-2 text-sm text-purple">
+                  <Lock className="w-4 h-4 shrink-0" />
+                  {t('node_caps.bulk_warning', { count: blockedCount })}
+                </div>
+              )}
+
               <div className="mt-6 flex gap-3">
                 <motion.button
                   type="submit"
-                  disabled={isExecuting || selectedServerIds.length === 0}
+                  disabled={isExecuting || eligibleIds.length === 0}
                   className={`btn flex items-center gap-2 ${
                     activeType === 'terminal' || activeMode === 'create' || activeMode === 'start' || activeMode === 'restart'
                       ? 'btn-primary'

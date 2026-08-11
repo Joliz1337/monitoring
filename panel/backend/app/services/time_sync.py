@@ -15,6 +15,7 @@ from sqlalchemy import select
 from app.database import async_session
 from app.models import Server, PanelSettings
 from app.services.http_client import get_node_client, node_auth_headers
+from app.services.node_capabilities import Capability, denied_message, server_allows
 
 logger = logging.getLogger(__name__)
 
@@ -178,6 +179,9 @@ class TimeSyncService:
 
     # ------------------------------------------------------------------
     async def _sync_node(self, server: Server, tz: str) -> dict:
+        if not server_allows(server, Capability.SYSTEM, write=True):
+            return {"success": False, "denied": True,
+                    "error": denied_message(Capability.SYSTEM, True)}
         try:
             client = get_node_client(server)
             response = await client.post(

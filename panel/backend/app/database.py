@@ -1893,6 +1893,35 @@ async def _migrate_traffic_v2(conn):
         logger.warning(f"traffic v2 migration: {e}")
 
 
+async def _migrate_node_capabilities(conn):
+    """Права, которые нода выдала панели.
+
+    Единственная миграция, которой позволено остановить старт: колонку уже
+    объявляет модель, значит SQLAlchemy подставит её в каждый SELECT по servers.
+    Панель, поднявшаяся без неё, отвечала бы 500 на любой запрос о серверах —
+    внятная строка в логе полезнее.
+    """
+    result = await conn.execute(text("""
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'servers'
+    """))
+    columns = {row[0] for row in result.fetchall()}
+    if not columns or "node_capabilities" in columns:
+        return
+
+    try:
+        await conn.execute(text('ALTER TABLE servers ADD COLUMN "node_capabilities" TEXT'))
+        logger.info("Added column: servers.node_capabilities")
+    except Exception as e:
+        if "already exists" in str(e).lower():
+            return
+        logger.error(
+            "Could not add servers.node_capabilities: %s. "
+            'Run manually: ALTER TABLE servers ADD COLUMN "node_capabilities" TEXT', e
+        )
+        raise
+
+
 async def init_db():
     """Initialize database: create tables, run migrations."""
     async with engine.begin() as conn:
@@ -1916,6 +1945,7 @@ async def init_db():
         await _migrate_drop_redundant_indexes(conn)
         await _migrate_db_optimizations(conn)
         await _migrate_traffic_v2(conn)
+        await _migrate_node_capabilities(conn)
 
     await _warmup_pool()
 

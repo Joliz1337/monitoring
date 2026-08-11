@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react'
-import { Shield, ShieldCheck, Plus, Trash2, RefreshCw, Server, Globe, List, Loader2, ExternalLink, AlertCircle, Check, X, ArrowDownToLine, ArrowUpFromLine, CheckCircle2, XCircle, ChevronDown } from 'lucide-react'
+import { nodeAllows } from '../utils/nodeCapabilities'
+import { Shield, ShieldCheck, Plus, Trash2, RefreshCw, Server, Globe, List, Loader2, ExternalLink, AlertCircle, Check, X, ArrowDownToLine, ArrowUpFromLine, CheckCircle2, XCircle, ChevronDown, Lock } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
@@ -913,6 +914,12 @@ export default function Blocklist() {
                         <div className="flex items-center gap-2.5 min-w-0">
                           <Server className="w-4 h-4 text-accent-400 shrink-0" />
                           <span className="font-semibold text-dark-100 truncate">{server.name}</span>
+                          {!nodeAllows(server, 'ipset', 'write') && (
+                            <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-purple/10 text-purple text-[10px] font-medium shrink-0">
+                              <Lock className="w-3 h-3" />
+                              {t('node_caps.row_blocked')}
+                            </span>
+                          )}
                         </div>
                         <div className="flex items-center gap-2 shrink-0">
                           {data?.loaded && (

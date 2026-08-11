@@ -27,6 +27,7 @@ import {
   ChevronDown,
   Eye,
   EyeOff,
+  Lock,
 } from 'lucide-react'
 import { Tooltip } from '../components/ui/Tooltip'
 import {
@@ -143,6 +144,11 @@ function syncStatusBadge(status: FirewallSyncStatus | null) {
       color: 'text-dark-300 bg-dark-700/40 border-dark-600/40',
       label: 'Расхождение',
       icon: <AlertTriangle className="w-3 h-3" />,
+    },
+    denied: {
+      color: 'text-purple bg-purple/10 border-purple/20',
+      label: 'Закрыто на ноде',
+      icon: <Lock className="w-3 h-3" />,
     },
   }
   const s = status ? map[status] : null

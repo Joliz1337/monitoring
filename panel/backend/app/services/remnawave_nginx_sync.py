@@ -21,6 +21,7 @@ from app.database import async_session_maker
 from app.models import PanelSettings, RemnawaveNginxProfile, RemnawaveNginxSyncLog, Server
 from app.services.haproxy_profile_sync import compute_config_hash, is_server_online
 from app.services.http_client import get_node_client, node_auth_headers
+from app.services.node_capabilities import Capability, server_allows
 from app.services.remnawave_nginx_config import DOMAIN_PLACEHOLDER, render_for_server
 
 logger = logging.getLogger(__name__)
@@ -200,6 +201,17 @@ async def sync_profile_to_servers(
     servers = list(result.scalars().all())
     if not servers:
         return []
+
+    # Закрытый раздел: статус denied, не pending — pending заставил бы
+    # retry_pending_remnawave_nginx_syncs дёргать ноду каждые полминуты
+    denied = [s for s in servers if not server_allows(s, Capability.REMNAWAVE, write=True)]
+    if denied:
+        await db.execute(
+            update(Server).where(Server.id.in_([s.id for s in denied]))
+            .values(remnawave_nginx_sync_status="denied")
+        )
+        await db.commit()
+        servers = [s for s in servers if s not in denied]
 
     online = [s for s in servers if is_server_online(s)]
     offline = [s for s in servers if not is_server_online(s)]

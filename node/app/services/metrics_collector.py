@@ -53,6 +53,10 @@ class MetricsCollector:
         # импортировать нельзя — main сам импортирует этот модуль
         from app.routers.system import get_current_version
         self._agent_version: str = get_current_version()
+        # Права в пределах процесса не меняются — собирать карту заново на
+        # каждый опрос (а он раз в 10 секунд) незачем
+        from app.capabilities import get_policy
+        self._capabilities: Optional[dict] = get_policy().published()
 
     def _read_host_file(self, path: str) -> str:
         """Read file from host filesystem"""
@@ -799,6 +803,7 @@ class MetricsCollector:
             "certificates": certs,
             "antiddos": antiddos,
             "agent_version": self._agent_version,
+            "capabilities": self._capabilities,
         }
 
 

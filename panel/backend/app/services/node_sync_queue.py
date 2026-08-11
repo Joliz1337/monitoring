@@ -18,6 +18,8 @@ from typing import Awaitable, Callable, Optional
 from sqlalchemy import and_, delete, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from app.services.node_capabilities import Capability, allows, server_allows
+
 from app.database import async_session
 from app.models import NodePendingSync, Server
 from app.services.haproxy_profile_sync import is_server_online
@@ -27,6 +29,15 @@ logger = logging.getLogger(__name__)
 KIND_BLOCKLIST = "blocklist"
 KIND_ANTIDDOS_WHITELIST = "antiddos_whitelist"
 KIND_FIREWALL_PROFILE = "firewall_profile"
+
+# Право, без которого долг неисполним. Все три вида — запись на ноду; долг,
+# который нода не примет никогда, здесь не задерживается: потолка попыток нет,
+# и он остался бы в таблице навсегда, дёргая ноду каждые полчаса.
+KIND_CAPABILITIES: dict[str, Capability] = {
+    KIND_BLOCKLIST: Capability.IPSET,
+    KIND_ANTIDDOS_WHITELIST: Capability.ANTIDDOS,
+    KIND_FIREWALL_PROFILE: Capability.FIREWALL,
+}
 
 RETRY_BASE_SECONDS = 60
 RETRY_MAX_SECONDS = 1800
@@ -48,6 +59,10 @@ async def enqueue(server_ids: list[int], kind: str, reason: str = "") -> None:
     """Записать долг перед нодами. Повторная запись не плодит строк и сбрасывает
     отсрочку: появилось новое изменение, ждать конца прошлого backoff незачем."""
     unique_ids = list(dict.fromkeys(server_ids))
+    if not unique_ids:
+        return
+
+    unique_ids = await _drop_ids_without_capability(unique_ids, kind)
     if not unique_ids:
         return
 
@@ -81,6 +96,64 @@ async def enqueue(server_ids: list[int], kind: str, reason: str = "") -> None:
             await db.commit()
     except Exception as e:
         logger.error(f"Failed to enqueue {kind} for servers {unique_ids}: {e}")
+
+
+async def _drop_ids_without_capability(server_ids: list[int], kind: str) -> list[int]:
+    """Отсечь ноды, которые этот вид долга принять не могут."""
+    capability = KIND_CAPABILITIES.get(kind)
+    if capability is None:
+        return server_ids
+    try:
+        async with async_session() as db:
+            rows = (await db.execute(
+                select(Server.id, Server.node_capabilities).where(Server.id.in_(server_ids))
+            )).all()
+    except Exception as e:
+        # Не знаем — пропускаем: потерянный долг хуже лишней попытки
+        logger.error(f"Capability check before enqueue failed: {e}")
+        return server_ids
+
+    forbidden = {
+        sid for sid, caps in rows
+        if not allows(caps, capability, write=True)
+    }
+    if not forbidden:
+        return server_ids
+    logger.debug("Skipping %s for nodes with the section closed: %s", kind, sorted(forbidden))
+    return [sid for sid in server_ids if sid not in forbidden]
+
+
+async def drop_forbidden(server_ids: list[int]) -> None:
+    """Снять долги, ставшие неисполнимыми после смены прав на ноде."""
+    if not server_ids:
+        return
+    try:
+        async with async_session() as db:
+            rows = (await db.execute(
+                select(NodePendingSync.server_id, NodePendingSync.kind, Server.node_capabilities)
+                .join(Server, Server.id == NodePendingSync.server_id)
+                .where(NodePendingSync.server_id.in_(server_ids))
+            )).all()
+
+            doomed = [
+                (sid, kind) for sid, kind, caps in rows
+                if kind in KIND_CAPABILITIES
+                and not allows(caps, KIND_CAPABILITIES[kind], write=True)
+            ]
+            if not doomed:
+                return
+
+            for sid, kind in doomed:
+                await db.execute(
+                    delete(NodePendingSync).where(
+                        NodePendingSync.server_id == sid,
+                        NodePendingSync.kind == kind,
+                    )
+                )
+            await db.commit()
+        logger.info("Dropped %d pending sync(s) closed by node permissions", len(doomed))
+    except Exception as e:
+        logger.error(f"Failed to drop forbidden pending syncs: {e}")
 
 
 async def clear(server_id: int, kinds: list[str], before: datetime) -> None:
@@ -171,10 +244,22 @@ class NodeSyncQueue:
             )).all()
 
         due: dict[str, list[int]] = defaultdict(list)
+        stale: list[tuple[int, str]] = []
         for kind, server in rows:
+            capability = KIND_CAPABILITIES.get(kind)
+            # Подметальщик: сюда попадают долги, записанные до того, как нода
+            # закрыла раздел, — в том числе пережившие перезапуск панели
+            if capability is not None and not server_allows(server, capability, write=True):
+                stale.append((server.id, kind))
+                continue
             if (server.id, kind) in self._inflight or not is_server_online(server):
                 continue
             due[kind].append(server.id)
+
+        if stale:
+            for kind in {kind for _, kind in stale}:
+                await self._drop(kind, [sid for sid, k in stale if k == kind])
+            logger.info("Dropped %d pending sync(s) closed by node permissions", len(stale))
 
         if not due:
             return

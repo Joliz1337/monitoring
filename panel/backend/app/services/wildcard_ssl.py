@@ -11,6 +11,7 @@ from sqlalchemy import select
 from app.database import async_session
 from app.models import WildcardCertificate, Server, PanelSettings, AlertSettings
 from app.services.http_client import get_node_client, node_auth_headers
+from app.services.node_capabilities import Capability, server_allows
 
 logger = logging.getLogger(__name__)
 
@@ -211,6 +212,9 @@ class WildcardSSLManager:
                 )
             )).scalars().all())
 
+        # Ноды с закрытым разделом отсекаем до отправки, иначе уведомление
+        # «развёрнуто на N из M» считало бы их провалом
+        servers = [s for s in servers if server_allows(s, Capability.SSL, write=True)]
         if not servers:
             return [{"success": False, "message": "No servers with wildcard SSL enabled"}]
 
@@ -249,6 +253,20 @@ class WildcardSSLManager:
                 json=payload,
                 timeout=60.0,
             )
+            if response.status_code != 200:
+                # Без этой проверки любой не-200 разбирался как обычный ответ
+                # и превращался в «success=False, Unknown» с уведомлением
+                detail = ""
+                try:
+                    detail = response.json().get("detail", "")
+                except Exception:
+                    pass
+                return {
+                    "success": False,
+                    "message": detail or f"HTTP {response.status_code}",
+                    "server_id": server.id,
+                    "server_name": server.name,
+                }
             data = response.json()
             return {
                 "success": data.get("success", False),

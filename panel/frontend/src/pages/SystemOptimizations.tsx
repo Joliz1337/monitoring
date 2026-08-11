@@ -1,4 +1,5 @@
 import { useState, useEffect, useLayoutEffect, useCallback, useRef } from 'react'
+import { useNodeCapabilities } from '../hooks/useNodeCapabilities'
 import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
 import {
@@ -23,6 +24,7 @@ import { systemApi, VersionBaseInfo, SingleNodeVersion, NicInfo } from '../api/c
 import { Skeleton } from '../components/ui/Skeleton'
 import { FAQIcon } from '../components/FAQ'
 import { Tooltip } from '../components/ui/Tooltip'
+import { useSettingsStore } from '../stores/settingsStore'
 
 type LoadState = 'pending' | 'loading' | 'loaded' | 'error'
 
@@ -48,11 +50,13 @@ interface NodeState {
 
 export default function SystemOptimizations() {
   const { t } = useTranslation()
+  const { cpuAffinityEnabled, setCpuAffinityEnabled, fetchSettings } = useSettingsStore()
 
   const [baseInfo, setBaseInfo] = useState<VersionBaseInfo | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [nodes, setNodes] = useState<Map<number, NodeState>>(new Map())
+  const { allows } = useNodeCapabilities()
   const [isChecking, setIsChecking] = useState(false)
 
   const [applyingNodes, setApplyingNodes] = useState<Set<number>>(new Set())
@@ -199,8 +203,9 @@ export default function SystemOptimizations() {
 
   useEffect(() => {
     fetchBase()
+    fetchSettings()
     return () => { abortRef.current = true }
-  }, [fetchBase])
+  }, [fetchBase, fetchSettings])
 
   const handleRefresh = useCallback(() => {
     abortRef.current = true
@@ -369,6 +374,7 @@ export default function SystemOptimizations() {
     const showModeDropdown = modeDropdown === node.id
     const showConfirmRemove = confirmRemove === node.id
     const mqSupported = node.nicInfo?.multiqueue_supported ?? false
+    const optAllowed = allows(node.id, 'system', 'write')
     const currentProfile = node.optProfile || 'vpn'
     const hasOpenDropdown = showModeDropdown || showConfirmRemove
 
@@ -463,7 +469,7 @@ export default function SystemOptimizations() {
                 <motion.button
                   ref={(el) => { if (el) applyTriggerRefs.current.set(node.id, el) }}
                   onClick={() => { setProfileChoice(null); setModeDropdown(showModeDropdown ? null : node.id) }}
-                  disabled={isBusy}
+                  disabled={isBusy || !optAllowed}
                   className="btn btn-secondary text-xs px-2.5 py-1.5"
                   whileHover={{ scale: 1.05 }}
                   whileTap={{ scale: 0.95 }}
@@ -575,7 +581,7 @@ export default function SystemOptimizations() {
                 <motion.button
                   ref={(el) => { if (el) removeTriggerRefs.current.set(node.id, el) }}
                   onClick={() => setConfirmRemove(showConfirmRemove ? null : node.id)}
-                  disabled={isBusy}
+                  disabled={isBusy || !optAllowed}
                   className="btn btn-secondary text-xs px-1.5 py-1.5 !text-danger hover:!bg-danger/10"
                   whileHover={{ scale: 1.05 }}
                   whileTap={{ scale: 0.95 }}
@@ -614,6 +620,7 @@ export default function SystemOptimizations() {
     const result = results[`node-${node.id}`]
     const showModeDropdown = modeDropdown === node.id
     const mqSupported = node.nicInfo?.multiqueue_supported ?? false
+    const optAllowed = allows(node.id, 'system', 'write')
 
     return (
       <motion.div
@@ -664,7 +671,7 @@ export default function SystemOptimizations() {
                     setProfileChoice(null)
                     setModeDropdown(showModeDropdown ? null : node.id)
                   }}
-                  disabled={isApplying}
+                  disabled={isApplying || !optAllowed}
                   className="btn btn-primary text-xs px-2.5 py-1.5"
                   whileHover={{ scale: 1.05 }}
                   whileTap={{ scale: 0.95 }}
@@ -843,6 +850,31 @@ export default function SystemOptimizations() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Развод по ядрам — глобальный переключатель */}
+      <div className="card mb-6 flex items-center justify-between gap-4">
+        <div className="min-w-0">
+          <div className="flex items-center gap-1 text-sm font-medium text-dark-200">
+            <Cpu className="w-4 h-4 text-accent-400" />
+            {t('sys_opt.cpu_affinity')}
+            <FAQIcon screen="SYS_OPT_CPU_AFFINITY" size="sm" />
+          </div>
+          <p className="text-xs text-dark-500 mt-1">{t('sys_opt.cpu_affinity_hint')}</p>
+        </div>
+        <motion.button
+          onClick={() => setCpuAffinityEnabled(!cpuAffinityEnabled)}
+          className={`relative w-11 h-6 rounded-full transition-colors flex-shrink-0 ${
+            cpuAffinityEnabled ? 'bg-accent-500' : 'bg-dark-600'
+          }`}
+          whileTap={{ scale: 0.95 }}
+        >
+          <motion.div
+            className="absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow-md"
+            animate={{ x: cpuAffinityEnabled ? 20 : 0 }}
+            transition={{ type: 'spring', stiffness: 500, damping: 30 }}
+          />
+        </motion.button>
+      </div>
 
       {nodesList.length === 0 ? (
         <div className="card text-center py-12">

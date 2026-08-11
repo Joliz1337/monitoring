@@ -19,6 +19,7 @@ from uuid import uuid4
 import psutil
 
 from app.config import get_settings
+from app.services import cpu_affinity
 from app.services.host_executor import get_host_executor
 
 logger = logging.getLogger(__name__)
@@ -259,6 +260,8 @@ class HAProxyManager:
     tune.bufsize 16384
     tune.maxpollevents 1024
     tune.recv_enough 16384
+    hard-stop-after 1h
+    # cpu-affinity (auto)
 
 defaults
     mode tcp
@@ -1110,6 +1113,7 @@ backend {backend_name}
             try:
                 config_content = self._patch_dns_resolvers(config_content)
                 config_content = self._ensure_global_maxconn(config_content)
+                config_content = cpu_affinity.apply(config_content, psutil.cpu_count() or 1)
                 self._write_config(config_content)
             except Exception as e:
                 rollback()

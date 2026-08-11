@@ -23,6 +23,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.database import async_session
 from app.models import Server, ServerTraffic, TrafficImportState
 from app.services.http_client import get_node_client, node_auth_headers
+from app.services.node_capabilities import Capability, server_allows
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,7 @@ HARD_TIMEOUT_SECONDS = 90
 class ImportStatus(str, Enum):
     PENDING = "pending"
     NODE_TOO_OLD = "node_too_old"
+    NODE_DENIED = "node_denied"
     IMPORTED = "imported"
     PURGED = "purged"
     EMPTY = "empty"
@@ -79,6 +81,7 @@ RETRY_STATUSES = (
     ImportStatus.PENDING.value,
     ImportStatus.FAILED.value,
     ImportStatus.NODE_TOO_OLD.value,
+    ImportStatus.NODE_DENIED.value,
     ImportStatus.IMPORTED.value,
 )
 
@@ -329,6 +332,17 @@ class TrafficImporter:
 
     async def _import_and_purge(self, server: Server) -> None:
         node_version = server.node_version
+        if not server_allows(server, Capability.TRAFFIC, write=False):
+            # Раздел закрыт на самой ноде: ждём не обновления, а решения владельца
+            await self._save_state(
+                server.id,
+                status=ImportStatus.NODE_DENIED.value,
+                node_version=node_version,
+                last_error=None,
+                next_attempt_at=_utcnow() + NODE_TOO_OLD_RETRY,
+            )
+            return
+
         if not node_supports_traffic_v2(node_version):
             # Нода просто ещё не обновилась — штатное ожидание, не ошибка.
             logger.debug(f"Legacy traffic import postponed: {server.name} runs {node_version or 'unknown'}")
@@ -408,6 +422,18 @@ class TrafficImporter:
         )
 
     async def _finish_purge(self, server: Server) -> None:
+        # Чтение разрешено, а запись нет: историю мы забрали, удалить копию на
+        # ноде не можем. Считаем работу законченной, иначе она повторялась бы
+        # каждые полчаса до конца времён.
+        if not server_allows(server, Capability.TRAFFIC, write=True):
+            await self._save_state(
+                server.id,
+                status=ImportStatus.IMPORTED.value,
+                last_error=None,
+                next_attempt_at=None,
+            )
+            return
+
         try:
             await self._purge_node(server)
         except LegacyPurgeError as e:

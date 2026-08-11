@@ -68,7 +68,7 @@ fi
 
 h "Ключевые значения"
 for kv in "net.ipv4.tcp_timestamps=1" "net.netfilter.nf_conntrack_tcp_be_liberal=1" \
-          "net.ipv4.tcp_retries2=10" "net.ipv4.tcp_autocorking=0" "net.core.default_qdisc=fq" \
+          "net.ipv4.tcp_retries2=10" "net.ipv4.tcp_autocorking=1" "net.core.default_qdisc=fq" \
           "net.ipv4.tcp_congestion_control=bbr"; do
     k=${kv%%=*}; want=${kv#*=}; got=$(sv "$k")
     [ "$got" = "$want" ] && ok "$k=$got" || warn "$k=$got (ожидалось $want)"

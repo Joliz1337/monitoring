@@ -24,6 +24,8 @@ from pydantic import BaseModel, Field
 # requests-ошибка, которую DockerException не покрывает
 from requests.exceptions import ReadTimeout, RequestException
 
+from app.capabilities import get_policy
+from app.services import cpu_affinity
 from app.services.host_executor import get_host_executor, MAX_TIMEOUT, DEFAULT_TIMEOUT
 from app.services.host_files import read_host_file, write_host_file
 from app.services.sysctl_verify import (
@@ -832,9 +834,12 @@ async def get_all_versions():
     )
 
     opt_installed = sysctl_content is not None
+    policy = get_policy()
 
     return {
         "node_version": node_version if node_version != "unknown" else None,
+        "capabilities": policy.published(),
+        "capabilities_unknown": list(policy.unknown_tokens),
         "optimizations": {
             "installed": opt_installed,
             "version": opt_version,
@@ -891,6 +896,10 @@ class ApplyOptimizationsRequest(BaseModel):
     multiqueue_tune_service_content: Optional[str] = Field(None, description="Multiqueue tune service (HW)")
     hybrid_tune_content: Optional[str] = Field(None, description="Hybrid tune script (HW+RPS)")
     hybrid_tune_service_content: Optional[str] = Field(None, description="Hybrid tune service (HW+RPS)")
+    cpu_affinity: bool = Field(
+        False,
+        description="Развести приложения и сетевые прерывания по разным ядрам",
+    )
     nic_mode: Literal["rps", "multiqueue", "hybrid"] = Field(
         "rps", description="NIC tuning mode: rps, multiqueue, or hybrid"
     )
@@ -970,6 +979,57 @@ async def remove_hybrid_mode(executor) -> list[str]:
     return removed
 
 
+class CpuAffinityRequest(BaseModel):
+    enabled: bool = Field(..., description="Включить развод по ядрам")
+
+
+def _cpu_affinity_state() -> dict:
+    cpu_count = os.cpu_count() or 1
+    enabled = cpu_affinity.is_enabled()
+    network_cpus = sorted(cpu_affinity.detect_network_cpus())
+    app_cpus = cpu_affinity.resolve_app_cpus("auto", cpu_count) if enabled else None
+    return {
+        "enabled": enabled,
+        "cpu_count": cpu_count,
+        "network_cpus": network_cpus,
+        "app_cpus": app_cpus or [],
+        "applicable": bool(app_cpus),
+        "containers": cpu_affinity.container_names(),
+    }
+
+
+@router.get("/cpu-affinity")
+async def get_cpu_affinity():
+    """Текущее состояние развода по ядрам и что нода на себе определила."""
+    return _cpu_affinity_state()
+
+
+@router.post("/cpu-affinity")
+async def set_cpu_affinity(request: CpuAffinityRequest):
+    """Переключает развод по ядрам без полного применения оптимизаций.
+
+    Настройка глобальная, а полный apply на каждой ноде занимает минуты — поэтому
+    у переключателя своя лёгкая ручка. Контейнеры приводятся к новой привязке
+    сразу, HAProxy — при ближайшем применении конфига.
+    """
+    written = await write_host_file(
+        str(cpu_affinity.STATE_FILE),
+        cpu_affinity.render_state(request.enabled),
+        mode="644",
+    )
+    if not written:
+        raise HTTPException(status_code=500, detail="Failed to write cpu-affinity state")
+
+    executor = get_host_executor()
+    cpu_count = os.cpu_count() or 1
+    if request.enabled:
+        changed = await cpu_affinity.sync_containers(executor, cpu_count)
+    else:
+        changed = await cpu_affinity.reset_containers(executor)
+
+    return {**_cpu_affinity_state(), "containers_changed": changed}
+
+
 @router.post("/optimizations/apply")
 async def apply_optimizations(request: ApplyOptimizationsRequest):
     """
@@ -1012,6 +1072,11 @@ async def apply_optimizations(request: ApplyOptimizationsRequest):
     # 2. Profile marker must exist before the renderer runs: the boot-time
     #    ExecStartPre has no argument and reads the profile from this file.
     await write_host_file(OPT_PROFILE_PATH, request.opt_profile + "\n", mode="644")
+    await write_host_file(
+        str(cpu_affinity.STATE_FILE),
+        cpu_affinity.render_state(request.cpu_affinity),
+        mode="644",
+    )
     if request.version:
         await write_host_file(OPTIMIZATIONS_VERSION_PATH, request.version + "\n", mode="644")
 

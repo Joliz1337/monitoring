@@ -260,7 +260,8 @@
     "deploy_bindings": "Bind to profiles:",
     "deploy_haproxy_profile": "HAProxy config",
     "deploy_firewall_profile": "Firewall profile",
-    "deploy_profile_none": "Do not bind"
+    "deploy_profile_none": "Do not bind",
+    "restricted_badge": "Restricted"
   },
   "infra": {
     "title": "Infrastructure",
@@ -889,7 +890,9 @@
     "panel_nodes": "Universal Servers",
     "node_outdated": "Update node",
     "info_title": "Information",
-    "info_text": "Optimizations are applied to the host machine via nsenter. When switching NIC mode, the previous mode is automatically removed."
+    "info_text": "Optimizations are applied to the host machine via nsenter. When switching NIC mode, the previous mode is automatically removed.",
+    "cpu_affinity": "Split workloads off network cores",
+    "cpu_affinity_hint": "Moves HAProxy and Remnawave containers away from cores handling network interrupts"
   },
   "bulk_actions": {
     "title": "Bulk Actions",
@@ -1665,6 +1668,39 @@
     "webhook_delay": "Delay before ban (seconds)",
     "webhook_delay_hint": "How long to wait after sending the webhook before banning the IP (grace period for the user). Should be less than the poll interval",
     "webhook_test": "Send test webhook"
+  },
+  "node_caps": {
+    "restricted_title": "The node closed this section",
+    "readonly_title": "This section is view-only",
+    "restricted_body": "That is how the server itself is configured: the panel does not reach here. It is not a connection failure and not an error.",
+    "allowed": "Allowed: {{allowed}}",
+    "allowed_everything": "everything",
+    "allowed_none": "metrics, version and node updates only",
+    "where": "NODE_CAPABILITIES in /opt/monitoring-node/.env",
+    "restricted_action": "How to set permissions",
+    "badge": "Restricted",
+    "badge_tooltip_title": "The node did not hand the panel everything",
+    "write_blocked": "The node allows viewing this section only",
+    "exec_blocked": "The node closed command execution",
+    "row_blocked": "This section is closed on this node",
+    "sync_blocked": "The node does not accept these settings",
+    "fleet_skipped": "Nodes with the section closed will be skipped: {{count}}",
+    "bulk_warning": "Will not accept the operation: {{count}}",
+    "bulk_execute_count": "Execute ({{count}})",
+    "bulk_all_blocked": "None of the selected nodes will accept this operation",
+    "unknown_tokens": "The node did not understand: {{tokens}}",
+    "status_denied": "Closed on the node",
+    "domain_traffic": "Port tracking",
+    "domain_haproxy": "HAProxy",
+    "domain_firewall": "Firewall",
+    "domain_ipset": "IP blocking",
+    "domain_ssh": "SSH Security",
+    "domain_ssl": "Wildcard SSL",
+    "domain_antiddos": "Anti-DDoS",
+    "domain_remnawave": "Remnawave nginx",
+    "domain_system": "Optimizations and time",
+    "domain_exec": "Terminal and commands",
+    "readonly_suffix": "view only"
   },
   "faq": {
     "title": "Help",

@@ -2,6 +2,12 @@ import logging
 
 import httpx
 from app.services.http_client import get_node_apply_client, get_node_client, node_auth_headers
+from app.services.node_capabilities import (
+    Capability,
+    NodeCapabilityError,
+    learn_from_denial,
+    server_allows_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +63,10 @@ async def proxy_to_node(
     timeout: float = 30.0,
     use_apply_client: bool = False,
 ) -> dict:
+    allowed, capability, write = server_allows_path(server, path, method)
+    if not allowed:
+        raise NodeCapabilityError(capability, write)
+
     client = get_node_apply_client(server) if use_apply_client else get_node_client(server)
     url = f"{server.url}{path}"
     headers = node_auth_headers(server)
@@ -78,6 +88,16 @@ async def proxy_to_node(
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404:
             raise LookupError(f"Node {server.name} does not support SSH management (update required)")
+        if e.response.status_code == 403:
+            # Права сменили только что: запоминаем и говорим правду вместо
+            # «нода недоступна», которой стал бы обычный RuntimeError
+            body = None
+            try:
+                body = e.response.json()
+            except Exception:
+                pass
+            await learn_from_denial(server.id, 403, body)
+            raise NodeCapabilityError(Capability.SSH, method.upper() not in ("GET", "HEAD"))
         detail = ""
         try:
             detail = e.response.json().get("detail", "")

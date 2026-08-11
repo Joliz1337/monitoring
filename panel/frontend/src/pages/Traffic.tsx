@@ -20,6 +20,8 @@ import {
 import { toast } from 'sonner'
 import { proxyApi, trafficApi, TrafficSummary, TrafficStatus, TrafficSeries, ServerMetrics } from '../api/client'
 import { useServersStore } from '../stores/serversStore'
+import NodeRestrictedNotice from '../components/servers/NodeRestrictedNotice'
+import { nodeAllows } from '../utils/nodeCapabilities'
 import { useTranslation } from 'react-i18next'
 import { useSmartRefresh } from '../hooks/useAutoRefresh'
 import { formatBytes, createBitsFormatter } from '../utils/format'
@@ -57,6 +59,10 @@ export default function Traffic() {
   const [isAddingPort, setIsAddingPort] = useState(false)
 
   const server = servers.find(s => s.id === Number(serverId))
+  // Графики и сводка считаются из базы панели, поэтому от прав ноды не зависят.
+  // Закрыть можно только управление списком отслеживаемых портов.
+  const portsReadable = nodeAllows(server, 'traffic', 'read')
+  const portsWritable = nodeAllows(server, 'traffic', 'write')
 
   const fetchSummary = useCallback(async () => {
     if (!serverId) return
@@ -186,7 +192,7 @@ export default function Traffic() {
 
   const handleAddPort = async () => {
     const port = parseInt(newPort)
-    if (isNaN(port) || port < 1 || port > 65535) return
+    if (isNaN(port) || port < 1 || port > 65535 || !portsWritable) return
 
     setIsAddingPort(true)
     try {
@@ -209,6 +215,7 @@ export default function Traffic() {
   }
 
   const handleRemovePort = async (port: number) => {
+    if (!portsWritable) return
     try {
       const res = await proxyApi.removeTrackedPort(Number(serverId), port)
       if (res.data.success) {
@@ -599,7 +606,9 @@ export default function Traffic() {
 
             {/* Учёт по портам читает счётчики iptables, их отдаёт только агент 10.13.0+.
                 Суммарный трафик и интерфейсы выше работают на ноде любой версии. */}
-            {status && !status.supported ? (
+            {!portsReadable ? (
+              <NodeRestrictedNotice server={server} compact />
+            ) : status && !status.supported ? (
               <TrafficUnsupportedNotice nodeVersion={status.node_version} minVersion={status.min_version} />
             ) : (
             <>
@@ -615,10 +624,11 @@ export default function Traffic() {
               />
               <motion.button
                 onClick={handleAddPort}
-                className="btn btn-primary"
+                className="btn btn-primary disabled:opacity-40 disabled:cursor-not-allowed"
                 whileHover={{ scale: 1.02 }}
                 whileTap={{ scale: 0.98 }}
-                disabled={isAddingPort || !newPort}
+                disabled={isAddingPort || !newPort || !portsWritable}
+                title={portsWritable ? undefined : t('node_caps.write_blocked')}
               >
                 <Plus className="w-4 h-4" />
                 {t('traffic.add_port')}
@@ -658,12 +668,15 @@ export default function Traffic() {
                           <span className="text-dark-500 text-sm">{t('traffic.no_data_yet')}</span>
                         )}
                       </div>
-                      <Tooltip label={t('common.delete')}>
+                      <Tooltip label={portsWritable ? t('common.delete') : t('node_caps.write_blocked')}>
                         <motion.button
                           onClick={() => handleRemovePort(port)}
-                          className="p-2 hover:bg-danger/20 rounded-lg text-dark-400 hover:text-danger transition-colors"
-                          whileHover={{ scale: 1.1 }}
-                          whileTap={{ scale: 0.9 }}
+                          disabled={!portsWritable}
+                          className={`p-2 rounded-lg text-dark-400 transition-colors ${
+                            portsWritable ? 'hover:bg-danger/20 hover:text-danger' : 'opacity-40 cursor-not-allowed'
+                          }`}
+                          whileHover={{ scale: portsWritable ? 1.1 : 1 }}
+                          whileTap={{ scale: portsWritable ? 0.9 : 1 }}
                         >
                           <Trash2 className="w-4 h-4" />
                         </motion.button>

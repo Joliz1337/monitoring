@@ -2990,6 +2990,13 @@ run_unattended() {
     echo " Monitoring Installer — unattended mode"
     echo "=========================================="
 
+    # Значение уходит в .env ноды через sed — отсеиваем всё, что там не нужно
+    if [ -n "${MON_NODE_CAPABILITIES:-}" ] && \
+       ! printf '%s' "$MON_NODE_CAPABILITIES" | grep -qE '^[A-Za-z:, ]+$'; then
+        log_error "MON_NODE_CAPABILITIES contains unexpected characters, ignored"
+        unset MON_NODE_CAPABILITIES
+    fi
+
     if [ -n "${MON_PROXY_URL:-}" ]; then
         log_info "Configuring installer proxy"
         cat > /etc/monitoring/proxy.conf << PROXYEOF
@@ -3086,7 +3093,8 @@ collect_firstboot_env() {
     local var
     for var in NODE_SECRET PANEL_IP MON_PROXY_URL MON_BRANCH \
                MON_INSTALL_NODE MON_INSTALL_OPTIMIZATIONS MON_INSTALL_WARP \
-               MON_INSTALL_REMNAWAVE MON_NIC_MODE MON_OPT_PROFILE REMNAWAVE_CERT; do
+               MON_INSTALL_REMNAWAVE MON_NIC_MODE MON_OPT_PROFILE \
+               MON_NODE_CAPABILITIES REMNAWAVE_CERT; do
         [ -n "${!var:-}" ] && printf '%s=%q\n' "$var" "${!var}"
     done
 }
@@ -3317,6 +3325,13 @@ Usage:
   bash install.sh <NODE_SECRET> --optimize --profile=panel|vpn
   bash install.sh --node=<NODE_SECRET>         Same as positional form
   bash install.sh --unattended                 Env-driven install (MON_INSTALL_*, NODE_SECRET, ...)
+
+Node permissions (optional):
+  MON_NODE_CAPABILITIES=readonly,haproxy bash install.sh <NODE_SECRET>
+                                               Limit what the panel may do on this node.
+                                               Words: traffic haproxy firewall ipset ssh ssl
+                                               antiddos remnawave system exec; ":ro" = view only;
+                                               presets: monitoring, readonly, full. Empty = all.
 
 Quick remote install:
   bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh) <NODE_SECRET>

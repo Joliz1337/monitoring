@@ -17,6 +17,7 @@ from app.database import async_session, async_session_maker
 from app.models import Server, FirewallProfile, FirewallSyncLog
 from app.services.haproxy_profile_sync import is_server_online
 from app.services.http_client import get_node_apply_client, node_auth_headers
+from app.services.node_capabilities import Capability, denied_message, server_allows
 from app.services.node_sync_queue import KIND_FIREWALL_PROFILE, enqueue
 
 logger = logging.getLogger(__name__)
@@ -252,18 +253,35 @@ async def sync_profile_to_servers(
     if not servers:
         return []
 
+    # Ноды с закрытым разделом отделяем до всего остального: pending на них
+    # означал бы «вот-вот доедет», а не доедет никогда
+    denied = [s for s in servers if not server_allows(s, Capability.FIREWALL, write=True)]
+    servers = [s for s in servers if s not in denied]
+
     ids = [s.id for s in servers]
-    await db.execute(
-        update(Server).where(Server.id.in_(ids)).values(firewall_sync_status="pending")
-    )
+    if ids:
+        await db.execute(
+            update(Server).where(Server.id.in_(ids)).values(firewall_sync_status="pending")
+        )
+    if denied:
+        await db.execute(
+            update(Server).where(Server.id.in_([s.id for s in denied]))
+            .values(firewall_sync_status="denied")
+        )
     await db.commit()
+
+    results_denied = [
+        SyncResult(s.id, s.name, False, denied_message(Capability.FIREWALL, True))
+        for s in denied
+    ]
 
     online = [s for s in servers if is_server_online(s)]
     offline = [s for s in servers if not is_server_online(s)]
 
     # Статус pending уже проставлен выше всем — офлайн-ноды так и остаются в нём
     # до момента, когда очередь их догонит.
-    results: list[SyncResult] = await _queue_offline_servers(offline, profile.id, rules_hash)
+    results: list[SyncResult] = results_denied
+    results.extend(await _queue_offline_servers(offline, profile.id, rules_hash))
 
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_SYNCS)
 
@@ -313,6 +331,8 @@ async def sync_firewall_to_servers(server_ids: list[int]) -> dict[int, Optional[
                 profile, db, server_ids=sids, queue_failures=False
             )
             for sync in synced:
-                results[sync.server_id] = None if sync.success else sync.message
+                # Закрытый раздел — долг закрыт: повтор дал бы тот же отказ
+                denied_here = sync.message == denied_message(Capability.FIREWALL, True)
+                results[sync.server_id] = None if (sync.success or denied_here) else sync.message
 
     return results

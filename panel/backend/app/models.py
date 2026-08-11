@@ -127,6 +127,10 @@ class Server(Base):
     node_version = Column(String(20), nullable=True)
     tracked_ports = Column(Text, nullable=True)
 
+    # Карта прав, которую нода прислала о себе (NODE_CAPABILITIES в её .env).
+    # NULL — ограничений нет; по ней панель решает, идти ли к ноде вообще.
+    node_capabilities = Column(Text, nullable=True)
+
 
 class ServerCache(Base):
     """Отдельная таблица для тяжёлых JSON-кешей, часто обновляемых фоновыми задачами.

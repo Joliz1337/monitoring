@@ -10,6 +10,11 @@ import logging
 
 from app.database import get_db
 from app.models import Server
+from app.services.node_capabilities import (
+    denied_message,
+    learn_from_denial,
+    server_allows_path,
+)
 from app.services.traffic_import import (
     MIN_NODE_VERSION_FOR_TRAFFIC_V2,
     node_supports_traffic_v2,
@@ -103,6 +108,10 @@ async def proxy_request_safe(
     timeout: float = 30.0
 ) -> tuple[bool, dict | str]:
     """Make a proxy request and return (success, result/error)."""
+    allowed, capability, write = server_allows_path(server, endpoint, method)
+    if not allowed:
+        return False, denied_message(capability, write)
+
     url = f"{server.url}{endpoint}"
 
     try:
@@ -123,7 +132,14 @@ async def proxy_request_safe(
         if response.status_code == 200:
             return True, response.json()
         else:
-            error_detail = response.json().get("detail", f"Error {response.status_code}")
+            body = None
+            try:
+                body = response.json()
+            except Exception:
+                pass
+            if response.status_code == 403:
+                await learn_from_denial(server.id, response.status_code, body)
+            error_detail = (body or {}).get("detail", f"Error {response.status_code}")
             return False, error_detail
     except httpx.TimeoutException:
         return False, "Connection timeout"

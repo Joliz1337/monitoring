@@ -1,4 +1,4 @@
-# Monitoring Panel v10.56.0
+# Monitoring Panel v10.58.0
 
 Веб-панель для мониторинга серверов. Собирает метрики с нод с настраиваемым интервалом (по умолчанию 10 сек) и хранит историю локально.
 
@@ -27,6 +27,7 @@
 - **Авторазвёртывание ноды** — установка ноды мониторинга прямо из вкладки «Серверы»: подключение по SSH (пароль или приватный ключ), запуск `install.sh --unattended` на целевом сервере; установка выполняется **в фоне на бэкенде** — закрытие вкладки браузера не прерывает процесс; живой лог переподключаем (GET-стрим с реплеем); опционально устанавливает WARP и ноду Remnawave с сохранёнными именованными сертификатами; **массовый деплой** — произвольное количество дополнительных целей, каждая со своим SSH и опциями; после успешного деплоя бэкенд автоматически привязывает сервер к выбранным HAProxy-профилю и/или Firewall-профилю; незавершённые задачи переживают перезагрузку страницы (восстановление через localStorage + `GET /deploy/jobs`); **поддержка Hetzner Rescue System** — при обнаружении rescue-среды `install.sh` устанавливает Ubuntu 24.04, перезагружается, панель ждёт ноду до 40 мин через поллинг и завершает деплой автоматически
 - **SOCKS5-прокси до ноды** — опциональное поле у сервера (`ip:port` или `ip:port@login:pass`): при заполнении все запросы панели к этой ноде идут через указанный прокси вместо прямого соединения — и HTTP (метрики, proxy-роутер, синхронизация блок-листов/анти-DDoS, SSE-терминал, тест подключения), и SSH при авторазвёртывании ноды
 - **Канал обновлений** — переключатель «Стабильный» (`main`) / «Dev» (`dev`) в разделе Настройки; определяет, откуда панель качает свой и нодовский код при обновлении, конфиги оптимизаций/анти-DDoS и Docker-образы (тег `:latest` для main, `:dev` для dev)
+- **Права ноды (NODE_CAPABILITIES)** — владелец ноды может ограничить, что панель вправе на ней делать, строкой в `.env` ноды; панель хранит присланную нодой карту прав и не отправляет запросы, на которые заведомо получит отказ — закрытые разделы помечаются в интерфейсе, а не падают ошибкой
 
 ## Интервалы сбора данных
 
@@ -484,6 +485,14 @@ PK таблицы — `BigInteger` (не int32). При 500 нодах с инт
 
 **Гейт по версии ноды:** `POST /api/proxy/{id}/system/optimizations/apply` (`routers/proxy.py`) отдаёт `HTTP 409`, если версия ноды ниже `MIN_NODE_VERSION_FOR_RENDER = "10.6.0"` (`node_supports_renderer()`/`_version_tuple()` в `routers/system.py`) — это гейт по версии, а не шим: старая нода записала бы входные файлы рендерера буквально, с нерасшифрованными `@@TOKEN@@`, которые `sysctl` бы отверг.
 
+**Развод по ядрам (cpu-affinity) — глобальный тумблер:**
+
+Уводит HAProxy и контейнеры Remnawave (`remnanode`, `remnawave-nginx`) с ядер, занятых прерываниями сетевой карты — подробности механизма в [node/DOCUMENTATION.md](../node/DOCUMENTATION.md#haproxy). Выключен по умолчанию: выигрыш зависит от того, во что упирается конкретная нода, а ядро под сеть при включении забирается у приложения целиком.
+
+- Настройка глобальная и одна на весь парк, хранится в `panel_settings` под ключом `cpu_affinity_enabled` (`routers/settings.py`, `DEFAULT_SETTINGS["cpu_affinity_enabled"] = "false"`, хелпер `cpu_affinity_enabled(db)`). Смена значения через `PUT /settings/{key}` асинхронно запускает рассылку на ноды (`asyncio.ensure_future`, не блокирует ответ).
+- `panel/backend/app/services/cpu_affinity_sync.py` — `push_to_all_nodes(enabled)` разносит новое значение по всем активным нодам параллельно (`asyncio.Semaphore(CONCURRENCY=50)` — тот же потолок, что у синхронизации времени), таймаут 20с на ноду, гейтится `server_allows(..., Capability.SYSTEM, write=True)`. Каждая нода получает `POST /api/system/cpu-affinity` — лёгкая ручка, не полное применение оптимизаций. Офлайн-нода не считается ошибкой: она подхватит актуальное значение при ближайшем полном применении оптимизаций, которое всегда несёт флаг с собой (`ApplyOptimizationsRequest.cpu_affinity`, см. `routers/proxy.py` — `apply_data["cpu_affinity"] = await cpu_affinity_enabled(db)`).
+- Frontend: карточка с тумблером над списком нод на странице «Системные оптимизации» (`stores/settingsStore.ts` — `cpuAffinityEnabled`/`setCpuAffinityEnabled`, подхватывается через `fetchSettings()` при монтировании страницы), значок FAQ `SYS_OPT_CPU_AFFINITY`.
+
 **Страница «Системные оптимизации» (SystemOptimizations.tsx):**
 
 Отображает диагностику NIC на каждой ноде через `GET /api/system/nic-info`. Оператор видит бейджи диагностики и выбирает режим (rps/hybrid/multiqueue) самостоятельно — авто-рекомендация не используется.
@@ -545,6 +554,8 @@ interface NicInfo {
 | DELETE | /api/servers/folders/{folder_name} | Расформировать папку (серверы остаются, `folder` очищается) |
 
 Поле `proxy_url` в `ServerCreate`/`ServerUpdate` и во всех ответах (`GET /servers`, `POST /servers`) — см. «SOCKS5-прокси до ноды» ниже.
+
+Поле `node_capabilities` в ответе `GET /servers` — разобранная карта прав, которые нода выдала панели (`null` — без ограничений), см. «Права ноды (NODE_CAPABILITIES)» ниже.
 
 `GET /servers` без `include_metrics` (лёгкий путь, не кэшируется) тоже возвращает поле `status` (`online`/`offline`/`loading`). Оба пути используют общий `resolve_status()` из `app/services/server_status.py` (см. «Массовые действия (Bulk Actions)» ниже — тот же модуль лежит в основе пропуска офлайн-нод в bulk-операциях).
 
@@ -646,6 +657,55 @@ interface NicInfo {
 - `panel/frontend/src/components/servers/ExtraServerCard.tsx`
 - `panel/frontend/src/api/client.ts`
 - `panel/frontend/src/stores/serversStore.ts`
+
+### Права ноды (NODE_CAPABILITIES)
+
+Владелец ноды может ограничить, к чему панель получает доступ на его сервере, строкой `NODE_CAPABILITIES` в `.env` ноды (грамматика — см. [node/DOCUMENTATION.md](../node/DOCUMENTATION.md#права-доступа-панели-node_capabilities)). Панель узнаёт про это не запросом, а пассивно: нода сама публикует карту своих прав в каждом ответе `/api/metrics`, `/api/version` и `/api/system/versions`. Панель хранит эту карту и решает вопрос «можно ли» **до** сетевого похода на ноду — запрос, который заведомо получит `403`, вообще не отправляется. Это не оптимизация ожидания: без предварительной проверки такой запрос успевал бы отметиться ошибкой в интерфейсе и осесть вечным долгом в очереди отложенной синхронизации нод (см. ниже), которая штатно ретраит только сетевые сбои, а не осознанный отказ.
+
+**Хранение и разбор (`panel/backend/app/services/node_capabilities.py`):**
+- Колонка `Server.node_capabilities` (`Text`, nullable) — канонический JSON карты (`{"traffic": "ro", ...}`) или `NULL`, если у ноды ограничений нет. Миграция `_migrate_node_capabilities()` в `database.py` добавляет колонку идемпотентно; это единственная миграция в файле, которой позволено остановить старт панели — модель уже объявляет колонку, и без неё панель отвечала бы `500` на любой запрос о серверах.
+- `parse(raw)` — разбор JSON с `lru_cache(512)`: предикат зовут из циклов с конкурентностью до 30 (fan-out по нодам), разбор JSON на каждый вызов заметно грузил бы event loop.
+- `allows(raw, capability, write)` / `server_allows(server, capability, write)` — булев ответ на «можно ли». `raw is None` (нода без ограничений) → всегда `True`. Если карта есть, но конкретного ключа в ней нет — тоже `True`: панель может знать домен, которого не знает старая нода, и решает в этом случае сама нода при получении запроса, а не панель заранее.
+- `resolve_route(path, method)` / `server_allows_path(server, path, method)` — то же самое, но по HTTP-пути: `DOMAIN_PREFIXES`, `ALWAYS_ALLOWED`, `READ_ONLY_WRITES` — точное зеркало одноимённых структур `node/app/capabilities.py`. Дублирование намеренное: решение принимается на этой стороне, до сетевого похода, поэтому карта путей нужна панели независимо от ноды. Расхождение между копиями ловит `MirrorTest` (`panel/backend/tests/test_node_capabilities.py`), который грузит `node/app/capabilities.py` через `importlib` (общий пакет `app` есть в обоих проектах, поэтому обычный импорт невозможен) и структурно сверяет обе карты.
+- `normalize_map(value)` — сырую карту от ноды в канонический JSON для хранения: неизвестные домены и значения отбрасываются, пустая карта после фильтрации → `None`.
+- `capabilities_from_version(body)` — различает «поля `capabilities` нет вовсе» (старая нода, сохранённое значение не трогаем) и «поле есть и равно `null`» (ограничения только что сняли).
+- `capabilities_from_denial(body)` — карта из тела `403` самой ноды; требует маркер `error: "capability_denied"`, иначе `403` от постороннего прокси перед нодой не переписал бы сохранённые права.
+- `remember_capabilities(server_id, caps_json)` — сохраняет карту, если она изменилась, и возвращает, изменилась ли.
+- `learn_from_denial(server_id, status_code, body)` — досрочно уточняет карту по факту живого `403`: между сменой прав на ноде и следующим циклом метрик может пройти до получаса, и без этого панель всё это время продолжала бы ходить в закрытое и копить долги. При реальном изменении карты вызывает `drop_forbidden()` (см. «Очередь отложенной синхронизации нод» ниже).
+
+**Enforcement — два независимых слоя:**
+1. **По каждому запросу** (`panel/backend/app/routers/proxy.py`): `require_capability(server, capability, write)` — явная проверка перед действием, используется там, где до отправки запроса на ноду есть дорогая подготовительная работа (проверка версии, поход на GitHub за конфигами оптимизаций) — `POST /system/execute`, `/system/execute-stream`, `/system/optimizations/apply`, три эндпоинта анти-DDoS. `_require_endpoint(server, endpoint, method)` — тот же принцип, но по пути: вызывается из общего `proxy_request()` и покрывает без отдельного кода все остальные per-node проксируемые эндпоинты (HAProxy, firewall, ssh, ssl, traffic, remnawave). Обе функции отвечают `HTTPException(409)`, а не `403`: `403` в API самой панели фронт трактует как «сессия протухла» и редиректит на логин, а `502`/`503`/`504` ретраятся автоматически — тем же кодом `409` уже помечено «нода не в том состоянии» у гейта по версии агента (`_require_traffic_v2`, см. «Traffic» выше), логика согласована. Если нода уже отдала честный `403` (права поменяли только что, локальная копия карты ещё старая) — `proxy_request()` перехватывает его, вызывает `learn_from_denial()` и тоже транслирует клиенту как `409`.
+2. **Перед пакетной рассылкой** (`blocklist_manager.py`, `firewall_profile_sync.py`, `haproxy_profile_sync.py`, `antiddos_manager.py`, `remnawave_nginx_sync.py`, `torrent_blocker.py`, `time_sync.py`, `wildcard_ssl.py`, `recovery_reconciler.py`) — эти сервисы ходят на ноды напрямую через `get_node_client()`, минуя `proxy_request()`, поэтому каждый перед отправкой сам отфильтровывает закрытые ноды через `server_allows()`. Закрытая нода не получает сетевой запрос вообще и помечается статусом `"denied"` в соответствующем поле синхронизации (`firewall_sync_status`, `remnawave_nginx_sync_status`, результат blocklist/anti-DDoS push) — отдельно от `"pending"`/`queued`, которым помечаются офлайн-ноды и сетевые сбои (см. «Очередь отложенной синхронизации нод» ниже). Различие важно: `pending` уходит в ретраи с backoff, а `denied` — осознанный отказ владельца ноды, повторные попытки его не изменят.
+
+**Публикация панелью:**
+- `GET /api/servers` отдаёт поле `Server.node_capabilities` как разобранную карту (`parse_capabilities(s.node_capabilities)`) — `null` для ноды без ограничений, иначе все десять доменов со значениями. Фронт по этой карте прячет разделы UI, которых у ноды всё равно нет, вместо того чтобы показывать их и ловить `409` по клику.
+- Карта обновляется в трёх местах: фоновым циклом метрик (`metrics_collector.py`, из каждого ответа `/api/metrics`), кнопкой «Тест» на странице серверов (`routers/servers.py`, `capabilities_from_version()` на ответ `/api/version` — самый быстрый способ узнать права, не дожидаясь цикла метрик) и сразу после того, как заново установленная нода отвечает панели (`deploy_job_manager.py`, `_wait_node_online()` — единственный момент, когда панель уже говорит с новой нодой, а записи о её правах ещё нет; без неё вся пост-настройка после установки уткнулась бы в пачку отказов).
+- `metrics_collector.py` при обнаруженном изменении карты (`_handle_capability_change()`) делает две вещи: `drop_forbidden()` вычищает из очереди отложенной синхронизации долги по разделам, которые только что закрыли (открывшийся раздел ничего не чистит — под него просто снова начнут проходить запросы), и перезапускает `_launch_reconcile()` — тот же механизм, что после возврата ноды в сеть (см. «Авто-восстановление ноды» ниже), досинхронизирует то, что могло открыться.
+- Кэш HAProxy-данных (`_cache_server_haproxy()`) заранее отбирает из `HAPROXY_ENDPOINTS` только разрешённые нодой эндпоинты (домены `haproxy`/`firewall` разные) — без этого фоновый цикл раз в 5 минут гарантированно собирал бы отказы по каждому закрытому эндпоинту у каждой такой ноды.
+
+**Тесты:** `panel/backend/tests/test_node_capabilities.py` — 26 тестов: разбор и кэш карты, `allows`/`server_allows` (включая fail-open на отсутствующем ключе), резолв пути, `MirrorTest` (структурная сверка карты путей с `node/app/capabilities.py` через `importlib`), `CallSiteCoverageTest` (сканирует `panel/backend/app` на создание HTTP-клиентов к ноде и сверяет найденные точки с реестром рассмотренных в этом же тест-файле — новый сервис, ходящий на ноду напрямую и забывший про гейт, роняет тест, а не остаётся немым пробелом).
+
+**Файлы:**
+- `panel/backend/app/services/node_capabilities.py` — вся логика выше
+- `panel/backend/app/models.py` — колонка `Server.node_capabilities`
+- `panel/backend/app/database.py` — `_migrate_node_capabilities()`
+- `panel/backend/app/services/metrics_collector.py` — приём карты из `/api/metrics`, `_handle_capability_change()`, фильтр `HAPROXY_ENDPOINTS`
+- `panel/backend/app/routers/servers.py` — карта в ответе `GET /api/servers`, обновление по кнопке «Тест»
+- `panel/backend/app/services/deploy_job_manager.py` — обновление карты сразу после первого ответа новой ноды
+- `panel/backend/app/routers/proxy.py` — `require_capability()`, `_require_endpoint()`, трансляция `403` ноды в `409`
+- `panel/backend/app/routers/bulk_actions.py` — гейт в `proxy_request_safe`, обучение по `403`
+- `panel/backend/app/services/ssh_manager.py`, `panel/backend/app/routers/ssh_security.py` — `NodeCapabilityError` → `409` (раньше любой не-2xx от ноды в этом модуле давал `503` «нода недоступна»)
+- `panel/backend/app/services/blocklist_manager.py`, `firewall_profile_sync.py`, `haproxy_profile_sync.py`, `antiddos_manager.py`, `remnawave_nginx_sync.py`, `torrent_blocker.py`, `time_sync.py`, `wildcard_ssl.py` — фильтр закрытых нод перед фан-аутом
+- `panel/backend/app/services/recovery_reconciler.py` — `RECONCILED_STATES` включает `"denied"`: закрытый на ноде раздел авто-восстановление не пытается чинить и не считает дрейфом
+- `panel/backend/app/services/node_sync_queue.py` — `KIND_CAPABILITIES`, отсев неисполнимых долгов (см. ниже)
+- `panel/frontend/src/utils/nodeCapabilities.ts` — `nodeAllows()`, `nodeIsRestricted()`, `describeAllowedDomains()`
+- `panel/frontend/src/hooks/useNodeCapabilities.ts` — хук для страниц с выбором сервера
+- `panel/frontend/src/components/servers/NodeRestrictedNotice.tsx` — заглушка на месте закрытого раздела (иконка Lock, фиолетовая палитра — янтарный цвет в панели зарезервирован за «сломалось/устарело», а тут всё исправно, просто не разрешено)
+- `panel/frontend/src/api/client.ts` — `NODE_CAPABILITY_DOMAINS`, тип `NodeCapabilities`, поле `Server.node_capabilities`, значение `denied` в union-типах статусов синхронизации
+- `panel/frontend/src/pages/Servers.tsx` — бейдж «Ограничено» с тултипом у карточки сервера
+- Затронутые страницы (скрывают недоступные по карте элементы управления и/или фильтруют фоновый поллинг): `ServerDetails.tsx` (терминал, Reboot/Shutdown), `Traffic.tsx`, `HAProxy.tsx`, `HAProxyConfigs.tsx`, `SSHSecurity.tsx`, `FirewallProfiles.tsx`, `AntiDdos.tsx`, `RemnawaveNginx.tsx`, `Blocklist.tsx`, `TorrentBlocker.tsx`, `WildcardSSL.tsx`, `SystemOptimizations.tsx`, `BulkActions.tsx` (счётчик серверов, которые не примут операцию, и отправка только подходящим)
+- `panel/frontend/src/locales/ru.json`, `en.json` — секция `node_caps` (31 ключ) + `servers.restricted_badge`
+- `panel/frontend/src/data/faq/content/{ru,en}/PAGE_SERVERS.md` — раздел «Что нода отдаёт панели»
 
 ### Dashboard: drag-and-drop серверов по папкам
 
@@ -778,6 +838,8 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 
 Саму скорость `_build_snapshot()` берёт из `TrafficIngest.observe()` (см. «Traffic» ниже), а не считает отдельно: счётчик и формула дельты должны быть одни на всю панель, иначе график скорости разошёлся бы с историей трафика. Ответ ноды приходит туда как есть, а снапшоты всей флотилии собираются одним проходом — исключение на одной ноде не роняет остальные, скорость такого сервера в этом цикле просто нулевая.
 
+**Права ноды:** тот же ответ несёт поле `capabilities` — карту прав, которые владелец ноды выдал панели (см. «Права ноды (NODE_CAPABILITIES)» выше). Это основной канал, по которому панель узнаёт об ограничениях: `null` — без ограничений, иначе все десять доменов со значениями `no`/`ro`/`rw`.
+
 **Load Average:** нода собирает `load_avg_1`, `load_avg_5`, `load_avg_15` из `/proc/loadavg`. На dashboard (стандартный и подробный вид) Load Average отображается в футере карточки с иконкой Activity. На странице `ServerDetails.tsx` — в строке Uptime (`LA: X.XX / X.XX / X.XX`), в секции System Information и в виде графика Load Average History рядом с Network Traffic (цвет `#f59e0b`). Поле `load_avg_1` есть в интерфейсе `HistoryData`.
 
 ### HAProxy
@@ -825,7 +887,9 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 
 Базовый шаблон (`generate_base_config()` в `haproxy_config.py`, тот же шаблон дублируется в `node/app/services/haproxy_manager.py`) использует `tune.bufsize 16384`, `timeout tunnel 1h` и интервалы TCP keepalive (`clitcpka-idle 60s`/`-intvl 10s`/`-cnt 3`, аналогично `srvtcpka-*`) — мёртвое соединение детектится ядром за ~1.5 минуты, а не висит часами до `timeout tunnel`. Обоснование — инцидент на нагруженной ноде: одно правило держало ~115k сессий HAProxy, из которых ~99k — мёртвые туннели от клиентов за NAT/ТСПУ, обрывающихся без FIN; каждая сессия держала буфер вплоть до `timeout tunnel`, суммарно HAProxy съедал ~4 ГБ RSS.
 
-Панельный шаблон **не** содержит `maxconn` в секции `global` — один профиль применяется на серверы с разной RAM, поэтому потолок соединений вычисляет и подставляет сама нода при `apply_config()` (см. «Лимит соединений (maxconn)» в [node/DOCUMENTATION.md](../node/DOCUMENTATION.md#haproxy)).
+`hard-stop-after 1h` в той же секции `global` рвёт воркеров, оставшихся от seamless reload (`systemctl reload haproxy`, `-sf`): без него старый воркер живёт неограниченно, пока не закроются все его туннели, а `timeout tunnel 1h` их не форсирует. Значение равно `timeout tunnel`, поэтому принудительно обрываются только соединения, и так близкие к таймауту.
+
+Панельный шаблон **не** содержит `maxconn` в секции `global` — один профиль применяется на серверы с разной RAM, поэтому потолок соединений вычисляет и подставляет сама нода при `apply_config()` (см. «Лимит соединений (maxconn)» в [node/DOCUMENTATION.md](../node/DOCUMENTATION.md#haproxy)). По той же причине число ядер под HAProxy не прописано готовым `cpu-map`, а задано комментарием-маркером `# cpu-affinity (auto)` в `global` — какие ядра заняты прерываниями сетевой карты, знает только сама нода; она же при `apply_config()` подставляет под маркер `nbthread`/`cpu-map`, если глобальный тумблер «Развод по ядрам» включён (см. «Системные оптимизации» ниже и «Развод по ядрам» в [node/DOCUMENTATION.md](../node/DOCUMENTATION.md#haproxy)) — тот же механизм заодно уводит с сетевых ядер и контейнеры Remnawave, это уже не только про HAProxy.
 
 Существующие профили получают актуальный базовый шаблон через кнопку «Перегенерировать конфиг» (`POST /haproxy-profiles/{id}/regenerate-config`) — новые профили создаются с ним сразу.
 
@@ -841,6 +905,8 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 ### Traffic
 
 Историю трафика ведёт панель. Нода отдаёт только кумулятивные счётчики в составе метрик (`network.interfaces[]`, `network.ports[]`, `system.boot_id`, `agent_version` — см. [node/DOCUMENTATION.md](../node/DOCUMENTATION.md#метрики)), а дельты, бакеты, ретеншн и выдачу графикам делает панель из своего PostgreSQL.
+
+Изменение списка отслеживаемых портов (`POST /api/proxy/{id}/traffic/ports/{add,remove}`) требует домен `traffic:rw`, перенос легаси-истории — `traffic:ro` (см. «Права ноды (NODE_CAPABILITIES)» выше); сам приём кумулятивных счётчиков идёт каналом метрик и ничем не закрывается. Перенос легаси-истории с закрытой ноды получает статус `NODE_DENIED` в `traffic_import_state.status` — отдельно от обычных ретраев сетевого сбоя.
 
 **Чтение истории — из базы панели:**
 
@@ -939,6 +1005,8 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 ### Очередь отложенной синхронизации нод (`node_pending_sync`)
 
 Общая инфраструктура для трёх подсистем, доставляющих изменения массовой рассылкой на все ноды: IP Blocklist, whitelist Анти-DDoS и Firewall Profiles. Нода, лежавшая в момент рассылки, изменение не получала — и не получила бы уже никогда: рассылка одноразовая, а следующий полный проход по расписанию бывает нескоро (блок-лист/whitelist) либо не происходит вовсе без ручного действия оператора (firewall). Здесь за такой нодой записывается долг, и фоновый воркер закрывает его сам, как только она снова начинает отвечать. Долг лежит в PostgreSQL — перезапуск панели его не теряет.
+
+Долг, который нода не примет никогда из-за `NODE_CAPABILITIES` (закрытый домен), в этой очереди не задерживается: `KIND_CAPABILITIES` сопоставляет вид долга нужному домену (`blocklist` → `ipset`, `antiddos_whitelist` → `antiddos`, `firewall_profile` → `firewall`), `_drop_ids_without_capability()` отсеивает такие ноды ещё в `enqueue()` — не добавляя строку, а не добавляя и сразу удаляя, — а `drop_forbidden()` вычищает уже лежащие долги, когда права меняются на более узкие (вызывается из `metrics_collector._handle_capability_change()`, см. «Права ноды (NODE_CAPABILITIES)» выше). Без этого потолка попыток нет, и неисполнимый долг остался бы в таблице навсегда, дёргая закрытую ноду каждые полчаса.
 
 **Модель (`app/models.py`, таблица `node_pending_sync`):** составной PK `(server_id, kind)`, FK на `servers.id ON DELETE CASCADE`; поля `requested_at`, `next_attempt_at`, `attempts`, `last_error`. `kind` — `blocklist` / `antiddos_whitelist` / `firewall_profile` (константы `KIND_*` в `node_sync_queue.py`). Хранится только вид работы, без payload — исполнитель каждого вида сам собирает актуальное желаемое состояние в момент отправки, поэтому за время простоя ноды не копятся устаревшие команды. `requested_at` — метка версии долга: закрыть можно только тот долг, что был записан до начала работы исполнителя, иначе изменение, прилетевшее уже во время синка, стёрлось бы вместе со старым. Таблица создаётся через `Base.metadata.create_all`, отдельной миграции не требует.
 
@@ -1042,6 +1110,8 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 - **Servers** — выбор сервера + форма добавления слева, список правил сервера справа
 - **Sources** — список источников слева, форма добавления источника + настройки справа; под формой добавления — подсказка о лимите ноды (`blocklist.sources_limit_hint`: 1 000 000 записей на направление, ~10 МБ ОЗУ на ноду на каждые 100 000 записей); в карточке источника с `ip_count >= 500 000` (`LARGE_SOURCE_WARN_THRESHOLD`) — предупреждение с оценкой памяти (`blocklist.large_source_ram`, МБ = `ip_count / 10 000`)
 - **Белый список** (иконка ShieldCheck) — форма добавления (in/out/both) слева, двухколоночный список IN/OUT справа; переиспользует компонент `RulesList`
+
+**Ноды с закрытым доменом `ipset`:** отсеиваются до сетевого запроса (`server_allows(..., Capability.IPSET, write=True)`) и попадают в результат синка с `denied: true` — отдельно от `queued` (офлайн/сетевой сбой, см. «Очередь отложенной синхронизации нод» выше): долг за такую ноду в очередь не ставится, повтор её не откроет.
 
 **Параллельная синхронизация**: `sync_all_nodes()` использует `asyncio.gather` — все серверы синхронизируются одновременно. Таймаут на ноду растёт с размером списка (`_sync_timeout()` = 20с базово + 1с на каждые 40k IP; бюджет `_sync_one_server_safe` считается из размеров списков обоих направлений) — фиксированный таймаут обрубал бы синк на середине для списков в сотни тысяч и миллионы записей. Офлайн-ноды не опрашиваются вовсе, а сразу ставятся в очередь отложенной синхронизации (`queued: true`, см. «Очередь отложенной синхронизации нод» выше); если живой сервер не отвечает — он получает статус ошибки и тоже попадает в очередь, остальные не блокируются.
 
@@ -1259,6 +1329,7 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 - При добавлении нового сервера синхронизация запускается немедленно
 - При изменении настройки `server_timezone` — синхронизация запускается на всех серверах
 - Хост панели синхронизируется через Docker-контейнер с `nsenter`
+- Нода с закрытым доменом `system` (`NODE_CAPABILITIES`) отвечает отказом (`server_allows(server, Capability.SYSTEM, write=True)` проверяется до отправки), результат синхронизации по ней несёт `denied_message(Capability.SYSTEM, True)` вместо сетевой ошибки
 
 **Нода** (`POST /api/system/time-sync`):
 - Принимает IANA timezone (например `Europe/Moscow`)
@@ -1293,6 +1364,8 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 ### SSH Security Management
 
 Централизованное управление SSH-безопасностью серверов. Панель проксирует запросы к нодам и предоставляет пресеты безопасности для быстрой настройки. Bulk-операции работают через NDJSON-стриминг: результат по каждому серверу поступает в реальном времени по мере выполнения.
+
+Закрытый на ноде домен `ssh` (`NODE_CAPABILITIES`) даёт `NodeCapabilityError`, который `ssh_manager.py`/`ssh_security.py` транслируют в `HTTP 409` с понятным сообщением — до этого механизма любой не-2xx от ноды в этом модуле маппился в `503` «нода недоступна», что для осознанно закрытого раздела вводило в заблуждение.
 
 **Per-server эндпоинты (прокси к ноде):**
 
@@ -1604,9 +1677,11 @@ Frontend сохраняет незавершённые job_id в `localStorage` 
 **Принцип работы:**
 1. Панель вызывает certbot с плагином `certbot-dns-cloudflare` для DNS-01 challenge — получает wildcard `*.domain.com`
 2. Сертификат записывается в `/etc/letsencrypt/` внутри контейнера backend (volume смонтирован с `rw`)
-3. Панель отправляет cert + key на каждую настроенную ноду через `POST /api/ssl/wildcard/deploy`
+3. Панель отправляет cert + key на каждую настроенную ноду через `POST /api/ssl/wildcard/deploy` — ноды с закрытым доменом `ssl` (`NODE_CAPABILITIES`) отфильтровываются заранее, до отправки
 4. Нода валидирует файлы, делает бэкап текущих, записывает новые и вызывает `reload_cmd`
 5. Фоновая задача проверяет сроки сертификатов каждые 24ч и автоматически продлевает; при сбое отправляет Telegram-уведомление
+
+**Обработка ответа ноды:** до этой версии `response.json()` вызывался без проверки `status_code` — любой не-200 (в том числе честный `403` от закрытого домена `ssl`) давал `{"success": false, "message": "Unknown"}` и ложное «Unknown»-уведомление в Telegram вместо понятной причины. Теперь код ответа проверяется первым, а `detail` из тела ошибки идёт в сообщение как есть.
 
 **Telegram-уведомления при сбоях автопродления:**
 
@@ -1728,6 +1803,8 @@ Replace-атомарно: полное состояние ноды = состо�
 
 Панель использует `get_node_client(server)` + `node_auth_headers(server)` — поддерживаются как обычные ноды (API-ключ), так и mTLS-ноды. Таймаут apply — 120 секунд на ноду. Офлайн-ноды не опрашиваются вовсе — раскатка на них откладывается в очередь отложенной синхронизации нод (`node_pending_sync`, см. выше) вместо ожидания полного таймаута с итоговым `failed`; статус сервера при этом остаётся `pending`. Сетевой сбой у живой ноды тоже ставится в очередь.
 
+Ноды с закрытым доменом `firewall` (`NODE_CAPABILITIES`, см. «Права ноды» выше) отфильтровываются ещё до `get_node_client()` и получают `firewall_sync_status="denied"` — не `pending`: долг за такую ноду в очередь отложенной синхронизации не ставится, а `_queue_offline_servers(..., queue_failures=False)` не путает осознанный отказ владельца ноды с временной недоступностью.
+
 **Схема БД:**
 
 `firewall_profiles`:
@@ -1806,7 +1883,7 @@ Replace-атомарно: полное состояние ноды = состо�
    - ручная — `user_cidrs` из настроек;
    - авто-источники по URL — см. «Авто-источники whitelist» ниже.
 
-   Офлайн-нодам список не отправляется — они сразу попадают в очередь отложенной синхронизации нод (`node_pending_sync`, см. выше); сбой рассылки живой ноде тоже ставится в очередь. `push_whitelist_all()` возвращает поле `queued` — число нод, чьё изменение отложено.
+   Офлайн-нодам список не отправляется — они сразу попадают в очередь отложенной синхронизации нод (`node_pending_sync`, см. выше); сбой рассылки живой ноде тоже ставится в очередь. `push_whitelist_all()` возвращает поле `queued` — число нод, чьё изменение отложено. Ноды с закрытым доменом `antiddos` отфильтровываются отдельно, ещё до отправки, и в очередь не попадают — владелец такой ноды сам не хочет, чтобы панель туда писала.
 2. **Status poll** — раз в 60 сек (настраивается) опрашивает `GET /api/antiddos/status` на каждой ноде, пишет результат в `Server.antiddos_*` и при переходе ноды в аварийный режим **автоматически** (`source=auto`, то есть сработал watchdog, а не оператор) отправляет Telegram-алерт (`alert_type="antiddos_emergency"`) и запись в `AlertHistory`. Этот же цикл выполняет **zero-touch раскатку watchdog** (`_maybe_auto_install`) — см. ниже. Оба цикла ограничены `asyncio.Semaphore` (`DB_CONCURRENCY=10`, `HTTP_CONCURRENCY=50`) — масштабируются на сотни нод без роста числа соединений, по образцу `blocklist_manager`. Оба цикла работают, только когда `AntiDdosSettings.enabled=True` (мастер-тумблер «Автодетект атак») — при выключенном автодетекте панель не пушит whitelist и не поллит статус, но аварийный режим при этом не трогается: это отдельный независимый контрол (см. ниже).
 
 Менеджер регистрируется в `lifespan` панели (`start_antiddos_manager()` / `stop_antiddos_manager()`).
@@ -1862,7 +1939,7 @@ Whitelist можно наполнять из внешних списков по 
 
 Остаточное поведение: если конкретная нода была недоступна именно в момент общего «выключить на всех», её аварийный режим (ручной пин) не снимется в этом обходе — это ожидаемо, ручной пин намеренно не снимается автоматически watchdog'ом. Снять точечно тумблером на карточке ноды либо повторить общее действие.
 
-**Per-node проксируемые эндпоинты (`panel/backend/app/routers/proxy.py`, prefix `/proxy/{server_id}/antiddos`):** `POST /emergency` (ручной пин — watchdog его не снимет), `POST /watchdog`, `POST /install`. Эти per-node эндпоинты выполняются синхронно (один сервер, короткий таймаут) — асинхронными сделаны только три глобальных fan-out эндпоинта выше. Статус конкретной ноды отдельным запросом не запрашивается — панель показывает то, что накопил фоновый status poll (`GET /antiddos/status`, см. выше).
+**Per-node проксируемые эндпоинты (`panel/backend/app/routers/proxy.py`, prefix `/proxy/{server_id}/antiddos`):** `POST /emergency` (ручной пин — watchdog его не снимет), `POST /watchdog`, `POST /install`. Эти per-node эндпоинты выполняются синхронно (один сервер, короткий таймаут) — асинхронными сделаны только три глобальных fan-out эндпоинта выше. Все три гейтятся `require_capability(server, Capability.ANTIDDOS, write=True)` явно (а не общим `_require_endpoint()` из `proxy_request()`), потому что вызываются напрямую из роутера, минуя `proxy_request()`. Статус конкретной ноды отдельным запросом не запрашивается — панель показывает то, что накопил фоновый status poll (`GET /antiddos/status`, см. выше).
 
 **Frontend (`panel/frontend/src/pages/AntiDdos.tsx`):** страница «Анти-DDoS» (пункт меню с иконкой `Siren`, route `/{uid}/anti-ddos`), три вкладки:
 - **Управление** — три независимых контрола, разнесённых по секциям: (1) мастер-тумблер «Автодетект атак» вверху карточки — вкл/выкл watchdog на всех нодах разом; (2) секция «Аварийный режим вручную (на всех нодах)» за визуальным разделителем — кнопки «Включить на всех» / «Выключить на всех» (`POST /antiddos/emergency-all`); (3) список нод со статусом (дежурный/аварийный, источник, причина) и per-node тумблерами «Автодетект» и «Аварийный». Рассылка whitelist — отдельной кнопкой в своей секции. Кнопки ручной установки watchdog в интерфейсе нет — установка полностью автоматическая (zero-touch фоновым опросом, см. выше); эндпоинты `POST /antiddos/install-all` и `POST /proxy/{id}/antiddos/install` есть в API и используются автоустановкой. Версия watchdog-скрипта нодой отдаётся (`GET /api/antiddos/status` → `version`), но панель использует её только внутри `_maybe_auto_install` для сравнения — в UI не выводится.
@@ -1917,6 +1994,7 @@ Whitelist можно наполнять из внешних списков по 
 | **Remnawave Nginx** | `GET /api/remnawave/nginx/config` с ноды → sha256 нормализованного контента | ожидаемый hash отрендеренного (per-domain) конфига профиля, привязанного к серверу | `remnawave_nginx_sync.sync_profile_to_servers` на один сервер, только если сервер привязан к профилю и есть домен |
 
 Особенности:
+- Каждая подсистема сверяется только если нода пропускает соответствующий домен (`server_allows(server, Capability.FIREWALL/HAPROXY/REMNAWAVE, write=True)`, `NODE_CAPABILITIES`) — закрытый раздел не читается вовсе и не считается дрейфом: `"denied"` — один из `RECONCILED_STATES` наравне с `"in_sync"`/`"reapplied"`/`"no_profile"`, реконсилер не должен путать сознательное ограничение владельца ноды с рассинхроном, который надо чинить.
 - UFW: при `ufw reset` + risk есть авто-rollback и node-API-port-guard на 9100; переприменение только при реальном drift или если UFW выключен.
 - HAProxy автозапуск: если HAProxy был выключен до падения — не трогает. Запускает только при `installed=true` и `config_valid=true`.
 - Результат пишется одной строкой в лог (`logger.info "recovery_reconcile_done ..."`). Telegram-уведомлений нет.
@@ -1951,6 +2029,8 @@ Whitelist можно наполнять из внешних списков по 
 
 `haproxy_profile_sync.py` определяет онлайн/офлайн по `last_seen` ноды (порог `max(90, collect_interval*3+30)` сек). Офлайн-ноды при sync пропускаются: им выставляется `sync_status='pending'` и `SyncResult.status='queued'`. Фоновый цикл `_haproxy_pending_sync_loop` (интервал `HAPROXY_RETRY_INTERVAL=30` сек) в `metrics_collector.py` автоматически досинхронизирует ожившие pending-ноды через `retry_pending_haproxy_syncs`.
 
+Ноды с закрытым доменом `haproxy` (`NODE_CAPABILITIES`) отфильтровываются отдельно от офлайн-нод — им выставляется `sync_status='denied'`, ретрая нет: `_haproxy_pending_sync_loop` досинхронизирует только `pending`, не `denied`.
+
 Каждый сервер синхронизируется с **собственной сессией БД** (не шареной) — статусы обновляются по мере готовности, а не разом в конце.
 
 **API:**
@@ -1975,7 +2055,7 @@ Whitelist можно наполнять из внешних списков по 
 | POST | /haproxy-profiles/validate | Валидировать config_content без сохранения → `{valid, message}` |
 | GET | /haproxy-profiles/available-servers | Серверы доступные для привязки |
 
-**SyncResult.status:** `success` | `failed` | `queued` (офлайн-нода, синхронизация отложена).
+**SyncResult.status:** `success` | `failed` | `queued` (офлайн-нода, синхронизация отложена) | `denied` (закрытый на ноде домен `haproxy`, `NODE_CAPABILITIES` — см. «Права ноды» выше; в очередь на ретрай не попадает).
 
 **Frontend (`panel/frontend/src/pages/HAProxyConfigs.tsx`):**
 - Двухколоночный layout: список профилей слева + детали справа
@@ -2072,7 +2152,7 @@ Whitelist можно наполнять из внешних списков по 
 
 **Фоновые интеграции:**
 - `_check_xray_on_all_servers` (цикл ~120 сек, `metrics_collector.py`) дополнительно вызывает `GET /api/remnawave/nginx/discover` на каждой ноде и пишет `Server.remnawave_nginx_detected` — панель знает, есть ли установка Remnawave, ещё до того, как оператор привяжет профиль
-- `_haproxy_pending_sync_loop` (30 сек, тот же файл) дополнительно вызывает `retry_pending_remnawave_nginx_syncs` — офлайн-нода при sync получает `queued`, досинхронизируется автоматически когда ожила (тот же паттерн, что HAProxy Configs)
+- `_haproxy_pending_sync_loop` (30 сек, тот же файл) дополнительно вызывает `retry_pending_remnawave_nginx_syncs` — офлайн-нода при sync получает `queued`, досинхронизируется автоматически когда ожила (тот же паттерн, что HAProxy Configs). Нода с закрытым доменом `remnawave` (`NODE_CAPABILITIES`) получает `remnawave_nginx_sync_status="denied"` вместо `queued` — не в очереди на ретрай (`sync_profile_to_servers` отсеивает такие ноды через `server_allows` до сетевого запроса)
 - `recovery_reconciler.py` при переходе ноды offline→online сверяет sha256 конфига с ноды с ожидаемым rendered-хэшем и ресинкает при дрейфе (см. «Авто-восстановление ноды» выше)
 
 **API (`prefix /remnawave-nginx-profiles`, зеркалирует `haproxy_profiles`):**
@@ -2242,7 +2322,7 @@ SSE-события: `note_update` — `{"content": "...", "version": N}`, `tasks
 2. Если `webhook_enabled=True` и URL задан — обогащает цели (`_enrich_targets`): дотягивает `telegram_id` и `short_uuid` из таблицы-кэша `remnawave_user_cache` по UUID пользователя.
 3. Отправляет POST-вебхуки на внешний URL параллельно через `_send_webhooks` (concurrency 20, `WEBHOOK_CONCURRENCY`).
 4. Ждёт `webhook_delay_seconds` секунд — грейс-период, во время которого пользователь может остановить торрент.
-5. Банит IP на всех нодах.
+5. Банит IP на всех нодах (`_send_to_nodes`) — бан идёт через ipset, поэтому ноды с закрытым доменом `ipset` (`NODE_CAPABILITIES`) отфильтровываются заранее и в бан не участвуют.
 
 Сбой вебхука или отсутствие `telegram_id` бан **не отменяет** (fail-open): система всегда банит по истечении задержки.
 

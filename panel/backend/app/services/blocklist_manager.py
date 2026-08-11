@@ -22,6 +22,7 @@ from urllib.parse import urlparse
 from app.services.haproxy_profile_sync import is_server_online
 from app.services.http_client import get_node_client, get_external_client, node_auth_headers
 from app.services.net_utils import is_public_range, resolve_panel_ip, host_to_ip
+from app.services.node_capabilities import Capability, server_allows
 from app.services.node_sync_queue import KIND_BLOCKLIST, enqueue
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -39,6 +40,7 @@ SYNC_BASE_TIMEOUT = 20.0
 ALLOW_SYNC_TIMEOUT = 20.0
 SYNC_TIMEOUT_IPS_PER_SEC = 40_000  # +1 сек к таймауту синка на каждые 40k IP
 QUEUED_MESSAGE = "Сервер офлайн — синхронизация отложена до восстановления"
+DENIED_MESSAGE = "Нода закрыла блокировку IP в своих настройках"
 
 DEFAULT_SOURCES = [
     {
@@ -610,6 +612,26 @@ class BlocklistManager:
             "out": dict(skipped),
         }
 
+    @staticmethod
+    def _denied_result(server: Server) -> dict:
+        """Результат для ноды, закрывшей ipset: в очередь такой долг не идёт."""
+        skipped = {"success": False, "message": DENIED_MESSAGE, "ip_count": 0}
+        return {
+            "server_id": server.id,
+            "server_name": server.name,
+            "success": False,
+            "denied": True,
+            "in": dict(skipped),
+            "out": dict(skipped),
+        }
+
+    @staticmethod
+    def _split_denied(servers: list[Server]) -> tuple[list[Server], list[Server]]:
+        allowed, denied = [], []
+        for server in servers:
+            (allowed if server_allows(server, Capability.IPSET, write=True) else denied).append(server)
+        return allowed, denied
+
     async def _queue_offline(self, servers: list[Server]) -> dict:
         """Отложить синк офлайн-нодам: HTTP к ним всё равно упрётся в таймаут,
         а очередь доставит список сама, как только они вернутся в сеть."""
@@ -637,6 +659,12 @@ class BlocklistManager:
                 if not servers:
                     self._store_sync_result({})
                     return {}
+
+                # Закрывшие раздел отсекаются до подсчёта: сборка общих
+                # списков на миллионах адресов стоит слишком дорого, чтобы
+                # делать её ради нод, которые их не примут
+                servers, denied = self._split_denied(list(servers))
+                results.update({s.id: self._denied_result(s) for s in denied})
 
                 online = [s for s in servers if is_server_online(s)]
                 results.update(await self._queue_offline(
@@ -666,7 +694,10 @@ class BlocklistManager:
             return results
 
     async def _enqueue_failed(self, results: list[dict]) -> None:
-        failed = [sr["server_id"] for sr in results if not sr.get("success")]
+        failed = [
+            sr["server_id"] for sr in results
+            if not sr.get("success") and not sr.get("denied")
+        ]
         if failed:
             await enqueue(failed, KIND_BLOCKLIST, "Нода не приняла блок-лист")
 
@@ -689,6 +720,12 @@ class BlocklistManager:
         results: dict[int, Optional[str]] = {
             sid: None for sid in server_ids if sid not in {s.id for s in servers}
         }
+        if not servers:
+            return results
+
+        # Долг ноды, закрывшей раздел, закрываем: повтор дал бы тот же отказ
+        servers, denied = self._split_denied(servers)
+        results.update({s.id: None for s in denied})
         if not servers:
             return results
 
@@ -737,6 +774,13 @@ class BlocklistManager:
             if not server:
                 self._sync_in_progress = False
                 return {}
+
+            if not server_allows(server, Capability.IPSET, write=True):
+                sr = self._denied_result(server)
+                prev = self._last_sync.get("servers", {}) if self._last_sync else {}
+                prev[server_id] = sr
+                self._store_sync_result(prev)
+                return sr
 
             if not is_server_online(server):
                 sr = self._queued_result(server)

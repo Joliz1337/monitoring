@@ -1,10 +1,11 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
+import { nodeAllows } from '../utils/nodeCapabilities'
 import { useTranslation } from 'react-i18next'
 import ReactApexChart from 'react-apexcharts'
 import type { ApexOptions } from 'apexcharts'
 import {
   ShieldBan, Settings, Activity, BarChart3, Ban,
-  Play, Save, Loader2, CheckCircle2,
+  Play, Save, Loader2, CheckCircle2, Lock,
   Server as ServerIcon, Search, X, Webhook, Send,
 } from 'lucide-react'
 import { useTorrentBlockerStore } from '../stores/torrentBlockerStore'
@@ -383,6 +384,9 @@ export default function TorrentBlocker() {
                           </div>
                           <ServerIcon className="w-3.5 h-3.5 text-dark-500 shrink-0" />
                           <span className="truncate">{server.name}</span>
+                          {!nodeAllows(server, 'ipset', 'write') && (
+                            <Lock className="w-3 h-3 text-purple shrink-0" />
+                          )}
                         </button>
                       )
                     })

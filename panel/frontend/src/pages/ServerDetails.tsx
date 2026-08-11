@@ -35,6 +35,8 @@ import ProcessTable from '../components/Processes/ProcessTable'
 import CpuCoresChart from '../components/Charts/CpuCoresChart'
 import CpuCoresHistoryChart from '../components/Charts/CpuCoresHistoryChart'
 import Terminal from '../components/Terminal/Terminal'
+import NodeRestrictedNotice from '../components/servers/NodeRestrictedNotice'
+import { nodeAllows } from '../utils/nodeCapabilities'
 import { formatBytes, formatUptime, formatPercent, createBitsFormatter, formatTimeAgo } from '../utils/format'
 import { useCachedData, createServerCacheKey } from '../hooks/useCachedData'
 import CachedDataBanner from '../components/ui/CachedDataBanner'
@@ -104,6 +106,7 @@ export default function ServerDetails() {
   historyRef.current = history
   
   const server = servers.find(s => s.id === Number(serverId))
+  const execAllowed = nodeAllows(server, 'exec', 'write')
   
   const handleFetchError = useCallback((err: unknown) => {
     const cached = loadFromCache()
@@ -220,7 +223,7 @@ export default function ServerDetails() {
   }
   
   const handlePowerAction = async () => {
-    if (!serverId || !powerAction) return
+    if (!serverId || !powerAction || !execAllowed) return
     
     setIsPowerActionLoading(true)
     setPowerActionError(null)
@@ -397,23 +400,25 @@ export default function ServerDetails() {
             </motion.button>
           </Tooltip>
 
-          {/* Power control buttons */}
-          <Tooltip label={t('server_details.reboot')}>
+          {/* Power control buttons — идут через терминал ноды, поэтому тот же домен */}
+          <Tooltip label={execAllowed ? t('server_details.reboot') : t('node_caps.exec_blocked')}>
             <motion.button
               onClick={() => setPowerAction('reboot')}
-              className="btn btn-secondary"
-              whileHover={{ scale: 1.02 }}
-              whileTap={{ scale: 0.98 }}
+              disabled={!execAllowed}
+              className={`btn btn-secondary ${execAllowed ? '' : 'opacity-40 cursor-not-allowed'}`}
+              whileHover={{ scale: execAllowed ? 1.02 : 1 }}
+              whileTap={{ scale: execAllowed ? 0.98 : 1 }}
             >
               <RotateCcw className="w-4 h-4" />
             </motion.button>
           </Tooltip>
-          <Tooltip label={t('server_details.shutdown')}>
+          <Tooltip label={execAllowed ? t('server_details.shutdown') : t('node_caps.exec_blocked')}>
             <motion.button
               onClick={() => setPowerAction('shutdown')}
-              className="btn btn-secondary text-danger hover:bg-danger/10"
-              whileHover={{ scale: 1.02 }}
-              whileTap={{ scale: 0.98 }}
+              disabled={!execAllowed}
+              className={`btn btn-secondary text-danger hover:bg-danger/10 ${execAllowed ? '' : 'opacity-40 cursor-not-allowed'}`}
+              whileHover={{ scale: execAllowed ? 1.02 : 1 }}
+              whileTap={{ scale: execAllowed ? 0.98 : 1 }}
             >
               <Power className="w-4 h-4" />
             </motion.button>
@@ -731,7 +736,9 @@ export default function ServerDetails() {
             
             {/* Terminal section */}
             <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }} className="mt-6">
-              <Terminal serverId={Number(serverId)} />
+              {execAllowed
+                ? <Terminal serverId={Number(serverId)} />
+                : <NodeRestrictedNotice server={server} compact />}
             </motion.div>
           </motion.div>
         )}

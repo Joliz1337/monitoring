@@ -13,6 +13,11 @@ from typing import Optional
 import httpx
 import json
 from app.services.http_client import get_node_client, node_auth_headers, validate_proxy_input
+from app.services.node_capabilities import (
+    capabilities_from_version,
+    parse as parse_capabilities,
+    remember_capabilities,
+)
 
 from app.database import get_db
 from app.models import Server, MetricsSnapshot, ServerTraffic
@@ -379,6 +384,9 @@ async def _build_servers_list(db: AsyncSession, include_metrics: bool) -> dict:
             "uses_shared_cert": bool(s.uses_shared_cert),
             "auth_kind": classify_server(s),
             "antiddos_emergency_mode": bool(s.antiddos_emergency_mode),
+            # null — нода без ограничений; интерфейс по этой карте прячет
+            # разделы, которых у неё всё равно нет
+            "node_capabilities": parse_capabilities(s.node_capabilities),
         }
 
         if include_metrics and s.last_metrics:
@@ -731,11 +739,18 @@ async def test_server_connection(
 
         if response.status_code == 200:
             data = response.json()
+            # Живая проба — заодно самый быстрый способ узнать права: не ждём
+            # цикла метрик и показываем оператору непонятые ноде слова
+            found, caps = capabilities_from_version(data)
+            if found:
+                await remember_capabilities(server.id, caps)
             return {
                 "success": True,
                 "status": "online",
                 "server_name": data.get("node_name", "Unknown"),
-                "version": data.get("version")
+                "version": data.get("version"),
+                "capabilities": caps,
+                "capabilities_unknown": data.get("capabilities_unknown") or [],
             }
         else:
             return {

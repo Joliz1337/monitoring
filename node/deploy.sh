@@ -622,6 +622,22 @@ setup_env() {
         echo "MON_IMAGE_TAG=$image_tag" >> .env
     fi
 
+    # Права панели на этой ноде. Свою проверку держим здесь, а не только в
+    # install.sh: deploy.sh запускают и напрямую, а "&" в правой части sed
+    # раскрылся бы в найденный текст.
+    if [ -n "${MON_NODE_CAPABILITIES:-}" ]; then
+        if printf '%s' "$MON_NODE_CAPABILITIES" | grep -qE '^[A-Za-z:, ]+$'; then
+            if grep -q "^NODE_CAPABILITIES=" .env 2>/dev/null; then
+                sed -i "s|^NODE_CAPABILITIES=.*|NODE_CAPABILITIES=$MON_NODE_CAPABILITIES|" .env
+            else
+                echo "NODE_CAPABILITIES=$MON_NODE_CAPABILITIES" >> .env
+            fi
+            log_info "Node capabilities: $MON_NODE_CAPABILITIES"
+        else
+            log_error "MON_NODE_CAPABILITIES contains unexpected characters, ignored"
+        fi
+    fi
+
     log_success "Environment configured"
 }
 

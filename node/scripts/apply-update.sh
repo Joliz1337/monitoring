@@ -602,6 +602,16 @@ if [ -n "$IMAGE_TAG" ] && [ -f "$NODE_DIR/.env" ]; then
     log_info "Docker image tag: $IMAGE_TAG"
 fi
 
+# Права панели на ноде: строку заводим пустой, чтобы владелец сервера увидел её
+# в .env и знал, что настройка есть. Существующее значение не трогаем никогда.
+if [ -f "$NODE_DIR/.env" ] && ! grep -q '^NODE_CAPABILITIES=' "$NODE_DIR/.env"; then
+    {
+        echo ""
+        echo "# Что из API доступно панели. Пусто — всё. Подробности в .env.example"
+        echo "NODE_CAPABILITIES="
+    } >> "$NODE_DIR/.env"
+fi
+
 # Make scripts executable
 chmod +x "$NODE_DIR"/*.sh 2>/dev/null || true
 chmod +x "$NODE_DIR"/scripts/*.sh 2>/dev/null || true

@@ -243,4 +243,7 @@ class AllMetrics(BaseModel):
     certificates: Optional[CertificatesInfo] = None
     antiddos: Optional[AntiDdosInfo] = None
     agent_version: Optional[str] = None
+    # Карта прав панели на этой ноде; null — ограничений нет. Поле обязано быть
+    # объявлено здесь: то, чего нет в response_model, FastAPI из ответа вырежет.
+    capabilities: Optional[dict[str, str]] = None
 

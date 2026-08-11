@@ -89,6 +89,7 @@ interface SettingsState {
   timeSyncEnabled: boolean
   remnawaveNginxPath: string
   updateBranch: string
+  cpuAffinityEnabled: boolean
   isLoading: boolean
 
   fetchSettings: () => Promise<void>
@@ -104,6 +105,7 @@ interface SettingsState {
   setTimeSyncEnabled: (enabled: boolean) => Promise<void>
   setRemnawaveNginxPath: (path: string) => Promise<void>
   setUpdateBranch: (branch: string) => Promise<void>
+  setCpuAffinityEnabled: (enabled: boolean) => Promise<void>
   getEffectiveTimezone: () => string
 }
 
@@ -120,6 +122,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   timeSyncEnabled: true,
   remnawaveNginxPath: '/opt/remnawave',
   updateBranch: 'main',
+  cpuAffinityEnabled: false,
   isLoading: true,
   
   fetchSettings: async () => {
@@ -138,6 +141,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         timeSyncEnabled: data.settings.time_sync_enabled !== 'false',
         remnawaveNginxPath: data.settings.remnawave_nginx_path || '/opt/remnawave',
         updateBranch: data.settings.update_branch || 'main',
+        cpuAffinityEnabled: data.settings.cpu_affinity_enabled === 'true',
         isLoading: false,
       })
     } catch {
@@ -208,6 +212,12 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   setUpdateBranch: async (branch: string) => {
     set({ updateBranch: branch })
     await settingsApi.set('update_branch', branch)
+    toast.success(i18n.t('common.saved'))
+  },
+
+  setCpuAffinityEnabled: async (enabled: boolean) => {
+    set({ cpuAffinityEnabled: enabled })
+    await settingsApi.set('cpu_affinity_enabled', enabled.toString())
     toast.success(i18n.t('common.saved'))
   },
 

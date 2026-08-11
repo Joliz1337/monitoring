@@ -23,6 +23,10 @@ from app.database import async_session_maker
 from app.models import Server
 from app.services.blocklist_manager import get_blocklist_manager
 from app.services.deploy_service import DeployParams, deploy_node
+from app.services.node_capabilities import (
+    capabilities_from_version,
+    remember_capabilities,
+)
 from app.services.ssh_manager import MAXIMUM_PRESET, RECOMMENDED_PRESET, proxy_to_node
 from app.services.time_sync import get_time_sync_service
 
@@ -245,7 +249,13 @@ class DeployJobManager:
         attempt = 0
         while time.time() < deadline:
             try:
-                await proxy_to_node(server, "GET", "/api/version", timeout=10.0)
+                info = await proxy_to_node(server, "GET", "/api/version", timeout=10.0)
+                # Единственный момент, когда панель уже говорит с новой нодой, а
+                # записи о её правах ещё нет: без этого вся пост-настройка ниже
+                # упёрлась бы в пачку отказов
+                found, caps = capabilities_from_version(info)
+                if found:
+                    await remember_capabilities(server.id, caps)
                 self._emit(job, {"type": "log", "line": "[panel] Нода онлайн — продолжаю настройку"})
                 return True
             except Exception:  # noqa: BLE001 — нода ещё грузится, любой сбой = ещё не готова

@@ -262,7 +262,8 @@
     "deploy_bindings": "Привязать к профилям:",
     "deploy_haproxy_profile": "HAProxy-конфиг",
     "deploy_firewall_profile": "Firewall-профиль",
-    "deploy_profile_none": "Не добавлять"
+    "deploy_profile_none": "Не добавлять",
+    "restricted_badge": "Ограничено"
   },
   "infra": {
     "title": "Инфраструктура",
@@ -891,7 +892,9 @@
     "panel_nodes": "Универсальные серверы",
     "node_outdated": "Обновите ноду",
     "info_title": "Информация",
-    "info_text": "Оптимизации применяются на хостовой машине через nsenter. При переключении режима NIC предыдущий автоматически удаляется."
+    "info_text": "Оптимизации применяются на хостовой машине через nsenter. При переключении режима NIC предыдущий автоматически удаляется.",
+    "cpu_affinity": "Развод по ядрам",
+    "cpu_affinity_hint": "Уводит HAProxy и контейнеры Remnawave с ядер, занятых прерываниями сетевой карты"
   },
   "bulk_actions": {
     "title": "Массовые действия",
@@ -1667,6 +1670,39 @@
     "webhook_delay": "Задержка перед баном (секунды)",
     "webhook_delay_hint": "Сколько ждать после отправки вебхука перед блокировкой IP (грейс-период для пользователя). Должна быть меньше интервала опроса",
     "webhook_test": "Отправить тестовый вебхук"
+  },
+  "node_caps": {
+    "restricted_title": "Нода закрыла этот раздел",
+    "readonly_title": "Раздел доступен только для просмотра",
+    "restricted_body": "Так настроено на самом сервере: панель сюда не обращается. Это не обрыв связи и не ошибка.",
+    "allowed": "Разрешено: {{allowed}}",
+    "allowed_everything": "всё",
+    "allowed_none": "только метрики, версия и обновление ноды",
+    "where": "NODE_CAPABILITIES в /opt/monitoring-node/.env",
+    "restricted_action": "Как настроить права",
+    "badge": "Ограничено",
+    "badge_tooltip_title": "Нода отдала панели не всё",
+    "write_blocked": "Нода разрешает только просмотр этого раздела",
+    "exec_blocked": "Нода закрыла выполнение команд",
+    "row_blocked": "Раздел закрыт на этой ноде",
+    "sync_blocked": "Нода не принимает эти настройки",
+    "fleet_skipped": "Будут пропущены ноды с закрытым разделом: {{count}}",
+    "bulk_warning": "Не примут операцию: {{count}}",
+    "bulk_execute_count": "Выполнить ({{count}})",
+    "bulk_all_blocked": "Ни одна из выбранных нод не примет эту операцию",
+    "unknown_tokens": "Нода не поняла: {{tokens}}",
+    "status_denied": "Закрыто на ноде",
+    "domain_traffic": "Отслеживание портов",
+    "domain_haproxy": "HAProxy",
+    "domain_firewall": "Файрвол",
+    "domain_ipset": "Блокировка IP",
+    "domain_ssh": "SSH-безопасность",
+    "domain_ssl": "Wildcard SSL",
+    "domain_antiddos": "Анти-DDoS",
+    "domain_remnawave": "Remnawave nginx",
+    "domain_system": "Оптимизации и время",
+    "domain_exec": "Терминал и команды",
+    "readonly_suffix": "только просмотр"
   },
   "faq": {
     "title": "Справка",

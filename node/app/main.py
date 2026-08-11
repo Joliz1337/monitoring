@@ -6,12 +6,14 @@ Uvicorn слушает только 127.0.0.1:7500 и доверяет прош�
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.gzip import GZipMiddleware
 
+from app.capabilities import CapabilityMiddleware, get_policy
 from app.config import get_settings
 from app.routers import haproxy, metrics, traffic, system, ipset, remnawave, ssh, ssl, firewall_profile, antiddos
 from app.services.metrics_collector import get_collector as get_metrics_collector
@@ -54,6 +56,27 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"IPSet init failed, blocklist rules are not applied: {e}", exc_info=True)
 
+    from app.services import cpu_affinity
+    from app.services.host_executor import get_host_executor
+    affinity_sync = cpu_affinity.ContainerAffinitySync(
+        get_host_executor(), os.cpu_count() or 1
+    )
+    try:
+        await affinity_sync.start()
+        logger.info("CPU affinity sync started (enabled=%s)", cpu_affinity.is_enabled())
+    except Exception as e:
+        logger.error(f"CPU affinity sync start failed: {e}", exc_info=True)
+
+    if CAPABILITY_POLICY.unrestricted:
+        logger.info("Capabilities: unrestricted")
+    else:
+        logger.info(
+            "Capabilities: %s%s",
+            CAPABILITY_POLICY.published(),
+            f", unknown tokens: {list(CAPABILITY_POLICY.unknown_tokens)}"
+            if CAPABILITY_POLICY.unknown_tokens else "",
+        )
+
     logger.info("Server ready")
     yield
 
@@ -61,10 +84,15 @@ async def lifespan(app: FastAPI):
         await port_sampler.stop()
     except Exception as e:
         logger.error(f"Port traffic sampler stop failed: {e}", exc_info=True)
+    try:
+        await affinity_sync.stop()
+    except Exception as e:
+        logger.error(f"CPU affinity sync stop failed: {e}", exc_info=True)
     logger.info("Shutdown complete")
 
 
 settings = get_settings()
+CAPABILITY_POLICY = get_policy()
 
 app = FastAPI(
     title="Server Monitoring Agent API",
@@ -76,6 +104,11 @@ app = FastAPI(
 )
 
 app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
+
+# Ноду без ограничений слой не трогает вовсе — у подавляющего большинства
+# установок стек обработки запроса остаётся прежним.
+if not CAPABILITY_POLICY.unrestricted:
+    app.add_middleware(CapabilityMiddleware, policy=CAPABILITY_POLICY)
 
 # Роутеры без auth dependency: nginx делает mTLS до того как запрос попадает в uvicorn.
 app.include_router(metrics.router)
@@ -112,5 +145,7 @@ async def api_version():
     return {
         "version": NODE_VERSION,
         "component": "node",
-        "node_name": settings.node_name
+        "node_name": settings.node_name,
+        "capabilities": CAPABILITY_POLICY.published(),
+        "capabilities_unknown": list(CAPABILITY_POLICY.unknown_tokens),
     }
