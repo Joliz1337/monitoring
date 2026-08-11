@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src=".github/screenshots/logo.png" alt="Monitoring" width="360">
+<img src=".github/screenshots/logo.png" alt="Monitoring" width="820">
 
 # Monitoring
 
@@ -109,55 +109,63 @@ If the command is run inside the Hetzner Rescue System, the installer provisions
 
 ## Screenshots
 
-> Screenshots are clickable — they open in full size.
+> Click a row to expand the screenshot. Images are clickable — they open in full size.
 
-### Dashboard
-
-All servers on one screen: statuses, metrics, SSL.
+<details>
+<summary><b>Dashboard</b> — all servers on one screen: statuses, metrics, SSL</summary>
 
 ![Dashboard — server cards](.github/screenshots/dashboard.png)
 
-### Server page
+</details>
 
-Real-time metrics and charts: CPU, RAM, disks, network, processes.
+<details>
+<summary><b>Server page</b> — real-time metrics and charts: CPU, RAM, disks, network, processes</summary>
 
 ![Server metrics and charts](.github/screenshots/server-details.png)
 
-### Traffic
+</details>
 
-Breakdown by interface, port and connection.
+<details>
+<summary><b>Traffic</b> — breakdown by interface, port and connection</summary>
 
 ![Traffic by interface and port](.github/screenshots/traffic.png)
 
-### HAProxy
+</details>
 
-Proxy rules, service control and config editor.
+<details>
+<summary><b>HAProxy</b> — proxy rules, service control and config editor</summary>
 
 ![HAProxy management](.github/screenshots/haproxy.png)
 
-### IP Blocklist
+</details>
 
-Block lists with auto-updated sources.
+<details>
+<summary><b>IP Blocklist</b> — block lists with auto-updated sources</summary>
 
 ![IP Blocklist](.github/screenshots/blocklist.png)
 
-### Remnawave
+</details>
 
-User statistics and anomaly analyzer.
+<details>
+<summary><b>Remnawave</b> — user statistics and anomaly analyzer</summary>
 
 ![Remnawave statistics](.github/screenshots/remnawave.png)
 
-### Anti-DDoS
+</details>
 
-Node protection status, attack auto-detection and emergency mode.
+<details>
+<summary><b>Anti-DDoS</b> — node protection status, attack auto-detection and emergency mode</summary>
 
 ![Anti-DDoS protection](.github/screenshots/anti-ddos.png)
 
-### Alerts
+</details>
 
-Fine-grained Telegram notification settings per trigger.
+<details>
+<summary><b>Alerts</b> — fine-grained Telegram notification settings per trigger</summary>
 
 ![Alert settings](.github/screenshots/alerts.png)
+
+</details>
 
 ## Architecture
 

@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src=".github/screenshots/logo.png" alt="Monitoring" width="360">
+<img src=".github/screenshots/logo.png" alt="Monitoring" width="820">
 
 # Monitoring
 
@@ -109,55 +109,63 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/in
 
 ## Скриншоты
 
-> Скриншоты кликабельны — открываются в полном размере.
+> Нажмите на строку, чтобы развернуть скриншот. Картинки кликабельны — открываются в полном размере.
 
-### Dashboard
-
-Все серверы на одном экране: статусы, метрики, SSL.
+<details>
+<summary><b>Dashboard</b> — все серверы на одном экране: статусы, метрики, SSL</summary>
 
 ![Dashboard — карточки серверов](.github/screenshots/dashboard.png)
 
-### Страница сервера
+</details>
 
-Метрики и графики в реальном времени: CPU, RAM, диски, сеть, процессы.
+<details>
+<summary><b>Страница сервера</b> — метрики и графики в реальном времени: CPU, RAM, диски, сеть, процессы</summary>
 
 ![Метрики и графики сервера](.github/screenshots/server-details.png)
 
-### Трафик
+</details>
 
-Разбивка по интерфейсам, портам и соединениям.
+<details>
+<summary><b>Трафик</b> — разбивка по интерфейсам, портам и соединениям</summary>
 
 ![Трафик по интерфейсам и портам](.github/screenshots/traffic.png)
 
-### HAProxy
+</details>
 
-Правила проксирования, управление сервисом и редактор конфига.
+<details>
+<summary><b>HAProxy</b> — правила проксирования, управление сервисом и редактор конфига</summary>
 
 ![Управление HAProxy](.github/screenshots/haproxy.png)
 
-### IP Blocklist
+</details>
 
-Списки блокировок с автообновляемыми источниками.
+<details>
+<summary><b>IP Blocklist</b> — списки блокировок с автообновляемыми источниками</summary>
 
 ![IP Blocklist](.github/screenshots/blocklist.png)
 
-### Remnawave
+</details>
 
-Статистика пользователей и анализатор аномалий.
+<details>
+<summary><b>Remnawave</b> — статистика пользователей и анализатор аномалий</summary>
 
 ![Статистика Remnawave](.github/screenshots/remnawave.png)
 
-### Анти-DDoS
+</details>
 
-Состояние защиты нод, автодетект атак и аварийный режим.
+<details>
+<summary><b>Анти-DDoS</b> — состояние защиты нод, автодетект атак и аварийный режим</summary>
 
 ![Анти-DDoS защита](.github/screenshots/anti-ddos.png)
 
-### Алерты
+</details>
 
-Гибкая настройка Telegram-уведомлений по каждому триггеру.
+<details>
+<summary><b>Алерты</b> — гибкая настройка Telegram-уведомлений по каждому триггеру</summary>
 
 ![Настройка алертов](.github/screenshots/alerts.png)
+
+</details>
 
 ## Архитектура
 
