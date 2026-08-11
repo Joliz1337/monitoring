@@ -1027,7 +1027,15 @@
     "sync_error": "Ошибка применения правил на: {{servers}}",
     "sync_queued": "Правила применены. Офлайн-серверы получат их при возвращении в сеть: {{servers}}",
     "sync_cancelled": "Синхронизация отменена, серверы не изменены: {{reason}}",
-    "loading_rules": "Загрузка..."
+    "loading_rules": "Загрузка...",
+    "search_placeholder": "Поиск: IP, префикс или CIDR",
+    "select_all": "Выбрать все",
+    "selected_count": "Выбрано: {{count}}",
+    "delete_selected": "Удалить ({{count}})",
+    "confirm_delete_selected": "Удалить выбранные правила ({{count}})? Изменения будут применены на серверы автоматически.",
+    "deleted_count": "Удалено правил: {{count}}",
+    "shown_of": "Показано {{shown}} из {{total}} — уточните запрос",
+    "no_search_results": "Ничего не найдено"
   },
   "remnawave": {
     "subtitle": "Мониторинг активности пользователей",

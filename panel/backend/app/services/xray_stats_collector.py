@@ -488,24 +488,29 @@ class XrayStatsCollector:
 
             now = datetime.now(timezone.utc).replace(tzinfo=None)
 
-            # Remnawave >= 2.8.0 отдаёт userId (число) вместо userUuid —
-            # восстанавливаем uuid через кэш пользователей (email = числовой id Remnawave)
+            # Remnawave 3.x знает пользователя только по числовому id, старые версии
+            # отдают userUuid — его переводим в id через кэш (email = числовой id Remnawave)
             async with async_session() as db:
                 uuid_rows = (await db.execute(
                     select(RemnawaveUserCache.email, RemnawaveUserCache.uuid)
                     .where(RemnawaveUserCache.uuid.isnot(None))
                 )).all()
-            uuid_by_user_id = {user_id: uuid for user_id, uuid in uuid_rows}
+            user_id_by_uuid = {uuid: user_id for user_id, uuid in uuid_rows}
 
             # Дедупликация по hwid — API может вернуть дубли
             unique: dict[str, dict] = {}
+            unmapped = 0
             for dev in devices:
                 hwid = dev.get("hwid")
                 if not hwid:
                     continue
+                user_id = self._as_int(dev.get("userId")) or user_id_by_uuid.get(dev.get("userUuid"))
+                if not user_id:
+                    unmapped += 1
+                    continue
                 unique[hwid] = {
                     "hwid": hwid,
-                    "user_uuid": dev.get("userUuid") or uuid_by_user_id.get(dev.get("userId"), ""),
+                    "user_id": user_id,
                     "platform": dev.get("platform"),
                     "os_version": dev.get("osVersion"),
                     "device_model": dev.get("deviceModel"),
@@ -516,12 +521,17 @@ class XrayStatsCollector:
                 }
             values = list(unique.values())
 
-            unmapped = sum(1 for v in values if not v["user_uuid"])
             if unmapped:
-                logger.warning(f"HWID sync: {unmapped}/{len(values)} devices without user mapping (user cache stale?)")
+                logger.warning(f"HWID sync: {unmapped} devices without user mapping (user cache stale?)")
+
+            # Все устройства без владельца — кэш пользователей ещё не прогрет. Продолжить
+            # значило бы вычистить таблицу целиком: ниже удаляется всё, что не попало в синк.
+            if not values:
+                logger.warning("HWID sync skipped: no device could be mapped to a user")
+                return
 
             update_cols = [
-                'user_uuid', 'platform', 'os_version', 'device_model',
+                'user_id', 'platform', 'os_version', 'device_model',
                 'user_agent', 'created_at', 'updated_at', 'synced_at',
             ]
 
@@ -621,12 +631,12 @@ class XrayStatsCollector:
             )).all() if ip_check_on else []
 
             hwid_rows = (await db.execute(
-                select(RemnawaveHwidDevice.user_uuid, sql_func.count().label("cnt"))
-                .group_by(RemnawaveHwidDevice.user_uuid)
+                select(RemnawaveHwidDevice.user_id, sql_func.count().label("cnt"))
+                .group_by(RemnawaveHwidDevice.user_id)
             )).all() if hwid_check_on else []
 
             device_rows = (await db.execute(
-                select(RemnawaveHwidDevice.user_uuid, RemnawaveHwidDevice.user_agent,
+                select(RemnawaveHwidDevice.user_id, RemnawaveHwidDevice.user_agent,
                        RemnawaveHwidDevice.platform, RemnawaveHwidDevice.device_model,
                        RemnawaveHwidDevice.os_version, RemnawaveHwidDevice.hwid)
             )).all() if (ua_check_on or devdata_check_on) else []
@@ -643,7 +653,6 @@ class XrayStatsCollector:
                 )
             )).all()
             by_email = {u.email: u for u in cache_rows}
-            by_uuid = {u.uuid: u for u in cache_rows if u.uuid}
 
         # Детальный список IP больше НЕ грузим целиком — только по подтверждённым
         # аномальным пользователям (см. ниже), иначе это вся таблица XrayStats в памяти.
@@ -694,8 +703,8 @@ class XrayStatsCollector:
             # Умное определение: разъездной пользователь меняет адреса, но столько
             # трафика в одиночку не выкачивает — раздача подписки выкачивает.
             # Стоит раньше ASN-блока: тут один запрос, там резолв всех IP через RIPE.
-            if smart_check_on and cached.uuid:
-                used_bytes = await self._user_daily_traffic(settings, cached.uuid)
+            if smart_check_on:
+                used_bytes = await self._user_daily_traffic(settings, email, cached.uuid)
                 if used_bytes is not None and used_bytes < smart_traffic_bytes:
                     logger.info(
                         f"IP anomaly suppressed by traffic: {cached.username or email} "
@@ -766,8 +775,8 @@ class XrayStatsCollector:
                 del self._ip_anomaly_streak[email]
 
         # 2) HWID > лимит → авто-очистка устройств через API (без уведомления)
-        for uuid, device_count in hwid_rows:
-            cached = by_uuid.get(uuid)
+        for user_id, device_count in hwid_rows:
+            cached = by_email.get(user_id)
             if not cached or cached.status != 'ACTIVE':
                 continue
             if cached.email in ignored_all or cached.email in ignore_hwid:
@@ -781,12 +790,12 @@ class XrayStatsCollector:
             if last and (now - last).total_seconds() < COOLDOWN_SECONDS:
                 continue
             self._anomaly_last_notified[key] = now
-            await self._auto_clear_hwid(settings, uuid, cached.username, cached.email, device_count, cached.hwid_device_limit)
+            await self._auto_clear_hwid(settings, cached, device_count)
 
         # 3) Неизвестные UA → уведомление с кнопкой [Игнор HWID]
         # 4) Невалидные данные устройства (платформа/версия/модель)
-        for uuid, user_agent, platform, device_model, os_version, hwid in device_rows:
-            cached = by_uuid.get(uuid)
+        for user_id, user_agent, platform, device_model, os_version, hwid in device_rows:
+            cached = by_email.get(user_id)
             if not cached or cached.status != 'ACTIVE':
                 continue
             if cached.email in ignored_all or cached.email in ignore_hwid:
@@ -936,25 +945,27 @@ class XrayStatsCollector:
         """email -> (streak_count, ip_count)"""
         return dict(self._ip_anomaly_streak)
 
-    async def _user_daily_traffic(self, settings: RemnawaveSettings, user_uuid: str) -> int | None:
+    async def _user_daily_traffic(self, settings: RemnawaveSettings, user_id: int, user_uuid: str | None) -> int | None:
         """Расход трафика пользователя за сутки; None — данные недоступны (уведомление тогда шлём)."""
         api = get_remnawave_api(settings.api_url, settings.api_token, settings.cookie_secret)
         try:
-            return await api.get_user_traffic_bytes(user_uuid)
+            return await api.get_user_traffic_bytes(user_id, user_uuid)
         except Exception as e:
-            logger.warning(f"Traffic check failed for {user_uuid}: {e}")
+            logger.warning(f"Traffic check failed for {user_id}: {e}")
             return None
         finally:
             await api.close()
 
-    async def _auto_clear_hwid(self, settings: RemnawaveSettings, user_uuid: str, username: str | None, email: int, current: int, limit: int):
+    async def _auto_clear_hwid(self, settings: RemnawaveSettings, cached, current: int):
         """Авто-очистка HWID устройств при превышении лимита."""
+        limit = cached.hwid_device_limit
+        who = cached.username or cached.email
         api = get_remnawave_api(settings.api_url, settings.api_token, settings.cookie_secret)
         try:
-            await api.delete_all_user_hwid_devices(user_uuid)
-            logger.info(f"HWID auto-clear: {username or email} had {current}/{limit} devices, cleared")
+            await api.delete_all_user_hwid_devices(cached.email, cached.uuid)
+            logger.info(f"HWID auto-clear: {who} had {current}/{limit} devices, cleared")
         except Exception as e:
-            logger.warning(f"HWID auto-clear failed for {username or email}: {e}")
+            logger.warning(f"HWID auto-clear failed for {who}: {e}")
         finally:
             await api.close()
 

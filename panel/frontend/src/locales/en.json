@@ -1025,7 +1025,15 @@
     "sync_error": "Error applying rules on: {{servers}}",
     "sync_queued": "Rules applied. Offline servers will receive them once back online: {{servers}}",
     "sync_cancelled": "Sync cancelled, servers left unchanged: {{reason}}",
-    "loading_rules": "Loading..."
+    "loading_rules": "Loading...",
+    "search_placeholder": "Search: IP, prefix or CIDR",
+    "select_all": "Select all",
+    "selected_count": "Selected: {{count}}",
+    "delete_selected": "Delete ({{count}})",
+    "confirm_delete_selected": "Delete selected rules ({{count}})? Changes will be applied to servers automatically.",
+    "deleted_count": "Rules deleted: {{count}}",
+    "shown_of": "Showing {{shown}} of {{total}} — refine your query",
+    "no_search_results": "No results found"
   },
   "remnawave": {
     "subtitle": "User activity monitoring",

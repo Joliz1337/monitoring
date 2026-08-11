@@ -378,7 +378,7 @@ class RemnawaveHwidDevice(Base):
     __tablename__ = "remnawave_hwid_devices"
 
     hwid = Column(String(200), primary_key=True)
-    user_uuid = Column(String(100), nullable=False, index=True)
+    user_id = Column(Integer, nullable=False, index=True)
     platform = Column(String(100), nullable=True)
     os_version = Column(String(100), nullable=True)
     device_model = Column(String(200), nullable=True)
