@@ -464,7 +464,7 @@ export default function BulkActions() {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Left column - Server selection */}
         <motion.div className="lg:col-span-1" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }}>
-          <div className="card">
+          <div className="card h-full flex flex-col">
             <div className="flex items-center justify-between mb-4">
               <h2 className="font-semibold text-dark-100 flex items-center gap-2">
                 <Server className="w-4 h-4 text-accent-500" />
@@ -503,7 +503,7 @@ export default function BulkActions() {
                   </button>
                 </div>
 
-                <div className="space-y-1 max-h-[400px] overflow-y-auto pr-2">
+                <div className="space-y-1 max-h-[400px] lg:max-h-none lg:flex-1 lg:min-h-0 overflow-y-auto pr-2">
                   {hasFolders ? (
                     <>
                       {sortedFolderNames
