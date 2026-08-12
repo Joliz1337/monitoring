@@ -194,7 +194,7 @@ export function ServerSelector({ servers, selectedIds, onChange, activeId, onOpe
   const nothingVisible = filtered.folders.size === 0 && filtered.noFolder.length === 0
 
   return (
-    <div className="card">
+    <div className="card flex flex-col">
       <div className="flex items-center justify-between mb-3">
         <h2 className="font-semibold text-dark-100 flex items-center gap-2">
           <Server className="w-4 h-4 text-accent-500" />
@@ -231,7 +231,7 @@ export function ServerSelector({ servers, selectedIds, onChange, activeId, onOpe
             </button>
           </div>
 
-          <div className="space-y-1 max-h-[420px] overflow-y-auto pr-1">
+          <div className="space-y-1 max-h-[420px] lg:max-h-none lg:flex-1 lg:min-h-0 overflow-y-auto pr-1">
             {hasFolders ? (
               <>
                 {sortedFolderNames
