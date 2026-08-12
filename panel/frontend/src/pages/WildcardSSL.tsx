@@ -13,6 +13,15 @@ const DEFAULT_DEPLOY_PATH = '/etc/letsencrypt/live'
 const DEFAULT_FULLCHAIN_NAME = 'fullchain.pem'
 const DEFAULT_PRIVKEY_NAME = 'privkey.pem'
 
+// Wildcard действует ровно на один уровень: *.example.com покрывает
+// panel.example.com, но не a.b.example.com (та же логика на бэкенде)
+function wildcardCoversDomain(baseDomain: string, domain: string): boolean {
+  if (!baseDomain || !domain) return false
+  if (domain === baseDomain) return true
+  const suffix = '.' + baseDomain
+  return domain.endsWith(suffix) && !domain.slice(0, -suffix.length).includes('.')
+}
+
 export interface ServerSavePayload {
   deploy_path: string
   reload_cmd: string
@@ -362,6 +371,7 @@ export default function WildcardSSL() {
   const [email, setEmail] = useState('')
   const [autoRenew, setAutoRenew] = useState(false)
   const [renewDays, setRenewDays] = useState(30)
+  const [useForPanel, setUseForPanel] = useState(false)
   const [showToken, setShowToken] = useState(false)
   const [savingSettings, setSavingSettings] = useState(false)
 
@@ -390,6 +400,7 @@ export default function WildcardSSL() {
       setEmail(res.data.email)
       setAutoRenew(res.data.auto_renew_enabled)
       setRenewDays(res.data.renew_days_before)
+      setUseForPanel(res.data.use_for_panel)
     } catch { /* ignore */ } finally {
       setSettingsLoading(false)
     }
@@ -514,10 +525,18 @@ export default function WildcardSSL() {
   const handleSaveSettings = async () => {
     setSavingSettings(true)
     try {
-      const data: any = { email, auto_renew_enabled: autoRenew, renew_days_before: renewDays }
+      const data: any = { email, auto_renew_enabled: autoRenew, renew_days_before: renewDays, use_for_panel: useForPanel }
       if (cfToken) data.cloudflare_api_token = cfToken
-      await wildcardSSLApi.updateSettings(data)
+      const res = await wildcardSSLApi.updateSettings(data)
       toast.success(t('wildcard_ssl.settings_saved'))
+      const panelDeploy = res.data?.panel_deploy
+      if (panelDeploy) {
+        if (panelDeploy.success) {
+          toast.success(t('wildcard_ssl.panel_applied'))
+        } else {
+          toast.error(t('wildcard_ssl.panel_apply_failed', { message: panelDeploy.message }), { duration: 8000 })
+        }
+      }
       setCfToken('')
       setCfTokenRevealed('')
       setShowToken(false)
@@ -800,6 +819,33 @@ export default function WildcardSSL() {
                 <Info className="w-3.5 h-3.5 shrink-0" />
                 {t('wildcard_ssl.auto_renew_hint')}
               </p>
+            </div>
+
+            <div className="space-y-2">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={useForPanel}
+                  onChange={e => setUseForPanel(e.target.checked)}
+                  className="w-4 h-4 rounded border-dark-600 text-accent-500 focus:ring-accent-500 bg-dark-800"
+                />
+                <span className="text-sm text-dark-200">{t('wildcard_ssl.use_for_panel')}</span>
+                {settings?.panel_domain && (
+                  <span className="text-xs text-dark-500 font-mono">({settings.panel_domain})</span>
+                )}
+              </label>
+              <p className="text-xs text-dark-500 flex items-center gap-1">
+                <Info className="w-3.5 h-3.5 shrink-0" />
+                {t('wildcard_ssl.use_for_panel_hint')}
+              </p>
+              {useForPanel && cert && !!settings?.panel_domain && !wildcardCoversDomain(cert.base_domain, settings.panel_domain) && (
+                <div className="flex items-start gap-2 p-3 bg-yellow-500/10 border border-yellow-500/20 rounded-lg">
+                  <Info className="w-4 h-4 text-yellow-400 mt-0.5 shrink-0" />
+                  <span className="text-xs text-yellow-300">
+                    {t('wildcard_ssl.use_for_panel_not_covered', { cert: cert.domain, domain: settings.panel_domain })}
+                  </span>
+                </div>
+              )}
             </div>
 
             <button onClick={handleSaveSettings} disabled={savingSettings}

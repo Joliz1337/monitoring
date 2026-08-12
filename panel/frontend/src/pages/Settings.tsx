@@ -1464,26 +1464,34 @@ export default function Settings() {
                     </span>
                   )}
                   
-                  {/* Renew button */}
-                  <motion.button
-                    onClick={() => handleRenewCert()}
-                    disabled={certRenewing}
-                    className="btn btn-secondary text-sm"
-                    whileHover={{ scale: 1.02 }}
-                    whileTap={{ scale: 0.98 }}
-                  >
-                    {certRenewing ? (
-                      <>
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                        {t('settings.ssl_renewing')}
-                      </>
-                    ) : (
-                      <>
-                        <RefreshCw className="w-4 h-4" />
-                        {t('settings.ssl_renew')}
-                      </>
-                    )}
-                  </motion.button>
+                  {/* Сертификатом владеет wildcard-модуль: standalone-продление отсюда запрещено бэкендом */}
+                  {certInfo.managed_by_wildcard ? (
+                    <Tooltip label={t('settings.ssl_managed_by_wildcard_hint')}>
+                      <span className="px-3 py-1.5 text-sm font-medium bg-accent-500/10 text-accent-400 rounded-lg cursor-default">
+                        {t('settings.ssl_managed_by_wildcard')}
+                      </span>
+                    </Tooltip>
+                  ) : (
+                    <motion.button
+                      onClick={() => handleRenewCert()}
+                      disabled={certRenewing}
+                      className="btn btn-secondary text-sm"
+                      whileHover={{ scale: 1.02 }}
+                      whileTap={{ scale: 0.98 }}
+                    >
+                      {certRenewing ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          {t('settings.ssl_renewing')}
+                        </>
+                      ) : (
+                        <>
+                          <RefreshCw className="w-4 h-4" />
+                          {t('settings.ssl_renew')}
+                        </>
+                      )}
+                    </motion.button>
+                  )}
                 </div>
               </div>
               

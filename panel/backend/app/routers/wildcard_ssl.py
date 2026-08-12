@@ -7,9 +7,15 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from app.auth import verify_auth
+from app.config import get_settings as get_app_config
 from app.database import async_session
 from app.models import WildcardCertificate, Server, PanelSettings
-from app.services.wildcard_ssl import get_wildcard_ssl_manager, get_issue_status
+from app.services.wildcard_ssl import (
+    USE_FOR_PANEL_SETTING,
+    get_wildcard_ssl_manager,
+    get_issue_status,
+    wildcard_covers_domain,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +49,7 @@ class SettingsUpdate(BaseModel):
     email: Optional[str] = None
     auto_renew_enabled: Optional[bool] = None
     renew_days_before: Optional[int] = None
+    use_for_panel: Optional[bool] = None
 
 
 # ─── Certificates ───
@@ -169,6 +176,8 @@ async def get_settings(_: dict = Depends(verify_auth)):
             "email": await _get_setting(db, "wildcard_email") or "",
             "auto_renew_enabled": (await _get_setting(db, "wildcard_auto_renew_enabled")) == "true",
             "renew_days_before": int(await _get_setting(db, "wildcard_renew_days_before") or "30"),
+            "use_for_panel": (await _get_setting(db, USE_FOR_PANEL_SETTING)) == "true",
+            "panel_domain": get_app_config().domain or "",
         }
 
 
@@ -181,6 +190,9 @@ async def get_token_raw(_: dict = Depends(verify_auth)):
 
 @router.put("/settings")
 async def update_settings(req: SettingsUpdate, _: dict = Depends(verify_auth)):
+    turned_on_for_panel = False
+    panel_cert_domain: Optional[str] = None
+
     async with async_session() as db:
         if req.cloudflare_api_token is not None:
             await _set_setting(db, "wildcard_cloudflare_api_token", req.cloudflare_api_token)
@@ -190,8 +202,29 @@ async def update_settings(req: SettingsUpdate, _: dict = Depends(verify_auth)):
             await _set_setting(db, "wildcard_auto_renew_enabled", "true" if req.auto_renew_enabled else "false")
         if req.renew_days_before is not None:
             await _set_setting(db, "wildcard_renew_days_before", str(req.renew_days_before))
+        if req.use_for_panel is not None:
+            was_enabled = (await _get_setting(db, USE_FOR_PANEL_SETTING)) == "true"
+            await _set_setting(db, USE_FOR_PANEL_SETTING, "true" if req.use_for_panel else "false")
+            turned_on_for_panel = req.use_for_panel and not was_enabled
+
+        if turned_on_for_panel:
+            panel_domain = get_app_config().domain or ""
+            certs = (await db.execute(select(WildcardCertificate))).scalars().all()
+            covering = next(
+                (c for c in certs if wildcard_covers_domain(c.base_domain, panel_domain)), None
+            )
+            panel_cert_domain = covering.base_domain if covering else None
+
         await db.commit()
-    return {"success": True}
+
+    # Применяем сразу при включении, а не ждём следующего продления.
+    # Сетевые/докерные действия — после закрытия сессии БД.
+    panel_deploy = None
+    if turned_on_for_panel and panel_cert_domain:
+        manager = get_wildcard_ssl_manager()
+        panel_deploy = await manager.apply_to_panel(panel_cert_domain)
+
+    return {"success": True, "panel_deploy": panel_deploy}
 
 
 # ─── Server config ───

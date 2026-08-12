@@ -18,10 +18,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import verify_auth
 from app.config import get_settings
-from app.database import get_db
-from app.models import Server
+from app.database import get_db, async_session
+from app.models import Server, PanelSettings
 from app.services import update_channel
 from app.services.net_utils import resolve_host
+from app.services.wildcard_ssl import USE_FOR_PANEL_SETTING
 
 router = APIRouter(prefix="/system", tags=["system"])
 logger = logging.getLogger(__name__)
@@ -630,11 +631,20 @@ def get_panel_certificate_info() -> dict:
         }
 
 
+async def _panel_cert_managed_by_wildcard() -> bool:
+    async with async_session() as db:
+        row = (await db.execute(
+            select(PanelSettings).where(PanelSettings.key == USE_FOR_PANEL_SETTING)
+        )).scalar_one_or_none()
+        return bool(row and row.value == "true")
+
+
 @router.get("/certificate")
 async def get_certificate_info(_: dict = Depends(verify_auth)):
     """Get SSL certificate information for the panel"""
     cert_info = get_panel_certificate_info()
     cert_info["renewal_in_progress"] = _cert_renewal_status["in_progress"]
+    cert_info["managed_by_wildcard"] = await _panel_cert_managed_by_wildcard()
     return cert_info
 
 
@@ -728,7 +738,12 @@ async def renew_certificate(
     """
     if _cert_renewal_status["in_progress"]:
         raise HTTPException(status_code=409)
-    
+
+    # Сертификат панели ведёт wildcard-модуль: standalone-продление здесь создало
+    # бы параллельную certbot-линию и увело nginx с wildcard-сертификата
+    if await _panel_cert_managed_by_wildcard():
+        raise HTTPException(status_code=400, detail="Certificate is managed by Wildcard SSL")
+
     # Check if certificate exists
     cert_info = get_panel_certificate_info()
     if "error" in cert_info and cert_info.get("error") == "Certificate not found":
