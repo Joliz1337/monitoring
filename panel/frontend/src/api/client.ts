@@ -790,6 +790,7 @@ export interface PanelCertificateInfo {
   expired?: boolean
   error?: string
   renewal_in_progress?: boolean
+  managed_by_wildcard?: boolean
 }
 
 export interface CertRenewalResponse {
@@ -1609,6 +1610,8 @@ export interface WildcardSSLSettings {
   email: string
   auto_renew_enabled: boolean
   renew_days_before: number
+  use_for_panel: boolean
+  panel_domain: string
 }
 
 export interface WildcardServerConfig {
@@ -1654,7 +1657,7 @@ export const wildcardSSLApi = {
   getTokenRaw: () =>
     api.get<{ cloudflare_api_token: string }>('/wildcard-ssl/settings/token'),
   updateSettings: (data: Partial<WildcardSSLSettings>) =>
-    api.put('/wildcard-ssl/settings', data),
+    api.put<{ success: boolean; panel_deploy?: { success: boolean; message: string } | null }>('/wildcard-ssl/settings', data),
   getServers: () =>
     api.get<{ servers: WildcardServerConfig[] }>('/wildcard-ssl/servers'),
   updateServer: (serverId: number, data: Partial<WildcardServerConfig>) =>

@@ -6,8 +6,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import docker
 from sqlalchemy import select
 
+from app.config import get_settings
 from app.database import async_session
 from app.models import WildcardCertificate, Server, PanelSettings, AlertSettings
 from app.services.http_client import get_node_client, node_auth_headers
@@ -16,6 +18,24 @@ from app.services.node_capabilities import Capability, server_allows
 logger = logging.getLogger(__name__)
 
 DEFAULT_DEPLOY_PATH = "/etc/letsencrypt/live"
+PANEL_NGINX_CONTAINER = "panel-nginx"
+LETSENCRYPT_LIVE = Path("/etc/letsencrypt/live")
+LETSENCRYPT_RENEWAL = Path("/etc/letsencrypt/renewal")
+USE_FOR_PANEL_SETTING = "wildcard_use_for_panel"
+
+
+def wildcard_covers_domain(base_domain: str, domain: str) -> bool:
+    """Покрывает ли сертификат (*.base + base) указанный домен.
+
+    Wildcard действует ровно на один уровень: *.example.com покрывает
+    panel.example.com, но не a.b.example.com.
+    """
+    if not base_domain or not domain:
+        return False
+    if domain == base_domain:
+        return True
+    suffix = f".{base_domain}"
+    return domain.endswith(suffix) and "." not in domain[: -len(suffix)]
 
 # Статус выпуска/продления (in-memory, для polling)
 _issue_status = {
@@ -108,6 +128,7 @@ class WildcardSSLManager:
             _issue_status["last_result"] = "success"
             _issue_status["output"] = result[1]
             logger.info(f"Wildcard certificate issued for *.{base_domain}")
+            await self._apply_to_panel_if_enabled(base_domain)
             return True, f"Certificate issued for *.{base_domain}"
 
         except Exception as e:
@@ -174,7 +195,9 @@ class WildcardSSLManager:
                 f"Wildcard certificate renewed for *.{cert.base_domain} "
                 f"(expires {expiry.isoformat() if expiry else '?'})"
             )
-            return True, f"Certificate renewed for *.{cert.base_domain}"
+
+        await self._apply_to_panel_if_enabled(cert.base_domain)
+        return True, f"Certificate renewed for *.{cert.base_domain}"
 
     # ─── Deploy ───
 
@@ -284,6 +307,124 @@ class WildcardSSLManager:
                 "server_name": server.name,
             }
 
+    # ─── Deploy to panel itself ───
+
+    async def apply_to_panel(self, base_domain: str) -> dict:
+        """Применить wildcard-сертификат к nginx самой панели.
+
+        Nginx панели читает /etc/letsencrypt/live/{DOMAIN}/ — направляем этот
+        путь симлинком на линию wildcard-сертификата и перезагружаем nginx.
+        После этого каждое продление обновляет файлы «на месте», панели
+        достаточно reload.
+        """
+        panel_domain = get_settings().domain
+        if not panel_domain:
+            return {"success": False, "message": "Panel domain is not configured"}
+        if not wildcard_covers_domain(base_domain, panel_domain):
+            return {
+                "success": False,
+                "message": f"Certificate *.{base_domain} does not cover panel domain {panel_domain}",
+            }
+
+        lineage = await self._find_cert_lineage(base_domain)
+        if not lineage:
+            return {"success": False, "message": "Certificate files not found in /etc/letsencrypt/live"}
+        _, lineage_dir = lineage
+
+        try:
+            await asyncio.to_thread(self._link_panel_cert, panel_domain, lineage_dir)
+        except OSError as e:
+            logger.error(f"Failed to link panel cert to wildcard lineage: {e}")
+            return {"success": False, "message": f"Failed to link certificate: {e}"}
+
+        ok, detail = await self._reload_panel_nginx()
+        if not ok:
+            return {"success": False, "message": f"Certificate linked, but nginx reload failed: {detail}"}
+
+        logger.info(f"Wildcard certificate *.{base_domain} applied to panel ({panel_domain})")
+        return {"success": True, "message": f"Certificate applied to panel ({panel_domain})"}
+
+    def _link_panel_cert(self, panel_domain: str, lineage_dir: Path) -> None:
+        live_path = LETSENCRYPT_LIVE / panel_domain
+
+        if live_path.is_symlink():
+            if live_path.exists() and live_path.resolve() == lineage_dir.resolve():
+                return
+            live_path.unlink()
+        elif live_path.exists():
+            if live_path.resolve() == lineage_dir.resolve():
+                return
+            # Собственная standalone-линия панели. Убираем её вместе с
+            # renewal-конфигом: иначе ночной certbot renew этой линии перепишет
+            # симлинки внутри каталога wildcard-линии на свой архив.
+            live_path.rename(self._free_backup_path(live_path.parent, f"{panel_domain}.pre-wildcard"))
+            renewal_conf = LETSENCRYPT_RENEWAL / f"{panel_domain}.conf"
+            if renewal_conf.exists():
+                renewal_conf.rename(
+                    self._free_backup_path(renewal_conf.parent, f"{panel_domain}.conf.pre-wildcard")
+                )
+
+        live_path.symlink_to(lineage_dir)
+
+    @staticmethod
+    def _free_backup_path(parent: Path, name: str) -> Path:
+        candidate = parent / name
+        counter = 2
+        while candidate.exists() or candidate.is_symlink():
+            candidate = parent / f"{name}-{counter}"
+            counter += 1
+        return candidate
+
+    async def _reload_panel_nginx(self) -> tuple[bool, str]:
+        def _reload() -> tuple[int, str]:
+            client = docker.from_env()
+            container = client.containers.get(PANEL_NGINX_CONTAINER)
+            # nginx -s reload возвращает 0 даже при битом конфиге (сигнал ушёл,
+            # мастер молча остаётся на старом) — валидируем заранее
+            code, output = container.exec_run(["nginx", "-t"])
+            if code != 0:
+                return code, (output or b"").decode(errors="replace")
+            code, output = container.exec_run(["nginx", "-s", "reload"])
+            return code, (output or b"").decode(errors="replace")
+
+        try:
+            code, output = await asyncio.to_thread(_reload)
+        except Exception as e:
+            return False, str(e)
+        if code != 0:
+            return False, output.strip() or f"exit code {code}"
+        return True, "reloaded"
+
+    async def _apply_to_panel_if_enabled(self, base_domain: str, notify: bool = True) -> Optional[dict]:
+        """Применить сертификат к панели, если настройка включена.
+
+        Возвращает None, когда настройка выключена. Сбой применения не роняет
+        выпуск/продление: ошибка логируется и (в фоновых сценариях) уходит
+        в Telegram.
+        """
+        async with async_session() as db:
+            enabled = await self._get_setting(db, USE_FOR_PANEL_SETTING)
+            alerts = None
+            if notify:
+                alerts = (await db.execute(select(AlertSettings).limit(1))).scalar_one_or_none()
+
+        if enabled != "true":
+            return None
+
+        try:
+            result = await self.apply_to_panel(base_domain)
+        except Exception as e:
+            logger.error(f"Panel wildcard SSL apply crashed: {e}")
+            result = {"success": False, "message": str(e)}
+
+        if not result["success"]:
+            logger.error(f"Panel wildcard SSL apply failed: {result['message']}")
+            if notify:
+                await self._notify(
+                    alerts, self._msg_panel_apply_failed(alerts, base_domain, result["message"])
+                )
+        return result
+
     # ─── Auto-renew loop ───
 
     async def _check_and_renew(self):
@@ -352,6 +493,13 @@ class WildcardSSLManager:
             f"Certificate *.{base_domain} renewed, but deploy failed "
             f"on {len(failed)} of {total} nodes:\n{lines}"
         )
+
+    def _msg_panel_apply_failed(
+        self, settings: Optional[AlertSettings], base_domain: str, reason: str
+    ) -> str:
+        if self._alert_lang(settings) == "ru":
+            return f"Сертификат *.{base_domain} не удалось применить к самой панели:\n{reason}"
+        return f"Failed to apply certificate *.{base_domain} to the panel itself:\n{reason}"
 
     async def _notify(self, settings: Optional[AlertSettings], message: str):
         if not settings or not settings.telegram_bot_token or not settings.telegram_chat_id:

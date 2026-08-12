@@ -1,4 +1,4 @@
-# Monitoring Panel v10.60.0
+# Monitoring Panel v10.61.0
 
 Веб-панель для мониторинга серверов. Собирает метрики с нод с настраиваемым интервалом (по умолчанию 10 сек) и хранит историю локально.
 
@@ -77,6 +77,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/in
 - В разделе **Настройки** отображается информация о сертификате панели
 - Показывается домен, дата истечения и дней до истечения
 - Кнопка "Продлить" для ручного продления через веб-интерфейс
+- Если сертификат панели управляется настройкой «Использовать для панели» из [Wildcard SSL](#wildcard-ssl) — вместо кнопки «Продлить» показывается бейдж «Управляется Wildcard SSL» с подсказкой; продление такого сертификата идёт вместе с продлением wildcard-сертификата, отдельно его продлить нельзя
 
 **Cron автопродления (только для сертификатов, выпущенных certbot напрямую):**
 
@@ -450,10 +451,12 @@ PK таблицы — `BigInteger` (не int32). При 500 нодах с инт
 | GET | /api/system/nodes/{id}/version | Версия и статус одной ноды (SSH/сетевой запрос к ней) — фронт догружает поштучно после `version/base` |
 | GET | /api/system/stats | Статистика сервера панели (CPU, RAM, диск) |
 | POST | /api/system/update | Обновление панели (target_ref: branch/tag/commit, по умолчанию — выбранный канал обновлений) |
-| GET | /api/system/certificate | Информация о SSL сертификате панели |
-| POST | /api/system/certificate/renew?force=bool | Продление SSL сертификата (force=true для принудительного) |
+| GET | /api/system/certificate | Информация о SSL сертификате панели, включая `managed_by_wildcard` |
+| POST | /api/system/certificate/renew?force=bool | Продление SSL сертификата (force=true для принудительного); `400`, если сертификат управляется Wildcard SSL |
 | GET | /api/system/certificate/renew/status | Статус продления сертификата |
 | POST | /api/proxy/{id}/system/optimizations/apply | Применить системные оптимизации на ноду |
+
+**`managed_by_wildcard`** (`GET /api/system/certificate`) — `true`, если включена настройка «Использовать для панели» из [Wildcard SSL](#wildcard-ssl) (`wildcard_use_for_panel` в `panel_settings`). В этом случае `POST /api/system/certificate/renew` отвечает `400 Certificate is managed by Wildcard SSL`: самостоятельное продление создало бы отдельную certbot-линию и увело nginx панели с уже применённого wildcard-сертификата.
 
 **Механизм обновления**:
 1. API создаёт временный контейнер `panel-updater` (образ `docker:cli`)
@@ -1709,6 +1712,17 @@ Frontend сохраняет незавершённые job_id в `localStorage` 
 
 Провальным деплой считается только для записей с реальным `server_id` (служебные ответы вроде «нет нод с включённым wildcard SSL» уведомление не вызывают). Если Telegram не настроен — тихо пропускается. Сообщения локализованы (ru/en) по полю `language` из `AlertSettings`. Хелперы: `_notify`, `_msg_renew_failed`, `_msg_deploy_failed`, `_alert_lang`.
 
+**Использование сертификата для самой панели:**
+
+Настройка `wildcard_use_for_panel` (`panel_settings`, константа `USE_FOR_PANEL_SETTING`) — при включении выпущенный/продлённый wildcard-сертификат применяется не только к нодам, но и к nginx самой панели, вместо отдельного certbot-цикла на домен панели.
+
+- `wildcard_covers_domain(base_domain, domain)` — модульная функция: проверяет, что сертификат `*.base_domain` покрывает `domain` ровно на один уровень вложенности (`sub.example.com` — да, `a.b.example.com` — нет). Используется и на бэкенде, и (зеркалом, `wildcardCoversDomain`) на фронтенде.
+- `WildcardSSLManager.apply_to_panel(base_domain)` — находит актуальную certbot-линию сертификата (`_find_cert_lineage`), делает `/etc/letsencrypt/live/{ДОМЕН_ПАНЕЛИ}` симлинком на её каталог (`_link_panel_cert`) и перезагружает nginx панели через Docker SDK (`_reload_panel_nginx`): сначала `nginx -t`, затем `nginx -s reload` — reload возвращает код `0` даже при битом конфиге, поэтому валидация нужна заранее.
+- Если на месте `/etc/letsencrypt/live/{ДОМЕН_ПАНЕЛИ}` уже лежит собственная standalone-линия панели (реальный каталог, не симлинк) — она переименовывается в `{ДОМЕН}.pre-wildcard` (при занятости имени — с числовым суффиксом, `_free_backup_path`), а её renewal-конфиг `/etc/letsencrypt/renewal/{ДОМЕН}.conf` — в `.conf.pre-wildcard`. Иначе ночной `certbot renew` этой старой линии переписал бы симлинки внутри каталога wildcard-линии на свой архив.
+- `_apply_to_panel_if_enabled(base_domain, notify=True)` вызывается после каждого успешного выпуска и продления (ручное и автоматическое продление идут через один и тот же `renew_certificate`); сбой применения не роняет сам выпуск/продление — логируется и (в фоновых сценариях) уходит в Telegram через тот же механизм алертов, что и остальные уведомления модуля (`_msg_panel_apply_failed`, ru/en).
+- Включение настройки в UI сразу применяет к панели уже существующий сертификат, покрывающий её домен (если такой есть) — не дожидаясь следующего продления.
+- В разделе Настройки при включённой настройке кнопка «Продлить» сертификата панели заменяется бейджем — см. [SSL сертификаты](#ssl-сертификаты) и API `GET /api/system/certificate`.
+
 **Обработка повреждённых renewal-конфигов certbot:**
 
 При повреждении `/etc/letsencrypt/renewal/<domain>.conf` (например, файл обнулился в 0 байт) certbot при каждом продлении создаёт новую линию с суффиксом: `<domain>-0001`, `-0002` и т.д. Сервис `wildcard_ssl.py` устойчив к этой ситуации:
@@ -1752,9 +1766,9 @@ Frontend сохраняет незавершённые job_id в `localStorage` 
 | DELETE | /api/wildcard-ssl/certificates/{id} | Удалить сертификат |
 | POST | /api/wildcard-ssl/certificates/{id}/deploy | Задеплоить на все серверы |
 | POST | /api/wildcard-ssl/certificates/{id}/deploy/{server_id} | Задеплоить на конкретный сервер |
-| GET | /api/wildcard-ssl/settings | Настройки Cloudflare (токен маскирован) |
+| GET | /api/wildcard-ssl/settings | Настройки Cloudflare (токен маскирован), плюс `use_for_panel` и `panel_domain` |
 | GET | /api/wildcard-ssl/settings/token | Токен Cloudflare в открытом виде |
-| PUT | /api/wildcard-ssl/settings | Обновить настройки Cloudflare |
+| PUT | /api/wildcard-ssl/settings | Обновить настройки Cloudflare и `use_for_panel`; при переключении выкл→вкл сразу применяет к панели существующий подходящий сертификат — результат в поле ответа `panel_deploy` (`{success, message}` или `null`) |
 | GET | /api/wildcard-ssl/servers | Конфигурация деплоя по серверам |
 | PUT | /api/wildcard-ssl/servers/{server_id} | Настроить деплой для сервера (путь, reload_cmd, enabled) |
 
@@ -1768,6 +1782,7 @@ Volume `/etc/letsencrypt` смонтирован с `:rw` — backend запис
 - Выпуск нового сертификата (ввод домена, запуск certbot)
 - Продление и деплой существующих сертификатов
 - Настройки Cloudflare (API token, email)
+- Чекбокс «Использовать для панели» в той же карточке настроек — домен панели рядом с подпиской, подсказка, жёлтое предупреждение, если текущий сертификат не покрывает домен панели (локальная `wildcardCoversDomain`, зеркало серверной проверки); после сохранения с включением — toast с результатом применения (`panel_deploy`)
 - Конфигурация каждого сервера: включить деплой, путь, reload-команда
 - При частичном сбое «Раскидать по серверам» — toast с числом успешных/всего и списком упавших нод с причинами (ключ локализации `wildcard_ssl.deploy_partial`)
 - **Файлы сертификата** (`components/wildcard/CertificateMaterials.tsx`) — раскрывающийся блок в карточке сертификата с четырьмя PEM-файлами (fullchain.pem, cert.pem, chain.pem, privkey.pem): кнопки «Копировать» и «Скачать» у каждого (скачивается как `<base_domain>-<имя файла>`); приватный ключ по умолчанию скрыт размытием и предупреждением, показывается по кнопке «Показать»; данные грузятся лениво при первом раскрытии через `GET /certificates/{id}/pem`; компонент пересоздаётся (`key` по `last_renewed`/`issued_at`) после продления, чтобы не показать закэшированный старый PEM
@@ -1781,6 +1796,7 @@ Volume `/etc/letsencrypt` смонтирован с `:rw` — backend запис
 - `panel/frontend/src/pages/WildcardSSL.tsx` — страница управления
 - `panel/frontend/src/components/wildcard/CertificateMaterials.tsx` — блок просмотра/копирования/скачивания PEM-материалов
 - `panel/frontend/src/api/client.ts` — `wildcardSSLApi` с интерфейсами, включая `WildcardCertificateMaterial`
+- `panel/frontend/src/pages/Settings.tsx` — бейдж «Управляется Wildcard SSL» вместо кнопки «Продлить», когда сертификат панели покрыт wildcard-сертификатом (см. [SSL сертификаты](#ssl-сертификаты))
 - `panel/frontend/src/App.tsx` — роут `/wildcard-ssl`
 - `panel/frontend/src/components/Layout/Layout.tsx` — пункт навигации «Wildcard SSL»
 - `panel/frontend/src/locales/en.json`, `ru.json` — i18n ключи пространства имён `wildcard_ssl`
