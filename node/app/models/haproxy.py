@@ -311,3 +311,48 @@ class ConfigApplyResponse(BaseModel):
     reloaded: bool = False
 
 
+# ==================== Live Stats Models ====================
+
+class HAProxyStatRow(BaseModel):
+    """One row of `show stat` output (frontend, backend or server)"""
+    name: str
+    kind: str  # frontend | backend | server
+    status: str  # UP/DOWN/OPEN/no check/MAINT/DRAIN/...
+    check_status: Optional[str] = None
+    addr: Optional[str] = None  # only for servers, haproxy 1.7+
+    scur: int = 0
+    smax: int = 0
+    slim: Optional[int] = None
+    stot: int = 0
+    rate: int = 0
+    rate_max: int = 0
+    bin: int = 0
+    bout: int = 0
+    econ: Optional[int] = None
+    eresp: Optional[int] = None
+    weight: Optional[int] = None
+    backup: bool = False
+    lastchg: Optional[int] = None  # seconds since last state change
+    downtime: Optional[int] = None
+
+
+class HAProxyProxyStats(BaseModel):
+    """Stats rows grouped by proxy (pxname)"""
+    name: str
+    mode: Optional[str] = None
+    frontend: Optional[HAProxyStatRow] = None
+    backend: Optional[HAProxyStatRow] = None
+    servers: list[HAProxyStatRow] = []
+
+
+class HAProxyStatsResponse(BaseModel):
+    """Live stats from the HAProxy stats socket"""
+    available: bool
+    reason: Optional[str] = None  # socket_not_configured|haproxy_stopped|socket_unavailable|timeout|error
+    message: Optional[str] = None
+    haproxy_version: Optional[str] = None
+    uptime_sec: Optional[int] = None
+    curr_conns: Optional[int] = None
+    proxies: list[HAProxyProxyStats] = []
+
+

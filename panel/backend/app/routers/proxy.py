@@ -514,6 +514,16 @@ async def get_haproxy_status(
     return await proxy_request(server, "/api/haproxy/status")
 
 
+@router.get("/{server_id}/haproxy/stats")
+async def get_haproxy_stats(
+    server_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    server = await get_server_by_id(server_id, db)
+    return await proxy_request(server, "/api/haproxy/stats", timeout=10.0)
+
+
 @router.get("/{server_id}/haproxy/rules")
 async def get_haproxy_rules(
     server_id: int,

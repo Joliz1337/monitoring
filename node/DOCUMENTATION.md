@@ -100,6 +100,18 @@ HAProxy работает как **нативный systemd сервис** на �
 
 Существующий шаблон в уже применённых конфигах обновляется через «Перегенерировать конфиг» на странице профиля в панели или через `POST /api/haproxy/config/apply` с новым содержимым — сама по себе установка/обновление ноды конфиг не трогает.
 
+**Живая статистика (stats socket):**
+
+`GET /api/haproxy/stats` — живой срез `show stat` + `show info` через stats socket (строка `stats socket /var/run/haproxy.sock ... level admin` есть в базовом шаблоне конфига). Только чтение, admin-команды сокета не используются. Методы — в `haproxy_manager.py` (`get_stats()` и чистые парсеры).
+
+- Путь сокета извлекается из строки `stats socket` самого конфига. Строки нет (конфиг создан старым шаблоном — `init_config()` не трогает существующий файл) — ответ `available: false, reason: socket_not_configured`; лечится перегенерацией/применением конфига и **restart** HAProxy.
+- Контейнер агента работает с `pid: host` + `privileged`, поэтому сокет хоста доступен через `/proc/1/root` без bind-mount (mount на inode сокета ломался бы при рестарте haproxy). `/var/run` — absolute-симлинк на `/run` и под `/proc/1/root` может разрезолвиться в корень контейнера, поэтому кандидаты перебираются по порядку: `/proc/1/root/run/...` → `/proc/1/root/var/run/...` → сам путь из конфига.
+- Ошибки — всегда HTTP 200 с `available: false` и машиночитаемым `reason`: `socket_not_configured` / `haproxy_stopped` / `socket_unavailable` (haproxy запущен без сокета — нужен restart, reload не создаёт сокет) / `timeout` / `error`. Кэш панели сохраняет только ответы 200 — состояние «недоступно» тоже должно доезжать до UI.
+- Успешный ответ: `haproxy_version`, `uptime_sec`, `curr_conns` (из `show info`, его отказ не фатален) и `proxies[]` — строки CSV `show stat`, сгруппированные по `pxname` (frontend/backend/servers, классификация по `svname`). CSV парсится по заголовку (`csv.DictReader`), поэтому отсутствующие в старых haproxy колонки (например `addr`) дают `null`, а не ошибку.
+- Кэш результата на ноде — 2 секунды (`_stats_cache_ttl`): гасит наложение fast-цикла панели (5 с) и авто-обновления нескольких открытых вкладок UI.
+
+Тесты: `node/tests/test_haproxy_stats.py` — парсинг CSV/`show info`, выбор пути сокета, fallback-логика причин недоступности, кэш.
+
 **Управление через терминал панели**:
 ```bash
 systemctl status haproxy       # Статус
@@ -415,6 +427,7 @@ data: {"message": "error description"}
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
 | GET | /api/haproxy/status | Статус сервиса |
+| GET | /api/haproxy/stats | Живая статистика из stats socket (`show stat` + `show info`), read-only |
 | GET | /api/haproxy/rules | Список правил |
 | POST | /api/haproxy/rules | Создать правило |
 | PUT | /api/haproxy/rules/{name} | Обновить правило |

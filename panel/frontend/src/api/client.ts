@@ -26,6 +26,7 @@ function resolveTimeout(url: string): number {
   if (
     url.includes('/metrics') ||
     url.endsWith('/haproxy/status') ||
+    url.endsWith('/haproxy/stats') ||
     url.includes('/auth/check')
   ) {
     return 15_000
@@ -281,6 +282,53 @@ export interface HAProxyStatus {
   config_message: string
 }
 
+export interface HAProxyStatRow {
+  name: string
+  kind: 'frontend' | 'backend' | 'server'
+  status: string
+  check_status: string | null
+  addr: string | null
+  scur: number
+  smax: number
+  slim: number | null
+  stot: number
+  rate: number
+  rate_max: number
+  bin: number
+  bout: number
+  econ: number | null
+  eresp: number | null
+  weight: number | null
+  backup: boolean
+  lastchg: number | null
+  downtime: number | null
+}
+
+export interface HAProxyProxyStats {
+  name: string
+  mode: string | null
+  frontend: HAProxyStatRow | null
+  backend: HAProxyStatRow | null
+  servers: HAProxyStatRow[]
+}
+
+export type HAProxyStatsReason =
+  | 'socket_not_configured'
+  | 'haproxy_stopped'
+  | 'socket_unavailable'
+  | 'timeout'
+  | 'error'
+
+export interface HAProxyLiveStats {
+  available: boolean
+  reason?: HAProxyStatsReason | null
+  message?: string | null
+  haproxy_version?: string | null
+  uptime_sec?: number | null
+  curr_conns?: number | null
+  proxies: HAProxyProxyStats[]
+}
+
 export interface CertificateFiles {
   pem: string | null
   key: string | null
@@ -498,11 +546,12 @@ export const proxyApi = {
   getHistory: (serverId: number, params?: { period?: string; from_time?: string; to_time?: string; limit?: number; include_per_cpu?: boolean }) =>
     api.get(`/proxy/${serverId}/metrics/history`, { params }),
   
-  // Cached HAProxy data (status, rules, certs, firewall) - updated every 30s
-  getHAProxyCached: (serverId: number) => 
-    api.get<{ status?: HAProxyStatus; rules?: { count: number; rules: HAProxyRule[] }; certs?: { certificates: Certificate[]; count: number }; firewall?: { rules: FirewallRule[]; count: number; active: boolean }; cached_at?: string }>(`/proxy/${serverId}/haproxy/cached`),
-  
+  // Cached HAProxy data (status, stats, rules, certs, firewall) - updated every 30s
+  getHAProxyCached: (serverId: number) =>
+    api.get<{ status?: HAProxyStatus; stats?: HAProxyLiveStats; rules?: { count: number; rules: HAProxyRule[] }; certs?: { certificates: Certificate[]; count: number }; firewall?: { rules: FirewallRule[]; count: number; active: boolean }; cached_at?: string }>(`/proxy/${serverId}/haproxy/cached`),
+
   getHAProxyStatus: (serverId: number) => api.get<HAProxyStatus>(`/proxy/${serverId}/haproxy/status`),
+  getHAProxyStats: (serverId: number) => api.get<HAProxyLiveStats>(`/proxy/${serverId}/haproxy/stats`),
   getHAProxyRules: (serverId: number) => 
     api.get<{ count: number; rules: HAProxyRule[] }>(`/proxy/${serverId}/haproxy/rules`),
   reloadHAProxy: (serverId: number) => api.post(`/proxy/${serverId}/haproxy/reload`),

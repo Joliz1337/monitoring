@@ -30,15 +30,25 @@ import {
   FileText,
   Code,
 } from 'lucide-react'
-import { proxyApi, HAProxyRule, HAProxyStatus, Certificate, FirewallRule, haproxyProfilesApi } from '../api/client'
+import { proxyApi, HAProxyRule, HAProxyStatus, HAProxyLiveStats, HAProxyStatRow, Certificate, FirewallRule, haproxyProfilesApi } from '../api/client'
 import { useServersStore } from '../stores/serversStore'
 import NodeRestrictedNotice from '../components/servers/NodeRestrictedNotice'
 import { nodeAllows } from '../utils/nodeCapabilities'
+import { formatBytes, formatUptime } from '../utils/format'
 import { useAutoRefresh } from '../hooks/useAutoRefresh'
 import { useCachedData, createServerCacheKey } from '../hooks/useCachedData'
 import CachedDataBanner from '../components/ui/CachedDataBanner'
 import { Tooltip } from '../components/ui/Tooltip'
 import { FAQIcon } from '../components/FAQ'
+
+// Статусы show stat с суффиксами вида "UP 1/3" — сравниваем по префиксу
+function statsStatusClass(status: string): string {
+  const s = status.toUpperCase()
+  if (s.startsWith('UP') || s === 'OPEN') return 'bg-success/10 text-success border-success/20'
+  if (s.startsWith('DOWN')) return 'bg-danger/10 text-danger border-danger/20'
+  if (s.startsWith('MAINT') || s.startsWith('DRAIN') || s.startsWith('NOLB')) return 'bg-warning/10 text-warning border-warning/20'
+  return 'bg-dark-700/50 text-dark-400 border-dark-600/30'
+}
 
 export default function HAProxy() {
   const { uid, serverId } = useParams()
@@ -50,6 +60,9 @@ export default function HAProxy() {
   const [rules, setRules] = useState<HAProxyRule[]>([])
   const [certs, setCerts] = useState<string[]>([])
   const [certDetails, setCertDetails] = useState<Record<string, Certificate>>({})
+  const [stats, setStats] = useState<HAProxyLiveStats | null>(null)
+  // false после 404 от ноды — агент старой версии без эндпоинта /haproxy/stats
+  const [statsSupported, setStatsSupported] = useState(true)
   
   const [isLoading, setIsLoading] = useState(true)
   const [isRefreshing, setIsRefreshing] = useState(false)
@@ -59,7 +72,8 @@ export default function HAProxy() {
   const reloadMenuRef = useRef<HTMLDivElement>(null)
   
   const lastLiveRefreshRef = useRef<number>(0)
-  
+  const lastStatsLiveRef = useRef<number>(0)
+
   // Cache for offline data
   interface HAProxyCacheData {
     status: HAProxyStatus | null
@@ -68,6 +82,7 @@ export default function HAProxy() {
     certDetails: Record<string, Certificate>
     firewallRules: FirewallRule[]
     firewallActive: boolean
+    stats?: HAProxyLiveStats | null
   }
   const cacheKey = serverId ? createServerCacheKey(serverId, 'haproxy') : ''
   const { isCached, cachedAt, saveToCache, loadFromCache, setIsCached, setCachedAt } = useCachedData<HAProxyCacheData>(cacheKey)
@@ -117,12 +132,13 @@ export default function HAProxy() {
   
   // Collapsed sections states
   const [collapsedSections, setCollapsedSections] = useState<{
+    liveStats: boolean
     proxyRules: boolean
     sslCerts: boolean
     firewall: boolean
-  }>({ proxyRules: false, sslCerts: false, firewall: false })
-  
-  const toggleSection = (section: 'proxyRules' | 'sslCerts' | 'firewall') => {
+  }>({ liveStats: false, proxyRules: false, sslCerts: false, firewall: false })
+
+  const toggleSection = (section: 'liveStats' | 'proxyRules' | 'sslCerts' | 'firewall') => {
     setCollapsedSections(prev => ({ ...prev, [section]: !prev[section] }))
   }
   
@@ -154,12 +170,16 @@ export default function HAProxy() {
     [firewallRules]
   )
   
-  const applyCachedResponse = useCallback((data: { status?: HAProxyStatus; rules?: { rules: HAProxyRule[] }; certs?: { certificates: Certificate[] }; firewall?: { rules: FirewallRule[]; active: boolean } }) => {
+  const applyCachedResponse = useCallback((data: { status?: HAProxyStatus; stats?: HAProxyLiveStats; rules?: { rules: HAProxyRule[] }; certs?: { certificates: Certificate[] }; firewall?: { rules: FirewallRule[]; active: boolean } }) => {
     setStatus(data.status || null)
     setRules(data.rules?.rules || [])
     setCerts((data.certs?.certificates || []).map(c => c.domain))
     setFirewallRules(data.firewall?.rules || [])
     setFirewallActive(data.firewall?.active || false)
+    // Кэш панели (до 5 минут) не должен затирать свежие live-данные статистики
+    if (data.stats && Date.now() - lastStatsLiveRef.current > 15000) {
+      setStats(data.stats)
+    }
 
     const details: Record<string, Certificate> = {}
     for (const cert of data.certs?.certificates || []) {
@@ -177,6 +197,7 @@ export default function HAProxy() {
       certDetails: details,
       firewallRules: data.firewall?.rules || [],
       firewallActive: data.firewall?.active || false,
+      stats: data.stats || null,
     })
   }, [saveToCache, setIsCached, setCachedAt])
 
@@ -197,6 +218,7 @@ export default function HAProxy() {
         setCertDetails(cached.certDetails)
         setFirewallRules(cached.firewallRules)
         setFirewallActive(cached.firewallActive)
+        setStats(cached.stats ?? null)
         setError(null)
       } else {
         setError(t('haproxy.failed_fetch'))
@@ -226,15 +248,19 @@ export default function HAProxy() {
     setIsRefreshing(true)
     
     try {
-      const [statusRes, rulesRes, certsRes, fwRes, allCertsRes] = await Promise.all([
+      const [statusRes, rulesRes, certsRes, fwRes, allCertsRes, statsRes] = await Promise.all([
         haproxyReadable ? proxyApi.getHAProxyStatus(Number(serverId)).catch(() => null) : null,
         haproxyReadable ? proxyApi.getHAProxyRules(Number(serverId)).catch(() => null) : null,
         haproxyReadable ? proxyApi.getHAProxyCerts(Number(serverId)).catch(() => null) : null,
         firewallReadable ? proxyApi.getFirewallRules(Number(serverId)).catch(() => null) : null,
         haproxyReadable ? proxyApi.getAllCerts(Number(serverId)).catch(() => null) : null,
+        haproxyReadable && statsSupported ? proxyApi.getHAProxyStats(Number(serverId)).catch((err: unknown) => {
+          if ((err as { response?: { status?: number } }).response?.status === 404) setStatsSupported(false)
+          return null
+        }) : null,
       ])
-      
-      const hasAnyData = statusRes || rulesRes || certsRes || fwRes || allCertsRes
+
+      const hasAnyData = statusRes || rulesRes || certsRes || fwRes || allCertsRes || statsRes
       if (!hasAnyData) {
         if (!status && !rules.length) {
           const cached = loadFromCache()
@@ -245,21 +271,23 @@ export default function HAProxy() {
             setCertDetails(cached.certDetails)
             setFirewallRules(cached.firewallRules)
             setFirewallActive(cached.firewallActive)
+            setStats(cached.stats ?? null)
           }
         }
         return
       }
-      
+
       const statusData = statusRes?.data ?? status
       const rulesData = rulesRes?.data?.rules ?? rules
       const certsData = certsRes?.data?.certificates ?? certs.map(d => d)
       const fwRulesData = fwRes?.data?.rules ?? firewallRules
       const fwActiveData = fwRes?.data?.active ?? firewallActive
-      
+      const statsData = statsRes?.data ?? stats
+
       const details: Record<string, Certificate> = allCertsRes
         ? Object.fromEntries((allCertsRes.data.certificates || []).map((c: Certificate) => [c.domain, c]))
         : { ...certDetails }
-      
+
       if (statusRes) setStatus(statusData)
       if (rulesRes) setRules(rulesData)
       if (certsRes) setCerts(certsData)
@@ -268,11 +296,15 @@ export default function HAProxy() {
         setFirewallActive(fwActiveData)
       }
       if (allCertsRes) setCertDetails(details)
+      if (statsRes) {
+        setStats(statsData)
+        lastStatsLiveRef.current = Date.now()
+      }
       setError(null)
       setIsCached(false)
       setCachedAt(null)
       lastLiveRefreshRef.current = Date.now()
-      
+
       saveToCache({
         status: statusData,
         rules: rulesData,
@@ -280,11 +312,12 @@ export default function HAProxy() {
         certDetails: details,
         firewallRules: fwRulesData,
         firewallActive: fwActiveData,
+        stats: statsData,
       })
     } finally {
       setIsRefreshing(false)
     }
-  }, [serverId, isRefreshing, status, rules, certs, firewallRules, firewallActive, certDetails, saveToCache, loadFromCache, setIsCached, setCachedAt])
+  }, [serverId, isRefreshing, status, rules, certs, firewallRules, firewallActive, certDetails, stats, statsSupported, haproxyReadable, firewallReadable, saveToCache, loadFromCache, setIsCached, setCachedAt])
   
   // Quick status-only refresh
   const refreshStatus = async () => {
@@ -310,6 +343,52 @@ export default function HAProxy() {
   }, [serverId, fetchServers, fetchData])
   
   useAutoRefresh(refreshFromCache, { immediate: false })
+
+  // Live-поллинг статистики — только пока секция раскрыта: фоновый кэш
+  // обновляется раз в ~5 минут и «живости» не даёт
+  const refreshStats = useCallback(async () => {
+    if (!serverId) return
+    try {
+      const { data } = await proxyApi.getHAProxyStats(Number(serverId))
+      setStats(data)
+      lastStatsLiveRef.current = Date.now()
+    } catch (err) {
+      if ((err as { response?: { status?: number } }).response?.status === 404) {
+        setStatsSupported(false)
+      }
+    }
+  }, [serverId])
+
+  useAutoRefresh(refreshStats, {
+    immediate: false,
+    enabled: haproxyReadable && statsSupported && !collapsedSections.liveStats,
+  })
+
+  // Конфиг-генератор кладёт frontend `X` и backend `backend_X` в разные pxname —
+  // для отображения склеиваем такие пары в одну группу
+  const statsGroups = useMemo(() => {
+    if (!stats?.available) return []
+    const byName = new Map(stats.proxies.map(p => [p.name, p]))
+    const paired = new Set<string>()
+    const groups: { name: string; mode: string | null; frontend: HAProxyStatRow | null; backend: HAProxyStatRow | null; servers: HAProxyStatRow[] }[] = []
+    for (const proxy of stats.proxies) {
+      if (proxy.name.startsWith('backend_')) continue
+      const backendProxy = byName.get(`backend_${proxy.name}`)
+      if (backendProxy) paired.add(backendProxy.name)
+      groups.push({
+        name: proxy.name,
+        mode: proxy.mode ?? backendProxy?.mode ?? null,
+        frontend: proxy.frontend,
+        backend: proxy.backend ?? backendProxy?.backend ?? null,
+        servers: proxy.servers.length ? proxy.servers : backendProxy?.servers ?? [],
+      })
+    }
+    for (const proxy of stats.proxies) {
+      if (!proxy.name.startsWith('backend_') || paired.has(proxy.name)) continue
+      groups.push({ name: proxy.name, mode: proxy.mode, frontend: proxy.frontend, backend: proxy.backend, servers: proxy.servers })
+    }
+    return groups
+  }, [stats])
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -1016,15 +1095,170 @@ export default function HAProxy() {
               </motion.div>
             </motion.div>
             
-            {/* Proxy Rules */}
-            <motion.div 
+            {/* Live Stats */}
+            <motion.div
               className="card mb-6"
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.4 }}
             >
               <div className="flex items-center justify-between mb-5">
-                <button 
+                <button
+                  onClick={() => toggleSection('liveStats')}
+                  className="flex items-center gap-2 hover:opacity-80 transition-opacity"
+                >
+                  <motion.div
+                    animate={{ rotate: collapsedSections.liveStats ? -90 : 0 }}
+                    transition={{ duration: 0.2 }}
+                  >
+                    <ChevronDown className="w-5 h-5 text-dark-400" />
+                  </motion.div>
+                  <h2 className="text-lg font-semibold text-dark-100 flex items-center gap-2">
+                    <Activity className="w-5 h-5 text-accent-500" />
+                    {t('haproxy.live_stats')}
+                  </h2>
+                  {stats?.available && (
+                    <span className="text-sm text-dark-500">({statsGroups.length})</span>
+                  )}
+                </button>
+                {stats?.available && (
+                  <div className="hidden sm:flex items-center gap-4 text-xs text-dark-400">
+                    {stats.haproxy_version && <span>v{stats.haproxy_version}</span>}
+                    {stats.uptime_sec != null && (
+                      <span>{t('haproxy.stats_uptime')}: {formatUptime(stats.uptime_sec)}</span>
+                    )}
+                    {stats.curr_conns != null && (
+                      <span>{t('haproxy.stats_current_conns')}: {stats.curr_conns}</span>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div className={`collapse-grid ${!collapsedSections.liveStats ? 'open' : ''}`}>
+              <div className="collapse-content">
+
+              {!statsSupported ? (
+                <div className="text-center py-8 text-dark-500">
+                  <AlertTriangle className="w-10 h-10 mx-auto mb-3 opacity-50" />
+                  <p>{t('haproxy.stats_node_too_old')}</p>
+                </div>
+              ) : !stats ? (
+                <div className="text-center py-8 text-dark-500">
+                  <Loader2 className="w-6 h-6 mx-auto animate-spin opacity-50" />
+                </div>
+              ) : !stats.available ? (
+                <div className="text-center py-8 text-dark-500">
+                  <AlertTriangle className="w-10 h-10 mx-auto mb-3 opacity-50" />
+                  <p>
+                    {stats.reason === 'socket_not_configured' ? t('haproxy.stats_socket_not_configured')
+                      : stats.reason === 'haproxy_stopped' ? t('haproxy.stats_haproxy_stopped')
+                      : stats.reason === 'socket_unavailable' ? t('haproxy.stats_socket_unavailable')
+                      : stats.reason === 'timeout' ? t('haproxy.stats_timeout')
+                      : stats.message || t('haproxy.stats_unavailable')}
+                  </p>
+                  {stats.reason === 'socket_not_configured' && (
+                    <p className="text-sm mt-2 text-dark-600">{t('haproxy.stats_socket_not_configured_hint')}</p>
+                  )}
+                  {stats.reason === 'socket_unavailable' && (
+                    <p className="text-sm mt-2 text-dark-600">{t('haproxy.stats_socket_unavailable_hint')}</p>
+                  )}
+                </div>
+              ) : statsGroups.length === 0 ? (
+                <div className="text-center py-8 text-dark-500">
+                  <Activity className="w-10 h-10 mx-auto mb-3 opacity-50" />
+                  <p>{t('haproxy.stats_no_proxies')}</p>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {statsGroups.map(group => (
+                    <div key={group.name} className="bg-dark-800/50 rounded-xl border border-dark-700/30 overflow-hidden">
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-3">
+                        <span className="font-medium text-dark-100">{group.name}</span>
+                        {group.mode && (
+                          <span className="px-2 py-0.5 rounded text-xs font-medium bg-accent-500/10 text-accent-400 border border-accent-500/20 uppercase">
+                            {group.mode}
+                          </span>
+                        )}
+                        {group.frontend && (
+                          <>
+                            <span className={`px-2 py-0.5 rounded text-xs font-medium border ${statsStatusClass(group.frontend.status)}`}>
+                              {group.frontend.status}
+                            </span>
+                            <span className="text-xs text-dark-400">
+                              {t('haproxy.stats_col_sessions')}: {group.frontend.scur} · {t('haproxy.stats_col_rate')}: {group.frontend.rate}/s
+                            </span>
+                          </>
+                        )}
+                      </div>
+                      {(group.backend || group.servers.length > 0) && (
+                        <div className="overflow-x-auto border-t border-dark-700/30">
+                          <table className="w-full text-sm">
+                            <thead>
+                              <tr className="text-left text-xs text-dark-500">
+                                <th className="px-4 py-2 font-medium">{t('haproxy.stats_col_server')}</th>
+                                <th className="px-4 py-2 font-medium">{t('haproxy.stats_col_status')}</th>
+                                <th className="px-4 py-2 font-medium">{t('haproxy.stats_col_check')}</th>
+                                <th className="px-4 py-2 font-medium">{t('haproxy.stats_col_sessions')}</th>
+                                <th className="px-4 py-2 font-medium">{t('haproxy.stats_col_rate')}</th>
+                                <th className="px-4 py-2 font-medium">{t('haproxy.stats_col_in')}</th>
+                                <th className="px-4 py-2 font-medium">{t('haproxy.stats_col_out')}</th>
+                                <th className="px-4 py-2 font-medium">{t('haproxy.stats_col_weight')}</th>
+                                <th className="px-4 py-2 font-medium">{t('haproxy.stats_col_since')}</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {[...group.servers, ...(group.backend ? [group.backend] : [])].map(row => (
+                                <tr key={row.name} className="border-t border-dark-700/30">
+                                  <td className="px-4 py-2 whitespace-nowrap">
+                                    <span className={row.kind === 'backend' ? 'text-dark-400' : 'text-dark-100'}>
+                                      {row.kind === 'backend' ? t('haproxy.stats_backend_total') : row.name}
+                                    </span>
+                                    {row.backup && (
+                                      <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] font-medium bg-warning/10 text-warning border border-warning/20">
+                                        {t('haproxy.stats_backup_badge')}
+                                      </span>
+                                    )}
+                                    {row.addr && <p className="text-xs text-dark-500 font-mono">{row.addr}</p>}
+                                  </td>
+                                  <td className="px-4 py-2">
+                                    <span className={`px-2 py-0.5 rounded text-xs font-medium border ${statsStatusClass(row.status)}`}>
+                                      {row.status}
+                                    </span>
+                                  </td>
+                                  <td className="px-4 py-2 text-xs text-dark-400">{row.check_status || '—'}</td>
+                                  <td className="px-4 py-2 text-dark-200">
+                                    {row.scur}<span className="text-dark-500"> / {row.smax}</span>
+                                  </td>
+                                  <td className="px-4 py-2 text-dark-200">{row.rate}/s</td>
+                                  <td className="px-4 py-2 text-dark-200 whitespace-nowrap">{formatBytes(row.bin)}</td>
+                                  <td className="px-4 py-2 text-dark-200 whitespace-nowrap">{formatBytes(row.bout)}</td>
+                                  <td className="px-4 py-2 text-dark-400">{row.weight ?? '—'}</td>
+                                  <td className="px-4 py-2 text-dark-400 whitespace-nowrap">
+                                    {row.lastchg != null ? formatUptime(row.lastchg) : '—'}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+              </div>
+              </div>
+            </motion.div>
+
+            {/* Proxy Rules */}
+            <motion.div
+              className="card mb-6"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.4 }}
+            >
+              <div className="flex items-center justify-between mb-5">
+                <button
                   onClick={() => toggleSection('proxyRules')}
                   className="flex items-center gap-2 hover:opacity-80 transition-opacity"
                 >

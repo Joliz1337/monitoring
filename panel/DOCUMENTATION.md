@@ -1,4 +1,4 @@
-# Monitoring Panel v10.61.0
+# Monitoring Panel v10.63.0
 
 Веб-панель для мониторинга серверов. Собирает метрики с нод с настраиваемым интервалом (по умолчанию 10 сек) и хранит историю локально.
 
@@ -850,11 +850,21 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
 | GET | /api/proxy/{id}/haproxy/status | Статус |
+| GET | /api/proxy/{id}/haproxy/stats | Живая статистика из stats socket ноды (`show stat` + `show info`), read-only |
 | GET | /api/proxy/{id}/haproxy/rules | Список правил (только чтение — CRUD правил идёт через HAProxy Configs, см. ниже) |
 | POST | /api/proxy/{id}/haproxy/start | Запустить |
 | POST | /api/proxy/{id}/haproxy/stop | Остановить |
 | POST | /api/proxy/{id}/haproxy/reload | Перезагрузить конфиг (graceful, `systemctl reload`) |
 | POST | /api/proxy/{id}/haproxy/restart | Перезапустить процесс (`systemctl restart`) |
+
+**Живая статистика (секция «Живая статистика» на странице `HAProxy.tsx`):**
+
+Срез `show stat` с бекендами, серверами и фронтендами: статус (UP/DOWN/MAINT), health-check, текущие/пиковые сессии, rate, байты, вес, время в текущем состоянии; в шапке — версия HAProxy, аптайм и текущие соединения из `show info`. Механика на стороне ноды — в [node/DOCUMENTATION.md](../node/DOCUMENTATION.md#haproxy).
+
+- Эндпоинт ноды включён в `HAPROXY_ENDPOINTS` коллектора (`metrics_collector.py`, ключ `stats`) — данные попадают в `ServerCache.last_haproxy_data` и отдаются через `/haproxy/cached` вместе с остальными, включая быстрый 5-секундный цикл при активности UI.
+- Живое обновление: секция поллит `GET /proxy/{id}/haproxy/stats` через собственный `useAutoRefresh` только пока раскрыта; данные из кэша панели не затирают live-данные свежее 15 секунд (`lastStatsLiveRef`).
+- Мягкая деградация: 404 от старой ноды без эндпоинта → `statsSupported=false` и подсказка обновить ноду (жёсткого версионного гейта нет — read-only запрос безопасен); `available: false` от ноды → сообщение по `reason` (для `socket_not_configured` — подсказка перегенерировать конфиг и перезапустить процесс). Отказ эндпоинта в коллекторе уже гасится per-endpoint `try/except` в `_cache_server_haproxy`.
+- Для отображения frontend `X` и backend `backend_X` (разные `pxname` в выводе `show stat`, так их именует генератор конфига) склеиваются в одну группу (`statsGroups` в `HAProxy.tsx`).
 
 **Перезагрузка конфига vs перезапуск процесса:**
 

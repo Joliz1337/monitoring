@@ -29,6 +29,7 @@ from app.models.haproxy import (
     HAProxyRuleResponse,
     HAProxyRulesListResponse,
     HAProxyRuleUpdate,
+    HAProxyStatsResponse,
     HAProxyStatusResponse,
     HAProxyValidateResponse,
 )
@@ -90,6 +91,13 @@ async def get_haproxy_status():
     """Get HAProxy service status"""
     manager = get_haproxy_manager()
     return await asyncio.to_thread(manager.get_status)
+
+
+@router.get("/stats", response_model=HAProxyStatsResponse)
+async def get_haproxy_stats():
+    """Live stats from the HAProxy stats socket (show stat), read-only"""
+    manager = get_haproxy_manager()
+    return await asyncio.to_thread(manager.get_stats)
 
 
 @router.get("/rules", response_model=HAProxyRulesListResponse)
