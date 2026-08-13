@@ -360,6 +360,8 @@ class RemnawaveSettings(Base):
     anomaly_asn_margin = Column(Integer, default=0)          # уведомление только если ASN > лимит + запас
     anomaly_ip_smart_enabled = Column(Boolean, default=True)     # умное определение: сверять с расходом трафика
     anomaly_ip_smart_traffic_gb = Column(Float, default=20.0)    # меньше этого за сутки — не уведомлять
+    anomaly_hwid_smart_enabled = Column(Boolean, default=True)   # умное определение HWID: сверять с расходом трафика
+    anomaly_hwid_smart_traffic_gb = Column(Float, default=20.0)  # меньше этого за сутки — не чистить устройства
     anomaly_ua_patterns = Column(Text, nullable=True)        # реестр известных UA; NULL = встроенный
     anomaly_use_custom_bot = Column(Boolean, default=False)
     anomaly_tg_bot_token = Column(String(200), nullable=True)

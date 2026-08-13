@@ -1008,6 +1008,8 @@ export interface RemnawaveSettings {
   anomaly_asn_margin: number
   anomaly_ip_smart_enabled: boolean
   anomaly_ip_smart_traffic_gb: number
+  anomaly_hwid_smart_enabled: boolean
+  anomaly_hwid_smart_traffic_gb: number
   anomaly_ua_patterns: string
   anomaly_use_custom_bot: boolean
   anomaly_tg_bot_token: string | null

@@ -622,6 +622,9 @@ class XrayStatsCollector:
         smart_check_on = settings.anomaly_ip_smart_enabled is not False
         smart_traffic_gb = settings.anomaly_ip_smart_traffic_gb if settings.anomaly_ip_smart_traffic_gb is not None else 20.0
         smart_traffic_bytes = int(smart_traffic_gb * 1024 ** 3)
+        hwid_smart_on = settings.anomaly_hwid_smart_enabled is not False
+        hwid_smart_gb = settings.anomaly_hwid_smart_traffic_gb if settings.anomaly_hwid_smart_traffic_gb is not None else 20.0
+        hwid_smart_bytes = int(hwid_smart_gb * 1024 ** 3)
         ua_pattern = build_ua_pattern(settings.anomaly_ua_patterns)
 
         async with async_session() as db:
@@ -789,6 +792,20 @@ class XrayStatsCollector:
             last = self._anomaly_last_notified.get(key)
             if last and (now - last).total_seconds() < COOLDOWN_SECONDS:
                 continue
+
+            # Умное определение (как у IP-аномалии): устройств больше лимита, но трафик
+            # расходуется как у одного человека — не чистим. Cooldown не фиксируем,
+            # чтобы при росте трафика очистка сработала в ближайшем же цикле.
+            if hwid_smart_on:
+                used_bytes = await self._user_daily_traffic(settings, cached.email, cached.uuid)
+                if used_bytes is not None and used_bytes < hwid_smart_bytes:
+                    logger.info(
+                        f"HWID auto-clear suppressed by traffic: {cached.username or cached.email} "
+                        f"has {device_count} devices but {round(used_bytes / 1024 ** 3, 2)} GB "
+                        f"per day (threshold: {hwid_smart_gb} GB)"
+                    )
+                    continue
+
             self._anomaly_last_notified[key] = now
             await self._auto_clear_hwid(settings, cached, device_count)
 
