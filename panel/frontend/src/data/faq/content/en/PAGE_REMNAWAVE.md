@@ -26,7 +26,7 @@ Each check has its own on/off toggle; the rest keep working. IP check settings:
 - **ASN margin** — the same, but for providers. Home Wi-Fi plus mobile data for one person is already two providers, which is normal. A notification comes only when providers exceed the device limit plus this margin.
 - **Smart detection** — before raising an alarm the panel checks how much the user downloaded over the last day. Below the threshold there is no alarm: someone travelling changes addresses and providers, but one person doesn't pull that much traffic, while a subscription shared by several people does. The threshold sits right next to it, 20 GB per day by default. Turn it off and notifications come purely by the number of addresses, as before.
 
-The device check has the same **smart detection**: when there are more devices than the limit but daily traffic stays below the threshold, device auto-clear is skipped — a family owns many devices yet consumes traffic like one person. It has its own threshold, set under the check's toggle.
+The device data check has the same **smart detection**: the "invalid device data" notification arrives only when the user downloaded more than the threshold over the last day. Broken device data alone is not worth an alarm — it matters when the subscription pushes serious traffic. It has its own threshold, set under the check's toggle.
 
 **Known clients** — the list of apps considered normal. Every device introduces itself with a User-Agent string, e.g. `Happ/1.6.2 iPhone`. The panel compares the start of that string against each line of the list — if none matches, the "Unknown User-Agent" alarm fires.
 

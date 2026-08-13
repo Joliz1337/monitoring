@@ -622,9 +622,9 @@ class XrayStatsCollector:
         smart_check_on = settings.anomaly_ip_smart_enabled is not False
         smart_traffic_gb = settings.anomaly_ip_smart_traffic_gb if settings.anomaly_ip_smart_traffic_gb is not None else 20.0
         smart_traffic_bytes = int(smart_traffic_gb * 1024 ** 3)
-        hwid_smart_on = settings.anomaly_hwid_smart_enabled is not False
-        hwid_smart_gb = settings.anomaly_hwid_smart_traffic_gb if settings.anomaly_hwid_smart_traffic_gb is not None else 20.0
-        hwid_smart_bytes = int(hwid_smart_gb * 1024 ** 3)
+        devdata_smart_on = settings.anomaly_devdata_smart_enabled is not False
+        devdata_smart_gb = settings.anomaly_devdata_smart_traffic_gb if settings.anomaly_devdata_smart_traffic_gb is not None else 20.0
+        devdata_smart_bytes = int(devdata_smart_gb * 1024 ** 3)
         ua_pattern = build_ua_pattern(settings.anomaly_ua_patterns)
 
         async with async_session() as db:
@@ -792,25 +792,14 @@ class XrayStatsCollector:
             last = self._anomaly_last_notified.get(key)
             if last and (now - last).total_seconds() < COOLDOWN_SECONDS:
                 continue
-
-            # Умное определение (как у IP-аномалии): устройств больше лимита, но трафик
-            # расходуется как у одного человека — не чистим. Cooldown не фиксируем,
-            # чтобы при росте трафика очистка сработала в ближайшем же цикле.
-            if hwid_smart_on:
-                used_bytes = await self._user_daily_traffic(settings, cached.email, cached.uuid)
-                if used_bytes is not None and used_bytes < hwid_smart_bytes:
-                    logger.info(
-                        f"HWID auto-clear suppressed by traffic: {cached.username or cached.email} "
-                        f"has {device_count} devices but {round(used_bytes / 1024 ** 3, 2)} GB "
-                        f"per day (threshold: {hwid_smart_gb} GB)"
-                    )
-                    continue
-
             self._anomaly_last_notified[key] = now
             await self._auto_clear_hwid(settings, cached, device_count)
 
         # 3) Неизвестные UA → уведомление с кнопкой [Игнор HWID]
         # 4) Невалидные данные устройства (платформа/версия/модель)
+        # Суточный трафик у одного пользователя может понадобиться для нескольких устройств —
+        # кэшируем на время цикла, чтобы не дёргать Remnawave API повторно.
+        daily_traffic_cache: dict[int, int | None] = {}
         for user_id, user_agent, platform, device_model, os_version, hwid in device_rows:
             cached = by_email.get(user_id)
             if not cached or cached.status != 'ACTIVE':
@@ -853,6 +842,21 @@ class XrayStatsCollector:
                 last = self._anomaly_last_notified.get(key)
                 if last and (now - last).total_seconds() < COOLDOWN_SECONDS:
                     continue
+
+                # Умное определение (как у IP-аномалии): кривые данные устройства интересны,
+                # только когда через подписку гонят заметный трафик. Cooldown при подавлении
+                # не фиксируем — превысит порог, уведомление придёт в ближайшем цикле.
+                if devdata_smart_on:
+                    if cached.email not in daily_traffic_cache:
+                        daily_traffic_cache[cached.email] = await self._user_daily_traffic(settings, cached.email, cached.uuid)
+                    used_bytes = daily_traffic_cache[cached.email]
+                    if used_bytes is not None and used_bytes < devdata_smart_bytes:
+                        logger.debug(
+                            f"Devdata anomaly suppressed by traffic: {cached.username or cached.email} "
+                            f"has {round(used_bytes / 1024 ** 3, 2)} GB per day (threshold: {devdata_smart_gb} GB)"
+                        )
+                        continue
+
                 self._anomaly_last_notified[key] = now
                 keyboard = [[
                     {"text": "\U0001f6ab Игнор HWID", "callback_data": f"rw_ignore:hwid:{cached.email}"},

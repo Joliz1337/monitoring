@@ -1550,8 +1550,8 @@ async def _migrate_remnawave_anomaly_settings(conn):
         "anomaly_asn_margin": "INTEGER DEFAULT 0",
         "anomaly_ip_smart_enabled": "BOOLEAN DEFAULT TRUE",
         "anomaly_ip_smart_traffic_gb": "FLOAT DEFAULT 20.0",
-        "anomaly_hwid_smart_enabled": "BOOLEAN DEFAULT TRUE",
-        "anomaly_hwid_smart_traffic_gb": "FLOAT DEFAULT 20.0",
+        "anomaly_devdata_smart_enabled": "BOOLEAN DEFAULT TRUE",
+        "anomaly_devdata_smart_traffic_gb": "FLOAT DEFAULT 20.0",
         "anomaly_ua_patterns": "TEXT",
     }
     for col_name, col_type in new_cols.items():

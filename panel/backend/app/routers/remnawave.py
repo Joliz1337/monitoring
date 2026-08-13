@@ -42,8 +42,8 @@ class UpdateSettingsRequest(BaseModel):
     anomaly_asn_margin: Optional[int] = Field(None, ge=0, le=50)
     anomaly_ip_smart_enabled: Optional[bool] = None
     anomaly_ip_smart_traffic_gb: Optional[float] = Field(None, ge=1.0, le=500.0)
-    anomaly_hwid_smart_enabled: Optional[bool] = None
-    anomaly_hwid_smart_traffic_gb: Optional[float] = Field(None, ge=1.0, le=500.0)
+    anomaly_devdata_smart_enabled: Optional[bool] = None
+    anomaly_devdata_smart_traffic_gb: Optional[float] = Field(None, ge=1.0, le=500.0)
     anomaly_ua_patterns: Optional[str] = Field(None, max_length=10000)
     anomaly_use_custom_bot: Optional[bool] = None
     anomaly_tg_bot_token: Optional[str] = Field(None, max_length=200)
@@ -102,8 +102,8 @@ async def get_settings(db: AsyncSession = Depends(get_db), _: dict = Depends(ver
         "anomaly_asn_margin": s.anomaly_asn_margin if s.anomaly_asn_margin is not None else 0,
         "anomaly_ip_smart_enabled": s.anomaly_ip_smart_enabled is not False,
         "anomaly_ip_smart_traffic_gb": s.anomaly_ip_smart_traffic_gb if s.anomaly_ip_smart_traffic_gb is not None else 20.0,
-        "anomaly_hwid_smart_enabled": s.anomaly_hwid_smart_enabled is not False,
-        "anomaly_hwid_smart_traffic_gb": s.anomaly_hwid_smart_traffic_gb if s.anomaly_hwid_smart_traffic_gb is not None else 20.0,
+        "anomaly_devdata_smart_enabled": s.anomaly_devdata_smart_enabled is not False,
+        "anomaly_devdata_smart_traffic_gb": s.anomaly_devdata_smart_traffic_gb if s.anomaly_devdata_smart_traffic_gb is not None else 20.0,
         "anomaly_ua_patterns": s.anomaly_ua_patterns or default_ua_text(),
         "anomaly_use_custom_bot": s.anomaly_use_custom_bot or False,
         "anomaly_tg_bot_token": "***" if s.anomaly_tg_bot_token else None,
@@ -129,7 +129,7 @@ async def update_settings(request: UpdateSettingsRequest, db: AsyncSession = Dep
                        "anomaly_ua_enabled", "anomaly_devdata_enabled",
                        "anomaly_ip_margin", "anomaly_ip_confirm_count", "anomaly_asn_margin",
                        "anomaly_ip_smart_enabled", "anomaly_ip_smart_traffic_gb",
-                       "anomaly_hwid_smart_enabled", "anomaly_hwid_smart_traffic_gb",
+                       "anomaly_devdata_smart_enabled", "anomaly_devdata_smart_traffic_gb",
                        "anomaly_ua_patterns", "anomaly_use_custom_bot",
                        "anomaly_tg_bot_token", "anomaly_tg_chat_id",
                        "traffic_anomaly_enabled", "traffic_threshold_gb", "traffic_confirm_count"):
