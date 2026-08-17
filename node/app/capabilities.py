@@ -40,6 +40,7 @@ class Domain(str, Enum):
     REMNAWAVE = "remnawave"
     SYSTEM = "system"
     EXEC = "exec"
+    DNAT = "dnat"
 
 
 class Access(str, Enum):
@@ -65,6 +66,7 @@ DOMAIN_PREFIXES: dict[str, Domain] = {
     "/api/system": Domain.SYSTEM,
     "/api/system/execute": Domain.EXEC,
     "/api/system/execute-stream": Domain.EXEC,
+    "/api/dnat": Domain.DNAT,
 }
 
 # Эти адреса не закрываются ничем. Без метрик панель перестаёт обновлять

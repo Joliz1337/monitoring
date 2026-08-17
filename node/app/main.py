@@ -15,10 +15,11 @@ from fastapi.middleware.gzip import GZipMiddleware
 
 from app.capabilities import CapabilityMiddleware, get_policy
 from app.config import get_settings
-from app.routers import haproxy, metrics, traffic, system, ipset, remnawave, ssh, ssl, firewall_profile, antiddos
+from app.routers import haproxy, metrics, traffic, system, ipset, remnawave, ssh, ssl, firewall_profile, antiddos, dnat
 from app.services.metrics_collector import get_collector as get_metrics_collector
 from app.services.port_traffic_sampler import get_port_traffic_sampler
 from app.services.ipset_manager import get_ipset_manager
+from app.services.dnat_manager import get_dnat_manager
 
 logging.basicConfig(
     level=logging.INFO,
@@ -56,6 +57,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"IPSet init failed, blocklist rules are not applied: {e}", exc_info=True)
 
+    dnat_manager = get_dnat_manager()
+    try:
+        await dnat_manager.start()
+        logger.info("DNAT manager started")
+    except Exception as e:
+        logger.error(f"DNAT manager start failed, port forwarding rules are not restored: {e}", exc_info=True)
+
     from app.services import cpu_affinity
     from app.services.host_executor import get_host_executor
     affinity_sync = cpu_affinity.ContainerAffinitySync(
@@ -88,6 +96,10 @@ async def lifespan(app: FastAPI):
         await affinity_sync.stop()
     except Exception as e:
         logger.error(f"CPU affinity sync stop failed: {e}", exc_info=True)
+    try:
+        await dnat_manager.stop()
+    except Exception as e:
+        logger.error(f"DNAT manager stop failed: {e}", exc_info=True)
     logger.info("Shutdown complete")
 
 
@@ -121,6 +133,7 @@ app.include_router(ssh.router)
 app.include_router(ssl.router)
 app.include_router(firewall_profile.router)
 app.include_router(antiddos.router)
+app.include_router(dnat.router)
 
 
 @app.get("/health")

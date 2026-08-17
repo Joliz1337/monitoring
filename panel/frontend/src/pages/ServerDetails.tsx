@@ -8,6 +8,7 @@ import {
   MemoryStick,
   HardDrive,
   Network,
+  Route,
   Activity,
   Clock,
   Server,
@@ -432,6 +433,16 @@ export default function ServerDetails() {
             >
               <Network className="w-4 h-4" />
               {t('server_details.traffic')}
+            </motion.div>
+          </Link>
+          <Link to={`/${uid}/server/${serverId}/dnat`}>
+            <motion.div
+              className="btn btn-secondary"
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.98 }}
+            >
+              <Route className="w-4 h-4" />
+              {t('dnat.title')}
             </motion.div>
           </Link>
           <Link to={`/${uid}/server/${serverId}/haproxy`}>

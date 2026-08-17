@@ -36,6 +36,7 @@ from app.models.haproxy import (
 from app.services.haproxy_manager import HAProxyRule, get_haproxy_manager
 from app.models.haproxy import BackendServerModel, BalancerOptionsModel
 from app.services.firewall_manager import get_firewall_manager
+from app.services.dnat_manager import get_dnat_manager
 
 logger = logging.getLogger(__name__)
 
@@ -562,6 +563,7 @@ async def enable_firewall():
 
     if success:
         logger.info("Firewall enabled via API")
+        get_dnat_manager().request_recheck()
     
     return FirewallActionResponse(
         success=success,
@@ -578,6 +580,7 @@ async def disable_firewall():
 
     if success:
         logger.info("Firewall disabled via API")
+        get_dnat_manager().request_recheck()
     
     return FirewallActionResponse(
         success=success,

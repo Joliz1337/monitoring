@@ -95,7 +95,7 @@ api.get = function <T = unknown>(url: string, config?: AxiosRequestConfig): Prom
 // Порядок задаёт и порядок перечисления в подсказках интерфейса.
 export const NODE_CAPABILITY_DOMAINS = [
   'traffic', 'haproxy', 'firewall', 'ipset', 'ssh',
-  'ssl', 'antiddos', 'remnawave', 'system', 'exec',
+  'ssl', 'antiddos', 'remnawave', 'system', 'exec', 'dnat',
 ] as const
 export type NodeCapabilityDomain = (typeof NODE_CAPABILITY_DOMAINS)[number]
 
@@ -590,6 +590,11 @@ export const proxyApi = {
     api.post<FirewallActionResponse>(`/proxy/${serverId}/haproxy/firewall/enable`),
   disableFirewall: (serverId: number) =>
     api.post<FirewallActionResponse>(`/proxy/${serverId}/haproxy/firewall/disable`),
+
+  // DNAT (проброс портов через iptables nat)
+  getDnatState: (serverId: number) => api.get<DnatNodeState>(`/proxy/${serverId}/dnat/state`),
+  reapplyDnat: (serverId: number) => api.post<{ success: boolean; message: string }>(`/proxy/${serverId}/dnat/reapply`),
+  clearDnat: (serverId: number) => api.post<{ success: boolean; message: string }>(`/proxy/${serverId}/dnat/clear`),
   
   // Управление правилами учёта трафика в iptables ноды
   addTrackedPort: (serverId: number, port: number) =>
@@ -2176,6 +2181,132 @@ export const firewallProfilesApi = {
     ),
   getAvailableServers: () =>
     api.get<FirewallAvailableServer[]>('/firewall-profiles/available-servers'),
+}
+
+// ==================== DNAT Profiles (проброс портов через iptables nat) ====================
+
+export type DnatProtocol = 'tcp' | 'udp' | 'both'
+export type DnatSyncStatus = 'synced' | 'pending' | 'failed' | 'denied' | null
+
+export interface DnatRuleData {
+  name: string
+  protocol: DnatProtocol
+  listen_port: number
+  listen_port_end: number | null
+  target_ip: string
+  // 0 — порт назначения равен входящему (для диапазона порты сохраняются)
+  target_port: number
+  masquerade: boolean
+  enabled: boolean
+  comment: string | null
+}
+
+export interface DnatProfile {
+  id: number
+  name: string
+  description: string | null
+  rules: DnatRuleData[]
+  position: number
+  linked_servers_count: number
+  synced_servers_count: number
+  ssh_port_covered: boolean
+  ssh_default_port: number
+  node_api_port: number
+  created_at: string | null
+  updated_at: string | null
+}
+
+export interface DnatProfileServerInfo {
+  server_id: number
+  server_name: string
+  server_url: string
+  sync_status: DnatSyncStatus
+  rules_hash: string | null
+  is_synced: boolean
+  last_sync_at: string | null
+}
+
+export interface DnatProfileWithServers extends DnatProfile {
+  rules_hash: string
+  servers: DnatProfileServerInfo[]
+}
+
+export interface DnatSyncResult {
+  server_id: number
+  server_name: string
+  success: boolean
+  message: string
+  queued: boolean
+}
+
+export interface DnatSyncLogEntry {
+  id: number
+  server_id: number
+  server_name: string
+  status: string
+  message: string | null
+  rules_hash: string | null
+  created_at: string | null
+}
+
+export interface DnatAvailableServer {
+  id: number
+  name: string
+  url: string
+  active_profile_id: number | null
+  sync_status: DnatSyncStatus
+  folder?: string | null
+}
+
+export interface DnatRuleCounters {
+  name: string
+  present: boolean
+  conns: number
+  packets_in: number
+  bytes_in: number
+  packets_out: number
+  bytes_out: number
+}
+
+export interface DnatNodeState {
+  available: boolean
+  ip_forward: boolean
+  rules: DnatRuleData[]
+  rules_hash: string
+  healthy: boolean
+  missing: string[]
+  counters: DnatRuleCounters[]
+  applied_at: string | null
+  message: string | null
+}
+
+export const dnatProfilesApi = {
+  list: () => api.get<DnatProfile[]>('/dnat-profiles/'),
+  create: (data: { name: string; description?: string | null; rules?: DnatRuleData[] | null }) =>
+    api.post<DnatProfile>('/dnat-profiles/', data),
+  get: (id: number) => api.get<DnatProfileWithServers>(`/dnat-profiles/${id}`),
+  update: (id: number, data: Partial<{ name: string; description: string | null; rules: DnatRuleData[] }>) =>
+    api.put<DnatProfile>(`/dnat-profiles/${id}`, data),
+  delete: (id: number) => api.delete(`/dnat-profiles/${id}`),
+  clone: (id: number, name?: string) =>
+    api.post<DnatProfile>(`/dnat-profiles/${id}/clone`, { name: name ?? null }),
+  addRule: (profileId: number, rule: DnatRuleData) =>
+    api.post<{ success: boolean; rules: DnatRuleData[] }>(`/dnat-profiles/${profileId}/rules`, rule),
+  updateRule: (profileId: number, index: number, rule: DnatRuleData) =>
+    api.put<{ success: boolean; rules: DnatRuleData[] }>(`/dnat-profiles/${profileId}/rules/${index}`, rule),
+  deleteRule: (profileId: number, index: number) =>
+    api.delete<{ success: boolean; rules: DnatRuleData[] }>(`/dnat-profiles/${profileId}/rules/${index}`),
+  linkServer: (profileId: number, serverId: number) =>
+    api.post(`/dnat-profiles/${profileId}/servers/${serverId}`),
+  unlinkServer: (profileId: number, serverId: number) =>
+    api.delete(`/dnat-profiles/${profileId}/servers/${serverId}`),
+  syncAll: (profileId: number) =>
+    api.post<{ results: DnatSyncResult[] }>(`/dnat-profiles/${profileId}/sync`),
+  syncOne: (profileId: number, serverId: number) =>
+    api.post<DnatSyncResult>(`/dnat-profiles/${profileId}/sync/${serverId}`),
+  getLog: (profileId: number, limit = 50) =>
+    api.get<DnatSyncLogEntry[]>(`/dnat-profiles/${profileId}/log`, { params: { limit } }),
+  getAvailableServers: () => api.get<DnatAvailableServer[]>('/dnat-profiles/available-servers'),
 }
 
 // ==================== Torrent Blocker ====================

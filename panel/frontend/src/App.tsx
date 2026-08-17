@@ -47,6 +47,8 @@ const SystemOptimizations = lazyRetry(() => import('./pages/SystemOptimizations'
 const TorrentBlocker = lazyRetry(() => import('./pages/TorrentBlocker'))
 const AntiDdos = lazyRetry(() => import('./pages/AntiDdos'))
 const RemnawaveNginx = lazyRetry(() => import('./pages/RemnawaveNginx'))
+const DnatProfiles = lazyRetry(() => import('./pages/DnatProfiles'))
+const Dnat = lazyRetry(() => import('./pages/Dnat'))
 
 const ExtPageLazy = isExtEnabled 
   ? lazyRetry(() => import('./pages/_internal/ExtPage'))
@@ -190,8 +192,10 @@ export default function App() {
           <Route path="server/:serverId" element={<SuspenseWithBoundary><ServerDetails /></SuspenseWithBoundary>} />
           <Route path="server/:serverId/haproxy" element={<SuspenseWithBoundary><HAProxy /></SuspenseWithBoundary>} />
           <Route path="server/:serverId/traffic" element={<SuspenseWithBoundary><Traffic /></SuspenseWithBoundary>} />
+          <Route path="server/:serverId/dnat" element={<SuspenseWithBoundary><Dnat /></SuspenseWithBoundary>} />
           <Route path="haproxy-configs" element={<SuspenseWithBoundary><HAProxyConfigs /></SuspenseWithBoundary>} />
           <Route path="firewall-profiles" element={<SuspenseWithBoundary><FirewallProfiles /></SuspenseWithBoundary>} />
+          <Route path="dnat-profiles" element={<SuspenseWithBoundary><DnatProfiles /></SuspenseWithBoundary>} />
           <Route path="wildcard-ssl" element={<SuspenseWithBoundary><WildcardSSL /></SuspenseWithBoundary>} />
           <Route path="settings" element={<SuspenseWithBoundary><Settings /></SuspenseWithBoundary>} />
           <Route path="updates" element={<SuspenseWithBoundary><Updates /></SuspenseWithBoundary>} />

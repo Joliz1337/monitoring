@@ -94,6 +94,12 @@ class Server(Base):
     firewall_last_sync_at = Column(DateTime(timezone=True), nullable=True)
     firewall_sync_status = Column(String(20), nullable=True)
 
+    # DNAT (port forwarding) profile binding
+    active_dnat_profile_id = Column(Integer, ForeignKey("dnat_profiles.id", ondelete="SET NULL"), nullable=True)
+    dnat_rules_hash = Column(String(64), nullable=True)
+    dnat_last_sync_at = Column(DateTime(timezone=True), nullable=True)
+    dnat_sync_status = Column(String(20), nullable=True)  # synced | pending | failed | denied
+
     # PKI (mTLS) — флаги типа авторизации с нодой
     # pki_enabled: нода работает по mTLS (false = legacy с api_key)
     # uses_shared_cert: нода уже мигрирована на общий shared cert
@@ -871,6 +877,37 @@ class FirewallSyncLog(Base):
         Index('idx_fw_sync_log_server', 'server_id'),
         Index('idx_fw_sync_log_created', 'created_at'),
         Index('idx_fw_sync_log_profile', 'profile_id'),
+    )
+
+
+# ==================== DNAT Profiles (port forwarding via iptables nat) ====================
+
+class DnatProfile(Base):
+    __tablename__ = "dnat_profiles"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(200), nullable=False, unique=True)
+    description = Column(Text, nullable=True)
+    rules_json = Column(Text, nullable=False, default="[]")
+    position = Column(Integer, default=0)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class DnatSyncLog(Base):
+    __tablename__ = "dnat_sync_log"
+
+    id = Column(Integer, primary_key=True)
+    server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), nullable=False, index=True)
+    profile_id = Column(Integer, ForeignKey("dnat_profiles.id", ondelete="SET NULL"), nullable=True)
+    status = Column(String(20), nullable=False)  # success | failed | skipped
+    message = Column(Text, nullable=True)
+    rules_hash = Column(String(64), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        Index('idx_dnat_sync_log_created', 'created_at'),
+        Index('idx_dnat_sync_log_profile', 'profile_id'),
     )
 
 
