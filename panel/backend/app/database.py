@@ -467,6 +467,7 @@ async def run_migrations(conn):
             ("dnat_rules_hash", "VARCHAR(64)"),
             ("dnat_last_sync_at", "TIMESTAMP"),
             ("dnat_sync_status", "VARCHAR(20)"),
+            ("dnat_link_position", "INTEGER"),
         ]
         for col_name, col_type in dnat_profile_columns:
             if col_name not in columns:

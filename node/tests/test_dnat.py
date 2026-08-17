@@ -47,9 +47,9 @@ NAT_DUMP = """\
 [10:600] -A PREROUTING -j MON_DNAT
 [3:200] -A PREROUTING -m addrtype --dst-type LOCAL -j DOCKER
 [10:600] -A POSTROUTING -j MON_DNAT_POST
-[7:420] -A MON_DNAT -p tcp -m tcp --dport 443 -m comment --comment "mon-dnat:vless" -j DNAT --to-destination 10.0.0.2:8443
-[2:120] -A MON_DNAT -p udp -m udp --dport 20000:30000 -m comment --comment "mon-dnat:hop" -j DNAT --to-destination 10.0.0.3:443
-[7:420] -A MON_DNAT_POST -d 10.0.0.2/32 -p tcp -m tcp --dport 8443 -m conntrack --ctstate DNAT -m comment --comment "mon-dnat:vless" -j MASQUERADE
+[7:420] -A MON_DNAT -p tcp -m tcp --dport 443 -m comment --comment "mon-dnat:vless@10.0.0.2" -j DNAT --to-destination 10.0.0.2:8443
+[2:120] -A MON_DNAT -p udp -m udp --dport 20000:30000 -m comment --comment "mon-dnat:hop@10.0.0.3" -j DNAT --to-destination 10.0.0.3:443
+[7:420] -A MON_DNAT_POST -d 10.0.0.2/32 -p tcp -m tcp --dport 8443 -m conntrack --ctstate DNAT -m comment --comment "mon-dnat:vless@10.0.0.2" -j MASQUERADE
 COMMIT
 """
 
@@ -60,8 +60,8 @@ FILTER_DUMP = """\
 :OUTPUT ACCEPT [0:0]
 :MON_DNAT_FWD - [0:0]
 [500:40000] -A FORWARD -j MON_DNAT_FWD
-[300:20000] -A MON_DNAT_FWD -d 10.0.0.2/32 -p tcp -m tcp --dport 8443 -m conntrack --ctstate DNAT -m comment --comment "mon-dnat:vless:in" -j ACCEPT
-[200:900000] -A MON_DNAT_FWD -s 10.0.0.2/32 -p tcp -m tcp --sport 8443 -m conntrack --ctstate DNAT -m comment --comment "mon-dnat:vless:out" -j ACCEPT
+[300:20000] -A MON_DNAT_FWD -d 10.0.0.2/32 -p tcp -m tcp --dport 8443 -m conntrack --ctstate DNAT -m comment --comment "mon-dnat:vless:in@10.0.0.2" -j ACCEPT
+[200:900000] -A MON_DNAT_FWD -s 10.0.0.2/32 -p tcp -m tcp --sport 8443 -m conntrack --ctstate DNAT -m comment --comment "mon-dnat:vless:out@10.0.0.2" -j ACCEPT
 [0:0] -A MON_DNAT_FWD -m conntrack --ctstate RELATED -m comment --comment "mon-dnat:related" -j ACCEPT
 COMMIT
 """
@@ -103,9 +103,17 @@ class RuleModelTest(unittest.TestCase):
             rule(listen_port_end=100)
 
     def test_target_must_be_ipv4(self):
-        for bad in ("example.com", "::1", "0.0.0.0", "224.0.0.1", ""):
+        for bad in ("example.com", "::1", "0.0.0.0", "224.0.0.1", "", "10.0.0.2, host"):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 rule(target_ip=bad)
+
+    def test_target_list_is_normalized(self):
+        self.assertEqual(rule(target_ip=" 10.0.0.2 ,10.0.0.3, 10.0.0.2").target_ip, "10.0.0.2,10.0.0.3")
+        self.assertEqual(rule(target_ip="10.0.0.2,10.0.0.3").targets(), ["10.0.0.2", "10.0.0.3"])
+
+    def test_per_server_with_several_targets_is_rejected_by_validate(self):
+        self.assertIn("distribution", validate_rules([rule(target_ip="10.0.0.2,10.0.0.3")]))
+        self.assertIsNone(validate_rules([rule(target_ip="10.0.0.2,10.0.0.3", distribution="random")]))
 
 
 class RestoreScriptTest(unittest.TestCase):
@@ -115,16 +123,53 @@ class RestoreScriptTest(unittest.TestCase):
         self.assertIn(f":{CHAIN_PREROUTING} - [0:0]", script)
         self.assertIn(f"-F {CHAIN_PREROUTING}", script)
         self.assertIn(
-            f'-A {CHAIN_PREROUTING} -p tcp --dport 443 -m comment --comment "mon-dnat:vless" -j DNAT --to-destination 10.0.0.2:8443',
+            f'-A {CHAIN_PREROUTING} -p tcp --dport 443 -m comment --comment "mon-dnat:vless@10.0.0.2" -j DNAT --to-destination 10.0.0.2:8443',
             script,
         )
         self.assertIn(
-            f'-A {CHAIN_POSTROUTING} -p tcp -d 10.0.0.2 --dport 8443 -m conntrack --ctstate DNAT -m comment --comment "mon-dnat:vless" -j MASQUERADE',
+            f'-A {CHAIN_POSTROUTING} -p tcp -d 10.0.0.2 --dport 8443 -m conntrack --ctstate DNAT -m comment --comment "mon-dnat:vless@10.0.0.2" -j MASQUERADE',
             script,
         )
-        self.assertIn(f'-A {CHAIN_FORWARD} -p tcp -d 10.0.0.2 --dport 8443 -m conntrack --ctstate DNAT -m comment --comment "mon-dnat:vless:in" -j ACCEPT', script)
-        self.assertIn(f'-A {CHAIN_FORWARD} -p tcp -s 10.0.0.2 --sport 8443 -m conntrack --ctstate DNAT -m comment --comment "mon-dnat:vless:out" -j ACCEPT', script)
+        self.assertIn(f'-A {CHAIN_FORWARD} -p tcp -d 10.0.0.2 --dport 8443 -m conntrack --ctstate DNAT -m comment --comment "mon-dnat:vless:in@10.0.0.2" -j ACCEPT', script)
+        self.assertIn(f'-A {CHAIN_FORWARD} -p tcp -s 10.0.0.2 --sport 8443 -m conntrack --ctstate DNAT -m comment --comment "mon-dnat:vless:out@10.0.0.2" -j ACCEPT', script)
         self.assertEqual(script.count("COMMIT"), 2)
+        self.assertNotIn("statistic", script)
+        self.assertNotIn("HMARK", script)
+
+    def test_random_distribution_chains_probabilities(self):
+        script = build_restore_script([rule(target_ip="10.0.0.2,10.0.0.3,10.0.0.4", distribution="random")])
+        self.assertIn('--dport 443 -m statistic --mode random --probability 0.333333 -m comment --comment "mon-dnat:vless@10.0.0.2" -j DNAT --to-destination 10.0.0.2:8443', script)
+        self.assertIn('--dport 443 -m statistic --mode random --probability 0.500000 -m comment --comment "mon-dnat:vless@10.0.0.3" -j DNAT --to-destination 10.0.0.3:8443', script)
+        # последняя цель — без условия
+        self.assertIn('--dport 443 -m comment --comment "mon-dnat:vless@10.0.0.4" -j DNAT --to-destination 10.0.0.4:8443', script)
+        # MASQUERADE и FORWARD — на каждую цель
+        for ip in ("10.0.0.2", "10.0.0.3", "10.0.0.4"):
+            self.assertIn(f'-d {ip} --dport 8443 -m conntrack --ctstate DNAT -m comment --comment "mon-dnat:vless@{ip}" -j MASQUERADE', script)
+            self.assertIn(f'"mon-dnat:vless:in@{ip}"', script)
+            self.assertIn(f'"mon-dnat:vless:out@{ip}"', script)
+
+    def test_round_robin_uses_nth(self):
+        script = build_restore_script([rule(target_ip="10.0.0.2,10.0.0.3,10.0.0.4", distribution="round_robin")])
+        self.assertIn('-m statistic --mode nth --every 3 --packet 0 -m comment --comment "mon-dnat:vless@10.0.0.2"', script)
+        self.assertIn('-m statistic --mode nth --every 2 --packet 0 -m comment --comment "mon-dnat:vless@10.0.0.3"', script)
+        self.assertIn('--dport 443 -m comment --comment "mon-dnat:vless@10.0.0.4"', script)
+
+    def test_client_hash_marks_then_matches(self):
+        script = build_restore_script([rule(target_ip="10.0.0.2,10.0.0.3", distribution="client_hash")])
+        lines = script.splitlines()
+        hmark = next(i for i, l in enumerate(lines) if "-j HMARK" in l)
+        self.assertIn('--hmark-tuple src --hmark-mod 2 --hmark-offset 0x4d440000', lines[hmark])
+        self.assertIn('"mon-dnat:vless#hash"', lines[hmark])
+        first = next(i for i, l in enumerate(lines) if "-m mark --mark 0x4d440000 " in l)
+        second = next(i for i, l in enumerate(lines) if "-m mark --mark 0x4d440001 " in l)
+        self.assertLess(hmark, first)
+        self.assertLess(first, second)
+        self.assertNotIn("statistic", script)
+
+    def test_single_target_ignores_distribution(self):
+        script = build_restore_script([rule(distribution="client_hash")])
+        self.assertNotIn("HMARK", script)
+        self.assertNotIn("-m mark", script)
 
     def test_range_keeps_ports_when_target_port_zero(self):
         script = build_restore_script([rule(name="hop", protocol="udp", listen_port=20000, listen_port_end=30000, target_port=0)])
@@ -152,8 +197,8 @@ class ParseDumpTest(unittest.TestCase):
         self.assertIn(("PREROUTING", CHAIN_PREROUTING), jumps)
         self.assertIn(("POSTROUTING", CHAIN_POSTROUTING), jumps)
         self.assertNotIn(("PREROUTING", "DOCKER"), jumps)
-        self.assertIn((CHAIN_PREROUTING, "vless", 7, 420), marked)
-        self.assertIn((CHAIN_PREROUTING, "hop", 2, 120), marked)
+        self.assertIn((CHAIN_PREROUTING, "vless@10.0.0.2", 7, 420), marked)
+        self.assertIn((CHAIN_PREROUTING, "hop@10.0.0.3", 2, 120), marked)
 
     def test_summarize_counts_and_missing(self):
         rules = [rule(), rule(name="hop", protocol="udp", listen_port=20000, listen_port_end=30000, target_ip="10.0.0.3", target_port=443)]
@@ -163,9 +208,28 @@ class ParseDumpTest(unittest.TestCase):
         self.assertEqual(by_name["vless"]["conns"], 7)
         self.assertEqual(by_name["vless"]["bytes_in"], 20000)
         self.assertEqual(by_name["vless"]["bytes_out"], 900000)
+        self.assertEqual(by_name["vless"]["targets"][0]["ip"], "10.0.0.2")
+        self.assertEqual(by_name["vless"]["targets"][0]["conns"], 7)
         # у hop нет FORWARD-правил и MASQUERADE — правило считается потерянным
         self.assertFalse(by_name["hop"]["present"])
+        self.assertFalse(by_name["hop"]["targets"][0]["present"])
         self.assertEqual(missing, ["hop"])
+
+    def test_multi_target_sums_and_requires_hash_rule(self):
+        multi = rule(target_ip="10.0.0.2,10.0.0.5", distribution="client_hash")
+        nat = NAT_DUMP + '[3:180] -A MON_DNAT -p tcp -m tcp --dport 443 -m mark --mark 0x4d440001 -m comment --comment "mon-dnat:vless@10.0.0.5" -j DNAT --to-destination 10.0.0.5:8443\n'
+        nat += '[3:180] -A MON_DNAT_POST -d 10.0.0.5/32 -p tcp -m tcp --dport 8443 -m conntrack --ctstate DNAT -m comment --comment "mon-dnat:vless@10.0.0.5" -j MASQUERADE\n'
+        fwd = FILTER_DUMP + '[10:1000] -A MON_DNAT_FWD -d 10.0.0.5/32 -p tcp -m tcp --dport 8443 -m conntrack --ctstate DNAT -m comment --comment "mon-dnat:vless:in@10.0.0.5" -j ACCEPT\n'
+        fwd += '[20:2000] -A MON_DNAT_FWD -s 10.0.0.5/32 -p tcp -m tcp --sport 8443 -m conntrack --ctstate DNAT -m comment --comment "mon-dnat:vless:out@10.0.0.5" -j ACCEPT\n'
+        counters, missing = summarize([multi], nat, fwd)
+        self.assertEqual(counters[0]["conns"], 10)
+        self.assertEqual(counters[0]["bytes_in"], 21000)
+        self.assertEqual([t["ip"] for t in counters[0]["targets"]], ["10.0.0.2", "10.0.0.5"])
+        self.assertTrue(all(t["present"] for t in counters[0]["targets"]))
+        # обе цели на месте, но HMARK-строки нет — без неё DNAT по метке не сработает
+        self.assertEqual(missing, ["vless"])
+        with_hash = nat + '[13:780] -A MON_DNAT -p tcp -m tcp --dport 443 -m comment --comment "mon-dnat:vless#hash" -j HMARK --hmark-tuple src --hmark-mod 2 --hmark-offset 0x4d440000 --hmark-rnd 0x6d6f6e64\n'
+        self.assertEqual(summarize([multi], with_hash, fwd)[1], [])
 
     def test_missing_jump_reported(self):
         counters, missing = summarize([rule()], NAT_DUMP.replace("[10:600] -A PREROUTING -j MON_DNAT\n", ""), FILTER_DUMP)
@@ -181,7 +245,7 @@ GOLDEN_RULES = [
     {"name": "vless", "protocol": "tcp", "listen_port": 443, "listen_port_end": 443, "target_ip": "10.0.0.2",
      "target_port": 8443, "masquerade": False, "enabled": False, "comment": ""},
 ]
-GOLDEN_HASH = "f5ccd7baf1f7bdc84a6b8897bb2c23ddd790b1f3ff9076597a6a67dc9e803ce3"
+GOLDEN_HASH = "41ef543685f03f262ef1774aac8e2b769e7cf80b2270561d6aa5939768a71bc5"
 
 
 class HashTest(unittest.TestCase):
@@ -198,6 +262,12 @@ class HashTest(unittest.TestCase):
             compute_rules_hash([{"name": "a", "listen_port": 443, "listen_port_end": 443, "target_ip": "1.1.1.1"}]),
             compute_rules_hash([{"name": "a", "listen_port": 443, "target_ip": "1.1.1.1"}]),
         )
+
+    def test_distribution_and_targets_change_hash(self):
+        base = rule(target_ip="10.0.0.2,10.0.0.3", distribution="random").model_dump()
+        other = rule(target_ip="10.0.0.2,10.0.0.3", distribution="round_robin").model_dump()
+        self.assertNotEqual(compute_rules_hash([base]), compute_rules_hash([other]))
+        self.assertNotEqual(compute_rules_hash([base]), compute_rules_hash([rule(target_ip="10.0.0.2", distribution="random").model_dump()]))
 
     def test_enabled_changes_hash(self):
         self.assertNotEqual(

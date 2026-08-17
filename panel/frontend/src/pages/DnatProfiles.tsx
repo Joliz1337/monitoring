@@ -42,15 +42,17 @@ import {
   DnatAvailableServer,
   DnatProfileServerInfo,
   DnatProtocol,
+  DnatDistribution,
   DnatSyncStatus,
 } from '../api/client'
 import { FAQIcon } from '../components/FAQ'
-import { formatListen, formatTarget, protocolLabel } from '../utils/dnat'
+import { formatListen, formatTarget, protocolLabel, splitTargets } from '../utils/dnat'
 
 type TabKey = 'rules' | 'servers' | 'log'
 type TranslateFn = (key: string, options?: Record<string, unknown>) => string
 
 const PROTOCOL_OPTIONS: DnatProtocol[] = ['tcp', 'udp', 'both']
+const DISTRIBUTION_OPTIONS: DnatDistribution[] = ['per_server', 'random', 'round_robin', 'client_hash']
 
 const EMPTY_RULE: DnatRuleData = {
   name: '',
@@ -58,6 +60,7 @@ const EMPTY_RULE: DnatRuleData = {
   listen_port: 443,
   listen_port_end: null,
   target_ip: '',
+  distribution: 'per_server',
   target_port: 0,
   masquerade: true,
   enabled: true,
@@ -168,7 +171,8 @@ function RuleForm({
       toast.error(t('dnat_profiles.validation_port_range'))
       return
     }
-    if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(form.target_ip.trim())) {
+    const targets = splitTargets(form.target_ip)
+    if (targets.length === 0 || targets.some(ip => !/^\d{1,3}(\.\d{1,3}){3}$/.test(ip))) {
       toast.error(t('dnat_profiles.validation_target'))
       return
     }
@@ -180,7 +184,7 @@ function RuleForm({
       ...form,
       name,
       listen_port_end: portEnd === form.listen_port ? null : portEnd,
-      target_ip: form.target_ip.trim(),
+      target_ip: targets.join(','),
       comment: form.comment?.trim() ? form.comment.trim() : null,
     })
   }
@@ -224,10 +228,12 @@ function RuleForm({
             </select>
           </div>
           <div className="flex items-end gap-4 pb-1.5">
-            <label className="flex items-center gap-1.5 text-xs text-dark-300 cursor-pointer">
-              <input type="checkbox" checked={form.enabled} onChange={e => update({ enabled: e.target.checked })} className="accent-accent-500" />
-              {t('dnat_profiles.field_enabled')}
-            </label>
+            <Tooltip label={t('dnat_profiles.enabled_hint')} maxWidth={340}>
+              <label className="flex items-center gap-1.5 text-xs text-dark-300 cursor-pointer">
+                <input type="checkbox" checked={form.enabled} onChange={e => update({ enabled: e.target.checked })} className="accent-accent-500" />
+                {t('dnat_profiles.field_enabled')}
+              </label>
+            </Tooltip>
           </div>
 
           <div>
@@ -260,10 +266,20 @@ function RuleForm({
               type="text"
               value={form.target_ip}
               onChange={e => update({ target_ip: e.target.value })}
-              placeholder="10.0.0.2"
+              placeholder="10.0.0.2, 10.0.0.3"
               className={inputCls}
             />
+            <p className="text-[11px] text-dark-500 mt-1">{t('dnat_profiles.target_ip_hint')}</p>
           </div>
+          {splitTargets(form.target_ip).length > 1 && (
+            <div className="col-span-2 sm:col-span-4">
+              <label className="block text-xs text-dark-400 mb-1">{t('dnat_profiles.field_distribution')}</label>
+              <select value={form.distribution} onChange={e => update({ distribution: e.target.value as DnatDistribution })} className={inputCls}>
+                {DISTRIBUTION_OPTIONS.map(d => <option key={d} value={d}>{t(`dnat_profiles.distribution_${d}`)}</option>)}
+              </select>
+              <p className="text-[11px] text-dark-500 mt-1">{t(`dnat_profiles.distribution_${form.distribution}_hint`)}</p>
+            </div>
+          )}
           <div>
             <label className="block text-xs text-dark-400 mb-1">{t('dnat_profiles.field_target_port')}</label>
             <input
@@ -701,7 +717,14 @@ function RulesTab({
                             </span>
                           </Tooltip>
                         )}
-                        {rule.enabled && rule.masquerade && <span className="text-dark-600">—</span>}
+                        {splitTargets(rule.target_ip).length > 1 && (
+                          <Tooltip label={t(`dnat_profiles.distribution_${rule.distribution ?? 'per_server'}_hint`)} maxWidth={360}>
+                            <span className="px-2 py-0.5 rounded-md text-[11px] bg-accent-500/10 text-accent-400 border border-accent-500/20">
+                              {t('dnat_profiles.balancer_badge', { count: splitTargets(rule.target_ip).length })} · {t(`dnat_profiles.distribution_${rule.distribution ?? 'per_server'}`)}
+                            </span>
+                          </Tooltip>
+                        )}
+                        {rule.enabled && rule.masquerade && splitTargets(rule.target_ip).length <= 1 && <span className="text-dark-600">—</span>}
                       </div>
                     </td>
                     <td className="px-3 py-2 text-dark-400 truncate max-w-xs">{rule.comment || '—'}</td>
@@ -953,11 +976,21 @@ function ServersTab({
               <div key={srv.server_id} className="flex items-center justify-between px-3 py-2 rounded-lg bg-dark-900/30 border border-dark-800/50">
                 <div className="flex items-center gap-3 min-w-0">
                   <Server className="w-4 h-4 text-dark-400 shrink-0" />
+                  <span className="text-xs text-dark-500 font-mono shrink-0 w-6 text-right">#{srv.link_position}</span>
                   <div className="min-w-0">
                     <Link to={`/${uid}/server/${srv.server_id}/dnat`} className="text-sm text-dark-200 hover:text-accent-300 truncate block transition-colors">
                       {srv.server_name}
                     </Link>
                     <div className="text-xs text-dark-500 truncate">{srv.server_url}</div>
+                    {Object.keys(srv.targets ?? {}).length > 0 && (
+                      <div className="flex flex-wrap gap-1 mt-1">
+                        {Object.entries(srv.targets).map(([ruleName, ip]) => (
+                          <span key={ruleName} className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-accent-500/10 text-accent-300 border border-accent-500/20">
+                            {ruleName} → {ip}
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </div>
                   {syncStatusBadge(srv.sync_status, t)}
                 </div>

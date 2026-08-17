@@ -17,7 +17,12 @@ from app.database import async_session
 from app.models import DnatProfile, FirewallProfile, HAProxyConfigProfile, RemnawaveNginxProfile, Server, ServerCache
 from app.services.blocklist_manager import get_blocklist_manager
 from app.services.dnat_profile_sync import (
+    clear_dnat_on_servers,
     compute_rules_hash as compute_dnat_hash,
+    load_rules as load_dnat_rules,
+    ordered_linked_servers as ordered_dnat_servers,
+    render_rules_for_server as render_dnat_rules,
+    server_index as dnat_server_index,
     sync_profile_to_servers as sync_dnat_profile,
 )
 from app.services.firewall_profile_sync import (
@@ -51,7 +56,8 @@ HAPROXY_START_TIMEOUT = 30.0
 # либо применять нечего.
 # denied — тоже «делать больше нечего»: раздел закрыт на самой ноде,
 # и долг в очереди только копился бы
-RECONCILED_STATES = {"in_sync", "reapplied", "no_profile", "denied"}
+# cleared — у ноды профиля больше нет, и её правила сняты
+RECONCILED_STATES = {"in_sync", "reapplied", "no_profile", "denied", "cleared"}
 
 
 @dataclass
@@ -236,19 +242,30 @@ async def _reconcile_dnat(server_id: int) -> str:
     нода лежала."""
     async with async_session() as db:
         server = await db.get(Server, server_id)
-        if not server or not server.active_dnat_profile_id:
+        if not server:
             return "no_profile"
         if not server_allows(server, Capability.DNAT, write=True):
             return "denied"
-        profile = await db.get(DnatProfile, server.active_dnat_profile_id)
-        if not profile:
-            return "no_profile"
+        profile = (
+            await db.get(DnatProfile, server.active_dnat_profile_id)
+            if server.active_dnat_profile_id else None
+        )
 
         state = await _node_get(server, "/api/dnat/state")
         if state is None:
             return "node_unreachable"
 
-        expected = compute_dnat_hash(profile.rules_json)
+        # Отвязали, пока нода лежала: без профиля правил на ней быть не должно
+        if profile is None:
+            if not state.get("rules"):
+                return "no_profile"
+            cleared = await clear_dnat_on_servers([server_id], queue_failures=False)
+            return "cleared" if cleared.get(server_id) is None else "clear_failed"
+
+        linked = await ordered_dnat_servers(profile.id, db)
+        expected = compute_dnat_hash(
+            render_dnat_rules(load_dnat_rules(profile), dnat_server_index(linked, server_id))
+        )
         if state.get("rules_hash") == expected and state.get("healthy", False):
             return "in_sync"
 

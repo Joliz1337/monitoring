@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useTranslation } from 'react-i18next'
@@ -402,8 +402,10 @@ export default function Dnat() {
                       {state.rules.map(rule => {
                         const counters = countersByName[rule.name]
                         const rate = rates[rule.name]
+                        const targetRows = (counters?.targets ?? []).length > 1 ? counters.targets : []
                         return (
-                          <tr key={rule.name} className={`border-t border-dark-800/40 hover:bg-dark-800/30 transition-colors ${rule.enabled ? '' : 'opacity-50'}`}>
+                          <Fragment key={rule.name}>
+                          <tr className={`border-t border-dark-800/40 hover:bg-dark-800/30 transition-colors ${rule.enabled ? '' : 'opacity-50'}`}>
                             <td className="px-3 py-2">
                               <div className="font-medium text-dark-100 font-mono">{rule.name}</div>
                               {rule.comment && <div className="text-xs text-dark-500 truncate max-w-xs">{rule.comment}</div>}
@@ -451,6 +453,21 @@ export default function Dnat() {
                               )}
                             </td>
                           </tr>
+                          {targetRows.map(target => (
+                            <tr key={`${rule.name}@${target.ip}`} className="bg-dark-900/30 text-xs">
+                              <td className="px-3 py-1 text-dark-500 pl-8">↳ {t(`dnat_profiles.distribution_${rule.distribution ?? 'per_server'}`)}</td>
+                              <td className="px-3 py-1 font-mono text-dark-300">→ {target.ip}</td>
+                              <td className="px-3 py-1 text-right font-mono text-dark-300">{target.conns.toLocaleString()}</td>
+                              <td className="px-3 py-1 text-right font-mono text-dark-300">{formatBytes(target.bytes_in)}</td>
+                              <td className="px-3 py-1 text-right font-mono text-dark-300">{formatBytes(target.bytes_out)}</td>
+                              <td className="px-3 py-1 text-right">
+                                {target.present
+                                  ? <span className="text-success">{t('dnat.rule_active')}</span>
+                                  : <span className="text-danger">{t('dnat.rule_missing')}</span>}
+                              </td>
+                            </tr>
+                          ))}
+                          </Fragment>
                         )
                       })}
                     </tbody>

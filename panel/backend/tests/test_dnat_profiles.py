@@ -4,7 +4,6 @@
 Запуск из panel/backend:  python -m unittest discover -s tests -p "test_*.py"
 """
 
-import json
 import os
 import sys
 import unittest
@@ -13,7 +12,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 try:
     from app.routers.dnat_profiles import DnatRuleData, validate_rule_set  # noqa: E402
-    from app.services.dnat_profile_sync import compute_rules_hash  # noqa: E402
+    from app.services.dnat_profile_sync import (  # noqa: E402
+        assigned_targets,
+        compute_rules_hash,
+        render_rules_for_server,
+        split_targets,
+    )
 except ImportError as e:  # рантайм панели не установлен
     raise unittest.SkipTest(f"dnat profiles require the panel runtime: {e}")
 
@@ -26,7 +30,7 @@ GOLDEN_RULES = [
     {"name": "vless", "protocol": "tcp", "listen_port": 443, "listen_port_end": 443, "target_ip": "10.0.0.2",
      "target_port": 8443, "masquerade": False, "enabled": False, "comment": ""},
 ]
-GOLDEN_HASH = "f5ccd7baf1f7bdc84a6b8897bb2c23ddd790b1f3ff9076597a6a67dc9e803ce3"
+GOLDEN_HASH = "41ef543685f03f262ef1774aac8e2b769e7cf80b2270561d6aa5939768a71bc5"
 
 
 def rule(**overrides) -> dict:
@@ -37,14 +41,50 @@ def rule(**overrides) -> dict:
 
 class HashTest(unittest.TestCase):
     def test_golden_vector_matches_node(self):
-        self.assertEqual(compute_rules_hash(json.dumps(GOLDEN_RULES)), GOLDEN_HASH)
+        self.assertEqual(compute_rules_hash(GOLDEN_RULES), GOLDEN_HASH)
 
-    def test_comment_ignored_and_broken_json_is_empty_set(self):
-        self.assertEqual(
-            compute_rules_hash(json.dumps([rule(comment="a")])),
-            compute_rules_hash(json.dumps([rule(comment="b")])),
+    def test_comment_ignored(self):
+        self.assertEqual(compute_rules_hash([rule(comment="a")]), compute_rules_hash([rule(comment="b")]))
+
+
+class BalancerTest(unittest.TestCase):
+    """Несколько IP назначения раздаются серверам по кругу в порядке привязки."""
+
+    def test_split_and_validation(self):
+        self.assertEqual(split_targets(" 10.0.0.2 ,10.0.0.3, "), ["10.0.0.2", "10.0.0.3"])
+        self.assertEqual(rule(target_ip="10.0.0.2, 10.0.0.3, 10.0.0.2")["target_ip"], "10.0.0.2,10.0.0.3")
+        with self.assertRaises(ValueError):
+            rule(target_ip="10.0.0.2, example.com")
+
+    def test_round_robin_by_server_index(self):
+        rules = [rule(name="a", target_ip="10.0.0.2,10.0.0.3,10.0.0.4"), rule(name="b", listen_port=444, target_ip="10.9.9.9")]
+        for index, expected in enumerate(["10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.2", "10.0.0.3"]):
+            rendered = render_rules_for_server(rules, index)
+            self.assertEqual(rendered[0]["target_ip"], expected)
+            # одиночный адрес не меняется, остальные поля переносятся как есть
+            self.assertEqual(rendered[1]["target_ip"], "10.9.9.9")
+            self.assertEqual(rendered[0]["target_port"], 8443)
+        self.assertEqual(assigned_targets(rules, 1), {"a": "10.0.0.3"})
+
+    def test_node_side_modes_keep_full_list(self):
+        for mode in ("random", "round_robin", "client_hash"):
+            rules = [rule(target_ip="10.0.0.2,10.0.0.3", distribution=mode)]
+            for index in range(3):
+                self.assertEqual(render_rules_for_server(rules, index)[0]["target_ip"], "10.0.0.2,10.0.0.3")
+            self.assertEqual(assigned_targets(rules, 1), {})
+        # без режима панель раздаёт по серверам и хэши разных серверов различаются
+        self.assertEqual(rule()["distribution"], "per_server")
+
+    def test_hash_differs_per_server(self):
+        rules = [rule(target_ip="10.0.0.2,10.0.0.3")]
+        self.assertNotEqual(
+            compute_rules_hash(render_rules_for_server(rules, 0)),
+            compute_rules_hash(render_rules_for_server(rules, 1)),
         )
-        self.assertEqual(compute_rules_hash("not json"), compute_rules_hash("[]"))
+        self.assertEqual(
+            compute_rules_hash(render_rules_for_server(rules, 0)),
+            compute_rules_hash(render_rules_for_server(rules, 2)),
+        )
 
 
 class ValidateRuleSetTest(unittest.TestCase):

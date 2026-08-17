@@ -13,7 +13,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import verify_auth
 from app.database import async_session_maker, get_db
 from app.models import DnatProfile, DnatSyncLog, Server
-from app.services.dnat_profile_sync import compute_rules_hash, load_rules, sync_profile_to_servers
+from app.services.dnat_profile_sync import (
+    assigned_targets,
+    clear_dnat_on_servers,
+    compute_rules_hash,
+    load_rules,
+    ordered_linked_servers,
+    render_rules_for_server,
+    split_targets,
+    sync_profile_to_servers,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -22,8 +31,13 @@ router = APIRouter(prefix="/dnat-profiles", tags=["dnat-profiles"])
 # Порт mTLS-nginx ноды: правило на него отрезало бы панель от сервера
 NODE_API_PORT = 9100
 SSH_DEFAULT_PORT = 22
+# Больше адресов назначения в одном правиле не бывает нужно — а нода получает всё равно один
+MAX_TARGETS_PER_RULE = 32
 
 Protocol = Literal["tcp", "udp", "both"]
+# per_server — каждой ноде свой IP из списка по порядку привязки (распределяет панель);
+# остальные — нода получает весь список и раскидывает новые соединения сама
+Distribution = Literal["per_server", "random", "round_robin", "client_hash"]
 
 
 # ==================== Schemas ====================
@@ -34,6 +48,7 @@ class DnatRuleData(BaseModel):
     listen_port: int = Field(..., ge=1, le=65535)
     listen_port_end: Optional[int] = Field(None, ge=1, le=65535)
     target_ip: str
+    distribution: Distribution = "per_server"
     target_port: int = Field(0, ge=0, le=65535)
     masquerade: bool = True
     enabled: bool = True
@@ -41,15 +56,23 @@ class DnatRuleData(BaseModel):
 
     @field_validator("target_ip")
     @classmethod
-    def _ipv4_only(cls, value: str) -> str:
-        value = (value or "").strip()
-        try:
-            address = ipaddress.IPv4Address(value)
-        except ValueError:
-            raise ValueError("Адрес назначения должен быть IPv4")
-        if address.is_unspecified or address.is_multicast:
-            raise ValueError("Адрес назначения должен быть unicast IPv4")
-        return str(address)
+    def _ipv4_list(cls, value: str) -> str:
+        """Один адрес или несколько через запятую — серверы профиля получают их по кругу."""
+        targets: list[str] = []
+        for part in split_targets(value):
+            try:
+                address = ipaddress.IPv4Address(part)
+            except ValueError:
+                raise ValueError(f"Адрес назначения '{part}' должен быть IPv4")
+            if address.is_unspecified or address.is_multicast:
+                raise ValueError(f"Адрес назначения '{part}' должен быть unicast IPv4")
+            if str(address) not in targets:
+                targets.append(str(address))
+        if not targets:
+            raise ValueError("Укажите хотя бы один адрес назначения")
+        if len(targets) > MAX_TARGETS_PER_RULE:
+            raise ValueError(f"Не больше {MAX_TARGETS_PER_RULE} адресов назначения в одном правиле")
+        return ",".join(targets)
 
     @field_validator("comment", mode="before")
     @classmethod
@@ -154,17 +177,15 @@ def _profile_to_dict(profile: DnatProfile, *, linked: int = 0, synced: int = 0) 
 
 
 async def _store_rules(profile: DnatProfile, rules: list[dict], db: AsyncSession) -> None:
-    """Сохранить набор и перевести разъехавшиеся серверы в pending."""
+    """Сохранить набор и перевести разъехавшиеся серверы в pending. Ожидаемый хэш у
+    каждого сервера свой — правило с несколькими IP рендерится под его позицию."""
     error = validate_rule_set(rules)
     if error:
         raise HTTPException(409, error)
     profile.rules_json = json.dumps(rules)
-    new_hash = compute_rules_hash(profile.rules_json)
-    await db.execute(
-        update(Server)
-        .where(Server.active_dnat_profile_id == profile.id, Server.dnat_rules_hash != new_hash)
-        .values(dnat_sync_status="pending")
-    )
+    for index, server in enumerate(await ordered_linked_servers(profile.id, db)):
+        if server.dnat_rules_hash != compute_rules_hash(render_rules_for_server(rules, index)):
+            server.dnat_sync_status = "pending"
     await db.commit()
 
 
@@ -238,13 +259,11 @@ async def create_profile(data: ProfileCreate, db: AsyncSession = Depends(get_db)
 @router.get("/{profile_id}")
 async def get_profile(profile_id: int, db: AsyncSession = Depends(get_db), _=Depends(verify_auth)):
     profile = await _get_profile(profile_id, db)
-    servers = list((await db.execute(
-        select(Server).where(Server.active_dnat_profile_id == profile_id).order_by(Server.name)
-    )).scalars().all())
-    rules_hash = compute_rules_hash(profile.rules_json)
+    rules = load_rules(profile)
+    servers = await ordered_linked_servers(profile_id, db)
 
     data = _profile_to_dict(profile)
-    data["rules_hash"] = rules_hash
+    data["rules_hash"] = compute_rules_hash(rules)
     data["servers"] = [
         {
             "server_id": s.id,
@@ -252,10 +271,12 @@ async def get_profile(profile_id: int, db: AsyncSession = Depends(get_db), _=Dep
             "server_url": s.url,
             "sync_status": s.dnat_sync_status,
             "rules_hash": s.dnat_rules_hash,
-            "is_synced": s.dnat_rules_hash == rules_hash,
+            "is_synced": s.dnat_rules_hash == compute_rules_hash(render_rules_for_server(rules, index)),
             "last_sync_at": s.dnat_last_sync_at.isoformat() if s.dnat_last_sync_at else None,
+            "link_position": index + 1,
+            "targets": assigned_targets(rules, index),
         }
-        for s in servers
+        for index, s in enumerate(servers)
     ]
     return data
 
@@ -313,15 +334,26 @@ async def clone_profile(
 
 
 @router.delete("/{profile_id}")
-async def delete_profile(profile_id: int, db: AsyncSession = Depends(get_db), _=Depends(verify_auth)):
+async def delete_profile(
+    profile_id: int, bg: BackgroundTasks, db: AsyncSession = Depends(get_db), _=Depends(verify_auth),
+):
+    """Удалить профиль; с привязанных нод правила снимаются — иначе они пробрасывали
+    бы трафик дальше без профиля, который бы этим управлял."""
     profile = await _get_profile(profile_id, db)
+    linked = [
+        row[0] for row in (await db.execute(
+            select(Server.id).where(Server.active_dnat_profile_id == profile_id)
+        )).fetchall()
+    ]
     await db.execute(
         update(Server)
         .where(Server.active_dnat_profile_id == profile_id)
-        .values(active_dnat_profile_id=None, dnat_sync_status=None)
+        .values(active_dnat_profile_id=None, dnat_sync_status=None, dnat_link_position=None)
     )
     await db.delete(profile)
     await db.commit()
+    if linked:
+        bg.add_task(clear_dnat_on_servers, linked)
     return {"success": True}
 
 
@@ -382,8 +414,14 @@ async def link_server(
     if not server:
         raise HTTPException(404, "Server not found")
 
+    # Новый сервер встаёт в конец очереди привязки: у уже привязанных IP назначения
+    # не меняются, и их правила не переприменяются
+    last_position = (await db.execute(
+        select(func.max(Server.dnat_link_position)).where(Server.active_dnat_profile_id == profile_id)
+    )).scalar() or 0
     server.active_dnat_profile_id = profile_id
     server.dnat_sync_status = "pending"
+    server.dnat_link_position = last_position + 1
     await db.commit()
 
     bg.add_task(_bg_sync_profile, profile_id, server_ids=[server_id])
@@ -391,7 +429,11 @@ async def link_server(
 
 
 @router.delete("/{profile_id}/servers/{server_id}")
-async def unlink_server(profile_id: int, server_id: int, db: AsyncSession = Depends(get_db), _=Depends(verify_auth)):
+async def unlink_server(
+    profile_id: int, server_id: int, bg: BackgroundTasks,
+    db: AsyncSession = Depends(get_db), _=Depends(verify_auth),
+):
+    """Отвязать сервер и снять с ноды правила (офлайн-нода получит это через очередь)."""
     server = (await db.execute(select(Server).where(Server.id == server_id))).scalar_one_or_none()
     if not server:
         raise HTTPException(404, "Server not found")
@@ -400,7 +442,10 @@ async def unlink_server(profile_id: int, server_id: int, db: AsyncSession = Depe
     server.dnat_sync_status = None
     server.dnat_rules_hash = None
     server.dnat_last_sync_at = None
+    server.dnat_link_position = None
     await db.commit()
+
+    bg.add_task(clear_dnat_on_servers, [server_id], True, profile_id)
     return {"success": True}
 
 

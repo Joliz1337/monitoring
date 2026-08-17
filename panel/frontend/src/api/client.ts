@@ -2186,6 +2186,8 @@ export const firewallProfilesApi = {
 // ==================== DNAT Profiles (проброс портов через iptables nat) ====================
 
 export type DnatProtocol = 'tcp' | 'udp' | 'both'
+// per_server — каждой ноде свой IP из списка (распределяет панель); остальные — нода раскидывает соединения сама
+export type DnatDistribution = 'per_server' | 'random' | 'round_robin' | 'client_hash'
 export type DnatSyncStatus = 'synced' | 'pending' | 'failed' | 'denied' | null
 
 export interface DnatRuleData {
@@ -2193,7 +2195,9 @@ export interface DnatRuleData {
   protocol: DnatProtocol
   listen_port: number
   listen_port_end: number | null
+  // Один IPv4 или несколько через запятую
   target_ip: string
+  distribution: DnatDistribution
   // 0 — порт назначения равен входящему (для диапазона порты сохраняются)
   target_port: number
   masquerade: boolean
@@ -2224,6 +2228,10 @@ export interface DnatProfileServerInfo {
   rules_hash: string | null
   is_synced: boolean
   last_sync_at: string | null
+  // Порядок привязки (с 1): по нему сервер получает свой IP из списка назначения правила
+  link_position: number
+  // Правило → IP, доставшийся этому серверу (только для правил с несколькими IP)
+  targets: Record<string, string>
 }
 
 export interface DnatProfileWithServers extends DnatProfile {
@@ -2258,6 +2266,16 @@ export interface DnatAvailableServer {
   folder?: string | null
 }
 
+export interface DnatTargetCounters {
+  ip: string
+  present: boolean
+  conns: number
+  packets_in: number
+  bytes_in: number
+  packets_out: number
+  bytes_out: number
+}
+
 export interface DnatRuleCounters {
   name: string
   present: boolean
@@ -2266,6 +2284,7 @@ export interface DnatRuleCounters {
   bytes_in: number
   packets_out: number
   bytes_out: number
+  targets: DnatTargetCounters[]
 }
 
 export interface DnatNodeState {

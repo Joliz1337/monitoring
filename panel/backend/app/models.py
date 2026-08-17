@@ -99,6 +99,9 @@ class Server(Base):
     dnat_rules_hash = Column(String(64), nullable=True)
     dnat_last_sync_at = Column(DateTime(timezone=True), nullable=True)
     dnat_sync_status = Column(String(20), nullable=True)  # synced | pending | failed | denied
+    # Порядок привязки к DNAT-профилю: по нему сервер получает свой IP назначения
+    # из списка через запятую (первый сервер — первый IP, по кругу)
+    dnat_link_position = Column(Integer, nullable=True)
 
     # PKI (mTLS) — флаги типа авторизации с нодой
     # pki_enabled: нода работает по mTLS (false = legacy с api_key)

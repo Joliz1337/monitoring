@@ -50,18 +50,16 @@ def normalize_rule(rule: dict) -> dict:
         "protocol": (rule.get("protocol") or "tcp").lower(),
         "listen_port": listen_port,
         "listen_port_end": end,
-        "target_ip": str(rule.get("target_ip", "")).strip(),
+        "target_ip": ",".join(p.strip() for p in str(rule.get("target_ip", "")).split(",") if p.strip()),
+        "distribution": (rule.get("distribution") or "per_server").lower(),
         "target_port": int(rule.get("target_port") or 0),
         "masquerade": bool(rule.get("masquerade", True)),
         "enabled": bool(rule.get("enabled", True)),
     }
 
 
-def compute_rules_hash(rules_json: str) -> str:
-    try:
-        rules = json.loads(rules_json) if rules_json else []
-    except (json.JSONDecodeError, TypeError):
-        rules = []
+def compute_rules_hash(rules: list[dict]) -> str:
+    """Хэш набора, как его видит нода — то есть уже отрендеренного под конкретный сервер."""
     canonical = sorted((normalize_rule(r) for r in rules), key=lambda r: r["name"])
     payload = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode()).hexdigest()
@@ -73,6 +71,63 @@ def load_rules(profile: DnatProfile) -> list[dict]:
         return rules if isinstance(rules, list) else []
     except (json.JSONDecodeError, TypeError):
         return []
+
+
+def split_targets(target_ip: str) -> list[str]:
+    """«10.0.0.2, 10.0.0.3» → ['10.0.0.2', '10.0.0.3']; один адрес — список из одного."""
+    return [part.strip() for part in (target_ip or "").split(",") if part.strip()]
+
+
+def _per_server(rule: dict) -> bool:
+    return (rule.get("distribution") or "per_server") == "per_server"
+
+
+def render_rules_for_server(rules: list[dict], server_index: int) -> list[dict]:
+    """Правила профиля → правила для одной ноды. В режиме per_server из списка IP
+    берётся адрес по порядку привязки сервера, по кругу — нода получает один IP.
+    В остальных режимах список уходит на ноду целиком, распределяет она сама."""
+    rendered: list[dict] = []
+    for rule in rules:
+        targets = split_targets(rule.get("target_ip", ""))
+        item = dict(rule)
+        if targets and _per_server(rule):
+            item["target_ip"] = targets[server_index % len(targets)]
+        rendered.append(item)
+    return rendered
+
+
+def assigned_targets(rules: list[dict], server_index: int) -> dict[str, str]:
+    """Что достанется серверу по per_server-правилам с несколькими IP — для отображения в панели."""
+    return {
+        rule["name"]: targets[server_index % len(targets)]
+        for rule in rules
+        if _per_server(rule) and len(targets := split_targets(rule.get("target_ip", ""))) > 1
+    }
+
+
+async def ordered_linked_servers(profile_id: int, db: AsyncSession) -> list[Server]:
+    """Привязанные серверы в порядке привязки (`dnat_link_position`, затем id).
+    Серверам, привязанным до появления позиции, она дописывается один раз."""
+    servers = list((await db.execute(
+        select(Server)
+        .where(Server.active_dnat_profile_id == profile_id)
+        .order_by(Server.dnat_link_position.asc().nulls_last(), Server.id)
+    )).scalars().all())
+    unnumbered = [s for s in servers if s.dnat_link_position is None]
+    if unnumbered:
+        next_position = max((s.dnat_link_position for s in servers if s.dnat_link_position is not None), default=0) + 1
+        for server in unnumbered:
+            server.dnat_link_position = next_position
+            next_position += 1
+        await db.commit()
+    return servers
+
+
+def server_index(servers: list[Server], server_id: int) -> int:
+    for index, server in enumerate(servers):
+        if server.id == server_id:
+            return index
+    return 0
 
 
 async def _log_failure(
@@ -94,7 +149,7 @@ async def _log_failure(
 
 
 async def _queue_offline_servers(
-    servers: list[Server], profile_id: int, rules_hash: str,
+    servers: list[Server], profile_id: int, hashes: dict[int, str],
 ) -> list[SyncResult]:
     if not servers:
         return []
@@ -102,7 +157,7 @@ async def _queue_offline_servers(
         db.add_all([
             DnatSyncLog(
                 server_id=server.id, profile_id=profile_id, status="skipped",
-                message=QUEUED_MESSAGE, rules_hash=rules_hash,
+                message=QUEUED_MESSAGE, rules_hash=hashes[server.id],
             )
             for server in servers
         ])
@@ -186,15 +241,13 @@ async def sync_profile_to_servers(
     повторы, а собственная постановка долга обнулила бы её выдержку.
     """
     rules = load_rules(profile)
-    rules_hash = compute_rules_hash(profile.rules_json)
+    # Порядок привязки считается по всем привязанным серверам, а не по подмножеству —
+    # иначе синк одного сервера выдал бы ему чужой IP из списка назначения
+    linked = await ordered_linked_servers(profile.id, db)
+    rendered = {s.id: render_rules_for_server(rules, index) for index, s in enumerate(linked)}
+    hashes = {sid: compute_rules_hash(items) for sid, items in rendered.items()}
 
-    query = select(Server).where(
-        Server.active_dnat_profile_id == profile.id,
-        Server.is_active.is_(True),
-    )
-    if server_ids:
-        query = query.where(Server.id.in_(server_ids))
-    servers = list((await db.execute(query)).scalars().all())
+    servers = [s for s in linked if s.is_active and (not server_ids or s.id in server_ids)]
     if not servers:
         return []
 
@@ -217,35 +270,122 @@ async def sync_profile_to_servers(
 
     online = [s for s in servers if is_server_online(s)]
     offline = [s for s in servers if not is_server_online(s)]
-    results.extend(await _queue_offline_servers(offline, profile.id, rules_hash))
+    results.extend(await _queue_offline_servers(offline, profile.id, hashes))
 
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_SYNCS)
 
     async def _guarded(server: Server) -> SyncResult:
         async with semaphore:
-            return await _sync_single_server(server, rules, rules_hash, profile.id, queue_failures)
+            return await _sync_single_server(
+                server, rendered[server.id], hashes[server.id], profile.id, queue_failures,
+            )
 
     results.extend(await asyncio.gather(*[_guarded(s) for s in online]))
     return results
 
 
-async def sync_dnat_to_servers(server_ids: list[int]) -> dict[int, Optional[str]]:
-    """Досинхронизировать DNAT-профиль перечисленным нодам (исполнитель очереди)."""
+CLEAR_QUEUED_MESSAGE = "Сервер офлайн — снятие правил отложено до восстановления"
+
+
+async def _clear_single_server(server: Server, queue_failures: bool, profile_id: Optional[int]) -> Optional[str]:
+    """Снять DNAT-правила с ноды, у которой больше нет профиля. None — успех или
+    повторять бессмысленно; строка — ошибка, с которой долг остаётся в очереди."""
+    url = f"{server.url.rstrip('/')}/api/dnat/clear"
+    async with async_session_maker() as db:
+        try:
+            client = get_node_apply_client(server)
+            response = await client.post(
+                url, headers=node_auth_headers(server), timeout=APPLY_TIMEOUT_SECONDS,
+            )
+            # Старый агент правил не имеет — снимать нечего
+            if response.status_code == 404:
+                return None
+            if response.status_code != 200:
+                message = f"HTTP {response.status_code}"
+                db.add(DnatSyncLog(server_id=server.id, profile_id=profile_id, status="failed", message=f"clear: {message}"))
+                await db.commit()
+                return message
+            data = response.json() if response.content else {}
+            if not data.get("success", False):
+                message = data.get("message", "clear failed")
+                db.add(DnatSyncLog(server_id=server.id, profile_id=profile_id, status="failed", message=f"clear: {message}"))
+                await db.commit()
+                return message
+            await db.execute(
+                update(Server).where(Server.id == server.id).values(dnat_rules_hash=None, dnat_last_sync_at=None)
+            )
+            db.add(DnatSyncLog(server_id=server.id, profile_id=profile_id, status="cleared", message="DNAT rules removed from node"))
+            await db.commit()
+            return None
+        except (httpx.TimeoutException, httpx.RequestError) as e:
+            message = f"Connection error: {e}"
+            db.add(DnatSyncLog(server_id=server.id, profile_id=profile_id, status="failed", message=f"clear: {message}"))
+            await db.commit()
+            if queue_failures:
+                await enqueue([server.id], KIND_DNAT_PROFILE, message)
+            return message
+
+
+async def clear_dnat_on_servers(
+    server_ids: list[int], queue_failures: bool = True, profile_id: Optional[int] = None,
+) -> dict[int, Optional[str]]:
+    """Снять правила с нод, отвязанных от профиля: онлайн — сразу, офлайн — через
+    очередь отложенной синхронизации (её исполнитель видит, что профиля больше
+    нет, и делает то же самое). Иначе отвязанная нода пробрасывала бы трафик
+    дальше и после перезагрузки — свои правила она хранит и восстанавливает сама.
+    `profile_id` — бывший профиль, только чтобы запись попала в его историю.
+    """
     async with async_session() as db:
         servers = list((await db.execute(
-            select(Server).where(
-                Server.id.in_(server_ids),
-                Server.is_active.is_(True),
-                Server.active_dnat_profile_id.isnot(None),
-            )
+            select(Server).where(Server.id.in_(server_ids), Server.is_active.is_(True))
+        )).scalars().all())
+
+    results: dict[int, Optional[str]] = {sid: None for sid in server_ids}
+    todo = [s for s in servers if server_allows(s, Capability.DNAT, write=True)]
+    offline = [s for s in todo if not is_server_online(s)]
+    online = [s for s in todo if is_server_online(s)]
+
+    if offline and queue_failures:
+        async with async_session_maker() as db:
+            db.add_all([
+                DnatSyncLog(server_id=s.id, profile_id=profile_id, status="skipped", message=CLEAR_QUEUED_MESSAGE)
+                for s in offline
+            ])
+            await db.commit()
+        await enqueue([s.id for s in offline], KIND_DNAT_PROFILE, CLEAR_QUEUED_MESSAGE)
+    for s in offline:
+        results[s.id] = CLEAR_QUEUED_MESSAGE
+
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_SYNCS)
+
+    async def _guarded(server: Server) -> tuple[int, Optional[str]]:
+        async with semaphore:
+            return server.id, await _clear_single_server(server, queue_failures, profile_id)
+
+    for server_id, error in await asyncio.gather(*[_guarded(s) for s in online]):
+        results[server_id] = error
+    return results
+
+
+async def sync_dnat_to_servers(server_ids: list[int]) -> dict[int, Optional[str]]:
+    """Исполнитель очереди: нодам с профилем — досинхронизировать его, нодам без
+    профиля (отвязаны, пока лежали) — снять правила."""
+    async with async_session() as db:
+        servers = list((await db.execute(
+            select(Server).where(Server.id.in_(server_ids), Server.is_active.is_(True))
         )).scalars().all())
 
     found = {s.id for s in servers}
     results: dict[int, Optional[str]] = {sid: None for sid in server_ids if sid not in found}
 
+    orphans = [s.id for s in servers if s.active_dnat_profile_id is None]
+    if orphans:
+        results.update(await clear_dnat_on_servers(orphans, queue_failures=False))
+
     by_profile: dict[int, list[int]] = defaultdict(list)
     for server in servers:
-        by_profile[server.active_dnat_profile_id].append(server.id)
+        if server.active_dnat_profile_id is not None:
+            by_profile[server.active_dnat_profile_id].append(server.id)
 
     for profile_id, sids in by_profile.items():
         async with async_session() as db:

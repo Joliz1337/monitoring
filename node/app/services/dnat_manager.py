@@ -3,8 +3,14 @@
 Правила живут в трёх собственных цепочках — `MON_DNAT` (nat/PREROUTING),
 `MON_DNAT_POST` (nat/POSTROUTING, MASQUERADE) и `MON_DNAT_FWD` (filter/FORWARD,
 ACCEPT для проброшенных потоков: и Docker, и UFW держат политику FORWARD DROP).
-Каждое правило помечено `-m comment mon-dnat:<имя>`: по метке считаются
-счётчики и проверяется, что правило на месте.
+Каждая строка помечена `-m comment mon-dnat:<имя>@<ip>`: по метке считаются
+счётчики по каждому адресу назначения и проверяется, что правило на месте.
+
+Несколько адресов назначения в одном правиле нода раскидывает сама по новым
+соединениям: `random` — цепочка `-m statistic --mode random` с вероятностями
+1/N, 1/(N-1), …; `round_robin` — `--mode nth`; `client_hash` — `HMARK` по адресу
+клиента и DNAT по метке, чтобы один клиент всегда попадал на одну цель.
+Выбор делается на первом пакете, дальше соединение держит conntrack.
 
 Желаемое состояние хранится в JSON рядом с конфигом учёта портов и
 переприменяется при старте агента и фоновым циклом: правила netfilter не
@@ -46,6 +52,12 @@ JUMPS: tuple[tuple[str, str, str], ...] = (
 
 IP_FORWARD_PATH = Path("/proc/sys/net/ipv4/ip_forward")
 
+# client_hash: HMARK кладёт в fwmark HMARK_OFFSET + (hash(src) mod N), а DNAT-строка
+# цели i совпадает по метке HMARK_OFFSET + i. Смещение вынесено в верхние биты,
+# чтобы не пересекаться с чужими маленькими метками (policy routing и т.п.)
+HMARK_OFFSET = 0x4D440000
+HMARK_SEED = 0x6D6F6E64
+
 XTABLES_LOCK_WAIT_SEC = 5
 COMMAND_TIMEOUT_SEC = 30
 SELF_HEAL_INTERVAL_SEC = 30
@@ -69,7 +81,8 @@ def normalize_rule(rule: dict) -> dict:
         "protocol": (rule.get("protocol") or "tcp").lower(),
         "listen_port": listen_port,
         "listen_port_end": end,
-        "target_ip": str(rule.get("target_ip", "")).strip(),
+        "target_ip": ",".join(p.strip() for p in str(rule.get("target_ip", "")).split(",") if p.strip()),
+        "distribution": (rule.get("distribution") or "per_server").lower(),
         "target_port": int(rule.get("target_port") or 0),
         "masquerade": bool(rule.get("masquerade", True)),
         "enabled": bool(rule.get("enabled", True)),
@@ -93,6 +106,9 @@ def validate_rules(rules: list[DnatRule]) -> Optional[str]:
 
     active = [r for r in rules if r.enabled]
     for rule in active:
+        # per_server — режим панели: она уже оставила этой ноде один адрес
+        if rule.distribution == "per_server" and len(rule.targets()) > 1:
+            return f"Rule '{rule.name}' has several targets but no distribution mode for the node"
         if "tcp" in rule.protocols() and rule.covers_port(NODE_API_PORT):
             return (
                 f"Rule '{rule.name}' covers node API port {NODE_API_PORT}/tcp — "
@@ -120,12 +136,32 @@ def _target_port_spec(rule: DnatRule) -> str:
     return str(rule.target_port) if rule.target_port else _port_spec(rule)
 
 
-def _destination(rule: DnatRule) -> str:
-    return f"{rule.target_ip}:{rule.target_port}" if rule.target_port else rule.target_ip
+def _destination(rule: DnatRule, ip: str) -> str:
+    return f"{ip}:{rule.target_port}" if rule.target_port else ip
 
 
 def _comment(tag: str) -> str:
     return f'-m comment --comment "{COMMENT_PREFIX}{tag}"'
+
+
+def _selector(rule: DnatRule, index: int, total: int) -> str:
+    """Матч, отбирающий новые соединения для цели номер index из total.
+
+    random: цепочка вероятностей 1/N, 1/(N-1), … — в сумме равномерно, последняя
+    цель без условия. round_robin: `nth --every K --packet 0` на остатке списка,
+    так каждое K-е из ещё не распределённых соединений уходит в текущую цель.
+    client_hash: метка, выставленная HMARK-строкой перед DNAT-строками.
+    """
+    remaining = total - index
+    if rule.distribution == "client_hash":
+        return f"-m mark --mark {HMARK_OFFSET + index:#x} "
+    if remaining <= 1:
+        return ""
+    if rule.distribution == "random":
+        return f"-m statistic --mode random --probability {1 / remaining:.6f} "
+    if rule.distribution == "round_robin":
+        return f"-m statistic --mode nth --every {remaining} --packet 0 "
+    return ""
 
 
 def build_restore_script(rules: list[DnatRule]) -> str:
@@ -136,27 +172,37 @@ def build_restore_script(rules: list[DnatRule]) -> str:
     for rule in rules:
         if not rule.enabled:
             continue
+        targets = rule.targets()
         for proto in rule.protocols():
-            nat.append(
-                f"-A {CHAIN_PREROUTING} -p {proto} --dport {_port_spec(rule)} "
-                f"{_comment(rule.name)} -j DNAT --to-destination {_destination(rule)}"
-            )
-            if rule.masquerade:
+            if rule.distribution == "client_hash" and len(targets) > 1:
                 nat.append(
-                    f"-A {CHAIN_POSTROUTING} -p {proto} -d {rule.target_ip} "
-                    f"--dport {_target_port_spec(rule)} -m conntrack --ctstate DNAT "
-                    f"{_comment(rule.name)} -j MASQUERADE"
+                    f"-A {CHAIN_PREROUTING} -p {proto} --dport {_port_spec(rule)} "
+                    f"{_comment(rule.name + '#hash')} -j HMARK --hmark-tuple src "
+                    f"--hmark-mod {len(targets)} --hmark-offset {HMARK_OFFSET:#x} --hmark-rnd {HMARK_SEED:#x}"
                 )
-            fwd.append(
-                f"-A {CHAIN_FORWARD} -p {proto} -d {rule.target_ip} "
-                f"--dport {_target_port_spec(rule)} -m conntrack --ctstate DNAT "
-                f"{_comment(rule.name + ':in')} -j ACCEPT"
-            )
-            fwd.append(
-                f"-A {CHAIN_FORWARD} -p {proto} -s {rule.target_ip} "
-                f"--sport {_target_port_spec(rule)} -m conntrack --ctstate DNAT "
-                f"{_comment(rule.name + ':out')} -j ACCEPT"
-            )
+            for index, ip in enumerate(targets):
+                selector = _selector(rule, index, len(targets)) if len(targets) > 1 else ""
+                tag = f"{rule.name}@{ip}"
+                nat.append(
+                    f"-A {CHAIN_PREROUTING} -p {proto} --dport {_port_spec(rule)} {selector}"
+                    f"{_comment(tag)} -j DNAT --to-destination {_destination(rule, ip)}"
+                )
+                if rule.masquerade:
+                    nat.append(
+                        f"-A {CHAIN_POSTROUTING} -p {proto} -d {ip} "
+                        f"--dport {_target_port_spec(rule)} -m conntrack --ctstate DNAT "
+                        f"{_comment(tag)} -j MASQUERADE"
+                    )
+                fwd.append(
+                    f"-A {CHAIN_FORWARD} -p {proto} -d {ip} "
+                    f"--dport {_target_port_spec(rule)} -m conntrack --ctstate DNAT "
+                    f"{_comment(rule.name + ':in@' + ip)} -j ACCEPT"
+                )
+                fwd.append(
+                    f"-A {CHAIN_FORWARD} -p {proto} -s {ip} "
+                    f"--sport {_target_port_spec(rule)} -m conntrack --ctstate DNAT "
+                    f"{_comment(rule.name + ':out@' + ip)} -j ACCEPT"
+                )
     # ICMP-ошибки (в т.ч. fragmentation needed для PMTUD) к проброшенным потокам
     fwd.append(
         f'-A {CHAIN_FORWARD} -m conntrack --ctstate RELATED -m comment --comment "{RELATED_COMMENT}" -j ACCEPT'
@@ -241,23 +287,42 @@ def summarize(
     for rule in rules:
         if not rule.enabled:
             continue
-        expected = [(CHAIN_PREROUTING, rule.name), (CHAIN_FORWARD, f"{rule.name}:in"), (CHAIN_FORWARD, f"{rule.name}:out")]
-        if rule.masquerade:
-            expected.append((CHAIN_POSTROUTING, rule.name))
-        rule_present = all(key in present for key in expected)
+        targets = rule.targets()
+        per_target: list[dict] = []
+        for ip in targets:
+            expected = [
+                (CHAIN_PREROUTING, f"{rule.name}@{ip}"),
+                (CHAIN_FORWARD, f"{rule.name}:in@{ip}"),
+                (CHAIN_FORWARD, f"{rule.name}:out@{ip}"),
+            ]
+            if rule.masquerade:
+                expected.append((CHAIN_POSTROUTING, f"{rule.name}@{ip}"))
+            conns, _ = present.get((CHAIN_PREROUTING, f"{rule.name}@{ip}"), (0, 0))
+            packets_in, bytes_in = present.get((CHAIN_FORWARD, f"{rule.name}:in@{ip}"), (0, 0))
+            packets_out, bytes_out = present.get((CHAIN_FORWARD, f"{rule.name}:out@{ip}"), (0, 0))
+            per_target.append({
+                "ip": ip,
+                "present": all(key in present for key in expected),
+                "conns": conns,
+                "packets_in": packets_in,
+                "bytes_in": bytes_in,
+                "packets_out": packets_out,
+                "bytes_out": bytes_out,
+            })
+        rule_present = all(t["present"] for t in per_target)
+        if rule.distribution == "client_hash" and len(targets) > 1:
+            rule_present = rule_present and (CHAIN_PREROUTING, f"{rule.name}#hash") in present
         if not rule_present:
             missing.append(rule.name)
-        conns, _ = present.get((CHAIN_PREROUTING, rule.name), (0, 0))
-        packets_in, bytes_in = present.get((CHAIN_FORWARD, f"{rule.name}:in"), (0, 0))
-        packets_out, bytes_out = present.get((CHAIN_FORWARD, f"{rule.name}:out"), (0, 0))
         counters.append({
             "name": rule.name,
             "present": rule_present,
-            "conns": conns,
-            "packets_in": packets_in,
-            "bytes_in": bytes_in,
-            "packets_out": packets_out,
-            "bytes_out": bytes_out,
+            "conns": sum(t["conns"] for t in per_target),
+            "packets_in": sum(t["packets_in"] for t in per_target),
+            "bytes_in": sum(t["bytes_in"] for t in per_target),
+            "packets_out": sum(t["packets_out"] for t in per_target),
+            "bytes_out": sum(t["bytes_out"] for t in per_target),
+            "targets": per_target,
         })
     return counters, missing
 
