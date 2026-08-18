@@ -51,6 +51,8 @@ class DnatRuleData(BaseModel):
     distribution: Distribution = "per_server"
     target_port: int = Field(0, ge=0, le=65535)
     masquerade: bool = True
+    # Маскировка транзита на ноде: TTL=64 + MSS clamp на потоках правила
+    mask_ttl: bool = False
     enabled: bool = True
     comment: Optional[str] = Field("", max_length=200)
 

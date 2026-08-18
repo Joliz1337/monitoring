@@ -54,6 +54,7 @@ def normalize_rule(rule: dict) -> dict:
         "distribution": (rule.get("distribution") or "per_server").lower(),
         "target_port": int(rule.get("target_port") or 0),
         "masquerade": bool(rule.get("masquerade", True)),
+        "mask_ttl": bool(rule.get("mask_ttl", False)),
         "enabled": bool(rule.get("enabled", True)),
     }
 

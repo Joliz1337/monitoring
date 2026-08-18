@@ -26,6 +26,7 @@ from requests.exceptions import ReadTimeout, RequestException
 
 from app.capabilities import get_policy
 from app.services import cpu_affinity
+from app.services.bandwidth_limit import MAX_MBIT, MIN_MBIT, get_bandwidth_limiter
 from app.services.host_executor import get_host_executor, MAX_TIMEOUT, DEFAULT_TIMEOUT
 from app.services.host_files import read_host_file, write_host_file
 from app.services.sysctl_verify import (
@@ -1028,6 +1029,29 @@ async def set_cpu_affinity(request: CpuAffinityRequest):
         changed = await cpu_affinity.reset_containers(executor)
 
     return {**_cpu_affinity_state(), "containers_changed": changed}
+
+
+class BandwidthLimitRequest(BaseModel):
+    enabled: bool = Field(..., description="Включить лимит полосы на дефолтном интерфейсе")
+    mbit: int = Field(0, ge=0, le=MAX_MBIT, description="Лимит, Мбит/с (при enabled)")
+
+
+@router.get("/bandwidth-limit")
+async def get_bandwidth_limit():
+    """Желаемый лимит полосы и что реально стоит корневым qdisc на интерфейсе."""
+    return await get_bandwidth_limiter().state()
+
+
+@router.post("/bandwidth-limit")
+async def set_bandwidth_limit(request: BandwidthLimitRequest):
+    """Поставить/снять шейпер tc (cake, fallback tbf); состояние переживает ребут."""
+    mbit = request.mbit if request.enabled else 0
+    if request.enabled and mbit < MIN_MBIT:
+        raise HTTPException(status_code=400, detail=f"mbit must be >= {MIN_MBIT}")
+    result = await get_bandwidth_limiter().set_limit(mbit)
+    if not result["success"]:
+        raise HTTPException(status_code=500, detail=result["message"])
+    return {**await get_bandwidth_limiter().state(), "message": result["message"]}
 
 
 @router.post("/optimizations/apply")

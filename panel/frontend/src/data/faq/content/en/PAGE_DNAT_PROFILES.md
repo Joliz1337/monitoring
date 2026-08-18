@@ -2,6 +2,31 @@
 
 Kernel-level port forwarding on a node: listen port → target IP:port. Same job as HAProxy routing, but without a userspace proxy — netfilter rewrites the packets, so CPU cost is minimal and UDP is forwarded just like TCP.
 
+## What it is and how it differs from HAProxy
+
+HAProxy **terminates** the connection: it accepts TCP from the client, opens its own connection to the target and shuffles bytes. DNAT accepts nothing — the kernel rewrites the destination address in the packet header and sends it on; the reply comes back to the client via conntrack. The node opens no sockets and runs no process.
+
+| | DNAT | HAProxy |
+|---|---|---|
+| CPU per 1 Gbit/s | a few percent (softirq) | a good share of a core: two TCP stacks + userspace copies |
+| UDP (Hysteria, WireGuard, QUIC) | yes | no |
+| Ephemeral ports / TIME_WAIT on the node | not used | one per connection to the target |
+| Processes on the node | none — iptables rules only | haproxy |
+| Real client IP at the target | no (MASQUERADE) — only if the target routes replies back through the node | no, but PROXY protocol is available |
+| TLS/SNI/domains, backend health checks | no | yes |
+| What DPI sees between node and target | the clients' packets as they are: their TCP options, window, MSS, source ports, TTL (TTL and MSS can be disguised) | the node's own connections — a normal server stack |
+| Balancing | across servers / random / round-robin / by client IP, no health checks | leastconn, weights, health checks |
+
+Rule of thumb: DNAT where you need cheap transit and UDP and the path between node and target is "quiet" (your own nodes, same country, a tunnel); HAProxy where an aggressive DPI sits between node and target and looking like a server matters, or you need TLS/PROXY protocol/health checks.
+
+## What DPI sees on the path and what disguising does
+
+A DPI on the node's uplink sees DNAT transit as a stream of connections from one IP to one IP:port carrying the **clients' TCP headers**: different windows/MSS/wscale (phones, Windows, iOS), client-range source ports and — without disguise — mixed TTLs (50s from mobiles, 110s from Windows). To a DPI that is a NAT-relay tell. Plus the SNI inside TLS: a well-known domain's SNI towards a foreign IP (`vk.com`, `max.ru`, `google.com` at a hoster's IP) is dropped for the domain↔IP mismatch; only the SNI of a domain that really points at this IP passes (self-steal with your own domain).
+
+The **"Disguise transit"** checkbox rewrites the TTL of forwarded packets to 64 in both directions (like a Linux server's own traffic) and clamps MSS to the MTU. The TTL mix disappears; client TCP options cannot be hidden — a fundamental limit of forwarding, only termination (HAProxy) hides them.
+
+Sign of a "learned" and throttled endpoint: the rule's connections and bytes "from clients" grow while "to clients" stays near zero; TCP from the node to the target succeeds every other time with 0 % ICMP loss. Fix: change the target port (one field in the rule, clients untouched), keep several ports/IPs ready in advance and distribute by client IP.
+
 A profile is the complete forwarding rule set of a node. The node applies it atomically, remembers it and restores it after a reboot or a firewall reset. The panel checks the rule checksum and shows per-rule connection and traffic counters on the server page.
 
 ## Listen port, range end, target port
@@ -45,3 +70,4 @@ Turn it off only if such return routing is already in place. Need the real clien
 - The “Rule enabled” checkbox is a pause without deleting: a disabled rule stays in the profile but is removed from the nodes and no traffic is forwarded through it; tick it again and it is re-applied.
 - Unlinking a server from a profile (and deleting a profile) removes all DNAT rules from the node; an offline node gets this once it is back online. Rules can also be removed manually with the button on the server page.
 - Permissions: the `dnat` domain in the node's NODE_CAPABILITIES.
+- An artificial bandwidth limit for the node (a flat ceiling on the hoster's counters) is on the server page, "Bandwidth limit" card.

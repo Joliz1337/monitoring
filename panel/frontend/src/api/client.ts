@@ -591,6 +591,11 @@ export const proxyApi = {
   disableFirewall: (serverId: number) =>
     api.post<FirewallActionResponse>(`/proxy/${serverId}/haproxy/firewall/disable`),
 
+  // Лимит полосы (tc на ноде)
+  getBandwidthLimit: (serverId: number) => api.get<BandwidthLimitState>(`/proxy/${serverId}/system/bandwidth-limit`),
+  setBandwidthLimit: (serverId: number, data: { enabled: boolean; mbit: number }) =>
+    api.post<BandwidthLimitState & { message: string }>(`/proxy/${serverId}/system/bandwidth-limit`, data, { timeout: 45000 }),
+
   // DNAT (проброс портов через iptables nat)
   getDnatState: (serverId: number) => api.get<DnatNodeState>(`/proxy/${serverId}/dnat/state`),
   reapplyDnat: (serverId: number) => api.post<{ success: boolean; message: string }>(`/proxy/${serverId}/dnat/reapply`),
@@ -2201,6 +2206,8 @@ export interface DnatRuleData {
   // 0 — порт назначения равен входящему (для диапазона порты сохраняются)
   target_port: number
   masquerade: boolean
+  // Маскировка транзита на ноде: TTL=64 + MSS clamp на потоках правила
+  mask_ttl: boolean
   enabled: boolean
   comment: string | null
 }
@@ -2274,6 +2281,16 @@ export interface DnatTargetCounters {
   bytes_in: number
   packets_out: number
   bytes_out: number
+}
+
+export interface BandwidthLimitState {
+  enabled: boolean
+  mbit: number
+  iface: string
+  applied: boolean
+  applied_mbit: number | null
+  qdisc: 'cake' | 'tbf' | null
+  in_sync: boolean
 }
 
 export interface DnatRuleCounters {

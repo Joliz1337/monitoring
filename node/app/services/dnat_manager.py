@@ -6,6 +6,11 @@ ACCEPT для проброшенных потоков: и Docker, и UFW дер�
 Каждая строка помечена `-m comment mon-dnat:<имя>@<ip>`: по метке считаются
 счётчики по каждому адресу назначения и проверяется, что правило на месте.
 
+Четвёртая цепочка `MON_DNAT_MANGLE` (mangle/FORWARD) — маскировка транзита для
+правил с `mask_ttl`: TTL всех проброшенных пакетов выставляется в 64 (иначе с IP
+ноды уезжает разнобой клиентских TTL — 50-е у мобильных, 110-е у Windows —
+учебная сигнатура NAT-релея для DPI), а MSS в SYN зажимается под PMTU.
+
 Несколько адресов назначения в одном правиле нода раскидывает сама по новым
 соединениям: `random` — цепочка `-m statistic --mode random` с вероятностями
 1/N, 1/(N-1), …; `round_robin` — `--mode nth`; `client_hash` — `HMARK` по адресу
@@ -40,6 +45,7 @@ logger = logging.getLogger(__name__)
 CHAIN_PREROUTING = "MON_DNAT"
 CHAIN_POSTROUTING = "MON_DNAT_POST"
 CHAIN_FORWARD = "MON_DNAT_FWD"
+CHAIN_MANGLE = "MON_DNAT_MANGLE"
 COMMENT_PREFIX = "mon-dnat:"
 RELATED_COMMENT = f"{COMMENT_PREFIX}related"
 
@@ -48,7 +54,11 @@ JUMPS: tuple[tuple[str, str, str], ...] = (
     ("nat", "PREROUTING", CHAIN_PREROUTING),
     ("nat", "POSTROUTING", CHAIN_POSTROUTING),
     ("filter", "FORWARD", CHAIN_FORWARD),
+    ("mangle", "FORWARD", CHAIN_MANGLE),
 )
+
+# Значение TTL, с которым выходят пакеты собственного стека Linux
+MASKED_TTL = 64
 
 IP_FORWARD_PATH = Path("/proc/sys/net/ipv4/ip_forward")
 
@@ -85,6 +95,7 @@ def normalize_rule(rule: dict) -> dict:
         "distribution": (rule.get("distribution") or "per_server").lower(),
         "target_port": int(rule.get("target_port") or 0),
         "masquerade": bool(rule.get("masquerade", True)),
+        "mask_ttl": bool(rule.get("mask_ttl", False)),
         "enabled": bool(rule.get("enabled", True)),
     }
 
@@ -169,6 +180,7 @@ def build_restore_script(rules: list[DnatRule]) -> str:
     заполняются с нуля, остальное содержимое таблиц не трогается."""
     nat: list[str] = []
     fwd: list[str] = []
+    mangle: list[str] = []
     for rule in rules:
         if not rule.enabled:
             continue
@@ -203,6 +215,25 @@ def build_restore_script(rules: list[DnatRule]) -> str:
                     f"--sport {_target_port_spec(rule)} -m conntrack --ctstate DNAT "
                     f"{_comment(rule.name + ':out@' + ip)} -j ACCEPT"
                 )
+                if rule.mask_ttl:
+                    # TTL — в обе стороны: к цели уходят пакеты клиентов, к клиенту — цели;
+                    # и те и другие с IP ноды должны выглядеть как её собственные
+                    mangle.append(
+                        f"-A {CHAIN_MANGLE} -p {proto} -d {ip} --dport {_target_port_spec(rule)} "
+                        f"-m conntrack --ctstate DNAT {_comment(rule.name + ':ttl-in@' + ip)} "
+                        f"-j TTL --ttl-set {MASKED_TTL}"
+                    )
+                    mangle.append(
+                        f"-A {CHAIN_MANGLE} -p {proto} -s {ip} --sport {_target_port_spec(rule)} "
+                        f"-m conntrack --ctstate DNAT {_comment(rule.name + ':ttl-out@' + ip)} "
+                        f"-j TTL --ttl-set {MASKED_TTL}"
+                    )
+                    if proto == "tcp":
+                        mangle.append(
+                            f"-A {CHAIN_MANGLE} -p tcp -d {ip} --dport {_target_port_spec(rule)} "
+                            f"--tcp-flags SYN,RST SYN -m conntrack --ctstate DNAT "
+                            f"{_comment(rule.name + ':mss@' + ip)} -j TCPMSS --clamp-mss-to-pmtu"
+                        )
     # ICMP-ошибки (в т.ч. fragmentation needed для PMTUD) к проброшенным потокам
     fwd.append(
         f'-A {CHAIN_FORWARD} -m conntrack --ctstate RELATED -m comment --comment "{RELATED_COMMENT}" -j ACCEPT'
@@ -223,6 +254,11 @@ def build_restore_script(rules: list[DnatRule]) -> str:
         f":{CHAIN_FORWARD} - [0:0]",
         f"-F {CHAIN_FORWARD}",
         *fwd,
+        "COMMIT",
+        "*mangle",
+        f":{CHAIN_MANGLE} - [0:0]",
+        f"-F {CHAIN_MANGLE}",
+        *mangle,
         "COMMIT",
     ]
     return "\n".join(lines) + "\n"
@@ -267,21 +303,22 @@ def _argument(tokens: list[str], flag: str) -> Optional[str]:
 
 
 def summarize(
-    rules: list[DnatRule], nat_dump: str, filter_dump: str,
+    rules: list[DnatRule], nat_dump: str, filter_dump: str, mangle_dump: str = "",
 ) -> tuple[list[dict], list[str]]:
     """Счётчики по правилам и список того, чего в ядре не хватает."""
     nat_marked, nat_jumps = parse_dump(nat_dump)
     fwd_marked, fwd_jumps = parse_dump(filter_dump)
+    mangle_marked, mangle_jumps = parse_dump(mangle_dump)
     present: dict[tuple[str, str], tuple[int, int]] = {}
-    for chain, tag, packets, byte_count in nat_marked + fwd_marked:
+    for chain, tag, packets, byte_count in nat_marked + fwd_marked + mangle_marked:
         old_packets, old_bytes = present.get((chain, tag), (0, 0))
         present[(chain, tag)] = (old_packets + packets, old_bytes + byte_count)
 
+    jumps_by_table = {"nat": nat_jumps, "filter": fwd_jumps, "mangle": mangle_jumps}
     missing: list[str] = []
     for table, builtin, chain in JUMPS:
-        jumps = nat_jumps if table == "nat" else fwd_jumps
-        if (builtin, chain) not in jumps:
-            missing.append(f"jump:{builtin}")
+        if (builtin, chain) not in jumps_by_table[table]:
+            missing.append(f"jump:{table}/{builtin}")
 
     counters: list[dict] = []
     for rule in rules:
@@ -297,6 +334,9 @@ def summarize(
             ]
             if rule.masquerade:
                 expected.append((CHAIN_POSTROUTING, f"{rule.name}@{ip}"))
+            if rule.mask_ttl:
+                expected.append((CHAIN_MANGLE, f"{rule.name}:ttl-in@{ip}"))
+                expected.append((CHAIN_MANGLE, f"{rule.name}:ttl-out@{ip}"))
             conns, _ = present.get((CHAIN_PREROUTING, f"{rule.name}@{ip}"), (0, 0))
             packets_in, bytes_in = present.get((CHAIN_FORWARD, f"{rule.name}:in@{ip}"), (0, 0))
             packets_out, bytes_out = present.get((CHAIN_FORWARD, f"{rule.name}:out@{ip}"), (0, 0))
@@ -430,9 +470,10 @@ class DnatManager:
     def _summary(self, rules: list[DnatRule]) -> Optional[tuple[list[dict], list[str]]]:
         nat_dump = self._dump("nat")
         filter_dump = self._dump("filter")
-        if nat_dump is None or filter_dump is None:
+        mangle_dump = self._dump("mangle")
+        if nat_dump is None or filter_dump is None or mangle_dump is None:
             return None
-        return summarize(rules, nat_dump, filter_dump)
+        return summarize(rules, nat_dump, filter_dump, mangle_dump)
 
     def apply(self, rules: list[DnatRule]) -> dict:
         error = validate_rules(rules)

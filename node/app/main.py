@@ -20,6 +20,7 @@ from app.services.metrics_collector import get_collector as get_metrics_collecto
 from app.services.port_traffic_sampler import get_port_traffic_sampler
 from app.services.ipset_manager import get_ipset_manager
 from app.services.dnat_manager import get_dnat_manager
+from app.services.bandwidth_limit import get_bandwidth_limiter
 
 logging.basicConfig(
     level=logging.INFO,
@@ -64,6 +65,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"DNAT manager start failed, port forwarding rules are not restored: {e}", exc_info=True)
 
+    bandwidth_limiter = get_bandwidth_limiter()
+    try:
+        await bandwidth_limiter.start()
+    except Exception as e:
+        logger.error(f"Bandwidth limiter start failed, shaping is not restored: {e}", exc_info=True)
+
     from app.services import cpu_affinity
     from app.services.host_executor import get_host_executor
     affinity_sync = cpu_affinity.ContainerAffinitySync(
@@ -100,6 +107,10 @@ async def lifespan(app: FastAPI):
         await dnat_manager.stop()
     except Exception as e:
         logger.error(f"DNAT manager stop failed: {e}", exc_info=True)
+    try:
+        await bandwidth_limiter.stop()
+    except Exception as e:
+        logger.error(f"Bandwidth limiter stop failed: {e}", exc_info=True)
     logger.info("Shutdown complete")
 
 

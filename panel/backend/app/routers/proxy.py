@@ -747,6 +747,27 @@ async def clear_dnat(
     return result
 
 
+@router.get("/{server_id}/system/bandwidth-limit")
+async def get_bandwidth_limit(
+    server_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    server = await get_server_by_id(server_id, db)
+    return await proxy_request(server, "/api/system/bandwidth-limit", timeout=20.0)
+
+
+@router.post("/{server_id}/system/bandwidth-limit")
+async def set_bandwidth_limit(
+    server_id: int,
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    server = await get_server_by_id(server_id, db)
+    return await proxy_request(server, "/api/system/bandwidth-limit", method="POST", json_data=data, timeout=40.0)
+
+
 # ==================== Traffic Tracking ====================
 # История трафика живёт в PostgreSQL панели и отдаётся роутером /api/traffic.
 # Здесь остаётся только управление правилами учёта портов в iptables ноды.

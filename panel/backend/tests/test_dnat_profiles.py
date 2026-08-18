@@ -30,7 +30,7 @@ GOLDEN_RULES = [
     {"name": "vless", "protocol": "tcp", "listen_port": 443, "listen_port_end": 443, "target_ip": "10.0.0.2",
      "target_port": 8443, "masquerade": False, "enabled": False, "comment": ""},
 ]
-GOLDEN_HASH = "41ef543685f03f262ef1774aac8e2b769e7cf80b2270561d6aa5939768a71bc5"
+GOLDEN_HASH = "281199e72b412545ccd7fc9967b02812e5123c266df98e1f97e25d53de7f0327"
 
 
 def rule(**overrides) -> dict:

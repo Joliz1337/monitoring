@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from app.models.dnat import DnatRule  # noqa: E402
 from app.services.dnat_manager import (  # noqa: E402
     CHAIN_FORWARD,
+    CHAIN_MANGLE,
     CHAIN_POSTROUTING,
     CHAIN_PREROUTING,
     DnatManager,
@@ -63,6 +64,15 @@ FILTER_DUMP = """\
 [300:20000] -A MON_DNAT_FWD -d 10.0.0.2/32 -p tcp -m tcp --dport 8443 -m conntrack --ctstate DNAT -m comment --comment "mon-dnat:vless:in@10.0.0.2" -j ACCEPT
 [200:900000] -A MON_DNAT_FWD -s 10.0.0.2/32 -p tcp -m tcp --sport 8443 -m conntrack --ctstate DNAT -m comment --comment "mon-dnat:vless:out@10.0.0.2" -j ACCEPT
 [0:0] -A MON_DNAT_FWD -m conntrack --ctstate RELATED -m comment --comment "mon-dnat:related" -j ACCEPT
+COMMIT
+"""
+
+MANGLE_DUMP = """\
+*mangle
+:PREROUTING ACCEPT [0:0]
+:FORWARD ACCEPT [0:0]
+:MON_DNAT_MANGLE - [0:0]
+[500:40000] -A FORWARD -j MON_DNAT_MANGLE
 COMMIT
 """
 
@@ -132,9 +142,22 @@ class RestoreScriptTest(unittest.TestCase):
         )
         self.assertIn(f'-A {CHAIN_FORWARD} -p tcp -d 10.0.0.2 --dport 8443 -m conntrack --ctstate DNAT -m comment --comment "mon-dnat:vless:in@10.0.0.2" -j ACCEPT', script)
         self.assertIn(f'-A {CHAIN_FORWARD} -p tcp -s 10.0.0.2 --sport 8443 -m conntrack --ctstate DNAT -m comment --comment "mon-dnat:vless:out@10.0.0.2" -j ACCEPT', script)
-        self.assertEqual(script.count("COMMIT"), 2)
+        self.assertEqual(script.count("COMMIT"), 3)
         self.assertNotIn("statistic", script)
         self.assertNotIn("HMARK", script)
+        # без mask_ttl цепочка mangle объявляется пустой
+        self.assertIn(f":{CHAIN_MANGLE} - [0:0]", script)
+        self.assertNotIn("-j TTL", script)
+        self.assertNotIn("TCPMSS", script)
+
+    def test_mask_ttl_adds_mangle_rules_both_directions(self):
+        script = build_restore_script([rule(mask_ttl=True, protocol="both")])
+        self.assertIn(f'-A {CHAIN_MANGLE} -p tcp -d 10.0.0.2 --dport 8443 -m conntrack --ctstate DNAT -m comment --comment "mon-dnat:vless:ttl-in@10.0.0.2" -j TTL --ttl-set 64', script)
+        self.assertIn(f'-A {CHAIN_MANGLE} -p tcp -s 10.0.0.2 --sport 8443 -m conntrack --ctstate DNAT -m comment --comment "mon-dnat:vless:ttl-out@10.0.0.2" -j TTL --ttl-set 64', script)
+        self.assertIn(f'-A {CHAIN_MANGLE} -p udp -d 10.0.0.2 --dport 8443 -m conntrack --ctstate DNAT -m comment --comment "mon-dnat:vless:ttl-in@10.0.0.2" -j TTL --ttl-set 64', script)
+        # MSS clamp — только tcp и только SYN
+        self.assertIn(f'-A {CHAIN_MANGLE} -p tcp -d 10.0.0.2 --dport 8443 --tcp-flags SYN,RST SYN -m conntrack --ctstate DNAT -m comment --comment "mon-dnat:vless:mss@10.0.0.2" -j TCPMSS --clamp-mss-to-pmtu', script)
+        self.assertNotIn("-p udp -d 10.0.0.2 --dport 8443 --tcp-flags", script)
 
     def test_random_distribution_chains_probabilities(self):
         script = build_restore_script([rule(target_ip="10.0.0.2,10.0.0.3,10.0.0.4", distribution="random")])
@@ -202,7 +225,7 @@ class ParseDumpTest(unittest.TestCase):
 
     def test_summarize_counts_and_missing(self):
         rules = [rule(), rule(name="hop", protocol="udp", listen_port=20000, listen_port_end=30000, target_ip="10.0.0.3", target_port=443)]
-        counters, missing = summarize(rules, NAT_DUMP, FILTER_DUMP)
+        counters, missing = summarize(rules, NAT_DUMP, FILTER_DUMP, MANGLE_DUMP)
         by_name = {c["name"]: c for c in counters}
         self.assertTrue(by_name["vless"]["present"])
         self.assertEqual(by_name["vless"]["conns"], 7)
@@ -221,7 +244,7 @@ class ParseDumpTest(unittest.TestCase):
         nat += '[3:180] -A MON_DNAT_POST -d 10.0.0.5/32 -p tcp -m tcp --dport 8443 -m conntrack --ctstate DNAT -m comment --comment "mon-dnat:vless@10.0.0.5" -j MASQUERADE\n'
         fwd = FILTER_DUMP + '[10:1000] -A MON_DNAT_FWD -d 10.0.0.5/32 -p tcp -m tcp --dport 8443 -m conntrack --ctstate DNAT -m comment --comment "mon-dnat:vless:in@10.0.0.5" -j ACCEPT\n'
         fwd += '[20:2000] -A MON_DNAT_FWD -s 10.0.0.5/32 -p tcp -m tcp --sport 8443 -m conntrack --ctstate DNAT -m comment --comment "mon-dnat:vless:out@10.0.0.5" -j ACCEPT\n'
-        counters, missing = summarize([multi], nat, fwd)
+        counters, missing = summarize([multi], nat, fwd, MANGLE_DUMP)
         self.assertEqual(counters[0]["conns"], 10)
         self.assertEqual(counters[0]["bytes_in"], 21000)
         self.assertEqual([t["ip"] for t in counters[0]["targets"]], ["10.0.0.2", "10.0.0.5"])
@@ -229,12 +252,25 @@ class ParseDumpTest(unittest.TestCase):
         # обе цели на месте, но HMARK-строки нет — без неё DNAT по метке не сработает
         self.assertEqual(missing, ["vless"])
         with_hash = nat + '[13:780] -A MON_DNAT -p tcp -m tcp --dport 443 -m comment --comment "mon-dnat:vless#hash" -j HMARK --hmark-tuple src --hmark-mod 2 --hmark-offset 0x4d440000 --hmark-rnd 0x6d6f6e64\n'
-        self.assertEqual(summarize([multi], with_hash, fwd)[1], [])
+        self.assertEqual(summarize([multi], with_hash, fwd, MANGLE_DUMP)[1], [])
 
     def test_missing_jump_reported(self):
-        counters, missing = summarize([rule()], NAT_DUMP.replace("[10:600] -A PREROUTING -j MON_DNAT\n", ""), FILTER_DUMP)
-        self.assertIn("jump:PREROUTING", missing)
+        counters, missing = summarize([rule()], NAT_DUMP.replace("[10:600] -A PREROUTING -j MON_DNAT\n", ""), FILTER_DUMP, MANGLE_DUMP)
+        self.assertIn("jump:nat/PREROUTING", missing)
         self.assertTrue(counters[0]["present"])
+        # без дампа mangle джамп маскировки считается потерянным
+        self.assertIn("jump:mangle/FORWARD", summarize([rule()], NAT_DUMP, FILTER_DUMP)[1])
+
+    def test_mask_ttl_requires_mangle_rules(self):
+        masked = rule(mask_ttl=True)
+        counters, missing = summarize([masked], NAT_DUMP, FILTER_DUMP, MANGLE_DUMP)
+        self.assertFalse(counters[0]["present"])
+        self.assertEqual(missing, ["vless"])
+        with_ttl = MANGLE_DUMP + (
+            '[1:60] -A MON_DNAT_MANGLE -d 10.0.0.2/32 -p tcp -m tcp --dport 8443 -m conntrack --ctstate DNAT -m comment --comment "mon-dnat:vless:ttl-in@10.0.0.2" -j TTL --ttl-set 64\n'
+            '[1:60] -A MON_DNAT_MANGLE -s 10.0.0.2/32 -p tcp -m tcp --sport 8443 -m conntrack --ctstate DNAT -m comment --comment "mon-dnat:vless:ttl-out@10.0.0.2" -j TTL --ttl-set 64\n'
+        )
+        self.assertEqual(summarize([masked], NAT_DUMP, FILTER_DUMP, with_ttl)[1], [])
 
 
 # Тот же вектор и хэш лежат в panel/backend/tests/test_dnat_profiles.py:
@@ -245,7 +281,7 @@ GOLDEN_RULES = [
     {"name": "vless", "protocol": "tcp", "listen_port": 443, "listen_port_end": 443, "target_ip": "10.0.0.2",
      "target_port": 8443, "masquerade": False, "enabled": False, "comment": ""},
 ]
-GOLDEN_HASH = "41ef543685f03f262ef1774aac8e2b769e7cf80b2270561d6aa5939768a71bc5"
+GOLDEN_HASH = "281199e72b412545ccd7fc9967b02812e5123c266df98e1f97e25d53de7f0327"
 
 
 class HashTest(unittest.TestCase):
@@ -268,6 +304,9 @@ class HashTest(unittest.TestCase):
         other = rule(target_ip="10.0.0.2,10.0.0.3", distribution="round_robin").model_dump()
         self.assertNotEqual(compute_rules_hash([base]), compute_rules_hash([other]))
         self.assertNotEqual(compute_rules_hash([base]), compute_rules_hash([rule(target_ip="10.0.0.2", distribution="random").model_dump()]))
+
+    def test_mask_ttl_changes_hash(self):
+        self.assertNotEqual(compute_rules_hash([rule().model_dump()]), compute_rules_hash([rule(mask_ttl=True).model_dump()]))
 
     def test_enabled_changes_hash(self):
         self.assertNotEqual(

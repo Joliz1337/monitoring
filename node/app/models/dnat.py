@@ -31,6 +31,9 @@ class DnatRule(BaseModel):
     # Подмена адреса источника (MASQUERADE): без неё цель должна маршрутизировать
     # ответы клиенту через эту ноду
     masquerade: bool = True
+    # Маскировка транзита: TTL=64 и MSS clamp на потоках правила — пакеты не выдают
+    # чужие стеки за IP ноды (см. dnat_manager)
+    mask_ttl: bool = False
     enabled: bool = True
     comment: Optional[str] = Field("", max_length=200)
 

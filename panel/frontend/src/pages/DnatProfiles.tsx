@@ -63,6 +63,7 @@ const EMPTY_RULE: DnatRuleData = {
   distribution: 'per_server',
   target_port: 0,
   masquerade: true,
+  mask_ttl: false,
   enabled: true,
   comment: '',
 }
@@ -304,11 +305,17 @@ function RuleForm({
               className={inputCls}
             />
           </div>
-          <div className="col-span-2 sm:col-span-4">
+          <div className="col-span-2 sm:col-span-4 flex flex-wrap gap-x-6 gap-y-2">
             <Tooltip label={t('dnat_profiles.masquerade_hint')} maxWidth={360}>
               <label className="inline-flex items-center gap-1.5 text-xs text-dark-300 cursor-pointer">
                 <input type="checkbox" checked={form.masquerade} onChange={e => update({ masquerade: e.target.checked })} className="accent-accent-500" />
                 {t('dnat_profiles.field_masquerade')}
+              </label>
+            </Tooltip>
+            <Tooltip label={t('dnat_profiles.mask_ttl_hint')} maxWidth={380}>
+              <label className="inline-flex items-center gap-1.5 text-xs text-dark-300 cursor-pointer">
+                <input type="checkbox" checked={form.mask_ttl} onChange={e => update({ mask_ttl: e.target.checked })} className="accent-accent-500" />
+                {t('dnat_profiles.field_mask_ttl')}
               </label>
             </Tooltip>
           </div>
@@ -717,6 +724,13 @@ function RulesTab({
                             </span>
                           </Tooltip>
                         )}
+                        {rule.mask_ttl && (
+                          <Tooltip label={t('dnat_profiles.mask_ttl_hint')} maxWidth={380}>
+                            <span className="px-2 py-0.5 rounded-md text-[11px] bg-dark-700/60 text-dark-200 border border-dark-600/50">
+                              {t('dnat_profiles.mask_ttl_badge')}
+                            </span>
+                          </Tooltip>
+                        )}
                         {splitTargets(rule.target_ip).length > 1 && (
                           <Tooltip label={t(`dnat_profiles.distribution_${rule.distribution ?? 'per_server'}_hint`)} maxWidth={360}>
                             <span className="px-2 py-0.5 rounded-md text-[11px] bg-accent-500/10 text-accent-400 border border-accent-500/20">
@@ -724,7 +738,7 @@ function RulesTab({
                             </span>
                           </Tooltip>
                         )}
-                        {rule.enabled && rule.masquerade && splitTargets(rule.target_ip).length <= 1 && <span className="text-dark-600">—</span>}
+                        {rule.enabled && rule.masquerade && !rule.mask_ttl && splitTargets(rule.target_ip).length <= 1 && <span className="text-dark-600">—</span>}
                       </div>
                     </td>
                     <td className="px-3 py-2 text-dark-400 truncate max-w-xs">{rule.comment || '—'}</td>
