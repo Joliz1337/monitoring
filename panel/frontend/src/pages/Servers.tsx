@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef, FormEvent } from 'react'
+import { useState, useEffect, useMemo, useRef, useCallback, FormEvent } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Plus,
@@ -183,10 +183,28 @@ export default function Servers() {
 
   const addExtra = () => setExtras(prev => [...prev, makeExtraTarget(deploy)])
 
+  const resetForm = useCallback(() => {
+    setShowForm(false)
+    setEditingId(null)
+    setFormData({ name: '', host: '', port: '9100', proxy: '' })
+    setDeploy(DEPLOY_DEFAULTS)
+    setDeployLog([])
+    setPrimaryStatus('idle')
+    setExtras([])
+    setError('')
+  }, [])
+
   useEffect(() => {
     const el = deployLogRef.current
     if (el) el.scrollTop = el.scrollHeight
   }, [deployLog])
+
+  // Все цели автоустановки завершились успешно — форма закрывается, как после обычного добавления
+  useEffect(() => {
+    if (!showForm || !deploy.enabled || primaryStatus !== 'success') return
+    if (extras.some(e => e.status !== 'success')) return
+    resetForm()
+  }, [showForm, deploy.enabled, primaryStatus, extras, resetForm])
 
   const filteredServers = useMemo(() => {
     const q = searchQuery.toLowerCase().trim()
@@ -643,14 +661,7 @@ export default function Servers() {
 
   const handleCancel = () => {
     if (isDeploying) return
-    setShowForm(false)
-    setEditingId(null)
-    setFormData({ name: '', host: '', port: '9100', proxy: '' })
-    setDeploy(DEPLOY_DEFAULTS)
-    setDeployLog([])
-    setPrimaryStatus('idle')
-    setExtras([])
-    setError('')
+    resetForm()
   }
 
   const handleCopyToken = async () => {
