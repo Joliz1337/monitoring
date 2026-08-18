@@ -1,8 +1,8 @@
-import { Terminal, KeyRound, Save, Loader2, Plus, X, Network, Shield } from 'lucide-react'
+import { Terminal, KeyRound, Save, Loader2, Plus, X, Network, Shield, Route } from 'lucide-react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useTranslation } from 'react-i18next'
 import { Tooltip } from '../ui/Tooltip'
-import type { RemnawaveCertProfile, HAProxyConfigProfile, FirewallProfile } from '../../api/client'
+import type { RemnawaveCertProfile, HAProxyConfigProfile, FirewallProfile, DnatProfile } from '../../api/client'
 
 export interface DeployFormData {
   enabled: boolean
@@ -27,6 +27,7 @@ export interface DeployFormData {
   proxyUrl: string
   haproxyProfileId: number | null
   firewallProfileId: number | null
+  dnatProfileId: number | null
 }
 
 export const DEPLOY_DEFAULTS: DeployFormData = {
@@ -52,6 +53,7 @@ export const DEPLOY_DEFAULTS: DeployFormData = {
   proxyUrl: '',
   haproxyProfileId: null,
   firewallProfileId: null,
+  dnatProfileId: null,
 }
 
 interface Props {
@@ -60,6 +62,7 @@ interface Props {
   remnaCertProfiles: RemnawaveCertProfile[]
   haproxyProfiles: HAProxyConfigProfile[]
   firewallProfiles: FirewallProfile[]
+  dnatProfiles: DnatProfile[]
   savingCert: boolean
   onSaveCert: () => void
   onDeleteCert: (id: number) => void
@@ -72,6 +75,7 @@ export default function DeployTargetFields({
   remnaCertProfiles,
   haproxyProfiles,
   firewallProfiles,
+  dnatProfiles,
   savingCert,
   onSaveCert,
   onDeleteCert,
@@ -403,6 +407,23 @@ export default function DeployTargetFields({
           >
             <option value="">{t('servers.deploy_profile_none')}</option>
             {firewallProfiles.map(p => (
+              <option key={p.id} value={p.id}>{p.name}</option>
+            ))}
+          </select>
+        </div>
+
+        <div>
+          <label className="block text-xs text-dark-400 mb-1.5 flex items-center gap-1.5">
+            <Route className="w-3.5 h-3.5" />
+            {t('servers.deploy_dnat_profile')}
+          </label>
+          <select
+            value={deploy.dnatProfileId ?? ''}
+            onChange={(e) => onChange({ dnatProfileId: e.target.value ? Number(e.target.value) : null })}
+            className="input"
+          >
+            <option value="">{t('servers.deploy_profile_none')}</option>
+            {dnatProfiles.map(p => (
               <option key={p.id} value={p.id}>{p.name}</option>
             ))}
           </select>

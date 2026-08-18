@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import async_session, async_session_maker
@@ -104,6 +104,17 @@ def assigned_targets(rules: list[dict], server_index: int) -> dict[str, str]:
         for rule in rules
         if _per_server(rule) and len(targets := split_targets(rule.get("target_ip", ""))) > 1
     }
+
+
+async def link_server_to_profile(server: Server, profile_id: int, db: AsyncSession) -> None:
+    """Привязать сервер к профилю (без commit). Новый сервер встаёт в конец очереди
+    привязки: у уже привязанных IP назначения не меняются, их правила не переприменяются."""
+    last_position = (await db.execute(
+        select(func.max(Server.dnat_link_position)).where(Server.active_dnat_profile_id == profile_id)
+    )).scalar() or 0
+    server.active_dnat_profile_id = profile_id
+    server.dnat_sync_status = "pending"
+    server.dnat_link_position = last_position + 1
 
 
 async def ordered_linked_servers(profile_id: int, db: AsyncSession) -> list[Server]:

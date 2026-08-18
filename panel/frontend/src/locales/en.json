@@ -261,6 +261,7 @@
     "deploy_bindings": "Bind to profiles:",
     "deploy_haproxy_profile": "HAProxy config",
     "deploy_firewall_profile": "Firewall profile",
+    "deploy_dnat_profile": "DNAT profile",
     "deploy_profile_none": "Do not bind",
     "restricted_badge": "Restricted"
   },

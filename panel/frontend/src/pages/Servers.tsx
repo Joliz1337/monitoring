@@ -36,8 +36,10 @@ import {
   RemnawaveCertProfile,
   haproxyProfilesApi,
   firewallProfilesApi,
+  dnatProfilesApi,
   HAProxyConfigProfile,
   FirewallProfile,
+  DnatProfile,
 } from '../api/client'
 import { streamNdjsonGet, StreamUnauthorizedError } from '../utils/ndjsonStream'
 import InfraTree from '../components/Infra/InfraTree'
@@ -160,6 +162,7 @@ export default function Servers() {
   const [remnaCertProfiles, setRemnaCertProfiles] = useState<RemnawaveCertProfile[]>([])
   const [haproxyProfiles, setHaproxyProfiles] = useState<HAProxyConfigProfile[]>([])
   const [firewallProfiles, setFirewallProfiles] = useState<FirewallProfile[]>([])
+  const [dnatProfiles, setDnatProfiles] = useState<DnatProfile[]>([])
   const [deployLog, setDeployLog] = useState<string[]>([])
   const [primaryStatus, setPrimaryStatus] = useState<DeployStatus>('idle')
   const [extras, setExtras] = useState<ExtraTarget[]>([])
@@ -241,6 +244,9 @@ export default function Servers() {
       .catch(() => {})
     firewallProfilesApi.list()
       .then(res => setFirewallProfiles(res.data))
+      .catch(() => {})
+    dnatProfilesApi.list()
+      .then(res => setDnatProfiles(res.data))
       .catch(() => {})
   }, [showForm, editingId])
 
@@ -343,6 +349,7 @@ export default function Servers() {
     new_root_password: d.changePassword ? d.newPassword : null,
     haproxy_profile_id: d.haproxyProfileId ?? null,
     firewall_profile_id: d.firewallProfileId ?? null,
+    dnat_profile_id: d.dnatProfileId ?? null,
   })
 
   // Читает NDJSON-лог фоновой задачи. finished=true только если дошли до 'done'
@@ -969,6 +976,7 @@ export default function Servers() {
                         remnaCertProfiles={remnaCertProfiles}
                         haproxyProfiles={haproxyProfiles}
                         firewallProfiles={firewallProfiles}
+                        dnatProfiles={dnatProfiles}
                         savingCert={savingCert}
                         onSaveCert={handleSaveCert}
                         onDeleteCert={handleDeleteCert}
@@ -1006,6 +1014,7 @@ export default function Servers() {
                         remnaCertProfiles={remnaCertProfiles}
                         haproxyProfiles={haproxyProfiles}
                         firewallProfiles={firewallProfiles}
+                        dnatProfiles={dnatProfiles}
                         savingCert={savingCert}
                         onSaveCert={handleSaveCert}
                         onDeleteCert={handleDeleteCert}

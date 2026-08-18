@@ -1,4 +1,4 @@
-# Monitoring Panel v10.67.0
+# Monitoring Panel v10.68.0
 
 Веб-панель для мониторинга серверов. Собирает метрики с нод с настраиваемым интервалом (по умолчанию 10 сек) и хранит историю локально.
 
@@ -1487,7 +1487,7 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 2. Вводит SSH-данные (порт, логин, пароль или приватный ключ + passphrase) и выбирает доп. компоненты
 3. Frontend отправляет `POST /api/servers/deploy` → бэкенд немедленно возвращает `{"job_id": "<hex>"}` и запускает `asyncio.create_task`
 4. Frontend подписывается на лог через `GET /api/servers/deploy/{job_id}/stream` (NDJSON)
-5. При успехе backend создаёт запись `Server`, применяет SSH-пресет/пароль (`_post_install`) и привязывает к выбранным HAProxy/Firewall-профилям (`_bind_profiles`)
+5. При успехе backend создаёт запись `Server`, применяет SSH-пресет/пароль (`_post_install`) и привязывает к выбранным HAProxy/Firewall/DNAT-профилям (`_bind_profiles`)
 6. Завершённые задачи хранятся 600 секунд (`FINISHED_TTL_SECONDS`) для переподключения, затем удаляются из памяти
 
 **Ограничение:** перезапуск backend-контейнера во время установки прерывает её.
@@ -1499,7 +1499,7 @@ Singleton-сервис `panel/backend/app/services/deploy_job_manager.py`. Уп�
 - Дедупликация строк между реплеем и live-потоком — по индексу `_idx`
 - `_create_server` — создание записи `Server` после успешной установки
 - `_post_install` — постустановочные шаги (SSH-пресет, fail2ban, смена пароля root)
-- `_bind_profiles` — привязка к HAProxy/Firewall-профилям (выполняется на бэке внутри задачи — срабатывает даже при закрытой странице)
+- `_bind_profiles` — привязка к HAProxy/Firewall/DNAT-профилям (выполняется на бэке внутри задачи — срабатывает даже при закрытой странице)
 - `get_deploy_job_manager()` — dependency для получения singleton через FastAPI DI
 
 **SSH-подключение:**
@@ -1557,6 +1557,7 @@ Singleton-сервис `panel/backend/app/services/deploy_job_manager.py`. Уп�
 `DeployRequest` содержит:
 - `haproxy_profile_id: int | None` — привязать к HAProxy-профилю после установки
 - `firewall_profile_id: int | None` — привязать к Firewall-профилю после установки
+- `dnat_profile_id: int | None` — привязать к DNAT-профилю после установки
 - `install_optimizations: bool` — при `true` передаётся `MON_INSTALL_OPTIMIZATIONS=1`
 - `opt_profile: str` — профиль sysctl (`vpn` по умолчанию или `panel`)
 - `nic_mode: str` — NIC-режим (`auto` по умолчанию, либо `multiqueue`/`hybrid`/`rps`)
@@ -1616,6 +1617,7 @@ NODE_SECRET содержит долгоживущие PKI-сертификаты
 3. Если `new_root_password` задан — смена пароля root через ноду API
 4. Если `haproxy_profile_id` задан — `POST /haproxy-profiles/{id}/servers/{server_id}`
 5. Если `firewall_profile_id` задан — `POST /firewall-profiles/{id}/servers/{server_id}`
+6. Если `dnat_profile_id` задан — привязка через `link_server_to_profile()` (общий хелпер с роутером DNAT: сервер встаёт в конец очереди `dnat_link_position`, чтобы у уже привязанных нод IP назначения не поехали) и фоновая раскатка только на этот сервер
 
 Все шаги **best-effort**: ошибки пишутся в лог как NDJSON-события, нода считается успешно добавленной.
 
@@ -1653,10 +1655,10 @@ Frontend сохраняет незавершённые job_id в `localStorage` 
 - `readNdjsonResponse` — общая логика чтения для обеих функций
 
 **Компоненты:**
-- `panel/frontend/src/components/servers/DeployTargetFields.tsx` — переиспользуемые поля SSH/опций/прокси/Remnawave/SSH-пресета/смены пароля; блок «Привязать к профилям» (HAProxy + Firewall); экспортирует `DEPLOY_DEFAULTS` и тип `DeployFormData`
+- `panel/frontend/src/components/servers/DeployTargetFields.tsx` — переиспользуемые поля SSH/опций/прокси/Remnawave/SSH-пресета/смены пароля; блок «Привязать к профилям» (HAProxy + Firewall + DNAT); экспортирует `DEPLOY_DEFAULTS` и тип `DeployFormData`
 - `panel/frontend/src/components/servers/ExtraServerCard.tsx` — карточка дополнительной цели; поле `jobId?` в типе `ExtraTarget`
 
-**i18n:** ключи `deploy_add_extra`, `deploy_btn_multi`, `deploy_success_multi`, `deploy_failed_multi`, `deploy_primary`, `deploy_extra_default_name`, `deploy_extra_ok`, `deploy_extra_failed`, `deploy_extra_retry`, `deploy_extra_remove`, `deploy_bindings`, `deploy_haproxy_profile`, `deploy_firewall_profile`, `deploy_profile_none` в `ru.json` и `en.json`.
+**i18n:** ключи `deploy_add_extra`, `deploy_btn_multi`, `deploy_success_multi`, `deploy_failed_multi`, `deploy_primary`, `deploy_extra_default_name`, `deploy_extra_ok`, `deploy_extra_failed`, `deploy_extra_retry`, `deploy_extra_remove`, `deploy_bindings`, `deploy_haproxy_profile`, `deploy_firewall_profile`, `deploy_dnat_profile`, `deploy_profile_none` в `ru.json` и `en.json`.
 
 **Зависимости:**
 - `asyncssh` (`panel/backend/requirements.txt`)
@@ -1973,7 +1975,7 @@ Replace-атомарно: полное состояние ноды = состо�
 - `panel/backend/app/database.py` — миграция `dnat_profile_columns`
 - `panel/backend/app/routers/dnat_profiles.py` — API роутер (prefix `/dnat-profiles`), `DnatRuleData`, `validate_rule_set`
 - `panel/backend/app/routers/proxy.py` — `/proxy/{id}/dnat/state|reapply|clear`
-- `panel/backend/app/services/dnat_profile_sync.py` — `compute_rules_hash`, `load_rules`, `split_targets`, `render_rules_for_server`, `assigned_targets`, `ordered_linked_servers`, `server_index`, `sync_profile_to_servers`, `clear_dnat_on_servers`, `sync_dnat_to_servers` (исполнитель очереди: синк или снятие)
+- `panel/backend/app/services/dnat_profile_sync.py` — `compute_rules_hash`, `load_rules`, `split_targets`, `render_rules_for_server`, `assigned_targets`, `link_server_to_profile` (общая привязка для роутера и авторазвёртывания), `ordered_linked_servers`, `server_index`, `sync_profile_to_servers`, `clear_dnat_on_servers`, `sync_dnat_to_servers` (исполнитель очереди: синк или снятие)
 - `panel/backend/app/services/node_sync_queue.py` — `KIND_DNAT_PROFILE`
 - `panel/backend/app/services/node_capabilities.py` — `Capability.DNAT`, префикс `/api/dnat`
 - `panel/backend/app/services/recovery_reconciler.py` — `_reconcile_dnat`

@@ -49,6 +49,7 @@ class PostDeployOptions:
     new_root_password: Optional[str] = None
     haproxy_profile_id: Optional[int] = None
     firewall_profile_id: Optional[int] = None
+    dnat_profile_id: Optional[int] = None
 
 
 @dataclass
@@ -344,14 +345,20 @@ class DeployJobManager:
         server_id: int,
         post_opts: PostDeployOptions,
     ) -> None:
-        """Привязка к HAProxy/Firewall-профилям. Best-effort, лог в стрим."""
-        if post_opts.haproxy_profile_id is None and post_opts.firewall_profile_id is None:
+        """Привязка к HAProxy/Firewall/DNAT-профилям. Best-effort, лог в стрим."""
+        if (
+            post_opts.haproxy_profile_id is None
+            and post_opts.firewall_profile_id is None
+            and post_opts.dnat_profile_id is None
+        ):
             return
 
         # Ленивый импорт — роутеры профилей зависят от своих сервисов,
         # импорт на уровне модуля создал бы цикл
+        from app.routers.dnat_profiles import _bg_sync_profile as dnat_sync
         from app.routers.firewall_profiles import _bg_sync_profile as firewall_sync
         from app.routers.haproxy_profiles import _bg_sync_server_start as haproxy_sync_server
+        from app.services.dnat_profile_sync import link_server_to_profile as link_dnat_profile
 
         if post_opts.haproxy_profile_id is not None:
             try:
@@ -384,6 +391,21 @@ class DeployJobManager:
                 self._emit(job, {"type": "log", "line": "[panel] Привязан к Firewall-профилю"})
             except Exception as exc:  # noqa: BLE001 — best-effort постшаг
                 self._emit(job, {"type": "log", "line": f"[panel] Firewall-профиль не привязан: {exc}"})
+
+        if post_opts.dnat_profile_id is not None:
+            try:
+                async with async_session_maker() as db:
+                    result = await db.execute(select(Server).where(Server.id == server_id))
+                    server = result.scalar_one_or_none()
+                    if server:
+                        await link_dnat_profile(server, post_opts.dnat_profile_id, db)
+                        await db.commit()
+                asyncio.ensure_future(
+                    dnat_sync(post_opts.dnat_profile_id, server_ids=[server_id])
+                )
+                self._emit(job, {"type": "log", "line": "[panel] Привязан к DNAT-профилю"})
+            except Exception as exc:  # noqa: BLE001 — best-effort постшаг
+                self._emit(job, {"type": "log", "line": f"[panel] DNAT-профиль не привязан: {exc}"})
 
     async def subscribe(self, job_id: str) -> AsyncIterator[dict]:
         """Поток событий задачи: реплей накопленного лога + live до завершения."""

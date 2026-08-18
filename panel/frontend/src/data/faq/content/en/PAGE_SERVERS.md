@@ -15,7 +15,8 @@ Every node under monitoring: adding, connectivity checks, SSH auto-install and o
 
 1. Enable "Install node over SSH" in the form, provide the port, login and either a password or a private key.
 2. Tick what else to install: system optimisations (with profile and NIC mode), Cloudflare WARP, a Remnawave node, an HTTP proxy for restricted environments.
-3. Start it — the install log streams live.
+3. In the "Bind to profiles" block pick a ready HAProxy config, Firewall and DNAT profile — the panel binds the new server to them and rolls the rules out right after the install.
+4. Start it — the install log streams live.
 
 The install runs on the backend: closing the tab won't stop it, and you can return to the log for 10 minutes after it finishes. Only restarting the panel container aborts it. The install timeout is 25 minutes; the SSH password is never stored.
 

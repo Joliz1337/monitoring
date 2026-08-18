@@ -17,6 +17,7 @@ from app.services.dnat_profile_sync import (
     assigned_targets,
     clear_dnat_on_servers,
     compute_rules_hash,
+    link_server_to_profile,
     load_rules,
     ordered_linked_servers,
     render_rules_for_server,
@@ -416,14 +417,7 @@ async def link_server(
     if not server:
         raise HTTPException(404, "Server not found")
 
-    # Новый сервер встаёт в конец очереди привязки: у уже привязанных IP назначения
-    # не меняются, и их правила не переприменяются
-    last_position = (await db.execute(
-        select(func.max(Server.dnat_link_position)).where(Server.active_dnat_profile_id == profile_id)
-    )).scalar() or 0
-    server.active_dnat_profile_id = profile_id
-    server.dnat_sync_status = "pending"
-    server.dnat_link_position = last_position + 1
+    await link_server_to_profile(server, profile_id, db)
     await db.commit()
 
     bg.add_task(_bg_sync_profile, profile_id, server_ids=[server_id])
