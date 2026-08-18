@@ -150,6 +150,7 @@ class DeployRequest(BaseModel):
     new_root_password: Optional[str] = None
     haproxy_profile_id: Optional[int] = None
     firewall_profile_id: Optional[int] = None
+    dnat_profile_id: Optional[int] = None
 
     @field_validator('socks5_proxy')
     @classmethod
@@ -251,6 +252,7 @@ async def deploy_server(
         new_root_password=req.new_root_password,
         haproxy_profile_id=req.haproxy_profile_id,
         firewall_profile_id=req.firewall_profile_id,
+        dnat_profile_id=req.dnat_profile_id,
     )
 
     job_id = get_deploy_job_manager().start(params, req.name, server_url, post_opts)

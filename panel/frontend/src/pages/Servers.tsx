@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef, FormEvent } from 'react'
+import { useState, useEffect, useMemo, useRef, useCallback, FormEvent } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Plus,
@@ -36,8 +36,10 @@ import {
   RemnawaveCertProfile,
   haproxyProfilesApi,
   firewallProfilesApi,
+  dnatProfilesApi,
   HAProxyConfigProfile,
   FirewallProfile,
+  DnatProfile,
 } from '../api/client'
 import { streamNdjsonGet, StreamUnauthorizedError } from '../utils/ndjsonStream'
 import InfraTree from '../components/Infra/InfraTree'
@@ -160,6 +162,7 @@ export default function Servers() {
   const [remnaCertProfiles, setRemnaCertProfiles] = useState<RemnawaveCertProfile[]>([])
   const [haproxyProfiles, setHaproxyProfiles] = useState<HAProxyConfigProfile[]>([])
   const [firewallProfiles, setFirewallProfiles] = useState<FirewallProfile[]>([])
+  const [dnatProfiles, setDnatProfiles] = useState<DnatProfile[]>([])
   const [deployLog, setDeployLog] = useState<string[]>([])
   const [primaryStatus, setPrimaryStatus] = useState<DeployStatus>('idle')
   const [extras, setExtras] = useState<ExtraTarget[]>([])
@@ -180,10 +183,28 @@ export default function Servers() {
 
   const addExtra = () => setExtras(prev => [...prev, makeExtraTarget(deploy)])
 
+  const resetForm = useCallback(() => {
+    setShowForm(false)
+    setEditingId(null)
+    setFormData({ name: '', host: '', port: '9100', proxy: '' })
+    setDeploy(DEPLOY_DEFAULTS)
+    setDeployLog([])
+    setPrimaryStatus('idle')
+    setExtras([])
+    setError('')
+  }, [])
+
   useEffect(() => {
     const el = deployLogRef.current
     if (el) el.scrollTop = el.scrollHeight
   }, [deployLog])
+
+  // Все цели автоустановки завершились успешно — форма закрывается, как после обычного добавления
+  useEffect(() => {
+    if (!showForm || !deploy.enabled || primaryStatus !== 'success') return
+    if (extras.some(e => e.status !== 'success')) return
+    resetForm()
+  }, [showForm, deploy.enabled, primaryStatus, extras, resetForm])
 
   const filteredServers = useMemo(() => {
     const q = searchQuery.toLowerCase().trim()
@@ -241,6 +262,9 @@ export default function Servers() {
       .catch(() => {})
     firewallProfilesApi.list()
       .then(res => setFirewallProfiles(res.data))
+      .catch(() => {})
+    dnatProfilesApi.list()
+      .then(res => setDnatProfiles(res.data))
       .catch(() => {})
   }, [showForm, editingId])
 
@@ -343,6 +367,7 @@ export default function Servers() {
     new_root_password: d.changePassword ? d.newPassword : null,
     haproxy_profile_id: d.haproxyProfileId ?? null,
     firewall_profile_id: d.firewallProfileId ?? null,
+    dnat_profile_id: d.dnatProfileId ?? null,
   })
 
   // Читает NDJSON-лог фоновой задачи. finished=true только если дошли до 'done'
@@ -636,14 +661,7 @@ export default function Servers() {
 
   const handleCancel = () => {
     if (isDeploying) return
-    setShowForm(false)
-    setEditingId(null)
-    setFormData({ name: '', host: '', port: '9100', proxy: '' })
-    setDeploy(DEPLOY_DEFAULTS)
-    setDeployLog([])
-    setPrimaryStatus('idle')
-    setExtras([])
-    setError('')
+    resetForm()
   }
 
   const handleCopyToken = async () => {
@@ -969,6 +987,7 @@ export default function Servers() {
                         remnaCertProfiles={remnaCertProfiles}
                         haproxyProfiles={haproxyProfiles}
                         firewallProfiles={firewallProfiles}
+                        dnatProfiles={dnatProfiles}
                         savingCert={savingCert}
                         onSaveCert={handleSaveCert}
                         onDeleteCert={handleDeleteCert}
@@ -1006,6 +1025,7 @@ export default function Servers() {
                         remnaCertProfiles={remnaCertProfiles}
                         haproxyProfiles={haproxyProfiles}
                         firewallProfiles={firewallProfiles}
+                        dnatProfiles={dnatProfiles}
                         savingCert={savingCert}
                         onSaveCert={handleSaveCert}
                         onDeleteCert={handleDeleteCert}

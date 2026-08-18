@@ -18,7 +18,7 @@ set -u
 
 # Bumped when the script logic changes — the panel compares this against what a
 # node reports and auto-reinstalls on drift, so updates roll out without clicks.
-WATCHDOG_VERSION="2.2.0"
+WATCHDOG_VERSION="2.3.0"
 
 STATE_DIR="/opt/monitoring/antiddos"
 STATE_FILE="$STATE_DIR/state.json"
@@ -472,6 +472,19 @@ read_softnet_counters() {
 # Xray, переконфигурация). На живой ноде это давало фон в сотни за цикл при
 # НУЛЕВЫХ ListenOverflows — и вотчдог поднимал аварийный режим на ровном месте.
 # ListenOverflows инкрементируется строго при полной очереди accept.
+# Пакеты, прошедшие транзитом (FORWARD), а не к локальным сокетам: на DNAT-релее
+# это почти весь rx, и считать их флудом нельзя — они и есть полезная нагрузка.
+read_forwarded() {
+    local f="/proc/net/snmp" n
+    [ -r "$f" ] || { echo 0; return 0; }
+    n=$(awk '/^Ip:/ {
+            if (!hdr) { for (i = 1; i <= NF; i++) if ($i == "ForwDatagrams") col = i; hdr = 1 }
+            else if (col) { print $col + 0; exit }
+        }' "$f" 2>/dev/null)
+    [[ "$n" =~ ^[0-9]+$ ]] && echo "$n" || echo 0
+}
+
+
 read_listen_overflows() {
     local f="/proc/net/netstat" n
     [ -r "$f" ] || { echo 0; return 0; }
@@ -554,8 +567,13 @@ sample_signals() {
 
     # pps + avg packet size (flood of tiny packets). /proc/net/dev rows are
     # "iface: rx_bytes rx_packets ..." — split on ':' then whitespace so leading
-    # indentation doesn't shift columns.
+    # indentation doesn't shift columns. Из pps вычитаются пакеты FORWARD
+    # (ForwDatagrams из /proc/net/snmp): транзит DNAT-релея — сотни тысяч мелких
+    # ACK/SYN клиентов с одного интерфейса — иначе стабильно выглядит как флуд,
+    # хотя к самой ноде из них не адресован ни один; аварийный режим на INPUT
+    # такому трафику ничем не поможет и только шумит уведомлениями.
     local cur_pkts cur_bytes prev_pkts prev_bytes dpkts dbytes pps avg
+    local cur_fwd prev_fwd dfwd local_pkts
     read cur_pkts cur_bytes < <(awk -F: '
         NR>2 {
             iface=$1; gsub(/^ +/, "", iface)
@@ -571,11 +589,14 @@ sample_signals() {
     dpkts=$(( cur_pkts - prev_pkts )); dbytes=$(( cur_bytes - prev_bytes ))
     [ "$dpkts" -lt 0 ] && dpkts=0
     [ "$dbytes" -lt 0 ] && dbytes=0
-    pps=$(( dpkts / INTERVAL ))
+    cur_fwd=$(read_forwarded); prev_fwd=$(read_prev fwdpkts); save_prev fwdpkts "$cur_fwd"
+    dfwd=$(( cur_fwd - prev_fwd )); [ "$dfwd" -lt 0 ] && dfwd=0
+    local_pkts=$(( dpkts - dfwd )); [ "$local_pkts" -lt 0 ] && local_pkts=0
+    pps=$(( local_pkts / INTERVAL ))
     avg=0; [ "$dpkts" -gt 0 ] && avg=$(( dbytes / dpkts ))
     if [ "$pps" -ge "$PPS_THRESHOLD" ] 2>/dev/null && [ "$avg" -gt 0 ] && [ "$avg" -le "$SMALL_PKT_BYTES" ] 2>/dev/null; then
         SIG_WEAK=1
-        SIG_REASON="${SIG_REASON:+$SIG_REASON, }pps ${pps}, avg ${avg}B"
+        SIG_REASON="${SIG_REASON:+$SIG_REASON, }pps ${pps} local (fwd $(( dfwd / INTERVAL ))), avg ${avg}B"
     fi
 
     # softnet drops — STRONG, но с двумя оговорками.

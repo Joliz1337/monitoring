@@ -83,6 +83,7 @@ If the command is run inside the Hetzner Rescue System, the installer provisions
 | **HAProxy** | Rules, start/stop/reload, logs, config editor on every node |
 | **HAProxy configs** | Centralized configuration profiles with mass rollout to servers |
 | **Firewall profiles** | UFW rule templates: one click — identical firewall across a server group |
+| **DNAT routing** | Kernel-level port forwarding (iptables): TCP/UDP, port ranges, per-rule counters — transit with no CPU cost |
 | **Remnawave nginx** | Nginx config profiles for Remnawave nodes with real-IP forwarding setup |
 | **Wildcard SSL** | Wildcard certificate issuance (Cloudflare DNS), auto-renewal, deployment to nodes |
 | **Bulk actions** | One operation across multiple servers at once |

@@ -1,4 +1,4 @@
-# Monitoring Panel v10.61.0
+# Monitoring Panel v10.68.1
 
 Веб-панель для мониторинга серверов. Собирает метрики с нод с настраиваемым интервалом (по умолчанию 10 сек) и хранит историю локально.
 
@@ -21,9 +21,10 @@
 - **HAProxy Configs** — централизованные профили конфигурации HAProxy с массовой раскаткой на серверы: CRUD профилей и правил, балансировщик нагрузки, привязка серверов, history синхронизаций; запуск HAProxy per-server и bulk-запуск всех остановленных нод одним кликом; **авто-запуск при привязке** (start + enable autostart) и **авто-остановка при отвязке** (stop + disable autostart) сервера
 - **Remnawave Nginx** — централизованные профили конфигурации nginx перед Remnawave-нодой (каталог на хосте, по умолчанию `/opt/remnawave`), как HAProxy Configs: конструктор правил (gRPC-локации, произвольные proxy-локации), raw-редактор с pre-flight валидацией `nginx -t`, четыре схемы передачи реального IP клиента в Xray (напрямую, за CDN, за HAProxy по PROXY protocol, универсальная), привязка серверов с доменом на каждый (шаблон конфига хранит `{{DOMAIN}}`), sync с drift-детекцией по хэшу отрендеренного контента, retry для офлайн-нод, импорт существующего конфига с ноды
 - **Firewall Profiles** — шаблоны UFW с массовой раскаткой на серверы: CRUD профилей, привязка 1 сервер ↔ 1 активный профиль, history синхронизаций, node-API-port-guard (защита связи панели с нодой через порт 9100), drift-детекция по SHA256-хэшу; вкладка «Серверы» — поиск по имени/адресу, группировка доступных серверов по папкам со сворачиванием, скрытие занятых серверов с переключателем «Показать занятые»
+- **DNAT-маршрутизация** — профили проброса портов средствами ядра нод (iptables nat DNAT + MASQUERADE + FORWARD): та же модель, что у Firewall Profiles (CRUD профилей и правил, 1 сервер ↔ 1 профиль, sync с drift-детекцией по SHA256, очередь отложенной раскатки для офлайн-нод, история), плюс страница сервера с живыми счётчиками соединений/трафика по каждому правилу и кнопками «Переприменить»/«Снять правила»; TCP, UDP и диапазоны портов, без userspace-прокси
 - **Анти-DDoS** — многослойная защита от DDoS-атак на нодах: дежурный режим без лимитов, аварийный режим (iptables-цепочка `ANTIDDOS`: SYNPROXY + hashlimit, пороги авто-масштабируются рендерером тюнинга по CPU/RAM ноды) включаемый вручную или автоматически локальным watchdog по сигналам из `/proc`, whitelist на ipset с ежечасной автосинхронизацией (активен только в аварийном режиме); whitelist собирается из трёх источников — авто (ноды + панель), ручные CIDR и авто-источники по URL (список IP/CIDR формат-независимо парсится из JSON/plain text/HTML, например Cloudflare/Yandex Cloud); страница с независимыми контролами автодетекта и аварийного режима по нодам, редактированием ручного whitelist и управлением авто-источниками; установка watchdog на ноды по умолчанию при установке/обновлении агента, панель — backstop
 - **Системные оптимизации** — единый рендерер на ноде (`tune-sysctl.sh`) вычисляет sysctl/лимиты/HAProxy `maxconn` из MemTotal/nproc самой ноды; панель передаёт входные файлы, а не готовый конфиг (гейт по версии ноды ≥ 10.6.0), и видит дрейф хоста (ресайз VPS) отдельным флагом
-- **Авто-восстановление ноды** — при возвращении сервера в сеть панель автоматически сверяет состояние firewall (UFW), HAProxy-конфига, статуса HAProxy и IP Blocklist с ожидаемым; переприменяет только сбившееся (drift-detection по SHA256-хэшам); без Telegram-уведомлений
+- **Авто-восстановление ноды** — при возвращении сервера в сеть панель автоматически сверяет состояние firewall (UFW), HAProxy-конфига, статуса HAProxy, IP Blocklist и DNAT-правил с ожидаемым; переприменяет только сбившееся (drift-detection по SHA256-хэшам); без Telegram-уведомлений
 - **Авторазвёртывание ноды** — установка ноды мониторинга прямо из вкладки «Серверы»: подключение по SSH (пароль или приватный ключ), запуск `install.sh --unattended` на целевом сервере; установка выполняется **в фоне на бэкенде** — закрытие вкладки браузера не прерывает процесс; живой лог переподключаем (GET-стрим с реплеем); опционально устанавливает WARP и ноду Remnawave с сохранёнными именованными сертификатами; **массовый деплой** — произвольное количество дополнительных целей, каждая со своим SSH и опциями; после успешного деплоя бэкенд автоматически привязывает сервер к выбранным HAProxy-профилю и/или Firewall-профилю; незавершённые задачи переживают перезагрузку страницы (восстановление через localStorage + `GET /deploy/jobs`); **поддержка Hetzner Rescue System** — при обнаружении rescue-среды `install.sh` устанавливает Ubuntu 24.04, перезагружается, панель ждёт ноду до 40 мин через поллинг и завершает деплой автоматически
 - **SOCKS5-прокси до ноды** — опциональное поле у сервера (`ip:port` или `ip:port@login:pass`): при заполнении все запросы панели к этой ноде идут через указанный прокси вместо прямого соединения — и HTTP (метрики, proxy-роутер, синхронизация блок-листов/анти-DDoS, SSE-терминал, тест подключения), и SSH при авторазвёртывании ноды
 - **Канал обновлений** — переключатель «Стабильный» (`main`) / «Dev» (`dev`) в разделе Настройки; определяет, откуда панель качает свой и нодовский код при обновлении, конфиги оптимизаций/анти-DDoS и Docker-образы (тег `:latest` для main, `:dev` для dev)
@@ -111,6 +112,9 @@ panel/
 │       ├── pages/WildcardSSL.tsx        # Wildcard SSL: выпуск/продление/деплой + настройки Cloudflare и серверов
 │       ├── components/wildcard/CertificateMaterials.tsx  # Раскрывающийся блок PEM-материалов сертификата: копирование/скачивание, приватный ключ скрыт под кнопкой «Показать»
 │       ├── pages/FirewallProfiles.tsx   # Firewall Profiles: двухколоночный layout (список + детали с табами Rules/Servers/Log)
+│       ├── pages/DnatProfiles.tsx       # DNAT-профили: тот же layout, что у Firewall Profiles (i18n)
+│       ├── pages/Dnat.tsx               # Страница сервера: состояние DNAT на ноде, счётчики по правилам, «Переприменить»/«Снять правила»
+│       ├── utils/dnat.ts                # formatListen/formatTarget/protocolLabel — общее форматирование правил DNAT
 │       ├── pages/Servers.tsx            # Список серверов + InfraTree
 │       ├── components/ui/Skeleton.tsx   # Skeleton-лоадеры (Skeleton, ServerCardSkeleton, MetricCardSkeleton, ChartSkeleton)
 │       ├── components/Infra/            # Infrastructure Tree компоненты
@@ -132,6 +136,7 @@ panel/
 │       ├── routers/notes.py             # Shared Notes API роутер (SSE + REST)
 │       ├── routers/wildcard_ssl.py      # Wildcard SSL API роутер: CRUD сертификатов, деплой, настройки
 │       ├── routers/firewall_profiles.py # Firewall Profiles API роутер: CRUD профилей и правил, sync, log
+│       ├── routers/dnat_profiles.py     # DNAT Profiles API роутер: CRUD профилей и правил, sync, log, проверка набора (validate_rule_set)
 │       ├── routers/bulk_actions.py      # Bulk Actions API роутер: sync-эндпоинты + фоновые задачи /bulk/jobs
 │       ├── routers/traffic.py           # Traffic API роутер: чтение истории трафика из базы панели
 │       └── services/
@@ -681,7 +686,7 @@ interface NicInfo {
 2. **Перед пакетной рассылкой** (`blocklist_manager.py`, `firewall_profile_sync.py`, `haproxy_profile_sync.py`, `antiddos_manager.py`, `remnawave_nginx_sync.py`, `torrent_blocker.py`, `time_sync.py`, `wildcard_ssl.py`, `recovery_reconciler.py`) — эти сервисы ходят на ноды напрямую через `get_node_client()`, минуя `proxy_request()`, поэтому каждый перед отправкой сам отфильтровывает закрытые ноды через `server_allows()`. Закрытая нода не получает сетевой запрос вообще и помечается статусом `"denied"` в соответствующем поле синхронизации (`firewall_sync_status`, `remnawave_nginx_sync_status`, результат blocklist/anti-DDoS push) — отдельно от `"pending"`/`queued`, которым помечаются офлайн-ноды и сетевые сбои (см. «Очередь отложенной синхронизации нод» ниже). Различие важно: `pending` уходит в ретраи с backoff, а `denied` — осознанный отказ владельца ноды, повторные попытки его не изменят.
 
 **Публикация панелью:**
-- `GET /api/servers` отдаёт поле `Server.node_capabilities` как разобранную карту (`parse_capabilities(s.node_capabilities)`) — `null` для ноды без ограничений, иначе все десять доменов со значениями. Фронт по этой карте прячет разделы UI, которых у ноды всё равно нет, вместо того чтобы показывать их и ловить `409` по клику.
+- `GET /api/servers` отдаёт поле `Server.node_capabilities` как разобранную карту (`parse_capabilities(s.node_capabilities)`) — `null` для ноды без ограничений, иначе все одиннадцать доменов со значениями. Фронт по этой карте прячет разделы UI, которых у ноды всё равно нет, вместо того чтобы показывать их и ловить `409` по клику.
 - Карта обновляется в трёх местах: фоновым циклом метрик (`metrics_collector.py`, из каждого ответа `/api/metrics`), кнопкой «Тест» на странице серверов (`routers/servers.py`, `capabilities_from_version()` на ответ `/api/version` — самый быстрый способ узнать права, не дожидаясь цикла метрик) и сразу после того, как заново установленная нода отвечает панели (`deploy_job_manager.py`, `_wait_node_online()` — единственный момент, когда панель уже говорит с новой нодой, а записи о её правах ещё нет; без неё вся пост-настройка после установки уткнулась бы в пачку отказов).
 - `metrics_collector.py` при обнаруженном изменении карты (`_handle_capability_change()`) делает две вещи: `drop_forbidden()` вычищает из очереди отложенной синхронизации долги по разделам, которые только что закрыли (открывшийся раздел ничего не чистит — под него просто снова начнут проходить запросы), и перезапускает `_launch_reconcile()` — тот же механизм, что после возврата ноды в сеть (см. «Авто-восстановление ноды» ниже), досинхронизирует то, что могло открыться.
 - Кэш HAProxy-данных (`_cache_server_haproxy()`) заранее отбирает из `HAPROXY_ENDPOINTS` только разрешённые нодой эндпоинты (домены `haproxy`/`firewall` разные) — без этого фоновый цикл раз в 5 минут гарантированно собирал бы отказы по каждому закрытому эндпоинту у каждой такой ноды.
@@ -841,7 +846,7 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 
 Саму скорость `_build_snapshot()` берёт из `TrafficIngest.observe()` (см. «Traffic» ниже), а не считает отдельно: счётчик и формула дельты должны быть одни на всю панель, иначе график скорости разошёлся бы с историей трафика. Ответ ноды приходит туда как есть, а снапшоты всей флотилии собираются одним проходом — исключение на одной ноде не роняет остальные, скорость такого сервера в этом цикле просто нулевая.
 
-**Права ноды:** тот же ответ несёт поле `capabilities` — карту прав, которые владелец ноды выдал панели (см. «Права ноды (NODE_CAPABILITIES)» выше). Это основной канал, по которому панель узнаёт об ограничениях: `null` — без ограничений, иначе все десять доменов со значениями `no`/`ro`/`rw`.
+**Права ноды:** тот же ответ несёт поле `capabilities` — карту прав, которые владелец ноды выдал панели (см. «Права ноды (NODE_CAPABILITIES)» выше). Это основной канал, по которому панель узнаёт об ограничениях: `null` — без ограничений, иначе все одиннадцать доменов со значениями `no`/`ro`/`rw`.
 
 **Load Average:** нода собирает `load_avg_1`, `load_avg_5`, `load_avg_15` из `/proc/loadavg`. На dashboard (стандартный и подробный вид) Load Average отображается в футере карточки с иконкой Activity. На странице `ServerDetails.tsx` — в строке Uptime (`LA: X.XX / X.XX / X.XX`), в секции System Information и в виде графика Load Average History рядом с Network Traffic (цвет `#f59e0b`). Поле `load_avg_1` есть в интерфейсе `HistoryData`.
 
@@ -850,11 +855,21 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
 | GET | /api/proxy/{id}/haproxy/status | Статус |
+| GET | /api/proxy/{id}/haproxy/stats | Живая статистика из stats socket ноды (`show stat` + `show info`), read-only |
 | GET | /api/proxy/{id}/haproxy/rules | Список правил (только чтение — CRUD правил идёт через HAProxy Configs, см. ниже) |
 | POST | /api/proxy/{id}/haproxy/start | Запустить |
 | POST | /api/proxy/{id}/haproxy/stop | Остановить |
 | POST | /api/proxy/{id}/haproxy/reload | Перезагрузить конфиг (graceful, `systemctl reload`) |
 | POST | /api/proxy/{id}/haproxy/restart | Перезапустить процесс (`systemctl restart`) |
+
+**Живая статистика (секция «Живая статистика» на странице `HAProxy.tsx`):**
+
+Срез `show stat` с бекендами, серверами и фронтендами: статус (UP/DOWN/MAINT), health-check, текущие/пиковые сессии, rate, байты, вес, время в текущем состоянии; в шапке — версия HAProxy, аптайм и текущие соединения из `show info`. Механика на стороне ноды — в [node/DOCUMENTATION.md](../node/DOCUMENTATION.md#haproxy).
+
+- Эндпоинт ноды включён в `HAPROXY_ENDPOINTS` коллектора (`metrics_collector.py`, ключ `stats`) — данные попадают в `ServerCache.last_haproxy_data` и отдаются через `/haproxy/cached` вместе с остальными, включая быстрый 5-секундный цикл при активности UI.
+- Живое обновление: секция поллит `GET /proxy/{id}/haproxy/stats` через собственный `useAutoRefresh` только пока раскрыта; данные из кэша панели не затирают live-данные свежее 15 секунд (`lastStatsLiveRef`).
+- Мягкая деградация: 404 от старой ноды без эндпоинта → `statsSupported=false` и подсказка обновить ноду (жёсткого версионного гейта нет — read-only запрос безопасен); `available: false` от ноды → сообщение по `reason` (для `socket_not_configured` — подсказка перегенерировать конфиг и перезапустить процесс). Отказ эндпоинта в коллекторе уже гасится per-endpoint `try/except` в `_cache_server_haproxy`.
+- Для отображения frontend `X` и backend `backend_X` (разные `pxname` в выводе `show stat`, так их именует генератор конфига) склеиваются в одну группу (`statsGroups` в `HAProxy.tsx`).
 
 **Перезагрузка конфига vs перезапуск процесса:**
 
@@ -1024,7 +1039,8 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 - **Blocklist** (`blocklist_manager.py`) — `sync_all_nodes()`/`sync_single_node_by_id()` делят ноды на живые и офлайн: офлайн сразу отмечаются как отложенные (`queued: true` в результате, без попытки HTTP), сбой у живой ноды (таймаут, отказ) тоже ставится в очередь. Пакетный исполнитель — `sync_nodes_by_ids(server_ids)`: собирает общие списки (`build_shared_lists()`) один раз на весь набор нод, а не на каждую отдельно.
 - **Anti-DDoS whitelist** (`antiddos_manager.py`) — `push_whitelist_all()` делит так же; в ответе поле `queued` — число нод, чьё изменение отложено. Исполнитель — `push_whitelist_to_servers(server_ids)`.
 - **Firewall Profiles** (`firewall_profile_sync.py`) — `sync_profile_to_servers()` передаёт офлайн-ноды в `_queue_offline_servers()` (лог `FirewallSyncLog.status="skipped"` + постановка в очередь, статус сервера остаётся `pending`) вместо ожидания `APPLY_TIMEOUT_SECONDS=120` сек с итоговым `failed` без единого повтора; сетевой сбой у живой ноды тоже ставится в очередь. Флаг `queue_failures=False` отключает это при вызове из самой очереди (исполнитель — `sync_firewall_to_servers(server_ids)`), иначе собственная постановка долга обнулила бы её же backoff и превратила повторы в непрерывное долбление ноды.
-- **Авто-восстановление ноды** (`recovery_reconciler.py`) — после успешного `reconcile_recovered_server()` вызывает `clear()` для подсистем (firewall, blocklist), которые сам привёл в соответствие напрямую, чтобы воркер очереди не повторял ту же работу.
+- **DNAT Profiles** (`dnat_profile_sync.py`) — та же схема, что у Firewall Profiles: `KIND_DNAT_PROFILE`, исполнитель `sync_dnat_to_servers(server_ids)`, лог `DnatSyncLog.status="skipped"` для офлайн-нод, `queue_failures=False` из очереди. Тот же вид долга ставится и при отвязке офлайн-ноды: исполнитель, не найдя у ноды профиля, снимает с неё правила (`clear_dnat_on_servers`).
+- **Авто-восстановление ноды** (`recovery_reconciler.py`) — после успешного `reconcile_recovered_server()` вызывает `clear()` для подсистем (firewall, blocklist, dnat), которые сам привёл в соответствие напрямую, чтобы воркер очереди не повторял ту же работу.
 
 **Фронтенд:** офлайн-нода в ответе синхронизации помечена `queued: true` вместо простого `success: false` — Blocklist.tsx и FirewallProfiles.tsx показывают её отдельно от настоящих ошибок (ключ i18n `blocklist.sync_queued`; в тосте FirewallProfiles отложенные считаются отдельной цифрой от успехов и сбоев), а не как сбой синхронизации. `api/client.ts` — поле `queued?: boolean` в соответствующих типах результатов.
 
@@ -1165,7 +1181,7 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
-| GET/PUT | /api/remnawave/settings | Настройки (api_url, api_token, cookie_secret, enabled, collection_interval, anomaly_use_custom_bot, anomaly_ip_enabled, anomaly_hwid_enabled, anomaly_ua_enabled, anomaly_devdata_enabled, anomaly_ip_margin, anomaly_ip_confirm_count, anomaly_asn_margin, anomaly_ip_smart_enabled, anomaly_ip_smart_traffic_gb, anomaly_ua_patterns, traffic_threshold_gb, traffic_confirm_count) |
+| GET/PUT | /api/remnawave/settings | Настройки (api_url, api_token, cookie_secret, enabled, collection_interval, anomaly_use_custom_bot, anomaly_ip_enabled, anomaly_hwid_enabled, anomaly_ua_enabled, anomaly_devdata_enabled, anomaly_ip_margin, anomaly_ip_confirm_count, anomaly_asn_margin, anomaly_ip_smart_enabled, anomaly_ip_smart_traffic_gb, anomaly_devdata_smart_enabled, anomaly_devdata_smart_traffic_gb, anomaly_ua_patterns, traffic_threshold_gb, traffic_confirm_count) |
 | POST | /api/remnawave/settings/test | Проверить подключение к Remnawave API |
 | GET/POST/DELETE | /api/remnawave/ignored-users | Управление игнорируемыми пользователями |
 | GET | /api/remnawave/status | Статус коллектора |
@@ -1214,7 +1230,7 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 | `ip_exceeds_limit` | IP-адресов > `hwid_device_limit + anomaly_ip_margin` (default 2); подавляется, если уникальных ASN ≤ `hwid_device_limit + anomaly_asn_margin` (default 0), либо если суточный трафик пользователя ниже `anomaly_ip_smart_traffic_gb` (default 20 ГБ, см. «Умное определение» ниже) | [Игнор IP] [Сбросить] | `anomaly_ip_enabled` |
 | `hwid_exceeds_limit` | HWID-устройств > `hwid_device_limit`; триггерит авто-очистку через API | нет уведомления | `anomaly_hwid_enabled` |
 | `unknown_user_agent` | User-Agent не совпадает с реестром известных клиентов (`anomaly_ua_patterns`, см. ниже) | [Игнор HWID] | `anomaly_ua_enabled` |
-| `invalid_device_data` | На HWID-устройстве пусто платформа/модель, либо версия ОС без цифр (`VERSION_PATTERN`) | [Игнор HWID] | `anomaly_devdata_enabled` |
+| `invalid_device_data` | На HWID-устройстве пусто платформа/модель, либо версия ОС без цифр (`VERSION_PATTERN`); уведомление подавляется, если суточный трафик пользователя ниже `anomaly_devdata_smart_traffic_gb` (default 20 ГБ, см. «Умное определение» ниже) | [Игнор HWID] | `anomaly_devdata_enabled` |
 | `traffic_exceeds_limit` | Потребление трафика за 30 минут > `traffic_threshold_gb` ГБ N раз подряд | нет кнопки | `traffic_anomaly_enabled` (отдельный, не входит в четвёрку ниже) |
 
 **Пер-тип переключатели**: `anomaly_enabled` — мастер-переключатель (при выключении не проверяется ничего). Первые четыре типа из таблицы дополнительно управляются отдельными Boolean-полями `anomaly_ip_enabled`/`anomaly_hwid_enabled`/`anomaly_ua_enabled`/`anomaly_devdata_enabled` (default TRUE, NULL трактуется как включено — обратная совместимость со строками до миграции). Выключенный тип не проверяется ни в коллекторе (`xray_stats_collector._check_anomalies` — соответствующий SQL-запрос вообще пропускается), ни в эндпоинте `GET /api/remnawave/anomalies`. Трафик-детектор имеет свой независимый `traffic_anomaly_enabled` и не участвует в этой четвёрке.
@@ -1225,6 +1241,7 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 - `anomaly_ip_confirm_count` (default 5) — сколько подряд обнаружений превышения нужно для отправки уведомления в Telegram.
 - `anomaly_asn_margin` (default 0) — уведомление об IP-аномалии подавляется, если число уникальных ASN (провайдеров) среди текущих IP пользователя не превышает `hwid_device_limit + anomaly_asn_margin`: много IP от одного оператора мобильной связи (CGNAT) — не аномалия.
 - `anomaly_ip_smart_enabled` (Boolean, default TRUE) / `anomaly_ip_smart_traffic_gb` (Float, default 20.0) — «умное определение»: перед отправкой уведомления об IP-аномалии панель запрашивает суточный расход трафика пользователя через Remnawave API (`RemnawaveAPI.get_user_traffic_bytes`) и подавляет уведомление, если он ниже порога. Отсекает ложные срабатывания, которые не ловит ASN-проверка выше: пользователь в разъездах даёт и много IP, и много разных провайдеров, но в одиночку не выкачивает десятки ГБ в сутки — в отличие от подписки, которой пользуются несколько человек. Проверка идёт до ASN-блока (один запрос к Remnawave против резолва всех IP через RIPE Stat) и делает `continue` до отправки, поэтому счётчик срабатываний и `known_ips` не фиксируются — при росте трафика уведомление придёт со всем накопившимся списком новых IP. Данные о трафике недоступны (ошибка API, незнакомый формат ответа) — уведомление отправляется (fail-open).
+- `anomaly_devdata_smart_enabled` (Boolean, default TRUE) / `anomaly_devdata_smart_traffic_gb` (Float, default 20.0) — то же «умное определение» для аномалии `invalid_device_data`: перед отправкой уведомления панель сверяет суточный расход трафика пользователя (тот же `_user_daily_traffic`, результат кэшируется на цикл — у одного пользователя может быть несколько невалидных устройств) и подавляет уведомление, если он ниже порога: кривые данные устройства интересны, только когда через подписку гонят заметный трафик. Проверка идёт после cooldown-проверки, при подавлении cooldown не фиксируется — при росте трафика уведомление придёт в ближайшем цикле. Данные о трафике недоступны — уведомление отправляется (fail-open, как у IP-варианта).
 - `anomaly_ua_patterns` (Text, nullable) — реестр известных VPN-клиентов для проверки User-Agent, одна строка — одна маска (сопоставляется с начала UA, регистронезависимо). NULL/пустое значение — используется встроенный список `DEFAULT_UA_PATTERNS`.
 
 Сервис `panel/backend/app/services/known_clients.py`: реестр — маски: `*` — любое количество символов, `?` — ровно один, остальное — буквально (`_mask_to_regex()`: `re.escape` + замена `\*`→`.*`, `\?`→`.`). `DEFAULT_UA_PATTERNS` — единственный источник встроенного списка (v2raytun, Happ, Hiddify и т.д.); `default_ua_text()` — список как текст для предзаполнения формы; `build_ua_pattern(raw) -> re.Pattern` — компилирует объединяющий паттерн `^(?:...|...)` с `IGNORECASE`; пустой ввод откатывается на встроенный список. Отдельной валидации формата нет — маска не может быть синтаксически некорректной, поэтому `PUT /api/remnawave/settings` не возвращает HTTP 400 за содержимое реестра.
@@ -1250,7 +1267,7 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 - Status filter по умолчанию: `ACTIVE`
 - Toggle "Использовать другого Telegram бота" в настройках аномалий; поля token/chat_id показываются только при включённом toggle
 - При включённом мастер-тумблере `anomaly_enabled` — 4 суб-тумблера пер-тип проверок (IP/HWID/UA/данные устройства)
-- Под тумблером «IP превышает лимит» — три числовых поля (запас IP, число подтверждений, запас ASN) и отдельный суб-блок «Умное определение»: тумблер + числовое поле порога трафика в ГБ/сутки, видны только при включённом `anomaly_ip_enabled`; под тумблером «Неизвестный User-Agent» — короткий label «Известные клиенты (по одному на строку)» и textarea реестра масок (моноширинный шрифт); очистка textarea и сохранение возвращает встроенный список клиентов. Объяснение параметров простым языком — в FAQ вкладки «Настройки» (обзорная статья `PAGE_REMNAWAVE.md`, раздел «Настройки проверок»), не в подсказках под полями
+- Под тумблером «IP превышает лимит» — три числовых поля (запас IP, число подтверждений, запас ASN) и отдельный суб-блок «Умное определение»: тумблер + числовое поле порога трафика в ГБ/сутки, видны только при включённом `anomaly_ip_enabled`; такой же суб-блок «Умное определение» — под тумблером «Невалидные данные устройства» (виден при включённом `anomaly_devdata_enabled`); под тумблером «Неизвестный User-Agent» — короткий label «Известные клиенты (по одному на строку)» и textarea реестра масок (моноширинный шрифт); очистка textarea и сохранение возвращает встроенный список клиентов. Объяснение параметров простым языком — в FAQ вкладки «Настройки» (обзорная статья `PAGE_REMNAWAVE.md`, раздел «Настройки проверок»), не в подсказках под полями
 - Кнопка игнора аномалии — контекстная: `ip_exceeds_limit` → «Игнор IP», остальные типы → «Игнор HWID»
 - Вкладка Settings: двухколоночный grid (lg-брейкпоинт). Левая колонка: API / Collection / Anomaly Notifications. Правая колонка: Traffic Anomaly Triggers (порог в ГБ + confirm count). Save, Ignored Users, списки игнора и Danger Zone — на всю ширину под grid. Секции Ignored Users / Ignore IP / Ignore HWID — в трёхколоночном grid. Контент растянут на всю ширину без ограничения (max-w-5xl/max-w-3xl); поле поиска и IP-фильтр — без ограничения max-w-sm.
 - Все строки локализованы через i18n (ru.json / en.json)
@@ -1470,7 +1487,7 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 2. Вводит SSH-данные (порт, логин, пароль или приватный ключ + passphrase) и выбирает доп. компоненты
 3. Frontend отправляет `POST /api/servers/deploy` → бэкенд немедленно возвращает `{"job_id": "<hex>"}` и запускает `asyncio.create_task`
 4. Frontend подписывается на лог через `GET /api/servers/deploy/{job_id}/stream` (NDJSON)
-5. При успехе backend создаёт запись `Server`, применяет SSH-пресет/пароль (`_post_install`) и привязывает к выбранным HAProxy/Firewall-профилям (`_bind_profiles`)
+5. При успехе backend создаёт запись `Server`, применяет SSH-пресет/пароль (`_post_install`) и привязывает к выбранным HAProxy/Firewall/DNAT-профилям (`_bind_profiles`)
 6. Завершённые задачи хранятся 600 секунд (`FINISHED_TTL_SECONDS`) для переподключения, затем удаляются из памяти
 
 **Ограничение:** перезапуск backend-контейнера во время установки прерывает её.
@@ -1482,7 +1499,7 @@ Singleton-сервис `panel/backend/app/services/deploy_job_manager.py`. Уп�
 - Дедупликация строк между реплеем и live-потоком — по индексу `_idx`
 - `_create_server` — создание записи `Server` после успешной установки
 - `_post_install` — постустановочные шаги (SSH-пресет, fail2ban, смена пароля root)
-- `_bind_profiles` — привязка к HAProxy/Firewall-профилям (выполняется на бэке внутри задачи — срабатывает даже при закрытой странице)
+- `_bind_profiles` — привязка к HAProxy/Firewall/DNAT-профилям (выполняется на бэке внутри задачи — срабатывает даже при закрытой странице)
 - `get_deploy_job_manager()` — dependency для получения singleton через FastAPI DI
 
 **SSH-подключение:**
@@ -1540,6 +1557,7 @@ Singleton-сервис `panel/backend/app/services/deploy_job_manager.py`. Уп�
 `DeployRequest` содержит:
 - `haproxy_profile_id: int | None` — привязать к HAProxy-профилю после установки
 - `firewall_profile_id: int | None` — привязать к Firewall-профилю после установки
+- `dnat_profile_id: int | None` — привязать к DNAT-профилю после установки
 - `install_optimizations: bool` — при `true` передаётся `MON_INSTALL_OPTIMIZATIONS=1`
 - `opt_profile: str` — профиль sysctl (`vpn` по умолчанию или `panel`)
 - `nic_mode: str` — NIC-режим (`auto` по умолчанию, либо `multiqueue`/`hybrid`/`rps`)
@@ -1599,6 +1617,7 @@ NODE_SECRET содержит долгоживущие PKI-сертификаты
 3. Если `new_root_password` задан — смена пароля root через ноду API
 4. Если `haproxy_profile_id` задан — `POST /haproxy-profiles/{id}/servers/{server_id}`
 5. Если `firewall_profile_id` задан — `POST /firewall-profiles/{id}/servers/{server_id}`
+6. Если `dnat_profile_id` задан — привязка через `link_server_to_profile()` (общий хелпер с роутером DNAT: сервер встаёт в конец очереди `dnat_link_position`, чтобы у уже привязанных нод IP назначения не поехали) и фоновая раскатка только на этот сервер
 
 Все шаги **best-effort**: ошибки пишутся в лог как NDJSON-события, нода считается успешно добавленной.
 
@@ -1606,7 +1625,7 @@ NODE_SECRET содержит долгоживущие PKI-сертификаты
 
 Frontend сохраняет незавершённые job_id в `localStorage` (`deploy_active_jobs_v1`). При загрузке страницы вызывается `restoreDeployJobs` — сверяет сохранённые job_id с ответом `GET /api/servers/deploy/jobs` и переподключает активные задачи.
 
-**Авто-скрытие после успеха:** через ~6 секунд (`AUTO_HIDE_MS`) после успешного деплоя лог скрывается, а extra-карточка удаляется.
+**Завершение:** когда все цели (основная + extra) завершились успешно, форма закрывается и сбрасывается (`resetForm`) — как после обычного добавления сервера. При частичном успехе форма остаётся открытой для повтора неудачных целей; успешная основная цель и успешные extra-карточки при этом убираются через ~6 секунд (`AUTO_HIDE_MS`).
 
 **Регистрация роутера:** `server_deploy.router` зарегистрирован в `main.py` до `servers.router`, чтобы статичные пути (`/servers/deploy`, `/servers/remnawave-certs`) матчились раньше параметрического `GET /servers/{id}`.
 
@@ -1636,10 +1655,10 @@ Frontend сохраняет незавершённые job_id в `localStorage` 
 - `readNdjsonResponse` — общая логика чтения для обеих функций
 
 **Компоненты:**
-- `panel/frontend/src/components/servers/DeployTargetFields.tsx` — переиспользуемые поля SSH/опций/прокси/Remnawave/SSH-пресета/смены пароля; блок «Привязать к профилям» (HAProxy + Firewall); экспортирует `DEPLOY_DEFAULTS` и тип `DeployFormData`
+- `panel/frontend/src/components/servers/DeployTargetFields.tsx` — переиспользуемые поля SSH/опций/прокси/Remnawave/SSH-пресета/смены пароля; блок «Привязать к профилям» (HAProxy + Firewall + DNAT); экспортирует `DEPLOY_DEFAULTS` и тип `DeployFormData`
 - `panel/frontend/src/components/servers/ExtraServerCard.tsx` — карточка дополнительной цели; поле `jobId?` в типе `ExtraTarget`
 
-**i18n:** ключи `deploy_add_extra`, `deploy_btn_multi`, `deploy_success_multi`, `deploy_failed_multi`, `deploy_primary`, `deploy_extra_default_name`, `deploy_extra_ok`, `deploy_extra_failed`, `deploy_extra_retry`, `deploy_extra_remove`, `deploy_bindings`, `deploy_haproxy_profile`, `deploy_firewall_profile`, `deploy_profile_none` в `ru.json` и `en.json`.
+**i18n:** ключи `deploy_add_extra`, `deploy_btn_multi`, `deploy_success_multi`, `deploy_failed_multi`, `deploy_primary`, `deploy_extra_default_name`, `deploy_extra_ok`, `deploy_extra_failed`, `deploy_extra_retry`, `deploy_extra_remove`, `deploy_bindings`, `deploy_haproxy_profile`, `deploy_firewall_profile`, `deploy_dnat_profile`, `deploy_profile_none` в `ru.json` и `en.json`.
 
 **Зависимости:**
 - `asyncssh` (`panel/backend/requirements.txt`)
@@ -1905,6 +1924,64 @@ Replace-атомарно: полное состояние ноды = состо�
 - `node/app/models/firewall_profile.py` — Pydantic модели: `ProfileRule`, `ProfileApplyRequest`, `ProfileApplyResponse`, `ProfileStateResponse`
 - `node/app/routers/firewall_profile.py` — `POST /api/firewall/profile/apply` (asyncio.Lock), `GET /api/firewall/profile/state`
 
+### DNAT Profiles (проброс портов через iptables nat)
+
+Маршрутизация трафика «как в HAProxy» (входящий порт → адрес:порт), но средствами ядра ноды: netfilter переписывает адрес назначения (DNAT), подменяет источник (MASQUERADE) и пропускает поток через FORWARD. Нет userspace-прокси — нет и его цены по CPU; UDP пробрасывается наравне с TCP, диапазон портов — одним правилом. Нет и того, что даёт HAProxy: терминации TLS, разбора доменов, PROXY protocol — цель видит адрес ноды, а не клиента. Устройство модуля на ноде — [node/DOCUMENTATION.md](../node/DOCUMENTATION.md#dnat-маршрутизация).
+
+Архитектурно — копия Firewall Profiles: один активный профиль на сервер (`Server.active_dnat_profile_id`), JSON-массив правил в `rules_json`, раскатка через `POST /api/dnat/apply` на ноде, drift по SHA256, очередь отложенной синхронизации для офлайн-нод, история в `dnat_sync_log`. Отличия от firewall перечислены ниже, остальное — по образцу.
+
+**Правило:** `name` (`^[a-zA-Z0-9_-]{1,64}$`, уникально в профиле, на ноде становится меткой `-m comment`), `protocol` (`tcp`/`udp`/`both`), `listen_port`, `listen_port_end` (диапазон; конец, равный началу, схлопывается в `null`), `target_ip` (один unicast IPv4 или несколько через запятую — см. балансировку ниже; хранится как `a,b,c` без пробелов, дубли схлопываются, не больше `MAX_TARGETS_PER_RULE = 32`), `target_port` (`0` — сохранить входящий порт), `masquerade` (по умолчанию `true`), `mask_ttl` (по умолчанию `false` — маскировка транзита на ноде: TTL=64 в обе стороны + MSS clamp; входит в хэш; галочка «Маскировать транзит» и бейдж «TTL 64» в форме/таблице правил, подсказка объясняет, что TCP-опции клиентов она не скрывает), `enabled`, `comment`. Выключенное правило остаётся в профиле, но на ноду не уходит.
+
+**Несколько IP назначения — режимы (`distribution`).** `per_server` (по умолчанию) — распределяет панель, нода получает один IP; `random`/`round_robin`/`client_hash` — нода получает весь список и раскидывает новые соединения сама (`-m statistic` / `HMARK`, см. [node/DOCUMENTATION.md](../node/DOCUMENTATION.md#dnat-маршрутизация)); `render_rules_for_server` в этих режимах список не трогает, `assigned_targets` пуст, счётчики на странице сервера показываются по каждой цели (`DnatRuleCounters.targets`, подстроки в таблице). Режимы ноды требуют агента 10.24.0. Далее про `per_server`: `render_rules_for_server(rules, server_index)` подставляет в правило `targets[server_index % len(targets)]`, где `server_index` — место сервера в порядке привязки (`Server.dnat_link_position`, ставится как `max+1` при привязке, сбрасывается при отвязке/удалении профиля; `ordered_linked_servers()` сортирует по нему с `id` как запасным ключом и один раз донумеровывает серверы, привязанные до появления колонки). Первый привязанный сервер → первый IP, дальше по кругу; новый сервер встаёт в конец, поэтому у остальных адреса не меняются и лишних переприменений нет. Это распределение входных нод по целям, а не балансировка соединений внутри ноды. Следствие для хэшей: ожидаемый набор у каждого сервера свой, поэтому `dnat_rules_hash` сравнивается с хэшем **отрендеренного** под этот сервер набора (`_store_rules`, `GET /{id}` → `is_synced`, `_reconcile_dnat`), а раскатка считает порядок по всем привязанным серверам, даже когда синхронизируется один (`sync_profile_to_servers`). `GET /{id}` отдаёт по серверу `link_position` (с 1) и `targets` — `{имя правила: IP}` для правил с несколькими адресами; фронт показывает `#N` и чипы `правило → IP` во вкладке «Серверы», бейдж «балансер ×N» в таблице правил.
+
+**Проверка набора (`validate_rule_set`, `routers/dnat_profiles.py`)** — зеркало `validate_rules` ноды, срабатывает при любом изменении правил (`_store_rules`) до записи в БД, ответ `HTTP 409`: дубликат имени; включённое правило, закрывающее порт API ноды 9100/tcp; пересечение портов у включённых правил с общим протоколом. Правило, которое нода отвергнет, не должно попадать в профиль и вечно висеть в `failed`. Предупреждение о SSH (`ssh_port_covered`, порт 22/tcp) — только индикатор в UI, как у firewall.
+
+**Хэш (`compute_rules_hash(rules)`, `services/dnat_profile_sync.py`)** — SHA256 канонического JSON списка правил (по имени, без комментария), считается от набора, отрендеренного под сервер; формула обязана совпадать с нодой, совпадение закреплено общим «золотым» вектором в `tests/test_dnat_profiles.py` и `node/tests/test_dnat.py`.
+
+**Синхронизация (`sync_profile_to_servers`)** — как у firewall: `denied` для нод с закрытым доменом `dnat` (без постановки в очередь), офлайн-ноды → `_queue_offline_servers()` (`skipped` в логе, `KIND_DNAT_PROFILE` в очереди), онлайн — `POST /api/dnat/apply` под `asyncio.Semaphore(10)`, таймаут 60 с; `404` от ноды — «На ноде нет модуля DNAT — обновите агент ноды» (агент < 10.23.0). Флага `force` нет: единственный жёсткий запрет (порт 9100) обходить незачем. Успех пишет `dnat_rules_hash`/`dnat_last_sync_at`/`dnat_sync_status="synced"`.
+
+**Отвязка и удаление профиля снимают правила с ноды** — в отличие от firewall-профилей: нода хранит DNAT-правила у себя и восстанавливает после ребута, так что отвязанная нода без этого пробрасывала бы трафик бесконечно, без профиля, который бы этим управлял. `clear_dnat_on_servers(server_ids, queue_failures, profile_id)` (`services/dnat_profile_sync.py`): онлайн-нодам — `POST /api/dnat/clear` под семафором (лог `DnatSyncLog.status="cleared"`, `dnat_rules_hash` сбрасывается; `404` от старого агента считается успехом — снимать нечего), офлайн-нодам — запись `skipped` и долг `KIND_DNAT_PROFILE` в очереди. Исполнитель очереди `sync_dnat_to_servers` различает ноды по наличию профиля: с профилем — досинхронизировать, без профиля («сироты», отвязанные пока лежали) — снять правила. Ту же развилку знает `_reconcile_dnat` реконсилера: у ноды без профиля, но с правилами в ответе `/api/dnat/state`, правила снимаются (`"cleared"` — в `RECONCILED_STATES`, чтобы долг из очереди снялся), иначе `"no_profile"`. Ручное снятие — `POST /proxy/{id}/dnat/clear` со страницы сервера.
+
+**Схема БД:** `dnat_profiles` (`id`, `name` unique, `description`, `rules_json`, `position`, `created_at`, `updated_at`), `dnat_sync_log` (`server_id` FK, `profile_id` FK SET NULL, `status` success/failed/skipped/cleared, `message`, `rules_hash`, `created_at`; индексы по `created_at` и `profile_id`); в `servers` — `active_dnat_profile_id` (FK SET NULL), `dnat_rules_hash`, `dnat_last_sync_at`, `dnat_sync_status` (`synced`/`pending`/`failed`/`denied`). Таблицы создаёт `create_all`, колонки `servers` добавляет `run_migrations` (`dnat_profile_columns`).
+
+**API:**
+
+| Метод | Endpoint | Описание |
+|-------|----------|----------|
+| GET | /dnat-profiles | Список профилей со счётчиками привязанных/синхронизированных |
+| POST | /dnat-profiles | Создать профиль (пустой или с правилами; набор проверяется) |
+| GET | /dnat-profiles/{id} | Профиль с `rules_hash` и привязанными серверами (`is_synced`, `sync_status`, `last_sync_at`) |
+| PUT | /dnat-profiles/{id} | Имя/описание/полный набор правил; при смене правил — фоновая раскатка (pending только серверам, чей отрендеренный хэш изменился) |
+| POST | /dnat-profiles/{id}/clone | Копия профиля |
+| DELETE | /dnat-profiles/{id} | Удалить: серверы отвязываются, с их нод правила снимаются фоном |
+| POST/PUT/DELETE | /dnat-profiles/{id}/rules[/{index}] | Правила по индексу; `409` при нарушении набора; фоновая раскатка на все привязанные |
+| POST/DELETE | /dnat-profiles/{id}/servers/{server_id} | Привязать (раскатка только на этот сервер) / отвязать — с ноды снимаются все DNAT-правила (`clear_dnat_on_servers`, фоном) |
+| POST | /dnat-profiles/{id}/sync[/{server_id}] | Раскатка на все привязанные / на один |
+| GET | /dnat-profiles/{id}/log | История синхронизаций |
+| GET | /dnat-profiles/available-servers | Все серверы для привязки (`active_profile_id`, `sync_status`, `folder`) |
+| GET | /proxy/{id}/dnat/state | Живое состояние с ноды: правила, `healthy`/`missing`, `ip_forward`, счётчики по правилам |
+| POST | /proxy/{id}/dnat/reapply | Ручное самолечение на ноде |
+| POST | /proxy/{id}/dnat/clear | Снять все правила с ноды; панель сбрасывает `dnat_rules_hash`, а при привязанном профиле ставит `pending` — желаемое состояние снова расходится с фактическим |
+
+**Frontend:**
+- `pages/DnatProfiles.tsx` — двухколоночный layout и три вкладки как у Firewall Profiles (Rules / Servers с поиском, папками и «Показать занятые» / Log с автообновлением), полностью через i18n (`dnat_profiles.*`). Форма правила: имя (при редактировании не меняется — это ключ метки на ноде), протокол, входящий порт и конец диапазона, IP и порт назначения (0 — тот же порт), «Правило включено» (пауза без удаления, подсказка), MASQUERADE с подсказкой, комментарий; клиентская валидация дублирует серверную по формату. В таблице правил — тумблер вкл/выкл (Eye/EyeOff), бейджи «выключено»/«без MASQ», предупреждение при перехвате порта SSH; имя сервера во вкладке Servers ведёт на страницу сервера. Ошибки pydantic (`detail` массивом) сворачиваются в первую `msg`.
+- `components/servers/BandwidthLimitCard.tsx` — карточка «Лимит полосы» на странице сервера (над терминалом): `GET/POST /proxy/{id}/system/bandwidth-limit` → нода ставит `tc cake`/`tbf` на дефолтный интерфейс и восстанавливает сам (см. node/DOCUMENTATION.md «Лимит полосы»); тумблер + Мбит/с + «Применить», статус «N Мбит/с через cake на eth0» / «задан, но на интерфейсе нет — нода восстановит»; домен `system`, `404` от старого агента → «обновите ноду до 10.25.0». Ключи `server_details.bandwidth_*`.
+- `pages/Dnat.tsx` (`/{uid}/server/{id}/dnat`, кнопка «DNAT-маршрутизация» на странице сервера рядом с «Трафик») — опрос `GET /proxy/{id}/dnat/state` каждые 5 с (`useAutoRefresh`), три карточки (здоровье: работает/расхождение/`iptables` недоступен/правил нет; `ip_forward`; суммарные соединения и байты), таблица правил с кумулятивными счётчиками и скоростями между двумя опросами (`computeRates`: соединений/с, бит/с в обе стороны), статус по правилу (активно/нет в ядре/выключено), баннер профиля. Кнопки «Переприменить»/«Снять правила» — только при праве записи домена `dnat`; `404` от ноды → заглушка «агент не поддерживает, обновите до 10.23.0».
+- `api/client.ts` — типы `DnatRuleData`, `DnatProfile*`, `DnatNodeState`, `DnatRuleCounters`; `dnatProfilesApi`; `proxyApi.getDnatState/reapplyDnat/clearDnat`; домен `dnat` в `NODE_CAPABILITY_DOMAINS` (подпись `node_caps.domain_dnat`).
+- Route `dnat-profiles` и `server/:serverId/dnat` (lazy), пункт меню «DNAT-маршрутизация» (иконка Route) после Firewall профилей, FAQ `PAGE_DNAT_PROFILES` (ru/en).
+
+**Файлы:**
+- `panel/backend/app/models.py` — `DnatProfile`, `DnatSyncLog`; поля `Server.active_dnat_profile_id/dnat_rules_hash/dnat_last_sync_at/dnat_sync_status/dnat_link_position`
+- `panel/backend/app/database.py` — миграция `dnat_profile_columns`
+- `panel/backend/app/routers/dnat_profiles.py` — API роутер (prefix `/dnat-profiles`), `DnatRuleData`, `validate_rule_set`
+- `panel/backend/app/routers/proxy.py` — `/proxy/{id}/dnat/state|reapply|clear`
+- `panel/backend/app/services/dnat_profile_sync.py` — `compute_rules_hash`, `load_rules`, `split_targets`, `render_rules_for_server`, `assigned_targets`, `link_server_to_profile` (общая привязка для роутера и авторазвёртывания), `ordered_linked_servers`, `server_index`, `sync_profile_to_servers`, `clear_dnat_on_servers`, `sync_dnat_to_servers` (исполнитель очереди: синк или снятие)
+- `panel/backend/app/services/node_sync_queue.py` — `KIND_DNAT_PROFILE`
+- `panel/backend/app/services/node_capabilities.py` — `Capability.DNAT`, префикс `/api/dnat`
+- `panel/backend/app/services/recovery_reconciler.py` — `_reconcile_dnat`
+- `panel/backend/tests/test_dnat_profiles.py` — «золотой» хэш, проверка набора, схема правила, балансировка (разбор списка IP, раздача по кругу, разные хэши у разных серверов, режимы ноды не рендерятся)
+- `panel/frontend/src/pages/DnatProfiles.tsx`, `pages/Dnat.tsx`, `utils/dnat.ts`, `api/client.ts`, `App.tsx`, `components/Layout/Layout.tsx`, `pages/ServerDetails.tsx`, `components/FAQ/faq.types.ts`, `data/faq/content/{ru,en}/PAGE_DNAT_PROFILES.md`, `locales/{ru,en}.json` (`dnat_profiles`, `dnat`, `node_caps.domain_dnat`)
+
 ### Анти-DDoS защита
 
 Централизованное управление многослойной анти-DDoS защитой на нодах (правила и детект живут на ноде, см. node/DOCUMENTATION.md — здесь только панельная часть: настройки, агрегированный статус, массовые действия, whitelist).
@@ -2015,7 +2092,7 @@ Whitelist можно наполнять из внешних списков по 
 
 Точка входа: `reconcile_recovered_server(server_id, semaphore) -> RecoveryReport`.
 
-`RecoveryReport` (@dataclass): `server_id` + статусы по четырём подсистемам.
+`RecoveryReport` (@dataclass): `server_id` + статусы по подсистемам (firewall, haproxy_cfg, haproxy_run, remnawave_nginx, blocklist, dnat).
 
 Логика — сверяет фактическое состояние ноды с ожидаемым по контрольной сумме (drift-detection) и переприменяет **только то, что реально сбилось**:
 
@@ -2026,6 +2103,7 @@ Whitelist можно наполнять из внешних списков по 
 | **HAProxy автозапуск** | `GET /api/haproxy/status` → `running` | `ServerCache.last_haproxy_data` (состояние до падения) | `POST /api/haproxy/start` если был запущен и конфиг валиден |
 | **IP Blocklist** | — | — | Всегда переотправляет permanent-списки обоих направлений через `blocklist_manager.sync_single_node_by_id` |
 | **Remnawave Nginx** | `GET /api/remnawave/nginx/config` с ноды → sha256 нормализованного контента | ожидаемый hash отрендеренного (per-domain) конфига профиля, привязанного к серверу | `remnawave_nginx_sync.sync_profile_to_servers` на один сервер, только если сервер привязан к профилю и есть домен |
+| **DNAT** | `GET /api/dnat/state` → `rules_hash` + флаг `healthy`; у ноды без профиля — непустой список `rules` | `dnat_profile_sync.compute_rules_hash` профиля | `dnat_profile_sync.sync_profile_to_servers`; без профиля — `clear_dnat_on_servers`; нода и сама возвращает правила из своего файла состояния — здесь ловится потеря файла, правки профиля и отвязка, пришедшиеся на простой |
 
 Особенности:
 - Каждая подсистема сверяется только если нода пропускает соответствующий домен (`server_allows(server, Capability.FIREWALL/HAPROXY/REMNAWAVE, write=True)`, `NODE_CAPABILITIES`) — закрытый раздел не читается вовсе и не считается дрейфом: `"denied"` — один из `RECONCILED_STATES` наравне с `"in_sync"`/`"reapplied"`/`"no_profile"`, реконсилер не должен путать сознательное ограничение владельца ноды с рассинхроном, который надо чинить.
@@ -2034,7 +2112,7 @@ Whitelist можно наполнять из внешних списков по 
 - Результат пишется одной строкой в лог (`logger.info "recovery_reconcile_done ..."`). Telegram-уведомлений нет.
 - Переприменения firewall/HAProxy дополнительно логируются в `FirewallSyncLog` / `HAProxySyncLog`.
 - На ноде изменений нет — используются существующие эндпоинты.
-- После сверки вызывается `clear()` очереди отложенной синхронизации нод (`node_pending_sync`, см. выше) для подсистем, приведённых в соответствие здесь напрямую (firewall, blocklist) — иначе фоновый воркер очереди через полминуты повторил бы ту же самую работу.
+- После сверки вызывается `clear()` очереди отложенной синхронизации нод (`node_pending_sync`, см. выше) для подсистем, приведённых в соответствие здесь напрямую (firewall, blocklist, dnat) — иначе фоновый воркер очереди через полминуты повторил бы ту же самую работу.
 
 **Файлы:**
 - `panel/backend/app/services/recovery_reconciler.py` — `RecoveryReport` dataclass, `reconcile_recovered_server()`

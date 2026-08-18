@@ -245,6 +245,7 @@ class CallSiteCoverageTest(unittest.TestCase):
         "services/antiddos_manager.py",
         "services/blocklist_manager.py",
         "services/cpu_affinity_sync.py",
+        "services/dnat_profile_sync.py",
         "services/firewall_profile_sync.py",
         "services/haproxy_profile_sync.py",
         "services/metrics_collector.py",

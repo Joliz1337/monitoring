@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select, desc, func
+from sqlalchemy import select, desc, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional, Any, AsyncGenerator
 from datetime import datetime, timedelta, timezone
@@ -514,6 +514,16 @@ async def get_haproxy_status(
     return await proxy_request(server, "/api/haproxy/status")
 
 
+@router.get("/{server_id}/haproxy/stats")
+async def get_haproxy_stats(
+    server_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    server = await get_server_by_id(server_id, db)
+    return await proxy_request(server, "/api/haproxy/stats", timeout=10.0)
+
+
 @router.get("/{server_id}/haproxy/rules")
 async def get_haproxy_rules(
     server_id: int,
@@ -692,6 +702,70 @@ async def disable_firewall(
 ):
     server = await get_server_by_id(server_id, db)
     return await proxy_request(server, "/api/haproxy/firewall/disable", method="POST")
+
+
+# ==================== DNAT (проброс портов) ====================
+
+@router.get("/{server_id}/dnat/state")
+async def get_dnat_state(
+    server_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    server = await get_server_by_id(server_id, db)
+    return await proxy_request(server, "/api/dnat/state", timeout=20.0)
+
+
+@router.post("/{server_id}/dnat/reapply")
+async def reapply_dnat(
+    server_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    server = await get_server_by_id(server_id, db)
+    return await proxy_request(server, "/api/dnat/reapply", method="POST", timeout=60.0)
+
+
+@router.post("/{server_id}/dnat/clear")
+async def clear_dnat(
+    server_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    server = await get_server_by_id(server_id, db)
+    result = await proxy_request(server, "/api/dnat/clear", method="POST", timeout=60.0)
+    if result.get("success"):
+        # Нода больше ничего не пробрасывает: контрольная сумма профиля на ней
+        # недействительна, привязанный профиль снова ждёт раскатки
+        await db.execute(
+            update(Server).where(Server.id == server_id).values(
+                dnat_rules_hash=None,
+                dnat_sync_status="pending" if server.active_dnat_profile_id else None,
+            )
+        )
+        await db.commit()
+    return result
+
+
+@router.get("/{server_id}/system/bandwidth-limit")
+async def get_bandwidth_limit(
+    server_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    server = await get_server_by_id(server_id, db)
+    return await proxy_request(server, "/api/system/bandwidth-limit", timeout=20.0)
+
+
+@router.post("/{server_id}/system/bandwidth-limit")
+async def set_bandwidth_limit(
+    server_id: int,
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    server = await get_server_by_id(server_id, db)
+    return await proxy_request(server, "/api/system/bandwidth-limit", method="POST", json_data=data, timeout=40.0)
 
 
 # ==================== Traffic Tracking ====================

@@ -16,7 +16,7 @@ import {
 import { useTranslation } from 'react-i18next'
 import { Tooltip } from '../ui/Tooltip'
 import DeployTargetFields, { type DeployFormData } from './DeployTargetFields'
-import type { RemnawaveCertProfile, HAProxyConfigProfile, FirewallProfile } from '../../api/client'
+import type { RemnawaveCertProfile, HAProxyConfigProfile, FirewallProfile, DnatProfile } from '../../api/client'
 
 export type DeployStatus = 'idle' | 'running' | 'success' | 'error'
 
@@ -45,6 +45,7 @@ interface Props {
   remnaCertProfiles: RemnawaveCertProfile[]
   haproxyProfiles: HAProxyConfigProfile[]
   firewallProfiles: FirewallProfile[]
+  dnatProfiles: DnatProfile[]
   savingCert: boolean
   onSaveCert: () => void
   onDeleteCert: (id: number) => void
@@ -62,6 +63,7 @@ export default function ExtraServerCard({
   remnaCertProfiles,
   haproxyProfiles,
   firewallProfiles,
+  dnatProfiles,
   savingCert,
   onSaveCert,
   onDeleteCert,
@@ -192,6 +194,7 @@ export default function ExtraServerCard({
             remnaCertProfiles={remnaCertProfiles}
             haproxyProfiles={haproxyProfiles}
             firewallProfiles={firewallProfiles}
+            dnatProfiles={dnatProfiles}
             savingCert={savingCert}
             onSaveCert={onSaveCert}
             onDeleteCert={onDeleteCert}

@@ -460,6 +460,24 @@ async def run_migrations(conn):
                     if "already exists" not in str(e).lower():
                         logger.warning(f"Could not add column {col_name}: {e}")
 
+    # DNAT profile binding columns
+    if columns:
+        dnat_profile_columns = [
+            ("active_dnat_profile_id", "INTEGER"),
+            ("dnat_rules_hash", "VARCHAR(64)"),
+            ("dnat_last_sync_at", "TIMESTAMP"),
+            ("dnat_sync_status", "VARCHAR(20)"),
+            ("dnat_link_position", "INTEGER"),
+        ]
+        for col_name, col_type in dnat_profile_columns:
+            if col_name not in columns:
+                try:
+                    await conn.execute(text(f'ALTER TABLE servers ADD COLUMN "{col_name}" {col_type}'))
+                    logger.info(f"Added column: servers.{col_name}")
+                except Exception as e:
+                    if "already exists" not in str(e).lower():
+                        logger.warning(f"Could not add column {col_name}: {e}")
+
     # Anti-DDoS emergency-mode state columns (mirrored from node watchdog)
     if columns:
         antiddos_columns = [
@@ -1550,6 +1568,8 @@ async def _migrate_remnawave_anomaly_settings(conn):
         "anomaly_asn_margin": "INTEGER DEFAULT 0",
         "anomaly_ip_smart_enabled": "BOOLEAN DEFAULT TRUE",
         "anomaly_ip_smart_traffic_gb": "FLOAT DEFAULT 20.0",
+        "anomaly_devdata_smart_enabled": "BOOLEAN DEFAULT TRUE",
+        "anomaly_devdata_smart_traffic_gb": "FLOAT DEFAULT 20.0",
         "anomaly_ua_patterns": "TEXT",
     }
     for col_name, col_type in new_cols.items():

@@ -29,14 +29,16 @@ logger = logging.getLogger(__name__)
 KIND_BLOCKLIST = "blocklist"
 KIND_ANTIDDOS_WHITELIST = "antiddos_whitelist"
 KIND_FIREWALL_PROFILE = "firewall_profile"
+KIND_DNAT_PROFILE = "dnat_profile"
 
-# Право, без которого долг неисполним. Все три вида — запись на ноду; долг,
+# Право, без которого долг неисполним. Все виды — запись на ноду; долг,
 # который нода не примет никогда, здесь не задерживается: потолка попыток нет,
 # и он остался бы в таблице навсегда, дёргая ноду каждые полчаса.
 KIND_CAPABILITIES: dict[str, Capability] = {
     KIND_BLOCKLIST: Capability.IPSET,
     KIND_ANTIDDOS_WHITELIST: Capability.ANTIDDOS,
     KIND_FIREWALL_PROFILE: Capability.FIREWALL,
+    KIND_DNAT_PROFILE: Capability.DNAT,
 }
 
 RETRY_BASE_SECONDS = 60
@@ -214,12 +216,14 @@ class NodeSyncQueue:
         а импорт на уровне модуля замкнул бы это в цикл."""
         from app.services.antiddos_manager import get_antiddos_manager
         from app.services.blocklist_manager import get_blocklist_manager
+        from app.services.dnat_profile_sync import sync_dnat_to_servers
         from app.services.firewall_profile_sync import sync_firewall_to_servers
 
         return {
             KIND_BLOCKLIST: get_blocklist_manager().sync_nodes_by_ids,
             KIND_ANTIDDOS_WHITELIST: get_antiddos_manager().push_whitelist_to_servers,
             KIND_FIREWALL_PROFILE: sync_firewall_to_servers,
+            KIND_DNAT_PROFILE: sync_dnat_to_servers,
         }
 
     async def _loop(self):

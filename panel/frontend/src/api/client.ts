@@ -26,6 +26,7 @@ function resolveTimeout(url: string): number {
   if (
     url.includes('/metrics') ||
     url.endsWith('/haproxy/status') ||
+    url.endsWith('/haproxy/stats') ||
     url.includes('/auth/check')
   ) {
     return 15_000
@@ -94,7 +95,7 @@ api.get = function <T = unknown>(url: string, config?: AxiosRequestConfig): Prom
 // Порядок задаёт и порядок перечисления в подсказках интерфейса.
 export const NODE_CAPABILITY_DOMAINS = [
   'traffic', 'haproxy', 'firewall', 'ipset', 'ssh',
-  'ssl', 'antiddos', 'remnawave', 'system', 'exec',
+  'ssl', 'antiddos', 'remnawave', 'system', 'exec', 'dnat',
 ] as const
 export type NodeCapabilityDomain = (typeof NODE_CAPABILITY_DOMAINS)[number]
 
@@ -279,6 +280,53 @@ export interface HAProxyStatus {
   running: boolean
   config_valid: boolean
   config_message: string
+}
+
+export interface HAProxyStatRow {
+  name: string
+  kind: 'frontend' | 'backend' | 'server'
+  status: string
+  check_status: string | null
+  addr: string | null
+  scur: number
+  smax: number
+  slim: number | null
+  stot: number
+  rate: number
+  rate_max: number
+  bin: number
+  bout: number
+  econ: number | null
+  eresp: number | null
+  weight: number | null
+  backup: boolean
+  lastchg: number | null
+  downtime: number | null
+}
+
+export interface HAProxyProxyStats {
+  name: string
+  mode: string | null
+  frontend: HAProxyStatRow | null
+  backend: HAProxyStatRow | null
+  servers: HAProxyStatRow[]
+}
+
+export type HAProxyStatsReason =
+  | 'socket_not_configured'
+  | 'haproxy_stopped'
+  | 'socket_unavailable'
+  | 'timeout'
+  | 'error'
+
+export interface HAProxyLiveStats {
+  available: boolean
+  reason?: HAProxyStatsReason | null
+  message?: string | null
+  haproxy_version?: string | null
+  uptime_sec?: number | null
+  curr_conns?: number | null
+  proxies: HAProxyProxyStats[]
 }
 
 export interface CertificateFiles {
@@ -498,11 +546,12 @@ export const proxyApi = {
   getHistory: (serverId: number, params?: { period?: string; from_time?: string; to_time?: string; limit?: number; include_per_cpu?: boolean }) =>
     api.get(`/proxy/${serverId}/metrics/history`, { params }),
   
-  // Cached HAProxy data (status, rules, certs, firewall) - updated every 30s
-  getHAProxyCached: (serverId: number) => 
-    api.get<{ status?: HAProxyStatus; rules?: { count: number; rules: HAProxyRule[] }; certs?: { certificates: Certificate[]; count: number }; firewall?: { rules: FirewallRule[]; count: number; active: boolean }; cached_at?: string }>(`/proxy/${serverId}/haproxy/cached`),
-  
+  // Cached HAProxy data (status, stats, rules, certs, firewall) - updated every 30s
+  getHAProxyCached: (serverId: number) =>
+    api.get<{ status?: HAProxyStatus; stats?: HAProxyLiveStats; rules?: { count: number; rules: HAProxyRule[] }; certs?: { certificates: Certificate[]; count: number }; firewall?: { rules: FirewallRule[]; count: number; active: boolean }; cached_at?: string }>(`/proxy/${serverId}/haproxy/cached`),
+
   getHAProxyStatus: (serverId: number) => api.get<HAProxyStatus>(`/proxy/${serverId}/haproxy/status`),
+  getHAProxyStats: (serverId: number) => api.get<HAProxyLiveStats>(`/proxy/${serverId}/haproxy/stats`),
   getHAProxyRules: (serverId: number) => 
     api.get<{ count: number; rules: HAProxyRule[] }>(`/proxy/${serverId}/haproxy/rules`),
   reloadHAProxy: (serverId: number) => api.post(`/proxy/${serverId}/haproxy/reload`),
@@ -541,6 +590,16 @@ export const proxyApi = {
     api.post<FirewallActionResponse>(`/proxy/${serverId}/haproxy/firewall/enable`),
   disableFirewall: (serverId: number) =>
     api.post<FirewallActionResponse>(`/proxy/${serverId}/haproxy/firewall/disable`),
+
+  // Лимит полосы (tc на ноде)
+  getBandwidthLimit: (serverId: number) => api.get<BandwidthLimitState>(`/proxy/${serverId}/system/bandwidth-limit`),
+  setBandwidthLimit: (serverId: number, data: { enabled: boolean; mbit: number }) =>
+    api.post<BandwidthLimitState & { message: string }>(`/proxy/${serverId}/system/bandwidth-limit`, data, { timeout: 45000 }),
+
+  // DNAT (проброс портов через iptables nat)
+  getDnatState: (serverId: number) => api.get<DnatNodeState>(`/proxy/${serverId}/dnat/state`),
+  reapplyDnat: (serverId: number) => api.post<{ success: boolean; message: string }>(`/proxy/${serverId}/dnat/reapply`),
+  clearDnat: (serverId: number) => api.post<{ success: boolean; message: string }>(`/proxy/${serverId}/dnat/clear`),
   
   // Управление правилами учёта трафика в iptables ноды
   addTrackedPort: (serverId: number, port: number) =>
@@ -1008,6 +1067,8 @@ export interface RemnawaveSettings {
   anomaly_asn_margin: number
   anomaly_ip_smart_enabled: boolean
   anomaly_ip_smart_traffic_gb: number
+  anomaly_devdata_smart_enabled: boolean
+  anomaly_devdata_smart_traffic_gb: number
   anomaly_ua_patterns: string
   anomaly_use_custom_bot: boolean
   anomaly_tg_bot_token: string | null
@@ -2125,6 +2186,163 @@ export const firewallProfilesApi = {
     ),
   getAvailableServers: () =>
     api.get<FirewallAvailableServer[]>('/firewall-profiles/available-servers'),
+}
+
+// ==================== DNAT Profiles (проброс портов через iptables nat) ====================
+
+export type DnatProtocol = 'tcp' | 'udp' | 'both'
+// per_server — каждой ноде свой IP из списка (распределяет панель); остальные — нода раскидывает соединения сама
+export type DnatDistribution = 'per_server' | 'random' | 'round_robin' | 'client_hash'
+export type DnatSyncStatus = 'synced' | 'pending' | 'failed' | 'denied' | null
+
+export interface DnatRuleData {
+  name: string
+  protocol: DnatProtocol
+  listen_port: number
+  listen_port_end: number | null
+  // Один IPv4 или несколько через запятую
+  target_ip: string
+  distribution: DnatDistribution
+  // 0 — порт назначения равен входящему (для диапазона порты сохраняются)
+  target_port: number
+  masquerade: boolean
+  // Маскировка транзита на ноде: TTL=64 + MSS clamp на потоках правила
+  mask_ttl: boolean
+  enabled: boolean
+  comment: string | null
+}
+
+export interface DnatProfile {
+  id: number
+  name: string
+  description: string | null
+  rules: DnatRuleData[]
+  position: number
+  linked_servers_count: number
+  synced_servers_count: number
+  ssh_port_covered: boolean
+  ssh_default_port: number
+  node_api_port: number
+  created_at: string | null
+  updated_at: string | null
+}
+
+export interface DnatProfileServerInfo {
+  server_id: number
+  server_name: string
+  server_url: string
+  sync_status: DnatSyncStatus
+  rules_hash: string | null
+  is_synced: boolean
+  last_sync_at: string | null
+  // Порядок привязки (с 1): по нему сервер получает свой IP из списка назначения правила
+  link_position: number
+  // Правило → IP, доставшийся этому серверу (только для правил с несколькими IP)
+  targets: Record<string, string>
+}
+
+export interface DnatProfileWithServers extends DnatProfile {
+  rules_hash: string
+  servers: DnatProfileServerInfo[]
+}
+
+export interface DnatSyncResult {
+  server_id: number
+  server_name: string
+  success: boolean
+  message: string
+  queued: boolean
+}
+
+export interface DnatSyncLogEntry {
+  id: number
+  server_id: number
+  server_name: string
+  status: string
+  message: string | null
+  rules_hash: string | null
+  created_at: string | null
+}
+
+export interface DnatAvailableServer {
+  id: number
+  name: string
+  url: string
+  active_profile_id: number | null
+  sync_status: DnatSyncStatus
+  folder?: string | null
+}
+
+export interface DnatTargetCounters {
+  ip: string
+  present: boolean
+  conns: number
+  packets_in: number
+  bytes_in: number
+  packets_out: number
+  bytes_out: number
+}
+
+export interface BandwidthLimitState {
+  enabled: boolean
+  mbit: number
+  iface: string
+  applied: boolean
+  applied_mbit: number | null
+  qdisc: 'cake' | 'tbf' | null
+  in_sync: boolean
+}
+
+export interface DnatRuleCounters {
+  name: string
+  present: boolean
+  conns: number
+  packets_in: number
+  bytes_in: number
+  packets_out: number
+  bytes_out: number
+  targets: DnatTargetCounters[]
+}
+
+export interface DnatNodeState {
+  available: boolean
+  ip_forward: boolean
+  rules: DnatRuleData[]
+  rules_hash: string
+  healthy: boolean
+  missing: string[]
+  counters: DnatRuleCounters[]
+  applied_at: string | null
+  message: string | null
+}
+
+export const dnatProfilesApi = {
+  list: () => api.get<DnatProfile[]>('/dnat-profiles/'),
+  create: (data: { name: string; description?: string | null; rules?: DnatRuleData[] | null }) =>
+    api.post<DnatProfile>('/dnat-profiles/', data),
+  get: (id: number) => api.get<DnatProfileWithServers>(`/dnat-profiles/${id}`),
+  update: (id: number, data: Partial<{ name: string; description: string | null; rules: DnatRuleData[] }>) =>
+    api.put<DnatProfile>(`/dnat-profiles/${id}`, data),
+  delete: (id: number) => api.delete(`/dnat-profiles/${id}`),
+  clone: (id: number, name?: string) =>
+    api.post<DnatProfile>(`/dnat-profiles/${id}/clone`, { name: name ?? null }),
+  addRule: (profileId: number, rule: DnatRuleData) =>
+    api.post<{ success: boolean; rules: DnatRuleData[] }>(`/dnat-profiles/${profileId}/rules`, rule),
+  updateRule: (profileId: number, index: number, rule: DnatRuleData) =>
+    api.put<{ success: boolean; rules: DnatRuleData[] }>(`/dnat-profiles/${profileId}/rules/${index}`, rule),
+  deleteRule: (profileId: number, index: number) =>
+    api.delete<{ success: boolean; rules: DnatRuleData[] }>(`/dnat-profiles/${profileId}/rules/${index}`),
+  linkServer: (profileId: number, serverId: number) =>
+    api.post(`/dnat-profiles/${profileId}/servers/${serverId}`),
+  unlinkServer: (profileId: number, serverId: number) =>
+    api.delete(`/dnat-profiles/${profileId}/servers/${serverId}`),
+  syncAll: (profileId: number) =>
+    api.post<{ results: DnatSyncResult[] }>(`/dnat-profiles/${profileId}/sync`),
+  syncOne: (profileId: number, serverId: number) =>
+    api.post<DnatSyncResult>(`/dnat-profiles/${profileId}/sync/${serverId}`),
+  getLog: (profileId: number, limit = 50) =>
+    api.get<DnatSyncLogEntry[]>(`/dnat-profiles/${profileId}/log`, { params: { limit } }),
+  getAvailableServers: () => api.get<DnatAvailableServer[]>('/dnat-profiles/available-servers'),
 }
 
 // ==================== Torrent Blocker ====================

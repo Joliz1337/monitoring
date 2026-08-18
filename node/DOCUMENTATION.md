@@ -16,9 +16,10 @@ API агент для сбора метрик сервера, отслежива
 - **SSH Security** — управление SSH-безопасностью сервера: настройки sshd, fail2ban, SSH-ключи
 - **Wildcard SSL** — приём и деплой wildcard сертификатов, выпущенных панелью: разбор и валидация PEM, запись файлов на хост, бэкап, откат при ошибке reload
 - **Firewall Profiles** — атомарное применение UFW-профилей от панели: backup → reset → apply → enable, авторолбэк при ошибке, node-API-port-guard (порт 9100), drift-детекция по SHA256-хэшу
+- **DNAT-маршрутизация** — проброс портов средствами netfilter (iptables nat DNAT + MASQUERADE + FORWARD ACCEPT) в собственных цепочках `MON_DNAT*`: атомарное применение набора правил от панели одним `iptables-restore --noflush`, счётчики соединений/байт по правилу, файл состояния и самолечение после ребута/`ufw reset`
 - **Анти-DDoS** — многослойная защита: дежурный режим без лимитов, аварийный режим (SYNPROXY + hashlimit в отдельной iptables-цепочке `ANTIDDOS`, пороги авто-масштабируются по CPU/RAM хоста), автодетект атаки по сигналам из `/proc` (watchdog), whitelist на ipset, переживающий ребут и недоступность панели, self-check доступности ноды во время аварийного режима
 - **Системные оптимизации** — sysctl/лимиты/HAProxy `maxconn` вычисляются на самой ноде из её MemTotal/nproc единым рендерером (`tune-sysctl.sh`), а не приходят готовыми от панели; авто-ре-рендер при каждой загрузке подхватывает ресайз VPS
-- **Права доступа панели (NODE_CAPABILITIES)** — владелец ноды опционально сужает, что панель может делать через API, строкой в `.env`: по доменам (traffic/haproxy/firewall/ipset/ssh/ssl/antiddos/remnawave/system/exec) и уровню доступа (без доступа/только чтение/чтение и запись); пусто — полный доступ
+- **Права доступа панели (NODE_CAPABILITIES)** — владелец ноды опционально сужает, что панель может делать через API, строкой в `.env`: по доменам (traffic/haproxy/firewall/ipset/ssh/ssl/antiddos/remnawave/system/exec/dnat) и уровню доступа (без доступа/только чтение/чтение и запись); пусто — полный доступ
 
 ## Быстрый старт
 
@@ -100,6 +101,18 @@ HAProxy работает как **нативный systemd сервис** на �
 
 Существующий шаблон в уже применённых конфигах обновляется через «Перегенерировать конфиг» на странице профиля в панели или через `POST /api/haproxy/config/apply` с новым содержимым — сама по себе установка/обновление ноды конфиг не трогает.
 
+**Живая статистика (stats socket):**
+
+`GET /api/haproxy/stats` — живой срез `show stat` + `show info` через stats socket (строка `stats socket /var/run/haproxy.sock ... level admin` есть в базовом шаблоне конфига). Только чтение, admin-команды сокета не используются. Методы — в `haproxy_manager.py` (`get_stats()` и чистые парсеры).
+
+- Путь сокета извлекается из строки `stats socket` самого конфига. Строки нет (конфиг создан старым шаблоном — `init_config()` не трогает существующий файл) — ответ `available: false, reason: socket_not_configured`; лечится перегенерацией/применением конфига и **restart** HAProxy.
+- Контейнер агента работает с `pid: host` + `privileged`, поэтому сокет хоста доступен через `/proc/1/root` без bind-mount (mount на inode сокета ломался бы при рестарте haproxy). `/var/run` — absolute-симлинк на `/run` и под `/proc/1/root` может разрезолвиться в корень контейнера, поэтому кандидаты перебираются по порядку: `/proc/1/root/run/...` → `/proc/1/root/var/run/...` → сам путь из конфига.
+- Ошибки — всегда HTTP 200 с `available: false` и машиночитаемым `reason`: `socket_not_configured` / `haproxy_stopped` / `socket_unavailable` (haproxy запущен без сокета — нужен restart, reload не создаёт сокет) / `timeout` / `error`. Кэш панели сохраняет только ответы 200 — состояние «недоступно» тоже должно доезжать до UI.
+- Успешный ответ: `haproxy_version`, `uptime_sec`, `curr_conns` (из `show info`, его отказ не фатален) и `proxies[]` — строки CSV `show stat`, сгруппированные по `pxname` (frontend/backend/servers, классификация по `svname`). CSV парсится по заголовку (`csv.DictReader`), поэтому отсутствующие в старых haproxy колонки (например `addr`) дают `null`, а не ошибку.
+- Кэш результата на ноде — 2 секунды (`_stats_cache_ttl`): гасит наложение fast-цикла панели (5 с) и авто-обновления нескольких открытых вкладок UI.
+
+Тесты: `node/tests/test_haproxy_stats.py` — парсинг CSV/`show info`, выбор пути сокета, fallback-логика причин недоступности, кэш.
+
 **Управление через терминал панели**:
 ```bash
 systemctl status haproxy       # Статус
@@ -136,11 +149,13 @@ node/
 │   ├── models/
 │   │   ├── ssl.py        # Pydantic модели: WildcardDeployRequest/Response
 │   │   ├── firewall_profile.py  # Pydantic модели: ProfileRule, ProfileApplyRequest/Response, ProfileStateResponse
+│   │   ├── dnat.py              # Pydantic модели: DnatRule, DnatApplyRequest/Response, DnatStateResponse, DnatRuleCounters
 │   │   └── remnawave_nginx.py   # Pydantic модели: NginxDiscoverResponse, NginxConfigResponse, NginxStatusResponse, NginxApplyRequest/Response, NginxActionResponse
 │   ├── routers/          # API эндпоинты (metrics, haproxy, traffic, ssh, ssl, firewall, antiddos, remnawave и др.)
 │   └── services/         # Сбор метрик, HAProxy, трафик, SSH менеджер
 │       ├── ssl_manager.py          # Деплой wildcard сертификатов: запись на хост, бэкап, откат, валидация
 │       ├── firewall_manager.py     # UFW: apply_profile, backup/restore, compute_rules_hash, get_full_state
+│       ├── dnat_manager.py         # DNAT: цепочки MON_DNAT/MON_DNAT_POST/MON_DNAT_FWD, restore-скрипт, счётчики, файл состояния, самолечение
 │       ├── antiddos_manager.py     # Тонкая обёртка над ddos-watchdog.sh (nsenter): enable/disable emergency, watchdog, whitelist sync
 │       ├── host_files.py           # read_host_file()/write_host_file()/read_host_file_exact() — общая работа с файлами на хосте через nsenter+base64
 │       ├── port_traffic_sampler.py # Цепочки учёта TRAFFIC_ACCOUNTING, фоновый съём счётчиков портов, список отслеживаемых портов
@@ -189,7 +204,7 @@ node/
 
 Агент читает строку прямо из смонтированного файла `.env` при старте процесса (значение кэшируется на время жизни процесса) — правку применяет обычный `docker compose restart api`, пересоздавать контейнер не нужно. Если сам файл не смонтирован в контейнер (нода с `docker-compose.yml` без этой строки в volumes) — агент откатывается на переменную окружения контейнера, как и раньше; в этом случае правка по-прежнему требует пересоздания (`docker compose up -d --force-recreate api`).
 
-**Грамматика.** Десять доменов, по одному на смысловой раздел API: `traffic haproxy firewall ipset ssh ssl antiddos remnawave system exec`. Слово без суффикса даёт домену чтение и запись (`rw`), с суффиксом `:ro` — только чтение. Три готовых пресета разворачиваются в набор доменов: `full` (все `rw`, то же самое, что пустая строка, но явно), `readonly` (все `ro`), `monitoring` (`traffic:ro` + `system:ro` — минимум для отображения ноды на дашборде). Слова можно комбинировать: уровень домена только повышается, порядок токенов не важен — `readonly,haproxy` и `haproxy,readonly` дают одно и то же (всё `ro`, кроме `haproxy: rw`). Регистр не важен, разделители — запятая, пробел или таб, кавычки по краям строки снимаются. Токен `metrics` принимается молча, но ни на что не влияет — метрики закрыть нельзя (см. always-allowed ниже), а слово в строке прав — не опечатка оператора. Незнакомое слово не роняет ноду и не блокирует остальную строку: оно игнорируется, попадает в `capabilities_unknown` (публикуется панели) и даёт один `WARNING` в лог ноды.
+**Грамматика.** Одиннадцать доменов, по одному на смысловой раздел API: `traffic haproxy firewall ipset ssh ssl antiddos remnawave system exec dnat`. Слово без суффикса даёт домену чтение и запись (`rw`), с суффиксом `:ro` — только чтение. Три готовых пресета разворачиваются в набор доменов: `full` (все `rw`, то же самое, что пустая строка, но явно), `readonly` (все `ro`), `monitoring` (`traffic:ro` + `system:ro` — минимум для отображения ноды на дашборде). Слова можно комбинировать: уровень домена только повышается, порядок токенов не важен — `readonly,haproxy` и `haproxy,readonly` дают одно и то же (всё `ro`, кроме `haproxy: rw`). Регистр не важен, разделители — запятая, пробел или таб, кавычки по краям строки снимаются. Токен `metrics` принимается молча, но ни на что не влияет — метрики закрыть нельзя (см. always-allowed ниже), а слово в строке прав — не опечатка оператора. Незнакомое слово не роняет ноду и не блокирует остальную строку: оно игнорируется, попадает в `capabilities_unknown` (публикуется панели) и даёт один `WARNING` в лог ноды.
 
 Пример: `NODE_CAPABILITIES=readonly,haproxy,exec:ro` — вся нода в режиме чтения, кроме HAProxy (полный доступ). У домена `exec` нет читающих эндпоинтов — оба его пути (`/api/system/execute`, `/api/system/execute-stream`) принимают только POST, поэтому `exec:ro` на практике закрывает терминал целиком, а не переводит его в режим просмотра.
 
@@ -199,7 +214,7 @@ node/
 
 Два POST-эндпоинта ничего не меняют на хосте и поэтому проходят и под `:ro` домена: `POST /api/haproxy/validate`, `POST /api/ssh/config/test`.
 
-**Формат публикации прав.** Нода отдаёт свою карту прав панели в каждом ответе `GET /api/metrics` (основной канал — панель и так опрашивает его каждые несколько секунд), а также в `GET /api/version` и `GET /api/system/versions`. Публикация — по принципу «всё или ничего»: `capabilities: null` означает «ограничений нет» (в том числе у любой ноды старой версии, которая про это поле вообще не знает), а если ограничения есть — публикуются **все** десять доменов сразу, каждый со значением `no`/`ro`/`rw`. Частичная карта не годится в принципе: сторона, читающая карту, трактует отсутствие ключа как разрешение, и «публикуем только явно разрешённое» тихо открыло бы всё, что забыли перечислить. Отдельно публикуется `capabilities_unknown` — список нераспознанных слов из `NODE_CAPABILITIES`, чтобы админ панели видел опечатку в конфиге ноды, не заходя на неё по SSH.
+**Формат публикации прав.** Нода отдаёт свою карту прав панели в каждом ответе `GET /api/metrics` (основной канал — панель и так опрашивает его каждые несколько секунд), а также в `GET /api/version` и `GET /api/system/versions`. Публикация — по принципу «всё или ничего»: `capabilities: null` означает «ограничений нет» (в том числе у любой ноды старой версии, которая про это поле вообще не знает), а если ограничения есть — публикуются **все** одиннадцать доменов сразу, каждый со значением `no`/`ro`/`rw`. Частичная карта не годится в принципе: сторона, читающая карту, трактует отсутствие ключа как разрешение, и «публикуем только явно разрешённое» тихо открыло бы всё, что забыли перечислить. Отдельно публикуется `capabilities_unknown` — список нераспознанных слов из `NODE_CAPABILITIES`, чтобы админ панели видел опечатку в конфиге ноды, не заходя на неё по SSH.
 
 **Формат отказа.** Закрытый запрос получает `403` с телом `{detail, error: "capability_denied", domain, access, capabilities}` и заголовком `X-Capability-Denied: <домен>:<rw|ro>`. Панель это тело не пробрасывает клиенту как есть — `403` в её собственном API означает «сессия протухла», а `502`/`503`/`504` ретраятся автоматически; вместо этого панель транслирует отказ ноды в `409` (подробности — [panel/DOCUMENTATION.md](../panel/DOCUMENTATION.md#права-ноды-node_capabilities)).
 
@@ -415,6 +430,7 @@ data: {"message": "error description"}
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
 | GET | /api/haproxy/status | Статус сервиса |
+| GET | /api/haproxy/stats | Живая статистика из stats socket (`show stat` + `show info`), read-only |
 | GET | /api/haproxy/rules | Список правил |
 | POST | /api/haproxy/rules | Создать правило |
 | PUT | /api/haproxy/rules/{name} | Обновить правило |
@@ -700,6 +716,67 @@ PEM разбирается в процессе агента через `cryptogr
 
 **Определение работы в контейнере.** `running_in_container()` (`app/services/container_detect.py`) — единая точка правды, используемая `firewall_manager.py`, `ipset_manager.py`, `ssh_config_manager.py` и `host_executor.py`: проверяет `/.dockerenv`, а при его отсутствии (containerd, поды Kubernetes) ищет маркеры `docker`/`containerd`/`kubepods` в `/proc/1/cgroup`. До объединения существовало четыре независимые копии этой проверки, и одна из них (в sshd-менеджере) знала про containerd/kubepods, а остальные — только про `/.dockerenv`: на таком хосте sshd-менеджер шёл к хосту через `nsenter`, а файрвол и блокировки продолжали работать внутри контейнера, где нужных им правил и цепочек попросту нет.
 
+### DNAT-маршрутизация
+
+Проброс портов средствами netfilter — то же назначение, что у правил HAProxy (входящий порт → адрес:порт), но без userspace-прокси: пакеты переписывает ядро, CPU почти не тратится, UDP пробрасывается наравне с TCP. Обратная сторона: терминации TLS и разбора доменов нет, а цель видит адрес ноды, а не клиента (MASQUERADE).
+
+| Метод | Endpoint | Описание |
+|-------|----------|----------|
+| GET | /api/dnat/state | Желаемые правила из файла состояния, их наличие в ядре (`healthy`/`missing`), `ip_forward`, счётчики по правилам |
+| POST | /api/dnat/apply | Атомарно заменить набор правил (`DnatApplyRequest{rules}`); ответ `success`, `message`, `rules_hash`, `error_log` |
+| POST | /api/dnat/reapply | Вернуть в ядро сохранённые правила, если они потерялись (ручное самолечение) |
+| POST | /api/dnat/clear | Снять джампы и цепочки, удалить файл состояния |
+
+**Правило (`DnatRule`):** `name` (`^[a-zA-Z0-9_-]{1,64}$` — уходит в `-m comment`), `protocol` (`tcp`/`udp`/`both`), `listen_port`, `listen_port_end` (диапазон; `None` — одиночный порт, равный началу — схлопывается в `None`), `target_ip` (один или несколько unicast IPv4 через запятую, хранится как `a,b,c`, дубли схлопываются, не больше `MAX_TARGETS = 32`; DNAT не резолвит имена), `distribution` (`per_server` по умолчанию — панель уже оставила ноде один адрес, несколько адресов с этим режимом `validate_rules` отвергает; `random`/`round_robin`/`client_hash` — нода раскидывает сама, см. ниже), `target_port` (`0` — сохранить входящий порт; для диапазона порты сохраняются как есть), `masquerade` (по умолчанию `True`), `mask_ttl` (по умолчанию `False`, см. «Маскировка транзита»), `enabled`, `comment`.
+
+**Маскировка транзита (`mask_ttl`).** Четвёртая цепочка `MON_DNAT_MANGLE` (mangle/FORWARD, джамп `-I FORWARD 1`): на каждую цель правила — `-d <ip> --dport … --ctstate DNAT -j TTL --ttl-set 64` и зеркальная `-s <ip> --sport …` (метки `<имя>:ttl-in@<ip>`/`<имя>:ttl-out@<ip>`), для tcp дополнительно `--tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu` (`<имя>:mss@<ip>`). Без этого с IP ноды уезжают TTL клиентских стеков вперемешку (50-е у мобильных, 110-е у Windows) — узнаваемый признак NAT-релея для DPI на аплинке; `MASKED_TTL = 64` совпадает с TTL собственного трафика Linux. TCP-опции клиентов (окно, wscale, MSS, timestamps) маскировка не трогает — их спрятать может только терминирующий прокси. Цепочка mangle входит в тот же `iptables-restore` (третья таблица в скрипте), в самолечение и в проверку «на месте»: у правила с `mask_ttl` `present` требует обеих TTL-строк на каждую цель. Требует `xt_TTL`/`xt_TCPMSS` (штатно в Ubuntu).
+
+**Несколько адресов назначения (`build_restore_script`, `_selector`).** На каждую цель — своя DNAT-строка в `MON_DNAT` (плюс свои MASQUERADE и пара FORWARD-строк с `-d`/`-s` этой цели), а выбор цели для нового соединения делает матч перед `-j DNAT`:
+- `random` — `-m statistic --mode random --probability p`: цель i из N получает `p = 1/(N−i)` (1/3, затем 1/2, последняя без условия) — в сумме равномерно; DNAT терминирует обход, так что до следующей строки доходят только «непойманные» соединения;
+- `round_robin` — `-m statistic --mode nth --every (N−i) --packet 0` на остатке списка: каждое K-е из ещё не распределённых соединений уходит в текущую цель, итог — строгая очередь 1→2→3→1;
+- `client_hash` — перед DNAT-строками одна строка `-j HMARK --hmark-tuple src --hmark-mod N --hmark-offset HMARK_OFFSET --hmark-rnd HMARK_SEED` (метка `<имя>#hash`), а цель i совпадает по `-m mark --mark HMARK_OFFSET+i`. Смещение `0x4D440000` вынесено в верхние биты fwmark, чтобы не пересечься с чужими маленькими метками (policy routing xray/WireGuard); HMARK ставит метку только первому пакету соединения (nat), на маршрутизацию транзита не влияет. Требует `xt_HMARK` (в Ubuntu-ядрах есть); без него `iptables-restore` падает и apply возвращает `error_log`.
+
+Решение принимается на первом пакете, дальше соединение держит conntrack — живые соединения при смене списка не перекидываются. Проверки живости целей нет. Один адрес — режим не имеет значения, матч не добавляется.
+
+**Проверка набора (`validate_rules`)** — отказ до любого касания netfilter: дубликаты имён; включённое правило, закрывающее `NODE_API_PORT` 9100/tcp (панель потеряла бы ноду — принудительного обхода нет); пересечение диапазонов портов у включённых правил с общим протоколом (в iptables сработало бы первое, а панель показывала бы оба как активные). Выключенные правила в проверке не участвуют — в ядро они не попадают.
+
+**Как лежит в ядре.** Три собственные цепочки, джампы в них вставляются первыми (`-I ... 1`) в `nat/PREROUTING`, `nat/POSTROUTING` и `filter/FORWARD`:
+- `MON_DNAT` — `-p <proto> --dport <port|a:b> -j DNAT --to-destination <ip>[:<port>]`;
+- `MON_DNAT_POST` — при `masquerade`: `-p <proto> -d <ip> --dport <порт(ы) цели> -m conntrack --ctstate DNAT -j MASQUERADE`. Без него цель обязана маршрутизировать ответы клиенту через эту ноду;
+- `MON_DNAT_FWD` — на правило две строки ACCEPT: `-d <ip> --dport … --ctstate DNAT` (клиент → цель) и `-s <ip> --sport … --ctstate DNAT` (ответы), плюс общий `--ctstate RELATED` (ICMP-ошибки, PMTUD). Цепочка нужна обязательно: и Docker, и UFW ставят политику FORWARD DROP.
+
+Каждая строка помечена `-m comment --comment "mon-dnat:<имя>@<ip>"` (в FORWARD — `<имя>:in@<ip>`/`<имя>:out@<ip>`, HMARK-строка — `<имя>#hash`); по меткам считаются счётчики по каждой цели и проверяется наличие правила — правило «на месте», когда на месте все его цели (и HMARK-строка для `client_hash`). `--ctstate DNAT` в FORWARD и POSTROUTING — свойство соединения, а не пакета, поэтому совпадает в обе стороны и уже на первом пакете (бит выставляется при установке NAT-привязки в PREROUTING).
+
+**Применение (`DnatManager.apply`).** `validate_rules` → проверка `iptables -t nat` → `net.ipv4.ip_forward=1` (запись в `/proc/sys/net/ipv4/ip_forward`; контейнер в сетевом namespace хоста и privileged, поэтому это хостовый sysctl; на нодах его и так держит Docker) → `-N` цепочек и `-C`/`-I` джампов → один `iptables-restore --noflush -w 5` с текстом из `build_restore_script()`: в нём `:CHAIN - [0:0]` (создать/очистить) и явный `-F CHAIN` для каждой нашей цепочки, затем строки правил, `COMMIT` на таблицу. Транзакция на таблицу означает: полусостояния не бывает, чужие правила (Docker, ufw, ANTIDDOS, учёт портов) не трогаются, а живые соединения переживают переприменение — их NAT-привязка уже в conntrack. После restore — дамп `iptables-save -c` обеих таблиц и сверка по меткам: если чего-то нет, откат к предыдущему набору из файла состояния и ошибка. Только после успешной сверки набор пишется в файл состояния (`/var/lib/monitoring/dnat_rules.json`, атомарно через `.tmp` + `replace`) и возвращается `rules_hash`.
+
+**Хэш (`compute_rules_hash`)** — SHA256 канонического JSON: правила отсортированы по имени, поля `name/protocol/listen_port/listen_port_end/target_ip/distribution/target_port/masquerade/mask_ttl/enabled`, комментарий не входит. Формула продублирована в панели (`panel/backend/app/services/dnat_profile_sync.py`); совпадение закреплено общим «золотым» вектором в тестах обеих сторон.
+
+**Самолечение.** Правила netfilter не переживают ребут, а `ufw --force reset` (профили firewall), `ufw disable`/`enable` вычищают джампы из встроенных цепочек. Поэтому `DnatManager.start()` в lifespan переприменяет набор из файла состояния при старте агента и запускает цикл `ensure_applied()` раз в `SELF_HEAL_INTERVAL_SEC = 30`: два дампа, сверка меток и джампов, при расхождении или сброшенном `ip_forward` — полный `apply()` из файла. Роутеры `firewall_profile.apply` и `haproxy/firewall/enable|disable` будят цикл сразу (`request_recheck()`), чтобы окно без проброса не растягивалось до следующего тика. Все операции менеджера (apply/state/ensure/clear) идут под одним `asyncio.Lock`, сами команды — в тред-пуле.
+
+**Счётчики (`GET /api/dnat/state`).** `conns` — счётчик пакетов DNAT-строки в `MON_DNAT`: nat-таблица видит только первый пакет соединения, поэтому это число новых соединений; `bytes_in`/`packets_in` — со строки `:in` в FORWARD (клиент → цель), `bytes_out`/`packets_out` — со строки `:out` (цель → клиент). Поле `targets[]` (`DnatTargetCounters`) — то же по каждому адресу назначения, суммы на уровне правила — по всем целям. Ответ также несёт `available` (нет iptables → `False`), `ip_forward`, `healthy` и `missing` (имена потерянных правил и `jump:<цепочка>`), `applied_at`. Активные соединения не считаются — обход conntrack на нагруженной ноде слишком дорог.
+
+**Ограничения:** только IPv4; локально сгенерированный трафик самой ноды (OUTPUT) не пробрасывается — только транзитный через PREROUTING; DNAT не терминирует TCP, поэтому в сторону цели уходят TCP-заголовки клиентов как есть (маскируются только TTL и MSS) — на плече через агрессивный DPI предпочтительнее HAProxy; у `both` строки tcp и udp несут одну метку и в счётчиках суммируются. Анти-DDoS (цепочка `ANTIDDOS` в INPUT, SYNPROXY, hashlimit) проброшенного трафика не касается — он идёт PREROUTING → FORWARD; `--notrack` watchdog ставит только на порты слушающих сокетов, DNAT-порты под него не попадают, если только не совпадают с портом локального сервиса.
+
+**Файлы:**
+- `node/app/models/dnat.py` — `DnatRule` (валидация IPv4, диапазона, `protocols()`, `covers_port()`), `DnatApplyRequest/Response`, `DnatRuleCounters`, `DnatStateResponse`, `DnatActionResponse`, `NODE_API_PORT`
+- `node/app/services/dnat_manager.py` — чистые функции `normalize_rule`, `compute_rules_hash`, `validate_rules`, `build_restore_script`, `parse_dump`, `summarize`; `DnatManager` (`apply`, `clear`, `state`, `ensure_applied`, async-обёртки под замком, `start`/`stop`, `request_recheck`)
+- `node/app/routers/dnat.py` — роутер (prefix `/api/dnat`)
+- `node/app/main.py` — старт/остановка менеджера в lifespan, регистрация роутера
+- `node/app/routers/firewall_profile.py`, `node/app/routers/haproxy.py` — `request_recheck()` после операций, перестраивающих встроенные цепочки
+- `node/app/capabilities.py` — домен `dnat` (`/api/dnat`)
+- `node/tests/test_dnat.py` — проверка набора (дубликаты, пересечения, порт 9100, выключенные правила, несколько целей без режима), модель (диапазон, список IPv4), restore-скрипт (одиночный порт, диапазон с сохранением портов, `both`, без MASQUERADE, выключенное правило, `random`/`round_robin`/`client_hash`, один адрес без матча), разбор дампа и сводка (счётчики по целям, потерянные правила/джампы/HMARK-строка), «золотой» хэш, файл состояния и `state()` без правил не дёргает `iptables-save`
+
+### Лимит полосы (`bandwidth_limit.py`)
+
+Искусственный шейпер на исходящем направлении дефолтного интерфейса хоста — ровная полка на счётчиках хостера вместо пиков; на релее ограничивает оба направления транзита (к цели и обратно к клиенту оба выходят через тот же интерфейс). Команды `tc` выполняются на хосте через `HostExecutor` (в контейнере нет iproute2). Состояние читается из `tc -j qdisc show dev X`; в JSON iproute2 печатает `bandwidth`/`rate` в байтах в секунду (в отличие от текстового вывода), `parse_tc_root` переводит в Мбит умножением на 8. Предпочитается `cake bandwidth Nmbit besteffort` (честное деление по потокам, короткая очередь — под насыщением джиттер в единицах мс), при отсутствии `sch_cake` — `tbf rate Nmbit burst 512kb latency 50ms`. Ниже лимита шейпер невидим (очередь пуста); снимается только собственный qdisc (`cake`/`tbf`), чужой корневой (`mq`/`fq_codel` хоста) не трогается.
+
+| Метод | Endpoint | Описание |
+|-------|----------|----------|
+| GET | /api/system/bandwidth-limit | `enabled`, `mbit`, `iface`, `applied`, `applied_mbit`, `qdisc` (`cake`/`tbf`), `in_sync` |
+| POST | /api/system/bandwidth-limit | `{enabled, mbit}` (1–100000); `enabled=false` снимает |
+
+Состояние — `/opt/monitoring/configs/bandwidth-limit.env` (`BANDWIDTH_LIMIT_MBIT`, `BANDWIDTH_LIMIT_IFACE`) на хосте, пишется до применения: если `tc` упал, намерение не теряется. `BandwidthLimiter.start()` в lifespan переприменяет лимит при старте агента и подтверждает раз в `BANDWIDTH_RECHECK_INTERVAL_SEC = 120` (`ensure()`: корневой qdisc не наш или не с той полосой → `_apply`) — `ethtool -L` из тюнинга и ручной `tc qdisc del` сбрасывают корневой qdisc. Тесты: `node/tests/test_bandwidth_limit.py` — разбор состояния и `tc -j`, `in_sync`/дрейф, самолечение только при расхождении, fallback на tbf, снятие только своего qdisc.
+
 ### Анти-DDoS
 
 Многослойная защита от DDoS-атак: дежурный режим без лимитов → аварийный режим с iptables-правилами в отдельной цепочке `ANTIDDOS` → автодетект атаки локальным watchdog-сервисом. Вся логика правил и детекции живёт в одном host-скрипте `configs/ddos-watchdog.sh` — нода лишь дёргает его CLI-команды через `nsenter`, поэтому набор правил идентичен независимо от того, кто включил режим (watchdog или панель).
@@ -752,7 +829,7 @@ Raw-правила `--notrack` (снимают SYN с трекинга до SYNP
 
 **CLI-команды `ddos-watchdog.sh`** (вызываются нодой через `nsenter`, доступны и вручную на хосте): `loop`, `enable-manual`, `disable-manual`, `watchdog-on`, `watchdog-off`, `apply`, `clear`, `selfheal`, `whitelist-sync` (IP через stdin), `detect-ports`, `dry-run`, `self-test`, `version`, `status`. Состояние — `/opt/monitoring/antiddos/state.json` (mode/source/since/reason/watchdog).
 
-**Версионирование watchdog-скрипта:** константа `WATCHDOG_VERSION` в шапке `ddos-watchdog.sh` (сейчас `"2.2.0"`) — команда `status` возвращает её полем `version`, отдельная команда `version` печатает только её. Значение растёт при изменении логики скрипта; панель сверяет его с версией, установленной на ноде (см. «Установка» ниже).
+**Версионирование watchdog-скрипта:** константа `WATCHDOG_VERSION` в шапке `ddos-watchdog.sh` (сейчас `"2.3.0"`) — команда `status` возвращает её полем `version`, отдельная команда `version` печатает только её. Значение растёт при изменении логики скрипта; панель сверяет его с версией, установленной на ноде (см. «Установка» ниже).
 
 **Установка — по умолчанию.** `install.sh` вызывает `install_antiddos_watchdog()` сразу после применения системных оптимизаций — свежая нода получает watchdog без какого-либо участия панели, в состоянии покоя (`watchdog=on`, аварийный режим выключен). Существующие ноды получают его от панели — через `apply-update.sh` это не идёт, потому что rsync обновления агента исключает `configs/`: репозиторных конфигов рядом с нодой нет. Панель в фоновом опросе статуса (см. panel/DOCUMENTATION.md) видит, что нода отвечает на `/api/antiddos/status`, и сама вызывает `POST /api/antiddos/install`, если watchdog не установлен либо его `version` отличается от актуальной версии `ddos-watchdog.sh` на GitHub. Backend-эндпоинты ручной установки (`POST /antiddos/install-all` в панели, `POST /api/antiddos/install` на ноде) остаются доступны по API.
 

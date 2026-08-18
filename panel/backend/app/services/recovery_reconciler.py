@@ -14,8 +14,17 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from app.database import async_session
-from app.models import FirewallProfile, HAProxyConfigProfile, RemnawaveNginxProfile, Server, ServerCache
+from app.models import DnatProfile, FirewallProfile, HAProxyConfigProfile, RemnawaveNginxProfile, Server, ServerCache
 from app.services.blocklist_manager import get_blocklist_manager
+from app.services.dnat_profile_sync import (
+    clear_dnat_on_servers,
+    compute_rules_hash as compute_dnat_hash,
+    load_rules as load_dnat_rules,
+    ordered_linked_servers as ordered_dnat_servers,
+    render_rules_for_server as render_dnat_rules,
+    server_index as dnat_server_index,
+    sync_profile_to_servers as sync_dnat_profile,
+)
 from app.services.firewall_profile_sync import (
     compute_rules_hash,
     sync_profile_to_servers as sync_firewall_profile,
@@ -28,6 +37,7 @@ from app.services.http_client import get_node_client, node_auth_headers
 from app.services.node_capabilities import Capability, server_allows
 from app.services.node_sync_queue import (
     KIND_BLOCKLIST,
+    KIND_DNAT_PROFILE,
     KIND_FIREWALL_PROFILE,
     clear as clear_pending_sync,
 )
@@ -46,7 +56,8 @@ HAPROXY_START_TIMEOUT = 30.0
 # либо применять нечего.
 # denied — тоже «делать больше нечего»: раздел закрыт на самой ноде,
 # и долг в очереди только копился бы
-RECONCILED_STATES = {"in_sync", "reapplied", "no_profile", "denied"}
+# cleared — у ноды профиля больше нет, и её правила сняты
+RECONCILED_STATES = {"in_sync", "reapplied", "no_profile", "denied", "cleared"}
 
 
 @dataclass
@@ -58,6 +69,7 @@ class RecoveryReport:
     haproxy_run: str = "skipped"
     remnawave_nginx: str = "skipped"
     blocklist: str = "skipped"
+    dnat: str = "skipped"
 
 
 def _normalize_config(text: str) -> str:
@@ -224,6 +236,44 @@ async def _reconcile_remnawave_nginx(server_id: int) -> str:
         return "reapplied" if ok else "reapply_failed"
 
 
+async def _reconcile_dnat(server_id: int) -> str:
+    """Нода сама возвращает DNAT-правила из своего файла состояния; здесь ловится
+    случай, когда файл потерян (пересозданный volume) или правила менялись, пока
+    нода лежала."""
+    async with async_session() as db:
+        server = await db.get(Server, server_id)
+        if not server:
+            return "no_profile"
+        if not server_allows(server, Capability.DNAT, write=True):
+            return "denied"
+        profile = (
+            await db.get(DnatProfile, server.active_dnat_profile_id)
+            if server.active_dnat_profile_id else None
+        )
+
+        state = await _node_get(server, "/api/dnat/state")
+        if state is None:
+            return "node_unreachable"
+
+        # Отвязали, пока нода лежала: без профиля правил на ней быть не должно
+        if profile is None:
+            if not state.get("rules"):
+                return "no_profile"
+            cleared = await clear_dnat_on_servers([server_id], queue_failures=False)
+            return "cleared" if cleared.get(server_id) is None else "clear_failed"
+
+        linked = await ordered_dnat_servers(profile.id, db)
+        expected = compute_dnat_hash(
+            render_dnat_rules(load_dnat_rules(profile), dnat_server_index(linked, server_id))
+        )
+        if state.get("rules_hash") == expected and state.get("healthy", False):
+            return "in_sync"
+
+        results = await sync_dnat_profile(profile, db, server_ids=[server_id])
+        ok = bool(results) and results[0].success
+        return "reapplied" if ok else "reapply_failed"
+
+
 async def _reconcile_blocklist(server_id: int) -> str:
     result = await get_blocklist_manager().sync_single_node_by_id(server_id)
     if result and result.get("denied"):
@@ -252,6 +302,7 @@ async def reconcile_recovered_server(server_id: int, semaphore: asyncio.Semaphor
         report.haproxy_run = await _reconcile_haproxy_running(server_id, pre_death_running)
         report.remnawave_nginx = await _reconcile_remnawave_nginx(server_id)
         report.blocklist = await _reconcile_blocklist(server_id)
+        report.dnat = await _reconcile_dnat(server_id)
 
         # То, что уже приведено к ожидаемому, снимаем с очереди отложенных синков —
         # иначе её воркер повторит ту же работу через полминуты.
@@ -260,11 +311,13 @@ async def reconcile_recovered_server(server_id: int, semaphore: asyncio.Semaphor
             settled.append(KIND_FIREWALL_PROFILE)
         if report.blocklist in ("synced", "denied"):
             settled.append(KIND_BLOCKLIST)
+        if report.dnat in RECONCILED_STATES:
+            settled.append(KIND_DNAT_PROFILE)
         await clear_pending_sync(server_id, settled, started_at)
 
     logger.info(
-        "recovery_reconcile_done server=%s(%s) firewall=%s haproxy_cfg=%s haproxy_run=%s remnawave_nginx=%s blocklist=%s",
+        "recovery_reconcile_done server=%s(%s) firewall=%s haproxy_cfg=%s haproxy_run=%s remnawave_nginx=%s blocklist=%s dnat=%s",
         server_id, server_name, report.firewall, report.haproxy_cfg, report.haproxy_run,
-        report.remnawave_nginx, report.blocklist,
+        report.remnawave_nginx, report.blocklist, report.dnat,
     )
     return report

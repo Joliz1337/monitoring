@@ -1,10 +1,12 @@
 """HAProxy configuration manager for native systemd HAProxy service"""
 
 import asyncio
+import csv
 import ipaddress
 import logging
 import re
 import shutil
+import socket
 import subprocess
 import tempfile
 import time
@@ -34,6 +36,9 @@ MAXCONN_MAX = 500000
 OPENSSL_TIMEOUT_SEC = 10
 CERTBOT_ISSUE_TIMEOUT_SEC = 120
 CERTBOT_RENEW_TIMEOUT_SEC = 300
+
+STATS_SOCKET_TIMEOUT_SEC = 3.0
+STATS_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 
 # Срок сертификата меняется раз в месяцы, а get_cert_info вызывается на каждом
 # опросе метрик по каждому домену — без кэша это форк openssl на домен раз в
@@ -128,6 +133,11 @@ class HAProxyManager:
         self._status_cache: Optional[dict] = None
         self._status_cache_time: float = 0
         self._status_cache_ttl: float = 5.0  # 5 seconds
+        # Кэш live-статистики: гасит наложение fast-цикла панели (5 с)
+        # и авто-обновления нескольких открытых вкладок UI
+        self._stats_cache: Optional[dict] = None
+        self._stats_cache_time: float = 0
+        self._stats_cache_ttl: float = 2.0
         self._cert_info_cache: dict[str, tuple[float, dict]] = {}
 
     @staticmethod
@@ -409,9 +419,177 @@ resolvers mydns
         # Cache the result
         self._status_cache = result
         self._status_cache_time = current_time
-        
+
         return result
-    
+
+    def get_stats(self) -> dict:
+        """Live stats from the HAProxy stats socket (show stat), read-only"""
+        current_time = time.time()
+        if current_time - self._stats_cache_time < self._stats_cache_ttl and self._stats_cache:
+            return self._stats_cache
+
+        result = self._collect_stats()
+        self._stats_cache = result
+        self._stats_cache_time = current_time
+        return result
+
+    def _collect_stats(self) -> dict:
+        socket_path = self._stats_socket_path_from_config()
+        if not socket_path:
+            return self._stats_unavailable(
+                "socket_not_configured",
+                "No 'stats socket' line in haproxy.cfg",
+            )
+
+        csv_text = None
+        connected_path = ""
+        for candidate in self._stats_socket_candidates(socket_path):
+            try:
+                csv_text = self._query_stats_socket("show stat", candidate)
+                connected_path = candidate
+                break
+            except (FileNotFoundError, NotADirectoryError, ConnectionRefusedError):
+                continue
+            except socket.timeout:
+                return self._stats_unavailable("timeout", "Stats socket did not respond in time")
+            except OSError as e:
+                return self._stats_unavailable("error", str(e))
+
+        if csv_text is None:
+            if not self.is_running():
+                return self._stats_unavailable("haproxy_stopped", "HAProxy is not running")
+            return self._stats_unavailable(
+                "socket_unavailable",
+                "Stats socket is configured but absent — HAProxy needs a restart to create it",
+            )
+
+        result = {
+            "available": True,
+            "proxies": self._parse_show_stat(csv_text),
+        }
+        # Версия/аптайм — приятная шапка, но не повод ронять весь ответ
+        try:
+            result.update(self._parse_show_info(self._query_stats_socket("show info", connected_path)))
+        except OSError:
+            pass
+        return result
+
+    def _stats_socket_path_from_config(self) -> Optional[str]:
+        match = re.search(r'^\s*stats socket\s+(\S+)', self._read_config(), re.MULTILINE)
+        return match.group(1) if match else None
+
+    @staticmethod
+    def _stats_socket_candidates(path: str) -> list[str]:
+        # Контейнер агента работает с pid: host + privileged, поэтому сокет хоста
+        # доступен через /proc/1/root без bind-mount (mount на inode сокета
+        # ломался бы при рестарте haproxy: unlink+recreate). /var/run — absolute-симлинк
+        # на /run и под /proc/1/root может разрезолвиться в корень контейнера,
+        # поэтому первым идёт честный /run-путь.
+        run_path = path.replace("/var/run/", "/run/", 1)
+        candidates = [f"/proc/1/root{run_path}", f"/proc/1/root{path}", path]
+        return list(dict.fromkeys(candidates))
+
+    @staticmethod
+    def _query_stats_socket(command: str, socket_path: str) -> str:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(STATS_SOCKET_TIMEOUT_SEC)
+        try:
+            sock.connect(socket_path)
+            sock.sendall(command.encode() + b"\n")
+            chunks = []
+            total = 0
+            # HAProxy закрывает соединение после ответа — читаем до EOF
+            while total < STATS_MAX_RESPONSE_BYTES:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+            return b"".join(chunks).decode('utf-8', errors='replace')
+        finally:
+            sock.close()
+
+    @staticmethod
+    def _stat_int(value: Optional[str]) -> Optional[int]:
+        if not value:
+            return None
+        try:
+            return int(value)
+        except ValueError:
+            return None
+
+    @classmethod
+    def _parse_show_stat(cls, csv_text: str) -> list[dict]:
+        lines = [line for line in csv_text.splitlines() if line.strip()]
+        if not lines or not lines[0].startswith("#"):
+            return []
+        lines[0] = lines[0].lstrip("#").strip()
+
+        def as_int(value: Optional[str]) -> int:
+            return cls._stat_int(value) or 0
+
+        proxies: dict[str, dict] = {}
+        for row in csv.DictReader(lines):
+            pxname = row.get("pxname")
+            svname = row.get("svname")
+            if not pxname or not svname:
+                continue
+
+            kind = {"FRONTEND": "frontend", "BACKEND": "backend"}.get(svname, "server")
+            entry = {
+                "name": svname,
+                "kind": kind,
+                "status": row.get("status") or "",
+                "check_status": row.get("check_status") or None,
+                "addr": (row.get("addr") or None) if kind == "server" else None,
+                "scur": as_int(row.get("scur")),
+                "smax": as_int(row.get("smax")),
+                "slim": cls._stat_int(row.get("slim")),
+                "stot": as_int(row.get("stot")),
+                "rate": as_int(row.get("rate")),
+                "rate_max": as_int(row.get("rate_max")),
+                "bin": as_int(row.get("bin")),
+                "bout": as_int(row.get("bout")),
+                "econ": cls._stat_int(row.get("econ")),
+                "eresp": cls._stat_int(row.get("eresp")),
+                "weight": cls._stat_int(row.get("weight")),
+                "backup": row.get("bck") == "1",
+                "lastchg": cls._stat_int(row.get("lastchg")),
+                "downtime": cls._stat_int(row.get("downtime")),
+            }
+
+            proxy = proxies.setdefault(pxname, {
+                "name": pxname, "mode": None,
+                "frontend": None, "backend": None, "servers": [],
+            })
+            if row.get("mode"):
+                proxy["mode"] = row["mode"]
+            if kind == "frontend":
+                proxy["frontend"] = entry
+            elif kind == "backend":
+                proxy["backend"] = entry
+            else:
+                proxy["servers"].append(entry)
+
+        return list(proxies.values())
+
+    @classmethod
+    def _parse_show_info(cls, text: str) -> dict:
+        info = {}
+        for line in text.splitlines():
+            key, sep, value = line.partition(":")
+            if sep:
+                info[key.strip()] = value.strip()
+        return {
+            "haproxy_version": info.get("Version") or None,
+            "uptime_sec": cls._stat_int(info.get("Uptime_sec")),
+            "curr_conns": cls._stat_int(info.get("CurrConns")),
+        }
+
+    @staticmethod
+    def _stats_unavailable(reason: str, message: str) -> dict:
+        return {"available": False, "reason": reason, "message": message, "proxies": []}
+
     def get_logs(self, tail: int = 100) -> str:
         """Get HAProxy service logs via journalctl"""
         result = self._executor.execute_sync(

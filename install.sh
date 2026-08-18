@@ -3330,7 +3330,7 @@ Node permissions (optional):
   MON_NODE_CAPABILITIES=readonly,haproxy bash install.sh <NODE_SECRET>
                                                Limit what the panel may do on this node.
                                                Words: traffic haproxy firewall ipset ssh ssl
-                                               antiddos remnawave system exec; ":ro" = view only;
+                                               antiddos remnawave system exec dnat; ":ro" = view only;
                                                presets: monitoring, readonly, full. Empty = all.
 
 Quick remote install:

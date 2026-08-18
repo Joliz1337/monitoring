@@ -29,12 +29,14 @@ from app.models.haproxy import (
     HAProxyRuleResponse,
     HAProxyRulesListResponse,
     HAProxyRuleUpdate,
+    HAProxyStatsResponse,
     HAProxyStatusResponse,
     HAProxyValidateResponse,
 )
 from app.services.haproxy_manager import HAProxyRule, get_haproxy_manager
 from app.models.haproxy import BackendServerModel, BalancerOptionsModel
 from app.services.firewall_manager import get_firewall_manager
+from app.services.dnat_manager import get_dnat_manager
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +92,13 @@ async def get_haproxy_status():
     """Get HAProxy service status"""
     manager = get_haproxy_manager()
     return await asyncio.to_thread(manager.get_status)
+
+
+@router.get("/stats", response_model=HAProxyStatsResponse)
+async def get_haproxy_stats():
+    """Live stats from the HAProxy stats socket (show stat), read-only"""
+    manager = get_haproxy_manager()
+    return await asyncio.to_thread(manager.get_stats)
 
 
 @router.get("/rules", response_model=HAProxyRulesListResponse)
@@ -554,6 +563,7 @@ async def enable_firewall():
 
     if success:
         logger.info("Firewall enabled via API")
+        get_dnat_manager().request_recheck()
     
     return FirewallActionResponse(
         success=success,
@@ -570,6 +580,7 @@ async def disable_firewall():
 
     if success:
         logger.info("Firewall disabled via API")
+        get_dnat_manager().request_recheck()
     
     return FirewallActionResponse(
         success=success,

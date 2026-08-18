@@ -10,6 +10,7 @@ from app.models.firewall_profile import (
     ProfileApplyResponse,
     ProfileStateResponse,
 )
+from app.services.dnat_manager import get_dnat_manager
 from app.services.firewall_manager import get_firewall_manager
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,8 @@ async def apply_profile(request: ProfileApplyRequest) -> ProfileApplyResponse:
             request.force,
         )
 
+    # `ufw --force reset` внутри apply вычищает джампы DNAT из встроенных цепочек
+    get_dnat_manager().request_recheck()
     return ProfileApplyResponse(**result)
 
 

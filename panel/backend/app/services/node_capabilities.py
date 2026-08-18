@@ -32,6 +32,7 @@ class Capability(str, Enum):
     REMNAWAVE = "remnawave"
     SYSTEM = "system"
     EXEC = "exec"
+    DNAT = "dnat"
 
 
 ACCESS_NONE = "no"
@@ -54,6 +55,7 @@ DOMAIN_PREFIXES: dict[str, Capability] = {
     "/api/system": Capability.SYSTEM,
     "/api/system/execute": Capability.EXEC,
     "/api/system/execute-stream": Capability.EXEC,
+    "/api/dnat": Capability.DNAT,
 }
 
 ALWAYS_ALLOWED: frozenset[str] = frozenset({

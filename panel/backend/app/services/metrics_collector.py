@@ -94,6 +94,7 @@ class MetricsCollector:
     # Правила файрвола живут под префиксом haproxy, но закрываются своим доменом
     HAPROXY_ENDPOINTS = (
         ("/api/haproxy/status", "status", Capability.HAPROXY),
+        ("/api/haproxy/stats", "stats", Capability.HAPROXY),
         ("/api/haproxy/rules", "rules", Capability.HAPROXY),
         ("/api/haproxy/certs/all", "certs", Capability.HAPROXY),
         ("/api/haproxy/firewall/rules", "firewall", Capability.FIREWALL),

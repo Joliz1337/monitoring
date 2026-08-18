@@ -8,6 +8,7 @@ import {
   MemoryStick,
   HardDrive,
   Network,
+  Route,
   Activity,
   Clock,
   Server,
@@ -36,6 +37,7 @@ import CpuCoresChart from '../components/Charts/CpuCoresChart'
 import CpuCoresHistoryChart from '../components/Charts/CpuCoresHistoryChart'
 import Terminal from '../components/Terminal/Terminal'
 import NodeRestrictedNotice from '../components/servers/NodeRestrictedNotice'
+import BandwidthLimitCard from '../components/servers/BandwidthLimitCard'
 import { nodeAllows } from '../utils/nodeCapabilities'
 import { formatBytes, formatUptime, formatPercent, createBitsFormatter, formatTimeAgo } from '../utils/format'
 import { useCachedData, createServerCacheKey } from '../hooks/useCachedData'
@@ -434,6 +436,16 @@ export default function ServerDetails() {
               {t('server_details.traffic')}
             </motion.div>
           </Link>
+          <Link to={`/${uid}/server/${serverId}/dnat`}>
+            <motion.div
+              className="btn btn-secondary"
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.98 }}
+            >
+              <Route className="w-4 h-4" />
+              {t('dnat.title')}
+            </motion.div>
+          </Link>
           <Link to={`/${uid}/server/${serverId}/haproxy`}>
             <motion.div
               className="btn btn-primary"
@@ -734,6 +746,11 @@ export default function ServerDetails() {
               </div>
             </motion.div>
             
+            {/* Лимит полосы (tc на ноде) */}
+            <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }} className="mt-6">
+              <BandwidthLimitCard serverId={Number(serverId)} server={server} />
+            </motion.div>
+
             {/* Terminal section */}
             <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }} className="mt-6">
               {execAllowed

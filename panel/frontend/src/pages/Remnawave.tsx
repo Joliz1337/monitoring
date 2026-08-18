@@ -975,6 +975,7 @@ function SettingsTab() {
     anomaly_ua_enabled: true, anomaly_devdata_enabled: true,
     anomaly_ip_margin: 2, anomaly_ip_confirm_count: 5, anomaly_asn_margin: 0,
     anomaly_ip_smart_enabled: true, anomaly_ip_smart_traffic_gb: 20,
+    anomaly_devdata_smart_enabled: true, anomaly_devdata_smart_traffic_gb: 20,
     anomaly_ua_patterns: '',
     anomaly_tg_bot_token: '', anomaly_tg_chat_id: '',
     traffic_anomaly_enabled: false, traffic_threshold_gb: 30, traffic_confirm_count: 2,
@@ -1015,6 +1016,8 @@ function SettingsTab() {
         anomaly_asn_margin: s.anomaly_asn_margin ?? 0,
         anomaly_ip_smart_enabled: s.anomaly_ip_smart_enabled ?? true,
         anomaly_ip_smart_traffic_gb: s.anomaly_ip_smart_traffic_gb ?? 20,
+        anomaly_devdata_smart_enabled: s.anomaly_devdata_smart_enabled ?? true,
+        anomaly_devdata_smart_traffic_gb: s.anomaly_devdata_smart_traffic_gb ?? 20,
         anomaly_ua_patterns: s.anomaly_ua_patterns || '',
         anomaly_tg_bot_token: '',
         anomaly_tg_chat_id: s.anomaly_tg_chat_id || '',
@@ -1260,6 +1263,32 @@ function SettingsTab() {
                                 <label className="block text-[11px] text-dark-500 mb-1">{t('remnawave.anomalySmartTrafficGb')}</label>
                                 <input type="number" value={form.anomaly_ip_smart_traffic_gb} min={1} max={500}
                                   onChange={e => { const v = parseFloat(e.target.value); updateField('anomaly_ip_smart_traffic_gb', Number.isNaN(v) ? 1 : v) }}
+                                  className="input" />
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {key === 'anomaly_devdata_enabled' && form.anomaly_devdata_enabled && (
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between">
+                            <span className="text-dark-400 text-xs">{t('remnawave.anomalySmartTitle')}</span>
+                            <button onClick={() => updateField('anomaly_devdata_smart_enabled', !form.anomaly_devdata_smart_enabled)}
+                              className={`w-11 h-6 rounded-full transition-colors relative shrink-0 ${form.anomaly_devdata_smart_enabled ? 'bg-accent-500' : 'bg-dark-600'}`}>
+                              <motion.div
+                                className="w-5 h-5 bg-white rounded-full absolute top-0.5 shadow-sm"
+                                animate={{ x: form.anomaly_devdata_smart_enabled ? 22 : 2 }}
+                                transition={{ type: 'spring', stiffness: 500, damping: 30 }}
+                              />
+                            </button>
+                          </div>
+                          {form.anomaly_devdata_smart_enabled && (
+                            <div className="grid grid-cols-3 gap-2">
+                              <div>
+                                <label className="block text-[11px] text-dark-500 mb-1">{t('remnawave.anomalySmartTrafficGb')}</label>
+                                <input type="number" value={form.anomaly_devdata_smart_traffic_gb} min={1} max={500}
+                                  onChange={e => { const v = parseFloat(e.target.value); updateField('anomaly_devdata_smart_traffic_gb', Number.isNaN(v) ? 1 : v) }}
                                   className="input" />
                               </div>
                             </div>
