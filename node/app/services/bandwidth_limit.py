@@ -59,7 +59,9 @@ def parse_state(text: str) -> tuple[int, str]:
 
 def parse_tc_root(tc_json: str) -> tuple[Optional[str], Optional[int]]:
     """Корневой qdisc из `tc -j qdisc show dev X`: (вид, лимит в Мбит) — лимит
-    только для наших видов (cake отдаёт bandwidth в бит/с, tbf — rate в бит/с)."""
+    только для наших видов. В JSON iproute2 печатает `bandwidth`/`rate` в
+    БАЙТАХ в секунду (print_color_rate возвращает значение до `rate <<= 3`;
+    умножение на 8 есть только в текстовом выводе)."""
     try:
         entries = json.loads(tc_json or "[]")
     except ValueError:
@@ -69,8 +71,8 @@ def parse_tc_root(tc_json: str) -> tuple[Optional[str], Optional[int]]:
             continue
         kind = entry.get("kind")
         options = entry.get("options") or {}
-        bits = options.get("bandwidth") if kind == QDISC_CAKE else options.get("rate") if kind == QDISC_TBF else None
-        mbit = round(int(bits) / 1_000_000) if isinstance(bits, (int, float)) and bits else None
+        bytes_per_sec = options.get("bandwidth") if kind == QDISC_CAKE else options.get("rate") if kind == QDISC_TBF else None
+        mbit = round(int(bytes_per_sec) * 8 / 1_000_000) if isinstance(bytes_per_sec, (int, float)) and bytes_per_sec else None
         return kind, mbit
     return None, None
 

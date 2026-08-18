@@ -43,11 +43,12 @@ class FakeExecutor:
         return FakeResult(success=False, exit_code=1, stderr="no answer")
 
 
-CAKE_JSON = '[{"kind":"cake","handle":"8001:","root":true,"refcnt":2,"options":{"bandwidth":950000000,"diffserv":"besteffort"}}]'
-TBF_JSON = '[{"kind":"tbf","handle":"8002:","root":true,"options":{"rate":500000000,"burst":524288}}]'
+CAKE_JSON = '[{"kind":"cake","handle":"8001:","root":true,"refcnt":2,"options":{"bandwidth":118750000,"diffserv":"besteffort"}}]'
+TBF_JSON = '[{"kind":"tbf","handle":"8002:","root":true,"options":{"rate":62500000,"burst":524288}}]'
 MQ_JSON = '[{"kind":"mq","handle":"0:","root":true,"refcnt":2},{"kind":"fq_codel","handle":"0:","parent":"0:1","options":{"limit":10240}}]'
 
 
+# JSON tc отдаёт байты/с: 950 Мбит/с = 118 750 000, 500 Мбит/с = 62 500 000
 class ParseTest(unittest.TestCase):
     def test_state_roundtrip(self):
         self.assertEqual(parse_state(render_state(950, "eth0")), (950, "eth0"))
