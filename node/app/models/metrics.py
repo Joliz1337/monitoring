@@ -74,9 +74,16 @@ class DiskIO(BaseModel):
     write_bytes_per_sec: Optional[float] = None
 
 
+class DiskIOTotal(BaseModel):
+    """Суммарная скорость только по целым дискам: раздел sda1 уже внутри sda."""
+    read_bytes_per_sec: float = 0.0
+    write_bytes_per_sec: float = 0.0
+
+
 class DiskInfo(BaseModel):
     partitions: list[DiskPartition]
     io: dict[str, DiskIO]
+    io_total: DiskIOTotal = Field(default_factory=DiskIOTotal)
 
 
 class NetworkAddress(BaseModel):
@@ -230,6 +237,13 @@ class AntiDdosInfo(BaseModel):
     listen_drops_total: Optional[int] = None       # шире: включает смену сокетов
 
 
+class LiveRates(BaseModel):
+    """Маркер: скорости в этом ответе посчитаны нодой за последнее окно.
+    Без него панель считает дельты сама (старый агент, семплер не прогрелся)."""
+    window_sec: float
+    sampled_at: float
+
+
 class AllMetrics(BaseModel):
     timestamp: str
     server_name: str
@@ -242,6 +256,7 @@ class AllMetrics(BaseModel):
     system: SystemInfo
     certificates: Optional[CertificatesInfo] = None
     antiddos: Optional[AntiDdosInfo] = None
+    live_rates: Optional[LiveRates] = None
     agent_version: Optional[str] = None
     # Карта прав панели на этой ноде; null — ограничений нет. Поле обязано быть
     # объявлено здесь: то, чего нет в response_model, FastAPI из ответа вырежет.

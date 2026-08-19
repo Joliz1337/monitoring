@@ -330,7 +330,7 @@
     "power_action_failed": "Failed to execute power action",
     "load_average": "Load Average",
     "bandwidth_title": "Bandwidth limit",
-    "bandwidth_hint": "tc shaper (cake, or tbf if unavailable) on the egress of the default interface: a flat ceiling on the hoster's counters instead of spikes. Invisible below the limit, behaves like a real port of that speed at the limit. Applied and restored by the node agent.",
+    "bandwidth_hint": "tc shaper (tbf) on the egress of the default interface: a flat ceiling on the hoster's counters instead of spikes. Invisible below the limit, behaves like a real port of that speed at the limit. Applied and restored by the node agent.",
     "bandwidth_enable": "Limit bandwidth",
     "bandwidth_mbit": "Mbit/s",
     "bandwidth_apply": "Apply",

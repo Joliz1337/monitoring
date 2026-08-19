@@ -16,8 +16,8 @@ from fastapi.middleware.gzip import GZipMiddleware
 from app.capabilities import CapabilityMiddleware, get_policy
 from app.config import get_settings
 from app.routers import haproxy, metrics, traffic, system, ipset, remnawave, ssh, ssl, firewall_profile, antiddos, dnat
-from app.services.metrics_collector import get_collector as get_metrics_collector
 from app.services.port_traffic_sampler import get_port_traffic_sampler
+from app.services.rate_sampler import get_rate_sampler
 from app.services.ipset_manager import get_ipset_manager
 from app.services.dnat_manager import get_dnat_manager
 from app.services.bandwidth_limit import get_bandwidth_limiter
@@ -34,9 +34,14 @@ async def lifespan(app: FastAPI):
     """Application lifespan"""
     logger.info("Starting Server Monitoring Agent...")
 
-    # Прогрев замера CPU до приёма запросов: иначе первый запрос метрик меряет
-    # нагрузку на нулевом интервале и отдаёт мусор («одно ядро 100%, остальные 0»)
-    await asyncio.to_thread(get_metrics_collector().prime_cpu_baseline)
+    # Прогрев посекундного замера до приёма запросов: иначе первый запрос метрик
+    # ушёл бы без скоростей и CPU, и панель на цикл посчитала бы дельты сама
+    rate_sampler = get_rate_sampler()
+    try:
+        await asyncio.to_thread(rate_sampler.prime)
+        await rate_sampler.start()
+    except Exception as e:
+        logger.error(f"Rate sampler start failed, speeds fall back to panel-side deltas: {e}", exc_info=True)
 
     from app.services.haproxy_manager import get_haproxy_manager
     haproxy_manager = get_haproxy_manager()
@@ -99,6 +104,10 @@ async def lifespan(app: FastAPI):
         await port_sampler.stop()
     except Exception as e:
         logger.error(f"Port traffic sampler stop failed: {e}", exc_info=True)
+    try:
+        await rate_sampler.stop()
+    except Exception as e:
+        logger.error(f"Rate sampler stop failed: {e}", exc_info=True)
     try:
         await affinity_sync.stop()
     except Exception as e:

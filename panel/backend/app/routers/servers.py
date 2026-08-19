@@ -23,6 +23,7 @@ from app.database import get_db
 from app.models import Server, MetricsSnapshot, ServerTraffic
 from app.auth import verify_auth
 from app.services.blocklist_manager import get_blocklist_manager
+from app.services.metrics_rates import enrich_metrics_with_speeds
 from app.services.server_status import get_offline_threshold, resolve_status
 from app.services.time_sync import get_time_sync_service
 from app.services.net_utils import resolve_panel_ip
@@ -111,62 +112,6 @@ def to_iso_utc(dt: Optional[datetime]) -> Optional[str]:
     dt = dt.replace(microsecond=(dt.microsecond // 1000) * 1000)
     # Format as ISO and append Z (all our times are UTC)
     return dt.strftime('%Y-%m-%dT%H:%M:%S.') + f'{dt.microsecond // 1000:03d}Z'
-
-
-def enrich_metrics_with_speeds(metrics: dict, snapshot: MetricsSnapshot) -> dict:
-    """Enrich raw metrics with calculated network/disk speeds from snapshot.
-
-    Node returns raw bytes only, panel calculates speeds from byte differences.
-    This function adds the calculated speeds to the metrics dict.
-    Speed is distributed only to physical interfaces (is_virtual=false)
-    to avoid double-counting traffic on Docker veth/bridge interfaces.
-    """
-    if not snapshot:
-        return metrics
-
-    if "network" in metrics:
-        total_rx_speed = snapshot.net_rx_bytes_per_sec or 0
-        total_tx_speed = snapshot.net_tx_bytes_per_sec or 0
-
-        if "total" in metrics["network"]:
-            metrics["network"]["total"]["rx_bytes_per_sec"] = total_rx_speed
-            metrics["network"]["total"]["tx_bytes_per_sec"] = total_tx_speed
-
-        interfaces = metrics["network"].get("interfaces", [])
-        if interfaces:
-            # Only distribute speed to physical interfaces
-            physical = [i for i in interfaces if not i.get("is_virtual", False)]
-            phys_rx = sum(i.get("rx_bytes", 0) for i in physical) if physical else 0
-            phys_tx = sum(i.get("tx_bytes", 0) for i in physical) if physical else 0
-
-            for iface in interfaces:
-                if iface.get("is_virtual", False):
-                    iface["rx_bytes_per_sec"] = 0.0
-                    iface["tx_bytes_per_sec"] = 0.0
-                    continue
-                if phys_rx > 0:
-                    iface["rx_bytes_per_sec"] = total_rx_speed * iface.get("rx_bytes", 0) / phys_rx
-                if phys_tx > 0:
-                    iface["tx_bytes_per_sec"] = total_tx_speed * iface.get("tx_bytes", 0) / phys_tx
-
-    if "disk" in metrics and "io" in metrics["disk"]:
-        disk_read_speed = snapshot.disk_read_bytes_per_sec or 0
-        disk_write_speed = snapshot.disk_write_bytes_per_sec or 0
-
-        io_stats = metrics["disk"]["io"]
-        if io_stats:
-            total_read = sum(d.get("read_bytes", 0) for d in io_stats.values())
-            total_write = sum(d.get("write_bytes", 0) for d in io_stats.values())
-
-            for disk_name, disk_io in io_stats.items():
-                if total_read > 0:
-                    ratio = disk_io.get("read_bytes", 0) / total_read
-                    disk_io["read_bytes_per_sec"] = disk_read_speed * ratio
-                if total_write > 0:
-                    ratio = disk_io.get("write_bytes", 0) / total_write
-                    disk_io["write_bytes_per_sec"] = disk_write_speed * ratio
-
-    return metrics
 
 
 async def get_latest_snapshots_bulk(server_ids: list[int], db: AsyncSession) -> dict[int, MetricsSnapshot]:

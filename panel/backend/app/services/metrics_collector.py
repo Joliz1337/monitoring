@@ -1,7 +1,8 @@
 """
 Background metrics collector for the panel.
 Polls all servers every N seconds and stores metrics in local DB.
-Disk speeds are derived here; network speed and traffic history belong to traffic_ingest.
+Network/disk speeds come from the node's one-second sampler when present;
+otherwise disk speed is derived here and network speed by traffic_ingest.
 """
 
 import asyncio
@@ -26,6 +27,7 @@ from app.models import (
     Server, ServerCache, MetricsSnapshot, AggregatedMetrics, PanelSettings,
     ServerDowntime, ServerTraffic,
 )
+from app.services.metrics_rates import node_live_rates
 from app.services.traffic_ingest import get_traffic_ingest
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -669,8 +671,7 @@ class MetricsCollector:
         processes = metrics.get("processes", {})
         system = metrics.get("system", {})
 
-        # Скорость сети берём у учёта трафика: счётчик и формула дельты должны быть
-        # одни на всю панель, иначе график скорости разойдётся с историей трафика.
+        # Учёт трафика наблюдает счётчики всегда — это история байт, не скорость.
         # Ответ ноды приходит сюда как есть, а снапшоты всей флотилии собираются
         # одним проходом — исключение на одной ноде не должно ронять остальные.
         try:
@@ -680,11 +681,19 @@ class MetricsCollector:
             logger.warning(f"Traffic observe failed for server {server_id}: {e}")
             net_rx_speed, net_tx_speed = 0.0, 0.0
 
-        disk_read = sum(d.get("read_bytes", 0) for d in disk.get("io", {}).values())
-        disk_write = sum(d.get("write_bytes", 0) for d in disk.get("io", {}).values())
-        disk_read_speed, disk_write_speed = self._disk_speeds(
-            server_id, disk_read, disk_write, current_time
-        )
+        # Скорость — нагрузка за последнюю секунду, посчитанная самой нодой.
+        # Без неё (старый агент, семплер ещё не прогрелся) — среднее за интервал
+        # опроса по дельте счётчиков, как считали всегда.
+        node_rates = node_live_rates(metrics)
+        if node_rates:
+            net_rx_speed, net_tx_speed = node_rates.net_rx, node_rates.net_tx
+            disk_read_speed, disk_write_speed = node_rates.disk_read, node_rates.disk_write
+        else:
+            disk_read = sum(d.get("read_bytes", 0) for d in disk.get("io", {}).values())
+            disk_write = sum(d.get("write_bytes", 0) for d in disk.get("io", {}).values())
+            disk_read_speed, disk_write_speed = self._disk_speeds(
+                server_id, disk_read, disk_write, current_time
+            )
 
         disk_percent = 0.0
         partitions = disk.get("partitions", [])
