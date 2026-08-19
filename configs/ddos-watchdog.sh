@@ -18,7 +18,7 @@ set -u
 
 # Bumped when the script logic changes — the panel compares this against what a
 # node reports and auto-reinstalls on drift, so updates roll out without clicks.
-WATCHDOG_VERSION="2.3.0"
+WATCHDOG_VERSION="2.4.0"
 
 STATE_DIR="/opt/monitoring/antiddos"
 STATE_FILE="$STATE_DIR/state.json"
@@ -155,9 +155,18 @@ detect_ssh_ports() {
     echo $ports
 }
 
-# Management ports (static) + auto-detected SSH port(s) — never rate-limited.
+# The node's mTLS-nginx may listen on a custom port (NODE_API_PORT in the
+# node's .env) — without it in never-drop, emergency mode would rate-limit
+# the panel itself on such nodes.
+detect_node_api_port() {
+    grep -s '^NODE_API_PORT=' /opt/monitoring-node/.env 2>/dev/null \
+        | head -1 | cut -d= -f2 | tr -dc '0-9'
+}
+
+# Management ports (static) + configured node API port + auto-detected SSH
+# port(s) — never rate-limited.
 effective_never_drop() {
-    printf '%s\n' $NEVER_DROP_PORTS $(detect_ssh_ports) | grep -E '^[0-9]+$' | sort -un
+    printf '%s\n' $NEVER_DROP_PORTS $(detect_node_api_port) $(detect_ssh_ports) | grep -E '^[0-9]+$' | sort -un
 }
 
 # Listening TCP ports on non-loopback addresses, minus the never-drop set.

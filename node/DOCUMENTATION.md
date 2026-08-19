@@ -15,7 +15,7 @@ API агент для сбора метрик сервера, отслежива
 - **Синхронизация времени** — установка IANA timezone через `timedatectl`, включение NTP и принудительная синхронизация через `systemd-timesyncd`
 - **SSH Security** — управление SSH-безопасностью сервера: настройки sshd, fail2ban, SSH-ключи
 - **Wildcard SSL** — приём и деплой wildcard сертификатов, выпущенных панелью: разбор и валидация PEM, запись файлов на хост, бэкап, откат при ошибке reload
-- **Firewall Profiles** — атомарное применение UFW-профилей от панели: backup → reset → apply → enable, авторолбэк при ошибке, node-API-port-guard (порт 9100), drift-детекция по SHA256-хэшу
+- **Firewall Profiles** — атомарное применение UFW-профилей от панели: backup → reset → apply → enable, авторолбэк при ошибке, node-API-port-guard (порт из `NODE_API_PORT`), drift-детекция по SHA256-хэшу
 - **DNAT-маршрутизация** — проброс портов средствами netfilter (iptables nat DNAT + MASQUERADE + FORWARD ACCEPT) в собственных цепочках `MON_DNAT*`: атомарное применение набора правил от панели одним `iptables-restore --noflush`, счётчики соединений/байт по правилу, файл состояния и самолечение после ребута/`ufw reset`
 - **Анти-DDoS** — многослойная защита: дежурный режим без лимитов, аварийный режим (SYNPROXY + hashlimit в отдельной iptables-цепочке `ANTIDDOS`, пороги авто-масштабируются по CPU/RAM хоста), автодетект атаки по сигналам из `/proc` (watchdog), whitelist на ipset, переживающий ребут и недоступность панели, self-check доступности ноды во время аварийного режима
 - **Системные оптимизации** — sysctl/лимиты/HAProxy `maxconn` вычисляются на самой ноде из её MemTotal/nproc единым рендерером (`tune-sysctl.sh`), а не приходят готовыми от панели; авто-ре-рендер при каждой загрузке подхватывает ресайз VPS
@@ -176,6 +176,7 @@ node/
 | Параметр | Описание | Default |
 |----------|----------|---------|
 | NODE_NAME | Имя ноды | node-01 |
+| NODE_API_PORT | Порт mTLS-nginx, на который подключается панель. Читают трое: compose подставляет его в шаблон nginx (`nginx/templates/api.conf.template`, рендерится entrypoint'ом образа в `conf.d/api.conf`), агент — для guard'а файрвола и валидации DNAT, анти-DDoS сторож — для never-drop. Задаётся при установке (`--api-port=N` / env `NODE_API_PORT`); смена на живой ноде: правка `.env` → открыть новый порт в UFW → `docker compose up -d` → поменять порт в URL сервера на панели | 9100 |
 | PANEL_IP | IP панели (для UFW) | задаётся при установке |
 | PORT_SAMPLE_INTERVAL | Интервал съёма счётчиков портов из iptables (сек) | 30 |
 | TRAFFIC_DB_PATH | Файл легаси-БД трафика; в его каталоге лежит и `traffic_config.json` со списком отслеживаемых портов | /var/lib/monitoring/traffic.db |
@@ -187,16 +188,16 @@ node/
 
 | Порт | Доступ | Описание |
 |------|--------|----------|
-| 9100 | Только Panel IP | API мониторинга |
+| 9100 (`NODE_API_PORT`) | Только Panel IP | API мониторинга |
 | 80 | Все | Let's Encrypt верификация |
 | 22 | Все | SSH |
 
 ## Безопасность
 
-- **mTLS**: nginx на порту 9100 требует клиентский сертификат, подписанный панельным CA (`ssl_verify_client on`); без валидного сертификата соединение обрывается на TLS-handshake, до HTTP — приложение вообще не видит запрос
-- **Внутренний API изолирован**: uvicorn слушает только `127.0.0.1:7500` (`Dockerfile`), а не `0.0.0.0` — порт не проброшен наружу даже с `network_mode: host`, единственный путь на ноду снаружи — nginx с mTLS на 9100. Роутеры зарегистрированы без auth-зависимости именно поэтому: авторизация происходит раньше, на уровне TLS-хендшейка nginx
+- **mTLS**: nginx на порту API (`NODE_API_PORT`, по умолчанию 9100) требует клиентский сертификат, подписанный панельным CA (`ssl_verify_client on`); без валидного сертификата соединение обрывается на TLS-handshake, до HTTP — приложение вообще не видит запрос
+- **Внутренний API изолирован**: uvicorn слушает только `127.0.0.1:7500` (`Dockerfile`), а не `0.0.0.0` — порт не проброшен наружу даже с `network_mode: host`, единственный путь на ноду снаружи — nginx с mTLS. Роутеры зарегистрированы без auth-зависимости именно поэтому: авторизация происходит раньше, на уровне TLS-хендшейка nginx
 - **TLS 1.2/1.3** с сильными шифрами
-- **UFW**: порт 9100 доступен только с IP панели
+- **UFW**: порт API доступен только с IP панели
 - **NODE_CAPABILITIES**: mTLS решает, что панель это панель; NODE_CAPABILITIES — отдельный, более узкий вопрос: что этой конкретной панели разрешено делать на этой ноде. Прошедший TLS-хендшейк запрос может получить `403` на уровне ASGI-миддлвари, до роутера. Подробности — «Права доступа панели (NODE_CAPABILITIES)» ниже
 
 ## Права доступа панели (NODE_CAPABILITIES)
@@ -681,7 +682,7 @@ PEM разбирается в процессе агента через `cryptogr
 - `force` — обойти node-API-port-guard (default: false)
 
 Алгоритм apply:
-1. Node-API-port-guard: если `default_incoming != 'allow'` и в правилах нет `allow 9100/tcp IN` и `force=False` — возвращает ошибку "Allow rule for node API port 9100/tcp missing — panel will lose connection to node. Use force=true to apply anyway". Константа `NODE_API_PORT = 9100`. Правило `with_from_ip` допустимо — проверяется только наличие allow-правила для порта, без требования `from any`.
+1. Node-API-port-guard: если `default_incoming != 'allow'` и в правилах нет `allow <порт API>/tcp IN` и `force=False` — возвращает ошибку "Allow rule for node API port N/tcp missing — panel will lose connection to node. Use force=true to apply anyway". Порт берётся из `settings.node_api_port` (`NODE_API_PORT` в `.env`, по умолчанию 9100). Правило `with_from_ip` допустимо — проверяется только наличие allow-правила для порта, без требования `from any`. Тесты guard'а — `node/tests/test_firewall_api_port_guard.py`.
 2. `_backup_state()` — снимок текущего UFW в `/etc/monitoring/ufw_backup_<timestamp>.json` (через nsenter); хранится максимум `MAX_BACKUPS=5`
 3. `ufw reset` → установка политик → применение правил → `ufw enable`
 4. При любой ошибке — `_restore_state(backup_path)` (автоматический rollback)
@@ -704,7 +705,7 @@ PEM разбирается в процессе агента через `cryptogr
 Три уровня защиты от потери связи панели с нодой:
 1. Панель автозаполняет новый профиль правилом для порта 9100 при создании
 2. Панель показывает баннер-предупреждение и индикатор-иконку в UI
-3. Нода отклоняет apply, если нет `allow 9100/tcp IN` и `default_incoming != allow`, и `force=False`
+3. Нода отклоняет apply, если нет `allow <NODE_API_PORT>/tcp IN` и `default_incoming != allow`, и `force=False`
 
 **Бэкапы UFW:**
 
@@ -746,7 +747,7 @@ PEM разбирается в процессе агента через `cryptogr
 
 Решение принимается на первом пакете, дальше соединение держит conntrack — живые соединения при смене списка не перекидываются. Проверки живости целей нет. Один адрес — режим не имеет значения, матч не добавляется.
 
-**Проверка набора (`validate_rules`)** — отказ до любого касания netfilter: дубликаты имён; включённое правило, закрывающее `NODE_API_PORT` 9100/tcp (панель потеряла бы ноду — принудительного обхода нет); пересечение диапазонов портов у включённых правил с общим протоколом (в iptables сработало бы первое, а панель показывала бы оба как активные). Выключенные правила в проверке не участвуют — в ядро они не попадают.
+**Проверка набора (`validate_rules`)** — отказ до любого касания netfilter: дубликаты имён; включённое правило, закрывающее порт API ноды (`validate_rules(rules, api_port)`, порт из `settings.node_api_port`; панель потеряла бы ноду — принудительного обхода нет); пересечение диапазонов портов у включённых правил с общим протоколом (в iptables сработало бы первое, а панель показывала бы оба как активные). Выключенные правила в проверке не участвуют — в ядро они не попадают.
 
 **Как лежит в ядре.** Три собственные цепочки, джампы в них вставляются первыми (`-I ... 1`) в `nat/PREROUTING`, `nat/POSTROUTING` и `filter/FORWARD`:
 - `MON_DNAT` — `-p <proto> --dport <port|a:b> -j DNAT --to-destination <ip>[:<port>]`;
@@ -805,7 +806,7 @@ PEM разбирается в процессе агента через `cryptogr
 1. DROP/ACCEPT по temp-блоклисту (`blocklist_temp`, если ipset-набор существует)
 2. ACCEPT по whitelist (`antiddos_allow`, ipset `hash:net`)
 3. ACCEPT established/related соединений
-4. ACCEPT SSH (порт автоопределяется, см. ниже), nginx mTLS API (9100) и внутренний uvicorn-API ноды (7500) — никогда не дропаются
+4. ACCEPT SSH (порт автоопределяется, см. ниже), nginx mTLS API (9100 + кастомный `NODE_API_PORT` из `.env` ноды, если задан) и внутренний uvicorn-API ноды (7500) — никогда не дропаются
 5. На автоопределённые клиентские порты — **SYNPROXY** (проверка TCP-рукопожатия до создания conntrack-записи, гасит SYN-флуд со спуфнутых IP; best-effort — если `xt_SYNPROXY`/`nf_synproxy_core` недоступны, шаг пропускается). `--wscale`/`--mss` вычисляются `tune-sysctl.sh` из реальных `rmem_max` и MTU хоста — захардкоженные значения зажимали бы окно проксируемых соединений и были бы неверны на туннелированном пути
 6. DROP INVALID (эффективно вместе с `nf_conntrack_tcp_loose=0` из системных оптимизаций)
 7. Не-SYN пакеты в состоянии NEW — DROP
@@ -817,7 +818,7 @@ Raw-правила `--notrack` (снимают SYN с трекинга до SYNP
 
 **Разбивка портов на группы (`build_chain`):** `iptables -m multiport --dports` принимает не более 15 портов на правило. Busy Xray-нода может слушать 30+ клиентских инбаундов, поэтому `detect_client_ports` разбивается на группы по ≤15 портов, и для каждой группы генерируется свой набор правил SYNPROXY/hashlimit. Хэш-таблица hashlimit **одна общая** на все группы (`--hashlimit-name ad_emg`) с настраиваемой `--hashlimit-srcmask` (`HASHLIMIT_SRCMASK`, по умолчанию 32) — отдельная таблица на группу умножала бы эффективный лимит на число групп (нода с 60 портами получила бы 4×`NEWRATE` и вчетверо больше памяти htable).
 
-**Автоопределение SSH-порта (`detect_ssh_ports()`):** захардкоженный порт 22 в never-drop оставил бы ноду с нестандартным SSH-портом без ACCEPT для реального порта — тот попал бы под hashlimit клиентских портов. Порт(ы) определяются из трёх источников и объединяются: директива `Port` в `/etc/ssh/sshd_config` и `/etc/ssh/sshd_config.d/*.conf`; `ListenStream=` в systemd socket-активации (`ssh.socket` и override'ы — дефолт Ubuntu 24); живые sshd-листенеры через `ss -H -tlnp` (грепом по `sshd`). Если ни один источник не дал результата — откат на 22. `effective_never_drop()` объединяет статические management-порты (`NEVER_DROP_PORTS="9100 7500"`) с автоопределёнными SSH-портами (дедуп) — используется и при исключении клиентских портов (`detect_client_ports`), и при генерации ACCEPT-правил (`build_chain`).
+**Автоопределение SSH-порта (`detect_ssh_ports()`):** захардкоженный порт 22 в never-drop оставил бы ноду с нестандартным SSH-портом без ACCEPT для реального порта — тот попал бы под hashlimit клиентских портов. Порт(ы) определяются из трёх источников и объединяются: директива `Port` в `/etc/ssh/sshd_config` и `/etc/ssh/sshd_config.d/*.conf`; `ListenStream=` в systemd socket-активации (`ssh.socket` и override'ы — дефолт Ubuntu 24); живые sshd-листенеры через `ss -H -tlnp` (грепом по `sshd`). Если ни один источник не дал результата — откат на 22. `effective_never_drop()` объединяет статические management-порты (`NEVER_DROP_PORTS="9100 7500"`), кастомный порт API из `/opt/monitoring-node/.env` (`detect_node_api_port()`, если `NODE_API_PORT` задан) и автоопределённые SSH-порты (дедуп) — используется и при исключении клиентских портов (`detect_client_ports`), и при генерации ACCEPT-правил (`build_chain`).
 
 Джамп ставится только на время активного режима — в дежурном режиме никаких дополнительных правил и накладных расходов.
 
@@ -839,7 +840,7 @@ Raw-правила `--notrack` (снимают SYN с трекинга до SYNP
 
 **CLI-команды `ddos-watchdog.sh`** (вызываются нодой через `nsenter`, доступны и вручную на хосте): `loop`, `enable-manual`, `disable-manual`, `watchdog-on`, `watchdog-off`, `apply`, `clear`, `selfheal`, `whitelist-sync` (IP через stdin), `detect-ports`, `dry-run`, `self-test`, `version`, `status`. Состояние — `/opt/monitoring/antiddos/state.json` (mode/source/since/reason/watchdog).
 
-**Версионирование watchdog-скрипта:** константа `WATCHDOG_VERSION` в шапке `ddos-watchdog.sh` (сейчас `"2.3.0"`) — команда `status` возвращает её полем `version`, отдельная команда `version` печатает только её. Значение растёт при изменении логики скрипта; панель сверяет его с версией, установленной на ноде (см. «Установка» ниже).
+**Версионирование watchdog-скрипта:** константа `WATCHDOG_VERSION` в шапке `ddos-watchdog.sh` (сейчас `"2.4.0"`) — команда `status` возвращает её полем `version`, отдельная команда `version` печатает только её. Значение растёт при изменении логики скрипта; панель сверяет его с версией, установленной на ноде (см. «Установка» ниже).
 
 **Установка — по умолчанию.** `install.sh` вызывает `install_antiddos_watchdog()` сразу после применения системных оптимизаций — свежая нода получает watchdog без какого-либо участия панели, в состоянии покоя (`watchdog=on`, аварийный режим выключен). Существующие ноды получают его от панели — через `apply-update.sh` это не идёт, потому что rsync обновления агента исключает `configs/`: репозиторных конфигов рядом с нодой нет. Панель в фоновом опросе статуса (см. panel/DOCUMENTATION.md) видит, что нода отвечает на `/api/antiddos/status`, и сама вызывает `POST /api/antiddos/install`, если watchdog не установлен либо его `version` отличается от актуальной версии `ddos-watchdog.sh` на GitHub. Backend-эндпоинты ручной установки (`POST /antiddos/install-all` в панели, `POST /api/antiddos/install` на ноде) остаются доступны по API.
 

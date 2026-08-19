@@ -13,8 +13,9 @@ Distribution = Literal["per_server", "random", "round_robin", "client_hash"]
 RULE_NAME_PATTERN = r"^[a-zA-Z0-9_-]{1,64}$"
 MAX_TARGETS = 32
 
-# Порт mTLS-nginx ноды: DNAT на него отрезал бы панель от сервера
-NODE_API_PORT = 9100
+# Дефолтный порт mTLS-nginx ноды: DNAT на порт API отрезал бы панель от
+# сервера. Фактический порт — settings.node_api_port, сюда идёт как параметр
+DEFAULT_NODE_API_PORT = 9100
 
 
 class DnatRule(BaseModel):

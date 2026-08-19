@@ -600,6 +600,21 @@ setup_env() {
         echo "PANEL_IP=$PANEL_IP" >> .env
     fi
 
+    # Кастомный порт mTLS-API: env NODE_API_PORT задаёт его при установке;
+    # без него уже настроенный в .env порт не трогаем (переустановка)
+    if [ -n "${NODE_API_PORT:-}" ]; then
+        if ! printf '%s' "$NODE_API_PORT" | grep -qE '^[0-9]+$' || [ "$NODE_API_PORT" -lt 1 ] || [ "$NODE_API_PORT" -gt 65535 ]; then
+            log_error "NODE_API_PORT must be a port number (1-65535), got: $NODE_API_PORT"
+            return 1
+        fi
+        if grep -q "^NODE_API_PORT=" .env 2>/dev/null; then
+            sed -i "s/^NODE_API_PORT=.*/NODE_API_PORT=$NODE_API_PORT/" .env
+        else
+            echo "NODE_API_PORT=$NODE_API_PORT" >> .env
+        fi
+        log_info "Node API port: $NODE_API_PORT"
+    fi
+
     if [ -n "${NODE_NAME:-}" ]; then
         if grep -q "^NODE_NAME=" .env; then
             sed -i "s/^NODE_NAME=.*/NODE_NAME=$NODE_NAME/" .env
@@ -688,6 +703,14 @@ validate_ip() {
     return 1
 }
 
+# Фактический порт mTLS-API: env установки → .env (переустановка) → дефолт 9100
+effective_api_port() {
+    local port="${NODE_API_PORT:-}"
+    [ -z "$port" ] && port=$(grep -s '^NODE_API_PORT=' .env | head -1 | cut -d= -f2 | tr -dc '0-9')
+    [ -z "$port" ] && port=9100
+    echo "$port"
+}
+
 ask_panel_ip() {
     if [ -n "${PANEL_IP:-}" ] && validate_ip "$PANEL_IP"; then
         log_success "Using panel IP from NODE_SECRET: $PANEL_IP"
@@ -700,7 +723,7 @@ ask_panel_ip() {
     echo -e "${YELLOW}========================================${NC}"
     echo ""
     echo -e "Enter the IP address of your monitoring panel."
-    echo -e "Port 9100 will be accessible ONLY from this IP."
+    echo -e "Node API port ($(effective_api_port)) will be accessible ONLY from this IP."
     echo ""
 
     local max_attempts=5
@@ -764,23 +787,26 @@ setup_firewall() {
     fi
     
     ask_panel_ip
-    
+
+    local api_port
+    api_port=$(effective_api_port)
+
     ufw delete allow 9100/tcp >/dev/null 2>&1 || true
-    
-    log_info "Adding UFW rule: allow port 9100 from $PANEL_IP"
-    ufw allow from "$PANEL_IP" to any port 9100 proto tcp comment "Monitoring API from Panel" >/dev/null 2>&1 || \
-    ufw allow from "$PANEL_IP" to any port 9100 proto tcp >/dev/null 2>&1 || true
-    
+
+    log_info "Adding UFW rule: allow port $api_port from $PANEL_IP"
+    ufw allow from "$PANEL_IP" to any port "$api_port" proto tcp comment "Monitoring API from Panel" >/dev/null 2>&1 || \
+    ufw allow from "$PANEL_IP" to any port "$api_port" proto tcp >/dev/null 2>&1 || true
+
     ufw allow 80/tcp comment "HTTP for Let's Encrypt" >/dev/null 2>&1 || true
     ufw allow ssh >/dev/null 2>&1 || ufw allow 22/tcp >/dev/null 2>&1 || true
-    
+
     if [ "$ufw_was_active" = true ]; then
         log_success "Firewall configured"
     else
         log_warn "UFW is not active - rules added but firewall remains disabled"
     fi
-    
-    log_info "Port 9100 accessible only from: $PANEL_IP"
+
+    log_info "Port $api_port accessible only from: $PANEL_IP"
 }
 
 pull_and_start() {
@@ -866,8 +892,10 @@ check_endpoints() {
     # Снаружи ноду видно только через nginx с mTLS, а клиентский сертификат
     # лежит на панели — с самой ноды полноценный запрос не сделать,
     # поэтому проверяется только то, что порт принимает соединения.
-    echo -n "  nginx :9100 (mTLS): "
-    if timeout "$TIMEOUT_HEALTH_CHECK" bash -c "</dev/tcp/127.0.0.1/9100" 2>/dev/null; then
+    local api_port
+    api_port=$(effective_api_port)
+    echo -n "  nginx :$api_port (mTLS): "
+    if timeout "$TIMEOUT_HEALTH_CHECK" bash -c "</dev/tcp/127.0.0.1/$api_port" 2>/dev/null; then
         echo -e "${GREEN}OK${NC}"
     else
         echo -e "${RED}FAIL${NC}"
@@ -922,7 +950,7 @@ show_status() {
     echo "=========================================="
     echo ""
     echo -e "${GREEN}Firewall Configuration:${NC}"
-    echo "  - Panel IP (port 9100 allowed): $PANEL_IP"
+    echo "  - Panel IP (port $(effective_api_port) allowed): $PANEL_IP"
     echo "  - SSH (port 22): Open for all"
     echo "  - HTTP (port 80): Open for all"
     echo ""
@@ -950,7 +978,7 @@ show_status() {
     echo -e "  ${GREEN}══ NODE READY (mTLS) ══${NC}"
     echo ""
     echo -e "    ${YELLOW}Server IP:${NC}   ${CYAN}${server_ip}${NC}"
-    echo -e "    ${YELLOW}Port:${NC}        ${CYAN}9100${NC}"
+    echo -e "    ${YELLOW}Port:${NC}        ${CYAN}$(effective_api_port)${NC}"
     echo -e "    ${YELLOW}Auth:${NC}        ${CYAN}mTLS (client certificate required)${NC}"
     echo -e "    ${YELLOW}CA fp SHA256:${NC}"
     echo -e "    ${BLUE}${ca_fp}${NC}"

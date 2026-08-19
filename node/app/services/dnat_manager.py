@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import Optional
 
 from app.config import get_settings
-from app.models.dnat import NODE_API_PORT, DnatRule
+from app.models.dnat import DEFAULT_NODE_API_PORT, DnatRule
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +106,7 @@ def compute_rules_hash(rules: list[dict]) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
-def validate_rules(rules: list[DnatRule]) -> Optional[str]:
+def validate_rules(rules: list[DnatRule], api_port: int = DEFAULT_NODE_API_PORT) -> Optional[str]:
     """Причина отказа или None. Проверяются только включённые правила: выключенное
     в netfilter не попадает и ни с чем не конфликтует."""
     seen: set[str] = set()
@@ -120,9 +120,9 @@ def validate_rules(rules: list[DnatRule]) -> Optional[str]:
         # per_server — режим панели: она уже оставила этой ноде один адрес
         if rule.distribution == "per_server" and len(rule.targets()) > 1:
             return f"Rule '{rule.name}' has several targets but no distribution mode for the node"
-        if "tcp" in rule.protocols() and rule.covers_port(NODE_API_PORT):
+        if "tcp" in rule.protocols() and rule.covers_port(api_port):
             return (
-                f"Rule '{rule.name}' covers node API port {NODE_API_PORT}/tcp — "
+                f"Rule '{rule.name}' covers node API port {api_port}/tcp — "
                 "panel would lose connection to this node"
             )
 
@@ -476,7 +476,7 @@ class DnatManager:
         return summarize(rules, nat_dump, filter_dump, mangle_dump)
 
     def apply(self, rules: list[DnatRule]) -> dict:
-        error = validate_rules(rules)
+        error = validate_rules(rules, get_settings().node_api_port)
         if error:
             return {"success": False, "message": error, "rules_hash": None, "error_log": None}
         if not self.iptables_available():

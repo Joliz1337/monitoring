@@ -11,7 +11,7 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from typing import Optional
@@ -126,7 +126,7 @@ async def delete_remnawave_cert(
 class DeployRequest(BaseModel):
     name: str
     host: str
-    monitoring_port: int = 9100
+    monitoring_port: int = Field(9100, ge=1, le=65535)
     ssh_port: int = 22
     ssh_user: str = "root"
     ssh_password: Optional[str] = None
@@ -233,6 +233,7 @@ async def deploy_server(
         ssh_user=req.ssh_user.strip() or "root",
         node_secret=node_secret,
         panel_ip=panel_ip,
+        node_api_port=req.monitoring_port,
         ssh_password=req.ssh_password,
         ssh_private_key=req.ssh_private_key,
         ssh_key_passphrase=req.ssh_key_passphrase,

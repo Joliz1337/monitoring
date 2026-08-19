@@ -6,8 +6,13 @@ services:
     # Debian 13/Trixie AppArmor + docker-default блокирует AF_UNIX socketpair() у воркеров nginx
     security_opt:
       - apparmor=unconfined
+    # Порт mTLS-API: compose читает NODE_API_PORT из .env ноды, entrypoint
+    # образа подставляет его в templates/api.conf.template при старте
+    environment:
+      - NODE_API_PORT=${NODE_API_PORT:-9100}
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/templates:/etc/nginx/templates:ro
       - ./nginx/ssl:/etc/nginx/ssl:ro
     # Explicit, modest limits: without these the container inherits dockerd's
     # LimitNOFILE (~1073741816 from systemd), which makes nginx preallocate an
