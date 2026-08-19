@@ -92,6 +92,60 @@ class LiveRatesMarkerTests(unittest.TestCase):
         self.assertIsNone(MetricsCollector.live_rates(None))
 
 
+class ResponseModelTests(unittest.TestCase):
+    """FastAPI silently drops anything the response_model does not declare.
+
+    This is exactly how live_rates and disk.io_total got lost in production:
+    the collector emitted them, AllMetrics filtered them out, the panel saw an
+    up-to-date node without the marker and kept averaging speeds itself.
+    """
+
+    def test_live_rates_and_io_total_survive_the_response_model(self):
+        from app.models.metrics import AllMetrics
+
+        payload = {
+            "timestamp": "2026-08-19T00:00:00",
+            "server_name": "test",
+            "cpu": {
+                "cores_physical": 1, "cores_logical": 1, "model": "x",
+                "usage_percent": 25.0, "per_cpu_percent": [25.0],
+                "load_avg_1": 0, "load_avg_5": 0, "load_avg_15": 0,
+                "frequency": {"current": 0, "min": 0, "max": 0},
+            },
+            "memory": {
+                "ram": {"total": 1, "used": 1, "free": 0, "available": 0, "percent": 100.0},
+                "swap": {"total": 0, "used": 0, "free": 0, "percent": 0.0},
+            },
+            "disk": {
+                "partitions": [],
+                "io": {},
+                "io_total": {"read_bytes_per_sec": 300.0, "write_bytes_per_sec": 400.0},
+            },
+            "network": {
+                "interfaces": [],
+                "total": {"rx_bytes": 0, "tx_bytes": 0, "rx_packets": 0, "tx_packets": 0,
+                          "rx_bytes_per_sec": 1_000.0, "tx_bytes_per_sec": 2_000.0},
+            },
+            "processes": {"total": 0, "running": 0, "sleeping": 0, "top_by_cpu": [], "top_by_memory": []},
+            "system": {
+                "hostname": "h", "os": "linux", "kernel": "6", "architecture": "x86_64",
+                "boot_time": "2026-08-19T00:00:00", "uptime_seconds": 1, "uptime_human": "1m",
+                "open_files": 0,
+                "connections": {"established": 0, "listen": 0, "time_wait": 0, "other": 0},
+                "server_name": "test",
+            },
+            "live_rates": {"window_sec": 1.0, "sampled_at": 1_700_000_000.0},
+        }
+
+        serialized = AllMetrics.model_validate(payload).model_dump()
+
+        self.assertEqual(serialized["live_rates"], {"window_sec": 1.0, "sampled_at": 1_700_000_000.0})
+        self.assertEqual(
+            serialized["disk"]["io_total"],
+            {"read_bytes_per_sec": 300.0, "write_bytes_per_sec": 400.0},
+        )
+
+
 class CpuRatesTests(unittest.TestCase):
 
     def test_per_cpu_percent_comes_from_the_sample(self):
