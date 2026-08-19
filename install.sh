@@ -1425,7 +1425,7 @@ install_antiddos_watchdog() {
     # собирает и раз в час рассылает панель (IP всех нод + свой + ручные CIDR),
     # а при установке ноды из панели пуш идёт сразу после установки. Затравка
     # закрывает только окно у ноды, поставленной руками: панель о ней ещё не
-    # знает. Доступ самой панели затравка не спасает и не обязана — порт 9100
+    # знает. Доступ самой панели затравка не спасает и не обязана — порт API ноды
     # у вотчдога в never-drop, ACCEPT на него стоит раньше любого DROP;
     # whitelist влияет на клиентские порты.
     if [ ! -f "$OPT_DIR/antiddos/whitelist.json" ]; then
@@ -3091,7 +3091,7 @@ find_ubuntu2404_image() {
 # установщик. Эти параметры доедут до новой ОС и продолжат настройку.
 collect_firstboot_env() {
     local var
-    for var in NODE_SECRET PANEL_IP MON_PROXY_URL MON_BRANCH \
+    for var in NODE_SECRET PANEL_IP NODE_API_PORT MON_PROXY_URL MON_BRANCH \
                MON_INSTALL_NODE MON_INSTALL_OPTIMIZATIONS MON_INSTALL_WARP \
                MON_INSTALL_REMNAWAVE MON_NIC_MODE MON_OPT_PROFILE \
                MON_NODE_CAPABILITIES REMNAWAVE_CERT; do
@@ -3314,6 +3314,9 @@ main() {
             --node=*)
                 quick_token="${1#--node=}"
                 ;;
+            --api-port=*)
+                export NODE_API_PORT="${1#--api-port=}"
+                ;;
             -h|--help)
                 cat <<'HELPEOF'
 Monitoring System Installer
@@ -3324,6 +3327,7 @@ Usage:
   bash install.sh <NODE_SECRET> --optimize     Node + system optimizations (auto NIC)
   bash install.sh <NODE_SECRET> --optimize --profile=panel|vpn
   bash install.sh --node=<NODE_SECRET>         Same as positional form
+  bash install.sh <NODE_SECRET> --api-port=N   Custom node API port (default 9100)
   bash install.sh --unattended                 Env-driven install (MON_INSTALL_*, NODE_SECRET, ...)
 
 Node permissions (optional):

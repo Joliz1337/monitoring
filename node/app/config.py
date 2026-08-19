@@ -15,6 +15,11 @@ class Settings(BaseSettings):
     # Node identity
     node_name: str = "node-01"
 
+    # Порт mTLS-nginx, на который подключается панель. Меняется в паре с
+    # NODE_API_PORT в .env (его же читает compose для listen nginx) — guard
+    # файрвола и валидация DNAT защищают именно этот порт
+    node_api_port: int = 9100
+
     # Что из API доступно панели. Пусто — всё, как и было до появления настройки.
     # Строкой, а не списком: pydantic-settings разбирает «сложные» типы как JSON
     # и упал бы при импорте на обычном перечислении через запятую.

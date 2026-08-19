@@ -103,6 +103,11 @@ class ValidateRulesTest(unittest.TestCase):
         # udp на 9100 не мешает mTLS-nginx
         self.assertIsNone(validate_rules([rule(protocol="udp", listen_port=9100)]))
 
+    def test_api_port_check_follows_the_configured_port(self):
+        # Нода на кастомном порту: её реальный порт защищён, а дефолтный 9100 свободен
+        self.assertIn("12345", validate_rules([rule(listen_port=12345)], api_port=12345))
+        self.assertIsNone(validate_rules([rule(listen_port=9100)], api_port=12345))
+
 
 class RuleModelTest(unittest.TestCase):
     def test_range_end_equal_to_start_collapses(self):

@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from app.config import get_settings
 from app.services.container_detect import running_in_container
 from app.services.host_files import write_host_file_sync
 
@@ -22,7 +23,6 @@ logger = logging.getLogger(__name__)
 
 BACKUP_DIR = "/etc/monitoring"
 MAX_BACKUPS = 5
-NODE_API_PORT = 9100
 
 _IP_OR_CIDR_RE = re.compile(
     r'^(?:(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?|[0-9a-fA-F:]+(?:/\d{1,3})?)$'
@@ -711,14 +711,14 @@ class FirewallManager:
         }
 
     @staticmethod
-    def _has_node_port_allow(rules: list[dict], default_in: str) -> bool:
-        """Без правила allow 9100/tcp IN панель потеряет связь с нодой."""
+    def _has_node_port_allow(rules: list[dict], default_in: str, api_port: int) -> bool:
+        """Без правила allow на порт API ноды панель потеряет с ней связь."""
         if (default_in or "deny").lower() == "allow":
             return True
         for raw in rules:
             r = FirewallManager._normalize_rule(raw)
             if (
-                r["port"] == NODE_API_PORT
+                r["port"] == api_port
                 and r["protocol"] in ("tcp", "any")
                 and r["action"] == "allow"
                 and r["direction"] == "in"
@@ -770,14 +770,15 @@ class FirewallManager:
         """Атомарно заменить состояние UFW правилами профиля.
 
         Стратегия: backup → reset → defaults → rules → enable. При ошибке —
-        rollback из бэкапа. Без правила 9100/tcp IN apply отказывает, если
-        не передан force=True.
+        rollback из бэкапа. Без allow на порт API ноды (settings.node_api_port)
+        apply отказывает, если не передан force=True.
         """
-        if not force and not self._has_node_port_allow(rules, default_incoming):
+        api_port = get_settings().node_api_port
+        if not force and not self._has_node_port_allow(rules, default_incoming, api_port):
             return {
                 "success": False,
                 "message": (
-                    f"Allow rule for node API port {NODE_API_PORT}/tcp missing — "
+                    f"Allow rule for node API port {api_port}/tcp missing — "
                     "panel will lose connection to node. Use force=true to apply anyway"
                 ),
                 "rules_hash": None,

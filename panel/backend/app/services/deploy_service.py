@@ -73,6 +73,8 @@ class DeployParams:
     ssh_user: str
     node_secret: str
     panel_ip: str | None = None
+    # Порт mTLS-API ноды; не 9100 — уезжает установщику как NODE_API_PORT
+    node_api_port: int = 9100
     ssh_password: str | None = None
     ssh_private_key: str | None = None
     ssh_key_passphrase: str | None = None
@@ -127,6 +129,8 @@ def _build_inner_command(params: DeployParams) -> str:
         env["MON_BRANCH"] = update_channel.current_branch()
     if params.panel_ip:
         env["PANEL_IP"] = params.panel_ip
+    if params.node_api_port != 9100:
+        env["NODE_API_PORT"] = str(params.node_api_port)
     if params.proxy_url:
         env["MON_PROXY_URL"] = params.proxy_url
     if params.install_optimizations:
