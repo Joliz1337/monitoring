@@ -2,9 +2,15 @@
 
 Ограничивается исходящее направление дефолтного интерфейса; на релее это оба
 направления транзита (к цели и обратно к клиенту оба выходят через него), а
-хостер на своих счётчиках видит ровную полку вместо пиков. Предпочитается
-`cake` (честное деление по потокам, короткая очередь), при отсутствии модуля
-`sch_cake` — `tbf`. Ниже лимита шейпер невидим: очередь пуста, задержки нет.
+хостер на своих счётчиках видит ровную полку вместо пиков. Ниже лимита шейпер
+невидим: очередь пуста, задержки нет.
+
+Шейпер — `tbf` с burst от скорости. Не `cake`: на боевой VPS (kvm-clock) cake
+при свободном CPU недобирал ~35% полосы — лимит 950 Мбит давал фактические
+~600 с 8% дропов (его hrtimer-расписание плюс разрезание GSO-пачек по 68 КБ
+на каждый пакет), tbf на той же машине под той же нагрузкой держит 929-940
+без единого дропа. cake распознаётся как legacy: самолечение мигрирует его
+на tbf при первой сверке.
 
 Состояние — в `/opt/monitoring/configs/bandwidth-limit.env` на хосте, чтобы
 пережить перезапуск агента и перезагрузку; агент переприменяет лимит при
@@ -34,8 +40,22 @@ MAX_MBIT = 100_000
 BANDWIDTH_RECHECK_INTERVAL_SEC = 120
 TC_TIMEOUT_SEC = 15
 
+# cake — только legacy: распознаётся и снимается, но больше не ставится
 QDISC_CAKE = "cake"
 QDISC_TBF = "tbf"
+
+# Burst tbf — 30 мс полосы: меньше (512 КБ на ~1 Гбит) tbf физически недобирает
+# лимит, сильно больше — рваная полка на мгновенных скоростях. Пол — чтобы на
+# малых лимитах burst не выродился ниже пары GSO-пачек (по 64 КБ каждая).
+BURST_SECONDS = 0.03
+BURST_MIN_BYTES = 512 * 1024
+BURST_MAX_BYTES = 16 * 1024 * 1024
+TBF_LATENCY = "100ms"
+
+
+def tbf_burst_bytes(mbit: int) -> int:
+    burst = int(mbit * 1_000_000 / 8 * BURST_SECONDS)
+    return min(max(burst, BURST_MIN_BYTES), BURST_MAX_BYTES)
 
 
 def render_state(mbit: int, iface: str) -> str:
@@ -109,8 +129,9 @@ class BandwidthLimiter:
             "applied": limited,
             "applied_mbit": applied_mbit if limited else None,
             "qdisc": kind if limited else None,
-            # расхождение: хотим лимит, а корневой qdisc не наш или не с той полосой
-            "in_sync": (not mbit and not limited) or (limited and applied_mbit == mbit),
+            # Расхождение: хотим лимит, а корневой qdisc не tbf с той полосой.
+            # Legacy cake работает (applied), но in_sync=false — самолечение мигрирует.
+            "in_sync": (not mbit and not limited) or (kind == QDISC_TBF and applied_mbit == mbit),
         }
 
     # ── запись ──
@@ -135,19 +156,14 @@ class BandwidthLimiter:
 
     async def _apply(self, iface: str, mbit: int) -> Optional[str]:
         dev = shlex.quote(iface)
-        cake = await self._executor.execute(
-            f"tc qdisc replace dev {dev} root cake bandwidth {mbit}mbit besteffort", timeout=TC_TIMEOUT_SEC,
-        )
-        if cake.success and cake.exit_code == 0:
-            return None
-        # sch_cake отсутствует (старое/урезанное ядро) — tbf есть везде
         tbf = await self._executor.execute(
-            f"tc qdisc replace dev {dev} root tbf rate {mbit}mbit burst 512kb latency 50ms", timeout=TC_TIMEOUT_SEC,
+            f"tc qdisc replace dev {dev} root tbf rate {mbit}mbit"
+            f" burst {tbf_burst_bytes(mbit)} latency {TBF_LATENCY}",
+            timeout=TC_TIMEOUT_SEC,
         )
         if tbf.success and tbf.exit_code == 0:
-            logger.warning("bandwidth limit: cake unavailable on %s, using tbf (%s)", iface, cake.stderr or cake.error)
             return None
-        return f"tc failed: {tbf.stderr or tbf.error or cake.stderr or cake.error or 'unknown error'}"
+        return f"tc failed: {tbf.stderr or tbf.error or 'unknown error'}"
 
     async def _remove(self, iface: str) -> None:
         # Снимаем только свой шейпер: чужой корневой qdisc (mq/fq_codel хоста) не трогаем
@@ -162,7 +178,7 @@ class BandwidthLimiter:
             if mbit <= 0 or not iface:
                 return None
             kind, applied_mbit = await self.applied(iface)
-            if kind in (QDISC_CAKE, QDISC_TBF) and applied_mbit == mbit:
+            if kind == QDISC_TBF and applied_mbit == mbit:
                 return None
             error = await self._apply(iface, mbit)
             if error:

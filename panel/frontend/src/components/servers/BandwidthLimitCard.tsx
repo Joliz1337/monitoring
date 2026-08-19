@@ -14,7 +14,7 @@ interface Props {
   server?: Server | null
 }
 
-/** Искусственный лимит полосы ноды (tc cake/tbf), ставится и восстанавливается агентом. */
+/** Искусственный лимит полосы ноды (tc tbf; cake — legacy), ставится и восстанавливается агентом. */
 export default function BandwidthLimitCard({ serverId, server }: Props) {
   const { t } = useTranslation()
   const writable = nodeAllows(server, 'system', 'write')
