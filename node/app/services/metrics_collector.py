@@ -1,5 +1,8 @@
-"""System metrics collector using psutil - returns raw current values only.
-All speed calculations are done on the panel side.
+"""System metrics collector using psutil.
+
+Мгновенный срез хоста плюс кумулятивные счётчики (их дельты и историю ведёт
+панель). Скорости — CPU за последнюю секунду, байт/с по интерфейсам и дискам —
+копируются из посекундного `RateSampler`, а не считаются в момент запроса.
 """
 
 import asyncio
@@ -8,7 +11,6 @@ import logging
 import os
 import socket
 import platform
-import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -18,27 +20,19 @@ import psutil
 
 from app.config import get_settings
 from app.services.port_traffic_sampler import get_port_traffic_sampler
+from app.services.rate_sampler import RateSample, RateSampler, get_rate_sampler, read_net_dev
 
 logger = logging.getLogger(__name__)
 
+NO_RATE = (0.0, 0.0)
+
 
 class MetricsCollector:
-    """Collects current system metrics from host - raw values only.
-    Speed calculations are done on the panel side.
-    """
-    
-    # Минимум натиканного счётчиками /proc/stat, при котором замер осмыслен.
-    # Тик ядра — 10 мс, и на дельте в единицы тиков доля busy вырождается
-    # в 0 или 100 («одно ядро 100%, остальные 0»).
-    CPU_MIN_TICKS_SECONDS = 0.2
-    # Длительность стартового замера — с запасом над порогом выше
-    CPU_PRIME_SECONDS = 0.3
+    """Collects current system metrics from host."""
 
-    def __init__(self):
+    def __init__(self, rate_sampler: Optional[RateSampler] = None):
         self.settings = get_settings()
-        self._prev_cpu_times: list = psutil.cpu_times(percpu=True)
-        self._last_cpu_percent: list = [0.0] * len(self._prev_cpu_times)
-        self._cpu_lock = threading.Lock()
+        self._rate_sampler = rate_sampler or get_rate_sampler()
         # Process cache to avoid blocking
         self._processes_cache: list = []
         self._processes_cache_time: float = 0
@@ -67,65 +61,22 @@ class MetricsCollector:
         if fallback.exists():
             return fallback.read_text(encoding='utf-8', errors='replace')
         return ""
-    
-    def prime_cpu_baseline(self):
-        """Стартовый блокирующий замер при запуске ноды: первый запрос метрик
-        сразу получает реальные значения per-CPU, а не нули пустого baseline."""
-        before = psutil.cpu_times(percpu=True)
-        time.sleep(self.CPU_PRIME_SECONDS)
-        after = psutil.cpu_times(percpu=True)
-        with self._cpu_lock:
-            self._prev_cpu_times = after
-            percents = self._per_cpu_from(before, after)
-            if percents is not None:
-                self._last_cpu_percent = percents
 
-    @classmethod
-    def _per_cpu_from(cls, before: list, after: list) -> Optional[list]:
-        """Занятость каждого ядра по дельте счётчиков, либо None при слишком
-        короткой дельте — тогда считать нечего и звать не за чем."""
-        if not after or len(after) != len(before):
+    @staticmethod
+    def live_rates(rates: Optional[RateSample]) -> Optional[dict]:
+        """Маркер для панели: скорости в ответе — реальные, за это окно.
+        Без свежего замера маркера нет, и панель считает дельты сама."""
+        if rates is None:
             return None
+        return {"window_sec": round(rates.window_sec, 3), "sampled_at": rates.sampled_at}
 
-        percents = []
-        for prev, cur in zip(before, after):
-            total = sum(cur) - sum(prev)
-            if total < cls.CPU_MIN_TICKS_SECONDS:
-                return None
-            busy = total - (cur.idle - prev.idle)
-            percents.append(round(min(max(busy, 0.0) / total * 100, 100.0), 1))
-        return percents
-
-    def _sample_per_cpu(self) -> list:
-        """Per-CPU % по дельте /proc/stat, с отбраковкой вырожденного интервала.
-
-        Порог берётся из самих счётчиков, а не из настенных часов: запросы метрик
-        идут из тред-пула, и поток может простоять между взглядом на часы и чтением
-        /proc/stat — сторож по времени тогда пропускает замер, у которого реального
-        интервала нет. Пока тиков мало, baseline не сдвигается и отдаётся последний
-        валидный замер: следующий запрос померит от него же, уже на длинной дельте."""
-        with self._cpu_lock:
-            current = psutil.cpu_times(percpu=True)
-
-            if len(current) != len(self._prev_cpu_times):
-                # Число ядер сменилось (ресайз VPS) — старый baseline несопоставим
-                self._prev_cpu_times = current
-                self._last_cpu_percent = [0.0] * len(current)
-                return self._last_cpu_percent
-
-            percents = self._per_cpu_from(self._prev_cpu_times, current)
-            if percents is not None:
-                self._prev_cpu_times = current
-                self._last_cpu_percent = percents
-            return self._last_cpu_percent
-
-    def get_cpu_info(self) -> dict:
+    def get_cpu_info(self, rates: Optional[RateSample]) -> dict:
         """Get CPU information and usage"""
         cpu_count_logical = psutil.cpu_count(logical=True) or 1
         cpu_count_physical = psutil.cpu_count(logical=False) or 1
 
-        per_cpu = self._sample_per_cpu()
-        
+        per_cpu = list(rates.per_cpu_percent) if rates else []
+
         try:
             load_avg = os.getloadavg()
         except (OSError, AttributeError):
@@ -197,8 +148,8 @@ class MetricsCollector:
             }
         }
     
-    def get_disk_info(self) -> dict:
-        """Get disk partitions and usage - raw bytes, no speed calculation"""
+    def get_disk_info(self, rates: Optional[RateSample]) -> dict:
+        """Get disk partitions, usage, cumulative I/O counters and per-second rates"""
         partitions = []
         
         for part in psutil.disk_partitions(all=False):
@@ -217,56 +168,34 @@ class MetricsCollector:
                 except (PermissionError, OSError):
                     continue
         
-        # Disk I/O - raw bytes only
+        disk_rates = rates.disk if rates else {}
+        total_read, total_write = rates.disk_total if rates else NO_RATE
+
         io_counters = psutil.disk_io_counters(perdisk=True)
         io_stats = {}
-        
         for disk, counters in (io_counters or {}).items():
+            read_rate, write_rate = disk_rates.get(disk, NO_RATE)
             io_stats[disk] = {
                 "read_bytes": counters.read_bytes,
                 "write_bytes": counters.write_bytes,
                 "read_count": counters.read_count,
                 "write_count": counters.write_count,
                 "read_time_ms": counters.read_time,
-                "write_time_ms": counters.write_time
+                "write_time_ms": counters.write_time,
+                "read_bytes_per_sec": read_rate,
+                "write_bytes_per_sec": write_rate,
             }
-        
+
         return {
             "partitions": partitions,
-            "io": io_stats
+            "io": io_stats,
+            # Только целые диски: раздел sda1 уже внутри счётчика sda
+            "io_total": {
+                "read_bytes_per_sec": total_read,
+                "write_bytes_per_sec": total_write,
+            },
         }
-    
-    def _read_host_net_dev(self) -> dict[str, dict]:
-        """Read network stats - with network_mode: host psutil sees real traffic"""
-        result = {}
-        # With network_mode: host, use standard /proc/net/dev (real host network)
-        net_dev_path = Path("/proc/net/dev")
-        
-        try:
-            content = net_dev_path.read_text()
-            for line in content.split('\n')[2:]:  # Skip headers
-                if ':' not in line:
-                    continue
-                parts = line.split(':')
-                iface = parts[0].strip()
-                if iface == 'lo':
-                    continue
-                values = parts[1].split()
-                if len(values) >= 16:
-                    result[iface] = {
-                        'rx_bytes': int(values[0]),
-                        'rx_packets': int(values[1]),
-                        'rx_errors': int(values[2]),
-                        'rx_drops': int(values[3]),
-                        'tx_bytes': int(values[8]),
-                        'tx_packets': int(values[9]),
-                        'tx_errors': int(values[10]),
-                        'tx_drops': int(values[11]),
-                    }
-        except (OSError, ValueError) as e:
-            logger.warning(f"Failed to read {net_dev_path}, network counters will be zero: {e}")
-        return result
-    
+
     # Virtual/bridge/tunnel interfaces whose traffic is already counted on physical interfaces
     VIRTUAL_IFACE_PREFIXES = (
         'veth', 'docker', 'br-', 'virbr', 'flannel', 'cni', 'cali',
@@ -294,12 +223,11 @@ class MetricsCollector:
             logger.debug(f"Failed to enumerate bond slaves, totals may double-count: {e}")
         return slaves
 
-    def get_network_info(self) -> dict:
-        """Get network interfaces - raw bytes only, speed calculated on panel"""
+    def get_network_info(self, rates: Optional[RateSample]) -> dict:
+        """Get network interfaces: cumulative counters plus one-second rates"""
         interfaces = []
 
-        # Read from HOST's /proc/net/dev for real traffic
-        host_net_stats = self._read_host_net_dev()
+        host_net_stats = read_net_dev()
 
         addrs = psutil.net_if_addrs()
         stats = psutil.net_if_stats()
@@ -307,9 +235,11 @@ class MetricsCollector:
         # Bond slaves duplicate traffic already counted on bond master
         bond_slaves = self._get_bond_slaves()
 
-        # Process interfaces from host stats
+        net_rates = rates.net if rates else {}
+
         for iface, io in host_net_stats.items():
             is_virtual = self._is_virtual_interface(iface) or iface in bond_slaves
+            rx_rate, tx_rate = net_rates.get(iface, NO_RATE)
             iface_info = {
                 "name": iface,
                 "addresses": [],
@@ -326,9 +256,8 @@ class MetricsCollector:
                 "tx_errors": io['tx_errors'],
                 "rx_drops": io['rx_drops'],
                 "tx_drops": io['tx_drops'],
-                # Speed fields for backward compatibility (panel calculates actual values)
-                "rx_bytes_per_sec": 0.0,
-                "tx_bytes_per_sec": 0.0,
+                "rx_bytes_per_sec": rx_rate,
+                "tx_bytes_per_sec": tx_rate,
             }
 
             # Get addresses if available (from container's view)
@@ -358,23 +287,17 @@ class MetricsCollector:
 
         # Total traffic — only physical interfaces, excluding bond slaves to avoid double-counting
         # (bond master already includes all slave traffic; veth/docker/br-* mirror physical)
-        physical_stats = {
-            iface: io for iface, io in host_net_stats.items()
+        physical = [
+            iface for iface in host_net_stats
             if not self._is_virtual_interface(iface) and iface not in bond_slaves
-        }
-        total_rx = sum(io['rx_bytes'] for io in physical_stats.values())
-        total_tx = sum(io['tx_bytes'] for io in physical_stats.values())
-        total_rx_packets = sum(io['rx_packets'] for io in physical_stats.values())
-        total_tx_packets = sum(io['tx_packets'] for io in physical_stats.values())
-        
+        ]
         total = {
-            "rx_bytes": total_rx,
-            "tx_bytes": total_tx,
-            "rx_packets": total_rx_packets,
-            "tx_packets": total_tx_packets,
-            # Speed fields for backward compatibility (panel calculates actual values)
-            "rx_bytes_per_sec": 0.0,
-            "tx_bytes_per_sec": 0.0
+            "rx_bytes": sum(host_net_stats[i]['rx_bytes'] for i in physical),
+            "tx_bytes": sum(host_net_stats[i]['tx_bytes'] for i in physical),
+            "rx_packets": sum(host_net_stats[i]['rx_packets'] for i in physical),
+            "tx_packets": sum(host_net_stats[i]['tx_packets'] for i in physical),
+            "rx_bytes_per_sec": sum(net_rates.get(i, NO_RATE)[0] for i in physical),
+            "tx_bytes_per_sec": sum(net_rates.get(i, NO_RATE)[1] for i in physical),
         }
 
         ports, ports_available, ports_sampled_at = self._port_counters()
@@ -780,11 +703,13 @@ class MetricsCollector:
     async def get_all_metrics(self) -> dict:
         """Collect all metrics in parallel using thread pool"""
         tz_info = self._get_timezone_info()
+        # Один сэмпл на весь ответ: маркер live_rates и сами скорости — из одного окна
+        rates = self._rate_sampler.snapshot()
         cpu, memory, disk, network, processes, system, certs, antiddos = await asyncio.gather(
-            asyncio.to_thread(self.get_cpu_info),
+            asyncio.to_thread(self.get_cpu_info, rates),
             asyncio.to_thread(self.get_memory_info),
-            asyncio.to_thread(self.get_disk_info),
-            asyncio.to_thread(self.get_network_info),
+            asyncio.to_thread(self.get_disk_info, rates),
+            asyncio.to_thread(self.get_network_info, rates),
             asyncio.to_thread(self.get_processes_info),
             asyncio.to_thread(self.get_system_info),
             asyncio.to_thread(self.get_certificates_info),
@@ -802,6 +727,7 @@ class MetricsCollector:
             "system": system,
             "certificates": certs,
             "antiddos": antiddos,
+            "live_rates": self.live_rates(rates),
             "agent_version": self._agent_version,
             "capabilities": self._capabilities,
         }
