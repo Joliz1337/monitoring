@@ -7,6 +7,7 @@ from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy import text
 
 from app.config import get_settings
+from app import crypto
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -1978,6 +1979,42 @@ async def _migrate_node_capabilities(conn):
         raise
 
 
+# (таблица, колонка) — целевые секреты: приватные ключи, не публичные сертификаты
+_SECRET_COLUMNS = [
+    ("keygen", "ca_key_pem"),
+    ("keygen", "client_key_pem"),
+    ("keygen", "shared_node_key_pem"),
+    ("node_install_keys", "key_pem"),
+    ("servers", "api_key"),
+    ("remnawave_cert_profiles", "secret_key"),
+]
+
+
+def needs_encryption(value) -> bool:
+    return bool(value) and not value.startswith(crypto.ENC_PREFIX)
+
+
+async def _migrate_encrypt_secrets(conn) -> None:
+    """Зашифровать уже лежащие открытым текстом секреты. Гейт по ключу: без
+    PANEL_ENC_KEY не трогаем — панель продолжает работать на плейнтексте.
+    Имена таблиц/колонок — константы, не пользовательский ввод; значения параметризованы."""
+    if not crypto.encryption_enabled():
+        return
+    for table, col in _SECRET_COLUMNS:
+        rows = (await conn.execute(
+            text(f'SELECT id, "{col}" AS v FROM {table} '
+                 f'WHERE "{col}" IS NOT NULL AND "{col}" NOT LIKE :pfx'),
+            {"pfx": crypto.ENC_PREFIX + "%"},
+        )).fetchall()
+        for row in rows:
+            if not needs_encryption(row.v):
+                continue
+            await conn.execute(
+                text(f'UPDATE {table} SET "{col}" = :val WHERE id = :id'),
+                {"val": crypto.encrypt_secret(row.v), "id": row.id},
+            )
+
+
 async def init_db():
     """Initialize database: create tables, run migrations."""
     async with engine.begin() as conn:
@@ -2003,6 +2040,7 @@ async def init_db():
         await _migrate_db_optimizations(conn)
         await _migrate_traffic_v2(conn)
         await _migrate_node_capabilities(conn)
+        await _migrate_encrypt_secrets(conn)
 
     await _warmup_pool()
 
