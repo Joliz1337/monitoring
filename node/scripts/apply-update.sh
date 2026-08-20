@@ -158,6 +158,20 @@ load_proxy() {
 }
 load_proxy
 
+# Все образы из compose уже есть локально? На ноде под ТСПУ, где GHCR недоступен,
+# оператор переносит образ вручную (`docker save` на достижимой машине → `docker
+# load` на ноде) — тогда pull ожидаемо падает, но сборка не нужна.
+compose_images_present() {
+    local images image
+    images=$(docker compose config --images 2>/dev/null) || return 1
+    [ -n "$images" ] || return 1
+    while IFS= read -r image; do
+        [ -z "$image" ] && continue
+        docker image inspect "$image" >/dev/null 2>&1 || return 1
+    done <<< "$images"
+    return 0
+}
+
 # ==================== Configuration ====================
 
 # Timeouts (in seconds)
@@ -667,13 +681,17 @@ set +e
 # Pull ready images from GHCR (normal flow)
 if ! spin_retry "$DOCKER_PULL_TIMEOUT" "$DOCKER_PULL_RETRIES" "$DOCKER_PULL_RETRY_DELAY" \
     "Pulling Docker images" docker compose pull; then
-    log_warn "Failed to pull from registry, building locally..."
-    spin "Pulling base images" bash -c \
-        'docker compose pull --ignore-buildable 2>/dev/null || true'
-    spin_retry 900 2 10 "Building images from source" docker compose build || {
-        log_error "Failed to get new images — update cancelled, node keeps running old version"
-        exit 1
-    }
+    if compose_images_present; then
+        log_success "Registry unreachable — using images already present locally"
+    else
+        log_warn "Failed to pull from registry, building locally..."
+        spin "Pulling base images" bash -c \
+            'docker compose pull --ignore-buildable 2>/dev/null || true'
+        spin_retry 900 2 10 "Building images from source" docker compose build || {
+            log_error "Failed to get new images — update cancelled, node keeps running old version"
+            exit 1
+        }
+    fi
 fi
 set -e
 

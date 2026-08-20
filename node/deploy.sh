@@ -809,6 +809,20 @@ setup_firewall() {
     log_info "Port $api_port accessible only from: $PANEL_IP"
 }
 
+# Все образы из compose уже есть локально? На ноде под ТСПУ, где GHCR недоступен,
+# оператор переносит образ вручную (`docker save` на достижимой машине → `docker
+# load` на ноде) — тогда pull ожидаемо падает, но сборка не нужна.
+compose_images_present() {
+    local images image
+    images=$(docker compose config --images 2>/dev/null) || return 1
+    [ -n "$images" ] || return 1
+    while IFS= read -r image; do
+        [ -z "$image" ] && continue
+        docker image inspect "$image" >/dev/null 2>&1 || return 1
+    done <<< "$images"
+    return 0
+}
+
 pull_and_start() {
     log_info "Building and starting containers..."
 
@@ -817,13 +831,17 @@ pull_and_start() {
 
     # Pull ready images from GHCR (normal flow)
     if ! spin_retry 240 5 10 "Pulling Docker images" docker compose pull 2>/dev/null; then
-        log_warn "Failed to pull from registry, building locally..."
-        spin "Pulling base images" bash -c \
-            'docker compose pull --ignore-buildable 2>/dev/null || true'
-        spin_retry 600 2 10 "Building images from source" docker compose build || {
-            log_error "Failed to build images"
-            exit 1
-        }
+        if compose_images_present; then
+            log_success "Registry unreachable — using images already present locally"
+        else
+            log_warn "Failed to pull from registry, building locally..."
+            spin "Pulling base images" bash -c \
+                'docker compose pull --ignore-buildable 2>/dev/null || true'
+            spin_retry 600 2 10 "Building images from source" docker compose build || {
+                log_error "Failed to build images"
+                exit 1
+            }
+        fi
     fi
 
     ensure_haproxy_dir
