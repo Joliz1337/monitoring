@@ -25,10 +25,17 @@ _key_cache: bytes | None = None
 _key_loaded = False
 
 
-def _reset_cache_for_tests() -> None:
+def reload_key() -> None:
+    """Сбросить кэш ключа — перечитать PANEL_ENC_KEY из окружения.
+
+    Нужно после restore из бэкапа: восстановление может сменить ключ на тот, что
+    ехал в наборе (иначе восстановленные секреты не расшифровались бы)."""
     global _key_cache, _key_loaded
     _key_cache = None
     _key_loaded = False
+
+
+_reset_cache_for_tests = reload_key  # алиас для тестов
 
 
 def _load_key() -> bytes | None:

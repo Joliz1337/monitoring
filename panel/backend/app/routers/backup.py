@@ -3,9 +3,12 @@
 import asyncio
 import json
 import logging
+import os
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
+
+from app import crypto
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
@@ -25,6 +28,12 @@ logger = logging.getLogger(__name__)
 BACKUP_DIR = Path("/app/data/backups")
 POSTGRES_CONTAINER = "panel-postgres"
 MAX_BACKUPS = 20
+
+# Ключ шифрования секретов едет внутри .dump заголовком: без него восстановленный
+# на новом хосте дамп не расшифровал бы mTLS-ключи (потеря доступа ко всем нодам).
+# Дамп всё равно содержит эти ключи — самодостаточность бэкапа важнее.
+PANEL_ENV_PATH = Path("/opt/monitoring-panel/.env")
+_BACKUP_MAGIC = b"MONBKP1\n"  # сырой pg_dump начинается с "PGDMP" — легаси-дампы отличимы
 
 _operation_status: dict = {
     "state": "idle",
@@ -129,6 +138,42 @@ def _run_pg_restore(data: bytes) -> str | None:
     return "\n\n".join(errors) if errors else None
 
 
+def _frame_backup(dump: bytes, key: str | None) -> bytes:
+    """Вшить ключ шифрования в начало дампа. Без ключа — сырой pg_dump (легаси)."""
+    if not key:
+        return dump
+    return _BACKUP_MAGIC + key.encode() + b"\n" + dump
+
+
+def _unframe_backup(data: bytes) -> tuple[bytes, str | None]:
+    """Достать вшитый ключ и вернуть чистый дамп. Легаси-дамп — как есть, ключа нет."""
+    if not data.startswith(_BACKUP_MAGIC):
+        return data, None
+    rest = data[len(_BACKUP_MAGIC):]
+    key_line, _, dump = rest.partition(b"\n")
+    return dump, key_line.decode() or None
+
+
+def _persist_enc_key(key: str) -> None:
+    """Записать PANEL_ENC_KEY в .env панели и перечитать его в процессе.
+
+    После полного restore все секреты в БД зашифрованы ключом из набора — панель
+    обязана использовать именно его, иначе не расшифрует mTLS-ключи."""
+    try:
+        lines = PANEL_ENV_PATH.read_text().splitlines() if PANEL_ENV_PATH.exists() else []
+        for i, ln in enumerate(lines):
+            if ln.startswith("PANEL_ENC_KEY="):
+                lines[i] = f"PANEL_ENC_KEY={key}"
+                break
+        else:
+            lines.append(f"PANEL_ENC_KEY={key}")
+        PANEL_ENV_PATH.write_text("\n".join(lines) + "\n")
+    except OSError as e:
+        logger.error(f"Could not persist PANEL_ENC_KEY to .env: {e}")
+    os.environ["PANEL_ENC_KEY"] = key
+    crypto.reload_key()
+
+
 def _ensure_dir():
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -195,9 +240,11 @@ async def _create_backup_task(filename: str):
             logger.error(f"Backup failed: {err}")
             return
 
+        key = os.environ.get("PANEL_ENC_KEY") if crypto.encryption_enabled() else None
+        framed = _frame_backup(data, key)
         dump_path = BACKUP_DIR / filename
-        dump_path.write_bytes(data)
-        _save_metadata(filename, len(data))
+        dump_path.write_bytes(framed)
+        _save_metadata(filename, len(framed))
         _cleanup_old_backups()
         _set_status("idle", filename)
         logger.info(f"Backup created: {filename} ({len(data)} bytes)")
@@ -220,13 +267,18 @@ async def _reload_pki(app) -> None:
 
 async def _restore_backup_task(data: bytes, filename: str, app=None):
     try:
+        dump, embedded_key = _unframe_backup(data)
         err = await asyncio.get_event_loop().run_in_executor(
-            None, _run_pg_restore, data
+            None, _run_pg_restore, dump
         )
         if err:
             _set_status("idle", filename, err)
             logger.error(f"Restore failed: {err}")
         else:
+            # Ключ из набора нужен ДО чтения PKI: восстановленные mTLS-ключи
+            # зашифрованы им. На том же хосте ключ совпадает — перезапись пропускается.
+            if embedded_key and embedded_key != os.environ.get("PANEL_ENC_KEY"):
+                _persist_enc_key(embedded_key)
             if app is not None:
                 await _reload_pki(app)
             _set_status("idle", filename)
