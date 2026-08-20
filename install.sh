@@ -237,6 +237,7 @@ MSG_EN[warp_proxy_fail]="Could not verify WARP proxy. Check manually"
 MSG_EN[warp_reinstall_confirm]="WARP already installed. Reinstall? (y/N)"
 MSG_EN[warp_codename_fallback]="Release not supported by Cloudflare, using fallback"
 MSG_EN[warp_install_failed]="Failed to install cloudflare-warp. Check Cloudflare repository availability"
+MSG_EN[warp_svc_limit]="warp-svc memory limit and auto-restart configured"
 MSG_EN[menu_speed_test]="Speed test"
 MSG_EN[speedtest_menu_title]="Speed test — choose tool"
 MSG_EN[speedtest_opt_ookla]="Ookla Speedtest (snap)"
@@ -387,6 +388,7 @@ MSG_RU[warp_proxy_fail]="Не удалось проверить WARP прокс�
 MSG_RU[warp_reinstall_confirm]="WARP уже установлен. Переустановить? (y/N)"
 MSG_RU[warp_codename_fallback]="Релиз не поддерживается Cloudflare, используется запасной"
 MSG_RU[warp_install_failed]="Не удалось установить cloudflare-warp. Проверьте доступность репозитория Cloudflare"
+MSG_RU[warp_svc_limit]="Ограничение памяти warp-svc и авторестарт настроены"
 MSG_RU[menu_speed_test]="Проверка скорости"
 MSG_RU[speedtest_menu_title]="Проверка скорости — выбор инструмента"
 MSG_RU[speedtest_opt_ookla]="Ookla Speedtest (snap)"
@@ -2367,6 +2369,21 @@ https://pkg.cloudflareclient.com/ ${codename} main" | \
     fi
 
     log_success "Cloudflare WARP: $(warp-cli --version 2>/dev/null || echo 'installed')"
+
+    # У warp-svc известна утечка памяти на долгом аптайме (гигабайты RSS за месяцы,
+    # плавающие обрывы соединений). Потолок cgroup: при превышении systemd прибьёт
+    # и перезапустит демона, туннель переподключится сам (Always On). Лимит
+    # применяется только с рестарта, поэтому перезапускаем сразу — туннель ещё не поднят.
+    mkdir -p /etc/systemd/system/warp-svc.service.d
+    tee /etc/systemd/system/warp-svc.service.d/memory-limit.conf >/dev/null << 'OVERRIDE'
+[Service]
+MemoryMax=1G
+Restart=always
+RestartSec=5
+OVERRIDE
+    systemctl daemon-reload
+    systemctl restart warp-svc &>/dev/null
+    log_success "$(msg warp_svc_limit)"
 
     # Фикс для VPS с /32 адресацией: WARP не видит primary IPv4 без LAN range
     fix_warp_network
