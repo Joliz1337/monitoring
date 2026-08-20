@@ -256,6 +256,14 @@ EOF
     fi
 fi
 
+# Add secret-encryption key if missing (older installations). БЭКАПИТЬ вместе с БД:
+# потеря ключа = панель не расшифрует mTLS-ключи и потеряет доступ к нодам.
+if [ -f "$PANEL_DIR/.env" ] && ! grep -q "^PANEL_ENC_KEY=" "$PANEL_DIR/.env"; then
+    log_info "Adding PANEL_ENC_KEY to .env..."
+    printf 'PANEL_ENC_KEY=%s\n' "$(openssl rand -base64 32 | tr -d '\n')" >> "$PANEL_DIR/.env"
+    log_success "PANEL_ENC_KEY added"
+fi
+
 tune_postgres_env "$PANEL_DIR/.env"
 
 # Regenerate nginx config

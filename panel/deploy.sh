@@ -875,7 +875,13 @@ POSTGRES_DB=panel
 EOF
             print_status "PostgreSQL configuration added"
         fi
-        
+
+        if ! grep -q "^PANEL_ENC_KEY=" .env 2>/dev/null; then
+            print_info "Generating PANEL_ENC_KEY..."
+            printf 'PANEL_ENC_KEY=%s\n' "$(openssl rand -base64 32 | tr -d '\n')" >> .env
+            print_status "PANEL_ENC_KEY added"
+        fi
+
         if [ -z "$PANEL_UID" ] || [ "$PANEL_UID" = "changeme" ]; then
             print_info "Regenerating credentials..."
         else
@@ -886,11 +892,12 @@ EOF
     
     print_info "Generating .env configuration..."
     
-    local panel_uid panel_password jwt_secret postgres_password
+    local panel_uid panel_password jwt_secret postgres_password panel_enc_key
     panel_uid=$(generate_random 16)
     panel_password=$(generate_random 32)
     jwt_secret=$(generate_random 64)
     postgres_password=$(generate_random 32)
+    panel_enc_key=$(openssl rand -base64 32 | tr -d '\n')
     
     cat > .env << EOF
 # Domain (required for SSL)
@@ -903,6 +910,9 @@ PANEL_PASSWORD=${panel_password}
 # JWT Settings
 JWT_SECRET=${jwt_secret}
 JWT_EXPIRE_MINUTES=1440
+
+# Secret encryption key (base64 32B, auto-generated) — БЭКАПИТЬ вместе с БД!
+PANEL_ENC_KEY=${panel_enc_key}
 
 # Security
 MAX_FAILED_ATTEMPTS=5
