@@ -1,6 +1,7 @@
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, Float, BigInteger, Index, ForeignKey, UniqueConstraint
 from sqlalchemy.sql import func
 from app.database import Base
+from app.crypto import EncryptedString
 
 
 class PKIKeygen(Base):
@@ -9,11 +10,11 @@ class PKIKeygen(Base):
 
     id = Column(Integer, primary_key=True)
     ca_cert_pem = Column(Text, nullable=False)
-    ca_key_pem = Column(Text, nullable=False)
+    ca_key_pem = Column(EncryptedString, nullable=False)
     client_cert_pem = Column(Text, nullable=False)
-    client_key_pem = Column(Text, nullable=False)
+    client_key_pem = Column(EncryptedString, nullable=False)
     shared_node_cert_pem = Column(Text, nullable=True)
-    shared_node_key_pem = Column(Text, nullable=True)
+    shared_node_key_pem = Column(EncryptedString, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -31,7 +32,7 @@ class NodeInstallKey(Base):
     name = Column(String(200), nullable=False)
     common_name = Column(String(120), nullable=False, unique=True)
     cert_pem = Column(Text, nullable=False)
-    key_pem = Column(Text, nullable=False)
+    key_pem = Column(EncryptedString, nullable=False)
     fingerprint = Column(String(100), nullable=False)
     expires_at = Column(DateTime(timezone=True), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
@@ -43,7 +44,7 @@ class RemnawaveCertProfile(Base):
 
     id = Column(Integer, primary_key=True)
     name = Column(String(100), nullable=False, unique=True)
-    secret_key = Column(Text, nullable=False)
+    secret_key = Column(EncryptedString, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -53,7 +54,7 @@ class Server(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(100), nullable=False)
     url = Column(String(500), nullable=False)
-    api_key = Column(String(200), nullable=True)
+    api_key = Column(EncryptedString, nullable=True)
     # SOCKS5-прокси панель→нода: "ip:port" или "ip:port@login:pass"
     proxy_url = Column(String(255), nullable=True)
     position = Column(Integer, default=0)

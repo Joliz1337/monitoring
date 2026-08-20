@@ -23,7 +23,8 @@ class Settings(BaseSettings):
     domain: str = ""
     
     ext_key: str = ""
-    
+    panel_enc_key: str = ""
+
     @property
     def database_url(self) -> str:
         """PostgreSQL connection URL"""

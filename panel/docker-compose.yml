@@ -137,6 +137,7 @@ services:
       - POSTGRES_DB=${POSTGRES_DB:-panel}
       - DOMAIN=${DOMAIN}
       - EXT_KEY=${EXT_KEY:-}
+      - PANEL_ENC_KEY=${PANEL_ENC_KEY:-}
     volumes:
       - panel-data:/app/data
       # For update/renew scripts: access to project directory and docker
