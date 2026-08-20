@@ -140,6 +140,11 @@ class Server(Base):
     # NULL — ограничений нет; по ней панель решает, идти ли к ноде вообще.
     node_capabilities = Column(Text, nullable=True)
 
+    # Доп. порты этой ноды, исключаемые из эфемерной выдачи ядра (строка вида
+    # "5201,8443-8450"); при рассылке объединяются с общим списком из
+    # panel_settings (ключ reserved_ports_global)
+    reserved_ports = Column(Text, nullable=True)
+
 
 class ServerCache(Base):
     """Отдельная таблица для тяжёлых JSON-кешей, часто обновляемых фоновыми задачами.

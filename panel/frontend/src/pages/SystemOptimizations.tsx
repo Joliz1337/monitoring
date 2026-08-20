@@ -18,9 +18,10 @@ import {
   ChevronDown,
   Shield,
   Monitor,
+  Network,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import { systemApi, VersionBaseInfo, SingleNodeVersion, NicInfo } from '../api/client'
+import { systemApi, reservedPortsApi, VersionBaseInfo, SingleNodeVersion, NicInfo, ReservedPortsConfig } from '../api/client'
 import { Skeleton } from '../components/ui/Skeleton'
 import { FAQIcon } from '../components/FAQ'
 import { Tooltip } from '../components/ui/Tooltip'
@@ -72,6 +73,55 @@ export default function SystemOptimizations() {
   const applyTriggerRefs = useRef<Map<number, HTMLButtonElement>>(new Map())
   const removeTriggerRefs = useRef<Map<number, HTMLButtonElement>>(new Map())
   const [dropdownUp, setDropdownUp] = useState(true)
+
+  // Резервация портов: общий список + списки отдельных нод
+  const [rpConfig, setRpConfig] = useState<ReservedPortsConfig | null>(null)
+  const [rpGlobal, setRpGlobal] = useState('')
+  const [rpServerPorts, setRpServerPorts] = useState<Record<number, string>>({})
+  const [rpExpanded, setRpExpanded] = useState(false)
+  const [rpSavingGlobal, setRpSavingGlobal] = useState(false)
+  const [rpSavingServer, setRpSavingServer] = useState<number | null>(null)
+
+  const fetchReservedPorts = useCallback(async () => {
+    try {
+      const resp = await reservedPortsApi.getConfig()
+      setRpConfig(resp.data)
+      setRpGlobal(resp.data.global_ports)
+      setRpServerPorts(Object.fromEntries(resp.data.servers.map(s => [s.id, s.ports])))
+    } catch { /* карточка просто останется без данных */ }
+  }, [])
+
+  const saveGlobalReservedPorts = async () => {
+    setRpSavingGlobal(true)
+    try {
+      const resp = await reservedPortsApi.setGlobal(rpGlobal)
+      setRpGlobal(resp.data.ports)
+      toast.success(t('sys_opt.reserved_ports_saved_global'))
+    } catch (err: any) {
+      toast.error(err.response?.data?.detail || t('sys_opt.reserved_ports_save_failed'))
+    } finally {
+      setRpSavingGlobal(false)
+    }
+  }
+
+  const saveServerReservedPorts = async (serverId: number) => {
+    setRpSavingServer(serverId)
+    try {
+      const resp = await reservedPortsApi.setServer(serverId, rpServerPorts[serverId] ?? '')
+      setRpServerPorts(prev => ({ ...prev, [serverId]: resp.data.ports }))
+      if (resp.data.error) {
+        toast.error(resp.data.error)
+      } else if (resp.data.queued) {
+        toast.success(t('sys_opt.reserved_ports_queued'))
+      } else {
+        toast.success(t('sys_opt.reserved_ports_saved_node'))
+      }
+    } catch (err: any) {
+      toast.error(err.response?.data?.detail || t('sys_opt.reserved_ports_save_failed'))
+    } finally {
+      setRpSavingServer(null)
+    }
+  }
 
   const DROPDOWN_MAX_HEIGHT = 280
 
@@ -204,8 +254,9 @@ export default function SystemOptimizations() {
   useEffect(() => {
     fetchBase()
     fetchSettings()
+    fetchReservedPorts()
     return () => { abortRef.current = true }
-  }, [fetchBase, fetchSettings])
+  }, [fetchBase, fetchSettings, fetchReservedPorts])
 
   const handleRefresh = useCallback(() => {
     abortRef.current = true
@@ -874,6 +925,92 @@ export default function SystemOptimizations() {
             transition={{ type: 'spring', stiffness: 500, damping: 30 }}
           />
         </motion.button>
+      </div>
+
+      {/* Резервация портов от эфемерной выдачи */}
+      <div className="card mb-6">
+        <div className="flex items-center justify-between gap-4">
+          <div className="min-w-0">
+            <div className="flex items-center gap-1 text-sm font-medium text-dark-200">
+              <Network className="w-4 h-4 text-accent-400" />
+              {t('sys_opt.reserved_ports')}
+              <FAQIcon screen="SYS_OPT_RESERVED_PORTS" size="sm" />
+            </div>
+            <p className="text-xs text-dark-500 mt-1">{t('sys_opt.reserved_ports_hint')}</p>
+          </div>
+          <button
+            onClick={() => setRpExpanded(v => !v)}
+            className="btn btn-secondary flex-shrink-0 text-xs"
+          >
+            <ChevronDown className={`w-4 h-4 transition-transform ${rpExpanded ? 'rotate-180' : ''}`} />
+            {t('sys_opt.reserved_ports_per_node')}
+          </button>
+        </div>
+
+        <div className="flex items-center gap-2 mt-3">
+          <input
+            value={rpGlobal}
+            onChange={e => setRpGlobal(e.target.value)}
+            placeholder={t('sys_opt.reserved_ports_placeholder')}
+            className="input flex-1 font-mono text-sm"
+          />
+          <button
+            onClick={saveGlobalReservedPorts}
+            disabled={rpSavingGlobal || !rpConfig}
+            className="btn btn-primary flex-shrink-0"
+          >
+            {rpSavingGlobal ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
+            {t('common.save')}
+          </button>
+        </div>
+
+        <AnimatePresence>
+          {rpExpanded && rpConfig && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              className="overflow-hidden"
+            >
+              <div className="mt-4 pt-3 border-t border-dark-800/60 space-y-2">
+                {rpConfig.servers.length === 0 && (
+                  <p className="text-xs text-dark-500">{t('sys_opt.no_nodes')}</p>
+                )}
+                {rpConfig.servers.map(s => (
+                  <div key={s.id} className="flex items-center gap-2">
+                    <span className="text-sm text-dark-300 w-44 truncate flex-shrink-0" title={s.name}>
+                      {s.name}
+                    </span>
+                    {s.supported ? (
+                      <>
+                        <input
+                          value={rpServerPorts[s.id] ?? ''}
+                          onChange={e => setRpServerPorts(prev => ({ ...prev, [s.id]: e.target.value }))}
+                          placeholder={t('sys_opt.reserved_ports_placeholder')}
+                          className="input flex-1 font-mono text-sm"
+                        />
+                        <button
+                          onClick={() => saveServerReservedPorts(s.id)}
+                          disabled={rpSavingServer !== null}
+                          className="btn btn-secondary flex-shrink-0 text-xs"
+                        >
+                          {rpSavingServer === s.id
+                            ? <Loader2 className="w-4 h-4 animate-spin" />
+                            : <Check className="w-4 h-4" />}
+                          {t('common.save')}
+                        </button>
+                      </>
+                    ) : (
+                      <span className="text-xs text-warning">
+                        {t('sys_opt.reserved_ports_node_old', { version: rpConfig.min_node_version })}
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
 
       {nodesList.length === 0 ? (

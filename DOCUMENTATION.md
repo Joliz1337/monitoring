@@ -67,13 +67,13 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/in
 
 На ряде хостеров (OVH и аналогичных с port-security на свитчах) `ethtool -G` (resize ring buffers) на интерфейсах `igb`/`ixgbe`/`i40e` вызывает hard link reset, что может лишить доступа к серверу. По этой причине `ethtool -G` в tune-скриптах не используется.
 
-**Системный тюнинг — универсальный рендерер (`configs/tune-sysctl.sh`, `configs/VERSION` 5.8.0):**
+**Системный тюнинг — универсальный рендерер (`configs/tune-sysctl.sh`, `configs/VERSION` 5.9.0):**
 
 Единственный владелец всех производных чисел — `configs/tune-sysctl.sh`: он читает MemTotal/nproc/MTU/скорость линка самого хоста и пересчитывает conntrack, буферы, лимиты дескрипторов и HAProxy `maxconn` при каждом применении. Плоские константы, одинаковые для сервера на 4 ГБ и на 248 ГБ, были бы на маленьких хостах OOM-вектором (`nf_conntrack_max=2097152` ≈ 670 МБ одной только таблицы), а на больших — недокрутом (`fs.nr_open=524288` ломал бы контейнеры с бо́льшим `ulimits`).
 
 Верби: `facts` (посчитать и напечатать факты), `render` (посчитать → отрендерить все выходные файлы → `sysctl -e -p`), `verify` (сверить живые значения с записанными фактами), `rollback` (восстановить `.prev`), `self-test` (прогнать внутренние инварианты). Значения (включая `tcp_mem`/`udp_mem`/`vm.min_free_kbytes`) пишутся в файл, а не применяются транзиентно — транзиентные значения сбрасывал бы к дефолтам ядра любой сторонний `sysctl --system`. Рендерер отказывается писать при неразрешённом токене, дублирующемся ключе в базовых файлах или нарушении числовой цепочки (например `fs.nr_open` ниже лимита HAProxy) — предыдущий конфиг остаётся в силе.
 
-Входные файлы — `configs/profiles/common.base.conf` (общие ключи) + `vpn.base.conf`/`panel.base.conf` (только поведенческие отличия: короткие таймауты conntrack на VPN-ноде против долгоживущих исходящих сессий панели) + `limits.tmpl`/`systemd-limits.tmpl`. Вычисляемые значения помечены токенами `@@TOKEN@@` и подставляются рендерером внутрь базового файла, а не дописываются отдельным блоком — `sysctl` берёт последнее вхождение ключа, и дубль молча менял бы смысл в зависимости от порядка строк. Оператор может переопределить любое значение через `/opt/monitoring/configs/local-overrides.conf` — рендерер его не трогает и подключает последним.
+Входные файлы — `configs/profiles/common.base.conf` (общие ключи) + `vpn.base.conf`/`panel.base.conf` (только поведенческие отличия: короткие таймауты conntrack на VPN-ноде против долгоживущих исходящих сессий панели; пол эфемерного диапазона — 1024 у vpn против 9101 у panel) + `limits.tmpl`/`systemd-limits.tmpl`. Сервисные порты рендерер исключает из эфемерной выдачи через `net.ipv4.ip_local_reserved_ports`: база — 7500, `NODE_API_PORT` из `.env` ноды, 2222 (Remnawave) — плюс доп. порты из `/opt/monitoring/configs/reserved-ports.conf`, которыми управляет панель (общий список парка и списки отдельных нод); подробности — в [node/DOCUMENTATION.md](node/DOCUMENTATION.md#резервация-портов-от-эфемерной-выдачи). Вычисляемые значения помечены токенами `@@TOKEN@@` и подставляются рендерером внутрь базового файла, а не дописываются отдельным блоком — `sysctl` берёт последнее вхождение ключа, и дубль молча менял бы смысл в зависимости от порядка строк. Оператор может переопределить любое значение через `/opt/monitoring/configs/local-overrides.conf` — рендерер его не трогает и подключает последним.
 
 Выходы: `/etc/sysctl.d/99-vless-tuning.conf` (+`.prev` для отката), лимиты дескрипторов (`/etc/security/limits.d/`, drop-ins `system.conf.d`/`user-.slice.d`/`haproxy.service.d`), `/etc/modprobe.d/nf_conntrack.conf`, пороги анти-DDoS вотчдога (`/opt/monitoring/antiddos/config.auto`) и факты для верификации/дрейфа (`/opt/monitoring/configs/tuning-facts.json`). Входные файлы остаются на хосте в `/opt/monitoring/configs/profiles/` и `/opt/monitoring/scripts/tune-sysctl.sh` — без них не сработал бы загрузочный ре-рендер: каждый `*-tune.service` (network/multiqueue/hybrid) вызывает `tune-sysctl.sh render` через `ExecStartPre` при каждой загрузке, поэтому ресайз VPS подхватывается сам, без участия панели.
 
@@ -83,7 +83,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/in
 
 - `configs/tune-sysctl.sh` — рендерер (см. выше)
 - `configs/profiles/common.base.conf`, `vpn.base.conf`, `panel.base.conf`, `limits.tmpl`, `systemd-limits.tmpl` — входные файлы рендерера
-- `configs/tests/render-matrix.sh` — 252 комбинации (9 размеров RAM × 7 CPU × 2 профиля × 2 page size), 293 проверки инвариантов; прав root и VM не требует — факты хоста подменяются через `MON_FACT_*`, выходы пишутся в `MON_RENDER_ROOT`
+- `configs/tests/render-matrix.sh` — 252 комбинации (9 размеров RAM × 7 CPU × 2 профиля × 2 page size), 301 проверка инвариантов (включая резервацию портов и полы эфемерного диапазона по профилям); прав root и VM не требует — факты хоста подменяются через `MON_FACT_*`, выходы пишутся в `MON_RENDER_ROOT`
 - `configs/network-tune.sh` — программный RPS/RFS: `rps_cpus`/`rps_flow_cnt` на всех очередях (`rps_flow_cnt` — обязательно степень двойки через `pow2_floor()`, иначе ядро молча отклоняет RFS); `configure_conntrack()` только грузит модуль и поднимает hashsize из `tuning-facts.env`, если он там выше текущего — сами sysctl-значения задаёт рендерер; `configure_gro_batching()` на интерфейсах с одной RX-очередью включает `napi_defer_hard_irqs`/`gro_flush_timeout` (50 мкс) — даёт GRO собрать несколько пакетов в один skb, чтобы через единственное кольцо и стек проходило меньше буферов; на многоочередных картах и ядре < 5.10 не применяется
 - `configs/multiqueue-tune.sh` — аппаратный multiqueue: `ethtool -L combined N` (или `-L rx N tx N` для карт без combined-каналов), XPS, IRQ affinity; ring buffer resize (`ethtool -G`) не используется
 - `configs/hybrid-tune.sh` — гибридный режим: аппаратные очереди на часть ядер + RPS на остальные
@@ -227,7 +227,7 @@ bash install.sh --unattended
 
 Подробная документация по каждому компоненту:
 
-- [panel/DOCUMENTATION.md](panel/DOCUMENTATION.md) — веб-панель: API, БД, конфигурация, безопасность (v10.70.0)
+- [panel/DOCUMENTATION.md](panel/DOCUMENTATION.md) — веб-панель: API, БД, конфигурация, безопасность (v10.71.0)
 - [node/DOCUMENTATION.md](node/DOCUMENTATION.md) — нода-агент: API, метрики, HAProxy, DNAT-маршрутизация, трафик, Remnawave, Remnawave Nginx, Firewall Profiles, Системные оптимизации, Анти-DDoS
 
 ## Архитектура

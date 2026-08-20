@@ -251,6 +251,7 @@ class CallSiteCoverageTest(unittest.TestCase):
         "services/metrics_collector.py",
         "services/recovery_reconciler.py",
         "services/remnawave_nginx_sync.py",
+        "services/reserved_ports_sync.py",
         "services/ssh_manager.py",
         "services/time_sync.py",
         "services/torrent_blocker.py",

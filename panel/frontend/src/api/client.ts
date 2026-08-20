@@ -678,6 +678,36 @@ export const settingsApi = {
   timeSyncStatus: () => api.get<TimeSyncStatus>('/settings/time-sync/status'),
 }
 
+// Reserved ports (excluded from the kernel's ephemeral allocation on nodes)
+export interface ReservedPortsServer {
+  id: number
+  name: string
+  ports: string
+  node_version: string | null
+  supported: boolean
+}
+
+export interface ReservedPortsConfig {
+  global_ports: string
+  min_node_version: string
+  servers: ReservedPortsServer[]
+}
+
+export interface ReservedPortsSaveResult {
+  success: boolean
+  ports: string
+  queued?: boolean
+  error?: string | null
+}
+
+export const reservedPortsApi = {
+  getConfig: () => api.get<ReservedPortsConfig>('/reserved-ports'),
+  setGlobal: (ports: string) =>
+    api.put<ReservedPortsSaveResult>('/reserved-ports/global', { ports }),
+  setServer: (serverId: number, ports: string) =>
+    api.put<ReservedPortsSaveResult>(`/reserved-ports/servers/${serverId}`, { ports }, { timeout: 90000 }),
+}
+
 // Blocklist types
 export type BlocklistDirection = 'in' | 'out'
 export type BlocklistListType = 'block' | 'allow'

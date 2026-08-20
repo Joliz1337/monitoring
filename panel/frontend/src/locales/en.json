@@ -933,7 +933,16 @@
     "info_title": "Information",
     "info_text": "Optimizations are applied to the host machine via nsenter. When switching NIC mode, the previous mode is automatically removed.",
     "cpu_affinity": "Split workloads off network cores",
-    "cpu_affinity_hint": "Moves HAProxy and Remnawave containers away from cores handling network interrupts"
+    "cpu_affinity_hint": "Moves HAProxy and Remnawave containers away from cores handling network interrupts",
+    "reserved_ports": "Reserved ports",
+    "reserved_ports_hint": "Ports the kernel will never hand out to outbound connections — so a restarting service cannot lose its port. Node ports (API, 7500, 2222) are always protected; extras listed here apply to all nodes",
+    "reserved_ports_per_node": "Per-node ports",
+    "reserved_ports_placeholder": "5201, 8443-8450",
+    "reserved_ports_saved_global": "Global list saved, pushing to nodes",
+    "reserved_ports_saved_node": "List saved and applied on the node",
+    "reserved_ports_queued": "List saved — the node will receive it once back online",
+    "reserved_ports_save_failed": "Failed to save the ports list",
+    "reserved_ports_node_old": "Requires node ≥ {{version}} — update the agent"
   },
   "bulk_actions": {
     "title": "Bulk Actions",

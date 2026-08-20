@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 from requests.exceptions import ReadTimeout, RequestException
 
 from app.capabilities import get_policy
-from app.services import cpu_affinity
+from app.services import cpu_affinity, reserved_ports
 from app.services.bandwidth_limit import MAX_MBIT, MIN_MBIT, get_bandwidth_limiter
 from app.services.host_executor import get_host_executor, MAX_TIMEOUT, DEFAULT_TIMEOUT
 from app.services.host_files import read_host_file, write_host_file
@@ -1029,6 +1029,65 @@ async def set_cpu_affinity(request: CpuAffinityRequest):
         changed = await cpu_affinity.reset_containers(executor)
 
     return {**_cpu_affinity_state(), "containers_changed": changed}
+
+
+class ReservedPortsRequest(BaseModel):
+    extra_ports: list[str] = Field(
+        default_factory=list,
+        max_length=reserved_ports.MAX_ENTRIES,
+        description="Доп. порты/диапазоны (a-b), исключаемые из эфемерной выдачи",
+    )
+
+
+async def _reserved_ports_state() -> dict:
+    check = await get_host_executor().execute(f"test -f {RENDERER_PATH}", timeout=5)
+    return {
+        "base_ports": reserved_ports.base_ports(),
+        "extra_ports": reserved_ports.read_extra_entries(),
+        "effective": reserved_ports.effective_reserved(),
+        "optimizations_installed": check.exit_code == 0,
+    }
+
+
+@router.get("/reserved-ports")
+async def get_reserved_ports():
+    """Базовые и доп. порты, исключённые из эфемерной выдачи, и что стоит в ядре."""
+    return await _reserved_ports_state()
+
+
+@router.post("/reserved-ports")
+async def set_reserved_ports(request: ReservedPortsRequest):
+    """Заменить список доп. резервируемых портов и переприменить sysctl.
+
+    Агент пишет только файл доп. портов; сам ключ ip_local_reserved_ports
+    считает и применяет рендерер (базовые порты он добавляет сам). Без
+    установленных оптимизаций файл лишь сохраняется — рендерер подхватит его
+    при первом применении оптимизаций, ошибкой это не считается.
+    """
+    try:
+        entries = reserved_ports.normalize_entries(request.extra_ports)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    written = await write_host_file(
+        str(reserved_ports.RESERVED_EXTRA_FILE),
+        reserved_ports.render_extra_file(entries),
+        mode="644",
+    )
+    if not written:
+        raise HTTPException(status_code=500, detail="Failed to write reserved-ports file")
+
+    executor = get_host_executor()
+    applied = False
+    render_error = None
+    check = await executor.execute(f"test -f {RENDERER_PATH}", timeout=5)
+    if check.exit_code == 0:
+        result = await executor.execute(f"{RENDERER_PATH} render", timeout=90, shell="bash")
+        applied = result.success and result.exit_code == 0
+        if not applied:
+            render_error = (result.stderr or "").strip()[-500:] or "render failed"
+
+    return {**await _reserved_ports_state(), "applied": applied, "render_error": render_error}
 
 
 class BandwidthLimitRequest(BaseModel):

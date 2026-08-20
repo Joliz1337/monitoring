@@ -176,7 +176,7 @@ node/
 | Параметр | Описание | Default |
 |----------|----------|---------|
 | NODE_NAME | Имя ноды | node-01 |
-| NODE_API_PORT | Порт mTLS-nginx, на который подключается панель. Читают трое: compose подставляет его в шаблон nginx (`nginx/templates/api.conf.template`, рендерится entrypoint'ом образа в `conf.d/api.conf`), агент — для guard'а файрвола и валидации DNAT, анти-DDoS сторож — для never-drop. Задаётся при установке (`--api-port=N` / env `NODE_API_PORT`); смена на живой ноде: правка `.env` → открыть новый порт в UFW → `docker compose up -d` → поменять порт в URL сервера на панели | 9100 |
+| NODE_API_PORT | Порт mTLS-nginx, на который подключается панель. Читают четверо: compose подставляет его в шаблон nginx (`nginx/templates/api.conf.template`, рендерится entrypoint'ом образа в `conf.d/api.conf`), агент — для guard'а файрвола и валидации DNAT, анти-DDoS сторож — для never-drop, рендерер оптимизаций — для резервации порта от эфемерной выдачи. Задаётся при установке (`--api-port=N` / env `NODE_API_PORT`); смена на живой ноде: правка `.env` → открыть новый порт в UFW → `docker compose up -d` → поменять порт в URL сервера на панели | 9100 |
 | PANEL_IP | IP панели (для UFW) | задаётся при установке |
 | PORT_SAMPLE_INTERVAL | Интервал съёма счётчиков портов из iptables (сек) | 30 |
 | TRAFFIC_DB_PATH | Файл легаси-БД трафика; в его каталоге лежит и `traffic_config.json` со списком отслеживаемых портов | /var/lib/monitoring/traffic.db |
@@ -255,6 +255,8 @@ node/
 | POST | /api/system/execute | Выполнить команду на хосте |
 | POST | /api/system/execute-stream | Выполнить команду с потоковым выводом (SSE) |
 | POST | /api/system/time-sync | Установить часовой пояс и синхронизировать NTP |
+| GET | /api/system/reserved-ports | Порты, исключённые из эфемерной выдачи: базовые, доп. из файла, текущее значение ядра |
+| POST | /api/system/reserved-ports | Заменить доп. резервируемые порты (`{extra_ports: ["5201", "8443-8450"]}`) и переприменить sysctl |
 
 **`POST /api/system/time-sync`** — значение `timezone` идёт в shell-команду (`timedatectl set-timezone ...`), исполняемую на хосте от root через `nsenter`, поэтому проверяется трижды: формат ограничен паттерном `^[A-Za-z0-9_+/-]+$` (`TIMEZONE_PATTERN`, набор символов IANA-имён без точки — «..» из каталога зон не выйти), сама подстановка идёт через `shlex.quote`, и до выполнения `timezone_exists_on_host()` сверяет имя с реальным файлом в `/usr/share/zoneinfo` на хосте (`test -f`), а не только с форматом.
 
@@ -552,7 +554,7 @@ data: {"message": "error description"}
 - `node/tests/test_haproxy_parsing.py` — чистые части `haproxy_manager`: разбор server-строк со всеми опциями (`send-proxy-v2` не выставляет заодно `send-proxy`), подстановка `resolvers` только доменным таргетам и только один раз, разбор опций балансировщика, распознавание правил в конфиге (балансировщик против одиночного таргета, backend без frontend игнорируется), расчёт `maxconn` от RAM с потолком по лимиту дескрипторов, вставка `maxconn` в `global` без затирания явного значения
 - `node/tests/test_sshd_config.py` — сборка `sshd_config`: закомментированные директивы не оживают, содержимое `Match`-блоков копируется дословно, недостающие ключи встают перед первым `Match`, повторный прогон ничего не меняет; разбор конфига по правилу первого вхождения, преобразование значений туда-обратно, разбор секции fail2ban и единиц времени бана
 - `node/tests/test_update_ref_validation.py` — валидация ссылки обновления и адреса прокси: пропускает ветки, теги версий и хеши коммитов (путь отката), отклоняет метасимволы shell и ведущий дефис
-- Всего тестов ноды — 229 (`python -m unittest discover -s node/tests`)
+- Всего тестов ноды — 336 (`python -m unittest discover -s node/tests`)
 
 ### IPSet Blocklist
 
@@ -889,11 +891,21 @@ Per-IP применение (2 subprocess-вызова `ipset add`/`del` на з
 
 Установка/обновление ноды **не** применяет и не меняет оптимизации сама по себе — только через UI панели (раздел **Обновления**) или главный установщик (`monitoring` → пункт 7). После первого применения рендерер сам повторно накатывает значения на **каждой загрузке** хоста (`ExecStartPre` активного `*-tune.service`) — ресайз VPS подхватывается без повторного клика в панели.
 
-Категории тюнинга: IPv6 (отключение), BBR + fq_codel, TCP/UDP-буферы, Busy Polling, TCP ECN, очереди (`somaxconn`/`netdev_max_backlog`), TCP performance (fastopen, no slow start after idle, MTU probing, autocorking), TIME-WAIT (tw_reuse), syncookies/rp_filter/ICMP-protection, conntrack, лимиты файловых дескрипторов. Все размерные значения из этого списка вычисляются из MemTotal/nproc/MTU/скорости линка хоста единым рендерером `tune-sysctl.sh` (`configs/`, версия формулы отдельная от `configs/VERSION` — `FORMULA_VERSION`, сейчас `1.0.0`) — не хардкод и не флат-число, одинаковое для любого сервера.
+Категории тюнинга: IPv6 (отключение), BBR + fq_codel, TCP/UDP-буферы, Busy Polling, TCP ECN, очереди (`somaxconn`/`netdev_max_backlog`), TCP performance (fastopen, no slow start after idle, MTU probing, autocorking), TIME-WAIT (tw_reuse), эфемерные порты и резервация сервисных портов, syncookies/rp_filter/ICMP-protection, conntrack, лимиты файловых дескрипторов. Все размерные значения из этого списка вычисляются из MemTotal/nproc/MTU/скорости линка хоста единым рендерером `tune-sysctl.sh` (`configs/`, версия формулы отдельная от `configs/VERSION` — `FORMULA_VERSION`) — не хардкод и не флат-число, одинаковое для любого сервера.
 
 `net.ipv4.tcp_autocorking = 1` (`configs/profiles/common.base.conf`): задержка мелких записей ради их слияния в один сегмент. Замер на боевой ноде — средний исходящий TCP-сегмент 1243 байта (ровно один сегмент), то есть прокси в `mode tcp` сам не батчит и каждая запись стоила отдельного virtio-kick (0.53 на пакет); включение снизило это примерно на 19%.
 
 Отдельный глобальный тумблер на этой же странице панели — «Развод по ядрам» (cpu-affinity): уводит HAProxy и контейнеры Remnawave с ядер, занятых прерываниями сетевой карты. Своя лёгкая ручка (`GET/POST /api/system/cpu-affinity`) в обход полного применения оптимизаций, но состояние переживается и полным применением тоже — см. «Развод по ядрам» в разделе HAProxy выше.
+
+### Резервация портов от эфемерной выдачи
+
+Профиль vpn опускает пол `ip_local_port_range` до 1024 (профиль panel остаётся на 9101) — потолок одновременных исходящих соединений на один destination у релея растёт на ~14%, но сервисные порты оказываются внутри эфемерного окна: при рестарте сервиса исходящее соединение может занять его порт как source-порт, и bind после рестарта не пройдёт. От этого защищает `net.ipv4.ip_local_reserved_ports` — порты из списка исключаются из **автоматической** выдачи, явный `bind()` работает как обычно.
+
+Сам ключ считает и применяет рендерер (`@@RESERVED_PORTS@@` в `common.base.conf`): база — `7500` (внутренний uvicorn), `NODE_API_PORT` из `/opt/monitoring-node/.env` (по умолчанию 9100, у рендерера — `detect_node_api_port()`, переопределяется `MON_FACT_NODE_API_PORT` в тестах) и `2222` (SSH ноды Remnawave) — плюс дополнительные порты из `/opt/monitoring/configs/reserved-ports.conf` (порты и диапазоны `a-b`, построчно или через запятую, `#`-комментарии). Итог канонизируется в формат ядра (сортировка, слияние пересечений и смежных, диапазоны `a-b`) — иначе `verify` сравнивал бы нашу строку с ядровой и всегда видел бы расхождение; инвариант рендерера отвергает файл, резервирующий суммарно больше 4096 портов. Значение попадает в `computed` в `tuning-facts.json` и проверяется верификацией наравне с остальными.
+
+Агент управляет только файлом доп. портов: `GET /api/system/reserved-ports` — база, доп. записи, текущее значение ядра (читается напрямую из `/proc/sys/net/ipv4/ip_local_reserved_ports` — контейнер в сетевом namespace хоста) и установлены ли оптимизации; `POST /api/system/reserved-ports` (`{extra_ports: ["5201", "8443-8450"]}`, ≤64 записей, ≤4096 портов суммарно) — валидирует (`normalize_entries()`), пишет файл через `write_host_file()` и, если рендерер установлен, запускает `tune-sysctl.sh render` (профиль — из маркера `OPT_PROFILE`). Без установленных оптимизаций файл лишь сохраняется (`applied: false` в ответе, не ошибка) — рендерер подхватит его при первом применении оптимизаций; ре-рендер на каждой загрузке перечитывает файл сам.
+
+**Файлы:** `node/app/services/reserved_ports.py` (`normalize_entries`, `render_extra_file`, `read_extra_entries`, `base_ports`, `effective_reserved`, потолки `MAX_ENTRIES`/`MAX_TOTAL_PORTS`), эндпоинты в `node/app/routers/system.py`, тесты — `node/tests/test_reserved_ports.py` (17 тестов: нормализация и отказ на мусор/границы/переполнение, round-trip файла, база с кастомным портом API, чтение значения ядра).
 
 ### Контракт с панелью
 
@@ -909,7 +921,7 @@ Per-IP применение (2 subprocess-вызова `ipset add`/`del` на з
 
 Рендерер утверждает её численно и отказывается писать при нарушении: `nginx worker_rlimit_nofile ≤ container nofile ≤ NOFILE_LIMIT == limits.conf nofile == DefaultLimitNOFILE ≤ fs.nr_open == fs.file-max`, и `haproxy maxconn ≤ (RLIMIT_NOFILE HAProxy − 1024) / 3` (см. «Лимит соединений (maxconn)» в разделе HAProxy выше). `fs.nr_open` поднимается **до** записи `limits.conf` — иначе PAM ломается о значение выше текущего `nr_open`. `node/docker-compose.yml` задаёт явные `ulimits: nofile 65536` для обоих сервисов (без явного лимита наследовалось бы ~1073741816 от dockerd) и монтирует `/opt/monitoring:ro`, чтобы контейнер видел `tuning-facts.env`/`.json`.
 
-**Тесты:** `node/tests/test_verify_sysctl.py` — 14 тестов на stdlib `unittest` (подхватываются и pytest): нормализация значений, сборка ожидаемого набора из facts, порог hashsize, отсутствующий/битый facts-файл, чтение всех ключей одним вызовом. `configs/tests/render-matrix.sh` — 252 комбинации размеров хоста × профилей, 293 проверки инвариантов на стороне самого рендерера, см. корневой [DOCUMENTATION.md](../DOCUMENTATION.md).
+**Тесты:** `node/tests/test_verify_sysctl.py` — 14 тестов на stdlib `unittest` (подхватываются и pytest): нормализация значений, сборка ожидаемого набора из facts, порог hashsize, отсутствующий/битый facts-файл, чтение всех ключей одним вызовом. `configs/tests/render-matrix.sh` — 252 комбинации размеров хоста × профилей, 301 проверка инвариантов на стороне самого рендерера, см. корневой [DOCUMENTATION.md](../DOCUMENTATION.md).
 
 **Файлы:** верификация и вычистка конфликтующих sysctl/limits-конфигов вынесены из `node/app/routers/system.py` в отдельный `node/app/services/sysctl_verify.py` (`expected_from_facts`, `_normalize_sysctl_value`, `verify_sysctl_values`, `cleanup_conflicting_configs`, `_is_system_sysctl`) — это единственный кусок роутера, у которого были собственные тесты, поэтому вынос сервисного слоя проверяем ими же.
 

@@ -15,6 +15,10 @@ from app.services import update_channel
 router = APIRouter(prefix="/settings", tags=["settings"])
 
 CPU_AFFINITY_KEY = "cpu_affinity_enabled"
+# Общий на весь парк список доп. портов, исключаемых из эфемерной выдачи ядра
+# ("5201,8443-8450"). Меняется через PUT /reserved-ports/global — тот же ключ
+# через generic PUT /settings/{key} рассылку на ноды не запускает.
+RESERVED_PORTS_KEY = "reserved_ports_global"
 
 DEFAULT_SETTINGS = {
     "refresh_interval": "5",
@@ -38,6 +42,7 @@ DEFAULT_SETTINGS = {
     # умолчанию: выигрыш зависит от того, во что упирается конкретная нода, а
     # ядро под сеть забирается у приложения целиком.
     CPU_AFFINITY_KEY: "false",
+    RESERVED_PORTS_KEY: "",
 }
 
 
