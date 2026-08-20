@@ -833,6 +833,9 @@ pull_and_start() {
     if ! spin_retry 240 5 10 "Pulling Docker images" docker compose pull 2>/dev/null; then
         if compose_images_present; then
             log_success "Registry unreachable — using images already present locally"
+        elif [ "${MON_ALLOW_LOCAL_BUILD:-1}" = "0" ]; then
+            log_error "Image unavailable, local build disabled (MON_ALLOW_LOCAL_BUILD=0) — expecting delivery from panel"
+            exit 20
         else
             log_warn "Failed to pull from registry, building locally..."
             spin "Pulling base images" bash -c \

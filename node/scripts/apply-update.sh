@@ -683,6 +683,11 @@ if ! spin_retry "$DOCKER_PULL_TIMEOUT" "$DOCKER_PULL_RETRIES" "$DOCKER_PULL_RETR
     "Pulling Docker images" docker compose pull; then
     if compose_images_present; then
         log_success "Registry unreachable — using images already present locally"
+    elif [ "${MON_ALLOW_LOCAL_BUILD:-1}" = "0" ]; then
+        # Панель-триггер для заблокированной ноды: не молотим 15 мин обречённую
+        # сборку, а быстро сигналим «образа нет» — панель дотолкнёт его по SSH.
+        log_error "Image unavailable, local build disabled (MON_ALLOW_LOCAL_BUILD=0) — expecting delivery from panel"
+        exit 20
     else
         log_warn "Failed to pull from registry, building locally..."
         spin "Pulling base images" bash -c \

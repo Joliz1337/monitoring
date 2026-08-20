@@ -61,7 +61,8 @@ _update_status = {
     "in_progress": False,
     "last_result": None,
     "last_error": None,
-    "last_update_time": None
+    "last_update_time": None,
+    "reason": None,  # "image_unavailable" — образ не достался, нужна доставка с панели
 }
 
 # Ссылка на живую таску апдейтера: create_task её не удерживает, и незавершённую
@@ -202,7 +203,7 @@ async def replace_node_cert(payload: ReplaceCertRequest):
     return {"success": True}
 
 
-async def run_update_in_container(target_ref: str | None = None, proxy: str | None = None):
+async def run_update_in_container(target_ref: str | None = None, proxy: str | None = None, allow_local_build: bool = True):
     """
     Run update in separate Docker container.
     
@@ -237,6 +238,7 @@ async def run_update_in_container(target_ref: str | None = None, proxy: str | No
             await asyncio.to_thread(client.images.pull, UPDATER_IMAGE)
 
         ref_arg = target_ref if target_ref else "main"
+        allow_build_val = "1" if allow_local_build else "0"
         proxy_info = f" (via proxy: {proxy})" if proxy else ""
         logger.info(f"Starting update to: {ref_arg}{proxy_info}")
         
@@ -317,7 +319,7 @@ nsenter -t 1 -m -u -n -i -p -- chmod +x /tmp/monitoring-staging/node/scripts/app
 
 echo "[INFO] Running update on host via nsenter..."
 set +e
-nsenter -t 1 -m -u -n -i -p -- bash /tmp/monitoring-staging/node/scripts/apply-update.sh /tmp/monitoring-staging /opt/monitoring-node "$CURRENT_VERSION" "{ref_arg}"
+nsenter -t 1 -m -u -n -i -p -- env MON_ALLOW_LOCAL_BUILD={allow_build_val} bash /tmp/monitoring-staging/node/scripts/apply-update.sh /tmp/monitoring-staging /opt/monitoring-node "$CURRENT_VERSION" "{ref_arg}"
 UPDATE_RC=$?
 set -e
 
@@ -374,6 +376,13 @@ echo "[SUCCESS] Update completed!"
             _update_status["last_result"] = "success"
             _update_status["last_update_time"] = datetime.now().isoformat()
             logger.info(f"Update completed successfully\n{logs[-1000:]}")
+        elif exit_code == 20:
+            # apply-update.sh: образ не достался из реестра, сборка отключена —
+            # панель дотолкнёт образ по SSH. Нода осталась на старой версии.
+            _update_status["last_result"] = "failed"
+            _update_status["reason"] = "image_unavailable"
+            _update_status["last_error"] = "Образ недоступен из реестра, сборка отключена — нужна доставка образа с панели"
+            logger.warning("Update needs image delivery from panel (exit 20)")
         else:
             _update_status["last_result"] = "failed"
             _update_status["last_error"] = f"Exit code: {exit_code}\n{logs[-1000:]}"
@@ -419,6 +428,10 @@ class UpdateRequest(BaseModel):
         pattern=PROXY_URL_PATTERN,
         description="HTTP proxy for downloads (e.g., http://127.0.0.1:3128)",
     )
+    allow_local_build: bool = Field(
+        True,
+        description="Собирать образ на ноде при недоступном реестре. False — быстрый фейл (image_unavailable) для доставки образа с панели",
+    )
 
 
 @router.post("/update")
@@ -445,10 +458,12 @@ async def trigger_update(data: UpdateRequest = None):
 
     target_ref = data.target_version if data else None
     proxy = data.proxy if data else None
+    allow_local_build = data.allow_local_build if data else True
 
     _update_status["in_progress"] = True
     _update_status["last_error"] = None
-    _update_task = asyncio.create_task(run_update_in_container(target_ref, proxy))
+    _update_status["reason"] = None
+    _update_task = asyncio.create_task(run_update_in_container(target_ref, proxy, allow_local_build))
 
     return {
         "success": True,
@@ -475,7 +490,8 @@ async def get_update_status():
         "in_progress": _update_status["in_progress"] or container_running,
         "last_result": _update_status["last_result"],
         "last_error": _update_status["last_error"],
-        "last_update_time": _update_status["last_update_time"]
+        "last_update_time": _update_status["last_update_time"],
+        "reason": _update_status["reason"],
     }
 
 
