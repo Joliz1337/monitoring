@@ -499,6 +499,26 @@ async def run_migrations(conn):
                     if "already exists" not in str(e).lower():
                         logger.warning(f"Could not add column {col_name}: {e}")
 
+    # Node image delivery + SSH credentials (encrypted) for TSPU-blocked nodes
+    if columns:
+        image_delivery_columns = [
+            ("image_delivery", "VARCHAR(10) NOT NULL DEFAULT 'auto'"),
+            ("ssh_host", "VARCHAR(255)"),
+            ("ssh_port", "INTEGER"),
+            ("ssh_user", "VARCHAR(100)"),
+            ("ssh_password", "TEXT"),
+            ("ssh_private_key", "TEXT"),
+            ("ssh_passphrase", "TEXT"),
+        ]
+        for col_name, col_type in image_delivery_columns:
+            if col_name not in columns:
+                try:
+                    await conn.execute(text(f'ALTER TABLE servers ADD COLUMN "{col_name}" {col_type}'))
+                    logger.info(f"Added column: servers.{col_name}")
+                except Exception as e:
+                    if "already exists" not in str(e).lower():
+                        logger.warning(f"Could not add column {col_name}: {e}")
+
     # Remnawave nginx profile binding columns
     if columns:
         remnawave_nginx_columns = [

@@ -74,6 +74,17 @@ class Server(Base):
     # Xray node detection (updated periodically)
     has_xray_node = Column(Boolean, default=False, server_default="false")
 
+    # Доставка образа ноды с панели (для нод под ТСПУ, без доступа к GHCR).
+    # image_delivery: auto — нода тянет GHCR, при провале доставка по SSH; ssh — сразу SSH.
+    # SSH-креды для доставки хранятся зашифрованными (EncryptedString), заполняются опционально.
+    image_delivery = Column(String(10), nullable=False, server_default="auto")
+    ssh_host = Column(String(255), nullable=True)
+    ssh_port = Column(Integer, nullable=True)
+    ssh_user = Column(String(100), nullable=True)
+    ssh_password = Column(EncryptedString, nullable=True)
+    ssh_private_key = Column(EncryptedString, nullable=True)
+    ssh_passphrase = Column(EncryptedString, nullable=True)
+
     # Wildcard SSL deployment config
     wildcard_ssl_enabled = Column(Boolean, default=False, server_default="false")
     wildcard_ssl_deploy_path = Column(String(500), nullable=True)
