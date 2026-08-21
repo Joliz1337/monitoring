@@ -29,6 +29,27 @@ When someone else installs the node — the owner of a server you rent — the s
 - It installs like any token: `mon` → `Install Node`. The **Install command** button copies a ready one-liner you can simply forward.
 - An issued key cannot be revoked from an already installed node — deleting it in the panel only removes it from the list. Limit the lifetime instead of counting on revocation.
 
+## A node under blocking (no access to the image registry)
+
+If a server is behind heavy DPI (e.g. Russia's TSPU) and cannot pull the node image from the registry, the panel ships the image over SSH itself.
+
+**Update an already installed node.** On the **Updates** page each node has a **"Deliver image over SSH"** button: the panel pulls the fresh image to itself, uploads it to the node over SSH and brings it up — nothing is downloaded on the node itself. Requires root access; SSH credentials can be saved (stored encrypted) or entered each time. Progress is shown as a live log.
+
+**Install a node on a bare/blocked server:**
+
+1. Copy the NODE_SECRET (the "Add server" button).
+2. On the server, run the installer in blocked mode — it installs Docker, files, certificates and `.env`, then stops quickly at the image instead of hanging on the download:
+
+   ```
+   MON_ALLOW_LOCAL_BUILD=0 bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh) <NODE_SECRET>
+   ```
+
+   Pick the branch in the URL to match your update channel: `main` for stable, `dev` for dev.
+3. Add the server in the panel manually: name + address `https://IP:port`. It appears offline.
+4. Updates → **"Deliver image over SSH"** on the node → it comes up and goes online.
+
+The same blocked-mode command fixes a node with an old or missing `.env`: the installer rewrites the config and certificates, then deliver the image. The order is such because a bare server first needs the installer (Docker, certificates, `.env`), and only then the image.
+
 ## What the node hands over
 
 By default a node is fully open to the panel. If the server belongs to someone else, or you simply don't want to hand over everything, trim the permissions on the node itself: the file `/opt/monitoring-node/.env`, the line `NODE_CAPABILITIES=`. Empty, or no line at all, means everything is allowed, exactly as before.
