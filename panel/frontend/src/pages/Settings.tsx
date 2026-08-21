@@ -7,6 +7,7 @@ import { systemApi, backupApi, settingsApi, PanelCertificateInfo, PanelServerSta
 import { toast } from 'sonner'
 import { Tooltip } from '../components/ui/Tooltip'
 import { FAQIcon } from '../components/FAQ'
+import AutoBackupCard from '../components/settings/AutoBackupCard'
 
 interface RenewalResult {
   success: boolean
@@ -1178,6 +1179,11 @@ export default function Settings() {
             )}
           </AnimatePresence>
         </motion.div>
+
+        {/* Auto-backup to Telegram */}
+        <div className="mb-6">
+          <AutoBackupCard />
+        </div>
 
         {/* Backup + SSL row */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

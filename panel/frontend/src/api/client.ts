@@ -1484,6 +1484,31 @@ export interface BackupStatus {
   completed_at: string | null
 }
 
+export interface BackupAutoSettings {
+  enabled: boolean
+  schedule_kind: 'daily' | 'every_hours'
+  at_time: string
+  every_hours: number
+  chat_id: string | null
+  volume_size_mb: number
+  has_bot_token: boolean
+  has_archive_password: boolean
+  last_run_at: string | null
+  last_status: string | null
+  last_error: string | null
+}
+
+export interface BackupAutoSettingsIn {
+  enabled?: boolean
+  schedule_kind?: string
+  at_time?: string
+  every_hours?: number
+  bot_token?: string
+  chat_id?: string
+  archive_password?: string
+  volume_size_mb?: number
+}
+
 export const backupApi = {
   create: () =>
     api.post<{ success: boolean; message: string }>('/backup/create'),
@@ -1503,6 +1528,14 @@ export const backupApi = {
   },
   getStatus: () =>
     api.get<BackupStatus>('/backup/status'),
+  getAutoSettings: () =>
+    api.get<BackupAutoSettings>('/backup/settings'),
+  updateAutoSettings: (data: BackupAutoSettingsIn) =>
+    api.put<{ success: boolean }>('/backup/settings', data),
+  telegramNow: () =>
+    api.post<{ success: boolean; message: string }>('/backup/telegram-now'),
+  testTelegram: () =>
+    api.post<{ success: boolean }>('/backup/test-telegram'),
 }
 
 // SSH Security

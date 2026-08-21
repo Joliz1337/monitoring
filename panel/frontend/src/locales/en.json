@@ -674,6 +674,33 @@
     "error": "Delivery failed",
     "failed": "Delivery error"
   },
+  "backup": {
+    "auto": {
+      "title": "Auto-backups to Telegram",
+      "desc": "On a schedule: database dump → password encryption → volumes <50 MB → sent to a Telegram channel. The set embeds the secret-encryption key — restore is self-contained.",
+      "enabled": "Enable",
+      "daily": "Daily",
+      "every_hours": "Every N hours",
+      "time_utc": "time in UTC",
+      "bot_token": "Bot token",
+      "token_set": "Token set — enter a new one to replace",
+      "chat_id": "Channel ID (-100…)",
+      "password": "Archive password",
+      "password_set": "Password set — enter a new one to replace",
+      "volume_mb": "Volume size, MB (max 49)",
+      "note": "Keep the archive password separately — the set can't be restored without it. Token and password are stored encrypted.",
+      "last_ok": "Last backup succeeded",
+      "last_error": "Last backup failed",
+      "test": "Test channel",
+      "run_now": "Back up now",
+      "saved": "Settings saved",
+      "save_failed": "Failed to save",
+      "test_ok": "Test message sent",
+      "test_failed": "Test failed — check token and channel ID",
+      "run_started": "Backup started — volumes will arrive in the channel",
+      "run_failed": "Failed to start backup"
+    }
+  },
   "updates": {
     "title": "Updates",
     "subtitle": "Manage panel and nodes versions",
