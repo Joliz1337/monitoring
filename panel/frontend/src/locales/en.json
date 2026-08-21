@@ -682,6 +682,8 @@
       "daily": "Daily",
       "every_hours": "Every N hours",
       "time_utc": "time in UTC",
+      "schedule": "Schedule",
+      "hours": "hours",
       "bot_token": "Bot token",
       "token_set": "Token set — enter a new one to replace",
       "chat_id": "Channel ID (-100…)",

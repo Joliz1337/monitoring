@@ -121,25 +121,45 @@ export default function AutoBackupCard() {
         </label>
       </div>
 
-      <div className="space-y-3">
-        <div className="flex flex-wrap items-center gap-3">
-          <select className="input" value={scheduleKind} onChange={(e) => setScheduleKind(e.target.value as any)}>
-            <option value="daily">{t('backup.auto.daily')}</option>
-            <option value="every_hours">{t('backup.auto.every_hours')}</option>
-          </select>
-          {scheduleKind === 'daily' ? (
-            <input className="input w-28" value={atTime} onChange={(e) => setAtTime(e.target.value)} placeholder="04:00" />
-          ) : (
-            <input className="input w-28" type="number" min={1} value={everyHours} onChange={(e) => setEveryHours(Number(e.target.value) || 24)} />
-          )}
-          <span className="text-xs text-dark-500">{t('backup.auto.time_utc')}</span>
+      <div className="space-y-4">
+        <div>
+          <label className="block text-xs text-dark-400 mb-1">{t('backup.auto.schedule')}</label>
+          <div className="flex flex-wrap items-center gap-3">
+            <select className="input" value={scheduleKind} onChange={(e) => setScheduleKind(e.target.value as any)}>
+              <option value="daily">{t('backup.auto.daily')}</option>
+              <option value="every_hours">{t('backup.auto.every_hours')}</option>
+            </select>
+            {scheduleKind === 'daily' ? (
+              <>
+                <input className="input w-28" value={atTime} onChange={(e) => setAtTime(e.target.value)} placeholder="04:00" />
+                <span className="text-xs text-dark-500">{t('backup.auto.time_utc')}</span>
+              </>
+            ) : (
+              <>
+                <input className="input w-24" type="number" min={1} value={everyHours} onChange={(e) => setEveryHours(Number(e.target.value) || 24)} />
+                <span className="text-xs text-dark-500">{t('backup.auto.hours')}</span>
+              </>
+            )}
+          </div>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <input className="input" placeholder={hasToken ? t('backup.auto.token_set') : t('backup.auto.bot_token')} value={botToken} onChange={(e) => setBotToken(e.target.value)} />
-          <input className="input" placeholder={t('backup.auto.chat_id')} value={chatId} onChange={(e) => setChatId(e.target.value)} />
-          <input className="input" type="password" placeholder={hasPassword ? t('backup.auto.password_set') : t('backup.auto.password')} value={password} onChange={(e) => setPassword(e.target.value)} />
-          <input className="input" type="number" min={1} max={49} value={volumeMb} onChange={(e) => setVolumeMb(Number(e.target.value) || 45)} title={t('backup.auto.volume_mb')} />
+          <div>
+            <label className="block text-xs text-dark-400 mb-1">{t('backup.auto.bot_token')}</label>
+            <input className="input w-full" placeholder={hasToken ? t('backup.auto.token_set') : ''} value={botToken} onChange={(e) => setBotToken(e.target.value)} />
+          </div>
+          <div>
+            <label className="block text-xs text-dark-400 mb-1">{t('backup.auto.chat_id')}</label>
+            <input className="input w-full" placeholder="-100..." value={chatId} onChange={(e) => setChatId(e.target.value)} />
+          </div>
+          <div>
+            <label className="block text-xs text-dark-400 mb-1">{t('backup.auto.password')}</label>
+            <input className="input w-full" type="password" placeholder={hasPassword ? t('backup.auto.password_set') : ''} value={password} onChange={(e) => setPassword(e.target.value)} />
+          </div>
+          <div>
+            <label className="block text-xs text-dark-400 mb-1">{t('backup.auto.volume_mb')}</label>
+            <input className="input w-full" type="number" min={1} max={49} value={volumeMb} onChange={(e) => setVolumeMb(Number(e.target.value) || 45)} />
+          </div>
         </div>
 
         {lastRunAt && (
