@@ -50,6 +50,10 @@ def _connect_kwargs(t: SSHTarget) -> dict:
         "username": t.user,
         "known_hosts": None,
         "connect_timeout": CONNECT_TIMEOUT,
+        # Долгая заливка образа по медленному/throttled-каналу: keepalive держит
+        # SSH-сессию живой в паузах между шагами.
+        "keepalive_interval": 15,
+        "keepalive_count_max": 8,
     }
     if t.private_key:
         kwargs["client_keys"] = [asyncssh.import_private_key(t.private_key, t.passphrase or None)]
@@ -98,7 +102,23 @@ async def deliver_image(target: SSHTarget, tag: str, ref: str) -> AsyncIterator[
             yield {"type": "log", "line": f"[panel] SSH к {target.host}:{target.port} установлен"}
             yield {"type": "log", "line": f"[panel] Заливаю образ ({size_mb} МБ) — на медленном канале это несколько минут…"}
             async with conn.start_sftp_client() as sftp:
-                await sftp.put(str(tar), REMOTE_TAR)
+                total = tar.stat().st_size
+                progress = {"copied": 0}
+
+                def _on_progress(_src, _dst, copied, _total):
+                    progress["copied"] = copied
+
+                put_task = asyncio.create_task(
+                    sftp.put(str(tar), REMOTE_TAR, progress_handler=_on_progress)
+                )
+                # Пока идёт заливка — раз в 8с шлём прогресс: стрим лога не молчит
+                # (иначе прокси/браузер рвут соединение по idle-таймауту) и виден процент.
+                while not put_task.done():
+                    await asyncio.sleep(8)
+                    done_mb = progress["copied"] // (1024 * 1024)
+                    pct = int(progress["copied"] * 100 / total) if total else 0
+                    yield {"type": "log", "line": f"[panel] Заливка: {pct}% ({done_mb}/{size_mb} МБ)"}
+                await put_task  # пробросить исключение, если заливка упала
 
             yield {"type": "log", "line": "[panel] Загружаю образ в docker…"}
             load_cmd = f"gunzip -c {shlex.quote(REMOTE_TAR)} | docker load && rm -f {shlex.quote(REMOTE_TAR)}"
