@@ -7,18 +7,21 @@ import os
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 from app import crypto
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 # Именно starlette-версия: fastapi.UploadFile — её наследник, и парсер формы
 # отдаёт базовый класс, который isinstance по наследнику не признаёт
 from starlette.datastructures import UploadFile
 
 from app.auth import verify_auth
 from app.config import get_settings
-from app.database import async_session
+from app.database import async_session, async_session_maker, get_db
 from app.services.http_client import close_http_clients, init_http_clients
 from app.services.pki import load_or_create_keygen
 
@@ -385,3 +388,101 @@ async def backup_status(_: dict = Depends(verify_auth)):
         "started_at": _operation_status["started_at"],
         "completed_at": _operation_status["completed_at"],
     }
+
+
+# ==================== Автобэкапы в Telegram ====================
+
+
+class BackupSettingsIn(BaseModel):
+    enabled: Optional[bool] = None
+    schedule_kind: Optional[str] = None
+    at_time: Optional[str] = None
+    every_hours: Optional[int] = None
+    bot_token: Optional[str] = None
+    chat_id: Optional[str] = None
+    archive_password: Optional[str] = None
+    volume_size_mb: Optional[int] = None
+
+
+@router.get("/settings")
+async def get_backup_settings(db: AsyncSession = Depends(get_db), _: dict = Depends(verify_auth)):
+    from app.services.backup_scheduler import get_or_create_settings
+    s = await get_or_create_settings(db)
+    return {
+        "enabled": s.enabled,
+        "schedule_kind": s.schedule_kind,
+        "at_time": s.at_time,
+        "every_hours": s.every_hours,
+        "chat_id": s.chat_id,
+        "volume_size_mb": s.volume_size_mb,
+        "has_bot_token": bool(s.bot_token),
+        "has_archive_password": bool(s.archive_password),
+        "last_run_at": s.last_run_at.isoformat() if s.last_run_at else None,
+        "last_status": s.last_status,
+        "last_error": s.last_error,
+    }
+
+
+@router.put("/settings")
+async def update_backup_settings(
+    req: BackupSettingsIn,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth),
+):
+    from app.services.backup_scheduler import get_or_create_settings
+    s = await get_or_create_settings(db)
+    if req.schedule_kind is not None:
+        if req.schedule_kind not in ("daily", "every_hours"):
+            raise HTTPException(400, "schedule_kind: daily | every_hours")
+        s.schedule_kind = req.schedule_kind
+    if req.at_time is not None:
+        s.at_time = req.at_time.strip() or "04:00"
+    if req.every_hours is not None:
+        s.every_hours = max(1, req.every_hours)
+    if req.chat_id is not None:
+        s.chat_id = req.chat_id.strip() or None
+    if req.volume_size_mb is not None:
+        s.volume_size_mb = min(49, max(1, req.volume_size_mb))
+    if req.bot_token is not None:
+        s.bot_token = req.bot_token.strip() or None
+    if req.archive_password is not None:
+        s.archive_password = req.archive_password or None
+    if req.enabled is not None:
+        s.enabled = req.enabled
+    if s.enabled and (not s.bot_token or not s.chat_id or not s.archive_password):
+        raise HTTPException(400, "Для автобэкапов нужны бот-токен, чат и пароль архива")
+    await db.commit()
+    return {"success": True}
+
+
+@router.post("/telegram-now")
+async def backup_to_telegram_now(_: dict = Depends(verify_auth)):
+    """Внеплановый бэкап в Telegram в фоне (может идти минуты на медленном канале)."""
+    async def task():
+        from app.services.backup_scheduler import get_or_create_settings, run_backup_to_telegram
+        now = datetime.now(timezone.utc)
+        async with async_session_maker() as db:
+            s = await get_or_create_settings(db)
+            ok, err = await run_backup_to_telegram(s)
+            s.last_run_at = now
+            s.last_status = "ok" if ok else "error"
+            s.last_error = err
+            await db.commit()
+
+    asyncio.create_task(task())
+    return {"success": True, "message": "Backup to Telegram started"}
+
+
+@router.post("/test-telegram")
+async def test_telegram(db: AsyncSession = Depends(get_db), _: dict = Depends(verify_auth)):
+    from app.services import backup_telegram
+    from app.services.backup_scheduler import get_or_create_settings
+    s = await get_or_create_settings(db)
+    if not s.bot_token or not s.chat_id:
+        raise HTTPException(400, "Не заданы бот-токен и чат")
+    ok = await backup_telegram.send_message(
+        s.bot_token, s.chat_id, "✅ Тест: панель мониторинга подключена к каналу бэкапов"
+    )
+    if not ok:
+        raise HTTPException(400, "Не удалось отправить в Telegram — проверьте токен и chat_id")
+    return {"success": True}

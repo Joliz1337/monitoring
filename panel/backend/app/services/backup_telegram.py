@@ -52,16 +52,18 @@ def join_and_decrypt(parts: list[bytes], password: str) -> bytes:
     return AESGCM(_derive_key(password, salt)).decrypt(nonce, ct, None)
 
 
-async def send_message(token: str, chat_id: str, text: str) -> None:
-    """Текстовое сообщение в канал (алерты об ошибках). Best-effort."""
+async def send_message(token: str, chat_id: str, text: str) -> bool:
+    """Текстовое сообщение в канал (алерты, тест). True — доставлено."""
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            await client.post(
+            resp = await client.post(
                 f"https://api.telegram.org/bot{token}/sendMessage",
                 data={"chat_id": chat_id, "text": text},
             )
+            return resp.status_code == 200 and bool(resp.json().get("ok"))
     except httpx.HTTPError as e:
         logger.warning(f"Telegram sendMessage failed: {e}")
+        return False
 
 
 async def send_volumes(

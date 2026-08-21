@@ -105,6 +105,9 @@ async def lifespan(app: FastAPI):
     # Долги перед нодами лежат в базе — очередь подхватывает их и после перезапуска панели.
     await start_node_sync_queue()
 
+    from app.services.backup_scheduler import start_scheduler as start_backup_scheduler
+    start_backup_scheduler()
+
     # Перенос легаси-истории трафика — разовая фоновая задача: панель обязана
     # подняться, даже если она не стартовала.
     try:

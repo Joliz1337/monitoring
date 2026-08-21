@@ -48,6 +48,24 @@ class RemnawaveCertProfile(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
+class BackupSettings(Base):
+    """Синглтон: настройки автоматических бэкапов панели в Telegram."""
+    __tablename__ = "backup_settings"
+
+    id = Column(Integer, primary_key=True)
+    enabled = Column(Boolean, default=False, server_default="false", nullable=False)
+    schedule_kind = Column(String(20), default="daily", server_default="daily")  # daily | every_hours
+    at_time = Column(String(5), default="04:00", server_default="04:00")  # HH:MM UTC для daily
+    every_hours = Column(Integer, default=24, server_default="24")
+    bot_token = Column(EncryptedString, nullable=True)
+    chat_id = Column(String(100), nullable=True)
+    archive_password = Column(EncryptedString, nullable=True)
+    volume_size_mb = Column(Integer, default=45, server_default="45")
+    last_run_at = Column(DateTime(timezone=True), nullable=True)
+    last_status = Column(String(20), nullable=True)  # ok | error
+    last_error = Column(String(500), nullable=True)
+
+
 class Server(Base):
     __tablename__ = "servers"
 
