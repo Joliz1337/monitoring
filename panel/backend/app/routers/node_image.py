@@ -141,12 +141,12 @@ async def deliver_image_to_server(
     if not password and not private_key:
         raise HTTPException(400, "Нет SSH-кредов: сохраните их у сервера или укажите в запросе")
 
-    tag, ref = _target_tag_ref()
+    tag, _ = _target_tag_ref()
     target = SSHTarget(
         host=host, port=port, user=user,
         password=password, private_key=private_key, passphrase=passphrase,
     )
-    job_id = get_image_delivery_manager().start(server.name, target, tag, ref)
+    job_id = get_image_delivery_manager().start(server.name, target, tag)
     return {"job_id": job_id}
 
 

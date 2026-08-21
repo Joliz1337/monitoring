@@ -87,8 +87,8 @@ async def _run_streamed(conn, command: str, timeout: int) -> AsyncIterator[dict]
     yield {"type": "exit", "code": process.returncode if process.returncode is not None else 1}
 
 
-async def deliver_image(target: SSHTarget, tag: str, ref: str) -> AsyncIterator[dict]:
-    """Доставить образ ноды и обновить её. Стримит события {type: log|error|done}."""
+async def deliver_image(target: SSHTarget, tag: str) -> AsyncIterator[dict]:
+    """Доставить образ ноды и поднять её на нём. Стримит события {type: log|error|done}."""
     yield {"type": "log", "line": f"[panel] Готовлю образ ноды ({tag})…"}
     try:
         tar = await ensure_image(tag)
@@ -130,17 +130,26 @@ async def deliver_image(target: SSHTarget, tag: str, ref: str) -> AsyncIterator[
                 else:
                     yield ev
 
-            yield {"type": "log", "line": "[panel] Обновляю ноду на локальном образе…"}
-            update_cmd = f"bash /opt/monitoring-node/update.sh {shlex.quote(ref)}"
-            async for ev in _run_streamed(conn, update_cmd, UPDATE_TIMEOUT):
+            # Никаких скачиваний с ноды: образ уже загружен, просто поднимаем её на
+            # нём. Тег в .env приводим к доставленному, иначе compose полез бы в реестр.
+            yield {"type": "log", "line": "[panel] Поднимаю ноду на доставленном образе (без скачивания)…"}
+            apply_cmd = (
+                "cd /opt/monitoring-node && "
+                f"{{ grep -q '^MON_IMAGE_TAG=' .env && sed -i 's|^MON_IMAGE_TAG=.*|MON_IMAGE_TAG={tag}|' .env "
+                f"|| echo 'MON_IMAGE_TAG={tag}' >> .env; }} && "
+                "docker compose up -d && "
+                "for i in $(seq 1 30); do curl -sf http://localhost:7500/health >/dev/null 2>&1 && break; sleep 2; done; "
+                "echo '[node] нода поднята на доставленном образе'"
+            )
+            async for ev in _run_streamed(conn, apply_cmd, UPDATE_TIMEOUT):
                 if ev["type"] == "exit":
                     if ev["code"] != 0:
-                        yield {"type": "error", "message": f"Обновление ноды завершилось с кодом {ev['code']}"}
+                        yield {"type": "error", "message": f"Не удалось поднять ноду на образе (код {ev['code']})"}
                         return
                 else:
                     yield ev
 
-            yield {"type": "done", "message": "Образ доставлен, нода обновлена"}
+            yield {"type": "done", "message": "Образ доставлен, нода поднята"}
     except asyncssh.PermissionDenied:
         yield {"type": "error", "message": "SSH: неверный логин, пароль или ключ"}
     except (OSError, asyncssh.Error, asyncio.TimeoutError) as exc:
@@ -185,12 +194,12 @@ class ImageDeliveryJobManager:
             for j in sorted(self._jobs.values(), key=lambda x: x.started_at)
         ]
 
-    def start(self, name: str, target: SSHTarget, tag: str, ref: str) -> str:
+    def start(self, name: str, target: SSHTarget, tag: str) -> str:
         self._cleanup_finished()
         job_id = uuid.uuid4().hex
         job = DeliveryJob(id=job_id, name=name, host=target.host)
         self._jobs[job_id] = job
-        job.task = asyncio.create_task(self._run(job, target, tag, ref))
+        job.task = asyncio.create_task(self._run(job, target, tag))
         return job_id
 
     def _emit(self, job: DeliveryJob, event: dict) -> None:
@@ -205,10 +214,10 @@ class ImageDeliveryJobManager:
             except asyncio.QueueFull:
                 pass
 
-    async def _run(self, job: DeliveryJob, target: SSHTarget, tag: str, ref: str) -> None:
+    async def _run(self, job: DeliveryJob, target: SSHTarget, tag: str) -> None:
         try:
             self._emit(job, {"type": "start", "host": job.host})
-            async for event in deliver_image(target, tag, ref):
+            async for event in deliver_image(target, tag):
                 etype = event.get("type")
                 if etype == "error":
                     job.error = event.get("message")
