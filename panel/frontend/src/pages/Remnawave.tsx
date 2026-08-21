@@ -1,19 +1,25 @@
-import { useState, useEffect, useCallback, memo, type ReactNode } from 'react'
+import { useState, useEffect, useCallback, useRef, memo, type ReactNode } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Radio, Settings, Users, BarChart3, Check, X,
   Search, Play, Server, Trash2, Eye, EyeOff, ChevronDown, ChevronUp,
-  Loader2, Smartphone, Globe, ArrowUp, ArrowDown, AlertTriangle, Shield, ExternalLink
+  Loader2, Smartphone, Globe, ArrowUp, ArrowDown, AlertTriangle, Shield, ExternalLink,
+  Download, Plus, Save, Terminal
 } from 'lucide-react'
-import { remnawaveApi } from '../api/client'
-import type { RemnawaveApiNode, RemnawaveHwidDevice, RemnawaveAnomaly } from '../api/client'
+import { remnawaveApi, serversApi, remnawaveInstallApi, remnawaveInstallStreamUrl } from '../api/client'
+import type {
+  RemnawaveApiNode, RemnawaveHwidDevice, RemnawaveAnomaly,
+  Server as ServerInfo, RemnawaveCertProfile, RemnawaveInstallEvent,
+} from '../api/client'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { useAutoRefresh } from '../hooks/useAutoRefresh'
 import { Tooltip } from '../components/ui/Tooltip'
 import { FAQIcon } from '../components/FAQ'
+import { streamNdjsonGet, StreamUnauthorizedError } from '../utils/ndjsonStream'
+import { nodeAllows } from '../utils/nodeCapabilities'
 
-type TabType = 'overview' | 'users' | 'anomalies' | 'settings'
+type TabType = 'overview' | 'users' | 'anomalies' | 'install' | 'settings'
 
 export default function Remnawave() {
   const { t } = useTranslation()
@@ -23,6 +29,7 @@ export default function Remnawave() {
     { id: 'overview', label: t('remnawave.overview'), icon: BarChart3 },
     { id: 'users', label: t('remnawave.users'), icon: Users },
     { id: 'anomalies', label: t('remnawave.anomalies'), icon: Shield },
+    { id: 'install', label: t('remnawave.install'), icon: Download },
     { id: 'settings', label: t('remnawave.settings'), icon: Settings },
   ]
 
@@ -72,6 +79,8 @@ export default function Remnawave() {
           <UsersTab key="users" />
         ) : activeTab === 'anomalies' ? (
           <AnomaliesTab key="anomalies" />
+        ) : activeTab === 'install' ? (
+          <InstallTab key="install" />
         ) : (
           <SettingsTab key="settings" />
         )}
@@ -955,6 +964,393 @@ function AnomaliesTab() {
           })
         )}
       </div>
+    </motion.div>
+  )
+}
+
+// Лог install.sh приходит с ANSI-кодами и \r-перерисовкой спиннеров —
+// берём последний сегмент после \r и вырезаем управляющие последовательности
+const cleanInstallLogLine = (line: string): string => {
+  const visible = line.split('\r').pop() ?? line
+  // eslint-disable-next-line no-control-regex
+  return visible.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b/g, '').trimEnd()
+}
+
+// Незавершённая установка хранится в localStorage: после перезагрузки страницы
+// лог переподключается (команду на ноде держит бэкенд, фон не прерывается)
+const INSTALL_JOB_KEY = 'remnawave_install_job_v1'
+
+interface StoredInstallJob {
+  jobId: string
+  serverId: number
+  name: string
+}
+
+const readStoredInstallJob = (): StoredInstallJob | null => {
+  try {
+    const raw = localStorage.getItem(INSTALL_JOB_KEY)
+    return raw ? (JSON.parse(raw) as StoredInstallJob) : null
+  } catch {
+    return null
+  }
+}
+
+const writeStoredInstallJob = (job: StoredInstallJob | null) => {
+  try {
+    if (job) localStorage.setItem(INSTALL_JOB_KEY, JSON.stringify(job))
+    else localStorage.removeItem(INSTALL_JOB_KEY)
+  } catch {
+    // localStorage недоступен — восстановление после перезагрузки просто не сработает
+  }
+}
+
+function InstallTab() {
+  const { t } = useTranslation()
+  const [servers, setServers] = useState<ServerInfo[]>([])
+  const [certProfiles, setCertProfiles] = useState<RemnawaveCertProfile[]>([])
+  const [loading, setLoading] = useState(true)
+  const [search, setSearch] = useState('')
+  const [selectedId, setSelectedId] = useState<number | null>(null)
+  const [certMode, setCertMode] = useState<'saved' | 'inline'>('inline')
+  const [certProfileId, setCertProfileId] = useState<number | null>(null)
+  const [certInline, setCertInline] = useState('')
+  const [savingCert, setSavingCert] = useState(false)
+  const [phase, setPhase] = useState<'idle' | 'running' | 'success' | 'error'>('idle')
+  const [log, setLog] = useState<string[]>([])
+  const [jobName, setJobName] = useState('')
+  const logRef = useRef<HTMLPreElement>(null)
+  const restoredRef = useRef(false)
+
+  const fetchData = useCallback(async (initial = false) => {
+    try {
+      const [srv, certs] = await Promise.all([serversApi.list(), serversApi.remnawaveCerts()])
+      setServers(srv.data.servers)
+      setCertProfiles(certs.data.profiles)
+      if (initial && certs.data.profiles.length > 0) setCertMode('saved')
+    } catch {
+      // ignore
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { fetchData(true) }, [fetchData])
+
+  useEffect(() => {
+    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
+  }, [log])
+
+  const attachStream = useCallback(async (jobId: string) => {
+    let finished = false
+    let ok = false
+    let errMsg: string | null = null
+    try {
+      await streamNdjsonGet<RemnawaveInstallEvent>(
+        remnawaveInstallStreamUrl(jobId),
+        (ev) => {
+          if (ev.type === 'log') {
+            setLog(prev => [...prev, cleanInstallLogLine(ev.line)])
+          } else if (ev.type === 'start') {
+            if (ev.name) setJobName(ev.name)
+          } else if (ev.type === 'error') {
+            errMsg = ev.message
+            setLog(prev => [...prev, `[ERROR] ${ev.message}`])
+          } else if (ev.type === 'done') {
+            finished = true
+            ok = ev.status === 'success'
+          }
+        },
+        new AbortController().signal,
+      )
+    } catch (e) {
+      if (!(e instanceof StreamUnauthorizedError)) {
+        errMsg = e instanceof Error ? e.message : String(e)
+      }
+    }
+    if (finished) {
+      writeStoredInstallJob(null)
+      setPhase(ok ? 'success' : 'error')
+      if (ok) {
+        toast.success(t('remnawave.install_success'))
+        fetchData()
+      } else {
+        toast.error(errMsg || t('remnawave.install_failed'))
+      }
+    } else if (errMsg !== null) {
+      // стрим упал с ошибкой (не обрыв) — задача может жить, но показать это надо
+      setPhase('error')
+      toast.error(errMsg)
+    }
+    // тихий обрыв без done: установка продолжается на бэке, статус running
+    // остаётся — после перезагрузки страницы лог переподключится
+  }, [t, fetchData])
+
+  useEffect(() => {
+    if (restoredRef.current) return
+    restoredRef.current = true
+    const stored = readStoredInstallJob()
+    if (!stored) return
+    ;(async () => {
+      try {
+        const { data } = await remnawaveInstallApi.jobs()
+        const job = data.jobs.find(j => j.job_id === stored.jobId)
+        if (!job) {
+          writeStoredInstallJob(null)
+          return
+        }
+        setSelectedId(stored.serverId)
+        setJobName(stored.name)
+        setPhase('running')
+        await attachStream(stored.jobId)
+      } catch {
+        // ignore
+      }
+    })()
+  }, [attachStream])
+
+  const startInstall = async () => {
+    const server = servers.find(s => s.id === selectedId)
+    if (!server) return
+    setPhase('running')
+    setLog([])
+    setJobName(server.name)
+    try {
+      const body = certMode === 'saved'
+        ? { remnawave_cert_profile_id: certProfileId }
+        : { remnawave_cert_inline: certInline.trim() }
+      const { data } = await remnawaveInstallApi.start(server.id, body)
+      writeStoredInstallJob({ jobId: data.job_id, serverId: server.id, name: server.name })
+      await attachStream(data.job_id)
+    } catch (e) {
+      const err = e as { response?: { data?: { detail?: string } } }
+      setPhase('error')
+      toast.error(err.response?.data?.detail || t('remnawave.install_failed'))
+    }
+  }
+
+  const handleSaveCert = async () => {
+    const name = window.prompt(t('servers.deploy_remna_save_prompt'))
+    if (!name || !name.trim()) return
+    setSavingCert(true)
+    try {
+      const { data } = await serversApi.saveRemnawaveCert(name.trim(), certInline.trim())
+      toast.success(t('servers.deploy_remna_saved'))
+      setCertMode('saved')
+      setCertProfileId(data.id)
+      fetchData()
+    } catch (e) {
+      const err = e as { response?: { data?: { detail?: string } } }
+      toast.error(err.response?.data?.detail || t('servers.deploy_remna_save_failed'))
+    }
+    setSavingCert(false)
+  }
+
+  const handleDeleteCert = async (id: number) => {
+    if (!window.confirm(t('servers.deploy_remna_delete_confirm'))) return
+    try {
+      await serversApi.deleteRemnawaveCert(id)
+      setCertProfiles(prev => prev.filter(p => p.id !== id))
+      if (certProfileId === id) setCertProfileId(null)
+    } catch {
+      toast.error(t('servers.deploy_remna_save_failed'))
+    }
+  }
+
+  const selectedServer = servers.find(s => s.id === selectedId)
+  const query = search.trim().toLowerCase()
+  const visibleServers = query
+    ? servers.filter(s => s.name.toLowerCase().includes(query) || s.url.toLowerCase().includes(query))
+    : servers
+  const certReady = certMode === 'saved' ? certProfileId !== null : certInline.trim().length > 0
+  const canInstall = !!selectedServer && certReady && phase !== 'running'
+    && nodeAllows(selectedServer, 'exec', 'write')
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 12 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: -12 }}
+      className="space-y-6"
+    >
+      <div className="grid lg:grid-cols-2 gap-6 items-start">
+        <Section title={t('remnawave.install_pick_server')} icon={<Server className="w-4 h-4" />}>
+          <div className="relative mb-3">
+            <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-dark-500" />
+            <input
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              placeholder={t('remnawave.install_search_placeholder')}
+              className="input pl-11"
+            />
+          </div>
+          {loading ? (
+            <div className="space-y-2">
+              {[...Array(4)].map((_, i) => (
+                <div key={i} className="h-11 bg-dark-700/50 rounded-lg animate-pulse" />
+              ))}
+            </div>
+          ) : visibleServers.length === 0 ? (
+            <p className="text-sm text-dark-500 py-4 text-center">{t('remnawave.install_no_servers')}</p>
+          ) : (
+            <div className="space-y-1.5 max-h-80 overflow-y-auto pr-1">
+              {visibleServers.map(s => {
+                const execAllowed = nodeAllows(s, 'exec', 'write')
+                const active = selectedId === s.id
+                return (
+                  <button
+                    key={s.id}
+                    type="button"
+                    disabled={!execAllowed}
+                    onClick={() => setSelectedId(s.id)}
+                    className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg border text-left transition-colors ${
+                      active
+                        ? 'border-accent-500/50 bg-accent-500/10'
+                        : 'border-dark-700/50 bg-dark-800/30 hover:bg-dark-800/60'
+                    } ${execAllowed ? '' : 'opacity-50 cursor-not-allowed'}`}
+                  >
+                    <span className={`w-2 h-2 rounded-full shrink-0 ${
+                      s.status === 'online' ? 'bg-success' : 'bg-dark-600'
+                    }`} />
+                    <span className="flex-1 min-w-0">
+                      <span className={`block text-sm truncate ${active ? 'text-accent-300' : 'text-dark-200'}`}>
+                        {s.name}
+                      </span>
+                      <span className="block text-xs text-dark-500 truncate">{s.url}</span>
+                    </span>
+                    {!execAllowed ? (
+                      <span className="text-[10px] text-dark-500 shrink-0">{t('remnawave.install_exec_denied')}</span>
+                    ) : s.has_xray_node ? (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-success/10 text-success shrink-0">
+                        {t('remnawave.install_already')}
+                      </span>
+                    ) : null}
+                  </button>
+                )
+              })}
+            </div>
+          )}
+        </Section>
+
+        <Section title={t('remnawave.install_cert')} icon={<Shield className="w-4 h-4" />}>
+          <div className="space-y-3">
+            <div className="flex flex-wrap gap-2">
+              {certProfiles.map(p => {
+                const active = certMode === 'saved' && certProfileId === p.id
+                return (
+                  <div
+                    key={p.id}
+                    className={`flex items-center rounded-lg border text-xs overflow-hidden ${
+                      active
+                        ? 'border-accent-500/50 bg-accent-500/10'
+                        : 'border-dark-700/50 bg-dark-800/50'
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => { setCertMode('saved'); setCertProfileId(p.id) }}
+                      className={`px-2.5 py-1.5 transition-colors ${
+                        active ? 'text-accent-300' : 'text-dark-200 hover:text-dark-50'
+                      }`}
+                    >
+                      {p.name}
+                    </button>
+                    <Tooltip label={t('common.delete')}>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteCert(p.id)}
+                        className="px-1.5 py-1.5 text-dark-500 hover:text-danger hover:bg-danger/10 transition-colors"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </Tooltip>
+                  </div>
+                )
+              })}
+              <button
+                type="button"
+                onClick={() => { setCertMode('inline'); setCertProfileId(null) }}
+                className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs transition-colors ${
+                  certMode === 'inline'
+                    ? 'border-accent-500/50 bg-accent-500/10 text-accent-300'
+                    : 'border-dark-700/50 bg-dark-800/50 text-dark-200 hover:text-dark-50'
+                }`}
+              >
+                <Plus className="w-3 h-3" />
+                {t('servers.deploy_remna_new')}
+              </button>
+            </div>
+            {certMode === 'inline' && (
+              <>
+                <textarea
+                  value={certInline}
+                  onChange={e => setCertInline(e.target.value)}
+                  placeholder={t('servers.deploy_remna_cert_placeholder')}
+                  className="input font-mono text-xs resize-none w-full min-h-[96px]"
+                />
+                <button
+                  type="button"
+                  onClick={handleSaveCert}
+                  disabled={savingCert || !certInline.trim()}
+                  className="btn btn-secondary text-xs"
+                >
+                  {savingCert ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+                  {t('servers.deploy_remna_save')}
+                </button>
+              </>
+            )}
+          </div>
+        </Section>
+      </div>
+
+      {selectedServer?.has_xray_node && (
+        <div className="flex items-start gap-2.5 p-3 rounded-xl bg-warning/10 border border-warning/20 text-sm text-warning">
+          <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+          {t('remnawave.install_reinstall_warning')}
+        </div>
+      )}
+
+      <motion.button
+        whileHover={{ scale: 1.02 }}
+        whileTap={{ scale: 0.98 }}
+        onClick={startInstall}
+        disabled={!canInstall}
+        className="btn btn-primary text-sm disabled:opacity-50"
+      >
+        {phase === 'running' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+        {t('remnawave.install_button')}
+      </motion.button>
+
+      {(log.length > 0 || phase === 'running') && (
+        <div className="rounded-xl bg-dark-900/70 border border-dark-700/50 p-3">
+          <div className="flex items-center justify-between mb-2 text-xs">
+            <div className="flex items-center gap-2 text-dark-400">
+              {phase === 'running'
+                ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                : <Terminal className="w-3.5 h-3.5" />}
+              {t('remnawave.install_log')}
+              {jobName && <span className="text-dark-500">— {jobName}</span>}
+            </div>
+            {phase === 'success' && (
+              <span className="flex items-center gap-1 text-success">
+                <Check className="w-3 h-3" />
+                {t('remnawave.install_success')}
+              </span>
+            )}
+            {phase === 'error' && (
+              <span className="flex items-center gap-1 text-danger">
+                <X className="w-3 h-3" />
+                {t('remnawave.install_failed')}
+              </span>
+            )}
+          </div>
+          <pre
+            ref={logRef}
+            className="text-[11px] leading-relaxed font-mono text-dark-300 max-h-64 overflow-auto whitespace-pre-wrap"
+          >
+            {log.join('\n')}
+          </pre>
+        </div>
+      )}
     </motion.div>
   )
 }

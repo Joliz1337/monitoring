@@ -121,6 +121,7 @@ export interface Server {
   uses_shared_cert?: boolean
   auth_kind?: 'shared' | 'per_server' | 'legacy'
   antiddos_emergency_mode?: boolean
+  has_xray_node?: boolean
   node_capabilities?: NodeCapabilities | null
 }
 
@@ -464,6 +465,33 @@ export interface DeployJobInfo {
 // Стрим лога читается не через axios — нужен полный путь с /api для fetch
 export const serverDeployJobStreamUrl = (jobId: string) =>
   `/api/servers/deploy/${jobId}/stream`
+
+// Установка ноды Remnawave на уже добавленный сервер через агента ноды
+export type RemnawaveInstallEvent =
+  | { type: 'start'; name?: string }
+  | { type: 'log'; line: string }
+  | { type: 'error'; message: string }
+  | { type: 'done'; status: 'success' | 'error'; exit_code: number | null }
+
+export interface RemnawaveInstallJobInfo {
+  job_id: string
+  server_id: number
+  name: string
+  status: 'running' | 'success' | 'error'
+  exit_code: number | null
+  error: string | null
+}
+
+export const remnawaveInstallStreamUrl = (jobId: string) =>
+  `/api/servers/remnawave-install/${jobId}/stream`
+
+export const remnawaveInstallApi = {
+  start: (
+    serverId: number,
+    body: { remnawave_cert_profile_id?: number | null; remnawave_cert_inline?: string | null },
+  ) => api.post<{ job_id: string }>(`/servers/${serverId}/install-remnawave`, body),
+  jobs: () => api.get<{ jobs: RemnawaveInstallJobInfo[] }>('/servers/remnawave-install/jobs'),
+}
 
 // Доставка образа ноды с панели по SSH (ноды под ТСПУ, без доступа к GHCR)
 export type NodeImageDeliveryEvent =

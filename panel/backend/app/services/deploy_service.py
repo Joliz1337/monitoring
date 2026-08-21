@@ -116,11 +116,36 @@ def _looks_expired(line: str) -> bool:
     return any(marker in low for marker in _EXPIRED_MARKERS)
 
 
-def _build_inner_command(params: DeployParams) -> str:
-    """Команда установки: скачать install.sh и запустить --unattended.
+def _render_unattended_command(env: dict[str, str]) -> str:
+    """Скачать install.sh и запустить --unattended с заданным окружением.
 
-    Все значения env экранируются shlex.quote — защита от инъекций.
+    Все значения env экранируются shlex.quote — защита от инъекций. curl-часть
+    идёт первой не случайно: агент ноды логирует первые 100 символов команды,
+    и секреты из env туда попадать не должны.
     """
+    assignments = " ".join(f"{key}={shlex.quote(value)}" for key, value in env.items())
+    return (
+        f"curl -fsSL {shlex.quote(update_channel.installer_url())} -o {shlex.quote(REMOTE_SCRIPT)} && "
+        f"{assignments} bash {shlex.quote(REMOTE_SCRIPT)} --unattended"
+    )
+
+
+def _escape_remnawave_cert(cert: str) -> str:
+    # install.sh ждёт сертификат с экранированными переводами строк
+    return cert.replace("\r\n", "\n").replace("\n", "\\n")
+
+
+def build_remnawave_install_command(remnawave_cert: str) -> str:
+    """Команда установки только ноды Remnawave — для запуска через агента ноды."""
+    env = {"MON_INSTALL_REMNAWAVE": "1"}
+    if update_channel.current_branch() != update_channel.STABLE_BRANCH:
+        env["MON_BRANCH"] = update_channel.current_branch()
+    env["REMNAWAVE_CERT"] = _escape_remnawave_cert(remnawave_cert)
+    return _render_unattended_command(env)
+
+
+def _build_inner_command(params: DeployParams) -> str:
+    """Команда установки ноды мониторинга (+опции) для SSH-деплоя."""
     env: dict[str, str] = {
         "MON_INSTALL_NODE": "1",
         "NODE_SECRET": params.node_secret,
@@ -143,15 +168,9 @@ def _build_inner_command(params: DeployParams) -> str:
     if params.install_remnawave:
         env["MON_INSTALL_REMNAWAVE"] = "1"
         if params.remnawave_cert:
-            # install.sh ждёт сертификат с экранированными переводами строк
-            cert = params.remnawave_cert.replace("\r\n", "\n").replace("\n", "\\n")
-            env["REMNAWAVE_CERT"] = cert
+            env["REMNAWAVE_CERT"] = _escape_remnawave_cert(params.remnawave_cert)
 
-    assignments = " ".join(f"{key}={shlex.quote(value)}" for key, value in env.items())
-    return (
-        f"curl -fsSL {shlex.quote(update_channel.installer_url())} -o {shlex.quote(REMOTE_SCRIPT)} && "
-        f"{assignments} bash {shlex.quote(REMOTE_SCRIPT)} --unattended"
-    )
+    return _render_unattended_command(env)
 
 
 def _build_command(params: DeployParams) -> str:

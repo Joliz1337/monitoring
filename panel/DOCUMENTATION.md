@@ -581,6 +581,9 @@ interface NicInfo {
 | GET | /api/servers/remnawave-certs | Список сохранённых сертификатов Remnawave (без секретов) |
 | POST | /api/servers/remnawave-certs | Сохранить сертификат {name, secret_key} |
 | DELETE | /api/servers/remnawave-certs/{id} | Удалить сохранённый сертификат |
+| POST | /api/servers/{id}/install-remnawave | Установить ноду Remnawave на существующий сервер через агента → `{"job_id": "..."}` |
+| GET | /api/servers/remnawave-install/jobs | Список задач установки Remnawave (для восстановления UI) |
+| GET | /api/servers/remnawave-install/{job_id}/stream | NDJSON-стрим лога установки (переподключаемый) |
 | POST | /api/servers/reorder | Задать порядок карточек на Dashboard (`server_ids` — новый порядок id) |
 | POST | /api/servers/move-to-folder | Переместить серверы в папку (`server_ids`, `folder` или `null` — без папки) |
 | POST | /api/servers/folders/rename | Переименовать папку (`old_name` → `new_name`) |
@@ -1288,6 +1291,17 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 
 **Ноды в настройках:** раздела управления нодами нет — ноды получаются автоматически из Remnawave Panel API.
 
+**Установка ноды Remnawave на существующий сервер (вкладка «Установка»):**
+
+Пятая вкладка страницы Remnawave: выбор уже добавленного сервера + сертификата (сохранённый профиль `RemnawaveCertProfile` — общий CRUD с формой автодеплоя — или ввод вручную с возможностью сохранить), запуск установки с живым логом. Механизм — через агента ноды, без SSH: панель строит команду `curl install.sh && MON_INSTALL_REMNAWAVE=1 REMNAWAVE_CERT=… bash /tmp/mon-install.sh --unattended` (`build_remnawave_install_command` в `deploy_service.py`, канал main/dev — из `update_channel`) и исполняет её на хосте через SSE-эндпоинт агента `POST /api/system/execute-stream` (nsenter).
+
+- Требуется домен `exec` (rw) в правах ноды — при закрытом домене строка сервера в списке задизейблена, а `POST /{id}/install-remnawave` возвращает 409 (`require_capability`).
+- Установка идёт фоновой asyncio-задачей на бэке (`RemnawaveInstallJobManager` в `services/remnawave_node_install.py`, по образцу `ImageDeliveryJobManager`): буфер лога 5000 строк, pub/sub, NDJSON-стрим с реплеем и дедупом по `_idx`, завершённые задачи живут 600 с. Закрытие вкладки установку не прерывает; рестарт backend-контейнера — прерывает (job in-memory).
+- Потолок длительности — 600 с (лимит исполнителя ноды `MAX_TIMEOUT`): на медленном канале скачивание образов может не уложиться — повтор установки безопасен, переустановка чистит частичное состояние.
+- Секрет сертификата не попадает в лог агента: нода логирует первые 100 символов команды, а curl-префикс длиннее (закреплено тестом `test_remnawave_install_command.py`).
+- При exit 0 панель сразу (best-effort) ставит серверу `has_xray_node=true` — бейдж «установлена» появляется мгновенно, коллектор подтверждает в ближайшем цикле (≤2 мин). Поле `has_xray_node` отдаётся в `GET /api/servers`.
+- Переустановка на сервер с уже стоящей Remnawave: фронт показывает предупреждение (старая установка сносится `docker compose down -v`), `install.sh` в unattended-режиме переподтверждает сам.
+
 **Frontend:**
 - Страница Remnawave: 4 карточки в overview — Users, IPs, Devices, Nodes Online
 - Вкладка Anomalies: 5 карточек в summary (включая `traffic_exceeds`)
@@ -1309,7 +1323,9 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 - `panel/backend/app/services/remnawave_api.py` — клиент: `get_all_nodes()`, `poll_users_ips()`, `get_all_hwid_devices_paginated()`, `get_user_traffic_bytes()` (суточный расход трафика пользователя, для умного определения IP-аномалий); `get_api_version()` + `_versioned_request()` — детект и кэш версии API панели (2.8.x/3.x), см. «Поддержка версий Remnawave Panel API» выше; модульная функция `sum_usage_bytes()` разбирает ответ bandwidth-stats API
 - `panel/backend/app/services/telegram_bot.py` — приватный `_send() -> Message | None` с поддержкой `reply_to_message_id`; `send_message` сохраняет bool-контракт; `send_message_returning_id() -> int | None`
 - `panel/backend/app/models.py` — модель `RemnawaveIpAnomalyState`
-- `panel/frontend/src/pages/Remnawave.tsx` — страница (overview, users, settings)
+- `panel/backend/app/services/remnawave_node_install.py` — установка Remnawave на существующий сервер через агента: `parse_sse_event`, `run_install_on_node`, `RemnawaveInstallJobManager`
+- `panel/backend/app/routers/remnawave_install.py` — роутер установки (prefix `/servers`): `POST /{id}/install-remnawave`, `GET /remnawave-install/jobs`, `GET /remnawave-install/{job_id}/stream`
+- `panel/frontend/src/pages/Remnawave.tsx` — страница (overview, users, anomalies, install, settings)
 - `panel/frontend/src/api/client.ts` — API-клиент
 - `panel/frontend/src/locales/en.json`, `ru.json` — переводы
 
@@ -1656,7 +1672,7 @@ Frontend сохраняет незавершённые job_id в `localStorage` 
 
 **Завершение:** когда все цели (основная + extra) завершились успешно, форма закрывается и сбрасывается (`resetForm`) — как после обычного добавления сервера. При частичном успехе форма остаётся открытой для повтора неудачных целей; успешная основная цель и успешные extra-карточки при этом убираются через ~6 секунд (`AUTO_HIDE_MS`).
 
-**Регистрация роутера:** `server_deploy.router` зарегистрирован в `main.py` до `servers.router`, чтобы статичные пути (`/servers/deploy`, `/servers/remnawave-certs`) матчились раньше параметрического `GET /servers/{id}`.
+**Регистрация роутера:** `server_deploy.router` (как и `node_image.router`, `remnawave_install.router`) зарегистрирован в `main.py` до `servers.router`, чтобы статичные пути (`/servers/deploy`, `/servers/remnawave-certs`, `/servers/remnawave-install/...`) матчились раньше параметрического `GET /servers/{id}`.
 
 **Frontend (`panel/frontend/src/pages/Servers.tsx`):**
 - Чекбокс «Автоустановка ноды по SSH» в форме добавления сервера; при выключенном — сервер добавляется обычным способом через `POST /api/servers`

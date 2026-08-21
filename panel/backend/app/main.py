@@ -15,7 +15,7 @@ logging.basicConfig(
 
 from app.database import init_db, async_session
 from app.config import get_settings
-from app.routers import servers, server_deploy, node_install_keys, auth_router, proxy, settings as settings_router, system, bulk_actions, blocklist, remnawave, alerts, billing, backup, ssh_security, infra, notes, wildcard_ssl, haproxy_profiles, torrent_blocker, firewall_profiles, antiddos, remnawave_nginx_profiles, traffic, dnat_profiles, reserved_ports, node_image
+from app.routers import servers, server_deploy, node_install_keys, auth_router, proxy, settings as settings_router, system, bulk_actions, blocklist, remnawave, alerts, billing, backup, ssh_security, infra, notes, wildcard_ssl, haproxy_profiles, torrent_blocker, firewall_profiles, antiddos, remnawave_nginx_profiles, traffic, dnat_profiles, reserved_ports, node_image, remnawave_install
 from app.services.metrics_collector import start_collector, stop_collector
 from app.services.blocklist_manager import get_blocklist_manager
 from app.services.xray_stats_collector import start_xray_stats_collector, stop_xray_stats_collector
@@ -181,7 +181,8 @@ class GZipMiddlewareNoSSE:
             path = scope.get("path", "")
             if (path.endswith("/execute-stream") or path.endswith("/notes/stream")
                     or "/ssh-security/bulk/" in path or path.endswith("/servers/deploy")
-                    or ("/servers/deploy/" in path and path.endswith("/stream"))):
+                    or ("/servers/deploy/" in path and path.endswith("/stream"))
+                    or ("/servers/remnawave-install/" in path and path.endswith("/stream"))):
                 await self.app(scope, receive, send)
                 return
         await self.gzip(scope, receive, send)
@@ -195,6 +196,8 @@ app.include_router(auth_router.router)
 app.include_router(server_deploy.router)
 # node_image раньше servers: /servers/{id}/deliver-image и /servers/deliver-image/{job}/stream
 app.include_router(node_image.router)
+# remnawave_install раньше servers: /servers/remnawave-install/... — статичный сегмент
+app.include_router(remnawave_install.router)
 app.include_router(servers.router)
 app.include_router(node_install_keys.router)
 app.include_router(proxy.router)
