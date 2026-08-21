@@ -655,6 +655,25 @@
     "import_in_progress": "Migrating history from the node — it will appear shortly",
     "gaps_note": "Node unreachable periods: {{count}}. Traffic there is spread evenly, not measured"
   },
+  "imageDelivery": {
+    "title": "Deliver image over SSH",
+    "desc": "For blocked nodes (no access to the image registry): the panel uploads the image to the node over SSH and updates it. Requires root access.",
+    "deliver_hint": "Deliver the node image from the panel over SSH — for servers without registry access",
+    "using_stored": "Using saved SSH credentials ({{user}}@{{host}}:{{port}})",
+    "host": "SSH host",
+    "port": "Port",
+    "user": "User",
+    "auth_password": "Password",
+    "auth_key": "Private key",
+    "password": "SSH password",
+    "private_key": "SSH private key",
+    "passphrase": "Key passphrase (if any)",
+    "save_creds": "Save credentials on the server for future deliveries (encrypted)",
+    "deliver": "Deliver",
+    "done": "Image delivered, node updated",
+    "error": "Delivery failed",
+    "failed": "Delivery error"
+  },
   "updates": {
     "title": "Updates",
     "subtitle": "Manage panel and nodes versions",

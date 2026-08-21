@@ -465,6 +465,43 @@ export interface DeployJobInfo {
 export const serverDeployJobStreamUrl = (jobId: string) =>
   `/api/servers/deploy/${jobId}/stream`
 
+// Доставка образа ноды с панели по SSH (ноды под ТСПУ, без доступа к GHCR)
+export type NodeImageDeliveryEvent =
+  | { type: 'start'; host: string }
+  | { type: 'log'; line: string }
+  | { type: 'error'; message: string }
+  | { type: 'done'; status?: string; message?: string }
+
+export const imageDeliveryJobStreamUrl = (jobId: string) =>
+  `/api/servers/deliver-image/${jobId}/stream`
+
+export interface ImageDeliverySettings {
+  image_delivery: 'auto' | 'ssh'
+  ssh_host: string
+  ssh_port: number
+  ssh_user: string
+  has_ssh_password: boolean
+  has_ssh_private_key: boolean
+}
+
+export interface ImageDeliveryCreds {
+  ssh_host?: string
+  ssh_port?: number
+  ssh_user?: string
+  ssh_password?: string
+  ssh_private_key?: string
+  ssh_passphrase?: string
+}
+
+export const nodeImageApi = {
+  getSettings: (id: number) =>
+    api.get<ImageDeliverySettings>(`/servers/${id}/image-delivery`),
+  setSettings: (id: number, data: ImageDeliveryCreds & { image_delivery?: string }) =>
+    api.patch(`/servers/${id}/image-delivery`, data),
+  deliver: (id: number, creds: ImageDeliveryCreds) =>
+    api.post<{ job_id: string }>(`/servers/${id}/deliver-image`, creds),
+}
+
 export const serversApi = {
   list: (includeMetrics?: boolean) =>
     api.get<{ count: number; servers: ServerWithMetrics[] }>('/servers', {
