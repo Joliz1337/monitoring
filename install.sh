@@ -643,6 +643,8 @@ clone_repo_with_fallback() {
     local target_dir="$1"
     local branch="${2:-main}"
     local repo_url="https://github.com/Joliz1337/monitoring.git"
+    # Зеркало GitHub для серверов под блокировкой, где github.com недоступен
+    local mirror_url="https://ghfast.top/https://github.com/Joliz1337/monitoring.git"
 
     rm -rf "$target_dir" 2>/dev/null || true
 
@@ -651,7 +653,14 @@ clone_repo_with_fallback() {
         return 0
     fi
 
-    log_error "Failed to download repository"
+    rm -rf "$target_dir" 2>/dev/null || true
+    log_warn "GitHub недоступен, пробую зеркало (ghfast.top)..."
+    if spin_retry "$TIMEOUT_GIT_CLONE" 2 "$RETRY_DELAY" "Downloading via mirror" \
+        git clone --depth 1 --branch "$branch" "$mirror_url" "$target_dir"; then
+        return 0
+    fi
+
+    log_error "Failed to download repository (direct and mirror)"
     return 1
 }
 

@@ -50,6 +50,12 @@ If a server is behind heavy DPI (e.g. Russia's TSPU) and cannot pull the node im
 
 The same blocked-mode command fixes a node with an old or missing `.env`: the installer rewrites the config and certificates, then deliver the image. The order is such because a bare server first needs the installer (Docker, certificates, `.env`), and only then the image.
 
+The installer pulls the node code from GitHub, and if that's unreachable it automatically falls back to a mirror (`ghfast.top`). If even the installer address is blocked, run it via the mirror by prefixing `https://ghfast.top/` before `https://raw...`:
+
+```
+MON_ALLOW_LOCAL_BUILD=0 bash <(curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh) <NODE_SECRET>
+```
+
 ## What the node hands over
 
 By default a node is fully open to the panel. If the server belongs to someone else, or you simply don't want to hand over everything, trim the permissions on the node itself: the file `/opt/monitoring-node/.env`, the line `NODE_CAPABILITIES=`. Empty, or no line at all, means everything is allowed, exactly as before.
