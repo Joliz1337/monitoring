@@ -451,7 +451,7 @@ PK таблицы — `BigInteger` (не int32). При 500 нодах с инт
 
 - **Ключ `PANEL_ENC_KEY`** (base64 32 байта) живёт в `.env` панели, не в БД: утёкший дамп postgres сам по себе не расшифровывается. Генерируется установщиком (`deploy.sh`/`apply-update.sh`) один раз, идемпотентно.
 - **Формат `enc:v1:…`**; значение без префикса — легаси-открытый текст, читается как есть. При старте `_migrate_encrypt_secrets` (`database.py`) шифрует ещё открытые значения — строго под гейтом наличия ключа (без ключа секреты не трогаются, панель работает).
-- **Бэкап несёт ключ.** `routers/backup.py` вшивает `PANEL_ENC_KEY` в начало `.dump` (magic `MONBKP1`, сырой pg_dump отличим по `PGDMP`); restore извлекает ключ и применяет его в `.env` до перечитывания PKI — восстановление самодостаточно даже после переустановки панели с новым ключом. Поэтому **файл бэкапа содержит ключи доступа ко всем нодам — хранить приватно** (по чувствительности он таким был всегда). Потеря `PANEL_ENC_KEY` без бэкапа = недоступность нод, восстановление только перегеном PKI и передеплоем сертификатов.
+- **Бэкап несёт весь `.env`.** `routers/backup.py` вшивает целиком `.env` панели в начало `.dump` (magic `MONBKP2`; `MONBKP1` — легаси только с ключом; сырой pg_dump отличим по `PGDMP`). При restore `apply_restored_env` сливает `.env` из набора в текущий, **пропуская инфра-специфичные ключи** (`_ENV_PRESERVE`: `POSTGRES_*`, `DOMAIN`, порты, `MON_IMAGE_TAG`) — иначе чужой `POSTGRES_PASSWORD` оторвал бы панель от её postgres. `PANEL_ENC_KEY` применяется сразу (перечитывается crypto + PKI), остальное (логин/JWT) — после рестарта панели. Восстановление полностью самодостаточно, включая переустановку с нуля. Поэтому **файл бэкапа содержит все секреты и ключи доступа ко всем нодам — хранить приватно**. Потеря `PANEL_ENC_KEY` без бэкапа = недоступность нод, восстановление только перегеном PKI и передеплоем сертификатов.
 
 ### Доставка образа ноды с панели по SSH
 
@@ -459,7 +459,7 @@ PK таблицы — `BigInteger` (не int32). При 500 нодах с инт
 
 ### Автобэкапы в Telegram
 
-`routers/backup.py` + `services/backup_scheduler.py` + `services/backup_telegram.py`. По расписанию (`BackupSettings`: daily/every_hours, `bot_token`/`archive_password` под `EncryptedString`) панель снимает `pg_dump`, вшивает в него ключ шифрования (`_frame_backup`), шифрует паролем (AES-256-GCM, PBKDF2), бьёт на тома < 50 МБ и шлёт в Telegram (с алертом при сбое). Шедулер стартует в lifespan. Эндпоинты: `GET/PUT /backup/settings` (write-only секреты), `POST /backup/telegram-now`, `POST /backup/test-telegram`. Восстановление — `panel/scripts/backup/tg-restore.py` (собрать тома → расшифровать в `.dump`) → загрузка через существующий `POST /backup/restore`.
+`routers/backup.py` + `services/backup_scheduler.py` + `services/backup_telegram.py`. По расписанию (`BackupSettings`: daily/every_hours, `bot_token`/`archive_password` под `EncryptedString`) панель снимает `pg_dump`, вшивает в него весь `.env` (`_frame_backup`), шифрует паролем (AES-256-GCM, PBKDF2), бьёт на тома < 50 МБ и шлёт в Telegram (с алертом при сбое). Шедулер стартует в lifespan. Эндпоинты: `GET/PUT /backup/settings` (write-only секреты), `POST /backup/telegram-now`, `POST /backup/test-telegram`. Восстановление — `panel/scripts/backup/tg-restore.py` (собрать тома → расшифровать в `.dump`) → загрузка через существующий `POST /backup/restore`.
 
 ## API
 

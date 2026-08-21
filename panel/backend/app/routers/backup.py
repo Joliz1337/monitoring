@@ -32,11 +32,19 @@ BACKUP_DIR = Path("/app/data/backups")
 POSTGRES_CONTAINER = "panel-postgres"
 MAX_BACKUPS = 20
 
-# Ключ шифрования секретов едет внутри .dump заголовком: без него восстановленный
-# на новом хосте дамп не расшифровал бы mTLS-ключи (потеря доступа ко всем нодам).
-# Дамп всё равно содержит эти ключи — самодостаточность бэкапа важнее.
+# Весь .env панели едет внутри .dump заголовком — чтобы бэкапом можно было
+# восстановить панель полностью (логин, секреты, ключ шифрования). Без ключа
+# шифрования дамп не расшифровал бы mTLS-ключи (потеря доступа к нодам). Инфра-
+# специфичные ключи при restore НЕ применяются — иначе чужой POSTGRES_PASSWORD
+# оторвал бы панель от её же postgres.
 PANEL_ENV_PATH = Path("/opt/monitoring-panel/.env")
-_BACKUP_MAGIC = b"MONBKP1\n"  # сырой pg_dump начинается с "PGDMP" — легаси-дампы отличимы
+_BACKUP_MAGIC = b"MONBKP1\n"     # v1: только PANEL_ENC_KEY (легаси dev-бэкапы)
+_BACKUP_MAGIC_V2 = b"MONBKP2\n"  # v2: весь .env; сырой pg_dump начинается с "PGDMP"
+# Не восстанавливаем из бэкапа — специфичны для конкретной установки/postgres
+_ENV_PRESERVE = {
+    "POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB",
+    "DOMAIN", "PANEL_PORT", "PANEL_HTTP_PORT", "MON_IMAGE_TAG",
+}
 
 _operation_status: dict = {
     "state": "idle",
@@ -141,40 +149,85 @@ def _run_pg_restore(data: bytes) -> str | None:
     return "\n\n".join(errors) if errors else None
 
 
-def _frame_backup(dump: bytes, key: str | None) -> bytes:
-    """Вшить ключ шифрования в начало дампа. Без ключа — сырой pg_dump (легаси)."""
-    if not key:
+def parse_env(text: str) -> dict:
+    """Разобрать .env в словарь KEY→VALUE (пропуская комментарии/пустые строки)."""
+    result: dict = {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, _, value = stripped.partition("=")
+        result[key.strip()] = value
+    return result
+
+
+def read_panel_env() -> str | None:
+    try:
+        return PANEL_ENV_PATH.read_text() if PANEL_ENV_PATH.exists() else None
+    except OSError as e:
+        logger.warning(f"Could not read panel .env for backup: {e}")
+        return None
+
+
+def _frame_backup(dump: bytes, env_text: str | None) -> bytes:
+    """Вшить весь .env в начало дампа. Без .env — сырой pg_dump (легаси)."""
+    if not env_text:
         return dump
-    return _BACKUP_MAGIC + key.encode() + b"\n" + dump
+    env_b = env_text.encode("utf-8")
+    return _BACKUP_MAGIC_V2 + str(len(env_b)).encode() + b"\n" + env_b + dump
 
 
-def _unframe_backup(data: bytes) -> tuple[bytes, str | None]:
-    """Достать вшитый ключ и вернуть чистый дамп. Легаси-дамп — как есть, ключа нет."""
-    if not data.startswith(_BACKUP_MAGIC):
-        return data, None
-    rest = data[len(_BACKUP_MAGIC):]
-    key_line, _, dump = rest.partition(b"\n")
-    return dump, key_line.decode() or None
+def _unframe_backup(data: bytes) -> tuple[bytes, dict]:
+    """Вернуть чистый дамп и словарь восстанавливаемого .env.
+
+    v2 — весь .env; v1 — только PANEL_ENC_KEY; сырой pg_dump — .env пуст."""
+    if data.startswith(_BACKUP_MAGIC_V2):
+        rest = data[len(_BACKUP_MAGIC_V2):]
+        nl = rest.index(b"\n")
+        env_len = int(rest[:nl])
+        env_b = rest[nl + 1:nl + 1 + env_len]
+        dump = rest[nl + 1 + env_len:]
+        return dump, parse_env(env_b.decode("utf-8"))
+    if data.startswith(_BACKUP_MAGIC):
+        rest = data[len(_BACKUP_MAGIC):]
+        key_line, _, dump = rest.partition(b"\n")
+        key = key_line.decode()
+        return dump, ({"PANEL_ENC_KEY": key} if key else {})
+    return data, {}
 
 
-def _persist_enc_key(key: str) -> None:
-    """Записать PANEL_ENC_KEY в .env панели и перечитать его в процессе.
+def apply_restored_env(env_dict: dict) -> None:
+    """Слить восстановленный .env в текущий, пропуская инфра-специфичные ключи.
 
-    После полного restore все секреты в БД зашифрованы ключом из набора — панель
-    обязана использовать именно его, иначе не расшифрует mTLS-ключи."""
+    POSTGRES_*/DOMAIN/порты берутся из живой установки (иначе панель оторвётся от
+    своей БД). PANEL_ENC_KEY применяется сразу — им зашифрованы восстановленные
+    секреты; остальное (логин, JWT и т.п.) вступит в силу после рестарта панели."""
+    applied = {k: v for k, v in env_dict.items() if k not in _ENV_PRESERVE}
+    if not applied:
+        return
     try:
         lines = PANEL_ENV_PATH.read_text().splitlines() if PANEL_ENV_PATH.exists() else []
-        for i, ln in enumerate(lines):
-            if ln.startswith("PANEL_ENC_KEY="):
-                lines[i] = f"PANEL_ENC_KEY={key}"
-                break
-        else:
-            lines.append(f"PANEL_ENC_KEY={key}")
-        PANEL_ENV_PATH.write_text("\n".join(lines) + "\n")
+        seen = set()
+        out = []
+        for line in lines:
+            stripped = line.strip()
+            if "=" in stripped and not stripped.startswith("#"):
+                key = stripped.split("=", 1)[0].strip()
+                if key in applied:
+                    out.append(f"{key}={applied[key]}")
+                    seen.add(key)
+                    continue
+            out.append(line)
+        for key, value in applied.items():
+            if key not in seen:
+                out.append(f"{key}={value}")
+        PANEL_ENV_PATH.write_text("\n".join(out) + "\n")
     except OSError as e:
-        logger.error(f"Could not persist PANEL_ENC_KEY to .env: {e}")
-    os.environ["PANEL_ENC_KEY"] = key
-    crypto.reload_key()
+        logger.error(f"Could not write restored .env: {e}")
+
+    if "PANEL_ENC_KEY" in applied:
+        os.environ["PANEL_ENC_KEY"] = applied["PANEL_ENC_KEY"]
+        crypto.reload_key()
 
 
 def _ensure_dir():
@@ -243,8 +296,7 @@ async def _create_backup_task(filename: str):
             logger.error(f"Backup failed: {err}")
             return
 
-        key = os.environ.get("PANEL_ENC_KEY") if crypto.encryption_enabled() else None
-        framed = _frame_backup(data, key)
+        framed = _frame_backup(data, read_panel_env())
         dump_path = BACKUP_DIR / filename
         dump_path.write_bytes(framed)
         _save_metadata(filename, len(framed))
@@ -270,7 +322,7 @@ async def _reload_pki(app) -> None:
 
 async def _restore_backup_task(data: bytes, filename: str, app=None):
     try:
-        dump, embedded_key = _unframe_backup(data)
+        dump, env_dict = _unframe_backup(data)
         err = await asyncio.get_event_loop().run_in_executor(
             None, _run_pg_restore, dump
         )
@@ -278,10 +330,10 @@ async def _restore_backup_task(data: bytes, filename: str, app=None):
             _set_status("idle", filename, err)
             logger.error(f"Restore failed: {err}")
         else:
-            # Ключ из набора нужен ДО чтения PKI: восстановленные mTLS-ключи
-            # зашифрованы им. На том же хосте ключ совпадает — перезапись пропускается.
-            if embedded_key and embedded_key != os.environ.get("PANEL_ENC_KEY"):
-                _persist_enc_key(embedded_key)
+            # .env из набора применяем ДО чтения PKI: восстановленные mTLS-ключи
+            # зашифрованы ключом из набора. Инфра-специфичные ключи пропускаются;
+            # логин/JWT вступят в силу после рестарта панели.
+            apply_restored_env(env_dict)
             if app is not None:
                 await _reload_pki(app)
             _set_status("idle", filename)

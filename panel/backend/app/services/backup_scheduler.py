@@ -6,12 +6,10 @@
 """
 import asyncio
 import logging
-import os
 from datetime import datetime, timezone
 
 from sqlalchemy import select
 
-from app import crypto
 from app.database import async_session_maker
 from app.models import BackupSettings
 from app.routers import backup as backup_router
@@ -73,8 +71,7 @@ async def run_backup_to_telegram(s: BackupSettings) -> tuple[bool, str | None]:
         await backup_telegram.send_message(token, chat_id, f"🔴 Бэкап панели не выполнен: {msg}")
         return False, msg
 
-    key = os.environ.get("PANEL_ENC_KEY") if crypto.encryption_enabled() else None
-    framed = backup_router._frame_backup(data, key)
+    framed = backup_router._frame_backup(data, backup_router.read_panel_env())
 
     volume_bytes = max(1, s.volume_size_mb or 45) * 1024 * 1024
     try:
