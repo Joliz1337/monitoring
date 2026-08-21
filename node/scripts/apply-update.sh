@@ -678,16 +678,20 @@ fi
 cd "$NODE_DIR"
 
 set +e
-# Pull ready images from GHCR (normal flow)
-if ! spin_retry "$DOCKER_PULL_TIMEOUT" "$DOCKER_PULL_RETRIES" "$DOCKER_PULL_RETRY_DELAY" \
+# Блок-режим (MON_ALLOW_LOCAL_BUILD=0, панель-триггер для заблокированной ноды):
+# не молотим обречённые pull/сборку. Либо образ уже на диске — поднимаемся на нём,
+# либо быстрый выход 20 «нужна доставка образа с панели».
+if [ "${MON_ALLOW_LOCAL_BUILD:-1}" = "0" ]; then
+    if compose_images_present; then
+        log_success "Образ уже на диске — скачивание не требуется"
+    else
+        log_error "Image unavailable, local build disabled (MON_ALLOW_LOCAL_BUILD=0) — expecting delivery from panel"
+        exit 20
+    fi
+elif ! spin_retry "$DOCKER_PULL_TIMEOUT" "$DOCKER_PULL_RETRIES" "$DOCKER_PULL_RETRY_DELAY" \
     "Pulling Docker images" docker compose pull; then
     if compose_images_present; then
         log_success "Registry unreachable — using images already present locally"
-    elif [ "${MON_ALLOW_LOCAL_BUILD:-1}" = "0" ]; then
-        # Панель-триггер для заблокированной ноды: не молотим 15 мин обречённую
-        # сборку, а быстро сигналим «образа нет» — панель дотолкнёт его по SSH.
-        log_error "Image unavailable, local build disabled (MON_ALLOW_LOCAL_BUILD=0) — expecting delivery from panel"
-        exit 20
     else
         log_warn "Failed to pull from registry, building locally..."
         spin "Pulling base images" bash -c \

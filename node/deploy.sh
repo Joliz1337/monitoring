@@ -829,13 +829,19 @@ pull_and_start() {
     spin "Stopping old containers" \
         timeout "$TIMEOUT_DOCKER_COMPOSE_DOWN" docker compose down 2>/dev/null || true
 
-    # Pull ready images from GHCR (normal flow)
-    if ! spin_retry 240 5 10 "Pulling Docker images" docker compose pull 2>/dev/null; then
+    # Блок-режим (сервер без доступа к реестру): не тратим 20 мин на обречённый pull.
+    # Либо образ уже на диске (доставлен/загружен вручную) — поднимаемся на нём,
+    # либо быстрый выход 20 «нужна доставка образа с панели».
+    if [ "${MON_ALLOW_LOCAL_BUILD:-1}" = "0" ]; then
+        if compose_images_present; then
+            log_success "Образ уже на диске — скачивание не требуется"
+        else
+            log_error "Образ недоступен из реестра, скачивание/сборка отключены — доставьте образ с панели"
+            exit 20
+        fi
+    elif ! spin_retry 240 5 10 "Pulling Docker images" docker compose pull 2>/dev/null; then
         if compose_images_present; then
             log_success "Registry unreachable — using images already present locally"
-        elif [ "${MON_ALLOW_LOCAL_BUILD:-1}" = "0" ]; then
-            log_error "Image unavailable, local build disabled (MON_ALLOW_LOCAL_BUILD=0) — expecting delivery from panel"
-            exit 20
         else
             log_warn "Failed to pull from registry, building locally..."
             spin "Pulling base images" bash -c \
