@@ -29,6 +29,7 @@ export default function DeliverImageModal({ serverId, serverName, onClose }: Pro
   const [passphrase, setPassphrase] = useState('')
   const [hasStoredCreds, setHasStoredCreds] = useState(false)
   const [saveCreds, setSaveCreds] = useState(false)
+  const [editCreds, setEditCreds] = useState(false)
 
   const [delivering, setDelivering] = useState(false)
   const [log, setLog] = useState<string[]>([])
@@ -56,26 +57,39 @@ export default function DeliverImageModal({ serverId, serverName, onClose }: Pro
 
   useEffect(() => () => abortRef.current?.abort(), [])
 
+  const handleForgetCreds = async () => {
+    try {
+      await nodeImageApi.setSettings(serverId, { ssh_password: '', ssh_private_key: '', ssh_passphrase: '' })
+      setHasStoredCreds(false)
+      setEditCreds(true)
+      toast.success(t('imageDelivery.creds_forgotten'))
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || t('imageDelivery.failed'))
+    }
+  }
+
   const handleDeliver = async () => {
     setDelivering(true)
     setResult(null)
     setLog([])
 
+    const useForm = !hasStoredCreds || editCreds
     const creds: ImageDeliveryCreds = {}
-    if (!hasStoredCreds) {
+    if (useForm) {
       creds.ssh_host = host.trim()
       creds.ssh_port = Number(port) || 22
       creds.ssh_user = user.trim() || 'root'
+      // Пустые поля не шлём: в режиме «Изменить» пустой пароль = оставить сохранённый
       if (authMethod === 'password') {
-        creds.ssh_password = password
+        if (password) creds.ssh_password = password
       } else {
-        creds.ssh_private_key = privateKey
+        if (privateKey) creds.ssh_private_key = privateKey
         if (passphrase) creds.ssh_passphrase = passphrase
       }
     }
 
     try {
-      if (!hasStoredCreds && saveCreds) {
+      if (useForm && saveCreds) {
         await nodeImageApi.setSettings(serverId, { image_delivery: 'ssh', ...creds })
       }
       const { data } = await nodeImageApi.deliver(serverId, creds)
@@ -124,9 +138,19 @@ export default function DeliverImageModal({ serverId, serverName, onClose }: Pro
 
         <p className="text-sm text-dark-400 mb-4">{t('imageDelivery.desc')}</p>
 
-        {hasStoredCreds ? (
-          <div className="text-sm text-dark-300 bg-dark-800/40 border border-dark-700/40 rounded-lg px-3 py-2 mb-4">
-            {t('imageDelivery.using_stored', { user, host, port })}
+        {(hasStoredCreds && !editCreds) ? (
+          <div className="mb-4 space-y-2">
+            <div className="text-sm text-dark-300 bg-dark-800/40 border border-dark-700/40 rounded-lg px-3 py-2">
+              {t('imageDelivery.using_stored', { user, host, port })}
+            </div>
+            <div className="flex gap-4 text-xs">
+              <button type="button" onClick={() => setEditCreds(true)} className="text-accent-400 hover:underline">
+                {t('imageDelivery.change_creds')}
+              </button>
+              <button type="button" onClick={handleForgetCreds} className="text-danger hover:underline">
+                {t('imageDelivery.forget_creds')}
+              </button>
+            </div>
           </div>
         ) : (
           <div className="space-y-3 mb-4">
