@@ -15,7 +15,7 @@ logging.basicConfig(
 
 from app.database import init_db, async_session
 from app.config import get_settings
-from app.routers import servers, server_deploy, node_install_keys, auth_router, proxy, settings as settings_router, system, bulk_actions, blocklist, remnawave, alerts, billing, backup, ssh_security, infra, notes, wildcard_ssl, haproxy_profiles, torrent_blocker, firewall_profiles, antiddos, remnawave_nginx_profiles, traffic, dnat_profiles, reserved_ports
+from app.routers import servers, server_deploy, node_install_keys, auth_router, proxy, settings as settings_router, system, bulk_actions, blocklist, remnawave, alerts, billing, backup, ssh_security, infra, notes, wildcard_ssl, haproxy_profiles, torrent_blocker, firewall_profiles, antiddos, remnawave_nginx_profiles, traffic, dnat_profiles, reserved_ports, node_image
 from app.services.metrics_collector import start_collector, stop_collector
 from app.services.blocklist_manager import get_blocklist_manager
 from app.services.xray_stats_collector import start_xray_stats_collector, stop_xray_stats_collector
@@ -186,6 +186,8 @@ app.include_router(auth_router.router)
 # server_deploy раньше servers: DELETE /servers/remnawave-certs/{id} и /servers/deploy
 # должны матчиться до параметрических /servers/{server_id}
 app.include_router(server_deploy.router)
+# node_image раньше servers: /servers/{id}/deliver-image и /servers/deliver-image/{job}/stream
+app.include_router(node_image.router)
 app.include_router(servers.router)
 app.include_router(node_install_keys.router)
 app.include_router(proxy.router)
