@@ -76,6 +76,10 @@ async def _init_optional_module(module_name: str, entrypoint: str) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Гарантируем ключ шифрования до миграций/чтения секретов — бэкенд не должен
+    # зависеть от того, отработал ли провижининг установщиком.
+    from app import crypto
+    crypto.ensure_key()
     await init_db()
     keygen = await load_or_create_keygen(async_session)
     app.state.pki = keygen

@@ -6,15 +6,20 @@
 """
 import base64
 import binascii
+import logging
 import os
+from pathlib import Path
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from sqlalchemy import Text
 from sqlalchemy.types import TypeDecorator
 
+logger = logging.getLogger(__name__)
+
 ENC_PREFIX = "enc:v1:"
 _NONCE_LEN = 12
+_PANEL_ENV_PATH = Path("/opt/monitoring-panel/.env")
 
 
 class EncryptionUnavailable(RuntimeError):
@@ -36,6 +41,59 @@ def reload_key() -> None:
 
 
 _reset_cache_for_tests = reload_key  # алиас для тестов
+
+
+def _read_env_key(env_path: Path) -> str | None:
+    try:
+        if env_path.exists():
+            for line in env_path.read_text().splitlines():
+                if line.startswith("PANEL_ENC_KEY="):
+                    return line.split("=", 1)[1].strip() or None
+    except OSError:
+        pass
+    return None
+
+
+def _write_env_key(env_path: Path, key: str) -> bool:
+    try:
+        lines = env_path.read_text().splitlines() if env_path.exists() else []
+        for i, line in enumerate(lines):
+            if line.startswith("PANEL_ENC_KEY="):
+                lines[i] = f"PANEL_ENC_KEY={key}"
+                break
+        else:
+            lines.append(f"PANEL_ENC_KEY={key}")
+        env_path.parent.mkdir(parents=True, exist_ok=True)
+        env_path.write_text("\n".join(lines) + "\n")
+        return True
+    except OSError as e:
+        logger.error("Could not persist PANEL_ENC_KEY to .env: %s", e)
+        return False
+
+
+def ensure_key(env_path: Path = _PANEL_ENV_PATH) -> None:
+    """Гарантировать наличие PANEL_ENC_KEY: окружение → .env → сгенерировать.
+
+    Вызывать на старте ДО init_db. Делает бэкенд самодостаточным: даже если
+    провижининг установщиком не отработал или ключ не долетел в окружение
+    контейнера, шифрование и миграция всё равно работают. Идемпотентно — существующий
+    ключ переиспользуется (иначе прошлый шифртекст стал бы нечитаемым)."""
+    if _load_key() is not None:
+        return
+
+    from_file = _read_env_key(env_path)
+    if from_file:
+        os.environ["PANEL_ENC_KEY"] = from_file
+        reload_key()
+        if _load_key() is not None:
+            logger.info("PANEL_ENC_KEY подхвачен из .env")
+            return
+
+    new_key = base64.b64encode(os.urandom(32)).decode("ascii")
+    if _write_env_key(env_path, new_key):
+        logger.warning("PANEL_ENC_KEY отсутствовал — сгенерирован и записан в .env")
+    os.environ["PANEL_ENC_KEY"] = new_key
+    reload_key()
 
 
 def _load_key() -> bytes | None:
