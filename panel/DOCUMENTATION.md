@@ -453,6 +453,14 @@ PK таблицы — `BigInteger` (не int32). При 500 нодах с инт
 - **Формат `enc:v1:…`**; значение без префикса — легаси-открытый текст, читается как есть. При старте `_migrate_encrypt_secrets` (`database.py`) шифрует ещё открытые значения — строго под гейтом наличия ключа (без ключа секреты не трогаются, панель работает).
 - **Бэкап несёт ключ.** `routers/backup.py` вшивает `PANEL_ENC_KEY` в начало `.dump` (magic `MONBKP1`, сырой pg_dump отличим по `PGDMP`); restore извлекает ключ и применяет его в `.env` до перечитывания PKI — восстановление самодостаточно даже после переустановки панели с новым ключом. Поэтому **файл бэкапа содержит ключи доступа ко всем нодам — хранить приватно** (по чувствительности он таким был всегда). Потеря `PANEL_ENC_KEY` без бэкапа = недоступность нод, восстановление только перегеном PKI и передеплоем сертификатов.
 
+### Доставка образа ноды с панели по SSH
+
+Для нод под жёсткой блокировкой (нет доступа к GHCR). `services/node_image_cache.py` тянет образ ноды с GHCR и хранит gzip-tar (переиспользование по digest). `services/node_image_delivery.py` — `deliver_image`: SFTP-заливка tar → `docker load` → `update.sh` одним SSH-сеансом (без mTLS), фоновая задача `ImageDeliveryJobManager` со стримом лога (переживает обрыв HTTP). Роутер `routers/node_image.py`: метод обновления и SSH-креды на `Server` (`image_delivery`, `ssh_*`; пароль/ключ/passphrase под `EncryptedString`, write-only), `POST /servers/{id}/deliver-image`, NDJSON-стрим. Нода при провале pull без локального образа и `MON_ALLOW_LOCAL_BUILD=0` отдаёт `reason=image_unavailable` (быстрый фейл вместо сборки). Только root-доступ по SSH.
+
+### Автобэкапы в Telegram
+
+`routers/backup.py` + `services/backup_scheduler.py` + `services/backup_telegram.py`. По расписанию (`BackupSettings`: daily/every_hours, `bot_token`/`archive_password` под `EncryptedString`) панель снимает `pg_dump`, вшивает в него ключ шифрования (`_frame_backup`), шифрует паролем (AES-256-GCM, PBKDF2), бьёт на тома < 50 МБ и шлёт в Telegram (с алертом при сбое). Шедулер стартует в lifespan. Эндпоинты: `GET/PUT /backup/settings` (write-only секреты), `POST /backup/telegram-now`, `POST /backup/test-telegram`. Восстановление — `panel/scripts/backup/tg-restore.py` (собрать тома → расшифровать в `.dump`) → загрузка через существующий `POST /backup/restore`.
+
 ## API
 
 ### Система
