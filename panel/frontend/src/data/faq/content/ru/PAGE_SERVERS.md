@@ -41,10 +41,10 @@
 2. На сервере запустите установщик в блок-режиме — он поставит Docker, файлы, сертификаты и `.env`, а на образе быстро остановится, не вися на скачивании:
 
    ```
-   MON_ALLOW_LOCAL_BUILD=0 bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh) <NODE_SECRET>
+   MON_BRANCH=main MON_ALLOW_LOCAL_BUILD=0 bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh) <NODE_SECRET>
    ```
 
-   Ветку в URL берите под свой канал обновлений: `main` — стабильный, `dev` — dev.
+   `MON_BRANCH` **и** ветка в URL должны совпадать с вашим каналом обновлений: `main` — стабильный, `dev` — dev. Для dev-канала замените `main` на `dev` в обоих местах. `MON_BRANCH` важен: он задаёт, из какой ветки установщик берёт код ноды.
 3. Добавьте сервер в панель вручную: имя + адрес `https://IP:порт`. Появится офлайн.
 4. «Обновления» → у ноды **«Доставить образ по SSH»** → нода поднимется и станет онлайн.
 
@@ -53,7 +53,7 @@
 Код ноды установщик тянет с GitHub, а если тот недоступен — автоматически с зеркала (`ghfast.top`). Если заблокирован и сам адрес установщика, запустите его через зеркало, дописав `https://ghfast.top/` перед `https://raw...`:
 
 ```
-MON_ALLOW_LOCAL_BUILD=0 bash <(curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh) <NODE_SECRET>
+MON_BRANCH=main MON_ALLOW_LOCAL_BUILD=0 bash <(curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh) <NODE_SECRET>
 ```
 
 ## Что нода отдаёт панели

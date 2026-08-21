@@ -41,10 +41,10 @@ If a server is behind heavy DPI (e.g. Russia's TSPU) and cannot pull the node im
 2. On the server, run the installer in blocked mode — it installs Docker, files, certificates and `.env`, then stops quickly at the image instead of hanging on the download:
 
    ```
-   MON_ALLOW_LOCAL_BUILD=0 bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh) <NODE_SECRET>
+   MON_BRANCH=main MON_ALLOW_LOCAL_BUILD=0 bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh) <NODE_SECRET>
    ```
 
-   Pick the branch in the URL to match your update channel: `main` for stable, `dev` for dev.
+   `MON_BRANCH` **and** the branch in the URL must match your update channel: `main` for stable, `dev` for dev. For the dev channel replace `main` with `dev` in both places. `MON_BRANCH` matters: it sets which branch the installer takes the node code from.
 3. Add the server in the panel manually: name + address `https://IP:port`. It appears offline.
 4. Updates → **"Deliver image over SSH"** on the node → it comes up and goes online.
 
@@ -53,7 +53,7 @@ The same blocked-mode command fixes a node with an old or missing `.env`: the in
 The installer pulls the node code from GitHub, and if that's unreachable it automatically falls back to a mirror (`ghfast.top`). If even the installer address is blocked, run it via the mirror by prefixing `https://ghfast.top/` before `https://raw...`:
 
 ```
-MON_ALLOW_LOCAL_BUILD=0 bash <(curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh) <NODE_SECRET>
+MON_BRANCH=main MON_ALLOW_LOCAL_BUILD=0 bash <(curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh) <NODE_SECRET>
 ```
 
 ## What the node hands over
