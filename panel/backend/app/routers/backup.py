@@ -416,15 +416,30 @@ async def restore_backup(
         raise HTTPException(409, "Another backup operation is in progress")
 
     async with request.form() as form:
-        upload = form.get("file")
-        if not isinstance(upload, UploadFile) or not (upload.filename or "").endswith(".dump"):
-            raise HTTPException(400, "Only .dump files are accepted")
+        uploads = [v for v in form.getlist("file") if isinstance(v, UploadFile)]
+        if not uploads:
+            raise HTTPException(400, "Файл не выбран")
+        raw_password = form.get("password")
+        password = str(raw_password).strip() if raw_password else ""
+        # Тома набора идут по имени: …enc.001 < …enc.002 < …
+        uploads.sort(key=lambda u: u.filename or "")
+        filename = uploads[0].filename or "backup"
+        parts = [await u.read() for u in uploads]
 
-        filename = upload.filename
-        data = await upload.read()
+    if password or len(parts) > 1:
+        # Набор томов из Telegram: собрать по порядку и расшифровать паролем архива
+        from app.services.backup_telegram import join_and_decrypt
+        if not password:
+            raise HTTPException(400, "Для набора томов из Telegram укажите пароль архива")
+        try:
+            data = join_and_decrypt(parts, password)
+        except Exception:
+            raise HTTPException(400, "Не удалось расшифровать: неверный пароль или неполный/перепутанный набор томов")
+    else:
+        data = parts[0]
 
     if len(data) < 16:
-        raise HTTPException(400, "File is too small to be a valid backup")
+        raise HTTPException(400, "Файл слишком мал для бэкапа")
 
     _claim_operation("restoring", filename)
     asyncio.create_task(_restore_backup_task(data, filename, app=request.app))

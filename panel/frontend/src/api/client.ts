@@ -1518,9 +1518,10 @@ export const backupApi = {
     api.get(`/backup/${filename}/download`, { responseType: 'blob' }),
   delete: (filename: string) =>
     api.delete<{ success: boolean }>(`/backup/${filename}`),
-  restore: (file: File) => {
+  restore: (files: File[], password?: string) => {
     const formData = new FormData()
-    formData.append('file', file)
+    for (const f of files) formData.append('file', f)
+    if (password) formData.append('password', password)
     return api.post<{ success: boolean; message: string }>('/backup/restore', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
       timeout: 600000,

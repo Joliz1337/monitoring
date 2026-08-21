@@ -131,7 +131,8 @@ export default function Settings() {
   const [backups, setBackups] = useState<BackupInfo[]>([])
   const [backupStatus, setBackupStatus] = useState<BackupStatus | null>(null)
   const [backupLoading, setBackupLoading] = useState(true)
-  const [confirmRestore, setConfirmRestore] = useState<File | null>(null)
+  const [confirmRestore, setConfirmRestore] = useState<File[] | null>(null)
+  const [restorePassword, setRestorePassword] = useState('')
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const backupPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -213,10 +214,12 @@ export default function Settings() {
     }
   }
   
-  const handleRestoreBackup = async (file: File) => {
+  const handleRestoreBackup = async (files: File[]) => {
+    const password = restorePassword
     setConfirmRestore(null)
+    setRestorePassword('')
     try {
-      await backupApi.restore(file)
+      await backupApi.restore(files, password)
       await fetchBackupStatus()
       startBackupPoll()
     } catch (err: any) {
@@ -229,19 +232,15 @@ export default function Settings() {
   }
   
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (file) {
-      setConfirmRestore(file)
-    }
+    const files = Array.from(e.target.files || [])
+    if (files.length) setConfirmRestore(files)
     if (fileInputRef.current) fileInputRef.current.value = ''
   }
-  
+
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault()
-    const file = e.dataTransfer.files?.[0]
-    if (file && file.name.endsWith('.dump')) {
-      setConfirmRestore(file)
-    }
+    const files = Array.from(e.dataTransfer.files || [])
+    if (files.length) setConfirmRestore(files)
   }
 
   const handleRenewCert = async () => {
@@ -1235,7 +1234,7 @@ export default function Settings() {
               <input
                 ref={fileInputRef}
                 type="file"
-                accept=".dump"
+                multiple
                 onChange={handleFileSelect}
                 className="hidden"
               />
@@ -1372,12 +1371,21 @@ export default function Settings() {
                   <h3 className="text-lg font-semibold text-dark-100">{t('settings.backup_restore')}</h3>
                 </div>
                 <p className="text-sm text-dark-300 mb-2">{t('settings.backup_confirm_restore')}</p>
-                <p className="text-xs text-dark-500 mb-5 font-mono bg-dark-800/50 rounded-lg px-3 py-2">
-                  {confirmRestore.name} ({formatBytes(confirmRestore.size)})
+                <p className="text-xs text-dark-500 mb-3 font-mono bg-dark-800/50 rounded-lg px-3 py-2">
+                  {confirmRestore.length === 1
+                    ? `${confirmRestore[0].name} (${formatBytes(confirmRestore[0].size)})`
+                    : t('settings.backup_restore_parts', { count: confirmRestore.length })}
                 </p>
+                <input
+                  type="password"
+                  value={restorePassword}
+                  onChange={e => setRestorePassword(e.target.value)}
+                  placeholder={t('settings.backup_restore_password')}
+                  className="input w-full mb-4"
+                />
                 <div className="flex gap-3">
                   <button
-                    onClick={() => setConfirmRestore(null)}
+                    onClick={() => { setConfirmRestore(null); setRestorePassword('') }}
                     className="flex-1 btn btn-secondary"
                   >
                     {t('common.cancel')}
