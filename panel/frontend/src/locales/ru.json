@@ -123,7 +123,9 @@
     "folder_created": "Папка создана",
     "folder_renamed": "Папка переименована",
     "folder_deleted": "Папка удалена",
-    "server_moved": "Сервер перемещён"
+    "server_moved": "Сервер перемещён",
+    "search_placeholder": "Поиск по имени или IP...",
+    "search_drag_hint": "Перетаскивание отключено на время поиска"
   },
   "servers": {
     "title": "Серверы",
@@ -265,7 +267,8 @@
     "deploy_firewall_profile": "Firewall-профиль",
     "deploy_dnat_profile": "DNAT-профиль",
     "deploy_profile_none": "Не добавлять",
-    "restricted_badge": "Ограничено"
+    "restricted_badge": "Ограничено",
+    "open_dashboard": "Открыть дашборд сервера"
   },
   "infra": {
     "title": "Инфраструктура",

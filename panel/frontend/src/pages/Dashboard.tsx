@@ -14,6 +14,7 @@ import {
   DragOverlay,
   useDroppable,
   type CollisionDetection,
+  type SensorDescriptor,
 } from '@dnd-kit/core'
 import {
   arrayMove,
@@ -51,6 +52,7 @@ import {
   X,
   Loader2,
   GripVertical,
+  Search,
 } from 'lucide-react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useServersStore, type ServerWithMetrics } from '../stores/serversStore'
@@ -66,6 +68,13 @@ import { FAQIcon } from '../components/FAQ'
 
 const COLLAPSED_KEY = 'dashboard_collapsed_folders'
 const FOLDER_ORDER_KEY = 'dashboard_folder_order'
+
+// Без сенсоров drag не стартует: при активном поиске список отфильтрован,
+// и сохранение порядка отправило бы на бэк неполный набор id
+const NO_SENSORS: SensorDescriptor<object>[] = []
+
+const matchesSearch = (server: ServerWithMetrics, query: string): boolean =>
+  server.name.toLowerCase().includes(query) || server.url.toLowerCase().includes(query)
 
 function loadCollapsed(): Set<string> {
   try {
@@ -107,6 +116,7 @@ export default function Dashboard() {
   const [collapsed, setCollapsed] = useState<Set<string>>(loadCollapsed)
   const [emptyFolders, setEmptyFolders] = useState<string[]>([])
   const [folderOrder, setFolderOrder] = useState<string[]>(loadFolderOrder)
+  const [searchQuery, setSearchQuery] = useState('')
   const [modalState, setModalState] = useState<
     | { kind: 'none' }
     | { kind: 'create-folder' }
@@ -156,15 +166,24 @@ export default function Dashboard() {
     }
   }, [displayedServers])
 
+  const normalizedQuery = searchQuery.toLowerCase().trim()
+  const isSearching = normalizedQuery.length > 0
+
+  const visibleServers = useMemo(
+    () => (isSearching ? activeServers.filter(s => matchesSearch(s, normalizedQuery)) : activeServers),
+    [activeServers, isSearching, normalizedQuery],
+  )
+
+  // При поиске пустые папки не показываем — в них нечего искать
   const folders = useMemo(() => {
     const allFolders = new Set<string>()
-    for (const s of activeServers) if (s.folder) allFolders.add(s.folder)
-    for (const f of emptyFolders) allFolders.add(f)
+    for (const s of visibleServers) if (s.folder) allFolders.add(s.folder)
+    if (!isSearching) for (const f of emptyFolders) allFolders.add(f)
 
     const ordered = folderOrder.filter(f => allFolders.has(f))
     const remaining = [...allFolders].filter(f => !folderOrder.includes(f)).sort()
     return [...ordered, ...remaining]
-  }, [activeServers, emptyFolders, folderOrder])
+  }, [visibleServers, isSearching, emptyFolders, folderOrder])
 
   const folderSortableIds = useMemo(
     () => folders.map(f => `sortable-folder:${f}`),
@@ -172,14 +191,14 @@ export default function Dashboard() {
   )
 
   const grouped = useMemo(() => {
-    const map = new Map<string | null, typeof activeServers>()
-    for (const s of activeServers) {
+    const map = new Map<string | null, typeof visibleServers>()
+    for (const s of visibleServers) {
       const key = s.folder || null
       if (!map.has(key)) map.set(key, [])
       map.get(key)!.push(s)
     }
     return map
-  }, [activeServers])
+  }, [visibleServers])
 
   const toggleCollapsed = useCallback((folder: string) => {
     setCollapsed(prev => {
@@ -539,6 +558,33 @@ export default function Dashboard() {
       {/* Fleet summary */}
       <FleetSummary servers={servers} />
 
+      {/* Search */}
+      {activeServers.length > 0 && (
+        <div className="flex items-center gap-3 mb-4">
+          <div className="flex-1 flex items-center gap-2 bg-dark-800/50 border border-dark-700/50 rounded-xl px-3 py-2">
+            <Search className="w-4 h-4 text-dark-400 shrink-0" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+              placeholder={t('dashboard.search_placeholder')}
+              className="bg-transparent text-sm text-dark-100 placeholder-dark-500 outline-none w-full"
+            />
+            {searchQuery && (
+              <button
+                onClick={() => setSearchQuery('')}
+                className="text-dark-500 hover:text-dark-300 transition-colors shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            )}
+          </div>
+          {isSearching && (
+            <span className="text-xs text-dark-500 hidden sm:inline">{t('dashboard.search_drag_hint')}</span>
+          )}
+        </div>
+      )}
+
       {/* Content */}
       {isLoading && activeServers.length === 0 ? (
         <div className={`${gridClass} fade-in`} key="loading">
@@ -560,9 +606,14 @@ export default function Dashboard() {
             </button>
           </div>
         </div>
+      ) : isSearching && visibleServers.length === 0 ? (
+        <div className="card text-center py-16 fade-in" key="no-results">
+          <Search className="w-12 h-12 text-dark-600 mx-auto mb-3" />
+          <p className="text-dark-400">{t('common.no_results')}</p>
+        </div>
       ) : (
         <DndContext
-          sensors={sensors}
+          sensors={isSearching ? NO_SENSORS : sensors}
           collisionDetection={collisionDetection}
           onDragStart={handleDragStart}
           onDragOver={handleDragOver}
@@ -573,7 +624,7 @@ export default function Dashboard() {
               {/* Sortable folder list */}
               <SortableContext items={folderSortableIds} strategy={verticalListSortingStrategy}>
                 {folders.map(folderName => {
-                  const isCollapsed = collapsed.has(folderName)
+                  const isCollapsed = !isSearching && collapsed.has(folderName)
                   const folderServers = grouped.get(folderName) || []
                   return (
                     <SortableFolderItem

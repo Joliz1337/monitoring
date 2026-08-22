@@ -121,7 +121,9 @@
     "folder_created": "Folder created",
     "folder_renamed": "Folder renamed",
     "folder_deleted": "Folder deleted",
-    "server_moved": "Server moved"
+    "server_moved": "Server moved",
+    "search_placeholder": "Search by name or IP...",
+    "search_drag_hint": "Drag-and-drop is disabled while searching"
   },
   "servers": {
     "title": "Servers",
@@ -263,7 +265,8 @@
     "deploy_firewall_profile": "Firewall profile",
     "deploy_dnat_profile": "DNAT profile",
     "deploy_profile_none": "Do not bind",
-    "restricted_badge": "Restricted"
+    "restricted_badge": "Restricted",
+    "open_dashboard": "Open server dashboard"
   },
   "infra": {
     "title": "Infrastructure",
