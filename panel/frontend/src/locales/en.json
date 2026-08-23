@@ -686,7 +686,9 @@
     "auto": {
       "title": "Auto-backups to Telegram",
       "desc": "On a schedule: database dump → password encryption → volumes <50 MB → sent to a Telegram channel. The set embeds the secret-encryption key — restore is self-contained.",
-      "enabled": "Enable",
+      "enabled": "Enable auto-backups",
+      "state_on": "Running on schedule",
+      "state_off": "Off — no backups are created",
       "daily": "Daily",
       "every_hours": "Every N hours",
       "time_utc": "time in UTC",

@@ -110,18 +110,32 @@ export default function AutoBackupCard() {
 
   return (
     <div className="card">
-      <div className="flex items-center justify-between mb-4">
-        <div>
-          <h3 className="text-base font-semibold text-dark-100">{t('backup.auto.title')}</h3>
-          <p className="text-sm text-dark-400 mt-0.5">{t('backup.auto.desc')}</p>
-        </div>
-        <label className="flex items-center gap-2 cursor-pointer">
-          <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
-          <span className="text-sm text-dark-300">{t('backup.auto.enabled')}</span>
-        </label>
+      <div className="mb-4">
+        <h3 className="text-base font-semibold text-dark-100">{t('backup.auto.title')}</h3>
+        <p className="text-sm text-dark-400 mt-0.5">{t('backup.auto.desc')}</p>
       </div>
 
       <div className="space-y-4">
+        <button
+          type="button"
+          onClick={() => setEnabled(!enabled)}
+          className={`w-full flex items-center gap-3 p-3 rounded-xl border transition-colors ${
+            enabled
+              ? 'bg-accent-500/10 border-accent-500/40'
+              : 'bg-dark-800/50 border-dark-700/50 hover:border-dark-600'
+          }`}
+        >
+          <span className={`relative w-11 h-6 rounded-full shrink-0 transition-colors ${enabled ? 'bg-accent-500' : 'bg-dark-600'}`}>
+            <span
+              className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow-md transition-transform ${enabled ? 'translate-x-5' : ''}`}
+            />
+          </span>
+          <span className="text-sm font-medium text-dark-100">{t('backup.auto.enabled')}</span>
+          <span className={`ml-auto text-xs ${enabled ? 'text-accent-400' : 'text-dark-500'}`}>
+            {enabled ? t('backup.auto.state_on') : t('backup.auto.state_off')}
+          </span>
+        </button>
+
         <div>
           <label className="block text-xs text-dark-400 mb-1">{t('backup.auto.schedule')}</label>
           <div className="flex flex-wrap items-center gap-3">
