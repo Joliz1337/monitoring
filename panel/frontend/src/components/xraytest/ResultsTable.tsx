@@ -2,6 +2,7 @@ import { Fragment, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { CheckCircle2, ChevronDown, ChevronRight, XCircle, AlertTriangle, ShieldAlert } from 'lucide-react'
 import type { XrayTestCell } from '../../api/client'
+import { Checkbox } from '../ui/Checkbox'
 import { Tooltip } from '../ui/Tooltip'
 
 type SortKey = 'index' | 'rtt' | 'verdict'
@@ -82,13 +83,8 @@ export function ResultsTable({ cells, groupBySni }: { cells: XrayTestCell[]; gro
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-3 text-xs">
-        <label className="flex items-center gap-2 text-dark-300 cursor-pointer">
-          <input
-            type="checkbox"
-            checked={onlyWorking}
-            onChange={event => setOnlyWorking(event.target.checked)}
-            className="rounded border-dark-700 bg-dark-900 text-accent-500"
-          />
+        <label className="flex items-center gap-2 text-dark-300 cursor-pointer select-none">
+          <Checkbox checked={onlyWorking} onChange={event => setOnlyWorking(event.target.checked)} />
           {t('xray_test.only_working')}
         </label>
         <div className="flex items-center gap-1 ml-auto">

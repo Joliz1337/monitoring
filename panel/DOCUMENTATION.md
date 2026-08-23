@@ -121,6 +121,7 @@ panel/
 │       │   ├── useTestRun.ts            # Хук прогона: запуск, NDJSON-стрим, восстановление job после F5 через localStorage
 │       │   ├── ResultsTable.tsx         # Таблица результатов: сортировка, фильтр «только рабочие», раскрытие деталей и TLS
 │       │   ├── ProfilesTab.tsx          # CRUD источников и наборов SNI
+│       │   ├── CoresTab.tsx             # Выбор версии ядра: список релизов с пометками, загрузка и удаление версий
 │       │   └── HistoryTab.tsx           # История прогонов с раскрытием результатов
 │       ├── pages/Servers.tsx            # Список серверов + InfraTree
 │       ├── components/ui/Skeleton.tsx   # Skeleton-лоадеры (Skeleton, ServerCardSkeleton, MetricCardSkeleton, ChartSkeleton)
@@ -150,7 +151,9 @@ panel/
 │       │   ├── models.py                # ProxyEndpoint/TlsSettings/TransportSettings (frozen), CellResult, коды отказов
 │       │   ├── parsers/                 # Ссылки всех протоколов + json_config.py (чужой конфиг → endpoint'ы)
 │       │   ├── config_builder/          # ProxyEndpoint → конфиг xray/sing-box с socks-inbound на loopback
-│       │   ├── core_manager.py          # Версии и sha256 ядер, скачивание в /app/data, выбор ядра по конфигурации
+│       │   ├── core_manager.py          # Загрузка ядра выбранной версии, проверка целостности, выбор ядра по конфигурации
+│       │   ├── core_registry.py         # Список релизов с GitHub (включая пре-релизы), резолв latest, чтение .dgst
+│       │   ├── startup.py               # Восстановление выбранных версий ядер из настроек при старте
 │       │   ├── probes.py                # DNS, TCP-пинг, TLS-инспекция, e2e через socks, выходной IP, скорость
 │       │   ├── runner.py                # LocalCoreRunner: запуск ядра, killpg-уборка, sweeper
 │       │   ├── node_runner.py           # NodeCoreRunner: доставка исполнителя и ядра на ноду, разбор ответа
@@ -2632,7 +2635,17 @@ SSE-события: `note_update` — `{"content": "...", "version": N}`, `tasks
 
 Обфускация mKCP (`seed`/`headerType`) удалена из Xray 26 и не поддерживается ни одним ядром — такие ссылки помечаются `UnsupportedConfigError` ещё на разборе. Clash YAML сознательно вне охвата.
 
-**Ядра не в образе.** Бинарники весят под 75 МБ на обе архитектуры, а версия ядра не должна быть прибита к релизу панели. Скачиваются один раз в `panel-data:/app/data/xray-test/cores/<core>/<version>/<arch>/`, версии и SHA-256 закреплены в `CORE_RELEASES`; при недоступности GitHub — зеркало `ghfast.top`, где сверка хэша обязательна. Распаковка — `zipfile`/`tarfile` из stdlib (`unzip` в образе панели нет).
+**Ядра не в образе и версия выбирается оператором.** Бинарники весят под 75 МБ на обе архитектуры, а Xray и sing-box выходят чаще панели — прибивать версию к релизу нельзя. Панель тянет список релизов с GitHub API (`core_registry.py`, кэш 30 мин, 30 последних), вкладка «Ядра» показывает их с пометками «пре-релиз», «скачана», «проверенная»; по умолчанию выбрано **`latest` — самая свежая, включая пре-релиз** (именно там появляются новые транспорты). Выбор хранится в `panel_settings` и кэшируется в памяти, как ветка канала обновлений: он нужен фоновым проверкам, где сессии БД нет. Каждая версия лежит отдельно (`/app/data/xray-test/cores/<core>/<version>/<arch>/`), поэтому переключение между уже скачанными мгновенно; лишние удаляются из интерфейса.
+
+Целостность важнее удобства: бинарник панель **запускает у себя**, поэтому подмена — это выполнение чужого кода.
+
+| Версия | Откуда берётся хэш | Зеркало `ghfast.top` |
+|---|---|---|
+| Закреплённая в `PINNED_RELEASES` | из кода | разрешено |
+| Любая другая у Xray | файл `.dgst` рядом с релизом | разрешено |
+| Любая другая у sing-box (`.dgst` не публикуется) | нечем сверять | **запрещено** — только прямой github.com, гарантию даёт TLS |
+
+Дополнительно сверяется размер ассета из GitHub API. Если GitHub API недоступен, панель откатывается на закреплённую версию. Распаковка — `zipfile`/`tarfile` из stdlib (`unzip` в образе панели нет).
 
 **Уборка процессов** — три рубежа, потому что на большой подписке ядер сотни: `finally` у каждой ячейки (`killpg(SIGTERM)` → 3 с → `SIGKILL` → `rmtree`), сборщик раз в 30 с добивает ядра старше 90 с, `stop_xray_test_service()` в `lifespan` — при остановке панели. Ядро запускается в своей process group (`start_new_session=True`): оно порождает дочерние процессы, и kill по одному pid оставил бы сирот.
 
@@ -2654,14 +2667,18 @@ SSE-события: `note_update` — `{"content": "...", "version": N}`, `tasks
 | `GET /api/xray-test/jobs/{id}/stream` | NDJSON: `start`, `cell`, `log`, `done` (переподключаемый, с реплеем) |
 | `POST /api/xray-test/jobs/{id}/cancel` | Отменить прогон |
 | `GET /api/xray-test/jobs/{id}/export` | `fmt=links\|subscription\|csv\|json` |
-| `GET/POST /api/xray-test/cores`, `/cores/download` | Состояние ядер и принудительная загрузка |
+| `GET /api/xray-test/cores` | Состояние ядер: выбор, установленные версии, готовность |
+| `GET /api/xray-test/cores/releases` | Опубликованные версии с GitHub, включая пре-релизы (`refresh=1` — мимо кэша) |
+| `PUT /api/xray-test/cores/version` | Закрепить версию (`latest` или конкретная) |
+| `POST /api/xray-test/cores/download` | Скачать версию заранее |
+| `DELETE /api/xray-test/cores/{core}/{version}` | Удалить скачанную версию |
 | CRUD `/api/xray-test/subscriptions`, `/sni-sets` | Профили источников и наборов SNI |
 | `GET/DELETE /api/xray-test/history[/{id}]` | История прогонов и результаты |
 | `GET /api/xray-test/bundle/{token}` | Отдача бинарника ядра ноде по одноразовому токену |
 
 Путь стрима внесён в `GZipMiddlewareNoSSE` (`app/main.py`) — иначе gzip забуферизовал бы поток.
 
-**Файлы:** `app/services/xray_test/` (см. «Структуру»), `app/routers/xray_test.py`, `configs/xray-test-runner.sh`, `panel/frontend/src/pages/XrayTest.tsx` и `src/components/xraytest/`. Тесты: `test_xray_test_parsers.py`, `test_xray_test_config.py`, `test_xray_test_subscription.py`, `test_xray_test_sanitize.py`, `test_xray_test_node_runner.py`.
+**Файлы:** `app/services/xray_test/` (см. «Структуру»), `app/routers/xray_test.py`, `configs/xray-test-runner.sh`, `panel/frontend/src/pages/XrayTest.tsx` и `src/components/xraytest/`. Тесты: `test_xray_test_parsers.py`, `test_xray_test_config.py`, `test_xray_test_subscription.py`, `test_xray_test_sanitize.py`, `test_xray_test_node_runner.py`, `test_xray_test_cores.py`.
 
 ## Диагностика
 

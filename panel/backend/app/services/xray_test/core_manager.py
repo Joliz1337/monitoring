@@ -1,11 +1,12 @@
-"""Бинарники прокси-ядер: выбор, загрузка, проверка целостности.
+"""Бинарники прокси-ядер: выбор версии, загрузка, проверка целостности.
 
 Ядра не вшиты в образ панели: они весят под 75 МБ на обе архитектуры, а версия
-ядра не должна быть прибита к релизу панели — xray и sing-box выходят чаще.
-Скачиваются один раз в volume panel-data и живут там между обновлениями.
+не должна быть прибита к релизу панели — Xray и sing-box выходят чаще. Каждая
+версия лежит в volume отдельно, поэтому переключение между ними не требует
+перекачивания.
 
-Каждый архив сверяется по SHA-256: зеркало ghfast.top, которым панель пользуется
-на заблокированных серверах, доверенным источником не является.
+Выбранная версия кэшируется в памяти (как ветка канала обновлений): она нужна
+фоновым проверкам, где сессии БД под рукой нет.
 """
 from __future__ import annotations
 
@@ -24,6 +25,8 @@ from pathlib import Path
 from typing import Optional
 
 from app.services.http_client import get_external_client
+from app.services.xray_test import core_registry
+from app.services.xray_test.core_registry import LATEST, ReleaseInfo
 from app.services.xray_test.errors import CoreDownloadError, UnsupportedConfigError
 from app.services.xray_test.models import Core, Protocol, ProxyEndpoint, Transport
 
@@ -33,6 +36,8 @@ CORES_DIR = Path("/app/data/xray-test/cores")
 GITHUB_MIRROR = "https://ghfast.top/"
 DOWNLOAD_TIMEOUT = 180.0
 MAX_ARCHIVE_BYTES = 120 * 1024 * 1024
+
+BINARY_NAMES = {Core.XRAY: "xray", Core.SINGBOX: "sing-box"}
 
 # Границы проверены на живых бинарниках xray 26.3.27 и sing-box 1.13.19.
 SINGBOX_ONLY_PROTOCOLS = frozenset({
@@ -46,65 +51,43 @@ XRAY_ONLY_TRANSPORTS = frozenset({Transport.XHTTP, Transport.MKCP})
 
 
 @dataclass(frozen=True)
-class CoreAsset:
-    filename: str
-    sha256: str
-    member: str
+class PinnedRelease:
+    """Версия с известным хэшем: её можно тянуть через зеркало."""
 
-
-@dataclass(frozen=True)
-class CoreRelease:
     version: str
-    base_url: str
-    binary: str
-    assets: dict[str, CoreAsset]
+    digests: dict[str, str]
 
 
-CORE_RELEASES: dict[Core, CoreRelease] = {
-    Core.XRAY: CoreRelease(
+# Проверены вручную; служат и фолбэком, когда GitHub API недоступен
+PINNED_RELEASES: dict[Core, PinnedRelease] = {
+    Core.XRAY: PinnedRelease(
         version="26.3.27",
-        base_url="https://github.com/XTLS/Xray-core/releases/download/v26.3.27",
-        binary="xray",
-        assets={
-            "amd64": CoreAsset(
-                filename="Xray-linux-64.zip",
-                sha256="23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae",
-                member="xray",
-            ),
-            "arm64": CoreAsset(
-                filename="Xray-linux-arm64-v8a.zip",
-                sha256="4d30283ae614e3057f730f67cd088a42be6fdf91f8639d82cb69e48cde80413c",
-                member="xray",
-            ),
+        digests={
+            "amd64": "23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae",
+            "arm64": "4d30283ae614e3057f730f67cd088a42be6fdf91f8639d82cb69e48cde80413c",
         },
     ),
-    Core.SINGBOX: CoreRelease(
+    Core.SINGBOX: PinnedRelease(
         version="1.13.19",
-        base_url="https://github.com/SagerNet/sing-box/releases/download/v1.13.19",
-        binary="sing-box",
-        assets={
-            "amd64": CoreAsset(
-                filename="sing-box-1.13.19-linux-amd64.tar.gz",
-                sha256="ef88a9e577d474210867bd708933d042e9b70106529df2656182c9db90106aa1",
-                member="sing-box-1.13.19-linux-amd64/sing-box",
-            ),
-            "arm64": CoreAsset(
-                filename="sing-box-1.13.19-linux-arm64.tar.gz",
-                sha256="7fe3597a95a3c5ad67477b1d7653b9ce097e0be7c676758eba1fcf558f353d57",
-                member="sing-box-1.13.19-linux-arm64/sing-box",
-            ),
+        digests={
+            "amd64": "ef88a9e577d474210867bd708933d042e9b70106529df2656182c9db90106aa1",
+            "arm64": "7fe3597a95a3c5ad67477b1d7653b9ce097e0be7c676758eba1fcf558f353d57",
         },
     ),
 }
 
-_locks: dict[Core, asyncio.Lock] = {core: asyncio.Lock() for core in CORE_RELEASES}
+SETTING_KEYS = {
+    Core.XRAY: "xray_test_version_xray",
+    Core.SINGBOX: "xray_test_version_singbox",
+}
+
+_selected: dict[Core, str] = {core: LATEST for core in Core}
+_locks: dict[Core, asyncio.Lock] = {core: asyncio.Lock() for core in Core}
 
 
 def detect_arch() -> str:
     machine = platform.machine().lower()
-    if machine in ("aarch64", "arm64"):
-        return "arm64"
-    return "amd64"
+    return "arm64" if machine in ("aarch64", "arm64") else "amd64"
 
 
 def select_core(endpoint: ProxyEndpoint) -> Core:
@@ -135,71 +118,149 @@ def select_core(endpoint: ProxyEndpoint) -> Core:
     return Core.SINGBOX if needs_singbox else Core.XRAY
 
 
-def binary_path(core: Core, arch: Optional[str] = None) -> Path:
-    release = CORE_RELEASES[core]
-    return CORES_DIR / core.value / release.version / (arch or detect_arch()) / release.binary
+def selected_version(core: Core) -> str:
+    return _selected.get(core, LATEST)
 
 
-def is_installed(core: Core) -> bool:
-    path = binary_path(core)
+def set_selected_version(core: Core, version: str) -> None:
+    _selected[core] = version or LATEST
+
+
+def load_selected(values: dict[str, str]) -> None:
+    """Восстановить выбор из настроек панели при старте."""
+    for core, key in SETTING_KEYS.items():
+        value = (values.get(key) or "").strip()
+        if value:
+            _selected[core] = value
+
+
+def binary_path(core: Core, version: str, arch: Optional[str] = None) -> Path:
+    return CORES_DIR / core.value / version / (arch or detect_arch()) / BINARY_NAMES[core]
+
+
+def is_installed(core: Core, version: str) -> bool:
+    path = binary_path(core, version)
     return path.is_file() and os.access(path, os.X_OK)
 
 
-def installed_status() -> list[dict]:
-    return [
-        {
-            "core": core.value,
-            "version": release.version,
-            "installed": is_installed(core),
-            "path": str(binary_path(core)),
-            "size": binary_path(core).stat().st_size if is_installed(core) else None,
-        }
-        for core, release in CORE_RELEASES.items()
-    ]
+def installed_versions(core: Core) -> list[str]:
+    root = CORES_DIR / core.value
+    if not root.is_dir():
+        return []
+    return sorted(
+        (item.name for item in root.iterdir() if item.is_dir() and is_installed(core, item.name)),
+        reverse=True,
+    )
 
 
-async def ensure_core(core: Core) -> Path:
+def remove_version(core: Core, version: str) -> None:
+    target = CORES_DIR / core.value / version
+    if not target.is_dir():
+        raise CoreDownloadError(f"Версия {core.value} {version} не установлена")
+    shutil.rmtree(target, ignore_errors=True)
+
+
+async def ensure_core(core: Core, version: Optional[str] = None) -> Path:
     """Путь к бинарнику ядра, при необходимости скачав его.
 
-    Блокировка на ядро: параллельные тесты не должны качать один архив
-    несколько раз и писать в один и тот же файл.
+    Блокировка на ядро: параллельные проверки не должны качать один архив
+    несколько раз и писать в один файл.
     """
-    path = binary_path(core)
-    if is_installed(core):
-        return path
-
     async with _locks[core]:
-        if is_installed(core):
+        release = await _resolve(core, version)
+        path = binary_path(core, release.version)
+        if is_installed(core, release.version):
             return path
-        await asyncio.to_thread(_install_sync, core, await _download(core))
+
+        payload, digest = await _download(core, release)
+        await asyncio.to_thread(_install_sync, core, release, payload)
+        logger.info(
+            "xray-test: installed %s %s (%s, sha256 %s)",
+            core.value, release.version, detect_arch(), (digest or "не сверялся")[:12],
+        )
         return path
 
 
-async def _download(core: Core) -> bytes:
-    arch = detect_arch()
-    release = CORE_RELEASES[core]
-    asset = release.assets.get(arch)
-    if asset is None:
-        raise CoreDownloadError(f"Нет сборки {core.value} для архитектуры {arch}")
+async def resolve_release(core: Core, version: Optional[str] = None) -> ReleaseInfo:
+    return await _resolve(core, version)
 
-    direct = f"{release.base_url}/{asset.filename}"
+
+async def _resolve(core: Core, version: Optional[str]) -> ReleaseInfo:
+    wanted = version or selected_version(core)
+    try:
+        return await core_registry.resolve_version(core, wanted)
+    except CoreDownloadError:
+        # GitHub недоступен: закреплённая версия остаётся рабочим вариантом
+        pinned = PINNED_RELEASES[core]
+        if wanted in (LATEST, pinned.version) and is_installed(core, pinned.version):
+            return _pinned_release(core)
+        if wanted in (LATEST, pinned.version):
+            logger.warning("xray-test: releases unavailable, falling back to pinned %s", pinned.version)
+            return _pinned_release(core)
+        raise
+
+
+def _pinned_release(core: Core) -> ReleaseInfo:
+    pinned = PINNED_RELEASES[core]
+    arch = detect_arch()
+    name = core_registry.ASSET_NAMES[core][arch].format(version=pinned.version)
+    base = {
+        Core.XRAY: f"https://github.com/XTLS/Xray-core/releases/download/v{pinned.version}",
+        Core.SINGBOX: f"https://github.com/SagerNet/sing-box/releases/download/v{pinned.version}",
+    }[core]
+    return ReleaseInfo(
+        version=pinned.version,
+        tag=f"v{pinned.version}",
+        prerelease=False,
+        published_at="",
+        asset_url=f"{base}/{name}",
+        asset_name=name,
+        asset_size=None,
+        digest_url=None,
+    )
+
+
+async def _expected_digest(core: Core, release: ReleaseInfo) -> Optional[str]:
+    arch = detect_arch()
+    pinned = PINNED_RELEASES[core]
+    if release.version == pinned.version:
+        return pinned.digests.get(arch)
+    return await core_registry.fetch_digest(release)
+
+
+async def _download(core: Core, release: ReleaseInfo) -> tuple[bytes, Optional[str]]:
+    if not release.asset_url:
+        raise CoreDownloadError(f"У {core.value} {release.version} нет сборки под {detect_arch()}")
+
+    expected = await _expected_digest(core, release)
+    # Зеркало допустимо только с известным хэшем: иначе подменённый бинарник
+    # запустится у нас же, а это выполнение чужого кода
+    urls = [release.asset_url]
+    if expected:
+        urls.append(f"{GITHUB_MIRROR}{release.asset_url}")
+
     errors: list[str] = []
-    for url in (direct, f"{GITHUB_MIRROR}{direct}"):
+    for url in urls:
         try:
             payload = await _fetch(url)
         except Exception as exc:  # noqa: BLE001 — фолбэк на зеркало по любой сетевой причине
-            errors.append(f"{url}: {exc}")
+            errors.append(f"{url.split('//')[1][:40]}…: {exc}")
             continue
 
         digest = sha256(payload).hexdigest()
-        if digest != asset.sha256:
-            errors.append(f"{url}: контрольная сумма не совпала ({digest[:12]}…)")
+        if expected and digest != expected:
+            errors.append(f"контрольная сумма не совпала ({digest[:12]}…)")
             continue
+        if release.asset_size and len(payload) != release.asset_size:
+            errors.append(f"размер не совпал ({len(payload)} вместо {release.asset_size})")
+            continue
+        return payload, digest if expected else None
 
-        logger.info("xray-test: downloaded %s %s (%s)", core.value, release.version, arch)
-        return payload
-
-    raise CoreDownloadError("; ".join(errors))
+    hint = "" if expected else (
+        " Для этой версии контрольная сумма не опубликована, поэтому зеркало не используется — "
+        "нужен прямой доступ к github.com"
+    )
+    raise CoreDownloadError("; ".join(errors) + hint)
 
 
 async def _fetch(url: str) -> bytes:
@@ -216,31 +277,31 @@ async def _fetch(url: str) -> bytes:
     return b"".join(chunks)
 
 
-def _install_sync(core: Core, payload: bytes) -> None:
+def _install_sync(core: Core, release: ReleaseInfo, payload: bytes) -> None:
     """Распаковка stdlib-средствами: unzip в образе панели нет."""
-    release = CORE_RELEASES[core]
     arch = detect_arch()
-    asset = release.assets[arch]
-    target = binary_path(core, arch)
+    target = binary_path(core, release.version, arch)
     target.parent.mkdir(parents=True, exist_ok=True)
+    member = core_registry.asset_member(core, release.version, arch)
+    name = release.asset_name or ""
 
     with tempfile.TemporaryDirectory(dir=str(target.parent)) as tmp:
         tmp_dir = Path(tmp)
-        archive = tmp_dir / asset.filename
+        archive = tmp_dir / (name or "core.bin")
         archive.write_bytes(payload)
-        extracted = tmp_dir / release.binary
+        extracted = tmp_dir / BINARY_NAMES[core]
 
-        if asset.filename.endswith(".zip"):
+        if name.endswith(".zip"):
             with zipfile.ZipFile(archive) as zf:
-                with zf.open(asset.member) as src, extracted.open("wb") as dst:
+                with zf.open(member) as src, extracted.open("wb") as dst:
                     shutil.copyfileobj(src, dst)
         else:
             with tarfile.open(archive, "r:gz") as tf:
-                member = tf.extractfile(asset.member)
-                if member is None:
-                    raise CoreDownloadError(f"В архиве нет файла {asset.member}")
+                source = tf.extractfile(member)
+                if source is None:
+                    raise CoreDownloadError(f"В архиве нет файла {member}")
                 with extracted.open("wb") as dst:
-                    shutil.copyfileobj(member, dst)
+                    shutil.copyfileobj(source, dst)
 
         extracted.chmod(extracted.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         os.replace(extracted, target)

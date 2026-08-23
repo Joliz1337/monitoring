@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   FlaskConical, Link2, FileJson, Rss, Bookmark, History, Play, Square,
-  Loader2, Download, Globe, Search, ChevronDown, ChevronUp,
+  Loader2, Download, Globe, Search, ChevronDown, ChevronUp, Cpu,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -18,13 +18,15 @@ import {
   type XrayTestSource,
 } from '../api/client'
 import { FAQIcon } from '../components/FAQ'
+import { Checkbox } from '../components/ui/Checkbox'
 import { nodeAllows } from '../utils/nodeCapabilities'
 import { ResultsTable } from '../components/xraytest/ResultsTable'
 import { ProfilesTab } from '../components/xraytest/ProfilesTab'
 import { HistoryTab } from '../components/xraytest/HistoryTab'
+import { CoresTab } from '../components/xraytest/CoresTab'
 import { extractError, useTestRun } from '../components/xraytest/useTestRun'
 
-type TabType = 'links' | 'json' | 'subscription' | 'profiles' | 'history'
+type TabType = 'links' | 'json' | 'subscription' | 'profiles' | 'history' | 'cores'
 
 const USER_AGENTS = ['v2rayNG/1.9.24', 'clash-verge/v1.7.7', 'Happ/1.0', 'sing-box/1.13.19']
 
@@ -38,6 +40,7 @@ export default function XrayTest() {
     { id: 'subscription', label: t('xray_test.tab_subscription'), icon: Rss },
     { id: 'profiles', label: t('xray_test.tab_profiles'), icon: Bookmark },
     { id: 'history', label: t('xray_test.tab_history'), icon: History },
+    { id: 'cores', label: t('xray_test.tab_cores'), icon: Cpu },
   ]
 
   return (
@@ -84,6 +87,8 @@ export default function XrayTest() {
           <ProfilesTab key="profiles" />
         ) : activeTab === 'history' ? (
           <HistoryTab key="history" />
+        ) : activeTab === 'cores' ? (
+          <CoresTab key="cores" />
         ) : (
           <TesterTab key={activeTab} source={activeTab} />
         )}
@@ -212,7 +217,7 @@ function TesterTab({ source }: { source: XrayTestSource }) {
     })
   }
 
-  const missingCore = cores.find(core => !core.installed)
+  const missingCore = cores.find(core => !core.ready && core.resolved)
   const progress = run.total ? Math.round((run.cells.length / run.total) * 100) : 0
 
   return (
@@ -361,13 +366,8 @@ function TesterTab({ source }: { source: XrayTestSource }) {
                   ))}
                 </div>
               )}
-              <label className="flex items-center gap-2 mt-2 text-xs text-dark-300 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={syncHost}
-                  onChange={event => setSyncHost(event.target.checked)}
-                  className="rounded border-dark-700 bg-dark-900 text-accent-500"
-                />
+              <label className="flex items-center gap-2 mt-2 text-xs text-dark-300 cursor-pointer select-none">
+                <Checkbox checked={syncHost} onChange={event => setSyncHost(event.target.checked)} />
                 {t('xray_test.sync_host')}
               </label>
             </div>
@@ -401,7 +401,7 @@ function TesterTab({ source }: { source: XrayTestSource }) {
 
             {missingCore && (
               <div className="text-[11px] text-dark-400">
-                {t('xray_test.core_will_download', { core: missingCore.core, version: missingCore.version })}
+                {t('xray_test.core_will_download', { core: missingCore.core, version: missingCore.resolved })}
               </div>
             )}
           </div>
@@ -494,17 +494,11 @@ function ConfigRow({ config, checked, onToggle }: {
   const { t } = useTranslation()
   return (
     <label
-      className={`flex items-center gap-3 px-3 py-2 text-xs cursor-pointer hover:bg-dark-800/30 ${
-        config.unsupported ? 'opacity-60' : ''
-      }`}
+      className={`flex items-center gap-3 px-3 py-2 text-xs cursor-pointer select-none transition-colors ${
+        config.unsupported ? 'opacity-60' : 'hover:bg-dark-800/30'
+      } ${checked && !config.unsupported ? 'bg-accent-500/[0.06]' : ''}`}
     >
-      <input
-        type="checkbox"
-        checked={checked}
-        disabled={!!config.unsupported}
-        onChange={onToggle}
-        className="rounded border-dark-700 bg-dark-900 text-accent-500"
-      />
+      <Checkbox checked={checked} disabled={!!config.unsupported} onChange={onToggle} />
       <span className="flex-1 min-w-0">
         <span className="block text-dark-200 truncate">
           {config.remark || `${config.address}:${config.port}`}
@@ -533,13 +527,10 @@ function Toggle({ checked, onChange, label, hint }: {
   hint?: string
 }) {
   return (
-    <label className="flex items-start gap-2 cursor-pointer">
-      <input
-        type="checkbox"
-        checked={checked}
-        onChange={event => onChange(event.target.checked)}
-        className="mt-0.5 rounded border-dark-700 bg-dark-900 text-accent-500"
-      />
+    <label className="flex items-start gap-2 cursor-pointer select-none">
+      <span className="mt-0.5">
+        <Checkbox checked={checked} onChange={event => onChange(event.target.checked)} />
+      </span>
       <span>
         {label}
         {hint && <span className="block text-dark-500 text-[11px]">{hint}</span>}

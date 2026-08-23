@@ -584,10 +584,23 @@ export interface XrayTestJobInfo {
 
 export interface XrayTestCoreInfo {
   core: string
+  selected: string
+  resolved: string | null
+  installed: string[]
+  ready: boolean
+  pinned: string
+  error: string | null
+}
+
+export interface XrayTestCoreRelease {
   version: string
-  installed: boolean
-  path: string
+  tag: string
+  prerelease: boolean
+  published_at: string
+  available: boolean
   size: number | null
+  verifiable: boolean
+  installed: boolean
 }
 
 export interface XrayTestSubscriptionProfile {
@@ -648,7 +661,19 @@ export const xrayTestApi = {
   jobs: () => api.get<{ jobs: XrayTestJobInfo[] }>('/xray-test/jobs'),
   cancel: (jobId: string) => api.post(`/xray-test/jobs/${jobId}/cancel`),
   cores: () => api.get<{ cores: XrayTestCoreInfo[]; arch: string }>('/xray-test/cores'),
-  downloadCore: (core: string) => api.post(`/xray-test/cores/download?core=${core}`),
+  coreReleases: (core: string, refresh = false) =>
+    api.get<{ releases: XrayTestCoreRelease[]; selected: string }>(
+      `/xray-test/cores/releases?core=${encodeURIComponent(core)}&refresh=${refresh}`,
+    ),
+  setCoreVersion: (core: string, version: string) =>
+    api.put<{ success: boolean; selected: string }>('/xray-test/cores/version', { core, version }),
+  downloadCore: (core: string, version?: string) =>
+    api.post<{ success: boolean; version: string }>(
+      `/xray-test/cores/download?core=${encodeURIComponent(core)}` +
+      (version ? `&version=${encodeURIComponent(version)}` : ''),
+    ),
+  deleteCoreVersion: (core: string, version: string) =>
+    api.delete(`/xray-test/cores/${encodeURIComponent(core)}/${encodeURIComponent(version)}`),
   subscriptions: () =>
     api.get<{ profiles: XrayTestSubscriptionProfile[] }>('/xray-test/subscriptions'),
   createSubscription: (body: {

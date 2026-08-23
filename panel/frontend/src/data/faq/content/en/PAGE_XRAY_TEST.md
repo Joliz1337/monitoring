@@ -24,6 +24,12 @@ In "Run from" you can pick any of your servers, and the run happens there instea
 
 Local ports 7501–7504 on the node are reserved for these checks — re-applying system optimizations enables the reservation.
 
+## Core version
+
+The "Cores" tab lists released Xray and sing-box versions and shows which one is in use. The default is "Always the newest", pre-releases included — new transports land there first. You can pin a specific version instead: downloaded ones sit side by side, so switching is instant.
+
+The panel runs the core binary itself, so downloads are treated strictly. Xray publishes a checksum next to each release, so those versions are verified and may come through the mirror when GitHub is blocked. sing-box publishes none, so its unpinned versions are downloaded only straight from GitHub, where TLS provides the guarantee. Without direct access, pick a version marked "verified".
+
 ## Not supported
 
 Clash YAML subscriptions are not parsed. mKCP obfuscation (`seed`, `headerType`) was removed in Xray 26, so such links are marked unsupported. Keys with certificate verification disabled are routed to sing-box automatically: Xray dropped that option.

@@ -17,7 +17,7 @@ from typing import Optional
 
 from app.config import get_settings
 from app.services.net_utils import resolve_panel_ip
-from app.services.xray_test.core_manager import CORE_RELEASES, binary_path, ensure_core
+from app.services.xray_test.core_manager import ensure_core, resolve_release
 from app.services.xray_test.models import Core
 
 TOKEN_TTL_SECONDS = 300
@@ -44,8 +44,13 @@ _digest_cache: dict[Path, str] = {}
 
 
 async def issue_ticket(core: Core) -> BundleTicket:
-    """Скачать ядро себе (если ещё нет) и выдать ноде одноразовую ссылку."""
-    path = await ensure_core(core)
+    """Скачать ядро себе (если ещё нет) и выдать ноде одноразовую ссылку.
+
+    Хэш считается по файлу, который панель уже проверила у себя, — нода
+    сверяет с ним и потому не зависит от доверия к транспорту.
+    """
+    release = await resolve_release(core)
+    path = await ensure_core(core, release.version)
     digest = await _digest(path)
     _drop_expired()
 
@@ -56,7 +61,7 @@ async def issue_ticket(core: Core) -> BundleTicket:
         token=token,
         url=f"{await panel_base_url()}/api/xray-test/bundle/{token}",
         sha256=digest,
-        version=CORE_RELEASES[core].version,
+        version=release.version,
         core=core,
     )
 
@@ -101,7 +106,3 @@ def _drop_expired() -> None:
     now = time.time()
     for token in [key for key, grant in _grants.items() if grant.expires_at < now]:
         _grants.pop(token, None)
-
-
-def binary_for(core: Core) -> Path:
-    return binary_path(core)

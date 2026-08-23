@@ -13,6 +13,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
+    PanelSettings,
     XrayTestResult,
     XrayTestRun,
     XrayTestSniSet,
@@ -30,6 +31,23 @@ class ProfileNameTakenError(XrayTestError):
 
 class ProfileNotFoundError(XrayTestError):
     code = "PROFILE_NOT_FOUND"
+
+
+async def load_core_versions(db: AsyncSession, keys: list[str]) -> dict[str, str]:
+    """Выбранные версии ядер из настроек панели — читается один раз при старте."""
+    rows = await db.execute(
+        select(PanelSettings.key, PanelSettings.value).where(PanelSettings.key.in_(keys))
+    )
+    return {key: value for key, value in rows.all() if value}
+
+
+async def save_core_version(db: AsyncSession, key: str, version: str) -> None:
+    setting = await db.scalar(select(PanelSettings).where(PanelSettings.key == key))
+    if setting is None:
+        db.add(PanelSettings(key=key, value=version))
+    else:
+        setting.value = version
+    await db.commit()
 
 
 async def list_subscriptions(db: AsyncSession) -> list[dict]:

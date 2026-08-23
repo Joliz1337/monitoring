@@ -20,7 +20,14 @@ from app.auth import verify_auth
 from app.database import async_session_maker, get_db
 from app.routers.proxy import get_server_by_id, require_capability
 from app.services.node_capabilities import Capability
-from app.services.xray_test import bundle, core_manager, export, storage, subscription
+from app.services.xray_test import (
+    bundle,
+    core_manager,
+    core_registry,
+    export,
+    storage,
+    subscription,
+)
 from app.services.xray_test.errors import XrayTestError
 from app.services.xray_test.job_manager import XrayTestJob, get_xray_test_manager
 from app.services.xray_test.matrix import build_matrix
@@ -70,6 +77,11 @@ class SubscriptionProfileUpdate(BaseModel):
     name: Optional[str] = Field(default=None, max_length=200)
     payload: Optional[str] = Field(default=None, max_length=200_000)
     user_agent: Optional[str] = None
+
+
+class CoreVersionRequest(BaseModel):
+    core: Literal["xray", "sing-box"]
+    version: Optional[str] = Field(default=None, max_length=40)
 
 
 class SniSetRequest(BaseModel):
@@ -293,18 +305,108 @@ async def export_job(
 
 @router.get("/cores")
 async def list_cores(_: dict = Depends(verify_auth)):
-    return {"cores": core_manager.installed_status(), "arch": core_manager.detect_arch()}
+    """Состояние ядер: что выбрано, что установлено, какая версия сейчас в деле."""
+    arch = core_manager.detect_arch()
+    cores = []
+    for core in Core:
+        selected = core_manager.selected_version(core)
+        installed = core_manager.installed_versions(core)
+        resolved: Optional[str] = None
+        error: Optional[str] = None
+        try:
+            resolved = (await core_manager.resolve_release(core)).version
+        except XrayTestError as exc:
+            error = str(exc)
+
+        cores.append({
+            "core": core.value,
+            "selected": selected,
+            "resolved": resolved,
+            "installed": installed,
+            "ready": bool(resolved and resolved in installed),
+            "pinned": core_manager.PINNED_RELEASES[core].version,
+            "error": error,
+        })
+    return {"cores": cores, "arch": arch}
+
+
+@router.get("/cores/releases")
+async def list_core_releases(
+    core: Literal["xray", "sing-box"] = Query(...),
+    refresh: bool = Query(False),
+    _: dict = Depends(verify_auth),
+):
+    """Опубликованные версии ядра, включая пре-релизы."""
+    target = Core(core)
+    try:
+        releases = await core_registry.list_releases(target, refresh=refresh)
+    except XrayTestError as exc:
+        raise _domain_error(exc) from exc
+
+    installed = set(core_manager.installed_versions(target))
+    return {
+        "releases": [
+            {
+                "version": item.version,
+                "tag": item.tag,
+                "prerelease": item.prerelease,
+                "published_at": item.published_at,
+                "available": item.available,
+                "size": item.asset_size,
+                "verifiable": bool(item.digest_url) or item.version == core_manager.PINNED_RELEASES[target].version,
+                "installed": item.version in installed,
+            }
+            for item in releases
+        ],
+        "selected": core_manager.selected_version(target),
+    }
+
+
+@router.put("/cores/version")
+async def choose_core_version(
+    req: CoreVersionRequest,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth),
+):
+    """Закрепить версию ядра. `latest` — всегда самая свежая, включая пре-релиз."""
+    target = Core(req.core)
+    version = (req.version or core_registry.LATEST).strip()
+
+    if version != core_registry.LATEST:
+        try:
+            await core_registry.resolve_version(target, version)
+        except XrayTestError as exc:
+            raise _domain_error(exc) from exc
+
+    core_manager.set_selected_version(target, version)
+    await storage.save_core_version(db, core_manager.SETTING_KEYS[target], version)
+    return {"success": True, "core": target.value, "selected": version}
 
 
 @router.post("/cores/download")
 async def download_core(
-    core: Literal["xray", "sing-box"] = Query(...), _: dict = Depends(verify_auth)
+    core: Literal["xray", "sing-box"] = Query(...),
+    version: Optional[str] = Query(None),
+    _: dict = Depends(verify_auth),
 ):
     try:
-        path = await core_manager.ensure_core(Core(core))
+        target = Core(core)
+        release = await core_manager.resolve_release(target, version)
+        path = await core_manager.ensure_core(target, release.version)
     except XrayTestError as exc:
         raise _domain_error(exc) from exc
-    return {"success": True, "path": str(path)}
+    return {"success": True, "version": release.version, "path": str(path)}
+
+
+@router.delete("/cores/{core}/{version}")
+async def delete_core_version(
+    core: Literal["xray", "sing-box"], version: str, _: dict = Depends(verify_auth)
+):
+    try:
+        core_manager.remove_version(Core(core), version)
+    except XrayTestError as exc:
+        raise _domain_error(exc) from exc
+    return {"success": True}
 
 
 @router.get("/bundle/{token}")

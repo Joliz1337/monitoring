@@ -28,6 +28,7 @@ from app.services.torrent_blocker import start_torrent_blocker, stop_torrent_blo
 from app.services.antiddos_manager import start_antiddos_manager, stop_antiddos_manager
 from app.services.node_sync_queue import start_node_sync_queue, stop_node_sync_queue
 from app.services.xray_test.runner import start_xray_test_service, stop_xray_test_service
+from app.services.xray_test.startup import load_xray_test_versions
 from app.services.traffic_import import start_traffic_import, stop_traffic_import
 from app.services.http_client import init_http_clients, close_http_clients
 from app.services.pki import load_or_create_keygen
@@ -89,6 +90,7 @@ async def lifespan(app: FastAPI):
 
     async with async_session() as db:
         branch = await load_branch_from_db(db)
+        await load_xray_test_versions(db)
     logger.info(f"Update channel: {branch}")
     
     await _init_optional_module("app.services._ext", "init_ext_db")
