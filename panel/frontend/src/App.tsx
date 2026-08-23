@@ -46,6 +46,7 @@ const FirewallProfiles = lazyRetry(() => import('./pages/FirewallProfiles'))
 const SystemOptimizations = lazyRetry(() => import('./pages/SystemOptimizations'))
 const TorrentBlocker = lazyRetry(() => import('./pages/TorrentBlocker'))
 const AntiDdos = lazyRetry(() => import('./pages/AntiDdos'))
+const XrayTest = lazyRetry(() => import('./pages/XrayTest'))
 const RemnawaveNginx = lazyRetry(() => import('./pages/RemnawaveNginx'))
 const DnatProfiles = lazyRetry(() => import('./pages/DnatProfiles'))
 const Dnat = lazyRetry(() => import('./pages/Dnat'))
@@ -201,6 +202,7 @@ export default function App() {
           <Route path="updates" element={<SuspenseWithBoundary><Updates /></SuspenseWithBoundary>} />
           <Route path="system-optimizations" element={<SuspenseWithBoundary><SystemOptimizations /></SuspenseWithBoundary>} />
           <Route path="anti-ddos" element={<SuspenseWithBoundary><AntiDdos /></SuspenseWithBoundary>} />
+          <Route path="xray-test" element={<SuspenseWithBoundary><XrayTest /></SuspenseWithBoundary>} />
           <Route path="remnawave-nginx" element={<SuspenseWithBoundary><RemnawaveNginx /></SuspenseWithBoundary>} />
           {ExtPageLazy && (
             <Route 

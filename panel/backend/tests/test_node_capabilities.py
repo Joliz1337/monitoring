@@ -259,6 +259,8 @@ class CallSiteCoverageTest(unittest.TestCase):
         "services/torrent_blocker.py",
         "services/traffic_import.py",
         "services/wildcard_ssl.py",
+        # гейт в роутере xray_test: require_capability(EXEC) до старта прогона
+        "services/xray_test/node_runner.py",
     }
 
     # Ходят только по always-allowed адресам либо обязаны работать всегда:

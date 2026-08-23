@@ -31,7 +31,7 @@
 
 set -u
 
-FORMULA_VERSION="1.4.0"
+FORMULA_VERSION="1.5.0"
 FACTS_SCHEMA=1
 
 # Гранулярность округления MemTotal вниз. Мирится с джиттером MemTotal между
@@ -347,8 +347,9 @@ detect_node_api_port() {
 
 compute_reserved_ports() {
     NODE_API_PORT=$(detect_node_api_port)
-    # 7500 — внутренний uvicorn ноды, 2222 — SSH-порт контейнера Remnawave.
-    local tokens="7500 $NODE_API_PORT 2222"
+    # 7500 — внутренний uvicorn ноды, 7501-7504 — локальные socks-порты проверки
+    # прокси-конфигураций из панели, 2222 — SSH-порт контейнера Remnawave.
+    local tokens="7500 7501-7504 $NODE_API_PORT 2222"
     if [ -f "$RESERVED_EXTRA_FILE" ]; then
         tokens="$tokens $(grep -vE '^[[:space:]]*#' "$RESERVED_EXTRA_FILE" 2>/dev/null | tr ',;' '  ')"
     fi

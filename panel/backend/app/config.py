@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     
     # Domain for CORS (optional, defaults to same-origin only)
     domain: str = ""
+    # Внешний порт панели: ноды по нему забирают ядра прокси для проверок
+    panel_port: int = 443
     
     ext_key: str = ""
     panel_enc_key: str = ""

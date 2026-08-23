@@ -136,6 +136,8 @@ services:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-panel_secret}
       - POSTGRES_DB=${POSTGRES_DB:-panel}
       - DOMAIN=${DOMAIN}
+      # Ноды забирают ядра прокси для проверок по внешнему адресу панели
+      - PANEL_PORT=${PANEL_PORT:-443}
       - EXT_KEY=${EXT_KEY:-}
       - PANEL_ENC_KEY=${PANEL_ENC_KEY:-}
     volumes:

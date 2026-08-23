@@ -1050,6 +1050,83 @@ class TrafficImportState(Base):
     last_error = Column(String(500), nullable=True)
 
 
+class XrayTestSubscription(Base):
+    """Сохранённый источник конфигураций для проверки: подписка или список ссылок."""
+    __tablename__ = "xray_test_subscriptions"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(200), nullable=False, unique=True)
+    kind = Column(String(10), nullable=False, default="url", server_default="url")  # url | links
+    # И URL подписки, и сами ссылки содержат ключи доступа — храним зашифрованными
+    payload = Column(EncryptedString, nullable=False)
+    user_agent = Column(String(200), nullable=True)
+    last_fetched_at = Column(DateTime(timezone=True), nullable=True)
+    last_count = Column(Integer, default=0, server_default="0")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class XrayTestSniSet(Base):
+    """Именованный список SNI для проверки одной конфигурации по многим доменам."""
+    __tablename__ = "xray_test_sni_sets"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(200), nullable=False, unique=True)
+    sni_list = Column(Text, nullable=False)  # JSON-массив доменов
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class XrayTestRun(Base):
+    """Сводка прогона. Хранится ограниченное число последних — см. history.py."""
+    __tablename__ = "xray_test_runs"
+
+    id = Column(Integer, primary_key=True)
+    started_at = Column(DateTime(timezone=True), server_default=func.now())
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+    source = Column(String(20), nullable=False)      # links | json | subscription
+    source_name = Column(String(200), nullable=True)
+    location = Column(String(40), nullable=False)    # panel | node:<id>
+    location_name = Column(String(200), nullable=True)
+    status = Column(String(12), nullable=False)      # success | error | cancelled
+    total = Column(Integer, default=0, server_default="0")
+    ok_count = Column(Integer, default=0, server_default="0")
+    degraded_count = Column(Integer, default=0, server_default="0")
+    fail_count = Column(Integer, default=0, server_default="0")
+
+
+class XrayTestResult(Base):
+    """Строка результата прогона.
+
+    Секретов не хранит: ссылка живёт только в памяти задачи, сюда попадают адрес,
+    протокол и метрики — этого хватает, чтобы сравнить прогоны между собой.
+    """
+    __tablename__ = "xray_test_results"
+
+    id = Column(BigInteger, primary_key=True)
+    run_id = Column(Integer, ForeignKey("xray_test_runs.id", ondelete="CASCADE"), nullable=False)
+    remark = Column(String(200), nullable=True)
+    protocol = Column(String(20), nullable=True)
+    address = Column(String(255), nullable=True)
+    port = Column(Integer, nullable=True)
+    sni = Column(String(255), nullable=True)
+    transport = Column(String(20), nullable=True)
+    security = Column(String(20), nullable=True)
+    core = Column(String(20), nullable=True)
+    verdict = Column(String(10), nullable=False)
+    reason = Column(String(40), nullable=True)
+    rtt_ms = Column(Float, nullable=True)
+    handshake_ms = Column(Float, nullable=True)
+    tcp_min_ms = Column(Float, nullable=True)
+    speed_mbps = Column(Float, nullable=True)
+    exit_ip = Column(String(64), nullable=True)
+    exit_country = Column(String(8), nullable=True)
+
+    __table_args__ = (
+        Index('idx_xray_test_results_run', 'run_id'),
+    )
+
+
 class ServerDowntime(Base):
     """Интервалы простоя: недоступность ноды и остановки самой панели.
 

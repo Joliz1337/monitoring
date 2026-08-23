@@ -512,24 +512,24 @@ rp_facts() {
 
 rp_setup
 got=$(rp_facts)
-[ "$got" = "2222,7500,9100" ] && ok || fail "база по умолчанию: ожидалось 2222,7500,9100, получено '$got'"
+[ "$got" = "2222,7500-7504,9100" ] && ok || fail "база по умолчанию: ожидалось 2222,7500-7504,9100, получено '$got'"
 
 got=$(rp_facts env MON_FACT_NODE_API_PORT=20000)
-[ "$got" = "2222,7500,20000" ] && ok || fail "кастомный NODE_API_PORT: ожидалось 2222,7500,20000, получено '$got'"
+[ "$got" = "2222,7500-7504,20000" ] && ok || fail "кастомный NODE_API_PORT: ожидалось 2222,7500-7504,20000, получено '$got'"
 
 # Из .env ноды порт тоже вычитывается (без MON_FACT-переопределения).
 mkdir -p "$rp_root/opt/monitoring-node"
 echo 'NODE_API_PORT=30000' > "$rp_root/opt/monitoring-node/.env"
 got=$(rp_facts)
-[ "$got" = "2222,7500,30000" ] && ok || fail "порт из .env ноды: ожидалось 2222,7500,30000, получено '$got'"
+[ "$got" = "2222,7500-7504,30000" ] && ok || fail "порт из .env ноды: ожидалось 2222,7500-7504,30000, получено '$got'"
 rm -rf "$rp_root/opt/monitoring-node"
 
 # Доп. файл: дубли, пересечения, смежные порты, мусор и порт вне диапазона.
 printf '# extras\n5201\n8443-8450, 8451\n7500\n2223\nmusor\n70000\n' \
     > "$rp_root/opt/monitoring/configs/reserved-ports.conf"
 got=$(rp_facts)
-[ "$got" = "2222-2223,5201,7500,8443-8451,9100" ] && ok \
-    || fail "канонизация extras: ожидалось 2222-2223,5201,7500,8443-8451,9100, получено '$got'"
+[ "$got" = "2222-2223,5201,7500-7504,8443-8451,9100" ] && ok \
+    || fail "канонизация extras: ожидалось 2222-2223,5201,7500-7504,8443-8451,9100, получено '$got'"
 
 # Забирающий весь диапазон файл обязан быть отвергнут инвариантом.
 printf '1024-65535\n' > "$rp_root/opt/monitoring/configs/reserved-ports.conf"
@@ -548,7 +548,7 @@ rp_file="$rp_root/etc/sysctl.d/99-vless-tuning.conf"
 rp_render vpn
 grep -q '^net.ipv4.ip_local_port_range = 1024 65535$' "$rp_file" && ok \
     || fail "vpn: диапазон не 1024 65535: $(grep '^net.ipv4.ip_local_port_range' "$rp_file")"
-grep -q '^net.ipv4.ip_local_reserved_ports = 2222,7500,9100$' "$rp_file" && ok \
+grep -q '^net.ipv4.ip_local_reserved_ports = 2222,7500-7504,9100$' "$rp_file" && ok \
     || fail "vpn: строка резервации неверна: $(grep '^net.ipv4.ip_local_reserved_ports' "$rp_file")"
 
 rp_render panel

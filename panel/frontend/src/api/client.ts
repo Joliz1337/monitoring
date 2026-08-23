@@ -493,6 +493,185 @@ export const remnawaveInstallApi = {
   jobs: () => api.get<{ jobs: RemnawaveInstallJobInfo[] }>('/servers/remnawave-install/jobs'),
 }
 
+// Проверка прокси-конфигураций: ссылки, JSON-конфиги и подписки
+export type XrayTestSource = 'links' | 'json' | 'subscription'
+export type XrayTestVerdict = 'ok' | 'degraded' | 'fail'
+
+export interface XrayTestConfigPreview {
+  index: number
+  remark: string
+  protocol: string
+  address: string
+  port: number
+  sni: string | null
+  transport: string
+  security: string
+  flow: string | null
+  core: string | null
+  unsupported: string | null
+  link: string | null
+}
+
+export interface XrayTestLineError {
+  line: number
+  preview: string
+  reason: string
+}
+
+export interface XrayTestParseResult {
+  format: string | null
+  dropped_sections: string[]
+  configs: XrayTestConfigPreview[]
+  errors: XrayTestLineError[]
+}
+
+export interface XrayTestCell {
+  index: number
+  remark: string
+  protocol: string
+  address: string
+  port: number
+  sni: string | null
+  transport: string
+  security: string
+  core: string | null
+  verdict: XrayTestVerdict
+  reason: string | null
+  detail: string
+  resolved_ip: string | null
+  exit_ip: string | null
+  exit_country: string | null
+  exit_asn: string | null
+  http_status: number | null
+  dns_ms: number | null
+  tcp_min_ms: number | null
+  tcp_avg_ms: number | null
+  tcp_jitter_ms: number | null
+  handshake_ms: number | null
+  rtt_ms: number | null
+  speed_mbps: number | null
+  tls: {
+    reachable: boolean
+    issuer: string | null
+    subject: string | null
+    not_after: string | null
+    version: string | null
+    alpn: string | null
+    self_signed: boolean
+    error: string | null
+  } | null
+}
+
+export type XrayTestEvent =
+  | { type: 'start'; total: number; location: string }
+  | { type: 'log'; line: string }
+  | ({ type: 'cell'; done: number } & XrayTestCell)
+  | { type: 'done'; status: string; error: string | null; total: number; done: number;
+      ok: number; degraded: number; fail: number }
+
+export interface XrayTestJobInfo {
+  job_id: string
+  status: 'running' | 'success' | 'error' | 'cancelled'
+  location: string
+  error: string | null
+  started_at: number
+  total: number
+  done: number
+  ok: number
+  degraded: number
+  fail: number
+}
+
+export interface XrayTestCoreInfo {
+  core: string
+  version: string
+  installed: boolean
+  path: string
+  size: number | null
+}
+
+export interface XrayTestSubscriptionProfile {
+  id: number
+  name: string
+  kind: 'url' | 'links'
+  payload: string
+  user_agent: string | null
+  last_fetched_at: string | null
+  last_count: number
+}
+
+export interface XrayTestSniSet {
+  id: number
+  name: string
+  sni_list: string[]
+}
+
+export interface XrayTestRunSummary {
+  id: number
+  started_at: string | null
+  finished_at: string | null
+  source: string
+  source_name: string | null
+  location: string
+  location_name: string | null
+  status: string
+  total: number
+  ok: number
+  degraded: number
+  fail: number
+}
+
+export interface XrayTestRunRequest {
+  source: XrayTestSource
+  payload: string
+  user_agent?: string | null
+  source_name?: string | null
+  selected?: number[] | null
+  sni_list: string[]
+  sync_transport_host: boolean
+  location: string
+  concurrency: number
+  full: boolean
+  tls_inspect: boolean
+  measure_speed: boolean
+}
+
+export const xrayTestStreamUrl = (jobId: string) => `/api/xray-test/jobs/${jobId}/stream`
+export const xrayTestExportUrl = (jobId: string, fmt: string, includeDegraded: boolean) =>
+  `/api/xray-test/jobs/${jobId}/export?fmt=${fmt}&include_degraded=${includeDegraded}`
+
+export const xrayTestApi = {
+  parse: (body: { source: XrayTestSource; payload: string; user_agent?: string | null }) =>
+    api.post<XrayTestParseResult>('/xray-test/parse', body),
+  run: (body: XrayTestRunRequest) =>
+    api.post<{ job_id: string; total: number }>('/xray-test/run', body),
+  jobs: () => api.get<{ jobs: XrayTestJobInfo[] }>('/xray-test/jobs'),
+  cancel: (jobId: string) => api.post(`/xray-test/jobs/${jobId}/cancel`),
+  cores: () => api.get<{ cores: XrayTestCoreInfo[]; arch: string }>('/xray-test/cores'),
+  downloadCore: (core: string) => api.post(`/xray-test/cores/download?core=${core}`),
+  subscriptions: () =>
+    api.get<{ profiles: XrayTestSubscriptionProfile[] }>('/xray-test/subscriptions'),
+  createSubscription: (body: {
+    name: string; kind: 'url' | 'links'; payload: string; user_agent?: string | null
+  }) => api.post<XrayTestSubscriptionProfile>('/xray-test/subscriptions', body),
+  updateSubscription: (
+    id: number,
+    body: { name?: string; payload?: string; user_agent?: string | null },
+  ) => api.patch<XrayTestSubscriptionProfile>(`/xray-test/subscriptions/${id}`, body),
+  deleteSubscription: (id: number) => api.delete(`/xray-test/subscriptions/${id}`),
+  sniSets: () => api.get<{ profiles: XrayTestSniSet[] }>('/xray-test/sni-sets'),
+  createSniSet: (body: { name: string; sni_list: string[] }) =>
+    api.post<XrayTestSniSet>('/xray-test/sni-sets', body),
+  updateSniSet: (id: number, body: { name?: string; sni_list?: string[] }) =>
+    api.patch<XrayTestSniSet>(`/xray-test/sni-sets/${id}`, body),
+  deleteSniSet: (id: number) => api.delete(`/xray-test/sni-sets/${id}`),
+  history: (limit = 30) =>
+    api.get<{ runs: XrayTestRunSummary[] }>(`/xray-test/history?limit=${limit}`),
+  historyResults: (runId: number) =>
+    api.get<{ results: XrayTestCell[] }>(`/xray-test/history/${runId}`),
+  deleteHistoryRun: (runId: number) => api.delete(`/xray-test/history/${runId}`),
+}
+
 // Доставка образа ноды с панели по SSH (ноды под ТСПУ, без доступа к GHCR)
 export type NodeImageDeliveryEvent =
   | { type: 'start'; host: string }

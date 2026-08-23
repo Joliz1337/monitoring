@@ -23,6 +23,7 @@
 - **Firewall Profiles** — шаблоны UFW с массовой раскаткой на серверы: CRUD профилей, привязка 1 сервер ↔ 1 активный профиль, history синхронизаций, node-API-port-guard (защита связи панели с нодой через порт 9100), drift-детекция по SHA256-хэшу; вкладка «Серверы» — поиск по имени/адресу, группировка доступных серверов по папкам со сворачиванием, скрытие занятых серверов с переключателем «Показать занятые»
 - **DNAT-маршрутизация** — профили проброса портов средствами ядра нод (iptables nat DNAT + MASQUERADE + FORWARD): та же модель, что у Firewall Profiles (CRUD профилей и правил, 1 сервер ↔ 1 профиль, sync с drift-детекцией по SHA256, очередь отложенной раскатки для офлайн-нод, история), плюс страница сервера с живыми счётчиками соединений/трафика по каждому правилу и кнопками «Переприменить»/«Снять правила»; TCP, UDP и диапазоны портов, без userspace-прокси
 - **Анти-DDoS** — многослойная защита от DDoS-атак на нодах: дежурный режим без лимитов, аварийный режим (iptables-цепочка `ANTIDDOS`: SYNPROXY + hashlimit, пороги авто-масштабируются рендерером тюнинга по CPU/RAM ноды) включаемый вручную или автоматически локальным watchdog по сигналам из `/proc`, whitelist на ipset с ежечасной автосинхронизацией (активен только в аварийном режиме); whitelist собирается из трёх источников — авто (ноды + панель), ручные CIDR и авто-источники по URL (список IP/CIDR формат-независимо парсится из JSON/plain text/HTML, например Cloudflare/Yandex Cloud); страница с независимыми контролами автодетекта и аварийного режима по нодам, редактированием ручного whitelist и управлением авто-источниками; установка watchdog на ноды по умолчанию при установке/обновлении агента, панель — backstop
+- **Xray тест** — проверка прокси-конфигураций: ссылка любого протокола (vless/vmess/trojan/ss/hysteria2/tuic/anytls/shadowtls/socks), вставленный JSON-конфиг Xray или sing-box, подписка по URL (base64/plain/JSON). Панель поднимает настоящее ядро (Xray для vless-семейства и xhttp/mKCP, sing-box для QUIC-протоколов, HTTP/2-транспорта и конфигов с отключённой проверкой сертификата), гоняет трафик через локальный socks и показывает вердикт, задержку рукопожатия и запроса, выходной IP со страной, сертификат SNI-домена и опционально скорость канала. **Мульти-SNI** — матрица «конфигурация × список SNI» с отметкой лучшего по задержке; **прогон с ноды** — тест из нужной локации через канал `exec` (ядро доставляет панель, нода в GitHub не ходит). Профили источников и наборов SNI с CRUD, история прогонов, экспорт рабочих ключей списком/base64-подпиской и отчёта CSV
 - **Системные оптимизации** — единый рендерер на ноде (`tune-sysctl.sh`) вычисляет sysctl/лимиты/HAProxy `maxconn` из MemTotal/nproc самой ноды; панель передаёт входные файлы, а не готовый конфиг (гейт по версии ноды ≥ 10.6.0), и видит дрейф хоста (ресайз VPS) отдельным флагом
 - **Авто-восстановление ноды** — при возвращении сервера в сеть панель автоматически сверяет состояние firewall (UFW), HAProxy-конфига, статуса HAProxy, IP Blocklist и DNAT-правил с ожидаемым; переприменяет только сбившееся (drift-detection по SHA256-хэшам); без Telegram-уведомлений
 - **Авторазвёртывание ноды** — установка ноды мониторинга прямо из вкладки «Серверы»: подключение по SSH (пароль или приватный ключ), запуск `install.sh --unattended` на целевом сервере; установка выполняется **в фоне на бэкенде** — закрытие вкладки браузера не прерывает процесс; живой лог переподключаем (GET-стрим с реплеем); опционально устанавливает WARP и ноду Remnawave с сохранёнными именованными сертификатами; **массовый деплой** — произвольное количество дополнительных целей, каждая со своим SSH и опциями; после успешного деплоя бэкенд автоматически привязывает сервер к выбранным HAProxy-профилю и/или Firewall-профилю; незавершённые задачи переживают перезагрузку страницы (восстановление через localStorage + `GET /deploy/jobs`); **поддержка Hetzner Rescue System** — при обнаружении rescue-среды `install.sh` устанавливает Ubuntu 24.04, перезагружается, панель ждёт ноду до 40 мин через поллинг и завершает деплой автоматически
@@ -115,6 +116,12 @@ panel/
 │       ├── pages/DnatProfiles.tsx       # DNAT-профили: тот же layout, что у Firewall Profiles (i18n)
 │       ├── pages/Dnat.tsx               # Страница сервера: состояние DNAT на ноде, счётчики по правилам, «Переприменить»/«Снять правила»
 │       ├── utils/dnat.ts                # formatListen/formatTarget/protocolLabel — общее форматирование правил DNAT
+│       ├── pages/XrayTest.tsx           # Xray тест: вкладки ввода (ссылки/JSON/подписка), параметры прогона, результаты
+│       ├── components/xraytest/
+│       │   ├── useTestRun.ts            # Хук прогона: запуск, NDJSON-стрим, восстановление job после F5 через localStorage
+│       │   ├── ResultsTable.tsx         # Таблица результатов: сортировка, фильтр «только рабочие», раскрытие деталей и TLS
+│       │   ├── ProfilesTab.tsx          # CRUD источников и наборов SNI
+│       │   └── HistoryTab.tsx           # История прогонов с раскрытием результатов
 │       ├── pages/Servers.tsx            # Список серверов + InfraTree
 │       ├── components/ui/Skeleton.tsx   # Skeleton-лоадеры (Skeleton, ServerCardSkeleton, MetricCardSkeleton, ChartSkeleton)
 │       ├── components/Infra/            # Infrastructure Tree компоненты
@@ -138,6 +145,21 @@ panel/
 │       ├── routers/firewall_profiles.py # Firewall Profiles API роутер: CRUD профилей и правил, sync, log
 │       ├── routers/dnat_profiles.py     # DNAT Profiles API роутер: CRUD профилей и правил, sync, log, проверка набора (validate_rule_set)
 │       ├── routers/bulk_actions.py      # Bulk Actions API роутер: sync-эндпоинты + фоновые задачи /bulk/jobs
+│       ├── routers/xray_test.py         # Xray тест: разбор входа, запуск прогона, стрим, экспорт, профили, история, раздача ядра ноде
+│       ├── services/xray_test/          # Проверка прокси-конфигураций (см. раздел «Xray тест»)
+│       │   ├── models.py                # ProxyEndpoint/TlsSettings/TransportSettings (frozen), CellResult, коды отказов
+│       │   ├── parsers/                 # Ссылки всех протоколов + json_config.py (чужой конфиг → endpoint'ы)
+│       │   ├── config_builder/          # ProxyEndpoint → конфиг xray/sing-box с socks-inbound на loopback
+│       │   ├── core_manager.py          # Версии и sha256 ядер, скачивание в /app/data, выбор ядра по конфигурации
+│       │   ├── probes.py                # DNS, TCP-пинг, TLS-инспекция, e2e через socks, выходной IP, скорость
+│       │   ├── runner.py                # LocalCoreRunner: запуск ядра, killpg-уборка, sweeper
+│       │   ├── node_runner.py           # NodeCoreRunner: доставка исполнителя и ядра на ноду, разбор ответа
+│       │   ├── bundle.py                # Одноразовые ссылки на бинарник ядра для нод
+│       │   ├── subscription.py          # Загрузка подписки с SSRF-guard, определение формата, нормализация
+│       │   ├── matrix.py                # Матрица «конфигурация × SNI», лимиты
+│       │   ├── job_manager.py           # Фоновые задачи с pub/sub лога и реплеем
+│       │   ├── storage.py               # Профили источников и SNI, история прогонов с обрезкой
+│       │   └── sanitize.py              # Маскирование секретов в ссылках, выводе ядра и ответах API
 │       ├── routers/traffic.py           # Traffic API роутер: чтение истории трафика из базы панели
 │       └── services/
 │           ├── ssh_manager.py           # Пресеты безопасности SSH + proxy helper
@@ -2591,6 +2613,55 @@ SSE-события: `note_update` — `{"content": "...", "version": N}`, `tasks
 - `panel/frontend/src/locales/ru.json`, `en.json` — ключи `torrent_blocker.active_bans`, `no_active_bans`, `col_banned_at`, `col_expires_in`, `webhook_*`
 - `panel/frontend/src/data/faq/content/ru/PAGE_TORRENT_BLOCKER.md` — краткое описание вебхука в общем FAQ страницы
 - `panel/frontend/src/data/faq/content/ru/TORRENT_BLOCKER_WEBHOOK.md`, `faq.types.ts` (`FAQ_SCREENS.TORRENT_BLOCKER_WEBHOOK`) — отдельная статья с полным форматом payload и разбором полей; значок `<FAQIcon screen="TORRENT_BLOCKER_WEBHOOK" size="sm" />` рядом с тумблером «Webhook-предупреждение»
+
+## Xray тест
+
+Раздел проверяет прокси-конфигурации по-настоящему: поднимает прокси-ядро, пропускает через него трафик и показывает результат. «Порт отвечает» и «трафик проходит» — разные вещи, поэтому TCP-проба лишь отсеивает мёртвые серверы, а вердикт даёт сквозной HTTP-запрос через локальный socks.
+
+**Единая модель.** Ссылка, вставленный JSON и подписка сводятся к `ProxyEndpoint` — дальше код не знает, откуда пришла конфигурация. Модель заморожена (`frozen=True`): мульти-SNI порождает копии через `dataclasses.replace`, и параллельные ячейки не мутируют общий объект.
+
+**Выбор ядра.** Границы сверены с живыми бинарниками Xray 26.3.27 и sing-box 1.13.19, а не с документацией:
+
+| Условие | Ядро | Почему |
+|---|---|---|
+| hysteria2, tuic, anytls, shadowtls | sing-box | Xray этих протоколов не реализует |
+| транспорт HTTP/2 (`type=http`) | sing-box | из Xray 26 убран, мигрировал в XHTTP stream-one |
+| `allowInsecure=1` в ссылке | sing-box | Xray 26 удалил `allowInsecure`; проверять сертификат там, где просили не проверять, значит показать «не работает» на рабочем ключе |
+| xhttp, mKCP | Xray | sing-box их не знает |
+| остальное | Xray | эталон для vless/REALITY/Vision |
+
+Обфускация mKCP (`seed`/`headerType`) удалена из Xray 26 и не поддерживается ни одним ядром — такие ссылки помечаются `UnsupportedConfigError` ещё на разборе. Clash YAML сознательно вне охвата.
+
+**Ядра не в образе.** Бинарники весят под 75 МБ на обе архитектуры, а версия ядра не должна быть прибита к релизу панели. Скачиваются один раз в `panel-data:/app/data/xray-test/cores/<core>/<version>/<arch>/`, версии и SHA-256 закреплены в `CORE_RELEASES`; при недоступности GitHub — зеркало `ghfast.top`, где сверка хэша обязательна. Распаковка — `zipfile`/`tarfile` из stdlib (`unzip` в образе панели нет).
+
+**Уборка процессов** — три рубежа, потому что на большой подписке ядер сотни: `finally` у каждой ячейки (`killpg(SIGTERM)` → 3 с → `SIGKILL` → `rmtree`), сборщик раз в 30 с добивает ядра старше 90 с, `stop_xray_test_service()` в `lifespan` — при остановке панели. Ядро запускается в своей process group (`start_new_session=True`): оно порождает дочерние процессы, и kill по одному pid оставил бы сирот.
+
+**Мульти-SNI.** У ws/httpupgrade/xhttp/grpc сервер маршрутизирует запрос по заголовку `Host`, обычно равному SNI. Подмена одного лишь SNI даёт 404, и ячейка соврала бы про блокировку — поэтому `sync_transport_host` по умолчанию включён для этих транспортов. Лимиты: `MAX_SNI=50`, `MAX_CELLS_PER_JOB=200`, `MAX_ENDPOINTS=500`; превышение — ошибка с текстом, а не молчаливое обрезание.
+
+**Прогон с ноды** (`node_runner.py`). Своего эндпоинта у ноды нет: используется общий канал `POST /api/system/execute-stream`, гейт — `require_capability(server, Capability.EXEC, write=True)` в роутере. Исполнитель `configs/xray-test-runner.sh` версионируется (`RUNNER_VERSION`) и доставляется панелью base64-командой при расхождении версии — тот же приём, что у сторожа анти-DDoS. Конфиг ядра генерирует панель: единственный генератор на оба места запуска означает, что «работает на панели» и «работает на ноде» проверяют одно и то же. Ядро нода забирает у панели по одноразовой ссылке (TTL 5 мин) и сверяет по SHA-256 — поэтому `curl --insecure` безопасен и способ работает на серверах без доступа к GitHub. Локальные socks-порты `7501-7504` зарезервированы от эфемерной выдачи в `configs/tune-sysctl.sh`.
+
+**Безопасность.** Вставленный JSON никогда не запускается как есть: из него извлекаются только исходящие подключения, а конфиг собирается заново с inbound строго на `127.0.0.1` — пастнутый файл может нести `listen: 0.0.0.0`, `dokodemo-door`, `api`/`stats` или `experimental.clash_api`, а на ноде с host-сетью это открытый порт наружу; отброшенные секции показываются в интерфейсе. URL подписки проверяется до запроса (все A/AAAA-записи через `net_utils.is_public_range()`), на каждом из трёх редиректов отдельно и ещё раз по фактически установленному соединению; клиент — свой, с `trust_env=False` и лимитом тела 2 МБ. Секреты маскируются в ссылках, **в выводе ядра** (Xray при ошибке печатает куски конфига) и в ответах API; полный конфиг наружу не отдаётся.
+
+**Хранение.** Профили источников (`xray_test_subscriptions`, поле `payload` — `EncryptedString`) и наборы SNI (`xray_test_sni_sets`) с CRUD. История (`xray_test_runs` + `xray_test_results`) хранит последние 50 прогонов с обрезкой при вставке; секретов в ней нет — только адрес, протокол и метрики.
+
+**API** (все, кроме `/bundle/{token}`, — под `verify_auth`):
+
+| Метод и путь | Назначение |
+|---|---|
+| `POST /api/xray-test/parse` | Разобрать вход, показать конфигурации и построчные ошибки, ничего не запуская |
+| `POST /api/xray-test/run` | Запустить прогон → `{job_id, total}` |
+| `GET /api/xray-test/jobs` | Активные и недавние задачи — восстановление интерфейса после перезагрузки |
+| `GET /api/xray-test/jobs/{id}/stream` | NDJSON: `start`, `cell`, `log`, `done` (переподключаемый, с реплеем) |
+| `POST /api/xray-test/jobs/{id}/cancel` | Отменить прогон |
+| `GET /api/xray-test/jobs/{id}/export` | `fmt=links\|subscription\|csv\|json` |
+| `GET/POST /api/xray-test/cores`, `/cores/download` | Состояние ядер и принудительная загрузка |
+| CRUD `/api/xray-test/subscriptions`, `/sni-sets` | Профили источников и наборов SNI |
+| `GET/DELETE /api/xray-test/history[/{id}]` | История прогонов и результаты |
+| `GET /api/xray-test/bundle/{token}` | Отдача бинарника ядра ноде по одноразовому токену |
+
+Путь стрима внесён в `GZipMiddlewareNoSSE` (`app/main.py`) — иначе gzip забуферизовал бы поток.
+
+**Файлы:** `app/services/xray_test/` (см. «Структуру»), `app/routers/xray_test.py`, `configs/xray-test-runner.sh`, `panel/frontend/src/pages/XrayTest.tsx` и `src/components/xraytest/`. Тесты: `test_xray_test_parsers.py`, `test_xray_test_config.py`, `test_xray_test_subscription.py`, `test_xray_test_sanitize.py`, `test_xray_test_node_runner.py`.
 
 ## Диагностика
 

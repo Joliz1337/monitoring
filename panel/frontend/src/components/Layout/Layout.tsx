@@ -25,6 +25,7 @@ import {
   StickyNote,
   Settings2,
   Waypoints,
+  FlaskConical,
   type LucideIcon
 } from 'lucide-react'
 import { useState } from 'react'
@@ -84,6 +85,7 @@ export default function Layout() {
     { to: `/${uid}/ssh-security`, icon: KeyRound, label: t('ssh_security.title'), end: false },
     { to: `/${uid}/remnawave`, icon: Radio, label: t('common.remnawave'), end: false },
     { to: `/${uid}/remnawave-nginx`, icon: Waypoints, label: t('remnawave_nginx.title'), end: false },
+    { to: `/${uid}/xray-test`, icon: FlaskConical, label: t('xray_test.title'), end: false },
     { to: `/${uid}/wildcard-ssl`, icon: ShieldCheck, label: t('wildcard_ssl.title'), end: false },
     { to: `/${uid}/updates`, icon: Package, label: t('common.updates'), end: false },
     { to: `/${uid}/system-optimizations`, icon: Settings2, label: t('sys_opt.title'), end: false },
