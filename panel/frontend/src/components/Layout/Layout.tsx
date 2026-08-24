@@ -1,9 +1,9 @@
 import { Outlet, NavLink, useParams, useLocation, Link } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
-import { 
-  LayoutDashboard, 
-  Server, 
-  Settings, 
+import {
+  LayoutDashboard,
+  Server,
+  Settings,
   Menu,
   Activity,
   X,
@@ -12,25 +12,15 @@ import {
   Layers,
   Search,
   Shield,
-  ShieldCheck,
-  ShieldBan,
-  FileCode2,
-  Flame,
-  Route,
-  Siren,
-  KeyRound,
   Radio,
-  Bell,
-  CreditCard,
   StickyNote,
-  Settings2,
-  Waypoints,
-  FlaskConical,
   type LucideIcon
 } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useExtStore } from '../../stores/_extStore'
 import { useNotesStore } from '../../stores/notesStore'
+import { useSettingsStore } from '../../stores/settingsStore'
+import { PANEL_MODULES } from '../../config/modules'
 import { useTranslation } from 'react-i18next'
 import { Tooltip } from '../ui/Tooltip'
 import NotesDrawer from '../Notes/NotesDrawer'
@@ -69,30 +59,21 @@ export default function Layout() {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const toggleNotes = useNotesStore(s => s.toggle)
   const notesOpen = useNotesStore(s => s.isOpen)
+  const hiddenModules = useSettingsStore(s => s.hiddenModules)
+  const fetchSettings = useSettingsStore(s => s.fetchSettings)
   const { t } = useTranslation()
-  
-  const baseNavItems = [
-    { to: `/${uid}`, icon: LayoutDashboard, label: t('common.dashboard'), end: true },
-    { to: `/${uid}/servers`, icon: Server, label: t('common.servers'), end: false },
-    { to: `/${uid}/bulk-actions`, icon: Layers, label: t('bulk_actions.title'), end: false },
-    { to: `/${uid}/haproxy-configs`, icon: FileCode2, label: t('haproxy_configs.title'), end: false },
-    { to: `/${uid}/firewall-profiles`, icon: Flame, label: t('firewall_profiles.title'), end: false },
-    { to: `/${uid}/dnat-profiles`, icon: Route, label: t('dnat_profiles.title'), end: false },
-    { to: `/${uid}/alerts`, icon: Bell, label: t('common.alerts'), end: false },
-    { to: `/${uid}/billing`, icon: CreditCard, label: t('common.billing'), end: false },
-    { to: `/${uid}/blocklist`, icon: Shield, label: t('common.blocklist'), end: false },
-    { to: `/${uid}/torrent-blocker`, icon: ShieldBan, label: t('torrent_blocker.title'), end: false },
-    { to: `/${uid}/ssh-security`, icon: KeyRound, label: t('ssh_security.title'), end: false },
-    { to: `/${uid}/remnawave`, icon: Radio, label: t('common.remnawave'), end: false },
-    { to: `/${uid}/remnawave-nginx`, icon: Waypoints, label: t('remnawave_nginx.title'), end: false },
-    { to: `/${uid}/xray-test`, icon: FlaskConical, label: t('xray_test.title'), end: false },
-    { to: `/${uid}/wildcard-ssl`, icon: ShieldCheck, label: t('wildcard_ssl.title'), end: false },
-    { to: `/${uid}/updates`, icon: Package, label: t('common.updates'), end: false },
-    { to: `/${uid}/system-optimizations`, icon: Settings2, label: t('sys_opt.title'), end: false },
-    { to: `/${uid}/anti-ddos`, icon: Siren, label: t('anti_ddos.title'), end: false },
-    { to: `/${uid}/settings`, icon: Settings, label: t('common.settings'), end: false },
-  ]
-  
+
+  useEffect(() => { fetchSettings() }, [fetchSettings])
+
+  const baseNavItems = PANEL_MODULES
+    .filter(module => !hiddenModules.includes(module.id))
+    .map(module => ({
+      to: module.path ? `/${uid}/${module.path}` : `/${uid}`,
+      icon: module.icon,
+      label: t(module.labelKey),
+      end: module.path === '',
+    }))
+
   const navItems = navItem 
     ? [...baseNavItems.slice(0, 3), { to: `/${uid}/${navItem.path}`, icon: iconMap[navItem.icon] || Search, label: navItem.label, end: false }, ...baseNavItems.slice(3)]
     : baseNavItems

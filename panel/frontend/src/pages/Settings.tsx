@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { Settings as SettingsIcon, RefreshCw, Layout, Languages, Sparkles, Check, Clock, Activity, Shield, AlertTriangle, Loader2, CheckCircle2, XCircle, Terminal, Server, Zap, Cpu, HardDrive, MemoryStick, Database, Download, Upload, Trash2, Archive, Globe, Waypoints, Save, GitBranch, FlaskConical } from 'lucide-react'
+import { Settings as SettingsIcon, RefreshCw, Layout, LayoutGrid, Languages, Sparkles, Check, Clock, Activity, Shield, AlertTriangle, Loader2, CheckCircle2, XCircle, Terminal, Server, Zap, Cpu, HardDrive, MemoryStick, Database, Download, Upload, Trash2, Archive, Globe, Waypoints, Save, GitBranch, FlaskConical } from 'lucide-react'
 import { useSettingsStore, TIMEZONE_OPTIONS, TRAFFIC_PERIOD_OPTIONS, METRICS_INTERVAL_OPTIONS, HAPROXY_INTERVAL_OPTIONS } from '../stores/settingsStore'
+import { TOGGLEABLE_MODULES } from '../config/modules'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence, LayoutGroup } from 'framer-motion'
 import { systemApi, backupApi, settingsApi, PanelCertificateInfo, PanelServerStats, BackupInfo, BackupStatus, TimeSyncStatus } from '../api/client'
@@ -23,10 +24,11 @@ export default function Settings() {
   const {
     refreshInterval, compactView, timezone, trafficPeriod,
     metricsCollectInterval, haproxyCollectInterval,
-    serverTimezone, timeSyncEnabled, remnawaveNginxPath, updateBranch,
+    serverTimezone, timeSyncEnabled, remnawaveNginxPath, updateBranch, hiddenModules,
     fetchSettings, setRefreshInterval, setCompactView, setTimezone, setTrafficPeriod,
     setMetricsCollectInterval, setHaproxyCollectInterval,
-    setServerTimezone, setTimeSyncEnabled, setRemnawaveNginxPath, setUpdateBranch
+    setServerTimezone, setTimeSyncEnabled, setRemnawaveNginxPath, setUpdateBranch,
+    setHiddenModules
   } = useSettingsStore()
   const { t, i18n } = useTranslation()
   
@@ -74,6 +76,13 @@ export default function Settings() {
   // Remnawave nginx search path (локальный черновик до сохранения)
   const [rwPathEdit, setRwPathEdit] = useState(remnawaveNginxPath)
   useEffect(() => { setRwPathEdit(remnawaveNginxPath) }, [remnawaveNginxPath])
+
+  const toggleModule = (moduleId: string) => {
+    const next = hiddenModules.includes(moduleId)
+      ? hiddenModules.filter(id => id !== moduleId)
+      : [...hiddenModules, moduleId]
+    setHiddenModules(next)
+  }
 
   const handleSaveRemnawavePath = async () => {
     const path = rwPathEdit.trim()
@@ -1077,6 +1086,67 @@ export default function Settings() {
           </div>
         </motion.div>
         </div>
+
+        {/* Panel modules */}
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }} className="card group hover:border-dark-700 transition-all">
+          <div className="flex items-center gap-3 mb-5">
+            <motion.div
+              className="w-11 h-11 rounded-xl bg-gradient-to-br from-accent-500/20 to-accent-600/20
+                         flex items-center justify-center border border-accent-500/20
+                         group-hover:shadow-lg group-hover:shadow-accent-500/10 transition-shadow"
+              whileHover={{ rotate: 10, scale: 1.05 }}
+            >
+              <LayoutGrid className="w-5 h-5 text-accent-500" />
+            </motion.div>
+            <div className="flex-1 min-w-0">
+              <h2 className="font-semibold text-dark-100">{t('settings.modules_title')}</h2>
+              <p className="text-sm text-dark-500">{t('settings.modules_desc')}</p>
+            </div>
+            <div className="flex items-center gap-3 flex-shrink-0">
+              <span className="text-xs text-dark-500 hidden sm:inline">
+                {t('settings.modules_enabled_count', {
+                  count: TOGGLEABLE_MODULES.length - hiddenModules.length,
+                  total: TOGGLEABLE_MODULES.length,
+                })}
+              </span>
+              <motion.button
+                onClick={() => setHiddenModules([])}
+                disabled={hiddenModules.length === 0}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium bg-dark-800/60 border border-dark-700/50
+                           text-dark-300 hover:bg-dark-700 transition-colors disabled:opacity-40 disabled:hover:bg-dark-800/60"
+                whileHover={{ scale: 1.03 }}
+                whileTap={{ scale: 0.97 }}
+              >
+                {t('settings.modules_enable_all')}
+              </motion.button>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2">
+            {TOGGLEABLE_MODULES.map(module => {
+              const enabled = !hiddenModules.includes(module.id)
+              return (
+                <motion.button
+                  key={module.id}
+                  onClick={() => toggleModule(module.id)}
+                  className={`flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-sm font-medium border transition-colors ${
+                    enabled
+                      ? 'bg-accent-500/10 border-accent-500/30 text-accent-300'
+                      : 'bg-dark-800/40 border-dark-700/50 text-dark-500 hover:bg-dark-800 hover:text-dark-300'
+                  }`}
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
+                >
+                  <module.icon className="w-4 h-4 flex-shrink-0" />
+                  <span className="truncate text-left">{t(module.labelKey)}</span>
+                  {enabled && <Check className="w-4 h-4 ml-auto flex-shrink-0" />}
+                </motion.button>
+              )
+            })}
+          </div>
+
+          <p className="text-xs text-dark-500 mt-3">{t('settings.modules_hint')}</p>
+        </motion.div>
 
         {/* Remnawave nginx search path */}
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }} className="card group hover:border-dark-700 transition-all">

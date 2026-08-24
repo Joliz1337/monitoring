@@ -101,7 +101,7 @@ export default function Dashboard() {
   const { uid } = useParams()
   const navigate = useNavigate()
   const { servers, fetchServersWithMetrics, applyServerArrangement, renameFolder, deleteFolder, isLoading } = useServersStore()
-  const { refreshInterval, compactView, setCompactView, fetchSettings, detailLevel, cardScale, setDetailLevel, setCardScale } = useSettingsStore()
+  const { refreshInterval, compactView, setCompactView, detailLevel, cardScale, setDetailLevel, setCardScale } = useSettingsStore()
   const { t } = useTranslation()
   
   const initialLoadDone = useRef(false)
@@ -130,9 +130,8 @@ export default function Dashboard() {
   )
   
   useEffect(() => {
-    fetchSettings()
     fetchServersWithMetrics().then(() => { initialLoadDone.current = true })
-  }, [fetchServersWithMetrics, fetchSettings])
+  }, [fetchServersWithMetrics])
   
   // На больших флотах поллить чаще, чем собираются метрики (~10с), бессмысленно —
   // поднимаем минимальный интервал, чтобы не гонять тяжёлый ответ зря.

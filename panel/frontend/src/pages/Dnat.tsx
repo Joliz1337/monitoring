@@ -25,6 +25,7 @@ import { nodeAllows } from '../utils/nodeCapabilities'
 import { formatBytes, formatBitsPerSecLocalized } from '../utils/format'
 import { formatListen, formatTarget, protocolLabel } from '../utils/dnat'
 import { useAutoRefresh } from '../hooks/useAutoRefresh'
+import { useModuleEnabled } from '../hooks/useModuleEnabled'
 import { Tooltip } from '../components/ui/Tooltip'
 import { FAQIcon } from '../components/FAQ'
 
@@ -76,6 +77,7 @@ export default function Dnat() {
   const server = servers.find(s => s.id === Number(serverId))
   const dnatReadable = nodeAllows(server, 'dnat', 'read')
   const dnatWritable = nodeAllows(server, 'dnat', 'write')
+  const profilesEnabled = useModuleEnabled('dnat-profiles')
 
   const [state, setState] = useState<DnatNodeState | null>(null)
   const [rates, setRates] = useState<Record<string, RuleRates>>({})
@@ -284,9 +286,11 @@ export default function Dnat() {
             <span className="text-dark-300">{t('dnat.managed_by_profile')}:</span>
             <span className="font-medium text-accent-300">{profileInfo.name}</span>
           </div>
-          <Link to={`/${uid}/dnat-profiles`} className="text-xs text-accent-400 hover:text-accent-300 transition-colors">
-            {t('dnat.view_profile')} →
-          </Link>
+          {profilesEnabled && (
+            <Link to={`/${uid}/dnat-profiles`} className="text-xs text-accent-400 hover:text-accent-300 transition-colors">
+              {t('dnat.view_profile')} →
+            </Link>
+          )}
         </motion.div>
       ) : (
         <motion.div
@@ -295,9 +299,11 @@ export default function Dnat() {
           className="mb-4 flex items-center justify-between px-4 py-3 rounded-xl bg-dark-800/40 border border-dark-700/40"
         >
           <span className="text-sm text-dark-400">{t('dnat.no_profile')}</span>
-          <Link to={`/${uid}/dnat-profiles`} className="text-xs text-accent-400 hover:text-accent-300 transition-colors">
-            {t('dnat.open_profiles')} →
-          </Link>
+          {profilesEnabled && (
+            <Link to={`/${uid}/dnat-profiles`} className="text-xs text-accent-400 hover:text-accent-300 transition-colors">
+              {t('dnat.open_profiles')} →
+            </Link>
+          )}
         </motion.div>
       )}
 

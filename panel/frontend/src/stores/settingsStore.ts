@@ -2,6 +2,25 @@ import { create } from 'zustand'
 import { toast } from 'sonner'
 import i18n from '../i18n'
 import { settingsApi } from '../api/client'
+import { parseHiddenModules, serializeHiddenModules } from '../config/modules'
+
+// Зеркало списка скрытых разделов в браузере: меню рисуется до ответа
+// /settings, иначе при каждой загрузке страницы мигал бы полный список вкладок.
+const HIDDEN_MODULES_CACHE_KEY = 'panel_hidden_modules'
+
+function readCachedHiddenModules(): string[] {
+  try {
+    return parseHiddenModules(localStorage.getItem(HIDDEN_MODULES_CACHE_KEY))
+  } catch {
+    return []
+  }
+}
+
+function cacheHiddenModules(ids: string[]): void {
+  try {
+    localStorage.setItem(HIDDEN_MODULES_CACHE_KEY, serializeHiddenModules(ids))
+  } catch { /* приватный режим браузера */ }
+}
 
 // Get browser timezone offset in format "+03:00" or "-05:00"
 function getBrowserTimezone(): string {
@@ -90,6 +109,7 @@ interface SettingsState {
   remnawaveNginxPath: string
   updateBranch: string
   cpuAffinityEnabled: boolean
+  hiddenModules: string[]
   isLoading: boolean
 
   fetchSettings: () => Promise<void>
@@ -106,6 +126,7 @@ interface SettingsState {
   setRemnawaveNginxPath: (path: string) => Promise<void>
   setUpdateBranch: (branch: string) => Promise<void>
   setCpuAffinityEnabled: (enabled: boolean) => Promise<void>
+  setHiddenModules: (ids: string[]) => Promise<void>
   getEffectiveTimezone: () => string
 }
 
@@ -123,11 +144,14 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   remnawaveNginxPath: '/opt/remnawave',
   updateBranch: 'main',
   cpuAffinityEnabled: false,
+  hiddenModules: readCachedHiddenModules(),
   isLoading: true,
-  
+
   fetchSettings: async () => {
     try {
       const { data } = await settingsApi.getAll()
+      const hiddenModules = parseHiddenModules(data.settings.hidden_modules)
+      cacheHiddenModules(hiddenModules)
       set({
         refreshInterval: parseInt(data.settings.refresh_interval || '30'),
         compactView: data.settings.compact_view === 'true',
@@ -142,6 +166,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         remnawaveNginxPath: data.settings.remnawave_nginx_path || '/opt/remnawave',
         updateBranch: data.settings.update_branch || 'main',
         cpuAffinityEnabled: data.settings.cpu_affinity_enabled === 'true',
+        hiddenModules,
         isLoading: false,
       })
     } catch {
@@ -219,6 +244,13 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     set({ cpuAffinityEnabled: enabled })
     await settingsApi.set('cpu_affinity_enabled', enabled.toString())
     toast.success(i18n.t('common.saved'))
+  },
+
+  // Без тоста: результат виден сразу в боковом меню, а разделы переключают пачкой
+  setHiddenModules: async (ids: string[]) => {
+    set({ hiddenModules: ids })
+    cacheHiddenModules(ids)
+    await settingsApi.set('hidden_modules', serializeHiddenModules(ids))
   },
 
   getEffectiveTimezone: () => {
