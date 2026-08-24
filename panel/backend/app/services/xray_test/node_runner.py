@@ -22,7 +22,7 @@ import httpx
 from app.models import Server
 from app.services.http_client import get_external_client, get_node_client, node_auth_headers
 from app.services.node_capabilities import learn_from_denial
-from app.services.update_channel import github_configs_base
+from app.services.update_channel import current_branch, github_configs_base
 from app.services.xray_test import bundle, core_manager
 from app.services.xray_test.config_builder import build_config
 from app.services.xray_test.errors import XrayTestError
@@ -203,7 +203,10 @@ async def _ensure_runner(server: Server) -> None:
     )
     result = await _run_command(server, install)
     if result.strip() != wanted:
-        raise NodeExecError(f"Не удалось установить исполнитель на ноду: {result[:200]}")
+        raise NodeExecError(
+            f"Исполнитель установлен, но вернул версию {result.strip() or '(пусто)'!r} "
+            f"вместо {wanted}"
+        )
 
     _runner_cache[server.id] = wanted
     logger.info("xray-test: runner %s installed on server %s", wanted, server.id)
@@ -219,8 +222,16 @@ async def _load_runner_source() -> str:
         try:
             response = await get_external_client().get(url, timeout=30.0)
             response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            # Своей копии configs/ у панели нет (установщик кладёт только panel/),
+            # поэтому исполнитель берётся с GitHub — из ветки текущего канала
+            raise NodeExecError(
+                f"Исполнитель проверок недоступен в канале «{current_branch()}» "
+                f"({exc.response.status_code} по {url}). Если панель на стабильном канале, "
+                f"функция появится после релиза"
+            ) from exc
         except httpx.HTTPError as exc:
-            raise NodeExecError(f"Не скачать исполнитель проверок: {exc}") from exc
+            raise NodeExecError(f"Не скачать исполнитель проверок с {url}: {exc}") from exc
 
         _runner_source = response.text
         return _runner_source
@@ -248,8 +259,18 @@ async def _run_command(server: Server, command: str) -> str:
 
     if response.status_code != 200:
         await learn_from_denial(server.id, response.status_code, _maybe_json(response.text))
-        raise NodeExecError(f"Нода ответила HTTP {response.status_code}")
-    return str(response.json().get("output", ""))
+        raise NodeExecError(f"Нода ответила HTTP {response.status_code}: {response.text[:200]}")
+
+    payload = response.json()
+    stdout = str(payload.get("stdout") or "").strip()
+    if payload.get("success"):
+        return stdout
+
+    # Без stderr и кода возврата ошибка выглядела бы пустой строкой
+    stderr = str(payload.get("stderr") or "").strip()
+    error = str(payload.get("error") or "").strip()
+    detail = stderr or error or stdout or "команда не дала вывода"
+    raise NodeExecError(f"код {payload.get('exit_code')}: {detail[:300]}")
 
 
 def _extract_line(data: str) -> str:
