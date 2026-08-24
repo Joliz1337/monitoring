@@ -50,6 +50,8 @@ The probe sends nothing through the proxy and costs almost no time, so it can st
 | **Mbps** | Speed, if measurement is enabled |
 | **Exit IP** | The address and country the connection leaves from. If the country differs from what the key's seller promised, it shows immediately |
 
+The three counters above the table — Works, Works with caveats, Fails — double as a filter: click one and only those rows remain. Several can be active at once; Reset brings everything back.
+
 Rows expand: inside are the server IP, DNS resolution time, average TCP and jitter, HTTP status, certificate details and the tail of the core's output explaining a failure.
 
 ## Saved sources and SNI sets

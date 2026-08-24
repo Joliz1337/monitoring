@@ -916,7 +916,6 @@
     "will_check": "Checks to run: {{count}}",
     "results": "Results",
     "no_results": "No results yet",
-    "only_working": "Working only",
     "sort_by": "Sort:",
     "sort_index": "by order",
     "sort_rtt": "by latency",
@@ -1012,7 +1011,9 @@
     "col_location": "From",
     "location_panel": "Panel",
     "pick_location": "Pick at least one place to run from",
-    "sync_host_hint": "Needed when the key's transport Host equals the SNI — otherwise the server answers 404"
+    "sync_host_hint": "Needed when the key's transport Host equals the SNI — otherwise the server answers 404",
+    "reset_filter": "Reset",
+    "filter_empty": "Nothing matches the filter"
   },
   "anti_ddos": {
     "title": "Anti-DDoS",

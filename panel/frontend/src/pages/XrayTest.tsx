@@ -547,13 +547,6 @@ function TesterTab({ source }: { source: XrayTestSource }) {
             ) : undefined
           }
         >
-          {run.summary && (
-            <div className="flex flex-wrap gap-3 mb-4 text-xs">
-              <Stat label={t('xray_test.verdict_ok')} value={run.summary.ok} tone="text-emerald-400" />
-              <Stat label={t('xray_test.verdict_degraded')} value={run.summary.degraded} tone="text-amber-400" />
-              <Stat label={t('xray_test.verdict_fail')} value={run.summary.fail} tone="text-red-400" />
-            </div>
-          )}
           <ResultsTable cells={run.cells} groupBySni={sniList.length > 1} />
 
           {!!run.log.length && (
@@ -628,15 +621,6 @@ function Toggle({ checked, onChange, label, hint }: {
         {hint && <span className="block text-dark-500 text-[11px]">{hint}</span>}
       </span>
     </label>
-  )
-}
-
-function Stat({ label, value, tone }: { label: string; value: number; tone: string }) {
-  return (
-    <div className="px-3 py-1.5 rounded-lg bg-dark-900/60 border border-dark-800/50">
-      <span className="text-dark-400">{label}: </span>
-      <span className={`font-semibold ${tone}`}>{value}</span>
-    </div>
   )
 }
 

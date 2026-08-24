@@ -1,8 +1,9 @@
 import { Fragment, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { CheckCircle2, ChevronDown, ChevronRight, XCircle, AlertTriangle, ShieldAlert } from 'lucide-react'
+import {
+  CheckCircle2, ChevronDown, ChevronRight, XCircle, AlertTriangle, ShieldAlert, X,
+} from 'lucide-react'
 import type { XrayTestCell } from '../../api/client'
-import { Checkbox } from '../ui/Checkbox'
 import { Tooltip } from '../ui/Tooltip'
 
 type SortKey = 'index' | 'rtt' | 'verdict'
@@ -32,11 +33,19 @@ function ms(value: number | null): string {
 export function ResultsTable({ cells, groupBySni }: { cells: XrayTestCell[]; groupBySni: boolean }) {
   const { t } = useTranslation()
   const [sort, setSort] = useState<SortKey>('index')
-  const [onlyWorking, setOnlyWorking] = useState(false)
+  const [picked, setPicked] = useState<Set<string>>(new Set())
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
 
+  const counts = useMemo(() => {
+    const totals: Record<string, number> = { ok: 0, degraded: 0, fail: 0 }
+    cells.forEach(cell => { totals[cell.verdict] = (totals[cell.verdict] || 0) + 1 })
+    return totals
+  }, [cells])
+
   const visible = useMemo(() => {
-    const filtered = onlyWorking ? cells.filter(c => c.verdict !== 'fail') : cells
+    // Пустой набор означает «показывать всё»: так фильтр не может случайно
+    // спрятать вообще все строки
+    const filtered = picked.size ? cells.filter(cell => picked.has(cell.verdict)) : cells
     const order = { ok: 0, degraded: 1, fail: 2 }
     return [...filtered].sort((a, b) => {
       if (sort === 'rtt') {
@@ -47,7 +56,16 @@ export function ResultsTable({ cells, groupBySni }: { cells: XrayTestCell[]; gro
       if (sort === 'verdict') return order[a.verdict] - order[b.verdict] || a.index - b.index
       return a.index - b.index
     })
-  }, [cells, sort, onlyWorking])
+  }, [cells, sort, picked])
+
+  const toggleVerdict = (verdict: string) => {
+    setPicked(prev => {
+      const next = new Set(prev)
+      if (next.has(verdict)) next.delete(verdict)
+      else next.add(verdict)
+      return next
+    })
+  }
 
   // Лучший SNI считается по всему набору, а не по видимому: фильтр не должен
   // менять, какой домен признан лучшим
@@ -89,10 +107,26 @@ export function ResultsTable({ cells, groupBySni }: { cells: XrayTestCell[]; gro
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-3 text-xs">
-        <label className="flex items-center gap-2 text-dark-300 cursor-pointer select-none">
-          <Checkbox checked={onlyWorking} onChange={event => setOnlyWorking(event.target.checked)} />
-          {t('xray_test.only_working')}
-        </label>
+        <div className="flex flex-wrap items-center gap-2">
+          {(['ok', 'degraded', 'fail'] as const).map(verdict => (
+            <FilterChip
+              key={verdict}
+              verdict={verdict}
+              count={counts[verdict] || 0}
+              active={picked.has(verdict)}
+              onClick={() => toggleVerdict(verdict)}
+            />
+          ))}
+          {picked.size > 0 && (
+            <button
+              className="flex items-center gap-1 px-2 py-1 rounded-md text-dark-400 hover:text-dark-200"
+              onClick={() => setPicked(new Set())}
+            >
+              <X className="w-3 h-3" />
+              {t('xray_test.reset_filter')}
+            </button>
+          )}
+        </div>
         <div className="flex items-center gap-1 ml-auto">
           <span className="text-dark-500">{t('xray_test.sort_by')}</span>
           {(['index', 'rtt', 'verdict'] as SortKey[]).map(key => (
@@ -109,6 +143,9 @@ export function ResultsTable({ cells, groupBySni }: { cells: XrayTestCell[]; gro
         </div>
       </div>
 
+      {visible.length === 0 ? (
+        <p className="text-center py-8 text-sm text-dark-400">{t('xray_test.filter_empty')}</p>
+      ) : (
       <div className="overflow-x-auto rounded-lg border border-dark-800/60">
         <table className="w-full text-xs">
           <thead className="bg-dark-900/70 sticky top-0 z-10">
@@ -216,7 +253,50 @@ export function ResultsTable({ cells, groupBySni }: { cells: XrayTestCell[]; gro
           </tbody>
         </table>
       </div>
+      )}
     </div>
+  )
+}
+
+const CHIP_STYLE: Record<string, { active: string; idle: string }> = {
+  ok: {
+    active: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40',
+    idle: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20 hover:border-emerald-500/40',
+  },
+  degraded: {
+    active: 'bg-amber-500/20 text-amber-300 border-amber-500/40',
+    idle: 'bg-amber-500/10 text-amber-400 border-amber-500/20 hover:border-amber-500/40',
+  },
+  fail: {
+    active: 'bg-red-500/20 text-red-300 border-red-500/40',
+    idle: 'bg-red-500/10 text-red-400 border-red-500/20 hover:border-red-500/40',
+  },
+}
+
+function FilterChip({ verdict, count, active, onClick }: {
+  verdict: string
+  count: number
+  active: boolean
+  onClick: () => void
+}) {
+  const { t } = useTranslation()
+  const style = CHIP_STYLE[verdict] || CHIP_STYLE.fail
+  const Icon = verdict === 'ok' ? CheckCircle2 : verdict === 'degraded' ? AlertTriangle : XCircle
+
+  return (
+    <button
+      onClick={onClick}
+      disabled={count === 0 && !active}
+      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border transition-all ${
+        active ? style.active : style.idle
+      } ${count === 0 && !active ? 'opacity-40 cursor-not-allowed' : ''} ${
+        active ? 'ring-1 ring-inset ring-current/30' : ''
+      }`}
+    >
+      <Icon className="w-3.5 h-3.5" />
+      {t(`xray_test.verdict_${verdict}`)}
+      <span className="font-semibold tabular-nums">{count}</span>
+    </button>
   )
 }
 
