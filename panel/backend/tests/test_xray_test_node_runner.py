@@ -125,6 +125,38 @@ class ParseResultTest(unittest.TestCase):
         result = _parse_result(_cell(), events)
         self.assertNotIn(UUID, result.detail)
 
+
+    def test_node_fields_fill_details(self):
+        """Резолв и усреднённый TCP приходят с ноды — иначе в строке прочерки."""
+        events = [{
+            "type": "cell", "index": 0, "verdict": "ok", "reason": None,
+            "resolved_ip": "203.0.113.5", "dns_ms": 12,
+            "tcp_min_ms": 30, "tcp_avg_ms": 34, "tcp_jitter_ms": 5,
+        }]
+        result = _parse_result(_cell(), events)
+
+        self.assertEqual(result.resolved_ip, "203.0.113.5")
+        self.assertEqual(result.timings.dns_ms, 12)
+        self.assertEqual(result.timings.tcp_avg_ms, 34)
+        self.assertEqual(result.timings.tcp_jitter_ms, 5)
+
+    def test_core_log_reduced_to_reason(self):
+        """С ноды прилетает хвост лога — показывать нужно суть, а не простыню."""
+        events = [{
+            "type": "cell", "index": 0, "verdict": "fail",
+            "reason": "PROXY_HANDSHAKE_FAILED",
+            "detail": (
+                "app/proxyman/outbound: failed to process outbound traffic > "
+                "common/retry: [dial tcp 1.2.3.4:443: i/o timeout] > "
+                "common/retry: all retry attempts failed"
+            ),
+        }]
+        result = _parse_result(_cell(), events)
+
+        self.assertIn("i/o timeout", result.detail)
+        self.assertNotIn("app/proxyman", result.detail)
+        self.assertEqual(result.hint, "IO_TIMEOUT")
+
     def test_missing_cell_falls_back_to_log(self):
         events = [{"type": "log", "line": "не удалось получить ядро xray"}]
         result = _parse_result(_cell(), events)

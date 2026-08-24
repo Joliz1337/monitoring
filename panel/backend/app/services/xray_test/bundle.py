@@ -67,9 +67,14 @@ async def issue_ticket(core: Core) -> BundleTicket:
 
 
 def redeem(token: str) -> Optional[Path]:
-    """Одноразовое погашение: повторное скачивание по той же ссылке невозможно."""
+    """Ссылка живёт до истечения срока, а не до первого скачивания.
+
+    Одноразовость выглядела строже, но ломала дело: ядро на ноду тянут
+    параллельные проверки, и все, кроме первой, получали 404. Ограничение по
+    времени защищает так же — ссылка бесполезна через пять минут.
+    """
     _drop_expired()
-    grant = _grants.pop(token, None)
+    grant = _grants.get(token)
     if grant is None or grant.expires_at < time.time():
         return None
     return grant.path

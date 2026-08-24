@@ -23,7 +23,7 @@ from app.models import Server
 from app.services.http_client import get_external_client, get_node_client, node_auth_headers
 from app.services.node_capabilities import learn_from_denial
 from app.services.update_channel import current_branch, github_configs_base
-from app.services.xray_test import bundle, core_manager
+from app.services.xray_test import bundle, core_manager, core_output
 from app.services.xray_test.config_builder import build_config
 from app.services.xray_test.errors import XrayTestError
 from app.services.xray_test.models import CellResult, Core, FailReason, TestCell, Verdict
@@ -33,11 +33,13 @@ from app.services.xray_test.sanitize import sanitize_output
 logger = logging.getLogger(__name__)
 
 RUNNER_PATH = "/opt/monitoring-node/tools/xray-test-runner.sh"
+CORES_DIR = "/opt/monitoring-node/tools/cores"
 RUNNER_SOURCE = "xray-test-runner.sh"
 # Порты зарезервированы от эфемерной выдачи (configs/tune-sysctl.sh): иначе
 # исходящее соединение ноды могло бы занять порт ровно между проверками
 PORT_POOL = (7501, 7502, 7503, 7504)
 EXEC_TIMEOUT = 120
+CORE_INSTALL_TIMEOUT = 300
 HTTP_READ_TIMEOUT = 140
 COMMAND_LIMIT = 60000
 
@@ -68,13 +70,19 @@ class NodeCoreRunner:
         self._tickets: dict[Core, bundle.BundleTicket] = {}
 
     async def prepare(self, cells: list[TestCell]) -> None:
-        """Доставить исполнитель и выписать ссылки на нужные ядра."""
+        """Доставить исполнитель и заранее положить на ноду нужные ядра.
+
+        Ядро ставится здесь, а не по ходу проверок: иначе параллельные ячейки
+        начинают тянуть один и тот же файл одновременно и мешают друг другу.
+        """
         async with self._prepare_lock:
             if self._prepared:
                 return
             await _ensure_runner(self.server)
             for core in _cores_for(cells):
-                self._tickets[core] = await bundle.issue_ticket(core)
+                ticket = await bundle.issue_ticket(core)
+                self._tickets[core] = ticket
+                await _ensure_core_on_node(self.server, ticket)
             self._prepared = True
 
     async def probe(self, cell: TestCell, options: ProbeOptions) -> CellResult:
@@ -182,6 +190,38 @@ async def _execute(server: Server, payload: str) -> list[dict]:
     return events
 
 
+async def _ensure_core_on_node(server: Server, ticket: bundle.BundleTicket) -> None:
+    """Положить бинарник ядра на ноду до начала проверок.
+
+    Скачивание идёт с панели: у ноды может не быть доступа к GitHub. Подмену
+    ловит сверка SHA-256, поэтому `--insecure` здесь безопасен — сертификат
+    панели бывает самоподписанным.
+    """
+    path = f"{CORES_DIR}/{ticket.core.value}-{ticket.version}"
+    command = (
+        f"set -e; mkdir -p {CORES_DIR}; "
+        f"if [ -x {path} ] && [ \"$(sha256sum {path} | cut -d' ' -f1)\" = {ticket.sha256} ]; "
+        f"then echo present; exit 0; fi; "
+        f"curl -fsSL --insecure --max-time 300 '{ticket.url}' -o {path}.tmp; "
+        f"[ \"$(sha256sum {path}.tmp | cut -d' ' -f1)\" = {ticket.sha256} ] "
+        f"|| {{ rm -f {path}.tmp; echo 'контрольная сумма не совпала' >&2; exit 1; }}; "
+        f"chmod 0755 {path}.tmp && mv -f {path}.tmp {path} && echo installed"
+    )
+
+    try:
+        result = await _run_command(server, command, timeout=CORE_INSTALL_TIMEOUT)
+    except NodeExecError as exc:
+        raise NodeExecError(
+            f"Ядро {ticket.core.value} {ticket.version} не доставлено на ноду: {exc}"
+        ) from exc
+
+    if "installed" in result:
+        logger.info(
+            "xray-test: core %s %s delivered to server %s",
+            ticket.core.value, ticket.version, server.id,
+        )
+
+
 async def _ensure_runner(server: Server) -> None:
     """Сверить версию исполнителя на ноде и при расхождении переустановить."""
     source = await _load_runner_source()
@@ -244,13 +284,13 @@ def _version_of(source: str) -> str:
     return match.group(1)
 
 
-async def _run_command(server: Server, command: str) -> str:
-    body = {"command": command, "timeout": 60, "shell": "bash"}
+async def _run_command(server: Server, command: str, timeout: int = 60) -> str:
+    body = {"command": command, "timeout": timeout, "shell": "bash"}
     try:
         client = get_node_client(server)
         response = await client.post(
             f"{server.url}/api/system/execute",
-            headers=node_auth_headers(server), json=body, timeout=70.0,
+            headers=node_auth_headers(server), json=body, timeout=float(timeout + 10),
         )
     except httpx.TimeoutException as exc:
         raise NodeExecError("Таймаут соединения с нодой") from exc
@@ -298,11 +338,18 @@ def _parse_result(cell: TestCell, events: list[dict]) -> CellResult:
     result.verdict = Verdict(payload.get("verdict", "fail"))
     reason = payload.get("reason")
     result.reason = FailReason(reason) if reason else None
-    result.detail = sanitize_output(str(payload.get("detail") or ""))[:400]
+    raw_detail = str(payload.get("detail") or "")
+    parsed_detail, hint = core_output.extract_reason(raw_detail)
+    result.detail = sanitize_output(parsed_detail or raw_detail)[:400]
+    result.hint = hint or core_output.detect_hint(raw_detail)
     result.http_status = payload.get("http_status")
     result.exit_ip = payload.get("exit_ip")
     result.exit_country = payload.get("exit_country")
+    result.resolved_ip = payload.get("resolved_ip")
+    result.timings.dns_ms = payload.get("dns_ms")
     result.timings.tcp_min_ms = payload.get("tcp_min_ms")
+    result.timings.tcp_avg_ms = payload.get("tcp_avg_ms")
+    result.timings.tcp_jitter_ms = payload.get("tcp_jitter_ms")
     result.timings.handshake_ms = payload.get("handshake_ms")
     result.timings.rtt_ms = payload.get("rtt_ms")
     result.timings.speed_mbps = payload.get("speed_mbps")

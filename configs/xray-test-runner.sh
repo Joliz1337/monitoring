@@ -13,7 +13,7 @@
 #         xray-test-runner.sh version
 set -uo pipefail
 
-RUNNER_VERSION="1.0.0"
+RUNNER_VERSION="1.1.0"
 
 TOOLS_DIR="/opt/monitoring-node/tools"
 CORES_DIR="$TOOLS_DIR/cores"
@@ -122,21 +122,47 @@ stop_core() {
 
 # ── пробы ───────────────────────────────────────────────────────────────────
 
+# Печатает «min avg jitter»; пусто, если сервер не ответил ни разу
 tcp_ping_ms() {
-    local host="$1" port="$2" best="" i start elapsed
+    local host="$1" port="$2" i start elapsed
+    local best="" worst="" total=0 count=0
     for i in 1 2 3; do
         start=$(now_ms)
         if timeout 3 bash -c "exec 3<>/dev/tcp/$host/$port" 2>/dev/null; then
             elapsed=$(( $(now_ms) - start ))
-            if [ -z "$best" ] || [ "$elapsed" -lt "$best" ]; then
-                best="$elapsed"
-            fi
+            count=$((count + 1))
+            total=$((total + elapsed))
+            if [ -z "$best" ] || [ "$elapsed" -lt "$best" ]; then best="$elapsed"; fi
+            if [ -z "$worst" ] || [ "$elapsed" -gt "$worst" ]; then worst="$elapsed"; fi
         fi
     done
-    printf '%s' "$best"
+    [ "$count" -eq 0 ] && return 0
+    printf '%s %s %s' "$best" "$((total / count))" "$((worst - best))"
+}
+
+# Печатает «ip ms». Без резолва в подробностях строки стояли бы прочерки
+resolve_host() {
+    local host="$1" start ip
+    case "$host" in
+        *[!0-9.]*) ;;
+        *) printf '%s 0' "$host"; return 0 ;;
+    esac
+    start=$(now_ms)
+    ip=$(getent ahostsv4 "$host" 2>/dev/null | awk 'NR==1{print $1}')
+    [ -n "$ip" ] || ip=$(getent hosts "$host" 2>/dev/null | awk 'NR==1{print $1}')
+    [ -n "$ip" ] || return 0
+    printf '%s %s' "$ip" "$(( $(now_ms) - start ))"
 }
 
 curl_socks() { curl -s --socks5-hostname "127.0.0.1:$SOCKS_PORT" "$@"; }
+
+# Последняя строка лога ядра со следами ошибки. Просто tail отдавал бы рабочий
+# вывод («accepted tcp:…», «dialing TCP to …»), который ничего не объясняет.
+core_failure_line() {
+    local log="$WORKDIR/core.log"
+    [ -f "$log" ] || return 0
+    grep -iE 'fail|error|refused|timeout|rejected' "$log" 2>/dev/null | tail -1 | cut -c1-400
+}
 
 # ── основной цикл ───────────────────────────────────────────────────────────
 
@@ -145,27 +171,47 @@ emit_cell() {
         "$1" "$2" "$3" "$(escape "$4")"
     printf '"tcp_min_ms":%s,"handshake_ms":%s,"rtt_ms":%s,"http_status":%s,' \
         "${5:-null}" "${6:-null}" "${7:-null}" "${8:-null}"
-    printf '"exit_ip":%s,"exit_country":%s,"speed_mbps":%s}\n' \
+    printf '"exit_ip":%s,"exit_country":%s,"speed_mbps":%s,' \
         "${9:-null}" "${10:-null}" "${11:-null}"
+    printf '"resolved_ip":%s,"dns_ms":%s,"tcp_avg_ms":%s,"tcp_jitter_ms":%s}\n' \
+        "${12:-null}" "${13:-null}" "${14:-null}" "${15:-null}"
 }
 
 json_str() { [ -n "${1:-}" ] && printf '"%s"' "$(escape "$1")" || printf 'null'; }
 
 run_cell() {
     local index="$1" core_name="$2" address="$3" port="$4" udp="$5" config_b64="$6"
-    local tcp_ms="" handshake="" rtt="" status="" exit_ip="" exit_country="" speed=""
+    local tcp_ms="" tcp_avg="" tcp_jitter="" handshake="" rtt="" status=""
+    local exit_ip="" exit_country="" speed="" resolved_ip="" dns_ms=""
+
+    local resolved
+    resolved=$(resolve_host "$address")
+    if [ -n "$resolved" ]; then
+        resolved_ip=$(printf '%s' "$resolved" | cut -d' ' -f1)
+        dns_ms=$(printf '%s' "$resolved" | cut -d' ' -f2)
+    else
+        emit_cell "$index" "fail" '"DNS_FAIL"' "домен $address не резолвится"
+        return
+    fi
 
     if [ "$OPT_TCP" = "1" ] && [ "$udp" != "1" ]; then
-        tcp_ms=$(tcp_ping_ms "$address" "$port")
-        if [ -z "$tcp_ms" ]; then
-            emit_cell "$index" "fail" '"TCP_REFUSED"' "порт $port недоступен" null null null null
+        local tcp
+        tcp=$(tcp_ping_ms "$address" "$port")
+        if [ -z "$tcp" ]; then
+            emit_cell "$index" "fail" '"TCP_REFUSED"' "порт $port недоступен" \
+                null null null null null null null "$(json_str "$resolved_ip")" "${dns_ms:-null}"
             return
         fi
+        tcp_ms=$(printf '%s' "$tcp" | cut -d' ' -f1)
+        tcp_avg=$(printf '%s' "$tcp" | cut -d' ' -f2)
+        tcp_jitter=$(printf '%s' "$tcp" | cut -d' ' -f3)
     fi
 
     local binary="${CORE_PATHS[$core_name]:-}"
     if [ -z "$binary" ]; then
-        emit_cell "$index" "fail" '"CORE_START_FAILED"' "ядро $core_name недоступно" "${tcp_ms:-null}"
+        emit_cell "$index" "fail" '"CORE_START_FAILED"' "ядро $core_name недоступно" \
+            "${tcp_ms:-null}" null null null null null null \
+            "$(json_str "$resolved_ip")" "${dns_ms:-null}" "${tcp_avg:-null}" "${tcp_jitter:-null}"
         return
     fi
 
@@ -174,8 +220,9 @@ run_cell() {
 
     if ! start_core "$binary" "$WORKDIR/config.json"; then
         local detail
-        detail=$(tail -c 400 "$WORKDIR/core.log" 2>/dev/null)
-        emit_cell "$index" "fail" '"CORE_START_FAILED"' "$detail" "${tcp_ms:-null}"
+        detail=$(core_failure_line)
+        [ -n "$detail" ] || detail=$(tail -c 400 "$WORKDIR/core.log" 2>/dev/null)
+        emit_cell "$index" "fail" '"CORE_START_FAILED"' "$detail"             "${tcp_ms:-null}" null null null null null null             "$(json_str "$resolved_ip")" "${dns_ms:-null}" "${tcp_avg:-null}" "${tcp_jitter:-null}"
         stop_core
         rm -rf "$WORKDIR"; WORKDIR=""
         return
@@ -190,7 +237,9 @@ run_cell() {
 
         if [ -z "$status" ] || [ "$status" = "000" ]; then
             emit_cell "$index" "fail" '"PROXY_HANDSHAKE_FAILED"' \
-                "$(tail -c 300 "$WORKDIR/core.log" 2>/dev/null)" "${tcp_ms:-null}"
+                "$(core_failure_line)" \
+                "${tcp_ms:-null}" null null null null null null \
+                "$(json_str "$resolved_ip")" "${dns_ms:-null}" "${tcp_avg:-null}" "${tcp_jitter:-null}"
             stop_core; rm -rf "$WORKDIR"; WORKDIR=""
             return
         fi
@@ -201,7 +250,8 @@ run_cell() {
 
         if [ "$status" != "204" ] && [ "$status" != "200" ]; then
             emit_cell "$index" "fail" '"HTTP_BAD_STATUS"' "HTTP $status" \
-                "${tcp_ms:-null}" "${handshake:-null}" "${rtt:-null}" "$status"
+                "${tcp_ms:-null}" "${handshake:-null}" "${rtt:-null}" "$status" null null null \
+                "$(json_str "$resolved_ip")" "${dns_ms:-null}" "${tcp_avg:-null}" "${tcp_jitter:-null}"
             stop_core; rm -rf "$WORKDIR"; WORKDIR=""
             return
         fi
@@ -232,7 +282,8 @@ run_cell() {
 
     emit_cell "$index" "$verdict" 'null' "" "${tcp_ms:-null}" "${handshake:-null}" \
         "${rtt:-null}" "${status:-null}" "$(json_str "$exit_ip")" \
-        "$(json_str "$exit_country")" "${speed:-null}"
+        "$(json_str "$exit_country")" "${speed:-null}" \
+        "$(json_str "$resolved_ip")" "${dns_ms:-null}" "${tcp_avg:-null}" "${tcp_jitter:-null}"
 }
 
 main() {
