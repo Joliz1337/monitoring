@@ -540,6 +540,7 @@ export interface XrayTestCell {
   verdict: XrayTestVerdict
   reason: string | null
   detail: string
+  hint: string | null
   resolved_ip: string | null
   exit_ip: string | null
   exit_country: string | null

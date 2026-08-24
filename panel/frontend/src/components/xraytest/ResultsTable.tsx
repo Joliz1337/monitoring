@@ -1,7 +1,7 @@
 import { Fragment, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
-  CheckCircle2, ChevronDown, ChevronRight, XCircle, AlertTriangle, ShieldAlert, X,
+  CheckCircle2, ChevronDown, ChevronRight, XCircle, AlertTriangle, ShieldAlert, X, Lightbulb,
 } from 'lucide-react'
 import type { XrayTestCell } from '../../api/client'
 import { Tooltip } from '../ui/Tooltip'
@@ -230,10 +230,21 @@ export function ResultsTable({ cells, groupBySni }: { cells: XrayTestCell[]; gro
                             {t(`xray_test.reason_${cell.reason}`, cell.reason)}
                           </div>
                         )}
+                        {cell.hint && (
+                          <div className="flex items-start gap-2 px-2.5 py-2 rounded-md bg-amber-500/10 border border-amber-500/20 text-amber-300">
+                            <Lightbulb className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                            <span>{t(`xray_test.hint_${cell.hint}`, '')}</span>
+                          </div>
+                        )}
                         {cell.detail && (
-                          <pre className="text-[11px] font-mono text-dark-400 whitespace-pre-wrap break-all bg-dark-950/60 rounded p-2 max-h-32 overflow-auto">
-                            {cell.detail}
-                          </pre>
+                          <div>
+                            <span className="text-dark-500 text-[11px]">
+                              {t('xray_test.core_says')}
+                            </span>
+                            <pre className="mt-1 text-[11px] font-mono text-dark-300 whitespace-pre-wrap break-all bg-dark-950/60 rounded p-2 max-h-32 overflow-auto">
+                              {cell.detail}
+                            </pre>
+                          </div>
                         )}
                         <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-[11px] text-dark-400">
                           <Detail label={t('xray_test.detail_dns')} value={cell.resolved_ip} />

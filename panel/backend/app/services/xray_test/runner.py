@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Protocol as TypingProtocol
 
-from app.services.xray_test import core_manager, probes
+from app.services.xray_test import core_manager, core_output, probes
 from app.services.xray_test.config_builder import build_config
 from app.services.xray_test.errors import CoreDownloadError, UnsupportedConfigError
 from app.services.xray_test.models import (
@@ -48,6 +48,7 @@ SWEEP_INTERVAL = 30.0
 TERM_GRACE = 3.0
 READY_POLL_INTERVAL = 0.05
 CORE_LOG_TAIL = 400
+CORE_LOG_LINES = 40
 
 _core_semaphore = asyncio.Semaphore(MAX_CONCURRENT_CORES)
 _live_processes: dict[asyncio.subprocess.Process, float] = {}
@@ -67,6 +68,10 @@ class _LaunchedCore:
     port: int
     workdir: tempfile.TemporaryDirectory
     started_at: float = field(default_factory=time.monotonic)
+    # Вывод копится фоном: причина отказа появляется в нём уже после старта,
+    # а читать поток по факту провала поздно — ядро к тому моменту убито
+    output: list[str] = field(default_factory=list)
+    reader: Optional[asyncio.Task] = None
 
 
 class LocalCoreRunner:
@@ -125,13 +130,17 @@ class LocalCoreRunner:
         try:
             launched = await self._launch(cell, core, binary)
         except _CoreStartError as exc:
-            return _fail(result, exc.reason, exc.detail)
+            return _fail(result, exc.reason, exc.detail, exc.hint)
 
         try:
             async with asyncio.timeout(CELL_TIMEOUT):
                 return await self._run_probes(launched, options, result)
         except asyncio.TimeoutError:
-            return _fail(result, FailReason.HTTP_TIMEOUT, "проверка не уложилась в отведённое время")
+            core_detail, hint = _core_reason(launched)
+            return _fail(
+                result, FailReason.HTTP_TIMEOUT,
+                core_detail or "проверка не уложилась в отведённое время", hint,
+            )
         finally:
             await _shutdown_core(launched)
 
@@ -144,10 +153,13 @@ class LocalCoreRunner:
         result.timings.rtt_ms = http.rtt_ms
 
         if http.reason is not None:
-            detail = http.error or ""
-            if http.reason is FailReason.PROXY_HANDSHAKE_FAILED and launched.process.returncode:
-                detail = f"{detail}; ядро завершилось с кодом {launched.process.returncode}"
-            return _fail(result, http.reason, detail)
+            # Текст исключения клиента часто пуст, а настоящая причина — в логе
+            # ядра: «certificate is valid for …, not …», «connection refused»
+            core_detail, hint = _core_reason(launched)
+            detail = core_detail or http.error or ""
+            if launched.process.returncode:
+                detail = f"{detail} (ядро завершилось с кодом {launched.process.returncode})".strip()
+            return _fail(result, http.reason, detail, hint)
 
         if options.exit_identity:
             identity = await probes.exit_identity(launched.port)
@@ -185,23 +197,27 @@ class LocalCoreRunner:
 
         _live_processes[process] = time.monotonic()
         launched = _LaunchedCore(process=process, port=port, workdir=workdir)
+        launched.reader = asyncio.create_task(_pump_output(launched))
 
         if not await _wait_ready(launched):
-            output = await _read_output(launched)
+            detail, hint = _core_reason(launched)
             await _shutdown_core(launched)
             reason = (
                 FailReason.CORE_CRASHED if process.returncode is not None
                 else FailReason.CORE_START_FAILED
             )
-            raise _CoreStartError(reason, output or "ядро не открыло локальный порт")
+            raise _CoreStartError(
+                reason, detail or "ядро не открыло локальный порт", hint
+            )
         return launched
 
 
 class _CoreStartError(Exception):
-    def __init__(self, reason: FailReason, detail: str) -> None:
+    def __init__(self, reason: FailReason, detail: str, hint: Optional[str] = None) -> None:
         super().__init__(detail)
         self.reason = reason
         self.detail = detail
+        self.hint = hint
 
 
 def _free_port() -> int:
@@ -227,20 +243,41 @@ async def _wait_ready(launched: _LaunchedCore) -> bool:
     return False
 
 
-async def _read_output(launched: _LaunchedCore) -> str:
-    if launched.process.stdout is None:
-        return ""
+async def _pump_output(launched: _LaunchedCore) -> None:
+    """Копить вывод ядра построчно, храня только хвост."""
+    stream = launched.process.stdout
+    if stream is None:
+        return
     try:
-        data = await asyncio.wait_for(launched.process.stdout.read(4096), timeout=1.0)
-    except (asyncio.TimeoutError, OSError):
-        return ""
-    text = data.decode("utf-8", errors="replace").strip()
-    return sanitize_output(text)[-CORE_LOG_TAIL:]
+        while True:
+            line = await stream.readline()
+            if not line:
+                return
+            text = line.decode("utf-8", errors="replace").rstrip()
+            if not text or core_output.is_noise(text):
+                continue
+            launched.output.append(text)
+            if len(launched.output) > CORE_LOG_LINES:
+                del launched.output[: len(launched.output) - CORE_LOG_LINES]
+    except (asyncio.CancelledError, OSError, ValueError):
+        return
+
+
+def _core_reason(launched: Optional[_LaunchedCore]) -> tuple[str, Optional[str]]:
+    if launched is None or not launched.output:
+        return "", None
+    detail, hint = core_output.extract_reason("\n".join(launched.output))
+    return sanitize_output(detail)[:CORE_LOG_TAIL], hint
 
 
 async def _shutdown_core(launched: Optional[_LaunchedCore]) -> None:
     if launched is None:
         return
+
+    if launched.reader is not None:
+        launched.reader.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await launched.reader
 
     process = launched.process
     _live_processes.pop(process, None)
@@ -322,10 +359,16 @@ def _empty_result(cell: TestCell) -> CellResult:
     )
 
 
-def _fail(result: CellResult, reason: FailReason, detail: str) -> CellResult:
+def _fail(
+    result: CellResult,
+    reason: FailReason,
+    detail: str,
+    hint: Optional[str] = None,
+) -> CellResult:
     result.verdict = Verdict.FAIL
     result.reason = reason
     result.detail = sanitize_output(detail)[:CORE_LOG_TAIL]
+    result.hint = hint or core_output.detect_hint(detail)
     return result
 
 

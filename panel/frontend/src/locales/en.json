@@ -1013,7 +1013,18 @@
     "pick_location": "Pick at least one place to run from",
     "sync_host_hint": "Needed when the key's transport Host equals the SNI — otherwise the server answers 404",
     "reset_filter": "Reset",
-    "filter_empty": "Nothing matches the filter"
+    "filter_empty": "Nothing matches the filter",
+    "core_says": "What the core reported:",
+    "hint_CERT_MISMATCH": "The server certificate is issued for a different domain. For REALITY this means the server rejected the masking parameters — check the public key, short id and SNI.",
+    "hint_CERT_UNTRUSTED": "The server certificate fails verification: expired, self-signed or issued by an unknown authority.",
+    "hint_CONN_REFUSED": "The server refused the connection on this port — the port is closed, the service is down, or the address is wrong.",
+    "hint_CONN_RESET": "The server dropped the connection. Usually a reply to wrong credentials, or the link is being cut by the provider.",
+    "hint_IO_TIMEOUT": "The server did not answer in time. It may be overloaded, unreachable from this location, or blocked on the way.",
+    "hint_DNS_FAIL": "The server domain does not resolve — check the address in the key.",
+    "hint_AUTH_FAILED": "The server rejected the credentials — the UUID or password in the key does not match.",
+    "hint_REALITY_REJECTED": "The server rejected the REALITY handshake — the public key, short id or SNI do not match.",
+    "hint_PROTOCOL_MISMATCH": "A different protocol answers on this port than the key declares — check the port and connection type.",
+    "hint_NO_ROUTE": "There is no route to the server from this point — most likely a network-level block."
   },
   "anti_ddos": {
     "title": "Anti-DDoS",

@@ -54,6 +54,20 @@ The three counters above the table — Works, Works with caveats, Fails — doub
 
 Rows expand: inside are the server IP, DNS resolution time, average TCP and jitter, HTTP status, certificate details and the tail of the core's output explaining a failure.
 
+## Why a key fails
+
+Expand a failed row — it holds the reason, a hint and the core's verbatim answer.
+
+The most common cases:
+
+- **The server certificate is issued for a different domain.** For REALITY this is the main sign that the server rejected the masking parameters: the public key, short id or SNI does not match. Check them in the key.
+- **The server refused the connection.** The port is closed, the service is down, or the address in the key is wrong. The TCP probe in the same row shows whether the port answers at all.
+- **The server rejected the credentials.** The UUID or password does not match — the key was revoked or copied with an error.
+- **A different protocol answers on the port.** Usually means a wrong port or another service sitting on it.
+- **The server did not answer in time.** Overloaded, unreachable from this point, or cut on the way — try running the check from another location.
+
+The "What the core reported" block is the verbatim answer from Xray or sing-box, untranslated. It helps with unusual failures: you can take it straight to the server owner.
+
 ## Saved sources and SNI sets
 
 A subscription or link list you check regularly can be stored with the "Save" button next to the input — it then appears as a chip above the field, one click away. Subscription URLs are stored encrypted. SNI sets work the same way: save a list of domains under a name and apply it with one button. Renaming, editing and deleting live on the "Saved" tab.

@@ -33,7 +33,9 @@ NETWORK_NAMES = {
 
 def build_config(endpoint: ProxyEndpoint, socks_port: int) -> dict[str, Any]:
     return {
-        "log": {"loglevel": "warning"},
+        # info, а не warning: на warning ядро молчит о причинах отказа,
+        # а именно они и нужны в результате проверки
+        "log": {"loglevel": "info"},
         "inbounds": [{
             "tag": INBOUND_TAG,
             "listen": "127.0.0.1",

@@ -170,6 +170,7 @@ class CellResult:
     verdict: Verdict = Verdict.FAIL
     reason: Optional[FailReason] = None
     detail: str = ""
+    hint: Optional[str] = None
     resolved_ip: Optional[str] = None
     exit_ip: Optional[str] = None
     exit_country: Optional[str] = None
@@ -198,6 +199,7 @@ class CellResult:
             "verdict": self.verdict.value,
             "reason": self.reason.value if self.reason else None,
             "detail": self.detail,
+            "hint": self.hint,
             "resolved_ip": self.resolved_ip,
             "exit_ip": self.exit_ip,
             "exit_country": self.exit_country,

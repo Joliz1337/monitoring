@@ -157,6 +157,7 @@ panel/
 │       │   ├── startup.py               # Восстановление выбранных версий ядер из настроек при старте
 │       │   ├── device_profiles.py       # Профили клиента подписки: User-Agent и заголовки HWID (uuid5 от адреса)
 │       │   ├── probes.py                # DNS, TCP-пинг, TLS-инспекция, e2e через socks, выходной IP, скорость
+│       │   ├── core_output.py           # Вывод ядра → короткая причина отказа и код подсказки
 │       │   ├── runner.py                # LocalCoreRunner: запуск ядра, killpg-уборка, sweeper
 │       │   ├── node_runner.py           # NodeCoreRunner: доставка исполнителя и ядра на ноду, разбор ответа
 │       │   ├── bundle.py                # Одноразовые ссылки на бинарник ядра для нод
@@ -2649,6 +2650,8 @@ SSE-события: `note_update` — `{"content": "...", "version": N}`, `tasks
 
 Дополнительно сверяется размер ассета из GitHub API. Если GitHub API недоступен, панель откатывается на закреплённую версию. Распаковка — `zipfile`/`tarfile` из stdlib (`unzip` в образе панели нет).
 
+**Причина отказа** (`core_output.py`). «Не работает» без объяснения бесполезно, а объяснение прячется в выводе ядра — и только на уровне `info`: на `warning` Xray о причинах молчит. Поэтому ядро запускается с `loglevel: info`, вывод копится фоновой задачей построчно (последние 40 строк, служебные отбрасываются), а при провале из него достаётся суть: ядро печатает цепочку обёрток «failed to process outbound traffic > … > common/retry: [dial tcp …: connection refused]», и нужное лежит в последних квадратных скобках; строка без признака ошибки причиной не считается. Рядом определяется код подсказки (`CERT_MISMATCH`, `CONN_REFUSED`, `AUTH_FAILED`, `REALITY_REJECTED`, `PROTOCOL_MISMATCH` и др.) — интерфейс показывает по нему человеческое объяснение, что проверить, и дословный вывод ядра отдельным блоком. Отдельно: текст исключения httpx часто пуст (`ConnectError` без сообщения) — вместо прочерка подставляется осмысленный запасной текст или тип исключения.
+
 **Уборка процессов** — три рубежа, потому что на большой подписке ядер сотни: `finally` у каждой ячейки (`killpg(SIGTERM)` → 3 с → `SIGKILL` → `rmtree`), сборщик раз в 30 с добивает ядра старше 90 с, `stop_xray_test_service()` в `lifespan` — при остановке панели. Ядро запускается в своей process group (`start_new_session=True`): оно порождает дочерние процессы, и kill по одному pid оставил бы сирот.
 
 **Места запуска.** Выбор множественный: панель и любое число нод (до 20). Матрица становится «конфигурация × SNI × место», у каждой точки своя строка результата — ключ, живой из одной страны, может быть мёртв из другой, и усреднять это нельзя. У каждой локации собственная очередь и постоянное число рабочих над ней (`concurrency` на точку): с общей очередью быстрая точка простаивала бы за медленной нодой. Задача на каждую ячейку не создаётся — прогон любого размера стоит памяти только на сами ячейки, а прогресс каждые `PROGRESS_STEP` результатов пишется в журнал задачи. В сводке прогона место одно поле (`multi:N` при нескольких), конкретная локация хранится у каждой строки результата.
@@ -2685,7 +2688,7 @@ SSE-события: `note_update` — `{"content": "...", "version": N}`, `tasks
 
 Путь стрима внесён в `GZipMiddlewareNoSSE` (`app/main.py`) — иначе gzip забуферизовал бы поток.
 
-**Файлы:** `app/services/xray_test/` (см. «Структуру»), `app/routers/xray_test.py`, `configs/xray-test-runner.sh`, `panel/frontend/src/pages/XrayTest.tsx` и `src/components/xraytest/`. Тесты: `test_xray_test_parsers.py`, `test_xray_test_config.py`, `test_xray_test_subscription.py`, `test_xray_test_sanitize.py`, `test_xray_test_node_runner.py`, `test_xray_test_cores.py`, `test_xray_test_client_headers.py`, `test_xray_test_queue.py`.
+**Файлы:** `app/services/xray_test/` (см. «Структуру»), `app/routers/xray_test.py`, `configs/xray-test-runner.sh`, `panel/frontend/src/pages/XrayTest.tsx` и `src/components/xraytest/`. Тесты: `test_xray_test_parsers.py`, `test_xray_test_config.py`, `test_xray_test_subscription.py`, `test_xray_test_sanitize.py`, `test_xray_test_node_runner.py`, `test_xray_test_cores.py`, `test_xray_test_client_headers.py`, `test_xray_test_queue.py`, `test_xray_test_core_output.py`.
 
 ## Диагностика
 

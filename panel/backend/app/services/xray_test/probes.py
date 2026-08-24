@@ -160,7 +160,7 @@ async def inspect_tls(host: str, port: int, sni: str) -> TlsInfo:
     except asyncio.TimeoutError:
         return TlsInfo(error="таймаут TLS-рукопожатия")
     except (ssl.SSLError, OSError) as exc:
-        return TlsInfo(error=str(exc))
+        return TlsInfo(error=_describe(exc, "соединение не установилось"))
 
     try:
         ssl_object = writer.get_extra_info("ssl_object")
@@ -219,12 +219,32 @@ async def http_through_proxy(socks_port: int, headers: Optional[dict] = None) ->
                 result.error = f"HTTP {status}"
             return result
         except httpx.TimeoutException as exc:
-            last = HttpResult(reason=FailReason.HTTP_TIMEOUT, error=str(exc) or "таймаут запроса")
+            last = HttpResult(reason=FailReason.HTTP_TIMEOUT, error=_describe(exc, "таймаут запроса"))
         except httpx.ProxyError as exc:
-            last = HttpResult(reason=FailReason.PROXY_HANDSHAKE_FAILED, error=str(exc))
+            last = HttpResult(
+                reason=FailReason.PROXY_HANDSHAKE_FAILED,
+                error=_describe(exc, "локальный socks не принял соединение"),
+            )
+        except httpx.ConnectError as exc:
+            last = HttpResult(
+                reason=FailReason.PROXY_HANDSHAKE_FAILED,
+                error=_describe(exc, "через прокси не удалось дойти до цели"),
+            )
         except httpx.HTTPError as exc:
-            last = HttpResult(reason=FailReason.PROXY_HANDSHAKE_FAILED, error=str(exc))
+            last = HttpResult(reason=FailReason.PROXY_HANDSHAKE_FAILED, error=_describe(exc))
     return last
+
+
+def _describe(exc: BaseException, fallback: str = "") -> str:
+    """Текст исключения, а если он пуст — хотя бы его тип.
+
+    httpx часто поднимает ConnectError с пустым сообщением: в интерфейсе это
+    выглядело прочерком вместо причины.
+    """
+    text = str(exc).strip()
+    if text:
+        return text
+    return fallback or type(exc).__name__
 
 
 async def exit_identity(socks_port: int) -> ExitIdentity:

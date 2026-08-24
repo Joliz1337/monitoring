@@ -29,7 +29,8 @@ TRANSPORT_NAMES = {
 
 def build_config(endpoint: ProxyEndpoint, socks_port: int) -> dict[str, Any]:
     return {
-        "log": {"level": "warn"},
+        # info, а не warn: причина отказа печатается только на этом уровне
+        "log": {"level": "info"},
         "inbounds": [{
             "type": "socks",
             "tag": INBOUND_TAG,
