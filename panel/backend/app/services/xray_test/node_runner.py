@@ -340,6 +340,8 @@ def _parse_result(cell: TestCell, events: list[dict]) -> CellResult:
     result.reason = FailReason(reason) if reason else None
     raw_detail = str(payload.get("detail") or "")
     parsed_detail, hint = core_output.extract_reason(raw_detail)
+    if not parsed_detail and core_output.looks_stalled(raw_detail):
+        parsed_detail, hint = core_output.STALLED_DETAIL, core_output.STALLED_HINT
     result.detail = sanitize_output(parsed_detail or raw_detail)[:400]
     result.hint = hint or core_output.detect_hint(raw_detail)
     result.http_status = payload.get("http_status")

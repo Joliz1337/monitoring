@@ -20,6 +20,7 @@ from app.services.xray_test.core_output import (  # noqa: E402
     detect_hint,
     extract_reason,
     is_noise,
+    looks_stalled,
 )
 
 CERT_MISMATCH = (
@@ -152,6 +153,44 @@ class DetectHintTest(unittest.TestCase):
         self.assertEqual(
             detect_hint("x509: certificate is valid for a.com, not b.com"), "CERT_MISMATCH"
         )
+
+
+class StalledHandshakeTest(unittest.TestCase):
+    """Ядро замолчало на рукопожатии — отсутствие ошибки тоже диагноз.
+
+    Лог снят с реального ключа vless+REALITY: сервер принял TCP (проба 35 мс),
+    но на рукопожатие не ответил. Ядру нечего писать, потому что оно всё ещё
+    ждёт, — и раньше строка оставалась вообще без объяснения.
+    """
+
+    STALLED = """2026/08/24 21:50:54 [Info] transport/internet/tcp: listening TCP on 127.0.0.1:49589
+2026/08/24 21:50:54 [Warning] core: Xray 26.3.27 started
+2026/08/24 21:50:55 [Info] proxy/socks: TCP Connect request to tcp:cp.cloudflare.com:443
+2026/08/24 21:50:55 [Info] app/dispatcher: taking detour [mon-test-out] for [tcp:cp.cloudflare.com:443]
+2026/08/24 21:50:55 [Info] transport/internet/tcp: dialing TCP to tcp:95.216.100.118:8443"""
+
+    def test_recognised_as_stalled(self):
+        self.assertTrue(looks_stalled(self.STALLED))
+
+    def test_no_reason_extracted_from_stalled_log(self):
+        detail, hint = extract_reason(self.STALLED)
+        self.assertEqual(detail, "")
+        self.assertIsNone(hint)
+
+    def test_log_with_error_is_not_stalled(self):
+        """Есть строка об ошибке — значит причина известна, а не «молчит»."""
+        text = (
+            self.STALLED
+            + "\n[Info] failed to process outbound traffic > [dial tcp: i/o timeout]"
+        )
+        self.assertFalse(looks_stalled(text))
+
+    def test_startup_without_dialing_is_not_stalled(self):
+        """Ядро даже не дошло до подключения — это другой случай."""
+        self.assertFalse(looks_stalled(STARTUP))
+
+    def test_empty_log_is_not_stalled(self):
+        self.assertFalse(looks_stalled(""))
 
 
 if __name__ == "__main__":

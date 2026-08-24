@@ -13,7 +13,7 @@
 #         xray-test-runner.sh version
 set -uo pipefail
 
-RUNNER_VERSION="1.2.0"
+RUNNER_VERSION="1.3.0"
 
 TOOLS_DIR="/opt/monitoring-node/tools"
 CORES_DIR="$TOOLS_DIR/cores"
@@ -159,9 +159,13 @@ curl_socks() { curl -s --socks5-hostname "127.0.0.1:$SOCKS_PORT" "$@"; }
 # Последняя строка лога ядра со следами ошибки. Просто tail отдавал бы рабочий
 # вывод («accepted tcp:…», «dialing TCP to …»), который ничего не объясняет.
 core_failure_line() {
-    local log="$WORKDIR/core.log"
+    local log="$WORKDIR/core.log" line
     [ -f "$log" ] || return 0
-    grep -iE 'fail|error|refused|timeout|rejected' "$log" 2>/dev/null | tail -1 | cut -c1-700
+    line=$(grep -iE 'fail|error|refused|timeout|rejected' "$log" 2>/dev/null | tail -1)
+    # Ошибок нет — отдаём хвост как есть: ядро могло замолчать на рукопожатии,
+    # и отсутствие ошибки само по себе диагноз, который разберёт панель
+    [ -n "$line" ] || line=$(tail -2 "$log" 2>/dev/null | tr '\n' ' ')
+    printf '%s' "$line" | cut -c1-700
 }
 
 # ── основной цикл ───────────────────────────────────────────────────────────

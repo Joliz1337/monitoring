@@ -108,6 +108,29 @@ def _shorten(detail: str) -> str:
     return parts[-1]
 
 
+STALLED_HINT = "HANDSHAKE_STALLED"
+STALLED_DETAIL = "соединение установлено, но ответа на рукопожатие не пришло"
+
+# Ядро дошло до подключения и замолчало: строки об ошибке нет, потому что оно
+# всё ещё ждёт ответа
+_DIALING_RE = re.compile(r"dialing (tcp|udp|to)", re.IGNORECASE)
+
+
+def looks_stalled(output: str) -> bool:
+    """Соединение открыто, ошибок нет — сервер просто не отвечает.
+
+    Для REALITY это штатное поведение при неподходящих параметрах: сервер не
+    отвечает «неправильному» клиенту вместо отказа. Отсутствие ошибки в логе —
+    такой же диагноз, как и сама ошибка, и назвать его нужно так же явно.
+    """
+    if not output:
+        return False
+    meaningful = [line for line in output.splitlines() if line.strip() and not is_noise(line)]
+    if any("fail" in line.lower() or "error" in line.lower() for line in meaningful):
+        return False
+    return any(_DIALING_RE.search(line) for line in meaningful)
+
+
 def detect_hint(text: str) -> Optional[str]:
     lowered = text.lower()
     for code, pattern in HINTS:

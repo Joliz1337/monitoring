@@ -1030,7 +1030,8 @@
     "hint_REALITY_REJECTED": "The server rejected the REALITY handshake — the public key, short id or SNI do not match.",
     "hint_PROTOCOL_MISMATCH": "A different protocol answers on this port than the key declares — check the port and connection type.",
     "hint_NO_ROUTE": "There is no route to the server from this point — most likely a network-level block.",
-    "hint_GRPC_UNAVAILABLE": "The server does not accept the gRPC connection: check serviceName in the key and that this port really serves gRPC rather than plain TLS."
+    "hint_GRPC_UNAVAILABLE": "The server does not accept the gRPC connection: check serviceName in the key and that this port really serves gRPC rather than plain TLS.",
+    "hint_HANDSHAKE_STALLED": "The server accepted the connection but never answered the handshake. For REALITY that is normal behaviour with wrong parameters: check the public key, short id and SNI. The other option is filtering on the way that throttles the connection."
   },
   "anti_ddos": {
     "title": "Anti-DDoS",

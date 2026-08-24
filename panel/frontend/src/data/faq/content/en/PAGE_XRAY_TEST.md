@@ -64,6 +64,7 @@ The most common cases:
 - **The server refused the connection.** The port is closed, the service is down, or the address in the key is wrong. The TCP probe in the same row shows whether the port answers at all.
 - **The server rejected the credentials.** The UUID or password does not match — the key was revoked or copied with an error.
 - **A different protocol answers on the port.** Usually means a wrong port or another service sitting on it.
+- **The server accepted the connection but never answered the handshake.** For REALITY this is the normal reaction to wrong parameters: the server stays silent instead of refusing. Check the public key, short id and SNI. The other option is filtering on the way.
 - **The server did not answer in time.** Overloaded, unreachable from this point, or cut on the way — try running the check from another location.
 
 The "What the core reported" block is the verbatim answer from Xray or sing-box, untranslated. It helps with unusual failures: you can take it straight to the server owner.
