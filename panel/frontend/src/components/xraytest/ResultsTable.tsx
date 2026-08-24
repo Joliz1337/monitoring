@@ -437,6 +437,16 @@ function CheckList({ cells, openCells, onToggleCell, groupBySni }: {
                   {cell.sni || t('xray_test.sni_from_key')}
                 </span>
 
+                {/* Точка отсчёта для подставленных имён — без пометки её не
+                    отличить от них, а сравнивают результаты именно с ней */}
+                {cell.sni_from_config && cells.length > 1 && (
+                  <Tooltip label={t('xray_test.sni_own_hint')}>
+                    <span className="px-2 py-1 rounded bg-dark-700/60 text-dark-300 text-xs shrink-0">
+                      {t('xray_test.sni_own')}
+                    </span>
+                  </Tooltip>
+                )}
+
                 {bestIndex === cell.index && (
                   <span className="px-2 py-1 rounded bg-accent-500/15 text-accent-400 text-xs shrink-0">
                     {t('xray_test.best_sni')}

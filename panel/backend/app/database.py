@@ -190,6 +190,19 @@ async def run_migrations(conn):
         except Exception:
             pass
     
+    result = await conn.execute(text("""
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'xray_test_results'
+    """))
+    xray_test_columns = {row[0] for row in result.fetchall()}
+
+    if xray_test_columns and "sni_from_config" not in xray_test_columns:
+        try:
+            await conn.execute(text('ALTER TABLE xray_test_results ADD COLUMN "sni_from_config" BOOLEAN DEFAULT FALSE'))
+            logger.info("Added column: xray_test_results.sni_from_config")
+        except Exception:
+            pass
+
     # Check remnawave_settings columns
     result = await conn.execute(text("""
         SELECT column_name FROM information_schema.columns 

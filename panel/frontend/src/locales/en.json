@@ -1033,6 +1033,8 @@
     "servers_count": "servers: {{count}}",
     "best_rtt": "best",
     "sni_from_key": "SNI from the key",
+    "sni_own": "from config",
+    "sni_own_hint": "The key's own SNI — the one that came in the subscription or link. The other rows are substituted from your list and should be compared against this one.",
     "reason_SLOW_RTT": "Works, but slowly",
     "reason_EXIT_IP_UNKNOWN": "Works, but the exit IP is unknown",
     "hint_SLOW_RTT": "Traffic passes, but latency is over 1.5 s — such a key is uncomfortable to use. Usually distant geography, an overloaded server or a narrow link.",

@@ -534,6 +534,7 @@ export interface XrayTestCell {
   address: string
   port: number
   sni: string | null
+  sni_from_config?: boolean
   transport: string
   security: string
   core: string | null

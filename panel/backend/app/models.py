@@ -1125,6 +1125,7 @@ class XrayTestResult(Base):
     speed_mbps = Column(Float, nullable=True)
     exit_ip = Column(String(64), nullable=True)
     exit_country = Column(String(8), nullable=True)
+    sni_from_config = Column(Boolean, default=False)
 
     __table_args__ = (
         Index('idx_xray_test_results_run', 'run_id'),

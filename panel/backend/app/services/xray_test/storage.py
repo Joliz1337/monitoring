@@ -209,6 +209,7 @@ async def save_run(
             speed_mbps=item.get("speed_mbps"),
             exit_ip=item.get("exit_ip"),
             exit_country=item.get("exit_country"),
+            sni_from_config=bool(item.get("sni_from_config")),
         )
         for item in results
     ])
@@ -264,6 +265,7 @@ async def get_run_results(db: AsyncSession, run_id: int) -> list[dict]:
             "speed_mbps": row.speed_mbps,
             "exit_ip": row.exit_ip,
             "exit_country": row.exit_country,
+            "sni_from_config": bool(row.sni_from_config),
         }
         for row in rows.scalars().all()
     ]

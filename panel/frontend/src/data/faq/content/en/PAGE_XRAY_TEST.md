@@ -96,7 +96,7 @@ A subscription or link list you check regularly can be stored with the "Save" bu
 
 Enter several domains and every configuration is checked against each of them; the fastest one gets a badge. This shows which masking domains your provider has not blocked yet.
 
-The **Also test the config's own SNI** checkbox is on by default: the key is tested as-is first, then with each domain from the list. It gives you a baseline — if every domain fails at once, the list alone cannot tell filtering from a dead server, while the row with the original name answers that immediately. The original name is not tested twice if you listed it yourself. Uncheck it when you want exactly the listed domains and nothing else.
+The **Also test the config's own SNI** checkbox is on by default: the key is tested as-is first, then with each domain from the list. It gives you a baseline — if every domain fails at once, the list alone cannot tell filtering from a dead server, while the row with the original name answers that immediately. In the results that row is tagged **from config**, so you do not have to hunt for it among the substituted ones. The original name is not tested twice if you listed it yourself. Uncheck it when you want exactly the listed domains and nothing else.
 
 The "Change transport Host along with SNI" option is off by default — the Host is often not equal to the SNI, and changing it blindly does more harm than good. Turn it on when they do match on your key: with WebSocket, gRPC, XHTTP and HTTPUpgrade the server routes requests by the Host header, so replacing only the SNI would return 404 and the check would wrongly report a block.
 

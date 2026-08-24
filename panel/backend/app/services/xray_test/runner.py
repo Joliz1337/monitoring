@@ -383,6 +383,7 @@ def _empty_result(cell: TestCell) -> CellResult:
         address=endpoint.address,
         port=endpoint.port,
         sni=cell.sni_label or endpoint.tls.sni,
+        sni_from_config=cell.sni_label is None,
         transport=endpoint.transport.kind.value,
         security=endpoint.tls.security.value,
         timings=ProbeTimings(),

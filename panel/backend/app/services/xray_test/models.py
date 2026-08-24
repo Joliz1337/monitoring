@@ -186,6 +186,9 @@ class CellResult:
     link: Optional[str] = None
     location: str = "panel"
     location_name: str = ""
+    # SNI взят из самой конфигурации, а не подставлен из списка оператора:
+    # такую строку надо отличать глазом, она точка отсчёта для остальных
+    sni_from_config: bool = False
 
     def as_event(self) -> dict:
         """Плоский JSON для NDJSON-стрима и таблицы на фронте."""
@@ -198,6 +201,7 @@ class CellResult:
             "address": self.address,
             "port": self.port,
             "sni": self.sni,
+            "sni_from_config": self.sni_from_config,
             "transport": self.transport,
             "security": self.security,
             "core": self.core,
