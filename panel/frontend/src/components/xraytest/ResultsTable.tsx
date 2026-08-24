@@ -71,35 +71,36 @@ export function ResultsTable({ cells, groupBySni }: { cells: XrayTestCell[]; gro
    * бы раскрывать группу ради единственного списка.
    */
   const groups = useMemo<Group[]>(() => {
-    const byServer = new Map<string, XrayTestCell[]>()
+    // Ключ — конфигурация целиком, а не адрес: один и тот же сервер живёт в
+    // разных профилях подписки под своими именами, и сливать их нельзя
+    const byConfig = new Map<string, XrayTestCell[]>()
     visible.forEach(cell => {
-      const key = `${cell.address}:${cell.port}`
-      if (!byServer.has(key)) byServer.set(key, [])
-      byServer.get(key)!.push(cell)
+      const key = `${cell.remark}|${cell.address}:${cell.port}`
+      if (!byConfig.has(key)) byConfig.set(key, [])
+      byConfig.get(key)!.push(cell)
     })
 
-    const result: Group[] = [...byServer.entries()].map(([key, serverCells]) => {
-      const locations = new Set(serverCells.map(cell => cell.location))
-      let children: Group[] = []
+    const result: Group[] = [...byConfig.entries()].map(([key, configCells]) => {
+      const byLocation = new Map<string, XrayTestCell[]>()
+      configCells.forEach(cell => {
+        if (!byLocation.has(cell.location)) byLocation.set(cell.location, [])
+        byLocation.get(cell.location)!.push(cell)
+      })
 
-      if (locations.size > 1) {
-        const byLocation = new Map<string, XrayTestCell[]>()
-        serverCells.forEach(cell => {
-          if (!byLocation.has(cell.location)) byLocation.set(cell.location, [])
-          byLocation.get(cell.location)!.push(cell)
-        })
-        children = [...byLocation.entries()].map(([location, locationCells]) => ({
-          key: `${key}|${location}`,
-          // Имя ноды может не доехать (старый прогон в истории) — тогда лучше
-          // показать код места запуска, чем пустую строку
-          label: locationCells[0].location_name
-            || (location === 'panel' ? t('xray_test.location_panel') : location),
-          cells: locationCells,
-          children: [],
-        }))
-      }
+      // Уровень места запуска показывается всегда: даже с одной точкой должно
+      // быть видно, откуда шла проверка
+      const children = [...byLocation.entries()].map(([location, locationCells]) => ({
+        key: `${key}|${location}`,
+        // Имя ноды может не доехать (старый прогон в истории) — тогда лучше
+        // показать код места запуска, чем пустую строку
+        label: locationCells[0].location_name
+          || (location === 'panel' ? t('xray_test.location_panel') : location),
+        cells: locationCells,
+        children: [],
+      }))
 
-      return { key, label: serverCells[0].remark || key, cells: serverCells, children }
+      const label = configCells[0].remark || `${configCells[0].address}:${configCells[0].port}`
+      return { key, label, cells: configCells, children }
     })
 
     const weight = (group: Group) => {
@@ -235,8 +236,7 @@ function ServerCard({
   const { t } = useTranslation()
   const summary = summarize(group.cells)
   const sample = group.cells[0]
-  const locationCount = new Set(group.cells.map(cell => cell.location)).size
-  const remarks = new Set(group.cells.map(cell => cell.remark).filter(Boolean))
+  const locationCount = group.children.length
 
   return (
     <div className="rounded-lg border border-dark-800/60 overflow-hidden">
@@ -250,11 +250,7 @@ function ServerCard({
         <Server className="w-4 h-4 text-dark-500 shrink-0" />
 
         <span className="flex-1 min-w-0">
-          <span className="block text-sm text-dark-200 truncate">
-            {remarks.size > 1
-              ? t('xray_test.several_configs', { count: remarks.size })
-              : group.label}
-          </span>
+          <span className="block text-sm text-dark-200 truncate">{group.label}</span>
           <span className="block text-[11px] text-dark-500 font-mono truncate">
             {sample.address}:{sample.port} · {sample.protocol} · {sample.transport} · {sample.security}
             {sample.core ? ` · ${sample.core}` : ''}
@@ -285,7 +281,9 @@ function ServerCard({
                 <LocationBlock
                   key={child.key}
                   group={child}
-                  open={openGroups.has(child.key)}
+                  // Единственная точка запуска раскрыта сразу: прятать за
+                  // кликом список, который всё равно один, незачем
+                  open={openGroups.has(child.key) || group.children.length === 1}
                   openCells={openCells}
                   onToggleGroup={onToggleGroup}
                   onToggleCell={onToggleCell}
@@ -372,18 +370,6 @@ function CheckList({ cells, openCells, onToggleCell, groupBySni }: {
   // Внутри блока локации она одна и подпись не нужна. Но если уровень локаций
   // не выделялся, соседние строки с одинаковым SNI различает только место
   // запуска — без подписи они выглядят одинаковыми
-  const showLocation = useMemo(
-    () => new Set(cells.map(cell => cell.location)).size > 1,
-    [cells],
-  )
-
-  // Один и тот же адрес попадается в разных профилях подписки: проверки идут
-  // отдельные, а адрес и SNI у них совпадают — различает только имя
-  const showRemark = useMemo(
-    () => new Set(cells.map(cell => cell.remark)).size > 1,
-    [cells],
-  )
-
   // Лучший SNI считается по всей группе: отметка не должна прыгать от сортировки
   const bestIndex = useMemo(() => {
     if (!groupBySni) return null
@@ -411,17 +397,7 @@ function CheckList({ cells, openCells, onToggleCell, groupBySni }: {
                 <span className="text-xs text-dark-300 truncate">
                   {cell.sni || t('xray_test.sni_from_key')}
                 </span>
-                {showRemark && cell.remark && (
-                  <span className="px-1.5 py-0.5 rounded bg-dark-800/70 text-dark-300 text-[10px] shrink-0 max-w-[220px] truncate">
-                    {cell.remark}
-                  </span>
-                )}
-                {showLocation && (
-                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-dark-800/70 text-dark-300 text-[10px] shrink-0">
-                    <MapPin className="w-2.5 h-2.5" />
-                    {cell.location_name || t('xray_test.location_panel')}
-                  </span>
-                )}
+
                 {bestIndex === cell.index && (
                   <span className="px-1.5 py-0.5 rounded bg-accent-500/15 text-accent-400 text-[10px] shrink-0">
                     {t('xray_test.best_sni')}

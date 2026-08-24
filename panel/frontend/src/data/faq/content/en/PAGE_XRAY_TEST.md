@@ -42,9 +42,11 @@ The probe sends nothing through the proxy and costs almost no time, so it can st
 
 ## How results are laid out
 
-Results are grouped by server rather than dumped into one list. The top row is the server: its address, best ping, best latency and a counter like "2/6" — how many checks passed out of how many. The server's verdict is the best of what it contains: if at least one SNI works, the server counts as usable.
+Results are stacked in three levels:
 
-Expand a server to see each check separately. If the run covered several locations, the locations come first and the SNIs sit inside them. Expand a single check to get the failure reason, the hint and the core's verbatim answer.
+1. **Configuration** — the key's name and address, best ping, best latency and a counter like "2/6": how many checks passed out of how many. The verdict is the best of what it contains: if at least one SNI works, the configuration is usable. The same address coming from different subscription profiles stays as separate rows, because those are different keys.
+2. **Where it ran** — the panel or a specific node. Always shown; a single location is expanded right away.
+3. **SNI** — the check itself with its metrics. Expand it for the failure reason, the hint and the core's verbatim answer.
 
 ## Reading the results table
 
