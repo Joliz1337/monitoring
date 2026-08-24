@@ -1034,7 +1034,9 @@
     "reason_SLOW_RTT": "Works, but slowly",
     "reason_EXIT_IP_UNKNOWN": "Works, but the exit IP is unknown",
     "hint_SLOW_RTT": "Traffic passes, but latency is over 1.5 s — such a key is uncomfortable to use. Usually distant geography, an overloaded server or a narrow link.",
-    "hint_EXIT_IP_UNKNOWN": "The connectivity check passed, but the service reporting the exit address did not answer. Servers that filter part of their outbound traffic behave like this: the key works, but not for every site."
+    "hint_EXIT_IP_UNKNOWN": "The connectivity check passed, but the service reporting the exit address did not answer. Servers that filter part of their outbound traffic behave like this: the key works, but not for every site.",
+    "filter_blocked": "Possible DPI block",
+    "filter_blocked_hint": "The server port answers but traffic does not pass — the typical picture of DPI filtering: the TCP handshake goes through and the connection itself is throttled. Explicit failures (closed port, wrong certificate, bad key) are not counted here."
   },
   "anti_ddos": {
     "title": "Anti-DDoS",

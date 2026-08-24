@@ -2,7 +2,7 @@ import { Fragment, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
   CheckCircle2, ChevronDown, ChevronRight, XCircle, AlertTriangle,
-  ShieldAlert, X, Lightbulb, Server, MapPin, Globe,
+  ShieldAlert, X, Lightbulb, Server, MapPin, Globe, ShieldOff,
 } from 'lucide-react'
 import type { XrayTestCell } from '../../api/client'
 import { Tooltip } from '../ui/Tooltip'
@@ -17,6 +17,26 @@ const VERDICT_STYLE: Record<string, string> = {
 }
 
 const VERDICT_ORDER: Record<string, number> = { ok: 0, degraded: 1, fail: 2 }
+
+const BLOCKED = 'blocked'
+
+// Отказы, похожие на удушение трафика: соединение открылось, но ответа нет.
+// Явные отказы сюда не входят — «порт закрыт», «не тот сертификат» и «неверные
+// учётные данные» означают проблему конфигурации, а не фильтрацию по пути.
+const BLOCK_LIKE = new Set([
+  'HANDSHAKE_STALLED', 'IO_TIMEOUT', 'GRPC_UNAVAILABLE', 'CONN_RESET',
+])
+const BLOCK_LIKE_REASONS = new Set(['PROXY_HANDSHAKE_FAILED', 'HTTP_TIMEOUT'])
+
+/**
+ * Порт отвечает, а трафик через него не идёт — характерная картина блокировки
+ * по DPI: фильтр пропускает TCP-рукопожатие и душит уже само соединение.
+ */
+function looksBlocked(cell: XrayTestCell): boolean {
+  if (cell.verdict !== 'fail' || cell.tcp_min_ms === null) return false
+  if (cell.hint && BLOCK_LIKE.has(cell.hint)) return true
+  return !cell.hint && !!cell.reason && BLOCK_LIKE_REASONS.has(cell.reason)
+}
 
 /** Узел дерева результатов: сервер, внутри — места запуска, внутри — SNI. */
 interface Group {
@@ -54,16 +74,21 @@ export function ResultsTable({ cells, groupBySni }: { cells: XrayTestCell[]; gro
   const [openCells, setOpenCells] = useState<Set<number>>(new Set())
 
   const counts = useMemo(() => {
-    const totals: Record<string, number> = { ok: 0, degraded: 0, fail: 0 }
-    cells.forEach(cell => { totals[cell.verdict] = (totals[cell.verdict] || 0) + 1 })
+    const totals: Record<string, number> = { ok: 0, degraded: 0, fail: 0, [BLOCKED]: 0 }
+    cells.forEach(cell => {
+      totals[cell.verdict] = (totals[cell.verdict] || 0) + 1
+      if (looksBlocked(cell)) totals[BLOCKED] += 1
+    })
     return totals
   }, [cells])
 
-  const visible = useMemo(
+  const visible = useMemo(() => {
     // Пустой набор означает «показывать всё»: фильтр не может спрятать таблицу целиком
-    () => (picked.size ? cells.filter(cell => picked.has(cell.verdict)) : cells),
-    [cells, picked],
-  )
+    if (!picked.size) return cells
+    return cells.filter(cell =>
+      picked.has(cell.verdict) || (picked.has(BLOCKED) && looksBlocked(cell)),
+    )
+  }, [cells, picked])
 
   /**
    * Сервер → места запуска → проверки. Промежуточный уровень появляется только
@@ -158,7 +183,7 @@ export function ResultsTable({ cells, groupBySni }: { cells: XrayTestCell[]; gro
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-3 text-xs">
         <div className="flex flex-wrap items-center gap-2">
-          {(['ok', 'degraded', 'fail'] as const).map(verdict => (
+          {(['ok', 'degraded', 'fail', BLOCKED] as const).map(verdict => (
             <FilterChip
               key={verdict}
               verdict={verdict}
@@ -522,6 +547,10 @@ const CHIP_STYLE: Record<string, { active: string; idle: string }> = {
     active: 'bg-red-500/20 text-red-300 border-red-500/40',
     idle: 'bg-red-500/10 text-red-400 border-red-500/20 hover:border-red-500/40',
   },
+  blocked: {
+    active: 'bg-purple/25 text-purple border-purple/50',
+    idle: 'bg-purple/10 text-purple border-purple/25 hover:border-purple/50',
+  },
 }
 
 function FilterChip({ verdict, count, active, onClick }: {
@@ -532,9 +561,16 @@ function FilterChip({ verdict, count, active, onClick }: {
 }) {
   const { t } = useTranslation()
   const style = CHIP_STYLE[verdict] || CHIP_STYLE.fail
-  const Icon = verdict === 'ok' ? CheckCircle2 : verdict === 'degraded' ? AlertTriangle : XCircle
+  const Icon = verdict === 'ok'
+    ? CheckCircle2
+    : verdict === 'degraded'
+      ? AlertTriangle
+      : verdict === BLOCKED ? ShieldOff : XCircle
+  const label = verdict === BLOCKED
+    ? t('xray_test.filter_blocked')
+    : t(`xray_test.verdict_${verdict}`)
 
-  return (
+  const chip = (
     <button
       onClick={onClick}
       disabled={count === 0 && !active}
@@ -543,10 +579,13 @@ function FilterChip({ verdict, count, active, onClick }: {
       } ${count === 0 && !active ? 'opacity-40 cursor-not-allowed' : ''}`}
     >
       <Icon className="w-3.5 h-3.5" />
-      {t(`xray_test.verdict_${verdict}`)}
+      {label}
       <span className="font-semibold tabular-nums">{count}</span>
     </button>
   )
+
+  if (verdict !== BLOCKED) return chip
+  return <Tooltip label={t('xray_test.filter_blocked_hint')}><span>{chip}</span></Tooltip>
 }
 
 function Detail({ label, value }: { label: string; value: string | number | null | undefined }) {
