@@ -61,7 +61,7 @@ class RunRequest(BaseModel):
     profile_id: Optional[int] = None
     selected: Optional[list[int]] = None
     sni_list: list[str] = Field(default_factory=list)
-    sync_transport_host: bool = True
+    sync_transport_host: bool = False
     locations: list[str] = Field(default_factory=lambda: ["panel"])
     concurrency: int = Field(default=4, ge=1, le=8)
     full: bool = True

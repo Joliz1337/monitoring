@@ -346,18 +346,19 @@ class MatrixTest(unittest.TestCase):
         cells = build_matrix([self._endpoint()], ["A.com", "a.com", " a.com ", "b.com"])
         self.assertEqual([cell.sni_label for cell in cells], ["a.com", "b.com"])
 
-    def test_host_follows_sni_for_ws(self):
+    def test_host_follows_sni_when_requested(self):
         endpoint = self._endpoint(
             f"vless://{UUID}@h.io:443?type=ws&security=tls&host=cdn.io&path=%2Fp#x"
         )
         cells = build_matrix([endpoint], ["new.com"], sync_transport_host=True)
         self.assertEqual(cells[0].endpoint.transport.host, "new.com")
 
-    def test_host_kept_when_sync_disabled(self):
+    def test_host_kept_by_default(self):
+        """По умолчанию Host транспорта не трогаем — он не всегда равен SNI."""
         endpoint = self._endpoint(
             f"vless://{UUID}@h.io:443?type=ws&security=tls&host=cdn.io&path=%2Fp#x"
         )
-        cells = build_matrix([endpoint], ["new.com"], sync_transport_host=False)
+        cells = build_matrix([endpoint], ["new.com"])
         self.assertEqual(cells[0].endpoint.transport.host, "cdn.io")
 
     def test_tcp_host_untouched(self):
@@ -371,10 +372,11 @@ class MatrixTest(unittest.TestCase):
         build_matrix([endpoint], ["a.com", "b.com"])
         self.assertEqual(endpoint.tls.sni, "orig.com")
 
-    def test_cell_limit_enforced(self):
+    def test_large_matrix_allowed(self):
+        """Потолка на размер прогона нет: ячейки разбирает очередь рабочих."""
         endpoints = [self._endpoint() for _ in range(20)]
-        with self.assertRaises(LimitExceededError):
-            build_matrix(endpoints, [f"s{i}.com" for i in range(30)])
+        cells = build_matrix(endpoints, [f"s{i}.com" for i in range(30)])
+        self.assertEqual(len(cells), 600)
 
     def test_sni_limit_enforced(self):
         with self.assertRaises(LimitExceededError):
@@ -425,11 +427,11 @@ class LocationMatrixTest(unittest.TestCase):
         )
         self.assertEqual(len({cell.index for cell in cells}), len(cells))
 
-    def test_cell_limit_counts_locations(self):
+    def test_large_matrix_with_locations_allowed(self):
         endpoints = [self._endpoint() for _ in range(10)]
-        with self.assertRaises(LimitExceededError):
-            build_matrix(endpoints, [f"s{i}.com" for i in range(11)],
-                         locations=[("panel", ""), ("node:1", "N")])
+        cells = build_matrix(endpoints, [f"s{i}.com" for i in range(11)],
+                             locations=[("panel", ""), ("node:1", "N")])
+        self.assertEqual(len(cells), 220)
 
     def test_too_many_locations_rejected(self):
         with self.assertRaises(LimitExceededError):

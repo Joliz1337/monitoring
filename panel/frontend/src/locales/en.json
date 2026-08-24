@@ -1011,7 +1011,8 @@
     "servers_restricted": "Hidden servers without execute permission: {{count}}",
     "col_location": "From",
     "location_panel": "Panel",
-    "pick_location": "Pick at least one place to run from"
+    "pick_location": "Pick at least one place to run from",
+    "sync_host_hint": "Needed when the key's transport Host equals the SNI — otherwise the server answers 404"
   },
   "anti_ddos": {
     "title": "Anti-DDoS",

@@ -26,6 +26,8 @@ FINISHED_TTL_SECONDS = 900
 LOG_BUFFER_LIMIT = 2000
 MAX_ACTIVE_JOBS = 5
 DEFAULT_CONCURRENCY = 4
+# Через сколько результатов отмечать прогресс в журнале задачи
+PROGRESS_STEP = 25
 MAX_CONCURRENCY = 8
 
 
@@ -113,32 +115,25 @@ class XrayTestJobManager:
         concurrency: int,
         on_finish: Optional[Callable[[XrayTestJob], Awaitable[None]]],
     ) -> None:
-        # Своя квота на каждое место запуска: нода тянет проверки последовательнее
-        # панели, и общий семафор отдал бы все слоты самой быстрой локации
-        semaphores = {code: asyncio.Semaphore(concurrency) for code in runners}
         self._emit(job, {"type": "start", "total": job.total, "location": job.location})
-        self._log(job, f"Проверок: {job.total}, параллельно: {concurrency}")
+        self._log(job, f"Проверок: {job.total}, параллельно на точку: {concurrency}")
 
-        async def run_cell(cell: TestCell) -> None:
-            runner = runners.get(cell.location)
-            if runner is None:
-                self._emit_result(job, _internal_error(
-                    cell, RuntimeError(f"нет исполнителя для {cell.location}")
-                ))
-                return
-
-            async with semaphores[cell.location]:
-                try:
-                    result = await runner.probe(cell, options)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:  # noqa: BLE001 — одна ячейка не валит задачу
-                    logger.warning("xray-test cell %s failed: %s", cell.index, exc)
-                    result = _internal_error(cell, exc)
-                self._emit_result(job, result)
+        # Очередь на каждое место запуска и постоянное число рабочих над ней.
+        # Размер прогона ничем не ограничен, поэтому создавать задачу на каждую
+        # ячейку нельзя — рабочие разбирают очередь порциями по мере готовности.
+        # Отдельные очереди нужны потому, что нода тянет проверки медленнее
+        # панели: с общей очередью быстрая точка простаивала бы за медленной.
+        queues: dict[str, asyncio.Queue[TestCell]] = {}
+        for cell in cells:
+            queues.setdefault(cell.location, asyncio.Queue()).put_nowait(cell)
 
         try:
-            await asyncio.gather(*(run_cell(cell) for cell in cells))
+            workers = [
+                asyncio.create_task(self._worker(job, queue, runners.get(code), options))
+                for code, queue in queues.items()
+                for _ in range(concurrency)
+            ]
+            await asyncio.gather(*workers)
             self._finish(job, "success")
         except asyncio.CancelledError:
             # История при отмене не пишется: await в отменённой задаче тут же
@@ -155,10 +150,48 @@ class XrayTestJobManager:
             except Exception as exc:  # noqa: BLE001 — история не должна валить прогон
                 logger.warning("xray-test history not saved for %s: %s", job.id, exc)
 
+    async def _worker(
+        self,
+        job: XrayTestJob,
+        queue: "asyncio.Queue[TestCell]",
+        runner: Optional[CoreRunner],
+        options: ProbeOptions,
+    ) -> None:
+        while True:
+            try:
+                cell = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+
+            if runner is None:
+                self._emit_result(job, _internal_error(
+                    cell, RuntimeError(f"нет исполнителя для {cell.location}")
+                ))
+                continue
+
+            try:
+                result = await runner.probe(cell, options)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — одна ячейка не валит задачу
+                logger.warning("xray-test cell %s failed: %s", cell.index, exc)
+                result = _internal_error(cell, exc)
+            self._emit_result(job, result)
+
     def _emit_result(self, job: XrayTestJob, result: CellResult) -> None:
         payload = result.as_event()
         job.results.append(payload)
-        self._emit(job, {"type": "cell", **payload, "done": len(job.results)})
+        done = len(job.results)
+        self._emit(job, {"type": "cell", **payload, "done": done})
+
+        # На длинном прогоне отметки в журнале показывают, что работа идёт
+        if job.total > PROGRESS_STEP and done % PROGRESS_STEP == 0:
+            counts = job.summary
+            self._log(job, (
+                f"Проверено {done} из {job.total} — "
+                f"работают {counts['ok']}, с оговорками {counts['degraded']}, "
+                f"не работают {counts['fail']}"
+            ))
 
     def _log(self, job: XrayTestJob, line: str) -> None:
         self._emit(job, {"type": "log", "line": sanitize_output(line)})

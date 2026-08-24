@@ -18,7 +18,6 @@ from app.services.xray_test.models import (
 )
 
 MAX_SNI = 50
-MAX_CELLS_PER_JOB = 200
 MAX_ENDPOINTS = 500
 MAX_LOCATIONS = 20
 
@@ -40,7 +39,7 @@ def build_matrix(
     endpoints: list[ProxyEndpoint],
     sni_list: Optional[list[str]] = None,
     *,
-    sync_transport_host: bool = True,
+    sync_transport_host: bool = False,
     links: Optional[list[Optional[str]]] = None,
     locations: Optional[list[tuple[str, str]]] = None,
 ) -> list[TestCell]:
@@ -49,6 +48,9 @@ def build_matrix(
     Локации — пары (код, отображаемое имя). Пустой список означает прогон с
     самой панели: один и тот же ключ из разных точек ведёт себя по-разному,
     поэтому каждая точка даёт свою ячейку, а не усредняется с остальными.
+
+    Размер матрицы не ограничен: ячейки исполняются очередью с постоянным
+    числом рабочих, поэтому большой прогон занимает время, а не память.
     """
     if not endpoints:
         raise LimitExceededError("Нечего проверять: не разобрано ни одной конфигурации")
@@ -64,13 +66,6 @@ def build_matrix(
     places = locations or [("panel", "")]
     if len(places) > MAX_LOCATIONS:
         raise LimitExceededError(f"Мест запуска больше допустимых {MAX_LOCATIONS}: {len(places)}")
-
-    total = len(endpoints) * max(1, len(names)) * len(places)
-    if total > MAX_CELLS_PER_JOB:
-        raise LimitExceededError(
-            f"Проверок в задаче больше допустимых {MAX_CELLS_PER_JOB}: {total}. "
-            f"Уменьшите список конфигураций, SNI или мест запуска"
-        )
 
     cells: list[TestCell] = []
     for position, endpoint in enumerate(endpoints):

@@ -129,7 +129,7 @@ function TesterTab({ source }: { source: XrayTestSource }) {
   const [selected, setSelected] = useState<Set<number>>(new Set())
 
   const [sniText, setSniText] = useState('')
-  const [syncHost, setSyncHost] = useState(true)
+  const [syncHost, setSyncHost] = useState(false)
   const [locations, setLocations] = useState<string[]>(['panel'])
   const [concurrency, setConcurrency] = useState(4)
   const [fullMode, setFullMode] = useState(true)
@@ -441,9 +441,16 @@ function TesterTab({ source }: { source: XrayTestSource }) {
                   ))}
                 </div>
               )}
-              <label className="flex items-center gap-2 mt-2 text-xs text-dark-300 cursor-pointer select-none">
-                <Checkbox checked={syncHost} onChange={event => setSyncHost(event.target.checked)} />
-                {t('xray_test.sync_host')}
+              <label className="flex items-start gap-2 mt-2 text-xs text-dark-300 cursor-pointer select-none">
+                <span className="mt-0.5">
+                  <Checkbox checked={syncHost} onChange={event => setSyncHost(event.target.checked)} />
+                </span>
+                <span>
+                  {t('xray_test.sync_host')}
+                  <span className="block text-dark-500 text-[11px]">
+                    {t('xray_test.sync_host_hint')}
+                  </span>
+                </span>
               </label>
             </div>
           </div>

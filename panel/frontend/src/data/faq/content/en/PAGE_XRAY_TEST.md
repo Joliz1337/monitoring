@@ -60,7 +60,9 @@ A subscription or link list you check regularly can be stored with the "Save" bu
 
 Enter several domains and every configuration is checked against each of them; the fastest one gets a badge. This shows which masking domains your provider has not blocked yet.
 
-The "Change transport Host along with SNI" option is on for a reason: with WebSocket, gRPC, XHTTP and HTTPUpgrade the server routes requests by the Host header, so replacing only the SNI returns 404 and the check would wrongly report a block. Turn it off only if you know the server ignores Host.
+The "Change transport Host along with SNI" option is off by default — the Host is often not equal to the SNI, and changing it blindly does more harm than good. Turn it on when they do match on your key: with WebSocket, gRPC, XHTTP and HTTPUpgrade the server routes requests by the Host header, so replacing only the SNI would return 404 and the check would wrongly report a block.
+
+The number of checks is not capped: they queue up and run in batches, a few at a time per selected location. A large run takes a while but finishes — the log shows how many are already done.
 
 ## Testing from another location
 
