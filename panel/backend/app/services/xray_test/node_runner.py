@@ -306,6 +306,8 @@ def _empty(cell: TestCell) -> CellResult:
         security=endpoint.tls.security.value,
         core=core,
         link=cell.link,
+        location=cell.location,
+        location_name=cell.location_name,
     )
 
 

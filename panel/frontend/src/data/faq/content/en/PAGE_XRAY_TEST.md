@@ -12,6 +12,14 @@ Checks proxy configurations: a link, a pasted JSON config, or a subscription. Th
 
 The TCP probe runs before the core starts and rules out dead servers immediately. Hysteria2 and TUIC skip it: they run over UDP, where a silent TCP port means nothing.
 
+## Subscription client and HWID
+
+Key-issuing panels look at what made the request. If device binding is enabled and the client sends no device identifier, you get a text instruction instead of keys — a formally valid subscription with nothing to check.
+
+The "Client" field picks what the panel presents itself as. Happ profiles (iPhone, Android, Windows, macOS) send the device identifier and its other headers like the real app does; v2rayNG, Clash, sing-box and the browser send only a User-Agent.
+
+The device identifier is derived from the subscription URL and never changes: the same address always yields the same HWID, regardless of the chosen device or panel restarts. That way checks do not register new devices in your panel or eat the key owner's limit.
+
 ## Test options
 
 **Full check.** On — the panel starts a proxy core and actually reaches the internet through it; that is the only way to know a key works. Off — only the fast probes remain, with no core started: domain resolution and a TCP connection to the port. Fast mode is handy for weeding dead servers out of a long list in seconds, but "the port answers" is not "traffic passes".
@@ -54,7 +62,9 @@ The "Change transport Host along with SNI" option is on for a reason: with WebSo
 
 ## Testing from another location
 
-In "Run from" you can pick any of your servers, and the run happens there instead of the panel's datacenter. The panel delivers the core to the node itself — the node never reaches out to GitHub — so this works on heavily filtered networks too. The server needs command execution permission; if it is restricted, the server is listed but cannot be selected.
+In "Run from" you can tick several places at once — the panel itself and any of your servers. The list has search and folders, just like bulk actions, so a whole folder can be ticked at once. Every key is checked from every ticked place, and a "From" column appears in the table — you immediately see that a key is alive from Germany but already dead from Russia.
+
+The panel delivers the core to the node itself — the node never reaches out to GitHub — so this works on heavily filtered networks too. The server needs command execution permission; servers without it are not listed, and their count is shown in a line below.
 
 Local ports 7501–7504 on the node are reserved for these checks — re-applying system optimizations enables the reservation.
 

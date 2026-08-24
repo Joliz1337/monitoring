@@ -1059,6 +1059,8 @@ class XrayTestSubscription(Base):
     kind = Column(String(10), nullable=False, default="url", server_default="url")  # url | links
     # И URL подписки, и сами ссылки содержат ключи доступа — храним зашифрованными
     payload = Column(EncryptedString, nullable=False)
+    # Идентификатор профиля клиента (device_profiles): от него зависят
+    # User-Agent и заголовки HWID запроса подписки
     user_agent = Column(String(200), nullable=True)
     last_fetched_at = Column(DateTime(timezone=True), nullable=True)
     last_count = Column(Integer, default=0, server_default="0")
@@ -1113,6 +1115,8 @@ class XrayTestResult(Base):
     transport = Column(String(20), nullable=True)
     security = Column(String(20), nullable=True)
     core = Column(String(20), nullable=True)
+    location = Column(String(40), nullable=True)
+    location_name = Column(String(200), nullable=True)
     verdict = Column(String(10), nullable=False)
     reason = Column(String(40), nullable=True)
     rtt_ms = Column(Float, nullable=True)

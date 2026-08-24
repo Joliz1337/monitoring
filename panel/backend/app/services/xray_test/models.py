@@ -156,7 +156,7 @@ class TlsInfo:
 
 @dataclass
 class CellResult:
-    """Результат одной ячейки матрицы «конфиг × SNI»."""
+    """Результат одной ячейки матрицы «конфиг × SNI × локация»."""
 
     index: int
     remark: str
@@ -178,12 +178,16 @@ class CellResult:
     timings: ProbeTimings = field(default_factory=ProbeTimings)
     tls_info: Optional[TlsInfo] = None
     link: Optional[str] = None
+    location: str = "panel"
+    location_name: str = ""
 
     def as_event(self) -> dict:
         """Плоский JSON для NDJSON-стрима и таблицы на фронте."""
         return {
             "index": self.index,
             "remark": self.remark,
+            "location": self.location,
+            "location_name": self.location_name,
             "protocol": self.protocol,
             "address": self.address,
             "port": self.port,
@@ -212,9 +216,11 @@ class CellResult:
 
 @dataclass(frozen=True)
 class TestCell:
-    """Ячейка матрицы: конфиг с уже применённым SNI."""
+    """Ячейка матрицы: конфиг с уже применённым SNI, привязанный к месту запуска."""
 
     index: int
     endpoint: ProxyEndpoint
     sni_label: Optional[str]
     link: Optional[str] = None
+    location: str = "panel"
+    location_name: str = ""

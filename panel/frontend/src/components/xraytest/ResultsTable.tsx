@@ -63,6 +63,12 @@ export function ResultsTable({ cells, groupBySni }: { cells: XrayTestCell[]; gro
     return new Set([...best.values()].map(cell => cell.index))
   }, [cells, groupBySni])
 
+  // Колонка места запуска нужна только когда прогон шёл больше чем из одной точки
+  const showLocation = useMemo(
+    () => new Set(cells.map(cell => cell.location)).size > 1,
+    [cells],
+  )
+
   const toggle = (key: string) => {
     setExpanded(prev => {
       const next = new Set(prev)
@@ -111,6 +117,9 @@ export function ResultsTable({ cells, groupBySni }: { cells: XrayTestCell[]; gro
               <th className="px-3 py-2 font-medium">{t('xray_test.col_name')}</th>
               <th className="px-3 py-2 font-medium">{t('xray_test.col_address')}</th>
               <th className="px-3 py-2 font-medium">{t('xray_test.col_sni')}</th>
+              {showLocation && (
+                <th className="px-3 py-2 font-medium">{t('xray_test.col_location')}</th>
+              )}
               <th className="px-3 py-2 font-medium">{t('xray_test.col_verdict')}</th>
               <th className="px-3 py-2 font-medium text-right">{t('xray_test.col_tcp')}</th>
               <th className="px-3 py-2 font-medium text-right">{t('xray_test.col_handshake')}</th>
@@ -150,6 +159,11 @@ export function ResultsTable({ cells, groupBySni }: { cells: XrayTestCell[]; gro
                       {cell.address}:{cell.port}
                     </td>
                     <td className="px-3 py-2 text-dark-300 max-w-[160px] truncate">{cell.sni || '—'}</td>
+                    {showLocation && (
+                      <td className="px-3 py-2 text-dark-300 max-w-[140px] truncate">
+                        {cell.location_name || t('xray_test.location_panel')}
+                      </td>
+                    )}
                     <td className="px-3 py-2">
                       {cell.reason ? (
                         <Tooltip label={t(`xray_test.reason_${cell.reason}`, cell.reason)}>
@@ -172,7 +186,7 @@ export function ResultsTable({ cells, groupBySni }: { cells: XrayTestCell[]; gro
                   {open && (
                     <tr className="bg-dark-900/40">
                       <td />
-                      <td colSpan={9} className="px-3 py-3 space-y-2">
+                      <td colSpan={showLocation ? 10 : 9} className="px-3 py-3 space-y-2">
                         {cell.reason && (
                           <div className="text-dark-300">
                             <span className="text-dark-500">{t('xray_test.col_reason')}: </span>

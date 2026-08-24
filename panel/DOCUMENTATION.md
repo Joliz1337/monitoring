@@ -122,6 +122,7 @@ panel/
 │       │   ├── ResultsTable.tsx         # Таблица результатов: сортировка, фильтр «только рабочие», раскрытие деталей и TLS
 │       │   ├── ProfilesTab.tsx          # CRUD источников и наборов SNI
 │       │   ├── CoresTab.tsx             # Выбор версии ядра: список релизов с пометками, загрузка и удаление версий
+│       │   ├── LocationPicker.tsx       # Выбор мест запуска: панель + ноды, поиск, папки, tri-state на папке
 │       │   └── HistoryTab.tsx           # История прогонов с раскрытием результатов
 │       ├── pages/Servers.tsx            # Список серверов + InfraTree
 │       ├── components/ui/Skeleton.tsx   # Skeleton-лоадеры (Skeleton, ServerCardSkeleton, MetricCardSkeleton, ChartSkeleton)
@@ -154,6 +155,7 @@ panel/
 │       │   ├── core_manager.py          # Загрузка ядра выбранной версии, проверка целостности, выбор ядра по конфигурации
 │       │   ├── core_registry.py         # Список релизов с GitHub (включая пре-релизы), резолв latest, чтение .dgst
 │       │   ├── startup.py               # Восстановление выбранных версий ядер из настроек при старте
+│       │   ├── device_profiles.py       # Профили клиента подписки: User-Agent и заголовки HWID (uuid5 от адреса)
 │       │   ├── probes.py                # DNS, TCP-пинг, TLS-инспекция, e2e через socks, выходной IP, скорость
 │       │   ├── runner.py                # LocalCoreRunner: запуск ядра, killpg-уборка, sweeper
 │       │   ├── node_runner.py           # NodeCoreRunner: доставка исполнителя и ядра на ноду, разбор ответа
@@ -2649,7 +2651,11 @@ SSE-события: `note_update` — `{"content": "...", "version": N}`, `tasks
 
 **Уборка процессов** — три рубежа, потому что на большой подписке ядер сотни: `finally` у каждой ячейки (`killpg(SIGTERM)` → 3 с → `SIGKILL` → `rmtree`), сборщик раз в 30 с добивает ядра старше 90 с, `stop_xray_test_service()` в `lifespan` — при остановке панели. Ядро запускается в своей process group (`start_new_session=True`): оно порождает дочерние процессы, и kill по одному pid оставил бы сирот.
 
+**Места запуска.** Выбор множественный: панель и любое число нод (до 20). Матрица становится «конфигурация × SNI × место», у каждой точки своя строка результата — ключ, живой из одной страны, может быть мёртв из другой, и усреднять это нельзя. У каждой локации собственная квота параллелизма: общий семафор отдал бы все слоты самой быстрой точке, а нода тянет проверки последовательнее панели. В сводке прогона место одно поле (`multi:N` при нескольких), конкретная локация хранится у каждой строки результата.
+
 **Мульти-SNI.** У ws/httpupgrade/xhttp/grpc сервер маршрутизирует запрос по заголовку `Host`, обычно равному SNI. Подмена одного лишь SNI даёт 404, и ячейка соврала бы про блокировку — поэтому `sync_transport_host` по умолчанию включён для этих транспортов. Лимиты: `MAX_SNI=50`, `MAX_CELLS_PER_JOB=200`, `MAX_ENDPOINTS=500`; превышение — ошибка с текстом, а не молчаливое обрезание.
+
+**Профиль клиента подписки** (`device_profiles.py`). Панели с привязкой по устройству отдают клиенту без HWID не ключи, а текст-инструкцию («у вас выключена передача hwid») — формально валидную подписку, из которой нечего проверять. Поэтому запрос идёт с набором заголовков выбранного клиента: Happ-профили (iOS/Android/Windows/macOS) шлют `x-hwid`, `x-device-os`, `x-ver-os`, `x-device-model`, `x-device-locale`, остальные (v2rayNG, Clash, sing-box, браузер) — только User-Agent. HWID выводится из адреса подписки детерминированно (`uuid5`): случайный на каждый запрос регистрировал бы в чужой панели новое устройство и съедал лимит владельца ключа. Один и тот же адрес всегда даёт один HWID независимо от выбранного устройства и перезапусков панели.
 
 **Прогон с ноды** (`node_runner.py`). Своего эндпоинта у ноды нет: используется общий канал `POST /api/system/execute-stream`, гейт — `require_capability(server, Capability.EXEC, write=True)` в роутере. Исполнитель `configs/xray-test-runner.sh` версионируется (`RUNNER_VERSION`) и доставляется панелью base64-командой при расхождении версии — тот же приём, что у сторожа анти-DDoS. Конфиг ядра генерирует панель: единственный генератор на оба места запуска означает, что «работает на панели» и «работает на ноде» проверяют одно и то же. Ядро нода забирает у панели по одноразовой ссылке (TTL 5 мин) и сверяет по SHA-256 — поэтому `curl --insecure` безопасен и способ работает на серверах без доступа к GitHub. Локальные socks-порты `7501-7504` зарезервированы от эфемерной выдачи в `configs/tune-sysctl.sh`.
 
@@ -2667,6 +2673,7 @@ SSE-события: `note_update` — `{"content": "...", "version": N}`, `tasks
 | `GET /api/xray-test/jobs/{id}/stream` | NDJSON: `start`, `cell`, `log`, `done` (переподключаемый, с реплеем) |
 | `POST /api/xray-test/jobs/{id}/cancel` | Отменить прогон |
 | `GET /api/xray-test/jobs/{id}/export` | `fmt=links\|subscription\|csv\|json` |
+| `GET /api/xray-test/clients` | Профили клиента подписки (какие шлют HWID) |
 | `GET /api/xray-test/cores` | Состояние ядер: выбор, установленные версии, готовность |
 | `GET /api/xray-test/cores/releases` | Опубликованные версии с GitHub, включая пре-релизы (`refresh=1` — мимо кэша) |
 | `PUT /api/xray-test/cores/version` | Закрепить версию (`latest` или конкретная) |
@@ -2678,7 +2685,7 @@ SSE-события: `note_update` — `{"content": "...", "version": N}`, `tasks
 
 Путь стрима внесён в `GZipMiddlewareNoSSE` (`app/main.py`) — иначе gzip забуферизовал бы поток.
 
-**Файлы:** `app/services/xray_test/` (см. «Структуру»), `app/routers/xray_test.py`, `configs/xray-test-runner.sh`, `panel/frontend/src/pages/XrayTest.tsx` и `src/components/xraytest/`. Тесты: `test_xray_test_parsers.py`, `test_xray_test_config.py`, `test_xray_test_subscription.py`, `test_xray_test_sanitize.py`, `test_xray_test_node_runner.py`, `test_xray_test_cores.py`.
+**Файлы:** `app/services/xray_test/` (см. «Структуру»), `app/routers/xray_test.py`, `configs/xray-test-runner.sh`, `panel/frontend/src/pages/XrayTest.tsx` и `src/components/xraytest/`. Тесты: `test_xray_test_parsers.py`, `test_xray_test_config.py`, `test_xray_test_subscription.py`, `test_xray_test_sanitize.py`, `test_xray_test_node_runner.py`, `test_xray_test_cores.py`, `test_xray_test_client_headers.py`.
 
 ## Диагностика
 

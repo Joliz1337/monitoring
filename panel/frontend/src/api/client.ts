@@ -528,6 +528,8 @@ export interface XrayTestParseResult {
 export interface XrayTestCell {
   index: number
   remark: string
+  location: string
+  location_name: string
   protocol: string
   address: string
   port: number
@@ -603,12 +605,19 @@ export interface XrayTestCoreRelease {
   installed: boolean
 }
 
+export interface XrayTestClient {
+  id: string
+  title: string
+  user_agent: string
+  sends_hwid: boolean
+}
+
 export interface XrayTestSubscriptionProfile {
   id: number
   name: string
   kind: 'url' | 'links'
   payload: string
-  user_agent: string | null
+  client: string | null
   last_fetched_at: string | null
   last_count: number
 }
@@ -637,13 +646,13 @@ export interface XrayTestRunSummary {
 export interface XrayTestRunRequest {
   source: XrayTestSource
   payload: string
-  user_agent?: string | null
+  client?: string | null
   source_name?: string | null
   profile_id?: number | null
   selected?: number[] | null
   sni_list: string[]
   sync_transport_host: boolean
-  location: string
+  locations: string[]
   concurrency: number
   full: boolean
   tls_inspect: boolean
@@ -657,13 +666,15 @@ export const xrayTestExportUrl = (jobId: string, fmt: string, includeDegraded: b
 export const xrayTestApi = {
   parse: (body: {
     source: XrayTestSource; payload: string;
-    user_agent?: string | null; profile_id?: number | null
+    client?: string | null; profile_id?: number | null
   }) =>
     api.post<XrayTestParseResult>('/xray-test/parse', body),
   run: (body: XrayTestRunRequest) =>
     api.post<{ job_id: string; total: number }>('/xray-test/run', body),
   jobs: () => api.get<{ jobs: XrayTestJobInfo[] }>('/xray-test/jobs'),
   cancel: (jobId: string) => api.post(`/xray-test/jobs/${jobId}/cancel`),
+  clients: () =>
+    api.get<{ clients: XrayTestClient[]; default: string }>('/xray-test/clients'),
   cores: () => api.get<{ cores: XrayTestCoreInfo[]; arch: string }>('/xray-test/cores'),
   coreReleases: (core: string, refresh = false) =>
     api.get<{ releases: XrayTestCoreRelease[]; selected: string }>(
@@ -681,11 +692,11 @@ export const xrayTestApi = {
   subscriptions: () =>
     api.get<{ profiles: XrayTestSubscriptionProfile[] }>('/xray-test/subscriptions'),
   createSubscription: (body: {
-    name: string; kind: 'url' | 'links'; payload: string; user_agent?: string | null
+    name: string; kind: 'url' | 'links'; payload: string; client?: string | null
   }) => api.post<XrayTestSubscriptionProfile>('/xray-test/subscriptions', body),
   updateSubscription: (
     id: number,
-    body: { name?: string; payload?: string; user_agent?: string | null },
+    body: { name?: string; payload?: string; client?: string | null },
   ) => api.patch<XrayTestSubscriptionProfile>(`/xray-test/subscriptions/${id}`, body),
   deleteSubscription: (id: number) => api.delete(`/xray-test/subscriptions/${id}`),
   sniSets: () => api.get<{ profiles: XrayTestSniSet[] }>('/xray-test/sni-sets'),

@@ -385,5 +385,57 @@ class MatrixTest(unittest.TestCase):
             build_matrix([])
 
 
+class LocationMatrixTest(unittest.TestCase):
+    """Одна конфигурация из нескольких точек — отдельная проверка на каждую.
+
+    Ключ, живой из Германии, может быть мёртв из России: усреднять такие
+    результаты нельзя, у каждой локации своя строка.
+    """
+
+    def _endpoint(self):
+        return parse_link(f"vless://{UUID}@h.io:443?security=tls&sni=a.com#node")
+
+    def test_locations_multiply_cells(self):
+        cells = build_matrix(
+            [self._endpoint()],
+            ["a.com", "b.com"],
+            locations=[("panel", ""), ("node:1", "Берлин"), ("node:2", "Москва")],
+        )
+        self.assertEqual(len(cells), 6)
+        self.assertEqual(
+            {(cell.sni_label, cell.location) for cell in cells},
+            {(sni, loc) for sni in ("a.com", "b.com")
+             for loc in ("panel", "node:1", "node:2")},
+        )
+
+    def test_location_name_carried(self):
+        cells = build_matrix([self._endpoint()], locations=[("node:7", "Амстердам")])
+        self.assertEqual(cells[0].location, "node:7")
+        self.assertEqual(cells[0].location_name, "Амстердам")
+
+    def test_default_location_is_panel(self):
+        cells = build_matrix([self._endpoint()])
+        self.assertEqual(cells[0].location, "panel")
+
+    def test_indexes_stay_unique(self):
+        cells = build_matrix(
+            [self._endpoint(), self._endpoint()],
+            ["a.com"],
+            locations=[("panel", ""), ("node:1", "N")],
+        )
+        self.assertEqual(len({cell.index for cell in cells}), len(cells))
+
+    def test_cell_limit_counts_locations(self):
+        endpoints = [self._endpoint() for _ in range(10)]
+        with self.assertRaises(LimitExceededError):
+            build_matrix(endpoints, [f"s{i}.com" for i in range(11)],
+                         locations=[("panel", ""), ("node:1", "N")])
+
+    def test_too_many_locations_rejected(self):
+        with self.assertRaises(LimitExceededError):
+            build_matrix([self._endpoint()],
+                         locations=[(f"node:{i}", str(i)) for i in range(25)])
+
+
 if __name__ == "__main__":
     unittest.main()

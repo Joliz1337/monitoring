@@ -888,7 +888,6 @@
     "input_links": "Links to check",
     "input_json": "Client config",
     "input_subscription": "Subscription URL",
-    "user_agent": "Subscription client",
     "parse": "Parse",
     "parse_first": "Parse the input first",
     "nothing_parsed": "No configurations could be parsed",
@@ -904,7 +903,6 @@
     "options": "Test options",
     "where": "Run from",
     "where_panel": "From the panel",
-    "node_no_exec": "no execute permission",
     "multi_sni": "Multi-SNI (one domain per line)",
     "sync_host": "Change transport Host along with SNI",
     "concurrency": "Concurrency",
@@ -1004,7 +1002,16 @@
     "saved_pick": "Saved:",
     "save_source": "Save",
     "full_mode_hint": "Without it — only DNS resolution and a TCP connection, the core is not started",
-    "tls_inspect_hint": "Who issued the masking domain's certificate: an unexpected issuer hints at interception"
+    "tls_inspect_hint": "Who issued the masking domain's certificate: an unexpected issuer hints at interception",
+    "client": "Client",
+    "client_hwid_on": "sends the device HWID",
+    "client_hwid_off": "no HWID — some panels will not return keys",
+    "search_servers": "Search by name or address",
+    "no_servers_found": "No servers found",
+    "servers_restricted": "Hidden servers without execute permission: {{count}}",
+    "col_location": "From",
+    "location_panel": "Panel",
+    "pick_location": "Pick at least one place to run from"
   },
   "anti_ddos": {
     "title": "Anti-DDoS",

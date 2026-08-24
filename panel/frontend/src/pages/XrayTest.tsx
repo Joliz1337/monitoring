@@ -17,19 +17,19 @@ import {
   type XrayTestSniSet,
   type XrayTestSource,
   type XrayTestSubscriptionProfile,
+  type XrayTestClient,
 } from '../api/client'
 import { FAQIcon } from '../components/FAQ'
 import { Checkbox } from '../components/ui/Checkbox'
-import { nodeAllows } from '../utils/nodeCapabilities'
 import { ResultsTable } from '../components/xraytest/ResultsTable'
 import { ProfilesTab } from '../components/xraytest/ProfilesTab'
 import { HistoryTab } from '../components/xraytest/HistoryTab'
 import { CoresTab } from '../components/xraytest/CoresTab'
+import { LocationPicker } from '../components/xraytest/LocationPicker'
 import { extractError, useTestRun } from '../components/xraytest/useTestRun'
 
 type TabType = 'links' | 'json' | 'subscription' | 'profiles' | 'history' | 'cores'
 
-const USER_AGENTS = ['v2rayNG/1.9.24', 'clash-verge/v1.7.7', 'Happ/1.0', 'sing-box/1.13.19']
 
 export default function XrayTest() {
   const { t } = useTranslation()
@@ -123,14 +123,14 @@ function TesterTab({ source }: { source: XrayTestSource }) {
   const run = useTestRun()
 
   const [payload, setPayload] = useState('')
-  const [userAgent, setUserAgent] = useState(USER_AGENTS[0])
+  const [client, setClient] = useState('')
   const [parsed, setParsed] = useState<XrayTestParseResult | null>(null)
   const [parsing, setParsing] = useState(false)
   const [selected, setSelected] = useState<Set<number>>(new Set())
 
   const [sniText, setSniText] = useState('')
   const [syncHost, setSyncHost] = useState(true)
-  const [location, setLocation] = useState('panel')
+  const [locations, setLocations] = useState<string[]>(['panel'])
   const [concurrency, setConcurrency] = useState(4)
   const [fullMode, setFullMode] = useState(true)
   const [tlsInspect, setTlsInspect] = useState(true)
@@ -140,6 +140,7 @@ function TesterTab({ source }: { source: XrayTestSource }) {
   const [servers, setServers] = useState<ServerWithMetrics[]>([])
   const [cores, setCores] = useState<XrayTestCoreInfo[]>([])
   const [sniSets, setSniSets] = useState<XrayTestSniSet[]>([])
+  const [clients, setClients] = useState<XrayTestClient[]>([])
   const [sources, setSources] = useState<XrayTestSubscriptionProfile[]>([])
   const [activeSource, setActiveSource] = useState<XrayTestSubscriptionProfile | null>(null)
 
@@ -153,6 +154,10 @@ function TesterTab({ source }: { source: XrayTestSource }) {
     serversApi.list().then(({ data }) => setServers(data.servers)).catch(() => setServers([]))
     xrayTestApi.cores().then(({ data }) => setCores(data.cores)).catch(() => setCores([]))
     xrayTestApi.sniSets().then(({ data }) => setSniSets(data.profiles)).catch(() => setSniSets([]))
+    xrayTestApi.clients().then(({ data }) => {
+      setClients(data.clients)
+      setClient(current => current || data.default)
+    }).catch(() => setClients([]))
     loadSources()
   }, [loadSources])
 
@@ -168,7 +173,7 @@ function TesterTab({ source }: { source: XrayTestSource }) {
     setPayload(profile.payload)
     setActiveSource(profile)
     setParsed(null)
-    if (profile.user_agent) setUserAgent(profile.user_agent)
+    if (profile.client) setClient(profile.client)
   }
 
   const saveCurrentSource = async () => {
@@ -179,7 +184,7 @@ function TesterTab({ source }: { source: XrayTestSource }) {
         name: name.trim(),
         kind: sourceKind,
         payload: payload.trim(),
-        user_agent: source === 'subscription' ? userAgent : null,
+        client: source === 'subscription' ? client : null,
       })
       toast.success(t('xray_test.profile_saved'))
       loadSources()
@@ -210,7 +215,7 @@ function TesterTab({ source }: { source: XrayTestSource }) {
       const { data } = await xrayTestApi.parse({
         source,
         payload: payload.trim(),
-        user_agent: source === 'subscription' ? userAgent : null,
+        client: source === 'subscription' ? client : null,
         profile_id: activeSource?.id ?? null,
       })
       setParsed(data)
@@ -222,7 +227,7 @@ function TesterTab({ source }: { source: XrayTestSource }) {
     } finally {
       setParsing(false)
     }
-  }, [payload, source, userAgent, t])
+  }, [payload, source, client, t])
 
   const handleRun = useCallback(async () => {
     if (!parsed) {
@@ -238,20 +243,20 @@ function TesterTab({ source }: { source: XrayTestSource }) {
     await run.start({
       source,
       payload: payload.trim(),
-      user_agent: source === 'subscription' ? userAgent : null,
+      client: source === 'subscription' ? client : null,
       source_name: activeSource?.name ?? null,
       profile_id: activeSource?.id ?? null,
       selected: indices,
       sni_list: sniList,
       sync_transport_host: syncHost,
-      location,
+      locations,
       concurrency,
       full: fullMode,
       tls_inspect: tlsInspect,
       measure_speed: measureSpeed,
     })
-  }, [parsed, selected, supported, run, source, payload, userAgent, sniList, syncHost,
-      location, concurrency, fullMode, tlsInspect, measureSpeed, t])
+  }, [parsed, selected, supported, run, source, payload, client, activeSource, sniList,
+      syncHost, locations, concurrency, fullMode, tlsInspect, measureSpeed, t])
 
   const toggleConfig = (index: number) => {
     setSelected(prev => {
@@ -321,15 +326,24 @@ function TesterTab({ source }: { source: XrayTestSource }) {
               value={payload}
               onChange={event => setPayload(event.target.value)}
             />
-            <div className="flex items-center gap-2 text-xs">
-              <span className="text-dark-400">{t('xray_test.user_agent')}</span>
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <span className="text-dark-400">{t('xray_test.client')}</span>
               <select
                 className="input py-1 text-xs"
-                value={userAgent}
-                onChange={event => setUserAgent(event.target.value)}
+                value={client}
+                onChange={event => setClient(event.target.value)}
               >
-                {USER_AGENTS.map(agent => <option key={agent} value={agent}>{agent}</option>)}
+                {clients.map(item => (
+                  <option key={item.id} value={item.id}>
+                    {item.title}{item.sends_hwid ? ' · HWID' : ''}
+                  </option>
+                ))}
               </select>
+              <span className="text-dark-500">
+                {clients.find(item => item.id === client)?.sends_hwid
+                  ? t('xray_test.client_hwid_on')
+                  : t('xray_test.client_hwid_off')}
+              </span>
             </div>
           </div>
         ) : (
@@ -401,21 +415,7 @@ function TesterTab({ source }: { source: XrayTestSource }) {
           <div className="space-y-3">
             <div>
               <label className="block text-xs text-dark-400 mb-1.5">{t('xray_test.where')}</label>
-              <select
-                className="input w-full text-sm"
-                value={location}
-                onChange={event => setLocation(event.target.value)}
-              >
-                <option value="panel">{t('xray_test.where_panel')}</option>
-                {servers.map(server => {
-                  const allowed = nodeAllows(server, 'exec', 'write')
-                  return (
-                    <option key={server.id} value={`node:${server.id}`} disabled={!allowed}>
-                      {server.name}{allowed ? '' : ` — ${t('xray_test.node_no_exec')}`}
-                    </option>
-                  )
-                })}
-              </select>
+              <LocationPicker servers={servers} value={locations} onChange={setLocations} />
             </div>
 
             <div>

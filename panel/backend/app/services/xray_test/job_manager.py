@@ -76,7 +76,7 @@ class XrayTestJobManager:
         self,
         cells: list[TestCell],
         options: ProbeOptions,
-        runner: CoreRunner,
+        runners: dict[str, CoreRunner],
         *,
         location: str,
         concurrency: int = DEFAULT_CONCURRENCY,
@@ -92,7 +92,7 @@ class XrayTestJobManager:
         job = XrayTestJob(id=uuid.uuid4().hex, total=len(cells), location=location)
         self._jobs[job.id] = job
         job.task = asyncio.create_task(self._run(
-            job, cells, options, runner,
+            job, cells, options, runners,
             max(1, min(concurrency, MAX_CONCURRENCY)), on_finish,
         ))
         return job.id
@@ -109,16 +109,25 @@ class XrayTestJobManager:
         job: XrayTestJob,
         cells: list[TestCell],
         options: ProbeOptions,
-        runner: CoreRunner,
+        runners: dict[str, CoreRunner],
         concurrency: int,
         on_finish: Optional[Callable[[XrayTestJob], Awaitable[None]]],
     ) -> None:
-        semaphore = asyncio.Semaphore(concurrency)
+        # Своя квота на каждое место запуска: нода тянет проверки последовательнее
+        # панели, и общий семафор отдал бы все слоты самой быстрой локации
+        semaphores = {code: asyncio.Semaphore(concurrency) for code in runners}
         self._emit(job, {"type": "start", "total": job.total, "location": job.location})
         self._log(job, f"Проверок: {job.total}, параллельно: {concurrency}")
 
         async def run_cell(cell: TestCell) -> None:
-            async with semaphore:
+            runner = runners.get(cell.location)
+            if runner is None:
+                self._emit_result(job, _internal_error(
+                    cell, RuntimeError(f"нет исполнителя для {cell.location}")
+                ))
+                return
+
+            async with semaphores[cell.location]:
                 try:
                     result = await runner.probe(cell, options)
                 except asyncio.CancelledError:
@@ -232,6 +241,8 @@ def _internal_error(cell: TestCell, exc: Exception) -> CellResult:
         reason=FailReason.INTERNAL,
         detail=sanitize_output(str(exc))[:400],
         link=cell.link,
+        location=cell.location,
+        location_name=cell.location_name,
     )
 
 

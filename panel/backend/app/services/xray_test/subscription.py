@@ -25,6 +25,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from app.services.net_utils import is_public_range, resolve_panel_ip
+from app.services.xray_test.device_profiles import build_headers
 from app.services.xray_test.errors import (
     LinkParseError,
     SubscriptionFetchError,
@@ -43,16 +44,6 @@ MAX_SUBSCRIPTION_BYTES = 2 * 1024 * 1024
 MAX_REDIRECTS = 3
 CONNECT_TIMEOUT = 5.0
 READ_TIMEOUT = 15.0
-DEFAULT_USER_AGENT = "v2rayNG/1.9.24"
-
-# Клиенты подписок отдают разный формат в зависимости от User-Agent
-KNOWN_USER_AGENTS = {
-    "v2rayng": "v2rayNG/1.9.24",
-    "clash": "clash-verge/v1.7.7",
-    "happ": "Happ/1.0",
-    "singbox": "sing-box/1.13.19",
-    "browser": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-}
 
 
 class SubscriptionFormat(str, Enum):
@@ -78,20 +69,24 @@ class SubscriptionContent:
     dropped_sections: list[str]
 
 
-async def fetch_subscription(url: str, user_agent: Optional[str] = None) -> str:
-    """Скачать тело подписки, не позволив увести запрос во внутреннюю сеть."""
+async def fetch_subscription(url: str, client: Optional[str] = None) -> str:
+    """Скачать тело подписки, не позволив увести запрос во внутреннюю сеть.
+
+    `client` — профиль устройства: от него зависят User-Agent и заголовки HWID,
+    без которых часть панелей отдаёт вместо ключей текст-инструкцию.
+    """
     current = url.strip()
-    headers = {"User-Agent": user_agent or DEFAULT_USER_AGENT, "Accept": "*/*"}
+    headers = build_headers(client, current)
 
     async with httpx.AsyncClient(
         follow_redirects=False,
         trust_env=False,
         timeout=httpx.Timeout(connect=CONNECT_TIMEOUT, read=READ_TIMEOUT, write=10.0, pool=10.0),
-    ) as client:
+    ) as http:
         for _ in range(MAX_REDIRECTS + 1):
             await assert_public_target(current)
             try:
-                async with client.stream("GET", current, headers=headers) as response:
+                async with http.stream("GET", current, headers=headers) as response:
                     if response.is_redirect:
                         location = response.headers.get("location")
                         if not location:

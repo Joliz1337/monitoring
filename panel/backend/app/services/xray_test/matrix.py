@@ -20,6 +20,7 @@ from app.services.xray_test.models import (
 MAX_SNI = 50
 MAX_CELLS_PER_JOB = 200
 MAX_ENDPOINTS = 500
+MAX_LOCATIONS = 20
 
 
 def normalize_sni_list(raw: Iterable[str]) -> list[str]:
@@ -41,7 +42,14 @@ def build_matrix(
     *,
     sync_transport_host: bool = True,
     links: Optional[list[Optional[str]]] = None,
+    locations: Optional[list[tuple[str, str]]] = None,
 ) -> list[TestCell]:
+    """Произведение «конфигурация × SNI × место запуска».
+
+    Локации — пары (код, отображаемое имя). Пустой список означает прогон с
+    самой панели: один и тот же ключ из разных точек ведёт себя по-разному,
+    поэтому каждая точка даёт свою ячейку, а не усредняется с остальными.
+    """
     if not endpoints:
         raise LimitExceededError("Нечего проверять: не разобрано ни одной конфигурации")
     if len(endpoints) > MAX_ENDPOINTS:
@@ -53,26 +61,37 @@ def build_matrix(
     if len(names) > MAX_SNI:
         raise LimitExceededError(f"SNI больше допустимых {MAX_SNI}: {len(names)}")
 
-    total = len(endpoints) * max(1, len(names))
+    places = locations or [("panel", "")]
+    if len(places) > MAX_LOCATIONS:
+        raise LimitExceededError(f"Мест запуска больше допустимых {MAX_LOCATIONS}: {len(places)}")
+
+    total = len(endpoints) * max(1, len(names)) * len(places)
     if total > MAX_CELLS_PER_JOB:
         raise LimitExceededError(
             f"Проверок в задаче больше допустимых {MAX_CELLS_PER_JOB}: {total}. "
-            f"Уменьшите список конфигураций или SNI"
+            f"Уменьшите список конфигураций, SNI или мест запуска"
         )
 
     cells: list[TestCell] = []
     for position, endpoint in enumerate(endpoints):
         link = links[position] if links and position < len(links) else None
-        if not names:
-            cells.append(TestCell(index=len(cells), endpoint=endpoint, sni_label=None, link=link))
-            continue
-        for name in names:
-            cells.append(TestCell(
-                index=len(cells),
-                endpoint=apply_sni(endpoint, name, sync_transport_host=sync_transport_host),
-                sni_label=name,
-                link=link,
-            ))
+        variants = (
+            [(endpoint, None)] if not names
+            else [
+                (apply_sni(endpoint, name, sync_transport_host=sync_transport_host), name)
+                for name in names
+            ]
+        )
+        for variant, sni_label in variants:
+            for code, title in places:
+                cells.append(TestCell(
+                    index=len(cells),
+                    endpoint=variant,
+                    sni_label=sni_label,
+                    link=link,
+                    location=code,
+                    location_name=title,
+                ))
     return cells
 
 

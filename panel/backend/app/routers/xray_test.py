@@ -24,6 +24,7 @@ from app.services.xray_test import (
     bundle,
     core_manager,
     core_registry,
+    device_profiles,
     export,
     storage,
     subscription,
@@ -48,20 +49,20 @@ SourceKind = Literal["links", "json", "subscription"]
 class ParseRequest(BaseModel):
     source: SourceKind
     payload: str = Field(min_length=1, max_length=2_000_000)
-    user_agent: Optional[str] = None
+    client: Optional[str] = None
     profile_id: Optional[int] = None
 
 
 class RunRequest(BaseModel):
     source: SourceKind
     payload: str = Field(min_length=1, max_length=2_000_000)
-    user_agent: Optional[str] = None
+    client: Optional[str] = None
     source_name: Optional[str] = None
     profile_id: Optional[int] = None
     selected: Optional[list[int]] = None
     sni_list: list[str] = Field(default_factory=list)
     sync_transport_host: bool = True
-    location: str = "panel"
+    locations: list[str] = Field(default_factory=lambda: ["panel"])
     concurrency: int = Field(default=4, ge=1, le=8)
     full: bool = True
     tls_inspect: bool = True
@@ -72,13 +73,13 @@ class SubscriptionProfileRequest(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     kind: Literal["url", "links"] = "url"
     payload: str = Field(min_length=1, max_length=200_000)
-    user_agent: Optional[str] = None
+    client: Optional[str] = None
 
 
 class SubscriptionProfileUpdate(BaseModel):
     name: Optional[str] = Field(default=None, max_length=200)
     payload: Optional[str] = Field(default=None, max_length=200_000)
-    user_agent: Optional[str] = None
+    client: Optional[str] = None
 
 
 class CoreVersionRequest(BaseModel):
@@ -105,7 +106,7 @@ def _domain_error(exc: XrayTestError) -> HTTPException:
 
 
 async def _load_endpoints(
-    source: SourceKind, payload: str, user_agent: Optional[str]
+    source: SourceKind, payload: str, client: Optional[str]
 ) -> tuple[list[ProxyEndpoint], list[Optional[str]], list, list[str], Optional[str]]:
     """Вход любого вида → конфигурации, исходные ссылки, ошибки строк, отброшенное."""
     if source == "links":
@@ -116,7 +117,7 @@ async def _load_endpoints(
         endpoints, dropped = json_config.parse_config(payload)
         return endpoints, [None] * len(endpoints), [], dropped, None
 
-    body = await subscription.fetch_subscription(payload, user_agent)
+    body = await subscription.fetch_subscription(payload, client)
     content = subscription.parse_subscription(body)
     return (
         content.endpoints, content.links, content.errors,
@@ -156,7 +157,7 @@ async def parse_input(
     """Разобрать вход и показать, что будет проверяться, ничего не запуская."""
     try:
         endpoints, links, errors, dropped, detected = await _load_endpoints(
-            req.source, req.payload, req.user_agent
+            req.source, req.payload, req.client
         )
     except XrayTestError as exc:
         raise _domain_error(exc) from exc
@@ -182,7 +183,7 @@ async def parse_input(
 async def start_run(req: RunRequest, _: dict = Depends(verify_auth)):
     try:
         endpoints, links, _errors, _dropped, _detected = await _load_endpoints(
-            req.source, req.payload, req.user_agent
+            req.source, req.payload, req.client
         )
 
         if req.selected is not None:
@@ -192,14 +193,21 @@ async def start_run(req: RunRequest, _: dict = Depends(verify_auth)):
             endpoints = [item[0] for item in filtered]
             links = [item[1] for item in filtered]
 
+        places = await _resolve_locations(req.locations)
         cells = build_matrix(
             endpoints, req.sni_list,
             sync_transport_host=req.sync_transport_host,
             links=links,
+            locations=[(code, title) for code, title, _ in places],
         )
-        runner, location_name = await _resolve_runner(req.location, cells)
+        runners = {code: runner for code, _, runner in places}
+        for _, _, runner in places:
+            if isinstance(runner, NodeCoreRunner):
+                await runner.prepare(cells)
     except XrayTestError as exc:
         raise _domain_error(exc) from exc
+
+    location_label = ", ".join(title or code for code, title, _ in places)
 
     options = ProbeOptions(
         tcp=True,
@@ -211,14 +219,18 @@ async def start_run(req: RunRequest, _: dict = Depends(verify_auth)):
 
     started_at = datetime.now(timezone.utc)
 
+    # В сводке прогона место запуска одно поле: при нескольких пишем счётчик,
+    # а конкретная локация остаётся у каждой строки результата
+    location_code = places[0][0] if len(places) == 1 else f"multi:{len(places)}"
+
     async def persist(job: XrayTestJob) -> None:
         async with async_session_maker() as db:
             await storage.save_run(
                 db,
                 source=req.source,
                 source_name=req.source_name,
-                location=req.location,
-                location_name=location_name,
+                location=location_code,
+                location_name=location_label,
                 status=job.status,
                 results=job.results,
                 started_at=started_at,
@@ -226,8 +238,8 @@ async def start_run(req: RunRequest, _: dict = Depends(verify_auth)):
 
     try:
         job_id = get_xray_test_manager().start(
-            cells, options, runner,
-            location=req.location,
+            cells, options, runners,
+            location=location_label or location_code,
             concurrency=req.concurrency,
             on_finish=persist,
         )
@@ -237,22 +249,27 @@ async def start_run(req: RunRequest, _: dict = Depends(verify_auth)):
     return {"job_id": job_id, "total": len(cells)}
 
 
-async def _resolve_runner(location: str, cells) -> tuple[CoreRunner, Optional[str]]:
-    """panel — прогон у себя, node:<id> — на сервере из списка."""
-    if location == "panel":
-        return LocalCoreRunner(), None
+async def _resolve_locations(locations: list[str]) -> list[tuple[str, str, CoreRunner]]:
+    """Коды мест запуска → (код, имя, исполнитель). `panel` — прогон у себя."""
+    wanted = list(dict.fromkeys(locations or ["panel"]))
+    if not wanted:
+        raise XrayTestError("Не выбрано ни одного места запуска")
 
-    prefix, _, raw_id = location.partition(":")
-    if prefix != "node" or not raw_id.isdigit():
-        raise XrayTestError(f"Неизвестное место запуска: {location}")
+    resolved: list[tuple[str, str, CoreRunner]] = []
+    for location in wanted:
+        if location == "panel":
+            resolved.append(("panel", "", LocalCoreRunner()))
+            continue
 
-    async with async_session_maker() as db:
-        server = await get_server_by_id(int(raw_id), db)
-    require_capability(server, Capability.EXEC, write=True)
+        prefix, _, raw_id = location.partition(":")
+        if prefix != "node" or not raw_id.isdigit():
+            raise XrayTestError(f"Неизвестное место запуска: {location}")
 
-    runner = NodeCoreRunner(server)
-    await runner.prepare(cells)
-    return runner, server.name
+        async with async_session_maker() as db:
+            server = await get_server_by_id(int(raw_id), db)
+        require_capability(server, Capability.EXEC, write=True)
+        resolved.append((location, server.name, NodeCoreRunner(server)))
+    return resolved
 
 
 @router.get("/jobs")
@@ -310,6 +327,12 @@ async def export_job(
     return PlainTextResponse(
         export.as_json(job.results), media_type="application/json; charset=utf-8"
     )
+
+
+@router.get("/clients")
+async def list_clients(_: dict = Depends(verify_auth)):
+    """Профили клиентов подписки: чем именно панель представляется при запросе."""
+    return {"clients": device_profiles.describe(), "default": device_profiles.DEFAULT_PROFILE_ID}
 
 
 @router.get("/cores")
@@ -447,7 +470,7 @@ async def create_subscription_profile(
 ):
     try:
         return await storage.create_subscription(
-            db, name=req.name, kind=req.kind, payload=req.payload, user_agent=req.user_agent
+            db, name=req.name, kind=req.kind, payload=req.payload, client=req.client
         )
     except XrayTestError as exc:
         raise _domain_error(exc) from exc
@@ -462,7 +485,7 @@ async def update_subscription_profile(
 ):
     try:
         return await storage.update_subscription(
-            db, profile_id, name=req.name, payload=req.payload, user_agent=req.user_agent
+            db, profile_id, name=req.name, payload=req.payload, client=req.client
         )
     except XrayTestError as exc:
         raise _domain_error(exc) from exc

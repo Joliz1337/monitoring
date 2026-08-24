@@ -317,6 +317,8 @@ def _empty_result(cell: TestCell) -> CellResult:
         security=endpoint.tls.security.value,
         timings=ProbeTimings(),
         link=cell.link,
+        location=cell.location,
+        location_name=cell.location_name,
     )
 
 

@@ -65,11 +65,11 @@ async def get_subscription(db: AsyncSession, profile_id: int) -> XrayTestSubscri
 
 
 async def create_subscription(
-    db: AsyncSession, *, name: str, kind: str, payload: str, user_agent: Optional[str]
+    db: AsyncSession, *, name: str, kind: str, payload: str, client: Optional[str]
 ) -> dict:
     await _assert_name_free(db, XrayTestSubscription, name)
     profile = XrayTestSubscription(
-        name=name.strip(), kind=kind, payload=payload, user_agent=user_agent
+        name=name.strip(), kind=kind, payload=payload, user_agent=client
     )
     db.add(profile)
     await db.commit()
@@ -83,7 +83,7 @@ async def update_subscription(
     *,
     name: Optional[str] = None,
     payload: Optional[str] = None,
-    user_agent: Optional[str] = None,
+    client: Optional[str] = None,
 ) -> dict:
     profile = await get_subscription(db, profile_id)
     if name and name.strip() != profile.name:
@@ -91,8 +91,8 @@ async def update_subscription(
         profile.name = name.strip()
     if payload is not None:
         profile.payload = payload
-    if user_agent is not None:
-        profile.user_agent = user_agent or None
+    if client is not None:
+        profile.user_agent = client or None
 
     await db.commit()
     await db.refresh(profile)
@@ -199,6 +199,8 @@ async def save_run(
             transport=item.get("transport"),
             security=item.get("security"),
             core=item.get("core"),
+            location=item.get("location"),
+            location_name=(item.get("location_name") or "")[:200] or None,
             verdict=item.get("verdict", "fail"),
             reason=item.get("reason"),
             rtt_ms=item.get("rtt_ms"),
@@ -252,6 +254,8 @@ async def get_run_results(db: AsyncSession, run_id: int) -> list[dict]:
             "transport": row.transport,
             "security": row.security,
             "core": row.core,
+            "location": row.location,
+            "location_name": row.location_name,
             "verdict": row.verdict,
             "reason": row.reason,
             "rtt_ms": row.rtt_ms,
@@ -302,7 +306,7 @@ def _subscription_view(profile: XrayTestSubscription) -> dict:
         "name": profile.name,
         "kind": profile.kind,
         "payload": profile.payload,
-        "user_agent": profile.user_agent,
+        "client": profile.user_agent,
         "last_fetched_at": profile.last_fetched_at.isoformat() if profile.last_fetched_at else None,
         "last_count": profile.last_count,
     }
