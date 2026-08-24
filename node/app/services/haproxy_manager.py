@@ -82,7 +82,6 @@ class BalancerOptions:
     httpchk_method: Optional[str] = None
     httpchk_uri: Optional[str] = None
     httpchk_expect: Optional[str] = None
-    check_sni: Optional[str] = None
     sticky_type: Optional[str] = None
     cookie_name: Optional[str] = None
     cookie_options: Optional[str] = None
@@ -848,12 +847,6 @@ resolvers mydns
         exp_m = re.search(r'http-check\s+expect\s+(.+)', block)
         if exp_m:
             opts.httpchk_expect = exp_m.group(1).strip()
-        # Проверка сайта-маскировки узнаётся по SNI в tcp-check connect и
-        # перекрывает голый option tcp-check, который стоит в том же блоке.
-        sni_m = re.search(r'tcp-check\s+connect\b[^\n]*\bsni\s+(\S+)', block)
-        if sni_m:
-            opts.health_check_type = "tls-check"
-            opts.check_sni = sni_m.group(1)
         cookie_m = re.search(r'^\s+cookie\s+(\S+)\s+(.+)', block, re.MULTILINE)
         if cookie_m:
             opts.sticky_type = "cookie"

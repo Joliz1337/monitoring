@@ -16,24 +16,6 @@ VALID_ALGORITHMS = (
     "url_param", "hdr", "random", "first", "rdp-cookie",
 )
 
-VALID_HEALTH_CHECKS = ("tcp-check", "httpchk", "tls-check")
-
-# SNI проверки подставляется прямо в текст haproxy.cfg, поэтому только метки
-# домена и точки между ними: ни пробела, ни перевода строки, ни обратного слэша
-# — иначе в конфиг можно дописать произвольную директиву.
-_SNI_LABEL = r"[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?"
-CHECK_SNI_PATTERN = re.compile(rf"^{_SNI_LABEL}(?:\.{_SNI_LABEL})*$")
-
-# Живой сервер отвечает на рукопожатие сайтом-маскировкой, поэтому годится
-# любой внятный HTTP-ответ: 2xx, редирект и даже 403/404 доказывают, что за
-# портом работает сервер. Из «здоровых» исключены только 5xx.
-TLS_CHECK_EXPECT = r"^HTTP/1\..\ [234][0-9][0-9]"
-
-# Каждая такая проверка — полное TLS-рукопожатие плюс реальный исходящий запрос
-# ядра на сайт-маскировку. На интервале по умолчанию (5s) это десятки тысяч
-# запросов в сутки с каждой ноды, поэтому у одиночных правил шаг реже.
-TLS_CHECK_INTER = "30s"
-
 
 @dataclass
 class BackendServer:
@@ -65,7 +47,6 @@ class BalancerOptions:
     httpchk_method: Optional[str] = None
     httpchk_uri: Optional[str] = None
     httpchk_expect: Optional[str] = None
-    check_sni: Optional[str] = None
 
     sticky_type: Optional[str] = None
     cookie_name: Optional[str] = None
@@ -169,47 +150,8 @@ resolvers mydns
         except ValueError:
             return True
     
-    @staticmethod
-    def _health_check_lines(opts: BalancerOptions | None) -> list[str]:
-        """Директивы проверки живости бэкенда.
-
-        `tls-check` проверяет не порт, а запасной ход REALITY: «неправильному»
-        клиенту живой сервер отдаёт настоящий сайт-маскировку. Значит успешное
-        TLS-рукопожатие с его SNI и внятный HTTP-ответ доказывают всю цепочку —
-        порт открыт, ядро приняло соединение и сумело сходить на dest. Обычный
-        tcp-check доказывает только то, что порт принял SYN.
-
-        `connect default` — чтобы проверка унаследовала параметры строки server
-        (в первую очередь PROXY protocol) и переопределила лишь TLS и SNI.
-        """
-        check_type = opts.health_check_type if opts else None
-        if check_type == "tls-check" and opts and opts.check_sni:
-            sni = opts.check_sni
-            return [
-                "    option tcp-check",
-                f"    tcp-check connect default ssl sni {sni}",
-                "    tcp-check send GET\\ /\\ HTTP/1.1\\r\\n",
-                f"    tcp-check send Host:\\ {sni}\\r\\n",
-                "    tcp-check send Connection:\\ close\\r\\n",
-                "    tcp-check send \\r\\n",
-                f"    tcp-check expect rstring {TLS_CHECK_EXPECT}",
-            ]
-        if check_type == "httpchk":
-            method = opts.httpchk_method or "GET" if opts else "GET"
-            uri = (opts.httpchk_uri or "/") if opts else "/"
-            lines = [f"    option httpchk {method} {uri}"]
-            if opts and opts.httpchk_expect:
-                lines.append(f"    http-check expect {opts.httpchk_expect}")
-            return lines
-        if check_type == "tcp-check":
-            return ["    option tcp-check"]
-        return []
-
-    @staticmethod
-    def _uses_tls_check(opts: BalancerOptions | None) -> bool:
-        return bool(opts and opts.health_check_type == "tls-check" and opts.check_sni)
-
-    def _build_server_line(self, srv: BackendServer, opts: BalancerOptions | None = None) -> str:
+    def _build_server_line(self, srv: BackendServer, opts: BalancerOptions | None = None,
+                           rule_type: str = "tcp") -> str:
         line = f"    server {srv.name} {srv.address}:{srv.port}"
         if srv.weight != 1:
             line += f" weight {srv.weight}"
@@ -217,14 +159,12 @@ resolvers mydns
             line += f" maxconn {srv.maxconn}"
         if self._is_domain(srv.address):
             line += " resolvers mydns resolve-prefer ipv4 init-addr none"
+        if rule_type == "https" and srv.send_proxy is False and srv.send_proxy_v2 is False:
+            pass  # без proxy protocol по умолчанию для https
         if srv.send_proxy and not srv.send_proxy_v2:
             line += " send-proxy"
         if srv.send_proxy_v2:
             line += " send-proxy-v2"
-        if self._uses_tls_check(opts):
-            # ssl-server-verify по умолчанию required, а CA-файла для проверки
-            # нет — без явного verify none HAProxy откажется стартовать.
-            line += " verify none"
         if srv.check:
             line += f" check inter {srv.inter} fall {srv.fall} rise {srv.rise}"
         if srv.backup:
@@ -283,7 +223,15 @@ frontend {frontend_name}
         if opts.hash_type and alg in ("source", "uri", "url_param", "hdr"):
             lines.append(f"    hash-type {opts.hash_type}")
 
-        lines.extend(self._health_check_lines(opts))
+        # Health checks
+        if opts.health_check_type == "tcp-check":
+            lines.append("    option tcp-check")
+        elif opts.health_check_type == "httpchk":
+            method = opts.httpchk_method or "GET"
+            uri = opts.httpchk_uri or "/"
+            lines.append(f"    option httpchk {method} {uri}")
+            if opts.httpchk_expect:
+                lines.append(f"    http-check expect {opts.httpchk_expect}")
 
         # Sticky sessions
         if opts.sticky_type == "cookie":
@@ -316,7 +264,7 @@ frontend {frontend_name}
 
         # Серверы
         for srv in rule.servers:
-            lines.append(self._build_server_line(srv, opts))
+            lines.append(self._build_server_line(srv, opts, rule.rule_type))
 
         return frontend + "\n".join(lines) + "\n"
 
@@ -331,19 +279,10 @@ frontend {frontend_name}
         accept_proxy_opt = " accept-proxy" if rule.accept_proxy else ""
 
         if rule.rule_type == "tcp":
-            opts = rule.balancer_options
-            if opts is None or not opts.health_check_type:
-                opts = BalancerOptions(health_check_type="tcp-check")
-            tls_check = self._uses_tls_check(opts)
-
             server_opts = ""
             if rule.send_proxy:
                 server_opts += " send-proxy-v2"
-            if tls_check:
-                server_opts += " verify none"
-            inter = TLS_CHECK_INTER if tls_check else "5s"
-            server_opts += f" check inter {inter} fall 3 rise 2"
-            check_block = "\n".join(self._health_check_lines(opts))
+            server_opts += " check inter 5s fall 3 rise 2"
 
             return f"""
 frontend {frontend_name}
@@ -353,7 +292,7 @@ frontend {frontend_name}
 
 backend {backend_name}
     mode tcp
-{check_block}
+    option tcp-check
     server srv1 {rule.target_ip}:{rule.target_port}{resolver_opts}{server_opts}
 """
         else:
@@ -431,18 +370,6 @@ backend {backend_name}
             if not 1 <= rule.target_port <= 65535:
                 return False, "Invalid target port (1-65535)"
 
-        check = rule.balancer_options
-        if check and check.health_check_type:
-            if check.health_check_type not in VALID_HEALTH_CHECKS:
-                return False, f"Invalid health check type: {check.health_check_type}"
-            if check.health_check_type == "tls-check":
-                if rule.rule_type != "tcp":
-                    return False, "TLS health check is available for TCP rules only"
-                if not check.check_sni:
-                    return False, "TLS health check requires an SNI domain"
-                if not CHECK_SNI_PATTERN.match(check.check_sni):
-                    return False, f"Invalid health check SNI: {check.check_sni}"
-
         return True, "Valid"
     
     @staticmethod
@@ -472,25 +399,6 @@ backend {backend_name}
             disabled="disabled" in opts.split(),
         )
 
-    @staticmethod
-    def _parse_health_check(block: str, opts: BalancerOptions) -> None:
-        if re.search(r'option\s+tcp-check', block):
-            opts.health_check_type = "tcp-check"
-        hc_m = re.search(r'option\s+httpchk\s+(\S+)\s+(\S+)', block)
-        if hc_m:
-            opts.health_check_type = "httpchk"
-            opts.httpchk_method = hc_m.group(1)
-            opts.httpchk_uri = hc_m.group(2)
-        exp_m = re.search(r'http-check\s+expect\s+(.+)', block)
-        if exp_m:
-            opts.httpchk_expect = exp_m.group(1).strip()
-        # Проверка сайта-маскировки узнаётся по SNI в tcp-check connect и
-        # перекрывает голый option tcp-check, который стоит в том же блоке.
-        sni_m = re.search(r'tcp-check\s+connect\b[^\n]*\bsni\s+(\S+)', block)
-        if sni_m:
-            opts.health_check_type = "tls-check"
-            opts.check_sni = sni_m.group(1)
-
     def _parse_balancer_options(self, block: str) -> BalancerOptions:
         opts = BalancerOptions()
 
@@ -504,7 +412,17 @@ backend {backend_name}
         if ht_m:
             opts.hash_type = ht_m.group(1)
 
-        self._parse_health_check(block, opts)
+        # health checks
+        if re.search(r'option\s+tcp-check', block):
+            opts.health_check_type = "tcp-check"
+        hc_m = re.search(r'option\s+httpchk\s+(\S+)\s+(\S+)', block)
+        if hc_m:
+            opts.health_check_type = "httpchk"
+            opts.httpchk_method = hc_m.group(1)
+            opts.httpchk_uri = hc_m.group(2)
+        exp_m = re.search(r'http-check\s+expect\s+(.+)', block)
+        if exp_m:
+            opts.httpchk_expect = exp_m.group(1).strip()
 
         # sticky sessions
         cookie_m = re.search(r'^\s+cookie\s+(\S+)\s+(.+)', block, re.MULTILINE)
@@ -594,11 +512,7 @@ backend {backend_name}
                 server_match = re.search(r'server\s+\S+\s+(\S+):(\d+)', block)
                 if server_match:
                     target_ssl = bool(re.search(r'server\s+\S+\s+\S+:\d+\s+ssl', block))
-                    send_proxy = bool(re.search(r'^\s*server\s+.*send-proxy', block, re.MULTILINE))
-                    # У одиночного правила проверка живости — единственная
-                    # настройка бэкенда, и хранить её негде, кроме опций.
-                    check_opts = BalancerOptions()
-                    self._parse_health_check(block, check_opts)
+                    send_proxy = bool(re.search(r'send-proxy', block))
                     rules.append(HAProxyRule(
                         name=name, rule_type=fe["type"], listen_port=fe["port"],
                         target_ip=server_match.group(1),
@@ -606,7 +520,6 @@ backend {backend_name}
                         cert_domain=fe["cert_domain"],
                         target_ssl=target_ssl, send_proxy=send_proxy,
                         accept_proxy=fe["accept_proxy"],
-                        balancer_options=check_opts if check_opts.health_check_type != "tcp-check" else None,
                     ))
 
         return rules

@@ -2174,7 +2174,6 @@ export interface BalancerOptions {
   httpchk_method?: string | null
   httpchk_uri?: string | null
   httpchk_expect?: string | null
-  check_sni?: string | null
   sticky_type?: string | null
   cookie_name?: string | null
   cookie_options?: string | null
