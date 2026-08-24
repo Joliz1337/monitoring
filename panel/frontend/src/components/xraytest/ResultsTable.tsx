@@ -178,12 +178,12 @@ export function ResultsTable({ cells, groupBySni }: { cells: XrayTestCell[]; gro
   })
 
   if (!cells.length) {
-    return <div className="text-center py-10 text-dark-400 text-sm">{t('xray_test.no_results')}</div>
+    return <div className="text-center py-10 text-dark-400 text-base">{t('xray_test.no_results')}</div>
   }
 
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap items-center gap-3 text-xs">
+      <div className="flex flex-wrap items-center gap-3 text-sm">
         <div className="flex flex-wrap items-center gap-2">
           {(['ok', 'degraded', 'fail', BLOCKED] as const).map(verdict => (
             <FilterChip
@@ -196,10 +196,10 @@ export function ResultsTable({ cells, groupBySni }: { cells: XrayTestCell[]; gro
           ))}
           {picked.size > 0 && (
             <button
-              className="flex items-center gap-1 px-2 py-1 rounded-md text-dark-400 hover:text-dark-200"
+              className="flex items-center gap-1 px-2.5 py-1.5 rounded-md text-dark-400 hover:text-dark-200"
               onClick={() => setPicked(new Set())}
             >
-              <X className="w-3 h-3" />
+              <X className="w-3.5 h-3.5" />
               {t('xray_test.reset_filter')}
             </button>
           )}
@@ -215,7 +215,7 @@ export function ResultsTable({ cells, groupBySni }: { cells: XrayTestCell[]; gro
             <button
               key={key}
               onClick={() => setSort(key)}
-              className={`px-2 py-1 rounded-md transition-colors ${
+              className={`px-2.5 py-1.5 rounded-md transition-colors ${
                 sort === key ? 'bg-accent-500/15 text-accent-400' : 'text-dark-400 hover:text-dark-200'
               }`}
             >
@@ -226,7 +226,7 @@ export function ResultsTable({ cells, groupBySni }: { cells: XrayTestCell[]; gro
       </div>
 
       {groups.length === 0 ? (
-        <p className="text-center py-8 text-sm text-dark-400">{t('xray_test.filter_empty')}</p>
+        <p className="text-center py-8 text-base text-dark-400">{t('xray_test.filter_empty')}</p>
       ) : (
         <div className="space-y-2">
           {groups.map(group => (
@@ -268,33 +268,33 @@ function ServerCard({
   return (
     <div className="rounded-lg border border-dark-800/60 overflow-hidden">
       <div
-        className="flex items-center gap-3 px-3 py-2.5 cursor-pointer hover:bg-dark-800/30 transition-colors"
+        className="flex items-center gap-3 px-3 py-3 cursor-pointer hover:bg-dark-800/30 transition-colors"
         onClick={() => onToggleGroup(group.key)}
       >
         <span className="text-dark-500 shrink-0">
-          {open ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+          {open ? <ChevronDown className="w-5 h-5" /> : <ChevronRight className="w-5 h-5" />}
         </span>
-        <Server className="w-4 h-4 text-dark-500 shrink-0" />
+        <Server className="w-5 h-5 text-dark-500 shrink-0" />
 
         <span className="flex-1 min-w-0">
-          <span className="block text-sm text-dark-200 truncate">{group.label}</span>
-          <span className="block text-[11px] text-dark-500 font-mono truncate">
+          <span className="block text-base text-dark-200 truncate">{group.label}</span>
+          <span className="block text-[13px] text-dark-500 font-mono truncate">
             {sample.address}:{sample.port} · {sample.protocol} · {sample.transport} · {sample.security}
             {sample.core ? ` · ${sample.core}` : ''}
           </span>
         </span>
 
-        <span className="hidden md:flex items-center gap-4 text-[11px] shrink-0">
+        <span className="hidden md:flex items-center gap-4 text-[13px] shrink-0">
           <Metric label={t('xray_test.col_tcp')} value={ms(best(group.cells, c => c.tcp_min_ms))} />
           <Metric label={t('xray_test.best_rtt')} value={ms(best(group.cells, c => c.rtt_ms))} />
         </span>
 
-        <span className="text-[11px] text-dark-400 shrink-0 tabular-nums">
+        <span className="text-[13px] text-dark-400 shrink-0 tabular-nums">
           {summary.working}/{summary.total}
         </span>
         {locationCount > 1 && (
-          <span className="hidden sm:inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-dark-800/70 text-dark-400 text-[10px] shrink-0">
-            <MapPin className="w-2.5 h-2.5" />
+          <span className="hidden sm:inline-flex items-center gap-1 px-2 py-1 rounded bg-dark-800/70 text-dark-400 text-xs shrink-0">
+            <MapPin className="w-3 h-3" />
             {locationCount}
           </span>
         )}
@@ -349,24 +349,24 @@ function LocationBlock({
   return (
     <div className="border-b border-dark-800/40 last:border-b-0">
       <div
-        className="flex items-center gap-3 px-3 py-2 pl-8 cursor-pointer bg-dark-900/50 hover:bg-dark-800/40 transition-colors"
+        className="flex items-center gap-3 px-3 py-2.5 pl-8 cursor-pointer bg-dark-900/50 hover:bg-dark-800/40 transition-colors"
         onClick={() => onToggleGroup(group.key)}
       >
         <span className="text-dark-500 shrink-0">
-          {open ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+          {open ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
         </span>
-        <MapPin className="w-3.5 h-3.5 text-accent-400/70 shrink-0" />
+        <MapPin className="w-4 h-4 text-accent-400/70 shrink-0" />
         <span className="flex-1 min-w-0 flex items-baseline gap-1.5 truncate">
-          <span className="text-[10px] text-dark-500 shrink-0">{t('xray_test.col_location')}:</span>
-          <span className="text-xs text-dark-100 font-medium truncate">{group.label}</span>
+          <span className="text-xs text-dark-500 shrink-0">{t('xray_test.col_location')}:</span>
+          <span className="text-sm text-dark-100 font-medium truncate">{group.label}</span>
         </span>
 
-        <span className="hidden md:flex items-center gap-4 text-[11px] shrink-0">
+        <span className="hidden md:flex items-center gap-4 text-[13px] shrink-0">
           <Metric label={t('xray_test.col_tcp')} value={ms(best(group.cells, c => c.tcp_min_ms))} />
           <Metric label={t('xray_test.best_rtt')} value={ms(best(group.cells, c => c.rtt_ms))} />
         </span>
 
-        <span className="text-[11px] text-dark-400 shrink-0 tabular-nums">
+        <span className="text-[13px] text-dark-400 shrink-0 tabular-nums">
           {summary.working}/{summary.total}
         </span>
         <VerdictBadge verdict={summary.verdict} small />
@@ -412,27 +412,27 @@ function CheckList({ cells, openCells, onToggleCell, groupBySni }: {
         return (
           <Fragment key={cell.index}>
             <div
-              className="flex items-center gap-3 px-3 py-2 pl-8 cursor-pointer hover:bg-dark-800/20 transition-colors"
+              className="flex items-center gap-3 px-3 py-2.5 pl-8 cursor-pointer hover:bg-dark-800/20 transition-colors"
               onClick={() => onToggleCell(cell.index)}
             >
               <span className="text-dark-600 shrink-0">
-                {open ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+                {open ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
               </span>
-              <Globe className="w-3.5 h-3.5 text-dark-600 shrink-0" />
+              <Globe className="w-4 h-4 text-dark-600 shrink-0" />
 
               <span className="flex-1 min-w-0 flex items-center gap-1.5">
-                <span className="text-xs text-dark-300 truncate">
+                <span className="text-sm text-dark-300 truncate">
                   {cell.sni || t('xray_test.sni_from_key')}
                 </span>
 
                 {bestIndex === cell.index && (
-                  <span className="px-1.5 py-0.5 rounded bg-accent-500/15 text-accent-400 text-[10px] shrink-0">
+                  <span className="px-2 py-1 rounded bg-accent-500/15 text-accent-400 text-xs shrink-0">
                     {t('xray_test.best_sni')}
                   </span>
                 )}
               </span>
 
-              <span className="hidden lg:flex items-center gap-4 text-[11px] shrink-0 tabular-nums">
+              <span className="hidden lg:flex items-center gap-4 text-[13px] shrink-0 tabular-nums">
                 <Metric label={t('xray_test.col_tcp')} value={ms(cell.tcp_min_ms)} />
                 <Metric label={t('xray_test.col_handshake')} value={ms(cell.handshake_ms)} />
                 <Metric label={t('xray_test.col_rtt')} value={ms(cell.rtt_ms)} />
@@ -441,7 +441,7 @@ function CheckList({ cells, openCells, onToggleCell, groupBySni }: {
                 ) : null}
               </span>
 
-              <span className="hidden xl:block text-[11px] text-dark-400 font-mono shrink-0 w-40 truncate">
+              <span className="hidden xl:block text-[13px] text-dark-400 font-mono shrink-0 w-40 truncate">
                 {cell.exit_ip
                   ? `${cell.exit_ip}${cell.exit_country ? ` (${cell.exit_country})` : ''}`
                   : '—'}
@@ -467,7 +467,7 @@ function CheckList({ cells, openCells, onToggleCell, groupBySni }: {
 function CellDetails({ cell }: { cell: XrayTestCell }) {
   const { t } = useTranslation()
   return (
-    <div className="px-3 py-3 pl-14 space-y-2 bg-dark-950/40 text-xs">
+    <div className="px-3 py-3 pl-14 space-y-2 bg-dark-950/40 text-sm">
       {cell.reason && (
         <div className="text-dark-300">
           <span className="text-dark-500">{t('xray_test.col_reason')}: </span>
@@ -476,25 +476,25 @@ function CellDetails({ cell }: { cell: XrayTestCell }) {
       )}
       {cell.hint && (
         <div
-          className={`flex items-start gap-2 px-2.5 py-2 rounded-md border ${
+          className={`flex items-start gap-2 px-3 py-2.5 rounded-md border ${
             cell.verdict === 'degraded'
               ? 'bg-dark-800/60 border-dark-700/60 text-dark-300'
               : 'bg-amber-500/10 border-amber-500/20 text-amber-300'
           }`}
         >
-          <Lightbulb className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+          <Lightbulb className="w-4 h-4 mt-0.5 shrink-0" />
           <span>{t(`xray_test.hint_${cell.hint}`, '')}</span>
         </div>
       )}
       {cell.detail && (
         <div>
-          <span className="text-dark-500 text-[11px]">{t('xray_test.core_says')}</span>
-          <pre className="mt-1 text-[11px] font-mono text-dark-300 whitespace-pre-wrap break-all bg-dark-950/60 rounded p-2 max-h-32 overflow-auto">
+          <span className="text-dark-500 text-[13px]">{t('xray_test.core_says')}</span>
+          <pre className="mt-1 text-[13px] font-mono text-dark-300 whitespace-pre-wrap break-all bg-dark-950/60 rounded p-2 max-h-32 overflow-auto">
             {cell.detail}
           </pre>
         </div>
       )}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-[11px] text-dark-400">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-[13px] text-dark-400">
         <Detail label={t('xray_test.detail_dns')} value={cell.resolved_ip} />
         <Detail label={t('xray_test.detail_dns_ms')} value={ms(cell.dns_ms)} />
         <Detail label={t('xray_test.detail_tcp_avg')} value={ms(cell.tcp_avg_ms)} />
@@ -527,10 +527,10 @@ function VerdictBadge({ verdict, small }: { verdict: string; small?: boolean }) 
   return (
     <span
       className={`inline-flex items-center gap-1.5 rounded-md border font-medium shrink-0 ${
-        small ? 'px-1.5 py-0.5 text-[10px]' : 'px-2 py-0.5 text-xs'
+        small ? 'px-2 py-1 text-xs' : 'px-2.5 py-1 text-sm'
       } ${VERDICT_STYLE[verdict] || VERDICT_STYLE.fail}`}
     >
-      <Icon className={small ? 'w-3 h-3' : 'w-3.5 h-3.5'} />
+      <Icon className={small ? 'w-3.5 h-3.5' : 'w-4 h-4'} />
       {t(`xray_test.verdict_${verdict}`)}
     </span>
   )
@@ -576,11 +576,11 @@ function FilterChip({ verdict, count, active, onClick }: {
     <button
       onClick={onClick}
       disabled={count === 0 && !active}
-      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border transition-all ${
+      className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border transition-all ${
         active ? style.active : style.idle
       } ${count === 0 && !active ? 'opacity-40 cursor-not-allowed' : ''}`}
     >
-      <Icon className="w-3.5 h-3.5" />
+      <Icon className="w-4 h-4" />
       {label}
       <span className="font-semibold tabular-nums">{count}</span>
     </button>
@@ -605,21 +605,21 @@ function TlsBlock({ tls }: { tls: NonNullable<XrayTestCell['tls']> }) {
   const { t } = useTranslation()
   if (!tls.reachable) {
     return (
-      <div className="flex items-center gap-2 text-[11px] text-amber-400">
-        <ShieldAlert className="w-3.5 h-3.5" />
+      <div className="flex items-center gap-2 text-[13px] text-amber-400">
+        <ShieldAlert className="w-4 h-4" />
         {t('xray_test.tls_unreachable')}: {tls.error || '—'}
       </div>
     )
   }
   return (
-    <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-[11px] text-dark-400">
+    <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-[13px] text-dark-400">
       <Detail label={t('xray_test.tls_issuer')} value={tls.issuer} />
       <Detail label={t('xray_test.tls_subject')} value={tls.subject} />
       <Detail label={t('xray_test.tls_version')} value={tls.version} />
       <Detail label={t('xray_test.tls_not_after')} value={tls.not_after} />
       {tls.self_signed && (
         <div className="col-span-2 md:col-span-4 flex items-center gap-2 text-amber-400">
-          <ShieldAlert className="w-3.5 h-3.5" />
+          <ShieldAlert className="w-4 h-4" />
           {t('xray_test.tls_self_signed')}
         </div>
       )}

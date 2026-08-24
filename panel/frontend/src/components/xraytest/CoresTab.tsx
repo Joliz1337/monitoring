@@ -37,7 +37,7 @@ export function CoresTab() {
   if (loading) {
     return (
       <div className="flex justify-center py-12">
-        <Loader2 className="w-5 h-5 animate-spin text-dark-500" />
+        <Loader2 className="w-6 h-6 animate-spin text-dark-500" />
       </div>
     )
   }
@@ -123,36 +123,36 @@ function CoreCard({ info, arch, onChanged }: {
   return (
     <Section
       title={info.core}
-      icon={<Cpu className="w-4 h-4" />}
+      icon={<Cpu className="w-5 h-5" />}
       right={
         <div className="flex items-center gap-2">
-          <span className="text-[11px] text-dark-500">{arch}</span>
+          <span className="text-[13px] text-dark-500">{arch}</span>
           <button
-            className="btn btn-secondary text-xs"
+            className="btn btn-secondary text-sm"
             onClick={() => loadReleases(true)}
             disabled={loading}
           >
-            {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+            {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
             {t('xray_test.refresh_releases')}
           </button>
         </div>
       }
     >
-      <div className="flex flex-wrap items-center gap-3 mb-4 text-xs">
+      <div className="flex flex-wrap items-center gap-3 mb-4 text-sm">
         <StatusChip info={info} />
         {info.error && (
           <span className="flex items-center gap-1.5 text-amber-400">
-            <AlertTriangle className="w-3.5 h-3.5" />
+            <AlertTriangle className="w-4 h-4" />
             {info.error}
           </span>
         )}
         {info.resolved && !info.ready && (
           <button
-            className="btn btn-primary text-xs"
+            className="btn btn-primary text-sm"
             onClick={() => download()}
             disabled={busy !== null}
           >
-            {busy === 'download' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+            {busy === 'download' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
             {t('xray_test.download_now', { version: info.resolved })}
           </button>
         )}
@@ -173,7 +173,7 @@ function CoreCard({ info, arch, onChanged }: {
 
         {loading && !releases.length ? (
           <div className="flex justify-center py-6">
-            <Loader2 className="w-4 h-4 animate-spin text-dark-500" />
+            <Loader2 className="w-5 h-5 animate-spin text-dark-500" />
           </div>
         ) : (
           <div className="max-h-80 overflow-auto space-y-1.5 pr-1">
@@ -195,7 +195,7 @@ function CoreCard({ info, arch, onChanged }: {
                       <Badge tone="emerald">{t('xray_test.installed')}</Badge>
                     )}
                     {!release.verifiable && (
-                      <Badge tone="dark" icon={<ShieldCheck className="w-3 h-3" />}>
+                      <Badge tone="dark" icon={<ShieldCheck className="w-3.5 h-3.5" />}>
                         {t('xray_test.direct_only')}
                       </Badge>
                     )}
@@ -217,8 +217,8 @@ function CoreCard({ info, arch, onChanged }: {
                         disabled={busy !== null}
                       >
                         {busy === release.version
-                          ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                          : <Download className="w-3.5 h-3.5" />}
+                          ? <Loader2 className="w-4 h-4 animate-spin" />
+                          : <Download className="w-4 h-4" />}
                       </button>
                     )}
                     {release.installed && (
@@ -228,7 +228,7 @@ function CoreCard({ info, arch, onChanged }: {
                         onClick={event => { event.stopPropagation(); remove(release.version) }}
                         disabled={busy !== null}
                       >
-                        <Trash2 className="w-3.5 h-3.5" />
+                        <Trash2 className="w-4 h-4" />
                       </button>
                     )}
                   </>
@@ -246,14 +246,14 @@ function StatusChip({ info }: { info: XrayTestCoreInfo }) {
   const { t } = useTranslation()
   if (info.ready) {
     return (
-      <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-        <Check className="w-3.5 h-3.5" />
+      <span className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+        <Check className="w-4 h-4" />
         {t('xray_test.core_ready', { version: info.resolved })}
       </span>
     )
   }
   return (
-    <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-dark-800/60 text-dark-300 border border-dark-700/60">
+    <span className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-dark-800/60 text-dark-300 border border-dark-700/60">
       {t('xray_test.core_not_downloaded')}
     </span>
   )
@@ -270,7 +270,7 @@ function Badge({ children, tone, icon }: {
     dark: 'bg-dark-800/70 text-dark-400 border-dark-700/60',
   }[tone]
   return (
-    <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-[10px] ${styles}`}>
+    <span className={`inline-flex items-center gap-1 px-2 py-1 rounded border text-xs ${styles}`}>
       {icon}
       {children}
     </span>
@@ -290,7 +290,7 @@ function VersionRow({ active, disabled, title, subtitle, badges, actions, onSele
   return (
     <div
       onClick={() => !disabled && !busy && onSelect()}
-      className={`flex items-center gap-3 px-3 py-2 rounded-lg border transition-colors ${
+      className={`flex items-center gap-3 px-3 py-2.5 rounded-lg border transition-colors ${
         disabled ? 'opacity-50 cursor-not-allowed border-dark-800/40' : 'cursor-pointer'
       } ${
         active
@@ -298,7 +298,7 @@ function VersionRow({ active, disabled, title, subtitle, badges, actions, onSele
           : 'border-dark-800/60 hover:border-dark-700/60 hover:bg-dark-800/20'
       }`}
     >
-      <span className={`w-4 h-4 rounded-full border flex items-center justify-center shrink-0 ${
+      <span className={`w-5 h-5 rounded-full border flex items-center justify-center shrink-0 ${
         active ? 'border-accent-500 bg-accent-500' : 'border-dark-600'
       }`}>
         {active && <span className="w-1.5 h-1.5 rounded-full bg-white" />}
@@ -306,10 +306,10 @@ function VersionRow({ active, disabled, title, subtitle, badges, actions, onSele
 
       <span className="flex-1 min-w-0">
         <span className="flex items-center gap-1.5 flex-wrap">
-          <span className="text-sm text-dark-200 font-mono">{title}</span>
+          <span className="text-base text-dark-200 font-mono">{title}</span>
           {badges}
         </span>
-        {subtitle && <span className="block text-[11px] text-dark-500">{subtitle}</span>}
+        {subtitle && <span className="block text-[13px] text-dark-500">{subtitle}</span>}
       </span>
 
       <span className="flex items-center gap-1 shrink-0">{actions}</span>

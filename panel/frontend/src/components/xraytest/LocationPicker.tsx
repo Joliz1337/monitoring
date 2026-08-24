@@ -98,27 +98,27 @@ export function LocationPicker({ servers, value, onChange }: Props) {
   return (
     <div className="rounded-lg border border-dark-800/60 overflow-hidden">
       <label
-        className={`flex items-center gap-2.5 px-3 py-2.5 cursor-pointer select-none border-b border-dark-800/60 transition-colors ${
+        className={`flex items-center gap-2.5 px-3 py-3 cursor-pointer select-none border-b border-dark-800/60 transition-colors ${
           panelSelected ? 'bg-accent-500/[0.08]' : 'hover:bg-dark-800/30'
         }`}
       >
         <Checkbox checked={panelSelected} onChange={() => toggle('panel')} />
-        <Monitor className="w-4 h-4 text-dark-400" />
-        <span className="text-sm text-dark-200">{t('xray_test.where_panel')}</span>
+        <Monitor className="w-5 h-5 text-dark-400" />
+        <span className="text-base text-dark-200">{t('xray_test.where_panel')}</span>
       </label>
 
       {usable.length > 0 && (
         <>
-          <div className="flex items-center gap-2 px-3 py-2 border-b border-dark-800/60">
-            <Search className="w-3.5 h-3.5 text-dark-500 shrink-0" />
+          <div className="flex items-center gap-2 px-3 py-2.5 border-b border-dark-800/60">
+            <Search className="w-4 h-4 text-dark-500 shrink-0" />
             <input
-              className="flex-1 bg-transparent text-xs text-dark-200 placeholder-dark-600 outline-none"
+              className="flex-1 bg-transparent text-sm text-dark-200 placeholder-dark-600 outline-none"
               placeholder={t('xray_test.search_servers')}
               value={search}
               onChange={event => setSearch(event.target.value)}
             />
             <button
-              className="text-[11px] text-dark-400 hover:text-accent-400 shrink-0"
+              className="text-[13px] text-dark-400 hover:text-accent-400 shrink-0"
               onClick={toggleAllNodes}
             >
               {selectedNodes.length === nodeIds.length
@@ -136,7 +136,7 @@ export function LocationPicker({ servers, value, onChange }: Props) {
               return (
                 <div key={folder}>
                   {folder !== NO_FOLDER && (
-                    <div className="flex items-center gap-2 px-3 py-1.5 bg-dark-900/40">
+                    <div className="flex items-center gap-2 px-3 py-2 bg-dark-900/40">
                       <Checkbox
                         checked={checkedCount === inFolder.length && checkedCount > 0}
                         indeterminate={checkedCount > 0 && checkedCount < inFolder.length}
@@ -147,16 +147,16 @@ export function LocationPicker({ servers, value, onChange }: Props) {
                         )}
                       />
                       <button
-                        className="flex items-center gap-1.5 text-xs text-dark-300 hover:text-dark-100"
+                        className="flex items-center gap-1.5 text-sm text-dark-300 hover:text-dark-100"
                         onClick={() => toggleFolder(folder)}
                       >
                         {isOpen
-                          ? <FolderOpen className="w-3.5 h-3.5" />
-                          : <Folder className="w-3.5 h-3.5" />}
+                          ? <FolderOpen className="w-4 h-4" />
+                          : <Folder className="w-4 h-4" />}
                         {folder}
                         <span className="text-dark-600">({list.length})</span>
                         <ChevronDown
-                          className={`w-3 h-3 transition-transform ${isOpen ? '' : '-rotate-90'}`}
+                          className={`w-3.5 h-3.5 transition-transform ${isOpen ? '' : '-rotate-90'}`}
                         />
                       </button>
                     </div>
@@ -168,15 +168,15 @@ export function LocationPicker({ servers, value, onChange }: Props) {
                     return (
                       <label
                         key={server.id}
-                        className={`flex items-center gap-2.5 px-3 py-2 cursor-pointer select-none transition-colors ${
+                        className={`flex items-center gap-2.5 px-3 py-2.5 cursor-pointer select-none transition-colors ${
                           folder !== NO_FOLDER ? 'pl-8' : ''
                         } ${checked ? 'bg-accent-500/[0.06]' : 'hover:bg-dark-800/30'}`}
                       >
                         <Checkbox checked={checked} onChange={() => toggle(id)} />
-                        <Server className="w-3.5 h-3.5 text-dark-500 shrink-0" />
+                        <Server className="w-4 h-4 text-dark-500 shrink-0" />
                         <span className="flex-1 min-w-0">
-                          <span className="block text-xs text-dark-200 truncate">{server.name}</span>
-                          <span className="block text-[10px] text-dark-500 font-mono truncate">
+                          <span className="block text-sm text-dark-200 truncate">{server.name}</span>
+                          <span className="block text-xs text-dark-500 font-mono truncate">
                             {server.url.replace(/^https?:\/\//, '')}
                           </span>
                         </span>
@@ -188,7 +188,7 @@ export function LocationPicker({ servers, value, onChange }: Props) {
             })}
 
             {grouped.size === 0 && (
-              <p className="px-3 py-4 text-xs text-dark-500 text-center">
+              <p className="px-3 py-4 text-sm text-dark-500 text-center">
                 {t('xray_test.no_servers_found')}
               </p>
             )}
@@ -197,7 +197,7 @@ export function LocationPicker({ servers, value, onChange }: Props) {
       )}
 
       {restricted.length > 0 && (
-        <p className="px-3 py-2 text-[11px] text-dark-500 border-t border-dark-800/60">
+        <p className="px-3 py-2.5 text-[13px] text-dark-500 border-t border-dark-800/60">
           {t('xray_test.servers_restricted', { count: restricted.length })}
         </p>
       )}

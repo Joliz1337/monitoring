@@ -54,14 +54,14 @@ export default function XrayTest() {
       >
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-accent-500/20 to-blue-500/20 flex items-center justify-center">
-            <FlaskConical className="w-5 h-5 text-accent-400" />
+            <FlaskConical className="w-6 h-6 text-accent-400" />
           </div>
           <div>
             <h1 className="text-xl font-semibold text-dark-50 flex items-center gap-2">
               {t('xray_test.title')}
               <FAQIcon screen="PAGE_XRAY_TEST" />
             </h1>
-            <p className="text-sm text-dark-400">{t('xray_test.subtitle')}</p>
+            <p className="text-base text-dark-400">{t('xray_test.subtitle')}</p>
           </div>
         </div>
       </motion.div>
@@ -71,13 +71,13 @@ export default function XrayTest() {
           <button
             key={tab.id}
             onClick={() => setActiveTab(tab.id)}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 ${
+            className={`flex items-center gap-2 px-4 py-2.5 rounded-lg text-base font-medium transition-all duration-200 ${
               activeTab === tab.id
                 ? 'bg-accent-500/15 text-accent-400 shadow-sm'
                 : 'text-dark-400 hover:text-dark-200 hover:bg-dark-800/50'
             }`}
           >
-            <tab.icon className="w-4 h-4" />
+            <tab.icon className="w-5 h-5" />
             {tab.label}
           </button>
         ))}
@@ -107,7 +107,7 @@ export function Section({ title, icon, children, right }: {
   return (
     <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="card">
       <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-2 text-dark-200 text-sm font-medium">
+        <div className="flex items-center gap-2 text-dark-200 text-base font-medium">
           {icon}
           {title}
         </div>
@@ -277,18 +277,18 @@ function TesterTab({ source }: { source: XrayTestSource }) {
     >
       <Section
         title={t(`xray_test.input_${source}`)}
-        icon={source === 'links' ? <Link2 className="w-4 h-4" /> : source === 'json'
-          ? <FileJson className="w-4 h-4" /> : <Rss className="w-4 h-4" />}
+        icon={source === 'links' ? <Link2 className="w-5 h-5" /> : source === 'json'
+          ? <FileJson className="w-5 h-5" /> : <Rss className="w-5 h-5" />}
         right={
           <div className="flex items-center gap-2">
             {source !== 'json' && payload.trim() && (
-              <button className="btn btn-ghost text-xs" onClick={saveCurrentSource}>
-                <Save className="w-3.5 h-3.5" />
+              <button className="btn btn-ghost text-sm" onClick={saveCurrentSource}>
+                <Save className="w-4 h-4" />
                 {t('xray_test.save_source')}
               </button>
             )}
-            <button className="btn btn-secondary text-xs" onClick={handleParse} disabled={parsing || !payload.trim()}>
-              {parsing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Search className="w-3.5 h-3.5" />}
+            <button className="btn btn-secondary text-sm" onClick={handleParse} disabled={parsing || !payload.trim()}>
+              {parsing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
               {t('xray_test.parse')}
             </button>
           </div>
@@ -296,12 +296,12 @@ function TesterTab({ source }: { source: XrayTestSource }) {
       >
         {!!ownSources.length && (
           <div className="flex flex-wrap items-center gap-1.5 mb-3">
-            <span className="text-[11px] text-dark-500 mr-1">{t('xray_test.saved_pick')}</span>
+            <span className="text-[13px] text-dark-500 mr-1">{t('xray_test.saved_pick')}</span>
             {ownSources.map(profile => (
               <button
                 key={profile.id}
                 onClick={() => applySource(profile)}
-                className={`px-2 py-0.5 rounded text-[11px] border transition-colors ${
+                className={`px-2.5 py-1 rounded text-[13px] border transition-colors ${
                   activeSource?.id === profile.id
                     ? 'border-accent-500/40 bg-accent-500/15 text-accent-400'
                     : 'border-dark-800/60 bg-dark-800/40 text-dark-300 hover:text-accent-400'
@@ -324,10 +324,10 @@ function TesterTab({ source }: { source: XrayTestSource }) {
               value={payload}
               onChange={event => setPayload(event.target.value)}
             />
-            <div className="flex flex-wrap items-center gap-2 text-xs">
+            <div className="flex flex-wrap items-center gap-2 text-sm">
               <span className="text-dark-400">{t('xray_test.client')}</span>
               <select
-                className="input py-1 text-xs"
+                className="input py-1.5 text-sm"
                 value={client}
                 onChange={event => setClient(event.target.value)}
               >
@@ -346,7 +346,7 @@ function TesterTab({ source }: { source: XrayTestSource }) {
           </div>
         ) : (
           <textarea
-            className="input w-full font-mono text-xs h-40"
+            className="input w-full font-mono text-sm h-40"
             placeholder={source === 'links' ? 'vless://…\ntrojan://…\nhysteria2://…' : '{ "outbounds": [ … ] }'}
             value={payload}
             onChange={event => setPayload(event.target.value)}
@@ -355,17 +355,17 @@ function TesterTab({ source }: { source: XrayTestSource }) {
 
         {parsed && (
           <div className="mt-4 space-y-3">
-            <div className="flex flex-wrap items-center gap-2 text-xs">
+            <div className="flex flex-wrap items-center gap-2 text-sm">
               <span className="text-dark-300">
                 {t('xray_test.parsed_count', { count: parsed.configs.length })}
               </span>
               {parsed.format && (
-                <span className="px-2 py-0.5 rounded bg-dark-800/60 text-dark-300">
+                <span className="px-2.5 py-1 rounded bg-dark-800/60 text-dark-300">
                   {t('xray_test.format')}: {parsed.format}
                 </span>
               )}
               {!!parsed.dropped_sections.length && (
-                <span className="px-2 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                <span className="px-2.5 py-1 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20">
                   {t('xray_test.dropped')}: {parsed.dropped_sections.join(', ')}
                 </span>
               )}
@@ -391,13 +391,13 @@ function TesterTab({ source }: { source: XrayTestSource }) {
             </div>
 
             {!!parsed.errors.length && (
-              <details className="text-xs">
+              <details className="text-sm">
                 <summary className="cursor-pointer text-amber-400">
                   {t('xray_test.line_errors', { count: parsed.errors.length })}
                 </summary>
                 <div className="mt-2 space-y-1 max-h-32 overflow-auto">
                   {parsed.errors.map(error => (
-                    <div key={error.line} className="text-dark-400 font-mono text-[11px]">
+                    <div key={error.line} className="text-dark-400 font-mono text-[13px]">
                       {t('xray_test.line')} {error.line}: {error.reason} — {error.preview}
                     </div>
                   ))}
@@ -408,20 +408,20 @@ function TesterTab({ source }: { source: XrayTestSource }) {
         )}
       </Section>
 
-      <Section title={t('xray_test.options')} icon={<FlaskConical className="w-4 h-4" />}>
+      <Section title={t('xray_test.options')} icon={<FlaskConical className="w-5 h-5" />}>
         <div className="grid gap-4 md:grid-cols-2">
           <div className="space-y-3">
             <div>
-              <label className="block text-xs text-dark-400 mb-1.5">{t('xray_test.where')}</label>
+              <label className="block text-sm text-dark-400 mb-1.5">{t('xray_test.where')}</label>
               <LocationPicker servers={servers} value={locations} onChange={setLocations} />
             </div>
 
             <div>
-              <label className="block text-xs text-dark-400 mb-1.5">
+              <label className="block text-sm text-dark-400 mb-1.5">
                 {t('xray_test.multi_sni')}
               </label>
               <textarea
-                className="input w-full font-mono text-xs h-20"
+                className="input w-full font-mono text-sm h-20"
                 placeholder="www.microsoft.com&#10;www.apple.com"
                 value={sniText}
                 onChange={event => setSniText(event.target.value)}
@@ -432,20 +432,20 @@ function TesterTab({ source }: { source: XrayTestSource }) {
                     <button
                       key={set.id}
                       onClick={() => setSniText(set.sni_list.join('\n'))}
-                      className="px-2 py-0.5 rounded bg-dark-800/60 text-dark-300 hover:text-accent-400 text-[11px]"
+                      className="px-2.5 py-1 rounded bg-dark-800/60 text-dark-300 hover:text-accent-400 text-[13px]"
                     >
                       {set.name}
                     </button>
                   ))}
                 </div>
               )}
-              <label className="flex items-start gap-2 mt-2 text-xs text-dark-300 cursor-pointer select-none">
+              <label className="flex items-start gap-2 mt-2 text-sm text-dark-300 cursor-pointer select-none">
                 <span className="mt-0.5">
                   <Checkbox checked={syncHost} onChange={event => setSyncHost(event.target.checked)} />
                 </span>
                 <span>
                   {t('xray_test.sync_host')}
-                  <span className="block text-dark-500 text-[11px]">
+                  <span className="block text-dark-500 text-[13px]">
                     {t('xray_test.sync_host_hint')}
                   </span>
                 </span>
@@ -454,7 +454,7 @@ function TesterTab({ source }: { source: XrayTestSource }) {
           </div>
 
           <div className="space-y-3">
-            <div className="space-y-2 text-xs text-dark-300">
+            <div className="space-y-2 text-sm text-dark-300">
               <Toggle
                 checked={fullMode}
                 onChange={setFullMode}
@@ -476,7 +476,7 @@ function TesterTab({ source }: { source: XrayTestSource }) {
             </div>
 
             {missingCore && (
-              <div className="text-[11px] text-dark-400">
+              <div className="text-[13px] text-dark-400">
                 {t('xray_test.core_will_download', { core: missingCore.core, version: missingCore.resolved })}
               </div>
             )}
@@ -486,22 +486,22 @@ function TesterTab({ source }: { source: XrayTestSource }) {
         <div className="flex flex-wrap items-center gap-3 mt-4 pt-4 border-t border-dark-800/50">
           {run.running ? (
             <button className="btn btn-danger" onClick={run.cancel}>
-              <Square className="w-4 h-4" />
+              <Square className="w-5 h-5" />
               {t('xray_test.stop')}
             </button>
           ) : (
             <button className="btn btn-primary" onClick={handleRun} disabled={!parsed}>
-              <Play className="w-4 h-4" />
+              <Play className="w-5 h-5" />
               {t('xray_test.start')}
             </button>
           )}
-          <span className="text-xs text-dark-400">
+          <span className="text-sm text-dark-400">
             {t('xray_test.will_check', { count: totalCells })}
           </span>
 
           {run.running && (
-            <div className="flex items-center gap-2 ml-auto text-xs text-dark-300">
-              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            <div className="flex items-center gap-2 ml-auto text-sm text-dark-300">
+              <Loader2 className="w-4 h-4 animate-spin" />
               {run.cells.length} / {run.total} ({progress}%)
             </div>
           )}
@@ -520,7 +520,7 @@ function TesterTab({ source }: { source: XrayTestSource }) {
       {(run.cells.length > 0 || run.summary) && (
         <Section
           title={t('xray_test.results')}
-          icon={<Globe className="w-4 h-4" />}
+          icon={<Globe className="w-5 h-5" />}
           right={
             run.jobId && !run.running ? (
               <div className="flex items-center gap-2">
@@ -536,14 +536,14 @@ function TesterTab({ source }: { source: XrayTestSource }) {
           {!!run.log.length && (
             <div className="mt-4">
               <button
-                className="flex items-center gap-1.5 text-xs text-dark-400 hover:text-dark-200"
+                className="flex items-center gap-1.5 text-sm text-dark-400 hover:text-dark-200"
                 onClick={() => setShowLog(value => !value)}
               >
-                {showLog ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                {showLog ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
                 {t('xray_test.log')}
               </button>
               {showLog && (
-                <pre className="mt-2 text-[11px] font-mono text-dark-400 bg-dark-950/60 rounded p-2 max-h-40 overflow-auto whitespace-pre-wrap">
+                <pre className="mt-2 text-[13px] font-mono text-dark-400 bg-dark-950/60 rounded p-2 max-h-40 overflow-auto whitespace-pre-wrap">
                   {run.log.join('\n')}
                 </pre>
               )}
@@ -563,7 +563,7 @@ function ConfigRow({ config, checked, onToggle }: {
   const { t } = useTranslation()
   return (
     <label
-      className={`flex items-center gap-3 px-3 py-2 text-xs cursor-pointer select-none transition-colors ${
+      className={`flex items-center gap-3 px-3 py-2.5 text-sm cursor-pointer select-none transition-colors ${
         config.unsupported ? 'opacity-60' : 'hover:bg-dark-800/30'
       } ${checked && !config.unsupported ? 'bg-accent-500/[0.06]' : ''}`}
     >
@@ -572,18 +572,18 @@ function ConfigRow({ config, checked, onToggle }: {
         <span className="block text-dark-200 truncate">
           {config.remark || `${config.address}:${config.port}`}
         </span>
-        <span className="block text-dark-500 text-[11px] font-mono truncate">
+        <span className="block text-dark-500 text-[13px] font-mono truncate">
           {config.address}:{config.port} · {config.protocol} · {config.transport} · {config.security}
           {config.flow ? ` · ${config.flow}` : ''}
           {config.sni ? ` · ${config.sni}` : ''}
         </span>
       </span>
       {config.unsupported ? (
-        <span className="px-2 py-0.5 rounded bg-red-500/10 text-red-400 border border-red-500/20 shrink-0">
+        <span className="px-2.5 py-1 rounded bg-red-500/10 text-red-400 border border-red-500/20 shrink-0">
           {t('xray_test.unsupported')}
         </span>
       ) : (
-        <span className="px-2 py-0.5 rounded bg-dark-800/60 text-dark-300 shrink-0">{config.core}</span>
+        <span className="px-2.5 py-1 rounded bg-dark-800/60 text-dark-300 shrink-0">{config.core}</span>
       )}
     </label>
   )
@@ -602,7 +602,7 @@ function Toggle({ checked, onChange, label, hint }: {
       </span>
       <span>
         {label}
-        {hint && <span className="block text-dark-500 text-[11px]">{hint}</span>}
+        {hint && <span className="block text-dark-500 text-[13px]">{hint}</span>}
       </span>
     </label>
   )
@@ -614,9 +614,9 @@ function ExportButton({ jobId, fmt, label }: { jobId: string; fmt: string; label
       href={xrayTestExportUrl(jobId, fmt, true)}
       target="_blank"
       rel="noreferrer"
-      className="btn btn-secondary text-xs"
+      className="btn btn-secondary text-sm"
     >
-      <Download className="w-3.5 h-3.5" />
+      <Download className="w-4 h-4" />
       {label}
     </a>
   )

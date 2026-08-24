@@ -34,7 +34,7 @@ export function ProfilesTab() {
   if (loading) {
     return (
       <div className="flex justify-center py-12">
-        <Loader2 className="w-5 h-5 animate-spin text-dark-500" />
+        <Loader2 className="w-6 h-6 animate-spin text-dark-500" />
       </div>
     )
   }
@@ -113,10 +113,10 @@ function SourceProfiles({ profiles, onChanged }: {
   return (
     <Section
       title={t('xray_test.saved_sources')}
-      icon={<Bookmark className="w-4 h-4" />}
+      icon={<Bookmark className="w-5 h-5" />}
       right={
-        <button className="btn btn-secondary text-xs" onClick={startNew}>
-          <Plus className="w-3.5 h-3.5" />
+        <button className="btn btn-secondary text-sm" onClick={startNew}>
+          <Plus className="w-4 h-4" />
           {t('xray_test.add')}
         </button>
       }
@@ -124,18 +124,18 @@ function SourceProfiles({ profiles, onChanged }: {
       {editing !== null && (
         <div className="mb-4 p-3 rounded-lg border border-dark-800/60 bg-dark-900/40 space-y-2">
           <input
-            className="input w-full text-sm"
+            className="input w-full text-base"
             placeholder={t('xray_test.profile_name')}
             value={name}
             onChange={event => setName(event.target.value)}
           />
           {editing === 'new' && (
-            <div className="flex gap-2 text-xs">
+            <div className="flex gap-2 text-sm">
               {(['url', 'links'] as const).map(option => (
                 <button
                   key={option}
                   onClick={() => setKind(option)}
-                  className={`px-3 py-1 rounded-md ${
+                  className={`px-3 py-1.5 rounded-md ${
                     kind === option ? 'bg-accent-500/15 text-accent-400' : 'text-dark-400 hover:text-dark-200'
                   }`}
                 >
@@ -145,18 +145,18 @@ function SourceProfiles({ profiles, onChanged }: {
             </div>
           )}
           <textarea
-            className="input w-full font-mono text-xs h-24"
+            className="input w-full font-mono text-sm h-24"
             placeholder={kind === 'url' ? 'https://example.com/sub/token' : 'vless://…'}
             value={payload}
             onChange={event => setPayload(event.target.value)}
           />
           <div className="flex gap-2">
-            <button className="btn btn-primary text-xs" onClick={save} disabled={saving}>
-              {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+            <button className="btn btn-primary text-sm" onClick={save} disabled={saving}>
+              {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
               {t('xray_test.save')}
             </button>
-            <button className="btn btn-ghost text-xs" onClick={() => setEditing(null)}>
-              <X className="w-3.5 h-3.5" />
+            <button className="btn btn-ghost text-sm" onClick={() => setEditing(null)}>
+              <X className="w-4 h-4" />
               {t('xray_test.cancel')}
             </button>
           </div>
@@ -164,7 +164,7 @@ function SourceProfiles({ profiles, onChanged }: {
       )}
 
       {profiles.length === 0 ? (
-        <p className="text-sm text-dark-400 text-center py-6">{t('xray_test.no_sources')}</p>
+        <p className="text-base text-dark-400 text-center py-6">{t('xray_test.no_sources')}</p>
       ) : (
         <div className="space-y-2">
           {profiles.map(profile => (
@@ -173,20 +173,20 @@ function SourceProfiles({ profiles, onChanged }: {
               className="flex items-center gap-3 p-2.5 rounded-lg border border-dark-800/60 hover:border-dark-700/60 transition-colors"
             >
               <div className="flex-1 min-w-0">
-                <div className="text-sm text-dark-200 truncate">{profile.name}</div>
-                <div className="text-[11px] text-dark-500">
+                <div className="text-base text-dark-200 truncate">{profile.name}</div>
+                <div className="text-[13px] text-dark-500">
                   {t(`xray_test.kind_${profile.kind}`)}
                   {profile.last_count ? ` · ${t('xray_test.last_count', { count: profile.last_count })}` : ''}
                 </div>
               </div>
               <button
-                className="text-xs text-dark-400 hover:text-accent-400"
+                className="text-sm text-dark-400 hover:text-accent-400"
                 onClick={() => startEdit(profile)}
               >
                 {t('xray_test.edit')}
               </button>
               <button className="text-dark-500 hover:text-red-400" onClick={() => remove(profile)}>
-                <Trash2 className="w-3.5 h-3.5" />
+                <Trash2 className="w-4 h-4" />
               </button>
             </div>
           ))}
@@ -243,13 +243,13 @@ function SniProfiles({ profiles, onChanged }: {
   return (
     <Section
       title={t('xray_test.saved_sni_sets')}
-      icon={<Globe className="w-4 h-4" />}
+      icon={<Globe className="w-5 h-5" />}
       right={
         <button
-          className="btn btn-secondary text-xs"
+          className="btn btn-secondary text-sm"
           onClick={() => { setEditing('new'); setName(''); setText('') }}
         >
-          <Plus className="w-3.5 h-3.5" />
+          <Plus className="w-4 h-4" />
           {t('xray_test.add')}
         </button>
       }
@@ -257,24 +257,24 @@ function SniProfiles({ profiles, onChanged }: {
       {editing !== null && (
         <div className="mb-4 p-3 rounded-lg border border-dark-800/60 bg-dark-900/40 space-y-2">
           <input
-            className="input w-full text-sm"
+            className="input w-full text-base"
             placeholder={t('xray_test.profile_name')}
             value={name}
             onChange={event => setName(event.target.value)}
           />
           <textarea
-            className="input w-full font-mono text-xs h-24"
+            className="input w-full font-mono text-sm h-24"
             placeholder="www.microsoft.com&#10;www.apple.com"
             value={text}
             onChange={event => setText(event.target.value)}
           />
           <div className="flex gap-2">
-            <button className="btn btn-primary text-xs" onClick={save} disabled={saving}>
-              {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+            <button className="btn btn-primary text-sm" onClick={save} disabled={saving}>
+              {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
               {t('xray_test.save')}
             </button>
-            <button className="btn btn-ghost text-xs" onClick={() => setEditing(null)}>
-              <X className="w-3.5 h-3.5" />
+            <button className="btn btn-ghost text-sm" onClick={() => setEditing(null)}>
+              <X className="w-4 h-4" />
               {t('xray_test.cancel')}
             </button>
           </div>
@@ -282,7 +282,7 @@ function SniProfiles({ profiles, onChanged }: {
       )}
 
       {profiles.length === 0 ? (
-        <p className="text-sm text-dark-400 text-center py-6">{t('xray_test.no_sni_sets')}</p>
+        <p className="text-base text-dark-400 text-center py-6">{t('xray_test.no_sni_sets')}</p>
       ) : (
         <div className="space-y-2">
           {profiles.map(profile => (
@@ -291,13 +291,13 @@ function SniProfiles({ profiles, onChanged }: {
               className="flex items-center gap-3 p-2.5 rounded-lg border border-dark-800/60 hover:border-dark-700/60 transition-colors"
             >
               <div className="flex-1 min-w-0">
-                <div className="text-sm text-dark-200 truncate">{profile.name}</div>
-                <div className="text-[11px] text-dark-500 truncate">
+                <div className="text-base text-dark-200 truncate">{profile.name}</div>
+                <div className="text-[13px] text-dark-500 truncate">
                   {profile.sni_list.join(', ')}
                 </div>
               </div>
               <button
-                className="text-xs text-dark-400 hover:text-accent-400"
+                className="text-sm text-dark-400 hover:text-accent-400"
                 onClick={() => {
                   setEditing(profile.id)
                   setName(profile.name)
@@ -307,7 +307,7 @@ function SniProfiles({ profiles, onChanged }: {
                 {t('xray_test.edit')}
               </button>
               <button className="text-dark-500 hover:text-red-400" onClick={() => remove(profile)}>
-                <Trash2 className="w-3.5 h-3.5" />
+                <Trash2 className="w-4 h-4" />
               </button>
             </div>
           ))}

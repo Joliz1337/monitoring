@@ -66,13 +66,13 @@ export function HistoryTab() {
 
   return (
     <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
-      <Section title={t('xray_test.tab_history')} icon={<History className="w-4 h-4" />}>
+      <Section title={t('xray_test.tab_history')} icon={<History className="w-5 h-5" />}>
         {loading ? (
           <div className="flex justify-center py-10">
-            <Loader2 className="w-5 h-5 animate-spin text-dark-500" />
+            <Loader2 className="w-6 h-6 animate-spin text-dark-500" />
           </div>
         ) : runs.length === 0 ? (
-          <p className="text-sm text-dark-400 text-center py-8">{t('xray_test.no_history')}</p>
+          <p className="text-base text-dark-400 text-center py-8">{t('xray_test.no_history')}</p>
         ) : (
           <div className="space-y-2">
             {runs.map(run => (
@@ -82,18 +82,18 @@ export function HistoryTab() {
                   onClick={() => toggle(run.id)}
                 >
                   {openRun === run.id
-                    ? <ChevronDown className="w-4 h-4 text-dark-500" />
-                    : <ChevronRight className="w-4 h-4 text-dark-500" />}
+                    ? <ChevronDown className="w-5 h-5 text-dark-500" />
+                    : <ChevronRight className="w-5 h-5 text-dark-500" />}
                   <div className="flex-1 min-w-0">
-                    <div className="text-sm text-dark-200">
+                    <div className="text-base text-dark-200">
                       {run.source_name || t(`xray_test.input_${run.source}`)}
-                      <span className="text-dark-500 text-xs ml-2">
+                      <span className="text-dark-500 text-sm ml-2">
                         {run.location_name || t('xray_test.where_panel')}
                       </span>
                     </div>
-                    <div className="text-[11px] text-dark-500">{formatDate(run.started_at)}</div>
+                    <div className="text-[13px] text-dark-500">{formatDate(run.started_at)}</div>
                   </div>
-                  <div className="flex items-center gap-2 text-xs shrink-0">
+                  <div className="flex items-center gap-2 text-sm shrink-0">
                     <span className="text-emerald-400">{run.ok}</span>
                     <span className="text-dark-600">/</span>
                     <span className="text-amber-400">{run.degraded}</span>
@@ -104,7 +104,7 @@ export function HistoryTab() {
                     className="text-dark-500 hover:text-red-400 shrink-0"
                     onClick={event => { event.stopPropagation(); remove(run.id) }}
                   >
-                    <Trash2 className="w-3.5 h-3.5" />
+                    <Trash2 className="w-4 h-4" />
                   </button>
                 </div>
 
@@ -112,7 +112,7 @@ export function HistoryTab() {
                   <div className="p-3 border-t border-dark-800/60 bg-dark-900/30">
                     {loadingResults ? (
                       <div className="flex justify-center py-6">
-                        <Loader2 className="w-4 h-4 animate-spin text-dark-500" />
+                        <Loader2 className="w-5 h-5 animate-spin text-dark-500" />
                       </div>
                     ) : (
                       <ResultsTable cells={results} groupBySni={false} />
