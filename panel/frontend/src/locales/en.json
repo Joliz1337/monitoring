@@ -1031,7 +1031,8 @@
     "hint_HANDSHAKE_STALLED": "The server accepted the connection but never answered the handshake. For REALITY that is normal behaviour with wrong parameters: check the public key, short id and SNI. The other option is filtering on the way that throttles the connection.",
     "servers_count": "servers: {{count}}",
     "best_rtt": "best",
-    "sni_from_key": "SNI from the key"
+    "sni_from_key": "SNI from the key",
+    "several_configs": "{{count}} configurations on this address"
   },
   "anti_ddos": {
     "title": "Anti-DDoS",
