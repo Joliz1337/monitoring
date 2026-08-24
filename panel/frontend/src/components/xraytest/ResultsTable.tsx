@@ -90,7 +90,10 @@ export function ResultsTable({ cells, groupBySni }: { cells: XrayTestCell[]; gro
         })
         children = [...byLocation.entries()].map(([location, locationCells]) => ({
           key: `${key}|${location}`,
-          label: locationCells[0].location_name || t('xray_test.location_panel'),
+          // Имя ноды может не доехать (старый прогон в истории) — тогда лучше
+          // показать код места запуска, чем пустую строку
+          label: locationCells[0].location_name
+            || (location === 'panel' ? t('xray_test.location_panel') : location),
           cells: locationCells,
           children: [],
         }))
@@ -321,14 +324,17 @@ function LocationBlock({
   return (
     <div className="border-b border-dark-800/40 last:border-b-0">
       <div
-        className="flex items-center gap-3 px-3 py-2 pl-8 cursor-pointer hover:bg-dark-800/30 transition-colors"
+        className="flex items-center gap-3 px-3 py-2 pl-8 cursor-pointer bg-dark-900/50 hover:bg-dark-800/40 transition-colors"
         onClick={() => onToggleGroup(group.key)}
       >
         <span className="text-dark-500 shrink-0">
           {open ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
         </span>
-        <MapPin className="w-3.5 h-3.5 text-dark-500 shrink-0" />
-        <span className="flex-1 min-w-0 text-xs text-dark-200 truncate">{group.label}</span>
+        <MapPin className="w-3.5 h-3.5 text-accent-400/70 shrink-0" />
+        <span className="flex-1 min-w-0 flex items-baseline gap-1.5 truncate">
+          <span className="text-[10px] text-dark-500 shrink-0">{t('xray_test.col_location')}:</span>
+          <span className="text-xs text-dark-100 font-medium truncate">{group.label}</span>
+        </span>
 
         <span className="hidden md:flex items-center gap-4 text-[11px] shrink-0">
           <Metric label={t('xray_test.col_tcp')} value={ms(best(group.cells, c => c.tcp_min_ms))} />
