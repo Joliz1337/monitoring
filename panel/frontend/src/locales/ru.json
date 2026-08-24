@@ -1002,7 +1002,11 @@
     "core_ready": "Готово к работе: {{version}}",
     "core_not_downloaded": "Ядро ещё не скачано — загрузится при первой проверке",
     "core_version_saved": "Версия выбрана",
-    "core_downloaded": "Скачано: {{version}}"
+    "core_downloaded": "Скачано: {{version}}",
+    "saved_pick": "Сохранённые:",
+    "save_source": "Сохранить",
+    "full_mode_hint": "Без неё — только резолв домена и TCP-подключение, ядро не запускается",
+    "tls_inspect_hint": "Кто выпустил сертификат домена-маскировки: чужой издатель — признак подмены"
   },
   "anti_ddos": {
     "title": "Анти-DDoS защита",

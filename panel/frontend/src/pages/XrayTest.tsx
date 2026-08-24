@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   FlaskConical, Link2, FileJson, Rss, Bookmark, History, Play, Square,
-  Loader2, Download, Globe, Search, ChevronDown, ChevronUp, Cpu,
+  Loader2, Download, Globe, Search, ChevronDown, ChevronUp, Cpu, Save,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -16,6 +16,7 @@ import {
   type XrayTestParseResult,
   type XrayTestSniSet,
   type XrayTestSource,
+  type XrayTestSubscriptionProfile,
 } from '../api/client'
 import { FAQIcon } from '../components/FAQ'
 import { Checkbox } from '../components/ui/Checkbox'
@@ -139,12 +140,53 @@ function TesterTab({ source }: { source: XrayTestSource }) {
   const [servers, setServers] = useState<ServerWithMetrics[]>([])
   const [cores, setCores] = useState<XrayTestCoreInfo[]>([])
   const [sniSets, setSniSets] = useState<XrayTestSniSet[]>([])
+  const [sources, setSources] = useState<XrayTestSubscriptionProfile[]>([])
+  const [activeSource, setActiveSource] = useState<XrayTestSubscriptionProfile | null>(null)
+
+  const loadSources = useCallback(() => {
+    xrayTestApi.subscriptions()
+      .then(({ data }) => setSources(data.profiles))
+      .catch(() => setSources([]))
+  }, [])
 
   useEffect(() => {
     serversApi.list().then(({ data }) => setServers(data.servers)).catch(() => setServers([]))
     xrayTestApi.cores().then(({ data }) => setCores(data.cores)).catch(() => setCores([]))
     xrayTestApi.sniSets().then(({ data }) => setSniSets(data.profiles)).catch(() => setSniSets([]))
-  }, [])
+    loadSources()
+  }, [loadSources])
+
+  // Источник хранит либо адрес подписки, либо список ссылок — на вкладку JSON
+  // подставлять нечего
+  const sourceKind = source === 'subscription' ? 'url' : 'links'
+  const ownSources = useMemo(
+    () => (source === 'json' ? [] : sources.filter(item => item.kind === sourceKind)),
+    [sources, source, sourceKind],
+  )
+
+  const applySource = (profile: XrayTestSubscriptionProfile) => {
+    setPayload(profile.payload)
+    setActiveSource(profile)
+    setParsed(null)
+    if (profile.user_agent) setUserAgent(profile.user_agent)
+  }
+
+  const saveCurrentSource = async () => {
+    const name = window.prompt(t('xray_test.profile_name'))
+    if (!name?.trim()) return
+    try {
+      await xrayTestApi.createSubscription({
+        name: name.trim(),
+        kind: sourceKind,
+        payload: payload.trim(),
+        user_agent: source === 'subscription' ? userAgent : null,
+      })
+      toast.success(t('xray_test.profile_saved'))
+      loadSources()
+    } catch (error) {
+      toast.error(extractError(error))
+    }
+  }
 
   const sniList = useMemo(
     () => sniText.split(/[\s,;]+/).map(item => item.trim()).filter(Boolean),
@@ -169,6 +211,7 @@ function TesterTab({ source }: { source: XrayTestSource }) {
         source,
         payload: payload.trim(),
         user_agent: source === 'subscription' ? userAgent : null,
+        profile_id: activeSource?.id ?? null,
       })
       setParsed(data)
       setSelected(new Set(data.configs.filter(c => !c.unsupported).map(c => c.index)))
@@ -196,6 +239,8 @@ function TesterTab({ source }: { source: XrayTestSource }) {
       source,
       payload: payload.trim(),
       user_agent: source === 'subscription' ? userAgent : null,
+      source_name: activeSource?.name ?? null,
+      profile_id: activeSource?.id ?? null,
       selected: indices,
       sni_list: sniList,
       sync_transport_host: syncHost,
@@ -232,12 +277,42 @@ function TesterTab({ source }: { source: XrayTestSource }) {
         icon={source === 'links' ? <Link2 className="w-4 h-4" /> : source === 'json'
           ? <FileJson className="w-4 h-4" /> : <Rss className="w-4 h-4" />}
         right={
-          <button className="btn btn-secondary text-xs" onClick={handleParse} disabled={parsing || !payload.trim()}>
-            {parsing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Search className="w-3.5 h-3.5" />}
-            {t('xray_test.parse')}
-          </button>
+          <div className="flex items-center gap-2">
+            {source !== 'json' && payload.trim() && (
+              <button className="btn btn-ghost text-xs" onClick={saveCurrentSource}>
+                <Save className="w-3.5 h-3.5" />
+                {t('xray_test.save_source')}
+              </button>
+            )}
+            <button className="btn btn-secondary text-xs" onClick={handleParse} disabled={parsing || !payload.trim()}>
+              {parsing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Search className="w-3.5 h-3.5" />}
+              {t('xray_test.parse')}
+            </button>
+          </div>
         }
       >
+        {!!ownSources.length && (
+          <div className="flex flex-wrap items-center gap-1.5 mb-3">
+            <span className="text-[11px] text-dark-500 mr-1">{t('xray_test.saved_pick')}</span>
+            {ownSources.map(profile => (
+              <button
+                key={profile.id}
+                onClick={() => applySource(profile)}
+                className={`px-2 py-0.5 rounded text-[11px] border transition-colors ${
+                  activeSource?.id === profile.id
+                    ? 'border-accent-500/40 bg-accent-500/15 text-accent-400'
+                    : 'border-dark-800/60 bg-dark-800/40 text-dark-300 hover:text-accent-400'
+                }`}
+              >
+                {profile.name}
+                {profile.last_count ? (
+                  <span className="text-dark-500 ml-1">· {profile.last_count}</span>
+                ) : null}
+              </button>
+            ))}
+          </div>
+        )}
+
         {source === 'subscription' ? (
           <div className="space-y-3">
             <input
@@ -389,8 +464,18 @@ function TesterTab({ source }: { source: XrayTestSource }) {
             </div>
 
             <div className="space-y-2 text-xs text-dark-300">
-              <Toggle checked={fullMode} onChange={setFullMode} label={t('xray_test.full_mode')} />
-              <Toggle checked={tlsInspect} onChange={setTlsInspect} label={t('xray_test.tls_inspect')} />
+              <Toggle
+                checked={fullMode}
+                onChange={setFullMode}
+                label={t('xray_test.full_mode')}
+                hint={t('xray_test.full_mode_hint')}
+              />
+              <Toggle
+                checked={tlsInspect}
+                onChange={setTlsInspect}
+                label={t('xray_test.tls_inspect')}
+                hint={t('xray_test.tls_inspect_hint')}
+              />
               <Toggle
                 checked={measureSpeed}
                 onChange={setMeasureSpeed}

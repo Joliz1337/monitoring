@@ -1000,7 +1000,11 @@
     "core_ready": "Ready to use: {{version}}",
     "core_not_downloaded": "Core not downloaded yet — it will be fetched on the first check",
     "core_version_saved": "Version selected",
-    "core_downloaded": "Downloaded: {{version}}"
+    "core_downloaded": "Downloaded: {{version}}",
+    "saved_pick": "Saved:",
+    "save_source": "Save",
+    "full_mode_hint": "Without it — only DNS resolution and a TCP connection, the core is not started",
+    "tls_inspect_hint": "Who issued the masking domain's certificate: an unexpected issuer hints at interception"
   },
   "anti_ddos": {
     "title": "Anti-DDoS",

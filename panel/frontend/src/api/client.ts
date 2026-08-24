@@ -639,6 +639,7 @@ export interface XrayTestRunRequest {
   payload: string
   user_agent?: string | null
   source_name?: string | null
+  profile_id?: number | null
   selected?: number[] | null
   sni_list: string[]
   sync_transport_host: boolean
@@ -654,7 +655,10 @@ export const xrayTestExportUrl = (jobId: string, fmt: string, includeDegraded: b
   `/api/xray-test/jobs/${jobId}/export?fmt=${fmt}&include_degraded=${includeDegraded}`
 
 export const xrayTestApi = {
-  parse: (body: { source: XrayTestSource; payload: string; user_agent?: string | null }) =>
+  parse: (body: {
+    source: XrayTestSource; payload: string;
+    user_agent?: string | null; profile_id?: number | null
+  }) =>
     api.post<XrayTestParseResult>('/xray-test/parse', body),
   run: (body: XrayTestRunRequest) =>
     api.post<{ job_id: string; total: number }>('/xray-test/run', body),

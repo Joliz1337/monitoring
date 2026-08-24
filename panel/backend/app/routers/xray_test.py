@@ -49,6 +49,7 @@ class ParseRequest(BaseModel):
     source: SourceKind
     payload: str = Field(min_length=1, max_length=2_000_000)
     user_agent: Optional[str] = None
+    profile_id: Optional[int] = None
 
 
 class RunRequest(BaseModel):
@@ -56,6 +57,7 @@ class RunRequest(BaseModel):
     payload: str = Field(min_length=1, max_length=2_000_000)
     user_agent: Optional[str] = None
     source_name: Optional[str] = None
+    profile_id: Optional[int] = None
     selected: Optional[list[int]] = None
     sni_list: list[str] = Field(default_factory=list)
     sync_transport_host: bool = True
@@ -146,7 +148,11 @@ def _endpoint_view(index: int, endpoint: ProxyEndpoint, link: Optional[str]) -> 
 
 
 @router.post("/parse")
-async def parse_input(req: ParseRequest, _: dict = Depends(verify_auth)):
+async def parse_input(
+    req: ParseRequest,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth),
+):
     """Разобрать вход и показать, что будет проверяться, ничего не запуская."""
     try:
         endpoints, links, errors, dropped, detected = await _load_endpoints(
@@ -154,6 +160,9 @@ async def parse_input(req: ParseRequest, _: dict = Depends(verify_auth)):
         )
     except XrayTestError as exc:
         raise _domain_error(exc) from exc
+
+    if req.profile_id is not None:
+        await storage.mark_subscription_fetched(db, req.profile_id, len(endpoints))
 
     return {
         "format": detected,

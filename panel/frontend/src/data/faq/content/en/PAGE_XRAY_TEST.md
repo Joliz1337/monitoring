@@ -12,6 +12,40 @@ Checks proxy configurations: a link, a pasted JSON config, or a subscription. Th
 
 The TCP probe runs before the core starts and rules out dead servers immediately. Hysteria2 and TUIC skip it: they run over UDP, where a silent TCP port means nothing.
 
+## Test options
+
+**Full check.** On — the panel starts a proxy core and actually reaches the internet through it; that is the only way to know a key works. Off — only the fast probes remain, with no core started: domain resolution and a TCP connection to the port. Fast mode is handy for weeding dead servers out of a long list in seconds, but "the port answers" is not "traffic passes".
+
+**Inspect the SNI domain certificate.** Separately from the proxy, the panel opens a TLS connection to the domain the key lists as SNI and looks at its certificate: who issued it, who it is for, how long it is valid, which TLS version is used.
+
+Why it matters:
+
+- For **REALITY**, the SNI is the masking domain your server hides behind. If it stopped answering or its certificate changed, the disguise no longer looks convincing.
+- An unexpected issuer is a sign of **interception**: when a provider substitutes the connection, you get its certificate instead of the real one. Self-signed certificates get their own warning.
+- Expiry is visible too — worth noticing early on your own servers.
+
+The probe sends nothing through the proxy and costs almost no time, so it can stay on permanently.
+
+**Measure link speed.** Downloads a ~10 MB test file through the proxy and computes megabits per second. Off by default: it takes noticeably longer and spends traffic on every check. Turn it on when suitability of the channel matters, not just liveness.
+
+**Concurrency.** How many checks run at once (1–8). Each is a separate core process, so high values load the panel's server. Four is a sensible middle ground; lower it on a weak machine.
+
+## Reading the results table
+
+| Column | Meaning |
+|---|---|
+| **TCP** | Time to establish a plain TCP connection to the server. A measure of network closeness; the proxy is not involved yet |
+| **Connect** | The whole first request through the proxy: handshake, encryption, session setup. A high value with low TCP means a heavy handshake |
+| **Latency** | A repeat request over the established connection. This is what you actually feel in use |
+| **Mbps** | Speed, if measurement is enabled |
+| **Exit IP** | The address and country the connection leaves from. If the country differs from what the key's seller promised, it shows immediately |
+
+Rows expand: inside are the server IP, DNS resolution time, average TCP and jitter, HTTP status, certificate details and the tail of the core's output explaining a failure.
+
+## Saved sources and SNI sets
+
+A subscription or link list you check regularly can be stored with the "Save" button next to the input — it then appears as a chip above the field, one click away. Subscription URLs are stored encrypted. SNI sets work the same way: save a list of domains under a name and apply it with one button. Renaming, editing and deleting live on the "Saved" tab.
+
 ## Multi-SNI
 
 Enter several domains and every configuration is checked against each of them; the fastest one gets a badge. This shows which masking domains your provider has not blocked yet.
