@@ -24,15 +24,21 @@ from app.services.xray_test.node_runner import (  # noqa: E402
     _build_payload,
     _cores_for,
     _parse_result,
+    _parse_results,
 )
 from app.services.xray_test.parsers import parse_link  # noqa: E402
 from app.services.xray_test.probes import ProbeOptions  # noqa: E402
 
 UUID = "11111111-2222-3333-4444-555555555555"
+TAB = "\t"
 
 
 def _cell(link: str = ""):
     return build_matrix([parse_link(link or f"vless://{UUID}@h.io:443?security=tls#node")])[0]
+
+
+def _cells(*links):
+    return build_matrix([parse_link(link) for link in links])
 
 
 def _ticket(core: Core = Core.XRAY) -> BundleTicket:
@@ -43,11 +49,19 @@ def _ticket(core: Core = Core.XRAY) -> BundleTicket:
 
 
 class PayloadTest(unittest.TestCase):
-    def _rows(self, **kwargs) -> list[list[str]]:
+    def _rows(self, cells=None, ports=None, core=Core.XRAY, **kwargs) -> list[list[str]]:
         options = ProbeOptions(**kwargs) if kwargs else ProbeOptions()
-        payload = _build_payload(_cell(), Core.XRAY, _ticket(), options, 7501)
+        payload = _build_payload(
+            cells or [_cell()], ports or [7501], core, _ticket(core), options
+        )
         decoded = base64.b64decode(payload).decode()
-        return [line.split("\t") for line in decoded.splitlines()]
+        return [line.split(TAB) for line in decoded.splitlines()]
+
+    @staticmethod
+    def _config(rows: list[list[str]]) -> dict:
+        return json.loads(base64.b64decode(
+            next(row for row in rows if row[0] == "CONF")[2]
+        ).decode())
 
     def test_core_row_carries_url_and_digest(self):
         core_row = next(row for row in self._rows() if row[0] == "CORE")
@@ -59,45 +73,77 @@ class PayloadTest(unittest.TestCase):
     def test_options_row_reflects_flags(self):
         row = next(r for r in self._rows(tcp=False, http=True, exit_identity=False, speed=True)
                    if r[0] == "OPTS")
-        self.assertEqual(row[1:6], ["0", "1", "0", "1", "7501"])
+        self.assertEqual(row[1:5], ["0", "1", "0", "1"])
 
-    def test_cell_row_contains_valid_config(self):
+    def test_single_config_for_whole_batch(self):
+        """Один конфиг на пачку — ядро на ноде поднимается ровно один раз."""
+        cells = _cells(
+            f"vless://{UUID}@a.io:443?security=tls#one",
+            f"vless://{UUID}@b.io:8443?security=tls#two",
+        )
+        rows = self._rows(cells=cells, ports=[7501, 7502])
+
+        self.assertEqual(len([row for row in rows if row[0] == "CONF"]), 1)
+        config = self._config(rows)
+        self.assertEqual([i["port"] for i in config["inbounds"]], [7501, 7502])
+        self.assertEqual(len(config["outbounds"]), 2)
+        self.assertTrue(all(i["listen"] == "127.0.0.1" for i in config["inbounds"]))
+
+    def test_tags_carry_cell_index(self):
+        """Слот в теге — номер ячейки: по нему исполнитель делит общий лог ядра."""
+        cells = _cells(
+            f"vless://{UUID}@a.io:443?security=tls#one",
+            f"vless://{UUID}@b.io:443?security=tls#two",
+        )
+        config = self._config(self._rows(cells=cells, ports=[7501, 7502]))
+
+        self.assertEqual(
+            [i["tag"] for i in config["inbounds"]],
+            [f"mon-test-in-{cells[0].index}", f"mon-test-in-{cells[1].index}"],
+        )
+        for rule in config["routing"]["rules"]:
+            self.assertEqual(
+                rule["inboundTag"][0].replace("-in-", "-out-"), rule["outboundTag"]
+            )
+
+    def test_cell_row_carries_socks_port(self):
         row = next(row for row in self._rows() if row[0] == "CELL")
-        config = json.loads(base64.b64decode(row[6]).decode())
-
         self.assertEqual(row[3], "h.io")
         self.assertEqual(row[4], "443")
         self.assertEqual(row[5], "0")  # не UDP-протокол
-        self.assertEqual(config["inbounds"][0]["listen"], "127.0.0.1")
-        self.assertEqual(config["inbounds"][0]["port"], 7501)
+        self.assertEqual(row[6], "7501")
 
     def test_udp_protocol_flagged(self):
-        payload = _build_payload(
-            _cell("hysteria2://pw@h.io:443#hy"), Core.SINGBOX, _ticket(Core.SINGBOX),
-            ProbeOptions(), 7502,
-        )
-        row = next(
-            line.split("\t") for line in base64.b64decode(payload).decode().splitlines()
-            if line.startswith("CELL")
-        )
+        rows = self._rows(cells=[_cell("hysteria2://pw@h.io:443#hy")],
+                          ports=[7502], core=Core.SINGBOX)
+        row = next(r for r in rows if r[0] == "CELL")
         self.assertEqual(row[5], "1")
+
+    def test_row_per_cell(self):
+        cells = _cells(
+            f"vless://{UUID}@a.io:443?security=tls#one",
+            f"vless://{UUID}@b.io:443?security=tls#two",
+            f"vless://{UUID}@c.io:443?security=tls#three",
+        )
+        rows = self._rows(cells=cells, ports=[7501, 7502, 7503])
+        self.assertEqual(
+            [row[0] for row in rows],
+            ["CORE", "OPTS", "CONF", "CELL", "CELL", "CELL"],
+        )
 
     def test_no_tabs_or_newlines_break_rows(self):
         """Каждая строка задания обязана остаться одной строкой."""
-        payload = _build_payload(_cell(), Core.XRAY, _ticket(), ProbeOptions(), 7501)
-        lines = base64.b64decode(payload).decode().splitlines()
-        self.assertEqual(len(lines), 3)
-        self.assertEqual([line.split("\t")[0] for line in lines], ["CORE", "OPTS", "CELL"])
+        rows = self._rows()
+        self.assertEqual([row[0] for row in rows], ["CORE", "OPTS", "CONF", "CELL"])
 
 
 class ParseResultTest(unittest.TestCase):
     def test_successful_cell(self):
-        events = [{
+        result = _parse_result(_cell(), {
             "type": "cell", "index": 0, "verdict": "ok", "reason": None, "detail": "",
             "tcp_min_ms": 12, "handshake_ms": 240, "rtt_ms": 95, "http_status": 204,
             "exit_ip": "203.0.113.7", "exit_country": "NL", "speed_mbps": 85.5,
-        }]
-        result = _parse_result(_cell(), events)
+        })
 
         self.assertIs(result.verdict, Verdict.OK)
         self.assertIsNone(result.reason)
@@ -107,33 +153,29 @@ class ParseResultTest(unittest.TestCase):
         self.assertEqual(result.timings.speed_mbps, 85.5)
 
     def test_failed_cell_keeps_reason(self):
-        events = [{
+        result = _parse_result(_cell(), {
             "type": "cell", "index": 0, "verdict": "fail",
             "reason": "CORE_START_FAILED", "detail": "invalid config",
-        }]
-        result = _parse_result(_cell(), events)
+        })
 
         self.assertIs(result.verdict, Verdict.FAIL)
         self.assertIs(result.reason, FailReason.CORE_START_FAILED)
         self.assertIn("invalid config", result.detail)
 
     def test_secrets_from_node_output_masked(self):
-        events = [{
+        result = _parse_result(_cell(), {
             "type": "cell", "index": 0, "verdict": "fail", "reason": "CORE_CRASHED",
-            "detail": f'failed to parse id {UUID}',
-        }]
-        result = _parse_result(_cell(), events)
+            "detail": f"failed to parse id {UUID}",
+        })
         self.assertNotIn(UUID, result.detail)
-
 
     def test_node_fields_fill_details(self):
         """Резолв и усреднённый TCP приходят с ноды — иначе в строке прочерки."""
-        events = [{
+        result = _parse_result(_cell(), {
             "type": "cell", "index": 0, "verdict": "ok", "reason": None,
             "resolved_ip": "203.0.113.5", "dns_ms": 12,
             "tcp_min_ms": 30, "tcp_avg_ms": 34, "tcp_jitter_ms": 5,
-        }]
-        result = _parse_result(_cell(), events)
+        })
 
         self.assertEqual(result.resolved_ip, "203.0.113.5")
         self.assertEqual(result.timings.dns_ms, 12)
@@ -142,7 +184,7 @@ class ParseResultTest(unittest.TestCase):
 
     def test_core_log_reduced_to_reason(self):
         """С ноды прилетает хвост лога — показывать нужно суть, а не простыню."""
-        events = [{
+        result = _parse_result(_cell(), {
             "type": "cell", "index": 0, "verdict": "fail",
             "reason": "PROXY_HANDSHAKE_FAILED",
             "detail": (
@@ -150,31 +192,58 @@ class ParseResultTest(unittest.TestCase):
                 "common/retry: [dial tcp 1.2.3.4:443: i/o timeout] > "
                 "common/retry: all retry attempts failed"
             ),
-        }]
-        result = _parse_result(_cell(), events)
+        })
 
         self.assertIn("i/o timeout", result.detail)
         self.assertNotIn("app/proxyman", result.detail)
         self.assertEqual(result.hint, "IO_TIMEOUT")
 
-    def test_missing_cell_falls_back_to_log(self):
-        events = [{"type": "log", "line": "не удалось получить ядро xray"}]
-        result = _parse_result(_cell(), events)
 
-        self.assertIs(result.verdict, Verdict.FAIL)
-        self.assertIs(result.reason, FailReason.NODE_ERROR)
-        self.assertIn("ядро xray", result.detail)
+class ParseBatchTest(unittest.TestCase):
+    """Ответы пачки сопоставляются по номеру ячейки, а не по порядку.
 
-    def test_empty_output_is_node_error(self):
-        result = _parse_result(_cell(), [])
-        self.assertIs(result.reason, FailReason.NODE_ERROR)
+    Исполнитель гонит проверки параллельно, поэтому строки приходят вперемешку.
+    """
 
-    def test_last_cell_wins(self):
-        events = [
-            {"type": "cell", "index": 0, "verdict": "fail", "reason": "TCP_TIMEOUT"},
-            {"type": "cell", "index": 0, "verdict": "ok", "reason": None},
-        ]
-        self.assertIs(_parse_result(_cell(), events).verdict, Verdict.OK)
+    def setUp(self):
+        self.cells = _cells(
+            f"vless://{UUID}@a.io:443?security=tls#one",
+            f"vless://{UUID}@b.io:443?security=tls#two",
+        )
+
+    def test_results_matched_by_index(self):
+        first, second = self.cells
+        results = _parse_results(self.cells, [
+            {"type": "cell", "index": second.index, "verdict": "ok", "reason": None},
+            {"type": "cell", "index": first.index, "verdict": "fail", "reason": "TCP_TIMEOUT"},
+        ])
+
+        self.assertIs(results[first.index].verdict, Verdict.FAIL)
+        self.assertIs(results[second.index].verdict, Verdict.OK)
+
+    def test_missing_cell_is_node_error(self):
+        first, second = self.cells
+        results = _parse_results(self.cells, [
+            {"type": "cell", "index": first.index, "verdict": "ok", "reason": None},
+            {"type": "log", "line": "не удалось получить ядро xray"},
+        ])
+
+        self.assertIs(results[first.index].verdict, Verdict.OK)
+        self.assertIs(results[second.index].reason, FailReason.NODE_ERROR)
+        self.assertIn("ядро xray", results[second.index].detail)
+
+    def test_empty_output_fails_every_cell(self):
+        results = _parse_results(self.cells, [])
+        self.assertEqual(len(results), 2)
+        self.assertTrue(all(r.reason is FailReason.NODE_ERROR for r in results.values()))
+
+    def test_last_answer_wins(self):
+        first, _ = self.cells
+        results = _parse_results(self.cells, [
+            {"type": "cell", "index": first.index, "verdict": "fail", "reason": "TCP_TIMEOUT"},
+            {"type": "cell", "index": first.index, "verdict": "ok", "reason": None},
+        ])
+        self.assertIs(results[first.index].verdict, Verdict.OK)
 
 
 class CoresForTest(unittest.TestCase):

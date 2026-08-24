@@ -22,40 +22,53 @@ from app.services.xray_test.matrix import build_matrix  # noqa: E402
 from app.services.xray_test.models import CellResult, TestCell, Verdict  # noqa: E402
 from app.services.xray_test.parsers import parse_link  # noqa: E402
 from app.services.xray_test.probes import ProbeOptions  # noqa: E402
+from app.services.xray_test.runner import BATCH_SIZE  # noqa: E402
 
 UUID = "11111111-2222-3333-4444-555555555555"
 
 
 class CountingRunner:
-    """Считает, сколько проверок идёт одновременно, и запоминает пик."""
+    """Считает пачки: сколько идёт одновременно, какая была самой большой."""
 
     def __init__(self, delay: float = 0.001) -> None:
         self.delay = delay
         self.active = 0
         self.peak = 0
         self.done = 0
+        self.batches: list[int] = []
 
     async def probe(self, cell: TestCell, options: ProbeOptions) -> CellResult:
+        results = await self.probe_batch([cell], options)
+        return results[0]
+
+    async def probe_batch(
+        self, cells: list[TestCell], options: ProbeOptions
+    ) -> list[CellResult]:
         self.active += 1
         self.peak = max(self.peak, self.active)
+        self.batches.append(len(cells))
         try:
             await asyncio.sleep(self.delay)
-            self.done += 1
-            return CellResult(
-                index=cell.index,
-                remark=cell.endpoint.remark,
-                protocol=cell.endpoint.protocol.value,
-                address=cell.endpoint.address,
-                port=cell.endpoint.port,
-                sni=cell.sni_label,
-                transport=cell.endpoint.transport.kind.value,
-                security=cell.endpoint.tls.security.value,
-                verdict=Verdict.OK,
-                location=cell.location,
-                location_name=cell.location_name,
-            )
+            self.done += len(cells)
+            return [self._result(cell) for cell in cells]
         finally:
             self.active -= 1
+
+    @staticmethod
+    def _result(cell: TestCell) -> CellResult:
+        return CellResult(
+            index=cell.index,
+            remark=cell.endpoint.remark,
+            protocol=cell.endpoint.protocol.value,
+            address=cell.endpoint.address,
+            port=cell.endpoint.port,
+            sni=cell.sni_label,
+            transport=cell.endpoint.transport.kind.value,
+            security=cell.endpoint.tls.security.value,
+            verdict=Verdict.OK,
+            location=cell.location,
+            location_name=cell.location_name,
+        )
 
 
 def _cells(count: int, locations=None):
@@ -89,15 +102,31 @@ class QueueTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runner.done, 500)
 
     async def test_concurrency_respected(self):
+        """Рабочих не больше заданного — теперь это число процессов ядра."""
         manager = XrayTestJobManager()
         runner = CountingRunner(delay=0.005)
 
-        job_id = manager.start(_cells(60), ProbeOptions(), {"panel": runner},
+        job_id = manager.start(_cells(200), ProbeOptions(), {"panel": runner},
                                location="panel", concurrency=3)
         await _drain(manager, job_id)
 
         self.assertLessEqual(runner.peak, 3)
         self.assertGreater(runner.peak, 1)
+
+    async def test_cells_batched(self):
+        """Ячейки уходят пачками — процесс ядра поднимается один на пачку."""
+        manager = XrayTestJobManager()
+        runner = CountingRunner()
+
+        job_id = manager.start(_cells(100), ProbeOptions(), {"panel": runner},
+                               location="panel", concurrency=2)
+        await _drain(manager, job_id)
+
+        self.assertEqual(runner.done, 100)
+        self.assertTrue(all(size <= BATCH_SIZE for size in runner.batches))
+        self.assertGreater(max(runner.batches), 1)
+        # Сотня проверок пачками — на порядок меньше запусков ядра, чем было
+        self.assertLessEqual(len(runner.batches), 100 // 2)
 
     async def test_each_location_has_own_quota(self):
         """Медленная точка не должна занимать слоты быстрой."""
@@ -114,6 +143,7 @@ class QueueTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(node.done, 30)
         self.assertLessEqual(panel.peak, 2)
         self.assertLessEqual(node.peak, 2)
+        self.assertTrue(all(size <= BATCH_SIZE for size in panel.batches))
 
     async def test_results_carry_location(self):
         manager = XrayTestJobManager()

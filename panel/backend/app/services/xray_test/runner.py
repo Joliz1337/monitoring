@@ -16,6 +16,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import signal
 import socket
 import tempfile
@@ -25,7 +26,8 @@ from pathlib import Path
 from typing import Optional, Protocol as TypingProtocol
 
 from app.services.xray_test import core_manager, core_output, probes
-from app.services.xray_test.config_builder import build_config
+from app.services.xray_test.config_builder import BatchEntry, build_batch, build_config
+from app.services.xray_test.config_builder.batch import INBOUND_TAG, OUTBOUND_TAG
 from app.services.xray_test.errors import CoreDownloadError, UnsupportedConfigError
 from app.services.xray_test.models import (
     CellResult,
@@ -42,6 +44,13 @@ logger = logging.getLogger(__name__)
 
 WORK_DIR = Path("/app/data/xray-test/run")
 MAX_CONCURRENT_CORES = 32
+# Пачка проверок на один процесс ядра. Ядро держит сколько угодно inbound'ов,
+# поэтому процесс на ячейку — чистые накладные расходы: запуск, память, CPU.
+# Шестнадцать выбрано под пул портов ноды (7501-7532) с запасом.
+BATCH_SIZE = 16
+# Замер скорости качает десять мегабайт: через общий процесс такие закачки
+# толкаются локтями и портят замер друг другу
+MAX_CONCURRENT_SPEED = 2
 CORE_START_TIMEOUT = 5.0
 CELL_TIMEOUT = 40.0
 CORE_MAX_LIFETIME = 90.0
@@ -52,6 +61,7 @@ CORE_LOG_TAIL = 400
 CORE_LOG_LINES = 40
 
 _core_semaphore = asyncio.Semaphore(MAX_CONCURRENT_CORES)
+_speed_semaphore = asyncio.Semaphore(MAX_CONCURRENT_SPEED)
 _live_processes: dict[asyncio.subprocess.Process, float] = {}
 _sweeper_task: Optional[asyncio.Task] = None
 
@@ -62,11 +72,25 @@ class CoreRunner(TypingProtocol):
     async def probe(self, cell: TestCell, options: probes.ProbeOptions) -> CellResult:
         ...
 
+    async def probe_batch(
+        self, cells: list[TestCell], options: probes.ProbeOptions
+    ) -> list[CellResult]:
+        ...
+
+
+@dataclass
+class _Ready:
+    """Ячейка после проб, которым ядро не нужно. `core=None` — уже готово."""
+
+    cell: TestCell
+    result: CellResult
+    core: Optional[Core]
+
 
 @dataclass
 class _LaunchedCore:
     process: asyncio.subprocess.Process
-    port: int
+    ports: list[int]
     workdir: tempfile.TemporaryDirectory
     started_at: float = field(default_factory=time.monotonic)
     # Вывод копится фоном: причина отказа появляется в нём уже после старта,
@@ -74,11 +98,56 @@ class _LaunchedCore:
     output: list[str] = field(default_factory=list)
     reader: Optional[asyncio.Task] = None
 
+    @property
+    def port(self) -> int:
+        return self.ports[0]
+
 
 class LocalCoreRunner:
     """Прогон на самой панели."""
 
     async def probe(self, cell: TestCell, options: probes.ProbeOptions) -> CellResult:
+        results = await self.probe_batch([cell], options)
+        return results[0]
+
+    async def probe_batch(
+        self, cells: list[TestCell], options: probes.ProbeOptions
+    ) -> list[CellResult]:
+        """Пачка проверок: один процесс ядра на всех, кому он вообще нужен.
+
+        Пробы до ядра (DNS, TCP, TLS) идут параллельно и часть ячеек отсеивают
+        ещё до запуска. Остальные группируются по ядру — Xray и sing-box в один
+        процесс не сложить — и разбираются кусками по `BATCH_SIZE`.
+        """
+        done: dict[int, CellResult] = {}
+        pending: list[_Ready] = []
+
+        for prepared in await asyncio.gather(*(self._prepare(c, options) for c in cells)):
+            done[prepared.cell.index] = prepared.result
+            if prepared.core is not None:
+                pending.append(prepared)
+
+        by_core: dict[Core, list[_Ready]] = {}
+        for item in pending:
+            by_core.setdefault(item.core, []).append(item)  # type: ignore[arg-type]
+
+        for core, items in by_core.items():
+            try:
+                binary = await core_manager.ensure_core(core)
+            except CoreDownloadError as exc:
+                for item in items:
+                    done[item.cell.index] = _fail(
+                        item.result, FailReason.CORE_START_FAILED, str(exc)
+                    )
+                continue
+            for start in range(0, len(items), BATCH_SIZE):
+                chunk = items[start:start + BATCH_SIZE]
+                done.update(await self._run_chunk(chunk, options, core, binary))
+
+        return [done[cell.index] for cell in cells]
+
+    async def _prepare(self, cell: TestCell, options: probes.ProbeOptions) -> _Ready:
+        """Всё, что можно узнать без ядра. `core=None` — ячейка уже завершена."""
         endpoint = cell.endpoint
         result = _empty_result(cell)
 
@@ -86,7 +155,7 @@ class LocalCoreRunner:
         result.resolved_ip = dns.ip
         result.timings.dns_ms = dns.elapsed_ms
         if dns.error:
-            return _fail(result, FailReason.DNS_FAIL, dns.error)
+            return _Ready(cell, _fail(result, FailReason.DNS_FAIL, dns.error), None)
 
         if options.tcp and not endpoint.is_udp_protocol:
             tcp = await probes.tcp_ping(endpoint.address, endpoint.port, options.attempts)
@@ -94,7 +163,9 @@ class LocalCoreRunner:
             result.timings.tcp_avg_ms = tcp.avg_ms
             result.timings.tcp_jitter_ms = tcp.jitter_ms
             if not tcp.alive:
-                return _fail(result, tcp.reason or FailReason.TCP_REFUSED, tcp.error or "")
+                return _Ready(cell, _fail(
+                    result, tcp.reason or FailReason.TCP_REFUSED, tcp.error or ""
+                ), None)
 
         if options.tls_inspect and endpoint.tls.security.value != "none":
             result.tls_info = await probes.inspect_tls(
@@ -103,21 +174,89 @@ class LocalCoreRunner:
 
         if not options.http:
             result.verdict = Verdict.OK
-            return result
+            return _Ready(cell, result, None)
 
         try:
             core = core_manager.select_core(endpoint)
         except UnsupportedConfigError as exc:
-            return _fail(result, FailReason.UNSUPPORTED, str(exc))
+            return _Ready(cell, _fail(result, FailReason.UNSUPPORTED, str(exc)), None)
+
         result.core = core.value
+        return _Ready(cell, result, core)
 
-        try:
-            binary = await core_manager.ensure_core(core)
-        except CoreDownloadError as exc:
-            return _fail(result, FailReason.CORE_START_FAILED, str(exc))
+    async def _run_chunk(
+        self,
+        chunk: list[_Ready],
+        options: probes.ProbeOptions,
+        core: Core,
+        binary: Path,
+    ) -> dict[int, CellResult]:
+        if len(chunk) > 1:
+            batched = await self._try_batch(chunk, options, core, binary)
+            if batched is not None:
+                return batched
 
+        # Поодиночке: либо в пачке нечего объединять, либо она не поднялась и
+        # надо понять, какая именно конфигурация виновата
+        async def one(item: _Ready) -> CellResult:
+            async with _core_semaphore:
+                return await self._probe_through_core(
+                    item.cell, options, item.result, core, binary
+                )
+
+        results = await asyncio.gather(*(one(item) for item in chunk))
+        return {item.cell.index: result for item, result in zip(chunk, results)}
+
+    async def _try_batch(
+        self,
+        chunk: list[_Ready],
+        options: probes.ProbeOptions,
+        core: Core,
+        binary: Path,
+    ) -> Optional[dict[int, CellResult]]:
+        """Пачка одним процессом. `None` — не поднялась, зовите поодиночке."""
         async with _core_semaphore:
-            return await self._probe_through_core(cell, options, result, core, binary)
+            try:
+                launched = await self._launch_batch(chunk, core, binary)
+            except _CoreStartError as exc:
+                logger.info(
+                    "xray-test: пачка из %d не поднялась (%s), проверяю по одной",
+                    len(chunk), exc.detail,
+                )
+                return None
+
+            try:
+                results = await asyncio.gather(*(
+                    self._probe_slot(launched, item, options, position)
+                    for position, item in enumerate(chunk)
+                ))
+                return {item.cell.index: result for item, result in zip(chunk, results)}
+            finally:
+                await _shutdown_core(launched)
+
+    async def _probe_slot(
+        self,
+        launched: _LaunchedCore,
+        item: _Ready,
+        options: probes.ProbeOptions,
+        position: int,
+    ) -> CellResult:
+        port = launched.ports[position]
+        # Слот в тегах конфига — номер ячейки, а не место в пачке: он же
+        # приходит с ноды, и по нему из общего лога отбираются свои строки
+        slot = str(item.cell.index)
+        try:
+            async with asyncio.timeout(CELL_TIMEOUT):
+                return await self._explain(
+                    item.cell,
+                    await self._run_probes(launched, options, item.result, port, slot),
+                )
+        except asyncio.TimeoutError:
+            core_detail, hint = _core_reason(launched, slot)
+            return await self._explain(item.cell, _fail(
+                item.result, FailReason.HTTP_TIMEOUT,
+                core_detail or "проверка не уложилась в отведённое время", hint,
+            ))
 
     async def _probe_through_core(
         self,
@@ -136,7 +275,7 @@ class LocalCoreRunner:
         try:
             async with asyncio.timeout(CELL_TIMEOUT):
                 return await self._explain(
-                    cell, await self._run_probes(launched, options, result)
+                    cell, await self._run_probes(launched, options, result, launched.port)
                 )
         except asyncio.TimeoutError:
             core_detail, hint = _core_reason(launched)
@@ -179,9 +318,14 @@ class LocalCoreRunner:
         return result
 
     async def _run_probes(
-        self, launched: _LaunchedCore, options: probes.ProbeOptions, result: CellResult
+        self,
+        launched: _LaunchedCore,
+        options: probes.ProbeOptions,
+        result: CellResult,
+        port: int,
+        slot: Optional[str] = None,
     ) -> CellResult:
-        http = await probes.http_through_proxy(launched.port, options.extra_headers)
+        http = await probes.http_through_proxy(port, options.extra_headers)
         result.http_status = http.status
         result.timings.handshake_ms = http.handshake_ms
         result.timings.rtt_ms = http.rtt_ms
@@ -189,29 +333,48 @@ class LocalCoreRunner:
         if http.reason is not None:
             # Текст исключения клиента часто пуст, а настоящая причина — в логе
             # ядра: «certificate is valid for …, not …», «connection refused»
-            core_detail, hint = _core_reason(launched)
+            core_detail, hint = _core_reason(launched, slot)
             detail = core_detail or http.error or ""
             if launched.process.returncode:
                 detail = f"{detail} (ядро завершилось с кодом {launched.process.returncode})".strip()
             return _fail(result, http.reason, detail, hint)
 
         if options.exit_identity:
-            identity = await probes.exit_identity(launched.port)
+            identity = await probes.exit_identity(port)
             result.exit_ip = identity.ip
             result.exit_country = identity.country
             result.exit_asn = identity.asn
 
         if options.speed:
-            result.timings.speed_mbps = await probes.download_speed(launched.port)
+            async with _speed_semaphore:
+                result.timings.speed_mbps = await probes.download_speed(port)
 
         return _apply_verdict(result, options)
 
     async def _launch(self, cell: TestCell, core: Core, binary: Path) -> _LaunchedCore:
-        WORK_DIR.mkdir(parents=True, exist_ok=True)
-        workdir = tempfile.TemporaryDirectory(dir=str(WORK_DIR), prefix="cell-")
         port = _free_port()
+        return await self._spawn(
+            build_config(cell.endpoint, core, port), [port], binary, prefix="cell-"
+        )
 
-        config = build_config(cell.endpoint, core, port)
+    async def _launch_batch(
+        self, chunk: list[_Ready], core: Core, binary: Path
+    ) -> _LaunchedCore:
+        ports = [_free_port() for _ in chunk]
+        entries = [
+            BatchEntry(str(slot), item.cell.endpoint, port)
+            for slot, (item, port) in enumerate(zip(chunk, ports))
+        ]
+        return await self._spawn(
+            build_batch(entries, core), ports, binary, prefix="batch-"
+        )
+
+    async def _spawn(
+        self, config: dict, ports: list[int], binary: Path, *, prefix: str
+    ) -> _LaunchedCore:
+        WORK_DIR.mkdir(parents=True, exist_ok=True)
+        workdir = tempfile.TemporaryDirectory(dir=str(WORK_DIR), prefix=prefix)
+
         config_path = Path(workdir.name) / "config.json"
         config_path.write_text(json.dumps(config), encoding="utf-8")
         config_path.chmod(0o600)
@@ -229,7 +392,7 @@ class LocalCoreRunner:
             raise _CoreStartError(FailReason.CORE_START_FAILED, str(exc)) from exc
 
         _live_processes[process] = time.monotonic()
-        launched = _LaunchedCore(process=process, port=port, workdir=workdir)
+        launched = _LaunchedCore(process=process, ports=ports, workdir=workdir)
         launched.reader = asyncio.create_task(_pump_output(launched))
 
         if not await _wait_ready(launched):
@@ -260,20 +423,32 @@ def _free_port() -> int:
 
 
 async def _wait_ready(launched: _LaunchedCore) -> bool:
+    """Готово, только когда открыты все порты пачки.
+
+    Половина открытых портов хуже отказа: часть проверок пошла бы в ядро,
+    которое ещё не дослушало остальные, и получила бы отказ ни за что.
+    """
     deadline = time.monotonic() + CORE_START_TIMEOUT
+    remaining = list(launched.ports)
     while time.monotonic() < deadline:
         if launched.process.returncode is not None:
             return False
-        try:
-            _, writer = await asyncio.open_connection("127.0.0.1", launched.port)
-        except OSError:
-            await asyncio.sleep(READY_POLL_INTERVAL)
-            continue
-        writer.close()
-        with contextlib.suppress(OSError):
-            await writer.wait_closed()
-        return True
+        remaining = [port for port in remaining if not await _port_open(port)]
+        if not remaining:
+            return True
+        await asyncio.sleep(READY_POLL_INTERVAL)
     return False
+
+
+async def _port_open(port: int) -> bool:
+    try:
+        _, writer = await asyncio.open_connection("127.0.0.1", port)
+    except OSError:
+        return False
+    writer.close()
+    with contextlib.suppress(OSError):
+        await writer.wait_closed()
+    return True
 
 
 async def _pump_output(launched: _LaunchedCore) -> None:
@@ -296,11 +471,37 @@ async def _pump_output(launched: _LaunchedCore) -> None:
         return
 
 
-def _core_reason(launched: Optional[_LaunchedCore]) -> tuple[str, Optional[str]]:
+def _core_reason(
+    launched: Optional[_LaunchedCore], slot: Optional[str] = None
+) -> tuple[str, Optional[str]]:
     if launched is None or not launched.output:
         return "", None
-    detail, hint = core_output.extract_reason("\n".join(launched.output))
+    lines = _lines_for_slot(launched.output, slot)
+    if not lines:
+        return "", None
+    detail, hint = core_output.extract_reason("\n".join(lines))
     return sanitize_output(detail)[:CORE_LOG_TAIL], hint
+
+
+def _lines_for_slot(output: list[str], slot: Optional[str]) -> list[str]:
+    """Строки лога, относящиеся к одной проверке пачки.
+
+    Ядро помечает строки соединения тегами `[mon-test-in-N -> mon-test-out-N]`,
+    и без такого отбора причина отказа одной конфигурации досталась бы соседней.
+    Строки вовсе без тега — общие: не поднялся транспорт, не разобрался конфиг;
+    они отдаются любому слоту, потому что относятся ко всей пачке.
+    """
+    if slot is None:
+        return output
+
+    tags = f"(?:{re.escape(INBOUND_TAG)}|{re.escape(OUTBOUND_TAG)})"
+    own = re.compile(rf"{tags}-{re.escape(slot)}(?![0-9])")
+    any_slot = re.compile(rf"{tags}-[0-9]+")
+
+    mine = [line for line in output if own.search(line)]
+    if mine:
+        return mine
+    return [line for line in output if not any_slot.search(line)]
 
 
 async def _shutdown_core(launched: Optional[_LaunchedCore]) -> None:

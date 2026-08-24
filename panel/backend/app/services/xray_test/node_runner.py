@@ -24,7 +24,7 @@ from app.services.http_client import get_external_client, get_node_client, node_
 from app.services.node_capabilities import learn_from_denial
 from app.services.update_channel import current_branch, github_configs_base
 from app.services.xray_test import bundle, core_manager, core_output
-from app.services.xray_test.config_builder import build_config
+from app.services.xray_test.config_builder import BatchEntry, build_batch
 from app.services.xray_test.errors import XrayTestError
 from app.services.xray_test.models import CellResult, Core, FailReason, TestCell, Verdict
 from app.services.xray_test.probes import ProbeOptions
@@ -43,6 +43,9 @@ EXEC_TIMEOUT = 120
 CORE_INSTALL_TIMEOUT = 300
 HTTP_READ_TIMEOUT = 140
 COMMAND_LIMIT = 60000
+# Задание для исполнителя: строки через перевод, поля внутри строки — табом
+SEP = "\t"
+LINE_SEP = "\n"
 
 _version_re = re.compile(r'RUNNER_VERSION="([0-9.]+)"')
 _runner_cache: dict[int, str] = {}
@@ -87,27 +90,79 @@ class NodeCoreRunner:
             self._prepared = True
 
     async def probe(self, cell: TestCell, options: ProbeOptions) -> CellResult:
-        try:
-            core = core_manager.select_core(cell.endpoint)
-        except XrayTestError as exc:
-            return _fail(cell, FailReason.UNSUPPORTED, str(exc))
+        results = await self.probe_batch([cell], options)
+        return results[0]
 
+    async def probe_batch(
+        self, cells: list[TestCell], options: ProbeOptions
+    ) -> list[CellResult]:
+        """Пачка проверок одним вызовом: ядро на ноде поднимается один раз.
+
+        Раньше на каждую ячейку уходил свой `execute-stream` со своим процессом
+        ядра — на боевой ноде это заметная нагрузка на ровном месте. Теперь
+        нода получает один конфиг, где у каждой проверки свой socks-порт.
+        """
+        done: dict[int, CellResult] = {}
+        by_core: dict[Core, list[TestCell]] = {}
+
+        for cell in cells:
+            try:
+                core = core_manager.select_core(cell.endpoint)
+            except XrayTestError as exc:
+                done[cell.index] = _fail(cell, FailReason.UNSUPPORTED, str(exc))
+                continue
+            by_core.setdefault(core, []).append(cell)
+
+        for core, group in by_core.items():
+            for start in range(0, len(group), len(PORT_POOL)):
+                chunk = group[start:start + len(PORT_POOL)]
+                done.update(await self._run_chunk(chunk, core, options))
+
+        return [done[cell.index] for cell in cells]
+
+    async def _run_chunk(
+        self, chunk: list[TestCell], core: Core, options: ProbeOptions
+    ) -> dict[int, CellResult]:
+        results = await self._execute_chunk(chunk, core, options)
+
+        # Ядро не поднялось — гоним по одной, чтобы отказ достался виновной
+        # конфигурации, а не всей пачке скопом
+        if len(chunk) > 1 and all(
+            result.reason is FailReason.CORE_START_FAILED for result in results.values()
+        ):
+            logger.info(
+                "xray-test: пачка из %d не поднялась на %s, проверяю по одной",
+                len(chunk), self.server.name,
+            )
+            single: dict[int, CellResult] = {}
+            for cell in chunk:
+                single.update(await self._execute_chunk([cell], core, options))
+            return single
+
+        return results
+
+    async def _execute_chunk(
+        self, chunk: list[TestCell], core: Core, options: ProbeOptions
+    ) -> dict[int, CellResult]:
         ticket = self._tickets.get(core)
         if ticket is None:
             # Ядро понадобилось уже после подготовки — выписываем ссылку на лету
             ticket = await bundle.issue_ticket(core)
             self._tickets[core] = ticket
 
-        port = await self._ports.get()
+        ports = [await self._ports.get() for _ in chunk]
         try:
-            payload = _build_payload(cell, core, ticket, options, port)
+            payload = _build_payload(chunk, ports, core, ticket, options)
             lines = await _execute(self.server, payload)
         except XrayTestError as exc:
-            return _fail(cell, FailReason.NODE_ERROR, str(exc))
+            return {
+                cell.index: _fail(cell, FailReason.NODE_ERROR, str(exc)) for cell in chunk
+            }
         finally:
-            self._ports.put_nowait(port)
+            for port in ports:
+                self._ports.put_nowait(port)
 
-        return _parse_result(cell, lines)
+        return _parse_results(chunk, lines)
 
 
 def _cores_for(cells: list[TestCell]) -> set[Core]:
@@ -121,39 +176,51 @@ def _cores_for(cells: list[TestCell]) -> set[Core]:
 
 
 def _build_payload(
-    cell: TestCell,
+    chunk: list[TestCell],
+    ports: list[int],
     core: Core,
     ticket: bundle.BundleTicket,
     options: ProbeOptions,
-    port: int,
 ) -> str:
-    config = build_config(cell.endpoint, core, port)
-    config_b64 = b64encode(json.dumps(config).encode()).decode()
+    """Одно задание на пачку: общий конфиг ядра плюс строка на каждую проверку.
+
+    Номер ячейки служит слотом: он же стоит в тегах конфига, и по нему
+    исполнитель отбирает из общего лога ядра строки нужной проверки.
+    """
+    entries = [
+        BatchEntry(str(cell.index), cell.endpoint, port)
+        for cell, port in zip(chunk, ports)
+    ]
+    config_b64 = b64encode(json.dumps(build_batch(entries, core)).encode()).decode()
 
     rows = [
-        "\t".join(["CORE", core.value, ticket.version, ticket.url, ticket.sha256]),
-        "\t".join([
+        SEP.join(["CORE", core.value, ticket.version, ticket.url, ticket.sha256]),
+        SEP.join([
             "OPTS",
             "1" if options.tcp else "0",
             "1" if options.http else "0",
             "1" if options.exit_identity else "0",
             "1" if options.speed else "0",
-            str(port),
         ]),
-        "\t".join([
+        SEP.join(["CONF", core.value, config_b64]),
+    ]
+    rows.extend(
+        SEP.join([
             "CELL",
             str(cell.index),
             core.value,
             cell.endpoint.address,
             str(cell.endpoint.port),
             "1" if cell.endpoint.is_udp_protocol else "0",
-            config_b64,
+            str(port),
             # SNI нужен исполнителю отдельно: по нему проверяется запасной ход
             # REALITY, отличающий блокировку от неподходящих параметров
             cell.endpoint.effective_sni,
-        ]),
-    ]
-    return b64encode("\n".join(rows).encode()).decode()
+        ])
+        for cell, port in zip(chunk, ports)
+    )
+    return b64encode(LINE_SEP.join(rows).encode()).decode()
+
 
 
 async def _execute(server: Server, payload: str) -> list[dict]:
@@ -331,13 +398,38 @@ def _maybe_json(text: str):
         return text
 
 
-def _parse_result(cell: TestCell, events: list[dict]) -> CellResult:
-    cells = [event for event in events if event.get("type") == "cell"]
-    if not cells:
-        logs = " ".join(str(event.get("line", "")) for event in events if event.get("type") == "log")
-        return _fail(cell, FailReason.NODE_ERROR, logs or "нода не вернула результат проверки")
+def _parse_results(chunk: list[TestCell], events: list[dict]) -> dict[int, CellResult]:
+    """Разложить строки исполнителя по ячейкам пачки.
 
-    payload = cells[-1]
+    Исполнитель гонит проверки параллельно, поэтому строки приходят вперемешку и
+    сопоставляются по номеру ячейки. Ячейка без своей строки — не молчаливый
+    провал, а отдельная ошибка: значит исполнитель до неё не дошёл.
+    """
+    by_index: dict[int, dict] = {}
+    for event in events:
+        if event.get("type") != "cell":
+            continue
+        try:
+            by_index[int(event.get("index"))] = event
+        except (TypeError, ValueError):
+            continue
+
+    logs = " ".join(
+        str(event.get("line", "")) for event in events if event.get("type") == "log"
+    )
+    results: dict[int, CellResult] = {}
+    for cell in chunk:
+        payload = by_index.get(cell.index)
+        if payload is None:
+            results[cell.index] = _fail(
+                cell, FailReason.NODE_ERROR, logs or "нода не вернула результат проверки"
+            )
+            continue
+        results[cell.index] = _parse_result(cell, payload)
+    return results
+
+
+def _parse_result(cell: TestCell, payload: dict) -> CellResult:
     result = _empty(cell)
     result.verdict = Verdict(payload.get("verdict", "fail"))
     reason = payload.get("reason")

@@ -17,7 +17,7 @@ from typing import AsyncIterator, Awaitable, Callable, Optional
 from app.services.xray_test.errors import LimitExceededError
 from app.services.xray_test.models import CellResult, FailReason, TestCell, Verdict
 from app.services.xray_test.probes import ProbeOptions
-from app.services.xray_test.runner import CoreRunner
+from app.services.xray_test.runner import BATCH_SIZE, CoreRunner
 from app.services.xray_test.sanitize import sanitize_output
 
 logger = logging.getLogger(__name__)
@@ -29,7 +29,10 @@ MAX_ACTIVE_JOBS = 5
 PROGRESS_STEP = 25
 # Потолок он же значение по умолчанию: держать проверки медленнее, чем позволяют
 # зарезервированные порты, смысла нет — это просто дольше при том же результате
-MAX_CONCURRENCY = 32
+# Рабочих на точку запуска. Каждый берёт из очереди пачку и прогоняет её одним
+# процессом ядра, поэтому число процессов теперь равно числу рабочих, а не числу
+# проверок: восьми хватает, чтобы не простаивать, и нода не задыхается.
+MAX_CONCURRENCY = 8
 
 
 @dataclass
@@ -159,25 +162,27 @@ class XrayTestJobManager:
         options: ProbeOptions,
     ) -> None:
         while True:
-            try:
-                cell = queue.get_nowait()
-            except asyncio.QueueEmpty:
+            batch = _take(queue, BATCH_SIZE)
+            if not batch:
                 return
 
             if runner is None:
-                self._emit_result(job, _internal_error(
-                    cell, RuntimeError(f"нет исполнителя для {cell.location}")
-                ))
+                for cell in batch:
+                    self._emit_result(job, _internal_error(
+                        cell, RuntimeError(f"нет исполнителя для {cell.location}")
+                    ))
                 continue
 
             try:
-                result = await runner.probe(cell, options)
+                results = await runner.probe_batch(batch, options)
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:  # noqa: BLE001 — одна ячейка не валит задачу
-                logger.warning("xray-test cell %s failed: %s", cell.index, exc)
-                result = _internal_error(cell, exc)
-            self._emit_result(job, result)
+            except Exception as exc:  # noqa: BLE001 — одна пачка не валит задачу
+                logger.warning("xray-test batch of %d failed: %s", len(batch), exc)
+                results = [_internal_error(cell, exc) for cell in batch]
+
+            for result in results:
+                self._emit_result(job, result)
 
     def _emit_result(self, job: XrayTestJob, result: CellResult) -> None:
         payload = result.as_event()
@@ -258,6 +263,17 @@ class XrayTestJobManager:
                     return
         finally:
             job.subscribers.discard(queue)
+
+
+def _take(queue: "asyncio.Queue[TestCell]", limit: int) -> list[TestCell]:
+    """Снять из очереди до `limit` ячеек, не дожидаясь остальных."""
+    batch: list[TestCell] = []
+    while len(batch) < limit:
+        try:
+            batch.append(queue.get_nowait())
+        except asyncio.QueueEmpty:
+            break
+    return batch
 
 
 def _internal_error(cell: TestCell, exc: Exception) -> CellResult:

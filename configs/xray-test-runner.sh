@@ -13,15 +13,20 @@
 #         xray-test-runner.sh version
 set -uo pipefail
 
-RUNNER_VERSION="1.6.0"
+RUNNER_VERSION="2.0.0"
 
 TOOLS_DIR="/opt/monitoring-node/tools"
 CORES_DIR="$TOOLS_DIR/cores"
-# Порт зарезервирован от эфемерной выдачи (tune-sysctl.sh): иначе исходящее
-# соединение могло бы занять его ровно между проверками
-SOCKS_PORT=7501
+# Порты зарезервированы от эфемерной выдачи (tune-sysctl.sh): иначе исходящее
+# соединение могло бы занять один ровно между проверками. Панель раздаёт их из
+# того же диапазона — по одному на проверку в пачке.
+PORTS=""
 CORE_START_TIMEOUT=5
 PROBE_TIMEOUT=10
+# Проверок в пачке до шестнадцати, и почти всё время каждая ждёт сеть. Гнать их
+# по очереди — держать процесс ядра простаивающим; восемь одновременно
+# укладываются в тот же процесс и не топят ноду.
+PARALLEL_CELLS=8
 SPEED_TIMEOUT=20
 SPEED_BYTES=10000000
 DEGRADED_RTT_MS=1500
@@ -89,20 +94,30 @@ ensure_core() {
     printf '%s' "$path"
 }
 
+# Один процесс на всю пачку: ядро держит сколько угодно inbound'ов, и каждый
+# порт правилом маршрутизации связан со своей конфигурацией. Готовым считается
+# только состояние, когда открыты все порты: половина открытых хуже отказа —
+# часть проверок пошла бы в ядро, которое их ещё не слушает.
 start_core() {
-    local binary="$1" config="$2"
+    local binary="$1" config="$2" ports="$3"
     setsid "$binary" run -c "$config" >"$WORKDIR/core.log" 2>&1 &
     local pid=$!
     CORE_PGID=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')
     [ -n "$CORE_PGID" ] || CORE_PGID="$pid"
 
     local deadline=$(( $(date +%s) + CORE_START_TIMEOUT ))
+    local port pending
     while [ "$(date +%s)" -lt "$deadline" ]; do
         kill -0 "$pid" 2>/dev/null || return 1
-        if (exec 3<>"/dev/tcp/127.0.0.1/$SOCKS_PORT") 2>/dev/null; then
+        pending=""
+        for port in $ports; do
+            if ! (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+                pending="yes"
+                break
+            fi
             exec 3>&- 2>/dev/null
-            return 0
-        fi
+        done
+        [ -z "$pending" ] && return 0
         sleep 0.1
     done
     return 1
@@ -154,7 +169,7 @@ resolve_host() {
     printf '%s %s' "$ip" "$(( $(now_ms) - start ))"
 }
 
-curl_socks() { curl -s --socks5-hostname "127.0.0.1:$SOCKS_PORT" "$@"; }
+curl_socks() { local port="$1"; shift; curl -s --socks5-hostname "127.0.0.1:$port" "$@"; }
 
 # У REALITY есть запасной ход: «неправильному» клиенту сервер отдаёт настоящий
 # сайт-маскировку. Живой и достижимый сервер обязан ответить на обычное
@@ -170,13 +185,23 @@ fallback_alive() {
 
 # Последняя строка лога ядра со следами ошибки. Просто tail отдавал бы рабочий
 # вывод («accepted tcp:…», «dialing TCP to …»), который ничего не объясняет.
+# Слот — номер проверки внутри пачки. Ядро помечает строки соединения тегами
+# [mon-test-in-N -> mon-test-out-N], и без отбора по ним причина отказа одной
+# конфигурации досталась бы соседней. Строки без тега общие для всей пачки.
 core_failure_line() {
-    local log="$WORKDIR/core.log" line
+    local slot="${1:-}" log="$WORKDIR/core.log" line src
     [ -f "$log" ] || return 0
-    line=$(grep -iE 'fail|error|refused|timeout|rejected' "$log" 2>/dev/null | tail -1)
+    src="$log"
+    if [ -n "$slot" ]; then
+        src="$WORKDIR/slot-$slot.log"
+        grep -E "mon-test-(in|out)-${slot}([^0-9]|$)" "$log" > "$src" 2>/dev/null
+        [ -s "$src" ] || grep -vE 'mon-test-(in|out)-[0-9]+' "$log" > "$src" 2>/dev/null
+        [ -s "$src" ] || src="$log"
+    fi
+    line=$(grep -iE 'fail|error|refused|timeout|rejected' "$src" 2>/dev/null | tail -1)
     # Ошибок нет — отдаём хвост как есть: ядро могло замолчать на рукопожатии,
     # и отсутствие ошибки само по себе диагноз, который разберёт панель
-    [ -n "$line" ] || line=$(tail -2 "$log" 2>/dev/null | tr '\n' ' ')
+    [ -n "$line" ] || line=$(tail -2 "$src" 2>/dev/null | tr '\n' ' ')
     printf '%s' "$line" | cut -c1-700
 }
 
@@ -196,7 +221,7 @@ emit_cell() {
 json_str() { [ -n "${1:-}" ] && printf '"%s"' "$(escape "$1")" || printf 'null'; }
 
 run_cell() {
-    local index="$1" core_name="$2" address="$3" port="$4" udp="$5" config_b64="$6"
+    local index="$1" core_name="$2" address="$3" port="$4" udp="$5" socks="$6" sni="$7"
     local tcp_ms="" tcp_avg="" tcp_jitter="" handshake="" rtt="" status=""
     local exit_ip="" exit_country="" speed="" resolved_ip="" dns_ms=""
 
@@ -223,30 +248,9 @@ run_cell() {
         tcp_jitter=$(printf '%s' "$tcp" | cut -d' ' -f3)
     fi
 
-    local binary="${CORE_PATHS[$core_name]:-}"
-    if [ -z "$binary" ]; then
-        emit_cell "$index" "fail" '"CORE_START_FAILED"' "ядро $core_name недоступно" \
-            "${tcp_ms:-null}" null null null null null null \
-            "$(json_str "$resolved_ip")" "${dns_ms:-null}" "${tcp_avg:-null}" "${tcp_jitter:-null}"
-        return
-    fi
-
-    WORKDIR=$(mktemp -d /tmp/mon-xtest.XXXXXX) || return
-    printf '%s' "$config_b64" | base64 -d > "$WORKDIR/config.json" 2>/dev/null
-
-    if ! start_core "$binary" "$WORKDIR/config.json"; then
-        local detail
-        detail=$(core_failure_line)
-        [ -n "$detail" ] || detail=$(tail -c 400 "$WORKDIR/core.log" 2>/dev/null)
-        emit_cell "$index" "fail" '"CORE_START_FAILED"' "$detail"             "${tcp_ms:-null}" null null null null null null             "$(json_str "$resolved_ip")" "${dns_ms:-null}" "${tcp_avg:-null}" "${tcp_jitter:-null}"
-        stop_core
-        rm -rf "$WORKDIR"; WORKDIR=""
-        return
-    fi
-
     if [ "$OPT_HTTP" = "1" ]; then
         local first second
-        first=$(curl_socks -o /dev/null --max-time "$PROBE_TIMEOUT" \
+        first=$(curl_socks "$socks" -o /dev/null --max-time "$PROBE_TIMEOUT" \
             -w '%{http_code} %{time_total}' "$GENERATE_204_URL" 2>/dev/null)
         status=$(printf '%s' "$first" | cut -d' ' -f1)
         handshake=$(printf '%s' "$first" | cut -d' ' -f2 | awk '{printf "%.0f", $1*1000}')
@@ -256,7 +260,7 @@ run_cell() {
         # ложные отказы; воспроизводимый отказ переживёт и её.
         if [ -z "$status" ] || [ "$status" = "000" ]; then
             sleep 1.5
-            first=$(curl_socks -o /dev/null --max-time "$PROBE_TIMEOUT" \
+            first=$(curl_socks "$socks" -o /dev/null --max-time "$PROBE_TIMEOUT" \
                 -w '%{http_code} %{time_total}' "$GENERATE_204_URL" 2>/dev/null)
             status=$(printf '%s' "$first" | cut -d' ' -f1)
             handshake=$(printf '%s' "$first" | cut -d' ' -f2 | awk '{printf "%.0f", $1*1000}')
@@ -265,18 +269,17 @@ run_cell() {
         if [ -z "$status" ] || [ "$status" = "000" ]; then
             sleep 0.4
             local fail_reason='"PROXY_HANDSHAKE_FAILED"'
-            if ! fallback_alive "$address" "$port" "$SNI"; then
+            if ! fallback_alive "$address" "$port" "$sni"; then
                 fail_reason='"DPI_BLOCK"'
             fi
             emit_cell "$index" "fail" "$fail_reason" \
-                "$(core_failure_line)" \
+                "$(core_failure_line "$index")" \
                 "${tcp_ms:-null}" null null null null null null \
                 "$(json_str "$resolved_ip")" "${dns_ms:-null}" "${tcp_avg:-null}" "${tcp_jitter:-null}"
-            stop_core; rm -rf "$WORKDIR"; WORKDIR=""
             return
         fi
 
-        second=$(curl_socks -o /dev/null --max-time "$PROBE_TIMEOUT" \
+        second=$(curl_socks "$socks" -o /dev/null --max-time "$PROBE_TIMEOUT" \
             -w '%{time_total}' "$GENERATE_204_URL" 2>/dev/null)
         rtt=$(printf '%s' "$second" | awk '{printf "%.0f", $1*1000}')
 
@@ -284,27 +287,23 @@ run_cell() {
             emit_cell "$index" "fail" '"HTTP_BAD_STATUS"' "HTTP $status" \
                 "${tcp_ms:-null}" "${handshake:-null}" "${rtt:-null}" "$status" null null null \
                 "$(json_str "$resolved_ip")" "${dns_ms:-null}" "${tcp_avg:-null}" "${tcp_jitter:-null}"
-            stop_core; rm -rf "$WORKDIR"; WORKDIR=""
             return
         fi
 
         if [ "$OPT_EXIT" = "1" ]; then
             local trace
-            trace=$(curl_socks --max-time "$PROBE_TIMEOUT" "$TRACE_URL" 2>/dev/null)
+            trace=$(curl_socks "$socks" --max-time "$PROBE_TIMEOUT" "$TRACE_URL" 2>/dev/null)
             exit_ip=$(printf '%s' "$trace" | awk -F= '/^ip=/{print $2}')
             exit_country=$(printf '%s' "$trace" | awk -F= '/^loc=/{print $2}')
         fi
 
         if [ "$OPT_SPEED" = "1" ]; then
             local bps
-            bps=$(curl_socks -o /dev/null --max-time "$SPEED_TIMEOUT" \
+            bps=$(curl_socks "$socks" -o /dev/null --max-time "$SPEED_TIMEOUT" \
                 -w '%{speed_download}' "$SPEED_URL" 2>/dev/null)
             speed=$(printf '%s' "$bps" | awk '{printf "%.2f", $1*8/1000000}')
         fi
     fi
-
-    stop_core
-    rm -rf "$WORKDIR"; WORKDIR=""
 
     # Оговорка без причины бесполезна: вердикт и код проставляются вместе
     local verdict="ok" reason='null'
@@ -323,17 +322,20 @@ run_cell() {
 }
 
 main() {
-    [ "${1:-}" = "version" ] && { printf '%s\n' "$RUNNER_VERSION"; return 0; }
+    [ "${1:-}" = "version" ] && { printf '%s
+' "$RUNNER_VERSION"; return 0; }
     [ -n "${1:-}" ] || { log "нет полезной нагрузки"; return 2; }
 
     kill_stale_cores
     declare -A CORE_PATHS=()
-    OPT_TCP=1; OPT_HTTP=1; OPT_EXIT=1; OPT_SPEED=0; SNI=""
+    OPT_TCP=1; OPT_HTTP=1; OPT_EXIT=1; OPT_SPEED=0
+    local batch_core="" batch_conf="" ports=""
+    local cells=()
 
     local payload
     payload=$(printf '%s' "$1" | base64 -d 2>/dev/null) || { log "не разобрать payload"; return 2; }
 
-    while IFS=$'\t' read -r kind a b c d e f g; do
+    while IFS=$'	' read -r kind a b c d e f g; do
         case "$kind" in
             CORE)
                 local path
@@ -345,14 +347,62 @@ main() {
                 ;;
             OPTS)
                 OPT_TCP="$a"; OPT_HTTP="$b"; OPT_EXIT="$c"; OPT_SPEED="$d"
-                [ -n "${e:-}" ] && SOCKS_PORT="$e"
+                ;;
+            CONF)
+                batch_core="$a"; batch_conf="$b"
                 ;;
             CELL)
-                SNI="$g"
-                run_cell "$a" "$b" "$c" "$d" "$e" "$f"
+                cells+=("$a"$'	'"$b"$'	'"$c"$'	'"$d"$'	'"$e"$'	'"$f"$'	'"$g")
+                ports="$ports $f"
                 ;;
         esac
     done <<< "$payload"
+
+    [ "${#cells[@]}" -gt 0 ] || { log "в задании нет проверок"; return 0; }
+
+    WORKDIR=$(mktemp -d /tmp/mon-xtest.XXXXXX) || { log "нет временного каталога"; return 2; }
+
+    # Ядро одно на всю пачку: у каждой проверки свой socks-порт, а маршрут
+    # внутри конфига связывает порт с её конфигурацией.
+    local started=0 start_detail=""
+    if [ "$OPT_HTTP" != "1" ]; then
+        started=1
+    elif [ -z "${CORE_PATHS[$batch_core]:-}" ]; then
+        start_detail="ядро $batch_core недоступно"
+    else
+        printf '%s' "$batch_conf" | base64 -d > "$WORKDIR/config.json" 2>/dev/null
+        if start_core "${CORE_PATHS[$batch_core]}" "$WORKDIR/config.json" "$ports"; then
+            started=1
+        else
+            start_detail=$(core_failure_line)
+            [ -n "$start_detail" ] || start_detail=$(tail -c 400 "$WORKDIR/core.log" 2>/dev/null)
+            stop_core
+        fi
+    fi
+
+    local row running=0
+    for row in "${cells[@]}"; do
+        if [ "$started" != "1" ]; then
+            emit_cell "${row%%$'	'*}" "fail" '"CORE_START_FAILED"' "$start_detail"
+            continue
+        fi
+        run_cell_row "$row" &
+        running=$((running + 1))
+        if [ "$running" -ge "$PARALLEL_CELLS" ]; then
+            wait -n 2>/dev/null || wait
+            running=$((running - 1))
+        fi
+    done
+    wait
+
+    stop_core
+    rm -rf "$WORKDIR"; WORKDIR=""
+}
+
+run_cell_row() {
+    local index core_name address port udp socks sni
+    IFS=$'	' read -r index core_name address port udp socks sni <<< "$1"
+    run_cell "$index" "$core_name" "$address" "$port" "$udp" "$socks" "$sni"
 }
 
 main "$@"

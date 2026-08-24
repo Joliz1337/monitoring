@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.services.xray_test.config_builder.batch import BatchEntry
 from app.services.xray_test.errors import UnsupportedConfigError
 from app.services.xray_test.models import (
     Protocol,
@@ -28,27 +29,44 @@ TRANSPORT_NAMES = {
 
 
 def build_config(endpoint: ProxyEndpoint, socks_port: int) -> dict[str, Any]:
+    return build_batch([BatchEntry("", endpoint, socks_port)])
+
+
+def build_batch(entries: list[BatchEntry]) -> dict[str, Any]:
+    """Один процесс на пачку — см. `xray.build_batch`.
+
+    `final` ставится только у одиночной проверки. В пачке маршрут по умолчанию
+    опасен: не сработай правило, трафик ушёл бы через чужую конфигурацию и
+    проверка показала бы «работает» для не того сервера. Каждый порт и так
+    связан со своим outbound явным правилом.
+    """
+    route: dict[str, Any] = {
+        "rules": [
+            {"inbound": [entry.inbound_tag], "outbound": entry.outbound_tag}
+            for entry in entries
+        ],
+    }
+    if len(entries) == 1:
+        route["final"] = entries[0].outbound_tag
+
     return {
         # info, а не warn: причина отказа печатается только на этом уровне
         "log": {"level": "info"},
         "inbounds": [{
             "type": "socks",
-            "tag": INBOUND_TAG,
+            "tag": entry.inbound_tag,
             "listen": "127.0.0.1",
-            "listen_port": socks_port,
-        }],
-        "outbounds": [_outbound(endpoint)],
-        "route": {
-            "rules": [{"inbound": [INBOUND_TAG], "outbound": OUTBOUND_TAG}],
-            "final": OUTBOUND_TAG,
-        },
+            "listen_port": entry.socks_port,
+        } for entry in entries],
+        "outbounds": [_outbound(entry.endpoint, entry.outbound_tag) for entry in entries],
+        "route": route,
     }
 
 
-def _outbound(endpoint: ProxyEndpoint) -> dict[str, Any]:
+def _outbound(endpoint: ProxyEndpoint, tag: str = OUTBOUND_TAG) -> dict[str, Any]:
     outbound: dict[str, Any] = {
         "type": endpoint.protocol.value,
-        "tag": OUTBOUND_TAG,
+        "tag": tag,
         "server": endpoint.address,
         "server_port": endpoint.port,
     }

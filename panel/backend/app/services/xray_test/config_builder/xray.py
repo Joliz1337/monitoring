@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.services.xray_test.config_builder.batch import BatchEntry
 from app.services.xray_test.errors import UnsupportedConfigError
 from app.services.xray_test.models import (
     Protocol,
@@ -32,28 +33,40 @@ NETWORK_NAMES = {
 
 
 def build_config(endpoint: ProxyEndpoint, socks_port: int) -> dict[str, Any]:
+    return build_batch([BatchEntry("", endpoint, socks_port)])
+
+
+def build_batch(entries: list[BatchEntry]) -> dict[str, Any]:
+    """Один процесс на пачку: свой socks-порт и свой outbound на каждую проверку.
+
+    Ядро держит сколько угодно inbound'ов, а маршрут `inboundTag → outboundTag`
+    жёстко связывает порт с конфигурацией — поэтому вместо процесса на ячейку
+    хватает одного на всю пачку. Теги содержат номер ячейки: в логе ядра строки
+    соединения помечены `[in → out]`, и только по ним ошибку можно вернуть той
+    проверке, которой она принадлежит.
+    """
     return {
         # info, а не warning: на warning ядро молчит о причинах отказа,
         # а именно они и нужны в результате проверки
         "log": {"loglevel": "info"},
         "inbounds": [{
-            "tag": INBOUND_TAG,
+            "tag": entry.inbound_tag,
             "listen": "127.0.0.1",
-            "port": socks_port,
+            "port": entry.socks_port,
             "protocol": "socks",
             "settings": {"auth": "noauth", "udp": False},
-        }],
+        } for entry in entries],
         "outbounds": [{
-            "tag": OUTBOUND_TAG,
-            "protocol": _protocol_name(endpoint.protocol),
-            "settings": _settings(endpoint),
-            "streamSettings": _stream_settings(endpoint),
-        }],
+            "tag": entry.outbound_tag,
+            "protocol": _protocol_name(entry.endpoint.protocol),
+            "settings": _settings(entry.endpoint),
+            "streamSettings": _stream_settings(entry.endpoint),
+        } for entry in entries],
         "routing": {"rules": [{
             "type": "field",
-            "inboundTag": [INBOUND_TAG],
-            "outboundTag": OUTBOUND_TAG,
-        }]},
+            "inboundTag": [entry.inbound_tag],
+            "outboundTag": entry.outbound_tag,
+        } for entry in entries]},
     }
 
 
