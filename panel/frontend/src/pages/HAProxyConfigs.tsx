@@ -190,6 +190,70 @@ function BackendServerRow({
   )
 }
 
+// ==================== Health Check ====================
+
+function HealthCheckSection({
+  opts, onChange, simple, t,
+}: {
+  opts: BalancerOptions
+  onChange: (o: BalancerOptions) => void
+  simple?: boolean
+  t: (k: string) => string
+}) {
+  const upd = (patch: Partial<BalancerOptions>) => onChange({ ...opts, ...patch })
+  const inp = "w-full px-2.5 py-1 rounded-lg bg-dark-800 border border-dark-700 text-dark-100 text-sm focus:outline-none focus:border-accent-500/50"
+  const current = opts.health_check_type ?? (simple ? 'tcp-check' : '')
+
+  return (
+    <>
+      <div>
+        <label className="flex items-center gap-1 text-xs text-dark-400 mb-1">
+          {t('balancer.health_check_type')}
+          <FAQIcon screen="HAPROXY_CONFIGS_HEALTHCHECK" size="sm" />
+        </label>
+        <select value={current} onChange={e => upd({ health_check_type: e.target.value || undefined })} className={inp}>
+          {!simple && <option value="">—</option>}
+          <option value="tcp-check">{t('balancer.tcp_check')}</option>
+          {!simple && <option value="httpchk">{t('balancer.http_check')}</option>}
+          <option value="tls-check">{t('balancer.tls_check')}</option>
+        </select>
+        {current === 'tcp-check' && <p className="text-[10px] text-dark-500 mt-0.5">{t('balancer.tcp_check_hint')}</p>}
+        {current === 'tls-check' && <p className="text-[10px] text-dark-500 mt-0.5">{t('balancer.tls_check_hint')}</p>}
+      </div>
+
+      {current === 'httpchk' && (
+        <div className="grid grid-cols-3 gap-2">
+          <div>
+            <label className="block text-[10px] text-dark-500 mb-0.5">{t('balancer.httpchk_method')}</label>
+            <select value={opts.httpchk_method ?? 'GET'} onChange={e => upd({ httpchk_method: e.target.value })} className={inp}>
+              <option>GET</option><option>HEAD</option><option>OPTIONS</option>
+            </select>
+          </div>
+          <div>
+            <label className="block text-[10px] text-dark-500 mb-0.5">{t('balancer.httpchk_uri')}</label>
+            <input type="text" value={opts.httpchk_uri ?? ''} onChange={e => upd({ httpchk_uri: e.target.value || undefined })}
+              placeholder="/health" className={inp} />
+          </div>
+          <div>
+            <label className="block text-[10px] text-dark-500 mb-0.5">{t('balancer.httpchk_expect')}</label>
+            <input type="text" value={opts.httpchk_expect ?? ''} onChange={e => upd({ httpchk_expect: e.target.value || undefined })}
+              placeholder="status 200" className={inp} />
+          </div>
+        </div>
+      )}
+
+      {current === 'tls-check' && (
+        <div>
+          <label className="block text-[10px] text-dark-500 mb-0.5">{t('balancer.check_sni')}</label>
+          <input type="text" value={opts.check_sni ?? ''} onChange={e => upd({ check_sni: e.target.value || undefined })}
+            placeholder="www.microsoft.com" className={inp} />
+          <p className="text-[10px] text-dark-500 mt-0.5">{t('balancer.check_sni_hint')}</p>
+        </div>
+      )}
+    </>
+  )
+}
+
 // ==================== Balancer Settings ====================
 
 function BalancerSettingsSection({
@@ -237,39 +301,7 @@ function BalancerSettingsSection({
 
       {expanded && (
         <div className="space-y-3 pl-2 border-l-2 border-dark-700/40">
-          {/* Health check */}
-          <div>
-            <label className="flex items-center gap-1 text-xs text-dark-400 mb-1">
-              {t('balancer.health_check_type')}
-              <FAQIcon screen="HAPROXY_CONFIGS_HEALTHCHECK" size="sm" />
-            </label>
-            <select value={opts.health_check_type ?? ''} onChange={e => upd({ health_check_type: e.target.value || undefined })} className={inp}>
-              <option value="">—</option>
-              <option value="tcp-check">{t('balancer.tcp_check')}</option>
-              <option value="httpchk">{t('balancer.http_check')}</option>
-            </select>
-          </div>
-
-          {opts.health_check_type === 'httpchk' && (
-            <div className="grid grid-cols-3 gap-2">
-              <div>
-                <label className="block text-[10px] text-dark-500 mb-0.5">{t('balancer.httpchk_method')}</label>
-                <select value={opts.httpchk_method ?? 'GET'} onChange={e => upd({ httpchk_method: e.target.value })} className={inp}>
-                  <option>GET</option><option>HEAD</option><option>OPTIONS</option>
-                </select>
-              </div>
-              <div>
-                <label className="block text-[10px] text-dark-500 mb-0.5">{t('balancer.httpchk_uri')}</label>
-                <input type="text" value={opts.httpchk_uri ?? ''} onChange={e => upd({ httpchk_uri: e.target.value || undefined })}
-                  placeholder="/health" className={inp} />
-              </div>
-              <div>
-                <label className="block text-[10px] text-dark-500 mb-0.5">{t('balancer.httpchk_expect')}</label>
-                <input type="text" value={opts.httpchk_expect ?? ''} onChange={e => upd({ httpchk_expect: e.target.value || undefined })}
-                  placeholder="status 200" className={inp} />
-              </div>
-            </div>
-          )}
+          <HealthCheckSection opts={opts} onChange={onChange} t={t} />
 
           {/* Sticky sessions */}
           <div>
@@ -513,6 +545,12 @@ function RuleForm({
               <Toggle value={form.send_proxy} onChange={v => setForm(f => ({ ...f, send_proxy: v }))} label={t('haproxy.send_proxy')} />
               <Toggle value={form.accept_proxy} onChange={v => setForm(f => ({ ...f, accept_proxy: v }))} label={t('haproxy.accept_proxy')} />
             </div>
+            <HealthCheckSection
+              opts={form.balancer_options || { ...DEFAULT_BALANCER_OPTIONS }}
+              onChange={o => setForm(f => ({ ...f, balancer_options: o }))}
+              simple
+              t={t}
+            />
           </>
         ) : (
           /* Balancer mode */
@@ -712,11 +750,19 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
         servers: form.servers, balancer_options: form.balancer_options,
       }
     }
+    // У одиночного правила из всех опций бэкенда осмысленна только проверка
+    // живости — остальное (алгоритм, липкость) без пула серверов не работает.
+    const check = form.balancer_options?.health_check_type
     return {
       name: form.name, rule_type: 'tcp',
       listen_port: parseInt(form.listen_port) || 0,
       target_ip: form.target_ip, target_port: parseInt(form.target_port) || 0,
       send_proxy: form.send_proxy, accept_proxy: form.accept_proxy, is_balancer: false,
+      balancer_options: check === 'tls-check' ? {
+        algorithm: 'roundrobin',
+        health_check_type: 'tls-check',
+        check_sni: form.balancer_options?.check_sni,
+      } : undefined,
     }
   }
 
@@ -975,6 +1021,11 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                             </span>
                             <span className="text-[10px] text-dark-500 hidden sm:block">{r.balancer_options?.algorithm}</span>
                             {r.accept_proxy && <span className="text-[10px] text-cyan-400/60 hidden sm:block">ACCEPT</span>}
+                            {r.balancer_options?.health_check_type === 'tls-check' && (
+                              <Tooltip label={t('balancer.tls_check_badge')}>
+                                <span className="text-[10px] text-green-400/70 hidden sm:block">TLS</span>
+                              </Tooltip>
+                            )}
                           </>
                         ) : (
                           <>
@@ -983,6 +1034,11 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                             </span>
                             {r.accept_proxy && <span className="text-[10px] text-cyan-400/60 hidden sm:block">ACCEPT</span>}
                             {r.send_proxy && <span className="text-[10px] text-yellow-400/60 hidden sm:block">PROXY</span>}
+                            {r.balancer_options?.health_check_type === 'tls-check' && (
+                              <Tooltip label={t('balancer.tls_check_badge')}>
+                                <span className="text-[10px] text-green-400/70 hidden sm:block">TLS</span>
+                              </Tooltip>
+                            )}
                           </>
                         )}
                       </div>

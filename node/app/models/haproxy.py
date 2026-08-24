@@ -55,6 +55,8 @@ class BalancerOptionsModel(BaseModel):
     httpchk_method: Optional[str] = None
     httpchk_uri: Optional[str] = None
     httpchk_expect: Optional[str] = None
+    check_sni: Optional[str] = Field(None, pattern=OPTIONAL_DOMAIN_PATTERN, max_length=253,
+                                     description="SNI for the masking-site health check")
     sticky_type: Optional[str] = None
     cookie_name: Optional[str] = None
     cookie_options: Optional[str] = None

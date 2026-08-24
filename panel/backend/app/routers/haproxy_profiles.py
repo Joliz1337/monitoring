@@ -66,6 +66,7 @@ class BalancerOptionsData(BaseModel):
     httpchk_method: Optional[str] = None
     httpchk_uri: Optional[str] = None
     httpchk_expect: Optional[str] = None
+    check_sni: Optional[str] = None
     sticky_type: Optional[str] = None
     cookie_name: Optional[str] = None
     cookie_options: Optional[str] = None
@@ -594,7 +595,7 @@ def _serialize_balancer_options(opts: BalancerOptions) -> dict:
         "hash_type": opts.hash_type,
         "health_check_type": opts.health_check_type,
         "httpchk_method": opts.httpchk_method, "httpchk_uri": opts.httpchk_uri,
-        "httpchk_expect": opts.httpchk_expect,
+        "httpchk_expect": opts.httpchk_expect, "check_sni": opts.check_sni,
         "sticky_type": opts.sticky_type, "cookie_name": opts.cookie_name,
         "cookie_options": opts.cookie_options,
         "stick_table_type": opts.stick_table_type,
