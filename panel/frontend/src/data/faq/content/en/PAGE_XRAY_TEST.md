@@ -20,6 +20,8 @@ The "Client" field picks what the panel presents itself as. Happ profiles (iPhon
 
 The device identifier is derived from the subscription URL and never changes: the same address always yields the same HWID, regardless of the chosen device or panel restarts. That way checks do not register new devices in your panel or eat the key owner's limit.
 
+A subscription may return a link list or ready-made configs — including an array of several profiles, each with its own name and set of servers. All of them are parsed, and the profile name is prefixed to the server name so you can tell which server came from where in a long list.
+
 ## Test options
 
 **Full check.** On — the panel starts a proxy core and actually reaches the internet through it; that is the only way to know a key works. Off — only the fast probes remain, with no core started: domain resolution and a TCP connection to the port. Fast mode is handy for weeding dead servers out of a long list in seconds, but "the port answers" is not "traffic passes".

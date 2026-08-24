@@ -11,6 +11,7 @@ clash_api — на ноде с host-сетью это открытый порт 
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import Any, Optional
 
 from app.services.xray_test.errors import LinkParseError
@@ -38,24 +39,49 @@ DROPPABLE_SECTIONS = (
 
 
 def parse_config(text: str) -> tuple[list[ProxyEndpoint], list[str]]:
-    """JSON-конфиг → (конфигурации, названия отброшенных секций)."""
+    """JSON-конфиг → (конфигурации, названия отброшенных секций).
+
+    Массив на верхнем уровне бывает двух видов: список исходящих подключений и
+    список целых конфигов (так подписки отдают набор профилей — каждый со своим
+    именем в `remarks`). Различаются по наличию ключа outbounds внутри.
+    """
     try:
         data = json.loads(text)
     except json.JSONDecodeError as exc:
         raise LinkParseError(f"Не разобрать JSON: {exc}") from exc
 
-    if isinstance(data, list):
-        outbounds = data
-        dropped: list[str] = []
-    elif isinstance(data, dict):
-        raw = data.get("outbounds")
-        outbounds = raw if isinstance(raw, list) else []
-        dropped = [name for name in DROPPABLE_SECTIONS if name in data]
+    if isinstance(data, dict):
+        configs = [data]
+    elif isinstance(data, list):
+        configs = data if _is_config_list(data) else [{"outbounds": data}]
     else:
         raise LinkParseError("Конфиг должен быть объектом или массивом JSON")
 
-    if not outbounds:
-        raise LinkParseError("В конфиге нет секции outbounds")
+    endpoints: list[ProxyEndpoint] = []
+    dropped: list[str] = []
+    for config in configs:
+        if not isinstance(config, dict):
+            continue
+        found, sections = _endpoints_from_config(config)
+        endpoints.extend(found)
+        dropped.extend(section for section in sections if section not in dropped)
+
+    if not endpoints:
+        raise LinkParseError("В конфиге нет исходящих подключений, которые можно проверить")
+    return endpoints, dropped
+
+
+def _is_config_list(items: list[Any]) -> bool:
+    return any(isinstance(item, dict) and "outbounds" in item for item in items)
+
+
+def _endpoints_from_config(config: dict[str, Any]) -> tuple[list[ProxyEndpoint], list[str]]:
+    raw = config.get("outbounds")
+    outbounds = raw if isinstance(raw, list) else []
+    dropped = [name for name in DROPPABLE_SECTIONS if name in config]
+    # Имя профиля из подписки: у отдельных outbounds его нет, а различать
+    # «Германия» и «Нидерланды» в списке из сотни серверов необходимо
+    profile_name = str(config.get("remarks") or "").strip()
 
     endpoints: list[ProxyEndpoint] = []
     for item in outbounds:
@@ -65,11 +91,15 @@ def parse_config(text: str) -> tuple[list[ProxyEndpoint], list[str]]:
         if not kind or kind in SERVICE_OUTBOUNDS:
             continue
         endpoint = _outbound_to_endpoint(item, kind)
-        if endpoint is not None:
-            endpoints.append(endpoint)
-
-    if not endpoints:
-        raise LinkParseError("В конфиге нет исходящих подключений, которые можно проверить")
+        if endpoint is None:
+            continue
+        if profile_name:
+            tag = endpoint.remark
+            endpoint = replace(
+                endpoint,
+                remark=f"{profile_name} · {tag}" if tag else profile_name,
+            )
+        endpoints.append(endpoint)
     return endpoints, dropped
 
 

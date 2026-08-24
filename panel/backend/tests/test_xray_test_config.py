@@ -437,5 +437,82 @@ class LocationMatrixTest(unittest.TestCase):
                          locations=[(f"node:{i}", str(i)) for i in range(25)])
 
 
+class SubscriptionConfigListTest(unittest.TestCase):
+    """Подписка отдаёт массив целых конфигов, а не список outbounds.
+
+    Так устроены реальные подписки: каждый элемент — самостоятельный профиль
+    со своим именем в `remarks`, своими outbounds и балансером. Массив
+    outbounds на верхнем уровне тоже встречается, поэтому вид определяется по
+    содержимому, а не по типу корня.
+    """
+
+    def _profile(self, name, hosts):
+        return {
+            "remarks": name,
+            "dns": {"servers": ["1.1.1.1"]},
+            "inbounds": [{"listen": "127.0.0.1", "port": 10808, "protocol": "socks"}],
+            "routing": {"balancers": [{"tag": "B", "selector": ["proxy"]}], "rules": []},
+            "outbounds": [
+                {
+                    "protocol": "vless", "tag": f"proxy{'' if i == 0 else f'-{i + 1}'}",
+                    "settings": {"vnext": [{"address": host, "port": 2053, "users": [
+                        {"id": UUID, "encryption": "none"}]}]},
+                    "streamSettings": {"network": "grpc", "security": "reality",
+                                       "grpcSettings": {"serviceName": "s"},
+                                       "realitySettings": {"serverName": "eh.vk.com",
+                                                           "publicKey": PBK}},
+                }
+                for i, host in enumerate(hosts)
+            ] + [{"protocol": "freedom", "tag": "direct"}],
+        }
+
+    def test_array_of_configs_parsed(self):
+        raw = json.dumps([
+            self._profile("Европа", ["1.1.1.1", "2.2.2.2"]),
+            self._profile("Сингапур", ["3.3.3.3"]),
+        ])
+        endpoints, dropped = parse_config(raw)
+
+        self.assertEqual(len(endpoints), 3)
+        self.assertEqual(
+            [e.address for e in endpoints], ["1.1.1.1", "2.2.2.2", "3.3.3.3"]
+        )
+        self.assertIn("routing", dropped)
+        self.assertIn("inbounds", dropped)
+
+    def test_profile_name_prefixes_tag(self):
+        raw = json.dumps([self._profile("Германия", ["1.1.1.1", "2.2.2.2"])])
+        endpoints, _ = parse_config(raw)
+
+        self.assertEqual(endpoints[0].remark, "Германия · proxy")
+        self.assertEqual(endpoints[1].remark, "Германия · proxy-2")
+
+    def test_profile_without_remarks_keeps_tag(self):
+        profile = self._profile("", ["1.1.1.1"])
+        profile.pop("remarks")
+        endpoints, _ = parse_config(json.dumps([profile]))
+        self.assertEqual(endpoints[0].remark, "proxy")
+
+    def test_plain_outbound_array_still_works(self):
+        raw = json.dumps([{
+            "protocol": "trojan", "tag": "single",
+            "settings": {"servers": [{"address": "h.io", "password": "pw", "port": 443}]},
+            "streamSettings": {"network": "tcp", "security": "tls"},
+        }])
+        endpoints, _ = parse_config(raw)
+
+        self.assertEqual(len(endpoints), 1)
+        self.assertEqual(endpoints[0].remark, "single")
+
+    def test_reality_details_survive(self):
+        endpoints, _ = parse_config(json.dumps([self._profile("EU", ["1.1.1.1"])]))
+        endpoint = endpoints[0]
+
+        self.assertEqual(endpoint.tls.security.value, "reality")
+        self.assertEqual(endpoint.tls.sni, "eh.vk.com")
+        self.assertEqual(endpoint.tls.reality_public_key, PBK)
+        self.assertEqual(endpoint.transport.kind, Transport.GRPC)
+
+
 if __name__ == "__main__":
     unittest.main()
