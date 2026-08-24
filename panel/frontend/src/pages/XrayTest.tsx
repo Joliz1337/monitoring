@@ -129,6 +129,7 @@ function TesterTab({ source }: { source: XrayTestSource }) {
   const [selected, setSelected] = useState<Set<number>>(new Set())
 
   const [sniText, setSniText] = useState('')
+  const [includeOriginal, setIncludeOriginal] = useState(true)
   const [syncHost, setSyncHost] = useState(false)
   const [locations, setLocations] = useState<string[]>(['panel'])
   const [fullMode, setFullMode] = useState(true)
@@ -204,8 +205,10 @@ function TesterTab({ source }: { source: XrayTestSource }) {
 
   const totalCells = useMemo(() => {
     const chosen = selected.size || supported.length
-    return chosen * Math.max(1, sniList.length)
-  }, [selected.size, supported.length, sniList.length])
+    // Родное имя из ключа идёт отдельной проверкой перед списком оператора
+    const variants = sniList.length ? sniList.length + (includeOriginal ? 1 : 0) : 1
+    return chosen * variants
+  }, [selected.size, supported.length, sniList.length, includeOriginal])
 
   const handleParse = useCallback(async () => {
     if (!payload.trim()) return
@@ -248,12 +251,13 @@ function TesterTab({ source }: { source: XrayTestSource }) {
       selected: indices,
       sni_list: sniList,
       sync_transport_host: syncHost,
+      include_original_sni: includeOriginal,
       locations,
       full: fullMode,
       tls_inspect: tlsInspect,
       measure_speed: measureSpeed,
     })
-  }, [parsed, selected, supported, run, source, payload, client, activeSource, sniList,
+  }, [parsed, selected, supported, run, source, payload, client, activeSource, sniList, includeOriginal,
       syncHost, locations, fullMode, tlsInspect, measureSpeed, t])
 
   const toggleConfig = (index: number) => {
@@ -439,6 +443,18 @@ function TesterTab({ source }: { source: XrayTestSource }) {
                   ))}
                 </div>
               )}
+              <label className="flex items-start gap-2 mt-2 text-sm text-dark-300 cursor-pointer select-none">
+                <span className="mt-0.5">
+                  <Checkbox checked={includeOriginal}
+                            onChange={event => setIncludeOriginal(event.target.checked)} />
+                </span>
+                <span>
+                  {t('xray_test.include_original_sni')}
+                  <span className="block text-dark-500 text-[13px]">
+                    {t('xray_test.include_original_sni_hint')}
+                  </span>
+                </span>
+              </label>
               <label className="flex items-start gap-2 mt-2 text-sm text-dark-300 cursor-pointer select-none">
                 <span className="mt-0.5">
                   <Checkbox checked={syncHost} onChange={event => setSyncHost(event.target.checked)} />

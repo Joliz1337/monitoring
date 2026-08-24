@@ -338,19 +338,39 @@ class MatrixTest(unittest.TestCase):
         self.assertIsNone(cells[0].sni_label)
 
     def test_matrix_is_product(self):
+        """Родное имя ключа идёт первым, дальше — список оператора."""
         cells = build_matrix([self._endpoint()], ["a.com", "b.com", "c.com"])
-        self.assertEqual(len(cells), 3)
-        self.assertEqual([cell.endpoint.tls.sni for cell in cells], ["a.com", "b.com", "c.com"])
+        self.assertEqual(len(cells), 4)
+        self.assertEqual(
+            [cell.endpoint.tls.sni for cell in cells],
+            ["orig.com", "a.com", "b.com", "c.com"],
+        )
+        self.assertEqual([cell.sni_label for cell in cells], [None, "a.com", "b.com", "c.com"])
+
+    def test_original_sni_can_be_dropped(self):
+        cells = build_matrix([self._endpoint()], ["a.com", "b.com"], include_original_sni=False)
+        self.assertEqual([cell.sni_label for cell in cells], ["a.com", "b.com"])
+
+    def test_original_sni_not_duplicated(self):
+        """Оператор перечислил родное имя сам — второй раз не гоняем."""
+        cells = build_matrix([self._endpoint()], ["ORIG.com", "a.com"])
+        self.assertEqual([cell.sni_label for cell in cells], ["orig.com", "a.com"])
+
+    def test_original_sni_ignored_without_list(self):
+        """Без списка проверять нечего кроме ключа — флаг ничего не меняет."""
+        self.assertEqual(len(build_matrix([self._endpoint()])), 1)
+        self.assertEqual(len(build_matrix([self._endpoint()], include_original_sni=False)), 1)
 
     def test_duplicates_and_case_normalized(self):
         cells = build_matrix([self._endpoint()], ["A.com", "a.com", " a.com ", "b.com"])
-        self.assertEqual([cell.sni_label for cell in cells], ["a.com", "b.com"])
+        self.assertEqual([cell.sni_label for cell in cells], [None, "a.com", "b.com"])
 
     def test_host_follows_sni_when_requested(self):
         endpoint = self._endpoint(
             f"vless://{UUID}@h.io:443?type=ws&security=tls&host=cdn.io&path=%2Fp#x"
         )
-        cells = build_matrix([endpoint], ["new.com"], sync_transport_host=True)
+        cells = build_matrix([endpoint], ["new.com"], sync_transport_host=True,
+                             include_original_sni=False)
         self.assertEqual(cells[0].endpoint.transport.host, "new.com")
 
     def test_host_kept_by_default(self):
@@ -358,12 +378,13 @@ class MatrixTest(unittest.TestCase):
         endpoint = self._endpoint(
             f"vless://{UUID}@h.io:443?type=ws&security=tls&host=cdn.io&path=%2Fp#x"
         )
-        cells = build_matrix([endpoint], ["new.com"])
+        cells = build_matrix([endpoint], ["new.com"], include_original_sni=False)
         self.assertEqual(cells[0].endpoint.transport.host, "cdn.io")
 
     def test_tcp_host_untouched(self):
         endpoint = self._endpoint()
-        cells = build_matrix([endpoint], ["new.com"], sync_transport_host=True)
+        cells = build_matrix([endpoint], ["new.com"], sync_transport_host=True,
+                             include_original_sni=False)
         self.assertEqual(cells[0].endpoint.transport.kind, Transport.TCP)
         self.assertEqual(cells[0].endpoint.tls.sni, "new.com")
 
@@ -376,7 +397,7 @@ class MatrixTest(unittest.TestCase):
         """Потолка на размер прогона нет: ячейки разбирает очередь рабочих."""
         endpoints = [self._endpoint() for _ in range(20)]
         cells = build_matrix(endpoints, [f"s{i}.com" for i in range(30)])
-        self.assertEqual(len(cells), 600)
+        self.assertEqual(len(cells), 20 * 31)
 
     def test_sni_limit_enforced(self):
         with self.assertRaises(LimitExceededError):
@@ -431,7 +452,7 @@ class LocationMatrixTest(unittest.TestCase):
         endpoints = [self._endpoint() for _ in range(10)]
         cells = build_matrix(endpoints, [f"s{i}.com" for i in range(11)],
                              locations=[("panel", ""), ("node:1", "N")])
-        self.assertEqual(len(cells), 220)
+        self.assertEqual(len(cells), 10 * 12 * 2)
 
     def test_too_many_locations_rejected(self):
         with self.assertRaises(LimitExceededError):

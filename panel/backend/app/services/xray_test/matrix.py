@@ -40,6 +40,7 @@ def build_matrix(
     sni_list: Optional[list[str]] = None,
     *,
     sync_transport_host: bool = False,
+    include_original_sni: bool = True,
     links: Optional[list[Optional[str]]] = None,
     locations: Optional[list[tuple[str, str]]] = None,
 ) -> list[TestCell]:
@@ -48,6 +49,11 @@ def build_matrix(
     Локации — пары (код, отображаемое имя). Пустой список означает прогон с
     самой панели: один и тот же ключ из разных точек ведёт себя по-разному,
     поэтому каждая точка даёт свою ячейку, а не усредняется с остальными.
+
+    `include_original_sni` добавляет к списку оператора родное имя из ключа —
+    первой проверкой и без пометки SNI. Без него подстановку не с чем сравнить:
+    все домены отвалились — и непонятно, режут их или лёг сам сервер. Имя,
+    которое оператор перечислил сам, второй раз не проверяется.
 
     Размер матрицы не ограничен: ячейки исполняются очередью с постоянным
     числом рабочих, поэтому большой прогон занимает время, а не память.
@@ -70,13 +76,15 @@ def build_matrix(
     cells: list[TestCell] = []
     for position, endpoint in enumerate(endpoints):
         link = links[position] if links and position < len(links) else None
-        variants = (
-            [(endpoint, None)] if not names
-            else [
+        if names:
+            variants = [
                 (apply_sni(endpoint, name, sync_transport_host=sync_transport_host), name)
                 for name in names
             ]
-        )
+            if include_original_sni and endpoint.effective_sni.lower() not in names:
+                variants.insert(0, (endpoint, None))
+        else:
+            variants = [(endpoint, None)]
         for variant, sni_label in variants:
             for code, title in places:
                 cells.append(TestCell(

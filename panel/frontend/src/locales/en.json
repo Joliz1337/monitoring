@@ -1013,6 +1013,8 @@
     "location_panel": "Panel",
     "pick_location": "Pick at least one place to run from",
     "sync_host_hint": "Needed when the key's transport Host equals the SNI — otherwise the server answers 404",
+    "include_original_sni": "Also test the config's own SNI",
+    "include_original_sni_hint": "The key is tested as-is first, then with each domain from the list. Without it there is nothing to compare against: if every domain fails, you cannot tell filtering from a dead server.",
     "reset_filter": "Reset",
     "filter_empty": "Nothing matches the filter",
     "core_says": "What the core reported:",

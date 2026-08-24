@@ -653,6 +653,7 @@ export interface XrayTestRunRequest {
   selected?: number[] | null
   sni_list: string[]
   sync_transport_host: boolean
+  include_original_sni: boolean
   locations: string[]
   full: boolean
   tls_inspect: boolean

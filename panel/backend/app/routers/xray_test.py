@@ -62,6 +62,7 @@ class RunRequest(BaseModel):
     selected: Optional[list[int]] = None
     sni_list: list[str] = Field(default_factory=list)
     sync_transport_host: bool = False
+    include_original_sni: bool = True
     locations: list[str] = Field(default_factory=lambda: ["panel"])
     full: bool = True
     tls_inspect: bool = True
@@ -196,6 +197,7 @@ async def start_run(req: RunRequest, _: dict = Depends(verify_auth)):
         cells = build_matrix(
             endpoints, req.sni_list,
             sync_transport_host=req.sync_transport_host,
+            include_original_sni=req.include_original_sni,
             links=links,
             locations=[(code, title) for code, title, _ in places],
         )
