@@ -345,6 +345,9 @@ def _parse_result(cell: TestCell, events: list[dict]) -> CellResult:
         parsed_detail, hint = core_output.STALLED_DETAIL, core_output.STALLED_HINT
     result.detail = sanitize_output(parsed_detail or raw_detail)[:400]
     result.hint = hint or core_output.detect_hint(raw_detail)
+    # У оговорок объяснение выводится из самой причины, лога ядра для них нет
+    if result.reason in (FailReason.SLOW_RTT, FailReason.EXIT_IP_UNKNOWN):
+        result.hint = result.reason.value
     result.http_status = payload.get("http_status")
     result.exit_ip = payload.get("exit_ip")
     result.exit_country = payload.get("exit_country")

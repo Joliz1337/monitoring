@@ -7,7 +7,7 @@ Checks proxy configurations: a link, a pasted JSON config, or a subscription. Th
 | Verdict | Meaning |
 |---|---|
 | **Works** | The request through the proxy succeeded |
-| **Works with caveats** | Traffic passes, but latency is above 1.5 s or the exit IP could not be determined |
+| **Works with caveats** | Traffic passes, but latency is above 1.5 s or the exit IP could not be determined. Which of the two is stated in the expanded row |
 | **Fails** | The reason is in the verdict column — hover over it or expand the row |
 
 The TCP probe runs before the core starts and rules out dead servers immediately. Hysteria2 and TUIC skip it: they run over UDP, where a silent TCP port means nothing.

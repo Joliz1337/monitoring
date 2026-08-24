@@ -170,8 +170,7 @@ class LocalCoreRunner:
         if options.speed:
             result.timings.speed_mbps = await probes.download_speed(launched.port)
 
-        result.verdict = _verdict(result, options)
-        return result
+        return _apply_verdict(result, options)
 
     async def _launch(self, cell: TestCell, core: Core, binary: Path) -> _LaunchedCore:
         WORK_DIR.mkdir(parents=True, exist_ok=True)
@@ -372,11 +371,23 @@ def _fail(
     return result
 
 
-def _verdict(result: CellResult, options: probes.ProbeOptions) -> Verdict:
+def _apply_verdict(result: CellResult, options: probes.ProbeOptions) -> CellResult:
     """Медленный, но живой канал — отдельная категория, а не «работает».
 
-    Иначе ключ с полутора секундами задержки выглядел бы так же, как быстрый.
+    Оговорка без объяснения бесполезна: у неё тоже проставляется причина, иначе
+    «с оговорками» выглядит как вердикт без повода.
     """
-    slow = (result.timings.rtt_ms or 0) > probes.DEGRADED_RTT_MS
-    identity_missing = options.exit_identity and not result.exit_ip
-    return Verdict.DEGRADED if slow or identity_missing else Verdict.OK
+    if (result.timings.rtt_ms or 0) > probes.DEGRADED_RTT_MS:
+        result.verdict = Verdict.DEGRADED
+        result.reason = FailReason.SLOW_RTT
+        result.hint = "SLOW_RTT"
+        return result
+
+    if options.exit_identity and not result.exit_ip:
+        result.verdict = Verdict.DEGRADED
+        result.reason = FailReason.EXIT_IP_UNKNOWN
+        result.hint = "EXIT_IP_UNKNOWN"
+        return result
+
+    result.verdict = Verdict.OK
+    return result

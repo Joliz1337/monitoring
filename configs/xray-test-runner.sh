@@ -13,7 +13,7 @@
 #         xray-test-runner.sh version
 set -uo pipefail
 
-RUNNER_VERSION="1.3.0"
+RUNNER_VERSION="1.4.0"
 
 TOOLS_DIR="/opt/monitoring-node/tools"
 CORES_DIR="$TOOLS_DIR/cores"
@@ -279,13 +279,17 @@ run_cell() {
     stop_core
     rm -rf "$WORKDIR"; WORKDIR=""
 
-    local verdict="ok"
+    # Оговорка без причины бесполезна: вердикт и код проставляются вместе
+    local verdict="ok" reason='null'
     if [ "$OPT_HTTP" = "1" ]; then
-        { [ -n "$rtt" ] && [ "$rtt" -gt "$DEGRADED_RTT_MS" ]; } && verdict="degraded"
-        [ "$OPT_EXIT" = "1" ] && [ -z "$exit_ip" ] && verdict="degraded"
+        if [ -n "$rtt" ] && [ "$rtt" -gt "$DEGRADED_RTT_MS" ]; then
+            verdict="degraded"; reason='"SLOW_RTT"'
+        elif [ "$OPT_EXIT" = "1" ] && [ -z "$exit_ip" ]; then
+            verdict="degraded"; reason='"EXIT_IP_UNKNOWN"'
+        fi
     fi
 
-    emit_cell "$index" "$verdict" 'null' "" "${tcp_ms:-null}" "${handshake:-null}" \
+    emit_cell "$index" "$verdict" "$reason" "" "${tcp_ms:-null}" "${handshake:-null}" \
         "${rtt:-null}" "${status:-null}" "$(json_str "$exit_ip")" \
         "$(json_str "$exit_country")" "${speed:-null}" \
         "$(json_str "$resolved_ip")" "${dns_ms:-null}" "${tcp_avg:-null}" "${tcp_jitter:-null}"

@@ -516,5 +516,65 @@ class SubscriptionConfigListTest(unittest.TestCase):
         self.assertEqual(endpoint.transport.kind, Transport.GRPC)
 
 
+class DegradedReasonTest(unittest.TestCase):
+    """У «с оговорками» тоже должна быть причина.
+
+    Вердикт без повода бесполезен: в интерфейсе он выглядел жёлтым бейджем без
+    объяснения, хотя поводов ровно два и они разные по смыслу.
+    """
+
+    def _result(self, **kwargs):
+        from app.services.xray_test.models import CellResult, ProbeTimings
+
+        timings = ProbeTimings(rtt_ms=kwargs.pop("rtt_ms", 100))
+        return CellResult(
+            index=0, remark="", protocol="vless", address="h.io", port=443,
+            sni=None, transport="tcp", security="reality", timings=timings, **kwargs,
+        )
+
+    def test_slow_link_named(self):
+        from app.services.xray_test.probes import ProbeOptions
+        from app.services.xray_test.runner import _apply_verdict
+
+        result = _apply_verdict(self._result(rtt_ms=2500, exit_ip="1.2.3.4"), ProbeOptions())
+
+        self.assertEqual(result.verdict.value, "degraded")
+        self.assertEqual(result.reason.value, "SLOW_RTT")
+        self.assertEqual(result.hint, "SLOW_RTT")
+
+    def test_missing_exit_ip_named(self):
+        from app.services.xray_test.probes import ProbeOptions
+        from app.services.xray_test.runner import _apply_verdict
+
+        result = _apply_verdict(self._result(rtt_ms=632), ProbeOptions(exit_identity=True))
+
+        self.assertEqual(result.verdict.value, "degraded")
+        self.assertEqual(result.reason.value, "EXIT_IP_UNKNOWN")
+
+    def test_fast_with_exit_ip_is_plain_ok(self):
+        from app.services.xray_test.probes import ProbeOptions
+        from app.services.xray_test.runner import _apply_verdict
+
+        result = _apply_verdict(self._result(rtt_ms=90, exit_ip="1.2.3.4"), ProbeOptions())
+
+        self.assertEqual(result.verdict.value, "ok")
+        self.assertIsNone(result.reason)
+
+    def test_exit_probe_disabled_does_not_degrade(self):
+        """Если выходной IP не запрашивали, его отсутствие — не оговорка."""
+        from app.services.xray_test.probes import ProbeOptions
+        from app.services.xray_test.runner import _apply_verdict
+
+        result = _apply_verdict(self._result(rtt_ms=90), ProbeOptions(exit_identity=False))
+        self.assertEqual(result.verdict.value, "ok")
+
+    def test_slow_wins_over_missing_exit(self):
+        from app.services.xray_test.probes import ProbeOptions
+        from app.services.xray_test.runner import _apply_verdict
+
+        result = _apply_verdict(self._result(rtt_ms=3000), ProbeOptions(exit_identity=True))
+        self.assertEqual(result.reason.value, "SLOW_RTT")
+
+
 if __name__ == "__main__":
     unittest.main()

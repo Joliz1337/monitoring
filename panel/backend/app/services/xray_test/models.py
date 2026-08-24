@@ -65,6 +65,9 @@ class FailReason(str, Enum):
     HTTP_BAD_STATUS = "HTTP_BAD_STATUS"
     TLS_REJECTED = "TLS_REJECTED"
     UNSUPPORTED = "UNSUPPORTED"
+    # Не отказы: трафик прошёл, но результат с оговоркой
+    SLOW_RTT = "SLOW_RTT"
+    EXIT_IP_UNKNOWN = "EXIT_IP_UNKNOWN"
     CANCELLED = "CANCELLED"
     NODE_ERROR = "NODE_ERROR"
     INTERNAL = "INTERNAL"

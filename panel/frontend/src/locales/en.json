@@ -1030,7 +1030,11 @@
     "hint_HANDSHAKE_STALLED": "The server accepted the connection but never answered the handshake. For REALITY that is normal behaviour with wrong parameters: check the public key, short id and SNI. The other option is filtering on the way that throttles the connection.",
     "servers_count": "servers: {{count}}",
     "best_rtt": "best",
-    "sni_from_key": "SNI from the key"
+    "sni_from_key": "SNI from the key",
+    "reason_SLOW_RTT": "Works, but slowly",
+    "reason_EXIT_IP_UNKNOWN": "Works, but the exit IP is unknown",
+    "hint_SLOW_RTT": "Traffic passes, but latency is over 1.5 s — such a key is uncomfortable to use. Usually distant geography, an overloaded server or a narrow link.",
+    "hint_EXIT_IP_UNKNOWN": "The connectivity check passed, but the service reporting the exit address did not answer. Servers that filter part of their outbound traffic behave like this: the key works, but not for every site."
   },
   "anti_ddos": {
     "title": "Anti-DDoS",

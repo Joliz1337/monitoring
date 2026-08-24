@@ -448,7 +448,13 @@ function CellDetails({ cell }: { cell: XrayTestCell }) {
         </div>
       )}
       {cell.hint && (
-        <div className="flex items-start gap-2 px-2.5 py-2 rounded-md bg-amber-500/10 border border-amber-500/20 text-amber-300">
+        <div
+          className={`flex items-start gap-2 px-2.5 py-2 rounded-md border ${
+            cell.verdict === 'degraded'
+              ? 'bg-dark-800/60 border-dark-700/60 text-dark-300'
+              : 'bg-amber-500/10 border-amber-500/20 text-amber-300'
+          }`}
+        >
           <Lightbulb className="w-3.5 h-3.5 mt-0.5 shrink-0" />
           <span>{t(`xray_test.hint_${cell.hint}`, '')}</span>
         </div>
