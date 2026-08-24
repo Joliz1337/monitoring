@@ -16,11 +16,20 @@ A TCP check proves exactly one thing: the port accepted a connection. It cannot 
 
 REALITY has a fallback: a client that does not match gets the real masking site. So a live server must answer a plain TLS handshake with its own SNI. That is what this check does — handshake, `GET /`, and the reply has to be sane HTTP: 2xx, a redirect, even 403/404 all count, because each proves a server is working behind the port. Silence or 5xx pulls the server out of rotation.
 
-The whole chain gets verified: the port is open, the core accepted the connection and managed to reach the masking site.
-
-- **SNI** must be a domain from the inbound's `serverNames`. With a foreign name the server drops the connection and the check fails every time.
+- **SNI** — a domain from the inbound's `serverNames`.
 - **Interval.** Every check is a full TLS handshake plus a real outbound request from the core. A single rule uses 30 seconds; in a pool it is set per server, and at 5 seconds one node alone sends tens of thousands of requests a day to the masking site.
 - **TCP rules only.** HTTPS rules terminate TLS in the panel, so a plain HTTP check works there.
+
+### What this check cannot see
+
+A green status means "the core on that server is alive and answering", not "the keys work". Four cases slip past it:
+
+- **A block on a path it does not travel.** The check runs from the node hosting HAProxy. If the filtering sits at the client's operator while the node-to-server path is clean, the status stays green — the check never crosses the filtered segment. Settle it with an Xray test run from the location in question.
+- **A wrong SNI.** REALITY hands any unrecognised client to the masking site, and the check is not a client with a key — so a domain missing from `serverNames` still answers.
+- **Neighbouring inbounds.** Only the address and port named in the rule get checked. Another port on the same server may be throttled without showing up here.
+- **Throttling after the handshake.** The check finishes inside the first few kilobytes. A filter that lets the connection open and then strangles the flow stays invisible to it.
+
+What it does catch reliably: a crashed core, a closed port, a server unreachable from this node at all. That is considerably more than a TCP check gives.
 
 ## Parameters
 
