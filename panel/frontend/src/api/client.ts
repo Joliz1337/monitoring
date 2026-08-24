@@ -654,7 +654,6 @@ export interface XrayTestRunRequest {
   sni_list: string[]
   sync_transport_host: boolean
   locations: string[]
-  concurrency: number
   full: boolean
   tls_inspect: boolean
   measure_speed: boolean

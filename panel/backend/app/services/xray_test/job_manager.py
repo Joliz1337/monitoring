@@ -25,9 +25,10 @@ logger = logging.getLogger(__name__)
 FINISHED_TTL_SECONDS = 900
 LOG_BUFFER_LIMIT = 2000
 MAX_ACTIVE_JOBS = 5
-DEFAULT_CONCURRENCY = 10
 # Через сколько результатов отмечать прогресс в журнале задачи
 PROGRESS_STEP = 25
+# Потолок он же значение по умолчанию: держать проверки медленнее, чем позволяют
+# зарезервированные порты, смысла нет — это просто дольше при том же результате
 MAX_CONCURRENCY = 32
 
 
@@ -81,7 +82,7 @@ class XrayTestJobManager:
         runners: dict[str, CoreRunner],
         *,
         location: str,
-        concurrency: int = DEFAULT_CONCURRENCY,
+        concurrency: int = MAX_CONCURRENCY,
         on_finish: Optional[Callable[[XrayTestJob], Awaitable[None]]] = None,
     ) -> str:
         self._cleanup_finished()

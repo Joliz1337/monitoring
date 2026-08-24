@@ -910,7 +910,6 @@
     "where_panel": "From the panel",
     "multi_sni": "Multi-SNI (one domain per line)",
     "sync_host": "Change transport Host along with SNI",
-    "concurrency": "Concurrency",
     "full_mode": "Full check (start the core and pass real traffic)",
     "tls_inspect": "Inspect the SNI domain certificate",
     "measure_speed": "Measure link speed",

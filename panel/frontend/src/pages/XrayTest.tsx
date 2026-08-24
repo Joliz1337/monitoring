@@ -131,7 +131,6 @@ function TesterTab({ source }: { source: XrayTestSource }) {
   const [sniText, setSniText] = useState('')
   const [syncHost, setSyncHost] = useState(false)
   const [locations, setLocations] = useState<string[]>(['panel'])
-  const [concurrency, setConcurrency] = useState(10)
   const [fullMode, setFullMode] = useState(true)
   const [tlsInspect, setTlsInspect] = useState(true)
   const [measureSpeed, setMeasureSpeed] = useState(false)
@@ -250,13 +249,12 @@ function TesterTab({ source }: { source: XrayTestSource }) {
       sni_list: sniList,
       sync_transport_host: syncHost,
       locations,
-      concurrency,
       full: fullMode,
       tls_inspect: tlsInspect,
       measure_speed: measureSpeed,
     })
   }, [parsed, selected, supported, run, source, payload, client, activeSource, sniList,
-      syncHost, locations, concurrency, fullMode, tlsInspect, measureSpeed, t])
+      syncHost, locations, fullMode, tlsInspect, measureSpeed, t])
 
   const toggleConfig = (index: number) => {
     setSelected(prev => {
@@ -456,20 +454,6 @@ function TesterTab({ source }: { source: XrayTestSource }) {
           </div>
 
           <div className="space-y-3">
-            <div>
-              <label className="block text-xs text-dark-400 mb-1.5">
-                {t('xray_test.concurrency')}: {concurrency}
-              </label>
-              <input
-                type="range"
-                min={1}
-                max={32}
-                value={concurrency}
-                onChange={event => setConcurrency(Number(event.target.value))}
-                className="w-full accent-accent-500"
-              />
-            </div>
-
             <div className="space-y-2 text-xs text-dark-300">
               <Toggle
                 checked={fullMode}
