@@ -13,7 +13,7 @@
 #         xray-test-runner.sh version
 set -uo pipefail
 
-RUNNER_VERSION="1.5.0"
+RUNNER_VERSION="1.6.0"
 
 TOOLS_DIR="/opt/monitoring-node/tools"
 CORES_DIR="$TOOLS_DIR/cores"
@@ -250,6 +250,17 @@ run_cell() {
             -w '%{http_code} %{time_total}' "$GENERATE_204_URL" 2>/dev/null)
         status=$(printf '%s' "$first" | cut -d' ' -f1)
         handshake=$(printf '%s' "$first" | cut -d' ' -f2 | awk '{printf "%.0f", $1*1000}')
+
+        # Проверки идут пачками, и на занятой ноде запрос может не уложиться в
+        # таймаут при живом канале. Одна повторная попытка отсекает такие
+        # ложные отказы; воспроизводимый отказ переживёт и её.
+        if [ -z "$status" ] || [ "$status" = "000" ]; then
+            sleep 1.5
+            first=$(curl_socks -o /dev/null --max-time "$PROBE_TIMEOUT" \
+                -w '%{http_code} %{time_total}' "$GENERATE_204_URL" 2>/dev/null)
+            status=$(printf '%s' "$first" | cut -d' ' -f1)
+            handshake=$(printf '%s' "$first" | cut -d' ' -f2 | awk '{printf "%.0f", $1*1000}')
+        fi
 
         if [ -z "$status" ] || [ "$status" = "000" ]; then
             sleep 0.4

@@ -65,6 +65,9 @@ class HttpResult:
     rtt_ms: Optional[float] = None
     reason: Optional[FailReason] = None
     error: Optional[str] = None
+    # Была вторая попытка: значит первая упала по таймауту, и результат стоит
+    # читать с поправкой — канал как минимум нестабилен
+    retried: bool = False
 
 
 @dataclass
@@ -185,7 +188,28 @@ async def inspect_tls(host: str, port: int, sni: str) -> TlsInfo:
             pass
 
 
+RETRY_PAUSE = 1.5
+RETRY_REASONS = (FailReason.HTTP_TIMEOUT, FailReason.PROXY_HANDSHAKE_FAILED)
+
+
 async def http_through_proxy(socks_port: int, headers: Optional[dict] = None) -> HttpResult:
+    """Проба через прокси с одной повторной попыткой по таймауту.
+
+    Проверки идут пачками, и на загруженной ноде запрос может не уложиться в
+    таймаут при живом канале — вердикт «не работает» по одной такой попытке
+    оказывается ложным. Явные отказы (плохой статус, отказ цели) не повторяем:
+    они воспроизводимы, и вторая попытка только тянет время.
+    """
+    first = await _http_attempt(socks_port, headers)
+    if first.reason not in RETRY_REASONS:
+        return first
+    await asyncio.sleep(RETRY_PAUSE)
+    second = await _http_attempt(socks_port, headers)
+    second.retried = True
+    return second
+
+
+async def _http_attempt(socks_port: int, headers: Optional[dict] = None) -> HttpResult:
     """Два запроса: первый меряет установку соединения, второй — чистый RTT.
 
     Без второго замера медленное рукопожатие и медленный канал сливались бы в
