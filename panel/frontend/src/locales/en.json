@@ -1036,7 +1036,10 @@
     "hint_SLOW_RTT": "Traffic passes, but latency is over 1.5 s — such a key is uncomfortable to use. Usually distant geography, an overloaded server or a narrow link.",
     "hint_EXIT_IP_UNKNOWN": "The connectivity check passed, but the service reporting the exit address did not answer. Servers that filter part of their outbound traffic behave like this: the key works, but not for every site.",
     "filter_blocked": "Possible DPI block",
-    "filter_blocked_hint": "The server port answers but traffic does not pass — the typical picture of DPI filtering: the TCP handshake goes through and the connection itself is throttled. Explicit failures (closed port, wrong certificate, bad key) are not counted here."
+    "filter_blocked_hint": "The server port answers but traffic does not pass — the typical picture of DPI filtering: the TCP handshake goes through and the connection itself is throttled. Explicit failures (closed port, wrong certificate, bad key) are not counted here.",
+    "reason_DPI_BLOCK": "Looks like filtering on the way",
+    "hint_DPI_BLOCK": "The server port answers, but even a plain TLS handshake with its SNI fails — a live REALITY server replies to that with its masking site. So the connection is throttled on the way and the key parameters are not at fault. Try the same key from a node in another country: if it works there, the block is on your segment.",
+    "hint_KEY_PARAMS": "The server is alive: it answers a plain TLS handshake with its masking site. So there is no block — the key parameters do not match: public key, short id, SNI or flow."
   },
   "anti_ddos": {
     "title": "Anti-DDoS",

@@ -62,6 +62,17 @@ Next to them sits a separate **Possible DPI block** filter. It collects keys who
 
 Rows expand: inside are the server IP, DNS resolution time, average TCP and jitter, HTTP status, certificate details and the tail of the core's output explaining a failure.
 
+## Block or a wrong key
+
+These two look identical — "traffic does not pass" — but need different fixes, and the panel tells them apart.
+
+REALITY has a fallback: a client that does not match gets the real masking site. So a live server must answer a plain TLS handshake with its own SNI. On failure the panel runs exactly that probe:
+
+- **The masking site answers** — the server is alive and reachable, there is no block. The key parameters do not match: public key, short id, SNI or flow.
+- **The masking site is silent while the port answers** — the connection is throttled on the way. The key is not at fault, and such rows land in the "Possible DPI block" filter.
+
+A run from a node in another country settles it: if the same key is alive from there, the block is on your segment.
+
 ## Why a key fails
 
 Expand a failed row — it holds the reason, a hint and the core's verbatim answer.

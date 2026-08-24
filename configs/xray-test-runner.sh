@@ -13,7 +13,7 @@
 #         xray-test-runner.sh version
 set -uo pipefail
 
-RUNNER_VERSION="1.4.0"
+RUNNER_VERSION="1.5.0"
 
 TOOLS_DIR="/opt/monitoring-node/tools"
 CORES_DIR="$TOOLS_DIR/cores"
@@ -156,6 +156,18 @@ resolve_host() {
 
 curl_socks() { curl -s --socks5-hostname "127.0.0.1:$SOCKS_PORT" "$@"; }
 
+# У REALITY есть запасной ход: «неправильному» клиенту сервер отдаёт настоящий
+# сайт-маскировку. Живой и достижимый сервер обязан ответить на обычное
+# TLS-рукопожатие со своим SNI; молчание при живом TCP-порте означает, что
+# соединение душат по пути, а не что не подошли параметры ключа.
+fallback_alive() {
+    local address="$1" port="$2" sni="$3" code
+    [ -n "$sni" ] || return 0
+    code=$(curl -sk --max-time 8 -o /dev/null -w '%{http_code}' \
+        --connect-to "${sni}:443:${address}:${port}" "https://${sni}/" 2>/dev/null)
+    [ -n "$code" ] && [ "$code" != "000" ]
+}
+
 # Последняя строка лога ядра со следами ошибки. Просто tail отдавал бы рабочий
 # вывод («accepted tcp:…», «dialing TCP to …»), который ничего не объясняет.
 core_failure_line() {
@@ -241,7 +253,11 @@ run_cell() {
 
         if [ -z "$status" ] || [ "$status" = "000" ]; then
             sleep 0.4
-            emit_cell "$index" "fail" '"PROXY_HANDSHAKE_FAILED"' \
+            local fail_reason='"PROXY_HANDSHAKE_FAILED"'
+            if ! fallback_alive "$address" "$port" "$SNI"; then
+                fail_reason='"DPI_BLOCK"'
+            fi
+            emit_cell "$index" "fail" "$fail_reason" \
                 "$(core_failure_line)" \
                 "${tcp_ms:-null}" null null null null null null \
                 "$(json_str "$resolved_ip")" "${dns_ms:-null}" "${tcp_avg:-null}" "${tcp_jitter:-null}"
@@ -301,12 +317,12 @@ main() {
 
     kill_stale_cores
     declare -A CORE_PATHS=()
-    OPT_TCP=1; OPT_HTTP=1; OPT_EXIT=1; OPT_SPEED=0
+    OPT_TCP=1; OPT_HTTP=1; OPT_EXIT=1; OPT_SPEED=0; SNI=""
 
     local payload
     payload=$(printf '%s' "$1" | base64 -d 2>/dev/null) || { log "не разобрать payload"; return 2; }
 
-    while IFS=$'\t' read -r kind a b c d e f; do
+    while IFS=$'\t' read -r kind a b c d e f g; do
         case "$kind" in
             CORE)
                 local path
@@ -321,6 +337,7 @@ main() {
                 [ -n "${e:-}" ] && SOCKS_PORT="$e"
                 ;;
             CELL)
+                SNI="$g"
                 run_cell "$a" "$b" "$c" "$d" "$e" "$f"
                 ;;
         esac

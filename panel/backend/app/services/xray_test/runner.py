@@ -32,6 +32,7 @@ from app.services.xray_test.models import (
     Core,
     FailReason,
     ProbeTimings,
+    Security,
     TestCell,
     Verdict,
 )
@@ -130,19 +131,52 @@ class LocalCoreRunner:
         try:
             launched = await self._launch(cell, core, binary)
         except _CoreStartError as exc:
-            return _fail(result, exc.reason, exc.detail, exc.hint)
+            return await self._explain(cell, _fail(result, exc.reason, exc.detail, exc.hint))
 
         try:
             async with asyncio.timeout(CELL_TIMEOUT):
-                return await self._run_probes(launched, options, result)
+                return await self._explain(
+                    cell, await self._run_probes(launched, options, result)
+                )
         except asyncio.TimeoutError:
             core_detail, hint = _core_reason(launched)
-            return _fail(
+            return await self._explain(cell, _fail(
                 result, FailReason.HTTP_TIMEOUT,
                 core_detail or "проверка не уложилась в отведённое время", hint,
-            )
+            ))
         finally:
             await _shutdown_core(launched)
+
+    async def _explain(self, cell: TestCell, result: CellResult) -> CellResult:
+        """Отделить блокировку по пути от неподходящих параметров ключа.
+
+        У REALITY есть запасной ход: «неправильному» клиенту сервер отдаёт
+        настоящий сайт-маскировку. Значит живой и достижимый сервер обязан
+        ответить на обычное TLS-рукопожатие с его SNI — а если молчит даже оно
+        при живом TCP-порте, соединение душат по пути, и дело не в ключе.
+        """
+        if result.verdict is not Verdict.FAIL or result.timings.tcp_min_ms is None:
+            return result
+        if cell.endpoint.tls.security is Security.NONE:
+            return result
+
+        tls = result.tls_info
+        if tls is None:
+            tls = await probes.inspect_tls(
+                cell.endpoint.address, cell.endpoint.port, cell.endpoint.effective_sni
+            )
+            result.tls_info = tls
+
+        if tls.reachable:
+            # Сервер жив и отвечает маскировкой — значит не подходят параметры
+            result.hint = result.hint or "KEY_PARAMS"
+            return result
+
+        result.reason = FailReason.DPI_BLOCK
+        result.hint = "DPI_BLOCK"
+        if tls.error:
+            result.detail = (result.detail or tls.error)[:CORE_LOG_TAIL]
+        return result
 
     async def _run_probes(
         self, launched: _LaunchedCore, options: probes.ProbeOptions, result: CellResult

@@ -65,6 +65,8 @@ class FailReason(str, Enum):
     HTTP_BAD_STATUS = "HTTP_BAD_STATUS"
     TLS_REJECTED = "TLS_REJECTED"
     UNSUPPORTED = "UNSUPPORTED"
+    # Порт отвечает, но даже маскировочный сайт молчит — трафик душат по пути
+    DPI_BLOCK = "DPI_BLOCK"
     # Не отказы: трафик прошёл, но результат с оговоркой
     SLOW_RTT = "SLOW_RTT"
     EXIT_IP_UNKNOWN = "EXIT_IP_UNKNOWN"

@@ -24,9 +24,9 @@ const BLOCKED = 'blocked'
 // Явные отказы сюда не входят — «порт закрыт», «не тот сертификат» и «неверные
 // учётные данные» означают проблему конфигурации, а не фильтрацию по пути.
 const BLOCK_LIKE = new Set([
-  'HANDSHAKE_STALLED', 'IO_TIMEOUT', 'GRPC_UNAVAILABLE', 'CONN_RESET',
+  'DPI_BLOCK', 'HANDSHAKE_STALLED', 'IO_TIMEOUT', 'GRPC_UNAVAILABLE', 'CONN_RESET',
 ])
-const BLOCK_LIKE_REASONS = new Set(['PROXY_HANDSHAKE_FAILED', 'HTTP_TIMEOUT'])
+const BLOCK_LIKE_REASONS = new Set(['DPI_BLOCK', 'PROXY_HANDSHAKE_FAILED', 'HTTP_TIMEOUT'])
 
 /**
  * Порт отвечает, а трафик через него не идёт — характерная картина блокировки
@@ -34,8 +34,10 @@ const BLOCK_LIKE_REASONS = new Set(['PROXY_HANDSHAKE_FAILED', 'HTTP_TIMEOUT'])
  */
 function looksBlocked(cell: XrayTestCell): boolean {
   if (cell.verdict !== 'fail' || cell.tcp_min_ms === null) return false
+  // Сервер отвечает маскировкой — значит жив, и дело в параметрах ключа
+  if (cell.hint === 'KEY_PARAMS') return false
   if (cell.hint && BLOCK_LIKE.has(cell.hint)) return true
-  return !cell.hint && !!cell.reason && BLOCK_LIKE_REASONS.has(cell.reason)
+  return !!cell.reason && BLOCK_LIKE_REASONS.has(cell.reason)
 }
 
 /** Узел дерева результатов: сервер, внутри — места запуска, внутри — SNI. */

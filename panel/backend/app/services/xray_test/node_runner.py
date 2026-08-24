@@ -148,6 +148,9 @@ def _build_payload(
             str(cell.endpoint.port),
             "1" if cell.endpoint.is_udp_protocol else "0",
             config_b64,
+            # SNI нужен исполнителю отдельно: по нему проверяется запасной ход
+            # REALITY, отличающий блокировку от неподходящих параметров
+            cell.endpoint.effective_sni,
         ]),
     ]
     return b64encode("\n".join(rows).encode()).decode()
