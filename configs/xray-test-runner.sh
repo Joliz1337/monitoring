@@ -13,7 +13,7 @@
 #         xray-test-runner.sh version
 set -uo pipefail
 
-RUNNER_VERSION="1.1.0"
+RUNNER_VERSION="1.2.0"
 
 TOOLS_DIR="/opt/monitoring-node/tools"
 CORES_DIR="$TOOLS_DIR/cores"
@@ -45,7 +45,7 @@ trap cleanup EXIT INT TERM
 log() { printf '{"type":"log","line":"%s"}\n' "$(escape "$1")"; }
 
 escape() {
-    printf '%s' "$1" | tr -d '\r' | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' ' | cut -c1-400
+    printf '%s' "$1" | tr -d '\r' | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' ' | cut -c1-700
 }
 
 now_ms() { date +%s%3N; }
@@ -161,7 +161,7 @@ curl_socks() { curl -s --socks5-hostname "127.0.0.1:$SOCKS_PORT" "$@"; }
 core_failure_line() {
     local log="$WORKDIR/core.log"
     [ -f "$log" ] || return 0
-    grep -iE 'fail|error|refused|timeout|rejected' "$log" 2>/dev/null | tail -1 | cut -c1-400
+    grep -iE 'fail|error|refused|timeout|rejected' "$log" 2>/dev/null | tail -1 | cut -c1-700
 }
 
 # ── основной цикл ───────────────────────────────────────────────────────────
@@ -236,6 +236,7 @@ run_cell() {
         handshake=$(printf '%s' "$first" | cut -d' ' -f2 | awk '{printf "%.0f", $1*1000}')
 
         if [ -z "$status" ] || [ "$status" = "000" ]; then
+            sleep 0.4
             emit_cell "$index" "fail" '"PROXY_HANDSHAKE_FAILED"' \
                 "$(core_failure_line)" \
                 "${tcp_ms:-null}" null null null null null null \

@@ -72,6 +72,38 @@ class ExtractReasonTest(unittest.TestCase):
         self.assertIn("actively refused", detail)
         self.assertEqual(hint, "CONN_REFUSED")
 
+
+    def test_truncated_bracket_still_parsed(self):
+        """Хвост лога режется по длине, и закрывающая скобка часто не доезжает."""
+        detail, hint = extract_reason(
+            "app/proxyman/outbound: failed to process outbound traffic > "
+            "proxy/vless/outbound: failed to find an available destination > common/retry: "
+            "[transport/internet/grpc: failed to dial gRPC > transport/internet/grpc: "
+            "Cannot dial gRPC > rpc error: code = Unavailable desc = connection"
+        )
+        self.assertIn("Unavailable", detail)
+        self.assertNotIn("app/proxyman", detail)
+        self.assertEqual(hint, "GRPC_UNAVAILABLE")
+
+    def test_nested_wrappers_reduced_to_last_segment(self):
+        """Обёртки живут и внутри скобок — показываем последний сегмент."""
+        detail, _ = extract_reason(
+            "failed to process outbound traffic > common/retry: "
+            "[transport/internet/grpc: failed to dial gRPC > rpc error: code = Unavailable "
+            'desc = connection error: desc = "context deadline exceeded"] > '
+            "common/retry: all retry attempts failed"
+        )
+        self.assertTrue(detail.startswith("rpc error"))
+        self.assertNotIn("transport/internet/grpc: failed to dial", detail)
+
+    def test_retry_summary_never_becomes_reason(self):
+        detail, _ = extract_reason(
+            "failed to dial > common/retry: [dial tcp: i/o timeout] > "
+            "common/retry: all retry attempts failed"
+        )
+        self.assertNotIn("all retry attempts", detail)
+        self.assertIn("i/o timeout", detail)
+
     def test_startup_only_gives_nothing(self):
         """Рабочий вывод без ошибок не должен выдаваться за причину отказа."""
         detail, hint = extract_reason(STARTUP)

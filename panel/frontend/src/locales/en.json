@@ -1029,7 +1029,8 @@
     "hint_AUTH_FAILED": "The server rejected the credentials — the UUID or password in the key does not match.",
     "hint_REALITY_REJECTED": "The server rejected the REALITY handshake — the public key, short id or SNI do not match.",
     "hint_PROTOCOL_MISMATCH": "A different protocol answers on this port than the key declares — check the port and connection type.",
-    "hint_NO_ROUTE": "There is no route to the server from this point — most likely a network-level block."
+    "hint_NO_ROUTE": "There is no route to the server from this point — most likely a network-level block.",
+    "hint_GRPC_UNAVAILABLE": "The server does not accept the gRPC connection: check serviceName in the key and that this port really serves gRPC rather than plain TLS."
   },
   "anti_ddos": {
     "title": "Anti-DDoS",

@@ -26,6 +26,9 @@ _NOISE = (
 )
 
 _BRACKET_RE = re.compile(r"\[([^\[\]]{6,})\]")
+# Хвост лога режется по длине, и закрывающая скобка часто не доезжает — тогда
+# берём всё от последней открывающей до конца строки
+_OPEN_BRACKET_RE = re.compile(r"\[([^\[\]]{6,})$")
 _TIMESTAMP_RE = re.compile(r"^\d{4}/\d{2}/\d{2} [\d:.]+\s*")
 _LEVEL_RE = re.compile(r"^\[(Info|Warning|Error|Debug)\]\s*", re.IGNORECASE)
 _ID_RE = re.compile(r"^\[\d+\]\s*")
@@ -39,6 +42,7 @@ HINTS: tuple[tuple[str, str], ...] = (
     ("IO_TIMEOUT", r"i/o timeout|context deadline exceeded|timeout awaiting"),
     ("DNS_FAIL", r"no such host|server misbehaving|lookup .* failed"),
     ("AUTH_FAILED", r"invalid user|not authenticated|authentication failed|invalid request user"),
+    ("GRPC_UNAVAILABLE", r"cannot dial grpc|failed to dial grpc|code = unavailable"),
     ("REALITY_REJECTED", r"reality"),
     ("PROTOCOL_MISMATCH", r"first payload|invalid protocol|unknown protocol|wrong version"),
     ("NO_ROUTE", r"no route to host|network is unreachable"),
@@ -77,9 +81,31 @@ def extract_reason(output: str) -> tuple[str, Optional[str]]:
     source = failures[-1]
 
     brackets = _BRACKET_RE.findall(source)
-    # Последние скобки — сама ошибка; «all retry attempts failed» это уже итог
-    detail = brackets[-1].strip() if brackets else source
-    return detail[:MAX_DETAIL], detect_hint(source)
+    if brackets:
+        # Последние скобки — сама ошибка; «all retry attempts failed» это итог
+        detail = brackets[-1].strip()
+    else:
+        unclosed = _OPEN_BRACKET_RE.search(source)
+        detail = unclosed.group(1).strip() if unclosed else source
+
+    return _shorten(detail)[:MAX_DETAIL], detect_hint(source)
+
+
+def _shorten(detail: str) -> str:
+    """Убрать оставшиеся служебные обёртки внутри самой ошибки.
+
+    Ядро вкладывает их и в скобки: «transport/internet/grpc: failed to dial gRPC
+    > … > rpc error: code = Unavailable desc = …». Оператору нужен последний
+    сегмент, где сказано, что именно случилось.
+    """
+    parts = [part.strip() for part in detail.split(" > ") if part.strip()]
+    if len(parts) < 2:
+        return detail
+    # Пропускаем хвостовые итоги вроде «all retry attempts failed»
+    for part in reversed(parts):
+        if "all retry attempts" not in part.lower():
+            return part
+    return parts[-1]
 
 
 def detect_hint(text: str) -> Optional[str]:
