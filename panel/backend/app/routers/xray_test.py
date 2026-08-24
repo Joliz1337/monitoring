@@ -63,7 +63,7 @@ class RunRequest(BaseModel):
     sni_list: list[str] = Field(default_factory=list)
     sync_transport_host: bool = False
     locations: list[str] = Field(default_factory=lambda: ["panel"])
-    concurrency: int = Field(default=4, ge=1, le=8)
+    concurrency: int = Field(default=10, ge=1, le=32)
     full: bool = True
     tls_inspect: bool = True
     measure_speed: bool = False

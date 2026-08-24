@@ -36,8 +36,9 @@ RUNNER_PATH = "/opt/monitoring-node/tools/xray-test-runner.sh"
 CORES_DIR = "/opt/monitoring-node/tools/cores"
 RUNNER_SOURCE = "xray-test-runner.sh"
 # Порты зарезервированы от эфемерной выдачи (configs/tune-sysctl.sh): иначе
-# исходящее соединение ноды могло бы занять порт ровно между проверками
-PORT_POOL = (7501, 7502, 7503, 7504)
+# исходящее соединение ноды могло бы занять порт ровно между проверками.
+# Размер пула — это и есть потолок параллельных проверок на одной ноде.
+PORT_POOL = tuple(range(7501, 7533))
 EXEC_TIMEOUT = 120
 CORE_INSTALL_TIMEOUT = 300
 HTTP_READ_TIMEOUT = 140

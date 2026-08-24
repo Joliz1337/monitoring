@@ -40,7 +40,7 @@ from app.services.xray_test.sanitize import sanitize_output
 logger = logging.getLogger(__name__)
 
 WORK_DIR = Path("/app/data/xray-test/run")
-MAX_CONCURRENT_CORES = 8
+MAX_CONCURRENT_CORES = 32
 CORE_START_TIMEOUT = 5.0
 CELL_TIMEOUT = 40.0
 CORE_MAX_LIFETIME = 90.0

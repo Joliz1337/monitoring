@@ -25,10 +25,10 @@ logger = logging.getLogger(__name__)
 FINISHED_TTL_SECONDS = 900
 LOG_BUFFER_LIMIT = 2000
 MAX_ACTIVE_JOBS = 5
-DEFAULT_CONCURRENCY = 4
+DEFAULT_CONCURRENCY = 10
 # Через сколько результатов отмечать прогресс в журнале задачи
 PROGRESS_STEP = 25
-MAX_CONCURRENCY = 8
+MAX_CONCURRENCY = 32
 
 
 @dataclass

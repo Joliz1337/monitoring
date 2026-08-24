@@ -38,7 +38,13 @@ The probe sends nothing through the proxy and costs almost no time, so it can st
 
 **Measure link speed.** Downloads a ~10 MB test file through the proxy and computes megabits per second. Off by default: it takes noticeably longer and spends traffic on every check. Turn it on when suitability of the channel matters, not just liveness.
 
-**Concurrency.** How many checks run at once (1–8). Each is a separate core process, so high values load the panel's server. Four is a sensible middle ground; lower it on a weak machine.
+**Concurrency.** How many checks run at once (up to 32 per location, 10 by default). Each is a separate core process, so high values load the machine. On nodes the ceiling is the number of ports reserved for this (7501–7532); on the panel it is simply resources — lower it on a weak machine.
+
+## How results are laid out
+
+Results are grouped by server rather than dumped into one list. The top row is the server: its address, best ping, best latency and a counter like "2/6" — how many checks passed out of how many. The server's verdict is the best of what it contains: if at least one SNI works, the server counts as usable.
+
+Expand a server to see each check separately. If the run covered several locations, the locations come first and the SNIs sit inside them. Expand a single check to get the failure reason, the hint and the core's verbatim answer.
 
 ## Reading the results table
 

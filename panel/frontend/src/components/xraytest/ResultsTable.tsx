@@ -1,12 +1,14 @@
 import { Fragment, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
-  CheckCircle2, ChevronDown, ChevronRight, XCircle, AlertTriangle, ShieldAlert, X, Lightbulb,
+  CheckCircle2, ChevronDown, ChevronRight, XCircle, AlertTriangle,
+  ShieldAlert, X, Lightbulb, Server, MapPin, Globe,
 } from 'lucide-react'
 import type { XrayTestCell } from '../../api/client'
 import { Tooltip } from '../ui/Tooltip'
 
 type SortKey = 'index' | 'rtt' | 'verdict'
+type Verdict = 'ok' | 'degraded' | 'fail'
 
 const VERDICT_STYLE: Record<string, string> = {
   ok: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20',
@@ -14,27 +16,42 @@ const VERDICT_STYLE: Record<string, string> = {
   fail: 'text-red-400 bg-red-500/10 border-red-500/20',
 }
 
-function VerdictBadge({ verdict }: { verdict: string }) {
-  const { t } = useTranslation()
-  const Icon = verdict === 'ok' ? CheckCircle2 : verdict === 'degraded' ? AlertTriangle : XCircle
-  return (
-    <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md border text-xs font-medium ${VERDICT_STYLE[verdict] || VERDICT_STYLE.fail}`}>
-      <Icon className="w-3.5 h-3.5" />
-      {t(`xray_test.verdict_${verdict}`)}
-    </span>
-  )
+const VERDICT_ORDER: Record<string, number> = { ok: 0, degraded: 1, fail: 2 }
+
+/** Узел дерева результатов: сервер, внутри — места запуска, внутри — SNI. */
+interface Group {
+  key: string
+  label: string
+  cells: XrayTestCell[]
+  children: Group[]
 }
 
-function ms(value: number | null): string {
+function ms(value: number | null | undefined): string {
   if (value === null || value === undefined) return '—'
   return `${Math.round(value)}`
+}
+
+function best(cells: XrayTestCell[], pick: (cell: XrayTestCell) => number | null): number | null {
+  const values = cells
+    .map(pick)
+    .filter((value): value is number => value !== null && value !== undefined)
+  return values.length ? Math.min(...values) : null
+}
+
+function summarize(cells: XrayTestCell[]) {
+  const counts: Record<Verdict, number> = { ok: 0, degraded: 0, fail: 0 }
+  cells.forEach(cell => { counts[cell.verdict as Verdict] += 1 })
+  // Итог группы — лучшее, что в ней есть: один рабочий SNI делает сервер пригодным
+  const verdict: Verdict = counts.ok ? 'ok' : counts.degraded ? 'degraded' : 'fail'
+  return { counts, verdict, working: counts.ok + counts.degraded, total: cells.length }
 }
 
 export function ResultsTable({ cells, groupBySni }: { cells: XrayTestCell[]; groupBySni: boolean }) {
   const { t } = useTranslation()
   const [sort, setSort] = useState<SortKey>('index')
   const [picked, setPicked] = useState<Set<string>>(new Set())
-  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  const [openGroups, setOpenGroups] = useState<Set<string>>(new Set())
+  const [openCells, setOpenCells] = useState<Set<number>>(new Set())
 
   const counts = useMemo(() => {
     const totals: Record<string, number> = { ok: 0, degraded: 0, fail: 0 }
@@ -42,21 +59,55 @@ export function ResultsTable({ cells, groupBySni }: { cells: XrayTestCell[]; gro
     return totals
   }, [cells])
 
-  const visible = useMemo(() => {
-    // Пустой набор означает «показывать всё»: так фильтр не может случайно
-    // спрятать вообще все строки
-    const filtered = picked.size ? cells.filter(cell => picked.has(cell.verdict)) : cells
-    const order = { ok: 0, degraded: 1, fail: 2 }
-    return [...filtered].sort((a, b) => {
-      if (sort === 'rtt') {
-        const left = a.rtt_ms ?? Number.MAX_SAFE_INTEGER
-        const right = b.rtt_ms ?? Number.MAX_SAFE_INTEGER
-        return left - right
-      }
-      if (sort === 'verdict') return order[a.verdict] - order[b.verdict] || a.index - b.index
-      return a.index - b.index
+  const visible = useMemo(
+    // Пустой набор означает «показывать всё»: фильтр не может спрятать таблицу целиком
+    () => (picked.size ? cells.filter(cell => picked.has(cell.verdict)) : cells),
+    [cells, picked],
+  )
+
+  /**
+   * Сервер → места запуска → проверки. Промежуточный уровень появляется только
+   * когда он что-то различает: с одной локацией лишняя вложенность заставляла
+   * бы раскрывать группу ради единственного списка.
+   */
+  const groups = useMemo<Group[]>(() => {
+    const byServer = new Map<string, XrayTestCell[]>()
+    visible.forEach(cell => {
+      const key = `${cell.address}:${cell.port}`
+      if (!byServer.has(key)) byServer.set(key, [])
+      byServer.get(key)!.push(cell)
     })
-  }, [cells, sort, picked])
+
+    const result: Group[] = [...byServer.entries()].map(([key, serverCells]) => {
+      const locations = new Set(serverCells.map(cell => cell.location))
+      let children: Group[] = []
+
+      if (locations.size > 1) {
+        const byLocation = new Map<string, XrayTestCell[]>()
+        serverCells.forEach(cell => {
+          if (!byLocation.has(cell.location)) byLocation.set(cell.location, [])
+          byLocation.get(cell.location)!.push(cell)
+        })
+        children = [...byLocation.entries()].map(([location, locationCells]) => ({
+          key: `${key}|${location}`,
+          label: locationCells[0].location_name || t('xray_test.location_panel'),
+          cells: locationCells,
+          children: [],
+        }))
+      }
+
+      return { key, label: serverCells[0].remark || key, cells: serverCells, children }
+    })
+
+    const weight = (group: Group) => {
+      if (sort === 'verdict') {
+        return VERDICT_ORDER[summarize(group.cells).verdict] * 1e9 + group.cells[0].index
+      }
+      if (sort === 'rtt') return best(group.cells, cell => cell.rtt_ms) ?? Number.MAX_SAFE_INTEGER
+      return group.cells[0].index
+    }
+    return result.sort((left, right) => weight(left) - weight(right))
+  }, [visible, sort, t])
 
   const toggleVerdict = (verdict: string) => {
     setPicked(prev => {
@@ -67,28 +118,8 @@ export function ResultsTable({ cells, groupBySni }: { cells: XrayTestCell[]; gro
     })
   }
 
-  // Лучший SNI считается по всему набору, а не по видимому: фильтр не должен
-  // менять, какой домен признан лучшим
-  const bestBySni = useMemo(() => {
-    if (!groupBySni) return new Set<number>()
-    const best = new Map<string, XrayTestCell>()
-    cells.forEach(cell => {
-      if (cell.verdict === 'fail' || cell.rtt_ms === null) return
-      const key = `${cell.address}:${cell.port}`
-      const current = best.get(key)
-      if (!current || (current.rtt_ms ?? Infinity) > cell.rtt_ms) best.set(key, cell)
-    })
-    return new Set([...best.values()].map(cell => cell.index))
-  }, [cells, groupBySni])
-
-  // Колонка места запуска нужна только когда прогон шёл больше чем из одной точки
-  const showLocation = useMemo(
-    () => new Set(cells.map(cell => cell.location)).size > 1,
-    [cells],
-  )
-
-  const toggle = (key: string) => {
-    setExpanded(prev => {
+  const toggleGroup = (key: string) => {
+    setOpenGroups(prev => {
       const next = new Set(prev)
       if (next.has(key)) next.delete(key)
       else next.add(key)
@@ -96,12 +127,27 @@ export function ResultsTable({ cells, groupBySni }: { cells: XrayTestCell[]; gro
     })
   }
 
+  const toggleCell = (index: number) => {
+    setOpenCells(prev => {
+      const next = new Set(prev)
+      if (next.has(index)) next.delete(index)
+      else next.add(index)
+      return next
+    })
+  }
+
+  const sortCells = (list: XrayTestCell[]) => [...list].sort((a, b) => {
+    if (sort === 'rtt') {
+      return (a.rtt_ms ?? Number.MAX_SAFE_INTEGER) - (b.rtt_ms ?? Number.MAX_SAFE_INTEGER)
+    }
+    if (sort === 'verdict') {
+      return VERDICT_ORDER[a.verdict] - VERDICT_ORDER[b.verdict] || a.index - b.index
+    }
+    return a.index - b.index
+  })
+
   if (!cells.length) {
-    return (
-      <div className="text-center py-10 text-dark-400 text-sm">
-        {t('xray_test.no_results')}
-      </div>
-    )
+    return <div className="text-center py-10 text-dark-400 text-sm">{t('xray_test.no_results')}</div>
   }
 
   return (
@@ -127,6 +173,11 @@ export function ResultsTable({ cells, groupBySni }: { cells: XrayTestCell[]; gro
             </button>
           )}
         </div>
+
+        <span className="text-dark-500">
+          {t('xray_test.servers_count', { count: groups.length })}
+        </span>
+
         <div className="flex items-center gap-1 ml-auto">
           <span className="text-dark-500">{t('xray_test.sort_by')}</span>
           {(['index', 'rtt', 'verdict'] as SortKey[]).map(key => (
@@ -143,129 +194,292 @@ export function ResultsTable({ cells, groupBySni }: { cells: XrayTestCell[]; gro
         </div>
       </div>
 
-      {visible.length === 0 ? (
+      {groups.length === 0 ? (
         <p className="text-center py-8 text-sm text-dark-400">{t('xray_test.filter_empty')}</p>
       ) : (
-      <div className="overflow-x-auto rounded-lg border border-dark-800/60">
-        <table className="w-full text-xs">
-          <thead className="bg-dark-900/70 sticky top-0 z-10">
-            <tr className="text-dark-400 text-left">
-              <th className="px-3 py-2 font-medium w-8" />
-              <th className="px-3 py-2 font-medium">{t('xray_test.col_name')}</th>
-              <th className="px-3 py-2 font-medium">{t('xray_test.col_address')}</th>
-              <th className="px-3 py-2 font-medium">{t('xray_test.col_sni')}</th>
-              {showLocation && (
-                <th className="px-3 py-2 font-medium">{t('xray_test.col_location')}</th>
-              )}
-              <th className="px-3 py-2 font-medium">{t('xray_test.col_verdict')}</th>
-              <th className="px-3 py-2 font-medium text-right">{t('xray_test.col_tcp')}</th>
-              <th className="px-3 py-2 font-medium text-right">{t('xray_test.col_handshake')}</th>
-              <th className="px-3 py-2 font-medium text-right">{t('xray_test.col_rtt')}</th>
-              <th className="px-3 py-2 font-medium text-right">{t('xray_test.col_speed')}</th>
-              <th className="px-3 py-2 font-medium">{t('xray_test.col_exit')}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {visible.map(cell => {
-              const key = `${cell.index}`
-              const open = expanded.has(key)
-              return (
-                <Fragment key={key}>
-                  <tr
-                    onClick={() => toggle(key)}
-                    className="border-t border-dark-800/40 hover:bg-dark-800/30 cursor-pointer"
-                  >
-                    <td className="px-3 py-2 text-dark-500">
-                      {open ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
-                    </td>
-                    <td className="px-3 py-2 text-dark-200 max-w-[200px] truncate">
-                      <span className="flex items-center gap-1.5">
-                        {cell.remark || `#${cell.index + 1}`}
-                        {bestBySni.has(cell.index) && (
-                          <span className="px-1.5 py-0.5 rounded bg-accent-500/15 text-accent-400 text-[10px]">
-                            {t('xray_test.best_sni')}
-                          </span>
-                        )}
-                      </span>
-                      <span className="text-dark-500 text-[10px]">
-                        {cell.protocol} · {cell.transport} · {cell.security}
-                        {cell.core ? ` · ${cell.core}` : ''}
-                      </span>
-                    </td>
-                    <td className="px-3 py-2 text-dark-300 font-mono text-[11px]">
-                      {cell.address}:{cell.port}
-                    </td>
-                    <td className="px-3 py-2 text-dark-300 max-w-[160px] truncate">{cell.sni || '—'}</td>
-                    {showLocation && (
-                      <td className="px-3 py-2 text-dark-300 max-w-[140px] truncate">
-                        {cell.location_name || t('xray_test.location_panel')}
-                      </td>
-                    )}
-                    <td className="px-3 py-2">
-                      {cell.reason ? (
-                        <Tooltip label={t(`xray_test.reason_${cell.reason}`, cell.reason)}>
-                          <span><VerdictBadge verdict={cell.verdict} /></span>
-                        </Tooltip>
-                      ) : (
-                        <VerdictBadge verdict={cell.verdict} />
-                      )}
-                    </td>
-                    <td className="px-3 py-2 text-right text-dark-300 tabular-nums">{ms(cell.tcp_min_ms)}</td>
-                    <td className="px-3 py-2 text-right text-dark-300 tabular-nums">{ms(cell.handshake_ms)}</td>
-                    <td className="px-3 py-2 text-right text-dark-200 tabular-nums">{ms(cell.rtt_ms)}</td>
-                    <td className="px-3 py-2 text-right text-dark-300 tabular-nums">
-                      {cell.speed_mbps ? cell.speed_mbps.toFixed(1) : '—'}
-                    </td>
-                    <td className="px-3 py-2 text-dark-300 font-mono text-[11px]">
-                      {cell.exit_ip ? `${cell.exit_ip}${cell.exit_country ? ` (${cell.exit_country})` : ''}` : '—'}
-                    </td>
-                  </tr>
-                  {open && (
-                    <tr className="bg-dark-900/40">
-                      <td />
-                      <td colSpan={showLocation ? 10 : 9} className="px-3 py-3 space-y-2">
-                        {cell.reason && (
-                          <div className="text-dark-300">
-                            <span className="text-dark-500">{t('xray_test.col_reason')}: </span>
-                            {t(`xray_test.reason_${cell.reason}`, cell.reason)}
-                          </div>
-                        )}
-                        {cell.hint && (
-                          <div className="flex items-start gap-2 px-2.5 py-2 rounded-md bg-amber-500/10 border border-amber-500/20 text-amber-300">
-                            <Lightbulb className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-                            <span>{t(`xray_test.hint_${cell.hint}`, '')}</span>
-                          </div>
-                        )}
-                        {cell.detail && (
-                          <div>
-                            <span className="text-dark-500 text-[11px]">
-                              {t('xray_test.core_says')}
-                            </span>
-                            <pre className="mt-1 text-[11px] font-mono text-dark-300 whitespace-pre-wrap break-all bg-dark-950/60 rounded p-2 max-h-32 overflow-auto">
-                              {cell.detail}
-                            </pre>
-                          </div>
-                        )}
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-[11px] text-dark-400">
-                          <Detail label={t('xray_test.detail_dns')} value={cell.resolved_ip} />
-                          <Detail label={t('xray_test.detail_dns_ms')} value={ms(cell.dns_ms)} />
-                          <Detail label={t('xray_test.detail_tcp_avg')} value={ms(cell.tcp_avg_ms)} />
-                          <Detail label={t('xray_test.detail_jitter')} value={ms(cell.tcp_jitter_ms)} />
-                          <Detail label={t('xray_test.detail_http')} value={cell.http_status} />
-                          <Detail label={t('xray_test.detail_asn')} value={cell.exit_asn} />
-                        </div>
-                        {cell.tls && <TlsBlock tls={cell.tls} />}
-                      </td>
-                    </tr>
-                  )}
-                </Fragment>
-              )
-            })}
-          </tbody>
-        </table>
-      </div>
+        <div className="space-y-2">
+          {groups.map(group => (
+            <ServerCard
+              key={group.key}
+              group={group}
+              open={openGroups.has(group.key)}
+              openGroups={openGroups}
+              openCells={openCells}
+              onToggleGroup={toggleGroup}
+              onToggleCell={toggleCell}
+              sortCells={sortCells}
+              groupBySni={groupBySni}
+            />
+          ))}
+        </div>
       )}
     </div>
+  )
+}
+
+function ServerCard({
+  group, open, openGroups, openCells, onToggleGroup, onToggleCell, sortCells, groupBySni,
+}: {
+  group: Group
+  open: boolean
+  openGroups: Set<string>
+  openCells: Set<number>
+  onToggleGroup: (key: string) => void
+  onToggleCell: (index: number) => void
+  sortCells: (cells: XrayTestCell[]) => XrayTestCell[]
+  groupBySni: boolean
+}) {
+  const { t } = useTranslation()
+  const summary = summarize(group.cells)
+  const sample = group.cells[0]
+
+  return (
+    <div className="rounded-lg border border-dark-800/60 overflow-hidden">
+      <div
+        className="flex items-center gap-3 px-3 py-2.5 cursor-pointer hover:bg-dark-800/30 transition-colors"
+        onClick={() => onToggleGroup(group.key)}
+      >
+        <span className="text-dark-500 shrink-0">
+          {open ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+        </span>
+        <Server className="w-4 h-4 text-dark-500 shrink-0" />
+
+        <span className="flex-1 min-w-0">
+          <span className="block text-sm text-dark-200 truncate">{group.label}</span>
+          <span className="block text-[11px] text-dark-500 font-mono truncate">
+            {sample.address}:{sample.port} · {sample.protocol} · {sample.transport} · {sample.security}
+            {sample.core ? ` · ${sample.core}` : ''}
+          </span>
+        </span>
+
+        <span className="hidden md:flex items-center gap-4 text-[11px] shrink-0">
+          <Metric label={t('xray_test.col_tcp')} value={ms(best(group.cells, c => c.tcp_min_ms))} />
+          <Metric label={t('xray_test.best_rtt')} value={ms(best(group.cells, c => c.rtt_ms))} />
+        </span>
+
+        <span className="text-[11px] text-dark-400 shrink-0 tabular-nums">
+          {summary.working}/{summary.total}
+        </span>
+        <VerdictBadge verdict={summary.verdict} />
+      </div>
+
+      {open && (
+        <div className="border-t border-dark-800/60 bg-dark-900/30">
+          {group.children.length > 0
+            ? group.children.map(child => (
+                <LocationBlock
+                  key={child.key}
+                  group={child}
+                  open={openGroups.has(child.key)}
+                  openCells={openCells}
+                  onToggleGroup={onToggleGroup}
+                  onToggleCell={onToggleCell}
+                  sortCells={sortCells}
+                  groupBySni={groupBySni}
+                />
+              ))
+            : (
+              <CheckList
+                cells={sortCells(group.cells)}
+                openCells={openCells}
+                onToggleCell={onToggleCell}
+                groupBySni={groupBySni}
+              />
+            )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function LocationBlock({
+  group, open, openCells, onToggleGroup, onToggleCell, sortCells, groupBySni,
+}: {
+  group: Group
+  open: boolean
+  openCells: Set<number>
+  onToggleGroup: (key: string) => void
+  onToggleCell: (index: number) => void
+  sortCells: (cells: XrayTestCell[]) => XrayTestCell[]
+  groupBySni: boolean
+}) {
+  const { t } = useTranslation()
+  const summary = summarize(group.cells)
+
+  return (
+    <div className="border-b border-dark-800/40 last:border-b-0">
+      <div
+        className="flex items-center gap-3 px-3 py-2 pl-8 cursor-pointer hover:bg-dark-800/30 transition-colors"
+        onClick={() => onToggleGroup(group.key)}
+      >
+        <span className="text-dark-500 shrink-0">
+          {open ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+        </span>
+        <MapPin className="w-3.5 h-3.5 text-dark-500 shrink-0" />
+        <span className="flex-1 min-w-0 text-xs text-dark-200 truncate">{group.label}</span>
+
+        <span className="hidden md:flex items-center gap-4 text-[11px] shrink-0">
+          <Metric label={t('xray_test.col_tcp')} value={ms(best(group.cells, c => c.tcp_min_ms))} />
+          <Metric label={t('xray_test.best_rtt')} value={ms(best(group.cells, c => c.rtt_ms))} />
+        </span>
+
+        <span className="text-[11px] text-dark-400 shrink-0 tabular-nums">
+          {summary.working}/{summary.total}
+        </span>
+        <VerdictBadge verdict={summary.verdict} small />
+      </div>
+
+      {open && (
+        <div className="pl-4">
+          <CheckList
+            cells={sortCells(group.cells)}
+            openCells={openCells}
+            onToggleCell={onToggleCell}
+            groupBySni={groupBySni}
+          />
+        </div>
+      )}
+    </div>
+  )
+}
+
+function CheckList({ cells, openCells, onToggleCell, groupBySni }: {
+  cells: XrayTestCell[]
+  openCells: Set<number>
+  onToggleCell: (index: number) => void
+  groupBySni: boolean
+}) {
+  const { t } = useTranslation()
+
+  // Лучший SNI считается по всей группе: отметка не должна прыгать от сортировки
+  const bestIndex = useMemo(() => {
+    if (!groupBySni) return null
+    const alive = cells.filter(cell => cell.verdict !== 'fail' && cell.rtt_ms !== null)
+    if (!alive.length) return null
+    return alive.reduce((a, b) => ((a.rtt_ms ?? Infinity) <= (b.rtt_ms ?? Infinity) ? a : b)).index
+  }, [cells, groupBySni])
+
+  return (
+    <div className="divide-y divide-dark-800/40">
+      {cells.map(cell => {
+        const open = openCells.has(cell.index)
+        return (
+          <Fragment key={cell.index}>
+            <div
+              className="flex items-center gap-3 px-3 py-2 pl-8 cursor-pointer hover:bg-dark-800/20 transition-colors"
+              onClick={() => onToggleCell(cell.index)}
+            >
+              <span className="text-dark-600 shrink-0">
+                {open ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+              </span>
+              <Globe className="w-3.5 h-3.5 text-dark-600 shrink-0" />
+
+              <span className="flex-1 min-w-0 flex items-center gap-1.5">
+                <span className="text-xs text-dark-300 truncate">
+                  {cell.sni || t('xray_test.sni_from_key')}
+                </span>
+                {bestIndex === cell.index && (
+                  <span className="px-1.5 py-0.5 rounded bg-accent-500/15 text-accent-400 text-[10px] shrink-0">
+                    {t('xray_test.best_sni')}
+                  </span>
+                )}
+              </span>
+
+              <span className="hidden lg:flex items-center gap-4 text-[11px] shrink-0 tabular-nums">
+                <Metric label={t('xray_test.col_tcp')} value={ms(cell.tcp_min_ms)} />
+                <Metric label={t('xray_test.col_handshake')} value={ms(cell.handshake_ms)} />
+                <Metric label={t('xray_test.col_rtt')} value={ms(cell.rtt_ms)} />
+                {cell.speed_mbps ? (
+                  <Metric label={t('xray_test.col_speed')} value={cell.speed_mbps.toFixed(1)} />
+                ) : null}
+              </span>
+
+              <span className="hidden xl:block text-[11px] text-dark-400 font-mono shrink-0 w-40 truncate">
+                {cell.exit_ip
+                  ? `${cell.exit_ip}${cell.exit_country ? ` (${cell.exit_country})` : ''}`
+                  : '—'}
+              </span>
+
+              {cell.reason ? (
+                <Tooltip label={t(`xray_test.reason_${cell.reason}`, cell.reason)}>
+                  <span><VerdictBadge verdict={cell.verdict} small /></span>
+                </Tooltip>
+              ) : (
+                <VerdictBadge verdict={cell.verdict} small />
+              )}
+            </div>
+
+            {open && <CellDetails cell={cell} />}
+          </Fragment>
+        )
+      })}
+    </div>
+  )
+}
+
+function CellDetails({ cell }: { cell: XrayTestCell }) {
+  const { t } = useTranslation()
+  return (
+    <div className="px-3 py-3 pl-14 space-y-2 bg-dark-950/40 text-xs">
+      {cell.reason && (
+        <div className="text-dark-300">
+          <span className="text-dark-500">{t('xray_test.col_reason')}: </span>
+          {t(`xray_test.reason_${cell.reason}`, cell.reason)}
+        </div>
+      )}
+      {cell.hint && (
+        <div className="flex items-start gap-2 px-2.5 py-2 rounded-md bg-amber-500/10 border border-amber-500/20 text-amber-300">
+          <Lightbulb className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+          <span>{t(`xray_test.hint_${cell.hint}`, '')}</span>
+        </div>
+      )}
+      {cell.detail && (
+        <div>
+          <span className="text-dark-500 text-[11px]">{t('xray_test.core_says')}</span>
+          <pre className="mt-1 text-[11px] font-mono text-dark-300 whitespace-pre-wrap break-all bg-dark-950/60 rounded p-2 max-h-32 overflow-auto">
+            {cell.detail}
+          </pre>
+        </div>
+      )}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-[11px] text-dark-400">
+        <Detail label={t('xray_test.detail_dns')} value={cell.resolved_ip} />
+        <Detail label={t('xray_test.detail_dns_ms')} value={ms(cell.dns_ms)} />
+        <Detail label={t('xray_test.detail_tcp_avg')} value={ms(cell.tcp_avg_ms)} />
+        <Detail label={t('xray_test.detail_jitter')} value={ms(cell.tcp_jitter_ms)} />
+        <Detail label={t('xray_test.detail_http')} value={cell.http_status} />
+        <Detail label={t('xray_test.detail_asn')} value={cell.exit_asn} />
+        <Detail label={t('xray_test.col_exit')} value={cell.exit_ip} />
+        <Detail
+          label={t('xray_test.col_location')}
+          value={cell.location_name || t('xray_test.location_panel')}
+        />
+      </div>
+      {cell.tls && <TlsBlock tls={cell.tls} />}
+    </div>
+  )
+}
+
+function Metric({ label, value }: { label: string; value: string }) {
+  return (
+    <span className="whitespace-nowrap">
+      <span className="text-dark-600">{label} </span>
+      <span className="text-dark-300">{value}</span>
+    </span>
+  )
+}
+
+function VerdictBadge({ verdict, small }: { verdict: string; small?: boolean }) {
+  const { t } = useTranslation()
+  const Icon = verdict === 'ok' ? CheckCircle2 : verdict === 'degraded' ? AlertTriangle : XCircle
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 rounded-md border font-medium shrink-0 ${
+        small ? 'px-1.5 py-0.5 text-[10px]' : 'px-2 py-0.5 text-xs'
+      } ${VERDICT_STYLE[verdict] || VERDICT_STYLE.fail}`}
+    >
+      <Icon className={small ? 'w-3 h-3' : 'w-3.5 h-3.5'} />
+      {t(`xray_test.verdict_${verdict}`)}
+    </span>
   )
 }
 
@@ -300,9 +514,7 @@ function FilterChip({ verdict, count, active, onClick }: {
       disabled={count === 0 && !active}
       className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border transition-all ${
         active ? style.active : style.idle
-      } ${count === 0 && !active ? 'opacity-40 cursor-not-allowed' : ''} ${
-        active ? 'ring-1 ring-inset ring-current/30' : ''
-      }`}
+      } ${count === 0 && !active ? 'opacity-40 cursor-not-allowed' : ''}`}
     >
       <Icon className="w-3.5 h-3.5" />
       {t(`xray_test.verdict_${verdict}`)}
@@ -315,7 +527,9 @@ function Detail({ label, value }: { label: string; value: string | number | null
   return (
     <div>
       <span className="text-dark-500">{label}: </span>
-      <span className="text-dark-300">{value === null || value === undefined || value === '' ? '—' : value}</span>
+      <span className="text-dark-300">
+        {value === null || value === undefined || value === '' ? '—' : value}
+      </span>
     </div>
   )
 }

@@ -131,7 +131,7 @@ function TesterTab({ source }: { source: XrayTestSource }) {
   const [sniText, setSniText] = useState('')
   const [syncHost, setSyncHost] = useState(false)
   const [locations, setLocations] = useState<string[]>(['panel'])
-  const [concurrency, setConcurrency] = useState(4)
+  const [concurrency, setConcurrency] = useState(10)
   const [fullMode, setFullMode] = useState(true)
   const [tlsInspect, setTlsInspect] = useState(true)
   const [measureSpeed, setMeasureSpeed] = useState(false)
@@ -463,7 +463,7 @@ function TesterTab({ source }: { source: XrayTestSource }) {
               <input
                 type="range"
                 min={1}
-                max={8}
+                max={32}
                 value={concurrency}
                 onChange={event => setConcurrency(Number(event.target.value))}
                 className="w-full accent-accent-500"
