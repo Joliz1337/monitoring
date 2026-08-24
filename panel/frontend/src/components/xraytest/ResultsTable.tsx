@@ -40,6 +40,12 @@ function looksBlocked(cell: XrayTestCell): boolean {
   return !!cell.reason && BLOCK_LIKE_REASONS.has(cell.reason)
 }
 
+/**
+ * Ключ сервера в дереве — конфигурация целиком, а не адрес: один и тот же сервер
+ * живёт в разных профилях подписки под своими именами, и сливать их нельзя.
+ */
+const configKey = (cell: XrayTestCell) => `${cell.remark}|${cell.address}:${cell.port}`
+
 /** Узел дерева результатов: сервер, внутри — места запуска, внутри — SNI. */
 interface Group {
   key: string
@@ -87,9 +93,17 @@ export function ResultsTable({ cells, groupBySni }: { cells: XrayTestCell[]; gro
   const visible = useMemo(() => {
     // Пустой набор означает «показывать всё»: фильтр не может спрятать таблицу целиком
     if (!picked.size) return cells
-    return cells.filter(cell =>
-      picked.has(cell.verdict) || (picked.has(BLOCKED) && looksBlocked(cell)),
-    )
+    // Отбираются серверы, а не отдельные проверки. У сервера с возможной
+    // блокировкой важно видеть и остальные его SNI: на их фоне и понятно, что
+    // отвалилось именно это имя, а не сервер целиком. Поэтому сервер попадает в
+    // выдачу целиком, если совпала хотя бы одна его проверка.
+    const matched = new Set<string>()
+    cells.forEach(cell => {
+      if (picked.has(cell.verdict) || (picked.has(BLOCKED) && looksBlocked(cell))) {
+        matched.add(configKey(cell))
+      }
+    })
+    return cells.filter(cell => matched.has(configKey(cell)))
   }, [cells, picked])
 
   /**
@@ -98,11 +112,9 @@ export function ResultsTable({ cells, groupBySni }: { cells: XrayTestCell[]; gro
    * бы раскрывать группу ради единственного списка.
    */
   const groups = useMemo<Group[]>(() => {
-    // Ключ — конфигурация целиком, а не адрес: один и тот же сервер живёт в
-    // разных профилях подписки под своими именами, и сливать их нельзя
     const byConfig = new Map<string, XrayTestCell[]>()
     visible.forEach(cell => {
-      const key = `${cell.remark}|${cell.address}:${cell.port}`
+      const key = configKey(cell)
       if (!byConfig.has(key)) byConfig.set(key, [])
       byConfig.get(key)!.push(cell)
     })

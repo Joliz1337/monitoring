@@ -56,7 +56,7 @@ Results are stacked in three levels:
 | **Mbps** | Speed, if measurement is enabled |
 | **Exit IP** | The address and country the connection leaves from. If the country differs from what the key's seller promised, it shows immediately |
 
-The counters above the table — Works, Works with caveats, Fails — double as a filter: click one and only those rows remain. Several can be active at once; Reset brings everything back.
+The counters above the table — Works, Works with caveats, Fails — double as a filter. Click one and you get the servers that have at least one such check. They are shown whole: every SNI and every run location, not just the matching rows — so you see what broke and what it broke against. How many servers are currently listed is printed next to the counters. Several filters can be active at once; Reset brings everything back.
 
 Next to them sits a separate **Possible DPI block** filter. It collects keys whose server port answers while traffic does not pass: the connection opens and silently stalls, resets or times out. That is what DPI filtering looks like — the TCP handshake is allowed through and the connection itself is throttled. Explicit failures stay out of it: a closed port, a wrong certificate or a bad key mean a configuration problem, not a block. Compare such a run with a check from another location: if the same keys are alive from there, the filtering is on your path.
 
