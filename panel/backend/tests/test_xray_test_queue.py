@@ -169,6 +169,58 @@ class QueueTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(job.results), 3)
         self.assertTrue(all(item["verdict"] == "fail" for item in job.results))
 
+    async def test_history_written_after_run(self):
+        manager = XrayTestJobManager()
+        saved: list[int] = []
+
+        async def persist(job):
+            saved.append(len(job.results))
+
+        job_id = manager.start(_cells(20), ProbeOptions(), {"panel": CountingRunner()},
+                               location="panel", concurrency=2, on_finish=persist)
+        await _drain(manager, job_id)
+
+        self.assertEqual(saved, [20])
+
+    async def test_history_written_when_run_cancelled(self):
+        """Остановленный вручную прогон — обычно самый интересный.
+
+        Внутри отменённой задачи любой await сразу получает отмену снова,
+        поэтому сохранение уходит отдельной задачей и должно пережить отмену.
+        """
+        manager = XrayTestJobManager()
+        saved: list[int] = []
+
+        async def persist(job):
+            saved.append(len(job.results))
+
+        runner = CountingRunner(delay=0.05)
+        job_id = manager.start(_cells(200), ProbeOptions(), {"panel": runner},
+                               location="panel", concurrency=1, on_finish=persist)
+
+        job = manager.get(job_id)
+        await asyncio.sleep(0.12)
+        job.task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await job.task
+        await asyncio.sleep(0.05)
+
+        self.assertEqual(len(saved), 1)
+        self.assertGreater(saved[0], 0)
+
+    async def test_nothing_saved_without_results(self):
+        manager = XrayTestJobManager()
+        saved: list[int] = []
+
+        async def persist(job):
+            saved.append(len(job.results))
+
+        job_id = manager.start(_cells(1), ProbeOptions(), {}, location="node:9",
+                               concurrency=1, on_finish=persist)
+        await _drain(manager, job_id)
+        # Исполнителя нет — но ячейки всё равно получили вердикт, это результат
+        self.assertEqual(saved, [1])
+
     async def test_progress_logged_on_long_run(self):
         manager = XrayTestJobManager()
         job_id = manager.start(_cells(60), ProbeOptions(), {"panel": CountingRunner()},

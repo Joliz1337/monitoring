@@ -26,6 +26,8 @@ FINISHED_TTL_SECONDS = 900
 LOG_BUFFER_LIMIT = 2000
 MAX_ACTIVE_JOBS = 5
 # Через сколько результатов отмечать прогресс в журнале задачи
+FinishHook = Callable[["XrayTestJob"], Awaitable[None]]
+
 PROGRESS_STEP = 25
 # Тик в поток, когда нечего сказать: прокси рвут молчащие соединения
 HEARTBEAT_INTERVAL = 15.0
@@ -62,6 +64,8 @@ class XrayTestJob:
 class XrayTestJobManager:
     def __init__(self) -> None:
         self._jobs: dict[str, XrayTestJob] = {}
+        # Сохранение истории отменённого прогона живёт дольше самой задачи
+        self._detached: set[asyncio.Task] = set()
 
     def get(self, job_id: str) -> Optional[XrayTestJob]:
         return self._jobs.get(job_id)
@@ -88,7 +92,7 @@ class XrayTestJobManager:
         *,
         location: str,
         concurrency: int = MAX_CONCURRENCY,
-        on_finish: Optional[Callable[[XrayTestJob], Awaitable[None]]] = None,
+        on_finish: Optional[FinishHook] = None,
     ) -> str:
         self._cleanup_finished()
         active = sum(1 for job in self._jobs.values() if job.finished_at is None)
@@ -119,7 +123,7 @@ class XrayTestJobManager:
         options: ProbeOptions,
         runners: dict[str, CoreRunner],
         concurrency: int,
-        on_finish: Optional[Callable[[XrayTestJob], Awaitable[None]]],
+        on_finish: Optional[FinishHook],
     ) -> None:
         self._emit(job, {"type": "start", "total": job.total, "location": job.location})
         self._log(job, f"Проверок: {job.total}, параллельно на точку: {concurrency}")
@@ -142,19 +146,38 @@ class XrayTestJobManager:
             await asyncio.gather(*workers)
             self._finish(job, "success")
         except asyncio.CancelledError:
-            # История при отмене не пишется: await в отменённой задаче тут же
-            # получит отмену снова, а частичный прогон сравнивать не с чем
             self._finish(job, "cancelled", "Проверка отменена")
+            # Внутри отменённой задачи любой await тут же получит отмену снова,
+            # поэтому сохранение уходит отдельной задачей: остановленный вручную
+            # прогон — обычно самый интересный, терять его результаты нельзя
+            self._persist_detached(job, on_finish)
             raise
         except Exception as exc:  # noqa: BLE001 — верхняя граница фоновой задачи
             logger.error("xray-test job %s failed: %s", job.id, exc)
             self._finish(job, "error", str(exc))
 
-        if on_finish is not None and job.results:
-            try:
-                await on_finish(job)
-            except Exception as exc:  # noqa: BLE001 — история не должна валить прогон
-                logger.warning("xray-test history not saved for %s: %s", job.id, exc)
+        await self._persist(job, on_finish)
+
+    async def _persist(self, job: XrayTestJob, on_finish: Optional[FinishHook]) -> None:
+        if on_finish is None or not job.results:
+            return
+        try:
+            await on_finish(job)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — история не должна валить прогон
+            # Молча потерянная история выглядит как «истории вообще нет»:
+            # причина должна дойти и до журнала прогона, а не только в лог
+            logger.error("xray-test history not saved for %s: %s", job.id, exc, exc_info=True)
+            self._log(job, f"История прогона не сохранена: {exc}")
+
+    def _persist_detached(self, job: XrayTestJob, on_finish: Optional[FinishHook]) -> None:
+        if on_finish is None or not job.results:
+            return
+        task = asyncio.create_task(self._persist(job, on_finish))
+        # Держим ссылку: задача без неё может быть собрана сборщиком мусора
+        self._detached.add(task)
+        task.add_done_callback(self._detached.discard)
 
     async def _worker(
         self,
