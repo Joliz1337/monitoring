@@ -13,7 +13,7 @@
 #         xray-test-runner.sh version
 set -uo pipefail
 
-RUNNER_VERSION="2.2.0"
+RUNNER_VERSION="2.3.0"
 
 TOOLS_DIR="/opt/monitoring-node/tools"
 CORES_DIR="$TOOLS_DIR/cores"
@@ -27,7 +27,7 @@ PROBE_TIMEOUT=10
 # ядро уже слушает свой порт на каждую проверку, и если гнать меньше — половина
 # занятых портов простаивает, а пропускная способность ноды падает вдвое.
 # Нагрузка при этом небольшая: процесс ядра один, остальное — ожидание сети.
-PARALLEL_CELLS=16
+PARALLEL_CELLS=8
 SPEED_TIMEOUT=20
 SPEED_BYTES=10000000
 DEGRADED_RTT_MS=1500

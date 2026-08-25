@@ -281,11 +281,13 @@ class PortPoolTest(unittest.IsolatedAsyncioTestCase):
                 for row in rows if row.startswith("CELL")
             ]
 
+        total = 128
         cells = build_matrix([
             parse_link(f"vless://{UUID}@h{i}.io:443?security=tls#n{i}")
-            for i in range(128)
+            for i in range(total)
         ])
-        batches = [cells[i:i + 16] for i in range(0, len(cells), 16)]
+        step = node_runner.NODE_BATCH_SIZE * 2
+        batches = [cells[i:i + step] for i in range(0, len(cells), step)]
 
         with mock.patch.object(node_runner, "_execute", fake_execute):
             results = await asyncio.wait_for(
@@ -293,8 +295,10 @@ class PortPoolTest(unittest.IsolatedAsyncioTestCase):
                 timeout=10,
             )
 
-        self.assertEqual(sum(len(r) for r in results), 128)
-        self.assertEqual(started, len(batches))
+        self.assertEqual(sum(len(r) for r in results), total)
+        # Крупная пачка режется на задания по NODE_BATCH_SIZE — портов на всех
+        # сразу не хватит, и слоты пропускают их волнами
+        self.assertEqual(started, -(-total // node_runner.NODE_BATCH_SIZE))
 
     async def test_ports_returned_after_batch(self):
         runner = self._runner()
