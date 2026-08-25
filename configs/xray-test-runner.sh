@@ -13,7 +13,7 @@
 #         xray-test-runner.sh version
 set -uo pipefail
 
-RUNNER_VERSION="2.3.0"
+RUNNER_VERSION="2.4.0"
 
 TOOLS_DIR="/opt/monitoring-node/tools"
 CORES_DIR="$TOOLS_DIR/cores"
@@ -34,6 +34,9 @@ DEGRADED_RTT_MS=1500
 # Больше самого длинного задания: пачки идут параллельно, и уборщик не должен
 # добивать живое ядро соседнего прогона
 STALE_CORE_SECONDS=900
+SWEEP_MARKER="/tmp/.mon-xtest-sweep"
+# Реже минуты убирать нечего: брошенное ядро никуда не денется
+SWEEP_MIN_INTERVAL=60
 
 GENERATE_204_URL="https://cp.cloudflare.com/generate_204"
 TRACE_URL="https://cloudflare.com/cdn-cgi/trace"
@@ -59,7 +62,17 @@ escape() {
     printf '%s' "$1" | tr -d '\r' | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' ' | cut -c1-700
 }
 
-now_ms() { date +%s%3N; }
+# Время без запуска процесса: now_ms зовётся по нескольку раз на проверку, а
+# проверок идут десятки параллельно — форк на каждый замер выливается в
+# заметную нагрузку на ровном месте.
+if [ -n "${EPOCHREALTIME:-}" ]; then
+    now_ms() {
+        local t=${EPOCHREALTIME/,/.}
+        printf '%s' "$(( ${t%.*} * 1000 + 10#${t#*.} / 1000 ))"
+    }
+else
+    now_ms() { date +%s%3N; }
+fi
 
 # ── ядра ────────────────────────────────────────────────────────────────────
 
@@ -68,11 +81,26 @@ now_ms() { date +%s%3N; }
 # в отличие от возраста: пачки идут параллельно, и живому ядру соседнего прогона
 # возраст ничего не доказывает. Возраст оставлен запасным правилом на случай,
 # когда каталог тоже уцелел.
+# Уборка брошенных ядер стоит обхода всех процессов системы, поэтому делается
+# изредка, а не в каждом из десятков параллельных заданий: иначе сама уборка,
+# помноженная на параллельность, становится основной нагрузкой на ноду.
+# Брошенное ядро опознаём по исчезнувшему каталогу задания — это точный
+# признак, в отличие от возраста: задания идут параллельно, и живому ядру
+# соседнего прогона возраст ничего не доказывает.
 kill_stale_cores() {
-    local pid etime dir args
-    for pid in $(pgrep -f "$CORES_DIR/" 2>/dev/null); do
-        args=$(ps -o args= -p "$pid" 2>/dev/null)
-        # Каталог задания из «… -c /tmp/mon-xtest.XXXX/config.json»
+    local now=${EPOCHSECONDS:-0} stamp=0
+    [ "$now" = "0" ] && now=$(date +%s)
+    [ -f "$SWEEP_MARKER" ] && stamp=$(stat -c %Y "$SWEEP_MARKER" 2>/dev/null || echo 0)
+    [ $(( now - stamp )) -lt "$SWEEP_MIN_INTERVAL" ] && return 0
+    : > "$SWEEP_MARKER" 2>/dev/null || return 0
+
+    # Один обход процессов вместо ps на каждое найденное ядро
+    local pid etimes args dir
+    while read -r pid etimes args; do
+        case "$args" in
+            *"$CORES_DIR/"*) ;;
+            *) continue ;;
+        esac
         dir=""
         case "$args" in
             *"-c /tmp/mon-xtest."*)
@@ -82,11 +110,10 @@ kill_stale_cores() {
         esac
         if [ -n "$dir" ] && [ ! -d "$dir" ]; then
             kill -9 "$pid" 2>/dev/null
-            continue
+        elif [ "${etimes:-0}" -gt "$STALE_CORE_SECONDS" ] 2>/dev/null; then
+            kill -9 "$pid" 2>/dev/null
         fi
-        etime=$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')
-        [ -n "$etime" ] && [ "$etime" -gt "$STALE_CORE_SECONDS" ] && kill -9 "$pid" 2>/dev/null
-    done
+    done < <(ps -eo pid=,etimes=,args= 2>/dev/null)
 }
 
 ensure_core() {
@@ -127,9 +154,11 @@ start_core() {
     CORE_PGID=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')
     [ -n "$CORE_PGID" ] || CORE_PGID="$pid"
 
-    local deadline=$(( $(date +%s) + CORE_START_TIMEOUT ))
+    # SECONDS — встроенный счётчик оболочки: цикл крутится десять раз в секунду,
+    # и date здесь означал бы столько же запусков процесса на каждое задание
+    local deadline=$(( SECONDS + CORE_START_TIMEOUT ))
     local port pending
-    while [ "$(date +%s)" -lt "$deadline" ]; do
+    while [ "$SECONDS" -lt "$deadline" ]; do
         kill -0 "$pid" 2>/dev/null || return 1
         pending=""
         for port in $ports; do
