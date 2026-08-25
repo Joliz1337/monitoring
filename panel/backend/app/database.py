@@ -196,12 +196,21 @@ async def run_migrations(conn):
     """))
     xray_test_columns = {row[0] for row in result.fetchall()}
 
-    if xray_test_columns and "sni_from_config" not in xray_test_columns:
-        try:
-            await conn.execute(text('ALTER TABLE xray_test_results ADD COLUMN "sni_from_config" BOOLEAN DEFAULT FALSE'))
-            logger.info("Added column: xray_test_results.sni_from_config")
-        except Exception:
-            pass
+    # Колонки, добавленные в модель после того, как таблица уже была создана
+    # create_all: без них падает вставка каждого прогона, и история пустует
+    if xray_test_columns:
+        for col_name, col_type in (
+            ("location", "VARCHAR(40)"),
+            ("location_name", "VARCHAR(200)"),
+            ("sni_from_config", "BOOLEAN DEFAULT FALSE"),
+        ):
+            if col_name in xray_test_columns:
+                continue
+            try:
+                await conn.execute(text(f'ALTER TABLE xray_test_results ADD COLUMN "{col_name}" {col_type}'))
+                logger.info(f"Added column: xray_test_results.{col_name}")
+            except Exception:
+                pass
 
     # Check remnawave_settings columns
     result = await conn.execute(text("""

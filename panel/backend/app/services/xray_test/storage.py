@@ -178,7 +178,8 @@ async def save_run(
         source=source,
         source_name=source_name,
         location=location,
-        location_name=location_name,
+        # Подпись — склейка имён всех выбранных нод, колонка её длину не вместит
+        location_name=(location_name or "")[:200] or None,
         status=status,
         total=len(results),
         ok_count=counts["ok"],
@@ -245,8 +246,10 @@ async def get_run_results(db: AsyncSession, run_id: int) -> list[dict]:
     rows = await db.execute(
         select(XrayTestResult).where(XrayTestResult.run_id == run_id).order_by(XrayTestResult.id)
     )
+    # Порядковый номер нужен таблице на фронте: по нему ключи строк и раскрытие
     return [
         {
+            "index": index,
             "remark": row.remark,
             "protocol": row.protocol,
             "address": row.address,
@@ -267,7 +270,7 @@ async def get_run_results(db: AsyncSession, run_id: int) -> list[dict]:
             "exit_country": row.exit_country,
             "sni_from_config": bool(row.sni_from_config),
         }
-        for row in rows.scalars().all()
+        for index, row in enumerate(rows.scalars().all())
     ]
 
 
