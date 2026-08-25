@@ -13,7 +13,7 @@
 #         xray-test-runner.sh version
 set -uo pipefail
 
-RUNNER_VERSION="2.6.0"
+RUNNER_VERSION="2.7.0"
 
 TOOLS_DIR="/opt/monitoring-node/tools"
 CORES_DIR="$TOOLS_DIR/cores"
@@ -58,8 +58,38 @@ trap cleanup EXIT INT TERM
 
 log() { printf '{"type":"log","line":"%s"}\n' "$(escape "$1")"; }
 
-escape() {
-    printf '%s' "$1" | tr -d '\r' | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' ' | cut -c1-700
+# Экранирование без запуска процессов. Прежний конвейер printf|tr|sed|tr|cut
+# стоил пяти процессов на вызов, а вызывается он по шесть раз на проверку: при
+# десятках параллельных проверок это тысячи запусков в секунду, и почти два ядра
+# уходило в ядро операционной системы вместо полезной работы.
+ESC=""
+BSLASH=$'\x5c'
+escape_var() {
+    local s=${1//$'\r'/}
+    s=${s//"$BSLASH"/"$BSLASH$BSLASH"}
+    s=${s//'"'/"$BSLASH"'"'}
+    s=${s//$'\n'/ }
+    s=${s//$'\t'/ }
+    ESC=${s:0:700}
+}
+
+escape() { escape_var "$1"; printf '%s' "$ESC"; }
+
+# Значение JSON в переменную с именем $1: строка в кавычках либо null
+json_str_to() {
+    local -n out="$1"
+    if [ -n "${2:-}" ]; then escape_var "$2"; out='"'"$ESC"'"'; else out=null; fi
+}
+
+# Секунды с точкой в миллисекунды, без awk
+MS=""
+secs_to_ms() {
+    local v="${1:-}" int frac
+    if [ -z "$v" ]; then MS=""; return; fi
+    int=${v%%.*}; frac=${v#*.}
+    [ "$frac" = "$v" ] && frac=0
+    frac="${frac}000"; frac=${frac:0:3}
+    MS=$(( 10#${int:-0} * 1000 + 10#$frac ))
 }
 
 # Время без запуска процесса: now_ms зовётся по нескольку раз на проверку, а
@@ -230,14 +260,20 @@ probe_pair() {
         "$GENERATE_204_URL" "$GENERATE_204_URL" 2>/dev/null
 }
 
-# Код ответа из строки $2 вывода
-pair_field() { printf '%s\n' "$1" | sed -n "$2p" | cut -d' ' -f1; }
-
-# Время из строки $2 в миллисекундах; пусто, если строки нет
-pair_ms() {
-    local value
-    value=$(printf '%s\n' "$1" | sed -n "$2p" | cut -d' ' -f2)
-    [ -n "$value" ] && printf '%s' "$value" | awk '{printf "%.0f", $1*1000}'
+# Разбор пары ответов без внешних команд: раньше здесь было по четыре запуска
+# процесса (printf, sed, cut, awk) на каждое из трёх значений.
+PAIR_STATUS=""; PAIR_HANDSHAKE=""; PAIR_RTT=""
+read_pair() {
+    local first second code
+    { read -r first; read -r second; } <<< "$1"
+    PAIR_STATUS=""; PAIR_HANDSHAKE=""; PAIR_RTT=""
+    if [ -n "$first" ]; then
+        PAIR_STATUS=${first%% *}
+        secs_to_ms "${first##* }"; PAIR_HANDSHAKE=$MS
+    fi
+    if [ -n "$second" ]; then
+        secs_to_ms "${second##* }"; PAIR_RTT=$MS
+    fi
 }
 
 curl_socks() { local port="$1"; shift; curl -s --socks5-hostname "127.0.0.1:$port" "$@"; }
@@ -278,35 +314,31 @@ core_failure_line() {
 
 # ── основной цикл ───────────────────────────────────────────────────────────
 
-# Строка собирается целиком и печатается одним вызовом. Проверки идут
-# параллельно и пишут в общий вывод: несколько printf на одну строку означали
-# бы, что куски разных ячеек наезжают друг на друга. Панель такой JSON молча
-# выбрасывает, и проверка получает «нода не вернула результат».
+# Строка результата собирается одной печатью и без единой подстановки:
+# каждая $( ) — это запуск процесса, а проверок идут десятки параллельно.
+# Одна печать заодно атомарна, поэтому строки соседних проверок не
+# налезают друг на друга в общем выводе.
 emit_cell() {
-    local line
-    line=$(printf '{"type":"cell","index":%s,"verdict":"%s","reason":%s,"detail":"%s",' \
-        "$1" "$2" "$3" "$(escape "$4")")
-    line+=$(printf '"tcp_min_ms":%s,"handshake_ms":%s,"rtt_ms":%s,"http_status":%s,' \
-        "${5:-null}" "${6:-null}" "${7:-null}" "${8:-null}")
-    line+=$(printf '"exit_ip":%s,"exit_country":%s,"speed_mbps":%s,' \
-        "${9:-null}" "${10:-null}" "${11:-null}")
-    line+=$(printf '"resolved_ip":%s,"dns_ms":%s,"tcp_avg_ms":%s,"tcp_jitter_ms":%s}' \
-        "${12:-null}" "${13:-null}" "${14:-null}" "${15:-null}")
-    printf '%s\n' "$line"
+    escape_var "$4"
+    printf '{"type":"cell","index":%s,"verdict":"%s","reason":%s,"detail":"%s","tcp_min_ms":%s,"handshake_ms":%s,"rtt_ms":%s,"http_status":%s,"exit_ip":%s,"exit_country":%s,"speed_mbps":%s,"resolved_ip":%s,"dns_ms":%s,"tcp_avg_ms":%s,"tcp_jitter_ms":%s}\n' \
+        "$1" "$2" "$3" "$ESC" \
+        "${5:-null}" "${6:-null}" "${7:-null}" "${8:-null}" \
+        "${9:-null}" "${10:-null}" "${11:-null}" \
+        "${12:-null}" "${13:-null}" "${14:-null}" "${15:-null}"
 }
 
-json_str() { [ -n "${1:-}" ] && printf '"%s"' "$(escape "$1")" || printf 'null'; }
 
 run_cell() {
     local index="$1" core_name="$2" address="$3" port="$4" udp="$5" socks="$6" sni="$7"
     local tcp_ms="" tcp_avg="" tcp_jitter="" handshake="" rtt="" status=""
     local exit_ip="" exit_country="" speed="" resolved_ip="" dns_ms=""
 
-    local resolved
+    local resolved J_RESOLVED=null J_EXIT_IP=null J_EXIT_CC=null
     resolved=$(resolve_host "$address")
     if [ -n "$resolved" ]; then
-        resolved_ip=$(printf '%s' "$resolved" | cut -d' ' -f1)
-        dns_ms=$(printf '%s' "$resolved" | cut -d' ' -f2)
+        resolved_ip=${resolved%% *}
+        dns_ms=${resolved##* }
+        json_str_to J_RESOLVED "$resolved_ip"
     else
         emit_cell "$index" "fail" '"DNS_FAIL"' "домен $address не резолвится"
         return
@@ -317,12 +349,10 @@ run_cell() {
         tcp=$(tcp_ping_ms "$address" "$port")
         if [ -z "$tcp" ]; then
             emit_cell "$index" "fail" '"TCP_REFUSED"' "порт $port недоступен" \
-                null null null null null null null "$(json_str "$resolved_ip")" "${dns_ms:-null}"
+                null null null null null null null "$J_RESOLVED" "${dns_ms:-null}"
             return
         fi
-        tcp_ms=$(printf '%s' "$tcp" | cut -d' ' -f1)
-        tcp_avg=$(printf '%s' "$tcp" | cut -d' ' -f2)
-        tcp_jitter=$(printf '%s' "$tcp" | cut -d' ' -f3)
+        read -r tcp_ms tcp_avg tcp_jitter <<< "$tcp"
     fi
 
     if [ "$OPT_HTTP" = "1" ]; then
@@ -333,9 +363,8 @@ run_cell() {
         # чем сами прокси-ядра.
         local pair rc
         pair=$(probe_pair "$socks"); rc=$?
-        status=$(pair_field "$pair" 1)
-        handshake=$(pair_ms "$pair" 1)
-        rtt=$(pair_ms "$pair" 2)
+        read_pair "$pair"
+        status=$PAIR_STATUS; handshake=$PAIR_HANDSHAKE; rtt=$PAIR_RTT
 
         # Проверки идут пачками, и на занятой ноде запрос может не уложиться в
         # таймаут при живом канале — такой отказ переспрашиваем. Отказ по другой
@@ -343,9 +372,8 @@ run_cell() {
         if [ "$rc" = "28" ]; then
             sleep 1.5
             pair=$(probe_pair "$socks")
-            status=$(pair_field "$pair" 1)
-            handshake=$(pair_ms "$pair" 1)
-            rtt=$(pair_ms "$pair" 2)
+            read_pair "$pair"
+            status=$PAIR_STATUS; handshake=$PAIR_HANDSHAKE; rtt=$PAIR_RTT
         fi
 
         if [ -z "$status" ] || [ "$status" = "000" ]; then
@@ -357,26 +385,27 @@ run_cell() {
             emit_cell "$index" "fail" "$fail_reason" \
                 "$(core_failure_line "$index")" \
                 "${tcp_ms:-null}" null null null null null null \
-                "$(json_str "$resolved_ip")" "${dns_ms:-null}" "${tcp_avg:-null}" "${tcp_jitter:-null}"
+                "$J_RESOLVED" "${dns_ms:-null}" "${tcp_avg:-null}" "${tcp_jitter:-null}"
             return
         fi
-
-        second=$(curl_socks "$socks" -o /dev/null --max-time "$PROBE_TIMEOUT" \
-            -w '%{time_total}' "$GENERATE_204_URL" 2>/dev/null)
-        rtt=$(printf '%s' "$second" | awk '{printf "%.0f", $1*1000}')
 
         if [ "$status" != "204" ] && [ "$status" != "200" ]; then
             emit_cell "$index" "fail" '"HTTP_BAD_STATUS"' "HTTP $status" \
                 "${tcp_ms:-null}" "${handshake:-null}" "${rtt:-null}" "$status" null null null \
-                "$(json_str "$resolved_ip")" "${dns_ms:-null}" "${tcp_avg:-null}" "${tcp_jitter:-null}"
+                "$J_RESOLVED" "${dns_ms:-null}" "${tcp_avg:-null}" "${tcp_jitter:-null}"
             return
         fi
 
         if [ "$OPT_EXIT" = "1" ]; then
             local trace
             trace=$(curl_socks "$socks" --max-time "$PROBE_TIMEOUT" "$TRACE_URL" 2>/dev/null)
-            exit_ip=$(printf '%s' "$trace" | awk -F= '/^ip=/{print $2}')
-            exit_country=$(printf '%s' "$trace" | awk -F= '/^loc=/{print $2}')
+            local tline
+            while IFS= read -r tline; do
+                case "$tline" in
+                    ip=*)  exit_ip=${tline#ip=} ;;
+                    loc=*) exit_country=${tline#loc=} ;;
+                esac
+            done <<< "$trace"
         fi
 
         if [ "$OPT_SPEED" = "1" ]; then
@@ -386,6 +415,9 @@ run_cell() {
             speed=$(printf '%s' "$bps" | awk '{printf "%.2f", $1*8/1000000}')
         fi
     fi
+
+    json_str_to J_EXIT_IP "$exit_ip"
+    json_str_to J_EXIT_CC "$exit_country"
 
     # Оговорка без причины бесполезна: вердикт и код проставляются вместе
     local verdict="ok" reason='null'
@@ -398,9 +430,9 @@ run_cell() {
     fi
 
     emit_cell "$index" "$verdict" "$reason" "" "${tcp_ms:-null}" "${handshake:-null}" \
-        "${rtt:-null}" "${status:-null}" "$(json_str "$exit_ip")" \
-        "$(json_str "$exit_country")" "${speed:-null}" \
-        "$(json_str "$resolved_ip")" "${dns_ms:-null}" "${tcp_avg:-null}" "${tcp_jitter:-null}"
+        "${rtt:-null}" "${status:-null}" "$J_EXIT_IP" \
+        "$J_EXIT_CC" "${speed:-null}" \
+        "$J_RESOLVED" "${dns_ms:-null}" "${tcp_avg:-null}" "${tcp_jitter:-null}"
 }
 
 main() {
