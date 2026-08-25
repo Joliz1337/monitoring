@@ -244,6 +244,26 @@ class LiveRates(BaseModel):
     sampled_at: float
 
 
+class WindowRates(BaseModel):
+    """Средние и пики за окно опроса панели (`?window=N`) — отдельный блок.
+
+    Мгновенные поля (`cpu.usage_percent`, `network.total.*_bytes_per_sec`)
+    читают карточки дашборда и веса HAProxy — их семантика не меняется.
+    `cpu_max` — пик секундного среднего по ядрам, то есть хоста, а не ядра.
+    """
+    window_sec: float
+    samples: int
+    cpu_avg: float
+    cpu_max: float
+    per_cpu_avg: list[float]
+    net_rx_avg: float
+    net_tx_avg: float
+    net_rx_max: float
+    net_tx_max: float
+    disk_read_avg: float
+    disk_write_avg: float
+
+
 class AllMetrics(BaseModel):
     timestamp: str
     server_name: str
@@ -257,6 +277,7 @@ class AllMetrics(BaseModel):
     certificates: Optional[CertificatesInfo] = None
     antiddos: Optional[AntiDdosInfo] = None
     live_rates: Optional[LiveRates] = None
+    window: Optional[WindowRates] = None
     agent_version: Optional[str] = None
     # Карта прав панели на этой ноде; null — ограничений нет. Поле обязано быть
     # объявлено здесь: то, чего нет в response_model, FastAPI из ответа вырежет.

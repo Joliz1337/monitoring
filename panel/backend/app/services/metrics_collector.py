@@ -1,13 +1,15 @@
 """
 Background metrics collector for the panel.
-Polls all servers every N seconds and stores metrics in local DB.
-Network/disk speeds come from the node's one-second sampler when present;
-otherwise disk speed is derived here and network speed by traffic_ingest.
+Polls all servers on a fixed tick and stores metrics in local DB.
+A node with the window sampler returns averages and peaks over the gap since
+the previous successful poll; older nodes fall back to one-second rates or to
+counter deltas (disk here, network by traffic_ingest).
 """
 
 import asyncio
 import json
 import logging
+import math
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -27,7 +29,7 @@ from app.models import (
     Server, ServerCache, MetricsSnapshot, AggregatedMetrics, PanelSettings,
     ServerDowntime, ServerTraffic,
 )
-from app.services.metrics_rates import node_live_rates
+from app.services.metrics_rates import NodeRates, poll_window_seconds, snapshot_rates
 from app.services.traffic_ingest import get_traffic_ingest
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -36,6 +38,19 @@ logger = logging.getLogger(__name__)
 # Default intervals (used if settings not in DB)
 DEFAULT_METRICS_INTERVAL = 10  # seconds (recommended: 10-15s)
 DEFAULT_HAPROXY_INTERVAL = 300  # seconds (5 minutes - HAProxy data changes rarely)
+
+
+def next_collection_tick(previous_tick: float, interval: float, now: float) -> float:
+    """Следующая отметка фиксированного такта.
+
+    Опоздание на период и больше не догоняется серией циклов подряд —
+    такт перескакивает на ближайшую будущую отметку той же сетки.
+    """
+    tick = previous_tick + interval
+    if tick > now:
+        return tick
+    missed = math.floor((now - tick) / interval) + 1
+    return tick + missed * interval
 
 
 class ErrorTypes:
@@ -140,6 +155,8 @@ class MetricsCollector:
 
         self._node_failures: dict[int, int] = {}
         self._node_skip_cycles: dict[int, int] = {}
+        # Момент последнего удачного ответа ноды по monotonic — от него считается окно.
+        self._last_success_mono: dict[int, float] = {}
 
         # Наблюдаемый переход offline → online для авто-восстановления состояния ноды.
         self._down_servers: set[int] = set()
@@ -234,14 +251,20 @@ class MetricsCollector:
         logger.info("Metrics collector stopped")
 
     async def _collection_loop(self):
-        """Main collection loop"""
+        """Main collection loop on a fixed tick.
+
+        Сон до следующей отметки, а не interval после работы: иначе время сбора
+        прибавлялось бы к каждому циклу и снапшоты уплывали бы от сетки.
+        """
+        next_tick = time.monotonic()
         while self._running:
             try:
                 await self._collect_all_servers()
             except Exception as e:
                 logger.error(f"Collection error: {e}")
-            
-            await asyncio.sleep(self._collect_interval)
+
+            next_tick = next_collection_tick(next_tick, self._collect_interval, time.monotonic())
+            await asyncio.sleep(max(0.0, next_tick - time.monotonic()))
     
     async def _collect_all_servers(self):
         """Collect metrics from all active servers with bounded concurrency."""
@@ -422,6 +445,12 @@ class MetricsCollector:
                 self._node_skip_cycles[server.id] = self.CB_SKIP_CYCLES
         return result
 
+    def _window_seconds(self, server_id: int) -> int:
+        """Окно усреднения для ноды — секунды с её прошлого удачного опроса."""
+        last_success = self._last_success_mono.get(server_id)
+        elapsed = None if last_success is None else time.monotonic() - last_success
+        return poll_window_seconds(elapsed, self._collect_interval)
+
     async def _fetch_metrics(self, server: Server) -> tuple[Optional[dict], Optional[dict]]:
         """Fetch current metrics from server API. Returns (metrics, error_info)"""
         url = f"{server.url}/api/metrics"
@@ -429,9 +458,12 @@ class MetricsCollector:
         try:
             client = get_node_client(server)
             # Таймаут берётся из клиента (_NODE_TIMEOUT = 2/5/2/2) — без лишних аллокаций.
-            response = await client.get(url, headers=node_auth_headers(server))
+            response = await client.get(
+                url, headers=node_auth_headers(server), params={"window": self._window_seconds(server.id)}
+            )
             if response.status_code == 200:
                 data = response.json()
+                self._last_success_mono[server.id] = time.monotonic()
                 # Момент ответа ноды — база времени для расчёта скоростей.
                 # Сборка снапшотов идёт после gather по всем нодам, и её момент
                 # плавает вместе с самой медленной нодой (см. _build_snapshot).
@@ -681,19 +713,20 @@ class MetricsCollector:
             logger.warning(f"Traffic observe failed for server {server_id}: {e}")
             net_rx_speed, net_tx_speed = 0.0, 0.0
 
-        # Скорость — нагрузка за последнюю секунду, посчитанная самой нодой.
-        # Без неё (старый агент, семплер ещё не прогрелся) — среднее за интервал
-        # опроса по дельте счётчиков, как считали всегда.
-        node_rates = node_live_rates(metrics)
-        if node_rates:
-            net_rx_speed, net_tx_speed = node_rates.net_rx, node_rates.net_tx
-            disk_read_speed, disk_write_speed = node_rates.disk_read, node_rates.disk_write
-        else:
-            disk_read = sum(d.get("read_bytes", 0) for d in disk.get("io", {}).values())
-            disk_write = sum(d.get("write_bytes", 0) for d in disk.get("io", {}).values())
-            disk_read_speed, disk_write_speed = self._disk_speeds(
-                server_id, disk_read, disk_write, current_time
-            )
+        # Дельты дисковых счётчиков считаются всегда: база должна быть тёплой
+        # к моменту, когда семплер ноды замолчит и придётся на них откатиться.
+        disk_read = sum(d.get("read_bytes", 0) for d in disk.get("io", {}).values())
+        disk_write = sum(d.get("write_bytes", 0) for d in disk.get("io", {}).values())
+        disk_read_speed, disk_write_speed = self._disk_speeds(
+            server_id, disk_read, disk_write, current_time
+        )
+        rates = snapshot_rates(
+            metrics,
+            NodeRates(
+                net_rx=net_rx_speed, net_tx=net_tx_speed,
+                disk_read=disk_read_speed, disk_write=disk_write_speed,
+            ),
+        )
 
         disk_percent = 0.0
         partitions = disk.get("partitions", [])
@@ -704,12 +737,12 @@ class MetricsCollector:
         connections_count = connections.get("established", 0) + connections.get("listen", 0)
         connections_detailed = system.get("connections_detailed", {})
         tcp_states = connections_detailed.get("tcp", {})
-        per_cpu = cpu.get("per_cpu_percent", [])
-        
+
         return {
             "server_id": server_id,
             "timestamp": now_utc,
-            "cpu_usage": cpu.get("usage_percent", 0),
+            "cpu_usage": rates.cpu_usage,
+            "cpu_usage_max": rates.cpu_usage_max,
             "load_avg_1": cpu.get("load_avg_1", 0),
             "load_avg_5": cpu.get("load_avg_5", 0),
             "load_avg_15": cpu.get("load_avg_15", 0),
@@ -719,11 +752,13 @@ class MetricsCollector:
             "memory_percent": memory.get("percent", 0),
             "swap_used": swap.get("used", 0),
             "swap_percent": swap.get("percent", 0),
-            "net_rx_bytes_per_sec": net_rx_speed,
-            "net_tx_bytes_per_sec": net_tx_speed,
+            "net_rx_bytes_per_sec": rates.net_rx,
+            "net_tx_bytes_per_sec": rates.net_tx,
+            "net_rx_bytes_per_sec_max": rates.net_rx_max,
+            "net_tx_bytes_per_sec_max": rates.net_tx_max,
             "disk_percent": disk_percent,
-            "disk_read_bytes_per_sec": disk_read_speed,
-            "disk_write_bytes_per_sec": disk_write_speed,
+            "disk_read_bytes_per_sec": rates.disk_read,
+            "disk_write_bytes_per_sec": rates.disk_write,
             "process_count": processes.get("total", 0),
             "connections_count": connections_count,
             "tcp_established": tcp_states.get("established"),
@@ -733,7 +768,7 @@ class MetricsCollector:
             "tcp_syn_sent": tcp_states.get("syn_sent"),
             "tcp_syn_recv": tcp_states.get("syn_recv") if tcp_states.get("syn_recv") is not None else tcp_states.get("syn_received"),
             "tcp_fin_wait": tcp_states.get("fin_wait"),
-            "per_cpu_percent": json.dumps(per_cpu) if per_cpu else None,
+            "per_cpu_percent": json.dumps(rates.per_cpu_percent) if rates.per_cpu_percent else None,
         }
 
     def _disk_speeds(
@@ -1101,6 +1136,9 @@ class MetricsCollector:
         и врал бы задним числом при смене metrics_collect_interval. LEFT JOIN даёт
         не больше одной строки на сервер (uq_server_traffic), поэтому MAX() —
         просто способ вытащить её значение в группе.
+
+        Пики берутся из окна ноды (`*_max`), а у строк без пика — из самого
+        среднего: старая нода или снапшот до миграции не должны обнулять максимум.
         """
         from sqlalchemy import text
 
@@ -1111,9 +1149,10 @@ class MetricsCollector:
         await db.execute(text("""
             INSERT INTO aggregated_metrics (
                 server_id, timestamp, period_type,
-                avg_cpu, max_cpu, avg_load,
+                avg_cpu, max_cpu, avg_load, max_load,
                 avg_memory_percent, max_memory_percent, avg_disk_percent,
-                total_rx_bytes, total_tx_bytes, avg_rx_speed, avg_tx_speed,
+                total_rx_bytes, total_tx_bytes,
+                avg_rx_speed, avg_tx_speed, max_rx_speed, max_tx_speed,
                 avg_disk_read_speed, avg_disk_write_speed,
                 avg_tcp_established, avg_tcp_listen, avg_tcp_time_wait,
                 avg_tcp_close_wait, avg_tcp_syn_sent, avg_tcp_syn_recv,
@@ -1121,10 +1160,13 @@ class MetricsCollector:
             )
             SELECT
                 m.server_id, :hour_start, 'hour',
-                AVG(m.cpu_usage), MAX(m.cpu_usage), AVG(m.load_avg_1),
+                AVG(m.cpu_usage), MAX(COALESCE(m.cpu_usage_max, m.cpu_usage)),
+                AVG(m.load_avg_1), MAX(m.load_avg_1),
                 AVG(m.memory_percent), MAX(m.memory_percent), AVG(m.disk_percent),
                 COALESCE(MAX(t.rx_bytes), 0), COALESCE(MAX(t.tx_bytes), 0),
                 AVG(m.net_rx_bytes_per_sec), AVG(m.net_tx_bytes_per_sec),
+                MAX(COALESCE(m.net_rx_bytes_per_sec_max, m.net_rx_bytes_per_sec)),
+                MAX(COALESCE(m.net_tx_bytes_per_sec_max, m.net_tx_bytes_per_sec)),
                 AVG(m.disk_read_bytes_per_sec), AVG(m.disk_write_bytes_per_sec),
                 AVG(m.tcp_established), AVG(m.tcp_listen), AVG(m.tcp_time_wait),
                 AVG(m.tcp_close_wait), AVG(m.tcp_syn_sent), AVG(m.tcp_syn_recv),
@@ -1155,9 +1197,10 @@ class MetricsCollector:
         await db.execute(text("""
             INSERT INTO aggregated_metrics (
                 server_id, timestamp, period_type,
-                avg_cpu, max_cpu, avg_load,
+                avg_cpu, max_cpu, avg_load, max_load,
                 avg_memory_percent, max_memory_percent, avg_disk_percent,
-                total_rx_bytes, total_tx_bytes, avg_rx_speed, avg_tx_speed,
+                total_rx_bytes, total_tx_bytes,
+                avg_rx_speed, avg_tx_speed, max_rx_speed, max_tx_speed,
                 avg_disk_read_speed, avg_disk_write_speed,
                 avg_tcp_established, avg_tcp_listen, avg_tcp_time_wait,
                 avg_tcp_close_wait, avg_tcp_syn_sent, avg_tcp_syn_recv,
@@ -1165,10 +1208,11 @@ class MetricsCollector:
             )
             SELECT
                 server_id, :day_start, 'day',
-                AVG(avg_cpu), MAX(max_cpu), AVG(avg_load),
+                AVG(avg_cpu), MAX(max_cpu), AVG(avg_load), MAX(COALESCE(max_load, avg_load)),
                 AVG(avg_memory_percent), MAX(max_memory_percent), AVG(avg_disk_percent),
                 COALESCE(SUM(total_rx_bytes), 0), COALESCE(SUM(total_tx_bytes), 0),
                 AVG(avg_rx_speed), AVG(avg_tx_speed),
+                MAX(COALESCE(max_rx_speed, avg_rx_speed)), MAX(COALESCE(max_tx_speed, avg_tx_speed)),
                 AVG(avg_disk_read_speed), AVG(avg_disk_write_speed),
                 AVG(avg_tcp_established), AVG(avg_tcp_listen), AVG(avg_tcp_time_wait),
                 AVG(avg_tcp_close_wait), AVG(avg_tcp_syn_sent), AVG(avg_tcp_syn_recv),

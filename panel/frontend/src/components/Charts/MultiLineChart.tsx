@@ -1,186 +1,156 @@
 import { useMemo } from 'react'
 import ReactApexChart from 'react-apexcharts'
-import { ApexOptions } from 'apexcharts'
+import type { ApexOptions } from 'apexcharts'
 import { useTranslation } from 'react-i18next'
 import {
   processSeriesWithGaps,
-  calculateMultiSeriesYMax,
+  bandTop,
   buildGapAnnotations,
   parseTimestamp,
-  ChartGap,
+  seriesMaxValue,
+  niceAxisMax,
+  type ChartGap,
+  type ProcessedPoint,
 } from '../../utils/chartUtils'
+import { DEFAULT_CHART_DISPLAY, type ChartDisplay } from '../../config/chartDisplay'
+import {
+  AREA_GRADIENT,
+  AXIS_FONT_SIZE,
+  CHART_LABEL_COLOR,
+  LINE_WIDTH,
+  PEAK_BAND_OPACITY,
+  buildBaseChartOptions,
+  formatDateLocalized,
+  getDateTimeFormat,
+  renderMetricTooltip,
+  seriesColor,
+} from './chartTheme'
 
-interface Series {
+export interface ChartSeriesPoint {
+  timestamp: string
+  value: number | null
+  /** Максимум за интервал точки; без него полоса пиков для точки не рисуется */
+  peak?: number | null
+}
+
+export interface ChartSeries {
   name: string
-  data: Array<{ timestamp: string; value: number | null }>
+  data: ChartSeriesPoint[]
   color?: string
 }
 
 interface MultiLineChartProps {
-  series: Series[]
+  series: ChartSeries[]
+  display?: ChartDisplay
   height?: number
   unit?: string
-  stacked?: boolean
-  formatValue?: (val: number) => string
+  formatValue?: (value: number) => string
   period?: string
-  smoothing?: number // Smoothing factor 0-1 (0 = no smoothing, 1 = max smoothing)
-  gaps?: ChartGap[] // Periods without data, highlighted on the x-axis
+  gaps?: ChartGap[]
+  yMin?: number
+  yMax?: number
+  showLegend?: boolean
 }
+
+type ChartType = 'area' | 'rangeArea'
 
 // Stable identity keeps the useMemo below from recomputing on every render
 const NO_GAPS: ChartGap[] = []
 
-const DEFAULT_COLORS = [
-  '#22d3ee', // cyan
-  '#10b981', // green
-  '#f59e0b', // yellow
-  '#ef4444', // red
-  '#8b5cf6', // purple
-  '#ec4899', // pink
-]
-
-// Локализованные названия месяцев
-const MONTHS: Record<string, string[]> = {
-  ru: ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'],
-  en: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
-}
-
-function formatDateLocalized(date: Date, format: string, lang: string): string {
-  const months = MONTHS[lang] || MONTHS.en
-  // Use local time methods to show time in user's timezone
-  const day = date.getDate().toString().padStart(2, '0')
-  const month = months[date.getMonth()]
-  const year = date.getFullYear()
-  const shortYear = year.toString().slice(-2)
-  const hours = date.getHours().toString().padStart(2, '0')
-  const minutes = date.getMinutes().toString().padStart(2, '0')
-  const seconds = date.getSeconds().toString().padStart(2, '0')
-  
-  return format
-    .replace('dd', day)
-    .replace('MMM', month)
-    .replace('yyyy', year.toString())
-    .replace('yy', shortYear)
-    .replace('HH', hours)
-    .replace('mm', minutes)
-    .replace('ss', seconds)
-}
-
-function getDateTimeFormat(period: string) {
-  switch (period) {
-    case '1h':
-      return { xaxis: 'HH:mm', tooltip: 'HH:mm:ss' }
-    case '24h':
-      return { xaxis: 'HH:mm', tooltip: 'dd MMM HH:mm' }
-    case '7d':
-      return { xaxis: 'dd MMM', tooltip: 'dd MMM HH:mm' }
-    case '30d':
-      return { xaxis: 'dd MMM', tooltip: 'dd MMM yyyy' }
-    case '365d':
-      return { xaxis: 'MMM yy', tooltip: 'dd MMM yyyy' }
-    default:
-      return { xaxis: 'HH:mm', tooltip: 'HH:mm:ss' }
-  }
+function latestTimestamp(seriesData: ProcessedPoint[][]): number {
+  return seriesData.reduce((latest, points) => {
+    const last = points[points.length - 1]
+    return last && last.x > latest ? last.x : latest
+  }, 0)
 }
 
 export default function MultiLineChart({
   series,
+  display = DEFAULT_CHART_DISPLAY,
   height = 250,
   unit = '',
-  stacked = false,
   formatValue,
   period = '1h',
-  smoothing = 0.35, // Default smoothing factor for pleasant curves
   gaps = NO_GAPS,
+  yMin,
+  yMax,
+  showLegend = series.length > 1,
 }: MultiLineChartProps) {
   const { t, i18n } = useTranslation()
 
-  const { chartSeries, options } = useMemo(() => {
+  const { chartSeries, chartType, options } = useMemo(() => {
     const lang = i18n.language || 'en'
     const noDataLabel = t('common.no_data')
+    const peakLabel = t('common.peak')
+    const dateFormat = getDateTimeFormat(period)
+    const formatTooltipValue = (value: number) => (formatValue ? formatValue(value) : `${value.toFixed(2)}${unit}`)
+    const formatAxisValue = (value: number) => (formatValue ? formatValue(value) : `${value.toFixed(1)}${unit}`)
 
-    // Smoothing and downsampling run per continuous segment, gaps stay null
-    const processedSeries = series.map(s =>
+    const processed = series.map(s =>
       processSeriesWithGaps(
-        s.data.map(d => ({ x: parseTimestamp(d.timestamp), y: d.value })),
-        { smoothing },
+        s.data.map(d => ({ x: parseTimestamp(d.timestamp), y: d.value, peak: d.peak })),
+        { smoothing: display.smoothing },
       ),
     )
+    const colors = series.map((s, i) => s.color ?? seriesColor(i))
 
-    const chartSeries = series.map((s, i) => ({
-      name: s.name,
-      data: processedSeries[i],
+    // Полоса есть только у рядов с пиками: старая нода на 1h их не отдаёт
+    const bandIndexes = display.showPeaks
+      ? processed.flatMap((points, i) => (points.some(p => p.peak !== null && p.y !== null) ? [i] : []))
+      : []
+    const hasBand = bandIndexes.length > 0
+    const chartType: ChartType = hasBand ? 'rangeArea' : 'area'
+
+    // Полосы идут первыми — рисуются под линиями
+    const bandSeries = bandIndexes.map(i => ({
+      name: `${series[i].name} · ${peakLabel}`,
+      type: 'rangeArea',
+      data: processed[i].map(p => {
+        const top = bandTop(p)
+        return { x: p.x, y: top === null ? null : [p.y as number, top] }
+      }),
     }))
+    const lineSeries = series.map((s, i) => ({
+      name: s.name,
+      type: hasBand ? 'line' : 'area',
+      data: processed[i].map(p => ({ x: p.x, y: p.y })),
+    }))
+    const chartSeries = [...bandSeries, ...lineSeries]
 
-    const dynamicYMax = calculateMultiSeriesYMax(processedSeries)
-
-    const lastTimestamp = processedSeries.reduce((latest, points) => {
-      const lastPoint = points[points.length - 1]
-      return lastPoint && lastPoint.x > latest ? lastPoint.x : latest
-    }, 0)
+    const lastTimestamp = latestTimestamp(processed)
     const gapRanges = lastTimestamp > 0 ? buildGapAnnotations(gaps, lastTimestamp) : []
 
-    const colors = series.map((s, i) => s.color || DEFAULT_COLORS[i % DEFAULT_COLORS.length])
-    const dateFormat = getDateTimeFormat(period)
-
+    const base = buildBaseChartOptions({ lang, period })
     const options: ApexOptions = {
-      chart: {
-        type: 'area',
-        stacked,
-        toolbar: { show: false },
-        zoom: { enabled: false },
-        background: 'transparent',
-        animations: {
-          enabled: false, // Disabled for performance
-        },
-        redrawOnParentResize: true,
-        redrawOnWindowResize: true,
-      },
-      theme: { mode: 'dark' },
-      colors,
+      ...base,
+      chart: { ...base.chart, type: chartType },
+      colors: [...bandIndexes.map(i => colors[i]), ...colors],
       stroke: {
-        curve: 'monotoneCubic', // Better than 'smooth' - no artifacts on sharp spikes
-        width: 2,
+        curve: display.curve,
+        width: hasBand ? [...bandSeries.map(() => 0), ...lineSeries.map(() => LINE_WIDTH)] : LINE_WIDTH,
       },
-      fill: {
-        type: 'gradient',
-        gradient: {
-          shadeIntensity: 1,
-          opacityFrom: stacked ? 0.6 : 0.3,
-          opacityTo: stacked ? 0.2 : 0,
-          stops: [0, 100],
-        },
-      },
-      dataLabels: { enabled: false },
-      grid: {
-        borderColor: '#343541',
-        strokeDashArray: 4,
-        xaxis: { lines: { show: false } },
-      },
-      xaxis: {
-        type: 'datetime',
-        labels: {
-          style: { colors: '#8e8ea0', fontSize: '11px' },
-          formatter: (value) => formatDateLocalized(new Date(value), dateFormat.xaxis, lang),
-        },
-        axisBorder: { show: false },
-        axisTicks: { show: false },
-      },
+      fill: hasBand
+        ? { type: 'solid', opacity: [...bandSeries.map(() => PEAK_BAND_OPACITY), ...lineSeries.map(() => 1)] }
+        : { type: 'gradient', gradient: AREA_GRADIENT },
       yaxis: {
-        min: 0,
-        max: dynamicYMax,
+        min: yMin ?? 0,
+        max: yMax ?? niceAxisMax(seriesMaxValue(processed)),
         labels: {
-          style: { colors: '#8e8ea0', fontSize: '11px' },
-          formatter: (val: number | null | undefined) => {
-            if (val == null || Number.isNaN(val)) return ''
-            return formatValue ? formatValue(val) : `${val.toFixed(1)}${unit}`
-          },
+          style: { colors: CHART_LABEL_COLOR, fontSize: AXIS_FONT_SIZE },
+          formatter: (value: number | null | undefined) =>
+            value == null || Number.isNaN(value) ? '' : formatAxisValue(value),
         },
       },
       legend: {
+        show: showLegend,
         position: 'top',
         horizontalAlign: 'left',
-        labels: { colors: '#8e8ea0' },
+        labels: { colors: CHART_LABEL_COLOR },
+        // Полосы в легенде не показываем, а без штатных пунктов клик по легенде не может
+        // скрыть ряд вместе с его полосой — переключение отключено целиком
+        customLegendItems: hasBand ? series.map(s => s.name) : [],
+        ...(hasBand ? { markers: { fillColors: colors } } : {}),
+        onItemClick: { toggleDataSeries: !hasBand },
       },
       // Пустой массив, а не undefined: updateOptions делает поверхностное присваивание
       // для не-объектных значений и стёр бы весь блок annotations вместе с images/texts
@@ -189,21 +159,31 @@ export default function MultiLineChart({
         theme: 'dark',
         shared: true,
         intersect: false,
-        x: {
-          formatter: (value) => formatDateLocalized(new Date(value), dateFormat.tooltip, lang),
-        },
-        y: {
-          // Apex passes null for gap points - showing 0 there would fake a metric
-          formatter: (val: number | null | undefined) => {
-            if (val == null || Number.isNaN(val)) return noDataLabel
-            return formatValue ? formatValue(val) : `${val.toFixed(2)}${unit}`
-          },
+        custom: ({ dataPointIndex }: { dataPointIndex: number }) => {
+          const anchor = processed.find(points => points[dataPointIndex] !== undefined)?.[dataPointIndex]
+          if (!anchor) return ''
+          const rows = series.map((s, i) => {
+            const point = processed[i][dataPointIndex]
+            const hasValue = point !== undefined && point.raw !== null
+            return {
+              color: colors[i],
+              name: s.name,
+              value: hasValue ? formatTooltipValue(point.raw as number) : null,
+              peak: hasValue && hasBand && point.peak !== null ? formatTooltipValue(point.peak) : null,
+            }
+          })
+          return renderMetricTooltip({
+            title: formatDateLocalized(new Date(anchor.x), dateFormat.tooltip, lang),
+            rows,
+            noDataLabel,
+            peakLabel,
+          })
         },
       },
     }
 
-    return { chartSeries, options }
-  }, [series, unit, stacked, formatValue, period, smoothing, gaps, i18n.language, t])
+    return { chartSeries, chartType, options }
+  }, [series, display, unit, formatValue, period, gaps, yMin, yMax, showLegend, i18n.language, t])
 
   if (series.every(s => s.data.every(d => d.value === null))) {
     return (
@@ -212,12 +192,14 @@ export default function MultiLineChart({
       </div>
     )
   }
-  
+
+  // Смена типа через updateOptions ненадёжна — при переключении полосы график пересоздаётся
   return (
     <ReactApexChart
+      key={chartType}
       options={options}
       series={chartSeries}
-      type="area"
+      type={chartType}
       height={height}
     />
   )

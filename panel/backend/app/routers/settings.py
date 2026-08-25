@@ -19,6 +19,10 @@ CPU_AFFINITY_KEY = "cpu_affinity_enabled"
 # ("5201,8443-8450"). Меняется через PUT /reserved-ports/global — тот же ключ
 # через generic PUT /settings/{key} рассылку на ноды не запускает.
 RESERVED_PORTS_KEY = "reserved_ports_global"
+# Графики истории: режим по умолчанию (smooth — сглаженные, raw — как есть),
+# полоса пиков и переопределения по метрикам ("cpu:raw,network:smooth")
+CHART_MODE_KEY = "chart_mode"
+CHART_MODES = {"smooth", "raw"}
 
 DEFAULT_SETTINGS = {
     "refresh_interval": "5",
@@ -46,6 +50,9 @@ DEFAULT_SETTINGS = {
     # Разделы, убранные из бокового меню ("billing,updates"). Хранится список
     # выключенных, а не включённых: раздел из следующего релиза появляется сам.
     "hidden_modules": "",
+    CHART_MODE_KEY: "smooth",
+    "chart_peaks": "true",
+    "chart_mode_overrides": "",
 }
 
 
@@ -103,6 +110,9 @@ async def update_setting(
 ):
     if key == "update_branch" and data.value not in update_channel.ALLOWED_BRANCHES:
         raise HTTPException(status_code=400, detail="Invalid update branch")
+
+    if key == CHART_MODE_KEY and data.value not in CHART_MODES:
+        raise HTTPException(status_code=400, detail="Invalid chart mode")
 
     await set_setting(key, data.value, db)
 

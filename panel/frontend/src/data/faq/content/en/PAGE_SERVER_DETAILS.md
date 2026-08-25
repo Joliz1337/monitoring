@@ -5,7 +5,7 @@ Diagnostics for a single node: charts, processes, terminal and power control. Th
 ## What you see
 
 - Charts for CPU, RAM, disk, network and load average over 1 hour, 24 hours, 7 days, 30 days or a year.
-- Per-core CPU breakdown (on the 1-hour and 24-hour ranges) — shows whether one core is pinned or load is spread.
+- Per-core heatmap (on the 1-hour and 24-hour ranges): one row per core, colour is load — shows whether one core is pinned or load is spread.
 - Process table sortable by CPU and memory.
 - Terminal, reboot and shutdown buttons, system information.
 

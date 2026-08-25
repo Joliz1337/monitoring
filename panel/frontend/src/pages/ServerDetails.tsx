@@ -24,9 +24,10 @@ import {
   AlertTriangle,
 } from 'lucide-react'
 import { toast } from 'sonner'
-import { proxyApi, ServerMetrics } from '../api/client'
+import { proxyApi, ServerMetrics, HistoryPoint, HistoryResponse } from '../api/client'
 import { useServersStore } from '../stores/serversStore'
 import { useSmartRefresh } from '../hooks/useAutoRefresh'
+import { useChartDisplay } from '../hooks/useChartDisplay'
 import ProgressBar from '../components/ui/ProgressBar'
 import StatusBadge from '../components/ui/StatusBadge'
 import PeriodSelector from '../components/ui/PeriodSelector'
@@ -34,7 +35,11 @@ import MetricChart from '../components/Charts/MetricChart'
 import MultiLineChart from '../components/Charts/MultiLineChart'
 import ProcessTable from '../components/Processes/ProcessTable'
 import CpuCoresChart from '../components/Charts/CpuCoresChart'
-import CpuCoresHistoryChart from '../components/Charts/CpuCoresHistoryChart'
+import CpuCoresHeatmap from '../components/Charts/CpuCoresHeatmap'
+import CollapsibleChartSection from '../components/Charts/CollapsibleChartSection'
+import ChartLoadingOverlay from '../components/Charts/ChartLoadingOverlay'
+import { METRIC_COLORS, NETWORK_COLORS } from '../components/Charts/chartTheme'
+import type { ChartGap } from '../utils/chartUtils'
 import Terminal from '../components/Terminal/Terminal'
 import NodeRestrictedNotice from '../components/servers/NodeRestrictedNotice'
 import BandwidthLimitCard from '../components/servers/BandwidthLimitCard'
@@ -59,25 +64,40 @@ function getLoadAvgColor(loadAvg: number, coresLogical: number): string {
   return 'text-success'
 }
 
-interface HistoryData {
-  timestamp: string
-  cpu_usage: number
-  load_avg_1?: number
-  memory_used: number
-  memory_available: number
-  memory_percent?: number
-  net_rx_bytes_per_sec: number
-  net_tx_bytes_per_sec: number
-  disk_percent?: number
-  disk_read_bytes_per_sec: number
-  disk_write_bytes_per_sec: number
-  process_count?: number
-  per_cpu_percent?: number[]
-}
-
 interface MetricsCacheData {
   metrics: ServerMetrics | null
-  history: HistoryData[]
+  history: HistoryResponse | null
+}
+
+// История по ядрам есть только там, где бэкенд отдаёт снапшоты, а не часовые агрегаты
+const PER_CPU_PERIODS = ['1h', '24h']
+
+// Историю перечитывать не чаще, чем в ней появляется новая точка:
+// на 24h бакет 5 минут, на 7d и дальше — час; 1h — каждый тик автообновления
+const HISTORY_REFRESH_SEC: Record<string, number> = {
+  '1h': 0,
+  '24h': 60,
+  '7d': 300,
+  '30d': 300,
+  '365d': 300,
+}
+
+// Stable identities keep the chart memos below from recomputing on every render
+const EMPTY_POINTS: HistoryPoint[] = []
+const NO_GAPS: ChartGap[] = []
+
+/** Матрица ядер весит больше всей остальной истории — в localStorage её не кладём */
+function withoutPerCpu(history: HistoryResponse): HistoryResponse {
+  const copy = { ...history }
+  delete copy.per_cpu
+  return copy
+}
+
+function memoryPercentOf(point: HistoryPoint): number | null {
+  if (point.memory_percent !== null) return point.memory_percent
+  if (point.memory_used === null || point.memory_available === null) return null
+  const total = point.memory_used + point.memory_available
+  return total > 0 ? (point.memory_used / total) * 100 : null
 }
 
 export default function ServerDetails() {
@@ -87,7 +107,7 @@ export default function ServerDetails() {
   const { t } = useTranslation()
   
   const [metrics, setMetrics] = useState<ServerMetrics | null>(null)
-  const [history, setHistory] = useState<HistoryData[]>([])
+  const [history, setHistory] = useState<HistoryResponse | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [isHistoryLoading, setIsHistoryLoading] = useState(false)
@@ -98,14 +118,21 @@ export default function ServerDetails() {
   const [isPowerActionLoading, setIsPowerActionLoading] = useState(false)
   const [powerActionError, setPowerActionError] = useState<string | null>(null)
   
-  const cacheKey = serverId ? createServerCacheKey(serverId, 'metrics') : ''
+  const cacheKey = serverId ? createServerCacheKey(serverId, 'metrics_v2') : ''
   const { isCached, cachedAt, saveToCache, loadFromCache, setIsCached, setCachedAt } = useCachedData<MetricsCacheData>(cacheKey)
-  
+
   // Refs to avoid stale closures without adding state to useCallback deps
   const metricsRef = useRef(metrics)
   const historyRef = useRef(history)
   metricsRef.current = metrics
   historyRef.current = history
+  const coresExpandedRef = useRef(false)
+  const lastHistoryFetchRef = useRef<{ period: string; at: number } | null>(null)
+
+  const cpuDisplay = useChartDisplay('cpu')
+  const memoryDisplay = useChartDisplay('memory')
+  const networkDisplay = useChartDisplay('network')
+  const loadDisplay = useChartDisplay('load')
   
   const server = servers.find(s => s.id === Number(serverId))
   const execAllowed = nodeAllows(server, 'exec', 'write')
@@ -133,39 +160,57 @@ export default function ServerDetails() {
     }
   }, [loadFromCache, t])
   
-  const fetchLiveData = useCallback(async (historyOnly = false, useCached = false) => {
+  // Матрица ядер запрашивается только пока раскрыт аккордеон «История по ядрам»
+  const loadHistory = useCallback(async (): Promise<HistoryResponse> => {
+    const includePerCpu = coresExpandedRef.current && PER_CPU_PERIODS.includes(period)
+    const res = await proxyApi.getHistory(Number(serverId), { period, include_per_cpu: includePerCpu })
+    lastHistoryFetchRef.current = { period, at: Date.now() }
+    return res.data
+  }, [serverId, period])
+
+  const historyIsFresh = useCallback(() => {
+    const last = lastHistoryFetchRef.current
+    if (last === null || last.period !== period) return false
+    const needsPerCpu = coresExpandedRef.current && PER_CPU_PERIODS.includes(period) && historyRef.current?.per_cpu === undefined
+    if (needsPerCpu) return false
+    return Date.now() - last.at < HISTORY_REFRESH_SEC[period] * 1000
+  }, [period])
+
+  const fetchLiveData = useCallback(async (historyOnly = false, useCached = false, forceHistory = false) => {
     if (!serverId) return
-    
+
     try {
-      const includePerCpu = period === '1h' || period === '24h'
-      
       if (historyOnly) {
         setIsHistoryLoading(true)
-        const historyRes = await proxyApi.getHistory(Number(serverId), { period, include_per_cpu: includePerCpu })
-        const historyData = historyRes.data.data || []
+        const historyData = await loadHistory()
         setHistory(historyData)
         setIsHistoryLoading(false)
-        
+
         if (metricsRef.current) {
-          saveToCache({ metrics: metricsRef.current, history: historyData })
+          saveToCache({ metrics: metricsRef.current, history: withoutPerCpu(historyData) })
         }
-      } else {
-        const [metricsRes, historyRes] = await Promise.all([
-          useCached 
-            ? proxyApi.getMetrics(Number(serverId))
-            : proxyApi.getLiveMetrics(Number(serverId)),
-          proxyApi.getHistory(Number(serverId), { period, include_per_cpu: includePerCpu }),
-        ])
-        
-        const metricsData = metricsRes.data
-        const historyData = historyRes.data.data || []
-        
-        setMetrics(metricsData)
-        setHistory(historyData)
-        setError(null)
-        setIsCached(false)
-        setCachedAt(null)
-        saveToCache({ metrics: metricsData, history: historyData })
+        return
+      }
+
+      const refreshHistory = forceHistory || !historyIsFresh()
+      const [metricsRes, historyData] = await Promise.all([
+        useCached
+          ? proxyApi.getMetrics(Number(serverId))
+          : proxyApi.getLiveMetrics(Number(serverId)),
+        refreshHistory ? loadHistory() : Promise.resolve(historyRef.current),
+      ])
+
+      const metricsData = metricsRes.data
+
+      setMetrics(metricsData)
+      setHistory(historyData)
+      setError(null)
+      setIsCached(false)
+      setCachedAt(null)
+      // Сериализовать сотни точек в localStorage на каждом тике незачем —
+      // кэш обновляется вместе с историей, метрики в нём отстают не больше её бакета
+      if (refreshHistory) {
+        saveToCache({ metrics: metricsData, history: historyData ? withoutPerCpu(historyData) : null })
       }
     } catch (err: unknown) {
       handleFetchError(err)
@@ -173,11 +218,11 @@ export default function ServerDetails() {
     } finally {
       setIsLoading(false)
     }
-  }, [serverId, period, saveToCache, handleFetchError, setIsCached, setCachedAt])
-  
+  }, [serverId, loadHistory, historyIsFresh, saveToCache, handleFetchError, setIsCached, setCachedAt])
+
   const fetchCachedData = useCallback(async () => {
     if (!serverId) return
-    
+
     try {
       const metricsRes = await proxyApi.getMetrics(Number(serverId))
       const metricsData = metricsRes.data
@@ -185,11 +230,18 @@ export default function ServerDetails() {
       setError(null)
       setIsCached(false)
       setCachedAt(null)
-      saveToCache({ metrics: metricsData, history: historyRef.current })
+      saveToCache({ metrics: metricsData, history: historyRef.current ? withoutPerCpu(historyRef.current) : null })
     } catch (err: unknown) {
       handleFetchError(err)
     }
   }, [serverId, saveToCache, handleFetchError, setIsCached, setCachedAt])
+
+  const handleCoresExpanded = useCallback((expanded: boolean) => {
+    coresExpandedRef.current = expanded
+    if (expanded && historyRef.current?.per_cpu === undefined) {
+      fetchLiveData(true)
+    }
+  }, [fetchLiveData])
   
   useEffect(() => {
     fetchServers()
@@ -220,7 +272,7 @@ export default function ServerDetails() {
   
   const handleManualRefresh = async () => {
     setIsRefreshing(true)
-    await fetchLiveData() // Always use live data for manual refresh
+    await fetchLiveData(false, false, true) // Always use live data for manual refresh
     setIsRefreshing(false)
   }
   
@@ -245,45 +297,46 @@ export default function ServerDetails() {
     }
   }
   
-  // Memoized chart data - must be before any conditional returns to follow React hooks rules
-  const cpuHistory = useMemo(() => 
-    history.map(h => ({ timestamp: h.timestamp, value: h.cpu_usage || 0 })),
-    [history]
+  // Memoized chart data - must be before any conditional returns to follow React hooks rules.
+  // null остаётся null: простой ноды на графике — разрыв, а не нулевая линия
+  const points = history?.data ?? EMPTY_POINTS
+  const historyGaps = history?.gaps ?? NO_GAPS
+
+  const cpuHistory = useMemo(() =>
+    points.map(h => ({ timestamp: h.timestamp, value: h.cpu_usage, peak: h.max_cpu })),
+    [points]
   )
-  
-  const memoryHistory = useMemo(() => 
-    history.map(h => ({
-      timestamp: h.timestamp,
-      value: h.memory_percent || (h.memory_used && h.memory_available 
-        ? (h.memory_used / (h.memory_used + h.memory_available)) * 100 
-        : 0)
-    })),
-    [history]
+
+  const memoryHistory = useMemo(() =>
+    points.map(h => ({ timestamp: h.timestamp, value: memoryPercentOf(h), peak: h.max_memory_percent })),
+    [points]
   )
-  
+
   const loadAvgHistory = useMemo(() =>
-    history.map(h => ({ timestamp: h.timestamp, value: h.load_avg_1 || 0 })),
-    [history]
+    points.map(h => ({ timestamp: h.timestamp, value: h.load_avg_1, peak: h.max_load })),
+    [points]
   )
 
   const networkHistory = useMemo(() => [
-    { 
-      name: t('common.download'), 
-      data: history.map(h => ({ 
-        timestamp: h.timestamp, 
-        value: h.net_rx_bytes_per_sec || 0
-      })), 
-      color: '#10b981' 
+    {
+      name: t('common.download'),
+      data: points.map(h => ({
+        timestamp: h.timestamp,
+        value: h.net_rx_bytes_per_sec,
+        peak: h.max_net_rx_bytes_per_sec,
+      })),
+      color: NETWORK_COLORS.download,
     },
-    { 
-      name: t('common.upload'), 
-      data: history.map(h => ({ 
-        timestamp: h.timestamp, 
-        value: h.net_tx_bytes_per_sec || 0
-      })), 
-      color: '#22d3ee' 
+    {
+      name: t('common.upload'),
+      data: points.map(h => ({
+        timestamp: h.timestamp,
+        value: h.net_tx_bytes_per_sec,
+        peak: h.max_net_tx_bytes_per_sec,
+      })),
+      color: NETWORK_COLORS.upload,
     },
-  ], [history, t])
+  ], [points, t])
   
   // Memoized localized bits formatter
   const bitsFormatter = useMemo(() => createBitsFormatter(t), [t])
@@ -598,22 +651,31 @@ export default function ServerDetails() {
                 >
                   <MetricChart
                     data={cpuHistory}
-                    color="#22d3ee"
+                    color={METRIC_COLORS.cpu}
                     unit="%"
                     min={0}
                     max={100}
                     period={period}
+                    gaps={historyGaps}
+                    display={cpuDisplay}
                   />
                 </ChartCard>
-                
+
                 {/* Per-CPU cores history (collapsible) */}
-                {(period === '1h' || period === '24h') && metrics?.cpu?.per_cpu_percent && (
-                  <CpuCoresHistoryChart
-                    history={history}
-                    period={period}
-                    coreCount={metrics.cpu.per_cpu_percent.length}
+                {PER_CPU_PERIODS.includes(period) && (
+                  <CollapsibleChartSection
+                    icon={<Cpu className="w-4 h-4 text-accent-500" />}
+                    title={t('cpu_chart.cores_history')}
+                    subtitle={`(${history?.per_cpu?.cores.length ?? metrics.cpu.cores_logical} ${t('cpu_chart.cores')})`}
                     isLoading={isHistoryLoading}
-                  />
+                    onExpandedChange={handleCoresExpanded}
+                  >
+                    <CpuCoresHeatmap
+                      perCpu={history?.per_cpu ?? null}
+                      period={period}
+                      isLoading={isHistoryLoading}
+                    />
+                  </CollapsibleChartSection>
                 )}
               </div>
               
@@ -624,11 +686,13 @@ export default function ServerDetails() {
               >
                 <MetricChart
                   data={memoryHistory}
-                  color="#10b981"
+                  color={METRIC_COLORS.memory}
                   unit="%"
                   min={0}
                   max={100}
                   period={period}
+                  gaps={historyGaps}
+                  display={memoryDisplay}
                 />
               </ChartCard>
             </motion.div>
@@ -649,6 +713,8 @@ export default function ServerDetails() {
                   formatValue={bitsFormatter}
                   height={250}
                   period={period}
+                  gaps={historyGaps}
+                  display={networkDisplay}
                 />
               </ChartCard>
 
@@ -659,9 +725,11 @@ export default function ServerDetails() {
               >
                 <MetricChart
                   data={loadAvgHistory}
-                  color="#f59e0b"
+                  color={METRIC_COLORS.load}
                   min={0}
                   period={period}
+                  gaps={historyGaps}
+                  display={loadDisplay}
                 />
               </ChartCard>
             </motion.div>
@@ -908,29 +976,7 @@ function ChartCard({ icon, title, isLoading, className = '', children }: ChartCa
         {title}
       </h3>
       {children}
-      <AnimatePresence>
-        {isLoading && (
-          <motion.div 
-            className="absolute inset-0 flex items-center justify-center bg-dark-900/50 backdrop-blur-sm rounded-2xl"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-          >
-            <div className="relative">
-              <motion.div
-                className="w-8 h-8 border-2 border-accent-500/30 rounded-full"
-                animate={{ rotate: 360 }}
-                transition={{ duration: 1.5, repeat: Infinity, ease: 'linear' }}
-              />
-              <motion.div
-                className="absolute inset-0 w-8 h-8 border-2 border-transparent border-t-accent-500 rounded-full"
-                animate={{ rotate: 360 }}
-                transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}
-              />
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+      <ChartLoadingOverlay visible={isLoading} className="rounded-2xl" />
     </motion.div>
   )
 }

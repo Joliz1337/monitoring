@@ -18,21 +18,29 @@ import {
   History
 } from 'lucide-react'
 import { toast } from 'sonner'
-import { proxyApi, trafficApi, TrafficSummary, TrafficStatus, TrafficSeries, ServerMetrics } from '../api/client'
+import { proxyApi, trafficApi, TrafficSummary, TrafficStatus, TrafficSeries, ServerMetrics, HistoryPoint, HistoryResponse } from '../api/client'
 import { useServersStore } from '../stores/serversStore'
 import NodeRestrictedNotice from '../components/servers/NodeRestrictedNotice'
 import { nodeAllows } from '../utils/nodeCapabilities'
 import { useTranslation } from 'react-i18next'
 import { useSmartRefresh } from '../hooks/useAutoRefresh'
+import { useChartDisplay } from '../hooks/useChartDisplay'
+import { RAW_DISPLAY } from '../config/chartDisplay'
 import { formatBytes, createBitsFormatter } from '../utils/format'
+import type { ChartGap } from '../utils/chartUtils'
 import PeriodSelector from '../components/ui/PeriodSelector'
 import { Tooltip } from '../components/ui/Tooltip'
 import { FAQIcon } from '../components/FAQ'
 import MultiLineChart from '../components/Charts/MultiLineChart'
 import TcpStatesHistoryChart from '../components/Charts/TcpStatesHistoryChart'
+import { NETWORK_COLORS } from '../components/Charts/chartTheme'
 import TrafficUnsupportedNotice from '../components/Traffic/TrafficUnsupportedNotice'
 
 const SUMMARY_DAYS = 30
+
+// Stable identities keep the chart memos below from recomputing on every render
+const EMPTY_POINTS: HistoryPoint[] = []
+const NO_GAPS: ChartGap[] = []
 
 // Пока перенос истории с ноды не завершён, накопленные бакеты неполные —
 // об этом предупреждаем баннером, но страницу не блокируем
@@ -43,12 +51,12 @@ export default function Traffic() {
   const navigate = useNavigate()
   const { servers, fetchServers } = useServersStore()
   const { t } = useTranslation()
+  const networkDisplay = useChartDisplay('network')
 
   const [status, setStatus] = useState<TrafficStatus | null>(null)
   const [summary, setSummary] = useState<TrafficSummary | null>(null)
   const [series, setSeries] = useState<TrafficSeries | null>(null)
-  const [speedHistory, setSpeedHistory] = useState<{ timestamp: string; rx: number; tx: number }[]>([])
-  const [rawHistory, setRawHistory] = useState<Array<Record<string, unknown>>>([])
+  const [speedHistory, setSpeedHistory] = useState<HistoryResponse | null>(null)
   const [metrics, setMetrics] = useState<ServerMetrics | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [isRefreshing, setIsRefreshing] = useState(false)
@@ -99,15 +107,9 @@ export default function Traffic() {
     if (!serverId) return
     try {
       const { data } = await proxyApi.getHistory(Number(serverId), { period: speedPeriod })
-      const rawSpeedData = (data as { data: Array<Record<string, unknown>> }).data || []
-      setSpeedHistory(rawSpeedData.map(d => ({
-        timestamp: d.timestamp as string,
-        rx: (d.net_rx_bytes_per_sec as number) || 0,
-        tx: (d.net_tx_bytes_per_sec as number) || 0,
-      })))
-      setRawHistory(rawSpeedData)
+      setSpeedHistory(data)
     } catch {
-      // Silent
+      // График скорости остаётся с последними данными — нода офлайн не должна ронять страницу
     }
   }, [serverId, speedPeriod])
 
@@ -240,28 +242,39 @@ export default function Traffic() {
       {
         name: t('common.download'),
         data: points.map(p => ({ timestamp: p.timestamp, value: p.rx })),
-        color: '#10b981'
+        color: NETWORK_COLORS.download,
       },
       {
         name: t('common.upload'),
         data: points.map(p => ({ timestamp: p.timestamp, value: p.tx })),
-        color: '#22d3ee'
+        color: NETWORK_COLORS.upload,
       },
     ]
   }, [series, t])
 
+  const speedPoints = speedHistory?.data ?? EMPTY_POINTS
+  const speedGaps = speedHistory?.gaps ?? NO_GAPS
+
   const speedSeries = useMemo(() => [
     {
       name: t('common.download'),
-      data: speedHistory.map(h => ({ timestamp: h.timestamp, value: h.rx })),
-      color: '#10b981'
+      data: speedPoints.map(h => ({
+        timestamp: h.timestamp,
+        value: h.net_rx_bytes_per_sec,
+        peak: h.max_net_rx_bytes_per_sec,
+      })),
+      color: NETWORK_COLORS.download,
     },
     {
       name: t('common.upload'),
-      data: speedHistory.map(h => ({ timestamp: h.timestamp, value: h.tx })),
-      color: '#22d3ee'
+      data: speedPoints.map(h => ({
+        timestamp: h.timestamp,
+        value: h.net_tx_bytes_per_sec,
+        peak: h.max_net_tx_bytes_per_sec,
+      })),
+      color: NETWORK_COLORS.upload,
     },
-  ], [speedHistory, t])
+  ], [speedPoints, t])
 
   const formatSpeed = useMemo(() => createBitsFormatter(t), [t])
 
@@ -527,43 +540,48 @@ export default function Traffic() {
               </div>
             </motion.div>
           )}
+        </motion.div>
+      )}
 
-          {/* Network Speed Chart */}
-          <motion.div className="card mb-6" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }}>
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold text-dark-100 flex items-center gap-2">
-                <Gauge className="w-4 h-4 text-accent-500" />
-                {t('traffic.network_speed')}
-              </h3>
-              <PeriodSelector
-                value={speedPeriod}
-                onChange={setSpeedPeriod}
-                options={[
-                  { value: '1h', label: '1h' },
-                  { value: '24h', label: '24h' },
-                  { value: '7d', label: '7d' },
-                  { value: '30d', label: '30d' },
-                  { value: '365d', label: '1y' },
-                ]}
-              />
-            </div>
-            <MultiLineChart
-              series={speedSeries}
-              formatValue={formatSpeed}
-              height={250}
-              period={speedPeriod}
-            />
-          </motion.div>
+      {/* Скорость и TCP берутся из истории метрик панели — видны и без сводки трафика */}
+      <motion.div className="card mb-6" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }}>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="font-semibold text-dark-100 flex items-center gap-2">
+            <Gauge className="w-4 h-4 text-accent-500" />
+            {t('traffic.network_speed')}
+          </h3>
+          <PeriodSelector
+            value={speedPeriod}
+            onChange={setSpeedPeriod}
+            options={[
+              { value: '1h', label: '1h' },
+              { value: '24h', label: '24h' },
+              { value: '7d', label: '7d' },
+              { value: '30d', label: '30d' },
+              { value: '365d', label: '1y' },
+            ]}
+          />
+        </div>
+        <MultiLineChart
+          series={speedSeries}
+          gaps={speedGaps}
+          display={networkDisplay}
+          formatValue={formatSpeed}
+          height={250}
+          period={speedPeriod}
+        />
+      </motion.div>
 
-          {/* TCP States History */}
-          <motion.div className="mb-6" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }}>
-            <TcpStatesHistoryChart
-              history={rawHistory as Array<{ timestamp: string; tcp_established?: number | null; tcp_listen?: number | null; tcp_time_wait?: number | null; tcp_close_wait?: number | null; tcp_syn_sent?: number | null; tcp_syn_recv?: number | null; tcp_fin_wait?: number | null }>}
-              period={speedPeriod}
-              isLoading={isRefreshing}
-            />
-          </motion.div>
+      <motion.div className="mb-6" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }}>
+        <TcpStatesHistoryChart
+          history={speedPoints}
+          period={speedPeriod}
+          isLoading={isRefreshing}
+        />
+      </motion.div>
 
+      {summary && (
+        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
           {/* Traffic Chart */}
           <motion.div className="card mb-6" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }}>
             <div className="flex items-center justify-between mb-4">
@@ -582,9 +600,11 @@ export default function Traffic() {
                 ]}
               />
             </div>
+            {/* Сумма байт за бакет — сглаживать нечестно, рисуется как есть */}
             <MultiLineChart
               series={networkHistory}
               gaps={trafficGaps}
+              display={RAW_DISPLAY}
               formatValue={formatBytes}
               height={250}
               period={period}

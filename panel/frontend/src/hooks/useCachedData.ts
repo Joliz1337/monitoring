@@ -82,6 +82,6 @@ export function useCachedData<T>(cacheKey: string): UseCachedDataReturn<T> {
 /**
  * Helper to create cache key for server-specific data
  */
-export function createServerCacheKey(serverId: number | string, dataType: 'haproxy' | 'traffic' | 'metrics'): string {
+export function createServerCacheKey(serverId: number | string, dataType: 'haproxy' | 'traffic' | 'metrics_v2'): string {
   return `${dataType}_${serverId}`
 }

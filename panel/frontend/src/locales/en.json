@@ -68,7 +68,8 @@
     "billing": "Billing",
     "back": "Back",
     "clear_search": "Clear search",
-    "remove_from_list": "Remove from list"
+    "remove_from_list": "Remove from list",
+    "peak": "peak"
   },
   "units": {
     "bps": "bit/s",
@@ -452,7 +453,25 @@
     "sync_success": "All servers synchronized",
     "sync_partial": "{{count}} of {{total}} servers synchronized",
     "last_sync": "Last sync",
-    "never": "Never"
+    "never": "Never",
+    "charts": "Charts",
+    "charts_desc": "How metric history is drawn",
+    "chart_mode": "Default mode",
+    "chart_mode_smooth": "Smoothed",
+    "chart_mode_raw": "As is",
+    "chart_mode_smooth_hint": "Soft curve over averages — shows the trend",
+    "chart_mode_raw_hint": "Every point as recorded, no smoothing",
+    "chart_peaks": "Peak band",
+    "chart_peaks_hint": "Translucent band from the average up to the interval peak",
+    "chart_per_metric": "Per-metric override",
+    "chart_inherit": "Same as default"
+  },
+  "chart_metric": {
+    "cpu": "CPU",
+    "memory": "Memory",
+    "network": "Network",
+    "load": "Load Average",
+    "tcp": "TCP connections"
   },
   "server_card": {
     "last_seen": "Last online: {{time}}",
@@ -482,7 +501,9 @@
     "avg": "Avg",
     "core": "Core",
     "cores": "cores",
-    "cores_history": "Per-Core History"
+    "cores_history": "Per-Core History",
+    "heatmap_scale": "Core load",
+    "no_history": "No per-core history for this period"
   },
   "tcp_chart": {
     "states_history": "TCP States History",

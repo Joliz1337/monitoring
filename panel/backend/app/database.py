@@ -2021,6 +2021,35 @@ async def _migrate_node_capabilities(conn):
         raise
 
 
+# Пики за окно опроса: (таблица, колонки). NULL — пика нет (старая нода, строка до миграции)
+_WINDOW_PEAK_COLUMNS = (
+    ("metrics_snapshots", ("cpu_usage_max", "net_rx_bytes_per_sec_max", "net_tx_bytes_per_sec_max")),
+    ("aggregated_metrics", ("max_load", "max_rx_speed", "max_tx_speed")),
+)
+
+
+async def _migrate_metrics_window_peaks(conn):
+    """ADD COLUMN FLOAT без DEFAULT в PG16 правит только каталог — горячая
+    таблица снапшотов не переписывается, старт не задерживается."""
+    for table, peak_columns in _WINDOW_PEAK_COLUMNS:
+        result = await conn.execute(text(f"""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name = '{table}'
+        """))
+        columns = {row[0] for row in result.fetchall()}
+        if not columns:
+            continue
+        for col_name in peak_columns:
+            if col_name in columns:
+                continue
+            try:
+                await conn.execute(text(f'ALTER TABLE {table} ADD COLUMN "{col_name}" FLOAT'))
+                logger.info(f"Added column: {table}.{col_name}")
+            except Exception as e:
+                if "already exists" not in str(e).lower():
+                    logger.warning(f"Could not add {table}.{col_name}: {e}")
+
+
 # (таблица, колонка) — целевые секреты: приватные ключи, не публичные сертификаты
 _SECRET_COLUMNS = [
     ("keygen", "ca_key_pem"),
@@ -2082,6 +2111,7 @@ async def init_db():
         await _migrate_db_optimizations(conn)
         await _migrate_traffic_v2(conn)
         await _migrate_node_capabilities(conn)
+        await _migrate_metrics_window_peaks(conn)
         await _migrate_encrypt_secrets(conn)
 
     await _warmup_pool()

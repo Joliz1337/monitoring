@@ -1,7 +1,8 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { Settings as SettingsIcon, RefreshCw, Layout, LayoutGrid, Languages, Sparkles, Check, Clock, Activity, Shield, AlertTriangle, Loader2, CheckCircle2, XCircle, Terminal, Server, Zap, Cpu, HardDrive, MemoryStick, Database, Download, Upload, Trash2, Archive, Globe, Waypoints, Save, GitBranch, FlaskConical } from 'lucide-react'
+import { Settings as SettingsIcon, RefreshCw, Layout, LayoutGrid, Languages, Sparkles, Check, Clock, Activity, Shield, AlertTriangle, Loader2, CheckCircle2, XCircle, Terminal, Server, Zap, Cpu, HardDrive, MemoryStick, Database, Download, Upload, Trash2, Archive, Globe, Waypoints, Save, GitBranch, FlaskConical, LineChart, ChevronDown } from 'lucide-react'
 import { useSettingsStore, TIMEZONE_OPTIONS, TRAFFIC_PERIOD_OPTIONS, METRICS_INTERVAL_OPTIONS, HAPROXY_INTERVAL_OPTIONS } from '../stores/settingsStore'
 import { TOGGLEABLE_MODULES } from '../config/modules'
+import { CHART_METRICS, type ChartMode } from '../config/chartDisplay'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence, LayoutGroup } from 'framer-motion'
 import { systemApi, backupApi, settingsApi, PanelCertificateInfo, PanelServerStats, BackupInfo, BackupStatus, TimeSyncStatus } from '../api/client'
@@ -9,6 +10,18 @@ import { toast } from 'sonner'
 import { Tooltip } from '../components/ui/Tooltip'
 import { FAQIcon } from '../components/FAQ'
 import AutoBackupCard from '../components/settings/AutoBackupCard'
+
+const CHART_MODE_OPTIONS: { value: ChartMode; labelKey: string; hintKey: string }[] = [
+  { value: 'smooth', labelKey: 'settings.chart_mode_smooth', hintKey: 'settings.chart_mode_smooth_hint' },
+  { value: 'raw', labelKey: 'settings.chart_mode_raw', hintKey: 'settings.chart_mode_raw_hint' },
+]
+
+// null — переопределения нет, метрика рисуется в общем режиме
+const METRIC_OVERRIDE_OPTIONS: { value: ChartMode | null; labelKey: string }[] = [
+  { value: null, labelKey: 'settings.chart_inherit' },
+  { value: 'smooth', labelKey: 'settings.chart_mode_smooth' },
+  { value: 'raw', labelKey: 'settings.chart_mode_raw' },
+]
 
 interface RenewalResult {
   success: boolean
@@ -25,12 +38,14 @@ export default function Settings() {
     refreshInterval, compactView, timezone, trafficPeriod,
     metricsCollectInterval, haproxyCollectInterval,
     serverTimezone, timeSyncEnabled, remnawaveNginxPath, updateBranch, hiddenModules,
+    chartMode, chartPeaks, chartModeOverrides,
     fetchSettings, setRefreshInterval, setCompactView, setTimezone, setTrafficPeriod,
     setMetricsCollectInterval, setHaproxyCollectInterval,
     setServerTimezone, setTimeSyncEnabled, setRemnawaveNginxPath, setUpdateBranch,
-    setHiddenModules
+    setHiddenModules, setChartMode, setChartPeaks, setChartModeOverride
   } = useSettingsStore()
   const { t, i18n } = useTranslation()
+  const [showPerMetric, setShowPerMetric] = useState(false)
   
   const [certInfo, setCertInfo] = useState<PanelCertificateInfo | null>(null)
   const [certLoading, setCertLoading] = useState(true)
@@ -1086,6 +1101,134 @@ export default function Settings() {
           </div>
         </motion.div>
         </div>
+
+        {/* Charts */}
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }} className="card group hover:border-dark-700 transition-all">
+          <div className="flex items-center gap-3 mb-5">
+            <motion.div
+              className="w-11 h-11 rounded-xl bg-gradient-to-br from-accent-500/20 to-accent-600/20
+                         flex items-center justify-center border border-accent-500/20
+                         group-hover:shadow-lg group-hover:shadow-accent-500/10 transition-shadow"
+              whileHover={{ rotate: 10, scale: 1.05 }}
+            >
+              <LineChart className="w-5 h-5 text-accent-500" />
+            </motion.div>
+            <div>
+              <h2 className="font-semibold text-dark-100 flex items-center gap-2">
+                {t('settings.charts')}
+                <FAQIcon screen="SETTINGS_CHARTS" size="sm" />
+              </h2>
+              <p className="text-sm text-dark-500">{t('settings.charts_desc')}</p>
+            </div>
+          </div>
+
+          <div className="mb-3">
+            <span className="text-sm text-dark-400">{t('settings.chart_mode')}</span>
+          </div>
+          <LayoutGroup id="chart-mode-selector">
+            <div className="grid grid-cols-2 gap-2 mb-4">
+              {CHART_MODE_OPTIONS.map((option) => (
+                <motion.button
+                  key={option.value}
+                  onClick={() => setChartMode(option.value)}
+                  className={`relative px-3 py-2.5 rounded-xl text-sm font-medium transition-all ${
+                    chartMode === option.value
+                      ? 'text-white'
+                      : 'bg-dark-800/60 text-dark-400 hover:text-dark-200 hover:bg-dark-700 border border-dark-700/50'
+                  }`}
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
+                >
+                  {chartMode === option.value && (
+                    <motion.div
+                      className="absolute inset-0 bg-gradient-to-r from-accent-500 to-accent-600 rounded-xl shadow-lg shadow-accent-500/20"
+                      layoutId="chartModeIndicator"
+                      initial={false}
+                      transition={{ type: 'spring', stiffness: 400, damping: 30 }}
+                    />
+                  )}
+                  <span className="relative z-10 flex flex-col items-center gap-0.5">
+                    <span>{t(option.labelKey)}</span>
+                    <span className={`text-xs font-normal ${chartMode === option.value ? 'text-white/70' : 'text-dark-500'}`}>
+                      {t(option.hintKey)}
+                    </span>
+                  </span>
+                </motion.button>
+              ))}
+            </div>
+          </LayoutGroup>
+
+          {/* Peak band toggle */}
+          <div className="flex items-center justify-between gap-4 mb-4 p-3 bg-dark-800/50 rounded-xl border border-dark-700/50">
+            <div className="min-w-0">
+              <span className="text-sm text-dark-300">{t('settings.chart_peaks')}</span>
+              <p className="text-xs text-dark-500 mt-0.5">{t('settings.chart_peaks_hint')}</p>
+            </div>
+            <motion.button
+              onClick={() => setChartPeaks(!chartPeaks)}
+              className={`relative w-11 h-6 rounded-full transition-colors flex-shrink-0 ${
+                chartPeaks ? 'bg-accent-500' : 'bg-dark-600'
+              }`}
+              whileTap={{ scale: 0.95 }}
+            >
+              <motion.div
+                className="absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow-md"
+                animate={{ x: chartPeaks ? 20 : 0 }}
+                transition={{ type: 'spring', stiffness: 500, damping: 30 }}
+              />
+            </motion.button>
+          </div>
+
+          {/* Per-metric overrides */}
+          <button
+            type="button"
+            onClick={() => setShowPerMetric(open => !open)}
+            className="w-full flex items-center justify-between text-sm text-dark-400 hover:text-dark-200 transition-colors"
+          >
+            <span>{t('settings.chart_per_metric')}</span>
+            <motion.span animate={{ rotate: showPerMetric ? 180 : 0 }} transition={{ duration: 0.2 }}>
+              <ChevronDown className="w-4 h-4" />
+            </motion.span>
+          </button>
+          <AnimatePresence>
+            {showPerMetric && (
+              <motion.div
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: 'auto', opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                transition={{ duration: 0.25 }}
+                className="overflow-hidden"
+              >
+                <div className="mt-3 space-y-2">
+                  {CHART_METRICS.map((metric) => {
+                    const current = chartModeOverrides[metric] ?? null
+                    return (
+                      <div key={metric} className="flex items-center justify-between gap-3 p-2.5 bg-dark-800/40 rounded-xl border border-dark-700/50">
+                        <span className="text-sm text-dark-300">{t(`chart_metric.${metric}`)}</span>
+                        <div className="flex gap-1 flex-shrink-0">
+                          {METRIC_OVERRIDE_OPTIONS.map((option) => (
+                            <button
+                              key={option.labelKey}
+                              type="button"
+                              onClick={() => setChartModeOverride(metric, option.value)}
+                              className={`px-2.5 py-1 rounded-lg text-xs font-medium border transition-colors ${
+                                current === option.value
+                                  ? 'bg-accent-500/20 border-accent-500/30 text-accent-300'
+                                  : 'bg-dark-800/60 border-dark-700/50 text-dark-400 hover:text-dark-200 hover:bg-dark-700'
+                              }`}
+                            >
+                              {t(option.labelKey)}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </motion.div>
 
         {/* Panel modules */}
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }} className="card group hover:border-dark-700 transition-all">

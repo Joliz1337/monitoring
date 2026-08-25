@@ -1,4 +1,5 @@
 import axios, { AxiosError, AxiosRequestConfig, AxiosResponse, InternalAxiosRequestConfig } from 'axios'
+import type { ChartGap } from '../utils/chartUtils'
 
 const DEFAULT_TIMEOUT_MS = 30000
 
@@ -823,16 +824,68 @@ export const installKeysApi = {
   delete: (id: number) => api.delete<{ success: boolean }>(`/install-keys/${id}`),
 }
 
+export type HistoryPeriod = '1h' | '24h' | '7d' | '30d' | '365d'
+export type HistoryDataSource = 'raw' | 'hour' | 'day'
+
+// Единая схема точки для всех периодов: чего нет в источнике — null, не 0.
+// Точка-маркер внутри простоя — все метрики null, data_points: 0.
+export interface HistoryPoint {
+  timestamp: string
+  data_points: number
+  cpu_usage: number | null
+  max_cpu: number | null
+  memory_percent: number | null
+  max_memory_percent: number | null
+  memory_used: number | null
+  memory_available: number | null
+  load_avg_1: number | null
+  max_load: number | null
+  net_rx_bytes_per_sec: number | null
+  max_net_rx_bytes_per_sec: number | null
+  net_tx_bytes_per_sec: number | null
+  max_net_tx_bytes_per_sec: number | null
+  disk_percent: number | null
+  disk_read_bytes_per_sec: number | null
+  disk_write_bytes_per_sec: number | null
+  process_count: number | null
+  tcp_established: number | null
+  tcp_listen: number | null
+  tcp_time_wait: number | null
+  tcp_close_wait: number | null
+  tcp_syn_sent: number | null
+  tcp_syn_recv: number | null
+  tcp_fin_wait: number | null
+}
+
+// Регулярная сетка бакетов: cores[ядро][бакет], null — бакет без замеров
+export interface PerCpuHistory {
+  bucket_sec: number
+  timestamps: string[]
+  cores: (number | null)[][]
+}
+
+export interface HistoryResponse {
+  period: HistoryPeriod
+  data_source: HistoryDataSource
+  bucket_sec: number | null
+  from_time: string
+  to_time: string
+  count: number
+  data: HistoryPoint[]
+  gaps: ChartGap[]
+  // undefined — блок не запрашивали, null — запрашивали, но истории по ядрам нет
+  per_cpu?: PerCpuHistory | null
+}
+
 export const proxyApi = {
   // Returns cached metrics from panel's database (collected by background worker)
   getMetrics: (serverId: number) => api.get<ServerMetrics>(`/proxy/${serverId}/metrics`),
   // Returns live metrics directly from node (use sparingly, causes load)
   getLiveMetrics: (serverId: number) => api.get<ServerMetrics>(`/proxy/${serverId}/metrics/live`),
-  // History is stored on the panel (collected every 5 seconds)
-  // period: '1h', '24h', '7d', '30d', '365d'
-  // include_per_cpu: true to include per-CPU usage data (only for raw data periods: 1h, 24h)
-  getHistory: (serverId: number, params?: { period?: string; from_time?: string; to_time?: string; limit?: number; include_per_cpu?: boolean }) =>
-    api.get(`/proxy/${serverId}/metrics/history`, { params }),
+  // 1h — снапшоты как есть, 24h — бакеты 5 мин, 7d/30d — часовые, 365d — суточные.
+  // include_per_cpu — блок per_cpu под тепловую карту, только для 1h/24h
+  getHistory: (serverId: number, params: { period: string; include_per_cpu?: boolean }) =>
+    api.get<HistoryResponse>(`/proxy/${serverId}/metrics/history`, { params }),
   
   // Cached HAProxy data (status, stats, rules, certs, firewall) - updated every 30s
   getHAProxyCached: (serverId: number) =>

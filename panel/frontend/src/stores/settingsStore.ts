@@ -3,6 +3,15 @@ import { toast } from 'sonner'
 import i18n from '../i18n'
 import { settingsApi } from '../api/client'
 import { parseHiddenModules, serializeHiddenModules } from '../config/modules'
+import {
+  parseChartMode,
+  parseChartModeOverrides,
+  serializeChartModeOverrides,
+  DEFAULT_CHART_MODE,
+  type ChartMode,
+  type ChartMetric,
+  type ChartModeOverrides,
+} from '../config/chartDisplay'
 
 // Зеркало списка скрытых разделов в браузере: меню рисуется до ответа
 // /settings, иначе при каждой загрузке страницы мигал бы полный список вкладок.
@@ -110,6 +119,9 @@ interface SettingsState {
   updateBranch: string
   cpuAffinityEnabled: boolean
   hiddenModules: string[]
+  chartMode: ChartMode
+  chartPeaks: boolean
+  chartModeOverrides: ChartModeOverrides
   isLoading: boolean
 
   fetchSettings: () => Promise<void>
@@ -127,6 +139,9 @@ interface SettingsState {
   setUpdateBranch: (branch: string) => Promise<void>
   setCpuAffinityEnabled: (enabled: boolean) => Promise<void>
   setHiddenModules: (ids: string[]) => Promise<void>
+  setChartMode: (mode: ChartMode) => Promise<void>
+  setChartPeaks: (enabled: boolean) => Promise<void>
+  setChartModeOverride: (metric: ChartMetric, mode: ChartMode | null) => Promise<void>
   getEffectiveTimezone: () => string
 }
 
@@ -145,6 +160,9 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   updateBranch: 'main',
   cpuAffinityEnabled: false,
   hiddenModules: readCachedHiddenModules(),
+  chartMode: DEFAULT_CHART_MODE,
+  chartPeaks: true,
+  chartModeOverrides: {},
   isLoading: true,
 
   fetchSettings: async () => {
@@ -167,6 +185,9 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         updateBranch: data.settings.update_branch || 'main',
         cpuAffinityEnabled: data.settings.cpu_affinity_enabled === 'true',
         hiddenModules,
+        chartMode: parseChartMode(data.settings.chart_mode),
+        chartPeaks: data.settings.chart_peaks !== 'false',
+        chartModeOverrides: parseChartModeOverrides(data.settings.chart_mode_overrides),
         isLoading: false,
       })
     } catch {
@@ -251,6 +272,28 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     set({ hiddenModules: ids })
     cacheHiddenModules(ids)
     await settingsApi.set('hidden_modules', serializeHiddenModules(ids))
+  },
+
+  // Без тоста: результат виден сразу на графиках
+  setChartMode: async (mode: ChartMode) => {
+    set({ chartMode: mode })
+    await settingsApi.set('chart_mode', mode)
+  },
+
+  setChartPeaks: async (enabled: boolean) => {
+    set({ chartPeaks: enabled })
+    await settingsApi.set('chart_peaks', enabled.toString())
+  },
+
+  setChartModeOverride: async (metric: ChartMetric, mode: ChartMode | null) => {
+    const overrides = { ...get().chartModeOverrides }
+    if (mode === null) {
+      delete overrides[metric]
+    } else {
+      overrides[metric] = mode
+    }
+    set({ chartModeOverrides: overrides })
+    await settingsApi.set('chart_mode_overrides', serializeChartModeOverrides(overrides))
   },
 
   getEffectiveTimezone: () => {

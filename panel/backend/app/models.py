@@ -222,12 +222,15 @@ class MetricsSnapshot(Base):
     server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), nullable=False)
     timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
     
-    # CPU
+    # CPU — среднее за окно опроса (у старой ноды — мгновенная проба).
+    # cpu_usage_max — максимум секундного среднего по ядрам за окно, не самое
+    # горячее ядро. NULL в *_max = «пика нет»: старая нода или строка до миграции.
     cpu_usage = Column(Float)
+    cpu_usage_max = Column(Float, nullable=True)
     load_avg_1 = Column(Float)
     load_avg_5 = Column(Float)
     load_avg_15 = Column(Float)
-    
+
     # Memory (bytes)
     memory_total = Column(BigInteger)
     memory_used = Column(BigInteger)
@@ -235,11 +238,13 @@ class MetricsSnapshot(Base):
     memory_percent = Column(Float)
     swap_used = Column(BigInteger)
     swap_percent = Column(Float)
-    
-    # Network speed (bytes per second) - calculated by panel
+
+    # Network speed (bytes per second): average over the poll window and its peak
     net_rx_bytes_per_sec = Column(Float, default=0)
     net_tx_bytes_per_sec = Column(Float, default=0)
-    
+    net_rx_bytes_per_sec_max = Column(Float, nullable=True)
+    net_tx_bytes_per_sec_max = Column(Float, nullable=True)
+
     # Disk
     disk_percent = Column(Float)
     disk_read_bytes_per_sec = Column(Float, default=0)
@@ -281,23 +286,26 @@ class AggregatedMetrics(Base):
     timestamp = Column(DateTime(timezone=True), nullable=False, index=True)
     period_type = Column(String(10), nullable=False)  # 'hour' or 'day'
     
-    # CPU
+    # CPU; NULL в max_* — агрегат до появления пиков
     avg_cpu = Column(Float)
     max_cpu = Column(Float)
     avg_load = Column(Float)
-    
+    max_load = Column(Float, nullable=True)
+
     # Memory
     avg_memory_percent = Column(Float)
     max_memory_percent = Column(Float)
-    
+
     # Disk
     avg_disk_percent = Column(Float)
-    
-    # Network (total bytes transferred in period)
+
+    # Network (total bytes transferred in period, average and peak speed)
     total_rx_bytes = Column(BigInteger, default=0)
     total_tx_bytes = Column(BigInteger, default=0)
     avg_rx_speed = Column(Float, default=0)
     avg_tx_speed = Column(Float, default=0)
+    max_rx_speed = Column(Float, nullable=True)
+    max_tx_speed = Column(Float, nullable=True)
     
     # Disk IO
     avg_disk_read_speed = Column(Float, default=0)

@@ -70,7 +70,8 @@
     "billing": "Оплата",
     "back": "Назад",
     "clear_search": "Очистить поиск",
-    "remove_from_list": "Убрать из списка"
+    "remove_from_list": "Убрать из списка",
+    "peak": "пик"
   },
   "units": {
     "bps": "бит/с",
@@ -454,7 +455,25 @@
     "sync_success": "Все серверы синхронизированы",
     "sync_partial": "{{count}} из {{total}} серверов синхронизированы",
     "last_sync": "Последняя синхронизация",
-    "never": "Никогда"
+    "never": "Никогда",
+    "charts": "Графики",
+    "charts_desc": "Как рисовать историю метрик",
+    "chart_mode": "Режим по умолчанию",
+    "chart_mode_smooth": "Сглаженные",
+    "chart_mode_raw": "Как есть",
+    "chart_mode_smooth_hint": "Мягкая кривая по средним — видно тренд",
+    "chart_mode_raw_hint": "Каждая точка — как записана, без сглаживания",
+    "chart_peaks": "Полоса пиков",
+    "chart_peaks_hint": "Полупрозрачная область от среднего до максимума за интервал",
+    "chart_per_metric": "Настроить по метрикам",
+    "chart_inherit": "Как везде"
+  },
+  "chart_metric": {
+    "cpu": "CPU",
+    "memory": "Память",
+    "network": "Сеть",
+    "load": "Load Average",
+    "tcp": "TCP-соединения"
   },
   "server_card": {
     "last_seen": "Был в сети: {{time}}",
@@ -484,7 +503,9 @@
     "avg": "Сред.",
     "core": "Ядро",
     "cores": "ядер",
-    "cores_history": "История по ядрам"
+    "cores_history": "История по ядрам",
+    "heatmap_scale": "Загрузка ядра",
+    "no_history": "Истории по ядрам за этот период нет"
   },
   "tcp_chart": {
     "states_history": "История TCP соединений",

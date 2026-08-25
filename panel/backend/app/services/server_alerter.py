@@ -961,6 +961,12 @@ class ServerAlerter:
     # ------------------------------------------------------------------
     @staticmethod
     def _extract_cpu(metrics: dict) -> float:
+        # Среднее за окно опроса, когда нода его прислала: секундная проба раз
+        # в 10–60 с против порога — лотерея, а не нагрузка. Окно без измеренного
+        # CPU (per_cpu_avg пуст) отдаёт нули — тогда честнее секундная проба.
+        window = metrics.get("window") or {}
+        if window.get("per_cpu_avg") and window.get("cpu_avg") is not None:
+            return window["cpu_avg"]
         cpu = metrics.get("cpu", {})
         return cpu.get("usage_percent", 0) or 0
 
