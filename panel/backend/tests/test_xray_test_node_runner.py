@@ -9,18 +9,23 @@
 Запуск из panel/backend:  python -m unittest discover -s tests -p "test_*.py"
 """
 
+import asyncio
 import base64
 import json
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from app.models import Server  # noqa: E402
+from app.services.xray_test import node_runner  # noqa: E402
 from app.services.xray_test.bundle import BundleTicket  # noqa: E402
 from app.services.xray_test.matrix import build_matrix  # noqa: E402
 from app.services.xray_test.models import Core, FailReason, Verdict  # noqa: E402
 from app.services.xray_test.node_runner import (  # noqa: E402
+    NodeCoreRunner,
     _build_payload,
     _cores_for,
     _parse_result,
@@ -244,6 +249,101 @@ class ParseBatchTest(unittest.TestCase):
             {"type": "cell", "index": first.index, "verdict": "ok", "reason": None},
         ])
         self.assertIs(results[first.index].verdict, Verdict.OK)
+
+
+class PortPoolTest(unittest.IsolatedAsyncioTestCase):
+    """Пачка забирает много портов сразу — пул нельзя разбирать по кускам.
+
+    Рабочих над очередью несколько, у каждого пачка в полтора десятка проверок.
+    Без ограничения они растаскивают пул по частям и встают намертво: каждому
+    портов не хватает, а отдать их некому — прогон замирает навсегда.
+    """
+
+    def _runner(self):
+        server = Server(id=1, name="node", url="https://node.example")
+        runner = NodeCoreRunner(server)
+        runner._tickets[Core.XRAY] = _ticket()
+        runner._prepared = True
+        return runner
+
+    async def test_concurrent_batches_do_not_deadlock(self):
+        runner = self._runner()
+        started = 0
+
+        async def fake_execute(server, payload, budget):
+            nonlocal started
+            started += 1
+            await asyncio.sleep(0.01)
+            rows = base64.b64decode(payload).decode().splitlines()
+            return [
+                {"type": "cell", "index": int(row.split(TAB)[1]), "verdict": "ok",
+                 "reason": None}
+                for row in rows if row.startswith("CELL")
+            ]
+
+        cells = build_matrix([
+            parse_link(f"vless://{UUID}@h{i}.io:443?security=tls#n{i}")
+            for i in range(128)
+        ])
+        batches = [cells[i:i + 16] for i in range(0, len(cells), 16)]
+
+        with mock.patch.object(node_runner, "_execute", fake_execute):
+            results = await asyncio.wait_for(
+                asyncio.gather(*(runner.probe_batch(b, ProbeOptions()) for b in batches)),
+                timeout=10,
+            )
+
+        self.assertEqual(sum(len(r) for r in results), 128)
+        self.assertEqual(started, len(batches))
+
+    async def test_ports_returned_after_batch(self):
+        runner = self._runner()
+
+        async def fake_execute(server, payload, budget):
+            return []
+
+        cells = build_matrix([
+            parse_link(f"vless://{UUID}@h{i}.io:443?security=tls#n{i}") for i in range(16)
+        ])
+        with mock.patch.object(node_runner, "_execute", fake_execute):
+            await runner.probe_batch(cells, ProbeOptions())
+
+        self.assertEqual(runner._ports.qsize(), len(node_runner.PORT_POOL))
+
+    async def test_ports_returned_when_node_fails(self):
+        runner = self._runner()
+
+        async def boom(server, payload, budget):
+            raise node_runner.NodeExecError("нода не ответила")
+
+        cells = build_matrix([
+            parse_link(f"vless://{UUID}@h{i}.io:443?security=tls#n{i}") for i in range(4)
+        ])
+        with mock.patch.object(node_runner, "_execute", boom):
+            results = await runner.probe_batch(cells, ProbeOptions())
+
+        self.assertTrue(all(r.reason is FailReason.NODE_ERROR for r in results))
+        self.assertEqual(runner._ports.qsize(), len(node_runner.PORT_POOL))
+
+
+class ExecTimeoutTest(unittest.TestCase):
+    """Один таймаут на любую пачку либо резал большую, либо тянул пустую."""
+
+    def test_grows_with_batch_size(self):
+        small = node_runner._exec_timeout(4, ProbeOptions())
+        large = node_runner._exec_timeout(16, ProbeOptions())
+        self.assertGreater(large, small)
+
+    def test_speed_measurement_adds_budget(self):
+        plain = node_runner._exec_timeout(8, ProbeOptions())
+        with_speed = node_runner._exec_timeout(8, ProbeOptions(speed=True))
+        self.assertGreater(with_speed, plain)
+
+    def test_capped(self):
+        self.assertLessEqual(
+            node_runner._exec_timeout(1000, ProbeOptions(speed=True)),
+            node_runner.EXEC_TIMEOUT_CAP,
+        )
 
 
 class CoresForTest(unittest.TestCase):

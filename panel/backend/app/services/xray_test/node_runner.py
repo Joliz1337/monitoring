@@ -39,9 +39,18 @@ RUNNER_SOURCE = "xray-test-runner.sh"
 # исходящее соединение ноды могло бы занять порт ровно между проверками.
 # Размер пула — это и есть потолок параллельных проверок на одной ноде.
 PORT_POOL = tuple(range(7501, 7533))
-EXEC_TIMEOUT = 120
+# Пачка на ноде: столько проверок уходит одним заданием. Больше пула портов
+# брать нельзя — задание просто не получит портов на всех.
+NODE_BATCH_SIZE = 16
+# Исполнитель гонит проверки внутри задания по восемь (PARALLEL_CELLS)
+NODE_PARALLEL_CELLS = 8
+# Худший случай на проверку: TCP-пинги, запрос с повтором по таймауту и выходной
+# IP. Замер скорости качает десять мегабайт и добавляется отдельно.
+CELL_BUDGET = 60
+SPEED_BUDGET = 25
+EXEC_OVERHEAD = 30
+EXEC_TIMEOUT_CAP = 600
 CORE_INSTALL_TIMEOUT = 300
-HTTP_READ_TIMEOUT = 140
 COMMAND_LIMIT = 60000
 # Задание для исполнителя: строки через перевод, поля внутри строки — табом
 SEP = "\t"
@@ -69,6 +78,11 @@ class NodeCoreRunner:
         self._ports: asyncio.Queue[int] = asyncio.Queue()
         for port in PORT_POOL:
             self._ports.put_nowait(port)
+        # Рабочих над очередью восемь, и без ограничения все восемь полезли бы
+        # на ноду одновременно — восемь потоков `execute-stream` и вчетверо
+        # больше запросов портов, чем в пуле. Слотов ровно столько, сколько
+        # пачек пул может обслужить одновременно.
+        self._batch_slots = asyncio.Semaphore(max(1, len(PORT_POOL) // NODE_BATCH_SIZE))
         self._prepared = False
         self._prepare_lock = asyncio.Lock()
         self._tickets: dict[Core, bundle.BundleTicket] = {}
@@ -114,8 +128,8 @@ class NodeCoreRunner:
             by_core.setdefault(core, []).append(cell)
 
         for core, group in by_core.items():
-            for start in range(0, len(group), len(PORT_POOL)):
-                chunk = group[start:start + len(PORT_POOL)]
+            for start in range(0, len(group), NODE_BATCH_SIZE):
+                chunk = group[start:start + NODE_BATCH_SIZE]
                 done.update(await self._run_chunk(chunk, core, options))
 
         return [done[cell.index] for cell in cells]
@@ -134,10 +148,10 @@ class NodeCoreRunner:
                 "xray-test: пачка из %d не поднялась на %s, проверяю по одной",
                 len(chunk), self.server.name,
             )
-            single: dict[int, CellResult] = {}
-            for cell in chunk:
-                single.update(await self._execute_chunk([cell], core, options))
-            return single
+            singles = await asyncio.gather(*(
+                self._execute_chunk([cell], core, options) for cell in chunk
+            ))
+            return {index: result for part in singles for index, result in part.items()}
 
         return results
 
@@ -150,17 +164,18 @@ class NodeCoreRunner:
             ticket = await bundle.issue_ticket(core)
             self._tickets[core] = ticket
 
-        ports = [await self._ports.get() for _ in chunk]
-        try:
-            payload = _build_payload(chunk, ports, core, ticket, options)
-            lines = await _execute(self.server, payload)
-        except XrayTestError as exc:
-            return {
-                cell.index: _fail(cell, FailReason.NODE_ERROR, str(exc)) for cell in chunk
-            }
-        finally:
-            for port in ports:
-                self._ports.put_nowait(port)
+        async with self._batch_slots:
+            ports = [await self._ports.get() for _ in chunk]
+            try:
+                payload = _build_payload(chunk, ports, core, ticket, options)
+                lines = await _execute(self.server, payload, _exec_timeout(len(chunk), options))
+            except XrayTestError as exc:
+                return {
+                    cell.index: _fail(cell, FailReason.NODE_ERROR, str(exc)) for cell in chunk
+                }
+            finally:
+                for port in ports:
+                    self._ports.put_nowait(port)
 
         return _parse_results(chunk, lines)
 
@@ -223,13 +238,26 @@ def _build_payload(
 
 
 
-async def _execute(server: Server, payload: str) -> list[dict]:
-    command = f"timeout -k 5 {EXEC_TIMEOUT} {RUNNER_PATH} {payload}"
+def _exec_timeout(count: int, options: ProbeOptions) -> int:
+    """Потолок времени на задание — по числу волн внутри него.
+
+    Один таймаут на любую пачку либо резал большие задания, либо заставлял ждать
+    минутами там, где всё давно кончилось.
+    """
+    waves = max(1, -(-count // NODE_PARALLEL_CELLS))
+    per_wave = CELL_BUDGET + (SPEED_BUDGET if options.speed else 0)
+    return min(EXEC_TIMEOUT_CAP, EXEC_OVERHEAD + waves * per_wave)
+
+
+async def _execute(server: Server, payload: str, budget: int) -> list[dict]:
+    command = f"timeout -k 5 {budget} {RUNNER_PATH} {payload}"
     if len(command) > COMMAND_LIMIT:
         raise NodeExecError("Конфигурация слишком велика для передачи на ноду")
 
-    body = {"command": command, "timeout": EXEC_TIMEOUT, "shell": "bash"}
-    timeout = httpx.Timeout(connect=10.0, read=HTTP_READ_TIMEOUT, write=10.0, pool=10.0)
+    body = {"command": command, "timeout": budget, "shell": "bash"}
+    # Читаем дольше, чем живёт задание: иначе панель бросит поток раньше, чем
+    # исполнитель успеет отдать последние строки
+    timeout = httpx.Timeout(connect=10.0, read=budget + 20, write=10.0, pool=10.0)
     events: list[dict] = []
 
     try:
