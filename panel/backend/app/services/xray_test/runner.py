@@ -506,13 +506,22 @@ def _core_reason(
     return sanitize_output(detail)[:CORE_LOG_TAIL], hint
 
 
+# Номер сессии — минимум семь цифр: короче бывает только счётчик секунд
+# sing-box вида INFO[0000], и путать их нельзя
+_SESSION_ID_RE = re.compile(r"\[(\d{7,})[^\]]*\]")
+
+
 def _lines_for_slot(output: list[str], slot: Optional[str]) -> list[str]:
     """Строки лога, относящиеся к одной проверке пачки.
 
-    Ядро помечает строки соединения тегами `[mon-test-in-N -> mon-test-out-N]`,
-    и без такого отбора причина отказа одной конфигурации досталась бы соседней.
-    Строки вовсе без тега — общие: не поднялся транспорт, не разобрался конфиг;
-    они отдаются любому слоту, потому что относятся ко всей пачке.
+    Теги `[mon-test-in-N -> mon-test-out-N]` ядро ставит только на строки
+    приёма и маршрута; сами ошибки («failed to process outbound traffic > …»)
+    оно печатает с одним номером сессии. Поэтому по помеченным строкам сначала
+    собираются номера сессий проверки, а затем к ним добираются строки этих
+    сессий без тега — отбор по одним тегам прятал бы настоящую причину отказа
+    за безобидными «accepted». Строки вовсе без тега и без сессии — общие: не
+    поднялся транспорт, не разобрался конфиг; они отдаются любому слоту,
+    потому что относятся ко всей пачке.
     """
     if slot is None:
         return output
@@ -522,9 +531,18 @@ def _lines_for_slot(output: list[str], slot: Optional[str]) -> list[str]:
     any_slot = re.compile(rf"{tags}-[0-9]+")
 
     mine = [line for line in output if own.search(line)]
-    if mine:
+    if not mine:
+        return [line for line in output if not any_slot.search(line)]
+
+    ids = {match.group(1) for line in mine for match in _SESSION_ID_RE.finditer(line)}
+    if not ids:
         return mine
-    return [line for line in output if not any_slot.search(line)]
+    own_session = re.compile(r"\[(?:%s)[\] ]" % "|".join(re.escape(sid) for sid in ids))
+    return [
+        line for line in output
+        if own.search(line)
+        or (not any_slot.search(line) and own_session.search(line))
+    ]
 
 
 async def _shutdown_core(launched: Optional[_LaunchedCore]) -> None:

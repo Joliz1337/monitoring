@@ -124,5 +124,46 @@ class LogAttributionTest(unittest.TestCase):
         self.assertEqual(_lines_for_slot(["a [mon-test-in-3 -> mon-test-out-3]"], "9"), [])
 
 
+class SessionIdAttributionTest(unittest.TestCase):
+    """Ошибки ядро печатает без тега — только с номером сессии.
+
+    Теги стоят лишь на строках приёма и маршрута, поэтому отбор по одним тегам
+    отдавал бы наружу безобидные «accepted», пряча настоящую причину отказа.
+    """
+
+    LOG = [
+        "[Info] [219696321] app/dispatcher: taking detour [mon-test-out-76]",
+        "[Info] [219696321] transport/internet/tcp: dialing TCP to tcp:cp.io:443",
+        "[Warning] [219696321] app/proxyman/outbound: failed to process "
+        "outbound traffic > [dial tcp 1.2.3.4:443: i/o timeout]",
+        "[Info] [884422113] app/dispatcher: taking detour [mon-test-out-77]",
+        "[Warning] [884422113] app/proxyman/outbound: failed to process "
+        "outbound traffic > [connection reset by peer]",
+        "failed to read config: unknown field",
+    ]
+
+    def test_untagged_error_follows_its_session(self):
+        self.assertEqual(_lines_for_slot(self.LOG, "76"), self.LOG[:3])
+
+    def test_neighbour_session_not_leaked(self):
+        self.assertEqual(_lines_for_slot(self.LOG, "77"), self.LOG[3:5])
+
+    def test_session_id_prefix_not_confused(self):
+        """Сессия 1234567 не должна забирать строки сессии 12345678."""
+        log = [
+            "[Info] [1234567] detour [mon-test-out-1]",
+            "[Warning] [12345678] failed to process outbound traffic",
+        ]
+        self.assertEqual(_lines_for_slot(log, "1"), [log[0]])
+
+    def test_singbox_counter_is_not_a_session(self):
+        """INFO[0000] — счётчик секунд sing-box, а не номер сессии."""
+        log = [
+            "INFO[0000] inbound/socks[mon-test-in-2]: connection",
+            "INFO[0000] some unrelated line",
+        ]
+        self.assertEqual(_lines_for_slot(log, "2"), [log[0]])
+
+
 if __name__ == "__main__":
     unittest.main()

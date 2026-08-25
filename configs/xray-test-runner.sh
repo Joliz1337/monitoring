@@ -13,7 +13,7 @@
 #         xray-test-runner.sh version
 set -uo pipefail
 
-RUNNER_VERSION="2.7.0"
+RUNNER_VERSION="2.8.0"
 
 TOOLS_DIR="/opt/monitoring-node/tools"
 CORES_DIR="$TOOLS_DIR/cores"
@@ -39,6 +39,9 @@ SWEEP_MARKER="/tmp/.mon-xtest-sweep"
 SWEEP_MIN_INTERVAL=60
 
 GENERATE_204_URL="https://cp.cloudflare.com/generate_204"
+# Повторная проба идёт на другой адрес: сбой одного проверочного хоста не
+# должен выглядеть сбоем всех конфигураций разом
+FALLBACK_204_URL="https://www.gstatic.com/generate_204"
 TRACE_URL="https://cloudflare.com/cdn-cgi/trace"
 SPEED_URL="https://speed.cloudflare.com/__down?bytes=${SPEED_BYTES}"
 
@@ -255,9 +258,10 @@ resolve_host() {
 # цепочки сертификатов. На боевой ноде это была самая дорогая часть проверки:
 # curl съедал больше процессора, чем сами прокси-ядра.
 probe_pair() {
-    curl_socks "$1" -o /dev/null -o /dev/null --max-time "$PROBE_TIMEOUT" \
+    local port="$1" url="$2"
+    curl_socks "$port" -o /dev/null -o /dev/null --max-time "$PROBE_TIMEOUT" \
         -w '%{http_code} %{time_total}\n' \
-        "$GENERATE_204_URL" "$GENERATE_204_URL" 2>/dev/null
+        "$url" "$url" 2>/dev/null
 }
 
 # Разбор пары ответов без внешних команд: раньше здесь было по четыре запуска
@@ -292,16 +296,30 @@ fallback_alive() {
 
 # Последняя строка лога ядра со следами ошибки. Просто tail отдавал бы рабочий
 # вывод («accepted tcp:…», «dialing TCP to …»), который ничего не объясняет.
-# Слот — номер проверки внутри пачки. Ядро помечает строки соединения тегами
-# [mon-test-in-N -> mon-test-out-N], и без отбора по ним причина отказа одной
-# конфигурации досталась бы соседней. Строки без тега общие для всей пачки.
+# Слот — номер проверки внутри пачки. Теги [mon-test-in-N -> mon-test-out-N]
+# ядро ставит только на строки приёма и маршрута; сами ошибки («failed to
+# process outbound traffic > … i/o timeout») оно печатает с одним номером
+# сессии. Поэтому по тегам сначала собираются номера сессий своей проверки, а
+# лог фильтруется уже по тегу вместе с ними — отбор по одним тегам оставлял бы
+# наружу безобидные «accepted», пряча настоящую причину. Строки без тега общие
+# для всей пачки. Отбор тега идёт по границе цифр, иначе слот 1 забирал бы
+# строки слота 11; у номера сессии минимум семь цифр, чтобы не путать его со
+# счётчиком секунд sing-box вида INFO[0000].
 core_failure_line() {
-    local slot="${1:-}" log="$WORKDIR/core.log" line src
+    local slot="${1:-}" log="$WORKDIR/core.log" line src ids
     [ -f "$log" ] || return 0
     src="$log"
     if [ -n "$slot" ]; then
         src="$WORKDIR/slot-$slot.log"
-        grep -E "mon-test-(in|out)-${slot}([^0-9]|$)" "$log" > "$src" 2>/dev/null
+        local tag_re="mon-test-(in|out)-${slot}([^0-9]|\$)"
+        ids=$(grep -E "$tag_re" "$log" 2>/dev/null \
+            | grep -oE '\[[0-9]{7,}[^]]*\]' | grep -oE '[0-9]{7,}' \
+            | sort -u | paste -sd'|' -)
+        if [ -n "$ids" ]; then
+            grep -E "$tag_re|\[($ids)[] ]" "$log" > "$src" 2>/dev/null
+        else
+            grep -E "$tag_re" "$log" > "$src" 2>/dev/null
+        fi
         [ -s "$src" ] || grep -vE 'mon-test-(in|out)-[0-9]+' "$log" > "$src" 2>/dev/null
         [ -s "$src" ] || src="$log"
     fi
@@ -361,17 +379,19 @@ run_cell() {
         # означали лишнюю проверку цепочки сертификатов на каждую проверку, а это
         # самая дорогая её часть — на боевой ноде curl съедал процессора больше,
         # чем сами прокси-ядра.
-        local pair rc
-        pair=$(probe_pair "$socks"); rc=$?
+        local pair
+        pair=$(probe_pair "$socks" "$GENERATE_204_URL")
         read_pair "$pair"
         status=$PAIR_STATUS; handshake=$PAIR_HANDSHAKE; rtt=$PAIR_RTT
 
-        # Проверки идут пачками, и на занятой ноде запрос может не уложиться в
-        # таймаут при живом канале — такой отказ переспрашиваем. Отказ по другой
-        # причине воспроизводим, и повтор только тянул бы время.
-        if [ "$rc" = "28" ]; then
+        # Любой первый отказ переспрашиваем, как это делает пробер панели:
+        # проверки стартуют залпом со всех локаций разом, и разовый сбой канала
+        # в этот момент — таймаут или мгновенный сброс туннеля — хоронил бы
+        # живую конфигурацию. Повтор идёт на запасной адрес, времени в худшем
+        # случае это стоит столько же, сколько прежний повтор по таймауту.
+        if [ -z "$status" ] || [ "$status" = "000" ] || [ -z "$rtt" ]; then
             sleep 1.5
-            pair=$(probe_pair "$socks")
+            pair=$(probe_pair "$socks" "$FALLBACK_204_URL")
             read_pair "$pair"
             status=$PAIR_STATUS; handshake=$PAIR_HANDSHAKE; rtt=$PAIR_RTT
         fi
