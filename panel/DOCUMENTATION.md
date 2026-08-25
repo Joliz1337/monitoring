@@ -212,7 +212,7 @@ CI/CD: `.github/workflows/docker-publish.yml` — job `tests` (матрица р
 - `POST /api/system/update` без явного `target_ref` — обновление панели на выбранную ветку (`run_panel_update_in_container`)
 - `POST /api/proxy/{id}/system/update` без явного `target_version` — обновление ноды на выбранную ветку
 - Скачивание конфигов системных оптимизаций (`GET /api/system/optimizations/*`) и файлов анти-DDoS вотчдога (`antiddos_manager.py`)
-- `install.sh`, скачиваемый при авторазвёртывании ноды (`deploy_service.py`); при dev-канале в окружение установки добавляется `MON_BRANCH=dev`, который сам `install.sh` разворачивает во все свои `raw.githubusercontent.com`-URL (клонирование репозитория, конфиги, firstboot-скрипт Hetzner Rescue) и передаёт дочернему `node/deploy.sh`
+- `install.sh`, скачиваемый при авторазвёртывании ноды (`deploy_service.py`) и в команде из карточки «Ключи установки» (`node_install_keys.build_install_command`); при dev-канале в окружение установки добавляется `MON_BRANCH=dev`, который сам `install.sh` разворачивает во все свои `raw.githubusercontent.com`-URL (клонирование репозитория, конфиги, firstboot-скрипт Hetzner Rescue) и передаёт дочернему `node/deploy.sh`
 - Тег Docker-образов, который апдейтер панели/ноды пишет в `.env` (`MON_IMAGE_TAG=latest|dev`) после обновления на ветку `main`/`dev`. Обновление на конкретный тег/коммит (путь отката) канал не меняет — вместо этого `resolve_pinned_tag()` в `apply-update.sh` проверяет через `docker manifest inspect`, есть ли в GHCR образ с тегом этой версии, и переключает `MON_IMAGE_TAG` на него; если такого образа нет — тег оставляется как есть и включается локальная сборка из скачанного кода
 
 Переключение канала в Настройках **не запускает обновление само по себе** — влияет только на то, откуда будет скачано следующее.
@@ -656,7 +656,7 @@ interface NicInfo {
 **Сервис (`panel/backend/app/services/node_install_keys.py`):**
 - `create_install_key`/`list_install_keys`/`delete_install_key` — CRUD по таблице `node_install_keys`
 - `build_key_token(keygen, key, panel_ip)` — тот же формат NODE_SECRET, что и у общего токена (`pack_node_secret`, `v=1`, base64url от JSON `ca`/`crt`/`key`/`panel_ip`); собирается на лету из PEM в БД, не хранится готовым
-- `build_install_command(token)` — one-liner `bash <(curl -fsSL <installer_url>) <token>`
+- `build_install_command(token)` — one-liner `bash <(curl -fsSL <installer_url>) <token>`; на dev-канале с префиксом `MON_BRANCH=dev` — `install.sh` не определяет ветку по URL, с которого его скачали, без переменной он клонирует код ноды, качает конфиги и выбирает тег образов (`MON_IMAGE_TAG`) из `main` (закреплено `test_node_install_key_command.py`)
 - `MIN_VALIDITY_DAYS = 1`, `MAX_VALIDITY_DAYS = 1095`, `DEFAULT_VALIDITY_DAYS = 90`
 
 **Схема БД:** `NodeInstallKey` / `node_install_keys` — `id`, `name`, `common_name` (unique), `cert_pem`, `key_pem`, `fingerprint`, `expires_at`, `created_at`. Таблица создаётся через `Base.metadata.create_all` в `init_db()`, отдельной миграции нет.
@@ -669,7 +669,7 @@ interface NicInfo {
 | POST | /api/install-keys | Выпустить ключ (`name`, `validity_days` 1–1095, по умолчанию 90) |
 | DELETE | /api/install-keys/{key_id} | Удалить запись из списка |
 
-Ответ несёт готовый `token` (NODE_SECRET) и `install_command`, собранные из PEM в БД + актуального `resolve_panel_ip()` и текущего канала обновлений (`installer_url()`) — IP панели и канал обновлений в них всегда свежие, даже у ключа, выпущенного давно.
+Ответ несёт готовый `token` (NODE_SECRET) и `install_command`, собранные из PEM в БД + актуального `resolve_panel_ip()` и текущего канала обновлений (`installer_url()` + `MON_BRANCH` на dev) — IP панели и канал обновлений в них всегда свежие, даже у ключа, выпущенного давно.
 
 **Свойства:**
 - Формат ключа не отличается от общего токена — `install.sh`, `node/deploy.sh` и код ноды принимают его как обычный NODE_SECRET без каких-либо доработок.

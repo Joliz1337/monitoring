@@ -14,7 +14,7 @@ from app.services.pki import (
     generate_dedicated_node_cert,
     pack_node_secret,
 )
-from app.services.update_channel import installer_url
+from app.services import update_channel
 
 logger = logging.getLogger(__name__)
 
@@ -86,4 +86,12 @@ def build_key_token(
 
 
 def build_install_command(token: str) -> str:
-    return f"bash <(curl -fsSL {installer_url()}) {token}"
+    """One-liner установки ноды с ключом этой выдачи.
+
+    install.sh не определяет ветку по URL, с которого его скачали, — канал
+    ему сообщает MON_BRANCH, иначе код ноды, конфиги и образы возьмутся из main.
+    """
+    command = f"bash <(curl -fsSL {update_channel.installer_url()}) {token}"
+    if update_channel.current_branch() == update_channel.STABLE_BRANCH:
+        return command
+    return f"MON_BRANCH={update_channel.current_branch()} {command}"
