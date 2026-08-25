@@ -529,6 +529,47 @@ class ChunkDispatchTest(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(peak, limit)
 
 
+class NodeCapacityTest(unittest.TestCase):
+    """Потолок проверок на ноде считается по её процессору.
+
+    Замер на боевой ноде: 64 проверки разом дали load average 14 и продолжали
+    расти. Нода делит процессор с пользовательским трафиком, поэтому брать весь
+    пул портов вслепую нельзя — проверки от нехватки CPU идут только медленнее.
+    """
+
+    @staticmethod
+    def _server(cores):
+        metrics = json.dumps({"cpu": {"cores_logical": cores}}) if cores is not None else None
+        return Server(id=1, name="n", url="https://n.example", last_metrics=metrics)
+
+    def test_scales_with_cores(self):
+        self.assertLess(
+            node_runner._node_capacity(self._server(2)),
+            node_runner._node_capacity(self._server(8)),
+        )
+
+    def test_never_exceeds_port_pool(self):
+        huge = node_runner._node_capacity(self._server(256))
+        self.assertLessEqual(huge, len(node_runner.PORT_POOL))
+
+    def test_weak_node_keeps_minimum(self):
+        self.assertEqual(
+            node_runner._node_capacity(self._server(1)), node_runner.MIN_NODE_CONCURRENCY
+        )
+
+    def test_unknown_cores_fall_back(self):
+        """Метрик ещё нет — берём осторожно, а не весь пул."""
+        capacity = node_runner._node_capacity(self._server(None))
+        self.assertEqual(capacity, node_runner.NODE_FALLBACK_CONCURRENCY)
+        self.assertLess(capacity, len(node_runner.PORT_POOL))
+
+    def test_broken_metrics_do_not_crash(self):
+        server = Server(id=1, name="n", url="https://n.example", last_metrics="не json")
+        self.assertEqual(
+            node_runner._node_capacity(server), node_runner.NODE_FALLBACK_CONCURRENCY
+        )
+
+
 class ExecTimeoutTest(unittest.TestCase):
     """Один таймаут на любую пачку либо резал большую, либо тянул пустую."""
 

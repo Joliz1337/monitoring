@@ -48,6 +48,14 @@ PORT_POOL = tuple(range(7501, 7565))
 # нодах это подтвердили. Ядер столько же, сколько параллельных проверок, зато
 # каждая освобождает свой порт сразу, как закончилась.
 NODE_BATCH_SIZE = 1
+# Сколько проверок вешать на одно ядро процессора ноды. Проверка почти всё время
+# ждёт сеть, но рукопожатие REALITY — это криптография, и на боевом транзите она
+# конкурирует с пользовательским трафиком. Замер на живой ноде: 64 проверки
+# разом дали load average 14 и продолжали расти, то есть упор уже не в порты.
+NODE_CHECKS_PER_CORE = 4
+# Сколько брать, когда метрик ноды ещё нет: лучше недобрать, чем положить транзит
+NODE_FALLBACK_CONCURRENCY = 16
+MIN_NODE_CONCURRENCY = 8
 # Исполнитель гонит проверки внутри задания по числу портов пачки
 NODE_PARALLEL_CELLS = NODE_BATCH_SIZE
 # Худший случай на проверку: TCP-пинги, запрос с повтором по таймауту и выходной
@@ -86,11 +94,12 @@ class NodeCoreRunner:
         self._ports: asyncio.Queue[int] = asyncio.Queue()
         for port in PORT_POOL:
             self._ports.put_nowait(port)
-        # Рабочих над очередью восемь, и без ограничения все восемь полезли бы
-        # на ноду одновременно — восемь потоков `execute-stream` и вчетверо
-        # больше запросов портов, чем в пуле. Слотов ровно столько, сколько
-        # пачек пул может обслужить одновременно.
-        self._batch_slots = asyncio.Semaphore(max(1, len(PORT_POOL) // NODE_BATCH_SIZE))
+        # Потолок одновременных проверок: меньшее из того, сколько потянет
+        # процессор ноды, и того, на сколько хватит зарезервированных портов.
+        # Брать весь пул вслепую нельзя — на слабой ноде это кладёт транзит,
+        # а проверки от нехватки процессора идут только медленнее.
+        self.capacity = _node_capacity(server)
+        self._batch_slots = asyncio.Semaphore(self.capacity)
         self._prepared = False
         self._prepare_lock = asyncio.Lock()
         self._tickets: dict[Core, bundle.BundleTicket] = {}
@@ -222,6 +231,21 @@ class NodeCoreRunner:
                     self._ports.put_nowait(port)
 
         return _parse_results(chunk, lines, early, on_result)
+
+
+def _node_capacity(server: Server) -> int:
+    """Сколько проверок нода потянет одновременно — по числу её ядер."""
+    cores = 0
+    if server.last_metrics:
+        try:
+            cores = int(json.loads(server.last_metrics).get("cpu", {}).get("cores_logical") or 0)
+        except (json.JSONDecodeError, AttributeError, TypeError, ValueError):
+            cores = 0
+
+    ports = len(PORT_POOL) // max(1, NODE_BATCH_SIZE)
+    if cores <= 0:
+        return min(ports, NODE_FALLBACK_CONCURRENCY)
+    return max(MIN_NODE_CONCURRENCY, min(ports, cores * NODE_CHECKS_PER_CORE))
 
 
 def _cores_for(cells: list[TestCell]) -> set[Core]:

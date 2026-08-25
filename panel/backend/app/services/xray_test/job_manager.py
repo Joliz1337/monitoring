@@ -127,6 +127,12 @@ class XrayTestJobManager:
     ) -> None:
         self._emit(job, {"type": "start", "total": job.total, "location": job.location})
         self._log(job, f"Проверок: {job.total}, параллельно на точку: {concurrency}")
+        # Нода тянет меньше панели и делит процессор с боевым трафиком, поэтому
+        # её потолок считается по числу ядер — и его видно, а не приходится гадать
+        for code, runner in runners.items():
+            capacity = getattr(runner, "capacity", None)
+            if capacity is not None:
+                self._log(job, f"Точка {code}: одновременных проверок не больше {capacity}")
 
         # Очередь на каждое место запуска и постоянное число рабочих над ней.
         # Размер прогона ничем не ограничен, поэтому создавать задачу на каждую
