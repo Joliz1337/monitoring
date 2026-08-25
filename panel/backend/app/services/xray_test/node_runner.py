@@ -50,6 +50,8 @@ CELL_BUDGET = 60
 SPEED_BUDGET = 25
 EXEC_OVERHEAD = 30
 EXEC_TIMEOUT_CAP = 600
+# Запас поверх задания: нода должна успеть дослать последние строки
+STREAM_GRACE = 30
 CORE_INSTALL_TIMEOUT = 300
 COMMAND_LIMIT = 60000
 # Задание для исполнителя: строки через перевод, поля внутри строки — табом
@@ -250,6 +252,21 @@ def _exec_timeout(count: int, options: ProbeOptions) -> int:
 
 
 async def _execute(server: Server, payload: str, budget: int) -> list[dict]:
+    """Задание на ноду с жёстким потолком по времени на весь вызов.
+
+    Потаймаутного чтения мало: оборванный исполнитель оставляет за собой
+    фоновые процессы, они держат stdout открытым, поток с ноды не закрывается —
+    и панель ждёт его вечно, а вместе с ней встаёт весь прогон. Потолок на
+    вызов целиком снимает этот класс зависаний независимо от поведения ноды.
+    """
+    try:
+        async with asyncio.timeout(budget + STREAM_GRACE):
+            return await _stream(server, payload, budget)
+    except asyncio.TimeoutError as exc:
+        raise NodeExecError("Нода не завершила задание в отведённое время") from exc
+
+
+async def _stream(server: Server, payload: str, budget: int) -> list[dict]:
     command = f"timeout -k 5 {budget} {RUNNER_PATH} {payload}"
     if len(command) > COMMAND_LIMIT:
         raise NodeExecError("Конфигурация слишком велика для передачи на ноду")

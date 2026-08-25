@@ -326,6 +326,47 @@ class PortPoolTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runner._ports.qsize(), len(node_runner.PORT_POOL))
 
 
+class StreamHangTest(unittest.IsolatedAsyncioTestCase):
+    """Молчащая нода не должна вешать прогон.
+
+    Оборванный исполнитель оставляет фоновые процессы, они держат stdout
+    открытым, и поток с ноды не закрывается никогда. Без потолка на весь вызов
+    панель ждала бы его вечно, а вместе с ней вставал весь прогон.
+    """
+
+    async def test_hanging_node_raises_instead_of_waiting(self):
+        async def never_ends(server, payload, budget):
+            await asyncio.sleep(3600)
+
+        with mock.patch.object(node_runner, "_stream", never_ends),              mock.patch.object(node_runner, "STREAM_GRACE", 0),              mock.patch.object(node_runner, "EXEC_OVERHEAD", 0),              mock.patch.object(node_runner, "CELL_BUDGET", 0):
+            with self.assertRaises(node_runner.NodeExecError):
+                await asyncio.wait_for(
+                    node_runner._execute(
+                        Server(id=1, name="n", url="https://n.example"), "payload", 0
+                    ),
+                    timeout=5,
+                )
+
+    async def test_hang_marks_cells_failed_and_frees_ports(self):
+        server = Server(id=1, name="node", url="https://node.example")
+        runner = NodeCoreRunner(server)
+        runner._tickets[Core.XRAY] = _ticket()
+        runner._prepared = True
+
+        async def hang(server, payload, budget):
+            raise node_runner.NodeExecError("Нода не завершила задание в отведённое время")
+
+        cells = build_matrix([
+            parse_link(f"vless://{UUID}@h{i}.io:443?security=tls#n{i}") for i in range(8)
+        ])
+        with mock.patch.object(node_runner, "_execute", hang):
+            results = await runner.probe_batch(cells, ProbeOptions())
+
+        self.assertEqual(len(results), 8)
+        self.assertTrue(all(r.reason is FailReason.NODE_ERROR for r in results))
+        self.assertEqual(runner._ports.qsize(), len(node_runner.PORT_POOL))
+
+
 class ExecTimeoutTest(unittest.TestCase):
     """Один таймаут на любую пачку либо резал большую, либо тянул пустую."""
 

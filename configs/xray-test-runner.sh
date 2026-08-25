@@ -13,7 +13,7 @@
 #         xray-test-runner.sh version
 set -uo pipefail
 
-RUNNER_VERSION="2.0.0"
+RUNNER_VERSION="2.1.0"
 
 TOOLS_DIR="/opt/monitoring-node/tools"
 CORES_DIR="$TOOLS_DIR/cores"
@@ -30,7 +30,9 @@ PARALLEL_CELLS=8
 SPEED_TIMEOUT=20
 SPEED_BYTES=10000000
 DEGRADED_RTT_MS=1500
-STALE_CORE_SECONDS=120
+# Больше самого длинного задания: пачки идут параллельно, и уборщик не должен
+# добивать живое ядро соседнего прогона
+STALE_CORE_SECONDS=900
 
 GENERATE_204_URL="https://cp.cloudflare.com/generate_204"
 TRACE_URL="https://cloudflare.com/cdn-cgi/trace"
@@ -43,6 +45,9 @@ umask 077
 
 cleanup() {
     stop_core
+    # Фоновые проверки держат stdout открытым, и поток на панели не закроется,
+    # пока жив хоть один потомок — панель будет ждать вечно
+    pkill -P $$ >/dev/null 2>&1
     [ -n "$WORKDIR" ] && [ -d "$WORKDIR" ] && rm -rf "$WORKDIR"
 }
 trap cleanup EXIT INT TERM
@@ -57,11 +62,27 @@ now_ms() { date +%s%3N; }
 
 # ── ядра ────────────────────────────────────────────────────────────────────
 
-# Ядро от прошлого прогона, переживившее аварийный выход, займёт порт и будет
-# жечь CPU — снимаем такие до начала работы.
+# Ядро от прошлого прогона, пережившее аварийный выход, займёт порт и будет
+# жечь CPU. Опознаём такое по исчезнувшему каталогу задания — это точный признак,
+# в отличие от возраста: пачки идут параллельно, и живому ядру соседнего прогона
+# возраст ничего не доказывает. Возраст оставлен запасным правилом на случай,
+# когда каталог тоже уцелел.
 kill_stale_cores() {
-    local pid etime
+    local pid etime dir args
     for pid in $(pgrep -f "$CORES_DIR/" 2>/dev/null); do
+        args=$(ps -o args= -p "$pid" 2>/dev/null)
+        # Каталог задания из «… -c /tmp/mon-xtest.XXXX/config.json»
+        dir=""
+        case "$args" in
+            *"-c /tmp/mon-xtest."*)
+                dir=${args#*-c }
+                dir=${dir%%/config.json*}
+                ;;
+        esac
+        if [ -n "$dir" ] && [ ! -d "$dir" ]; then
+            kill -9 "$pid" 2>/dev/null
+            continue
+        fi
         etime=$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')
         [ -n "$etime" ] && [ "$etime" -gt "$STALE_CORE_SECONDS" ] && kill -9 "$pid" 2>/dev/null
     done
