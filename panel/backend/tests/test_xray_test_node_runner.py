@@ -457,6 +457,78 @@ class ResultStreamingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sorted(reported), sorted(cell.index for cell in cells))
 
 
+class ChunkDispatchTest(unittest.IsolatedAsyncioTestCase):
+    """Задания уходят на ноду разом, а не по очереди.
+
+    Последовательный цикл сводил бы параллельность к одной проверке на рабочего
+    независимо от размера пула портов.
+    """
+
+    async def test_chunks_run_concurrently(self):
+        server = Server(id=1, name="node", url="https://node.example")
+        runner = NodeCoreRunner(server)
+        runner._tickets[Core.XRAY] = _ticket()
+        runner._prepared = True
+
+        active = 0
+        peak = 0
+
+        async def slow(server, payload, budget, on_event=None):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            try:
+                await asyncio.sleep(0.02)
+                rows = base64.b64decode(payload).decode().splitlines()
+                return [
+                    {"type": "cell", "index": int(row.split(TAB)[1]), "verdict": "ok",
+                     "reason": None}
+                    for row in rows if row.startswith("CELL")
+                ]
+            finally:
+                active -= 1
+
+        cells = build_matrix([
+            parse_link(f"vless://{UUID}@h{i}.io:443?security=tls#n{i}") for i in range(12)
+        ])
+        with mock.patch.object(node_runner, "_execute", slow):
+            results = await asyncio.wait_for(
+                runner.probe_batch(cells, ProbeOptions()), timeout=5
+            )
+
+        self.assertEqual(len(results), 12)
+        self.assertGreater(peak, 1)
+
+    async def test_slots_bounded_by_port_pool(self):
+        server = Server(id=1, name="node", url="https://node.example")
+        runner = NodeCoreRunner(server)
+        runner._tickets[Core.XRAY] = _ticket()
+        runner._prepared = True
+
+        limit = max(1, len(node_runner.PORT_POOL) // node_runner.NODE_BATCH_SIZE)
+        active = 0
+        peak = 0
+
+        async def slow(server, payload, budget, on_event=None):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            try:
+                await asyncio.sleep(0.02)
+                return []
+            finally:
+                active -= 1
+
+        cells = build_matrix([
+            parse_link(f"vless://{UUID}@h{i}.io:443?security=tls#n{i}")
+            for i in range(limit * 2)
+        ])
+        with mock.patch.object(node_runner, "_execute", slow):
+            await asyncio.wait_for(runner.probe_batch(cells, ProbeOptions()), timeout=10)
+
+        self.assertLessEqual(peak, limit)
+
+
 class ExecTimeoutTest(unittest.TestCase):
     """Один таймаут на любую пачку либо резал большую, либо тянул пустую."""
 
