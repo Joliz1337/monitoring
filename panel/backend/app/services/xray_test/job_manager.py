@@ -126,13 +126,12 @@ class XrayTestJobManager:
         on_finish: Optional[FinishHook],
     ) -> None:
         self._emit(job, {"type": "start", "total": job.total, "location": job.location})
-        self._log(job, f"Проверок: {job.total}, параллельно на точку: {concurrency}")
-        # Нода тянет меньше панели и делит процессор с боевым трафиком, поэтому
-        # её потолок считается по числу ядер — и его видно, а не приходится гадать
+        self._log(job, f"Проверок: {job.total}")
         for code, runner in runners.items():
-            capacity = getattr(runner, "capacity", None)
-            if capacity is not None:
-                self._log(job, f"Точка {code}: одновременных проверок не больше {capacity}")
+            self._log(job, (
+                f"Точка {code}: одновременно {_workers(runner, concurrency)} "
+                f"по {_batch(runner)} проверок"
+            ))
 
         # Очередь на каждое место запуска и постоянное число рабочих над ней.
         # Размер прогона ничем не ограничен, поэтому создавать задачу на каждую
@@ -144,10 +143,18 @@ class XrayTestJobManager:
             queues.setdefault(cell.location, asyncio.Queue()).put_nowait(cell)
 
         try:
+            # Сколько рабочих и по сколько проверок каждый — решает исполнитель.
+            # Панели выгодно брать пачками: её ячейки быстрые, а один процесс
+            # ядра на пачку экономит запуски. Нода наоборот берёт по одной:
+            # проверки там неравномерные, и рабочий, ждущий самую медленную из
+            # пачки, держит остальные слоты пустыми.
             workers = [
-                asyncio.create_task(self._worker(job, queue, runners.get(code), options))
+                asyncio.create_task(
+                    self._worker(job, queue, runners.get(code), options,
+                                 _batch(runners.get(code)))
+                )
                 for code, queue in queues.items()
-                for _ in range(concurrency)
+                for _ in range(_workers(runners.get(code), concurrency))
             ]
             await asyncio.gather(*workers)
             self._finish(job, "success")
@@ -191,9 +198,10 @@ class XrayTestJobManager:
         queue: "asyncio.Queue[TestCell]",
         runner: Optional[CoreRunner],
         options: ProbeOptions,
+        batch_size: int,
     ) -> None:
         while True:
-            batch = _take(queue, BATCH_SIZE)
+            batch = _take(queue, batch_size)
             if not batch:
                 return
 
@@ -329,6 +337,16 @@ def _rate(job: XrayTestJob, done: int) -> str:
     left = job.total - done
     eta = int(left / per_minute) if per_minute else 0
     return f"{per_minute:.0f}/мин, осталось ~{eta} мин" if left else f"{per_minute:.0f}/мин"
+
+
+def _workers(runner: Optional[CoreRunner], default: int) -> int:
+    """Сколько рабочих держать над очередью этой точки."""
+    return max(1, int(getattr(runner, "workers", default) or default))
+
+
+def _batch(runner: Optional[CoreRunner]) -> int:
+    """По сколько проверок рабочий забирает за раз."""
+    return max(1, int(getattr(runner, "batch_size", BATCH_SIZE) or BATCH_SIZE))
 
 
 def _take(queue: "asyncio.Queue[TestCell]", limit: int) -> list[TestCell]:

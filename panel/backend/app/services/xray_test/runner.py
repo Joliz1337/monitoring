@@ -108,7 +108,15 @@ class _LaunchedCore:
 
 
 class LocalCoreRunner:
-    """Прогон на самой панели."""
+    """Прогон на самой панели.
+
+    Порт берётся у системы, ячейки быстрые и однородные, поэтому выгодно брать
+    их пачками: один процесс ядра на пачку экономит запуски, а простой от
+    медленной ячейки внутри пачки здесь незаметен.
+    """
+
+    batch_size = BATCH_SIZE
+    workers = 8
 
     async def probe(self, cell: TestCell, options: probes.ProbeOptions) -> CellResult:
         results = await self.probe_batch([cell], options)

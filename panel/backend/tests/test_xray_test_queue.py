@@ -30,8 +30,11 @@ UUID = "11111111-2222-3333-4444-555555555555"
 class CountingRunner:
     """Считает пачки: сколько идёт одновременно, какая была самой большой."""
 
-    def __init__(self, delay: float = 0.001) -> None:
+    def __init__(self, delay: float = 0.001, workers: int = 4, batch_size: int = 16) -> None:
         self.delay = delay
+        # Сколько рабочих держать и по сколько брать — решает сам исполнитель
+        self.workers = workers
+        self.batch_size = batch_size
         self.active = 0
         self.peak = 0
         self.done = 0
@@ -41,6 +44,9 @@ class CountingRunner:
     async def probe(self, cell: TestCell, options: ProbeOptions) -> CellResult:
         results = await self.probe_batch([cell], options)
         return results[0]
+
+    batch_size = 16
+    workers = 4
 
     async def probe_batch(
         self, cells: list[TestCell], options: ProbeOptions, on_result=None
@@ -111,10 +117,10 @@ class QueueTest(unittest.IsolatedAsyncioTestCase):
     async def test_concurrency_respected(self):
         """Рабочих не больше заданного — теперь это число процессов ядра."""
         manager = XrayTestJobManager()
-        runner = CountingRunner(delay=0.005)
+        runner = CountingRunner(delay=0.005, workers=3)
 
         job_id = manager.start(_cells(200), ProbeOptions(), {"panel": runner},
-                               location="panel", concurrency=3)
+                               location="panel")
         await _drain(manager, job_id)
 
         self.assertLessEqual(runner.peak, 3)
@@ -138,8 +144,8 @@ class QueueTest(unittest.IsolatedAsyncioTestCase):
     async def test_each_location_has_own_quota(self):
         """Медленная точка не должна занимать слоты быстрой."""
         manager = XrayTestJobManager()
-        panel = CountingRunner(delay=0.001)
-        node = CountingRunner(delay=0.005)
+        panel = CountingRunner(delay=0.001, workers=2)
+        node = CountingRunner(delay=0.005, workers=2)
         cells = _cells(30, locations=[("panel", ""), ("node:1", "Нода")])
 
         job_id = manager.start(cells, ProbeOptions(), {"panel": panel, "node:1": node},
@@ -190,6 +196,44 @@ class QueueTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(job.results), 40)
         # Ни одна ячейка не попала в поток дважды
         self.assertEqual(len({item["index"] for item in job.results}), 40)
+
+    async def test_slow_cell_does_not_stall_the_rest(self):
+        """Медленная проверка не должна держать соседние слоты пустыми.
+
+        Это и была регрессия: рабочий забирал пачку и ждал самую медленную из
+        неё, вместо того чтобы освобождать слот сразу и брать следующую.
+        """
+        class OneByOne(CountingRunner):
+            def __init__(self):
+                super().__init__(workers=8, batch_size=1)
+
+            async def probe_batch(self, cells, options, on_result=None):
+                # Каждая четвёртая проверка медленная — как заблокированный сервер
+                self.delay = 0.05 if cells[0].index % 4 == 0 else 0.001
+                return await super().probe_batch(cells, options, on_result)
+
+        manager = XrayTestJobManager()
+        runner = OneByOne()
+        job_id = manager.start(_cells(64), ProbeOptions(), {"panel": runner},
+                               location="panel", concurrency=8)
+        await _drain(manager, job_id)
+
+        self.assertEqual(runner.done, 64)
+        self.assertTrue(all(size == 1 for size in runner.batches))
+        # Восемь рабочих по одной проверке — значит слоты переиспользуются
+        self.assertLessEqual(runner.peak, 8)
+        self.assertGreater(len(runner.batches), 8)
+
+    async def test_runner_decides_batching(self):
+        """Панель берёт пачками, нода — по одной; решает сам исполнитель."""
+        manager = XrayTestJobManager()
+        runner = CountingRunner()
+        job_id = manager.start(_cells(64), ProbeOptions(), {"panel": runner},
+                               location="panel", concurrency=99)
+        await _drain(manager, job_id)
+
+        self.assertTrue(all(size <= runner.batch_size for size in runner.batches))
+        self.assertLessEqual(runner.peak, runner.workers)
 
     async def test_history_written_after_run(self):
         manager = XrayTestJobManager()
