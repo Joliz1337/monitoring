@@ -235,6 +235,28 @@ class QueueTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(size <= runner.batch_size for size in runner.batches))
         self.assertLessEqual(runner.peak, runner.workers)
 
+    async def test_log_replayed_to_new_subscriber(self):
+        """Подписка отдаёт и журнал: при переподключении иначе теряется начало.
+
+        Там назначенные числа — сколько проверок и с какой параллельностью, —
+        по которым и разбирают, почему прогон идёт не так.
+        """
+        manager = XrayTestJobManager()
+        job_id = manager.start(_cells(4), ProbeOptions(), {"panel": CountingRunner()},
+                               location="panel")
+        await _drain(manager, job_id)
+
+        events = [event async for event in manager.subscribe(job_id)]
+        logs = [event["line"] for event in events if event["type"] == "log"]
+        job = manager.get(job_id)
+
+        self.assertEqual(logs, job.log)
+        self.assertTrue(any("Проверок" in line for line in logs))
+        # Порядок важен: сначала старт, потом журнал, потом результаты
+        kinds = [event["type"] for event in events]
+        self.assertEqual(kinds[0], "start")
+        self.assertLess(kinds.index("log"), kinds.index("cell"))
+
     async def test_history_written_after_run(self):
         manager = XrayTestJobManager()
         saved: list[int] = []

@@ -13,7 +13,7 @@
 #         xray-test-runner.sh version
 set -uo pipefail
 
-RUNNER_VERSION="2.4.0"
+RUNNER_VERSION="2.5.0"
 
 TOOLS_DIR="/opt/monitoring-node/tools"
 CORES_DIR="$TOOLS_DIR/cores"
@@ -439,20 +439,26 @@ main() {
         fi
     fi
 
+    # Ждём только сами проверки. Ядро запущено фоновым заданием этой же оболочки
+    # и само не завершается никогда, поэтому голый `wait` висел бы на нём до
+    # таймаута всего задания — проверка в 0.3 секунды превращалась в полторы
+    # минуты, а `stop_core` ниже просто не получал управления.
     local row running=0
+    local pids=()
     for row in "${cells[@]}"; do
         if [ "$started" != "1" ]; then
             emit_cell "${row%%$'	'*}" "fail" '"CORE_START_FAILED"' "$start_detail"
             continue
         fi
         run_cell_row "$row" &
+        pids+=("$!")
         running=$((running + 1))
         if [ "$running" -ge "$PARALLEL_CELLS" ]; then
-            wait -n 2>/dev/null || wait
+            wait -n "${pids[@]}" 2>/dev/null
             running=$((running - 1))
         fi
     done
-    wait
+    [ "${#pids[@]}" -gt 0 ] && wait "${pids[@]}" 2>/dev/null
 
     stop_core
     rm -rf "$WORKDIR"; WORKDIR=""

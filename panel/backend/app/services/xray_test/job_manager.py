@@ -292,6 +292,11 @@ class XrayTestJobManager:
         seen = len(backlog)
         try:
             yield {"type": "start", "total": job.total, "location": job.location}
+            # Журнал тоже переигрывается: без этого при переподключении терялось
+            # начало — там назначенные числа, по которым и разбирают, что пошло
+            # не так
+            for line in list(job.log):
+                yield {"type": "log", "line": line}
             for item in backlog:
                 yield {"type": "cell", **item, "done": item.get("index", 0) + 1}
 

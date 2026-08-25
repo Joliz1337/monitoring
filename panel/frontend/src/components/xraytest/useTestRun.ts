@@ -72,6 +72,8 @@ export function useTestRun() {
     setRunning(true)
     setTotal(expected)
     setCells([])
+    // Журнал бэкенд переигрывает вместе с результатами — иначе строки задвоятся
+    setLog([])
     setSummary(null)
     if (attempt === 0) finishedRef.current = false
 

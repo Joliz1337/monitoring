@@ -565,7 +565,7 @@ function TesterTab({ source }: { source: XrayTestSource }) {
                 {t('xray_test.log')}
               </button>
               {showLog && (
-                <pre className="mt-2 text-[13px] font-mono text-dark-400 bg-dark-950/60 rounded p-2 max-h-40 overflow-auto whitespace-pre-wrap">
+                <pre className="mt-2 text-[13px] font-mono text-dark-400 bg-dark-950/60 rounded p-3 max-h-96 overflow-auto whitespace-pre-wrap">
                   {run.log.join('\n')}
                 </pre>
               )}
