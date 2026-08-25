@@ -13,7 +13,7 @@
 #         xray-test-runner.sh version
 set -uo pipefail
 
-RUNNER_VERSION="2.8.0"
+RUNNER_VERSION="2.9.0"
 
 TOOLS_DIR="/opt/monitoring-node/tools"
 CORES_DIR="$TOOLS_DIR/cores"
@@ -379,7 +379,7 @@ run_cell() {
         # означали лишнюю проверку цепочки сертификатов на каждую проверку, а это
         # самая дорогая её часть — на боевой ноде curl съедал процессора больше,
         # чем сами прокси-ядра.
-        local pair
+        local pair fallback_pid=""
         pair=$(probe_pair "$socks" "$GENERATE_204_URL")
         read_pair "$pair"
         status=$PAIR_STATUS; handshake=$PAIR_HANDSHAKE; rtt=$PAIR_RTT
@@ -389,7 +389,14 @@ run_cell() {
         # в этот момент — таймаут или мгновенный сброс туннеля — хоронил бы
         # живую конфигурацию. Повтор идёт на запасной адрес, времени в худшем
         # случае это стоит столько же, сколько прежний повтор по таймауту.
+        # Контрольное TLS-рукопожатие с сервером (отличает блокировку по пути
+        # от неподходящих параметров ключа) от повтора не зависит, поэтому идёт
+        # фоном и целиком прячется внутри паузы и повторной пробы: после них
+        # оно добавляло мёртвой ячейке до восьми секунд, а именно из таких
+        # ячеек состоит хвост прогона.
         if [ -z "$status" ] || [ "$status" = "000" ] || [ -z "$rtt" ]; then
+            fallback_alive "$address" "$port" "$sni" &
+            fallback_pid=$!
             sleep 1.5
             pair=$(probe_pair "$socks" "$FALLBACK_204_URL")
             read_pair "$pair"
@@ -399,14 +406,19 @@ run_cell() {
         if [ -z "$status" ] || [ "$status" = "000" ]; then
             sleep 0.4
             local fail_reason='"PROXY_HANDSHAKE_FAILED"'
-            if ! fallback_alive "$address" "$port" "$sni"; then
-                fail_reason='"DPI_BLOCK"'
-            fi
+            wait "$fallback_pid" 2>/dev/null || fail_reason='"DPI_BLOCK"'
             emit_cell "$index" "fail" "$fail_reason" \
                 "$(core_failure_line "$index")" \
                 "${tcp_ms:-null}" null null null null null null \
                 "$J_RESOLVED" "${dns_ms:-null}" "${tcp_avg:-null}" "${tcp_jitter:-null}"
             return
+        fi
+
+        # Повтор прошёл — контрольная проба больше не нужна, а её процесс держал
+        # бы общий stdout, и с ним поток к панели, до своего таймаута
+        if [ -n "$fallback_pid" ]; then
+            kill "$fallback_pid" 2>/dev/null
+            wait "$fallback_pid" 2>/dev/null
         fi
 
         if [ "$status" != "204" ] && [ "$status" != "200" ]; then
