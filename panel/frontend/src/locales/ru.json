@@ -466,7 +466,7 @@
     "chart_peaks": "Полоса пиков",
     "chart_peaks_hint": "Полупрозрачная область от среднего до максимума за интервал",
     "chart_per_metric": "Настроить по метрикам",
-    "chart_inherit": "Как везде"
+    "chart_inherit": "Как по умолчанию"
   },
   "chart_metric": {
     "cpu": "CPU",
