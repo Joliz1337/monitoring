@@ -456,10 +456,19 @@ class ResultStreamingTest(unittest.IsolatedAsyncioTestCase):
 class ExecTimeoutTest(unittest.TestCase):
     """Один таймаут на любую пачку либо резал большую, либо тянул пустую."""
 
-    def test_grows_with_batch_size(self):
-        small = node_runner._exec_timeout(4, ProbeOptions())
-        large = node_runner._exec_timeout(16, ProbeOptions())
-        self.assertGreater(large, small)
+    def test_grows_with_number_of_waves(self):
+        """Бюджет растёт по волнам, а не по числу ячеек.
+
+        Проверки внутри волны идут одновременно, поэтому пачка из четырёх и из
+        шестнадцати занимает одно и то же время — а вот тридцать две это уже две
+        волны подряд.
+        """
+        one_wave = node_runner._exec_timeout(node_runner.NODE_PARALLEL_CELLS, ProbeOptions())
+        self.assertEqual(node_runner._exec_timeout(1, ProbeOptions()), one_wave)
+        two_waves = node_runner._exec_timeout(
+            node_runner.NODE_PARALLEL_CELLS + 1, ProbeOptions()
+        )
+        self.assertGreater(two_waves, one_wave)
 
     def test_speed_measurement_adds_budget(self):
         plain = node_runner._exec_timeout(8, ProbeOptions())

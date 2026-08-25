@@ -13,7 +13,7 @@
 #         xray-test-runner.sh version
 set -uo pipefail
 
-RUNNER_VERSION="2.1.0"
+RUNNER_VERSION="2.2.0"
 
 TOOLS_DIR="/opt/monitoring-node/tools"
 CORES_DIR="$TOOLS_DIR/cores"
@@ -23,10 +23,11 @@ CORES_DIR="$TOOLS_DIR/cores"
 PORTS=""
 CORE_START_TIMEOUT=5
 PROBE_TIMEOUT=10
-# Проверок в пачке до шестнадцати, и почти всё время каждая ждёт сеть. Гнать их
-# по очереди — держать процесс ядра простаивающим; восемь одновременно
-# укладываются в тот же процесс и не топят ноду.
-PARALLEL_CELLS=8
+# Столько проверок идёт одновременно. Значение равно размеру пачки не случайно:
+# ядро уже слушает свой порт на каждую проверку, и если гнать меньше — половина
+# занятых портов простаивает, а пропускная способность ноды падает вдвое.
+# Нагрузка при этом небольшая: процесс ядра один, остальное — ожидание сети.
+PARALLEL_CELLS=16
 SPEED_TIMEOUT=20
 SPEED_BYTES=10000000
 DEGRADED_RTT_MS=1500
@@ -228,15 +229,21 @@ core_failure_line() {
 
 # ── основной цикл ───────────────────────────────────────────────────────────
 
+# Строка собирается целиком и печатается одним вызовом. Проверки идут
+# параллельно и пишут в общий вывод: несколько printf на одну строку означали
+# бы, что куски разных ячеек наезжают друг на друга. Панель такой JSON молча
+# выбрасывает, и проверка получает «нода не вернула результат».
 emit_cell() {
-    printf '{"type":"cell","index":%s,"verdict":"%s","reason":%s,"detail":"%s",' \
-        "$1" "$2" "$3" "$(escape "$4")"
-    printf '"tcp_min_ms":%s,"handshake_ms":%s,"rtt_ms":%s,"http_status":%s,' \
-        "${5:-null}" "${6:-null}" "${7:-null}" "${8:-null}"
-    printf '"exit_ip":%s,"exit_country":%s,"speed_mbps":%s,' \
-        "${9:-null}" "${10:-null}" "${11:-null}"
-    printf '"resolved_ip":%s,"dns_ms":%s,"tcp_avg_ms":%s,"tcp_jitter_ms":%s}\n' \
-        "${12:-null}" "${13:-null}" "${14:-null}" "${15:-null}"
+    local line
+    line=$(printf '{"type":"cell","index":%s,"verdict":"%s","reason":%s,"detail":"%s",' \
+        "$1" "$2" "$3" "$(escape "$4")")
+    line+=$(printf '"tcp_min_ms":%s,"handshake_ms":%s,"rtt_ms":%s,"http_status":%s,' \
+        "${5:-null}" "${6:-null}" "${7:-null}" "${8:-null}")
+    line+=$(printf '"exit_ip":%s,"exit_country":%s,"speed_mbps":%s,' \
+        "${9:-null}" "${10:-null}" "${11:-null}")
+    line+=$(printf '"resolved_ip":%s,"dns_ms":%s,"tcp_avg_ms":%s,"tcp_jitter_ms":%s}' \
+        "${12:-null}" "${13:-null}" "${14:-null}" "${15:-null}")
+    printf '%s\n' "$line"
 }
 
 json_str() { [ -n "${1:-}" ] && printf '"%s"' "$(escape "$1")" || printf 'null'; }
@@ -271,15 +278,17 @@ run_cell() {
 
     if [ "$OPT_HTTP" = "1" ]; then
         local first second
+        local rc
         first=$(curl_socks "$socks" -o /dev/null --max-time "$PROBE_TIMEOUT" \
             -w '%{http_code} %{time_total}' "$GENERATE_204_URL" 2>/dev/null)
+        rc=$?
         status=$(printf '%s' "$first" | cut -d' ' -f1)
         handshake=$(printf '%s' "$first" | cut -d' ' -f2 | awk '{printf "%.0f", $1*1000}')
 
         # Проверки идут пачками, и на занятой ноде запрос может не уложиться в
-        # таймаут при живом канале. Одна повторная попытка отсекает такие
-        # ложные отказы; воспроизводимый отказ переживёт и её.
-        if [ -z "$status" ] || [ "$status" = "000" ]; then
+        # таймаут при живом канале — такой отказ переспрашиваем. Отказ по другой
+        # причине воспроизводим, и повтор только тянул бы время.
+        if [ "$rc" = "28" ]; then
             sleep 1.5
             first=$(curl_socks "$socks" -o /dev/null --max-time "$PROBE_TIMEOUT" \
                 -w '%{http_code} %{time_total}' "$GENERATE_204_URL" 2>/dev/null)
