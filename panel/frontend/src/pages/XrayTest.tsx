@@ -204,11 +204,17 @@ function TesterTab({ source }: { source: XrayTestSource }) {
   )
 
   const totalCells = useMemo(() => {
-    const chosen = selected.size || supported.length
-    // Родное имя из ключа идёт отдельной проверкой перед списком оператора
-    const variants = sniList.length ? sniList.length + (includeOriginal ? 1 : 0) : 1
-    return chosen * variants
-  }, [selected.size, supported.length, sniList.length, includeOriginal])
+    const chosen = selected.size ? supported.filter(c => selected.has(c.index)) : supported
+    if (!sniList.length) return chosen.length * Math.max(1, locations.length)
+    // Родное имя ключа идёт отдельной проверкой, но только если оператор не
+    // вписал его в список сам — иначе оценка разъезжается с прогоном
+    const names = new Set(sniList.map(name => name.toLowerCase()))
+    const perConfig = chosen.map(config =>
+      sniList.length + (includeOriginal && !names.has((config.sni || '').toLowerCase()) ? 1 : 0),
+    )
+    const cells = perConfig.reduce((sum, count) => sum + count, 0)
+    return cells * Math.max(1, locations.length)
+  }, [selected, supported, sniList, includeOriginal, locations.length])
 
   const handleParse = useCallback(async () => {
     if (!payload.trim()) return
