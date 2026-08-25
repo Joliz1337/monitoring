@@ -552,9 +552,14 @@ class NodeCapacityTest(unittest.TestCase):
         huge = node_runner._node_capacity(self._server(256))
         self.assertLessEqual(huge, len(node_runner.PORT_POOL))
 
-    def test_weak_node_keeps_minimum(self):
-        self.assertEqual(
+    def test_weak_node_never_below_minimum(self):
+        """Даже одноядерной ноде даём работать, просто немного."""
+        self.assertGreaterEqual(
             node_runner._node_capacity(self._server(1)), node_runner.MIN_NODE_CONCURRENCY
+        )
+        self.assertLess(
+            node_runner._node_capacity(self._server(1)),
+            node_runner._node_capacity(self._server(4)),
         )
 
     def test_unknown_cores_fall_back(self):
