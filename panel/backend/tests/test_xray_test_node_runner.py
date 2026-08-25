@@ -575,6 +575,34 @@ class NodeCapacityTest(unittest.TestCase):
         )
 
 
+class BatchAccountingTest(unittest.TestCase):
+    """Одновременных проверок ровно `capacity`, и портов на них хватает.
+
+    Задание держит свои порты целиком, поэтому число заданий и размер задания
+    должны в произведении давать потолок, а не превышать пул.
+    """
+
+    @staticmethod
+    def _runner(cores):
+        server = Server(id=1, name="n", url="https://n.example",
+                        last_metrics=json.dumps({"cpu": {"cores_logical": cores}}))
+        return NodeCoreRunner(server)
+
+    def test_jobs_times_batch_equals_capacity(self):
+        for cores in (1, 2, 4, 8, 16, 64):
+            r = self._runner(cores)
+            self.assertLessEqual(r.workers * r.batch_size, r.capacity)
+            self.assertLessEqual(r.workers * r.batch_size, len(node_runner.PORT_POOL))
+
+    def test_capacity_never_exceeds_pool(self):
+        self.assertLessEqual(self._runner(256).capacity, len(node_runner.PORT_POOL))
+
+    def test_batch_never_exceeds_capacity(self):
+        r = self._runner(1)
+        self.assertLessEqual(r.batch_size, r.capacity)
+        self.assertGreaterEqual(r.workers, 1)
+
+
 class ExecTimeoutTest(unittest.TestCase):
     """Один таймаут на любую пачку либо резал большую, либо тянул пустую."""
 
