@@ -35,6 +35,7 @@ class CountingRunner:
         self.active = 0
         self.peak = 0
         self.done = 0
+        self.streamed = 0
         self.batches: list[int] = []
 
     async def probe(self, cell: TestCell, options: ProbeOptions) -> CellResult:
@@ -42,7 +43,7 @@ class CountingRunner:
         return results[0]
 
     async def probe_batch(
-        self, cells: list[TestCell], options: ProbeOptions
+        self, cells: list[TestCell], options: ProbeOptions, on_result=None
     ) -> list[CellResult]:
         self.active += 1
         self.peak = max(self.peak, self.active)
@@ -50,7 +51,13 @@ class CountingRunner:
         try:
             await asyncio.sleep(self.delay)
             self.done += len(cells)
-            return [self._result(cell) for cell in cells]
+            results = [self._result(cell) for cell in cells]
+            # Настоящие раннеры отдают вердикты по мере готовности, а не разом
+            for result in results:
+                self.streamed += 1
+                if on_result is not None:
+                    on_result(result)
+            return results
         finally:
             self.active -= 1
 
@@ -168,6 +175,21 @@ class QueueTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(job.results), 3)
         self.assertTrue(all(item["verdict"] == "fail" for item in job.results))
+
+    async def test_results_streamed_not_held_until_batch_ends(self):
+        """Вердикт уходит в поток сразу — иначе таблица заполняется рывками."""
+        manager = XrayTestJobManager()
+        runner = CountingRunner()
+
+        job_id = manager.start(_cells(40), ProbeOptions(), {"panel": runner},
+                               location="panel", concurrency=1)
+        await _drain(manager, job_id)
+        job = manager.get(job_id)
+
+        self.assertEqual(runner.streamed, 40)
+        self.assertEqual(len(job.results), 40)
+        # Ни одна ячейка не попала в поток дважды
+        self.assertEqual(len({item["index"] for item in job.results}), 40)
 
     async def test_history_written_after_run(self):
         manager = XrayTestJobManager()

@@ -38,6 +38,7 @@ from app.services.xray_test.models import (
     TestCell,
     Verdict,
 )
+from app.services.xray_test.report import ResultSink, report as _report
 from app.services.xray_test.sanitize import sanitize_output
 
 logger = logging.getLogger(__name__)
@@ -73,7 +74,10 @@ class CoreRunner(TypingProtocol):
         ...
 
     async def probe_batch(
-        self, cells: list[TestCell], options: probes.ProbeOptions
+        self,
+        cells: list[TestCell],
+        options: probes.ProbeOptions,
+        on_result: ResultSink = None,
     ) -> list[CellResult]:
         ...
 
@@ -111,9 +115,15 @@ class LocalCoreRunner:
         return results[0]
 
     async def probe_batch(
-        self, cells: list[TestCell], options: probes.ProbeOptions
+        self,
+        cells: list[TestCell],
+        options: probes.ProbeOptions,
+        on_result: ResultSink = None,
     ) -> list[CellResult]:
         """Пачка проверок: один процесс ядра на всех, кому он вообще нужен.
+
+        Готовые вердикты отдаются приёмнику по мере готовности: ждать всю пачку
+        значит заполнять таблицу рывками, а на медленной точке — молчать минутами.
 
         Пробы до ядра (DNS, TCP, TLS) идут параллельно и часть ячеек отсеивают
         ещё до запуска. Остальные группируются по ядру — Xray и sing-box в один
@@ -124,7 +134,9 @@ class LocalCoreRunner:
 
         for prepared in await asyncio.gather(*(self._prepare(c, options) for c in cells)):
             done[prepared.cell.index] = prepared.result
-            if prepared.core is not None:
+            if prepared.core is None:
+                _report(prepared.result, on_result)
+            else:
                 pending.append(prepared)
 
         by_core: dict[Core, list[_Ready]] = {}
@@ -136,13 +148,13 @@ class LocalCoreRunner:
                 binary = await core_manager.ensure_core(core)
             except CoreDownloadError as exc:
                 for item in items:
-                    done[item.cell.index] = _fail(
+                    done[item.cell.index] = _report(_fail(
                         item.result, FailReason.CORE_START_FAILED, str(exc)
-                    )
+                    ), on_result)
                 continue
             for start in range(0, len(items), BATCH_SIZE):
                 chunk = items[start:start + BATCH_SIZE]
-                done.update(await self._run_chunk(chunk, options, core, binary))
+                done.update(await self._run_chunk(chunk, options, core, binary, on_result))
 
         return [done[cell.index] for cell in cells]
 
@@ -190,9 +202,10 @@ class LocalCoreRunner:
         options: probes.ProbeOptions,
         core: Core,
         binary: Path,
+        on_result: ResultSink = None,
     ) -> dict[int, CellResult]:
         if len(chunk) > 1:
-            batched = await self._try_batch(chunk, options, core, binary)
+            batched = await self._try_batch(chunk, options, core, binary, on_result)
             if batched is not None:
                 return batched
 
@@ -200,9 +213,9 @@ class LocalCoreRunner:
         # надо понять, какая именно конфигурация виновата
         async def one(item: _Ready) -> CellResult:
             async with _core_semaphore:
-                return await self._probe_through_core(
+                return _report(await self._probe_through_core(
                     item.cell, options, item.result, core, binary
-                )
+                ), on_result)
 
         results = await asyncio.gather(*(one(item) for item in chunk))
         return {item.cell.index: result for item, result in zip(chunk, results)}
@@ -213,6 +226,7 @@ class LocalCoreRunner:
         options: probes.ProbeOptions,
         core: Core,
         binary: Path,
+        on_result: ResultSink = None,
     ) -> Optional[dict[int, CellResult]]:
         """Пачка одним процессом. `None` — не поднялась, зовите поодиночке."""
         async with _core_semaphore:
@@ -227,7 +241,7 @@ class LocalCoreRunner:
 
             try:
                 results = await asyncio.gather(*(
-                    self._probe_slot(launched, item, options, position)
+                    self._probe_slot(launched, item, options, position, on_result)
                     for position, item in enumerate(chunk)
                 ))
                 return {item.cell.index: result for item, result in zip(chunk, results)}
@@ -240,6 +254,7 @@ class LocalCoreRunner:
         item: _Ready,
         options: probes.ProbeOptions,
         position: int,
+        on_result: ResultSink = None,
     ) -> CellResult:
         port = launched.ports[position]
         # Слот в тегах конфига — номер ячейки, а не место в пачке: он же
@@ -247,16 +262,16 @@ class LocalCoreRunner:
         slot = str(item.cell.index)
         try:
             async with asyncio.timeout(CELL_TIMEOUT):
-                return await self._explain(
+                return _report(await self._explain(
                     item.cell,
                     await self._run_probes(launched, options, item.result, port, slot),
-                )
+                ), on_result)
         except asyncio.TimeoutError:
             core_detail, hint = _core_reason(launched, slot)
-            return await self._explain(item.cell, _fail(
+            return _report(await self._explain(item.cell, _fail(
                 item.result, FailReason.HTTP_TIMEOUT,
                 core_detail or "проверка не уложилась в отведённое время", hint,
-            ))
+            )), on_result)
 
     async def _probe_through_core(
         self,

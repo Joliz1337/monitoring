@@ -198,16 +198,27 @@ class XrayTestJobManager:
                     ))
                 continue
 
+            # Результат уходит в поток сразу, как только готов: пачка на ноде
+            # идёт минуты, и ждать её целиком значит держать таблицу пустой
+            reported: set[int] = set()
+
+            def report(result: CellResult) -> None:
+                if result.index in reported:
+                    return
+                reported.add(result.index)
+                self._emit_result(job, result)
+
             try:
-                results = await runner.probe_batch(batch, options)
+                results = await runner.probe_batch(batch, options, report)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 — одна пачка не валит задачу
                 logger.warning("xray-test batch of %d failed: %s", len(batch), exc)
                 results = [_internal_error(cell, exc) for cell in batch]
 
+            # Добираем то, что раннер не успел отдать сам
             for result in results:
-                self._emit_result(job, result)
+                report(result)
 
     def _emit_result(self, job: XrayTestJob, result: CellResult) -> None:
         payload = result.as_event()

@@ -270,7 +270,7 @@ class PortPoolTest(unittest.IsolatedAsyncioTestCase):
         runner = self._runner()
         started = 0
 
-        async def fake_execute(server, payload, budget):
+        async def fake_execute(server, payload, budget, on_event=None):
             nonlocal started
             started += 1
             await asyncio.sleep(0.01)
@@ -299,7 +299,7 @@ class PortPoolTest(unittest.IsolatedAsyncioTestCase):
     async def test_ports_returned_after_batch(self):
         runner = self._runner()
 
-        async def fake_execute(server, payload, budget):
+        async def fake_execute(server, payload, budget, on_event=None):
             return []
 
         cells = build_matrix([
@@ -313,7 +313,7 @@ class PortPoolTest(unittest.IsolatedAsyncioTestCase):
     async def test_ports_returned_when_node_fails(self):
         runner = self._runner()
 
-        async def boom(server, payload, budget):
+        async def boom(server, payload, budget, on_event=None):
             raise node_runner.NodeExecError("нода не ответила")
 
         cells = build_matrix([
@@ -335,7 +335,7 @@ class StreamHangTest(unittest.IsolatedAsyncioTestCase):
     """
 
     async def test_hanging_node_raises_instead_of_waiting(self):
-        async def never_ends(server, payload, budget):
+        async def never_ends(server, payload, budget, on_event=None):
             await asyncio.sleep(3600)
 
         with mock.patch.object(node_runner, "_stream", never_ends),              mock.patch.object(node_runner, "STREAM_GRACE", 0),              mock.patch.object(node_runner, "EXEC_OVERHEAD", 0),              mock.patch.object(node_runner, "CELL_BUDGET", 0):
@@ -353,7 +353,7 @@ class StreamHangTest(unittest.IsolatedAsyncioTestCase):
         runner._tickets[Core.XRAY] = _ticket()
         runner._prepared = True
 
-        async def hang(server, payload, budget):
+        async def hang(server, payload, budget, on_event=None):
             raise node_runner.NodeExecError("Нода не завершила задание в отведённое время")
 
         cells = build_matrix([
@@ -365,6 +365,92 @@ class StreamHangTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(results), 8)
         self.assertTrue(all(r.reason is FailReason.NODE_ERROR for r in results))
         self.assertEqual(runner._ports.qsize(), len(node_runner.PORT_POOL))
+
+
+class ResultStreamingTest(unittest.IsolatedAsyncioTestCase):
+    """Строки исполнителя уходят наружу по мере появления, а не пачкой в конце."""
+
+    async def test_cells_reported_as_they_arrive(self):
+        server = Server(id=1, name="node", url="https://node.example")
+        runner = NodeCoreRunner(server)
+        runner._tickets[Core.XRAY] = _ticket()
+        runner._prepared = True
+
+        cells = build_matrix([
+            parse_link(f"vless://{UUID}@h{i}.io:443?security=tls#n{i}") for i in range(4)
+        ])
+        seen_during: list[int] = []
+
+        async def drip(server, payload, budget, on_event=None):
+            events = []
+            for cell in cells:
+                event = {"type": "cell", "index": cell.index, "verdict": "ok", "reason": None}
+                events.append(event)
+                if on_event is not None:
+                    on_event(event)
+            return events
+
+        with mock.patch.object(node_runner, "_execute", drip):
+            results = await runner.probe_batch(
+                cells, ProbeOptions(), lambda r: seen_during.append(r.index)
+            )
+
+        self.assertEqual(seen_during, [cell.index for cell in cells])
+        self.assertEqual(len(results), 4)
+
+    async def test_no_duplicate_reports(self):
+        """Строка уже отдана в поток — итоговый разбор не должен слать её снова."""
+        server = Server(id=1, name="node", url="https://node.example")
+        runner = NodeCoreRunner(server)
+        runner._tickets[Core.XRAY] = _ticket()
+        runner._prepared = True
+
+        cells = build_matrix([
+            parse_link(f"vless://{UUID}@h{i}.io:443?security=tls#n{i}") for i in range(3)
+        ])
+        reported: list[int] = []
+
+        async def drip(server, payload, budget, on_event=None):
+            events = [
+                {"type": "cell", "index": cell.index, "verdict": "ok", "reason": None}
+                for cell in cells
+            ]
+            for event in events:
+                if on_event is not None:
+                    on_event(event)
+            return events
+
+        with mock.patch.object(node_runner, "_execute", drip):
+            await runner.probe_batch(cells, ProbeOptions(), lambda r: reported.append(r.index))
+
+        self.assertEqual(sorted(reported), sorted(cell.index for cell in cells))
+        self.assertEqual(len(reported), len(set(reported)))
+
+    async def test_missing_cells_still_reported(self):
+        """Исполнитель замолчал на половине — остальным всё равно нужен вердикт."""
+        server = Server(id=1, name="node", url="https://node.example")
+        runner = NodeCoreRunner(server)
+        runner._tickets[Core.XRAY] = _ticket()
+        runner._prepared = True
+
+        cells = build_matrix([
+            parse_link(f"vless://{UUID}@h{i}.io:443?security=tls#n{i}") for i in range(4)
+        ])
+        reported: list[int] = []
+
+        async def half(server, payload, budget, on_event=None):
+            events = [
+                {"type": "cell", "index": cells[0].index, "verdict": "ok", "reason": None}
+            ]
+            for event in events:
+                if on_event is not None:
+                    on_event(event)
+            return events
+
+        with mock.patch.object(node_runner, "_execute", half):
+            await runner.probe_batch(cells, ProbeOptions(), lambda r: reported.append(r.index))
+
+        self.assertEqual(sorted(reported), sorted(cell.index for cell in cells))
 
 
 class ExecTimeoutTest(unittest.TestCase):

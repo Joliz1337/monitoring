@@ -15,7 +15,7 @@ import json
 import logging
 import re
 from base64 import b64encode
-from typing import Optional
+from typing import Callable, Optional
 
 import httpx
 
@@ -27,6 +27,7 @@ from app.services.xray_test import bundle, core_manager, core_output
 from app.services.xray_test.config_builder import BatchEntry, build_batch
 from app.services.xray_test.errors import XrayTestError
 from app.services.xray_test.models import CellResult, Core, FailReason, TestCell, Verdict
+from app.services.xray_test.report import ResultSink, report as _report
 from app.services.xray_test.probes import ProbeOptions
 from app.services.xray_test.sanitize import sanitize_output
 
@@ -110,7 +111,10 @@ class NodeCoreRunner:
         return results[0]
 
     async def probe_batch(
-        self, cells: list[TestCell], options: ProbeOptions
+        self,
+        cells: list[TestCell],
+        options: ProbeOptions,
+        on_result: ResultSink = None,
     ) -> list[CellResult]:
         """Пачка проверок одним вызовом: ядро на ноде поднимается один раз.
 
@@ -125,21 +129,25 @@ class NodeCoreRunner:
             try:
                 core = core_manager.select_core(cell.endpoint)
             except XrayTestError as exc:
-                done[cell.index] = _fail(cell, FailReason.UNSUPPORTED, str(exc))
+                done[cell.index] = _report(_fail(cell, FailReason.UNSUPPORTED, str(exc)), on_result)
                 continue
             by_core.setdefault(core, []).append(cell)
 
         for core, group in by_core.items():
             for start in range(0, len(group), NODE_BATCH_SIZE):
                 chunk = group[start:start + NODE_BATCH_SIZE]
-                done.update(await self._run_chunk(chunk, core, options))
+                done.update(await self._run_chunk(chunk, core, options, on_result))
 
         return [done[cell.index] for cell in cells]
 
     async def _run_chunk(
-        self, chunk: list[TestCell], core: Core, options: ProbeOptions
+        self,
+        chunk: list[TestCell],
+        core: Core,
+        options: ProbeOptions,
+        on_result: ResultSink = None,
     ) -> dict[int, CellResult]:
-        results = await self._execute_chunk(chunk, core, options)
+        results = await self._execute_chunk(chunk, core, options, on_result)
 
         # Ядро не поднялось — гоним по одной, чтобы отказ достался виновной
         # конфигурации, а не всей пачке скопом
@@ -151,14 +159,18 @@ class NodeCoreRunner:
                 len(chunk), self.server.name,
             )
             singles = await asyncio.gather(*(
-                self._execute_chunk([cell], core, options) for cell in chunk
+                self._execute_chunk([cell], core, options, on_result) for cell in chunk
             ))
             return {index: result for part in singles for index, result in part.items()}
 
         return results
 
     async def _execute_chunk(
-        self, chunk: list[TestCell], core: Core, options: ProbeOptions
+        self,
+        chunk: list[TestCell],
+        core: Core,
+        options: ProbeOptions,
+        on_result: ResultSink = None,
     ) -> dict[int, CellResult]:
         ticket = self._tickets.get(core)
         if ticket is None:
@@ -168,18 +180,36 @@ class NodeCoreRunner:
 
         async with self._batch_slots:
             ports = [await self._ports.get() for _ in chunk]
+            # Исполнитель печатает строку на каждую готовую проверку, поэтому
+            # результат отдаётся сразу — иначе пачка молчала бы до конца задания
+            # и таблица заполнялась бы рывками по шестнадцать строк
+            by_index = {cell.index: cell for cell in chunk}
+            early: dict[int, CellResult] = {}
+
+            def relay(event: dict) -> None:
+                if event.get("type") != "cell" or on_result is None:
+                    return
+                cell = by_index.get(_event_index(event))
+                if cell is None or cell.index in early:
+                    return
+                early[cell.index] = _report(_parse_result(cell, event), on_result)
+
             try:
                 payload = _build_payload(chunk, ports, core, ticket, options)
-                lines = await _execute(self.server, payload, _exec_timeout(len(chunk), options))
+                lines = await _execute(
+                    self.server, payload, _exec_timeout(len(chunk), options), relay
+                )
             except XrayTestError as exc:
-                return {
-                    cell.index: _fail(cell, FailReason.NODE_ERROR, str(exc)) for cell in chunk
+                failed = {
+                    cell.index: _report(_fail(cell, FailReason.NODE_ERROR, str(exc)), on_result)
+                    for cell in chunk if cell.index not in early
                 }
+                return {**early, **failed}
             finally:
                 for port in ports:
                     self._ports.put_nowait(port)
 
-        return _parse_results(chunk, lines)
+        return _parse_results(chunk, lines, early, on_result)
 
 
 def _cores_for(cells: list[TestCell]) -> set[Core]:
@@ -251,7 +281,10 @@ def _exec_timeout(count: int, options: ProbeOptions) -> int:
     return min(EXEC_TIMEOUT_CAP, EXEC_OVERHEAD + waves * per_wave)
 
 
-async def _execute(server: Server, payload: str, budget: int) -> list[dict]:
+async def _execute(
+    server: Server, payload: str, budget: int,
+    on_event: Optional[Callable[[dict], None]] = None,
+) -> list[dict]:
     """Задание на ноду с жёстким потолком по времени на весь вызов.
 
     Потаймаутного чтения мало: оборванный исполнитель оставляет за собой
@@ -261,12 +294,15 @@ async def _execute(server: Server, payload: str, budget: int) -> list[dict]:
     """
     try:
         async with asyncio.timeout(budget + STREAM_GRACE):
-            return await _stream(server, payload, budget)
+            return await _stream(server, payload, budget, on_event)
     except asyncio.TimeoutError as exc:
         raise NodeExecError("Нода не завершила задание в отведённое время") from exc
 
 
-async def _stream(server: Server, payload: str, budget: int) -> list[dict]:
+async def _stream(
+    server: Server, payload: str, budget: int,
+    on_event: Optional[Callable[[dict], None]] = None,
+) -> list[dict]:
     command = f"timeout -k 5 {budget} {RUNNER_PATH} {payload}"
     if len(command) > COMMAND_LIMIT:
         raise NodeExecError("Конфигурация слишком велика для передачи на ноду")
@@ -298,6 +334,8 @@ async def _stream(server: Server, payload: str, budget: int) -> list[dict]:
                     parsed = _maybe_json(payload_line)
                     if isinstance(parsed, dict):
                         events.append(parsed)
+                        if on_event is not None:
+                            on_event(parsed)
     except httpx.TimeoutException as exc:
         raise NodeExecError("Таймаут соединения с нодой") from exc
     except httpx.RequestError as exc:
@@ -443,7 +481,19 @@ def _maybe_json(text: str):
         return text
 
 
-def _parse_results(chunk: list[TestCell], events: list[dict]) -> dict[int, CellResult]:
+def _event_index(event: dict) -> Optional[int]:
+    try:
+        return int(event.get("index"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_results(
+    chunk: list[TestCell],
+    events: list[dict],
+    early: Optional[dict[int, CellResult]] = None,
+    on_result: ResultSink = None,
+) -> dict[int, CellResult]:
     """Разложить строки исполнителя по ячейкам пачки.
 
     Исполнитель гонит проверки параллельно, поэтому строки приходят вперемешку и
@@ -454,23 +504,24 @@ def _parse_results(chunk: list[TestCell], events: list[dict]) -> dict[int, CellR
     for event in events:
         if event.get("type") != "cell":
             continue
-        try:
-            by_index[int(event.get("index"))] = event
-        except (TypeError, ValueError):
-            continue
+        index = _event_index(event)
+        if index is not None:
+            by_index[index] = event
 
     logs = " ".join(
         str(event.get("line", "")) for event in events if event.get("type") == "log"
     )
-    results: dict[int, CellResult] = {}
+    results: dict[int, CellResult] = dict(early or {})
     for cell in chunk:
+        if cell.index in results:
+            continue
         payload = by_index.get(cell.index)
         if payload is None:
-            results[cell.index] = _fail(
+            results[cell.index] = _report(_fail(
                 cell, FailReason.NODE_ERROR, logs or "нода не вернула результат проверки"
-            )
+            ), on_result)
             continue
-        results[cell.index] = _parse_result(cell, payload)
+        results[cell.index] = _report(_parse_result(cell, payload), on_result)
     return results
 
 
