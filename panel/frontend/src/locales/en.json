@@ -464,7 +464,13 @@
     "chart_peaks": "Peak band",
     "chart_peaks_hint": "Translucent band from the average up to the interval peak",
     "chart_per_metric": "Per-metric override",
-    "chart_inherit": "Same as default"
+    "chart_inherit": "Same as default",
+    "live_values": "Live values",
+    "live_values_hint": "Numbers on the dashboard, in the infrastructure tree and in the server header",
+    "live_values_instant": "Instant",
+    "live_values_instant_hint": "The last second, as the node reports it",
+    "live_values_average": "Interval average",
+    "live_values_average_hint": "Average over the collection interval — the numbers stop twitching"
   },
   "chart_metric": {
     "cpu": "CPU",

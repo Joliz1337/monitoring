@@ -139,10 +139,26 @@ export interface CertificateExpiry {
   expired: boolean
 }
 
+/** Средние и пики за окно с прошлого опроса — нода отдаёт их только коллектору панели */
+export interface NodeWindow {
+  window_sec: number
+  samples: number
+  cpu_avg: number
+  cpu_max: number
+  per_cpu_avg: number[]
+  net_rx_avg: number
+  net_tx_avg: number
+  net_rx_max: number
+  net_tx_max: number
+  disk_read_avg: number
+  disk_write_avg: number
+}
+
 export interface ServerMetrics {
   timestamp: string
   server_name: string
   timezone?: TimezoneInfo
+  window?: NodeWindow | null
   cpu: {
     cores_physical: number
     cores_logical: number

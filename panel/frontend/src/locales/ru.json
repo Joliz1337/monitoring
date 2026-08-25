@@ -466,7 +466,13 @@
     "chart_peaks": "Полоса пиков",
     "chart_peaks_hint": "Полупрозрачная область от среднего до максимума за интервал",
     "chart_per_metric": "Настроить по метрикам",
-    "chart_inherit": "Как по умолчанию"
+    "chart_inherit": "Как по умолчанию",
+    "live_values": "Живые показатели",
+    "live_values_hint": "Цифры на дашборде, в дереве инфраструктуры и в шапке сервера",
+    "live_values_instant": "Мгновенные",
+    "live_values_instant_hint": "Последняя секунда, как отвечает нода",
+    "live_values_average": "Средние за интервал",
+    "live_values_average_hint": "Среднее за интервал опроса — цифры не дёргаются"
   },
   "chart_metric": {
     "cpu": "CPU",

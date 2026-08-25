@@ -23,6 +23,10 @@ RESERVED_PORTS_KEY = "reserved_ports_global"
 # полоса пиков и переопределения по метрикам ("cpu:raw,network:smooth")
 CHART_MODE_KEY = "chart_mode"
 CHART_MODES = {"smooth", "raw"}
+# Живые показатели на дашборде и в шапке сервера: instant — последняя секунда,
+# average — среднее за интервал опроса из блока window ноды
+LIVE_VALUES_KEY = "live_values"
+LIVE_VALUES_MODES = {"instant", "average"}
 
 DEFAULT_SETTINGS = {
     "refresh_interval": "5",
@@ -53,6 +57,7 @@ DEFAULT_SETTINGS = {
     CHART_MODE_KEY: "smooth",
     "chart_peaks": "true",
     "chart_mode_overrides": "",
+    LIVE_VALUES_KEY: "instant",
 }
 
 
@@ -113,6 +118,9 @@ async def update_setting(
 
     if key == CHART_MODE_KEY and data.value not in CHART_MODES:
         raise HTTPException(status_code=400, detail="Invalid chart mode")
+
+    if key == LIVE_VALUES_KEY and data.value not in LIVE_VALUES_MODES:
+        raise HTTPException(status_code=400, detail="Invalid live values mode")
 
     await set_setting(key, data.value, db)
 

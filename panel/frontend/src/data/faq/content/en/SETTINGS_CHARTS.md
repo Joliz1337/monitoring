@@ -12,6 +12,8 @@ The panel polls nodes once per collection interval (see "Data Collection Interva
 
 The mode can be overridden per metric: for example, network "as is" and everything else smoothed.
 
+**Live values** — the numbers on the dashboard, in the infrastructure tree and in the server page header. "Instant" is the last second as the node reports it; "Interval average" is the average over the collection interval from the same history: the numbers stop twitching but change no more often than the interval.
+
 ## Good to know
 
 - The setting is panel-wide: everyone who opens the panel sees it, not only your browser.

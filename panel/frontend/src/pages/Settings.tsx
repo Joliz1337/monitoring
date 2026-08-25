@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useRef } from 'react'
 import { Settings as SettingsIcon, RefreshCw, Layout, LayoutGrid, Languages, Sparkles, Check, Clock, Activity, Shield, AlertTriangle, Loader2, CheckCircle2, XCircle, Terminal, Server, Zap, Cpu, HardDrive, MemoryStick, Database, Download, Upload, Trash2, Archive, Globe, Waypoints, Save, GitBranch, FlaskConical, LineChart, ChevronDown } from 'lucide-react'
 import { useSettingsStore, TIMEZONE_OPTIONS, TRAFFIC_PERIOD_OPTIONS, METRICS_INTERVAL_OPTIONS, HAPROXY_INTERVAL_OPTIONS } from '../stores/settingsStore'
 import { TOGGLEABLE_MODULES } from '../config/modules'
-import { CHART_METRICS, type ChartMode } from '../config/chartDisplay'
+import { CHART_METRICS, type ChartMode, type LiveValuesMode } from '../config/chartDisplay'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence, LayoutGroup } from 'framer-motion'
 import { systemApi, backupApi, settingsApi, PanelCertificateInfo, PanelServerStats, BackupInfo, BackupStatus, TimeSyncStatus } from '../api/client'
@@ -14,6 +14,11 @@ import AutoBackupCard from '../components/settings/AutoBackupCard'
 const CHART_MODE_OPTIONS: { value: ChartMode; labelKey: string; hintKey: string }[] = [
   { value: 'smooth', labelKey: 'settings.chart_mode_smooth', hintKey: 'settings.chart_mode_smooth_hint' },
   { value: 'raw', labelKey: 'settings.chart_mode_raw', hintKey: 'settings.chart_mode_raw_hint' },
+]
+
+const LIVE_VALUES_OPTIONS: { value: LiveValuesMode; labelKey: string; hintKey: string }[] = [
+  { value: 'instant', labelKey: 'settings.live_values_instant', hintKey: 'settings.live_values_instant_hint' },
+  { value: 'average', labelKey: 'settings.live_values_average', hintKey: 'settings.live_values_average_hint' },
 ]
 
 // null — переопределения нет, метрика рисуется в общем режиме
@@ -38,11 +43,11 @@ export default function Settings() {
     refreshInterval, compactView, timezone, trafficPeriod,
     metricsCollectInterval, haproxyCollectInterval,
     serverTimezone, timeSyncEnabled, remnawaveNginxPath, updateBranch, hiddenModules,
-    chartMode, chartPeaks, chartModeOverrides,
+    chartMode, chartPeaks, chartModeOverrides, liveValues,
     fetchSettings, setRefreshInterval, setCompactView, setTimezone, setTrafficPeriod,
     setMetricsCollectInterval, setHaproxyCollectInterval,
     setServerTimezone, setTimeSyncEnabled, setRemnawaveNginxPath, setUpdateBranch,
-    setHiddenModules, setChartMode, setChartPeaks, setChartModeOverride
+    setHiddenModules, setChartMode, setChartPeaks, setChartModeOverride, setLiveValues
   } = useSettingsStore()
   const { t, i18n } = useTranslation()
   const [showPerMetric, setShowPerMetric] = useState(false)
@@ -1177,6 +1182,46 @@ export default function Settings() {
                 transition={{ type: 'spring', stiffness: 500, damping: 30 }}
               />
             </motion.button>
+          </div>
+
+          {/* Live values on dashboard and server header */}
+          <div className="mb-4">
+            <div className="mb-3">
+              <span className="text-sm text-dark-400">{t('settings.live_values')}</span>
+              <p className="text-xs text-dark-500 mt-0.5">{t('settings.live_values_hint')}</p>
+            </div>
+            <LayoutGroup id="live-values-selector">
+              <div className="grid grid-cols-2 gap-2">
+                {LIVE_VALUES_OPTIONS.map((option) => (
+                  <motion.button
+                    key={option.value}
+                    onClick={() => setLiveValues(option.value)}
+                    className={`relative px-3 py-2.5 rounded-xl text-sm font-medium transition-all ${
+                      liveValues === option.value
+                        ? 'text-white'
+                        : 'bg-dark-800/60 text-dark-400 hover:text-dark-200 hover:bg-dark-700 border border-dark-700/50'
+                    }`}
+                    whileHover={{ scale: 1.02 }}
+                    whileTap={{ scale: 0.98 }}
+                  >
+                    {liveValues === option.value && (
+                      <motion.div
+                        className="absolute inset-0 bg-gradient-to-r from-accent-500 to-accent-600 rounded-xl shadow-lg shadow-accent-500/20"
+                        layoutId="liveValuesIndicator"
+                        initial={false}
+                        transition={{ type: 'spring', stiffness: 400, damping: 30 }}
+                      />
+                    )}
+                    <span className="relative z-10 flex flex-col items-center gap-0.5">
+                      <span>{t(option.labelKey)}</span>
+                      <span className={`text-xs font-normal ${liveValues === option.value ? 'text-white/70' : 'text-dark-500'}`}>
+                        {t(option.hintKey)}
+                      </span>
+                    </span>
+                  </motion.button>
+                ))}
+              </div>
+            </LayoutGroup>
           </div>
 
           {/* Per-metric overrides */}

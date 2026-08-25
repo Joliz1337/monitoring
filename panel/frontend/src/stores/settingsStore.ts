@@ -7,10 +7,13 @@ import {
   parseChartMode,
   parseChartModeOverrides,
   serializeChartModeOverrides,
+  parseLiveValuesMode,
   DEFAULT_CHART_MODE,
+  DEFAULT_LIVE_VALUES_MODE,
   type ChartMode,
   type ChartMetric,
   type ChartModeOverrides,
+  type LiveValuesMode,
 } from '../config/chartDisplay'
 
 // Зеркало списка скрытых разделов в браузере: меню рисуется до ответа
@@ -122,6 +125,7 @@ interface SettingsState {
   chartMode: ChartMode
   chartPeaks: boolean
   chartModeOverrides: ChartModeOverrides
+  liveValues: LiveValuesMode
   isLoading: boolean
 
   fetchSettings: () => Promise<void>
@@ -142,6 +146,7 @@ interface SettingsState {
   setChartMode: (mode: ChartMode) => Promise<void>
   setChartPeaks: (enabled: boolean) => Promise<void>
   setChartModeOverride: (metric: ChartMetric, mode: ChartMode | null) => Promise<void>
+  setLiveValues: (mode: LiveValuesMode) => Promise<void>
   getEffectiveTimezone: () => string
 }
 
@@ -163,6 +168,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   chartMode: DEFAULT_CHART_MODE,
   chartPeaks: true,
   chartModeOverrides: {},
+  liveValues: DEFAULT_LIVE_VALUES_MODE,
   isLoading: true,
 
   fetchSettings: async () => {
@@ -188,6 +194,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         chartMode: parseChartMode(data.settings.chart_mode),
         chartPeaks: data.settings.chart_peaks !== 'false',
         chartModeOverrides: parseChartModeOverrides(data.settings.chart_mode_overrides),
+        liveValues: parseLiveValuesMode(data.settings.live_values),
         isLoading: false,
       })
     } catch {
@@ -294,6 +301,12 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     }
     set({ chartModeOverrides: overrides })
     await settingsApi.set('chart_mode_overrides', serializeChartModeOverrides(overrides))
+  },
+
+  // Без тоста: дашборд подхватит режим на следующем обновлении, страница сервера — сразу
+  setLiveValues: async (mode: LiveValuesMode) => {
+    set({ liveValues: mode })
+    await settingsApi.set('live_values', mode)
   },
 
   getEffectiveTimezone: () => {

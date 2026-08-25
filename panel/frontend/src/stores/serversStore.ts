@@ -1,6 +1,8 @@
 import { create } from 'zustand'
 import { toast } from 'sonner'
 import { serversApi, Server, ServerMetrics } from '../api/client'
+import { useSettingsStore } from './settingsStore'
+import { viewMetrics } from '../utils/metricsView'
 
 interface ServerTraffic {
   rx_bytes: number
@@ -75,8 +77,12 @@ export const useServersStore = create<ServersState>((set, get) => ({
     set({ isLoading: true, error: null })
     try {
       const { data } = await serversApi.list(true)
+      // Режим живых показателей применяется здесь, а не в карточках: дашборд,
+      // сводка флота и дерево инфраструктуры читают один и тот же стор
+      const liveValues = useSettingsStore.getState().liveValues
       const serversWithStatus = data.servers.map(s => ({
         ...s,
+        metrics: s.metrics ? viewMetrics(s.metrics, liveValues) : s.metrics,
         traffic: (s as { traffic?: ServerTraffic }).traffic || null,
         status: (s.status || (s.last_error ? 'offline' : (s.metrics ? 'online' : 'loading'))) as 'online' | 'offline' | 'loading' | 'error',
         lastUpdated: new Date(),

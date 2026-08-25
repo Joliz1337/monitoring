@@ -52,5 +52,13 @@ export function resolveChartDisplay(mode: ChartMode, showPeaks: boolean): ChartD
 
 export const DEFAULT_CHART_DISPLAY: ChartDisplay = resolveChartDisplay(DEFAULT_CHART_MODE, false)
 
+/** Живые показатели на дашборде и в шапке сервера: последняя секунда или среднее за интервал опроса */
+export type LiveValuesMode = 'instant' | 'average'
+export const DEFAULT_LIVE_VALUES_MODE: LiveValuesMode = 'instant'
+
+export function parseLiveValuesMode(raw: string | undefined | null): LiveValuesMode {
+  return raw === 'average' ? 'average' : DEFAULT_LIVE_VALUES_MODE
+}
+
 /** Для рядов, где сглаживать нечестно — например, сумма байт за час */
 export const RAW_DISPLAY: ChartDisplay = resolveChartDisplay('raw', false)

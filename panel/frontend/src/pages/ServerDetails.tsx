@@ -28,6 +28,8 @@ import { proxyApi, ServerMetrics, HistoryPoint, HistoryResponse } from '../api/c
 import { useServersStore } from '../stores/serversStore'
 import { useSmartRefresh } from '../hooks/useAutoRefresh'
 import { useChartDisplay } from '../hooks/useChartDisplay'
+import { useSettingsStore } from '../stores/settingsStore'
+import { viewMetrics } from '../utils/metricsView'
 import ProgressBar from '../components/ui/ProgressBar'
 import StatusBadge from '../components/ui/StatusBadge'
 import PeriodSelector from '../components/ui/PeriodSelector'
@@ -129,6 +131,7 @@ export default function ServerDetails() {
   const coresExpandedRef = useRef(false)
   const lastHistoryFetchRef = useRef<{ period: string; at: number } | null>(null)
 
+  const liveValues = useSettingsStore(state => state.liveValues)
   const cpuDisplay = useChartDisplay('cpu')
   const memoryDisplay = useChartDisplay('memory')
   const networkDisplay = useChartDisplay('network')
@@ -193,14 +196,16 @@ export default function ServerDetails() {
       }
 
       const refreshHistory = forceHistory || !historyIsFresh()
+      // Средние за интервал есть только в снапшоте коллектора: живой запрос
+      // к ноде отдаёт последнюю секунду без блока window
       const [metricsRes, historyData] = await Promise.all([
-        useCached
+        useCached || liveValues === 'average'
           ? proxyApi.getMetrics(Number(serverId))
           : proxyApi.getLiveMetrics(Number(serverId)),
         refreshHistory ? loadHistory() : Promise.resolve(historyRef.current),
       ])
 
-      const metricsData = metricsRes.data
+      const metricsData = viewMetrics(metricsRes.data, liveValues)
 
       setMetrics(metricsData)
       setHistory(historyData)
@@ -218,14 +223,14 @@ export default function ServerDetails() {
     } finally {
       setIsLoading(false)
     }
-  }, [serverId, loadHistory, historyIsFresh, saveToCache, handleFetchError, setIsCached, setCachedAt])
+  }, [serverId, liveValues, loadHistory, historyIsFresh, saveToCache, handleFetchError, setIsCached, setCachedAt])
 
   const fetchCachedData = useCallback(async () => {
     if (!serverId) return
 
     try {
       const metricsRes = await proxyApi.getMetrics(Number(serverId))
-      const metricsData = metricsRes.data
+      const metricsData = viewMetrics(metricsRes.data, liveValues)
       setMetrics(metricsData)
       setError(null)
       setIsCached(false)
