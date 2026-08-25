@@ -568,6 +568,8 @@ export interface XrayTestCell {
 
 export type XrayTestEvent =
   | { type: 'start'; total: number; location: string }
+  // Тик тишины: держит соединение, пока идут долгие проверки
+  | { type: 'ping'; done: number; total: number }
   | { type: 'log'; line: string }
   | ({ type: 'cell'; done: number } & XrayTestCell)
   | { type: 'done'; status: string; error: string | null; total: number; done: number;

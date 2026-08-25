@@ -10,6 +10,10 @@ import {
 import { streamNdjsonGet, StreamUnauthorizedError } from '../../utils/ndjsonStream'
 
 const JOB_KEY = 'xray_test_job_v1'
+// Прогон живёт на панели и не обрывается вместе с соединением, поэтому потерю
+// потока лечим переподключением: при нём бэкенд отдаёт все результаты заново.
+const STREAM_RETRIES = 60
+const STREAM_RETRY_DELAY = 3000
 
 interface StoredJob {
   jobId: string
@@ -54,9 +58,13 @@ export function useTestRun() {
   const [summary, setSummary] = useState<RunSummary | null>(null)
   const abortRef = useRef<AbortController | null>(null)
   const restoredRef = useRef(false)
+  const finishedRef = useRef(false)
+  const attachRef = useRef<((id: string, expected: number, attempt?: number) => void) | null>(null)
+  const retryRef = useRef<number | null>(null)
 
-  const attach = useCallback((id: string, expected: number) => {
+  const attach = useCallback((id: string, expected: number, attempt = 0) => {
     abortRef.current?.abort()
+    if (retryRef.current) window.clearTimeout(retryRef.current)
     const controller = new AbortController()
     abortRef.current = controller
 
@@ -65,6 +73,19 @@ export function useTestRun() {
     setTotal(expected)
     setCells([])
     setSummary(null)
+    if (attempt === 0) finishedRef.current = false
+
+    const retry = () => {
+      if (finishedRef.current || controller.signal.aborted) return
+      if (attempt >= STREAM_RETRIES) {
+        setRunning(false)
+        return
+      }
+      retryRef.current = window.setTimeout(
+        () => attachRef.current?.(id, expected, attempt + 1),
+        STREAM_RETRY_DELAY,
+      )
+    }
 
     streamNdjsonGet<XrayTestEvent>(
       xrayTestStreamUrl(id),
@@ -77,6 +98,7 @@ export function useTestRun() {
           const { type, done, ...cell } = event
           setCells(prev => [...prev, cell as XrayTestCell])
         } else if (event.type === 'done') {
+          finishedRef.current = true
           setSummary({ ok: event.ok, degraded: event.degraded, fail: event.fail })
           setRunning(false)
           writeStoredJob(null)
@@ -84,12 +106,18 @@ export function useTestRun() {
         }
       },
       controller.signal,
-    ).catch(error => {
+    ).then(() => {
+      // Поток кончился, а «готово» не пришло — значит оборвался по дороге
+      retry()
+    }).catch(error => {
       if (controller.signal.aborted || error instanceof StreamUnauthorizedError) return
-      // Обрыв соединения не означает обрыв задачи: она продолжается на панели
-      setRunning(false)
+      retry()
     })
   }, [])
+
+  useEffect(() => {
+    attachRef.current = attach
+  }, [attach])
 
   const start = useCallback(async (request: XrayTestRunRequest) => {
     try {

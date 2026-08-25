@@ -27,6 +27,8 @@ LOG_BUFFER_LIMIT = 2000
 MAX_ACTIVE_JOBS = 5
 # Через сколько результатов отмечать прогресс в журнале задачи
 PROGRESS_STEP = 25
+# Тик в поток, когда нечего сказать: прокси рвут молчащие соединения
+HEARTBEAT_INTERVAL = 15.0
 # Потолок он же значение по умолчанию: держать проверки медленнее, чем позволяют
 # зарезервированные порты, смысла нет — это просто дольше при том же результате
 # Рабочих на точку запуска. Каждый берёт из очереди пачку и прогоняет её одним
@@ -251,7 +253,14 @@ class XrayTestJobManager:
                 return
 
             while True:
-                event = await queue.get()
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=HEARTBEAT_INTERVAL)
+                except asyncio.TimeoutError:
+                    # Пока идут долгие проверки, событий нет минутами, и молчащий
+                    # поток закрывает прокси между панелью и браузером. Пустой
+                    # тик держит соединение и заодно показывает, что мы живы.
+                    yield {"type": "ping", "done": len(job.results), "total": job.total}
+                    continue
                 kind = event.get("type")
                 if kind == "start":
                     continue
