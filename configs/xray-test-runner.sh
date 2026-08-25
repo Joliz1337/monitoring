@@ -13,7 +13,7 @@
 #         xray-test-runner.sh version
 set -uo pipefail
 
-RUNNER_VERSION="2.5.0"
+RUNNER_VERSION="2.6.0"
 
 TOOLS_DIR="/opt/monitoring-node/tools"
 CORES_DIR="$TOOLS_DIR/cores"
@@ -220,6 +220,26 @@ resolve_host() {
     printf '%s %s' "$ip" "$(( $(now_ms) - start ))"
 }
 
+# Два запроса одним вызовом: второй переиспользует соединение, поэтому меряет
+# чистую задержку без рукопожатия и не тратит процессор на повторную проверку
+# цепочки сертификатов. На боевой ноде это была самая дорогая часть проверки:
+# curl съедал больше процессора, чем сами прокси-ядра.
+probe_pair() {
+    curl_socks "$1" -o /dev/null -o /dev/null --max-time "$PROBE_TIMEOUT" \
+        -w '%{http_code} %{time_total}\n' \
+        "$GENERATE_204_URL" "$GENERATE_204_URL" 2>/dev/null
+}
+
+# Код ответа из строки $2 вывода
+pair_field() { printf '%s\n' "$1" | sed -n "$2p" | cut -d' ' -f1; }
+
+# Время из строки $2 в миллисекундах; пусто, если строки нет
+pair_ms() {
+    local value
+    value=$(printf '%s\n' "$1" | sed -n "$2p" | cut -d' ' -f2)
+    [ -n "$value" ] && printf '%s' "$value" | awk '{printf "%.0f", $1*1000}'
+}
+
 curl_socks() { local port="$1"; shift; curl -s --socks5-hostname "127.0.0.1:$port" "$@"; }
 
 # У REALITY есть запасной ход: «неправильному» клиенту сервер отдаёт настоящий
@@ -306,23 +326,26 @@ run_cell() {
     fi
 
     if [ "$OPT_HTTP" = "1" ]; then
-        local first second
-        local rc
-        first=$(curl_socks "$socks" -o /dev/null --max-time "$PROBE_TIMEOUT" \
-            -w '%{http_code} %{time_total}' "$GENERATE_204_URL" 2>/dev/null)
-        rc=$?
-        status=$(printf '%s' "$first" | cut -d' ' -f1)
-        handshake=$(printf '%s' "$first" | cut -d' ' -f2 | awk '{printf "%.0f", $1*1000}')
+        # Оба запроса одним вызовом curl: второй идёт по уже установленному
+        # соединению, то есть без повторного TLS-рукопожатия. Раздельные вызовы
+        # означали лишнюю проверку цепочки сертификатов на каждую проверку, а это
+        # самая дорогая её часть — на боевой ноде curl съедал процессора больше,
+        # чем сами прокси-ядра.
+        local pair rc
+        pair=$(probe_pair "$socks"); rc=$?
+        status=$(pair_field "$pair" 1)
+        handshake=$(pair_ms "$pair" 1)
+        rtt=$(pair_ms "$pair" 2)
 
         # Проверки идут пачками, и на занятой ноде запрос может не уложиться в
         # таймаут при живом канале — такой отказ переспрашиваем. Отказ по другой
         # причине воспроизводим, и повтор только тянул бы время.
         if [ "$rc" = "28" ]; then
             sleep 1.5
-            first=$(curl_socks "$socks" -o /dev/null --max-time "$PROBE_TIMEOUT" \
-                -w '%{http_code} %{time_total}' "$GENERATE_204_URL" 2>/dev/null)
-            status=$(printf '%s' "$first" | cut -d' ' -f1)
-            handshake=$(printf '%s' "$first" | cut -d' ' -f2 | awk '{printf "%.0f", $1*1000}')
+            pair=$(probe_pair "$socks")
+            status=$(pair_field "$pair" 1)
+            handshake=$(pair_ms "$pair" 1)
+            rtt=$(pair_ms "$pair" 2)
         fi
 
         if [ -z "$status" ] || [ "$status" = "000" ]; then
