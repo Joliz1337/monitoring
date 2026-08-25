@@ -230,7 +230,8 @@ class XrayTestJobManager:
         if job.total > PROGRESS_STEP and done % PROGRESS_STEP == 0:
             counts = job.summary
             self._log(job, (
-                f"Проверено {done} из {job.total} — "
+                f"Проверено {done} из {job.total} за {_elapsed(job)} "
+                f"({_rate(job, done)}) — "
                 f"работают {counts['ok']}, с оговорками {counts['degraded']}, "
                 f"не работают {counts['fail']}"
             ))
@@ -306,6 +307,22 @@ class XrayTestJobManager:
                     return
         finally:
             job.subscribers.discard(queue)
+
+
+def _elapsed(job: XrayTestJob) -> str:
+    seconds = max(1, int(time.time() - job.started_at))
+    return f"{seconds // 60} мин {seconds % 60} с" if seconds >= 60 else f"{seconds} с"
+
+
+def _rate(job: XrayTestJob, done: int) -> str:
+    """Скорость и остаток: без них «долго» остаётся ощущением, а не числом."""
+    seconds = max(1.0, time.time() - job.started_at)
+    per_minute = done / seconds * 60
+    if per_minute < 1:
+        return "меньше 1/мин"
+    left = job.total - done
+    eta = int(left / per_minute) if per_minute else 0
+    return f"{per_minute:.0f}/мин, осталось ~{eta} мин" if left else f"{per_minute:.0f}/мин"
 
 
 def _take(queue: "asyncio.Queue[TestCell]", limit: int) -> list[TestCell]:

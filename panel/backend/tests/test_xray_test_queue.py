@@ -250,7 +250,10 @@ class QueueTest(unittest.IsolatedAsyncioTestCase):
         await _drain(manager, job_id)
         job = manager.get(job_id)
 
-        self.assertTrue(any("Проверено" in line for line in job.log))
+        progress = [line for line in job.log if "Проверено" in line]
+        self.assertTrue(progress)
+        # Скорость и остаток в строке — иначе «долго» остаётся ощущением
+        self.assertIn("/мин", progress[0])
 
 
 if __name__ == "__main__":
