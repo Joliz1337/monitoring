@@ -47,8 +47,10 @@ export const NETWORK_COLORS = {
   upload: '#22d3ee',
 }
 
-/** accent-900 → accent-300 из tailwind.config.js: один оттенок, яркость = загрузка */
-export const HEATMAP_SCALE = ['#164e63', '#0e7490', '#0891b2', '#06b6d4', '#22d3ee', '#67e8f9']
+/** Зелёный → жёлтый → красный, как у живых баров по ядрам (пороги 50/80 там же) */
+export const HEATMAP_SCALE = ['#1f5f4a', '#10b981', '#a3b83a', '#f59e0b', '#f0713a', '#ef4444']
+/** Ячейка без данных — еле заметный след поверхности, чтобы простой читался как пропуск */
+export const HEATMAP_EMPTY_COLOR = 'rgba(64, 65, 79, 0.25)'
 
 const HEATMAP_STOPS = HEATMAP_SCALE.map(hex => [
   parseInt(hex.slice(1, 3), 16),

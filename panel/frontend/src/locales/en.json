@@ -502,7 +502,7 @@
     "core": "Core",
     "cores": "cores",
     "cores_history": "Per-Core History",
-    "heatmap_scale": "Core load",
+    "empty_cell": "node was unreachable",
     "no_history": "No per-core history for this period"
   },
   "tcp_chart": {

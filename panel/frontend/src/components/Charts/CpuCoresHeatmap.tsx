@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { PerCpuHistory } from '../../api/client'
 import { parseTimestamp } from '../../utils/chartUtils'
-import { HEATMAP_SCALE, heatmapColor, formatDateLocalized, getDateTimeFormat } from './chartTheme'
+import { HEATMAP_EMPTY_COLOR, heatmapColor, formatDateLocalized, getDateTimeFormat } from './chartTheme'
 
 interface CpuCoresHeatmapProps {
   perCpu: PerCpuHistory | null
@@ -17,24 +17,35 @@ interface HoverCell {
   y: number
 }
 
-const MIN_ROW_HEIGHT = 6
-const MAX_ROW_HEIGHT = 14
-const TARGET_HEIGHT = 160
-// Подпись ядра не мельче этого; при более низких строках ядра подписываются через одно
+// Высота строки по числу ядер: 8 ядер читаются как таблица, 64 — как полотно
+const ROW_HEIGHT_BY_CORES: Array<[number, number]> = [[8, 26], [16, 20], [32, 14]]
+const DENSE_ROW_HEIGHT = 9
+const CELL_GAP = 2
+const CELL_RADIUS = 3
+// Ниже этой высоты строки подписи ядер идут через одно — иначе наезжают друг на друга
 const LABEL_MIN_HEIGHT = 12
-// С такой высоты строки между ними остаётся зазор в 1px
-const ROW_GAP_MIN_HEIGHT = 8
-const CORE_LABEL_WIDTH = 36
+const CORE_LABEL_WIDTH = 56
+const AVG_LABEL_WIDTH = 60
 const TIME_LABEL_COUNT = 6
 const TOOLTIP_OFFSET = 14
 const EMPTY_STATE_HEIGHT = 'h-24'
+const HOVER_OUTLINE = 'rgba(255, 255, 255, 0.6)'
+
+// Образцы для легенды: середины диапазонов шкалы
+const LEGEND_BINS = [
+  { label: '0–25', sample: 12 },
+  { label: '25–50', sample: 37 },
+  { label: '50–80', sample: 65 },
+  { label: '80–100', sample: 92 },
+]
 
 // Стабильные пустые значения: иначе эффект отрисовки перезапускался бы на каждом рендере без данных
 const NO_CORES: (number | null)[][] = []
 const NO_TIMESTAMPS: string[] = []
 
 function rowHeightFor(cores: number): number {
-  return Math.min(MAX_ROW_HEIGHT, Math.max(MIN_ROW_HEIGHT, TARGET_HEIGHT / cores))
+  const match = ROW_HEIGHT_BY_CORES.find(([limit]) => cores <= limit)
+  return match ? match[1] : DENSE_ROW_HEIGHT
 }
 
 function timeLabelColumns(cols: number): number[] {
@@ -43,9 +54,27 @@ function timeLabelColumns(cols: number): number[] {
   return Array.from({ length: count }, (_, k) => Math.round((k * (cols - 1)) / (count - 1)))
 }
 
+function coreAverage(values: (number | null)[]): number | null {
+  let sum = 0
+  let count = 0
+  for (const value of values) {
+    if (value === null) continue
+    sum += value
+    count += 1
+  }
+  return count > 0 ? sum / count : null
+}
+
+function fillCell(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number) {
+  ctx.beginPath()
+  ctx.roundRect(x, y, w, h, CELL_RADIUS)
+  ctx.fill()
+}
+
 /**
- * Строка = ядро (ядро 0 сверху), столбец = бакет истории, цвет = загрузка 0–100 %.
- * Рисуется на canvas: 64 ядра × 288 бакетов как SVG-узлы тормозили бы страницу.
+ * Строка = ядро (ядро 0 сверху), ячейка = бакет истории, цвет = загрузка 0–100 %
+ * по шкале зелёный → жёлтый → красный, как у живых баров по ядрам.
+ * Рисуется на canvas: 64 ядра × 144 бакета как SVG-узлы тормозили бы страницу.
  */
 export default function CpuCoresHeatmap({ perCpu, period, isLoading = false }: CpuCoresHeatmapProps) {
   const { t, i18n } = useTranslation()
@@ -58,11 +87,11 @@ export default function CpuCoresHeatmap({ perCpu, period, isLoading = false }: C
   const rows = cores.length
   const cols = timestamps.length
   const rowHeight = rowHeightFor(Math.max(rows, 1))
-  const cellHeight = rowHeight >= ROW_GAP_MIN_HEIGHT ? rowHeight - 1 : rowHeight
   const labelStep = Math.max(1, Math.ceil(LABEL_MIN_HEIGHT / rowHeight))
   const canvasHeight = rows * rowHeight
 
   const times = useMemo(() => timestamps.map(parseTimestamp), [timestamps])
+  const averages = useMemo(() => cores.map(coreAverage), [cores])
   const labelColumns = useMemo(() => timeLabelColumns(cols), [cols])
   const dateFormat = getDateTimeFormat(period)
   const lang = i18n.language || 'en'
@@ -86,23 +115,31 @@ export default function CpuCoresHeatmap({ perCpu, period, isLoading = false }: C
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
       ctx.clearRect(0, 0, width, canvasHeight)
 
-      const cellWidth = width / cols
+      const slotWidth = width / cols
+      const cellWidth = Math.max(1, slotWidth - CELL_GAP)
+      const cellHeight = Math.max(1, rowHeight - CELL_GAP)
       cores.forEach((values, row) => {
+        const top = row * rowHeight + CELL_GAP / 2
         values.forEach((value, col) => {
-          if (value === null) return
-          ctx.fillStyle = heatmapColor(value)
-          const left = Math.floor(col * cellWidth)
-          const right = Math.ceil((col + 1) * cellWidth)
-          ctx.fillRect(left, row * rowHeight, right - left, cellHeight)
+          ctx.fillStyle = value === null ? HEATMAP_EMPTY_COLOR : heatmapColor(value)
+          fillCell(ctx, col * slotWidth + CELL_GAP / 2, top, cellWidth, cellHeight)
         })
       })
+
+      if (hover) {
+        ctx.strokeStyle = HOVER_OUTLINE
+        ctx.lineWidth = 1
+        ctx.beginPath()
+        ctx.roundRect(hover.col * slotWidth + CELL_GAP / 2, hover.row * rowHeight + CELL_GAP / 2, cellWidth, cellHeight, CELL_RADIUS)
+        ctx.stroke()
+      }
     }
 
     draw()
     const observer = new ResizeObserver(draw)
     observer.observe(wrap)
     return () => observer.disconnect()
-  }, [cores, rows, cols, rowHeight, cellHeight, canvasHeight])
+  }, [cores, rows, cols, rowHeight, canvasHeight, hover])
 
   const handleMouseMove = (event: MouseEvent<HTMLCanvasElement>) => {
     const rect = event.currentTarget.getBoundingClientRect()
@@ -114,6 +151,7 @@ export default function CpuCoresHeatmap({ perCpu, period, isLoading = false }: C
       setHover(null)
       return
     }
+    if (hover && hover.row === row && hover.col === col) return
     setHover({ row, col, x, y })
   }
 
@@ -128,6 +166,7 @@ export default function CpuCoresHeatmap({ perCpu, period, isLoading = false }: C
 
   const hoverValue = hover ? cores[hover.row][hover.col] : null
   const wrapWidth = wrapRef.current?.clientWidth ?? 0
+  const rowLabelStyle = (row: number) => ({ top: row * rowHeight + rowHeight / 2, transform: 'translateY(-50%)' })
 
   return (
     <div>
@@ -136,10 +175,10 @@ export default function CpuCoresHeatmap({ perCpu, period, isLoading = false }: C
           {cores.map((_, core) => core % labelStep === 0 && (
             <span
               key={core}
-              className="absolute right-2 text-[10px] leading-none font-mono text-dark-500"
-              style={{ top: core * rowHeight + cellHeight / 2, transform: 'translateY(-50%)' }}
+              className="absolute right-2.5 text-xs leading-none font-mono text-dark-500 whitespace-nowrap"
+              style={rowLabelStyle(core)}
             >
-              {core}
+              {t('cpu_chart.core')} {core}
             </span>
           ))}
         </div>
@@ -167,6 +206,18 @@ export default function CpuCoresHeatmap({ perCpu, period, isLoading = false }: C
             </div>
           )}
         </div>
+
+        <div className="relative shrink-0" style={{ width: AVG_LABEL_WIDTH, height: canvasHeight }}>
+          {averages.map((average, core) => core % labelStep === 0 && (
+            <span
+              key={core}
+              className="absolute left-2.5 text-xs leading-none font-mono text-dark-500 whitespace-nowrap"
+              style={rowLabelStyle(core)}
+            >
+              {t('cpu_chart.avg')} <span className="text-dark-100">{average === null ? '—' : `${average.toFixed(0)}%`}</span>
+            </span>
+          ))}
+        </div>
       </div>
 
       <div className="flex mt-1">
@@ -185,16 +236,20 @@ export default function CpuCoresHeatmap({ perCpu, period, isLoading = false }: C
             </span>
           ))}
         </div>
+        <div className="shrink-0" style={{ width: AVG_LABEL_WIDTH }} />
       </div>
 
-      <div className="flex items-center justify-end gap-2 mt-2 text-[10px] text-dark-500">
-        <span>{t('cpu_chart.heatmap_scale')}</span>
-        <span className="font-mono">0%</span>
-        <div
-          className="h-2 w-24 rounded-sm"
-          style={{ background: `linear-gradient(to right, ${HEATMAP_SCALE.join(', ')})` }}
-        />
-        <span className="font-mono">100%</span>
+      <div className="flex items-center gap-4 mt-3 text-xs text-dark-500">
+        {LEGEND_BINS.map(bin => (
+          <span key={bin.label} className="flex items-center gap-1.5">
+            <span className="w-3 h-3 rounded-[3px]" style={{ background: heatmapColor(bin.sample) }} />
+            {bin.label}%
+          </span>
+        ))}
+        <span className="ml-auto flex items-center gap-1.5">
+          <span className="w-3 h-3 rounded-[3px]" style={{ background: HEATMAP_EMPTY_COLOR }} />
+          {t('cpu_chart.empty_cell')}
+        </span>
       </div>
     </div>
   )
