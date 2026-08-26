@@ -1856,22 +1856,29 @@ export interface BackupAutoSettingsIn {
   volume_size_mb?: number
 }
 
+// total не приходит, если сервер не отдал Content-Length — вызывающий подставляет свой
+export type TransferProgress = (loaded: number, total: number | undefined) => void
+
 export const backupApi = {
   create: () =>
     api.post<{ success: boolean; message: string }>('/backup/create'),
   list: () =>
     api.get<{ backups: BackupInfo[]; count: number }>('/backup/list'),
-  download: (filename: string) =>
-    api.get(`/backup/${filename}/download`, { responseType: 'blob' }),
+  download: (filename: string, onProgress?: TransferProgress) =>
+    api.get(`/backup/${filename}/download`, {
+      responseType: 'blob',
+      onDownloadProgress: e => onProgress?.(e.loaded, e.total),
+    }),
   delete: (filename: string) =>
     api.delete<{ success: boolean }>(`/backup/${filename}`),
-  restore: (files: File[], password?: string) => {
+  restore: (files: File[], password?: string, onProgress?: TransferProgress) => {
     const formData = new FormData()
     for (const f of files) formData.append('file', f)
     if (password) formData.append('password', password)
     return api.post<{ success: boolean; message: string }>('/backup/restore', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
       timeout: 600000,
+      onUploadProgress: e => onProgress?.(e.loaded, e.total),
     })
   },
   getStatus: () =>

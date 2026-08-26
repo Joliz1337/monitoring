@@ -7,6 +7,7 @@ import { toast } from 'sonner'
 import { backupApi, type BackupInfo, type BackupStatus } from '../../api/client'
 import { formatBytes } from '../../utils/format'
 import { Tooltip } from '../ui/Tooltip'
+import ProgressBar from '../ui/ProgressBar'
 import { SettingsSection } from './SettingsSection'
 
 const STATUS_POLL_MS = 2000
@@ -33,6 +34,14 @@ function detectVolumeSet(files: File[]): VolumeSet | null {
 
 const volumeLabel = (n: number) => `.${String(n).padStart(3, '0')}`
 
+// Одна передача за раз: заливка бэкапа на панель или скачивание файла с неё
+interface Transfer {
+  kind: 'upload' | 'download'
+  filename: string
+  loaded: number
+  total: number
+}
+
 function RestoreWarning({ text }: { text: string }) {
   return (
     <p className="text-xs text-warning mb-3 flex items-center gap-1.5">
@@ -50,6 +59,7 @@ export function BackupCard() {
   const [confirmRestore, setConfirmRestore] = useState<File[] | null>(null)
   const [restorePassword, setRestorePassword] = useState('')
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
+  const [transfer, setTransfer] = useState<Transfer | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -114,17 +124,23 @@ export function BackupCard() {
     }
   }
 
-  const handleDownload = async (filename: string) => {
+  const trackProgress = (loaded: number, total: number | undefined) =>
+    setTransfer(prev => prev && { ...prev, loaded, total: total ?? prev.total })
+
+  const handleDownload = async (backup: BackupInfo) => {
+    setTransfer({ kind: 'download', filename: backup.filename, loaded: 0, total: backup.size })
     try {
-      const res = await backupApi.download(filename)
+      const res = await backupApi.download(backup.filename, trackProgress)
       const url = window.URL.createObjectURL(new Blob([res.data]))
       const a = document.createElement('a')
       a.href = url
-      a.download = filename
+      a.download = backup.filename
       a.click()
       window.URL.revokeObjectURL(url)
     } catch {
       toast.error(t('settings.backup_error'))
+    } finally {
+      setTransfer(null)
     }
   }
 
@@ -142,8 +158,14 @@ export function BackupCard() {
     const password = restorePassword
     setConfirmRestore(null)
     setRestorePassword('')
+    setTransfer({
+      kind: 'upload',
+      filename: files[0].name,
+      loaded: 0,
+      total: files.reduce((sum, f) => sum + f.size, 0),
+    })
     try {
-      await backupApi.restore(files, password)
+      await backupApi.restore(files, password, trackProgress)
       await fetchStatus()
       startPoll()
     } catch (err: any) {
@@ -152,6 +174,8 @@ export function BackupCard() {
       } else {
         toast.error(err.response?.data?.detail || t('settings.backup_error'))
       }
+    } finally {
+      setTransfer(null)
     }
   }
 
@@ -174,6 +198,11 @@ export function BackupCard() {
 
   const busy = status !== null && status.state !== 'idle'
   const restoring = status?.state === 'restoring'
+  const uploading = transfer?.kind === 'upload'
+  // После 100 % запрос ещё висит: бэкенд читает форму и расшифровывает тома
+  const uploadLabel = transfer && transfer.loaded >= transfer.total
+    ? t('settings.backup_upload_processing')
+    : t('settings.backup_uploading', { loaded: formatBytes(transfer?.loaded ?? 0), total: formatBytes(transfer?.total ?? 0) })
 
   const volumeSet = confirmRestore ? detectVolumeSet(confirmRestore) : null
   const multiplePlainFiles = confirmRestore !== null && !volumeSet && confirmRestore.length > 1
@@ -199,15 +228,26 @@ export function BackupCard() {
         <div
           onDrop={handleDrop}
           onDragOver={e => e.preventDefault()}
-          onClick={() => !restoring && fileInputRef.current?.click()}
+          onClick={() => !restoring && !transfer && fileInputRef.current?.click()}
           className={`relative flex items-center justify-center gap-3 p-4 rounded-xl border-2 border-dashed transition-all cursor-pointer ${
-            restoring
+            restoring || uploading
               ? 'border-warning/40 bg-warning/5 cursor-not-allowed'
               : 'border-dark-700/50 hover:border-accent-500/50 hover:bg-accent-500/5'
           }`}
         >
           <input ref={fileInputRef} type="file" multiple onChange={handleFileSelect} className="hidden" />
-          {restoring ? (
+          {uploading ? (
+            <ProgressBar
+              value={transfer.loaded}
+              max={transfer.total}
+              size="sm"
+              color="warning"
+              animated
+              showLabel
+              label={uploadLabel}
+              className="w-full"
+            />
+          ) : restoring ? (
             <>
               <Loader2 className="w-5 h-5 text-warning animate-spin" />
               <span className="text-sm text-warning">{t('settings.backup_restoring')}</span>
@@ -246,52 +286,72 @@ export function BackupCard() {
         ) : (
           <div className="space-y-2">
             <div className="text-xs text-dark-400 uppercase tracking-wider">{t('settings.backup_list_title')}</div>
-            {backups.map(b => (
-              <div key={b.filename} className="flex items-center gap-3 p-3 bg-dark-800/50 rounded-xl border border-dark-700/50">
-                <Archive className="w-4 h-4 text-dark-400 flex-shrink-0" />
-                <div className="flex-1 min-w-0">
-                  <div className="text-sm text-dark-200 truncate">{b.filename}</div>
-                  <div className="flex items-center gap-3 text-xs text-dark-500 mt-0.5">
-                    <span>{formatBytes(b.size)}</span>
-                    <span>{new Date(b.created_at).toLocaleString()}</span>
-                    {b.version && <span className="text-dark-600">v{b.version}</span>}
-                  </div>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <Tooltip label={t('settings.backup_download')}>
-                    <button
-                      onClick={() => handleDownload(b.filename)}
-                      className="p-2 rounded-lg text-dark-400 hover:text-accent-400 hover:bg-dark-700/50 transition-colors"
-                    >
-                      <Download className="w-4 h-4" />
-                    </button>
-                  </Tooltip>
-                  {confirmDelete === b.filename ? (
-                    <div className="flex items-center gap-1">
-                      <Tooltip label={t('common.delete')}>
-                        <button onClick={() => handleDelete(b.filename)} className="p-2 rounded-lg text-danger hover:bg-danger/10 transition-colors">
-                          <Check className="w-4 h-4" />
-                        </button>
-                      </Tooltip>
-                      <Tooltip label={t('common.cancel')}>
-                        <button onClick={() => setConfirmDelete(null)} className="p-2 rounded-lg text-dark-400 hover:bg-dark-700/50 transition-colors">
-                          <XCircle className="w-4 h-4" />
-                        </button>
-                      </Tooltip>
+            {backups.map(b => {
+              const downloadingThis = transfer?.kind === 'download' && transfer.filename === b.filename
+              return (
+                <div key={b.filename} className="p-3 bg-dark-800/50 rounded-xl border border-dark-700/50">
+                  <div className="flex items-center gap-3">
+                    <Archive className="w-4 h-4 text-dark-400 flex-shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm text-dark-200 truncate">{b.filename}</div>
+                      <div className="flex items-center gap-3 text-xs text-dark-500 mt-0.5">
+                        <span>{formatBytes(b.size)}</span>
+                        <span>{new Date(b.created_at).toLocaleString()}</span>
+                        {b.version && <span className="text-dark-600">v{b.version}</span>}
+                      </div>
                     </div>
-                  ) : (
-                    <Tooltip label={t('settings.backup_delete')}>
-                      <button
-                        onClick={() => setConfirmDelete(b.filename)}
-                        className="p-2 rounded-lg text-dark-400 hover:text-danger hover:bg-danger/10 transition-colors"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </Tooltip>
+                    <div className="flex items-center gap-1.5">
+                      <Tooltip label={t('settings.backup_download')}>
+                        <button
+                          onClick={() => handleDownload(b)}
+                          disabled={transfer !== null}
+                          className="p-2 rounded-lg text-dark-400 hover:text-accent-400 hover:bg-dark-700/50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          {downloadingThis
+                            ? <Loader2 className="w-4 h-4 animate-spin text-accent-400" />
+                            : <Download className="w-4 h-4" />}
+                        </button>
+                      </Tooltip>
+                      {confirmDelete === b.filename ? (
+                        <div className="flex items-center gap-1">
+                          <Tooltip label={t('common.delete')}>
+                            <button onClick={() => handleDelete(b.filename)} className="p-2 rounded-lg text-danger hover:bg-danger/10 transition-colors">
+                              <Check className="w-4 h-4" />
+                            </button>
+                          </Tooltip>
+                          <Tooltip label={t('common.cancel')}>
+                            <button onClick={() => setConfirmDelete(null)} className="p-2 rounded-lg text-dark-400 hover:bg-dark-700/50 transition-colors">
+                              <XCircle className="w-4 h-4" />
+                            </button>
+                          </Tooltip>
+                        </div>
+                      ) : (
+                        <Tooltip label={t('settings.backup_delete')}>
+                          <button
+                            onClick={() => setConfirmDelete(b.filename)}
+                            className="p-2 rounded-lg text-dark-400 hover:text-danger hover:bg-danger/10 transition-colors"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </Tooltip>
+                      )}
+                    </div>
+                  </div>
+                  {downloadingThis && (
+                    <ProgressBar
+                      value={transfer.loaded}
+                      max={transfer.total}
+                      size="sm"
+                      color="accent"
+                      animated
+                      showLabel
+                      label={t('settings.backup_downloading', { loaded: formatBytes(transfer.loaded), total: formatBytes(transfer.total) })}
+                      className="mt-3"
+                    />
                   )}
                 </div>
-              </div>
-            ))}
+              )
+            })}
           </div>
         )}
       </div>
