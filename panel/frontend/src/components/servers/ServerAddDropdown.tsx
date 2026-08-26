@@ -222,7 +222,7 @@ export function ServerAddDropdown({ servers, excludeIds, onAdd, labels, storageK
       </div>
 
       {open && (
-        <div className="absolute z-20 mt-1 w-full bg-dark-900 border border-dark-700 rounded-lg shadow-xl max-h-64 overflow-y-auto">
+        <div className="absolute z-20 mt-1 w-full bg-dark-900 border border-dark-700 rounded-lg shadow-xl max-h-[32rem] overflow-y-auto">
           {nothingVisible ? (
             <p className="text-xs text-dark-500 py-3 text-center">{emptyMessage}</p>
           ) : hasFolders ? (
