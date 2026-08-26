@@ -8,7 +8,7 @@ The panel polls Remnawave, finds sessions with torrent traffic and bans those ad
 |---|---|
 | Poll interval | How often the panel asks Remnawave for new detections. 5 minutes by default |
 | Ban duration | How long an address stays blocked |
-| Excluded servers | Nodes the ban is not distributed to |
+| Excluded servers | Nodes the ban is not distributed to. Servers are listed by folder, already excluded ones are hidden; a whole folder can be excluded at once |
 | Webhook warning | Send a notification and give the user time to stop the client before the ban |
 
 ## How the warning works

@@ -2733,7 +2733,8 @@ SSE-события: `note_update` — `{"content": "...", "version": N}`, `tasks
 - `panel/backend/app/routers/torrent_blocker.py` — `UpdateSettings` с field_validator; `_settings_to_dict`; эндпоинты `POST /test-webhook`, `GET /active-bans`
 - `panel/frontend/src/api/client.ts` — тип `TorrentBlockerActiveBan {ip, banned_at, expires_at}`; метод `getActiveBans`; метод `testWebhook`
 - `panel/frontend/src/stores/torrentBlockerStore.ts` — состояние `activeBans/activeBansTotal`; action `fetchActiveBans`; action `testWebhook`
-- `panel/frontend/src/pages/TorrentBlocker.tsx` — блок «Webhook-предупреждение»; таблица «Заблокированные сейчас IP» с пагинацией и авто-обновлением 5 сек; хелпер `formatRemaining`
+- `panel/frontend/src/pages/TorrentBlocker.tsx` — блок «Webhook-предупреждение»; таблица «Заблокированные сейчас IP» с пагинацией и авто-обновлением 5 сек; хелпер `formatRemaining`; исключённые серверы — чипы выбранных + `ServerAddDropdown`
+- `panel/frontend/src/components/servers/ServerAddDropdown.tsx` — поиск с выпадающим списком серверов по папкам для добавления в список: уже добавленные (`excludeIds`) скрыты, у папки кнопка «добавить всю папку», при поиске папки раскрыты, раскрытые папки запоминаются в `localStorage` по `storageKey`, порядок папок — из `dashboard_folder_order`; `isRestricted` помечает замком ноды, которые действие не примут
 - `panel/frontend/src/locales/ru.json`, `en.json` — ключи `torrent_blocker.active_bans`, `no_active_bans`, `col_banned_at`, `col_expires_in`, `webhook_*`
 - `panel/frontend/src/data/faq/content/ru/PAGE_TORRENT_BLOCKER.md` — краткое описание вебхука в общем FAQ страницы
 - `panel/frontend/src/data/faq/content/ru/TORRENT_BLOCKER_WEBHOOK.md`, `faq.types.ts` (`FAQ_SCREENS.TORRENT_BLOCKER_WEBHOOK`) — отдельная статья с полным форматом payload и разбором полей; значок `<FAQIcon screen="TORRENT_BLOCKER_WEBHOOK" size="sm" />` рядом с тумблером «Webhook-предупреждение»

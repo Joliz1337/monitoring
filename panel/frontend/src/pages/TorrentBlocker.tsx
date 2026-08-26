@@ -1,17 +1,17 @@
-import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
+import { useEffect, useState, useCallback, useMemo } from 'react'
 import { nodeAllows } from '../utils/nodeCapabilities'
 import { useTranslation } from 'react-i18next'
 import ReactApexChart from 'react-apexcharts'
 import type { ApexOptions } from 'apexcharts'
 import {
   ShieldBan, Settings, Activity, BarChart3, Ban,
-  Play, Save, Loader2, CheckCircle2, Lock,
-  Server as ServerIcon, Search, X, Webhook, Send,
+  Play, Save, Loader2, Server as ServerIcon, X, Webhook, Send,
 } from 'lucide-react'
 import { useTorrentBlockerStore } from '../stores/torrentBlockerStore'
 import type { TorrentBlockerStatsRange } from '../api/client'
 import { Tooltip } from '../components/ui/Tooltip'
 import { FAQIcon } from '../components/FAQ'
+import { ServerAddDropdown } from '../components/servers/ServerAddDropdown'
 
 function formatRelative(iso: string | null): string {
   if (!iso) return '—'
@@ -69,9 +69,6 @@ export default function TorrentBlocker() {
   const [saving, setSaving] = useState(false)
   const [testingWebhook, setTestingWebhook] = useState(false)
   const [bansPage, setBansPage] = useState(0)
-  const [serverSearch, setServerSearch] = useState('')
-  const [serverDropdownOpen, setServerDropdownOpen] = useState(false)
-  const dropdownRef = useRef<HTMLDivElement>(null)
 
   const load = useCallback(() => {
     store.fetchSettings()
@@ -111,16 +108,6 @@ export default function TorrentBlocker() {
     store.fetchActiveBans(bansPage * 50, 50)
   }, [bansPage])
 
-  useEffect(() => {
-    const handleClick = (e: MouseEvent) => {
-      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
-        setServerDropdownOpen(false)
-      }
-    }
-    document.addEventListener('mousedown', handleClick)
-    return () => document.removeEventListener('mousedown', handleClick)
-  }, [])
-
   const handleSave = async () => {
     setSaving(true)
     await store.updateSettings(localSettings)
@@ -133,12 +120,10 @@ export default function TorrentBlocker() {
     setTestingWebhook(false)
   }
 
-  const toggleExclusion = (serverId: number) => {
+  const addExclusions = (serverIds: number[]) => {
     setLocalSettings(prev => ({
       ...prev,
-      excluded_server_ids: prev.excluded_server_ids.includes(serverId)
-        ? prev.excluded_server_ids.filter(id => id !== serverId)
-        : [...prev.excluded_server_ids, serverId],
+      excluded_server_ids: [...new Set([...prev.excluded_server_ids, ...serverIds])],
     }))
   }
 
@@ -148,14 +133,6 @@ export default function TorrentBlocker() {
       excluded_server_ids: prev.excluded_server_ids.filter(id => id !== serverId),
     }))
   }
-
-  const filteredServers = useMemo(() => {
-    const q = serverSearch.toLowerCase().trim()
-    if (!q) return store.servers
-    return store.servers.filter(s =>
-      s.name.toLowerCase().includes(q) || (s.url && s.url.toLowerCase().includes(q))
-    )
-  }, [serverSearch, store.servers])
 
   const excludedServerNames = useMemo(() => {
     const map = new Map(store.servers.map(s => [s.id, s.name]))
@@ -336,64 +313,21 @@ export default function TorrentBlocker() {
               </div>
             )}
 
-            <div className="relative" ref={dropdownRef}>
-              <div
-                onClick={() => setServerDropdownOpen(!serverDropdownOpen)}
-                className="flex items-center gap-2 px-3 py-2 rounded-lg bg-dark-800 border border-dark-700 cursor-pointer hover:border-dark-600"
-              >
-                <Search className="w-4 h-4 text-dark-400 shrink-0" />
-                <input
-                  type="text"
-                  value={serverSearch}
-                  onChange={e => { setServerSearch(e.target.value); setServerDropdownOpen(true) }}
-                  onFocus={() => setServerDropdownOpen(true)}
-                  placeholder={t('torrent_blocker.search_servers')}
-                  className="bg-transparent text-sm text-dark-100 placeholder-dark-500 outline-none w-full"
-                  onClick={e => e.stopPropagation()}
-                />
-                {serverSearch && (
-                  <Tooltip label={t('common.clear_search')}>
-                    <button onClick={(e) => { e.stopPropagation(); setServerSearch('') }} className="text-dark-500 hover:text-dark-300">
-                      <X className="w-3.5 h-3.5" />
-                    </button>
-                  </Tooltip>
-                )}
-              </div>
-
-              {serverDropdownOpen && (
-                <div className="absolute z-20 mt-1 w-full bg-dark-900 border border-dark-700 rounded-lg shadow-xl max-h-48 overflow-y-auto">
-                  {filteredServers.length === 0 ? (
-                    <p className="text-xs text-dark-500 py-3 text-center">{t('torrent_blocker.no_servers')}</p>
-                  ) : (
-                    filteredServers.map(server => {
-                      const isExcluded = localSettings.excluded_server_ids.includes(server.id)
-                      return (
-                        <button
-                          key={server.id}
-                          onClick={() => toggleExclusion(server.id)}
-                          className={`w-full flex items-center gap-2.5 px-3 py-2 text-left text-sm hover:bg-dark-800/80 transition-colors ${
-                            isExcluded ? 'bg-accent-500/10 text-accent-300' : 'text-dark-300'
-                          }`}
-                        >
-                          <div className={`w-4 h-4 rounded border flex items-center justify-center shrink-0 ${
-                            isExcluded
-                              ? 'bg-accent-500 border-accent-500'
-                              : 'border-dark-600 bg-dark-800'
-                          }`}>
-                            {isExcluded && <CheckCircle2 className="w-3 h-3 text-white" />}
-                          </div>
-                          <ServerIcon className="w-3.5 h-3.5 text-dark-500 shrink-0" />
-                          <span className="truncate">{server.name}</span>
-                          {!nodeAllows(server, 'ipset', 'write') && (
-                            <Lock className="w-3 h-3 text-purple shrink-0" />
-                          )}
-                        </button>
-                      )
-                    })
-                  )}
-                </div>
-              )}
-            </div>
+            <ServerAddDropdown
+              servers={store.servers}
+              excludeIds={localSettings.excluded_server_ids}
+              onAdd={addExclusions}
+              storageKey="torrent_excluded_expanded_folders"
+              isRestricted={server => !nodeAllows(server, 'ipset', 'write')}
+              labels={{
+                placeholder: t('torrent_blocker.search_servers'),
+                noFolder: t('torrent_blocker.no_folder'),
+                addFolder: t('torrent_blocker.exclude_folder'),
+                allAdded: store.servers.length === 0 ? t('torrent_blocker.no_servers') : t('torrent_blocker.all_excluded'),
+                noResults: t('common.no_results'),
+                clearSearch: t('common.clear_search'),
+              }}
+            />
           </div>
 
           <div className="border-t border-dark-800 pt-4 space-y-3">
