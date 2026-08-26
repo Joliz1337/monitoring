@@ -3,9 +3,31 @@ import { Send, Loader2, Save, CheckCircle2, XCircle, CalendarClock } from 'lucid
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { backupApi, BackupAutoSettings, BackupAutoSettingsIn } from '../../api/client'
+import { getBrowserUtcOffset } from '../../stores/settingsStore'
 import { SettingsSection } from './SettingsSection'
 import { SettingRow } from './SettingRow'
 import { Switch } from './Switch'
+
+const DEFAULT_AT_TIME_UTC = '04:00'
+
+const pad2 = (n: number) => n.toString().padStart(2, '0')
+
+// Планировщик держит время в UTC, пользователь вводит и видит его в поясе браузера
+function utcTimeToLocal(hhmm: string): string {
+  const [h, m] = hhmm.split(':').map(Number)
+  if (Number.isNaN(h) || Number.isNaN(m)) return hhmm
+  const date = new Date()
+  date.setUTCHours(h, m, 0, 0)
+  return `${pad2(date.getHours())}:${pad2(date.getMinutes())}`
+}
+
+function localTimeToUtc(hhmm: string): string {
+  const [h, m] = hhmm.split(':').map(Number)
+  if (Number.isNaN(h) || Number.isNaN(m)) return hhmm
+  const date = new Date()
+  date.setHours(h, m, 0, 0)
+  return `${pad2(date.getUTCHours())}:${pad2(date.getUTCMinutes())}`
+}
 
 export default function AutoBackupCard() {
   const { t } = useTranslation()
@@ -18,7 +40,7 @@ export default function AutoBackupCard() {
 
   const [enabled, setEnabled] = useState(false)
   const [scheduleKind, setScheduleKind] = useState<'daily' | 'every_hours'>('daily')
-  const [atTime, setAtTime] = useState('04:00')
+  const [atTime, setAtTime] = useState(utcTimeToLocal(DEFAULT_AT_TIME_UTC))
   const [everyHours, setEveryHours] = useState(24)
   const [chatId, setChatId] = useState('')
   const [volumeMb, setVolumeMb] = useState(45)
@@ -33,7 +55,7 @@ export default function AutoBackupCard() {
   const apply = (s: BackupAutoSettings) => {
     setEnabled(s.enabled)
     setScheduleKind(s.schedule_kind)
-    setAtTime(s.at_time || '04:00')
+    setAtTime(utcTimeToLocal(s.at_time || DEFAULT_AT_TIME_UTC))
     setEveryHours(s.every_hours || 24)
     setChatId(s.chat_id || '')
     setVolumeMb(s.volume_size_mb || 45)
@@ -56,7 +78,7 @@ export default function AutoBackupCard() {
     const p: BackupAutoSettingsIn = {
       enabled,
       schedule_kind: scheduleKind,
-      at_time: atTime,
+      at_time: localTimeToUtc(atTime),
       every_hours: everyHours,
       chat_id: chatId,
       volume_size_mb: volumeMb,
@@ -131,8 +153,8 @@ export default function AutoBackupCard() {
           </select>
           {scheduleKind === 'daily' ? (
             <>
-              <input className="input py-2 text-sm w-24" value={atTime} onChange={e => setAtTime(e.target.value)} placeholder="04:00" />
-              <span className="text-xs text-dark-500">{t('backup.auto.time_utc')}</span>
+              <input className="input py-2 text-sm w-24" value={atTime} onChange={e => setAtTime(e.target.value)} placeholder={utcTimeToLocal(DEFAULT_AT_TIME_UTC)} />
+              <span className="text-xs text-dark-500">{t('backup.auto.time_local', { offset: getBrowserUtcOffset() })}</span>
             </>
           ) : (
             <>

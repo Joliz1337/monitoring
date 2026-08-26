@@ -16,7 +16,7 @@ import {
   StickyNote,
   type LucideIcon
 } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useExtStore } from '../../stores/_extStore'
 import { useNotesStore } from '../../stores/notesStore'
 import { useSettingsStore } from '../../stores/settingsStore'
@@ -64,6 +64,11 @@ export default function Layout() {
   const { t } = useTranslation()
 
   useEffect(() => { fetchSettings() }, [fetchSettings])
+
+  // Каскадное появление пунктов — только при первой отрисовке меню: раздел,
+  // включённый в настройках позже, иначе висел бы прозрачным index × 0.1 с
+  const introDone = useRef(false)
+  useEffect(() => { introDone.current = true }, [])
 
   const baseNavItems = PANEL_MODULES
     .filter(module => !hiddenModules.includes(module.id))
@@ -180,7 +185,7 @@ export default function Layout() {
                   key={item.to}
                   custom={index}
                   variants={navItemVariants}
-                  initial="hidden"
+                  initial={introDone.current ? false : 'hidden'}
                   animate="visible"
                 >
                   <NavLink

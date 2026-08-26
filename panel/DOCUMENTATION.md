@@ -41,14 +41,23 @@
 | Интерфейс | `interface` | язык, сетка/список серверов, автообновление, период трафика, часовой пояс панели, графики (режим, полоса пиков, живые показатели, отклонения по метрикам) |
 | Ноды | `nodes` | интервалы сбора метрик и HAProxy, синхронизация времени, путь установок Remnawave |
 | Разделы | `modules` | какие разделы показывать в меню |
-| Система | `system` | ресурсы сервера панели, SSL-сертификат панели, канал обновлений |
+| Система | `system` | ресурсы сервера панели, SSL-сертификат панели, канал обновлений, история нагрузки хоста |
 | Бэкапы | `backups` | ручные бэкапы и восстановление, автобэкапы в Telegram |
 
 Секции внутри вкладки раскладываются плиткой (`TAB_GRID`): одна колонка до 1536px, две от 1536px, три от 2200px — на широком экране карточка во всю ширину оставляла бы пустоту между подписью и контролом; «Разделы» — всегда во всю ширину, «Бэкапы» — не больше двух колонок. Все настройки сохраняются сразу при изменении (`PUT /settings/{key}`); явная кнопка «Сохранить» только у пути Remnawave и у автобэкапов (секреты). Строки внутри секций — `SettingRow` (подпись и подсказка слева, контрол справа; id подписи уходит контролу через контекст как `aria-labelledby`). Контролы: `SegmentedControl` (`role="radiogroup"`, roving tabindex, стрелки переключают, одна бегущая «пилюля» с `layoutId` из `useId()`, без анимации при `prefers-reduced-motion`), `Switch` (`role="switch"`), нативный `<select>` для часовых поясов. Карточки с опросом (продление сертификата, синхронизация времени, бэкапы) при монтировании проверяют, не идёт ли операция, и продолжают опрос — переключение вкладок не теряет прогресс.
 
+### История нагрузки хоста панели
+
+Вкладка «Система» показывает графики CPU, памяти и load average самого сервера панели (`PanelHostChartsCard`) за 1h/24h/7d/30d — всегда сглаженная линия по средним и полупрозрачная полоса пиков, настройки «Графики» на них не влияют.
+
+Сэмплер `services/panel_host_metrics.py` (стартует в lifespan) раз в секунду читает хост: CPU — по собственной дельте `psutil.cpu_times()`, а не `cpu_percent` (у того один глобальный «прошлый замер» на процесс, и `/system/stats` сбивал бы окно сэмплера своими вызовами), память, load average; раз в 10 с пишет строку в `panel_host_metrics` со средним и максимумом по секундным пробам. Хранение 30 дней (чистка раз в час), без агрегатов — четверть миллиона строк, бакеты считаются напрямую. Сетевых счётчиков нет намеренно: бэкенд живёт в bridge-сети Docker и видит только трафик своего veth.
+
+`GET /system/stats/history?period=1h|24h|7d|30d`: 1h — снапшоты как есть, 24h — бакеты 5 мин, 7d/30d — часовые (`date_bin` от epoch, как у истории нод). Точка: `{timestamp, data_points, cpu_usage, max_cpu, memory_percent, max_memory_percent, memory_used, memory_available, load_avg_1, max_load}`. Простои панели — по дырам между соседними точками длиннее `max(30 с, 2×интервал, бакет)`: `gaps` для красной полосы и null-маркер в данных для разрыва линии (переиспользуется `insert_gap_markers` из `metrics_history`).
+
 **Файлы:**
 - `panel/frontend/src/pages/Settings.tsx` — оболочка: шапка, таб-бар, `?tab=`
-- `panel/frontend/src/components/settings/` — примитивы `SettingsSection`, `SettingRow`, `SegmentedControl`, `Switch`; вкладки `InterfaceTab`, `NodesTab`, `ModulesTab`, `SystemTab`, `BackupsTab`; карточки `PanelHostStatsCard`, `PanelCertificateCard`, `TimeSyncSection`, `BackupCard`, `AutoBackupCard`
+- `panel/frontend/src/components/settings/` — примитивы `SettingsSection`, `SettingRow`, `SegmentedControl`, `Switch`; вкладки `InterfaceTab`, `NodesTab`, `ModulesTab`, `SystemTab`, `BackupsTab`; карточки `PanelHostStatsCard`, `PanelHostChartsCard`, `PanelCertificateCard`, `TimeSyncSection`, `BackupCard`, `AutoBackupCard` (время автобэкапа вводится и показывается в поясе браузера, в API уходит UTC)
+- `panel/backend/app/services/panel_host_metrics.py` — сэмплер, `load_host_history`; модель `PanelHostMetric` в `models.py`; эндпоинт в `routers/system.py`; тесты `tests/test_panel_host_metrics.py`
 - FAQ: `data/faq/content/{ru,en}/PAGE_SETTINGS.md`
 
 ## Интервалы сбора данных

@@ -6,6 +6,7 @@ import { SettingsSection, TAB_MOTION, TAB_GRID } from './SettingsSection'
 import { SettingRow } from './SettingRow'
 import { SegmentedControl, type SegmentedOption } from './SegmentedControl'
 import { PanelHostStatsCard } from './PanelHostStatsCard'
+import { PanelHostChartsCard } from './PanelHostChartsCard'
 import { PanelCertificateCard } from './PanelCertificateCard'
 
 export function SystemTab() {
@@ -21,6 +22,7 @@ export function SystemTab() {
     <motion.div {...TAB_MOTION} className={TAB_GRID}>
       <PanelHostStatsCard />
       <PanelCertificateCard />
+      <PanelHostChartsCard className="2xl:col-span-2 min-[2200px]:col-span-3" />
 
       <SettingsSection icon={GitBranch} title={t('settings.update_channel')} description={t('settings.update_channel_desc')}>
         <SettingRow label={t('settings.update_channel_label')} hint={t('settings.update_channel_hint')}>

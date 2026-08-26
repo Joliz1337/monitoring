@@ -34,8 +34,8 @@ function cacheHiddenModules(ids: string[]): void {
   } catch { /* приватный режим браузера */ }
 }
 
-// Get browser timezone offset in format "+03:00" or "-05:00"
-function getBrowserTimezone(): string {
+// Смещение часового пояса браузера в формате "+03:00" / "-05:00"
+export function getBrowserUtcOffset(): string {
   const offset = -new Date().getTimezoneOffset()
   const sign = offset >= 0 ? '+' : '-'
   const hours = Math.floor(Math.abs(offset) / 60)
@@ -56,7 +56,7 @@ export interface TimezoneOption {
 
 // Common timezone options
 export const TIMEZONE_OPTIONS: TimezoneOption[] = [
-  { value: 'auto', label: 'Auto (Browser)', offset: getBrowserTimezone() },
+  { value: 'auto', label: 'Auto (Browser)', offset: getBrowserUtcOffset() },
   { value: 'UTC', label: 'UTC', offset: '+00:00' },
   { value: 'Europe/Moscow', label: 'Moscow (MSK)', offset: '+03:00' },
   { value: 'Europe/London', label: 'London (GMT/BST)', offset: '+00:00' },

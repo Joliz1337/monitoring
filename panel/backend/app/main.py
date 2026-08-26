@@ -30,6 +30,7 @@ from app.services.node_sync_queue import start_node_sync_queue, stop_node_sync_q
 from app.services.xray_test.runner import start_xray_test_service, stop_xray_test_service
 from app.services.xray_test.startup import load_xray_test_versions
 from app.services.traffic_import import start_traffic_import, stop_traffic_import
+from app.services.panel_host_metrics import start_panel_host_sampler, stop_panel_host_sampler
 from app.services.http_client import init_http_clients, close_http_clients
 from app.services.pki import load_or_create_keygen
 from app.services.update_channel import load_branch_from_db
@@ -98,6 +99,7 @@ async def lifespan(app: FastAPI):
 
     await start_telegram_bot_service()
     await start_collector()
+    await start_panel_host_sampler()
 
     blocklist_manager = get_blocklist_manager()
     await blocklist_manager.start()
@@ -139,6 +141,7 @@ async def lifespan(app: FastAPI):
     await stop_server_alerter()
     await stop_xray_stats_collector()
     await blocklist_manager.stop()
+    await stop_panel_host_sampler()
     await stop_collector()
     await stop_telegram_bot_service()
 

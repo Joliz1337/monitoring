@@ -213,6 +213,26 @@ class NodePendingSync(Base):
     last_error = Column(String(500), nullable=True)
 
 
+class PanelHostMetric(Base):
+    """История нагрузки хоста самой панели: среднее и пик за интервал снапшота.
+
+    Сетевых счётчиков нет намеренно — бэкенд живёт в bridge-сети Docker и
+    видит только трафик своего veth, а не сетевых карт хоста.
+    """
+    __tablename__ = "panel_host_metrics"
+
+    id = Column(BigInteger, primary_key=True)
+    timestamp = Column(DateTime(timezone=True), nullable=False, index=True)
+    cpu_usage = Column(Float)
+    cpu_usage_max = Column(Float)
+    memory_percent = Column(Float)
+    memory_percent_max = Column(Float)
+    memory_used = Column(BigInteger)
+    memory_available = Column(BigInteger)
+    load_avg_1 = Column(Float)
+    load_avg_1_max = Column(Float)
+
+
 class MetricsSnapshot(Base):
     """Хранит историю метрик для каждого сервера (сбор на панели)"""
     __tablename__ = "metrics_snapshots"

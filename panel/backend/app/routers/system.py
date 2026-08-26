@@ -22,6 +22,7 @@ from app.database import get_db, async_session
 from app.models import Server, PanelSettings
 from app.services import update_channel
 from app.services.net_utils import resolve_host
+from app.services.panel_host_metrics import HostHistoryPeriod, load_host_history
 from app.services.wildcard_ssl import USE_FOR_PANEL_SETTING
 
 router = APIRouter(prefix="/system", tags=["system"])
@@ -921,3 +922,13 @@ async def get_panel_server_stats(_: dict = Depends(verify_auth)):
     except Exception as e:
         logger.error(f"Error getting server stats: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get server stats: {str(e)}")
+
+
+@router.get("/stats/history")
+async def get_panel_host_history(
+    period: HostHistoryPeriod = Query(default="1h"),
+    _: dict = Depends(verify_auth),
+    db: AsyncSession = Depends(get_db),
+):
+    """История нагрузки хоста панели: среднее и пик за интервал точки."""
+    return await load_host_history(db, period)

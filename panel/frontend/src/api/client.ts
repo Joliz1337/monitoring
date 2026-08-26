@@ -1342,6 +1342,31 @@ export interface PanelServerStats {
   } | null
 }
 
+export type HostHistoryPeriod = '1h' | '24h' | '7d' | '30d'
+
+export interface PanelHostHistoryPoint {
+  timestamp: string
+  data_points: number
+  cpu_usage: number | null
+  max_cpu: number | null
+  memory_percent: number | null
+  max_memory_percent: number | null
+  memory_used: number | null
+  memory_available: number | null
+  load_avg_1: number | null
+  max_load: number | null
+}
+
+export interface PanelHostHistoryResponse {
+  period: HostHistoryPeriod
+  bucket_sec: number | null
+  from_time: string
+  to_time: string
+  count: number
+  data: PanelHostHistoryPoint[]
+  gaps: ChartGap[]
+}
+
 export const systemApi = {
   getPanelIp: () => api.get<PanelIpInfo>('/system/panel-ip'),
   getVersionBase: () => api.get<VersionBaseInfo>('/system/version/base'),
@@ -1370,6 +1395,8 @@ export const systemApi = {
   
   // Panel server statistics (CPU, RAM, Disk)
   getServerStats: () => api.get<PanelServerStats>('/system/stats'),
+  getStatsHistory: (period: HostHistoryPeriod) =>
+    api.get<PanelHostHistoryResponse>('/system/stats/history', { params: { period } }),
 }
 
 // Anti-DDoS types
