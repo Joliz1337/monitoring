@@ -1881,6 +1881,7 @@ Frontend сохраняет незавершённые job_id в `localStorage` 
 После восстановления рекомендуется перезапуск: `docker compose restart`.
 
 **Алгоритм восстановления (`_run_pg_restore`):**
+0. На всё время `pg_restore` панель закрывает себе доступ к базе — `database.database_maintenance()` (`engine.dispose()` + хук `do_connect` на `engine.sync_engine`, который кидает `DatabaseMaintenanceError` на каждую попытку нового соединения). Без этого фоновые циклы (сэмплер хоста панели раз в 10 с, коллектор, импорт трафика) пишут в таблицы между фазами: строка, вставленная до `setval` последовательности, получает `id=1`, дублирует строку из дампа, и фаза post-data падает на создании первичного ключа (`could not create unique index "panel_host_metrics_pkey"`); `pg_terminate_backend` в начале не спасает — пул переподключается мгновенно. Циклы на это время логируют ошибку и пропускают тик, API-запросы к базе отдают 500; `/backup/status` базу не трогает, поэтому опрос статуса с фронта работает. Запрет снимается в `finally` — и при провале restore тоже.
 1. `psql -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"` — полный сброс схемы через `docker exec`
 2. `pg_restore --no-owner --section=pre-data --section=data` — схема и данные
 3. Чистка осиротевших FK-ссылок (`server_cache`/`metrics_snapshots`/`aggregated_metrics`/`blocklist_rules`/`alert_history` на несуществующие `servers.id`) — перед добавлением constraints в фазе 3
@@ -1906,6 +1907,7 @@ Frontend сохраняет незавершённые job_id в `localStorage` 
 - `panel/frontend/src/components/settings/BackupCard.tsx`, `AutoBackupCard.tsx` — вкладка «Бэкапы» в настройках (модалка подтверждения восстановления рендерится через portal в `document.body`)
 - `panel/nginx/nginx.conf.template` — location `= /api/backup/restore` с увеличенными лимитами
 - `panel/backend/tests/test_backup_telegram.py` — шифрование, порядок томов, распознавание набора и дыр в нумерации
+- `panel/backend/app/database.py` — `database_maintenance`, `DatabaseMaintenanceError`; тест `tests/test_database_maintenance.py`
 
 ### Wildcard SSL
 

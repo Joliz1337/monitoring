@@ -22,7 +22,7 @@ from starlette.datastructures import UploadFile
 
 from app.auth import verify_auth
 from app.config import get_settings
-from app.database import async_session, async_session_maker, get_db
+from app.database import async_session, async_session_maker, database_maintenance, get_db
 from app.services import backup_telegram
 from app.services.http_client import close_http_clients, init_http_clients
 from app.services.pki import load_or_create_keygen
@@ -325,9 +325,12 @@ async def _reload_pki(app) -> None:
 async def _restore_backup_task(data: bytes, filename: str, app=None):
     try:
         dump, env_dict = _unframe_backup(data)
-        err = await asyncio.get_event_loop().run_in_executor(
-            None, _run_pg_restore, dump
-        )
+        # Пока идёт pg_restore, панель не должна трогать базу — иначе фоновые
+        # записи попадают между фазами и ломают первичные ключи
+        async with database_maintenance("database restore in progress"):
+            err = await asyncio.get_event_loop().run_in_executor(
+                None, _run_pg_restore, dump
+            )
         if err:
             _set_status("idle", filename, err)
             logger.error(f"Restore failed: {err}")

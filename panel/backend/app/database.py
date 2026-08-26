@@ -1,10 +1,11 @@
 """Database module with PostgreSQL support."""
 
 import logging
+from contextlib import asynccontextmanager
 
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
-from sqlalchemy import text
+from sqlalchemy import event, text
 
 from app.config import get_settings
 from app import crypto
@@ -28,6 +29,39 @@ async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit
 
 # Alias for background tasks
 async_session_maker = async_session
+
+
+class DatabaseMaintenanceError(RuntimeError):
+    """Панель сама закрыла себе доступ к базе — идёт операция, при которой писать нельзя."""
+
+
+_maintenance_reason: str | None = None
+
+
+@event.listens_for(engine.sync_engine, "do_connect")
+def _refuse_connections_during_maintenance(dialect, conn_rec, cargs, cparams):
+    if _maintenance_reason:
+        raise DatabaseMaintenanceError(_maintenance_reason)
+
+
+@asynccontextmanager
+async def database_maintenance(reason: str):
+    """Закрыть панели доступ к базе на время операции.
+
+    Восстановление из бэкапа сбрасывает схему и заливает её заново; фоновые
+    циклы (сэмплер хоста панели, коллектор, импорт трафика) при этом пишут в
+    таблицы прямо между фазами pg_restore — строка, вставленная в свежую
+    таблицу до setval последовательности, получает id=1 и дублирует строку из
+    дампа, после чего фаза post-data не может создать первичный ключ. Убить
+    соединения один раз недостаточно — пул тут же переподключается, поэтому
+    новые соединения отклоняются в do_connect до конца операции."""
+    global _maintenance_reason
+    _maintenance_reason = reason
+    await engine.dispose()
+    try:
+        yield
+    finally:
+        _maintenance_reason = None
 
 
 class Base(DeclarativeBase):
