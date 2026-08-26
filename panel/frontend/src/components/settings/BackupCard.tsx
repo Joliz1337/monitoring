@@ -96,9 +96,8 @@ export function BackupCard() {
       fetchBackups()
       if (current.error) {
         toast.error(current.error)
-      } else if (current.filename) {
-        const wasRestore = current.completed_at && !current.filename.startsWith('backup_')
-        toast.success(wasRestore ? t('settings.backup_restore_success') : t('settings.backup_success'))
+      } else if (current.operation) {
+        toast.success(current.operation === 'restore' ? t('settings.backup_restore_success') : t('settings.backup_success'))
       }
     }, STATUS_POLL_MS)
   }, [fetchStatus, fetchBackups, t])

@@ -1876,7 +1876,7 @@ Frontend сохраняет незавершённые job_id в `localStorage` 
 | GET | /api/backup/{filename}/download | Скачать файл бэкапа |
 | DELETE | /api/backup/{filename} | Удалить бэкап |
 | POST | /api/backup/restore | Загрузить и восстановить: один `.dump` или все тома набора из Telegram (multipart, поле `file` повторяется, `password` — пароль архива; до 2 ГБ) |
-| GET | /api/backup/status | Статус операции (idle/creating/restoring, поле `error` — текст последней ошибки) |
+| GET | /api/backup/status | Статус операции: `state` idle/creating/restoring, `operation` create/restore — какая операция шла (остаётся после возврата в idle, по нему фронт выбирает тост «создан»/«восстановлено»), `error` — текст последней ошибки |
 
 После восстановления рекомендуется перезапуск: `docker compose restart`.
 

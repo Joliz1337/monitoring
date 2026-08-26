@@ -50,6 +50,7 @@ _ENV_PRESERVE = {
 
 _operation_status: dict = {
     "state": "idle",
+    "operation": None,  # create | restore — какая операция шла/идёт; переживает возврат в idle
     "filename": None,
     "error": None,
     "started_at": None,
@@ -275,6 +276,7 @@ def _claim_operation(state: str, filename: str | None):
     """
     if _operation_status["state"] != "idle":
         raise HTTPException(409, "Another backup operation is in progress")
+    _operation_status["operation"] = "create" if state == "creating" else "restore"
     _set_status(state, filename)
 
 
@@ -467,6 +469,7 @@ async def restore_backup(
 async def backup_status(_: dict = Depends(verify_auth)):
     return {
         "state": _operation_status["state"],
+        "operation": _operation_status["operation"],
         "filename": _operation_status["filename"],
         "error": _operation_status["error"],
         "started_at": _operation_status["started_at"],

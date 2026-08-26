@@ -1825,6 +1825,7 @@ export interface BackupInfo {
 
 export interface BackupStatus {
   state: 'idle' | 'creating' | 'restoring'
+  operation: 'create' | 'restore' | null
   filename: string | null
   error: string | null
   started_at: string | null
