@@ -28,13 +28,32 @@
 - **Авто-восстановление ноды** — при возвращении сервера в сеть панель автоматически сверяет состояние firewall (UFW), HAProxy-конфига, статуса HAProxy, IP Blocklist и DNAT-правил с ожидаемым; переприменяет только сбившееся (drift-detection по SHA256-хэшам); без Telegram-уведомлений
 - **Авторазвёртывание ноды** — установка ноды мониторинга прямо из вкладки «Серверы»: подключение по SSH (пароль или приватный ключ), запуск `install.sh --unattended` на целевом сервере; установка выполняется **в фоне на бэкенде** — закрытие вкладки браузера не прерывает процесс; живой лог переподключаем (GET-стрим с реплеем); опционально устанавливает WARP и ноду Remnawave с сохранёнными именованными сертификатами; **массовый деплой** — произвольное количество дополнительных целей, каждая со своим SSH и опциями; после успешного деплоя бэкенд автоматически привязывает сервер к выбранным HAProxy-профилю и/или Firewall-профилю; незавершённые задачи переживают перезагрузку страницы (восстановление через localStorage + `GET /deploy/jobs`); **поддержка Hetzner Rescue System** — при обнаружении rescue-среды `install.sh` устанавливает Ubuntu 24.04, перезагружается, панель ждёт ноду до 40 мин через поллинг и завершает деплой автоматически
 - **SOCKS5-прокси до ноды** — опциональное поле у сервера (`ip:port` или `ip:port@login:pass`): при заполнении все запросы панели к этой ноде идут через указанный прокси вместо прямого соединения — и HTTP (метрики, proxy-роутер, синхронизация блок-листов/анти-DDoS, SSE-терминал, тест подключения), и SSH при авторазвёртывании ноды
-- **Канал обновлений** — переключатель «Стабильный» (`main`) / «Dev» (`dev`) в разделе Настройки; определяет, откуда панель качает свой и нодовский код при обновлении, конфиги оптимизаций/анти-DDoS и Docker-образы (тег `:latest` для main, `:dev` для dev)
-- **Выбор доступных разделов** — карточка «Разделы панели» в Настройках: вкладки, которыми эта установка не пользуется, убираются из бокового меню и закрываются по прямой ссылке; данные и фоновые задачи бэкенда при этом продолжают работать
+- **Канал обновлений** — переключатель «Стабильный» (`main`) / «Dev» (`dev`) в Настройках (вкладка «Система»); определяет, откуда панель качает свой и нодовский код при обновлении, конфиги оптимизаций/анти-DDoS и Docker-образы (тег `:latest` для main, `:dev` для dev)
+- **Выбор доступных разделов** — вкладка «Разделы» в Настройках: разделы, которыми эта установка не пользуется, убираются из бокового меню и закрываются по прямой ссылке; данные и фоновые задачи бэкенда при этом продолжают работать
 - **Права ноды (NODE_CAPABILITIES)** — владелец ноды может ограничить, что панель вправе на ней делать, строкой в `.env` ноды; панель хранит присланную нодой карту прав и не отправляет запросы, на которые заведомо получит отказ — закрытые разделы помечаются в интерфейсе, а не падают ошибкой
+
+## Страница «Настройки»
+
+Настройки разложены по пяти вкладкам; активная хранится в URL (`?tab=`), неизвестное значение открывает «Интерфейс»:
+
+| Вкладка | `?tab=` | Что внутри |
+|---------|---------|------------|
+| Интерфейс | `interface` | язык, сетка/список серверов, автообновление, период трафика, часовой пояс панели, графики (режим, полоса пиков, живые показатели, отклонения по метрикам) |
+| Ноды | `nodes` | интервалы сбора метрик и HAProxy, синхронизация времени, путь установок Remnawave |
+| Разделы | `modules` | какие разделы показывать в меню |
+| Система | `system` | ресурсы сервера панели, SSL-сертификат панели, канал обновлений |
+| Бэкапы | `backups` | ручные бэкапы и восстановление, автобэкапы в Telegram |
+
+Все настройки сохраняются сразу при изменении (`PUT /settings/{key}`); явная кнопка «Сохранить» только у пути Remnawave и у автобэкапов (секреты). Строки внутри секций — `SettingRow` (подпись и подсказка слева, контрол справа; id подписи уходит контролу через контекст как `aria-labelledby`). Контролы: `SegmentedControl` (`role="radiogroup"`, roving tabindex, стрелки переключают, одна бегущая «пилюля» с `layoutId` из `useId()`, без анимации при `prefers-reduced-motion`), `Switch` (`role="switch"`), нативный `<select>` для часовых поясов. Карточки с опросом (продление сертификата, синхронизация времени, бэкапы) при монтировании проверяют, не идёт ли операция, и продолжают опрос — переключение вкладок не теряет прогресс.
+
+**Файлы:**
+- `panel/frontend/src/pages/Settings.tsx` — оболочка: шапка, таб-бар, `?tab=`
+- `panel/frontend/src/components/settings/` — примитивы `SettingsSection`, `SettingRow`, `SegmentedControl`, `Switch`; вкладки `InterfaceTab`, `NodesTab`, `ModulesTab`, `SystemTab`, `BackupsTab`; карточки `PanelHostStatsCard`, `PanelCertificateCard`, `TimeSyncSection`, `BackupCard`, `AutoBackupCard`
+- FAQ: `data/faq/content/{ru,en}/PAGE_SETTINGS.md`
 
 ## Интервалы сбора данных
 
-Настраиваются в разделе **Настройки** панели:
+Настраиваются в разделе **Настройки** панели (вкладка «Ноды»):
 
 | Параметр | По умолчанию | Рекомендуемый | Описание |
 |----------|--------------|---------------|----------|
@@ -79,7 +98,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/in
 **Пример:** wildcard `*.example.com` лежит в `/etc/letsencrypt/live/example.com/`. Домен панели `panel.example.com` — скрипт найдёт сертификат автоматически и создаст symlink, certbot не запустится.
 
 **Управление через панель:**
-- В разделе **Настройки** отображается информация о сертификате панели
+- В разделе **Настройки** (вкладка «Система») отображается информация о сертификате панели
 - Показывается домен, дата истечения и дней до истечения
 - Кнопка "Продлить" для ручного продления через веб-интерфейс
 - Если сертификат панели управляется настройкой «Использовать для панели» из [Wildcard SSL](#wildcard-ssl) — вместо кнопки «Продлить» показывается бейдж «Управляется Wildcard SSL» с подсказкой; продление такого сертификата идёт вместе с продлением wildcard-сертификата, отдельно его продлить нельзя
@@ -239,11 +258,11 @@ CI/CD: `.github/workflows/docker-publish.yml` — job `tests` (матрица р
 - `panel/backend/app/main.py` — загрузка сохранённой ветки из БД в кэш на старте
 - `panel/backend/app/routers/system.py`, `routers/proxy.py`, `services/antiddos_manager.py`, `services/deploy_service.py` — потребители (см. выше)
 - `install.sh` — переменная `MON_BRANCH` (по умолчанию `main`), экспортируется для `node/deploy.sh`
-- `panel/frontend/src/pages/Settings.tsx`, `stores/settingsStore.ts` — карточка «Канал обновлений» (кнопки Стабильный/Dev, предупреждение для dev)
+- `panel/frontend/src/components/settings/SystemTab.tsx`, `stores/settingsStore.ts` — секция «Канал обновлений» (переключатель Стабильный/Dev, предупреждение для dev)
 
 ### Выбор доступных разделов
 
-Карточка «Разделы панели» в Настройках убирает из бокового меню то, чем эта установка не пользуется. Выключенный раздел пропадает из меню и закрыт по прямой ссылке (редирект на дашборд), но ничего не отключает по существу: фоновые задачи бэкенда (алерты, биллинг-чекер, torrent blocker, автопродление wildcard-сертификатов, синхронизация анти-DDoS), данные в базе и состояние нод не меняются — включённый обратно раздел работает как прежде.
+Вкладка «Разделы» в Настройках убирает из бокового меню то, чем эта установка не пользуется. Выключенный раздел пропадает из меню и закрыт по прямой ссылке (редирект на дашборд), но ничего не отключает по существу: фоновые задачи бэкенда (алерты, биллинг-чекер, torrent blocker, автопродление wildcard-сертификатов, синхронизация анти-DDoS), данные в базе и состояние нод не меняются — включённый обратно раздел работает как прежде.
 
 Настройка `hidden_modules` в `PanelSettings` — список **выключенных** id через запятую (`billing,torrent-blocker`). Хранятся именно выключенные: раздел, добавленный следующим релизом, появляется у всех сам, без правки настройки. Неизвестные id при чтении отбрасываются.
 
@@ -259,7 +278,7 @@ CI/CD: `.github/workflows/docker-publish.yml` — job `tests` (матрица р
 
 ### Графики истории
 
-Карточка «Графики» в Настройках задаёт, как рисуется история метрик на странице сервера и на странице трафика. Настройка общая для всех, кто заходит в панель (per-user настроек нет), хранится в `PanelSettings`:
+Секция «Графики» на вкладке «Интерфейс» Настроек задаёт, как рисуется история метрик на странице сервера и на странице трафика. Настройка общая для всех, кто заходит в панель (per-user настроек нет), хранится в `PanelSettings`:
 
 | Ключ | Значения | Смысл |
 |------|----------|-------|
@@ -279,7 +298,7 @@ CI/CD: `.github/workflows/docker-publish.yml` — job `tests` (матрица р
 - `panel/frontend/src/components/Charts/MultiLineChart.tsx` — единственный компонент линейных графиков (серии с `value`/`peak`, полоса пиков, разрывы); `MetricChart.tsx` — обёртка для одной серии
 - `panel/frontend/src/components/Charts/CpuCoresHeatmap.tsx` — тепловая карта ядер; `CollapsibleChartSection.tsx`, `ChartLoadingOverlay.tsx` — аккордеон и оверлей загрузки, общие для ядер, TCP-состояний и карточек графиков
 - `panel/frontend/src/utils/chartUtils.ts` — разбор времени, DEMA, разрезание по разрывам, ось Y
-- `panel/frontend/src/config/chartDisplay.ts`, `hooks/useChartDisplay.ts`, `stores/settingsStore.ts`, `pages/Settings.tsx` — настройка
+- `panel/frontend/src/config/chartDisplay.ts`, `hooks/useChartDisplay.ts`, `stores/settingsStore.ts`, `components/settings/InterfaceTab.tsx` — настройка
 - FAQ: `data/faq/content/{ru,en}/SETTINGS_CHARTS.md`
 
 ## Производительность
@@ -1541,7 +1560,7 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 | POST | /settings/time-sync/run | Запустить синхронизацию вручную на всех серверах |
 | GET | /settings/time-sync/status | Статус последней синхронизации |
 
-**Frontend (Settings.tsx):** блок «Синхронизация времени» с toggle включения, выбором timezone из списка, кнопкой «Синхронизировать» и отображением статуса последней синхронизации.
+**Frontend (`components/settings/TimeSyncSection.tsx`, вкладка «Ноды»):** секция «Синхронизация времени» с тумблером включения, выбором timezone из списка, кнопкой «Синхронизировать» и статусом последней синхронизации по серверам. Опрос статуса живёт в ref и чистится при размонтировании; если при монтировании синхронизация уже идёт — опрос продолжается.
 
 **Файлы:**
 - `panel/backend/app/services/time_sync.py` — `TimeSyncService`: фоновый сервис, синхронизация при добавлении сервера и изменении timezone
@@ -1549,7 +1568,7 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 - `node/app/routers/system.py` — `POST /api/system/time-sync` на ноде
 - `panel/frontend/src/api/client.ts` — `timeSyncRun`, `timeSyncStatus`
 - `panel/frontend/src/stores/settingsStore.ts` — `serverTimezone`, `timeSyncEnabled`
-- `panel/frontend/src/pages/Settings.tsx` — UI блок синхронизации времени
+- `panel/frontend/src/components/settings/TimeSyncSection.tsx` — UI секции синхронизации времени
 
 ### SSH Security Management
 
@@ -1859,7 +1878,7 @@ Frontend сохраняет незавершённые job_id в `localStorage` 
 
 **Файлы:**
 - `panel/backend/app/routers/backup.py` — API роутер
-- `panel/frontend/src/pages/Settings.tsx` — секция в настройках
+- `panel/frontend/src/components/settings/BackupCard.tsx`, `AutoBackupCard.tsx` — вкладка «Бэкапы» в настройках (модалка подтверждения восстановления рендерится через portal в `document.body`)
 - `panel/nginx/nginx.conf.template` — location `= /api/backup/restore` с увеличенными лимитами
 
 ### Wildcard SSL
@@ -1892,7 +1911,7 @@ Frontend сохраняет незавершённые job_id в `localStorage` 
 - Если на месте `/etc/letsencrypt/live/{ДОМЕН_ПАНЕЛИ}` уже лежит собственная standalone-линия панели (реальный каталог, не симлинк) — она переименовывается в `{ДОМЕН}.pre-wildcard` (при занятости имени — с числовым суффиксом, `_free_backup_path`), а её renewal-конфиг `/etc/letsencrypt/renewal/{ДОМЕН}.conf` — в `.conf.pre-wildcard`. Иначе ночной `certbot renew` этой старой линии переписал бы симлинки внутри каталога wildcard-линии на свой архив.
 - `_apply_to_panel_if_enabled(base_domain, notify=True)` вызывается после каждого успешного выпуска и продления (ручное и автоматическое продление идут через один и тот же `renew_certificate`); сбой применения не роняет сам выпуск/продление — логируется и (в фоновых сценариях) уходит в Telegram через тот же механизм алертов, что и остальные уведомления модуля (`_msg_panel_apply_failed`, ru/en).
 - Включение настройки в UI сразу применяет к панели уже существующий сертификат, покрывающий её домен (если такой есть) — не дожидаясь следующего продления.
-- В разделе Настройки при включённой настройке кнопка «Продлить» сертификата панели заменяется бейджем — см. [SSL сертификаты](#ssl-сертификаты) и API `GET /api/system/certificate`.
+- В Настройках (вкладка «Система») при включённой настройке кнопка «Продлить» сертификата панели заменяется бейджем — см. [SSL сертификаты](#ssl-сертификаты) и API `GET /api/system/certificate`.
 
 **Обработка повреждённых renewal-конфигов certbot:**
 
@@ -1967,7 +1986,7 @@ Volume `/etc/letsencrypt` смонтирован с `:rw` — backend запис
 - `panel/frontend/src/pages/WildcardSSL.tsx` — страница управления
 - `panel/frontend/src/components/wildcard/CertificateMaterials.tsx` — блок просмотра/копирования/скачивания PEM-материалов
 - `panel/frontend/src/api/client.ts` — `wildcardSSLApi` с интерфейсами, включая `WildcardCertificateMaterial`
-- `panel/frontend/src/pages/Settings.tsx` — бейдж «Управляется Wildcard SSL» вместо кнопки «Продлить», когда сертификат панели покрыт wildcard-сертификатом (см. [SSL сертификаты](#ssl-сертификаты))
+- `panel/frontend/src/components/settings/PanelCertificateCard.tsx` — бейдж «Управляется Wildcard SSL» вместо кнопки «Продлить», когда сертификат панели покрыт wildcard-сертификатом (см. [SSL сертификаты](#ssl-сертификаты))
 - `panel/frontend/src/App.tsx` — роут `/wildcard-ssl`
 - `panel/frontend/src/components/Layout/Layout.tsx` — пункт навигации «Wildcard SSL»
 - `panel/frontend/src/locales/en.json`, `ru.json` — i18n ключи пространства имён `wildcard_ssl`
@@ -2456,7 +2475,7 @@ Whitelist можно наполнять из внешних списков по 
 - Привязанные серверы: инлайн-редактирование домена, live-статус контейнера через proxy-роутер, restart контейнера, sync, unlink; предупреждающий блок о замене nginx.conf и автопереводе фрагментного монтирования install.sh-установок на полный конфиг (i18n-ключ `remnawave_nginx.link_replaces_config_warning`)
 - Лог синхронизаций
 - Route `/{uid}/remnawave-nginx`, пункт меню «Remnawave Nginx» (иконка Waypoints, после Remnawave)
-- Настройка **Путь установок Remnawave** (`remnawave_nginx_path`, по умолчанию `/opt/remnawave`) — карточка в разделе Настройки, применяется ко всем нодам как единый путь discover/apply
+- Настройка **Путь установок Remnawave** (`remnawave_nginx_path`, по умолчанию `/opt/remnawave`) — секция на вкладке «Ноды» в Настройках, применяется ко всем нодам как единый путь discover/apply
 
 **Прокси-эндпоинты (`routers/proxy.py`):** `GET /{server_id}/remnawave-nginx/status`, `POST /{server_id}/remnawave-nginx/restart` — путь установки берётся из панельной настройки `remnawave_nginx_path`. Обнаружение установки (`discover`), чтение конфига и импорт с ноды идут не через этот generic-проброс, а напрямую из специализированной бизнес-логики (`_check_xray_on_all_servers`, `import-from-node`) — вызывают ноду своим HTTP-клиентом.
 
@@ -2475,7 +2494,7 @@ Whitelist можно наполнять из внешних списков по 
 - `panel/backend/Dockerfile` — пакет `nginx`
 - `panel/frontend/src/api/client.ts` — `remnawaveNginxApi` + интерфейсы
 - `panel/frontend/src/pages/RemnawaveNginx.tsx` — страница управления
-- `panel/frontend/src/pages/Settings.tsx`, `panel/frontend/src/stores/settingsStore.ts` — карточка пути установок
+- `panel/frontend/src/components/settings/NodesTab.tsx`, `panel/frontend/src/stores/settingsStore.ts` — секция пути установок
 - `panel/frontend/src/App.tsx`, `panel/frontend/src/components/Layout/Layout.tsx` — роут и пункт меню
 - `panel/frontend/src/locales/ru.json`, `en.json` — namespace `remnawave_nginx`
 - `panel/frontend/src/components/FAQ/faq.types.ts`, `panel/frontend/src/data/faq/content/{ru,en}/PAGE_REMNAWAVE_NGINX.md` — статья FAQ
