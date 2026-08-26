@@ -293,6 +293,28 @@ install_ipset() {
     fi
 }
 
+# На минимальных образах ОС rsync отсутствует — без него копирование файлов
+# невозможно, а контейнеры ещё не тронуты, так что обновление просто отменяется
+ensure_rsync() {
+    command -v rsync &>/dev/null && return 0
+    if [ $IN_CONTAINER -eq 1 ] || ! command -v apt-get &>/dev/null; then
+        log_error "rsync is required for the update — install it on the host and run the update again"
+        return 1
+    fi
+
+    suppress_needrestart
+    wait_for_apt_lock || true
+    spin_retry 300 3 5 "Installing rsync" \
+        env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l NEEDRESTART_SUSPEND=1 \
+        apt-get install -y -qq rsync \
+        || spin_retry 300 2 5 "Installing rsync (after apt update)" bash -c \
+            'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq rsync'
+
+    command -v rsync &>/dev/null && return 0
+    log_error "Failed to install rsync — install it manually and run the update again"
+    return 1
+}
+
 migrate_haproxy_config_from_volume() {
     # Check for config in Docker volume (old container setup)
     local volume_config="/var/lib/docker/volumes/monitoring-node_haproxy_config/_data/haproxy.cfg"
@@ -568,6 +590,7 @@ fi
 # Copy files (preserve .env and SSL certs). Контейнеры ещё работают: rsync меняет
 # файлы на диске через rename (новый inode), bind-mounts запущенных контейнеров
 # продолжают видеть старые — ноль даунтайма на этом шаге.
+ensure_rsync || exit 1
 log_info "Copying new files..."
 rsync -av --delete \
     --exclude='.env' \
