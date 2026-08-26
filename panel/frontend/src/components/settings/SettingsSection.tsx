@@ -10,6 +10,10 @@ export const TAB_MOTION = {
   transition: { duration: 0.2 },
 }
 
+// Секции плиткой: на широких экранах карточка во всю ширину оставляла пустоту между подписью и контролом
+export const TAB_GRID = 'grid grid-cols-1 2xl:grid-cols-2 min-[2200px]:grid-cols-3 gap-6 items-start'
+export const TAB_GRID_TWO = 'grid grid-cols-1 2xl:grid-cols-2 gap-6 items-start'
+
 interface SettingsSectionProps {
   title: string
   description?: string

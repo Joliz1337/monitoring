@@ -2,7 +2,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { GitBranch, Shield, FlaskConical, AlertTriangle } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useSettingsStore } from '../../stores/settingsStore'
-import { SettingsSection, TAB_MOTION } from './SettingsSection'
+import { SettingsSection, TAB_MOTION, TAB_GRID } from './SettingsSection'
 import { SettingRow } from './SettingRow'
 import { SegmentedControl, type SegmentedOption } from './SegmentedControl'
 import { PanelHostStatsCard } from './PanelHostStatsCard'
@@ -18,7 +18,7 @@ export function SystemTab() {
   ]
 
   return (
-    <motion.div {...TAB_MOTION} className="space-y-6">
+    <motion.div {...TAB_MOTION} className={TAB_GRID}>
       <PanelHostStatsCard />
       <PanelCertificateCard />
 

@@ -6,7 +6,7 @@ import { toast } from 'sonner'
 import {
   useSettingsStore, METRICS_INTERVAL_OPTIONS, HAPROXY_INTERVAL_OPTIONS, type CollectorIntervalOption,
 } from '../../stores/settingsStore'
-import { SettingsSection, TAB_MOTION } from './SettingsSection'
+import { SettingsSection, TAB_MOTION, TAB_GRID } from './SettingsSection'
 import { SettingRow } from './SettingRow'
 import { SegmentedControl, type SegmentedOption } from './SegmentedControl'
 import { TimeSyncSection } from './TimeSyncSection'
@@ -42,7 +42,7 @@ export function NodesTab() {
   }
 
   return (
-    <motion.div {...TAB_MOTION} className="space-y-6">
+    <motion.div {...TAB_MOTION} className={TAB_GRID}>
       <SettingsSection icon={Activity} title={t('settings.collector_intervals')} description={t('settings.collector_intervals_desc')}>
         <SettingRow label={t('settings.metrics_interval')}>
           <SegmentedControl value={metricsCollectInterval} options={METRICS_OPTIONS} onChange={setMetricsCollectInterval} />

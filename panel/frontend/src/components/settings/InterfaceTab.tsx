@@ -4,7 +4,7 @@ import { Palette, Clock, LineChart, LayoutGrid, List, ChevronDown } from 'lucide
 import { useTranslation } from 'react-i18next'
 import { useSettingsStore, TIMEZONE_OPTIONS, TRAFFIC_PERIOD_OPTIONS } from '../../stores/settingsStore'
 import { CHART_METRICS, type ChartMode, type LiveValuesMode } from '../../config/chartDisplay'
-import { SettingsSection, TAB_MOTION } from './SettingsSection'
+import { SettingsSection, TAB_MOTION, TAB_GRID } from './SettingsSection'
 import { SettingRow } from './SettingRow'
 import { SegmentedControl, type SegmentedOption } from './SegmentedControl'
 import { Switch } from './Switch'
@@ -65,7 +65,7 @@ export function InterfaceTab() {
   ]
 
   return (
-    <motion.div {...TAB_MOTION} className="space-y-6">
+    <motion.div {...TAB_MOTION} className={TAB_GRID}>
       <SettingsSection icon={Palette} title={t('settings.section_appearance')}>
         <SettingRow label={t('settings.language')} hint={t('settings.language_desc')}>
           <SegmentedControl value={i18n.language} options={LANGUAGE_OPTIONS} onChange={lng => i18n.changeLanguage(lng)} />
