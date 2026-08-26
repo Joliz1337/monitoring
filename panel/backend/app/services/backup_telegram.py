@@ -2,12 +2,14 @@
 
 Архив самодостаточен (несёт вшитый в .dump ключ шифрования секретов), поэтому
 защищён паролем: AES-256-GCM, ключ из пароля через PBKDF2. Тома < 50 МБ — лимит
-Telegram Bot API. Восстановление: собрать тома по порядку → join_and_decrypt →
-получить .dump → загрузить через восстановление панели.
+Telegram Bot API. Восстановление — через обычное окно восстановления панели:
+пользователь выбирает все тома и вводит пароль, роутер собирает их по порядку и
+расшифровывает (join_and_decrypt).
 """
 import asyncio
 import logging
 import os
+import re
 
 import httpx
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -22,6 +24,25 @@ _NONCE_LEN = 12
 _PBKDF2_ITERS = 200_000
 SEND_RETRIES = 3
 SEND_RETRY_DELAY = 5
+_VOLUME_SUFFIX = re.compile(r"\.(\d{3})$")
+
+
+def is_encrypted_set(first_volume: bytes) -> bool:
+    """Первый том набора из Telegram начинается с сигнатуры; сырой pg_dump — с «PGDMP»."""
+    return first_volume.startswith(_MAGIC)
+
+
+def missing_volume_numbers(filenames: list[str]) -> list[int]:
+    """Номера томов, пропущенных в наборе (`…enc.001`, `.003` → не хватает 2).
+
+    Пустой список — набор без дыр или имена не похожи на тома. Отсутствие
+    последнего тома по именам не видно — его выявит проверка подлинности AES-GCM.
+    """
+    numbers = [int(m.group(1)) for name in filenames if (m := _VOLUME_SUFFIX.search(name))]
+    if len(numbers) != len(filenames) or not numbers:
+        return []
+    present = set(numbers)
+    return [n for n in range(1, max(present) + 1) if n not in present]
 
 
 def _derive_key(password: str, salt: bytes) -> bytes:

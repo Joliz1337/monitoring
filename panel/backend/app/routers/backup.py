@@ -11,6 +11,7 @@ from typing import Optional
 
 from app import crypto
 
+from cryptography.exceptions import InvalidTag
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -22,6 +23,7 @@ from starlette.datastructures import UploadFile
 from app.auth import verify_auth
 from app.config import get_settings
 from app.database import async_session, async_session_maker, get_db
+from app.services import backup_telegram
 from app.services.http_client import close_http_clients, init_http_clients
 from app.services.pki import load_or_create_keygen
 
@@ -401,6 +403,20 @@ async def delete_backup(filename: str, _: dict = Depends(verify_auth)):
     return {"success": True}
 
 
+def _decrypt_volume_set(parts: list[bytes], filenames: list[str], password: str) -> bytes:
+    """Набор томов из Telegram → чистый бэкап. Набор распознан по сигнатуре первого тома."""
+    missing = backup_telegram.missing_volume_numbers(filenames)
+    if missing:
+        numbers = ", ".join(f".{n:03d}" for n in missing)
+        raise HTTPException(400, f"Неполный набор: не хватает тома {numbers} — выберите все тома набора")
+    if not password:
+        raise HTTPException(400, "Это набор томов из Telegram — укажите пароль архива")
+    try:
+        return backup_telegram.join_and_decrypt(parts, password)
+    except (InvalidTag, ValueError):
+        raise HTTPException(400, "Не удалось расшифровать: неверный пароль или неполный/перепутанный набор томов")
+
+
 @router.post("/restore")
 async def restore_backup(
     request: Request,
@@ -423,18 +439,16 @@ async def restore_backup(
         password = str(raw_password).strip() if raw_password else ""
         # Тома набора идут по имени: …enc.001 < …enc.002 < …
         uploads.sort(key=lambda u: u.filename or "")
-        filename = uploads[0].filename or "backup"
+        filenames = [u.filename or "" for u in uploads]
+        filename = filenames[0] or "backup"
         parts = [await u.read() for u in uploads]
 
-    if password or len(parts) > 1:
-        # Набор томов из Telegram: собрать по порядку и расшифровать паролем архива
-        from app.services.backup_telegram import join_and_decrypt
-        if not password:
-            raise HTTPException(400, "Для набора томов из Telegram укажите пароль архива")
-        try:
-            data = join_and_decrypt(parts, password)
-        except Exception:
-            raise HTTPException(400, "Не удалось расшифровать: неверный пароль или неполный/перепутанный набор томов")
+    if backup_telegram.is_encrypted_set(parts[0]):
+        data = _decrypt_volume_set(parts, filenames, password)
+    elif len(parts) > 1:
+        raise HTTPException(
+            400, "Несколько файлов принимаются только как тома бэкапа из Telegram — обычный .dump загружайте одним файлом"
+        )
     else:
         data = parts[0]
 
@@ -542,7 +556,6 @@ async def backup_to_telegram_now(_: dict = Depends(verify_auth)):
 
 @router.post("/test-telegram")
 async def test_telegram(db: AsyncSession = Depends(get_db), _: dict = Depends(verify_auth)):
-    from app.services import backup_telegram
     from app.services.backup_scheduler import get_or_create_settings
     s = await get_or_create_settings(db)
     if not s.bot_token or not s.chat_id:

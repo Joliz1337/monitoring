@@ -10,6 +10,37 @@ import { Tooltip } from '../ui/Tooltip'
 import { SettingsSection } from './SettingsSection'
 
 const STATUS_POLL_MS = 2000
+const VOLUME_SUFFIX = /\.(\d{3})$/
+
+interface VolumeSet {
+  count: number
+  totalSize: number
+  missing: number[]
+}
+
+// Набор томов из Telegram: `…enc.001`, `.002`, … Полнота — по непрерывности номеров;
+// пропавший последний том по именам не виден, его поймает бэкенд при расшифровке
+function detectVolumeSet(files: File[]): VolumeSet | null {
+  const numbers = files.map(f => Number(f.name.match(VOLUME_SUFFIX)?.[1]))
+  if (!files.length || numbers.some(Number.isNaN)) return null
+  const present = new Set(numbers)
+  const missing: number[] = []
+  for (let n = 1; n <= Math.max(...numbers); n++) {
+    if (!present.has(n)) missing.push(n)
+  }
+  return { count: files.length, totalSize: files.reduce((sum, f) => sum + f.size, 0), missing }
+}
+
+const volumeLabel = (n: number) => `.${String(n).padStart(3, '0')}`
+
+function RestoreWarning({ text }: { text: string }) {
+  return (
+    <p className="text-xs text-warning mb-3 flex items-center gap-1.5">
+      <AlertTriangle className="w-3 h-3 flex-shrink-0" />
+      {text}
+    </p>
+  )
+}
 
 export function BackupCard() {
   const { t } = useTranslation()
@@ -143,6 +174,10 @@ export function BackupCard() {
 
   const busy = status !== null && status.state !== 'idle'
   const restoring = status?.state === 'restoring'
+
+  const volumeSet = confirmRestore ? detectVolumeSet(confirmRestore) : null
+  const multiplePlainFiles = confirmRestore !== null && !volumeSet && confirmRestore.length > 1
+  const restoreBlocked = multiplePlainFiles || (volumeSet !== null && (volumeSet.missing.length > 0 || !restorePassword))
 
   const createButton = (
     <button onClick={handleCreate} disabled={busy} className="btn btn-primary text-sm">
@@ -287,24 +322,35 @@ export function BackupCard() {
                 </div>
                 <p className="text-sm text-dark-300 mb-2">{t('settings.backup_confirm_restore')}</p>
                 <p className="text-xs text-dark-500 mb-3 font-mono bg-dark-800/50 rounded-lg px-3 py-2">
-                  {confirmRestore.length === 1
-                    ? `${confirmRestore[0].name} (${formatBytes(confirmRestore[0].size)})`
-                    : t('settings.backup_restore_parts', { count: confirmRestore.length })}
+                  {volumeSet
+                    ? t('settings.backup_restore_parts', { count: volumeSet.count, size: formatBytes(volumeSet.totalSize) })
+                    : confirmRestore.map(f => `${f.name} (${formatBytes(f.size)})`).join(', ')}
                 </p>
-                <input
-                  type="password"
-                  value={restorePassword}
-                  onChange={e => setRestorePassword(e.target.value)}
-                  placeholder={t('settings.backup_restore_password')}
-                  className="input w-full mb-4"
-                />
+                {volumeSet && volumeSet.missing.length > 0 && (
+                  <RestoreWarning text={t('settings.backup_restore_missing', { list: volumeSet.missing.map(volumeLabel).join(', ') })} />
+                )}
+                {multiplePlainFiles && <RestoreWarning text={t('settings.backup_restore_multi_plain')} />}
+                {volumeSet && (
+                  <div className="mb-4">
+                    <input
+                      type="password"
+                      autoFocus
+                      value={restorePassword}
+                      onChange={e => setRestorePassword(e.target.value)}
+                      placeholder={t('settings.backup_restore_password')}
+                      className="input w-full"
+                    />
+                    <p className="text-xs text-dark-500 mt-1.5">{t('settings.backup_restore_password_hint')}</p>
+                  </div>
+                )}
                 <div className="flex gap-3">
                   <button onClick={closeRestore} className="flex-1 btn btn-secondary">
                     {t('common.cancel')}
                   </button>
                   <button
                     onClick={() => handleRestore(confirmRestore)}
-                    className="flex-1 btn bg-warning/20 text-warning hover:bg-warning/30 border border-warning/30"
+                    disabled={restoreBlocked}
+                    className="flex-1 btn bg-warning/20 text-warning hover:bg-warning/30 border border-warning/30 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     {t('settings.backup_restore')}
                   </button>

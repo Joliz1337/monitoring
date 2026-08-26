@@ -571,7 +571,7 @@ PK таблицы — `BigInteger` (не int32). При 500 нодах с инт
 
 ### Автобэкапы в Telegram
 
-`routers/backup.py` + `services/backup_scheduler.py` + `services/backup_telegram.py`. По расписанию (`BackupSettings`: daily/every_hours, `bot_token`/`archive_password` под `EncryptedString`) панель снимает `pg_dump`, вшивает в него весь `.env` (`_frame_backup`), шифрует паролем (AES-256-GCM, PBKDF2), бьёт на тома < 50 МБ и шлёт в Telegram (с алертом при сбое). Шедулер стартует в lifespan. Эндпоинты: `GET/PUT /backup/settings` (write-only секреты), `POST /backup/telegram-now`, `POST /backup/test-telegram`. Восстановление — `panel/scripts/backup/tg-restore.py` (собрать тома → расшифровать в `.dump`) → загрузка через существующий `POST /backup/restore`.
+`routers/backup.py` + `services/backup_scheduler.py` + `services/backup_telegram.py`. По расписанию (`BackupSettings`: daily/every_hours, `bot_token`/`archive_password` под `EncryptedString`) панель снимает `pg_dump`, вшивает в него весь `.env` (`_frame_backup`), шифрует паролем (AES-256-GCM, PBKDF2), бьёт на тома < 50 МБ и шлёт в Telegram (с алертом при сбое). Шедулер стартует в lifespan. Эндпоинты: `GET/PUT /backup/settings` (write-only секреты), `POST /backup/telegram-now`, `POST /backup/test-telegram`. Восстановление — тем же `POST /backup/restore`, что и обычный дамп: пользователь выбирает все тома набора и вводит пароль архива, роутер распознаёт набор по сигнатуре `MTGB1` первого тома (`is_encrypted_set`), проверяет непрерывность номеров `.001…` (`missing_volume_numbers` — в ошибке называется недостающий том), собирает и расшифровывает (`join_and_decrypt`). Резервный путь без панели — `panel/scripts/backup/tg-restore.py`.
 
 ## API
 
@@ -1875,7 +1875,7 @@ Frontend сохраняет незавершённые job_id в `localStorage` 
 | GET | /api/backup/list | Список бэкапов (имя, размер, дата, версия) |
 | GET | /api/backup/{filename}/download | Скачать файл бэкапа |
 | DELETE | /api/backup/{filename} | Удалить бэкап |
-| POST | /api/backup/restore | Загрузить и восстановить из файла (multipart, до 100 MB) |
+| POST | /api/backup/restore | Загрузить и восстановить: один `.dump` или все тома набора из Telegram (multipart, поле `file` повторяется, `password` — пароль архива; до 2 ГБ) |
 | GET | /api/backup/status | Статус операции (idle/creating/restoring, поле `error` — текст последней ошибки) |
 
 После восстановления рекомендуется перезапуск: `docker compose restart`.
@@ -1892,14 +1892,18 @@ Frontend сохраняет незавершённые job_id в `localStorage` 
 
 Слот операции (`_claim_operation`) занимается синхронно в самом эндпоинте — до `asyncio.create_task` — чтобы два запроса подряд не проходили проверку «операция не идёт» одновременно и не запускали два параллельных `DROP SCHEMA`.
 
+**Что принимает `/restore`:** файлы сортируются по имени (`…enc.001` < `.002`), тип определяется по содержимому первого файла, не по наличию пароля. Сигнатура `MTGB1` → набор томов из Telegram: сначала проверка непрерывности номеров (400 «не хватает тома .002»), затем требование пароля, затем `join_and_decrypt` (неверный пароль или отсутствующий последний том → `InvalidTag` → 400). Иначе — обычный дамп; несколько обычных файлов — 400. Фронт (`BackupCard.tsx`, `detectVolumeSet`) делает те же проверки по именам до отправки: показывает недостающие тома, поле пароля выводит только для набора, кнопку «Восстановить» блокирует, пока набор неполный или пароль пуст.
+
 **Ограничения загрузки (nginx):**
 - Общий лимит запросов: `client_max_body_size 10m`
-- Эндпоинт `/api/backup/restore` имеет отдельный location-блок с `client_max_body_size 100m` и увеличенными таймаутами (`proxy_send_timeout 120s`, `proxy_read_timeout 120s`) — без него импорт бэкапов > 10 MB падал бы с ошибкой 413
+- Эндпоинт `/api/backup/restore` имеет отдельный location-блок: `client_max_body_size 2g`, `proxy_request_buffering off` (тело сразу уходит бэкенду, который проверяет авторизацию до чтения тела — аноним не может залить гигабайты на диск), таймауты `proxy_send_timeout 120s`, `proxy_read_timeout 120s`
 
 **Файлы:**
-- `panel/backend/app/routers/backup.py` — API роутер
+- `panel/backend/app/routers/backup.py` — API роутер (`_decrypt_volume_set` — набор томов → дамп)
+- `panel/backend/app/services/backup_telegram.py` — шифрование/тома, `is_encrypted_set`, `missing_volume_numbers`, `join_and_decrypt`
 - `panel/frontend/src/components/settings/BackupCard.tsx`, `AutoBackupCard.tsx` — вкладка «Бэкапы» в настройках (модалка подтверждения восстановления рендерится через portal в `document.body`)
 - `panel/nginx/nginx.conf.template` — location `= /api/backup/restore` с увеличенными лимитами
+- `panel/backend/tests/test_backup_telegram.py` — шифрование, порядок томов, распознавание набора и дыр в нумерации
 
 ### Wildcard SSL
 

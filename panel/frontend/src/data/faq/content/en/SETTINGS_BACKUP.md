@@ -10,9 +10,9 @@ A backup contains the mTLS keys the panel authenticates to nodes with. That make
 
 - Create — one button; the file stays on the panel server, and the last 20 copies are kept, older ones deleted automatically.
 - Download — take the file off the server: a copy sitting on the same machine won't survive losing it.
-- Restore — upload a backup file (`.dump`) or all the volumes of a Telegram backup at once. The database is wiped and refilled from the copy, so the current state is lost. There is no 100 MB cap — the panel accepts a file up to 2 GB.
+- Restore — upload a backup file (`.dump`) or all the volumes of a Telegram backup at once. The database is wiped and refilled from the copy, so the current state is lost. The panel accepts a file up to 2 GB.
 
-**Restoring from Telegram:** download every volume of one set from the channel (`…enc.001`, `.002`, …), select them **all at once** in the restore dialog and enter the **archive password** — the panel reassembles and decrypts them for you. A plain `.dump` restores without a password (leave the password field empty).
+**Restoring from Telegram:** download every volume of one set from the channel (`…enc.001`, `.002`, …), select them **all at once** in the restore dialog and enter the **archive password** — the one set under “Auto-backups to Telegram”. The panel recognises the set, reassembles the volumes in order and decrypts them; if a volume is missing, it tells you which one. A plain `.dump` needs no password.
 
 Restart the panel afterwards (`docker compose restart`) so the restored login and secrets take effect.
 
