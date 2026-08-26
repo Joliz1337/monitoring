@@ -1,5 +1,6 @@
 import { Component, type ReactNode } from 'react'
 import { AlertTriangle, RefreshCw } from 'lucide-react'
+import { isChunkLoadError, reloadOnStaleChunk } from '../utils/staleChunkReload'
 
 interface Props {
   children: ReactNode
@@ -16,13 +17,11 @@ export default class ErrorBoundary extends Component<Props, State> {
   state: State = { hasError: false, error: null, isChunkError: false }
 
   static getDerivedStateFromError(error: Error): State {
-    const isChunkError =
-      error.name === 'ChunkLoadError' ||
-      error.message?.includes('Loading chunk') ||
-      error.message?.includes('Failed to fetch dynamically imported module') ||
-      error.message?.includes('Importing a module script failed')
+    return { hasError: true, error, isChunkError: isChunkLoadError(error) }
+  }
 
-    return { hasError: true, error, isChunkError }
+  componentDidCatch(error: Error) {
+    if (isChunkLoadError(error)) reloadOnStaleChunk()
   }
 
   handleReload = () => {
