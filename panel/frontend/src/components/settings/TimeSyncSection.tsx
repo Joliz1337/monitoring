@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
-import { Globe, RefreshCw, Loader2, CheckCircle2, XCircle } from 'lucide-react'
+import { Globe, RefreshCw, Loader2, CheckCircle2, XCircle, AlertTriangle } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { settingsApi, type TimeSyncStatus } from '../../api/client'
@@ -10,6 +10,12 @@ import { Switch } from './Switch'
 
 const STATUS_POLL_MS = 3000
 const SERVER_TIMEZONES = TIMEZONE_OPTIONS.filter(o => o.value !== 'auto')
+
+type SyncResult = TimeSyncStatus['last_results'][number]
+
+function describeSyncResult(result: SyncResult): string {
+  return [result.timezone || 'OK', result.ntp_service].filter(Boolean).join(' · ')
+}
 
 export function TimeSyncSection() {
   const { t } = useTranslation()
@@ -111,8 +117,14 @@ export function TimeSyncSection() {
                       ? <CheckCircle2 className="w-3.5 h-3.5 text-success" />
                       : <XCircle className="w-3.5 h-3.5 text-danger" />}
                     <span className={r.success ? 'text-success' : 'text-danger'}>
-                      {r.success ? (r.timezone || 'OK') : (r.error || 'Error')}
+                      {r.success ? describeSyncResult(r) : (r.error || 'Error')}
                     </span>
+                    {r.success && r.ntp_synchronized === false && (
+                      <span className="flex items-center gap-1 text-warning">
+                        <AlertTriangle className="w-3.5 h-3.5" />
+                        {t('settings.ntp_not_synced')}
+                      </span>
+                    )}
                   </span>
                 </div>
               ))}

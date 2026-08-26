@@ -7,6 +7,7 @@ import os
 import re
 import shlex
 import shutil
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Optional
@@ -34,6 +35,7 @@ from app.services.sysctl_verify import (
     cleanup_conflicting_configs,
     verify_sysctl_values,
 )
+from app.services.time_sync import TIME_SYNC_TIMEOUT, build_time_sync_command, report_from_result
 
 NGINX_SSL_DIR = Path("/opt/monitoring-node/nginx/ssl")
 NGINX_CONTAINER_NAME = "monitoring-nginx"
@@ -1451,8 +1453,10 @@ class TimeSyncRequest(BaseModel):
 
 class TimeSyncResponse(BaseModel):
     success: bool
-    timezone_set: bool
     timezone: str
+    ntp_service: str
+    ntp_installed: bool
+    ntp_managed_by_host: bool
     ntp_enabled: bool
     ntp_synchronized: bool
     current_time: str
@@ -1468,11 +1472,7 @@ async def timezone_exists_on_host(executor, timezone_name: str) -> bool:
 
 @router.post("/time-sync", response_model=TimeSyncResponse)
 async def time_sync(request: TimeSyncRequest):
-    """
-    Set timezone and trigger NTP synchronization on the host.
-
-    Uses timedatectl + systemd-timesyncd (preinstalled on Ubuntu 24).
-    """
+    """Часовой пояс и NTP через тот демон, что есть на хосте; без демона ставится chrony."""
     executor = get_host_executor()
 
     if not await timezone_exists_on_host(executor, request.timezone):
@@ -1481,72 +1481,19 @@ async def time_sync(request: TimeSyncRequest):
             detail=f"Unknown timezone: {request.timezone}",
         )
 
-    errors: list[str] = []
-
-    # 1. Set timezone
-    tz_result = await executor.execute(
-        f"timedatectl set-timezone {shlex.quote(request.timezone)}",
-        timeout=15, shell="bash"
+    result = await executor.execute(
+        build_time_sync_command(request.timezone),
+        timeout=TIME_SYNC_TIMEOUT,
+        shell="bash",
     )
-    timezone_set = tz_result.success and tz_result.exit_code == 0
-    if not timezone_set:
-        errors.append(f"Failed to set timezone: {tz_result.stderr.strip()}")
+    report = report_from_result(result, request.timezone)
 
-    # 2. Enable NTP
-    ntp_result = await executor.execute("timedatectl set-ntp true", timeout=15)
-    if not ntp_result.success or ntp_result.exit_code != 0:
-        errors.append(f"Failed to enable NTP: {ntp_result.stderr.strip()}")
-
-    # 3. Restart systemd-timesyncd for immediate sync
-    restart_result = await executor.execute(
-        "systemctl restart systemd-timesyncd", timeout=15
-    )
-    if not restart_result.success or restart_result.exit_code != 0:
-        # Fallback: toggle NTP off/on
-        await executor.execute("timedatectl set-ntp false", timeout=10)
-        await asyncio.sleep(1)
-        await executor.execute("timedatectl set-ntp true", timeout=10)
-
-    # 4. Wait for sync and read status
-    await asyncio.sleep(2)
-    status_result = await executor.execute(
-        "timedatectl show --no-pager", timeout=10
-    )
-
-    ntp_enabled = False
-    ntp_synchronized = False
-    current_tz = request.timezone
-    current_time = ""
-
-    if status_result.success and status_result.exit_code == 0:
-        for line in status_result.stdout.strip().split("\n"):
-            if "=" not in line:
-                continue
-            key, _, value = line.partition("=")
-            key = key.strip()
-            value = value.strip()
-            if key == "Timezone":
-                current_tz = value
-            elif key == "NTP":
-                ntp_enabled = value == "yes"
-            elif key == "NTPSynchronized":
-                ntp_synchronized = value == "yes"
-            elif key == "TimeUSec":
-                current_time = value
-
-    success = timezone_set and ntp_enabled and not errors
-
-    if success:
-        logger.info(f"Time sync completed: tz={current_tz}, ntp={ntp_synchronized}")
+    if report.success:
+        logger.info(
+            f"Time sync completed: tz={report.timezone}, service={report.ntp_service or 'host'}, "
+            f"installed={report.ntp_installed}, synchronized={report.ntp_synchronized}"
+        )
     else:
-        logger.warning(f"Time sync issues: {errors}")
+        logger.warning(f"Time sync issues: {report.errors}")
 
-    return TimeSyncResponse(
-        success=success,
-        timezone_set=timezone_set,
-        timezone=current_tz,
-        ntp_enabled=ntp_enabled,
-        ntp_synchronized=ntp_synchronized,
-        current_time=current_time,
-        errors=errors,
-    )
+    return TimeSyncResponse(**asdict(report))

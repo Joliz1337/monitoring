@@ -472,6 +472,7 @@
     "sync_partial": "{{count}} of {{total}} servers synchronized",
     "last_sync": "Last sync",
     "never": "Never",
+    "ntp_not_synced": "NTP not synchronized yet",
     "charts": "Charts",
     "charts_desc": "How metric history is drawn",
     "chart_mode": "Default mode",

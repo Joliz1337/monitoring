@@ -1023,6 +1023,7 @@ export interface TimeSyncStatus {
     server_id?: number
     success: boolean
     timezone?: string
+    ntp_service?: string
     ntp_synchronized?: boolean
     error?: string
   }>

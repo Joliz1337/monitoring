@@ -1553,17 +1553,19 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 Автоматическая установка часового пояса и синхронизация NTP на всех серверах и хосте панели.
 
 **Принцип работы:**
-- Фоновая задача `TimeSyncService` каждые 24ч вызывает `POST /api/system/time-sync` на каждой активной ноде
+- Фоновая задача `TimeSyncService` каждые 24ч вызывает `POST /api/system/time-sync` на каждой активной ноде (волнами по 50, таймаут `SYNC_TIMEOUT` = 240 с на ноду — столько может занять установка демона времени)
 - При добавлении нового сервера синхронизация запускается немедленно
 - При изменении настройки `server_timezone` — синхронизация запускается на всех серверах
-- Хост панели синхронизируется через Docker-контейнер с `nsenter`
+- Хост панели синхронизируется через Docker-контейнер `docker:cli` с `nsenter`: `build_container_script()` передаёт host-скрипт в `bash -c` на хосте через base64 (многострочный скрипт с кавычками иначе пришлось бы экранировать и для sh контейнера, и для bash хоста); stdout и stderr контейнера читаются раздельно — из первого разбираются `key=value`, второй становится текстом ошибки
 - Нода с закрытым доменом `system` (`NODE_CAPABILITIES`) отвечает отказом (`server_allows(server, Capability.SYSTEM, write=True)` проверяется до отправки), результат синхронизации по ней несёт `denied_message(Capability.SYSTEM, True)` вместо сетевой ошибки
 
-**Нода** (`POST /api/system/time-sync`):
-- Принимает IANA timezone (например `Europe/Moscow`)
-- Устанавливает часовой пояс через `timedatectl set-timezone`
-- Включает NTP через `timedatectl set-ntp true`
-- Принудительно синхронизирует время через `systemd-timesyncd`
+**Host-скрипт `host_time_sync.sh`** — один и тот же для нод и хоста панели (лежит в двух копиях: `node/app/services/` и `panel/backend/app/services/`, образы собираются из разных контекстов; `test_time_sync.py` панели сверяет копии побайтно). Ожидает переменную `TZ_NAME`, которую обёртка подставляет первой строкой через `shlex.quote`. Что делает:
+- Находит демон времени, который уже стоит на хосте, в порядке предпочтения `chrony` → `systemd-timesyncd` → `ntpsec` → `ntp` (`systemctl show -p LoadState`; среди установленных приоритет у активного). Ни одного нет — ставит `chrony` через `apt-get` (сначала из кеша, при неудаче после `apt-get update`; `DPkg::Lock::Timeout=120` пережидает unattended-upgrades). Chrony выбран как штатный демон Debian/Proxmox, а на Ubuntu он заменяет `systemd-timesyncd` без конфликтов.
+- Внутри контейнера (`systemd-detect-virt --container`, например LXC) часы принадлежат хосту: демон не ставится и не трогается, выставляется только пояс (`NTPManagedByHost=yes`).
+- `timedatectl set-timezone` → `timedatectl set-ntp true` (включает юнит из `ntp-units.d`; демон без регистрации там включается `systemctl enable`) → `systemctl restart <юнит>` → до 15 с ждёт `NTPSynchronized=yes` — свежеустановленный chrony синхронизируется за несколько секунд, а не мгновенно.
+- Печатает в stdout `NTPService=`, `NTPInstalled=`, `NTPManagedByHost=` и вывод `timedatectl show`; причины сбоев — в stderr; код выхода 1, если не удалось настроить пояс или демон.
+
+**Нода** (`POST /api/system/time-sync`, обёртка `node/app/services/time_sync.py`): принимает IANA timezone, проверяет её наличие в `/usr/share/zoneinfo`, запускает host-скрипт через `HostExecutor` (`bash`, таймаут `TIME_SYNC_TIMEOUT` = 240 с) и разбирает вывод в `TimeSyncReport`: `success` = код выхода 0, `errors` — строки stderr только при ненулевом коде (на успехе stderr не читается — в нём может быть шум apt/systemd). Ответ: `success`, `timezone`, `ntp_service` (`chrony`/`systemd-timesyncd`/…, пусто в контейнере), `ntp_installed`, `ntp_managed_by_host`, `ntp_enabled`, `ntp_synchronized`, `current_time`, `errors`. Панель прокидывает `ntp_service` и склеенные `errors` в результат по серверу.
 
 **Настройки:**
 
@@ -1579,12 +1581,15 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 | POST | /settings/time-sync/run | Запустить синхронизацию вручную на всех серверах |
 | GET | /settings/time-sync/status | Статус последней синхронизации |
 
-**Frontend (`components/settings/TimeSyncSection.tsx`, вкладка «Ноды»):** секция «Синхронизация времени» с тумблером включения, выбором timezone из списка, кнопкой «Синхронизировать» и статусом последней синхронизации по серверам. Опрос статуса живёт в ref и чистится при размонтировании; если при монтировании синхронизация уже идёт — опрос продолжается.
+**Frontend (`components/settings/TimeSyncSection.tsx`, вкладка «Ноды»):** секция «Синхронизация времени» с тумблером включения, выбором timezone из списка, кнопкой «Синхронизировать» и статусом последней синхронизации по серверам: у успешного — пояс и демон времени (`Europe/Moscow · chrony`), у сервера, где демон ещё не успел синхронизироваться, — жёлтая пометка «NTP ещё не синхронизирован», у неудачного — текст ошибки с ноды. Опрос статуса живёт в ref и чистится при размонтировании; если при монтировании синхронизация уже идёт — опрос продолжается.
 
 **Файлы:**
-- `panel/backend/app/services/time_sync.py` — `TimeSyncService`: фоновый сервис, синхронизация при добавлении сервера и изменении timezone
+- `panel/backend/app/services/time_sync.py` — `TimeSyncService`: фоновый сервис, синхронизация при добавлении сервера и изменении timezone; `build_container_script()`, `parse_key_values()`
+- `panel/backend/app/services/host_time_sync.sh` — host-скрипт (копия нодовского)
+- `panel/backend/tests/test_time_sync.py` — обёртка base64, разбор вывода, идентичность копий скрипта
 - `panel/backend/app/routers/settings.py` — эндпоинты настроек и запуска синхронизации
 - `node/app/routers/system.py` — `POST /api/system/time-sync` на ноде
+- `node/app/services/time_sync.py`, `node/app/services/host_time_sync.sh`, `node/tests/test_time_sync.py` — обёртка, host-скрипт и тесты ноды
 - `panel/frontend/src/api/client.ts` — `timeSyncRun`, `timeSyncStatus`
 - `panel/frontend/src/stores/settingsStore.ts` — `serverTimezone`, `timeSyncEnabled`
 - `panel/frontend/src/components/settings/TimeSyncSection.tsx` — UI секции синхронизации времени

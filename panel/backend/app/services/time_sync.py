@@ -1,9 +1,11 @@
 import asyncio
+import base64
 import json
 import logging
 import re
 import shlex
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 import docker
@@ -22,6 +24,12 @@ logger = logging.getLogger(__name__)
 SYNC_INTERVAL = 86400  # 24 hours
 SYNC_CONTAINER_NAME = "panel-time-sync"
 SYNC_CONTAINER_IMAGE = "docker:cli"
+# Копия node/app/services/host_time_sync.sh — образы панели и ноды собираются из
+# разных контекстов, общего файла у них нет; test_time_sync.py сверяет копии
+HOST_TIME_SYNC_SCRIPT = Path(__file__).with_name("host_time_sync.sh").read_text(encoding="utf-8")
+# Худший случай — установка chrony на хосте без демона времени плюс ожидание
+# первой синхронизации; таймаут общий для ноды и для контейнера на хосте панели
+SYNC_TIMEOUT = 240
 
 DEFAULT_TIMEZONE = "Europe/Moscow"
 TIMEZONE_MAX_LEN = 100
@@ -43,6 +51,30 @@ def safe_timezone(tz: Optional[str]) -> str:
     if candidate:
         logger.warning(f"Rejected timezone {candidate!r}, falling back to {DEFAULT_TIMEZONE}")
     return DEFAULT_TIMEZONE
+
+
+def build_container_script(tz: str) -> str:
+    """Скрипт контейнера docker:cli: заходит в неймспейсы хоста и запускает host_time_sync.sh.
+
+    Скрипт хоста многострочный и с кавычками — передаётся через base64, иначе его
+    пришлось бы экранировать дважды: для sh контейнера и для bash хоста.
+    """
+    host_command = f"TZ_NAME={shlex.quote(tz)}\n{HOST_TIME_SYNC_SCRIPT}"
+    encoded = base64.b64encode(host_command.encode("utf-8")).decode("ascii")
+    return f"""#!/bin/sh
+set -e
+command -v nsenter >/dev/null 2>&1 || apk add --no-cache util-linux-misc >/dev/null 2>&1 || apk add --no-cache util-linux >/dev/null 2>&1
+nsenter -t 1 -m -u -n -i -p -- bash -c "$(echo {encoded} | base64 -d)"
+"""
+
+
+def parse_key_values(stdout: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for line in stdout.splitlines():
+        key, separator, value = line.partition("=")
+        if separator:
+            values[key.strip()] = value.strip()
+    return values
 
 
 class TimeSyncService:
@@ -188,18 +220,23 @@ class TimeSyncService:
                 f"{server.url}/api/system/time-sync",
                 json={"timezone": tz},
                 headers=node_auth_headers(server),
-                timeout=30.0,
+                timeout=SYNC_TIMEOUT,
             )
 
             if response.status_code == 200:
                 data = response.json()
-                return {
+                result = {
                     "name": server.name,
                     "server_id": server.id,
                     "success": data.get("success", False),
                     "timezone": data.get("timezone", ""),
+                    "ntp_service": data.get("ntp_service", ""),
                     "ntp_synchronized": data.get("ntp_synchronized", False),
                 }
+                errors = data.get("errors") or []
+                if errors:
+                    result["error"] = "; ".join(errors)
+                return result
 
             return {
                 "name": server.name,
@@ -241,20 +278,10 @@ class TimeSyncService:
         except ImageNotFound:
             client.images.pull(SYNC_CONTAINER_IMAGE)
 
-        script = f"""#!/bin/sh
-set -e
-command -v nsenter >/dev/null 2>&1 || apk add --no-cache util-linux-misc >/dev/null 2>&1 || apk add --no-cache util-linux >/dev/null 2>&1
-nsenter -t 1 -m -u -n -i -p -- timedatectl set-timezone {shlex.quote(tz)}
-nsenter -t 1 -m -u -n -i -p -- timedatectl set-ntp true
-nsenter -t 1 -m -u -n -i -p -- systemctl restart systemd-timesyncd 2>/dev/null || true
-sleep 2
-nsenter -t 1 -m -u -n -i -p -- timedatectl show --no-pager
-"""
-
         try:
             container = client.containers.run(
                 image=SYNC_CONTAINER_IMAGE,
-                command=["sh", "-c", script],
+                command=["sh", "-c", build_container_script(tz)],
                 name=SYNC_CONTAINER_NAME,
                 privileged=True,
                 pid_mode="host",
@@ -263,8 +290,9 @@ nsenter -t 1 -m -u -n -i -p -- timedatectl show --no-pager
                 remove=False,
             )
 
-            result = container.wait(timeout=60)
-            logs = container.logs().decode("utf-8", errors="replace")
+            result = container.wait(timeout=SYNC_TIMEOUT)
+            stdout = container.logs(stdout=True, stderr=False).decode("utf-8", errors="replace")
+            stderr = container.logs(stdout=False, stderr=True).decode("utf-8", errors="replace")
 
             try:
                 container.remove(force=True)
@@ -273,27 +301,17 @@ nsenter -t 1 -m -u -n -i -p -- timedatectl show --no-pager
 
             exit_code = result.get("StatusCode", -1)
             if exit_code != 0:
-                return {"name": "panel", "success": False, "error": f"Exit code {exit_code}: {logs[-500:]}"}
+                reasons = [line for line in stderr.splitlines() if line.strip()]
+                error = "; ".join(reasons)[-500:] or f"exit code {exit_code}"
+                return {"name": "panel", "success": False, "error": error}
 
-            # Парсим вывод timedatectl show
-            ntp_synced = False
-            current_tz = tz
-            for line in logs.strip().split("\n"):
-                if "=" not in line:
-                    continue
-                key, _, value = line.partition("=")
-                key = key.strip()
-                value = value.strip()
-                if key == "Timezone":
-                    current_tz = value
-                elif key == "NTPSynchronized":
-                    ntp_synced = value == "yes"
-
+            values = parse_key_values(stdout)
             return {
                 "name": "panel",
                 "success": True,
-                "timezone": current_tz,
-                "ntp_synchronized": ntp_synced,
+                "timezone": values.get("Timezone", tz),
+                "ntp_service": values.get("NTPService", ""),
+                "ntp_synchronized": values.get("NTPSynchronized") == "yes",
             }
 
         except Exception as e:
