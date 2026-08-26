@@ -1453,6 +1453,7 @@
     "notification_language": "Notification language",
     "test_send": "Send Test",
     "test_ok": "Message sent",
+    "test_request_failed": "The panel did not respond to the test request",
     "general_settings": "General Settings",
     "check_interval": "Check interval",
     "cooldown": "Alert cooldown",

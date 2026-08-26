@@ -6,12 +6,13 @@ from typing import Optional
 from aiogram import Bot, Dispatcher, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramRetryAfter
+from aiogram.exceptions import TelegramAPIError, TelegramNetworkError, TelegramRetryAfter
 from aiogram.filters import Command
 from aiogram.types import (
     Message,
     InlineKeyboardMarkup, InlineKeyboardButton, ReplyParameters,
 )
+from aiogram.utils.token import TokenValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,14 @@ SETTINGS_CHECK_INTERVAL = 60
 # Пейсинг отправки под лимит Telegram (~30 msg/s на бота): на 500 нодах массовый
 # всплеск алертов иначе ловит 429 и теряется молча.
 MIN_SEND_INTERVAL = 0.05
+
+
+class TelegramSendError(Exception):
+    """Сообщение не доставлено; `reason` — текст, пригодный для показа оператору."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
 
 
 class TelegramBotService:
@@ -98,9 +107,10 @@ class TelegramBotService:
         parse_mode: str = "HTML",
         reply_markup: dict | None = None,
         reply_to_message_id: int | None = None,
-    ) -> Message | None:
+    ) -> Message:
+        """Отправляет сообщение; при любой неудаче поднимает TelegramSendError с причиной."""
         if not bot_token or not chat_id:
-            return None
+            raise TelegramSendError("Bot token or chat ID is empty")
         bot = await self._get_or_create_bot(bot_token)
 
         markup = self._convert_markup(reply_markup)
@@ -114,7 +124,8 @@ class TelegramBotService:
             if gap < MIN_SEND_INTERVAL:
                 await asyncio.sleep(MIN_SEND_INTERVAL - gap)
 
-            for attempt in range(2):
+            retried = False
+            while True:
                 try:
                     msg = await bot.send_message(
                         chat_id=chat_id,
@@ -128,15 +139,16 @@ class TelegramBotService:
                 except TelegramRetryAfter as e:
                     # Telegram попросил подождать — единственная попытка переждать и повторить.
                     self._last_send_at[bot_token] = time.monotonic()
-                    if attempt == 0:
-                        await asyncio.sleep(e.retry_after + 0.5)
-                        continue
-                    logger.warning(f"Telegram 429 after retry: {e}")
-                    return None
+                    if retried:
+                        raise TelegramSendError(f"Telegram rate limit, retry after {e.retry_after}s") from e
+                    retried = True
+                    await asyncio.sleep(e.retry_after + 0.5)
+                except TelegramNetworkError as e:
+                    raise TelegramSendError(f"Network error: {e.message}") from e
+                except TelegramAPIError as e:
+                    raise TelegramSendError(f"Telegram: {e.message}") from e
                 except Exception as e:
-                    logger.warning(f"Telegram send failed: {e}")
-                    return None
-        return None
+                    raise TelegramSendError(str(e) or type(e).__name__) from e
 
     async def send_message(
         self,
@@ -146,7 +158,12 @@ class TelegramBotService:
         parse_mode: str = "HTML",
         reply_markup: dict | None = None,
     ) -> bool:
-        return (await self._send(bot_token, chat_id, text, parse_mode, reply_markup)) is not None
+        try:
+            await self._send(bot_token, chat_id, text, parse_mode, reply_markup)
+        except TelegramSendError as e:
+            logger.warning(f"Telegram send failed: {e.reason}")
+            return False
+        return True
 
     async def send_message_returning_id(
         self,
@@ -157,8 +174,12 @@ class TelegramBotService:
         reply_markup: dict | None = None,
         reply_to_message_id: int | None = None,
     ) -> int | None:
-        msg = await self._send(bot_token, chat_id, text, parse_mode, reply_markup, reply_to_message_id)
-        return msg.message_id if msg else None
+        try:
+            msg = await self._send(bot_token, chat_id, text, parse_mode, reply_markup, reply_to_message_id)
+        except TelegramSendError as e:
+            logger.warning(f"Telegram send failed: {e.reason}")
+            return None
+        return msg.message_id
 
     @staticmethod
     def _convert_markup(reply_markup) -> InlineKeyboardMarkup | None:
@@ -175,12 +196,11 @@ class TelegramBotService:
         return reply_markup
 
     async def send_test(self, bot_token: str, chat_id: str, text: str) -> dict:
-        if not bot_token or not chat_id:
-            return {"success": False, "error": "No bot token or chat ID"}
-        ok = await self.send_message(bot_token, chat_id, text)
-        if ok:
-            return {"success": True, "message": "Test message sent"}
-        return {"success": False, "error": "Failed to send message"}
+        try:
+            await self._send(bot_token, chat_id, text)
+        except TelegramSendError as e:
+            return {"success": False, "error": e.reason}
+        return {"success": True, "message": "Test message sent"}
 
     # --- Управление экземплярами Bot ---
 
@@ -188,7 +208,10 @@ class TelegramBotService:
         if token in self._bots:
             return self._bots[token]
 
-        bot = Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+        try:
+            bot = Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+        except TokenValidationError as e:
+            raise TelegramSendError("Invalid bot token format, expected <bot_id>:<secret>") from e
         self._bots[token] = bot
 
         task = asyncio.create_task(self._poll_loop(token))

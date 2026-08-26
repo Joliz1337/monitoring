@@ -1455,6 +1455,7 @@
     "notification_language": "Язык уведомлений",
     "test_send": "Тест",
     "test_ok": "Сообщение отправлено",
+    "test_request_failed": "Панель не ответила на запрос теста",
     "general_settings": "Общие настройки",
     "check_interval": "Интервал проверки",
     "cooldown": "Пауза между алертами",
