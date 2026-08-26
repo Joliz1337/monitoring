@@ -113,7 +113,7 @@ If the command is run inside the Hetzner Rescue System, the installer provisions
 > Click a row to expand the screenshot. Images are clickable — they open in full size.
 
 <details>
-<summary><b>Dashboard</b> — all servers on one screen: statuses, metrics, SSL</summary>
+<summary><b>Dashboard</b> — all servers on one screen: statuses, per-core load, traffic, SSL</summary>
 
 ![Dashboard — server cards](.github/screenshots/dashboard.png)
 
@@ -134,7 +134,7 @@ If the command is run inside the Hetzner Rescue System, the installer provisions
 </details>
 
 <details>
-<summary><b>HAProxy</b> — proxy rules, service control and config editor</summary>
+<summary><b>HAProxy</b> — live statistics, proxy rules, certificates and firewall</summary>
 
 ![HAProxy management](.github/screenshots/haproxy.png)
 

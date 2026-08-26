@@ -114,7 +114,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/in
 > Нажмите на строку, чтобы развернуть скриншот. Картинки кликабельны — открываются в полном размере.
 
 <details>
-<summary><b>Dashboard</b> — все серверы на одном экране: статусы, метрики, SSL</summary>
+<summary><b>Dashboard</b> — все серверы на одном экране: статусы, нагрузка по ядрам, трафик, SSL</summary>
 
 ![Dashboard — карточки серверов](.github/screenshots/dashboard.png)
 
@@ -135,7 +135,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/in
 </details>
 
 <details>
-<summary><b>HAProxy</b> — правила проксирования, управление сервисом и редактор конфига</summary>
+<summary><b>HAProxy</b> — живая статистика, правила проксирования, сертификаты и файрвол</summary>
 
 ![Управление HAProxy](.github/screenshots/haproxy.png)
 
