@@ -38,6 +38,7 @@ TIMEOUT_APT_LOCK=300            # 5 min wait for dpkg lock (unattended-upgrades 
 TIMEOUT_CURL=60                 # 1 min for curl requests
 TIMEOUT_DOCKER_COMPOSE_DOWN=120 # 2 min for docker compose down
 TIMEOUT_SYSTEMCTL=60            # 1 min for systemctl operations
+TIMEOUT_CREDENTIALS_SCREEN=7200 # keep panel login details on screen until Enter
 
 # Retry configuration
 MAX_RETRIES=3
@@ -136,6 +137,14 @@ declare -A MSG_RU
 
 # English messages
 MSG_EN[downloading_repo]="Downloading repository..."
+MSG_EN[downloading_mirror]="Downloading via mirror"
+MSG_EN[github_mirror]="GitHub is unreachable, trying the mirror (ghfast.top)..."
+MSG_EN[download_failed]="Failed to download the repository (direct and via mirror)"
+MSG_EN[git_install_failed]="Failed to install git"
+MSG_EN[cli_install_failed]="Could not install the mon command"
+MSG_EN[copy_failed]="Failed to copy files to"
+MSG_EN[deploy_failed]="Installation failed"
+MSG_EN[update_failed]="Update failed"
 MSG_EN[menu_title]="Monitoring System Installer"
 MSG_EN[menu_install_panel]="Install panel"
 MSG_EN[menu_install_node]="Install node"
@@ -287,6 +296,14 @@ MSG_EN[rescue_rebooting]="Rebooting into the new system in 5 seconds..."
 
 # Russian messages
 MSG_RU[downloading_repo]="Скачивание репозитория..."
+MSG_RU[downloading_mirror]="Скачивание через зеркало"
+MSG_RU[github_mirror]="GitHub недоступен, пробую зеркало (ghfast.top)..."
+MSG_RU[download_failed]="Не удалось скачать репозиторий (напрямую и через зеркало)"
+MSG_RU[git_install_failed]="Не удалось установить git"
+MSG_RU[cli_install_failed]="Не удалось установить команду mon"
+MSG_RU[copy_failed]="Не удалось скопировать файлы в"
+MSG_RU[deploy_failed]="Установка завершилась с ошибкой"
+MSG_RU[update_failed]="Обновление завершилось с ошибкой"
 MSG_RU[menu_title]="Установщик системы мониторинга"
 MSG_RU[menu_install_panel]="Установить панель"
 MSG_RU[menu_install_node]="Установить ноду"
@@ -654,13 +671,13 @@ clone_repo_with_fallback() {
     fi
 
     rm -rf "$target_dir" 2>/dev/null || true
-    log_warn "GitHub недоступен, пробую зеркало (ghfast.top)..."
-    if spin_retry "$TIMEOUT_GIT_CLONE" 2 "$RETRY_DELAY" "Downloading via mirror" \
+    log_warn "$(msg github_mirror)"
+    if spin_retry "$TIMEOUT_GIT_CLONE" 2 "$RETRY_DELAY" "$(msg downloading_mirror)" \
         git clone --depth 1 --branch "$branch" "$mirror_url" "$target_dir"; then
         return 0
     fi
 
-    log_error "Failed to download repository (direct and mirror)"
+    log_error "$(msg download_failed)"
     return 1
 }
 
@@ -723,7 +740,7 @@ check_git() {
     if ! command -v git &> /dev/null; then
         apt_update_safe || log_warn "apt update had issues"
         apt_install_safe git || {
-            log_error "Failed to install git"
+            log_error "$(msg git_install_failed)"
             return 1
         }
     fi
@@ -792,7 +809,7 @@ MON_CLI_EOF
         [ -f "/usr/local/bin/monitoring" ] && rm -f "/usr/local/bin/monitoring" 2>/dev/null || true
         log_success "$(msg cli_installed)"
     else
-        log_warn "Could not install CLI command"
+        log_warn "$(msg cli_install_failed)"
     fi
 }
 
@@ -1616,15 +1633,15 @@ install_panel() {
     fi
     
     cp -r "$TMP_DIR/panel" "$PANEL_DIR" || {
-        log_error "Failed to copy panel files"
+        log_error "$(msg copy_failed) $PANEL_DIR"
         return 1
     }
     copy_installer "$PANEL_DIR"
     cd "$PANEL_DIR" || return 1
     chmod +x deploy.sh update.sh >/dev/null 2>&1 || true
-    
+
     ./deploy.sh || {
-        log_error "Panel deploy failed"
+        log_error "$(msg deploy_failed)"
         return 1
     }
     
@@ -1642,21 +1659,16 @@ update_panel() {
     log_info "$(msg updating_panel)"
     cd "$PANEL_DIR" || return 1
     
-    if [ -f "update.sh" ]; then
-        ./update.sh || {
-            log_error "Panel update failed"
-            return 1
-        }
-    else
+    if [ ! -f "update.sh" ]; then
         clone_repo || return 1
         cp "$TMP_DIR/panel/update.sh" "$PANEL_DIR/update.sh" 2>/dev/null || true
         chmod +x "$PANEL_DIR/update.sh" 2>/dev/null || true
-        ./update.sh || {
-            log_error "Panel update failed"
-            return 1
-        }
     fi
-    
+    ./update.sh || {
+        log_error "$(msg update_failed)"
+        return 1
+    }
+
     copy_installer "$PANEL_DIR"
     log_success "$(msg update_complete)"
 }
@@ -1883,15 +1895,15 @@ install_node() {
     configure_dns
 
     cp -r "$TMP_DIR/node" "$NODE_DIR" || {
-        log_error "Failed to copy node files"
+        log_error "$(msg copy_failed) $NODE_DIR"
         return 1
     }
     copy_installer "$NODE_DIR"
     cd "$NODE_DIR" || return 1
     chmod +x deploy.sh update.sh >/dev/null 2>&1 || true
-    
+
     ./deploy.sh || {
-        log_error "Node deploy failed"
+        log_error "$(msg deploy_failed)"
         return 1
     }
     
@@ -1909,21 +1921,16 @@ update_node() {
     log_info "$(msg updating_node)"
     cd "$NODE_DIR" || return 1
     
-    if [ -f "update.sh" ]; then
-        ./update.sh || {
-            log_error "Node update failed"
-            return 1
-        }
-    else
+    if [ ! -f "update.sh" ]; then
         clone_repo || return 1
         cp "$TMP_DIR/node/update.sh" "$NODE_DIR/update.sh" 2>/dev/null || true
         chmod +x "$NODE_DIR/update.sh" 2>/dev/null || true
-        ./update.sh || {
-            log_error "Node update failed"
-            return 1
-        }
     fi
-    
+    ./update.sh || {
+        log_error "$(msg update_failed)"
+        return 1
+    }
+
     copy_installer "$NODE_DIR"
     log_success "$(msg update_complete)"
 }
@@ -3009,6 +3016,10 @@ run_unattended() {
     UNATTENDED=1
 
     mkdir -p /etc/monitoring 2>/dev/null || true
+    # Панель передаёт язык своего интерфейса — он становится языком ноды
+    case "${MON_LANG:-}" in
+        en|ru) echo "$MON_LANG" > /etc/monitoring/language 2>/dev/null || true ;;
+    esac
     [ -f /etc/monitoring/language ] || echo "en" > /etc/monitoring/language 2>/dev/null || true
     load_language
 
@@ -3117,7 +3128,7 @@ find_ubuntu2404_image() {
 # установщик. Эти параметры доедут до новой ОС и продолжат настройку.
 collect_firstboot_env() {
     local var
-    for var in NODE_SECRET PANEL_IP NODE_API_PORT MON_PROXY_URL MON_BRANCH \
+    for var in NODE_SECRET PANEL_IP NODE_API_PORT MON_PROXY_URL MON_BRANCH MON_LANG \
                MON_INSTALL_NODE MON_INSTALL_OPTIMIZATIONS MON_INSTALL_WARP \
                MON_INSTALL_REMNAWAVE MON_NIC_MODE MON_OPT_PROFILE \
                MON_NODE_CAPABILITIES REMNAWAVE_CERT; do
@@ -3429,7 +3440,8 @@ HELPEOF
                 clone_repo || continue
                 install_panel
                 cleanup_temp
-                safe_read "$(msg press_enter)" "" 30 >/dev/null
+                # Данные для входа показаны один раз — не даём меню смыть их по таймауту
+                safe_read "$(msg press_enter)" "" "$TIMEOUT_CREDENTIALS_SCREEN" >/dev/null
                 ;;
             2)
                 check_git || continue

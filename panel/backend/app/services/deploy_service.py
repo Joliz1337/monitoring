@@ -17,6 +17,7 @@ import secrets
 import shlex
 import string
 from dataclasses import dataclass
+from enum import Enum
 from typing import AsyncIterator
 
 import asyncssh
@@ -66,6 +67,13 @@ _PWCHANGE_OK_MARKERS = (
 )
 
 
+class InstallerLanguage(str, Enum):
+    """Языки install.sh — уезжают на ноду как MON_LANG."""
+
+    EN = "en"
+    RU = "ru"
+
+
 @dataclass
 class DeployParams:
     host: str
@@ -90,6 +98,8 @@ class DeployParams:
     nic_mode: str = "auto"  # auto | multiqueue | hybrid | rps
     # Желаемый пароль root: если задан и текущий просрочен — ставится сразу при смене
     new_password: str | None = None
+    # Язык интерфейса панели в момент запуска — им же говорит установщик и меню `mon` на ноде
+    lang: InstallerLanguage = InstallerLanguage.EN
 
 
 def _generate_strong_password(length: int = 20) -> str:
@@ -149,6 +159,7 @@ def _build_inner_command(params: DeployParams) -> str:
     env: dict[str, str] = {
         "MON_INSTALL_NODE": "1",
         "NODE_SECRET": params.node_secret,
+        "MON_LANG": params.lang.value,
     }
     if update_channel.current_branch() != update_channel.STABLE_BRANCH:
         env["MON_BRANCH"] = update_channel.current_branch()

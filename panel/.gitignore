@@ -1,9 +1,6 @@
 # Environment
 .env
 
-# Generated nginx config
-nginx/nginx.conf
-
 # Python
 __pycache__/
 *.py[cod]

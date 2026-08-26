@@ -91,20 +91,30 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/in
 - Автоматически скачивает случайный маскировочный шаблон в `/var/www/html/`
 - Настраивает UFW (порт 2222 для IP панели)
 
+## Установка панели (`deploy.sh`)
+
+`panel/deploy.sh` запускает установщик (`install.sh` → «Установить панель»); его можно запустить и напрямую из `/opt/monitoring-panel`. Поддерживаются только Debian/Ubuntu. Порядок: Docker → домен → способ получения сертификата → проверка DNS → файрвол (UFW, без него — iptables) → сертификат → cron продления → `.env` (+ `pg-tune.sh`) → `docker compose pull`/`up` → health-check → данные для входа.
+
+**Язык.** Скрипт читает `/etc/monitoring/language` (записывает `install.sh` при выборе языка) и выводит всё — подсказки, прогресс, ошибки, блок с данными для входа — на этом языке через `MSG_EN`/`MSG_RU` и `msg()`, как в `install.sh`. Ожидания Enter в конце нет: экран с паролем держит `install.sh` (`TIMEOUT_CREDENTIALS_SCREEN`), чтобы меню не смыло его по таймауту.
+
+**Переменные окружения (необязательные):** `DOMAIN` — домен без вопроса; `CF_API_TOKEN` — API-токен Cloudflare, сертификат выпускается через DNS-01 без вопросов.
+
+Nginx панели рендерит конфиг сам: `nginx/nginx.conf.template` монтируется в `/etc/nginx/templates/`, официальный entrypoint прогоняет envsubst (`DOMAIN`, `PANEL_UID`) при каждом старте контейнера — отдельного шага генерации `nginx.conf` нет.
+
 ## SSL сертификаты
 
-`deploy.sh` управляет SSL в три этапа:
+`deploy.sh` подбирает сертификат для домена панели в таком порядке:
 
-1. **Прямой путь** — проверяет `/etc/letsencrypt/live/{DOMAIN}/`. Если там лежит symlink (ранее созданный) — берёт его без лишних действий.
-2. **Поиск wildcard/SAN** (`find_existing_cert`) — сканирует все сертификаты в `/etc/letsencrypt/live/`, читает SAN-записи через `openssl` и ищет совпадение с доменом, включая wildcard (`*.example.com` покрывает `sub.example.com`). При нахождении создаёт symlink `{DOMAIN}` → найденный каталог.
-3. **Certbot** — запускается только если первые два шага не дали результата.
+1. **Прямой путь** — `/etc/letsencrypt/live/{DOMAIN}/`. Symlink (создан ранее или модулем Wildcard SSL) используется как есть. Собственная линия панели при сроке ≤ 30 дней (`CERT_RENEWAL_DAYS`) продлевается тем же способом, которым выпущена — способ читается из `authenticator` в `/etc/letsencrypt/renewal/{DOMAIN}.conf` (`cert_authenticator`).
+2. **Поиск wildcard/SAN** (`find_existing_cert`) — сканирует `/etc/letsencrypt/live/`, читает SAN через `openssl x509 -ext subjectAltName` и ищет совпадение с доменом, включая wildcard на один уровень (`*.example.com` покрывает `panel.example.com`). При нахождении создаёт symlink `{DOMAIN}` → найденный каталог.
+3. **Выпуск** — только если первые два шага ничего не дали. Способ выбирает оператор (`resolve_ssl_mode`, `SSL_MODE`):
+   - **Let's Encrypt по HTTP** (`http`) — `certbot certonly --standalone` (HTTP-01): домен должен резолвиться в IP сервера, порт 80 доступен из интернета; перед выпуском останавливаются сервисы на порту 80. Проверка DNS в этом режиме строгая: домен не резолвится или ведёт на другой IP → вопрос «продолжить?» (по умолчанию нет).
+   - **Let's Encrypt через Cloudflare DNS API** (`cloudflare`) — `certbot certonly --dns-cloudflare` с плагином `python3-certbot-dns-cloudflare` (DNS-01, тот же механизм, что у [Wildcard SSL](#wildcard-ssl) панели). Оператор вводит API-токен (шаблон «Edit zone DNS» в Cloudflare); установщик проверяет его через `GET https://api.cloudflare.com/client/v4/user/tokens/verify` (отклонён → повторный ввод, API недоступен → продолжаем) и сохраняет в `/etc/letsencrypt/cloudflare.ini` (0600). Каталог `/etc/letsencrypt` смонтирован в контейнер бэкенда, поэтому продление из панели видит файл по тому же пути. Порт 80 не нужен, домен может быть за прокси Cloudflare — проверка DNS только информирует и вопросов не задаёт.
 
 **Поведение для symlink-сертификатов:**
 - certbot не устанавливается
-- cron автопродления не устанавливается (`setup_cert_renewal_cron` пропускает шаг); если старая cron-задача уже существует — она удаляется
-- `print_credentials` показывает путь к источнику и пометку "Managed externally"
-
-**Пример:** wildcard `*.example.com` лежит в `/etc/letsencrypt/live/example.com/`. Домен панели `panel.example.com` — скрипт найдёт сертификат автоматически и создаст symlink, certbot не запустится.
+- cron автопродления не устанавливается; старая cron-задача, если была, удаляется
+- в итоговой сводке показывается путь к источнику и пометка, что продление на стороне владельца
 
 **Управление через панель:**
 - В разделе **Настройки** (вкладка «Система») отображается информация о сертификате панели
@@ -112,25 +122,25 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/in
 - Кнопка "Продлить" для ручного продления через веб-интерфейс
 - Если сертификат панели управляется настройкой «Использовать для панели» из [Wildcard SSL](#wildcard-ssl) — вместо кнопки «Продлить» показывается бейдж «Управляется Wildcard SSL» с подсказкой; продление такого сертификата идёт вместе с продлением wildcard-сертификата, отдельно его продлить нельзя
 
-**Cron автопродления (только для сертификатов, выпущенных certbot напрямую):**
+**Автопродление (только для собственной линии панели):**
 
-`setup_cert_renewal_cron()` устанавливает ежедневную задачу с pre/post-hook:
+`setup_cert_renewal_cron()` ставит ежедневную задачу (03:00), хуки зависят от способа выпуска:
 
 ```
+# standalone — panel-nginx держит порт 80, на время проверки контейнер останавливается
 certbot renew --cert-name '<DOMAIN>' --quiet \
-  --pre-hook  'docker stop panel-nginx ...' \
-  --post-hook 'docker start panel-nginx ...'
+  --pre-hook  'docker stop panel-nginx ...' --post-hook 'docker start panel-nginx ...'
+
+# dns-cloudflare — порт не нужен, после продления nginx перечитывает файлы
+certbot renew --cert-name '<DOMAIN>' --quiet \
+  --deploy-hook 'docker exec panel-nginx nginx -s reload ...'
 ```
 
-- `--cert-name <DOMAIN>` — ограничивает задачу только сертификатом панели; wildcard-сертификаты (продлеваются через Cloudflare DNS) не затрагиваются
-- `--pre-hook` останавливает `panel-nginx` перед certbot, освобождая порт 80 для standalone-плагина
-- `--post-hook` поднимает `panel-nginx` обратно независимо от результата
-- `renew-cert.sh` (ручное продление через UI) использует аналогичный подход: `trap 'docker start panel-nginx ...' EXIT` сразу после остановки nginx — контейнер гарантированно поднимается при любом исходе, включая ошибку certbot
-- Идемпотентность: при повторном запуске `deploy.sh` старая строка `certbot renew` удаляется из crontab и заменяется актуальной
+- `--cert-name <DOMAIN>` ограничивает задачу линией панели; wildcard-сертификаты (их продлевает панель) не затрагиваются
+- Идемпотентность: при повторном запуске `deploy.sh` прежняя строка `certbot renew` (в том числе с другими хуками) заменяется актуальной
+- `renew-cert.sh` — ручное продление кнопкой «Продлить» (выполняется бэкендом внутри контейнера) — выбирает способ по тому же `authenticator`: standalone — `docker run certbot/certbot` на порту 80 с остановкой `panel-nginx` (`trap ... EXIT` гарантирует старт обратно при любом исходе), с `--force` — `certonly --standalone --force-renewal`; dns-cloudflare — `certbot renew` прямо в контейнере бэкенда (certbot и `certbot-dns-cloudflare` есть в образе, `/etc/letsencrypt` смонтирован rw), nginx не останавливается, после успеха — `nginx -s reload`. Коды возврата: 0 — продлён, 2 — срок не подошёл, 1 — ошибка
 
-**Требования для certbot (только если нет wildcard/SAN):**
-- Домен должен указывать на IP сервера
-- Порт 80 должен быть открыт
+**Требования к выпуску:** HTTP — домен на IP сервера, порт 80 открыт; Cloudflare — DNS зоны обслуживается Cloudflare, у токена право Zone → DNS → Edit на зону домена.
 
 ## Структура
 
@@ -212,13 +222,13 @@ panel/
 │           ├── traffic_ingest.py        # Счётчики нод → дельты → часовые и суточные бакеты server_traffic
 │           ├── traffic_import.py        # Разовый перенос легаси-истории трафика с нод, гейт по версии ноды
 │           └── bulk_job_manager.py      # In-memory реестр фоновых массовых операций (по образцу deploy_job_manager)
-├── nginx/             # Reverse proxy с SSL
+├── nginx/             # Reverse proxy с SSL (nginx.conf.template рендерится entrypoint'ом контейнера)
 ├── scripts/
 │   ├── apply-update.sh          # Обновление панели, запускается из свежего клона (см. «Механизм обновления»)
-│   ├── generate-nginx-config.sh # Рендер nginx.conf панели
 │   └── pg-tune.sh                # Расчёт PostgreSQL-настроек из RAM хоста; подключается deploy.sh и apply-update.sh (см. «База данных»)
 ├── docker-compose.yml # Образы из GHCR + fallback build
-├── deploy.sh          # Установка: docker compose pull + up
+├── deploy.sh          # Установка: Docker, домен, SSL (HTTP-01 / Cloudflare DNS-01), .env, compose pull + up (см. «Установка панели»)
+├── renew-cert.sh      # Продление сертификата панели из UI (см. «SSL сертификаты»)
 └── VERSION            # Версия панели (единственный источник)
 ```
 
@@ -1665,7 +1675,7 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 **Принцип работы (job-модель):**
 1. Пользователь открывает форму «Добавить сервер», включает чекбокс «Автоустановка ноды по SSH»
 2. Вводит SSH-данные (порт, логин, пароль или приватный ключ + passphrase) и выбирает доп. компоненты. Поле «Порт» (monitoring_port, дефолт 9100) задаёт порт mTLS-API ноды: он попадает в URL создаваемого сервера, а при отличии от 9100 уезжает установщику как `NODE_API_PORT` (`_build_inner_command` в `deploy_service.py`, тест `tests/test_deploy_command.py`) — нода поднимает nginx и открывает UFW именно на нём
-3. Frontend отправляет `POST /api/servers/deploy` → бэкенд немедленно возвращает `{"job_id": "<hex>"}` и запускает `asyncio.create_task`
+3. Frontend отправляет `POST /api/servers/deploy` (в теле — ещё и текущий язык интерфейса `lang`: установщик на ноде и её меню `mon` будут на том же языке, что панель) → бэкенд немедленно возвращает `{"job_id": "<hex>"}` и запускает `asyncio.create_task`
 4. Frontend подписывается на лог через `GET /api/servers/deploy/{job_id}/stream` (NDJSON)
 5. При успехе backend создаёт запись `Server`, применяет SSH-пресет/пароль (`_post_install`) и привязывает к выбранным HAProxy/Firewall/DNAT-профилям (`_bind_profiles`)
 6. Завершённые задачи хранятся 600 секунд (`FINISHED_TTL_SECONDS`) для переподключения, затем удаляются из памяти
@@ -1743,6 +1753,7 @@ Singleton-сервис `panel/backend/app/services/deploy_job_manager.py`. Уп�
 - `nic_mode: str` — NIC-режим (`auto` по умолчанию, либо `multiqueue`/`hybrid`/`rps`)
 - `ssh_preset: str | None` — пресет защиты SSH: `None` / `recommended` / `maximum`
 - `new_root_password: str | None` — новый пароль root (минимум 8 символов)
+- `lang: "en" | "ru"` (`InstallerLanguage`, по умолчанию `en`) — язык интерфейса панели в момент запуска; всегда уезжает установщику как `MON_LANG` (явный `en` перебивает русский, оставшийся на сервере от прошлой ноды)
 
 Ответ: `{"job_id": "<hex>"}`.
 

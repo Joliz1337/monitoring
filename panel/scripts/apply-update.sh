@@ -185,7 +185,7 @@ for i in {1..15}; do
 done
 log_success "Containers stopped"
 
-# Copy files (preserve .env, database, generated nginx.conf)
+# Copy files (preserve .env and database)
 log_info "Copying new files..."
 rsync -av --delete \
     --exclude='.env' \
@@ -193,7 +193,6 @@ rsync -av --delete \
     --exclude='backend/.env' \
     --exclude='backend/.env.backup' \
     --exclude='backend/data' \
-    --exclude='nginx/nginx.conf' \
     "$TMP_DIR/panel/" "$PANEL_DIR/"
 
 # Restore .env files from backup if they exist
@@ -265,22 +264,6 @@ if [ -f "$PANEL_DIR/.env" ] && ! grep -q "^PANEL_ENC_KEY=" "$PANEL_DIR/.env"; th
 fi
 
 tune_postgres_env "$PANEL_DIR/.env"
-
-# Regenerate nginx config
-log_info "Regenerating nginx configuration..."
-if [ -f "$PANEL_DIR/scripts/generate-nginx-config.sh" ]; then
-    bash "$PANEL_DIR/scripts/generate-nginx-config.sh" "$PANEL_DIR"
-else
-    # Inline fallback
-    if [ -f "$PANEL_DIR/.env" ]; then
-        source "$PANEL_DIR/.env"
-        if [ -n "$DOMAIN" ] && [ -n "$PANEL_UID" ] && [ -f "$PANEL_DIR/nginx/nginx.conf.template" ]; then
-            export DOMAIN PANEL_UID
-            envsubst '${DOMAIN} ${PANEL_UID}' < "$PANEL_DIR/nginx/nginx.conf.template" > "$PANEL_DIR/nginx/nginx.conf"
-            log_success "Generated nginx.conf for $DOMAIN"
-        fi
-    fi
-fi
 
 log_success "Files updated"
 

@@ -20,7 +20,7 @@ from app.auth import verify_auth
 from app.database import async_session_maker, get_db
 from app.models import RemnawaveCertProfile
 from app.services.deploy_job_manager import PostDeployOptions, get_deploy_job_manager
-from app.services.deploy_service import DeployParams
+from app.services.deploy_service import DeployParams, InstallerLanguage
 from app.services.http_client import validate_proxy_input
 from app.services.net_utils import resolve_panel_ip
 from app.services.pki import build_installer_token
@@ -151,6 +151,8 @@ class DeployRequest(BaseModel):
     haproxy_profile_id: Optional[int] = None
     firewall_profile_id: Optional[int] = None
     dnat_profile_id: Optional[int] = None
+    # Язык интерфейса панели — установщик и меню `mon` на ноде будут на нём же
+    lang: InstallerLanguage = InstallerLanguage.EN
 
     @field_validator('socks5_proxy')
     @classmethod
@@ -254,6 +256,7 @@ async def deploy_server(
         proxy_url=proxy_url,
         socks5_proxy=req.socks5_proxy,
         new_password=req.new_root_password,
+        lang=req.lang,
     )
 
     post_opts = PostDeployOptions(

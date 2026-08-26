@@ -36,7 +36,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/in
 ```
 
 Меню установщика:
-- **1** — Установить панель
+- **1** — Установить панель: `install.sh` клонирует репозиторий и запускает `panel/deploy.sh` — Docker → домен → способ получения сертификата (Let's Encrypt по HTTP или через Cloudflare DNS API; второй работает за прокси Cloudflare и не требует порта 80; если подходящий сертификат уже лежит в `/etc/letsencrypt`, вопрос не задаётся) → UFW → `.env` → контейнеры. `deploy.sh` берёт язык из `/etc/monitoring/language` и говорит на нём от первой строки до данных для входа; экран с паролем `install.sh` держит до нажатия Enter (`TIMEOUT_CREDENTIALS_SCREEN`). Подробности — в [panel/DOCUMENTATION.md](panel/DOCUMENTATION.md#установка-панели-deploysh)
 - **2** — Установить ноду
 - **7** — Применить системные оптимизации (с выбором режима NIC)
 - **9** — Установить Remnawave ноду (без домена/SSL); контейнер `remnanode` запускается с `cap_add: NET_ADMIN` для управления сетевыми интерфейсами; генерируемый `docker-compose.yml` монтирует хостовый `/etc/letsencrypt:/etc/letsencrypt:ro` в сервис `remnawave-nginx`, чтобы контейнер видел сертификаты, выпущенные на хосте
@@ -173,6 +173,7 @@ bash install.sh --unattended
 | `NODE_API_PORT` | Порт mTLS-nginx ноды (по умолчанию 9100): пишется в `.env` ноды, открывается в UFW, подставляется в конфиг nginx; в URL сервера на панели указывается тот же порт |
 | `REMNAWAVE_CERT` | Сертификат ноды Remnawave (не читается из /dev/tty) |
 | `MON_BRANCH` | Канал обновлений: `main` (по умолчанию) или `dev` — ветка `git clone` и всех `raw.githubusercontent.com`-URL (конфиги, firstboot-скрипт Hetzner Rescue); экспортируется для `node/deploy.sh`, который по ней выбирает тег Docker-образов (`MON_IMAGE_TAG`) |
+| `MON_LANG` | Язык установщика и меню `mon` на ноде: `en` или `ru` — записывается в `/etc/monitoring/language` и перебивает уже сохранённый там выбор; другие значения игнорируются, без переменной остаётся сохранённый язык или `en`. Панель передаёт сюда язык своего интерфейса при автоустановке по SSH; в Hetzner Rescue доезжает до новой ОС через `firstboot.env` |
 
 Глобальный флаг `UNATTENDED=1` — все запросы подтверждения переустановки (нода/WARP/Remnawave) автоматически принимаются. Функция `run_unattended()` выполняет компоненты в порядке: HTTP-прокси установщика → нода мониторинга → оптимизации (если `MON_INSTALL_OPTIMIZATIONS=1`) → WARP → нода Remnawave. Интерактивное меню без изменений.
 

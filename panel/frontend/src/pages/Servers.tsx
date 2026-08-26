@@ -144,7 +144,7 @@ const removeStoredJob = (jobId: string) => {
 
 export default function Servers() {
   const { servers, fetchServersWithMetrics, addServer, deleteServer, testServer, updateServer, toggleServer } = useServersStore()
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const { uid } = useParams()
   const navigate = useNavigate()
 
@@ -374,6 +374,8 @@ export default function Servers() {
     haproxy_profile_id: d.haproxyProfileId ?? null,
     firewall_profile_id: d.firewallProfileId ?? null,
     dnat_profile_id: d.dnatProfileId ?? null,
+    // Установщик на ноде говорит на языке интерфейса панели
+    lang: i18n.language.startsWith('ru') ? 'ru' : 'en',
   })
 
   // Читает NDJSON-лог фоновой задачи. finished=true только если дошли до 'done'
