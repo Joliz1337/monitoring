@@ -2126,10 +2126,6 @@
     "fullconn": "Порог полной загрузки",
     "timeout_queue": "Таймаут очереди",
     "send_proxy_v2": "PROXY Protocol v2",
-    "on_marked_down": "При падении",
-    "on_marked_up": "При восстановлении",
-    "shutdown_sessions": "Закрыть сессии",
-    "shutdown_backup_sessions": "Закрыть backup-сессии",
     "min_one_server": "Нужен хотя бы один сервер",
     "auto_weight": "Авто-веса по CPU",
     "alg": {

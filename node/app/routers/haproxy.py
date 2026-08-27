@@ -55,7 +55,6 @@ def _rule_to_response(r: HAProxyRule) -> HAProxyRuleResponse:
             maxconn=s.maxconn, check=s.check, inter=s.inter, fall=s.fall, rise=s.rise,
             send_proxy=s.send_proxy, send_proxy_v2=s.send_proxy_v2,
             backup=s.backup, slowstart=s.slowstart,
-            on_marked_down=s.on_marked_down, on_marked_up=s.on_marked_up,
             disabled=s.disabled,
         )
         for s in r.servers

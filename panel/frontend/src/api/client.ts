@@ -2270,8 +2270,6 @@ export interface BackendServer {
   send_proxy_v2?: boolean
   backup?: boolean
   slowstart?: string
-  on_marked_down?: string | null
-  on_marked_up?: string | null
   disabled?: boolean
 }
 

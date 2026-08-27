@@ -2124,10 +2124,6 @@
     "fullconn": "Full Connection Threshold",
     "timeout_queue": "Queue Timeout",
     "send_proxy_v2": "PROXY Protocol v2",
-    "on_marked_down": "On Marked Down",
-    "on_marked_up": "On Marked Up",
-    "shutdown_sessions": "Shutdown Sessions",
-    "shutdown_backup_sessions": "Shutdown Backup Sessions",
     "min_one_server": "At least one server required",
     "auto_weight": "Auto-weight by CPU",
     "alg": {
