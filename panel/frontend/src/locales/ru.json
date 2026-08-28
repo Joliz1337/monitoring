@@ -1559,6 +1559,8 @@
     "expired": "Истёк",
     "short_days": "д",
     "short_hours": "ч",
+    "total_paid": "Итого будет оплачено",
+    "until": "до",
     "notification_settings": "Настройки уведомлений",
     "notification_hint": "Уведомления об истечении через Telegram из раздела Alerts",
     "enable_notifications": "Включить уведомления об оплате",

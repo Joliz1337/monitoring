@@ -1557,6 +1557,8 @@
     "expired": "Expired",
     "short_days": "d",
     "short_hours": "h",
+    "total_paid": "Paid in total",
+    "until": "until",
     "notification_settings": "Notification Settings",
     "notification_hint": "Expiration notifications via Telegram from Alerts section",
     "enable_notifications": "Enable billing notifications",

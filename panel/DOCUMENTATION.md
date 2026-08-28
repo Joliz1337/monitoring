@@ -1528,6 +1528,8 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 
 **Отображение остатка времени:** API отдаёт `days_left` с точностью до 2 знаков (`round(days_left, 2)`). Frontend `formatDays()` в `Billing.tsx` показывает дни и часы вместе (`12д 5ч`); если часов не осталось — только `12д`; если остаток меньше суток — только `5ч`; при истёкшем сроке — «Истёк». Единицы локализованы через `billing.short_days`/`billing.short_hours` в `ru.json`/`en.json`.
 
+**Предпросмотр итога в окнах «Продлить»/«Пополнить»:** компонент `PaidTotalHint` показывает «Итого будет оплачено: `<дни>` · до `<дата>`» и пересчитывается при каждом изменении ввода. Формулы повторяют бэкенд, чтобы предпросмотр совпадал с результатом после подтверждения: продление — `max(days_left, 0) + days` (эндпоинт `/extend` считает от `paid_until`, а при истёкшем сроке — от «сейчас»); пополнение — `((account_balance + amount) / monthly_cost) * 30` (`_compute_paid_until_resource` от уже «прожитого» баланса, который API отдаёт в `account_balance`). Дата — в часовом поясе панели (`useBillingDateFormat`). Ключи i18n: `billing.total_paid`, `billing.until`.
+
 **Yandex Cloud — детали:**
 - Баланс получается через `GET https://billing.api.cloud.yandex.net/billing/v1/billingAccounts/{id}`
 - IAM-токен хранится в БД, но в API-ответах не возвращается — только `has_yc_token: bool`

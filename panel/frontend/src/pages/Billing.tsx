@@ -51,6 +51,7 @@ type ModalState =
 const COLLAPSED_KEY = 'billing_collapsed_folders'
 const FOLDER_ORDER_KEY = 'billing_folder_order'
 const SERVER_ORDER_KEY = 'billing_server_order'
+const MS_PER_DAY = 86_400_000
 
 function loadCollapsed(): Set<string> {
   try {
@@ -1626,6 +1627,10 @@ function ExtendModal({ t, server, onClose, onDone }: {
 }) {
   const [days, setDays] = useState(30)
   const [saving, setSaving] = useState(false)
+  const { formatDateTime } = useBillingDateFormat()
+
+  // Бэкенд продлевает от текущей даты окончания, а если срок уже истёк — от «сейчас»
+  const totalDays = Math.max(server.days_left ?? 0, 0) + days
 
   const submit = async () => {
     if (days <= 0) return
@@ -1678,6 +1683,11 @@ function ExtendModal({ t, server, onClose, onDone }: {
               </button>
             ))}
           </div>
+          {days > 0 && (
+            <div className="text-xs text-emerald-400/80 bg-emerald-500/10 rounded-lg px-3 py-2">
+              <PaidTotalHint totalDays={totalDays} t={t} formatDateTime={formatDateTime} />
+            </div>
+          )}
         </div>
 
         <div className="flex gap-3 mt-6">
@@ -1707,8 +1717,13 @@ function TopupModal({ t, server, onClose, onDone }: {
 }) {
   const [amount, setAmount] = useState('')
   const [saving, setSaving] = useState(false)
+  const { formatDateTime } = useBillingDateFormat()
 
   const numAmount = parseFloat(amount) || 0
+  const monthlyCost = server.monthly_cost ?? 0
+  const addedDays = monthlyCost > 0 ? (numAmount / monthlyCost) * 30 : 0
+  // Как на бэкенде: срок считается от суммы текущего (уже «прожитого») баланса и пополнения
+  const totalDays = monthlyCost > 0 ? (((server.account_balance ?? 0) + numAmount) / monthlyCost) * 30 : 0
 
   const submit = async () => {
     if (numAmount <= 0) return
@@ -1778,10 +1793,13 @@ function TopupModal({ t, server, onClose, onDone }: {
               </button>
             ))}
           </div>
-          {numAmount > 0 && server.monthly_cost && server.monthly_cost > 0 && (
-            <div className="text-xs text-emerald-400/80 flex items-center gap-1 bg-emerald-500/10 rounded-lg px-3 py-2">
-              <Clock className="w-3 h-3" />
-              ≈ +{Math.round((numAmount / server.monthly_cost) * 30)} {t('common.days')}
+          {numAmount > 0 && monthlyCost > 0 && (
+            <div className="text-xs text-emerald-400/80 bg-emerald-500/10 rounded-lg px-3 py-2 space-y-1">
+              <div className="flex items-center gap-1">
+                <Clock className="w-3 h-3" />
+                ≈ +{Math.round(addedDays)} {t('common.days')}
+              </div>
+              <PaidTotalHint totalDays={totalDays} t={t} formatDateTime={formatDateTime} />
             </div>
           )}
         </div>
@@ -1802,6 +1820,21 @@ function TopupModal({ t, server, onClose, onDone }: {
         </div>
       </div>
     </Overlay>
+  )
+}
+
+function PaidTotalHint({ totalDays, t, formatDateTime }: {
+  totalDays: number
+  t: (k: string) => string
+  formatDateTime: (iso: string) => string
+}) {
+  const paidUntil = new Date(Date.now() + totalDays * MS_PER_DAY).toISOString()
+  return (
+    <div className="flex items-center gap-1 flex-wrap">
+      <CalendarClock className="w-3 h-3" />
+      {t('billing.total_paid')}: <span className="font-semibold">{formatDays(totalDays, t)}</span>
+      <span className="text-emerald-400/60">· {t('billing.until')} {formatDateTime(paidUntil)}</span>
+    </div>
   )
 }
 

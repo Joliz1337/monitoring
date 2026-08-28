@@ -13,7 +13,7 @@ Tracking when each server needs paying so nothing shuts down unexpectedly.
 ## What you can do
 
 - Add any server or hosting account, even one not connected to monitoring.
-- Extend by a number of days or top up the balance — the panel recalculates the end date.
+- Extend by a number of days or top up the balance — before you confirm, you see the total paid period and the resulting end date.
 - Get Telegram reminders in advance, through the same bot as alerts.
 - Keep notes: credentials, plan number, who pays for it.
 
