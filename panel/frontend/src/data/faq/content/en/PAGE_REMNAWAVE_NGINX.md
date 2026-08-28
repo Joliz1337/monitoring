@@ -25,6 +25,11 @@ A profile has three parts: **options** (real-IP scheme, certificates, fallback),
 - *port* is the inbound's local port (check with `ss -tlnp | grep 127.0.0.1`);
 - the client-IP header is always overwritten — it cannot be spoofed.
 
+**XHTTP → Xray** — the location for an XHTTP inbound:
+- *path* must match the inbound's `xhttpSettings.path`, *port* is the inbound's local port;
+- one rule serves every transport mode: `stream-one` and the `stream-up` upload arrive with the `application/grpc` content type and go through `grpc_pass` (full duplex), while `packet-up` and download streams go through an unbuffered streaming proxy;
+- a malformed request on that path returns the fallback site's response instead of an Xray error — someone who guesses the path cannot tell it from an ordinary page.
+
 **Proxy** — a plain location to a site: path and target address.
 
 Not allowed: duplicate rule names or paths; a rule with path `/` while fallback is set — that location already belongs to it.

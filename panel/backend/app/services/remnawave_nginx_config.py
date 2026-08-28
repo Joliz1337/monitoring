@@ -4,7 +4,7 @@
 Профиль хранит шаблон полного nginx.conf с плейсхолдером {{DOMAIN}}
 (server_name и пути сертификатов); домен подставляется per-node при синке.
 
-Схемы передачи реального IP клиента в Xray (gRPC за nginx):
+Схемы передачи реального IP клиента в Xray (Xray за nginx):
 - напрямую: `grpc_set_header X-Forwarded-For $remote_addr` (перезапись,
   никогда $proxy_add_x_forwarded_for — иначе клиент подделает IP);
 - CDN: geo по доверенным диапазонам + цепочка map
@@ -15,6 +15,10 @@
 Правила (location-блоки) живут между маркерами и парсятся обратно из
 конфига; опции схемы (CDN, PP и т.д.) хранятся в JSON-колонке профиля
 и из конфига не парсятся.
+
+Три типа правил: gRPC-инбаунд Xray, XHTTP-инбаунд Xray и обычное
+проксирование. XHTTP разводит трафик по Content-Type внутри одной
+локации — его режимы ходят по-разному (см. `_xhttp_block`).
 
 Политика ошибок: наружу уходит либо ответ сайта-заглушки, либо ничего.
 Всё, что подделать нельзя, — страницы ошибок самого nginx — превращается
@@ -67,6 +71,9 @@ CLOUDFLARE_RANGES = [
 
 _NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 _SERVICE_PATH_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# Путь XHTTP-инбаунда — многосегментный (`/api/v2/upload/<hex>`), в отличие
+# от serviceName gRPC; пустой хвост запрещён, иначе локация перехватила бы всё
+_XHTTP_PATH_RE = re.compile(r"^/[A-Za-z0-9._/-]{1,128}$")
 _PROXY_PATH_RE = re.compile(r"^/[A-Za-z0-9._/-]*$")
 _TARGET_URL_RE = re.compile(r"^https?://[A-Za-z0-9.\-\[\]:]+(?::\d{1,5})?(?:/[^\s]*)?$")
 _ABS_PATH_RE = re.compile(r"^/[A-Za-z0-9.{}_/-]+$")
@@ -75,6 +82,12 @@ _SERVER_NAME_RE = re.compile(r"^\s*server_name\s+([^\s;]+)", re.MULTILINE)
 _GRPC_BLOCK_RE = re.compile(
     r"# rule: (?P<name>\S+) type=grpc\n"
     r"\s*location \^~ /(?P<service_path>[^\s{]+) \{\n"
+    r"(?P<body>.*?)\n\s*\}",
+    re.DOTALL,
+)
+_XHTTP_BLOCK_RE = re.compile(
+    r"# rule: (?P<name>\S+) type=xhttp\n"
+    r"\s*location \^~ (?P<path>[^\s{]+) \{\n"
     r"(?P<body>.*?)\n\s*\}",
     re.DOTALL,
 )
@@ -110,12 +123,24 @@ class GrpcRule:
 
 
 @dataclass
+class XhttpRule:
+    """XHTTP-локация → Xray-инбаунд на 127.0.0.1 (path = путь инбаунда)."""
+    name: str
+    path: str
+    port: int
+    rule_type: str = "xhttp"
+
+
+@dataclass
 class ProxyRule:
     """Обычное проксирование (fallback-сайт, панель и т.п.)."""
     name: str
     path: str
     target_url: str
     rule_type: str = "proxy"
+
+
+Rule = GrpcRule | XhttpRule | ProxyRule
 
 
 @dataclass
@@ -171,6 +196,11 @@ def validate_rule(rule) -> None:
             raise RuleValidationError(f"Недопустимый serviceName: {rule.service_path!r}")
         if not 1 <= rule.port <= 65535:
             raise RuleValidationError(f"Недопустимый порт: {rule.port}")
+    elif isinstance(rule, XhttpRule):
+        if not _XHTTP_PATH_RE.match(rule.path):
+            raise RuleValidationError(f"Недопустимый путь XHTTP: {rule.path!r}")
+        if not 1 <= rule.port <= 65535:
+            raise RuleValidationError(f"Недопустимый порт: {rule.port}")
     elif isinstance(rule, ProxyRule):
         if not _PROXY_PATH_RE.match(rule.path):
             raise RuleValidationError(f"Недопустимый путь локации: {rule.path!r}")
@@ -180,13 +210,17 @@ def validate_rule(rule) -> None:
         raise RuleValidationError(f"Неизвестный тип правила: {type(rule).__name__}")
 
 
-def validate_rules(grpc_rules: list[GrpcRule], proxy_rules: list[ProxyRule]) -> None:
-    for rule in [*grpc_rules, *proxy_rules]:
+def rule_location_path(rule: Rule) -> str:
+    return f"/{rule.service_path}" if isinstance(rule, GrpcRule) else rule.path
+
+
+def validate_rules(rules: list[Rule]) -> None:
+    for rule in rules:
         validate_rule(rule)
-    names = [r.name for r in grpc_rules] + [r.name for r in proxy_rules]
+    names = [r.name for r in rules]
     if len(names) != len(set(names)):
         raise RuleValidationError("Имена правил должны быть уникальны")
-    paths = [f"/{r.service_path}" for r in grpc_rules] + [r.path for r in proxy_rules]
+    paths = [rule_location_path(r) for r in rules]
     if len(paths) != len(set(paths)):
         raise RuleValidationError("Пути локаций должны быть уникальны")
 
@@ -246,6 +280,62 @@ def _grpc_block(rule: GrpcRule, ip_var: str, has_fallback: bool) -> str:
         }}"""
 
 
+def _xhttp_block(rule: XhttpRule, ip_var: str, has_fallback: bool) -> str:
+    """Одно правило обслуживает все режимы XHTTP, разводя их по Content-Type.
+
+    `stream-one` и аплоад `stream-up` приходят с `application/grpc` (Xray сам
+    ставит этот тип, чтобы прокси и CDN пропускали поток) и требуют полного
+    дуплекса — их берёт `grpc_pass`. `packet-up` и даунлоад-стримы ходят
+    обычными GET/POST: им нужен `proxy_pass` без буферизации запроса и ответа,
+    иначе аплоад копится в nginx, а даунлоад встаёт. Разводка сделана через
+    error_page на именованную локацию, а не вторым `if`: `if` внутри location
+    безопасен только с `return`.
+
+    Ошибки перехватываются в обе стороны: Xray на неверный запрос отдаёт голый
+    400/404, по которому угаданный путь легко отличить от страницы сайта.
+    """
+    plain = f"@xhttp_{rule.name}"
+    drop = f"@xhttp_{rule.name}_drop"
+    on_error = "@fallback" if has_fallback else drop
+    block = f"""        # rule: {rule.name} type=xhttp
+        location ^~ {rule.path} {{
+            error_page {NOT_GRPC_CODE} = {plain};
+            error_page {NGINX_OWN_ERROR_CODES} = {on_error};
+            if ($content_type !~* "^application/grpc") {{ return {NOT_GRPC_CODE}; }}
+            grpc_pass grpc://127.0.0.1:{rule.port};
+            grpc_intercept_errors on;
+            grpc_set_header Host $host;
+            grpc_set_header X-Forwarded-For {ip_var};
+            grpc_read_timeout 1h;
+            grpc_send_timeout 1h;
+            access_log off;
+        }}
+
+        location {plain} {{
+            proxy_pass http://127.0.0.1:{rule.port};
+            proxy_http_version 1.1;
+            proxy_request_buffering off;
+            proxy_buffering off;
+            proxy_intercept_errors on;
+            error_page {NGINX_OWN_ERROR_CODES} = {on_error};
+            proxy_set_header Host $host;
+            proxy_set_header X-Forwarded-For {ip_var};
+            proxy_read_timeout 1h;
+            proxy_send_timeout 1h;
+            access_log off;
+        }}"""
+    if has_fallback:
+        return block
+    # Своя drop-локация вместо серверной @drop: правило вставляют и в чужие
+    # конфиги, где её нет, а собственный error_page отменяет наследование
+    # серверного — без этой локации ошибки отдавали бы страницу nginx
+    return f"""{block}
+
+        location {drop} {{
+            return 444;
+        }}"""
+
+
 def _proxy_headers(ip_var: str, indent: str = "            ") -> str:
     """HTTP/1.1 + проброс WebSocket: на HTTP/1.0 (дефолт proxy_pass) часть
     сайтов отвечает иначе, keepalive не работает, а Upgrade не проходит.
@@ -274,13 +364,18 @@ def _proxy_block(rule: ProxyRule, ip_var: str) -> str:
         }}"""
 
 
-def _render_locations(grpc_rules: list[GrpcRule], proxy_rules: list[ProxyRule],
-                      options: "ProfileOptions") -> str:
+def _render_rule(rule: Rule, ip_var: str, has_fallback: bool) -> str:
+    if isinstance(rule, GrpcRule):
+        return _grpc_block(rule, ip_var, has_fallback)
+    if isinstance(rule, XhttpRule):
+        return _xhttp_block(rule, ip_var, has_fallback)
+    return _proxy_block(rule, ip_var)
+
+
+def _render_locations(rules: list[Rule], options: "ProfileOptions") -> str:
     ip_var = options.client_ip_var
     has_fallback = bool(options.fallback_url)
-    blocks = [_grpc_block(r, ip_var, has_fallback) for r in grpc_rules]
-    blocks += [_proxy_block(r, ip_var) for r in proxy_rules]
-    return "\n\n".join(blocks)
+    return "\n\n".join(_render_rule(r, ip_var, has_fallback) for r in rules)
 
 
 def _fallback_locations(options: "ProfileOptions") -> str:
@@ -326,11 +421,10 @@ def _realip_maps(options: ProfileOptions) -> str:
 """
 
 
-def generate_full_config(options: ProfileOptions, grpc_rules: list[GrpcRule],
-                         proxy_rules: list[ProxyRule]) -> str:
+def generate_full_config(options: ProfileOptions, rules: list[Rule]) -> str:
     validate_options(options)
-    validate_rules(grpc_rules, proxy_rules)
-    if options.fallback_url and any(r.path == "/" for r in proxy_rules):
+    validate_rules(rules)
+    if options.fallback_url and any(isinstance(r, ProxyRule) and r.path == "/" for r in rules):
         raise RuleValidationError(
             "location / уже занята fallback-проксированием из опций — "
             "правило с путём / не нужно"
@@ -371,7 +465,7 @@ def generate_full_config(options: ProfileOptions, grpc_rules: list[GrpcRule],
     pp_realip = (f"        set_real_ip_from {options.haproxy_ip or '0.0.0.0/0'};\n"
                  f"        real_ip_header proxy_protocol;\n\n"
                  if options.proxy_protocol_enabled else "")
-    locations = _render_locations(grpc_rules, proxy_rules, options)
+    locations = _render_locations(rules, options)
     fallback = _fallback_locations(options) if options.fallback_url else ""
 
     # Своих заголовков в ответ не добавляем: клиент должен получать ровно то,
@@ -426,6 +520,10 @@ http {{
     # («client intended to send too large chunked body»).
     client_max_body_size 0;
 
+    # XHTTP в режиме packet-up умеет нести данные в заголовке запроса,
+    # и на больших uplinkChunkSize дефолтных буферов не хватает
+    large_client_header_buffers 8 32k;
+
     map $http_upgrade $connection_upgrade {{
         default upgrade;
         ""      close;
@@ -446,24 +544,27 @@ http {{
 """
 
 
-def splice_rules(config: str, grpc_rules: list[GrpcRule], proxy_rules: list[ProxyRule],
-                 options: ProfileOptions) -> str:
+def splice_rules(config: str, rules: list[Rule], options: ProfileOptions) -> str:
     """Заменяет секцию между маркерами, сохраняя ручные правки вне её."""
-    validate_rules(grpc_rules, proxy_rules)
+    validate_rules(rules)
     start = config.find(LOCATIONS_START_MARKER)
     end = config.find(LOCATIONS_END_MARKER)
     if start == -1 or end == -1 or end < start:
         raise MissingMarkersError(
             "В конфиге нет маркеров LOCATIONS — воспользуйтесь «Вставить шаблон»"
         )
-    locations = _render_locations(grpc_rules, proxy_rules, options)
+    locations = _render_locations(rules, options)
     head = config[: start + len(LOCATIONS_START_MARKER)]
     tail = config[end:]
     return f"{head}\n{locations}\n        {tail}"
 
 
-def parse_rules_from_config(config: str) -> tuple[list[GrpcRule], list[ProxyRule]]:
-    """Обратный парсер правил из секции LOCATIONS (round-trip c генерацией)."""
+def parse_rules_from_config(config: str) -> list[Rule]:
+    """Обратный парсер правил из секции LOCATIONS (round-trip c генерацией).
+
+    Правила возвращаются в порядке появления в конфиге — иначе повторная
+    генерация переставляла бы локации и каждый CRUD давал бы новый хэш.
+    """
     start = config.find(LOCATIONS_START_MARKER)
     end = config.find(LOCATIONS_END_MARKER)
     if start == -1 or end == -1 or end < start:
@@ -471,30 +572,39 @@ def parse_rules_from_config(config: str) -> tuple[list[GrpcRule], list[ProxyRule
             "В конфиге нет маркеров LOCATIONS — структурные правила недоступны"
         )
     section = config[start:end]
+    found: list[tuple[int, Rule]] = []
 
-    grpc_rules = []
     for match in _GRPC_BLOCK_RE.finditer(section):
         pass_match = _GRPC_PASS_RE.search(match.group("body"))
         if not pass_match:
             continue
-        grpc_rules.append(GrpcRule(
+        found.append((match.start(), GrpcRule(
             name=match.group("name"),
             service_path=match.group("service_path"),
             port=int(pass_match.group(1)),
-        ))
+        )))
 
-    proxy_rules = []
+    for match in _XHTTP_BLOCK_RE.finditer(section):
+        pass_match = _GRPC_PASS_RE.search(match.group("body"))
+        if not pass_match:
+            continue
+        found.append((match.start(), XhttpRule(
+            name=match.group("name"),
+            path=match.group("path"),
+            port=int(pass_match.group(1)),
+        )))
+
     for match in _PROXY_BLOCK_RE.finditer(section):
         pass_match = _PROXY_PASS_RE.search(match.group("body"))
         if not pass_match:
             continue
-        proxy_rules.append(ProxyRule(
+        found.append((match.start(), ProxyRule(
             name=match.group("name"),
             path=match.group("path"),
             target_url=pass_match.group(1),
-        ))
+        )))
 
-    return grpc_rules, proxy_rules
+    return [rule for _, rule in sorted(found, key=lambda item: item[0])]
 
 
 def has_markers(config: str) -> bool:

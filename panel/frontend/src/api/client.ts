@@ -2398,7 +2398,7 @@ export interface RemnawaveNginxProfileDetail extends RemnawaveNginxProfile {
 
 export interface RemnawaveNginxRule {
   name: string
-  rule_type: 'grpc' | 'proxy'
+  rule_type: 'grpc' | 'xhttp' | 'proxy'
   service_path?: string
   port?: number
   path?: string

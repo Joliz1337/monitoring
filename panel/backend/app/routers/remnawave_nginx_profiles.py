@@ -1,7 +1,7 @@
 """Профили nginx-конфигов Remnawave-нод (зеркало haproxy_profiles).
 
 Профиль — шаблон полного nginx.conf с плейсхолдером {{DOMAIN}} + JSON-опции
-схемы реального IP. Правила (gRPC/proxy-локации) живут в конфиге между
+схемы реального IP. Правила (gRPC/XHTTP/proxy-локации) живут в конфиге между
 маркерами и мутируются через parse → splice; опции меняют структуру
 server-блока и пересобирают конфиг целиком.
 """
@@ -27,7 +27,9 @@ from app.services.remnawave_nginx_config import (
     OptionsValidationError,
     ProfileOptions,
     ProxyRule,
+    Rule,
     RuleValidationError,
+    XhttpRule,
     detect_domain,
     generate_full_config,
     has_markers,
@@ -97,7 +99,7 @@ class LinkServerRequest(BaseModel):
 
 class RuleData(BaseModel):
     name: str
-    rule_type: str  # grpc | proxy
+    rule_type: str  # grpc | xhttp | proxy
     service_path: Optional[str] = None
     port: Optional[int] = None
     path: Optional[str] = None
@@ -106,7 +108,7 @@ class RuleData(BaseModel):
     @field_validator("rule_type")
     @classmethod
     def _check_type(cls, v: str) -> str:
-        if v not in ("grpc", "proxy"):
+        if v not in ("grpc", "xhttp", "proxy"):
             raise ValueError(f"Неизвестный тип правила: {v!r}")
         return v
 
@@ -128,25 +130,32 @@ def _profile_options(profile: RemnawaveNginxProfile) -> ProfileOptions:
     return ProfileOptions.from_dict(data)
 
 
-def _rule_from_data(data: RuleData):
+def _rule_from_data(data: RuleData) -> Rule:
     if data.rule_type == "grpc":
         if not data.service_path or data.port is None:
             raise HTTPException(400, "Для gRPC-правила нужны service_path и port")
         return GrpcRule(name=data.name, service_path=data.service_path, port=data.port)
+    if data.rule_type == "xhttp":
+        if not data.path or data.port is None:
+            raise HTTPException(400, "Для XHTTP-правила нужны path и port")
+        return XhttpRule(name=data.name, path=data.path, port=data.port)
     if not data.path or not data.target_url:
         raise HTTPException(400, "Для proxy-правила нужны path и target_url")
     return ProxyRule(name=data.name, path=data.path, target_url=data.target_url)
 
 
-def _serialize_rule(rule) -> dict:
+def _serialize_rule(rule: Rule) -> dict:
     if isinstance(rule, GrpcRule):
         return {"name": rule.name, "rule_type": "grpc",
                 "service_path": rule.service_path, "port": rule.port}
+    if isinstance(rule, XhttpRule):
+        return {"name": rule.name, "rule_type": "xhttp",
+                "path": rule.path, "port": rule.port}
     return {"name": rule.name, "rule_type": "proxy",
             "path": rule.path, "target_url": rule.target_url}
 
 
-def _parse_or_400(config: str) -> tuple[list[GrpcRule], list[ProxyRule]]:
+def _parse_or_400(config: str) -> list[Rule]:
     try:
         return parse_rules_from_config(config)
     except MissingMarkersError as e:
@@ -156,10 +165,9 @@ def _parse_or_400(config: str) -> tuple[list[GrpcRule], list[ProxyRule]]:
 def _rules_payload(config: str) -> dict:
     if not has_markers(config):
         return {"has_markers": False, "rules": []}
-    grpc_rules, proxy_rules = parse_rules_from_config(config)
     return {
         "has_markers": True,
-        "rules": [_serialize_rule(r) for r in [*grpc_rules, *proxy_rules]],
+        "rules": [_serialize_rule(r) for r in parse_rules_from_config(config)],
     }
 
 
@@ -308,7 +316,7 @@ async def create_profile(data: ProfileCreate, db: AsyncSession = Depends(get_db)
     config_content = data.config_content
     if not config_content:
         try:
-            config_content = generate_full_config(options, [], [])
+            config_content = generate_full_config(options, [])
         except OptionsValidationError as e:
             raise HTTPException(400, str(e))
 
@@ -428,12 +436,10 @@ async def update_options(
     profile = await _get_profile(profile_id, db)
     options = ProfileOptions.from_dict(data.options)
 
-    grpc_rules, proxy_rules = ([], [])
-    if has_markers(profile.config_content):
-        grpc_rules, proxy_rules = parse_rules_from_config(profile.config_content)
+    rules = parse_rules_from_config(profile.config_content) if has_markers(profile.config_content) else []
 
     try:
-        new_config = generate_full_config(options, grpc_rules, proxy_rules)
+        new_config = generate_full_config(options, rules)
     except (OptionsValidationError, RuleValidationError) as e:
         raise HTTPException(400, str(e))
 
@@ -448,12 +454,10 @@ async def regenerate_config(profile_id: int, db: AsyncSession = Depends(get_db),
     profile = await _get_profile(profile_id, db)
     options = _profile_options(profile)
 
-    grpc_rules, proxy_rules = ([], [])
-    if has_markers(profile.config_content):
-        grpc_rules, proxy_rules = parse_rules_from_config(profile.config_content)
+    rules = parse_rules_from_config(profile.config_content) if has_markers(profile.config_content) else []
 
     try:
-        regenerated = generate_full_config(options, grpc_rules, proxy_rules)
+        regenerated = generate_full_config(options, rules)
     except (OptionsValidationError, RuleValidationError) as e:
         raise HTTPException(400, str(e))
     return {"config_content": regenerated}
@@ -621,16 +625,11 @@ async def add_rule(
     profile = await _get_profile(profile_id, db)
     rule = _rule_from_data(data)
 
-    grpc_rules, proxy_rules = _parse_or_400(profile.config_content)
-    if any(r.name == rule.name for r in [*grpc_rules, *proxy_rules]):
+    rules = _parse_or_400(profile.config_content)
+    if any(r.name == rule.name for r in rules):
         raise HTTPException(400, f"Rule '{rule.name}' already exists")
 
-    if isinstance(rule, GrpcRule):
-        grpc_rules.append(rule)
-    else:
-        proxy_rules.append(rule)
-
-    new_config = _splice_or_400(profile, grpc_rules, proxy_rules)
+    new_config = _splice_or_400(profile, [*rules, rule])
     await _save_config_and_sync(profile, new_config, db, bg)
     return {"success": True, **_rules_payload(new_config)}
 
@@ -643,18 +642,15 @@ async def update_rule(
     profile = await _get_profile(profile_id, db)
     rule = _rule_from_data(data)
 
-    grpc_rules, proxy_rules = _parse_or_400(profile.config_content)
-    if not any(r.name == rule_name for r in [*grpc_rules, *proxy_rules]):
+    rules = _parse_or_400(profile.config_content)
+    if not any(r.name == rule_name for r in rules):
         raise HTTPException(404, f"Rule '{rule_name}' not found")
 
-    grpc_rules = [r for r in grpc_rules if r.name != rule_name]
-    proxy_rules = [r for r in proxy_rules if r.name != rule_name]
-    if isinstance(rule, GrpcRule):
-        grpc_rules.append(rule)
-    else:
-        proxy_rules.append(rule)
+    # Замена на месте, а не удаление с добавлением в конец: порядок локаций
+    # определяет содержимое конфига, а значит и хэш синхронизации
+    updated = [rule if r.name == rule_name else r for r in rules]
 
-    new_config = _splice_or_400(profile, grpc_rules, proxy_rules)
+    new_config = _splice_or_400(profile, updated)
     await _save_config_and_sync(profile, new_config, db, bg)
     return {"success": True, **_rules_payload(new_config)}
 
@@ -666,22 +662,18 @@ async def delete_rule(
 ):
     profile = await _get_profile(profile_id, db)
 
-    grpc_rules, proxy_rules = _parse_or_400(profile.config_content)
-    if not any(r.name == rule_name for r in [*grpc_rules, *proxy_rules]):
+    rules = _parse_or_400(profile.config_content)
+    if not any(r.name == rule_name for r in rules):
         raise HTTPException(404, f"Rule '{rule_name}' not found")
 
-    grpc_rules = [r for r in grpc_rules if r.name != rule_name]
-    proxy_rules = [r for r in proxy_rules if r.name != rule_name]
-
-    new_config = _splice_or_400(profile, grpc_rules, proxy_rules)
+    new_config = _splice_or_400(profile, [r for r in rules if r.name != rule_name])
     await _save_config_and_sync(profile, new_config, db, bg)
     return {"success": True, **_rules_payload(new_config)}
 
 
-def _splice_or_400(profile: RemnawaveNginxProfile, grpc_rules: list[GrpcRule],
-                   proxy_rules: list[ProxyRule]) -> str:
+def _splice_or_400(profile: RemnawaveNginxProfile, rules: list[Rule]) -> str:
     try:
-        return splice_rules(profile.config_content, grpc_rules, proxy_rules, _profile_options(profile))
+        return splice_rules(profile.config_content, rules, _profile_options(profile))
     except (MissingMarkersError, RuleValidationError) as e:
         raise HTTPException(400, str(e))
 
