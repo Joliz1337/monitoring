@@ -227,8 +227,52 @@ def is_covered_by_mounts(path: str, mount_targets: list[str]) -> bool:
     )
 
 
+def _indent_of(line: str) -> int:
+    return len(line) - len(line.lstrip(" \t"))
+
+
+def nginx_service_block(compose: str) -> str:
+    """Текст сервиса remnawave-nginx внутри compose.
+
+    Тома других сервисов для nginx не существуют: install.sh отдаёт
+    `/etc/letsencrypt` сервису remnanode, и поиск по всему файлу считал
+    сертификаты примонтированными, хотя контейнер nginx их не видел. Сервис
+    находится от строки монтирования ./nginx.conf — единственной, однозначно
+    принадлежащей ему: вверх до ключа сервиса (первая строка с отступом меньше,
+    чем у `volumes:`), вниз до следующего ключа того же уровня. Без якоря —
+    весь файл, как раньше.
+    """
+    match = _COMPOSE_MOUNT_RE.search(compose)
+    if not match:
+        return compose
+    lines = compose.splitlines(keepends=True)
+    anchor = compose.count("\n", 0, match.start())
+
+    volumes_indent = None
+    for index in range(anchor, -1, -1):
+        if lines[index].strip() == "volumes:":
+            volumes_indent = _indent_of(lines[index])
+            break
+    if volumes_indent is None:
+        return compose
+
+    start = 0
+    for index in range(anchor, -1, -1):
+        if lines[index].strip() and _indent_of(lines[index]) < volumes_indent:
+            start = index
+            break
+    service_indent = _indent_of(lines[start])
+
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        if lines[index].strip() and _indent_of(lines[index]) <= service_indent:
+            end = index
+            break
+    return "".join(lines[start:end])
+
+
 def compose_mount_targets(compose: str) -> list[str]:
-    return [dst for _, dst in _VOLUME_LINE_RE.findall(compose)]
+    return [dst for _, dst in _VOLUME_LINE_RE.findall(nginx_service_block(compose))]
 
 
 def missing_cert_mounts(compose: str, cert_files: list[str]) -> list[str]:
@@ -264,9 +308,9 @@ def patch_compose_volumes(compose: str, dirs: list[str]) -> Optional[str]:
 
 
 def host_path_for_cert(cert_file: str, compose: str, install_path: str) -> str:
-    """Путь файла на хосте: путь из конфига — это путь в контейнере, и если его
-    покрывает существующий volume, файл на хосте лежит в источнике маунта."""
-    for src, dst in _VOLUME_LINE_RE.findall(compose or ""):
+    """Путь файла на хосте: путь из конфига — это путь в контейнере nginx, и если
+    его покрывает volume этого сервиса, файл на хосте лежит в источнике маунта."""
+    for src, dst in _VOLUME_LINE_RE.findall(nginx_service_block(compose or "")):
         target = dst.rstrip("/")
         if cert_file == target or cert_file.startswith(target + "/"):
             if src.startswith("./"):
