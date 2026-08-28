@@ -51,7 +51,9 @@ interface NodeState {
 
 export default function SystemOptimizations() {
   const { t } = useTranslation()
-  const { cpuAffinityEnabled, setCpuAffinityEnabled, fetchSettings } = useSettingsStore()
+  const { cpuAffinityEnabled, setCpuAffinityEnabled, fetchSettings, updateBranch } = useSettingsStore()
+  // На dev-ветке configs/VERSION между пушами может не меняться — переприменение разрешено всегда
+  const isDevChannel = updateBranch === 'dev'
 
   const [baseInfo, setBaseInfo] = useState<VersionBaseInfo | null>(null)
   const [loading, setLoading] = useState(true)
@@ -331,14 +333,16 @@ export default function SystemOptimizations() {
     return !node.version || node.version !== baseInfo.optimizations.latest_version
   }
 
-  // Bulk re-apply on every node that has an update available, preserving each
-  // node's own profile (vpn/panel) and NIC mode. A node with NIC mode "none"
-  // gets the safe software default (rps).
+  // Цели кнопки «Обновить все»: онлайн-ноды с оптимизациями, у которых есть
+  // обновление; на dev-канале — все такие ноды независимо от версии
+  const isBulkUpdateTarget = (node: NodeState): boolean =>
+    node.loadState === 'loaded' && node.status === 'online' && node.installed && (isDevChannel || needsUpdate(node))
+
+  // Bulk re-apply preserving each node's own profile (vpn/panel) and NIC mode.
+  // A node with NIC mode "none" gets the safe software default (rps).
   const handleUpdateAll = async () => {
     if (updatingAll) return
-    const targets = Array.from(nodes.values()).filter(
-      n => n.loadState === 'loaded' && n.status === 'online' && n.installed && needsUpdate(n)
-    )
+    const targets = Array.from(nodes.values()).filter(isBulkUpdateTarget)
     if (targets.length === 0) return
 
     setUpdatingAll(true)
@@ -383,9 +387,7 @@ export default function SystemOptimizations() {
   const panelNodes = nodesList.filter(n => n.installed && n.optProfile === 'panel')
   // Недоступные ноды (ошибка подключения) не показываем вовсе — про их оптимизации ничего не известно
   const stillLoading = nodesList.filter(n => (n.loadState === 'pending' || n.loadState === 'loading') && !n.installed)
-  const updatableCount = nodesList.filter(
-    n => n.loadState === 'loaded' && n.status === 'online' && n.installed && needsUpdate(n)
-  ).length
+  const updatableCount = nodesList.filter(isBulkUpdateTarget).length
 
   // Рендер карточки ноды
   // Диагностика NIC/CPU: аппаратный multiqueue, число очередей, ядра/потоки —
@@ -855,6 +857,11 @@ export default function SystemOptimizations() {
           <h1 className="text-2xl font-bold text-dark-50 flex items-center gap-3">
             <Settings2 className="w-7 h-7 text-accent-400" />
             {t('sys_opt.title')}
+            {isDevChannel && (
+              <span className="px-2.5 py-1 text-xs font-medium rounded-full bg-warning/15 text-warning border border-warning/20">
+                {t('updates.dev_channel_badge')}
+              </span>
+            )}
             <FAQIcon screen="PAGE_SYSTEM_OPTIMIZATIONS" />
           </h1>
           <p className="text-dark-400 mt-1">{t('sys_opt.subtitle')}</p>
