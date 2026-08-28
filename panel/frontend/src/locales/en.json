@@ -1591,7 +1591,17 @@
     "yc_token_change_hint": "leave empty to keep current",
     "yc_last_sync": "Last sync",
     "yc_synced": "Yandex Cloud data synced",
-    "sync": "Sync"
+    "sync": "Sync",
+    "yc_plan": "Calculate",
+    "yc_plan_title": "How much to top up",
+    "yc_plan_days_left": "Lasts now for",
+    "yc_plan_days": "How many days it should last",
+    "yc_plan_amount": "Top-up amount",
+    "yc_plan_topup": "Top up by",
+    "yc_plan_enough": "No top-up needed — the current balance already covers it",
+    "yc_plan_lasts": "Will last",
+    "yc_plan_hint": "Based on the average spend over recent days — a rough estimate",
+    "yc_plan_no_cost": "No spending data yet — press “Sync” to fetch it from Yandex Cloud"
   },
   "ssh_security": {
     "title": "SSH Security",
