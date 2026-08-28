@@ -98,6 +98,31 @@ class RoundTripTests(unittest.TestCase):
         self.assertIn("keepalive_timeout 90s;", spliced)
         self.assertEqual(parse_rules_from_config(spliced), new_rules)
 
+    def test_splice_with_same_rules_is_identity(self):
+        """Splice обеих секций должен давать байт-в-байт тот же текст, что
+        и генерация — иначе каждый CRUD менял бы хэш без причины."""
+        config = generate_full_config(ProfileOptions(), ALL_RULES)
+        self.assertEqual(splice_rules(config, ALL_RULES, ProfileOptions()), config)
+
+    def test_splice_adds_xhttp_upstream(self):
+        config = generate_full_config(ProfileOptions(), GRPC_RULES)
+        self.assertNotIn("upstream xhttp_", config)
+        spliced = splice_rules(config, [*GRPC_RULES, *XHTTP_RULES], ProfileOptions())
+        self.assertIn("upstream xhttp_vlxhttp {", spliced)
+        self.assertIn("proxy_pass http://xhttp_vlxhttp;", spliced)
+
+    def test_splice_without_upstream_markers_proxies_directly(self):
+        """Конфиг, собранный до появления секции UPSTREAMS: правило не может
+        ссылаться на несуществующий upstream и проксирует напрямую."""
+        config = generate_full_config(ProfileOptions(), GRPC_RULES)
+        start = config.find("    # === UPSTREAMS START ===")
+        end = config.find("# === UPSTREAMS END ===") + len("# === UPSTREAMS END ===\n")
+        legacy = config[:start] + config[end:]
+        spliced = splice_rules(legacy, XHTTP_RULES, ProfileOptions())
+        self.assertNotIn("upstream xhttp_", spliced)
+        self.assertIn("proxy_pass http://127.0.0.1:2081;", spliced)
+        self.assertEqual(parse_rules_from_config(spliced), XHTTP_RULES)
+
 
 class ContentTests(unittest.TestCase):
     def test_grpc_uses_grpc_set_header_overwrite(self):
@@ -250,6 +275,10 @@ class ContentTests(unittest.TestCase):
 class XhttpTests(unittest.TestCase):
     """XHTTP-правило обслуживает все режимы транспорта одной локацией."""
 
+    @staticmethod
+    def _xhttp_section(config: str) -> str:
+        return config[config.find("# rule: vlxhttp"):config.find("# === LOCATIONS END")]
+
     def test_grpc_typed_modes_get_full_duplex(self):
         # stream-one и аплоад stream-up приходят с application/grpc
         config = generate_full_config(ProfileOptions(), XHTTP_RULES)
@@ -262,27 +291,77 @@ class XhttpTests(unittest.TestCase):
         config = generate_full_config(ProfileOptions(), XHTTP_RULES)
         self.assertIn("error_page 418 = @xhttp_vlxhttp;", config)
         self.assertIn("location @xhttp_vlxhttp {", config)
-        self.assertIn("proxy_pass http://127.0.0.1:2081;", config)
+        self.assertIn("proxy_http_version 1.1;", self._xhttp_section(config))
         self.assertIn("proxy_request_buffering off;", config)
         self.assertIn("proxy_buffering off;", config)
 
-    def test_xray_errors_are_replaced_by_fallback_site(self):
+    def test_plain_mode_reuses_upstream_connections(self):
+        """packet-up — отдельный POST на каждый чанк; без пула это новый
+        TCP-коннект к loopback на каждый пост и TIME_WAIT на стороне nginx."""
+        config = generate_full_config(ProfileOptions(), XHTTP_RULES)
+        self.assertIn("upstream xhttp_vlxhttp {", config)
+        self.assertIn("server 127.0.0.1:2081;", config)
+        self.assertIn("keepalive 64;", config)
+        section = self._xhttp_section(config)
+        self.assertIn("proxy_pass http://xhttp_vlxhttp;", section)
+        self.assertIn('proxy_set_header Connection "";', section)
+
+    def test_long_streams_are_not_cut_by_default_timeouts(self):
+        # Дефолтные 60 с рвали бы даунлоад-стрим и простаивающий stream-one
+        section = self._xhttp_section(generate_full_config(ProfileOptions(), XHTTP_RULES))
+        for directive in ("grpc_read_timeout", "grpc_send_timeout",
+                          "proxy_read_timeout", "proxy_send_timeout"):
+            self.assertIn(f"{directive} 1h;", section)
+
+    def test_body_limit_overridden_in_both_locations(self):
+        """Блок вставляют и в чужие конфиги с унаследованным лимитом 1m —
+        аплоад stream-up умер бы на первом мегабайте с 413."""
+        section = self._xhttp_section(generate_full_config(ProfileOptions(), XHTTP_RULES))
+        self.assertEqual(section.count("client_max_body_size 0;"), 2)
+
+    def test_probe_and_dead_xray_get_fallback_site(self):
         """Голый 404 от Xray на угаданном пути выдал бы, что там не сайт."""
         config = generate_full_config(
             ProfileOptions(fallback_url="https://example.com"), XHTTP_RULES,
         )
         self.assertIn("grpc_intercept_errors on;", config)
         self.assertIn("proxy_intercept_errors on;", config)
-        xhttp_block = config[config.find("# rule: vlxhttp"):config.find("# === LOCATIONS END")]
-        self.assertIn("404", next(l for l in xhttp_block.splitlines() if "= @fallback;" in l))
+        fallback_lines = [l for l in self._xhttp_section(config).splitlines() if "= @fallback;" in l]
+        self.assertEqual(len(fallback_lines), 2)
+        for line in fallback_lines:
+            for code in ("404", "405", "502", "503", "504"):
+                self.assertIn(code, line)
 
-    def test_without_fallback_errors_drop_via_own_location(self):
+    def test_xray_client_errors_pass_through(self):
+        """400/409/413 — ответы Xray своему клиенту (рассинхрон сессии,
+        коллизия, большой пост); подменённые заглушкой, они оставили бы
+        клиента с 200 и HTML вместо причины."""
+        config = generate_full_config(
+            ProfileOptions(fallback_url="https://example.com"), XHTTP_RULES,
+        )
+        error_pages = [l for l in self._xhttp_section(config).splitlines() if "error_page" in l]
+        for code in ("400", "409", "413"):
+            for line in error_pages:
+                self.assertNotIn(f" {code} ", f" {line.split('=')[0]} ")
+
+    def test_nginx_own_errors_drop_via_own_location(self):
         """Своя drop-локация: правило вставляют и в чужие конфиги, где @drop
         нет, а собственный error_page отменяет наследование серверного."""
+        for options in (ProfileOptions(), ProfileOptions(fallback_url="https://example.com")):
+            config = generate_full_config(options, XHTTP_RULES)
+            section = self._xhttp_section(config)
+            self.assertIn("location @xhttp_vlxhttp_drop {", section)
+            drop_lines = [l for l in section.splitlines() if "= @xhttp_vlxhttp_drop;" in l]
+            own_error_lines = [l for l in drop_lines if "404" not in l]
+            self.assertEqual(len(own_error_lines), 2)
+            for line in own_error_lines:
+                for code in ("497", "500", "408"):
+                    self.assertIn(code, line)
+
+    def test_without_fallback_probe_is_dropped(self):
         config = generate_full_config(ProfileOptions(), XHTTP_RULES)
-        self.assertIn("location @xhttp_vlxhttp_drop {", config)
-        self.assertIn("= @xhttp_vlxhttp_drop;", config)
         self.assertNotIn("@fallback", config)
+        self.assertIn("error_page 404 405 502 503 504 = @xhttp_vlxhttp_drop;", config)
 
     def test_real_ip_header_is_overwritten(self):
         config = generate_full_config(

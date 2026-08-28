@@ -35,6 +35,10 @@ from typing import Optional
 DOMAIN_PLACEHOLDER = "{{DOMAIN}}"
 LOCATIONS_START_MARKER = "# === LOCATIONS START ==="
 LOCATIONS_END_MARKER = "# === LOCATIONS END ==="
+# Секция в http-контексте для keepalive-пулов XHTTP; в конфигах, собранных
+# до её появления, отсутствует — тогда XHTTP-правило проксирует напрямую
+UPSTREAMS_START_MARKER = "# === UPSTREAMS START ==="
+UPSTREAMS_END_MARKER = "# === UPSTREAMS END ==="
 
 # Строки с этим маркером нода пересчитывает под свой хост при применении
 # (потолок дескрипторов контейнера и RAM у нод разные). Значения ниже —
@@ -57,6 +61,21 @@ NGINX_OWN_ERROR_CODES = (
 # Внутренний код для «пришёл не gRPC» — error_page уводит такой запрос
 # на заглушку, наружу он никогда не выходит
 NOT_GRPC_CODE = 418
+
+# Коды, которыми Xray на XHTTP-пути отвечает своему же клиенту: рассинхрон
+# сессии, коллизия сессий, слишком большой пост. Подменять их заглушкой
+# нельзя — клиент получил бы 200 с HTML вместо причины, и диагностика
+# шла бы вслепую. Пробер по угаданному пути получает 404/405, а не эти коды,
+# так что маскировка не страдает.
+XRAY_CLIENT_ERROR_CODES = ("400", "409", "413")
+# Что получает пробер на угаданном пути и что даёт упавший Xray — это
+# уходит на заглушку: путь неотличим от несуществующей страницы сайта
+XHTTP_FALLBACK_CODES = "404 405 502 503 504"
+# Остальные собственные ошибки nginx на XHTTP-пути — обрыв соединения
+XHTTP_DROP_CODES = " ".join(
+    code for code in NGINX_OWN_ERROR_CODES.split()
+    if code not in XRAY_CLIENT_ERROR_CODES and code not in XHTTP_FALLBACK_CODES.split()
+)
 
 # Публикуемые диапазоны Cloudflare (cloudflare.com/ips) — для кнопки
 # «Cloudflare по умолчанию» на фронте и подсказки в API
@@ -214,6 +233,10 @@ def rule_location_path(rule: Rule) -> str:
     return f"/{rule.service_path}" if isinstance(rule, GrpcRule) else rule.path
 
 
+def xhttp_upstream_name(rule: XhttpRule) -> str:
+    return f"xhttp_{rule.name}"
+
+
 def validate_rules(rules: list[Rule]) -> None:
     for rule in rules:
         validate_rule(rule)
@@ -280,7 +303,7 @@ def _grpc_block(rule: GrpcRule, ip_var: str, has_fallback: bool) -> str:
         }}"""
 
 
-def _xhttp_block(rule: XhttpRule, ip_var: str, has_fallback: bool) -> str:
+def _xhttp_block(rule: XhttpRule, ip_var: str, has_fallback: bool, keepalive: bool) -> str:
     """Одно правило обслуживает все режимы XHTTP, разводя их по Content-Type.
 
     `stream-one` и аплоад `stream-up` приходят с `application/grpc` (Xray сам
@@ -291,16 +314,32 @@ def _xhttp_block(rule: XhttpRule, ip_var: str, has_fallback: bool) -> str:
     error_page на именованную локацию, а не вторым `if`: `if` внутри location
     безопасен только с `return`.
 
-    Ошибки перехватываются в обе стороны: Xray на неверный запрос отдаёт голый
-    400/404, по которому угаданный путь легко отличить от страницы сайта.
+    Блок самодостаточен — его вставляют и в чужие конфиги: `client_max_body_size`
+    переопределён в обеих локациях (унаследованный дефолт 1m убил бы аплоад
+    stream-up на первом мегабайте), а обрыв идёт в свою drop-локацию, потому
+    что серверной @drop в чужом конфиге может не быть, а собственный
+    error_page в location отменяет наследование серверного.
+
+    Перехват ошибок Xray выборочный: 404/405 (пробер на верном пути) и
+    502/503/504 (Xray упал) уходят на заглушку, а 400/409/413 — это ответы
+    Xray своему клиенту, они проходят как есть.
     """
     plain = f"@xhttp_{rule.name}"
     drop = f"@xhttp_{rule.name}_drop"
     on_error = "@fallback" if has_fallback else drop
-    block = f"""        # rule: {rule.name} type=xhttp
+    if keepalive:
+        proxy_pass = (f"proxy_pass http://{xhttp_upstream_name(rule)};\n"
+                      f"            proxy_http_version 1.1;\n"
+                      f'            proxy_set_header Connection "";')
+    else:
+        proxy_pass = (f"proxy_pass http://127.0.0.1:{rule.port};\n"
+                      f"            proxy_http_version 1.1;")
+    return f"""        # rule: {rule.name} type=xhttp
         location ^~ {rule.path} {{
+            client_max_body_size 0;
             error_page {NOT_GRPC_CODE} = {plain};
-            error_page {NGINX_OWN_ERROR_CODES} = {on_error};
+            error_page {XHTTP_FALLBACK_CODES} = {on_error};
+            error_page {XHTTP_DROP_CODES} = {drop};
             if ($content_type !~* "^application/grpc") {{ return {NOT_GRPC_CODE}; }}
             grpc_pass grpc://127.0.0.1:{rule.port};
             grpc_intercept_errors on;
@@ -312,28 +351,36 @@ def _xhttp_block(rule: XhttpRule, ip_var: str, has_fallback: bool) -> str:
         }}
 
         location {plain} {{
-            proxy_pass http://127.0.0.1:{rule.port};
-            proxy_http_version 1.1;
+            client_max_body_size 0;
+            {proxy_pass}
             proxy_request_buffering off;
             proxy_buffering off;
             proxy_intercept_errors on;
-            error_page {NGINX_OWN_ERROR_CODES} = {on_error};
+            error_page {XHTTP_FALLBACK_CODES} = {on_error};
+            error_page {XHTTP_DROP_CODES} = {drop};
             proxy_set_header Host $host;
             proxy_set_header X-Forwarded-For {ip_var};
             proxy_read_timeout 1h;
             proxy_send_timeout 1h;
             access_log off;
-        }}"""
-    if has_fallback:
-        return block
-    # Своя drop-локация вместо серверной @drop: правило вставляют и в чужие
-    # конфиги, где её нет, а собственный error_page отменяет наследование
-    # серверного — без этой локации ошибки отдавали бы страницу nginx
-    return f"""{block}
+        }}
 
         location {drop} {{
             return 444;
         }}"""
+
+
+def _render_upstreams(rules: list[Rule]) -> str:
+    """Keepalive-пул к XHTTP-инбаунду. packet-up шлёт отдельный POST на каждый
+    чанк, и без пула каждый из них — новый TCP-коннект к 127.0.0.1 с TIME_WAIT
+    на стороне nginx. gRPC-ветке пул не нужен: там одно долгое h2c-соединение.
+    """
+    blocks = [f"""    upstream {xhttp_upstream_name(r)} {{
+        server 127.0.0.1:{r.port};
+        keepalive 64;
+        keepalive_requests 100000;
+    }}""" for r in rules if isinstance(r, XhttpRule)]
+    return "\n\n".join(blocks)
 
 
 def _proxy_headers(ip_var: str, indent: str = "            ") -> str:
@@ -364,18 +411,27 @@ def _proxy_block(rule: ProxyRule, ip_var: str) -> str:
         }}"""
 
 
-def _render_rule(rule: Rule, ip_var: str, has_fallback: bool) -> str:
+def _render_rule(rule: Rule, ip_var: str, has_fallback: bool, keepalive: bool) -> str:
     if isinstance(rule, GrpcRule):
         return _grpc_block(rule, ip_var, has_fallback)
     if isinstance(rule, XhttpRule):
-        return _xhttp_block(rule, ip_var, has_fallback)
+        return _xhttp_block(rule, ip_var, has_fallback, keepalive)
     return _proxy_block(rule, ip_var)
 
 
-def _render_locations(rules: list[Rule], options: "ProfileOptions") -> str:
+def _render_locations(rules: list[Rule], options: "ProfileOptions", keepalive: bool) -> str:
     ip_var = options.client_ip_var
     has_fallback = bool(options.fallback_url)
-    return "\n\n".join(_render_rule(r, ip_var, has_fallback) for r in rules)
+    return "\n\n".join(_render_rule(r, ip_var, has_fallback, keepalive) for r in rules)
+
+
+def _replace_section(config: str, start_marker: str, end_marker: str,
+                     body: str, indent: str) -> str:
+    start = config.find(start_marker)
+    end = config.find(end_marker)
+    head = config[: start + len(start_marker)]
+    tail = config[end:]
+    return f"{head}\n{body}\n{indent}{tail}"
 
 
 def _fallback_locations(options: "ProfileOptions") -> str:
@@ -434,6 +490,11 @@ def generate_full_config(options: ProfileOptions, rules: list[Rule]) -> str:
     if options.cdn_enabled:
         http_parts.append(_realip_maps(options))
 
+    http_parts.append(f"""    {UPSTREAMS_START_MARKER}
+{_render_upstreams(rules)}
+    {UPSTREAMS_END_MARKER}
+""")
+
     if options.http_redirect_enabled:
         acme = ("        location /.well-known/acme-challenge/ { root /var/www/html; }\n"
                 if options.acme_enabled else "")
@@ -465,7 +526,7 @@ def generate_full_config(options: ProfileOptions, rules: list[Rule]) -> str:
     pp_realip = (f"        set_real_ip_from {options.haproxy_ip or '0.0.0.0/0'};\n"
                  f"        real_ip_header proxy_protocol;\n\n"
                  if options.proxy_protocol_enabled else "")
-    locations = _render_locations(rules, options)
+    locations = _render_locations(rules, options, keepalive=True)
     fallback = _fallback_locations(options) if options.fallback_url else ""
 
     # Своих заголовков в ответ не добавляем: клиент должен получать ровно то,
@@ -545,18 +606,27 @@ http {{
 
 
 def splice_rules(config: str, rules: list[Rule], options: ProfileOptions) -> str:
-    """Заменяет секцию между маркерами, сохраняя ручные правки вне её."""
+    """Заменяет секции между маркерами, сохраняя ручные правки вне их.
+
+    Секция UPSTREAMS появилась позже LOCATIONS: в конфиге без неё XHTTP-правила
+    проксируют напрямую, без keepalive-пула — пул придёт после «Вставить шаблон».
+    """
     validate_rules(rules)
-    start = config.find(LOCATIONS_START_MARKER)
-    end = config.find(LOCATIONS_END_MARKER)
-    if start == -1 or end == -1 or end < start:
+    if not has_markers(config):
         raise MissingMarkersError(
             "В конфиге нет маркеров LOCATIONS — воспользуйтесь «Вставить шаблон»"
         )
-    locations = _render_locations(rules, options)
-    head = config[: start + len(LOCATIONS_START_MARKER)]
-    tail = config[end:]
-    return f"{head}\n{locations}\n        {tail}"
+    keepalive = has_upstream_markers(config)
+    result = _replace_section(
+        config, LOCATIONS_START_MARKER, LOCATIONS_END_MARKER,
+        _render_locations(rules, options, keepalive), indent="        ",
+    )
+    if keepalive:
+        result = _replace_section(
+            result, UPSTREAMS_START_MARKER, UPSTREAMS_END_MARKER,
+            _render_upstreams(rules), indent="    ",
+        )
+    return result
 
 
 def parse_rules_from_config(config: str) -> list[Rule]:
@@ -607,10 +677,18 @@ def parse_rules_from_config(config: str) -> list[Rule]:
     return [rule for _, rule in sorted(found, key=lambda item: item[0])]
 
 
-def has_markers(config: str) -> bool:
-    start = config.find(LOCATIONS_START_MARKER)
-    end = config.find(LOCATIONS_END_MARKER)
+def _has_section(config: str, start_marker: str, end_marker: str) -> bool:
+    start = config.find(start_marker)
+    end = config.find(end_marker)
     return start != -1 and end != -1 and end > start
+
+
+def has_markers(config: str) -> bool:
+    return _has_section(config, LOCATIONS_START_MARKER, LOCATIONS_END_MARKER)
+
+
+def has_upstream_markers(config: str) -> bool:
+    return _has_section(config, UPSTREAMS_START_MARKER, UPSTREAMS_END_MARKER)
 
 
 def render_for_server(template: str, domain: str) -> str:
