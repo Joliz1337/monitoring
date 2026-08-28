@@ -16,6 +16,7 @@ import hashlib
 import logging
 import re
 import shlex
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -95,6 +96,11 @@ _RELOAD_TIMEOUT = 30
 _RESTART_TIMEOUT = 90
 _COMPOSE_UP_TIMEOUT = 100
 _VALIDATE_TIMEOUT = 60
+# nginx с занятым портом или битым рантаймом падает в первую секунду после
+# старта; столько контейнер должен прожить, чтобы считаться поднявшимся
+_STARTUP_GRACE_SEC = 3.0
+_STARTUP_POLL_SEC = 0.5
+_STARTUP_LOG_LINES = "30"
 
 
 class InvalidInstallPathError(ValueError):
@@ -664,13 +670,13 @@ class RemnawaveNginxManager:
                                       validated=True, hash_=new_hash, remounted=remounted)
 
         recreated, msg = await self._compose_up(path, force_recreate=True)
-        check = await _docker("exec", NGINX_CONTAINER, "nginx", "-t", timeout=_VALIDATE_TIMEOUT)
-        if not recreated or not check.success:
+        survived, startup_report = (await self._container_survived_start()) if recreated else (False, "")
+        if not survived:
             if compose_patch is not None:
                 await write_host_file(compose_patch["path"], compose_patch["current"])
             await self._rollback(conf, current_conf)
             await self._compose_up(path, force_recreate=True)
-            detail = msg if not recreated else explain_validation_error(check.output)
+            detail = msg if not recreated else explain_validation_error(startup_report)
             return self._apply_result(
                 False, f"Не удалось пересоздать контейнер с новым конфигом, откат: {detail}",
                 validated=True,
@@ -679,6 +685,35 @@ class RemnawaveNginxManager:
         changes.append("контейнер пересоздан")
         return self._apply_result(True, "Конфиг применён; " + "; ".join(changes),
                                   validated=True, reloaded=True, hash_=new_hash, remounted=remounted)
+
+    async def _container_survived_start(self) -> tuple[bool, str]:
+        """После пересоздания контейнер должен не просто стартовать, а пережить
+        запуск nginx: `nginx -t` кандидата не биндит порты, и занятый порт
+        валит nginx уже в работающем контейнере. `restart: always` тут же
+        поднимает его снова, и `docker exec` попадает в окно между смертью и
+        рестартом («unable to upgrade to tcp, received 409») — без логов
+        причины. Поэтому статус опрашивается несколько секунд, а при падении
+        логи контейнера забираются в отчёт до отката, пока они ещё есть.
+        """
+        deadline = time.monotonic() + _STARTUP_GRACE_SEC
+        while True:
+            state = await _docker(
+                "inspect", "-f", "{{.State.Status}}|{{.RestartCount}}|{{.State.ExitCode}}",
+                NGINX_CONTAINER, timeout=10,
+            )
+            if not state.success:
+                return False, f"контейнер не найден после пересоздания: {state.output}"
+            status, _, rest = state.stdout.strip().partition("|")
+            restarts, _, exit_code = rest.partition("|")
+            if status != "running" or restarts != "0":
+                logs = await _docker("logs", "--tail", _STARTUP_LOG_LINES, NGINX_CONTAINER, timeout=10)
+                return False, (
+                    f"nginx упал сразу после старта (статус {status}, код выхода {exit_code}, "
+                    f"перезапусков {restarts}). Лог контейнера:\n{logs.output}"
+                )
+            if time.monotonic() >= deadline:
+                return True, ""
+            await asyncio.sleep(_STARTUP_POLL_SEC)
 
     async def reload(self) -> tuple[bool, str]:
         container = await self.container_status()
