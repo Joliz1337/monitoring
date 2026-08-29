@@ -15,7 +15,7 @@ logging.basicConfig(
 
 from app.database import init_db, async_session
 from app.config import get_settings
-from app.routers import servers, server_deploy, node_install_keys, auth_router, proxy, settings as settings_router, system, bulk_actions, blocklist, remnawave, alerts, billing, backup, ssh_security, infra, notes, wildcard_ssl, haproxy_profiles, torrent_blocker, firewall_profiles, antiddos, remnawave_nginx_profiles, traffic, dnat_profiles
+from app.routers import servers, server_deploy, node_install_keys, auth_router, proxy, settings as settings_router, system, bulk_actions, blocklist, remnawave, alerts, billing, backup, ssh_security, infra, notes, wildcard_ssl, haproxy_profiles, torrent_blocker, firewall_profiles, antiddos, remnawave_nginx_profiles, traffic, dnat_profiles, reserved_ports, node_image, remnawave_install, xray_test
 from app.services.metrics_collector import start_collector, stop_collector
 from app.services.blocklist_manager import get_blocklist_manager
 from app.services.xray_stats_collector import start_xray_stats_collector, stop_xray_stats_collector
@@ -27,7 +27,10 @@ from app.services.wildcard_ssl import start_wildcard_ssl_manager, stop_wildcard_
 from app.services.torrent_blocker import start_torrent_blocker, stop_torrent_blocker
 from app.services.antiddos_manager import start_antiddos_manager, stop_antiddos_manager
 from app.services.node_sync_queue import start_node_sync_queue, stop_node_sync_queue
+from app.services.xray_test.runner import start_xray_test_service, stop_xray_test_service
+from app.services.xray_test.startup import load_xray_test_versions
 from app.services.traffic_import import start_traffic_import, stop_traffic_import
+from app.services.panel_host_metrics import start_panel_host_sampler, stop_panel_host_sampler
 from app.services.http_client import init_http_clients, close_http_clients
 from app.services.pki import load_or_create_keygen
 from app.services.update_channel import load_branch_from_db
@@ -76,6 +79,10 @@ async def _init_optional_module(module_name: str, entrypoint: str) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Гарантируем ключ шифрования до миграций/чтения секретов — бэкенд не должен
+    # зависеть от того, отработал ли провижининг установщиком.
+    from app import crypto
+    crypto.ensure_key()
     await init_db()
     keygen = await load_or_create_keygen(async_session)
     app.state.pki = keygen
@@ -84,6 +91,7 @@ async def lifespan(app: FastAPI):
 
     async with async_session() as db:
         branch = await load_branch_from_db(db)
+        await load_xray_test_versions(db)
     logger.info(f"Update channel: {branch}")
     
     await _init_optional_module("app.services._ext", "init_ext_db")
@@ -91,6 +99,7 @@ async def lifespan(app: FastAPI):
 
     await start_telegram_bot_service()
     await start_collector()
+    await start_panel_host_sampler()
 
     blocklist_manager = get_blocklist_manager()
     await blocklist_manager.start()
@@ -104,6 +113,10 @@ async def lifespan(app: FastAPI):
     await start_antiddos_manager()
     # Долги перед нодами лежат в базе — очередь подхватывает их и после перезапуска панели.
     await start_node_sync_queue()
+    await start_xray_test_service()
+
+    from app.services.backup_scheduler import start_scheduler as start_backup_scheduler
+    start_backup_scheduler()
 
     # Перенос легаси-истории трафика — разовая фоновая задача: панель обязана
     # подняться, даже если она не стартовала.
@@ -115,6 +128,9 @@ async def lifespan(app: FastAPI):
     yield
 
     await close_http_clients()
+    # Ядра прокси добиваются до остальных сервисов: это внешние процессы,
+    # переживающие остановку панели, если их не убить явно.
+    await stop_xray_test_service()
     await stop_traffic_import()
     await stop_node_sync_queue()
     await stop_antiddos_manager()
@@ -125,6 +141,7 @@ async def lifespan(app: FastAPI):
     await stop_server_alerter()
     await stop_xray_stats_collector()
     await blocklist_manager.stop()
+    await stop_panel_host_sampler()
     await stop_collector()
     await stop_telegram_bot_service()
 
@@ -174,7 +191,9 @@ class GZipMiddlewareNoSSE:
             path = scope.get("path", "")
             if (path.endswith("/execute-stream") or path.endswith("/notes/stream")
                     or "/ssh-security/bulk/" in path or path.endswith("/servers/deploy")
-                    or ("/servers/deploy/" in path and path.endswith("/stream"))):
+                    or ("/servers/deploy/" in path and path.endswith("/stream"))
+                    or ("/servers/remnawave-install/" in path and path.endswith("/stream"))
+                    or ("/xray-test/jobs/" in path and path.endswith("/stream"))):
                 await self.app(scope, receive, send)
                 return
         await self.gzip(scope, receive, send)
@@ -186,6 +205,10 @@ app.include_router(auth_router.router)
 # server_deploy раньше servers: DELETE /servers/remnawave-certs/{id} и /servers/deploy
 # должны матчиться до параметрических /servers/{server_id}
 app.include_router(server_deploy.router)
+# node_image раньше servers: /servers/{id}/deliver-image и /servers/deliver-image/{job}/stream
+app.include_router(node_image.router)
+# remnawave_install раньше servers: /servers/remnawave-install/... — статичный сегмент
+app.include_router(remnawave_install.router)
 app.include_router(servers.router)
 app.include_router(node_install_keys.router)
 app.include_router(proxy.router)
@@ -208,6 +231,8 @@ app.include_router(antiddos.router)
 app.include_router(remnawave_nginx_profiles.router)
 app.include_router(traffic.router)
 app.include_router(dnat_profiles.router)
+app.include_router(reserved_ports.router)
+app.include_router(xray_test.router)
 
 try:
     from app.routers._internal import router as ext_router

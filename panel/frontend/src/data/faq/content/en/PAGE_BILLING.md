@@ -13,7 +13,8 @@ Tracking when each server needs paying so nothing shuts down unexpectedly.
 ## What you can do
 
 - Add any server or hosting account, even one not connected to monitoring.
-- Extend by a number of days or top up the balance — the panel recalculates the end date.
+- Extend by a number of days or top up the balance — before you confirm, you see the total paid period and the resulting end date.
+- For Yandex Cloud — plan a top-up: the “Calculate” button on the card shows how much to add so the balance lasts a given number of days, or how long a given amount will last.
 - Get Telegram reminders in advance, through the same bot as alerts.
 - Keep notes: credentials, plan number, who pays for it.
 

@@ -242,6 +242,26 @@ http {
             proxy_read_timeout 120s;
         }
 
+        # Поток прогона проверок прокси-конфигураций: между ячейками бывают
+        # минуты тишины, а общий location /api/ рвёт такое соединение
+        location ~ ^/api/(xray-test/jobs/[^/]+/stream)$ {
+            proxy_pass http://backend/$1;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header Connection "";
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $remote_addr;
+            proxy_set_header X-Forwarded-Proto $scheme;
+
+            proxy_buffering off;
+            proxy_cache off;
+            gzip off;
+
+            proxy_connect_timeout 60s;
+            proxy_send_timeout 3600s;
+            proxy_read_timeout 3600s;
+        }
+
         # SSE streaming (shared notes) — no buffering, no gzip
         location = /api/notes/stream {
             proxy_pass http://backend/notes/stream;

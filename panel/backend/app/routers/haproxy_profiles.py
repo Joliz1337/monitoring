@@ -53,8 +53,6 @@ class BackendServerData(BaseModel):
     send_proxy_v2: bool = False
     backup: bool = False
     slowstart: Optional[str] = None
-    on_marked_down: Optional[str] = None
-    on_marked_up: Optional[str] = None
     disabled: bool = False
 
 
@@ -583,7 +581,6 @@ def _serialize_server(s: BackendServer) -> dict:
         "check": s.check, "inter": s.inter, "fall": s.fall, "rise": s.rise,
         "send_proxy": s.send_proxy, "send_proxy_v2": s.send_proxy_v2,
         "backup": s.backup, "slowstart": s.slowstart,
-        "on_marked_down": s.on_marked_down, "on_marked_up": s.on_marked_up,
         "disabled": s.disabled,
     }
 

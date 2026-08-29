@@ -251,11 +251,16 @@ class CallSiteCoverageTest(unittest.TestCase):
         "services/metrics_collector.py",
         "services/recovery_reconciler.py",
         "services/remnawave_nginx_sync.py",
+        # гейт в роутере remnawave_install: require_capability(EXEC) до старта job
+        "services/remnawave_node_install.py",
+        "services/reserved_ports_sync.py",
         "services/ssh_manager.py",
         "services/time_sync.py",
         "services/torrent_blocker.py",
         "services/traffic_import.py",
         "services/wildcard_ssl.py",
+        # гейт в роутере xray_test: require_capability(EXEC) до старта прогона
+        "services/xray_test/node_runner.py",
     }
 
     # Ходят только по always-allowed адресам либо обязаны работать всегда:

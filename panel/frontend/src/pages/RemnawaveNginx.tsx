@@ -19,6 +19,7 @@ import {
 import { Tooltip } from '../components/ui/Tooltip'
 import { FAQIcon } from '../components/FAQ'
 
+const DEFAULT_CLIENT_KEEPALIVE = '30s:10s:3'
 
 function SyncStatusBadge({ status, online }: { status: string | null; online?: boolean }) {
   const { t } = useTranslation()
@@ -59,9 +60,11 @@ function Toggle({ value, onChange, label }: { value: boolean; onChange: (v: bool
 
 // ==================== Rule Form ====================
 
+type RuleType = 'grpc' | 'xhttp' | 'proxy'
+
 interface RuleFormData {
   name: string
-  rule_type: 'grpc' | 'proxy'
+  rule_type: RuleType
   service_path: string
   port: string
   path: string
@@ -110,30 +113,48 @@ function RuleForm({
           </div>
           <div>
             <label className="block text-xs text-dark-400 mb-1">{t('remnawave_nginx.rule_type')}</label>
-            <select value={form.rule_type} onChange={e => setForm(f => ({ ...f, rule_type: e.target.value as 'grpc' | 'proxy' }))} className={inp}>
+            <select value={form.rule_type} onChange={e => {
+              const rule_type = e.target.value as RuleType
+              // Дефолтный «/» подходит proxy-правилу, но XHTTP-путь всегда длиннее
+              setForm(f => ({ ...f, rule_type, path: rule_type === 'xhttp' && f.path === '/' ? '' : f.path }))
+            }} className={inp}>
               <option value="grpc">{t('remnawave_nginx.rule_type_grpc')}</option>
+              <option value="xhttp">{t('remnawave_nginx.rule_type_xhttp')}</option>
               <option value="proxy">{t('remnawave_nginx.rule_type_proxy')}</option>
             </select>
           </div>
         </div>
 
         {form.rule_type === 'grpc' ? (
-          <>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block text-xs text-dark-400 mb-1">{t('remnawave_nginx.service_path')}</label>
-                <input type="text" value={form.service_path} onChange={e => setForm(f => ({ ...f, service_path: e.target.value }))}
-                  placeholder="trgrpc" className={inp} />
-                <p className="text-[10px] text-dark-500 mt-0.5">{t('remnawave_nginx.service_path_hint')}</p>
-              </div>
-              <div>
-                <label className="block text-xs text-dark-400 mb-1">{t('remnawave_nginx.xray_port')}</label>
-                <input type="number" value={form.port} onChange={e => setForm(f => ({ ...f, port: e.target.value }))}
-                  placeholder="8443" className={inp} />
-                <p className="text-[10px] text-dark-500 mt-0.5">{t('remnawave_nginx.xray_port_hint')}</p>
-              </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs text-dark-400 mb-1">{t('remnawave_nginx.service_path')}</label>
+              <input type="text" value={form.service_path} onChange={e => setForm(f => ({ ...f, service_path: e.target.value }))}
+                placeholder="trgrpc" className={inp} />
+              <p className="text-[10px] text-dark-500 mt-0.5">{t('remnawave_nginx.service_path_hint')}</p>
             </div>
-          </>
+            <div>
+              <label className="block text-xs text-dark-400 mb-1">{t('remnawave_nginx.xray_port')}</label>
+              <input type="number" value={form.port} onChange={e => setForm(f => ({ ...f, port: e.target.value }))}
+                placeholder="8443" className={inp} />
+              <p className="text-[10px] text-dark-500 mt-0.5">{t('remnawave_nginx.xray_port_hint')}</p>
+            </div>
+          </div>
+        ) : form.rule_type === 'xhttp' ? (
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs text-dark-400 mb-1">{t('remnawave_nginx.xhttp_path')}</label>
+              <input type="text" value={form.path} onChange={e => setForm(f => ({ ...f, path: e.target.value }))}
+                placeholder="/api/v2/upload" className={inp} />
+              <p className="text-[10px] text-dark-500 mt-0.5">{t('remnawave_nginx.xhttp_path_hint')}</p>
+            </div>
+            <div>
+              <label className="block text-xs text-dark-400 mb-1">{t('remnawave_nginx.xray_port')}</label>
+              <input type="number" value={form.port} onChange={e => setForm(f => ({ ...f, port: e.target.value }))}
+                placeholder="2081" className={inp} />
+              <p className="text-[10px] text-dark-500 mt-0.5">{t('remnawave_nginx.xray_port_hint')}</p>
+            </div>
+          </div>
         ) : (
           <div className="grid grid-cols-2 gap-3">
             <div>
@@ -266,6 +287,23 @@ function OptionsSection({
           <Toggle value={opts.reject_default_server} onChange={v => upd({ reject_default_server: v })} label={t('remnawave_nginx.reject_default')} />
         </div>
         <p className="text-[10px] text-dark-500">{t('remnawave_nginx.acme_hint')}</p>
+      </div>
+
+      {/* TLS и соединения */}
+      <div className="space-y-2">
+        <Toggle value={opts.tls_session_tickets} onChange={v => upd({ tls_session_tickets: v })} label={t('remnawave_nginx.tls_session_tickets')} />
+        <p className="text-[10px] text-dark-500">{t('remnawave_nginx.tls_session_tickets_hint')}</p>
+        <Toggle value={opts.client_tcp_keepalive !== ''} onChange={v => upd({ client_tcp_keepalive: v ? DEFAULT_CLIENT_KEEPALIVE : '' })} label={t('remnawave_nginx.client_keepalive')} />
+        {opts.client_tcp_keepalive !== '' && (
+          <div className="pl-2 border-l-2 border-dark-700/40">
+            <label className="block text-xs text-dark-400 mb-1">{t('remnawave_nginx.client_keepalive_value')}</label>
+            <input type="text" value={opts.client_tcp_keepalive} onChange={e => upd({ client_tcp_keepalive: e.target.value })}
+              placeholder={DEFAULT_CLIENT_KEEPALIVE} className={`${inp} font-mono text-xs`} spellCheck={false} />
+          </div>
+        )}
+        <p className="text-[10px] text-dark-500">{t('remnawave_nginx.client_keepalive_hint')}</p>
+        <Toggle value={opts.access_log_enabled} onChange={v => upd({ access_log_enabled: v })} label={t('remnawave_nginx.access_log')} />
+        <p className="text-[10px] text-dark-500">{t('remnawave_nginx.access_log_hint')}</p>
       </div>
 
       {/* Пути сертификатов */}
@@ -443,7 +481,17 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
     if (form.rule_type === 'grpc') {
       return { name: form.name, rule_type: 'grpc', service_path: form.service_path, port: parseInt(form.port) || 0 }
     }
+    if (form.rule_type === 'xhttp') {
+      return { name: form.name, rule_type: 'xhttp', path: form.path, port: parseInt(form.port) || 0 }
+    }
     return { name: form.name, rule_type: 'proxy', path: form.path, target_url: form.target_url }
+  }
+
+  const isRuleFormIncomplete = (form: RuleFormData): boolean => {
+    if (!form.name) return true
+    if (form.rule_type === 'grpc') return !form.service_path || !form.port
+    if (form.rule_type === 'xhttp') return !form.path || !form.port
+    return !form.path || !form.target_url
   }
 
   const applyRulesResponse = (data: { rules: RemnawaveNginxRule[]; has_markers: boolean }) => {
@@ -452,7 +500,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
   }
 
   const handleAddRule = async (form: RuleFormData) => {
-    if (!form.name || (form.rule_type === 'grpc' ? (!form.service_path || !form.port) : (!form.path || !form.target_url))) {
+    if (isRuleFormIncomplete(form)) {
       toast.error(t('remnawave_nginx.rule_fields_required')); return
     }
     setRuleSaving(true)
@@ -727,12 +775,19 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                       onClick={() => toggleEditRule(r)}
                     >
                       <div className="flex items-center gap-3 min-w-0">
-                        {r.rule_type === 'grpc' ? <Lock className="w-3.5 h-3.5 text-accent-400 shrink-0" /> : <Globe className="w-3.5 h-3.5 text-dark-400 shrink-0" />}
+                        {r.rule_type === 'proxy'
+                          ? <Globe className="w-3.5 h-3.5 text-dark-400 shrink-0" />
+                          : <Lock className="w-3.5 h-3.5 text-accent-400 shrink-0" />}
                         <span className="text-sm text-dark-200 font-medium">{r.name}</span>
                         {r.rule_type === 'grpc' ? (
                           <>
                             <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-accent-500/10 text-accent-400 border border-accent-500/20">gRPC</span>
                             <span className="text-xs text-dark-500">/{r.service_path} → 127.0.0.1:{r.port}</span>
+                          </>
+                        ) : r.rule_type === 'xhttp' ? (
+                          <>
+                            <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-accent-500/10 text-accent-400 border border-accent-500/20">XHTTP</span>
+                            <span className="text-xs text-dark-500 truncate">{r.path} → 127.0.0.1:{r.port}</span>
                           </>
                         ) : (
                           <>

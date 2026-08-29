@@ -20,7 +20,7 @@ from app.auth import verify_auth
 from app.database import async_session_maker, get_db
 from app.models import RemnawaveCertProfile
 from app.services.deploy_job_manager import PostDeployOptions, get_deploy_job_manager
-from app.services.deploy_service import DeployParams
+from app.services.deploy_service import DeployParams, InstallerLanguage
 from app.services.http_client import validate_proxy_input
 from app.services.net_utils import resolve_panel_ip
 from app.services.pki import build_installer_token
@@ -151,6 +151,8 @@ class DeployRequest(BaseModel):
     haproxy_profile_id: Optional[int] = None
     firewall_profile_id: Optional[int] = None
     dnat_profile_id: Optional[int] = None
+    # Язык интерфейса панели — установщик и меню `mon` на ноде будут на нём же
+    lang: InstallerLanguage = InstallerLanguage.EN
 
     @field_validator('socks5_proxy')
     @classmethod
@@ -158,17 +160,20 @@ class DeployRequest(BaseModel):
         return validate_proxy_input(v)
 
 
-async def _resolve_remnawave_cert(req: DeployRequest) -> str:
+async def resolve_remnawave_cert(
+    inline: Optional[str],
+    profile_id: Optional[int],
+    save: bool = False,
+    save_name: Optional[str] = None,
+) -> str:
     """Достаёт сертификат Remnawave из inline-поля или сохранённого профиля,
     при необходимости сохраняет новый профиль."""
-    cert = (req.remnawave_cert_inline or "").strip()
+    cert = (inline or "").strip()
 
-    if not cert and req.remnawave_cert_profile_id is not None:
+    if not cert and profile_id is not None:
         async with async_session_maker() as db:
             result = await db.execute(
-                select(RemnawaveCertProfile).where(
-                    RemnawaveCertProfile.id == req.remnawave_cert_profile_id
-                )
+                select(RemnawaveCertProfile).where(RemnawaveCertProfile.id == profile_id)
             )
             profile = result.scalar_one_or_none()
         if not profile:
@@ -178,8 +183,8 @@ async def _resolve_remnawave_cert(req: DeployRequest) -> str:
     if not cert:
         raise HTTPException(400, "Не указан сертификат ноды Remnawave")
 
-    if req.save_remnawave_cert and req.remnawave_cert_inline:
-        name = (req.save_remnawave_cert_name or "").strip()
+    if save and inline:
+        name = (save_name or "").strip()
         if not name:
             raise HTTPException(400, "Не указано имя для сохранения сертификата")
         async with async_session_maker() as db:
@@ -210,7 +215,12 @@ async def deploy_server(
 
     remnawave_cert: Optional[str] = None
     if req.install_remnawave:
-        remnawave_cert = await _resolve_remnawave_cert(req)
+        remnawave_cert = await resolve_remnawave_cert(
+            req.remnawave_cert_inline,
+            req.remnawave_cert_profile_id,
+            save=req.save_remnawave_cert,
+            save_name=req.save_remnawave_cert_name,
+        )
 
     proxy_url: Optional[str] = None
     if req.install_proxy:
@@ -246,6 +256,7 @@ async def deploy_server(
         proxy_url=proxy_url,
         socks5_proxy=req.socks5_proxy,
         new_password=req.new_root_password,
+        lang=req.lang,
     )
 
     post_opts = PostDeployOptions(

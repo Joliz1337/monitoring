@@ -2,6 +2,7 @@ import { motion } from 'framer-motion'
 import { useNavigate, useParams } from 'react-router-dom'
 import { ArrowUpCircle, PackageOpen } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
+import { useModuleEnabled } from '../../hooks/useModuleEnabled'
 
 interface TrafficUnsupportedNoticeProps {
   nodeVersion: string | null
@@ -12,6 +13,7 @@ export default function TrafficUnsupportedNotice({ nodeVersion, minVersion }: Tr
   const { uid } = useParams()
   const navigate = useNavigate()
   const { t } = useTranslation()
+  const updatesEnabled = useModuleEnabled('updates')
 
   return (
     <motion.div
@@ -34,17 +36,19 @@ export default function TrafficUnsupportedNotice({ nodeVersion, minVersion }: Tr
           current: nodeVersion || t('traffic.unsupported_version_unknown'),
         })}
       </p>
-      <div className="flex justify-center">
-        <motion.button
-          onClick={() => navigate(`/${uid}/updates`)}
-          className="btn btn-primary"
-          whileHover={{ scale: 1.02 }}
-          whileTap={{ scale: 0.98 }}
-        >
-          <ArrowUpCircle className="w-4 h-4" />
-          {t('traffic.unsupported_action')}
-        </motion.button>
-      </div>
+      {updatesEnabled && (
+        <div className="flex justify-center">
+          <motion.button
+            onClick={() => navigate(`/${uid}/updates`)}
+            className="btn btn-primary"
+            whileHover={{ scale: 1.02 }}
+            whileTap={{ scale: 0.98 }}
+          >
+            <ArrowUpCircle className="w-4 h-4" />
+            {t('traffic.unsupported_action')}
+          </motion.button>
+        </div>
+      )}
     </motion.div>
   )
 }

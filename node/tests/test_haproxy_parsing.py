@@ -84,8 +84,7 @@ class ServerLineParsingTests(unittest.TestCase):
     def test_full_option_set(self):
         srv = self.manager._parse_server_line(
             "    server srv2 node.example.com:443 weight 5 maxconn 200 check "
-            "inter 3s fall 2 rise 4 backup slowstart 30s "
-            "on-marked-down shutdown-sessions on-marked-up shutdown-backup-sessions disabled"
+            "inter 3s fall 2 rise 4 backup slowstart 30s disabled"
         )
         self.assertEqual(srv.weight, 5)
         self.assertEqual(srv.maxconn, 200)
@@ -93,8 +92,6 @@ class ServerLineParsingTests(unittest.TestCase):
         self.assertEqual((srv.inter, srv.fall, srv.rise), ("3s", 2, 4))
         self.assertTrue(srv.backup)
         self.assertEqual(srv.slowstart, "30s")
-        self.assertEqual(srv.on_marked_down, "shutdown-sessions")
-        self.assertEqual(srv.on_marked_up, "shutdown-backup-sessions")
         self.assertTrue(srv.disabled)
 
     def test_send_proxy_v2_does_not_also_set_send_proxy(self):

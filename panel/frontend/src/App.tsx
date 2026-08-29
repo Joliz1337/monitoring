@@ -1,8 +1,9 @@
-import { Routes, Route, Navigate } from 'react-router-dom'
+import { Routes, Route, Navigate, useParams } from 'react-router-dom'
 import React, { useEffect, Suspense, lazy } from 'react'
 import { Activity } from 'lucide-react'
 import { Toaster, toast } from 'sonner'
 import { useAuthStore } from './stores/authStore'
+import { useSettingsStore } from './stores/settingsStore'
 import { useExtStore } from './stores/_extStore'
 import { useTranslation } from 'react-i18next'
 import ErrorBoundary from './components/ErrorBoundary'
@@ -46,6 +47,7 @@ const FirewallProfiles = lazyRetry(() => import('./pages/FirewallProfiles'))
 const SystemOptimizations = lazyRetry(() => import('./pages/SystemOptimizations'))
 const TorrentBlocker = lazyRetry(() => import('./pages/TorrentBlocker'))
 const AntiDdos = lazyRetry(() => import('./pages/AntiDdos'))
+const XrayTest = lazyRetry(() => import('./pages/XrayTest'))
 const RemnawaveNginx = lazyRetry(() => import('./pages/RemnawaveNginx'))
 const DnatProfiles = lazyRetry(() => import('./pages/DnatProfiles'))
 const Dnat = lazyRetry(() => import('./pages/Dnat'))
@@ -135,6 +137,22 @@ function SuspenseWithBoundary({ children }: { children: React.ReactNode }) {
   )
 }
 
+/**
+ * Раздел, выключенный в настройках, закрыт и по прямой ссылке. Пока настройки
+ * не загружены — экран загрузки: иначе закладка на разрешённый раздел
+ * отправляла бы на дашборд, не дождавшись ответа панели.
+ */
+function ModuleGuard({ id, children }: { id: string; children: React.ReactNode }) {
+  const { uid } = useParams()
+  const isLoading = useSettingsStore(s => s.isLoading)
+  const hidden = useSettingsStore(s => s.hiddenModules.includes(id))
+
+  if (isLoading) return <LoadingScreen />
+  if (hidden) return <Navigate to={`/${uid}`} replace />
+
+  return <>{children}</>
+}
+
 export default function App() {
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -182,26 +200,27 @@ export default function App() {
         >
           <Route index element={<ErrorBoundary><Dashboard /></ErrorBoundary>} />
           <Route path="servers" element={<ErrorBoundary><Servers /></ErrorBoundary>} />
-          <Route path="bulk-actions" element={<SuspenseWithBoundary><BulkActions /></SuspenseWithBoundary>} />
-          <Route path="alerts" element={<SuspenseWithBoundary><Alerts /></SuspenseWithBoundary>} />
-          <Route path="billing" element={<SuspenseWithBoundary><Billing /></SuspenseWithBoundary>} />
-          <Route path="blocklist" element={<SuspenseWithBoundary><Blocklist /></SuspenseWithBoundary>} />
-          <Route path="torrent-blocker" element={<SuspenseWithBoundary><TorrentBlocker /></SuspenseWithBoundary>} />
-          <Route path="ssh-security" element={<SuspenseWithBoundary><SSHSecurity /></SuspenseWithBoundary>} />
-          <Route path="remnawave" element={<SuspenseWithBoundary><Remnawave /></SuspenseWithBoundary>} />
+          <Route path="bulk-actions" element={<ModuleGuard id="bulk-actions"><SuspenseWithBoundary><BulkActions /></SuspenseWithBoundary></ModuleGuard>} />
+          <Route path="alerts" element={<ModuleGuard id="alerts"><SuspenseWithBoundary><Alerts /></SuspenseWithBoundary></ModuleGuard>} />
+          <Route path="billing" element={<ModuleGuard id="billing"><SuspenseWithBoundary><Billing /></SuspenseWithBoundary></ModuleGuard>} />
+          <Route path="blocklist" element={<ModuleGuard id="blocklist"><SuspenseWithBoundary><Blocklist /></SuspenseWithBoundary></ModuleGuard>} />
+          <Route path="torrent-blocker" element={<ModuleGuard id="torrent-blocker"><SuspenseWithBoundary><TorrentBlocker /></SuspenseWithBoundary></ModuleGuard>} />
+          <Route path="ssh-security" element={<ModuleGuard id="ssh-security"><SuspenseWithBoundary><SSHSecurity /></SuspenseWithBoundary></ModuleGuard>} />
+          <Route path="remnawave" element={<ModuleGuard id="remnawave"><SuspenseWithBoundary><Remnawave /></SuspenseWithBoundary></ModuleGuard>} />
           <Route path="server/:serverId" element={<SuspenseWithBoundary><ServerDetails /></SuspenseWithBoundary>} />
           <Route path="server/:serverId/haproxy" element={<SuspenseWithBoundary><HAProxy /></SuspenseWithBoundary>} />
           <Route path="server/:serverId/traffic" element={<SuspenseWithBoundary><Traffic /></SuspenseWithBoundary>} />
           <Route path="server/:serverId/dnat" element={<SuspenseWithBoundary><Dnat /></SuspenseWithBoundary>} />
-          <Route path="haproxy-configs" element={<SuspenseWithBoundary><HAProxyConfigs /></SuspenseWithBoundary>} />
-          <Route path="firewall-profiles" element={<SuspenseWithBoundary><FirewallProfiles /></SuspenseWithBoundary>} />
-          <Route path="dnat-profiles" element={<SuspenseWithBoundary><DnatProfiles /></SuspenseWithBoundary>} />
-          <Route path="wildcard-ssl" element={<SuspenseWithBoundary><WildcardSSL /></SuspenseWithBoundary>} />
+          <Route path="haproxy-configs" element={<ModuleGuard id="haproxy-configs"><SuspenseWithBoundary><HAProxyConfigs /></SuspenseWithBoundary></ModuleGuard>} />
+          <Route path="firewall-profiles" element={<ModuleGuard id="firewall-profiles"><SuspenseWithBoundary><FirewallProfiles /></SuspenseWithBoundary></ModuleGuard>} />
+          <Route path="dnat-profiles" element={<ModuleGuard id="dnat-profiles"><SuspenseWithBoundary><DnatProfiles /></SuspenseWithBoundary></ModuleGuard>} />
+          <Route path="wildcard-ssl" element={<ModuleGuard id="wildcard-ssl"><SuspenseWithBoundary><WildcardSSL /></SuspenseWithBoundary></ModuleGuard>} />
           <Route path="settings" element={<SuspenseWithBoundary><Settings /></SuspenseWithBoundary>} />
-          <Route path="updates" element={<SuspenseWithBoundary><Updates /></SuspenseWithBoundary>} />
-          <Route path="system-optimizations" element={<SuspenseWithBoundary><SystemOptimizations /></SuspenseWithBoundary>} />
-          <Route path="anti-ddos" element={<SuspenseWithBoundary><AntiDdos /></SuspenseWithBoundary>} />
-          <Route path="remnawave-nginx" element={<SuspenseWithBoundary><RemnawaveNginx /></SuspenseWithBoundary>} />
+          <Route path="updates" element={<ModuleGuard id="updates"><SuspenseWithBoundary><Updates /></SuspenseWithBoundary></ModuleGuard>} />
+          <Route path="system-optimizations" element={<ModuleGuard id="system-optimizations"><SuspenseWithBoundary><SystemOptimizations /></SuspenseWithBoundary></ModuleGuard>} />
+          <Route path="anti-ddos" element={<ModuleGuard id="anti-ddos"><SuspenseWithBoundary><AntiDdos /></SuspenseWithBoundary></ModuleGuard>} />
+          <Route path="xray-test" element={<ModuleGuard id="xray-test"><SuspenseWithBoundary><XrayTest /></SuspenseWithBoundary></ModuleGuard>} />
+          <Route path="remnawave-nginx" element={<ModuleGuard id="remnawave-nginx"><SuspenseWithBoundary><RemnawaveNginx /></SuspenseWithBoundary></ModuleGuard>} />
           {ExtPageLazy && (
             <Route 
               path="ip-search"

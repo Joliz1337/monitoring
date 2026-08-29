@@ -11,12 +11,23 @@ export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=l
 export NEEDRESTART_SUSPEND=1
 
-# Trap для обработки прерываний
+CONTAINERS_STOPPED=0
+
+# Любой сбой после остановки контейнеров не должен оставить панель лежать:
+# поднимаем то, что есть на диске (старую или уже скопированную версию)
 cleanup() {
     local exit_code=$?
     if [ $exit_code -ne 0 ]; then
         echo ""
         echo -e "\033[0;31m[ERROR] Script interrupted or failed (exit code: $exit_code)\033[0m"
+        if [ "$CONTAINERS_STOPPED" = "1" ]; then
+            echo -e "\033[1;33m[RECOVERY] Restarting containers after failed update...\033[0m"
+            if (cd "$PANEL_DIR" && docker compose up -d) 2>/dev/null; then
+                echo -e "\033[0;32m[RECOVERY] Containers restarted\033[0m"
+            else
+                echo -e "\033[0;31m[RECOVERY] Failed to restart containers! Run: cd $PANEL_DIR && docker compose up -d\033[0m"
+            fi
+        fi
     fi
     exit $exit_code
 }
@@ -170,10 +181,33 @@ if [ -f "$TMP_DIR/panel/VERSION" ]; then
 fi
 log_info "Applying update: ${CURRENT_VERSION:-unknown} → $NEW_VERSION"
 
+# rsync нужен для копирования файлов; на минимальных образах ОС его нет.
+# Проверяем ДО остановки контейнеров — иначе панель ляжет из-за отсутствующей утилиты.
+# Апдейтер из UI (контейнер docker:cli) ставит rsync сам через apk, здесь — путь с хоста.
+ensure_rsync() {
+    command -v rsync >/dev/null 2>&1 && return 0
+    log_info "rsync not found, installing..."
+    if command -v apt-get >/dev/null 2>&1; then
+        spin_retry 300 3 5 "Installing rsync" \
+            env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq -o DPkg::Lock::Timeout=120 rsync \
+            || spin_retry 300 2 5 "Installing rsync (after apt update)" bash -c \
+                'apt-get update -qq -o DPkg::Lock::Timeout=120 && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq rsync'
+    elif command -v apk >/dev/null 2>&1; then
+        spin "Installing rsync" apk add --no-cache rsync
+    fi
+    command -v rsync >/dev/null 2>&1 && return 0
+    log_error "rsync is required for the update — install it and run the update again"
+    return 1
+}
+set +e
+ensure_rsync || exit 1
+set -e
+
 # Stop containers
 log_info "Stopping containers..."
 cd "$PANEL_DIR"
 docker compose down --timeout 30 || true
+CONTAINERS_STOPPED=1
 
 # Wait for ports to be released
 log_info "Waiting for ports to be released..."
@@ -185,7 +219,7 @@ for i in {1..15}; do
 done
 log_success "Containers stopped"
 
-# Copy files (preserve .env, database, generated nginx.conf)
+# Copy files (preserve .env and database)
 log_info "Copying new files..."
 rsync -av --delete \
     --exclude='.env' \
@@ -193,7 +227,6 @@ rsync -av --delete \
     --exclude='backend/.env' \
     --exclude='backend/.env.backup' \
     --exclude='backend/data' \
-    --exclude='nginx/nginx.conf' \
     "$TMP_DIR/panel/" "$PANEL_DIR/"
 
 # Restore .env files from backup if they exist
@@ -256,23 +289,15 @@ EOF
     fi
 fi
 
-tune_postgres_env "$PANEL_DIR/.env"
-
-# Regenerate nginx config
-log_info "Regenerating nginx configuration..."
-if [ -f "$PANEL_DIR/scripts/generate-nginx-config.sh" ]; then
-    bash "$PANEL_DIR/scripts/generate-nginx-config.sh" "$PANEL_DIR"
-else
-    # Inline fallback
-    if [ -f "$PANEL_DIR/.env" ]; then
-        source "$PANEL_DIR/.env"
-        if [ -n "$DOMAIN" ] && [ -n "$PANEL_UID" ] && [ -f "$PANEL_DIR/nginx/nginx.conf.template" ]; then
-            export DOMAIN PANEL_UID
-            envsubst '${DOMAIN} ${PANEL_UID}' < "$PANEL_DIR/nginx/nginx.conf.template" > "$PANEL_DIR/nginx/nginx.conf"
-            log_success "Generated nginx.conf for $DOMAIN"
-        fi
-    fi
+# Add secret-encryption key if missing (older installations). БЭКАПИТЬ вместе с БД:
+# потеря ключа = панель не расшифрует mTLS-ключи и потеряет доступ к нодам.
+if [ -f "$PANEL_DIR/.env" ] && ! grep -q "^PANEL_ENC_KEY=" "$PANEL_DIR/.env"; then
+    log_info "Adding PANEL_ENC_KEY to .env..."
+    printf 'PANEL_ENC_KEY=%s\n' "$(openssl rand -base64 32 | tr -d '\n')" >> "$PANEL_DIR/.env"
+    log_success "PANEL_ENC_KEY added"
 fi
+
+tune_postgres_env "$PANEL_DIR/.env"
 
 log_success "Files updated"
 
@@ -322,6 +347,7 @@ spin "Starting containers" docker compose up -d || {
     log_error "Failed to start containers"
     exit 1
 }
+CONTAINERS_STOPPED=0
 
 # Wait for panel to be healthy
 log_info "Waiting for panel..."

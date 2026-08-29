@@ -32,8 +32,6 @@ class BackendServer:
     send_proxy_v2: bool = False
     backup: bool = False
     slowstart: Optional[str] = None
-    on_marked_down: Optional[str] = None
-    on_marked_up: Optional[str] = None
     disabled: bool = False
 
 
@@ -171,7 +169,6 @@ resolvers mydns
             line += " backup"
         if srv.slowstart:
             line += f" slowstart {srv.slowstart}"
-        line += " on-marked-down shutdown-sessions"
         if opts and opts.sticky_type == "cookie":
             line += f" cookie {srv.name}"
         if srv.disabled:
@@ -394,8 +391,6 @@ backend {backend_name}
             send_proxy_v2="send-proxy-v2" in opts,
             backup="backup" in opts.split(),
             slowstart=self._parse_server_opt(opts, "slowstart", str, None),
-            on_marked_down=self._parse_server_opt(opts, "on-marked-down", str, None),
-            on_marked_up=self._parse_server_opt(opts, "on-marked-up", str, None),
             disabled="disabled" in opts.split(),
         )
 

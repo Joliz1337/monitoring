@@ -1,9 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select, desc, func, update
+from sqlalchemy import select, desc, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional, Any, AsyncGenerator
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 import asyncio
 import httpx
 import json
@@ -12,9 +12,10 @@ import time
 from app.services.http_client import get_node_client, node_auth_headers
 
 from app.database import get_db
-from app.models import Server, ServerCache, MetricsSnapshot, AggregatedMetrics
+from app.models import Server, ServerCache, MetricsSnapshot
 from app.auth import verify_auth
 from app.services import update_channel
+from app.services.metrics_history import HistoryPeriod, load_history
 from app.services.metrics_rates import enrich_metrics_with_speeds
 from app.services.node_capabilities import (
     Capability,
@@ -235,197 +236,13 @@ async def get_live_metrics(
 @router.get("/{server_id}/metrics/history")
 async def get_metrics_history(
     server_id: int,
-    period: Optional[str] = Query(default="1h", description="Period: 1h, 24h, 7d, 30d, 365d"),
-    from_time: Optional[str] = None,
-    to_time: Optional[str] = None,
-    limit: int = Query(default=500, le=5000),
-    include_per_cpu: bool = Query(default=False, description="Include per-CPU usage data"),
+    period: HistoryPeriod = Query(default="1h"),
+    include_per_cpu: bool = Query(default=False),
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    """Get metrics history from panel's local database.
-    
-    Period determines data source:
-    - 1h: raw data (5-second intervals) - ~720 points
-    - 24h: raw data with downsampling (30-sec intervals) - ~2880 points max
-    - 7d: hourly aggregated data - ~168 points
-    - 30d, 365d: daily aggregated data
-    
-    Note: Uses naive UTC datetime (no timezone info stored in database).
-    Set include_per_cpu=true to include per-CPU usage data (only for raw data periods).
-    """
     await get_server_by_id(server_id, db)
-    # Use naive UTC datetime
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
-    
-    # Parse period to determine time range, data source, and max points for charts
-    # max_points: target number of points for the chart (will downsample if more)
-    period_config = {
-        "1h": {"delta": timedelta(hours=1), "source": "raw", "max_points": 800},      # ~720 raw points
-        "24h": {"delta": timedelta(hours=24), "source": "raw", "max_points": 1500},   # ~17k raw -> 1500
-        "7d": {"delta": timedelta(days=7), "source": "hour", "max_points": 500},      # ~168 hourly
-        "30d": {"delta": timedelta(days=30), "source": "day", "max_points": 500},     # ~30 daily
-        "365d": {"delta": timedelta(days=365), "source": "day", "max_points": 500},   # ~365 daily
-    }
-    
-    config = period_config.get(period, period_config["1h"])
-    
-    # Use explicit time range if provided, otherwise use period
-    # Convert to naive UTC
-    if to_time:
-        try:
-            parsed = datetime.fromisoformat(to_time.replace('Z', '+00:00'))
-            if parsed.tzinfo:
-                end_time = parsed.astimezone(timezone.utc).replace(tzinfo=None)
-            else:
-                end_time = parsed
-        except ValueError:
-            end_time = now
-    else:
-        end_time = now
-    
-    if from_time:
-        try:
-            parsed = datetime.fromisoformat(from_time.replace('Z', '+00:00'))
-            if parsed.tzinfo:
-                start_time = parsed.astimezone(timezone.utc).replace(tzinfo=None)
-            else:
-                start_time = parsed
-        except ValueError:
-            start_time = now - config["delta"]
-    else:
-        start_time = now - config["delta"]
-    
-    data_source = config["source"]
-    max_points = config.get("max_points", limit)
-    
-    if data_source == "raw":
-        count_result = await db.execute(
-            select(func.count(MetricsSnapshot.id))
-            .where(MetricsSnapshot.server_id == server_id)
-            .where(MetricsSnapshot.timestamp >= start_time)
-            .where(MetricsSnapshot.timestamp <= end_time)
-        )
-        total_count = count_result.scalar() or 0
-
-        if total_count <= max_points:
-            result = await db.execute(
-                select(MetricsSnapshot)
-                .where(MetricsSnapshot.server_id == server_id)
-                .where(MetricsSnapshot.timestamp >= start_time)
-                .where(MetricsSnapshot.timestamp <= end_time)
-                .order_by(MetricsSnapshot.timestamp)
-            )
-            snapshots = result.scalars().all()
-        else:
-            step = total_count // max_points
-            numbered = (
-                select(
-                    MetricsSnapshot.id.label("ms_id"),
-                    func.row_number().over(
-                        order_by=MetricsSnapshot.timestamp
-                    ).label("rn")
-                )
-                .where(MetricsSnapshot.server_id == server_id)
-                .where(MetricsSnapshot.timestamp >= start_time)
-                .where(MetricsSnapshot.timestamp <= end_time)
-                .subquery()
-            )
-            result = await db.execute(
-                select(MetricsSnapshot)
-                .join(numbered, MetricsSnapshot.id == numbered.c.ms_id)
-                .where(numbered.c.rn % step == 1)
-                .order_by(MetricsSnapshot.timestamp)
-            )
-            snapshots = result.scalars().all()
-        
-        def build_snapshot_dict(s: MetricsSnapshot) -> dict:
-            result = {
-                "timestamp": to_iso_utc(s.timestamp),
-                "cpu_usage": s.cpu_usage,
-                "max_cpu": s.cpu_usage,  # Same as avg for raw data
-                "load_avg_1": s.load_avg_1,
-                "memory_used": s.memory_used,
-                "memory_available": s.memory_available,
-                "memory_percent": s.memory_percent,
-                "max_memory_percent": s.memory_percent,
-                "swap_used": s.swap_used,
-                "net_rx_bytes_per_sec": s.net_rx_bytes_per_sec or 0,
-                "net_tx_bytes_per_sec": s.net_tx_bytes_per_sec or 0,
-                "disk_percent": s.disk_percent,
-                "disk_read_bytes_per_sec": s.disk_read_bytes_per_sec or 0,
-                "disk_write_bytes_per_sec": s.disk_write_bytes_per_sec or 0,
-                "process_count": s.process_count,
-                "tcp_established": s.tcp_established,
-                "tcp_listen": s.tcp_listen,
-                "tcp_time_wait": s.tcp_time_wait,
-                "tcp_close_wait": s.tcp_close_wait,
-                "tcp_syn_sent": s.tcp_syn_sent,
-                "tcp_syn_recv": s.tcp_syn_recv,
-                "tcp_fin_wait": s.tcp_fin_wait,
-            }
-            if include_per_cpu and s.per_cpu_percent:
-                try:
-                    result["per_cpu_percent"] = json.loads(s.per_cpu_percent)
-                except json.JSONDecodeError:
-                    pass
-            return result
-        
-        data = [build_snapshot_dict(s) for s in snapshots]
-    else:
-        # Query aggregated metrics (hourly or daily) - ascending order for charts
-        result = await db.execute(
-            select(AggregatedMetrics)
-            .where(AggregatedMetrics.server_id == server_id)
-            .where(AggregatedMetrics.period_type == data_source)
-            .where(AggregatedMetrics.timestamp >= start_time)
-            .where(AggregatedMetrics.timestamp <= end_time)
-            .order_by(AggregatedMetrics.timestamp)  # Ascending order
-        )
-        aggregated = result.scalars().all()
-        
-        # Apply downsampling if needed
-        total_count = len(aggregated)
-        if total_count > max_points:
-            step = total_count // max_points
-            if step > 1:
-                aggregated = aggregated[::step]
-        
-        data = [
-            {
-                "timestamp": to_iso_utc(a.timestamp),
-                "cpu_usage": a.avg_cpu,
-                "max_cpu": a.max_cpu,
-                "load_avg_1": a.avg_load,
-                "memory_percent": a.avg_memory_percent,
-                "max_memory_percent": a.max_memory_percent,
-                "disk_percent": a.avg_disk_percent,
-                "net_rx_bytes_per_sec": a.avg_rx_speed or 0,
-                "net_tx_bytes_per_sec": a.avg_tx_speed or 0,
-                "total_rx_bytes": a.total_rx_bytes or 0,
-                "total_tx_bytes": a.total_tx_bytes or 0,
-                "disk_read_bytes_per_sec": a.avg_disk_read_speed or 0,
-                "disk_write_bytes_per_sec": a.avg_disk_write_speed or 0,
-                "data_points": a.data_points,
-                "tcp_established": round(a.avg_tcp_established) if a.avg_tcp_established is not None else None,
-                "tcp_listen": round(a.avg_tcp_listen) if a.avg_tcp_listen is not None else None,
-                "tcp_time_wait": round(a.avg_tcp_time_wait) if a.avg_tcp_time_wait is not None else None,
-                "tcp_close_wait": round(a.avg_tcp_close_wait) if a.avg_tcp_close_wait is not None else None,
-                "tcp_syn_sent": round(a.avg_tcp_syn_sent) if a.avg_tcp_syn_sent is not None else None,
-                "tcp_syn_recv": round(a.avg_tcp_syn_recv) if a.avg_tcp_syn_recv is not None else None,
-                "tcp_fin_wait": round(a.avg_tcp_fin_wait) if a.avg_tcp_fin_wait is not None else None,
-            }
-            for a in aggregated
-        ]
-    
-    return {
-        "period": period,
-        "data_source": data_source,
-        "from_time": to_iso_utc(start_time),
-        "to_time": to_iso_utc(end_time),
-        "count": len(data),
-        "data": data
-    }
+    return await load_history(db, server_id, period, include_per_cpu)
 
 
 @router.get("/{server_id}/haproxy/cached")

@@ -94,8 +94,8 @@ export default function Alerts() {
     try {
       const res = await alertsApi.testTelegram(settings.telegram_bot_token, settings.telegram_chat_id)
       setTestResult({ success: res.data.success, message: res.data.error || res.data.message || '' })
-    } catch (e) {
-      setTestResult({ success: false, message: 'Connection error' })
+    } catch (e: any) {
+      setTestResult({ success: false, message: e?.response?.data?.detail || t('alerts.test_request_failed') })
     } finally {
       setTesting(false)
     }

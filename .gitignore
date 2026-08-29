@@ -65,6 +65,9 @@ doc*.yaml
 CHANGELOG.md
 TELEGRAM.md
 
+# Internal design specs (описывают внутренности/слабые места — не в публичный репо)
+docs/superpowers/
+
 # Claude Code
 CLAUDE.md
 .mcp.json

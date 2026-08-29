@@ -18,9 +18,10 @@ import {
   ChevronDown,
   Shield,
   Monitor,
+  Network,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import { systemApi, VersionBaseInfo, SingleNodeVersion, NicInfo } from '../api/client'
+import { systemApi, reservedPortsApi, VersionBaseInfo, SingleNodeVersion, NicInfo, ReservedPortsConfig } from '../api/client'
 import { Skeleton } from '../components/ui/Skeleton'
 import { FAQIcon } from '../components/FAQ'
 import { Tooltip } from '../components/ui/Tooltip'
@@ -50,7 +51,9 @@ interface NodeState {
 
 export default function SystemOptimizations() {
   const { t } = useTranslation()
-  const { cpuAffinityEnabled, setCpuAffinityEnabled, fetchSettings } = useSettingsStore()
+  const { cpuAffinityEnabled, setCpuAffinityEnabled, fetchSettings, updateBranch } = useSettingsStore()
+  // На dev-ветке configs/VERSION между пушами может не меняться — переприменение разрешено всегда
+  const isDevChannel = updateBranch === 'dev'
 
   const [baseInfo, setBaseInfo] = useState<VersionBaseInfo | null>(null)
   const [loading, setLoading] = useState(true)
@@ -72,6 +75,55 @@ export default function SystemOptimizations() {
   const applyTriggerRefs = useRef<Map<number, HTMLButtonElement>>(new Map())
   const removeTriggerRefs = useRef<Map<number, HTMLButtonElement>>(new Map())
   const [dropdownUp, setDropdownUp] = useState(true)
+
+  // Резервация портов: общий список + списки отдельных нод
+  const [rpConfig, setRpConfig] = useState<ReservedPortsConfig | null>(null)
+  const [rpGlobal, setRpGlobal] = useState('')
+  const [rpServerPorts, setRpServerPorts] = useState<Record<number, string>>({})
+  const [rpExpanded, setRpExpanded] = useState(false)
+  const [rpSavingGlobal, setRpSavingGlobal] = useState(false)
+  const [rpSavingServer, setRpSavingServer] = useState<number | null>(null)
+
+  const fetchReservedPorts = useCallback(async () => {
+    try {
+      const resp = await reservedPortsApi.getConfig()
+      setRpConfig(resp.data)
+      setRpGlobal(resp.data.global_ports)
+      setRpServerPorts(Object.fromEntries(resp.data.servers.map(s => [s.id, s.ports])))
+    } catch { /* карточка просто останется без данных */ }
+  }, [])
+
+  const saveGlobalReservedPorts = async () => {
+    setRpSavingGlobal(true)
+    try {
+      const resp = await reservedPortsApi.setGlobal(rpGlobal)
+      setRpGlobal(resp.data.ports)
+      toast.success(t('sys_opt.reserved_ports_saved_global'))
+    } catch (err: any) {
+      toast.error(err.response?.data?.detail || t('sys_opt.reserved_ports_save_failed'))
+    } finally {
+      setRpSavingGlobal(false)
+    }
+  }
+
+  const saveServerReservedPorts = async (serverId: number) => {
+    setRpSavingServer(serverId)
+    try {
+      const resp = await reservedPortsApi.setServer(serverId, rpServerPorts[serverId] ?? '')
+      setRpServerPorts(prev => ({ ...prev, [serverId]: resp.data.ports }))
+      if (resp.data.error) {
+        toast.error(resp.data.error)
+      } else if (resp.data.queued) {
+        toast.success(t('sys_opt.reserved_ports_queued'))
+      } else {
+        toast.success(t('sys_opt.reserved_ports_saved_node'))
+      }
+    } catch (err: any) {
+      toast.error(err.response?.data?.detail || t('sys_opt.reserved_ports_save_failed'))
+    } finally {
+      setRpSavingServer(null)
+    }
+  }
 
   const DROPDOWN_MAX_HEIGHT = 280
 
@@ -204,8 +256,9 @@ export default function SystemOptimizations() {
   useEffect(() => {
     fetchBase()
     fetchSettings()
+    fetchReservedPorts()
     return () => { abortRef.current = true }
-  }, [fetchBase, fetchSettings])
+  }, [fetchBase, fetchSettings, fetchReservedPorts])
 
   const handleRefresh = useCallback(() => {
     abortRef.current = true
@@ -280,14 +333,16 @@ export default function SystemOptimizations() {
     return !node.version || node.version !== baseInfo.optimizations.latest_version
   }
 
-  // Bulk re-apply on every node that has an update available, preserving each
-  // node's own profile (vpn/panel) and NIC mode. A node with NIC mode "none"
-  // gets the safe software default (rps).
+  // Цели кнопки «Обновить все»: онлайн-ноды с оптимизациями, у которых есть
+  // обновление; на dev-канале — все такие ноды независимо от версии
+  const isBulkUpdateTarget = (node: NodeState): boolean =>
+    node.loadState === 'loaded' && node.status === 'online' && node.installed && (isDevChannel || needsUpdate(node))
+
+  // Bulk re-apply preserving each node's own profile (vpn/panel) and NIC mode.
+  // A node with NIC mode "none" gets the safe software default (rps).
   const handleUpdateAll = async () => {
     if (updatingAll) return
-    const targets = Array.from(nodes.values()).filter(
-      n => n.loadState === 'loaded' && n.status === 'online' && n.installed && needsUpdate(n)
-    )
+    const targets = Array.from(nodes.values()).filter(isBulkUpdateTarget)
     if (targets.length === 0) return
 
     setUpdatingAll(true)
@@ -332,9 +387,7 @@ export default function SystemOptimizations() {
   const panelNodes = nodesList.filter(n => n.installed && n.optProfile === 'panel')
   // Недоступные ноды (ошибка подключения) не показываем вовсе — про их оптимизации ничего не известно
   const stillLoading = nodesList.filter(n => (n.loadState === 'pending' || n.loadState === 'loading') && !n.installed)
-  const updatableCount = nodesList.filter(
-    n => n.loadState === 'loaded' && n.status === 'online' && n.installed && needsUpdate(n)
-  ).length
+  const updatableCount = nodesList.filter(isBulkUpdateTarget).length
 
   // Рендер карточки ноды
   // Диагностика NIC/CPU: аппаратный multiqueue, число очередей, ядра/потоки —
@@ -804,6 +857,11 @@ export default function SystemOptimizations() {
           <h1 className="text-2xl font-bold text-dark-50 flex items-center gap-3">
             <Settings2 className="w-7 h-7 text-accent-400" />
             {t('sys_opt.title')}
+            {isDevChannel && (
+              <span className="px-2.5 py-1 text-xs font-medium rounded-full bg-warning/15 text-warning border border-warning/20">
+                {t('updates.dev_channel_badge')}
+              </span>
+            )}
             <FAQIcon screen="PAGE_SYSTEM_OPTIMIZATIONS" />
           </h1>
           <p className="text-dark-400 mt-1">{t('sys_opt.subtitle')}</p>
@@ -874,6 +932,92 @@ export default function SystemOptimizations() {
             transition={{ type: 'spring', stiffness: 500, damping: 30 }}
           />
         </motion.button>
+      </div>
+
+      {/* Резервация портов от эфемерной выдачи */}
+      <div className="card mb-6">
+        <div className="flex items-center justify-between gap-4">
+          <div className="min-w-0">
+            <div className="flex items-center gap-1 text-sm font-medium text-dark-200">
+              <Network className="w-4 h-4 text-accent-400" />
+              {t('sys_opt.reserved_ports')}
+              <FAQIcon screen="SYS_OPT_RESERVED_PORTS" size="sm" />
+            </div>
+            <p className="text-xs text-dark-500 mt-1">{t('sys_opt.reserved_ports_hint')}</p>
+          </div>
+          <button
+            onClick={() => setRpExpanded(v => !v)}
+            className="btn btn-secondary flex-shrink-0 text-xs"
+          >
+            <ChevronDown className={`w-4 h-4 transition-transform ${rpExpanded ? 'rotate-180' : ''}`} />
+            {t('sys_opt.reserved_ports_per_node')}
+          </button>
+        </div>
+
+        <div className="flex items-center gap-2 mt-3">
+          <input
+            value={rpGlobal}
+            onChange={e => setRpGlobal(e.target.value)}
+            placeholder={t('sys_opt.reserved_ports_placeholder')}
+            className="input flex-1 font-mono text-sm"
+          />
+          <button
+            onClick={saveGlobalReservedPorts}
+            disabled={rpSavingGlobal || !rpConfig}
+            className="btn btn-primary flex-shrink-0"
+          >
+            {rpSavingGlobal ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
+            {t('common.save')}
+          </button>
+        </div>
+
+        <AnimatePresence>
+          {rpExpanded && rpConfig && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              className="overflow-hidden"
+            >
+              <div className="mt-4 pt-3 border-t border-dark-800/60 space-y-2">
+                {rpConfig.servers.length === 0 && (
+                  <p className="text-xs text-dark-500">{t('sys_opt.no_nodes')}</p>
+                )}
+                {rpConfig.servers.map(s => (
+                  <div key={s.id} className="flex items-center gap-2">
+                    <span className="text-sm text-dark-300 w-44 truncate flex-shrink-0" title={s.name}>
+                      {s.name}
+                    </span>
+                    {s.supported ? (
+                      <>
+                        <input
+                          value={rpServerPorts[s.id] ?? ''}
+                          onChange={e => setRpServerPorts(prev => ({ ...prev, [s.id]: e.target.value }))}
+                          placeholder={t('sys_opt.reserved_ports_placeholder')}
+                          className="input flex-1 font-mono text-sm"
+                        />
+                        <button
+                          onClick={() => saveServerReservedPorts(s.id)}
+                          disabled={rpSavingServer !== null}
+                          className="btn btn-secondary flex-shrink-0 text-xs"
+                        >
+                          {rpSavingServer === s.id
+                            ? <Loader2 className="w-4 h-4 animate-spin" />
+                            : <Check className="w-4 h-4" />}
+                          {t('common.save')}
+                        </button>
+                      </>
+                    ) : (
+                      <span className="text-xs text-warning">
+                        {t('sys_opt.reserved_ports_node_old', { version: rpConfig.min_node_version })}
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
 
       {nodesList.length === 0 ? (

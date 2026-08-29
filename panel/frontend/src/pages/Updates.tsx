@@ -14,6 +14,7 @@ import {
   Clock,
   Check,
   Rocket,
+  Upload,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { systemApi, VersionBaseInfo, SingleNodeVersion } from '../api/client'
@@ -21,6 +22,7 @@ import { Skeleton } from '../components/ui/Skeleton'
 import { Tooltip } from '../components/ui/Tooltip'
 import { FAQIcon } from '../components/FAQ'
 import { useSettingsStore } from '../stores/settingsStore'
+import DeliverImageModal from '../components/servers/DeliverImageModal'
 
 type NodeLoadState = 'pending' | 'loading' | 'loaded' | 'error'
 
@@ -83,6 +85,7 @@ export default function Updates() {
   const [updateResults, setUpdateResults] = useState<Record<string, { success: boolean; message: string }>>({})
 
   const [isChecking, setIsChecking] = useState(false)
+  const [deliverTarget, setDeliverTarget] = useState<{ id: number; name: string } | null>(null)
 
   const abortRef = useRef(false)
   const rebootWaitCancelRef = useRef(false)
@@ -722,20 +725,35 @@ export default function Updates() {
                         )}
                       </div>
 
-                      <motion.button
-                        onClick={() => handleUpdateNode(node.id, node.name)}
-                        disabled={isUpdating || isNodeLoading || node.status === 'offline' || (!needsUpdate && !isDevChannel)}
-                        className="btn btn-secondary text-xs px-3 py-1.5 flex-shrink-0"
-                        whileHover={{ scale: 1.05 }}
-                        whileTap={{ scale: 0.95 }}
-                      >
-                        {isUpdating ? (
-                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                        ) : (
-                          <Download className="w-3.5 h-3.5" />
+                      <div className="flex items-center gap-2 flex-shrink-0">
+                        {!isNodeLoading && (
+                          <Tooltip label={t('imageDelivery.deliver_hint')} maxWidth={280}>
+                            <motion.button
+                              onClick={() => setDeliverTarget({ id: node.id, name: node.name })}
+                              disabled={isUpdating}
+                              className="btn btn-secondary text-xs px-2.5 py-1.5"
+                              whileHover={{ scale: 1.05 }}
+                              whileTap={{ scale: 0.95 }}
+                            >
+                              <Upload className="w-3.5 h-3.5" />
+                            </motion.button>
+                          </Tooltip>
                         )}
-                        {t('updates.update')}
-                      </motion.button>
+                        <motion.button
+                          onClick={() => handleUpdateNode(node.id, node.name)}
+                          disabled={isUpdating || isNodeLoading || node.status === 'offline' || (!needsUpdate && !isDevChannel)}
+                          className="btn btn-secondary text-xs px-3 py-1.5"
+                          whileHover={{ scale: 1.05 }}
+                          whileTap={{ scale: 0.95 }}
+                        >
+                          {isUpdating ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <Download className="w-3.5 h-3.5" />
+                          )}
+                          {t('updates.update')}
+                        </motion.button>
+                      </div>
                     </div>
                   </motion.div>
                 )
@@ -800,6 +818,14 @@ export default function Updates() {
           </div>
         </div>
       </motion.div>
+
+      {deliverTarget && (
+        <DeliverImageModal
+          serverId={deliverTarget.id}
+          serverName={deliverTarget.name}
+          onClose={() => setDeliverTarget(null)}
+        />
+      )}
     </motion.div>
   )
 }

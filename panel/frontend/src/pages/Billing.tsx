@@ -30,7 +30,7 @@ import {
   CreditCard, Plus, Pencil, Trash2, Clock, ArrowUpCircle,
   Wallet, X, ChevronDown, ChevronRight, Bell, Loader2,
   CalendarClock, DollarSign, Box, FolderPlus, Folder, FolderOpen, MoveRight,
-  CalendarX2, GripVertical, Cloud, RefreshCw,
+  CalendarX2, GripVertical, Cloud, RefreshCw, Calculator,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { billingApi, BillingServerData, BillingSettingsData } from '../api/client'
@@ -44,6 +44,7 @@ type ModalState =
   | { kind: 'edit'; server: BillingServerData }
   | { kind: 'extend'; server: BillingServerData }
   | { kind: 'topup'; server: BillingServerData }
+  | { kind: 'yc-plan'; server: BillingServerData }
   | { kind: 'create-folder' }
   | { kind: 'rename-folder'; folderName: string }
   | { kind: 'move-to-folder'; server: BillingServerData }
@@ -51,6 +52,8 @@ type ModalState =
 const COLLAPSED_KEY = 'billing_collapsed_folders'
 const FOLDER_ORDER_KEY = 'billing_folder_order'
 const SERVER_ORDER_KEY = 'billing_server_order'
+const MS_PER_DAY = 86_400_000
+const QUICK_DAYS = [7, 14, 30, 60, 90]
 
 function loadCollapsed(): Set<string> {
   try {
@@ -430,6 +433,7 @@ export default function Billing() {
         onDelete={() => handleDelete(srv.id)}
         onMoveToFolder={() => setModal({ kind: 'move-to-folder', server: srv })}
         onSync={() => handleSync(srv)}
+        onPlan={() => setModal({ kind: 'yc-plan', server: srv })}
       />
     ))
 
@@ -629,6 +633,7 @@ export default function Billing() {
                   onDelete={() => {}}
                   onMoveToFolder={() => {}}
                   onSync={() => {}}
+                  onPlan={() => {}}
                 />
               </div>
             )}
@@ -783,6 +788,9 @@ export default function Billing() {
           }}
         />
       )}
+      {modal.kind === 'yc-plan' && (
+        <YcPlanModal t={t} server={modal.server} onClose={() => setModal({ kind: 'none' })} />
+      )}
       {modal.kind === 'create-folder' && (
         <CreateFolderModal
           t={t}
@@ -869,7 +877,7 @@ function formatDays(days: number | null, t: (k: string) => string): string {
 /*  Project Card                                                       */
 /* ------------------------------------------------------------------ */
 
-function ProjectCard({ server, index, t, formatDateTime, sortable, onExtend, onTopup, onEdit, onDelete, onMoveToFolder, onSync }: {
+function ProjectCard({ server, index, t, formatDateTime, sortable, onExtend, onTopup, onEdit, onDelete, onMoveToFolder, onSync, onPlan }: {
   server: BillingServerData
   index: number
   t: (k: string, opts?: Record<string, unknown>) => string
@@ -881,6 +889,7 @@ function ProjectCard({ server, index, t, formatDateTime, sortable, onExtend, onT
   onDelete: () => void
   onMoveToFolder: () => void
   onSync: () => void
+  onPlan: () => void
 }) {
   const {
     setNodeRef,
@@ -1015,17 +1024,29 @@ function ProjectCard({ server, index, t, formatDateTime, sortable, onExtend, onT
       <div className="flex items-center justify-between mt-3">
         <div className="flex gap-2">
           {server.billing_type === 'yandex_cloud' ? (
-            <button
-              onClick={onSync}
-              className="flex items-center gap-1.5 px-4 py-2 text-xs font-semibold
-                         bg-gradient-to-r from-orange-500/20 to-amber-500/20 text-orange-400
-                         hover:from-orange-500/30 hover:to-amber-500/30
-                         border border-orange-500/20 hover:border-orange-500/40
-                         rounded-xl transition-all shadow-sm shadow-orange-500/5"
-            >
-              <RefreshCw className="w-4 h-4" />
-              {t('billing.sync')}
-            </button>
+            <>
+              <button
+                onClick={onSync}
+                className="flex items-center gap-1.5 px-4 py-2 text-xs font-semibold
+                           bg-gradient-to-r from-orange-500/20 to-amber-500/20 text-orange-400
+                           hover:from-orange-500/30 hover:to-amber-500/30
+                           border border-orange-500/20 hover:border-orange-500/40
+                           rounded-xl transition-all shadow-sm shadow-orange-500/5"
+              >
+                <RefreshCw className="w-4 h-4" />
+                {t('billing.sync')}
+              </button>
+              <button
+                onClick={onPlan}
+                className="flex items-center gap-1.5 px-4 py-2 text-xs font-semibold
+                           bg-dark-800 text-dark-300 hover:text-orange-400
+                           border border-dark-700/50 hover:border-orange-500/40
+                           rounded-xl transition-all"
+              >
+                <Calculator className="w-4 h-4" />
+                {t('billing.yc_plan')}
+              </button>
+            </>
           ) : server.billing_type === 'monthly' ? (
             <button
               onClick={onExtend}
@@ -1626,6 +1647,10 @@ function ExtendModal({ t, server, onClose, onDone }: {
 }) {
   const [days, setDays] = useState(30)
   const [saving, setSaving] = useState(false)
+  const { formatDateTime } = useBillingDateFormat()
+
+  // Бэкенд продлевает от текущей даты окончания, а если срок уже истёк — от «сейчас»
+  const totalDays = Math.max(server.days_left ?? 0, 0) + days
 
   const submit = async () => {
     if (days <= 0) return
@@ -1664,7 +1689,7 @@ function ExtendModal({ t, server, onClose, onDone }: {
             />
           </Field>
           <div className="flex flex-wrap gap-2">
-            {[7, 14, 30, 60, 90].map(d => (
+            {QUICK_DAYS.map(d => (
               <button
                 key={d}
                 onClick={() => setDays(d)}
@@ -1678,6 +1703,11 @@ function ExtendModal({ t, server, onClose, onDone }: {
               </button>
             ))}
           </div>
+          {days > 0 && (
+            <div className="text-xs text-emerald-400/80 bg-emerald-500/10 rounded-lg px-3 py-2">
+              <PaidTotalHint totalDays={totalDays} t={t} formatDateTime={formatDateTime} />
+            </div>
+          )}
         </div>
 
         <div className="flex gap-3 mt-6">
@@ -1707,8 +1737,13 @@ function TopupModal({ t, server, onClose, onDone }: {
 }) {
   const [amount, setAmount] = useState('')
   const [saving, setSaving] = useState(false)
+  const { formatDateTime } = useBillingDateFormat()
 
   const numAmount = parseFloat(amount) || 0
+  const monthlyCost = server.monthly_cost ?? 0
+  const addedDays = monthlyCost > 0 ? (numAmount / monthlyCost) * 30 : 0
+  // Как на бэкенде: срок считается от суммы текущего (уже «прожитого») баланса и пополнения
+  const totalDays = monthlyCost > 0 ? (((server.account_balance ?? 0) + numAmount) / monthlyCost) * 30 : 0
 
   const submit = async () => {
     if (numAmount <= 0) return
@@ -1778,10 +1813,13 @@ function TopupModal({ t, server, onClose, onDone }: {
               </button>
             ))}
           </div>
-          {numAmount > 0 && server.monthly_cost && server.monthly_cost > 0 && (
-            <div className="text-xs text-emerald-400/80 flex items-center gap-1 bg-emerald-500/10 rounded-lg px-3 py-2">
-              <Clock className="w-3 h-3" />
-              ≈ +{Math.round((numAmount / server.monthly_cost) * 30)} {t('common.days')}
+          {numAmount > 0 && monthlyCost > 0 && (
+            <div className="text-xs text-emerald-400/80 bg-emerald-500/10 rounded-lg px-3 py-2 space-y-1">
+              <div className="flex items-center gap-1">
+                <Clock className="w-3 h-3" />
+                ≈ +{Math.round(addedDays)} {t('common.days')}
+              </div>
+              <PaidTotalHint totalDays={totalDays} t={t} formatDateTime={formatDateTime} />
             </div>
           )}
         </div>
@@ -1798,6 +1836,150 @@ function TopupModal({ t, server, onClose, onDone }: {
           >
             {saving && <Loader2 className="w-4 h-4 animate-spin" />}
             {t('billing.topup')}
+          </button>
+        </div>
+      </div>
+    </Overlay>
+  )
+}
+
+function PaidTotalHint({ totalDays, t, formatDateTime, labelKey = 'billing.total_paid' }: {
+  totalDays: number
+  t: (k: string) => string
+  formatDateTime: (iso: string) => string
+  labelKey?: string
+}) {
+  const paidUntil = new Date(Date.now() + totalDays * MS_PER_DAY).toISOString()
+  return (
+    <div className="flex items-center gap-1 flex-wrap">
+      <CalendarClock className="w-3 h-3" />
+      {t(labelKey)}: <span className="font-semibold">{formatDays(totalDays, t)}</span>
+      <span className="opacity-70">· {t('billing.until')} {formatDateTime(paidUntil)}</span>
+    </div>
+  )
+}
+
+function YcPlanModal({ t, server, onClose }: {
+  t: (k: string) => string
+  server: BillingServerData
+  onClose: () => void
+}) {
+  const { formatDateTime } = useBillingDateFormat()
+  const [plan, setPlan] = useState<{ by: 'days' | 'amount'; value: string }>({ by: 'days', value: '30' })
+  const currency = currencySymbol(server.currency)
+  const dailyCost = server.yc_daily_cost ?? 0
+  const canPlan = dailyCost > 0
+  // Как compute_yc_days_left на бэкенде: тратить можно только то, что выше порога
+  const usable = (server.account_balance ?? 0) - (server.yc_balance_threshold ?? 0)
+  const entered = parseFloat(plan.value) || 0
+  const targetDays = !canPlan ? 0 : plan.by === 'days' ? entered : Math.max(0, (usable + entered) / dailyCost)
+  const requiredAmount = plan.by === 'days' ? Math.max(0, targetDays * dailyCost - usable) : entered
+  const lastsDays = requiredAmount > 0 || !canPlan ? targetDays : usable / dailyCost
+  const daysField = plan.by === 'days' ? plan.value : targetDays.toFixed(1)
+  const amountField = plan.by === 'amount' ? plan.value : requiredAmount.toFixed(2)
+
+  const inputClass = `w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200
+                      placeholder-dark-600 focus:border-accent-500/50 focus:outline-none transition`
+
+  return (
+    <Overlay onClose={onClose}>
+      <div className="p-6">
+        <div className="flex items-center justify-between mb-5">
+          <h2 className="text-lg font-semibold text-white">{t('billing.yc_plan_title')} — {server.name}</h2>
+          <button onClick={onClose} className="text-dark-500 hover:text-dark-300 transition">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <div className="space-y-4">
+          <div className="bg-dark-800/50 rounded-xl p-3 border border-dark-700/50 space-y-1">
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-dark-500">{t('billing.current_balance')}</span>
+              <span className="text-lg font-bold text-dark-200">
+                {(server.account_balance ?? 0).toFixed(2)} {currency}
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-dark-500">{t('billing.yc_balance_threshold')}</span>
+              <span className="text-xs text-dark-400">{(server.yc_balance_threshold ?? 0).toFixed(2)} {currency}</span>
+            </div>
+            {canPlan && (
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-dark-500">{t('billing.daily_cost')}</span>
+                <span className="text-xs text-dark-400">{dailyCost.toFixed(2)} {currency}{t('billing.per_day')}</span>
+              </div>
+            )}
+            {server.days_left !== null && (
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-dark-500">{t('billing.yc_plan_days_left')}</span>
+                <span className={`text-xs font-medium ${statusColor(server.days_left)}`}>{formatDays(server.days_left, t)}</span>
+              </div>
+            )}
+          </div>
+
+          {!canPlan ? (
+            <div className="text-xs text-yellow-400/80 bg-yellow-500/10 rounded-lg px-3 py-2">
+              {t('billing.yc_plan_no_cost')}
+            </div>
+          ) : (
+            <>
+              <Field label={t('billing.yc_plan_days')}>
+                <input
+                  type="number"
+                  min={1}
+                  step="1"
+                  value={daysField}
+                  onChange={e => setPlan({ by: 'days', value: e.target.value })}
+                  className={inputClass}
+                  autoFocus
+                />
+              </Field>
+              <div className="flex flex-wrap gap-2">
+                {QUICK_DAYS.map(d => (
+                  <button
+                    key={d}
+                    onClick={() => setPlan({ by: 'days', value: String(d) })}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${
+                      plan.by === 'days' && entered === d
+                        ? 'bg-orange-500/20 text-orange-400 border border-orange-500/30'
+                        : 'bg-dark-800 text-dark-400 border border-dark-700/50 hover:border-dark-600'
+                    }`}
+                  >
+                    {d}{t('billing.short_days')}
+                  </button>
+                ))}
+              </div>
+              <Field label={`${t('billing.yc_plan_amount')} (${currency})`}>
+                <input
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  value={amountField}
+                  onChange={e => setPlan({ by: 'amount', value: e.target.value })}
+                  className={inputClass}
+                />
+              </Field>
+              {entered > 0 && (
+                <div className="text-xs text-orange-400/80 bg-orange-500/10 rounded-lg px-3 py-2 space-y-1">
+                  {requiredAmount > 0 ? (
+                    <div className="flex items-center gap-1">
+                      <Wallet className="w-3 h-3" />
+                      {t('billing.yc_plan_topup')}: <span className="font-semibold">{requiredAmount.toFixed(2)} {currency}</span>
+                    </div>
+                  ) : (
+                    <div>{t('billing.yc_plan_enough')}</div>
+                  )}
+                  <PaidTotalHint totalDays={lastsDays} labelKey="billing.yc_plan_lasts" t={t} formatDateTime={formatDateTime} />
+                </div>
+              )}
+              <p className="text-[11px] text-dark-500">{t('billing.yc_plan_hint')}</p>
+            </>
+          )}
+        </div>
+
+        <div className="mt-6">
+          <button onClick={onClose} className="w-full py-2.5 bg-dark-800 text-dark-300 rounded-xl text-sm font-medium hover:bg-dark-700 transition">
+            {t('common.close')}
           </button>
         </div>
       </div>

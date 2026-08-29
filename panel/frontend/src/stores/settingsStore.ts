@@ -2,9 +2,40 @@ import { create } from 'zustand'
 import { toast } from 'sonner'
 import i18n from '../i18n'
 import { settingsApi } from '../api/client'
+import { parseHiddenModules, serializeHiddenModules } from '../config/modules'
+import {
+  parseChartMode,
+  parseChartModeOverrides,
+  serializeChartModeOverrides,
+  parseLiveValuesMode,
+  DEFAULT_CHART_MODE,
+  DEFAULT_LIVE_VALUES_MODE,
+  type ChartMode,
+  type ChartMetric,
+  type ChartModeOverrides,
+  type LiveValuesMode,
+} from '../config/chartDisplay'
 
-// Get browser timezone offset in format "+03:00" or "-05:00"
-function getBrowserTimezone(): string {
+// Зеркало списка скрытых разделов в браузере: меню рисуется до ответа
+// /settings, иначе при каждой загрузке страницы мигал бы полный список вкладок.
+const HIDDEN_MODULES_CACHE_KEY = 'panel_hidden_modules'
+
+function readCachedHiddenModules(): string[] {
+  try {
+    return parseHiddenModules(localStorage.getItem(HIDDEN_MODULES_CACHE_KEY))
+  } catch {
+    return []
+  }
+}
+
+function cacheHiddenModules(ids: string[]): void {
+  try {
+    localStorage.setItem(HIDDEN_MODULES_CACHE_KEY, serializeHiddenModules(ids))
+  } catch { /* приватный режим браузера */ }
+}
+
+// Смещение часового пояса браузера в формате "+03:00" / "-05:00"
+export function getBrowserUtcOffset(): string {
   const offset = -new Date().getTimezoneOffset()
   const sign = offset >= 0 ? '+' : '-'
   const hours = Math.floor(Math.abs(offset) / 60)
@@ -25,7 +56,7 @@ export interface TimezoneOption {
 
 // Common timezone options
 export const TIMEZONE_OPTIONS: TimezoneOption[] = [
-  { value: 'auto', label: 'Auto (Browser)', offset: getBrowserTimezone() },
+  { value: 'auto', label: 'Auto (Browser)', offset: getBrowserUtcOffset() },
   { value: 'UTC', label: 'UTC', offset: '+00:00' },
   { value: 'Europe/Moscow', label: 'Moscow (MSK)', offset: '+03:00' },
   { value: 'Europe/London', label: 'London (GMT/BST)', offset: '+00:00' },
@@ -90,6 +121,11 @@ interface SettingsState {
   remnawaveNginxPath: string
   updateBranch: string
   cpuAffinityEnabled: boolean
+  hiddenModules: string[]
+  chartMode: ChartMode
+  chartPeaks: boolean
+  chartModeOverrides: ChartModeOverrides
+  liveValues: LiveValuesMode
   isLoading: boolean
 
   fetchSettings: () => Promise<void>
@@ -106,6 +142,11 @@ interface SettingsState {
   setRemnawaveNginxPath: (path: string) => Promise<void>
   setUpdateBranch: (branch: string) => Promise<void>
   setCpuAffinityEnabled: (enabled: boolean) => Promise<void>
+  setHiddenModules: (ids: string[]) => Promise<void>
+  setChartMode: (mode: ChartMode) => Promise<void>
+  setChartPeaks: (enabled: boolean) => Promise<void>
+  setChartModeOverride: (metric: ChartMetric, mode: ChartMode | null) => Promise<void>
+  setLiveValues: (mode: LiveValuesMode) => Promise<void>
   getEffectiveTimezone: () => string
 }
 
@@ -123,11 +164,18 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   remnawaveNginxPath: '/opt/remnawave',
   updateBranch: 'main',
   cpuAffinityEnabled: false,
+  hiddenModules: readCachedHiddenModules(),
+  chartMode: DEFAULT_CHART_MODE,
+  chartPeaks: true,
+  chartModeOverrides: {},
+  liveValues: DEFAULT_LIVE_VALUES_MODE,
   isLoading: true,
-  
+
   fetchSettings: async () => {
     try {
       const { data } = await settingsApi.getAll()
+      const hiddenModules = parseHiddenModules(data.settings.hidden_modules)
+      cacheHiddenModules(hiddenModules)
       set({
         refreshInterval: parseInt(data.settings.refresh_interval || '30'),
         compactView: data.settings.compact_view === 'true',
@@ -142,6 +190,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         remnawaveNginxPath: data.settings.remnawave_nginx_path || '/opt/remnawave',
         updateBranch: data.settings.update_branch || 'main',
         cpuAffinityEnabled: data.settings.cpu_affinity_enabled === 'true',
+        hiddenModules,
+        chartMode: parseChartMode(data.settings.chart_mode),
+        chartPeaks: data.settings.chart_peaks !== 'false',
+        chartModeOverrides: parseChartModeOverrides(data.settings.chart_mode_overrides),
+        liveValues: parseLiveValuesMode(data.settings.live_values),
         isLoading: false,
       })
     } catch {
@@ -219,6 +272,41 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     set({ cpuAffinityEnabled: enabled })
     await settingsApi.set('cpu_affinity_enabled', enabled.toString())
     toast.success(i18n.t('common.saved'))
+  },
+
+  // Без тоста: результат виден сразу в боковом меню, а разделы переключают пачкой
+  setHiddenModules: async (ids: string[]) => {
+    set({ hiddenModules: ids })
+    cacheHiddenModules(ids)
+    await settingsApi.set('hidden_modules', serializeHiddenModules(ids))
+  },
+
+  // Без тоста: результат виден сразу на графиках
+  setChartMode: async (mode: ChartMode) => {
+    set({ chartMode: mode })
+    await settingsApi.set('chart_mode', mode)
+  },
+
+  setChartPeaks: async (enabled: boolean) => {
+    set({ chartPeaks: enabled })
+    await settingsApi.set('chart_peaks', enabled.toString())
+  },
+
+  setChartModeOverride: async (metric: ChartMetric, mode: ChartMode | null) => {
+    const overrides = { ...get().chartModeOverrides }
+    if (mode === null) {
+      delete overrides[metric]
+    } else {
+      overrides[metric] = mode
+    }
+    set({ chartModeOverrides: overrides })
+    await settingsApi.set('chart_mode_overrides', serializeChartModeOverrides(overrides))
+  },
+
+  // Без тоста: дашборд подхватит режим на следующем обновлении, страница сервера — сразу
+  setLiveValues: async (mode: LiveValuesMode) => {
+    set({ liveValues: mode })
+    await settingsApi.set('live_values', mode)
   },
 
   getEffectiveTimezone: () => {

@@ -1,4 +1,5 @@
 import axios, { AxiosError, AxiosRequestConfig, AxiosResponse, InternalAxiosRequestConfig } from 'axios'
+import type { ChartGap } from '../utils/chartUtils'
 
 const DEFAULT_TIMEOUT_MS = 30000
 
@@ -121,6 +122,7 @@ export interface Server {
   uses_shared_cert?: boolean
   auth_kind?: 'shared' | 'per_server' | 'legacy'
   antiddos_emergency_mode?: boolean
+  has_xray_node?: boolean
   node_capabilities?: NodeCapabilities | null
 }
 
@@ -137,10 +139,26 @@ export interface CertificateExpiry {
   expired: boolean
 }
 
+/** Средние и пики за окно с прошлого опроса — нода отдаёт их только коллектору панели */
+export interface NodeWindow {
+  window_sec: number
+  samples: number
+  cpu_avg: number
+  cpu_max: number
+  per_cpu_avg: number[]
+  net_rx_avg: number
+  net_tx_avg: number
+  net_rx_max: number
+  net_tx_max: number
+  disk_read_avg: number
+  disk_write_avg: number
+}
+
 export interface ServerMetrics {
   timestamp: string
   server_name: string
   timezone?: TimezoneInfo
+  window?: NodeWindow | null
   cpu: {
     cores_physical: number
     cores_logical: number
@@ -465,6 +483,293 @@ export interface DeployJobInfo {
 export const serverDeployJobStreamUrl = (jobId: string) =>
   `/api/servers/deploy/${jobId}/stream`
 
+// Установка ноды Remnawave на уже добавленный сервер через агента ноды
+export type RemnawaveInstallEvent =
+  | { type: 'start'; name?: string }
+  | { type: 'log'; line: string }
+  | { type: 'error'; message: string }
+  | { type: 'done'; status: 'success' | 'error'; exit_code: number | null }
+
+export interface RemnawaveInstallJobInfo {
+  job_id: string
+  server_id: number
+  name: string
+  status: 'running' | 'success' | 'error'
+  exit_code: number | null
+  error: string | null
+}
+
+export const remnawaveInstallStreamUrl = (jobId: string) =>
+  `/api/servers/remnawave-install/${jobId}/stream`
+
+export const remnawaveInstallApi = {
+  start: (
+    serverId: number,
+    body: { remnawave_cert_profile_id?: number | null; remnawave_cert_inline?: string | null },
+  ) => api.post<{ job_id: string }>(`/servers/${serverId}/install-remnawave`, body),
+  jobs: () => api.get<{ jobs: RemnawaveInstallJobInfo[] }>('/servers/remnawave-install/jobs'),
+}
+
+// Проверка прокси-конфигураций: ссылки, JSON-конфиги и подписки
+export type XrayTestSource = 'links' | 'json' | 'subscription'
+export type XrayTestVerdict = 'ok' | 'degraded' | 'fail'
+
+export interface XrayTestConfigPreview {
+  index: number
+  remark: string
+  protocol: string
+  address: string
+  port: number
+  sni: string | null
+  transport: string
+  security: string
+  flow: string | null
+  core: string | null
+  unsupported: string | null
+  link: string | null
+}
+
+export interface XrayTestLineError {
+  line: number
+  preview: string
+  reason: string
+}
+
+export interface XrayTestParseResult {
+  format: string | null
+  dropped_sections: string[]
+  configs: XrayTestConfigPreview[]
+  errors: XrayTestLineError[]
+}
+
+export interface XrayTestCell {
+  index: number
+  remark: string
+  location: string
+  location_name: string
+  protocol: string
+  address: string
+  port: number
+  sni: string | null
+  sni_from_config?: boolean
+  transport: string
+  security: string
+  core: string | null
+  verdict: XrayTestVerdict
+  reason: string | null
+  detail: string
+  hint: string | null
+  resolved_ip: string | null
+  exit_ip: string | null
+  exit_country: string | null
+  exit_asn: string | null
+  http_status: number | null
+  dns_ms: number | null
+  tcp_min_ms: number | null
+  tcp_avg_ms: number | null
+  tcp_jitter_ms: number | null
+  handshake_ms: number | null
+  rtt_ms: number | null
+  speed_mbps: number | null
+  tls: {
+    reachable: boolean
+    issuer: string | null
+    subject: string | null
+    not_after: string | null
+    version: string | null
+    alpn: string | null
+    self_signed: boolean
+    error: string | null
+  } | null
+}
+
+export type XrayTestEvent =
+  | { type: 'start'; total: number; location: string }
+  // Тик тишины: держит соединение, пока идут долгие проверки
+  | { type: 'ping'; done: number; total: number }
+  | { type: 'log'; line: string }
+  | ({ type: 'cell'; done: number } & XrayTestCell)
+  | { type: 'done'; status: string; error: string | null; total: number; done: number;
+      ok: number; degraded: number; fail: number }
+
+export interface XrayTestJobInfo {
+  job_id: string
+  status: 'running' | 'success' | 'error' | 'cancelled'
+  location: string
+  error: string | null
+  started_at: number
+  total: number
+  done: number
+  ok: number
+  degraded: number
+  fail: number
+}
+
+export interface XrayTestCoreInfo {
+  core: string
+  selected: string
+  resolved: string | null
+  installed: string[]
+  ready: boolean
+  pinned: string
+  error: string | null
+}
+
+export interface XrayTestCoreRelease {
+  version: string
+  tag: string
+  prerelease: boolean
+  published_at: string
+  available: boolean
+  size: number | null
+  verifiable: boolean
+  installed: boolean
+}
+
+export interface XrayTestClient {
+  id: string
+  title: string
+  user_agent: string
+  sends_hwid: boolean
+}
+
+export interface XrayTestSubscriptionProfile {
+  id: number
+  name: string
+  kind: 'url' | 'links'
+  payload: string
+  client: string | null
+  last_fetched_at: string | null
+  last_count: number
+}
+
+export interface XrayTestSniSet {
+  id: number
+  name: string
+  sni_list: string[]
+}
+
+export interface XrayTestRunSummary {
+  id: number
+  started_at: string | null
+  finished_at: string | null
+  source: string
+  source_name: string | null
+  location: string
+  location_name: string | null
+  status: string
+  total: number
+  ok: number
+  degraded: number
+  fail: number
+}
+
+export interface XrayTestRunRequest {
+  source: XrayTestSource
+  payload: string
+  client?: string | null
+  source_name?: string | null
+  profile_id?: number | null
+  selected?: number[] | null
+  sni_list: string[]
+  sync_transport_host: boolean
+  include_original_sni: boolean
+  locations: string[]
+  full: boolean
+  tls_inspect: boolean
+  measure_speed: boolean
+}
+
+export const xrayTestStreamUrl = (jobId: string) => `/api/xray-test/jobs/${jobId}/stream`
+export const xrayTestExportUrl = (jobId: string, fmt: string, includeDegraded: boolean) =>
+  `/api/xray-test/jobs/${jobId}/export?fmt=${fmt}&include_degraded=${includeDegraded}`
+
+export const xrayTestApi = {
+  parse: (body: {
+    source: XrayTestSource; payload: string;
+    client?: string | null; profile_id?: number | null
+  }) =>
+    api.post<XrayTestParseResult>('/xray-test/parse', body),
+  run: (body: XrayTestRunRequest) =>
+    api.post<{ job_id: string; total: number }>('/xray-test/run', body),
+  jobs: () => api.get<{ jobs: XrayTestJobInfo[] }>('/xray-test/jobs'),
+  cancel: (jobId: string) => api.post(`/xray-test/jobs/${jobId}/cancel`),
+  clients: () =>
+    api.get<{ clients: XrayTestClient[]; default: string }>('/xray-test/clients'),
+  cores: () => api.get<{ cores: XrayTestCoreInfo[]; arch: string }>('/xray-test/cores'),
+  coreReleases: (core: string, refresh = false) =>
+    api.get<{ releases: XrayTestCoreRelease[]; selected: string }>(
+      `/xray-test/cores/releases?core=${encodeURIComponent(core)}&refresh=${refresh}`,
+    ),
+  setCoreVersion: (core: string, version: string) =>
+    api.put<{ success: boolean; selected: string }>('/xray-test/cores/version', { core, version }),
+  downloadCore: (core: string, version?: string) =>
+    api.post<{ success: boolean; version: string }>(
+      `/xray-test/cores/download?core=${encodeURIComponent(core)}` +
+      (version ? `&version=${encodeURIComponent(version)}` : ''),
+    ),
+  deleteCoreVersion: (core: string, version: string) =>
+    api.delete(`/xray-test/cores/${encodeURIComponent(core)}/${encodeURIComponent(version)}`),
+  subscriptions: () =>
+    api.get<{ profiles: XrayTestSubscriptionProfile[] }>('/xray-test/subscriptions'),
+  createSubscription: (body: {
+    name: string; kind: 'url' | 'links'; payload: string; client?: string | null
+  }) => api.post<XrayTestSubscriptionProfile>('/xray-test/subscriptions', body),
+  updateSubscription: (
+    id: number,
+    body: { name?: string; payload?: string; client?: string | null },
+  ) => api.patch<XrayTestSubscriptionProfile>(`/xray-test/subscriptions/${id}`, body),
+  deleteSubscription: (id: number) => api.delete(`/xray-test/subscriptions/${id}`),
+  sniSets: () => api.get<{ profiles: XrayTestSniSet[] }>('/xray-test/sni-sets'),
+  createSniSet: (body: { name: string; sni_list: string[] }) =>
+    api.post<XrayTestSniSet>('/xray-test/sni-sets', body),
+  updateSniSet: (id: number, body: { name?: string; sni_list?: string[] }) =>
+    api.patch<XrayTestSniSet>(`/xray-test/sni-sets/${id}`, body),
+  deleteSniSet: (id: number) => api.delete(`/xray-test/sni-sets/${id}`),
+  history: (limit = 30) =>
+    api.get<{ runs: XrayTestRunSummary[] }>(`/xray-test/history?limit=${limit}`),
+  historyResults: (runId: number) =>
+    api.get<{ results: XrayTestCell[] }>(`/xray-test/history/${runId}`),
+  deleteHistoryRun: (runId: number) => api.delete(`/xray-test/history/${runId}`),
+}
+
+// Доставка образа ноды с панели по SSH (ноды под ТСПУ, без доступа к GHCR)
+export type NodeImageDeliveryEvent =
+  | { type: 'start'; host: string }
+  | { type: 'log'; line: string }
+  | { type: 'error'; message: string }
+  | { type: 'done'; status?: string; message?: string }
+
+export const imageDeliveryJobStreamUrl = (jobId: string) =>
+  `/api/servers/deliver-image/${jobId}/stream`
+
+export interface ImageDeliverySettings {
+  image_delivery: 'auto' | 'ssh'
+  ssh_host: string
+  ssh_port: number
+  ssh_user: string
+  has_ssh_password: boolean
+  has_ssh_private_key: boolean
+}
+
+export interface ImageDeliveryCreds {
+  ssh_host?: string
+  ssh_port?: number
+  ssh_user?: string
+  ssh_password?: string
+  ssh_private_key?: string
+  ssh_passphrase?: string
+}
+
+export const nodeImageApi = {
+  getSettings: (id: number) =>
+    api.get<ImageDeliverySettings>(`/servers/${id}/image-delivery`),
+  setSettings: (id: number, data: ImageDeliveryCreds & { image_delivery?: string }) =>
+    api.patch(`/servers/${id}/image-delivery`, data),
+  deliver: (id: number, creds: ImageDeliveryCreds) =>
+    api.post<{ job_id: string }>(`/servers/${id}/deliver-image`, creds),
+}
+
 export const serversApi = {
   list: (includeMetrics?: boolean) =>
     api.get<{ count: number; servers: ServerWithMetrics[] }>('/servers', {
@@ -535,16 +840,68 @@ export const installKeysApi = {
   delete: (id: number) => api.delete<{ success: boolean }>(`/install-keys/${id}`),
 }
 
+export type HistoryPeriod = '1h' | '24h' | '7d' | '30d' | '365d'
+export type HistoryDataSource = 'raw' | 'hour' | 'day'
+
+// Единая схема точки для всех периодов: чего нет в источнике — null, не 0.
+// Точка-маркер внутри простоя — все метрики null, data_points: 0.
+export interface HistoryPoint {
+  timestamp: string
+  data_points: number
+  cpu_usage: number | null
+  max_cpu: number | null
+  memory_percent: number | null
+  max_memory_percent: number | null
+  memory_used: number | null
+  memory_available: number | null
+  load_avg_1: number | null
+  max_load: number | null
+  net_rx_bytes_per_sec: number | null
+  max_net_rx_bytes_per_sec: number | null
+  net_tx_bytes_per_sec: number | null
+  max_net_tx_bytes_per_sec: number | null
+  disk_percent: number | null
+  disk_read_bytes_per_sec: number | null
+  disk_write_bytes_per_sec: number | null
+  process_count: number | null
+  tcp_established: number | null
+  tcp_listen: number | null
+  tcp_time_wait: number | null
+  tcp_close_wait: number | null
+  tcp_syn_sent: number | null
+  tcp_syn_recv: number | null
+  tcp_fin_wait: number | null
+}
+
+// Регулярная сетка бакетов: cores[ядро][бакет], null — бакет без замеров
+export interface PerCpuHistory {
+  bucket_sec: number
+  timestamps: string[]
+  cores: (number | null)[][]
+}
+
+export interface HistoryResponse {
+  period: HistoryPeriod
+  data_source: HistoryDataSource
+  bucket_sec: number | null
+  from_time: string
+  to_time: string
+  count: number
+  data: HistoryPoint[]
+  gaps: ChartGap[]
+  // undefined — блок не запрашивали, null — запрашивали, но истории по ядрам нет
+  per_cpu?: PerCpuHistory | null
+}
+
 export const proxyApi = {
   // Returns cached metrics from panel's database (collected by background worker)
   getMetrics: (serverId: number) => api.get<ServerMetrics>(`/proxy/${serverId}/metrics`),
   // Returns live metrics directly from node (use sparingly, causes load)
   getLiveMetrics: (serverId: number) => api.get<ServerMetrics>(`/proxy/${serverId}/metrics/live`),
-  // History is stored on the panel (collected every 5 seconds)
-  // period: '1h', '24h', '7d', '30d', '365d'
-  // include_per_cpu: true to include per-CPU usage data (only for raw data periods: 1h, 24h)
-  getHistory: (serverId: number, params?: { period?: string; from_time?: string; to_time?: string; limit?: number; include_per_cpu?: boolean }) =>
-    api.get(`/proxy/${serverId}/metrics/history`, { params }),
+  // 1h — снапшоты как есть, 24h — бакеты 5 мин, 7d/30d — часовые, 365d — суточные.
+  // include_per_cpu — блок per_cpu под тепловую карту, только для 1h/24h
+  getHistory: (serverId: number, params: { period: string; include_per_cpu?: boolean }) =>
+    api.get<HistoryResponse>(`/proxy/${serverId}/metrics/history`, { params }),
   
   // Cached HAProxy data (status, stats, rules, certs, firewall) - updated every 30s
   getHAProxyCached: (serverId: number) =>
@@ -666,6 +1023,7 @@ export interface TimeSyncStatus {
     server_id?: number
     success: boolean
     timezone?: string
+    ntp_service?: string
     ntp_synchronized?: boolean
     error?: string
   }>
@@ -676,6 +1034,36 @@ export const settingsApi = {
   set: (key: string, value: string) => api.put(`/settings/${key}`, { value }),
   timeSyncRun: () => api.post<{ success: boolean }>('/settings/time-sync/run'),
   timeSyncStatus: () => api.get<TimeSyncStatus>('/settings/time-sync/status'),
+}
+
+// Reserved ports (excluded from the kernel's ephemeral allocation on nodes)
+export interface ReservedPortsServer {
+  id: number
+  name: string
+  ports: string
+  node_version: string | null
+  supported: boolean
+}
+
+export interface ReservedPortsConfig {
+  global_ports: string
+  min_node_version: string
+  servers: ReservedPortsServer[]
+}
+
+export interface ReservedPortsSaveResult {
+  success: boolean
+  ports: string
+  queued?: boolean
+  error?: string | null
+}
+
+export const reservedPortsApi = {
+  getConfig: () => api.get<ReservedPortsConfig>('/reserved-ports'),
+  setGlobal: (ports: string) =>
+    api.put<ReservedPortsSaveResult>('/reserved-ports/global', { ports }),
+  setServer: (serverId: number, ports: string) =>
+    api.put<ReservedPortsSaveResult>(`/reserved-ports/servers/${serverId}`, { ports }, { timeout: 90000 }),
 }
 
 // Blocklist types
@@ -955,6 +1343,31 @@ export interface PanelServerStats {
   } | null
 }
 
+export type HostHistoryPeriod = '1h' | '24h' | '7d' | '30d'
+
+export interface PanelHostHistoryPoint {
+  timestamp: string
+  data_points: number
+  cpu_usage: number | null
+  max_cpu: number | null
+  memory_percent: number | null
+  max_memory_percent: number | null
+  memory_used: number | null
+  memory_available: number | null
+  load_avg_1: number | null
+  max_load: number | null
+}
+
+export interface PanelHostHistoryResponse {
+  period: HostHistoryPeriod
+  bucket_sec: number | null
+  from_time: string
+  to_time: string
+  count: number
+  data: PanelHostHistoryPoint[]
+  gaps: ChartGap[]
+}
+
 export const systemApi = {
   getPanelIp: () => api.get<PanelIpInfo>('/system/panel-ip'),
   getVersionBase: () => api.get<VersionBaseInfo>('/system/version/base'),
@@ -983,6 +1396,8 @@ export const systemApi = {
   
   // Panel server statistics (CPU, RAM, Disk)
   getServerStats: () => api.get<PanelServerStats>('/system/stats'),
+  getStatsHistory: (period: HostHistoryPeriod) =>
+    api.get<PanelHostHistoryResponse>('/system/stats/history', { params: { period } }),
 }
 
 // Anti-DDoS types
@@ -1411,31 +1826,73 @@ export interface BackupInfo {
 
 export interface BackupStatus {
   state: 'idle' | 'creating' | 'restoring'
+  operation: 'create' | 'restore' | null
   filename: string | null
   error: string | null
   started_at: string | null
   completed_at: string | null
 }
 
+export interface BackupAutoSettings {
+  enabled: boolean
+  schedule_kind: 'daily' | 'every_hours'
+  at_time: string
+  every_hours: number
+  chat_id: string | null
+  volume_size_mb: number
+  has_bot_token: boolean
+  has_archive_password: boolean
+  last_run_at: string | null
+  last_status: string | null
+  last_error: string | null
+}
+
+export interface BackupAutoSettingsIn {
+  enabled?: boolean
+  schedule_kind?: string
+  at_time?: string
+  every_hours?: number
+  bot_token?: string
+  chat_id?: string
+  archive_password?: string
+  volume_size_mb?: number
+}
+
+// total не приходит, если сервер не отдал Content-Length — вызывающий подставляет свой
+export type TransferProgress = (loaded: number, total: number | undefined) => void
+
 export const backupApi = {
   create: () =>
     api.post<{ success: boolean; message: string }>('/backup/create'),
   list: () =>
     api.get<{ backups: BackupInfo[]; count: number }>('/backup/list'),
-  download: (filename: string) =>
-    api.get(`/backup/${filename}/download`, { responseType: 'blob' }),
+  download: (filename: string, onProgress?: TransferProgress) =>
+    api.get(`/backup/${filename}/download`, {
+      responseType: 'blob',
+      onDownloadProgress: e => onProgress?.(e.loaded, e.total),
+    }),
   delete: (filename: string) =>
     api.delete<{ success: boolean }>(`/backup/${filename}`),
-  restore: (file: File) => {
+  restore: (files: File[], password?: string, onProgress?: TransferProgress) => {
     const formData = new FormData()
-    formData.append('file', file)
+    for (const f of files) formData.append('file', f)
+    if (password) formData.append('password', password)
     return api.post<{ success: boolean; message: string }>('/backup/restore', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
       timeout: 600000,
+      onUploadProgress: e => onProgress?.(e.loaded, e.total),
     })
   },
   getStatus: () =>
     api.get<BackupStatus>('/backup/status'),
+  getAutoSettings: () =>
+    api.get<BackupAutoSettings>('/backup/settings'),
+  updateAutoSettings: (data: BackupAutoSettingsIn) =>
+    api.put<{ success: boolean }>('/backup/settings', data),
+  telegramNow: () =>
+    api.post<{ success: boolean; message: string }>('/backup/telegram-now'),
+  testTelegram: () =>
+    api.post<{ success: boolean }>('/backup/test-telegram'),
 }
 
 // SSH Security
@@ -1813,8 +2270,6 @@ export interface BackendServer {
   send_proxy_v2?: boolean
   backup?: boolean
   slowstart?: string
-  on_marked_down?: string | null
-  on_marked_up?: string | null
   disabled?: boolean
 }
 
@@ -1910,6 +2365,9 @@ export interface RemnawaveNginxOptions {
   ssl_cert_path: string
   ssl_key_path: string
   fallback_url: string
+  tls_session_tickets: boolean
+  client_tcp_keepalive: string
+  access_log_enabled: boolean
 }
 
 export interface RemnawaveNginxProfile {
@@ -1943,7 +2401,7 @@ export interface RemnawaveNginxProfileDetail extends RemnawaveNginxProfile {
 
 export interface RemnawaveNginxRule {
   name: string
-  rule_type: 'grpc' | 'proxy'
+  rule_type: 'grpc' | 'xhttp' | 'proxy'
   service_path?: string
   port?: number
   path?: string

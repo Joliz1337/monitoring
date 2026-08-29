@@ -24,7 +24,9 @@ import {
   Terminal,
   PlusCircle,
   Lock,
+  Activity,
 } from 'lucide-react'
+import { useNavigate, useParams } from 'react-router-dom'
 import { useServersStore } from '../stores/serversStore'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -142,7 +144,11 @@ const removeStoredJob = (jobId: string) => {
 
 export default function Servers() {
   const { servers, fetchServersWithMetrics, addServer, deleteServer, testServer, updateServer, toggleServer } = useServersStore()
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
+  const { uid } = useParams()
+  const navigate = useNavigate()
+
+  const openDashboard = (serverId: number) => navigate(`/${uid}/server/${serverId}`)
 
   const [showForm, setShowForm] = useState(false)
   const [editingId, setEditingId] = useState<number | null>(null)
@@ -368,6 +374,8 @@ export default function Servers() {
     haproxy_profile_id: d.haproxyProfileId ?? null,
     firewall_profile_id: d.firewallProfileId ?? null,
     dnat_profile_id: d.dnatProfileId ?? null,
+    // Установщик на ноде говорит на языке интерфейса панели
+    lang: i18n.language.startsWith('ru') ? 'ru' : 'en',
   })
 
   // Читает NDJSON-лог фоновой задачи. finished=true только если дошли до 'done'
@@ -1190,7 +1198,14 @@ export default function Servers() {
                       </div>
                       <div className="min-w-0 flex-1">
                         <h3 className="font-semibold text-dark-100 flex items-center gap-2 truncate">
-                          <span className="truncate">{server.name}</span>
+                          <button
+                            type="button"
+                            onClick={() => openDashboard(server.id)}
+                            title={t('servers.open_dashboard')}
+                            className="truncate text-left hover:text-accent-400 transition-colors"
+                          >
+                            {server.name}
+                          </button>
                           <span
                             className={`w-2 h-2 rounded-full flex-shrink-0 ${
                               !server.is_active
@@ -1324,6 +1339,16 @@ export default function Servers() {
                       </div>
 
                       <div className="flex items-center gap-1 flex-shrink-0">
+                        <Tooltip label={t('servers.open_dashboard')}>
+                          <motion.button
+                            onClick={() => openDashboard(server.id)}
+                            className="p-2 rounded-lg transition-all text-accent-400 hover:bg-accent-500/10"
+                            whileTap={{ scale: 0.9 }}
+                          >
+                            <Activity className="w-3.5 h-3.5" />
+                          </motion.button>
+                        </Tooltip>
+
                         <Tooltip label={server.is_active ? t('servers.monitoring_enabled') : t('servers.monitoring_disabled')}>
                           <motion.button
                             onClick={() => toggleServer(server.id, !server.is_active)}

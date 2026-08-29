@@ -22,6 +22,7 @@ from app.services.remnawave_nginx_config import (  # noqa: E402
     ProfileOptions,
     ProxyRule,
     RuleValidationError,
+    XhttpRule,
     detect_domain,
     generate_full_config,
     has_markers,
@@ -37,18 +38,21 @@ GRPC_RULES = [
     GrpcRule(name="trgrpc", service_path="trgrpc", port=8443),
     GrpcRule(name="vlgrpc", service_path="vlgrpc", port=8444),
 ]
+XHTTP_RULES = [
+    XhttpRule(name="vlxhttp", path="/api/v2/upload/ab12", port=2081),
+]
 PROXY_RULES = [
     ProxyRule(name="fallback", path="/", target_url="https://example.com"),
 ]
+ALL_RULES = [*GRPC_RULES, *XHTTP_RULES, *PROXY_RULES]
 
 
 class RoundTripTests(unittest.TestCase):
     def _assert_round_trip(self, options: ProfileOptions):
-        config = generate_full_config(options, GRPC_RULES, PROXY_RULES)
-        grpc, proxy = parse_rules_from_config(config)
-        self.assertEqual(grpc, GRPC_RULES)
-        self.assertEqual(proxy, PROXY_RULES)
-        regenerated = generate_full_config(options, grpc, proxy)
+        config = generate_full_config(options, ALL_RULES)
+        parsed = parse_rules_from_config(config)
+        self.assertEqual(parsed, ALL_RULES)
+        regenerated = generate_full_config(options, parsed)
         self.assertEqual(config, regenerated)
 
     def test_scheme_direct(self):
@@ -72,38 +76,63 @@ class RoundTripTests(unittest.TestCase):
         ))
 
     def test_scheme_with_fallback(self):
-        config = generate_full_config(
-            ProfileOptions(fallback_url="https://example.com"), GRPC_RULES, [],
-        )
-        grpc, proxy = parse_rules_from_config(config)
-        self.assertEqual(grpc, GRPC_RULES)
-        self.assertEqual(proxy, [])
-        regenerated = generate_full_config(
-            ProfileOptions(fallback_url="https://example.com"), grpc, proxy,
-        )
-        self.assertEqual(config, regenerated)
+        options = ProfileOptions(fallback_url="https://example.com")
+        rules = [*GRPC_RULES, *XHTTP_RULES]
+        config = generate_full_config(options, rules)
+        parsed = parse_rules_from_config(config)
+        self.assertEqual(parsed, rules)
+        self.assertEqual(config, generate_full_config(options, parsed))
+
+    def test_rule_order_is_preserved(self):
+        """Порядок локаций определяет содержимое конфига и хэш синхронизации —
+        парсер обязан вернуть правила в том же порядке, а не по типам."""
+        rules = [PROXY_RULES[0], XHTTP_RULES[0], GRPC_RULES[0]]
+        config = generate_full_config(ProfileOptions(), rules)
+        self.assertEqual(parse_rules_from_config(config), rules)
 
     def test_splice_preserves_manual_edits_outside_markers(self):
-        config = generate_full_config(ProfileOptions(), GRPC_RULES, PROXY_RULES)
+        config = generate_full_config(ProfileOptions(), ALL_RULES)
         edited = config.replace("keepalive_timeout 75s;", "keepalive_timeout 90s;")
-        new_rules = GRPC_RULES + [GrpcRule(name="vmgrpc", service_path="vmgrpc", port=8445)]
-        spliced = splice_rules(edited, new_rules, PROXY_RULES, ProfileOptions())
+        new_rules = [*ALL_RULES, GrpcRule(name="vmgrpc", service_path="vmgrpc", port=8445)]
+        spliced = splice_rules(edited, new_rules, ProfileOptions())
         self.assertIn("keepalive_timeout 90s;", spliced)
-        grpc, proxy = parse_rules_from_config(spliced)
-        self.assertEqual(grpc, new_rules)
-        self.assertEqual(proxy, PROXY_RULES)
+        self.assertEqual(parse_rules_from_config(spliced), new_rules)
+
+    def test_splice_with_same_rules_is_identity(self):
+        """Splice обеих секций должен давать байт-в-байт тот же текст, что
+        и генерация — иначе каждый CRUD менял бы хэш без причины."""
+        config = generate_full_config(ProfileOptions(), ALL_RULES)
+        self.assertEqual(splice_rules(config, ALL_RULES, ProfileOptions()), config)
+
+    def test_splice_adds_xhttp_upstream(self):
+        config = generate_full_config(ProfileOptions(), GRPC_RULES)
+        self.assertNotIn("upstream xhttp_", config)
+        spliced = splice_rules(config, [*GRPC_RULES, *XHTTP_RULES], ProfileOptions())
+        self.assertIn("upstream xhttp_vlxhttp {", spliced)
+        self.assertIn("proxy_pass http://xhttp_vlxhttp;", spliced)
+
+    def test_splice_without_upstream_markers_proxies_directly(self):
+        """Конфиг, собранный до появления секции UPSTREAMS: правило не может
+        ссылаться на несуществующий upstream и проксирует напрямую."""
+        config = generate_full_config(ProfileOptions(), GRPC_RULES)
+        start = config.find("    # === UPSTREAMS START ===")
+        end = config.find("# === UPSTREAMS END ===") + len("# === UPSTREAMS END ===\n")
+        legacy = config[:start] + config[end:]
+        spliced = splice_rules(legacy, XHTTP_RULES, ProfileOptions())
+        self.assertNotIn("upstream xhttp_", spliced)
+        self.assertIn("proxy_pass http://127.0.0.1:2081;", spliced)
+        self.assertEqual(parse_rules_from_config(spliced), XHTTP_RULES)
 
 
 class ContentTests(unittest.TestCase):
     def test_grpc_uses_grpc_set_header_overwrite(self):
-        config = generate_full_config(ProfileOptions(), GRPC_RULES, [])
+        config = generate_full_config(ProfileOptions(), GRPC_RULES)
         self.assertIn("grpc_set_header X-Forwarded-For $remote_addr;", config)
         self.assertNotIn("$proxy_add_x_forwarded_for", config)
 
     def test_cdn_switches_to_client_ip(self):
         config = generate_full_config(
-            ProfileOptions(cdn_enabled=True, cdn_ranges=["173.245.48.0/20"]),
-            GRPC_RULES, PROXY_RULES,
+            ProfileOptions(cdn_enabled=True, cdn_ranges=["173.245.48.0/20"]), ALL_RULES,
         )
         self.assertIn("grpc_set_header X-Forwarded-For $client_ip;", config)
         self.assertIn("geo $remote_addr $from_edge", config)
@@ -113,23 +142,22 @@ class ContentTests(unittest.TestCase):
         config = generate_full_config(
             ProfileOptions(proxy_protocol_enabled=True, proxy_protocol_port=8449,
                            haproxy_ip="10.0.0.1"),
-            GRPC_RULES, [],
+            GRPC_RULES,
         )
-        self.assertIn("listen 8449 ssl proxy_protocol;", config)
+        self.assertIn("listen 8449 ssl proxy_protocol", config)
         self.assertIn("set_real_ip_from 10.0.0.1;", config)
         self.assertIn("real_ip_header proxy_protocol;", config)
 
     def test_proxy_protocol_without_haproxy_ip_trusts_all(self):
         # Пустой IP HAProxy = принимать PP-заголовок от всех, защита — файрвол
         config = generate_full_config(
-            ProfileOptions(proxy_protocol_enabled=True, proxy_protocol_port=8449),
-            GRPC_RULES, [],
+            ProfileOptions(proxy_protocol_enabled=True, proxy_protocol_port=8449), GRPC_RULES,
         )
         self.assertIn("set_real_ip_from 0.0.0.0/0;", config)
 
     def test_fallback_generates_locations_and_error_page(self):
         config = generate_full_config(
-            ProfileOptions(fallback_url="https://example.com"), GRPC_RULES, [],
+            ProfileOptions(fallback_url="https://example.com"), GRPC_RULES,
         )
         self.assertIn("proxy_pass https://example.com;", config)
         self.assertIn("error_page 418 502 503 504 = @fallback;", config)
@@ -137,31 +165,36 @@ class ContentTests(unittest.TestCase):
         self.assertIn("location / {", config)
 
     def test_no_fallback_no_error_page(self):
-        config = generate_full_config(ProfileOptions(), GRPC_RULES, [])
+        config = generate_full_config(ProfileOptions(), GRPC_RULES)
         self.assertNotIn("@fallback", config)
 
     def test_fallback_conflicts_with_root_proxy_rule(self):
         with self.assertRaises(RuleValidationError):
             generate_full_config(
                 ProfileOptions(fallback_url="https://1.2.3.4:8445"),
-                GRPC_RULES, PROXY_RULES,  # PROXY_RULES содержит path="/"
+                ALL_RULES,  # PROXY_RULES содержит path="/"
             )
 
     def test_host_specific_limits_are_marked_auto(self):
-        config = generate_full_config(ProfileOptions(), GRPC_RULES, [])
+        config = generate_full_config(ProfileOptions(), GRPC_RULES)
         for directive in ("worker_rlimit_nofile", "worker_connections", "ssl_session_cache"):
             line = next(l for l in config.splitlines() if l.strip().startswith(directive))
             self.assertIn(AUTO_MARKER, line, f"{directive} должен пересчитываться нодой")
 
     def test_grpc_stream_not_limited_by_body_size(self):
-        config = generate_full_config(ProfileOptions(), GRPC_RULES, [])
+        config = generate_full_config(ProfileOptions(), GRPC_RULES)
         self.assertIn("client_max_body_size 0;", config)
+
+    def test_xhttp_packet_up_headers_fit_in_buffers(self):
+        """packet-up умеет нести данные в заголовке — дефолтных буферов мало."""
+        config = generate_full_config(ProfileOptions(), XHTTP_RULES)
+        self.assertIn("large_client_header_buffers 8 32k;", config)
 
     def test_response_is_indistinguishable_from_backend(self):
         """Никаких своих заголовков в ответ: клиент должен получать ровно то,
         что отдала бы заглушка при прямом обращении."""
         config = generate_full_config(
-            ProfileOptions(fallback_url="https://1.2.3.4:8445"), GRPC_RULES, [],
+            ProfileOptions(fallback_url="https://1.2.3.4:8445"), GRPC_RULES,
         )
         self.assertNotIn("add_header", config)
         self.assertIn("proxy_pass_header Server;", config)
@@ -171,7 +204,7 @@ class ContentTests(unittest.TestCase):
         ни при битом запросе, ни при HTTP на TLS-порт (497), ни при мёртвой
         заглушке (502)."""
         config = generate_full_config(
-            ProfileOptions(fallback_url="https://1.2.3.4:8445"), GRPC_RULES, [],
+            ProfileOptions(fallback_url="https://1.2.3.4:8445"), GRPC_RULES,
         )
         error_page = next(l for l in config.splitlines() if "= @drop;" in l)
         for code in ("400", "404", "497", "502", "503", "504"):
@@ -183,18 +216,18 @@ class ContentTests(unittest.TestCase):
         """ssl_reject_handshake рвёт только TLS: обычный HTTP на 443 доходит
         до обработки запроса, и default-блоку тоже нужен свой @drop."""
         config = generate_full_config(
-            ProfileOptions(reject_default_server=True), GRPC_RULES, [],
+            ProfileOptions(reject_default_server=True), GRPC_RULES,
         )
         default_block = config[config.find("ssl_reject_handshake on;"):]
         default_block = default_block[:default_block.find("\n    server {")]
         self.assertIn("= @drop;", default_block)
         self.assertIn("return 444;", default_block)
 
-    def test_upstream_errors_are_not_intercepted(self):
+    def test_fallback_upstream_errors_are_not_intercepted(self):
         """404 самой заглушки обязан дойти до клиента как есть — иначе
         обрыв на несуществующей странице выдал бы прокси."""
         config = generate_full_config(
-            ProfileOptions(fallback_url="https://1.2.3.4:8445"), GRPC_RULES, [],
+            ProfileOptions(fallback_url="https://1.2.3.4:8445"), GRPC_RULES,
         )
         self.assertNotIn("proxy_intercept_errors", config)
 
@@ -202,7 +235,7 @@ class ContentTests(unittest.TestCase):
         """Правила внутри маркеров не должны ссылаться на @drop: их вставляют
         и в конфиги с ручными правками, где этой локации может не быть."""
         for options in (ProfileOptions(), ProfileOptions(fallback_url="https://example.com")):
-            config = generate_full_config(options, GRPC_RULES, [])
+            config = generate_full_config(options, [*GRPC_RULES, *XHTTP_RULES])
             start = config.find("# === LOCATIONS START ===")
             end = config.find("# === LOCATIONS END ===")
             self.assertNotIn("@drop", config[start:end])
@@ -212,17 +245,17 @@ class ContentTests(unittest.TestCase):
         """Браузер или сканер по gRPC-пути должен получить сайт, а не ответ
         Xray: путь выглядит как обычная несуществующая страница."""
         config = generate_full_config(
-            ProfileOptions(fallback_url="https://example.com"), GRPC_RULES, [],
+            ProfileOptions(fallback_url="https://example.com"), GRPC_RULES,
         )
         self.assertIn('if ($content_type !~* "^application/grpc") { return 418; }', config)
 
     def test_non_grpc_request_drops_without_fallback(self):
-        config = generate_full_config(ProfileOptions(), GRPC_RULES, [])
+        config = generate_full_config(ProfileOptions(), GRPC_RULES)
         self.assertIn('if ($content_type !~* "^application/grpc") { return 444; }', config)
 
     def test_proxy_locations_use_http11_and_websocket(self):
         config = generate_full_config(
-            ProfileOptions(fallback_url="https://1.2.3.4:8445"), GRPC_RULES, [],
+            ProfileOptions(fallback_url="https://1.2.3.4:8445"), GRPC_RULES,
         )
         self.assertIn("proxy_http_version 1.1;", config)
         self.assertIn("proxy_set_header Upgrade $http_upgrade;", config)
@@ -230,13 +263,180 @@ class ContentTests(unittest.TestCase):
         self.assertIn("map $http_upgrade $connection_upgrade {", config)
 
     def test_domain_placeholder_render(self):
-        config = generate_full_config(ProfileOptions(), GRPC_RULES, [])
+        config = generate_full_config(ProfileOptions(), GRPC_RULES)
         self.assertIn(f"server_name {DOMAIN_PLACEHOLDER};", config)
         self.assertIn(f"/etc/letsencrypt/live/{DOMAIN_PLACEHOLDER}/fullchain.pem", config)
         rendered = render_for_server(config, "node1.example.com")
         self.assertNotIn(DOMAIN_PLACEHOLDER, rendered)
         self.assertIn("server_name node1.example.com;", rendered)
         self.assertIn("/etc/letsencrypt/live/node1.example.com/fullchain.pem", rendered)
+
+
+class XhttpTests(unittest.TestCase):
+    """XHTTP-правило обслуживает все режимы транспорта одной локацией."""
+
+    @staticmethod
+    def _xhttp_section(config: str) -> str:
+        return config[config.find("# rule: vlxhttp"):config.find("# === LOCATIONS END")]
+
+    def test_grpc_typed_modes_get_full_duplex(self):
+        # stream-one и аплоад stream-up приходят с application/grpc
+        config = generate_full_config(ProfileOptions(), XHTTP_RULES)
+        self.assertIn("location ^~ /api/v2/upload/ab12 {", config)
+        self.assertIn("grpc_pass grpc://127.0.0.1:2081;", config)
+        self.assertIn('if ($content_type !~* "^application/grpc") { return 418; }', config)
+
+    def test_plain_mode_streams_without_buffering(self):
+        # packet-up и даунлоад-стримы: буферизация в обе стороны их ломает
+        config = generate_full_config(ProfileOptions(), XHTTP_RULES)
+        self.assertIn("error_page 418 = @xhttp_vlxhttp;", config)
+        self.assertIn("location @xhttp_vlxhttp {", config)
+        self.assertIn("proxy_http_version 1.1;", self._xhttp_section(config))
+        self.assertIn("proxy_request_buffering off;", config)
+        self.assertIn("proxy_buffering off;", config)
+
+    def test_plain_mode_reuses_upstream_connections(self):
+        """packet-up — отдельный POST на каждый чанк; без пула это новый
+        TCP-коннект к loopback на каждый пост и TIME_WAIT на стороне nginx."""
+        config = generate_full_config(ProfileOptions(), XHTTP_RULES)
+        self.assertIn("upstream xhttp_vlxhttp {", config)
+        self.assertIn("server 127.0.0.1:2081;", config)
+        self.assertIn("keepalive 64;", config)
+        section = self._xhttp_section(config)
+        self.assertIn("proxy_pass http://xhttp_vlxhttp;", section)
+        self.assertIn('proxy_set_header Connection "";', section)
+
+    def test_long_streams_are_not_cut_by_default_timeouts(self):
+        # Дефолтные 60 с рвали бы даунлоад-стрим и простаивающий stream-one
+        section = self._xhttp_section(generate_full_config(ProfileOptions(), XHTTP_RULES))
+        for directive in ("grpc_read_timeout", "grpc_send_timeout",
+                          "proxy_read_timeout", "proxy_send_timeout"):
+            self.assertIn(f"{directive} 1h;", section)
+
+    def test_body_limit_overridden_in_both_locations(self):
+        """Блок вставляют и в чужие конфиги с унаследованным лимитом 1m —
+        аплоад stream-up умер бы на первом мегабайте с 413."""
+        section = self._xhttp_section(generate_full_config(ProfileOptions(), XHTTP_RULES))
+        self.assertEqual(section.count("client_max_body_size 0;"), 2)
+
+    def test_probe_and_dead_xray_get_fallback_site(self):
+        """Голый 404 от Xray на угаданном пути выдал бы, что там не сайт."""
+        config = generate_full_config(
+            ProfileOptions(fallback_url="https://example.com"), XHTTP_RULES,
+        )
+        self.assertIn("grpc_intercept_errors on;", config)
+        self.assertIn("proxy_intercept_errors on;", config)
+        fallback_lines = [l for l in self._xhttp_section(config).splitlines() if "= @fallback;" in l]
+        self.assertEqual(len(fallback_lines), 2)
+        for line in fallback_lines:
+            for code in ("404", "405", "502", "503", "504"):
+                self.assertIn(code, line)
+
+    def test_xray_client_errors_pass_through(self):
+        """400/409/413 — ответы Xray своему клиенту (рассинхрон сессии,
+        коллизия, большой пост); подменённые заглушкой, они оставили бы
+        клиента с 200 и HTML вместо причины."""
+        config = generate_full_config(
+            ProfileOptions(fallback_url="https://example.com"), XHTTP_RULES,
+        )
+        error_pages = [l for l in self._xhttp_section(config).splitlines() if "error_page" in l]
+        for code in ("400", "409", "413"):
+            for line in error_pages:
+                self.assertNotIn(f" {code} ", f" {line.split('=')[0]} ")
+
+    def test_nginx_own_errors_drop_via_own_location(self):
+        """Своя drop-локация: правило вставляют и в чужие конфиги, где @drop
+        нет, а собственный error_page отменяет наследование серверного."""
+        for options in (ProfileOptions(), ProfileOptions(fallback_url="https://example.com")):
+            config = generate_full_config(options, XHTTP_RULES)
+            section = self._xhttp_section(config)
+            self.assertIn("location @xhttp_vlxhttp_drop {", section)
+            drop_lines = [l for l in section.splitlines() if "= @xhttp_vlxhttp_drop;" in l]
+            own_error_lines = [l for l in drop_lines if "404" not in l]
+            self.assertEqual(len(own_error_lines), 2)
+            for line in own_error_lines:
+                for code in ("497", "500", "408"):
+                    self.assertIn(code, line)
+
+    def test_without_fallback_probe_is_dropped(self):
+        config = generate_full_config(ProfileOptions(), XHTTP_RULES)
+        self.assertNotIn("@fallback", config)
+        self.assertIn("error_page 404 405 502 503 504 = @xhttp_vlxhttp_drop;", config)
+
+    def test_real_ip_header_is_overwritten(self):
+        config = generate_full_config(
+            ProfileOptions(cdn_enabled=True, cdn_ranges=["173.245.48.0/20"]), XHTTP_RULES,
+        )
+        self.assertIn("grpc_set_header X-Forwarded-For $client_ip;", config)
+        self.assertIn("proxy_set_header X-Forwarded-For $client_ip;", config)
+        self.assertNotIn("$proxy_add_x_forwarded_for", config)
+
+
+class TlsAndConnectionsTests(unittest.TestCase):
+    """Опции группы «TLS и соединения» живут вне маркеров и не влияют на парсер."""
+
+    @staticmethod
+    def _listen_lines(config: str) -> list[str]:
+        return [l.strip() for l in config.splitlines() if l.strip().startswith("listen ")]
+
+    def test_session_tickets_default_on(self):
+        # TLS 1.3 возобновляет сессию только через тикеты — без них каждое
+        # переподключение мобильного клиента стоит полного рукопожатия
+        config = generate_full_config(ProfileOptions(), GRPC_RULES)
+        self.assertIn("ssl_session_tickets on;", config)
+        self.assertNotIn("ssl_session_tickets off;", config)
+
+    def test_session_tickets_can_be_disabled(self):
+        config = generate_full_config(ProfileOptions(tls_session_tickets=False), GRPC_RULES)
+        self.assertIn("ssl_session_tickets off;", config)
+        self.assertNotIn("ssl_session_tickets on;", config)
+
+    def test_client_keepalive_on_all_tls_listens(self):
+        """Клиентские сокеты держит nginx, а не Xray: keepalive нужен на каждой
+        TLS-listen, включая PP-порт, но не на редиректе 80."""
+        config = generate_full_config(
+            ProfileOptions(proxy_protocol_enabled=True, proxy_protocol_port=8449), GRPC_RULES,
+        )
+        self.assertIn("listen 443 ssl so_keepalive=30s:10s:3;", config)
+        self.assertIn("listen 8449 ssl proxy_protocol so_keepalive=30s:10s:3;", config)
+        self.assertIn("listen 80;", self._listen_lines(config))
+
+    def test_client_keepalive_empty_omits_parameter(self):
+        config = generate_full_config(ProfileOptions(client_tcp_keepalive=""), GRPC_RULES)
+        self.assertNotIn("so_keepalive", config)
+        self.assertIn("listen 443 ssl;", config)
+
+    def test_client_keepalive_bad_format_rejected(self):
+        for bad in ("30:10", "abc", "30s:10s:0", "30s:10s:101", "30h:10s:3"):
+            with self.subTest(value=bad), self.assertRaises(OptionsValidationError):
+                validate_options(ProfileOptions(client_tcp_keepalive=bad))
+
+    def test_client_keepalive_accepts_minutes(self):
+        validate_options(ProfileOptions(client_tcp_keepalive="1m:30s:5"))
+
+    def test_access_log_disabled_by_default(self):
+        config = generate_full_config(ProfileOptions(), GRPC_RULES)
+        http_block = config[config.find("http {"):config.find("# === UPSTREAMS START")]
+        self.assertIn("access_log off;", http_block)
+
+    def test_access_log_can_be_enabled(self):
+        config = generate_full_config(ProfileOptions(access_log_enabled=True), GRPC_RULES)
+        http_block = config[config.find("http {"):config.find("# === UPSTREAMS START")]
+        self.assertNotIn("access_log", http_block)
+
+    def test_options_round_trip_dict(self):
+        options = ProfileOptions(
+            tls_session_tickets=False, client_tcp_keepalive="1m:30s:5", access_log_enabled=True,
+        )
+        self.assertEqual(ProfileOptions.from_dict(options.to_dict()), options)
+
+    def test_legacy_options_get_new_defaults(self):
+        # Старый профиль без новых ключей в JSON получает дефолты при
+        # следующем сохранении опций / «Вставить шаблон»
+        legacy = ProfileOptions.from_dict({"reject_default_server": True})
+        self.assertTrue(legacy.tls_session_tickets)
+        self.assertEqual(legacy.client_tcp_keepalive, "30s:10s:3")
+        self.assertFalse(legacy.access_log_enabled)
 
 
 class ValidationTests(unittest.TestCase):
@@ -266,14 +466,27 @@ class ValidationTests(unittest.TestCase):
 
     def test_duplicate_rule_names_rejected(self):
         with self.assertRaises(RuleValidationError):
-            validate_rules(
-                [GrpcRule(name="a", service_path="x", port=8443)],
-                [ProxyRule(name="a", path="/", target_url="https://1.2.3.4")],
-            )
+            validate_rules([
+                GrpcRule(name="a", service_path="x", port=8443),
+                ProxyRule(name="a", path="/", target_url="https://1.2.3.4"),
+            ])
+
+    def test_duplicate_paths_rejected(self):
+        with self.assertRaises(RuleValidationError):
+            validate_rules([
+                XhttpRule(name="a", path="/xh", port=2081),
+                ProxyRule(name="b", path="/xh", target_url="https://1.2.3.4"),
+            ])
 
     def test_bad_service_path_rejected(self):
         with self.assertRaises(RuleValidationError):
-            validate_rules([GrpcRule(name="a", service_path="x y", port=8443)], [])
+            validate_rules([GrpcRule(name="a", service_path="x y", port=8443)])
+
+    def test_xhttp_path_must_be_absolute_and_not_root(self):
+        with self.assertRaises(RuleValidationError):
+            validate_rules([XhttpRule(name="a", path="api/upload", port=2081)])
+        with self.assertRaises(RuleValidationError):
+            validate_rules([XhttpRule(name="a", path="/", port=2081)])
 
 
 class ImportHelpersTests(unittest.TestCase):

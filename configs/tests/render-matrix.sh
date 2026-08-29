@@ -490,6 +490,71 @@ else
     ok
 fi
 
+echo "=== pass 11: резервация портов от эфемерной выдачи ==="
+# С полом диапазона 1024 (vpn) сервисные порты внутри эфемерного окна, и без
+# ip_local_reserved_ports рестарт сервиса — окно для кражи порта исходящим
+# соединением. Канонизация обязана совпадать с форматом ядра (сортировка,
+# слияние смежных, диапазоны "a-b"), иначе verify всегда видел бы расхождение.
+rp_root="$WORK/rp"
+rp_setup() {
+    rm -rf "$rp_root"
+    mkdir -p "$rp_root/opt/monitoring/configs/profiles"
+    cp "$CONFIGS/profiles/"*.conf "$CONFIGS/profiles/"*.tmpl "$rp_root/opt/monitoring/configs/profiles/"
+    echo "test" > "$rp_root/opt/monitoring/configs/VERSION"
+}
+rp_facts() {
+    MON_RENDER_ROOT="$rp_root" MON_RENDER_DRYRUN=1 \
+    MON_FACT_MEMKB=4009856 MON_FACT_CPUS=2 MON_FACT_PAGESIZE=4096 \
+    MON_FACT_LINK_MBPS=1000 MON_FACT_MTU=1500 MON_FACT_FILENR=5000 \
+        "$@" bash "$RENDERER" facts vpn 2>/dev/null \
+        | grep -E '^RESERVED_PORTS=' | cut -d= -f2
+}
+
+rp_setup
+got=$(rp_facts)
+[ "$got" = "2222,7500-7564,9100" ] && ok || fail "база по умолчанию: ожидалось 2222,7500-7564,9100, получено '$got'"
+
+got=$(rp_facts env MON_FACT_NODE_API_PORT=20000)
+[ "$got" = "2222,7500-7564,20000" ] && ok || fail "кастомный NODE_API_PORT: ожидалось 2222,7500-7564,20000, получено '$got'"
+
+# Из .env ноды порт тоже вычитывается (без MON_FACT-переопределения).
+mkdir -p "$rp_root/opt/monitoring-node"
+echo 'NODE_API_PORT=30000' > "$rp_root/opt/monitoring-node/.env"
+got=$(rp_facts)
+[ "$got" = "2222,7500-7564,30000" ] && ok || fail "порт из .env ноды: ожидалось 2222,7500-7564,30000, получено '$got'"
+rm -rf "$rp_root/opt/monitoring-node"
+
+# Доп. файл: дубли, пересечения, смежные порты, мусор и порт вне диапазона.
+printf '# extras\n5201\n8443-8450, 8451\n7500\n2223\nmusor\n70000\n' \
+    > "$rp_root/opt/monitoring/configs/reserved-ports.conf"
+got=$(rp_facts)
+[ "$got" = "2222-2223,5201,7500-7564,8443-8451,9100" ] && ok \
+    || fail "канонизация extras: ожидалось 2222-2223,5201,7500-7564,8443-8451,9100, получено '$got'"
+
+# Забирающий весь диапазон файл обязан быть отвергнут инвариантом.
+printf '1024-65535\n' > "$rp_root/opt/monitoring/configs/reserved-ports.conf"
+if [ -z "$(rp_facts)" ]; then ok; else fail "reserved-ports.conf на весь диапазон не отвергнут"; fi
+rm -f "$rp_root/opt/monitoring/configs/reserved-ports.conf"
+
+# Рендер: у vpn пол диапазона 1024, у panel — 9101; строка резервации без токена.
+rp_render() {
+    MON_RENDER_ROOT="$rp_root" MON_RENDER_DRYRUN=1 \
+    MON_FACT_MEMKB=4009856 MON_FACT_CPUS=2 MON_FACT_PAGESIZE=4096 \
+    MON_FACT_LINK_MBPS=1000 MON_FACT_MTU=1500 MON_FACT_FILENR=5000 \
+        bash "$RENDERER" render "$1" >/dev/null 2>&1
+}
+rp_file="$rp_root/etc/sysctl.d/99-vless-tuning.conf"
+
+rp_render vpn
+grep -q '^net.ipv4.ip_local_port_range = 1024 65535$' "$rp_file" && ok \
+    || fail "vpn: диапазон не 1024 65535: $(grep '^net.ipv4.ip_local_port_range' "$rp_file")"
+grep -q '^net.ipv4.ip_local_reserved_ports = 2222,7500-7564,9100$' "$rp_file" && ok \
+    || fail "vpn: строка резервации неверна: $(grep '^net.ipv4.ip_local_reserved_ports' "$rp_file")"
+
+rp_render panel
+grep -q '^net.ipv4.ip_local_port_range = 9101 65535$' "$rp_file" && ok \
+    || fail "panel: диапазон не 9101 65535: $(grep '^net.ipv4.ip_local_port_range' "$rp_file")"
+
 echo
 echo "checks passed: $PASS   failed: $FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

@@ -15,6 +15,18 @@ from app.services import update_channel
 router = APIRouter(prefix="/settings", tags=["settings"])
 
 CPU_AFFINITY_KEY = "cpu_affinity_enabled"
+# Общий на весь парк список доп. портов, исключаемых из эфемерной выдачи ядра
+# ("5201,8443-8450"). Меняется через PUT /reserved-ports/global — тот же ключ
+# через generic PUT /settings/{key} рассылку на ноды не запускает.
+RESERVED_PORTS_KEY = "reserved_ports_global"
+# Графики истории: режим по умолчанию (smooth — сглаженные, raw — как есть),
+# полоса пиков и переопределения по метрикам ("cpu:raw,network:smooth")
+CHART_MODE_KEY = "chart_mode"
+CHART_MODES = {"smooth", "raw"}
+# Живые показатели на дашборде и в шапке сервера: instant — последняя секунда,
+# average — среднее за интервал опроса из блока window ноды
+LIVE_VALUES_KEY = "live_values"
+LIVE_VALUES_MODES = {"instant", "average"}
 
 DEFAULT_SETTINGS = {
     "refresh_interval": "5",
@@ -38,6 +50,14 @@ DEFAULT_SETTINGS = {
     # умолчанию: выигрыш зависит от того, во что упирается конкретная нода, а
     # ядро под сеть забирается у приложения целиком.
     CPU_AFFINITY_KEY: "false",
+    RESERVED_PORTS_KEY: "",
+    # Разделы, убранные из бокового меню ("billing,updates"). Хранится список
+    # выключенных, а не включённых: раздел из следующего релиза появляется сам.
+    "hidden_modules": "",
+    CHART_MODE_KEY: "smooth",
+    "chart_peaks": "true",
+    "chart_mode_overrides": "",
+    LIVE_VALUES_KEY: "instant",
 }
 
 
@@ -95,6 +115,12 @@ async def update_setting(
 ):
     if key == "update_branch" and data.value not in update_channel.ALLOWED_BRANCHES:
         raise HTTPException(status_code=400, detail="Invalid update branch")
+
+    if key == CHART_MODE_KEY and data.value not in CHART_MODES:
+        raise HTTPException(status_code=400, detail="Invalid chart mode")
+
+    if key == LIVE_VALUES_KEY and data.value not in LIVE_VALUES_MODES:
+        raise HTTPException(status_code=400, detail="Invalid live values mode")
 
     await set_setting(key, data.value, db)
 

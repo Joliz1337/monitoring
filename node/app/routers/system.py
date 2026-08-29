@@ -7,6 +7,7 @@ import os
 import re
 import shlex
 import shutil
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Optional
@@ -25,7 +26,7 @@ from pydantic import BaseModel, Field
 from requests.exceptions import ReadTimeout, RequestException
 
 from app.capabilities import get_policy
-from app.services import cpu_affinity
+from app.services import cpu_affinity, reserved_ports
 from app.services.bandwidth_limit import MAX_MBIT, MIN_MBIT, get_bandwidth_limiter
 from app.services.host_executor import get_host_executor, MAX_TIMEOUT, DEFAULT_TIMEOUT
 from app.services.host_files import read_host_file, write_host_file
@@ -34,6 +35,7 @@ from app.services.sysctl_verify import (
     cleanup_conflicting_configs,
     verify_sysctl_values,
 )
+from app.services.time_sync import TIME_SYNC_TIMEOUT, build_time_sync_command, report_from_result
 
 NGINX_SSL_DIR = Path("/opt/monitoring-node/nginx/ssl")
 NGINX_CONTAINER_NAME = "monitoring-nginx"
@@ -61,7 +63,8 @@ _update_status = {
     "in_progress": False,
     "last_result": None,
     "last_error": None,
-    "last_update_time": None
+    "last_update_time": None,
+    "reason": None,  # "image_unavailable" — образ не достался, нужна доставка с панели
 }
 
 # Ссылка на живую таску апдейтера: create_task её не удерживает, и незавершённую
@@ -202,7 +205,7 @@ async def replace_node_cert(payload: ReplaceCertRequest):
     return {"success": True}
 
 
-async def run_update_in_container(target_ref: str | None = None, proxy: str | None = None):
+async def run_update_in_container(target_ref: str | None = None, proxy: str | None = None, allow_local_build: bool = True):
     """
     Run update in separate Docker container.
     
@@ -237,6 +240,7 @@ async def run_update_in_container(target_ref: str | None = None, proxy: str | No
             await asyncio.to_thread(client.images.pull, UPDATER_IMAGE)
 
         ref_arg = target_ref if target_ref else "main"
+        allow_build_val = "1" if allow_local_build else "0"
         proxy_info = f" (via proxy: {proxy})" if proxy else ""
         logger.info(f"Starting update to: {ref_arg}{proxy_info}")
         
@@ -317,7 +321,7 @@ nsenter -t 1 -m -u -n -i -p -- chmod +x /tmp/monitoring-staging/node/scripts/app
 
 echo "[INFO] Running update on host via nsenter..."
 set +e
-nsenter -t 1 -m -u -n -i -p -- bash /tmp/monitoring-staging/node/scripts/apply-update.sh /tmp/monitoring-staging /opt/monitoring-node "$CURRENT_VERSION" "{ref_arg}"
+nsenter -t 1 -m -u -n -i -p -- env MON_ALLOW_LOCAL_BUILD={allow_build_val} bash /tmp/monitoring-staging/node/scripts/apply-update.sh /tmp/monitoring-staging /opt/monitoring-node "$CURRENT_VERSION" "{ref_arg}"
 UPDATE_RC=$?
 set -e
 
@@ -374,6 +378,13 @@ echo "[SUCCESS] Update completed!"
             _update_status["last_result"] = "success"
             _update_status["last_update_time"] = datetime.now().isoformat()
             logger.info(f"Update completed successfully\n{logs[-1000:]}")
+        elif exit_code == 20:
+            # apply-update.sh: образ не достался из реестра, сборка отключена —
+            # панель дотолкнёт образ по SSH. Нода осталась на старой версии.
+            _update_status["last_result"] = "failed"
+            _update_status["reason"] = "image_unavailable"
+            _update_status["last_error"] = "Образ недоступен из реестра, сборка отключена — нужна доставка образа с панели"
+            logger.warning("Update needs image delivery from panel (exit 20)")
         else:
             _update_status["last_result"] = "failed"
             _update_status["last_error"] = f"Exit code: {exit_code}\n{logs[-1000:]}"
@@ -419,6 +430,10 @@ class UpdateRequest(BaseModel):
         pattern=PROXY_URL_PATTERN,
         description="HTTP proxy for downloads (e.g., http://127.0.0.1:3128)",
     )
+    allow_local_build: bool = Field(
+        True,
+        description="Собирать образ на ноде при недоступном реестре. False — быстрый фейл (image_unavailable) для доставки образа с панели",
+    )
 
 
 @router.post("/update")
@@ -445,10 +460,12 @@ async def trigger_update(data: UpdateRequest = None):
 
     target_ref = data.target_version if data else None
     proxy = data.proxy if data else None
+    allow_local_build = data.allow_local_build if data else True
 
     _update_status["in_progress"] = True
     _update_status["last_error"] = None
-    _update_task = asyncio.create_task(run_update_in_container(target_ref, proxy))
+    _update_status["reason"] = None
+    _update_task = asyncio.create_task(run_update_in_container(target_ref, proxy, allow_local_build))
 
     return {
         "success": True,
@@ -475,7 +492,8 @@ async def get_update_status():
         "in_progress": _update_status["in_progress"] or container_running,
         "last_result": _update_status["last_result"],
         "last_error": _update_status["last_error"],
-        "last_update_time": _update_status["last_update_time"]
+        "last_update_time": _update_status["last_update_time"],
+        "reason": _update_status["reason"],
     }
 
 
@@ -1031,6 +1049,65 @@ async def set_cpu_affinity(request: CpuAffinityRequest):
     return {**_cpu_affinity_state(), "containers_changed": changed}
 
 
+class ReservedPortsRequest(BaseModel):
+    extra_ports: list[str] = Field(
+        default_factory=list,
+        max_length=reserved_ports.MAX_ENTRIES,
+        description="Доп. порты/диапазоны (a-b), исключаемые из эфемерной выдачи",
+    )
+
+
+async def _reserved_ports_state() -> dict:
+    check = await get_host_executor().execute(f"test -f {RENDERER_PATH}", timeout=5)
+    return {
+        "base_ports": reserved_ports.base_ports(),
+        "extra_ports": reserved_ports.read_extra_entries(),
+        "effective": reserved_ports.effective_reserved(),
+        "optimizations_installed": check.exit_code == 0,
+    }
+
+
+@router.get("/reserved-ports")
+async def get_reserved_ports():
+    """Базовые и доп. порты, исключённые из эфемерной выдачи, и что стоит в ядре."""
+    return await _reserved_ports_state()
+
+
+@router.post("/reserved-ports")
+async def set_reserved_ports(request: ReservedPortsRequest):
+    """Заменить список доп. резервируемых портов и переприменить sysctl.
+
+    Агент пишет только файл доп. портов; сам ключ ip_local_reserved_ports
+    считает и применяет рендерер (базовые порты он добавляет сам). Без
+    установленных оптимизаций файл лишь сохраняется — рендерер подхватит его
+    при первом применении оптимизаций, ошибкой это не считается.
+    """
+    try:
+        entries = reserved_ports.normalize_entries(request.extra_ports)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    written = await write_host_file(
+        str(reserved_ports.RESERVED_EXTRA_FILE),
+        reserved_ports.render_extra_file(entries),
+        mode="644",
+    )
+    if not written:
+        raise HTTPException(status_code=500, detail="Failed to write reserved-ports file")
+
+    executor = get_host_executor()
+    applied = False
+    render_error = None
+    check = await executor.execute(f"test -f {RENDERER_PATH}", timeout=5)
+    if check.exit_code == 0:
+        result = await executor.execute(f"{RENDERER_PATH} render", timeout=90, shell="bash")
+        applied = result.success and result.exit_code == 0
+        if not applied:
+            render_error = (result.stderr or "").strip()[-500:] or "render failed"
+
+    return {**await _reserved_ports_state(), "applied": applied, "render_error": render_error}
+
+
 class BandwidthLimitRequest(BaseModel):
     enabled: bool = Field(..., description="Включить лимит полосы на дефолтном интерфейсе")
     mbit: int = Field(0, ge=0, le=MAX_MBIT, description="Лимит, Мбит/с (при enabled)")
@@ -1376,8 +1453,10 @@ class TimeSyncRequest(BaseModel):
 
 class TimeSyncResponse(BaseModel):
     success: bool
-    timezone_set: bool
     timezone: str
+    ntp_service: str
+    ntp_installed: bool
+    ntp_managed_by_host: bool
     ntp_enabled: bool
     ntp_synchronized: bool
     current_time: str
@@ -1393,11 +1472,7 @@ async def timezone_exists_on_host(executor, timezone_name: str) -> bool:
 
 @router.post("/time-sync", response_model=TimeSyncResponse)
 async def time_sync(request: TimeSyncRequest):
-    """
-    Set timezone and trigger NTP synchronization on the host.
-
-    Uses timedatectl + systemd-timesyncd (preinstalled on Ubuntu 24).
-    """
+    """Часовой пояс и NTP через тот демон, что есть на хосте; без демона ставится chrony."""
     executor = get_host_executor()
 
     if not await timezone_exists_on_host(executor, request.timezone):
@@ -1406,72 +1481,19 @@ async def time_sync(request: TimeSyncRequest):
             detail=f"Unknown timezone: {request.timezone}",
         )
 
-    errors: list[str] = []
-
-    # 1. Set timezone
-    tz_result = await executor.execute(
-        f"timedatectl set-timezone {shlex.quote(request.timezone)}",
-        timeout=15, shell="bash"
+    result = await executor.execute(
+        build_time_sync_command(request.timezone),
+        timeout=TIME_SYNC_TIMEOUT,
+        shell="bash",
     )
-    timezone_set = tz_result.success and tz_result.exit_code == 0
-    if not timezone_set:
-        errors.append(f"Failed to set timezone: {tz_result.stderr.strip()}")
+    report = report_from_result(result, request.timezone)
 
-    # 2. Enable NTP
-    ntp_result = await executor.execute("timedatectl set-ntp true", timeout=15)
-    if not ntp_result.success or ntp_result.exit_code != 0:
-        errors.append(f"Failed to enable NTP: {ntp_result.stderr.strip()}")
-
-    # 3. Restart systemd-timesyncd for immediate sync
-    restart_result = await executor.execute(
-        "systemctl restart systemd-timesyncd", timeout=15
-    )
-    if not restart_result.success or restart_result.exit_code != 0:
-        # Fallback: toggle NTP off/on
-        await executor.execute("timedatectl set-ntp false", timeout=10)
-        await asyncio.sleep(1)
-        await executor.execute("timedatectl set-ntp true", timeout=10)
-
-    # 4. Wait for sync and read status
-    await asyncio.sleep(2)
-    status_result = await executor.execute(
-        "timedatectl show --no-pager", timeout=10
-    )
-
-    ntp_enabled = False
-    ntp_synchronized = False
-    current_tz = request.timezone
-    current_time = ""
-
-    if status_result.success and status_result.exit_code == 0:
-        for line in status_result.stdout.strip().split("\n"):
-            if "=" not in line:
-                continue
-            key, _, value = line.partition("=")
-            key = key.strip()
-            value = value.strip()
-            if key == "Timezone":
-                current_tz = value
-            elif key == "NTP":
-                ntp_enabled = value == "yes"
-            elif key == "NTPSynchronized":
-                ntp_synchronized = value == "yes"
-            elif key == "TimeUSec":
-                current_time = value
-
-    success = timezone_set and ntp_enabled and not errors
-
-    if success:
-        logger.info(f"Time sync completed: tz={current_tz}, ntp={ntp_synchronized}")
+    if report.success:
+        logger.info(
+            f"Time sync completed: tz={report.timezone}, service={report.ntp_service or 'host'}, "
+            f"installed={report.ntp_installed}, synchronized={report.ntp_synchronized}"
+        )
     else:
-        logger.warning(f"Time sync issues: {errors}")
+        logger.warning(f"Time sync issues: {report.errors}")
 
-    return TimeSyncResponse(
-        success=success,
-        timezone_set=timezone_set,
-        timezone=current_tz,
-        ntp_enabled=ntp_enabled,
-        ntp_synchronized=ntp_synchronized,
-        current_time=current_time,
-        errors=errors,
-    )
+    return TimeSyncResponse(**asdict(report))

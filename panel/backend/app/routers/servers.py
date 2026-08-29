@@ -329,6 +329,7 @@ async def _build_servers_list(db: AsyncSession, include_metrics: bool) -> dict:
             "uses_shared_cert": bool(s.uses_shared_cert),
             "auth_kind": classify_server(s),
             "antiddos_emergency_mode": bool(s.antiddos_emergency_mode),
+            "has_xray_node": bool(s.has_xray_node),
             # null — нода без ограничений; интерфейс по этой карте прячет
             # разделы, которых у неё всё равно нет
             "node_capabilities": parse_capabilities(s.node_capabilities),

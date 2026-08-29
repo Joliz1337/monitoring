@@ -1,6 +1,7 @@
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, Float, BigInteger, Index, ForeignKey, UniqueConstraint
 from sqlalchemy.sql import func
 from app.database import Base
+from app.crypto import EncryptedString
 
 
 class PKIKeygen(Base):
@@ -9,11 +10,11 @@ class PKIKeygen(Base):
 
     id = Column(Integer, primary_key=True)
     ca_cert_pem = Column(Text, nullable=False)
-    ca_key_pem = Column(Text, nullable=False)
+    ca_key_pem = Column(EncryptedString, nullable=False)
     client_cert_pem = Column(Text, nullable=False)
-    client_key_pem = Column(Text, nullable=False)
+    client_key_pem = Column(EncryptedString, nullable=False)
     shared_node_cert_pem = Column(Text, nullable=True)
-    shared_node_key_pem = Column(Text, nullable=True)
+    shared_node_key_pem = Column(EncryptedString, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -31,7 +32,7 @@ class NodeInstallKey(Base):
     name = Column(String(200), nullable=False)
     common_name = Column(String(120), nullable=False, unique=True)
     cert_pem = Column(Text, nullable=False)
-    key_pem = Column(Text, nullable=False)
+    key_pem = Column(EncryptedString, nullable=False)
     fingerprint = Column(String(100), nullable=False)
     expires_at = Column(DateTime(timezone=True), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
@@ -43,8 +44,26 @@ class RemnawaveCertProfile(Base):
 
     id = Column(Integer, primary_key=True)
     name = Column(String(100), nullable=False, unique=True)
-    secret_key = Column(Text, nullable=False)
+    secret_key = Column(EncryptedString, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class BackupSettings(Base):
+    """Синглтон: настройки автоматических бэкапов панели в Telegram."""
+    __tablename__ = "backup_settings"
+
+    id = Column(Integer, primary_key=True)
+    enabled = Column(Boolean, default=False, server_default="false", nullable=False)
+    schedule_kind = Column(String(20), default="daily", server_default="daily")  # daily | every_hours
+    at_time = Column(String(5), default="04:00", server_default="04:00")  # HH:MM UTC для daily
+    every_hours = Column(Integer, default=24, server_default="24")
+    bot_token = Column(EncryptedString, nullable=True)
+    chat_id = Column(String(100), nullable=True)
+    archive_password = Column(EncryptedString, nullable=True)
+    volume_size_mb = Column(Integer, default=45, server_default="45")
+    last_run_at = Column(DateTime(timezone=True), nullable=True)
+    last_status = Column(String(20), nullable=True)  # ok | error
+    last_error = Column(String(500), nullable=True)
 
 
 class Server(Base):
@@ -53,7 +72,7 @@ class Server(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(100), nullable=False)
     url = Column(String(500), nullable=False)
-    api_key = Column(String(200), nullable=True)
+    api_key = Column(EncryptedString, nullable=True)
     # SOCKS5-прокси панель→нода: "ip:port" или "ip:port@login:pass"
     proxy_url = Column(String(255), nullable=True)
     position = Column(Integer, default=0)
@@ -72,6 +91,17 @@ class Server(Base):
     
     # Xray node detection (updated periodically)
     has_xray_node = Column(Boolean, default=False, server_default="false")
+
+    # Доставка образа ноды с панели (для нод под ТСПУ, без доступа к GHCR).
+    # image_delivery: auto — нода тянет GHCR, при провале доставка по SSH; ssh — сразу SSH.
+    # SSH-креды для доставки хранятся зашифрованными (EncryptedString), заполняются опционально.
+    image_delivery = Column(String(10), nullable=False, server_default="auto")
+    ssh_host = Column(String(255), nullable=True)
+    ssh_port = Column(Integer, nullable=True)
+    ssh_user = Column(String(100), nullable=True)
+    ssh_password = Column(EncryptedString, nullable=True)
+    ssh_private_key = Column(EncryptedString, nullable=True)
+    ssh_passphrase = Column(EncryptedString, nullable=True)
 
     # Wildcard SSL deployment config
     wildcard_ssl_enabled = Column(Boolean, default=False, server_default="false")
@@ -140,6 +170,11 @@ class Server(Base):
     # NULL — ограничений нет; по ней панель решает, идти ли к ноде вообще.
     node_capabilities = Column(Text, nullable=True)
 
+    # Доп. порты этой ноды, исключаемые из эфемерной выдачи ядра (строка вида
+    # "5201,8443-8450"); при рассылке объединяются с общим списком из
+    # panel_settings (ключ reserved_ports_global)
+    reserved_ports = Column(Text, nullable=True)
+
 
 class ServerCache(Base):
     """Отдельная таблица для тяжёлых JSON-кешей, часто обновляемых фоновыми задачами.
@@ -178,6 +213,26 @@ class NodePendingSync(Base):
     last_error = Column(String(500), nullable=True)
 
 
+class PanelHostMetric(Base):
+    """История нагрузки хоста самой панели: среднее и пик за интервал снапшота.
+
+    Сетевых счётчиков нет намеренно — бэкенд живёт в bridge-сети Docker и
+    видит только трафик своего veth, а не сетевых карт хоста.
+    """
+    __tablename__ = "panel_host_metrics"
+
+    id = Column(BigInteger, primary_key=True)
+    timestamp = Column(DateTime(timezone=True), nullable=False, index=True)
+    cpu_usage = Column(Float)
+    cpu_usage_max = Column(Float)
+    memory_percent = Column(Float)
+    memory_percent_max = Column(Float)
+    memory_used = Column(BigInteger)
+    memory_available = Column(BigInteger)
+    load_avg_1 = Column(Float)
+    load_avg_1_max = Column(Float)
+
+
 class MetricsSnapshot(Base):
     """Хранит историю метрик для каждого сервера (сбор на панели)"""
     __tablename__ = "metrics_snapshots"
@@ -187,12 +242,15 @@ class MetricsSnapshot(Base):
     server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), nullable=False)
     timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
     
-    # CPU
+    # CPU — среднее за окно опроса (у старой ноды — мгновенная проба).
+    # cpu_usage_max — максимум секундного среднего по ядрам за окно, не самое
+    # горячее ядро. NULL в *_max = «пика нет»: старая нода или строка до миграции.
     cpu_usage = Column(Float)
+    cpu_usage_max = Column(Float, nullable=True)
     load_avg_1 = Column(Float)
     load_avg_5 = Column(Float)
     load_avg_15 = Column(Float)
-    
+
     # Memory (bytes)
     memory_total = Column(BigInteger)
     memory_used = Column(BigInteger)
@@ -200,11 +258,13 @@ class MetricsSnapshot(Base):
     memory_percent = Column(Float)
     swap_used = Column(BigInteger)
     swap_percent = Column(Float)
-    
-    # Network speed (bytes per second) - calculated by panel
+
+    # Network speed (bytes per second): average over the poll window and its peak
     net_rx_bytes_per_sec = Column(Float, default=0)
     net_tx_bytes_per_sec = Column(Float, default=0)
-    
+    net_rx_bytes_per_sec_max = Column(Float, nullable=True)
+    net_tx_bytes_per_sec_max = Column(Float, nullable=True)
+
     # Disk
     disk_percent = Column(Float)
     disk_read_bytes_per_sec = Column(Float, default=0)
@@ -246,23 +306,26 @@ class AggregatedMetrics(Base):
     timestamp = Column(DateTime(timezone=True), nullable=False, index=True)
     period_type = Column(String(10), nullable=False)  # 'hour' or 'day'
     
-    # CPU
+    # CPU; NULL в max_* — агрегат до появления пиков
     avg_cpu = Column(Float)
     max_cpu = Column(Float)
     avg_load = Column(Float)
-    
+    max_load = Column(Float, nullable=True)
+
     # Memory
     avg_memory_percent = Column(Float)
     max_memory_percent = Column(Float)
-    
+
     # Disk
     avg_disk_percent = Column(Float)
-    
-    # Network (total bytes transferred in period)
+
+    # Network (total bytes transferred in period, average and peak speed)
     total_rx_bytes = Column(BigInteger, default=0)
     total_tx_bytes = Column(BigInteger, default=0)
     avg_rx_speed = Column(Float, default=0)
     avg_tx_speed = Column(Float, default=0)
+    max_rx_speed = Column(Float, nullable=True)
+    max_tx_speed = Column(Float, nullable=True)
     
     # Disk IO
     avg_disk_read_speed = Column(Float, default=0)
@@ -1013,6 +1076,88 @@ class TrafficImportState(Base):
     attempts = Column(Integer, default=0, server_default="0")
     next_attempt_at = Column(DateTime, nullable=True)
     last_error = Column(String(500), nullable=True)
+
+
+class XrayTestSubscription(Base):
+    """Сохранённый источник конфигураций для проверки: подписка или список ссылок."""
+    __tablename__ = "xray_test_subscriptions"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(200), nullable=False, unique=True)
+    kind = Column(String(10), nullable=False, default="url", server_default="url")  # url | links
+    # И URL подписки, и сами ссылки содержат ключи доступа — храним зашифрованными
+    payload = Column(EncryptedString, nullable=False)
+    # Идентификатор профиля клиента (device_profiles): от него зависят
+    # User-Agent и заголовки HWID запроса подписки
+    user_agent = Column(String(200), nullable=True)
+    last_fetched_at = Column(DateTime(timezone=True), nullable=True)
+    last_count = Column(Integer, default=0, server_default="0")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class XrayTestSniSet(Base):
+    """Именованный список SNI для проверки одной конфигурации по многим доменам."""
+    __tablename__ = "xray_test_sni_sets"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(200), nullable=False, unique=True)
+    sni_list = Column(Text, nullable=False)  # JSON-массив доменов
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class XrayTestRun(Base):
+    """Сводка прогона. Хранится ограниченное число последних — см. history.py."""
+    __tablename__ = "xray_test_runs"
+
+    id = Column(Integer, primary_key=True)
+    started_at = Column(DateTime(timezone=True), server_default=func.now())
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+    source = Column(String(20), nullable=False)      # links | json | subscription
+    source_name = Column(String(200), nullable=True)
+    location = Column(String(40), nullable=False)    # panel | node:<id>
+    location_name = Column(String(200), nullable=True)
+    status = Column(String(12), nullable=False)      # success | error | cancelled
+    total = Column(Integer, default=0, server_default="0")
+    ok_count = Column(Integer, default=0, server_default="0")
+    degraded_count = Column(Integer, default=0, server_default="0")
+    fail_count = Column(Integer, default=0, server_default="0")
+
+
+class XrayTestResult(Base):
+    """Строка результата прогона.
+
+    Секретов не хранит: ссылка живёт только в памяти задачи, сюда попадают адрес,
+    протокол и метрики — этого хватает, чтобы сравнить прогоны между собой.
+    """
+    __tablename__ = "xray_test_results"
+
+    id = Column(BigInteger, primary_key=True)
+    run_id = Column(Integer, ForeignKey("xray_test_runs.id", ondelete="CASCADE"), nullable=False)
+    remark = Column(String(200), nullable=True)
+    protocol = Column(String(20), nullable=True)
+    address = Column(String(255), nullable=True)
+    port = Column(Integer, nullable=True)
+    sni = Column(String(255), nullable=True)
+    transport = Column(String(20), nullable=True)
+    security = Column(String(20), nullable=True)
+    core = Column(String(20), nullable=True)
+    location = Column(String(40), nullable=True)
+    location_name = Column(String(200), nullable=True)
+    verdict = Column(String(10), nullable=False)
+    reason = Column(String(40), nullable=True)
+    rtt_ms = Column(Float, nullable=True)
+    handshake_ms = Column(Float, nullable=True)
+    tcp_min_ms = Column(Float, nullable=True)
+    speed_mbps = Column(Float, nullable=True)
+    exit_ip = Column(String(64), nullable=True)
+    exit_country = Column(String(8), nullable=True)
+    sni_from_config = Column(Boolean, default=False)
+
+    __table_args__ = (
+        Index('idx_xray_test_results_run', 'run_id'),
+    )
 
 
 class ServerDowntime(Base):

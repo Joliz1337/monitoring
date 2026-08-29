@@ -8,19 +8,23 @@ ENV PYTHONUNBUFFERED=1
 ARG CACHE_BUST=""
 
 # Install system dependencies (minimal set for API container)
-# - gcc, libc-dev: compile Python C extensions (psutil)
 # - procps: ps command for process listing
 # - certbot: SSL certificate generation
 # - openssl: SSL utilities
 # - curl: health checks
 # - iptables: firewall management via API
 # - git, rsync: update scripts
+# - iperf3: speed test
+# psutil и cryptography ставятся из готовых manylinux-wheel, поэтому компилятор не
+# нужен — gcc/libc-dev намеренно отсутствуют. На Debian 13 они ещё и ломали сборку:
+# apt тянул libc6-dev, жёстко привязанный к более старому libc6, чем в базовом
+# образе (point-release skew) — не добавлять их обратно без реальной необходимости.
 # Note: haproxy runs on HOST as systemd service, not in container
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    gcc libc-dev procps certbot openssl curl iptables git rsync iperf3
+    procps certbot openssl curl iptables git rsync iperf3
 
 # Install Docker CLI for accessing remnanode container logs (Xray stats collection)
 RUN curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-26.1.4.tgz | tar xz -C /tmp && \

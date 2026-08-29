@@ -42,8 +42,6 @@ class BackendServerModel(BaseModel):
     send_proxy_v2: bool = False
     backup: bool = False
     slowstart: Optional[str] = None
-    on_marked_down: Optional[str] = None
-    on_marked_up: Optional[str] = None
     disabled: bool = False
 
 

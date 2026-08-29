@@ -25,6 +25,13 @@ A profile has three parts: **options** (real-IP scheme, certificates, fallback),
 - *port* is the inbound's local port (check with `ss -tlnp | grep 127.0.0.1`);
 - the client-IP header is always overwritten — it cannot be spoofed.
 
+**XHTTP → Xray** — the location for an XHTTP inbound:
+- *path* must match the inbound's `xhttpSettings.path`, *port* is the inbound's local port;
+- one rule serves every transport mode: `stream-one` and the `stream-up` upload arrive with the `application/grpc` content type and go through `grpc_pass` (full duplex), while `packet-up` and download streams go through an unbuffered streaming proxy with a keepalive pool to the inbound;
+- a scanner or browser on that path gets the fallback site's response instead of a 404 from Xray — someone who guesses the path cannot tell it from an ordinary page; errors Xray addresses to its own client (400, 409, 413) pass through unchanged so the client sees the reason;
+- keep `noGRPCHeader` at `false` in the inbound — without the `application/grpc` content type, `stream-one` lands in the non-duplex branch and never comes up;
+- a profile created before this rule type existed gains the keepalive pool only after "Apply template"; in an imported config without the template, add `large_client_header_buffers 8 32k;` to `http` by hand for `packet-up` with data in headers — a location cannot cover it.
+
 **Proxy** — a plain location to a site: path and target address.
 
 Not allowed: duplicate rule names or paths; a rule with path `/` while fallback is set — that location already belongs to it.

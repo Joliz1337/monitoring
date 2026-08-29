@@ -6,6 +6,10 @@ drifted with every live request in between), and network/disk speeds were not
 measured on the node at all — the panel derived them from cumulative counters
 over its own polling interval. Now a background task ticks every second and
 keeps the latest one-second rates; `/api/metrics` only copies them out.
+
+The sampler also keeps a ring buffer of those one-second samples so that
+`/api/metrics?window=N` can report averages and peaks over exactly the seconds
+between two panel polls instead of one instantaneous second out of ten.
 """
 
 import os
@@ -16,10 +20,14 @@ from collections import namedtuple
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.services.rate_sampler import (  # noqa: E402
+    MAX_WINDOW_SEC,
     STALE_AFTER_SEC,
+    RateSample,
     RateSampler,
     RawCounters,
     per_cpu_percent,
+    summarize_window,
+    weighted_mean,
 )
 
 
@@ -164,6 +172,26 @@ class AdvanceTests(unittest.TestCase):
         s.advance(raw(12.0, cpu=[times(user=1.0), times(idle=1.0), times(idle=1.0)]))
 
         self.assertEqual(s.snapshot().per_cpu_percent, [0.0, 0.0, 0.0])
+        self.assertFalse(s.snapshot().cpu_measured)
+
+    def test_measured_cpu_percent_is_flagged_as_such(self):
+        s = sampler()
+        s.advance(raw(10.0, cpu=[times()]))
+        s.advance(raw(11.0, cpu=[times(user=0.5, idle=0.5)]))
+
+        self.assertTrue(s.snapshot().cpu_measured)
+
+    def test_inherited_cpu_percent_is_flagged_unmeasured(self):
+        # A full second passed by the clock, but the kernel counters barely
+        # ticked (VM freeze, heavy steal): the sample keeps the last percentages
+        # and says so, so a window summary does not count that second twice.
+        s = sampler()
+        s.advance(raw(10.0, cpu=[times()]))
+        s.advance(raw(11.0, cpu=[times(user=0.5, idle=0.5)]))
+        s.advance(raw(12.0, cpu=[times(user=0.52, idle=0.5)]))
+
+        self.assertEqual(s.snapshot().per_cpu_percent, [50.0])
+        self.assertFalse(s.snapshot().cpu_measured)
 
     def test_disk_total_counts_whole_disks_only(self):
         # sda1 is a partition of sda: its bytes are already inside sda's counter
@@ -205,6 +233,157 @@ class StalenessTests(unittest.TestCase):
         s.advance(raw(11.0))
 
         self.assertIsNotNone(s.snapshot())
+
+
+def fed_sampler(ticks: int, step: float = 1.0) -> tuple[RateSampler, FakeClock]:
+    """Sampler that accepted `ticks` readings `step` seconds apart, clock parked on the last one."""
+    clock = FakeClock(0.0)
+    s = sampler(clock=clock)
+    for i in range(ticks + 1):
+        clock.now = i * step
+        busy = clock.now / 2
+        s.advance(raw(clock.now, cpu=[times(user=busy, idle=busy)]))
+    return s, clock
+
+
+class WindowTests(unittest.TestCase):
+
+    def test_buffer_is_capped_at_max_window_seconds_of_samples(self):
+        s, _ = fed_sampler(MAX_WINDOW_SEC + 50)
+
+        self.assertEqual(len(s.window(10 * MAX_WINDOW_SEC)), MAX_WINDOW_SEC)
+
+    def test_window_takes_newest_samples_until_they_cover_the_requested_seconds(self):
+        s, _ = fed_sampler(15)
+
+        window = s.window(10)
+
+        self.assertEqual(len(window), 10)
+        self.assertEqual(sum(sample.window_sec for sample in window), 10.0)
+        self.assertGreater(window[0].sampled_at, window[-1].sampled_at)
+
+    def test_two_second_ticks_cover_the_window_with_half_the_samples(self):
+        s, _ = fed_sampler(10, step=2.0)
+
+        self.assertEqual(len(s.window(10)), 5)
+
+    def test_short_buffer_yields_everything_it_has(self):
+        s, _ = fed_sampler(3)
+
+        self.assertEqual(len(s.window(10)), 3)
+
+    def test_window_is_withheld_when_the_sampler_is_stale(self):
+        s, clock = fed_sampler(15)
+        clock.now += STALE_AFTER_SEC + 1
+
+        self.assertIsNone(s.window(10))
+
+    def test_window_is_none_before_the_first_sample(self):
+        self.assertIsNone(sampler().window(10))
+
+
+def sample(cpu, net=None, disk_total=(0.0, 0.0), window=1.0, measured=True, at=0.0) -> RateSample:
+    return RateSample(
+        sampled_at=at,
+        window_sec=window,
+        per_cpu_percent=cpu,
+        cpu_measured=measured,
+        net=net or {},
+        disk_total=disk_total,
+    )
+
+
+PHYSICAL = {"eth0", "eth1"}
+
+
+class WeightedMeanTests(unittest.TestCase):
+
+    def test_values_are_weighted_by_their_window(self):
+        self.assertEqual(weighted_mean([(10.0, 1.0), (40.0, 2.0)]), 30.0)
+
+    def test_no_weight_gives_zero(self):
+        self.assertEqual(weighted_mean([]), 0.0)
+
+
+class SummarizeWindowTests(unittest.TestCase):
+    """Samples go newest first, as `window()` yields them."""
+
+    def test_window_length_and_sample_count_are_totals(self):
+        summary = summarize_window([sample([0.0], window=2.0), sample([0.0], window=1.0)], PHYSICAL)
+
+        self.assertEqual(summary.window_sec, 3.0)
+        self.assertEqual(summary.samples, 2)
+
+    def test_cpu_average_is_weighted_by_sample_window(self):
+        # A missed tick yields one two-second sample: it stands for two seconds, not one
+        summary = summarize_window([sample([40.0], window=2.0), sample([10.0], window=1.0)], PHYSICAL)
+
+        self.assertEqual(summary.cpu_avg, 30.0)
+
+    def test_cpu_max_is_the_peak_of_the_host_average_not_of_a_core(self):
+        summary = summarize_window([sample([100.0, 0.0]), sample([80.0, 40.0])], PHYSICAL)
+
+        self.assertEqual(summary.cpu_max, 60.0)
+
+    def test_per_cpu_average_is_computed_per_core(self):
+        summary = summarize_window([sample([20.0, 40.0]), sample([40.0, 60.0])], PHYSICAL)
+
+        self.assertEqual(summary.per_cpu_avg, [30.0, 50.0])
+
+    def test_inherited_cpu_sample_is_skipped_for_cpu_but_still_counts_for_the_window(self):
+        samples = [
+            sample([50.0]),
+            sample([50.0], measured=False),
+            sample([10.0]),
+        ]
+
+        summary = summarize_window(samples, PHYSICAL)
+
+        self.assertEqual(summary.cpu_avg, 30.0)
+        self.assertEqual(summary.window_sec, 3.0)
+        self.assertEqual(summary.samples, 3)
+
+    def test_core_count_change_inside_the_window_keeps_only_the_current_layout(self):
+        summary = summarize_window([sample([10.0, 20.0, 30.0]), sample([90.0])], PHYSICAL)
+
+        self.assertEqual(summary.per_cpu_avg, [10.0, 20.0, 30.0])
+        self.assertEqual(summary.cpu_avg, 20.0)
+
+    def test_window_without_a_single_measured_cpu_sample_has_no_cpu(self):
+        summary = summarize_window([sample([50.0], measured=False)], PHYSICAL)
+
+        self.assertEqual(summary.cpu_avg, 0.0)
+        self.assertEqual(summary.cpu_max, 0.0)
+        self.assertEqual(summary.per_cpu_avg, [])
+
+    def test_network_is_summed_over_physical_interfaces_inside_each_sample(self):
+        samples = [
+            sample([0.0], net={"eth0": (300.0, 30.0)}),
+            sample([0.0], net={"eth0": (100.0, 10.0), "eth1": (50.0, 5.0), "veth0": (1_000.0, 1_000.0)}),
+        ]
+
+        summary = summarize_window(samples, PHYSICAL)
+
+        self.assertEqual((summary.net_rx_avg, summary.net_tx_avg), (225.0, 22.5))
+        self.assertEqual((summary.net_rx_max, summary.net_tx_max), (300.0, 30.0))
+
+    def test_network_peak_is_of_the_sum_not_of_a_single_interface(self):
+        samples = [
+            sample([0.0], net={"eth0": (150.0, 0.0), "eth1": (0.0, 0.0)}),
+            sample([0.0], net={"eth0": (100.0, 0.0), "eth1": (100.0, 0.0)}),
+        ]
+
+        self.assertEqual(summarize_window(samples, PHYSICAL).net_rx_max, 200.0)
+
+    def test_disk_averages_come_from_whole_disk_totals(self):
+        samples = [
+            sample([0.0], disk_total=(400.0, 40.0), window=3.0),
+            sample([0.0], disk_total=(100.0, 10.0), window=1.0),
+        ]
+
+        summary = summarize_window(samples, PHYSICAL)
+
+        self.assertEqual((summary.disk_read_avg, summary.disk_write_avg), (325.0, 32.5))
 
 
 if __name__ == "__main__":

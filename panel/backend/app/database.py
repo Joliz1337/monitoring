@@ -1,12 +1,14 @@
 """Database module with PostgreSQL support."""
 
 import logging
+from contextlib import asynccontextmanager
 
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
-from sqlalchemy import text
+from sqlalchemy import event, text
 
 from app.config import get_settings
+from app import crypto
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -27,6 +29,39 @@ async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit
 
 # Alias for background tasks
 async_session_maker = async_session
+
+
+class DatabaseMaintenanceError(RuntimeError):
+    """Панель сама закрыла себе доступ к базе — идёт операция, при которой писать нельзя."""
+
+
+_maintenance_reason: str | None = None
+
+
+@event.listens_for(engine.sync_engine, "do_connect")
+def _refuse_connections_during_maintenance(dialect, conn_rec, cargs, cparams):
+    if _maintenance_reason:
+        raise DatabaseMaintenanceError(_maintenance_reason)
+
+
+@asynccontextmanager
+async def database_maintenance(reason: str):
+    """Закрыть панели доступ к базе на время операции.
+
+    Восстановление из бэкапа сбрасывает схему и заливает её заново; фоновые
+    циклы (сэмплер хоста панели, коллектор, импорт трафика) при этом пишут в
+    таблицы прямо между фазами pg_restore — строка, вставленная в свежую
+    таблицу до setval последовательности, получает id=1 и дублирует строку из
+    дампа, после чего фаза post-data не может создать первичный ключ. Убить
+    соединения один раз недостаточно — пул тут же переподключается, поэтому
+    новые соединения отклоняются в do_connect до конца операции."""
+    global _maintenance_reason
+    _maintenance_reason = reason
+    await engine.dispose()
+    try:
+        yield
+    finally:
+        _maintenance_reason = None
 
 
 class Base(DeclarativeBase):
@@ -52,6 +87,7 @@ async def run_migrations(conn):
             ("last_metrics", "TEXT"),
             ("has_xray_node", "BOOLEAN DEFAULT FALSE"),
             ("proxy_url", "VARCHAR(255)"),
+            ("reserved_ports", "TEXT"),
         ]
         
         for col_name, col_type in migrations:
@@ -188,6 +224,28 @@ async def run_migrations(conn):
         except Exception:
             pass
     
+    result = await conn.execute(text("""
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'xray_test_results'
+    """))
+    xray_test_columns = {row[0] for row in result.fetchall()}
+
+    # Колонки, добавленные в модель после того, как таблица уже была создана
+    # create_all: без них падает вставка каждого прогона, и история пустует
+    if xray_test_columns:
+        for col_name, col_type in (
+            ("location", "VARCHAR(40)"),
+            ("location_name", "VARCHAR(200)"),
+            ("sni_from_config", "BOOLEAN DEFAULT FALSE"),
+        ):
+            if col_name in xray_test_columns:
+                continue
+            try:
+                await conn.execute(text(f'ALTER TABLE xray_test_results ADD COLUMN "{col_name}" {col_type}'))
+                logger.info(f"Added column: xray_test_results.{col_name}")
+            except Exception:
+                pass
+
     # Check remnawave_settings columns
     result = await conn.execute(text("""
         SELECT column_name FROM information_schema.columns 
@@ -489,6 +547,26 @@ async def run_migrations(conn):
             ("antiddos_last_sync_at", "TIMESTAMP"),
         ]
         for col_name, col_type in antiddos_columns:
+            if col_name not in columns:
+                try:
+                    await conn.execute(text(f'ALTER TABLE servers ADD COLUMN "{col_name}" {col_type}'))
+                    logger.info(f"Added column: servers.{col_name}")
+                except Exception as e:
+                    if "already exists" not in str(e).lower():
+                        logger.warning(f"Could not add column {col_name}: {e}")
+
+    # Node image delivery + SSH credentials (encrypted) for TSPU-blocked nodes
+    if columns:
+        image_delivery_columns = [
+            ("image_delivery", "VARCHAR(10) NOT NULL DEFAULT 'auto'"),
+            ("ssh_host", "VARCHAR(255)"),
+            ("ssh_port", "INTEGER"),
+            ("ssh_user", "VARCHAR(100)"),
+            ("ssh_password", "TEXT"),
+            ("ssh_private_key", "TEXT"),
+            ("ssh_passphrase", "TEXT"),
+        ]
+        for col_name, col_type in image_delivery_columns:
             if col_name not in columns:
                 try:
                     await conn.execute(text(f'ALTER TABLE servers ADD COLUMN "{col_name}" {col_type}'))
@@ -1977,6 +2055,71 @@ async def _migrate_node_capabilities(conn):
         raise
 
 
+# Пики за окно опроса: (таблица, колонки). NULL — пика нет (старая нода, строка до миграции)
+_WINDOW_PEAK_COLUMNS = (
+    ("metrics_snapshots", ("cpu_usage_max", "net_rx_bytes_per_sec_max", "net_tx_bytes_per_sec_max")),
+    ("aggregated_metrics", ("max_load", "max_rx_speed", "max_tx_speed")),
+)
+
+
+async def _migrate_metrics_window_peaks(conn):
+    """ADD COLUMN FLOAT без DEFAULT в PG16 правит только каталог — горячая
+    таблица снапшотов не переписывается, старт не задерживается."""
+    for table, peak_columns in _WINDOW_PEAK_COLUMNS:
+        result = await conn.execute(text(f"""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name = '{table}'
+        """))
+        columns = {row[0] for row in result.fetchall()}
+        if not columns:
+            continue
+        for col_name in peak_columns:
+            if col_name in columns:
+                continue
+            try:
+                await conn.execute(text(f'ALTER TABLE {table} ADD COLUMN "{col_name}" FLOAT'))
+                logger.info(f"Added column: {table}.{col_name}")
+            except Exception as e:
+                if "already exists" not in str(e).lower():
+                    logger.warning(f"Could not add {table}.{col_name}: {e}")
+
+
+# (таблица, колонка) — целевые секреты: приватные ключи, не публичные сертификаты
+_SECRET_COLUMNS = [
+    ("keygen", "ca_key_pem"),
+    ("keygen", "client_key_pem"),
+    ("keygen", "shared_node_key_pem"),
+    ("node_install_keys", "key_pem"),
+    ("servers", "api_key"),
+    ("remnawave_cert_profiles", "secret_key"),
+]
+
+
+def needs_encryption(value) -> bool:
+    return bool(value) and not value.startswith(crypto.ENC_PREFIX)
+
+
+async def _migrate_encrypt_secrets(conn) -> None:
+    """Зашифровать уже лежащие открытым текстом секреты. Гейт по ключу: без
+    PANEL_ENC_KEY не трогаем — панель продолжает работать на плейнтексте.
+    Имена таблиц/колонок — константы, не пользовательский ввод; значения параметризованы."""
+    if not crypto.encryption_enabled():
+        return
+    for table, col in _SECRET_COLUMNS:
+        rows = (await conn.execute(
+            text(f'SELECT id, "{col}" AS v FROM {table} '
+                 f'WHERE "{col}" IS NOT NULL AND "{col}" NOT LIKE :pfx'),
+            {"pfx": crypto.ENC_PREFIX + "%"},
+        )).fetchall()
+        for row in rows:
+            if not needs_encryption(row.v):
+                continue
+            await conn.execute(
+                text(f'UPDATE {table} SET "{col}" = :val WHERE id = :id'),
+                {"val": crypto.encrypt_secret(row.v), "id": row.id},
+            )
+
+
 async def init_db():
     """Initialize database: create tables, run migrations."""
     async with engine.begin() as conn:
@@ -2002,6 +2145,8 @@ async def init_db():
         await _migrate_db_optimizations(conn)
         await _migrate_traffic_v2(conn)
         await _migrate_node_capabilities(conn)
+        await _migrate_metrics_window_peaks(conn)
+        await _migrate_encrypt_secrets(conn)
 
     await _warmup_pool()
 

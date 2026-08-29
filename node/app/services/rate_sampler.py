@@ -2,8 +2,10 @@
 
 Фоновая задача раз в секунду снимает `/proc/stat`, `/proc/net/dev` и
 `/proc/diskstats`, считает дельту к предыдущей секунде и держит в памяти
-только последний результат. `/api/metrics` его копирует — панель получает
-нагрузку за последнюю секунду, а не среднее за свой интервал опроса.
+последний результат плюс кольцевой буфер за `MAX_WINDOW_SEC`. `/api/metrics`
+копирует последний замер (нагрузка за секунду), а по запросу панели с
+`?window=N` сводит буфер в средние и пики за N секунд — ровно за промежуток
+между её опросами.
 
 Кумулятивные счётчики (байты, пакеты) нода по-прежнему отдаёт сырыми:
 учёт трафика и историю по ним ведёт панель. Здесь — только скорости.
@@ -12,15 +14,19 @@
 import asyncio
 import logging
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Collection, Iterable, Optional, Sequence
 
 import psutil
 
 logger = logging.getLogger(__name__)
 
 SAMPLE_INTERVAL_SEC = 1.0
+# Глубина буфера посекундных замеров: интервал опроса панели (до 300 с)
+# с запасом на дрейф её цикла
+MAX_WINDOW_SEC = 330
 # Если фоновый замер замолчал, нода лучше не отдаст скорость вовсе, чем
 # будет отдавать одну и ту же стухшую цифру
 STALE_AFTER_SEC = 5.0
@@ -55,9 +61,94 @@ class RateSample:
     sampled_at: float
     window_sec: float
     per_cpu_percent: list[float]
+    # False — проценты унаследованы от прошлого замера (дельта тиков была
+    # слишком короткой) или обнулены после смены числа ядер: в сводке за окно
+    # такой сэмпл не учитывается, иначе одна секунда весила бы дважды
+    cpu_measured: bool = True
     net: dict[str, Pair] = field(default_factory=dict)
     disk: dict[str, Pair] = field(default_factory=dict)
     disk_total: Pair = (0.0, 0.0)
+
+
+@dataclass(frozen=True)
+class WindowSummary:
+    """Средние и пики по сэмплам окна.
+
+    `cpu_max` — максимум секундного среднего по ядрам, то есть пик хоста,
+    а не самого горячего ядра.
+    """
+
+    window_sec: float
+    samples: int
+    cpu_avg: float
+    cpu_max: float
+    per_cpu_avg: list[float]
+    net_rx_avg: float
+    net_tx_avg: float
+    net_rx_max: float
+    net_tx_max: float
+    disk_read_avg: float
+    disk_write_avg: float
+
+
+def weighted_mean(values: Iterable[tuple[float, float]]) -> float:
+    """Среднее пар (значение, вес); без веса — 0.0."""
+    total = 0.0
+    weight_sum = 0.0
+    for value, weight in values:
+        total += value * weight
+        weight_sum += weight
+    if weight_sum <= 0:
+        return 0.0
+    return total / weight_sum
+
+
+def host_cpu_percent(per_cpu: Sequence[float]) -> float:
+    return sum(per_cpu) / len(per_cpu) if per_cpu else 0.0
+
+
+def _physical_sum(rates: dict[str, Pair], physical_ifaces: Collection[str]) -> Pair:
+    physical = [rates[name] for name in physical_ifaces if name in rates]
+    return (
+        sum(rate[0] for rate in physical),
+        sum(rate[1] for rate in physical),
+    )
+
+
+def summarize_window(samples: Sequence[RateSample], physical_ifaces: Collection[str]) -> WindowSummary:
+    """Сводка по сэмплам от новейшего к старому (как отдаёт `window()`).
+
+    Сэмплы разной длины неравноправны — пропущенный тик даёт окно в две
+    секунды, — поэтому средние взвешены по `window_sec`. CPU считается
+    только по измеренным сэмплам с тем же числом ядер, что у новейшего:
+    после ресайза VPS старые проценты несопоставимы. Сеть — сумма по
+    физическим интерфейсам внутри каждого сэмпла, пик — по этим суммам.
+    """
+    latest = samples[0]
+    core_count = len(latest.per_cpu_percent)
+    cpu_samples = [
+        sample for sample in samples
+        if sample.cpu_measured and len(sample.per_cpu_percent) == core_count
+    ]
+    host_cpu = [host_cpu_percent(sample.per_cpu_percent) for sample in cpu_samples]
+    net_sums = [_physical_sum(sample.net, physical_ifaces) for sample in samples]
+
+    return WindowSummary(
+        window_sec=sum(sample.window_sec for sample in samples),
+        samples=len(samples),
+        cpu_avg=weighted_mean(zip(host_cpu, (s.window_sec for s in cpu_samples))),
+        cpu_max=max(host_cpu, default=0.0),
+        per_cpu_avg=[
+            weighted_mean((s.per_cpu_percent[core], s.window_sec) for s in cpu_samples)
+            for core in range(core_count)
+        ] if cpu_samples else [],
+        net_rx_avg=weighted_mean((rx, s.window_sec) for (rx, _), s in zip(net_sums, samples)),
+        net_tx_avg=weighted_mean((tx, s.window_sec) for (_, tx), s in zip(net_sums, samples)),
+        net_rx_max=max((rx for rx, _ in net_sums), default=0.0),
+        net_tx_max=max((tx for _, tx in net_sums), default=0.0),
+        disk_read_avg=weighted_mean((s.disk_total[0], s.window_sec) for s in samples),
+        disk_write_avg=weighted_mean((s.disk_total[1], s.window_sec) for s in samples),
+    )
 
 
 def per_cpu_percent(before: list, after: list) -> Optional[list[float]]:
@@ -159,6 +250,7 @@ class RateSampler:
         self._clock = clock
         self._prev: Optional[RawCounters] = None
         self._sample: Optional[RateSample] = None
+        self._buffer: deque[RateSample] = deque(maxlen=MAX_WINDOW_SEC)
         self._task: Optional[asyncio.Task] = None
 
     def prime(self) -> None:
@@ -198,6 +290,29 @@ class RateSampler:
             return None
         return sample
 
+    def window(self, seconds: float) -> Optional[tuple[RateSample, ...]]:
+        """Сэмплы от новейшего к старому, пока их окна не покроют `seconds`.
+
+        Покрытие копится по `window_sec` (monotonic-дельты чтений): пропущенный
+        тик — это один сэмпл с окном в две секунды, а не дыра. Пока буфер
+        короче запрошенного окна, отдаётся всё, что есть. `None` — когда
+        протух `snapshot()`: сводка по замолчавшему семплеру не лучше стухшей
+        секунды.
+
+        Буфер пополняет `advance()` в потоке event loop, и читать его можно
+        только оттуда — deque не переживает мутацию во время обхода.
+        """
+        if self.snapshot() is None:
+            return None
+        taken: list[RateSample] = []
+        covered = 0.0
+        for sample in reversed(self._buffer):
+            taken.append(sample)
+            covered += sample.window_sec
+            if covered >= seconds:
+                break
+        return tuple(taken)
+
     def advance(self, current: RawCounters) -> None:
         prev = self._prev
         if prev is None:
@@ -212,25 +327,29 @@ class RateSampler:
 
         self._prev = current
         disk = counter_rates(prev.disk, current.disk, dt)
+        per_cpu, cpu_measured = self._cpu_percent(prev.cpu_times, current.cpu_times)
         self._sample = RateSample(
             sampled_at=current.wall_time,
             window_sec=dt,
-            per_cpu_percent=self._cpu_percent(prev.cpu_times, current.cpu_times),
+            per_cpu_percent=per_cpu,
+            cpu_measured=cpu_measured,
             net=counter_rates(prev.net, current.net, dt),
             disk=disk,
             disk_total=self._disk_total(disk),
         )
+        self._buffer.append(self._sample)
 
-    def _cpu_percent(self, before: list, after: list) -> list[float]:
+    def _cpu_percent(self, before: list, after: list) -> tuple[list[float], bool]:
+        """Проценты по ядрам и признак, что они измерены именно в этом окне."""
         percents = per_cpu_percent(before, after)
         if percents is not None:
-            return percents
+            return percents, True
         last = self._sample.per_cpu_percent if self._sample else []
         if len(last) == len(after):
             # Слишком короткое окно — отдаём последний валидный замер
-            return last
+            return last, False
         # Число ядер сменилось (ресайз VPS): старые проценты несопоставимы
-        return [0.0] * len(after)
+        return [0.0] * len(after), False
 
     def _disk_total(self, disk: dict[str, Pair]) -> Pair:
         whole = [rate for name, rate in disk.items() if self._is_whole_disk(name)]

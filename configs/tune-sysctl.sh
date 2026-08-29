@@ -31,7 +31,7 @@
 
 set -u
 
-FORMULA_VERSION="1.3.0"
+FORMULA_VERSION="1.7.0"
 FACTS_SCHEMA=1
 
 # Гранулярность округления MemTotal вниз. Мирится с джиттером MemTotal между
@@ -61,6 +61,11 @@ ANTIDDOS_AUTO="$OPT_DIR/antiddos/config.auto"
 FACTS_JSON="$CONF_DIR/tuning-facts.json"
 FACTS_ENV="$CONF_DIR/tuning-facts.env"
 OVERRIDES="$CONF_DIR/local-overrides.conf"
+# Extra ports to keep away from ephemeral allocation: written by the node agent
+# on the panel's request, or by the operator by hand. Ports/ranges (a-b), one
+# per line or comma-separated; # comments allowed.
+RESERVED_EXTRA_FILE="$CONF_DIR/reserved-ports.conf"
+NODE_ENV_FILE="$ROOT/opt/monitoring-node/.env"
 PROFILE_MARKER="$CONF_DIR/OPT_PROFILE"
 VERSION_FILE="$CONF_DIR/VERSION"
 
@@ -294,6 +299,8 @@ compute() {
 
     HAPROXY_MAXCONN=$(clamp "$(imin $(( MEM_MB * 10 )) $(( (NOFILE_LIMIT - 1024) / 3 )))" 10000 500000)
 
+    compute_reserved_ports
+
     # SYNPROXY encodes wscale/MSS/SACK in the TCP timestamp; a hardcoded
     # --wscale 7 caps every proxied connection's window at 8 MB.
     SYNPROXY_WSCALE=$(clamp "$(clog2 $(( SOCK_MAX / 65535 )))" 0 14)
@@ -316,6 +323,79 @@ cpu_all_mask() {
         if [ -z "$out" ]; then out="$grp"; else out="$grp,$out"; fi
     done
     echo "${out:-1}"
+}
+
+# ── reserved ports ──────────────────────────────────────────────────────────
+
+# Keep the ephemeral allocator away from service ports. With the vpn floor at
+# 1024 any managed port sits inside ip_local_port_range, and a service restart
+# opens a window where an outbound connection can steal the port as its source
+# — the service then fails to bind. Reserved ports are excluded from AUTOMATIC
+# allocation only; an explicit bind() still works, so the reservation is free.
+
+detect_node_api_port() {
+    local port=""
+    if [ -n "${MON_FACT_NODE_API_PORT:-}" ]; then
+        port="$MON_FACT_NODE_API_PORT"
+    else
+        port=$(awk -F= '/^NODE_API_PORT=/ {gsub(/[^0-9]/, "", $2); print $2}' \
+            "$NODE_ENV_FILE" 2>/dev/null | tail -1)
+    fi
+    [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || port=9100
+    echo "$port"
+}
+
+compute_reserved_ports() {
+    NODE_API_PORT=$(detect_node_api_port)
+    # 7500 — внутренний uvicorn ноды, 7501-7564 — локальные socks-порты проверки
+    # прокси-конфигураций из панели (по порту на параллельную проверку — это и
+    # есть потолок одновременных проверок на ноде), 2222 — SSH-порт контейнера
+    # Remnawave. Из эфемерной выдачи уходит 64 порта из ~60 тысяч.
+    local tokens="7500 7501-7564 $NODE_API_PORT 2222"
+    if [ -f "$RESERVED_EXTRA_FILE" ]; then
+        tokens="$tokens $(grep -vE '^[[:space:]]*#' "$RESERVED_EXTRA_FILE" 2>/dev/null | tr ',;' '  ')"
+    fi
+
+    # Canonical form MUST match what the kernel prints back from
+    # /proc/sys/net/ipv4/ip_local_reserved_ports (sorted ascending, overlapping
+    # and adjacent entries merged, runs of two or more as "a-b") — otherwise
+    # verify would compare our string against the kernel's and always mismatch.
+    local result
+    result=$(echo "$tokens" | awk '
+        function seg(a, b) { return (a == b ? a "" : a "-" b) "," }
+        {
+            for (i = 1; i <= NF; i++) {
+                if ($i ~ /^[0-9]+$/) { s = $i + 0; e = s }
+                else if ($i ~ /^[0-9]+-[0-9]+$/) {
+                    split($i, p, "-"); s = p[1] + 0; e = p[2] + 0
+                } else continue
+                if (s < 1 || e > 65535 || s > e) continue
+                n++; starts[n] = s; ends[n] = e
+            }
+        }
+        END {
+            if (!n) { print "|0"; exit }
+            for (i = 2; i <= n; i++) {
+                s = starts[i]; e = ends[i]; j = i - 1
+                while (j >= 1 && starts[j] > s) {
+                    starts[j+1] = starts[j]; ends[j+1] = ends[j]; j--
+                }
+                starts[j+1] = s; ends[j+1] = e
+            }
+            out = ""; cs = starts[1]; ce = ends[1]; total = 0
+            for (i = 2; i <= n; i++) {
+                if (starts[i] <= ce + 1) { if (ends[i] > ce) ce = ends[i]; continue }
+                out = out seg(cs, ce); total += ce - cs + 1
+                cs = starts[i]; ce = ends[i]
+            }
+            out = out seg(cs, ce); total += ce - cs + 1
+            sub(/,$/, "", out)
+            print out "|" total
+        }
+    ')
+    RESERVED_PORTS="${result%|*}"
+    RESERVED_PORTS_COUNT="${result#*|}"
+    [ -n "$RESERVED_PORTS" ] || die "reserved ports list rendered empty"
 }
 
 compute_antiddos() {
@@ -392,6 +472,11 @@ verify_invariants() {
     [ "$SOCK_DEFAULT" -le "$SOCK_MAX" ] || fail "SOCK_DEFAULT > SOCK_MAX"
     [ "$MIN_FREE_KBYTES" -le $(( MEM_KB * 4 / 100 )) ] || fail "min_free_kbytes > 4% of RAM"
 
+    # A runaway reserved-ports.conf (say 1024-65535) would leave the ephemeral
+    # allocator nothing to hand out and every outbound connect() would fail.
+    [ "${RESERVED_PORTS_COUNT:-0}" -le 4096 ] \
+        || fail "reserved ports total $RESERVED_PORTS_COUNT > 4096 — check reserved-ports.conf"
+
     [ "$errs" -eq 0 ] || die "$errs invariant violation(s) — refusing to write"
 }
 
@@ -430,6 +515,7 @@ DIRTY_RATIO=$DIRTY_RATIO
 DIRTY_BACKGROUND_RATIO=$DIRTY_BACKGROUND_RATIO
 NOFILE_LIMIT=$NOFILE_LIMIT
 NPROC_LIMIT=$NPROC_LIMIT
+RESERVED_PORTS=$RESERVED_PORTS
 EOF
 }
 
@@ -796,6 +882,7 @@ render_facts() {
     \"net.ipv4.udp_mem\": \"$UDP_MEM\",
     \"vm.min_free_kbytes\": \"$MIN_FREE_KBYTES\",
     \"net.core.rps_sock_flow_entries\": \"$RPS_SOCK_FLOW_ENTRIES\",
+    \"net.ipv4.ip_local_reserved_ports\": \"$RESERVED_PORTS\",
     \"net.ipv4.tcp_notsent_lowat\": \"$TCP_NOTSENT_LOWAT\",
     \"vm.dirty_ratio\": \"$DIRTY_RATIO\",
     \"vm.dirty_background_ratio\": \"$DIRTY_BACKGROUND_RATIO\"
@@ -849,6 +936,8 @@ FLOW_LIMIT_CPU_BITMAP=$FLOW_LIMIT_CPU_BITMAP
 FLOW_LIMIT_TABLE_LEN=$FLOW_LIMIT_TABLE_LEN
 SYNPROXY_WSCALE=$SYNPROXY_WSCALE
 SYNPROXY_MSS=$SYNPROXY_MSS
+NODE_API_PORT=$NODE_API_PORT
+RESERVED_PORTS=$RESERVED_PORTS
 "
 }
 
@@ -969,7 +1058,7 @@ do_facts() {
     emit_token_table
     echo "# derived"
     for v in CONNTRACK_HASHSIZE DOCKER_NOFILE HAPROXY_MAXCONN FLOW_LIMIT_CPU_BITMAP \
-             SYNPROXY_WSCALE SYNPROXY_MSS; do
+             SYNPROXY_WSCALE SYNPROXY_MSS NODE_API_PORT RESERVED_PORTS_COUNT; do
         eval "echo \"$v=\$$v\""
     done
     echo "# antiddos"

@@ -158,6 +158,20 @@ load_proxy() {
 }
 load_proxy
 
+# Все образы из compose уже есть локально? На ноде под ТСПУ, где GHCR недоступен,
+# оператор переносит образ вручную (`docker save` на достижимой машине → `docker
+# load` на ноде) — тогда pull ожидаемо падает, но сборка не нужна.
+compose_images_present() {
+    local images image
+    images=$(docker compose config --images 2>/dev/null) || return 1
+    [ -n "$images" ] || return 1
+    while IFS= read -r image; do
+        [ -z "$image" ] && continue
+        docker image inspect "$image" >/dev/null 2>&1 || return 1
+    done <<< "$images"
+    return 0
+}
+
 # ==================== Configuration ====================
 
 # Timeouts (in seconds)
@@ -277,6 +291,28 @@ install_ipset() {
         log_warn "Failed to install ipset — IP blocklist may not work"
         return 1
     fi
+}
+
+# На минимальных образах ОС rsync отсутствует — без него копирование файлов
+# невозможно, а контейнеры ещё не тронуты, так что обновление просто отменяется
+ensure_rsync() {
+    command -v rsync &>/dev/null && return 0
+    if [ $IN_CONTAINER -eq 1 ] || ! command -v apt-get &>/dev/null; then
+        log_error "rsync is required for the update — install it on the host and run the update again"
+        return 1
+    fi
+
+    suppress_needrestart
+    wait_for_apt_lock || true
+    spin_retry 300 3 5 "Installing rsync" \
+        env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l NEEDRESTART_SUSPEND=1 \
+        apt-get install -y -qq rsync \
+        || spin_retry 300 2 5 "Installing rsync (after apt update)" bash -c \
+            'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq rsync'
+
+    command -v rsync &>/dev/null && return 0
+    log_error "Failed to install rsync — install it manually and run the update again"
+    return 1
 }
 
 migrate_haproxy_config_from_volume() {
@@ -554,6 +590,7 @@ fi
 # Copy files (preserve .env and SSL certs). Контейнеры ещё работают: rsync меняет
 # файлы на диске через rename (новый inode), bind-mounts запущенных контейнеров
 # продолжают видеть старые — ноль даунтайма на этом шаге.
+ensure_rsync || exit 1
 log_info "Copying new files..."
 rsync -av --delete \
     --exclude='.env' \
@@ -664,16 +701,29 @@ fi
 cd "$NODE_DIR"
 
 set +e
-# Pull ready images from GHCR (normal flow)
-if ! spin_retry "$DOCKER_PULL_TIMEOUT" "$DOCKER_PULL_RETRIES" "$DOCKER_PULL_RETRY_DELAY" \
+# Блок-режим (MON_ALLOW_LOCAL_BUILD=0, панель-триггер для заблокированной ноды):
+# не молотим обречённые pull/сборку. Либо образ уже на диске — поднимаемся на нём,
+# либо быстрый выход 20 «нужна доставка образа с панели».
+if [ "${MON_ALLOW_LOCAL_BUILD:-1}" = "0" ]; then
+    if compose_images_present; then
+        log_success "Образ уже на диске — скачивание не требуется"
+    else
+        log_error "Image unavailable, local build disabled (MON_ALLOW_LOCAL_BUILD=0) — expecting delivery from panel"
+        exit 20
+    fi
+elif ! spin_retry "$DOCKER_PULL_TIMEOUT" "$DOCKER_PULL_RETRIES" "$DOCKER_PULL_RETRY_DELAY" \
     "Pulling Docker images" docker compose pull; then
-    log_warn "Failed to pull from registry, building locally..."
-    spin "Pulling base images" bash -c \
-        'docker compose pull --ignore-buildable 2>/dev/null || true'
-    spin_retry 900 2 10 "Building images from source" docker compose build || {
-        log_error "Failed to get new images — update cancelled, node keeps running old version"
-        exit 1
-    }
+    if compose_images_present; then
+        log_success "Registry unreachable — using images already present locally"
+    else
+        log_warn "Failed to pull from registry, building locally..."
+        spin "Pulling base images" bash -c \
+            'docker compose pull --ignore-buildable 2>/dev/null || true'
+        spin_retry 900 2 10 "Building images from source" docker compose build || {
+            log_error "Failed to get new images — update cancelled, node keeps running old version"
+            exit 1
+        }
+    fi
 fi
 set -e
 

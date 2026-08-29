@@ -36,6 +36,7 @@ import NodeRestrictedNotice from '../components/servers/NodeRestrictedNotice'
 import { nodeAllows } from '../utils/nodeCapabilities'
 import { formatBytes, formatUptime } from '../utils/format'
 import { useAutoRefresh } from '../hooks/useAutoRefresh'
+import { useModuleEnabled } from '../hooks/useModuleEnabled'
 import { useCachedData, createServerCacheKey } from '../hooks/useCachedData'
 import CachedDataBanner from '../components/ui/CachedDataBanner'
 import { Tooltip } from '../components/ui/Tooltip'
@@ -55,7 +56,8 @@ export default function HAProxy() {
   const navigate = useNavigate()
   const { servers, fetchServers } = useServersStore()
   const { t } = useTranslation()
-  
+  const profilesEnabled = useModuleEnabled('haproxy-configs')
+
   const [status, setStatus] = useState<HAProxyStatus | null>(null)
   const [rules, setRules] = useState<HAProxyRule[]>([])
   const [certs, setCerts] = useState<string[]>([])
@@ -882,12 +884,14 @@ export default function HAProxy() {
             <span className="text-dark-300">{t('haproxy_configs.managed_by_profile')}:</span>
             <span className="font-medium text-accent-300">{profileInfo.name}</span>
           </div>
-          <Link
-            to={`/${uid}/haproxy-configs`}
-            className="text-xs text-accent-400 hover:text-accent-300 transition-colors"
-          >
-            {t('haproxy_configs.view_profile')} →
-          </Link>
+          {profilesEnabled && (
+            <Link
+              to={`/${uid}/haproxy-configs`}
+              className="text-xs text-accent-400 hover:text-accent-300 transition-colors"
+            >
+              {t('haproxy_configs.view_profile')} →
+            </Link>
+          )}
         </motion.div>
       )}
 

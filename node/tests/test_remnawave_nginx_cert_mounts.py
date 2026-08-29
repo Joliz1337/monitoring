@@ -23,6 +23,7 @@ from app.services.remnawave_nginx_manager import (  # noqa: E402
     host_path_for_cert,
     is_covered_by_mounts,
     missing_cert_mounts,
+    nginx_service_block,
     patch_compose_volumes,
 )
 
@@ -63,6 +64,43 @@ COMPOSE_WITH_LE = COMPOSE.replace(
     "      - ./ssl:/etc/nginx/ssl:ro\n      - /etc/letsencrypt:/etc/letsencrypt:ro\n",
 )
 
+# Раскладка install.sh: /etc/letsencrypt отдан remnanode, у nginx его нет
+COMPOSE_LE_ON_REMNANODE = """services:
+  remnawave-nginx:
+    image: nginx:1.28
+    container_name: remnawave-nginx
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+      - /dev/shm:/dev/shm:rw
+    network_mode: host
+    depends_on:
+      - remnanode
+  remnanode:
+    image: remnawave/node:latest
+    network_mode: host
+    volumes:
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      - /dev/shm:/dev/shm:rw
+"""
+
+# То же, но сервис nginx описан вторым
+COMPOSE_NGINX_LAST = """services:
+  remnanode:
+    image: remnawave/node:latest
+    volumes:
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      - /dev/shm:/dev/shm:rw
+
+  remnawave-nginx:
+    image: nginx:1.28
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - /dev/shm:/dev/shm:rw
+    logging:
+      driver: json-file
+"""
+
 
 class ConfigCertFilesTests(unittest.TestCase):
     def test_extracts_cert_and_key_without_duplicates(self):
@@ -100,6 +138,13 @@ class MissingMountsTests(unittest.TestCase):
         dirs = missing_cert_mounts(COMPOSE, config_cert_files(CUSTOM_CONFIG))
         self.assertEqual(dirs, ["/opt/certs/site"])
 
+    def test_other_service_volumes_do_not_count(self):
+        """Том /etc/letsencrypt у remnanode для контейнера nginx не существует —
+        именно так nginx после пересоздания не находил сертификат."""
+        for compose in (COMPOSE_LE_ON_REMNANODE, COMPOSE_NGINX_LAST):
+            dirs = missing_cert_mounts(compose, config_cert_files(CONFIG))
+            self.assertEqual(dirs, [LETSENCRYPT_ROOT])
+
     def test_prefix_match_is_per_component(self):
         # /etc/letsencrypt-extra не должен считаться покрытым маунтом /etc/letsencrypt
         self.assertFalse(is_covered_by_mounts(
@@ -110,7 +155,35 @@ class MissingMountsTests(unittest.TestCase):
         ))
 
 
+class ServiceBlockTests(unittest.TestCase):
+    def test_block_is_only_the_nginx_service(self):
+        for compose in (COMPOSE_LE_ON_REMNANODE, COMPOSE_NGINX_LAST):
+            block = nginx_service_block(compose)
+            self.assertTrue(block.lstrip().startswith("remnawave-nginx:"))
+            self.assertIn("./nginx.conf:", block)
+            self.assertNotIn("remnawave/node", block)
+            self.assertNotIn("/etc/letsencrypt", block)
+
+    def test_block_keeps_trailing_keys_of_the_service(self):
+        # logging: после volumes: — часть того же сервиса, а не следующего
+        self.assertIn("driver: json-file", nginx_service_block(COMPOSE_NGINX_LAST))
+
+    def test_without_anchor_falls_back_to_whole_file(self):
+        compose = "services:\n  x:\n    volumes:\n      - /a:/a\n"
+        self.assertEqual(nginx_service_block(compose), compose)
+
+
 class PatchVolumesTests(unittest.TestCase):
+    def test_adds_volume_to_nginx_when_only_remnanode_has_it(self):
+        cert_files = config_cert_files(CONFIG)
+        patched = patch_compose_volumes(
+            COMPOSE_LE_ON_REMNANODE, missing_cert_mounts(COMPOSE_LE_ON_REMNANODE, cert_files)
+        )
+        self.assertIsNotNone(patched)
+        self.assertEqual(patched.count("/etc/letsencrypt:/etc/letsencrypt:ro"), 2)
+        self.assertIn("/etc/letsencrypt:/etc/letsencrypt:ro", nginx_service_block(patched))
+        self.assertEqual(missing_cert_mounts(patched, cert_files), [])
+
     def test_inserts_after_nginx_conf_mount(self):
         patched = patch_compose_volumes(COMPOSE, [LETSENCRYPT_ROOT])
         self.assertIsNotNone(patched)
@@ -150,6 +223,15 @@ class HostPathTests(unittest.TestCase):
         self.assertEqual(
             host_path_for_cert(
                 "/etc/letsencrypt/live/x/privkey.pem", COMPOSE_WITH_LE, "/opt/remnawave"
+            ),
+            "/etc/letsencrypt/live/x/privkey.pem",
+        )
+
+    def test_ignores_volumes_of_other_services(self):
+        # Путь из конфига — путь в контейнере nginx; том remnanode на него не влияет
+        self.assertEqual(
+            host_path_for_cert(
+                "/etc/letsencrypt/live/x/privkey.pem", COMPOSE_LE_ON_REMNANODE, "/opt/remnawave"
             ),
             "/etc/letsencrypt/live/x/privkey.pem",
         )

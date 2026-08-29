@@ -14,13 +14,19 @@ import platform
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 import psutil
 
 from app.config import get_settings
 from app.services.port_traffic_sampler import get_port_traffic_sampler
-from app.services.rate_sampler import RateSample, RateSampler, get_rate_sampler, read_net_dev
+from app.services.rate_sampler import (
+    RateSample,
+    RateSampler,
+    get_rate_sampler,
+    read_net_dev,
+    summarize_window,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +75,35 @@ class MetricsCollector:
         if rates is None:
             return None
         return {"window_sec": round(rates.window_sec, 3), "sampled_at": rates.sampled_at}
+
+    def window_stats(self, window_sec: Optional[int]) -> Optional[dict]:
+        """Средние и пики за последние `window_sec` секунд — отдельный блок
+        ответа, мгновенные поля он не подменяет.
+
+        Читает буфер семплера, поэтому зовётся только из потока event loop —
+        там же `advance()` его пополняет. Без параметра или при протухшем
+        семплере блока нет.
+        """
+        if not window_sec:
+            return None
+        samples = self._rate_sampler.window(window_sec)
+        if samples is None:
+            return None
+        seen_ifaces = {name for sample in samples for name in sample.net}
+        summary = summarize_window(samples, self.physical_interfaces(seen_ifaces))
+        return {
+            "window_sec": round(summary.window_sec, 3),
+            "samples": summary.samples,
+            "cpu_avg": round(summary.cpu_avg, 1),
+            "cpu_max": round(summary.cpu_max, 1),
+            "per_cpu_avg": [round(percent, 1) for percent in summary.per_cpu_avg],
+            "net_rx_avg": round(summary.net_rx_avg, 1),
+            "net_tx_avg": round(summary.net_tx_avg, 1),
+            "net_rx_max": round(summary.net_rx_max, 1),
+            "net_tx_max": round(summary.net_tx_max, 1),
+            "disk_read_avg": round(summary.disk_read_avg, 1),
+            "disk_write_avg": round(summary.disk_write_avg, 1),
+        }
 
     def get_cpu_info(self, rates: Optional[RateSample]) -> dict:
         """Get CPU information and usage"""
@@ -223,6 +258,15 @@ class MetricsCollector:
             logger.debug(f"Failed to enumerate bond slaves, totals may double-count: {e}")
         return slaves
 
+    def physical_interfaces(self, names: Iterable[str]) -> list[str]:
+        """Интерфейсы, чей трафик не дублирует чужой: без veth/docker/br-*
+        (зеркалят физические) и без bond-слейвов (их байты уже на мастере)."""
+        bond_slaves = self._get_bond_slaves()
+        return [
+            name for name in names
+            if not self._is_virtual_interface(name) and name not in bond_slaves
+        ]
+
     def get_network_info(self, rates: Optional[RateSample]) -> dict:
         """Get network interfaces: cumulative counters plus one-second rates"""
         interfaces = []
@@ -232,13 +276,12 @@ class MetricsCollector:
         addrs = psutil.net_if_addrs()
         stats = psutil.net_if_stats()
 
-        # Bond slaves duplicate traffic already counted on bond master
-        bond_slaves = self._get_bond_slaves()
+        physical = self.physical_interfaces(host_net_stats)
 
         net_rates = rates.net if rates else {}
 
         for iface, io in host_net_stats.items():
-            is_virtual = self._is_virtual_interface(iface) or iface in bond_slaves
+            is_virtual = iface not in physical
             rx_rate, tx_rate = net_rates.get(iface, NO_RATE)
             iface_info = {
                 "name": iface,
@@ -285,12 +328,6 @@ class MetricsCollector:
 
             interfaces.append(iface_info)
 
-        # Total traffic — only physical interfaces, excluding bond slaves to avoid double-counting
-        # (bond master already includes all slave traffic; veth/docker/br-* mirror physical)
-        physical = [
-            iface for iface in host_net_stats
-            if not self._is_virtual_interface(iface) and iface not in bond_slaves
-        ]
         total = {
             "rx_bytes": sum(host_net_stats[i]['rx_bytes'] for i in physical),
             "tx_bytes": sum(host_net_stats[i]['tx_bytes'] for i in physical),
@@ -700,11 +737,12 @@ class MetricsCollector:
 
         return info
 
-    async def get_all_metrics(self) -> dict:
+    async def get_all_metrics(self, window_sec: Optional[int] = None) -> dict:
         """Collect all metrics in parallel using thread pool"""
         tz_info = self._get_timezone_info()
         # Один сэмпл на весь ответ: маркер live_rates и сами скорости — из одного окна
         rates = self._rate_sampler.snapshot()
+        window = self.window_stats(window_sec)
         cpu, memory, disk, network, processes, system, certs, antiddos = await asyncio.gather(
             asyncio.to_thread(self.get_cpu_info, rates),
             asyncio.to_thread(self.get_memory_info),
@@ -728,6 +766,7 @@ class MetricsCollector:
             "certificates": certs,
             "antiddos": antiddos,
             "live_rates": self.live_rates(rates),
+            "window": window,
             "agent_version": self._agent_version,
             "capabilities": self._capabilities,
         }

@@ -38,7 +38,7 @@ After installation the `mon` command is available — an interactive manager:
 4) Update node                0) Exit
 ```
 
-**Panel** — the script installs Docker, asks for a domain, obtains a Let's Encrypt SSL certificate, generates `.env` and starts the containers. At the end it prints `https://{domain}/{uid}` and the login password.
+**Panel** — the script installs Docker, asks for a domain, obtains a Let's Encrypt SSL certificate (via HTTP — when the domain already points to the server and port 80 is open, or via the Cloudflare DNS API with a token — works behind Cloudflare proxy, no port 80 needed), generates `.env` and starts the containers. At the end it prints `https://{domain}/{uid}` and the login password.
 
 **Node** — installs Docker, HAProxy (native systemd), ipset and UFW. Asks you to paste `NODE_SECRET` — the shared install token from the **Servers** page of the panel (the same one for all nodes, copy it once). The token embeds the mTLS certificates and the panel IP — port 9100 opens for the panel only. After the install just add the server in the panel: name + IP.
 
@@ -113,7 +113,7 @@ If the command is run inside the Hetzner Rescue System, the installer provisions
 > Click a row to expand the screenshot. Images are clickable — they open in full size.
 
 <details>
-<summary><b>Dashboard</b> — all servers on one screen: statuses, metrics, SSL</summary>
+<summary><b>Dashboard</b> — all servers on one screen: statuses, per-core load, traffic, SSL</summary>
 
 ![Dashboard — server cards](.github/screenshots/dashboard.png)
 
@@ -134,7 +134,7 @@ If the command is run inside the Hetzner Rescue System, the installer provisions
 </details>
 
 <details>
-<summary><b>HAProxy</b> — proxy rules, service control and config editor</summary>
+<summary><b>HAProxy</b> — live statistics, proxy rules, certificates and firewall</summary>
 
 ![HAProxy management](.github/screenshots/haproxy.png)
 
