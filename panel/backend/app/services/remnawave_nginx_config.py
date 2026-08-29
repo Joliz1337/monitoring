@@ -100,6 +100,9 @@ _ABS_PATH_RE = re.compile(r"^/[A-Za-z0-9.{}_/-]+$")
 # суффиксом s/m, целое); cnt ограничен 1..100 отдельно
 _SO_KEEPALIVE_RE = re.compile(r"^(\d{1,4}[sm]):(\d{1,4}[sm]):(\d{1,3})$")
 _SERVER_NAME_RE = re.compile(r"^\s*server_name\s+([^\s;]+)", re.MULTILINE)
+DOMAIN_RE = re.compile(
+    r"^(?=.{4,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$", re.IGNORECASE
+)
 
 _GRPC_BLOCK_RE = re.compile(
     r"# rule: (?P<name>\S+) type=grpc\n"
@@ -177,6 +180,10 @@ class ProfileOptions:
     reject_default_server: bool = False
     ssl_cert_path: str = "/etc/letsencrypt/live/{{DOMAIN}}/fullchain.pem"
     ssl_key_path: str = "/etc/letsencrypt/live/{{DOMAIN}}/privkey.pem"
+    # Один базовый домен на весь профиль: server_name принимает его и все
+    # поддомены, {{DOMAIN}} в путях сертификатов — это он же. Домен у ноды
+    # тогда не нужен, но работает только с wildcard-сертификатом *.домен
+    wildcard_domain: str = ""
     # Куда проксировать «мусорный» трафик (всё, что не попало в правила)
     # и ошибки Xray (502/503/504) — снаружи сервер выглядит как обычный сайт
     fallback_url: str = ""
@@ -196,7 +203,9 @@ class ProfileOptions:
         if not data:
             return cls()
         known = {f for f in cls.__dataclass_fields__}
-        return cls(**{k: v for k, v in data.items() if k in known})
+        options = cls(**{k: v for k, v in data.items() if k in known})
+        options.wildcard_domain = (options.wildcard_domain or "").strip().lower()
+        return options
 
     def to_dict(self) -> dict:
         return {
@@ -210,6 +219,7 @@ class ProfileOptions:
             "reject_default_server": self.reject_default_server,
             "ssl_cert_path": self.ssl_cert_path,
             "ssl_key_path": self.ssl_key_path,
+            "wildcard_domain": self.wildcard_domain,
             "fallback_url": self.fallback_url,
             "tls_session_tickets": self.tls_session_tickets,
             "client_tcp_keepalive": self.client_tcp_keepalive,
@@ -221,6 +231,17 @@ class ProfileOptions:
         # При PP без CDN realip уже переписал $remote_addr адресом из
         # PROXY-заголовка, отдельная переменная не нужна
         return "$client_ip" if self.cdn_enabled else "$remote_addr"
+
+    @property
+    def server_names(self) -> str:
+        if self.wildcard_domain:
+            return f"{self.wildcard_domain} *.{self.wildcard_domain}"
+        return DOMAIN_PLACEHOLDER
+
+    def cert_path(self, path: str) -> str:
+        if self.wildcard_domain:
+            return path.replace(DOMAIN_PLACEHOLDER, self.wildcard_domain)
+        return path
 
 
 def validate_rule(rule) -> None:
@@ -288,6 +309,13 @@ def validate_options(options: ProfileOptions) -> None:
     for path in (options.ssl_cert_path, options.ssl_key_path):
         if not _ABS_PATH_RE.match(path or ""):
             raise OptionsValidationError(f"Некорректный путь сертификата: {path!r}")
+    if options.wildcard_domain:
+        if options.wildcard_domain.startswith("*."):
+            raise OptionsValidationError(
+                "Wildcard-домен указывается без «*.» — поддомены подхватываются сами"
+            )
+        if not DOMAIN_RE.match(options.wildcard_domain):
+            raise OptionsValidationError(f"Некорректный wildcard-домен: {options.wildcard_domain!r}")
     if options.client_tcp_keepalive:
         match = _SO_KEEPALIVE_RE.match(options.client_tcp_keepalive)
         if not match or not 1 <= int(match.group(3)) <= 100:
@@ -523,7 +551,7 @@ def generate_full_config(options: ProfileOptions, rules: list[Rule]) -> str:
                 if options.acme_enabled else "")
         http_parts.append(f"""    server {{
         listen 80;
-        server_name {DOMAIN_PLACEHOLDER};
+        server_name {options.server_names};
 {acme}        location / {{ return 301 https://$host$request_uri; }}
     }}
 """)
@@ -560,10 +588,10 @@ def generate_full_config(options: ProfileOptions, rules: list[Rule]) -> str:
     http_parts.append(f"""    server {{
         listen 443 ssl{so_keepalive};
 {pp_listen}        http2 on;
-        server_name {DOMAIN_PLACEHOLDER};
+        server_name {options.server_names};
 
-        ssl_certificate     {options.ssl_cert_path};
-        ssl_certificate_key {options.ssl_key_path};
+        ssl_certificate     {options.cert_path(options.ssl_cert_path)};
+        ssl_certificate_key {options.cert_path(options.ssl_key_path)};
 
         error_page {NGINX_OWN_ERROR_CODES} = @drop;
 

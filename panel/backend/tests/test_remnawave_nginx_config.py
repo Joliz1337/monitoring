@@ -513,5 +513,43 @@ class ImportHelpersTests(unittest.TestCase):
             parse_rules_from_config(self.USER_CONFIG)
 
 
+class WildcardDomainTests(unittest.TestCase):
+    OPTIONS = ProfileOptions(wildcard_domain="example.com")
+
+    def test_server_name_accepts_domain_and_all_subdomains(self):
+        config = generate_full_config(self.OPTIONS, GRPC_RULES)
+        self.assertEqual(config.count("server_name example.com *.example.com;"), 2)
+        self.assertNotIn(DOMAIN_PLACEHOLDER, config)
+
+    def test_cert_paths_use_base_domain(self):
+        config = generate_full_config(self.OPTIONS, [])
+        self.assertIn("ssl_certificate     /etc/letsencrypt/live/example.com/fullchain.pem;", config)
+        self.assertIn("ssl_certificate_key /etc/letsencrypt/live/example.com/privkey.pem;", config)
+
+    def test_rendered_config_is_identity_without_placeholder(self):
+        config = generate_full_config(self.OPTIONS, GRPC_RULES)
+        self.assertEqual(render_for_server(config, "node1.example.com"), config)
+
+    def test_round_trip_keeps_rules(self):
+        config = generate_full_config(self.OPTIONS, ALL_RULES)
+        self.assertEqual(parse_rules_from_config(config), ALL_RULES)
+        self.assertEqual(generate_full_config(self.OPTIONS, ALL_RULES), config)
+
+    def test_empty_domain_keeps_placeholder(self):
+        config = generate_full_config(ProfileOptions(), [])
+        self.assertIn(f"server_name {DOMAIN_PLACEHOLDER};", config)
+
+    def test_from_dict_normalizes_domain(self):
+        options = ProfileOptions.from_dict({"wildcard_domain": "  Example.COM "})
+        self.assertEqual(options.wildcard_domain, "example.com")
+        self.assertEqual(ProfileOptions.from_dict({"wildcard_domain": None}).wildcard_domain, "")
+
+    def test_rejects_star_prefix_and_invalid_domain(self):
+        with self.assertRaises(OptionsValidationError):
+            validate_options(ProfileOptions(wildcard_domain="*.example.com"))
+        with self.assertRaises(OptionsValidationError):
+            validate_options(ProfileOptions(wildcard_domain="not a domain"))
+
+
 if __name__ == "__main__":
     unittest.main()

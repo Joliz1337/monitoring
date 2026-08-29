@@ -8,7 +8,6 @@ server-блока и пересобирают конфиг целиком.
 
 import json
 import logging
-import re
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
@@ -22,6 +21,8 @@ from app.models import RemnawaveNginxProfile, RemnawaveNginxSyncLog, Server
 from app.services.haproxy_profile_sync import compute_config_hash, is_server_online
 from app.services.remnawave_nginx_config import (
     CLOUDFLARE_RANGES,
+    DOMAIN_PLACEHOLDER,
+    DOMAIN_RE,
     GrpcRule,
     MissingMarkersError,
     OptionsValidationError,
@@ -49,8 +50,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/remnawave-nginx-profiles", tags=["remnawave-nginx-profiles"])
 
-_DOMAIN_RE = re.compile(
-    r"^(?=.{4,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$", re.IGNORECASE
+NODE_DOMAIN_REQUIRED_MESSAGE = (
+    "Укажите домен ноды — в профиле нет wildcard-домена, и подставить в {{DOMAIN}} нечего"
 )
 
 
@@ -85,16 +86,33 @@ class ImportFromNodeRequest(BaseModel):
     server_id: int
 
 
+def _normalize_domain(value: str) -> str:
+    value = value.strip().lower()
+    if not DOMAIN_RE.match(value):
+        raise ValueError(f"Некорректный домен: {value!r}")
+    return value
+
+
 class LinkServerRequest(BaseModel):
+    """Домен нужен, только если шаблон профиля содержит {{DOMAIN}} —
+    при wildcard-домене профиля ноде свой домен не требуется."""
+    domain: Optional[str] = None
+
+    @field_validator("domain")
+    @classmethod
+    def _check_domain(cls, v: Optional[str]) -> Optional[str]:
+        if not v or not v.strip():
+            return None
+        return _normalize_domain(v)
+
+
+class ServerDomainRequest(BaseModel):
     domain: str
 
     @field_validator("domain")
     @classmethod
     def _check_domain(cls, v: str) -> str:
-        v = v.strip().lower()
-        if not _DOMAIN_RE.match(v):
-            raise ValueError(f"Некорректный домен: {v!r}")
-        return v
+        return _normalize_domain(v)
 
 
 class RuleData(BaseModel):
@@ -470,14 +488,20 @@ async def link_server(
     profile_id: int, server_id: int, data: LinkServerRequest, bg: BackgroundTasks,
     db: AsyncSession = Depends(get_db), _=Depends(verify_auth),
 ):
-    await _get_profile(profile_id, db)
+    profile = await _get_profile(profile_id, db)
 
     server = await db.get(Server, server_id)
     if not server:
         raise HTTPException(404, "Server not found")
 
+    # Домен — свойство ноды: без нового значения прежний сохраняется,
+    # а обязателен он лишь когда шаблону есть что им заменить
+    if data.domain:
+        server.remnawave_nginx_domain = data.domain
+    elif DOMAIN_PLACEHOLDER in profile.config_content and not server.remnawave_nginx_domain:
+        raise HTTPException(400, NODE_DOMAIN_REQUIRED_MESSAGE)
+
     server.active_remnawave_nginx_profile_id = profile_id
-    server.remnawave_nginx_domain = data.domain
     server.remnawave_nginx_sync_status = "pending"
     await db.commit()
 
@@ -487,7 +511,7 @@ async def link_server(
 
 @router.put("/{profile_id}/servers/{server_id}/domain")
 async def update_server_domain(
-    profile_id: int, server_id: int, data: LinkServerRequest, bg: BackgroundTasks,
+    profile_id: int, server_id: int, data: ServerDomainRequest, bg: BackgroundTasks,
     db: AsyncSession = Depends(get_db), _=Depends(verify_auth),
 ):
     await _get_profile(profile_id, db)

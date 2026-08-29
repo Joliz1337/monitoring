@@ -306,6 +306,20 @@ function OptionsSection({
         <p className="text-[10px] text-dark-500">{t('remnawave_nginx.access_log_hint')}</p>
       </div>
 
+      {/* Wildcard-домен: один на все ноды профиля */}
+      <div className="space-y-1.5">
+        <label className="block text-xs text-dark-400">{t('remnawave_nginx.wildcard_domain')}</label>
+        <input type="text" value={opts.wildcard_domain} onChange={e => upd({ wildcard_domain: e.target.value })}
+          placeholder="example.com" className={`${inp} font-mono text-xs`} spellCheck={false} />
+        <p className="text-[10px] text-dark-500">{t('remnawave_nginx.wildcard_domain_hint')}</p>
+        {opts.wildcard_domain.trim() !== '' && (
+          <div className="flex items-start gap-2 px-3 py-2 rounded-lg text-xs text-yellow-400 bg-yellow-500/10 border border-yellow-500/20">
+            <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+            {t('remnawave_nginx.wildcard_domain_warning', { domain: opts.wildcard_domain.trim() })}
+          </div>
+        )}
+      </div>
+
       {/* Пути сертификатов */}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <div>
@@ -388,6 +402,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
   const [detail, setDetail] = useState<RemnawaveNginxProfileDetail | null>(null)
   const [rules, setRules] = useState<RemnawaveNginxRule[]>([])
   const [hasMarkers, setHasMarkers] = useState(true)
+  const wildcardDomain = detail?.options.wildcard_domain || ''
   const [availableServers, setAvailableServers] = useState<RemnawaveNginxAvailableServer[]>([])
   const [serversStatus, setServersStatus] = useState<RemnawaveNginxServerStatus[]>([])
   const [nodeStatuses, setNodeStatuses] = useState<Record<number, RemnawaveNginxNodeStatus>>({})
@@ -642,9 +657,9 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
   // ---- Server binding ----
   const handleLinkServer = async () => {
     if (!linkingServer) return
-    if (!linkDomain.trim()) { toast.error(t('remnawave_nginx.domain_required')); return }
+    if (!wildcardDomain && !linkDomain.trim()) { toast.error(t('remnawave_nginx.domain_required')); return }
     try {
-      await remnawaveNginxApi.linkServer(profileId, linkingServer.id, linkDomain.trim())
+      await remnawaveNginxApi.linkServer(profileId, linkingServer.id, wildcardDomain ? null : linkDomain.trim())
       toast.success(t('remnawave_nginx.server_linked'))
       setLinkingServer(null); setLinkDomain(''); setShowAddServer(false)
       await fetchDetail(); onRefreshList()
@@ -950,18 +965,33 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                         </span>
                         <button onClick={() => { setLinkingServer(null); setLinkDomain('') }} className="p-1 text-dark-400 hover:text-dark-200"><X className="w-3.5 h-3.5" /></button>
                       </div>
-                      <label className="block text-xs text-dark-400">{t('remnawave_nginx.node_domain')}</label>
-                      <div className="flex items-center gap-2">
-                        <input type="text" value={linkDomain} onChange={e => setLinkDomain(e.target.value)}
-                          placeholder="node1.example.com" autoFocus
-                          onKeyDown={e => { if (e.key === 'Enter') handleLinkServer() }}
-                          className="flex-1 px-3 py-1.5 rounded-lg bg-dark-800 border border-dark-700 text-dark-100 text-sm font-mono focus:outline-none focus:border-accent-500/50" />
-                        <button onClick={handleLinkServer}
-                          className="px-3 py-1.5 rounded-lg text-xs font-medium bg-accent-600 hover:bg-accent-500 text-white transition-colors">
-                          {t('remnawave_nginx.link')}
-                        </button>
-                      </div>
-                      <p className="text-[10px] text-dark-500">{t('remnawave_nginx.node_domain_hint')}</p>
+                      {wildcardDomain ? (
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="flex items-center gap-1.5 text-xs text-dark-400">
+                            <Globe className="w-3 h-3" />
+                            {t('remnawave_nginx.wildcard_link_hint', { domain: wildcardDomain })}
+                          </span>
+                          <button onClick={handleLinkServer} autoFocus
+                            className="px-3 py-1.5 rounded-lg text-xs font-medium bg-accent-600 hover:bg-accent-500 text-white transition-colors">
+                            {t('remnawave_nginx.link')}
+                          </button>
+                        </div>
+                      ) : (
+                        <>
+                          <label className="block text-xs text-dark-400">{t('remnawave_nginx.node_domain')}</label>
+                          <div className="flex items-center gap-2">
+                            <input type="text" value={linkDomain} onChange={e => setLinkDomain(e.target.value)}
+                              placeholder="node1.example.com" autoFocus
+                              onKeyDown={e => { if (e.key === 'Enter') handleLinkServer() }}
+                              className="flex-1 px-3 py-1.5 rounded-lg bg-dark-800 border border-dark-700 text-dark-100 text-sm font-mono focus:outline-none focus:border-accent-500/50" />
+                            <button onClick={handleLinkServer}
+                              className="px-3 py-1.5 rounded-lg text-xs font-medium bg-accent-600 hover:bg-accent-500 text-white transition-colors">
+                              {t('remnawave_nginx.link')}
+                            </button>
+                          </div>
+                          <p className="text-[10px] text-dark-500">{t('remnawave_nginx.node_domain_hint')}</p>
+                        </>
+                      )}
                       <div className="flex items-start gap-2 px-2.5 py-2 rounded-lg text-[10px] text-yellow-400 bg-yellow-500/10 border border-yellow-500/20">
                         <AlertTriangle className="w-3 h-3 shrink-0 mt-0.5" /> {t('remnawave_nginx.link_replaces_config_warning')}
                       </div>
@@ -1029,7 +1059,11 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                           <AlertTriangle className="w-3.5 h-3.5 text-yellow-400/70 shrink-0" />
                         </Tooltip>
                       )}
-                      {editingDomainId === s.server_id ? (
+                      {wildcardDomain ? (
+                        <span className="flex items-center gap-1 text-xs font-mono text-dark-400">
+                          <Globe className="w-3 h-3" /> *.{wildcardDomain}
+                        </span>
+                      ) : editingDomainId === s.server_id ? (
                         <span className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
                           <input type="text" value={domainEdit} onChange={e => setDomainEdit(e.target.value)}
                             onKeyDown={e => { if (e.key === 'Enter') handleSaveDomain(s.server_id); if (e.key === 'Escape') setEditingDomainId(null) }}

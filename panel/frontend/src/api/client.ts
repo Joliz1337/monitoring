@@ -2364,6 +2364,7 @@ export interface RemnawaveNginxOptions {
   reject_default_server: boolean
   ssl_cert_path: string
   ssl_key_path: string
+  wildcard_domain: string
   fallback_url: string
   tls_session_tickets: boolean
   client_tcp_keepalive: string
@@ -2480,7 +2481,7 @@ export const remnawaveNginxApi = {
     api.get<{ ranges: string[] }>('/remnawave-nginx-profiles/cloudflare-ranges'),
   getAvailableServers: () =>
     api.get<RemnawaveNginxAvailableServer[]>('/remnawave-nginx-profiles/available-servers'),
-  linkServer: (profileId: number, serverId: number, domain: string) =>
+  linkServer: (profileId: number, serverId: number, domain: string | null) =>
     api.post(`/remnawave-nginx-profiles/${profileId}/servers/${serverId}`, { domain }),
   updateServerDomain: (profileId: number, serverId: number, domain: string) =>
     api.put(`/remnawave-nginx-profiles/${profileId}/servers/${serverId}/domain`, { domain }),
