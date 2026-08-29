@@ -1691,6 +1691,12 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 
 **Ограничение:** перезапуск backend-контейнера во время установки прерывает её.
 
+**Полуавтоматический режим (панель не может зайти по SSH):**
+
+Внизу формы автоустановки — сворачиваемый блок «Установите полуавтоматически» (`panel/frontend/src/components/servers/ManualInstallBlock.tsx`). В нём команда установки с теми же компонентами и настройками, что выбраны в форме (оптимизации/профиль/NIC-режим, WARP, Remnawave с сертификатом, HTTP-прокси, порт API, язык, канал): её собирает бэкенд — `POST /api/servers/deploy/command` принимает тот же `DeployRequest` и возвращает `{"command": "..."}` через общий `build_install_command()` из `deploy_service.py`; ничего не запускается, сертификат Remnawave при этом не сохраняется. Фронт перезапрашивает команду при изменении опций с паузой `MANUAL_COMMAND_DEBOUNCE_MS` (400 мс), только пока блок раскрыт.
+
+Оператор запускает команду на сервере сам и нажимает «Ждать ноду» — уходит обычный `POST /api/servers/deploy` с `manual: true`: SSH-креды не требуются, `DeployJobManager.start(..., wait_for_manual_install=True)` запускает `_run_manual()`, который вместо SSH-сессии ждёт появления ноды (`_await_node_then_finish()` — тот же путь, что после ребута из Hetzner Rescue, таймаут `NODE_ONLINE_TIMEOUT`) и затем выполняет постустановочные шаги, которые скриптом не ставятся: создание записи `Server`, SSH-пресет, смена пароля root, привязка к HAProxy/Firewall/DNAT-профилям. Лог, восстановление задачи после перезагрузки страницы и кнопка «Повторить» работают как у обычной установки. Доступен только для основного сервера формы (не для extra-карточек).
+
 **Менеджер фоновых задач (`DeployJobManager`):**
 
 Singleton-сервис `panel/backend/app/services/deploy_job_manager.py`. Управляет задачами установки нод:
@@ -1763,6 +1769,7 @@ Singleton-сервис `panel/backend/app/services/deploy_job_manager.py`. Уп�
 - `ssh_preset: str | None` — пресет защиты SSH: `None` / `recommended` / `maximum`
 - `new_root_password: str | None` — новый пароль root (минимум 8 символов)
 - `lang: "en" | "ru"` (`InstallerLanguage`, по умолчанию `en`) — язык интерфейса панели в момент запуска; всегда уезжает установщику как `MON_LANG` (явный `en` перебивает русский, оставшийся на сервере от прошлой ноды)
+- `manual: bool` — полуавтоматический режим: панель по SSH не ходит (пароль/ключ не обязательны), только ждёт ноду и выполняет постустановочные шаги
 
 Ответ: `{"job_id": "<hex>"}`.
 
@@ -1771,6 +1778,7 @@ Singleton-сервис `panel/backend/app/services/deploy_job_manager.py`. Уп�
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
 | POST | /api/servers/deploy | Запустить задачу деплоя → `{"job_id": "..."}` |
+| POST | /api/servers/deploy/command | Команда установки для ручного запуска из тех же полей → `{"command": "..."}` |
 | GET | /api/servers/deploy/jobs | Список задач: job_id, name, host, status, exit_code, server_id, error |
 | GET | /api/servers/deploy/{job_id}/stream | Переподключаемый NDJSON-стрим лога (реплей + live) |
 
@@ -1793,8 +1801,8 @@ Singleton-сервис `panel/backend/app/services/deploy_job_manager.py`. Уп�
 2. Перед перезагрузкой `install.sh` печатает маркер `MON_RESCUE_OS_INSTALLED_REBOOTING` в stdout.
 3. `deploy_service.py` обнаруживает маркер и интерпретирует последующий обрыв SSH не как ошибку, а как ожидаемое событие («сервер ушёл в ребут») — порождает событие `{"type": "done", "exit_code": 0, "rescue": True}`.
 4. `deploy_job_manager.py` при получении `rescue=True` вызывает `_on_rescue_reboot()` вместо обычного `_on_install_done()`.
-5. `_on_rescue_reboot()` создаёт транзиентный объект `Server` (без записи в БД, `pki_enabled=True`, `uses_shared_cert=True`) и ожидает ноду через `_wait_node_online()`.
-6. `_wait_node_online()` поллит `GET /api/version` ноды через `proxy_to_node` каждые 10 секунд; периодический лог (~раз в 30 с) служит keepalive для NDJSON-стрима; таймаут — 2400 секунд (40 минут, константа `RESCUE_ONLINE_TIMEOUT`).
+5. `_on_rescue_reboot()` → `_await_node_then_finish()` создаёт транзиентный объект `Server` (без записи в БД, `pki_enabled=True`, `uses_shared_cert=True`) и ожидает ноду через `_wait_node_online()`.
+6. `_wait_node_online()` поллит `GET /api/version` ноды через `proxy_to_node` каждые 10 секунд; периодический лог (~раз в 30 с) служит keepalive для NDJSON-стрима; таймаут — 2400 секунд (40 минут, константа `NODE_ONLINE_TIMEOUT`).
 7. При появлении ноды вызывается обычный `_on_install_done` — создание записи `Server`, SSH-пресет, смена пароля, привязка HAProxy/Firewall-профилей.
 8. При таймауте задача помечается ошибкой с пояснением; ОС на сервере уже установлена, нода должна появиться самостоятельно — оператор может проверить сервер вручную.
 
@@ -1806,8 +1814,8 @@ NODE_SECRET содержит долгоживущие PKI-сертификаты
 
 **Константы в `deploy_job_manager.py`:**
 - `RESCUE_REBOOT_MARKER = "MON_RESCUE_OS_INSTALLED_REBOOTING"` — маркер в stdout `install.sh` перед `reboot`
-- `RESCUE_ONLINE_TIMEOUT = 2400` — максимальное ожидание ноды после ребута (40 мин)
-- `RESCUE_POLL_INTERVAL = 10` — интервал опроса `GET /api/version` ноды (сек)
+- `NODE_ONLINE_TIMEOUT = 2400` — максимальное ожидание ноды, которую панель не ставит сама: после ребута из Rescue и в полуавтоматическом режиме (40 мин)
+- `NODE_POLL_INTERVAL = 10` — интервал опроса `GET /api/version` ноды (сек)
 
 **Постустановочная защита SSH и привязка профилей:**
 
@@ -1836,6 +1844,7 @@ Frontend сохраняет незавершённые job_id в `localStorage` 
 - При включении оптимизаций: переключатель профиля и переключатель NIC-режима
 - Выбор сертификата Remnawave: кликабельные чипы с именами
 - Раздел **«Защита SSH»**: переключатель пресета + смена пароля root
+- Внизу — блок полуавтоматической установки (`ManualInstallBlock`): команда для ручного запуска + кнопка «Ждать ноду»
 - При submit: POST startDeploy → job_id → подписка через `streamNdjsonGet`; живой лог в форме
 
 **Массовый авто-деплой (multi-target):**

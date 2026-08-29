@@ -810,6 +810,9 @@ export const serversApi = {
     api.delete<{ success: boolean; unfoldered: number }>(`/servers/folders/${encodeURIComponent(folderName)}`),
   startDeploy: (body: unknown) =>
     api.post<{ job_id: string }>('/servers/deploy', body),
+  // Команда установки для запуска руками — с теми же опциями, что в форме автоустановки
+  deployCommand: (body: unknown) =>
+    api.post<{ command: string }>('/servers/deploy/command', body),
   listDeployJobs: () =>
     api.get<{ jobs: DeployJobInfo[] }>('/servers/deploy/jobs'),
   remnawaveCerts: () =>

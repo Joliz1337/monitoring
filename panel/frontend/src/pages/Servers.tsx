@@ -54,6 +54,7 @@ import MigrationBanner from '../components/MigrationBanner'
 import DeployTargetFields, { DEPLOY_DEFAULTS, type DeployFormData } from '../components/servers/DeployTargetFields'
 import ExtraServerCard, { type ExtraTarget, type DeployStatus } from '../components/servers/ExtraServerCard'
 import InstallKeysPanel from '../components/servers/InstallKeysPanel'
+import ManualInstallBlock from '../components/servers/ManualInstallBlock'
 
 interface ServerFormData {
   name: string
@@ -101,6 +102,10 @@ const cleanLogLine = (line: string): string => {
 
 // Установка идёт в фоне на бэке — после успеха показываем результат и убираем
 const AUTO_HIDE_MS = 6000
+
+// Команда полуавтоматической установки пересобирается на бэке при каждом изменении
+// опций — пауза, чтобы не дёргать API на каждый символ в поле
+const MANUAL_COMMAND_DEBOUNCE_MS = 400
 
 // Незавершённые задачи установки храним в localStorage, чтобы переподключить
 // их лог после перезагрузки страницы (SSH держит бэкенд, фон не прерывается)
@@ -173,6 +178,9 @@ export default function Servers() {
   const [primaryStatus, setPrimaryStatus] = useState<DeployStatus>('idle')
   const [extras, setExtras] = useState<ExtraTarget[]>([])
   const [savingCert, setSavingCert] = useState(false)
+  const [manualOpen, setManualOpen] = useState(false)
+  const [manualCommand, setManualCommand] = useState<string | null>(null)
+  const [manualCommandLoading, setManualCommandLoading] = useState(false)
   const deployLogRef = useRef<HTMLPreElement>(null)
 
   const isDeploying = primaryStatus === 'running' || extras.some(e => e.status === 'running')
@@ -197,6 +205,8 @@ export default function Servers() {
     setDeployLog([])
     setPrimaryStatus('idle')
     setExtras([])
+    setManualOpen(false)
+    setManualCommand(null)
     setError('')
   }, [])
 
@@ -327,17 +337,19 @@ export default function Servers() {
     setIsSubmitting(false)
   }
 
+  // manual — полуавтоматический режим: SSH-доступ панели не нужен, остальное проверяется как обычно
   const validateDeployForm = (
     name: string,
     host: string,
     d: DeployFormData,
     proxy: string,
+    manual = false,
   ): string | null => {
     if (!name.trim()) return t('servers.server_name_placeholder')
     if (!host.trim()) return t('servers.server_host_placeholder')
     if (proxy.trim() && !PROXY_RE.test(proxy.trim())) return t('servers.proxy_invalid')
-    if (d.sshAuth === 'password' && !d.sshPassword.trim()) return t('servers.deploy_no_password')
-    if (d.sshAuth === 'key' && !d.sshPrivateKey.trim()) return t('servers.deploy_no_key')
+    if (!manual && d.sshAuth === 'password' && !d.sshPassword.trim()) return t('servers.deploy_no_password')
+    if (!manual && d.sshAuth === 'key' && !d.sshPrivateKey.trim()) return t('servers.deploy_no_key')
     if (d.installRemnawave) {
       const hasInline = d.remnaCertMode === 'inline' && d.remnaCertInline.trim()
       const hasSaved = d.remnaCertMode === 'saved' && d.remnaCertProfileId != null
@@ -469,8 +481,8 @@ export default function Servers() {
     return ok
   }
 
-  const deployPrimary = async (): Promise<boolean> => {
-    const body = buildDeployBody(formData.name, formData.host, formData.port, deploy, formData.proxy)
+  const deployPrimary = async (manual = false): Promise<boolean> => {
+    const body = { ...buildDeployBody(formData.name, formData.host, formData.port, deploy, formData.proxy), manual }
     let jobId: string
     try {
       const res = await serversApi.startDeploy(body)
@@ -611,6 +623,42 @@ export default function Servers() {
     if (ok) toast.success(t('servers.deploy_success'))
     else toast.error(t('servers.deploy_failed'))
   }
+
+  // Полуавтоматический режим: оператор сам запустил команду на сервере,
+  // панель ждёт ноду и применяет SSH-настройки/профили через её API
+  const waitManualPrimary = async () => {
+    const err = validateDeployForm(formData.name, formData.host, deploy, formData.proxy, true)
+    if (err) {
+      setError(err)
+      return
+    }
+    setError('')
+    setDeployLog([])
+    setPrimaryStatus('running')
+    const ok = await deployPrimary(true)
+    await fetchServersWithMetrics()
+    if (ok) toast.success(t('servers.deploy_success'))
+    else toast.error(t('servers.deploy_failed'))
+  }
+
+  // Команда для ручного запуска собирается на бэке из тех же опций, что и автоустановка
+  useEffect(() => {
+    if (!showForm || !deploy.enabled || !manualOpen) return
+    const body = buildDeployBody(formData.name, formData.host, formData.port, deploy, formData.proxy)
+    let cancelled = false
+    setManualCommandLoading(true)
+    const timer = setTimeout(() => {
+      serversApi.deployCommand(body)
+        .then(res => { if (!cancelled) setManualCommand(res.data.command) })
+        .catch(() => { if (!cancelled) setManualCommand(null) })
+        .finally(() => { if (!cancelled) setManualCommandLoading(false) })
+    }, MANUAL_COMMAND_DEBOUNCE_MS)
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showForm, manualOpen, deploy, formData.host, formData.port, i18n.language])
 
   const retryExtra = async (id: string) => {
     const target = extras.find(t => t.id === id)
@@ -1000,15 +1048,25 @@ export default function Servers() {
                         onSaveCert={handleSaveCert}
                         onDeleteCert={handleDeleteCert}
                         footerSlot={
-                          <button
-                            type="button"
-                            onClick={addExtra}
-                            disabled={isDeploying}
-                            className="btn btn-secondary text-sm w-full mt-2"
-                          >
-                            <PlusCircle className="w-4 h-4" />
-                            {t('servers.deploy_add_extra')}
-                          </button>
+                          <>
+                            <ManualInstallBlock
+                              open={manualOpen}
+                              onToggle={() => setManualOpen(v => !v)}
+                              command={manualCommand}
+                              loading={manualCommandLoading}
+                              onWait={waitManualPrimary}
+                              disabled={isDeploying}
+                            />
+                            <button
+                              type="button"
+                              onClick={addExtra}
+                              disabled={isDeploying}
+                              className="btn btn-secondary text-sm w-full mt-2"
+                            >
+                              <PlusCircle className="w-4 h-4" />
+                              {t('servers.deploy_add_extra')}
+                            </button>
+                          </>
                         }
                       />
                     </motion.div>

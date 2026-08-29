@@ -266,6 +266,12 @@
     "deploy_firewall_profile": "Firewall profile",
     "deploy_dnat_profile": "DNAT profile",
     "deploy_profile_none": "Do not bind",
+    "deploy_manual_title": "Panel can't reach the server over SSH? Install semi-automatically",
+    "deploy_manual_hint": "Run this command on the server as root — it already includes the components and settings selected above (optimizations, WARP, Remnawave, proxy, port, language).",
+    "deploy_manual_wait_hint": "SSH hardening, root password change and profile bindings are not done by the script — the panel applies them through the node API after installation. So once the command is running, click \"Wait for node\": the panel waits until the node responds, adds the server and finishes the rest.",
+    "deploy_manual_copy": "Copy command",
+    "deploy_manual_wait_btn": "Wait for node",
+    "deploy_manual_command_failed": "Could not build the command — check the filled-in fields",
     "restricted_badge": "Restricted",
     "open_dashboard": "Open server dashboard"
   },

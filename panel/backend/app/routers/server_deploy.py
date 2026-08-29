@@ -20,10 +20,10 @@ from app.auth import verify_auth
 from app.database import async_session_maker, get_db
 from app.models import RemnawaveCertProfile
 from app.services.deploy_job_manager import PostDeployOptions, get_deploy_job_manager
-from app.services.deploy_service import DeployParams, InstallerLanguage
+from app.services.deploy_service import DeployParams, InstallerLanguage, build_install_command
 from app.services.http_client import validate_proxy_input
 from app.services.net_utils import resolve_panel_ip
-from app.services.pki import build_installer_token
+from app.services.pki import PKIKeygenData, build_installer_token
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
@@ -153,6 +153,9 @@ class DeployRequest(BaseModel):
     dnat_profile_id: Optional[int] = None
     # Язык интерфейса панели — установщик и меню `mon` на ноде будут на нём же
     lang: InstallerLanguage = InstallerLanguage.EN
+    # Полуавтоматический режим: команду установки оператор запускает на сервере сам,
+    # панель по SSH не ходит — ждёт появления ноды и выполняет постустановочные шаги
+    manual: bool = False
 
     @field_validator('socks5_proxy')
     @classmethod
@@ -198,50 +201,38 @@ async def resolve_remnawave_cert(
     return cert
 
 
-@router.post("/deploy")
-async def deploy_server(
+def _installer_proxy_url(req: DeployRequest) -> Optional[str]:
+    if not req.install_proxy:
+        return None
+    proxy_url = (req.proxy_url or "").strip()
+    if not proxy_url:
+        raise HTTPException(400, "Не указан адрес прокси")
+    return proxy_url
+
+
+async def _build_deploy_params(
     req: DeployRequest,
-    request: Request,
-    _: dict = Depends(verify_auth),
-):
-    """Запустить фоновую установку ноды на удалённом сервере по SSH.
-
-    Возвращает job_id — лог читается отдельным запросом к /deploy/{job_id}/stream.
-    """
-    host = _validate_host(req.host)
-
-    if not req.ssh_password and not req.ssh_private_key:
-        raise HTTPException(400, "Укажите пароль или приватный SSH-ключ")
-
+    host: str,
+    pki: PKIKeygenData,
+    save_remnawave_cert: bool,
+) -> DeployParams:
+    """Параметры установки из запроса: общий NODE_SECRET, сертификат Remnawave,
+    HTTP-прокси установщика. Сохранение сертификата — только при реальном запуске."""
     remnawave_cert: Optional[str] = None
     if req.install_remnawave:
         remnawave_cert = await resolve_remnawave_cert(
             req.remnawave_cert_inline,
             req.remnawave_cert_profile_id,
-            save=req.save_remnawave_cert,
+            save=save_remnawave_cert and req.save_remnawave_cert,
             save_name=req.save_remnawave_cert_name,
         )
 
-    proxy_url: Optional[str] = None
-    if req.install_proxy:
-        proxy_url = (req.proxy_url or "").strip()
-        if not proxy_url:
-            raise HTTPException(400, "Не указан адрес прокси")
-
-    if req.ssh_preset and req.ssh_preset not in ("recommended", "maximum"):
-        raise HTTPException(400, "Некорректный SSH-пресет")
-    if req.new_root_password is not None and len(req.new_root_password) < 8:
-        raise HTTPException(400, "Пароль root: минимум 8 символов")
-
     panel_ip = await resolve_panel_ip()
-    node_secret = build_installer_token(request.app.state.pki, panel_ip=panel_ip)
-    server_url = f"https://{host}:{req.monitoring_port}"
-
-    params = DeployParams(
+    return DeployParams(
         host=host,
         ssh_port=req.ssh_port,
         ssh_user=req.ssh_user.strip() or "root",
-        node_secret=node_secret,
+        node_secret=build_installer_token(pki, panel_ip=panel_ip),
         panel_ip=panel_ip,
         node_api_port=req.monitoring_port,
         ssh_password=req.ssh_password,
@@ -253,11 +244,53 @@ async def deploy_server(
         nic_mode=req.nic_mode if req.nic_mode in ("multiqueue", "hybrid", "rps") else "auto",
         install_remnawave=req.install_remnawave,
         remnawave_cert=remnawave_cert,
-        proxy_url=proxy_url,
+        proxy_url=_installer_proxy_url(req),
         socks5_proxy=req.socks5_proxy,
         new_password=req.new_root_password,
         lang=req.lang,
     )
+
+
+@router.post("/deploy/command")
+async def deploy_command(
+    req: DeployRequest,
+    request: Request,
+    _: dict = Depends(verify_auth),
+):
+    """Команда установки для запуска руками — с теми же компонентами и
+    настройками, что выбраны в форме автоустановки. Ничего не запускает."""
+    params = await _build_deploy_params(
+        req, req.host.strip(), request.app.state.pki, save_remnawave_cert=False,
+    )
+    return {"command": build_install_command(params)}
+
+
+@router.post("/deploy")
+async def deploy_server(
+    req: DeployRequest,
+    request: Request,
+    _: dict = Depends(verify_auth),
+):
+    """Запустить фоновую установку ноды на удалённом сервере по SSH — или, в
+    полуавтоматическом режиме (`manual`), только ожидание ноды, которую оператор
+    ставит сам скопированной командой.
+
+    Возвращает job_id — лог читается отдельным запросом к /deploy/{job_id}/stream.
+    """
+    host = _validate_host(req.host)
+
+    if not req.manual and not req.ssh_password and not req.ssh_private_key:
+        raise HTTPException(400, "Укажите пароль или приватный SSH-ключ")
+
+    if req.ssh_preset and req.ssh_preset not in ("recommended", "maximum"):
+        raise HTTPException(400, "Некорректный SSH-пресет")
+    if req.new_root_password is not None and len(req.new_root_password) < 8:
+        raise HTTPException(400, "Пароль root: минимум 8 символов")
+
+    params = await _build_deploy_params(
+        req, host, request.app.state.pki, save_remnawave_cert=True,
+    )
+    server_url = f"https://{host}:{req.monitoring_port}"
 
     post_opts = PostDeployOptions(
         ssh_preset=req.ssh_preset,
@@ -267,7 +300,9 @@ async def deploy_server(
         dnat_profile_id=req.dnat_profile_id,
     )
 
-    job_id = get_deploy_job_manager().start(params, req.name, server_url, post_opts)
+    job_id = get_deploy_job_manager().start(
+        params, req.name, server_url, post_opts, wait_for_manual_install=req.manual,
+    )
     return {"job_id": job_id}
 
 

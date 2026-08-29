@@ -36,10 +36,11 @@ logger = logging.getLogger(__name__)
 FINISHED_TTL_SECONDS = 600
 # Защита от разрастания памяти на очень длинных логах установки
 LOG_BUFFER_LIMIT = 5000
-# Сколько ждать появления ноды после ребута из Rescue System (firstboot ставит
-# ОС → нода → docker pull может занять ~30 мин на медленном канале)
-RESCUE_ONLINE_TIMEOUT = 2400
-RESCUE_POLL_INTERVAL = 10
+# Сколько ждать появления ноды, которую панель не ставит сама: после ребута из
+# Rescue System (firstboot ставит ОС → нода → docker pull может занять ~30 мин
+# на медленном канале) и в полуавтоматическом режиме, где команду запускает оператор
+NODE_ONLINE_TIMEOUT = 2400
+NODE_POLL_INTERVAL = 10
 
 
 @dataclass
@@ -110,6 +111,7 @@ class DeployJobManager:
         name: str,
         server_url: str,
         post_opts: PostDeployOptions,
+        wait_for_manual_install: bool = False,
     ) -> str:
         self._cleanup_finished()
         job_id = uuid.uuid4().hex
@@ -121,7 +123,12 @@ class DeployJobManager:
             proxy_url=params.socks5_proxy,
         )
         self._jobs[job_id] = job
-        job.task = asyncio.create_task(self._run(job, params, post_opts))
+        runner = (
+            self._run_manual(job, post_opts)
+            if wait_for_manual_install
+            else self._run(job, params, post_opts)
+        )
+        job.task = asyncio.create_task(runner)
         return job_id
 
     def _emit(self, job: DeployJob, event: dict) -> None:
@@ -206,6 +213,29 @@ class DeployJobManager:
         self._emit(job, {"type": "done", "exit_code": 0, "server_id": server_id})
         self._finish(job, "success")
 
+    async def _run_manual(self, job: DeployJob, post_opts: PostDeployOptions) -> None:
+        """Полуавтоматический режим: команду установки оператор запускает на сервере
+        сам, панель по SSH не ходит — ждёт ноду и доделывает то, что скриптом не
+        ставится (SSH-пресет, пароль root, привязка к профилям)."""
+        try:
+            self._emit(job, {"type": "start", "host": job.host})
+            await self._await_node_then_finish(
+                job, post_opts,
+                intro="[panel] Жду, пока нода установится по скопированной команде "
+                      "(до 40 мин). После её появления применю SSH-настройки и профили...",
+                timeout_message="Нода не появилась за отведённое время (~40 мин). "
+                                "Проверьте, что команда установки выполнена на сервере, "
+                                "и нажмите «Ждать ноду» ещё раз.",
+            )
+        except asyncio.CancelledError:
+            self._finish(job, "error", "Ожидание отменено")
+            raise
+        except Exception as exc:  # noqa: BLE001 — верхняя граница фоновой задачи
+            logger.error("Manual deploy job %s failed: %s", job.id, exc)
+            self._emit(job, {"type": "error", "message": str(exc)})
+            self._emit(job, {"type": "done", "exit_code": 1, "server_id": None})
+            self._finish(job, "error", str(exc))
+
     async def _on_rescue_reboot(
         self,
         job: DeployJob,
@@ -213,13 +243,25 @@ class DeployJobManager:
         post_opts: PostDeployOptions,
     ) -> None:
         """Rescue-сценарий: ОС поставлена, сервер ушёл в ребут. Нода доустановится
-        сама (firstboot) с тем же NODE_SECRET. Ждём её появления, затем выполняем
+        сама (firstboot) с тем же NODE_SECRET."""
+        await self._await_node_then_finish(
+            job, post_opts,
+            intro="[panel] ОС установлена, сервер перезагружается. Нода доустановится "
+                  "автоматически — ожидаю её появления (до 40 мин)...",
+            timeout_message="Нода не появилась за отведённое время (~40 мин). "
+                            "ОС установлена — проверьте сервер вручную.",
+        )
+
+    async def _await_node_then_finish(
+        self,
+        job: DeployJob,
+        post_opts: PostDeployOptions,
+        intro: str,
+        timeout_message: str,
+    ) -> None:
+        """Ждёт появления ноды, которую панель не ставила сама, затем выполняет
         обычные постустановочные шаги (создание записи, SSH-пресет, профили)."""
-        self._emit(job, {
-            "type": "log",
-            "line": "[panel] ОС установлена, сервер перезагружается. Нода доустановится "
-                    "автоматически — ожидаю её появления (до 40 мин)...",
-        })
+        self._emit(job, {"type": "log", "line": intro})
 
         # Транзиентный объект (без записи в БД) — только чтобы поллить ноду по mTLS.
         # Реальную запись создаём через _create_server, когда нода ответит.
@@ -233,11 +275,9 @@ class DeployJobManager:
         )
 
         if not await self._wait_node_online(job, probe):
-            message = ("Нода не появилась за отведённое время (~40 мин). "
-                       "ОС установлена — проверьте сервер вручную.")
-            self._emit(job, {"type": "error", "message": message})
+            self._emit(job, {"type": "error", "message": timeout_message})
             self._emit(job, {"type": "done", "exit_code": 1, "server_id": None})
-            self._finish(job, "error", message)
+            self._finish(job, "error", timeout_message)
             return
 
         # Нода онлайн — дальше тот же путь, что и при обычном успешном деплое
@@ -246,7 +286,7 @@ class DeployJobManager:
     async def _wait_node_online(self, job: DeployJob, server: Server) -> bool:
         """Поллит /api/version ноды до ответа или таймаута. True — нода поднялась.
         Периодический лог служит и keepalive для NDJSON-стрима."""
-        deadline = time.time() + RESCUE_ONLINE_TIMEOUT
+        deadline = time.time() + NODE_ONLINE_TIMEOUT
         attempt = 0
         while time.time() < deadline:
             try:
@@ -265,7 +305,7 @@ class DeployJobManager:
             if attempt % 3 == 0:  # ~раз в 30 c
                 remaining = max(0, int(deadline - time.time()))
                 self._emit(job, {"type": "log", "line": f"[panel] Жду ноду... осталось ~{remaining // 60} мин"})
-            await asyncio.sleep(RESCUE_POLL_INTERVAL)
+            await asyncio.sleep(NODE_POLL_INTERVAL)
         return False
 
     async def _create_server(self, name: str, url: str, proxy_url: Optional[str]) -> int:
