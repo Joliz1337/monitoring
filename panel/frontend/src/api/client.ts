@@ -2365,6 +2365,9 @@ export interface RemnawaveNginxOptions {
   ssl_cert_path: string
   ssl_key_path: string
   fallback_url: string
+  tls_session_tickets: boolean
+  client_tcp_keepalive: string
+  access_log_enabled: boolean
 }
 
 export interface RemnawaveNginxProfile {

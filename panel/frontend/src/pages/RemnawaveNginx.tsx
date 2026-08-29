@@ -19,6 +19,7 @@ import {
 import { Tooltip } from '../components/ui/Tooltip'
 import { FAQIcon } from '../components/FAQ'
 
+const DEFAULT_CLIENT_KEEPALIVE = '30s:10s:3'
 
 function SyncStatusBadge({ status, online }: { status: string | null; online?: boolean }) {
   const { t } = useTranslation()
@@ -286,6 +287,23 @@ function OptionsSection({
           <Toggle value={opts.reject_default_server} onChange={v => upd({ reject_default_server: v })} label={t('remnawave_nginx.reject_default')} />
         </div>
         <p className="text-[10px] text-dark-500">{t('remnawave_nginx.acme_hint')}</p>
+      </div>
+
+      {/* TLS и соединения */}
+      <div className="space-y-2">
+        <Toggle value={opts.tls_session_tickets} onChange={v => upd({ tls_session_tickets: v })} label={t('remnawave_nginx.tls_session_tickets')} />
+        <p className="text-[10px] text-dark-500">{t('remnawave_nginx.tls_session_tickets_hint')}</p>
+        <Toggle value={opts.client_tcp_keepalive !== ''} onChange={v => upd({ client_tcp_keepalive: v ? DEFAULT_CLIENT_KEEPALIVE : '' })} label={t('remnawave_nginx.client_keepalive')} />
+        {opts.client_tcp_keepalive !== '' && (
+          <div className="pl-2 border-l-2 border-dark-700/40">
+            <label className="block text-xs text-dark-400 mb-1">{t('remnawave_nginx.client_keepalive_value')}</label>
+            <input type="text" value={opts.client_tcp_keepalive} onChange={e => upd({ client_tcp_keepalive: e.target.value })}
+              placeholder={DEFAULT_CLIENT_KEEPALIVE} className={`${inp} font-mono text-xs`} spellCheck={false} />
+          </div>
+        )}
+        <p className="text-[10px] text-dark-500">{t('remnawave_nginx.client_keepalive_hint')}</p>
+        <Toggle value={opts.access_log_enabled} onChange={v => upd({ access_log_enabled: v })} label={t('remnawave_nginx.access_log')} />
+        <p className="text-[10px] text-dark-500">{t('remnawave_nginx.access_log_hint')}</p>
       </div>
 
       {/* Пути сертификатов */}

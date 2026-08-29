@@ -96,6 +96,9 @@ _XHTTP_PATH_RE = re.compile(r"^/[A-Za-z0-9._/-]{1,128}$")
 _PROXY_PATH_RE = re.compile(r"^/[A-Za-z0-9._/-]*$")
 _TARGET_URL_RE = re.compile(r"^https?://[A-Za-z0-9.\-\[\]:]+(?::\d{1,5})?(?:/[^\s]*)?$")
 _ABS_PATH_RE = re.compile(r"^/[A-Za-z0-9.{}_/-]+$")
+# Формат so_keepalive у nginx: idle:intvl:cnt (число с суффиксом s/m, число с
+# суффиксом s/m, целое); cnt ограничен 1..100 отдельно
+_SO_KEEPALIVE_RE = re.compile(r"^(\d{1,4}[sm]):(\d{1,4}[sm]):(\d{1,3})$")
 _SERVER_NAME_RE = re.compile(r"^\s*server_name\s+([^\s;]+)", re.MULTILINE)
 
 _GRPC_BLOCK_RE = re.compile(
@@ -177,6 +180,16 @@ class ProfileOptions:
     # Куда проксировать «мусорный» трафик (всё, что не попало в правила)
     # и ошибки Xray (502/503/504) — снаружи сервер выглядит как обычный сайт
     fallback_url: str = ""
+    # В TLS 1.3 возобновление сессии работает только через тикеты: без них
+    # каждое переподключение мобильного клиента — полное рукопожатие,
+    # самая дорогая по CPU операция nginx
+    tls_session_tickets: bool = True
+    # so_keepalive на клиентских listen: сокеты клиентов держит nginx, а не
+    # Xray (keepalive в sockopt инбаунда действует только на loopback), и без
+    # него мёртвый клиент занимает worker_connection до grpc_read_timeout 1h.
+    # Пусто = выключено
+    client_tcp_keepalive: str = "30s:10s:3"
+    access_log_enabled: bool = False
 
     @classmethod
     def from_dict(cls, data: Optional[dict]) -> "ProfileOptions":
@@ -198,6 +211,9 @@ class ProfileOptions:
             "ssl_cert_path": self.ssl_cert_path,
             "ssl_key_path": self.ssl_key_path,
             "fallback_url": self.fallback_url,
+            "tls_session_tickets": self.tls_session_tickets,
+            "client_tcp_keepalive": self.client_tcp_keepalive,
+            "access_log_enabled": self.access_log_enabled,
         }
 
     @property
@@ -272,6 +288,13 @@ def validate_options(options: ProfileOptions) -> None:
     for path in (options.ssl_cert_path, options.ssl_key_path):
         if not _ABS_PATH_RE.match(path or ""):
             raise OptionsValidationError(f"Некорректный путь сертификата: {path!r}")
+    if options.client_tcp_keepalive:
+        match = _SO_KEEPALIVE_RE.match(options.client_tcp_keepalive)
+        if not match or not 1 <= int(match.group(3)) <= 100:
+            raise OptionsValidationError(
+                f"Некорректный TCP keepalive: {options.client_tcp_keepalive!r} — "
+                "ожидается idle:intvl:cnt, например 30s:10s:3 (cnt от 1 до 100)"
+            )
 
 
 def _grpc_block(rule: GrpcRule, ip_var: str, has_fallback: bool) -> str:
@@ -521,7 +544,9 @@ def generate_full_config(options: ProfileOptions, rules: list[Rule]) -> str:
     }}
 """)
 
-    pp_listen = (f"        listen {options.proxy_protocol_port} ssl proxy_protocol;\n"
+    so_keepalive = (f" so_keepalive={options.client_tcp_keepalive}"
+                    if options.client_tcp_keepalive else "")
+    pp_listen = (f"        listen {options.proxy_protocol_port} ssl proxy_protocol{so_keepalive};\n"
                  if options.proxy_protocol_enabled else "")
     pp_realip = (f"        set_real_ip_from {options.haproxy_ip or '0.0.0.0/0'};\n"
                  f"        real_ip_header proxy_protocol;\n\n"
@@ -533,7 +558,7 @@ def generate_full_config(options: ProfileOptions, rules: list[Rule]) -> str:
     # что отдала бы заглушка при прямом обращении — любой лишний или
     # продублированный заголовок выдаёт, что перед сайтом стоит прокси
     http_parts.append(f"""    server {{
-        listen 443 ssl;
+        listen 443 ssl{so_keepalive};
 {pp_listen}        http2 on;
         server_name {DOMAIN_PLACEHOLDER};
 
@@ -553,6 +578,9 @@ def generate_full_config(options: ProfileOptions, rules: list[Rule]) -> str:
 """)
 
     http_body = "\n".join(http_parts)
+    session_tickets = "on" if options.tls_session_tickets else "off"
+    # На VPN-ноде access_log — только бесполезная запись на диск в контейнере
+    access_log = "" if options.access_log_enabled else "    access_log off;\n"
     return f"""# Managed by monitoring panel (Remnawave nginx profile)
 worker_processes auto;
 worker_rlimit_nofile 65536;  {AUTO_MARKER}
@@ -568,7 +596,7 @@ events {{
 http {{
     include /etc/nginx/mime.types;
     default_type application/octet-stream;
-    server_tokens off;
+{access_log}    server_tokens off;
     sendfile on;
     tcp_nopush on;
     tcp_nodelay on;
@@ -599,7 +627,7 @@ http {{
     ssl_prefer_server_ciphers off;
     ssl_session_cache shared:SSL:20m;  {AUTO_MARKER}
     ssl_session_timeout 1d;
-    ssl_session_tickets off;
+    ssl_session_tickets {session_tickets};
 
 {http_body}}}
 """

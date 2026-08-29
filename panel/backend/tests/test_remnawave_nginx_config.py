@@ -144,7 +144,7 @@ class ContentTests(unittest.TestCase):
                            haproxy_ip="10.0.0.1"),
             GRPC_RULES,
         )
-        self.assertIn("listen 8449 ssl proxy_protocol;", config)
+        self.assertIn("listen 8449 ssl proxy_protocol", config)
         self.assertIn("set_real_ip_from 10.0.0.1;", config)
         self.assertIn("real_ip_header proxy_protocol;", config)
 
@@ -370,6 +370,73 @@ class XhttpTests(unittest.TestCase):
         self.assertIn("grpc_set_header X-Forwarded-For $client_ip;", config)
         self.assertIn("proxy_set_header X-Forwarded-For $client_ip;", config)
         self.assertNotIn("$proxy_add_x_forwarded_for", config)
+
+
+class TlsAndConnectionsTests(unittest.TestCase):
+    """Опции группы «TLS и соединения» живут вне маркеров и не влияют на парсер."""
+
+    @staticmethod
+    def _listen_lines(config: str) -> list[str]:
+        return [l.strip() for l in config.splitlines() if l.strip().startswith("listen ")]
+
+    def test_session_tickets_default_on(self):
+        # TLS 1.3 возобновляет сессию только через тикеты — без них каждое
+        # переподключение мобильного клиента стоит полного рукопожатия
+        config = generate_full_config(ProfileOptions(), GRPC_RULES)
+        self.assertIn("ssl_session_tickets on;", config)
+        self.assertNotIn("ssl_session_tickets off;", config)
+
+    def test_session_tickets_can_be_disabled(self):
+        config = generate_full_config(ProfileOptions(tls_session_tickets=False), GRPC_RULES)
+        self.assertIn("ssl_session_tickets off;", config)
+        self.assertNotIn("ssl_session_tickets on;", config)
+
+    def test_client_keepalive_on_all_tls_listens(self):
+        """Клиентские сокеты держит nginx, а не Xray: keepalive нужен на каждой
+        TLS-listen, включая PP-порт, но не на редиректе 80."""
+        config = generate_full_config(
+            ProfileOptions(proxy_protocol_enabled=True, proxy_protocol_port=8449), GRPC_RULES,
+        )
+        self.assertIn("listen 443 ssl so_keepalive=30s:10s:3;", config)
+        self.assertIn("listen 8449 ssl proxy_protocol so_keepalive=30s:10s:3;", config)
+        self.assertIn("listen 80;", self._listen_lines(config))
+
+    def test_client_keepalive_empty_omits_parameter(self):
+        config = generate_full_config(ProfileOptions(client_tcp_keepalive=""), GRPC_RULES)
+        self.assertNotIn("so_keepalive", config)
+        self.assertIn("listen 443 ssl;", config)
+
+    def test_client_keepalive_bad_format_rejected(self):
+        for bad in ("30:10", "abc", "30s:10s:0", "30s:10s:101", "30h:10s:3"):
+            with self.subTest(value=bad), self.assertRaises(OptionsValidationError):
+                validate_options(ProfileOptions(client_tcp_keepalive=bad))
+
+    def test_client_keepalive_accepts_minutes(self):
+        validate_options(ProfileOptions(client_tcp_keepalive="1m:30s:5"))
+
+    def test_access_log_disabled_by_default(self):
+        config = generate_full_config(ProfileOptions(), GRPC_RULES)
+        http_block = config[config.find("http {"):config.find("# === UPSTREAMS START")]
+        self.assertIn("access_log off;", http_block)
+
+    def test_access_log_can_be_enabled(self):
+        config = generate_full_config(ProfileOptions(access_log_enabled=True), GRPC_RULES)
+        http_block = config[config.find("http {"):config.find("# === UPSTREAMS START")]
+        self.assertNotIn("access_log", http_block)
+
+    def test_options_round_trip_dict(self):
+        options = ProfileOptions(
+            tls_session_tickets=False, client_tcp_keepalive="1m:30s:5", access_log_enabled=True,
+        )
+        self.assertEqual(ProfileOptions.from_dict(options.to_dict()), options)
+
+    def test_legacy_options_get_new_defaults(self):
+        # Старый профиль без новых ключей в JSON получает дефолты при
+        # следующем сохранении опций / «Вставить шаблон»
+        legacy = ProfileOptions.from_dict({"reject_default_server": True})
+        self.assertTrue(legacy.tls_session_tickets)
+        self.assertEqual(legacy.client_tcp_keepalive, "30s:10s:3")
+        self.assertFalse(legacy.access_log_enabled)
 
 
 class ValidationTests(unittest.TestCase):
