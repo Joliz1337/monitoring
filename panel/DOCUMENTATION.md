@@ -12,7 +12,7 @@
 - **IP Blocklist** — блокировка IP/CIDR через ipset с автообновлением списков из GitHub; источники и ручные правила защищены от приватных/служебных диапазонов (bogons)
 - **Remnawave** — интеграция с Remnawave Panel: пользователи, IP-адреса, HWID-устройства, обнаружение аномалий (только ACTIVE пользователи)
 - **Alerts** — Telegram-уведомления о состоянии серверов (offline, CPU, RAM, сеть, TCP)
-- **Billing** — отслеживание оплаты серверов: помесячная, ресурсная и Yandex Cloud модели; автосинхронизация баланса YC, уведомления об истечении через Telegram
+- **Billing** — отслеживание оплаты серверов: помесячная, ресурсная и облачная модели (Yandex Cloud, Selectel); автосинхронизация баланса у провайдера, сводка расходов, уведомления об истечении через Telegram
 - **Синхронизация времени** — автоматическая установка часового пояса и синхронизация NTP на всех серверах и хосте панели
 - **SSH Security** — управление SSH-безопасностью серверов: настройки sshd, fail2ban, SSH-ключи с пресетами безопасности и bulk-применением
 - **Infrastructure Tree** — двухуровневая иерархия серверов на странице Servers: Аккаунт (облачный email) → Проект (кластер) → Серверы; дерево встроено в существующую страницу, сворачивается, состояние сохраняется в localStorage
@@ -492,7 +492,7 @@ PK таблицы — `BigInteger` (не int32). При 500 нодах с инт
 
 **`billing_checker.py` — короткие сессии:**
 
-Настройки и список ID billing-серверов читаются в одной короткой сессии, которая закрывается до начала HTTP-вызовов к Yandex Cloud и Telegram. Каждый сервер обрабатывается в отдельной короткой сессии — сессия не висит idle-in-transaction на время внешних HTTP-запросов. YC-результаты сохраняются даже когда `paid_until` пустой.
+Настройки и список ID billing-серверов читаются в одной короткой сессии, которая закрывается до начала HTTP-вызовов к облачным провайдерам и Telegram. Каждый сервер обрабатывается в отдельной короткой сессии — сессия не висит idle-in-transaction на время внешних HTTP-запросов. Результаты синхронизации сохраняются даже когда `paid_until` пустой.
 
 ### Масштабируемость: снижение пиков ОЗУ при анализе аномалий (v10.14.5)
 
@@ -1508,49 +1508,58 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 ### Billing (Оплата серверов)
 
 Отслеживание сроков оплаты серверов. Три типа проектов:
-- **Помесячная** — указать количество дней до следующей оплаты.
-- **Ресурсная** — баланс + стоимость в месяц → автоматический расчёт оставшегося срока.
-- **Yandex Cloud** — автоматическая синхронизация баланса через Yandex Cloud Billing API. Дневное потребление рассчитывается по EMA (0.3 × new + 0.7 × old), оставшиеся дни = `(balance - threshold) / daily_cost`.
+- **Помесячная** (`monthly`) — указать количество дней до следующей оплаты.
+- **Ресурсная** (`resource`) — баланс + стоимость в месяц → автоматический расчёт оставшегося срока.
+- **Облачная** (`cloud`) — баланс и срок тянутся из API провайдера. Провайдер выбирается при создании (`cloud_provider`): `yandex_cloud` или `selectel`.
 
 Уведомления через Telegram бот из раздела Alerts.
 
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
+| GET | /api/billing/providers | Список облачных провайдеров и их требования к учётке |
 | GET | /api/billing/servers | Список серверов |
 | POST | /api/billing/servers | Добавить сервер |
 | PUT | /api/billing/servers/{id} | Обновить |
 | DELETE | /api/billing/servers/{id} | Удалить |
 | POST | /api/billing/servers/{id}/extend | Продлить (дни) |
 | POST | /api/billing/servers/{id}/topup | Пополнить баланс |
-| POST | /api/billing/servers/{id}/yc-sync | Ручная синхронизация баланса с Yandex Cloud |
+| POST | /api/billing/servers/{id}/sync | Синхронизация с облачным провайдером |
 | GET | /api/billing/settings | Настройки уведомлений |
 | PUT | /api/billing/settings | Обновить настройки |
 
-**Отображение остатка времени:** API отдаёт `days_left` с точностью до 2 знаков (`round(days_left, 2)`). Frontend `formatDays()` в `Billing.tsx` показывает дни и часы вместе (`12д 5ч`); если часов не осталось — только `12д`; если остаток меньше суток — только `5ч`; при истёкшем сроке — «Истёк». Единицы локализованы через `billing.short_days`/`billing.short_hours` в `ru.json`/`en.json`.
+**Сводка над списком** (`BillingSummary`) считается на фронте из уже загруженного списка, без отдельных запросов: расход в месяц, сумма балансов (без помесячных проектов — у них нет счёта) и сколько проектов истекает в ближайшие 7 дней. Суммы группируются по валютам и печатаются через `·` — рубли с долларами в одно число не складываются.
 
-**Предпросмотр итога в окнах «Продлить»/«Пополнить»:** компонент `PaidTotalHint` показывает «Итого будет оплачено: `<дни>` · до `<дата>`» и пересчитывается при каждом изменении ввода. Формулы повторяют бэкенд, чтобы предпросмотр совпадал с результатом после подтверждения: продление — `max(days_left, 0) + days` (эндпоинт `/extend` считает от `paid_until`, а при истёкшем сроке — от «сейчас»); пополнение — `((account_balance + amount) / monthly_cost) * 30` (`_compute_paid_until_resource` от уже «прожитого» баланса, который API отдаёт в `account_balance`). Дата — в часовом поясе панели (`useBillingDateFormat`). Ключи i18n: `billing.total_paid`, `billing.until`.
+**Отображение остатка времени:** API отдаёт `days_left` с точностью до 2 знаков (`round(days_left, 2)`). `formatDays()` показывает дни и часы вместе (`12д 5ч`); если часов не осталось — только `12д`; если остаток меньше суток — только `5ч`; при истёкшем сроке — «Истёк». Единицы локализованы через `billing.short_days`/`billing.short_hours`.
 
-**Калькулятор пополнения Yandex Cloud (`YcPlanModal`, кнопка «Рассчитать» в карточке YC):** баланс YC пополняется в самом облаке, поэтому это только расчёт, без записи в БД. Два связанных поля — «на сколько дней должно хватить» и «сумма пополнения»: правится одно, второе пересчитывается (`plan.by` помнит, какое поле ввёл пользователь). Формула повторяет `compute_yc_days_left`: `usable = account_balance - yc_balance_threshold`; из дней — `amount = max(0, days × yc_daily_cost - usable)`, из суммы — `days = max(0, (usable + amount) / yc_daily_cost)`. Если текущего баланса уже хватает — вместо суммы показывается «пополнять не нужно» и на сколько хватает сейчас; без `yc_daily_cost` (ещё не было синхронизации) калькулятор не показывается — только подсказка нажать «Обновить». Итог рендерит тот же `PaidTotalHint` с `labelKey="billing.yc_plan_lasts"`. Ключи i18n: `billing.yc_plan*`.
+**Предпросмотр итога в окнах «Продлить»/«Пополнить»:** компонент `PaidTotalHint` показывает «Итого будет оплачено: `<дни>` · до `<дата>`» и пересчитывается при каждом изменении ввода. Формулы повторяют бэкенд, чтобы предпросмотр совпадал с результатом после подтверждения: продление — `max(days_left, 0) + days` (эндпоинт `/extend` считает от `paid_until`, а при истёкшем сроке — от «сейчас»); пополнение — `((account_balance + amount) / monthly_cost) * 30` (`_compute_paid_until_resource` от уже «прожитого» баланса, который API отдаёт в `account_balance`). Дата — в часовом поясе панели (`useBillingDateFormat`).
 
-**Yandex Cloud — детали:**
-- Баланс получается через `GET https://billing.api.cloud.yandex.net/billing/v1/billingAccounts/{id}`
-- IAM-токен хранится в БД, но в API-ответах не возвращается — только `has_yc_token: bool`
-- Порог отрицательного баланса задаётся вручную (`yc_balance_threshold`)
-- Фоновая синхронизация запускается автоматически через `billing_checker.py`
-- Frontend: оранжевая иконка Cloud, кнопка "Обновить", поля для токена/billing account ID/порога
+**Калькулятор пополнения (`CloudPlanModal`, кнопка «Рассчитать» на облачной карточке):** облачный баланс пополняется у провайдера, поэтому это только расчёт, без записи в БД. Два связанных поля — «на сколько дней должно хватить» и «сумма пополнения»: правится одно, второе пересчитывается (`plan.by` помнит, какое поле ввёл пользователь). Формула повторяет `compute_days_left`: `usable = account_balance - cloud_balance_threshold`; из дней — `amount = max(0, days × cloud_daily_cost - usable)`, из суммы — `days = max(0, (usable + amount) / cloud_daily_cost)`. Если текущего баланса уже хватает — вместо суммы показывается «пополнять не нужно»; без `cloud_daily_cost` (ещё не было синхронизации) калькулятор не показывается — только подсказка нажать «Обновить».
 
-**Схема BillingServer (поля YC):**
-`yc_iam_token`, `yc_billing_account_id`, `yc_balance_threshold`, `yc_daily_cost`, `yc_last_sync_at`, `yc_last_error`
+**Слой облачных провайдеров (`app/services/cloud_billing/`):**
+
+Провайдер отдаёт только снимок аккаунта (`CloudSnapshot`: баланс, валюта, дневной расход или готовый прогноз, необязательное предупреждение). Всё остальное — общая часть `sync_cloud_balance(server, now)`: она же вызывается и роутером, и `billing_checker`, поэтому арифметика срока существует в одном месте.
+
+| Провайдер | Учётка | Баланс | Расход/прогноз |
+|-----------|--------|--------|----------------|
+| `yandex_cloud` | OAuth-токен + ID биллинг-аккаунта | REST `GET /billing/v1/billingAccounts/{id}` (Bearer IAM-токен, обмен в `yc_token_manager`) | gRPC `ConsumptionCoreService/GetBillingAccountUsageReport` за 3 дня → средний расход в сутки |
+| `selectel` | Статический API-ключ (заголовок `X-Token`) | `GET /v3/balances` — сумма `final_sum` по биллингам, делённая на 100 (API отдаёт копейки) | `GET /v2/billing/prediction` — часы жизни остатка; берётся ближайшее исчерпание среди ненулевых групп |
+
+Прогноз Selectel приводится к дневному расходу (`balance / days_left`) и пишется в `cloud_daily_cost` — дальше порог остатка, срок оплаты и калькулятор пополнения работают для обоих провайдеров по одной формуле `compute_days_left(balance, threshold, daily_cost)`. Ошибка получения расхода/прогноза не фатальна: баланс уже сохранён, в `cloud_last_error` остаётся причина, срок показывается как неизвестный. Ошибки провайдера — доменные `CloudBillingError`/`CloudAuthError`; запросы к Selectel повторяются 3 раза с экспоненциальной паузой на 5xx, на 4xx не повторяются.
+
+**Схема BillingServer (облачные поля):**
+`cloud_provider`, `cloud_credential` (шифруется `EncryptedString`, в API не возвращается — только `has_cloud_credential: bool`), `cloud_account_id`, `cloud_balance_threshold`, `cloud_daily_cost`, `cloud_last_sync_at`, `cloud_last_error`.
 
 **Файлы:**
 - `panel/backend/app/routers/billing.py` — API роутер
-- `panel/backend/app/services/billing_checker.py` — фоновая проверка сроков + Telegram + синхронизация YC
-- `panel/backend/app/services/yandex_billing.py` — клиент Yandex Cloud Billing API (баланс, EMA потребления, дней осталось)
-- `panel/backend/app/models.py` — `BillingServer` (включая поля YC), `BillingSettings`
-- `panel/backend/app/database.py` — миграция `_migrate_yandex_cloud_billing()`
-- `panel/frontend/src/pages/Billing.tsx` — вкладка оплаты (AddModal, EditModal, ProjectCard с поддержкой YC)
+- `panel/backend/app/services/billing_checker.py` — фоновая проверка сроков + Telegram + синхронизация облаков
+- `panel/backend/app/services/cloud_billing/` — `base.py` (контракт, `compute_days_left`), `yandex.py`, `selectel.py`, `__init__.py` (реестр `PROVIDERS`, `sync_cloud_balance`)
+- `panel/backend/app/services/yc_token_manager.py` — обмен OAuth-токена Yandex на IAM-токен с кэшем
+- `panel/backend/app/models.py` — `BillingServer`, `BillingSettings`
+- `panel/backend/app/database.py` — миграция `_migrate_cloud_billing()` (`yc_*` → `cloud_*`, тип `yandex_cloud` → `cloud`)
+- `panel/backend/tests/test_cloud_billing.py` — разбор ответов Selectel, расчёт срока, реестр провайдеров
+- `panel/frontend/src/pages/Billing.tsx` — страница: список, папки, drag-and-drop, настройки уведомлений
+- `panel/frontend/src/components/billing/` — `providers.ts` (реестр провайдеров: поля учётки, ссылки, цвета), `ProjectCard.tsx`, `ServerModals.tsx` (общая форма Add/Edit + продление/пополнение/калькулятор), `FolderModals.tsx`, `BillingSummary.tsx`, `shared.tsx` (формат дат, суммы по валютам, Overlay/Field/ToggleRow)
 - `panel/frontend/src/api/client.ts` — интерфейс `BillingServerData` и API методы
-- `panel/frontend/src/locales/ru.json`, `en.json` — переводы для YC полей
 
 ### Синхронизация времени
 

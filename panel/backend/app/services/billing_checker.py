@@ -9,6 +9,7 @@ from sqlalchemy import select
 
 from app.database import async_session
 from app.models import BillingServer, BillingSettings, AlertSettings, PanelSettings
+from app.services.cloud_billing import CloudBillingError, sync_cloud_balance
 
 logger = logging.getLogger(__name__)
 
@@ -95,8 +96,11 @@ class BillingChecker:
             if not srv:
                 return
 
-            if srv.billing_type == "yandex_cloud":
-                await self._sync_yandex_cloud(srv, now)
+            if srv.billing_type == "cloud":
+                try:
+                    await sync_cloud_balance(srv, now)
+                except CloudBillingError:
+                    pass  # причина уже записана в cloud_last_error и залогирована
 
             elif srv.billing_type == "resource" and srv.monthly_cost and srv.monthly_cost > 0:
                 if srv.balance_updated_at and srv.account_balance is not None:
@@ -136,55 +140,6 @@ class BillingChecker:
 
             await db.commit()
 
-    async def _sync_yandex_cloud(self, srv, now: datetime):
-        from app.services.yc_token_manager import get_yc_token_manager, YCTokenError
-        from app.services.yandex_billing import (
-            fetch_yc_balance,
-            fetch_yc_daily_cost,
-            compute_yc_days_left,
-        )
-
-        if not srv.yc_oauth_token or not srv.yc_billing_account_id:
-            return
-
-        try:
-            iam_token = await get_yc_token_manager().get_iam_token(srv.yc_oauth_token)
-        except YCTokenError as e:
-            srv.yc_last_error = str(e)
-            logger.warning(f"YC token error for '{srv.name}': {e}")
-            return
-
-        balance, currency, error = await fetch_yc_balance(
-            iam_token, srv.yc_billing_account_id
-        )
-        if error:
-            srv.yc_last_error = error
-            logger.warning(f"YC sync failed for '{srv.name}': {error}")
-            return
-
-        daily_cost, cost_err = await fetch_yc_daily_cost(
-            iam_token, srv.yc_billing_account_id,
-        )
-        if cost_err:
-            logger.warning(f"YC consumption API for '{srv.name}': {cost_err}")
-
-        srv.account_balance = balance
-        srv.balance_updated_at = now
-        srv.currency = currency
-        if daily_cost is not None:
-            srv.yc_daily_cost = daily_cost
-        srv.yc_last_sync_at = now
-        srv.yc_last_error = cost_err if not daily_cost and cost_err else None
-
-        threshold = srv.yc_balance_threshold or 0
-        effective_cost = srv.yc_daily_cost
-        days_left = compute_yc_days_left(balance, threshold, effective_cost)
-        if days_left is not None:
-            srv.paid_until = now + timedelta(days=days_left)
-            srv.monthly_cost = effective_cost * 30 if effective_cost else None
-        else:
-            srv.paid_until = None
-
     def _format_dt_in_tz(self, dt: datetime, tz_name: Optional[str]) -> str:
         try:
             if tz_name:
@@ -218,8 +173,8 @@ class BillingChecker:
             emoji = "\U0001f7e0"
             status = f"{days_left:.1f}d left"
 
-        billing_labels = {"monthly": "monthly", "resource": "resource", "yandex_cloud": "Yandex Cloud"}
-        billing_label = billing_labels.get(srv.billing_type, srv.billing_type)
+        billing_labels = {"monthly": "monthly", "resource": "resource"}
+        billing_label = billing_labels.get(srv.billing_type) or (srv.cloud_provider or srv.billing_type)
         lines = [
             f"{emoji} <b>Billing Alert</b>",
             "",
@@ -227,12 +182,12 @@ class BillingChecker:
             f"\u23f0 {status}",
         ]
 
-        if srv.billing_type in ("resource", "yandex_cloud") and srv.account_balance is not None:
+        if srv.billing_type in ("resource", "cloud") and srv.account_balance is not None:
             lines.append(f"\U0001f4b0 Balance: {srv.account_balance:.2f} {srv.currency or 'RUB'}")
-            if srv.billing_type == "yandex_cloud" and srv.yc_daily_cost:
-                lines.append(f"\U0001f4c9 Avg cost: {srv.yc_daily_cost:.2f}/day")
-                if srv.yc_balance_threshold:
-                    lines.append(f"\U0001f6a8 Threshold: {srv.yc_balance_threshold:.2f}")
+            if srv.billing_type == "cloud" and srv.cloud_daily_cost:
+                lines.append(f"\U0001f4c9 Avg cost: {srv.cloud_daily_cost:.2f}/day")
+                if srv.cloud_balance_threshold:
+                    lines.append(f"\U0001f6a8 Threshold: {srv.cloud_balance_threshold:.2f}")
             elif srv.monthly_cost:
                 lines.append(f"\U0001f4b8 Cost: {srv.monthly_cost:.2f}/mo")
 

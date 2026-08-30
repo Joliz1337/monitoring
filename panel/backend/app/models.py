@@ -743,7 +743,7 @@ class BillingServer(Base):
     
     id = Column(Integer, primary_key=True)
     name = Column(String(200), nullable=False)
-    billing_type = Column(String(20), nullable=False)  # 'monthly' | 'resource' | 'yandex_cloud'
+    billing_type = Column(String(20), nullable=False)  # 'monthly' | 'resource' | 'cloud'
     
     paid_until = Column(DateTime(timezone=True), nullable=True)
     
@@ -757,13 +757,14 @@ class BillingServer(Base):
     
     last_notified_days = Column(Text, nullable=True)  # JSON: which day-thresholds already sent
 
-    # Yandex Cloud
-    yc_oauth_token = Column(String(200), nullable=True)
-    yc_billing_account_id = Column(String(100), nullable=True)
-    yc_balance_threshold = Column(Float, nullable=True, default=0)
-    yc_daily_cost = Column(Float, nullable=True)
-    yc_last_sync_at = Column(DateTime(timezone=True), nullable=True)
-    yc_last_error = Column(String(500), nullable=True)
+    # Облачный провайдер (billing_type='cloud'): Yandex Cloud, Selectel
+    cloud_provider = Column(String(30), nullable=True)
+    cloud_credential = Column(EncryptedString, nullable=True)
+    cloud_account_id = Column(String(100), nullable=True)
+    cloud_balance_threshold = Column(Float, nullable=True, default=0)
+    cloud_daily_cost = Column(Float, nullable=True)
+    cloud_last_sync_at = Column(DateTime(timezone=True), nullable=True)
+    cloud_last_error = Column(String(500), nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())

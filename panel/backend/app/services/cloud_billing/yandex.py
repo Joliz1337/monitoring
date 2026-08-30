@@ -1,3 +1,9 @@
+"""Yandex Cloud: остаток по REST, средний дневной расход по gRPC.
+
+Готового Python-SDK биллинга в зависимостях панели нет, а тянуть его ради одного
+метода — лишний вес, поэтому запрос отчёта потребления сериализуется в protobuf
+вручную по схеме consumption_core_service.proto.
+"""
 import asyncio
 import logging
 from concurrent.futures import ThreadPoolExecutor
@@ -6,7 +12,14 @@ from typing import Optional
 
 import grpc
 
+from app.services.cloud_billing.base import (
+    CloudAuthError,
+    CloudBillingError,
+    CloudProvider,
+    CloudSnapshot,
+)
 from app.services.http_client import get_external_client
+from app.services.yc_token_manager import YCTokenError, get_yc_token_manager
 
 logger = logging.getLogger(__name__)
 
@@ -16,42 +29,9 @@ YC_USAGE_METHOD = (
     "/yandex.cloud.billing.usage_records.v1.ConsumptionCoreService"
     "/GetBillingAccountUsageReport"
 )
+CONSUMPTION_WINDOW_DAYS = 3
 
 _grpc_pool = ThreadPoolExecutor(max_workers=2)
-
-
-# ── REST: баланс ──────────────────────────────────────────────────
-
-
-async def fetch_yc_balance(
-    iam_token: str,
-    billing_account_id: str,
-) -> tuple[Optional[float], Optional[str], Optional[str]]:
-    """(balance, currency, error) — None/None/msg при ошибке."""
-    url = f"{YC_BILLING_BASE}/billingAccounts/{billing_account_id}"
-    headers = {"Authorization": f"Bearer {iam_token}"}
-
-    try:
-        client = get_external_client()
-        resp = await client.get(url, headers=headers, timeout=15.0)
-
-        if resp.status_code == 401:
-            return None, None, "Auth failed: invalid or expired IAM token"
-        if resp.status_code == 403:
-            return None, None, "Forbidden: need billing.accounts.viewer role"
-        if resp.status_code == 404:
-            return None, None, f"Billing account {billing_account_id} not found"
-        if resp.status_code != 200:
-            return None, None, f"HTTP {resp.status_code}: {resp.text[:200]}"
-
-        data = resp.json()
-        balance = float(data.get("balance", "0"))
-        currency = data.get("currency", "RUB")
-        return balance, currency, None
-
-    except Exception as e:
-        logger.error(f"YC billing API error for {billing_account_id}: {e}")
-        return None, None, str(e)
 
 
 # ── Protobuf: ручная сериализация ─────────────────────────────────
@@ -97,30 +77,24 @@ def _read_varint(data: bytes, pos: int) -> tuple[int, int]:
 
 
 def _pb_string(field: int, value: str) -> bytes:
-    """Encode string field (wire type 2)."""
     raw = value.encode("utf-8")
     return _varint(field << 3 | 2) + _varint(len(raw)) + raw
 
 
 def _pb_submessage(field: int, inner: bytes) -> bytes:
-    """Encode submessage field (wire type 2)."""
     return _varint(field << 3 | 2) + _varint(len(inner)) + inner
 
 
 def _pb_varint_field(field: int, value: int) -> bytes:
-    """Encode varint field (wire type 0)."""
     return _varint(field << 3) + _varint(value)
 
 
 def _pb_timestamp(field: int, dt: datetime) -> bytes:
-    """Encode google.protobuf.Timestamp as submessage."""
-    secs = int(dt.timestamp())
-    inner = _pb_varint_field(1, secs)  # Timestamp.seconds = field 1
+    inner = _pb_varint_field(1, int(dt.timestamp()))  # Timestamp.seconds = field 1
     return _pb_submessage(field, inner)
 
 
 def _build_usage_request(account_id: str, start: datetime, end: datetime) -> bytes:
-    """UsageReportRequest: account_id(1) + start_date(2) + end_date(3) + aggregation_period(10)=DAY(1)."""
     msg = _pb_string(1, account_id)
     msg += _pb_timestamp(2, start)
     msg += _pb_timestamp(3, end)
@@ -129,7 +103,7 @@ def _build_usage_request(account_id: str, start: datetime, end: datetime) -> byt
 
 
 def _extract_expense(data: bytes) -> Optional[str]:
-    """Извлечь expense (field 4) → StringDecimal.value (field 1) из response."""
+    """expense (field 4) → StringDecimal.value (field 1)."""
     pos = 0
     while pos < len(data):
         tag, pos = _read_varint(data, pos)
@@ -160,7 +134,7 @@ def _extract_expense(data: bytes) -> Optional[str]:
 
 
 def _extract_string_value(data: bytes) -> Optional[str]:
-    """Извлечь field 1 (string) из StringDecimal submessage."""
+    """field 1 (string) из StringDecimal submessage."""
     pos = 0
     while pos < len(data):
         tag, pos = _read_varint(data, pos)
@@ -183,16 +157,12 @@ def _extract_string_value(data: bytes) -> Optional[str]:
     return None
 
 
-# ── gRPC: потребление за последние N дней ─────────────────────────
-
-
 def _sync_fetch_consumption(
     iam_token: str,
     account_id: str,
     start_seconds: int,
     end_seconds: int,
 ) -> Optional[str]:
-    """Синхронный gRPC вызов → строка expense."""
     creds = grpc.composite_channel_credentials(
         grpc.ssl_channel_credentials(),
         grpc.access_token_call_credentials(iam_token),
@@ -213,28 +183,81 @@ def _sync_fetch_consumption(
         channel.close()
 
 
-async def fetch_yc_daily_cost(
-    iam_token: str,
-    billing_account_id: str,
-    days: int = 3,
-) -> tuple[Optional[float], Optional[str]]:
-    """Средний дневной расход за последние N дней через gRPC.
+class YandexCloudProvider(CloudProvider):
+    id = "yandex_cloud"
+    default_currency = "RUB"
+    requires_account_id = True
 
-    Returns: (daily_cost, error)
-    """
-    now = datetime.now(timezone.utc)
-    start = now - timedelta(days=days)
+    async def fetch(self, credential: str, account_id: Optional[str]) -> CloudSnapshot:
+        if not account_id:
+            raise CloudBillingError("Billing account ID is required")
 
-    loop = asyncio.get_event_loop()
-    try:
-        expense_str = await loop.run_in_executor(
-            _grpc_pool,
-            _sync_fetch_consumption,
-            iam_token,
-            billing_account_id,
-            int(start.timestamp()),
-            int(now.timestamp()),
+        iam_token = await self._iam_token(credential)
+        balance, currency = await self._fetch_balance(iam_token, account_id)
+        daily_cost, warning = await self._fetch_daily_cost(iam_token, account_id)
+
+        return CloudSnapshot(
+            balance=balance,
+            currency=currency,
+            daily_cost=daily_cost,
+            warning=warning,
         )
+
+    async def _iam_token(self, oauth_token: str) -> str:
+        try:
+            return await get_yc_token_manager().get_iam_token(oauth_token)
+        except YCTokenError as e:
+            raise CloudAuthError(str(e)) from e
+
+    async def _fetch_balance(self, iam_token: str, account_id: str) -> tuple[float, str]:
+        url = f"{YC_BILLING_BASE}/billingAccounts/{account_id}"
+        try:
+            resp = await get_external_client().get(
+                url,
+                headers={"Authorization": f"Bearer {iam_token}"},
+                timeout=15.0,
+            )
+        except Exception as e:
+            logger.warning("YC balance request failed for %s: %s", account_id, e)
+            raise CloudBillingError(str(e)) from e
+
+        if resp.status_code == 401:
+            raise CloudAuthError("Auth failed: invalid or expired IAM token")
+        if resp.status_code == 403:
+            raise CloudAuthError("Forbidden: need billing.accounts.viewer role")
+        if resp.status_code == 404:
+            raise CloudBillingError(f"Billing account {account_id} not found")
+        if resp.status_code != 200:
+            raise CloudBillingError(f"HTTP {resp.status_code}: {resp.text[:200]}")
+
+        data = resp.json()
+        return float(data.get("balance", "0")), data.get("currency") or self.default_currency
+
+    async def _fetch_daily_cost(
+        self, iam_token: str, account_id: str
+    ) -> tuple[Optional[float], Optional[str]]:
+        """Средний расход в сутки за окно потребления; ошибка здесь не фатальна —
+        баланс уже получен, без расхода теряется только прогноз."""
+        now = datetime.now(timezone.utc)
+        start = now - timedelta(days=CONSUMPTION_WINDOW_DAYS)
+
+        try:
+            expense_str = await asyncio.get_event_loop().run_in_executor(
+                _grpc_pool,
+                _sync_fetch_consumption,
+                iam_token,
+                account_id,
+                int(start.timestamp()),
+                int(now.timestamp()),
+            )
+        except grpc.RpcError as e:
+            msg = f"gRPC {e.code()}: {e.details()}"
+            logger.warning("YC consumption API failed for %s: %s", account_id, msg)
+            return None, msg
+        except Exception as e:
+            logger.error("YC consumption error for %s: %s", account_id, e)
+            return None, str(e)
+
         if expense_str is None:
             return None, "No expense data in response"
 
@@ -242,32 +265,4 @@ async def fetch_yc_daily_cost(
         if total <= 0:
             return None, None
 
-        daily = round(total / days, 4)
-        return daily, None
-
-    except grpc.RpcError as e:
-        msg = f"gRPC {e.code()}: {e.details()}"
-        logger.warning(f"YC consumption API failed for {billing_account_id}: {msg}")
-        return None, msg
-    except Exception as e:
-        logger.error(f"YC consumption error for {billing_account_id}: {e}")
-        return None, str(e)
-
-
-# ── Расчёты ───────────────────────────────────────────────────────
-
-
-def compute_yc_days_left(
-    balance: float,
-    threshold: float,
-    daily_cost: Optional[float],
-) -> Optional[float]:
-    """days_left = (balance - threshold) / daily_cost."""
-    if daily_cost is None or daily_cost <= 0:
-        return None
-
-    usable = balance - threshold
-    if usable <= 0:
-        return 0.0
-
-    return round(usable / daily_cost, 1)
+        return round(total / CONSUMPTION_WINDOW_DAYS, 4), None

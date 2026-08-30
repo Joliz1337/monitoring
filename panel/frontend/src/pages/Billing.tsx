@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
+import { useEffect, useState, useCallback, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
@@ -14,7 +14,6 @@ import {
   DragStartEvent,
   DragOverEvent,
   DragOverlay,
-  useDroppable,
   type CollisionDetection,
 } from '@dnd-kit/core'
 import {
@@ -23,20 +22,27 @@ import {
   sortableKeyboardCoordinates,
   rectSortingStrategy,
   verticalListSortingStrategy,
-  useSortable,
 } from '@dnd-kit/sortable'
-import { CSS } from '@dnd-kit/utilities'
 import {
-  CreditCard, Plus, Pencil, Trash2, Clock, ArrowUpCircle,
-  Wallet, X, ChevronDown, ChevronRight, Bell, Loader2,
-  CalendarClock, DollarSign, Box, FolderPlus, Folder, FolderOpen, MoveRight,
-  CalendarX2, GripVertical, Cloud, RefreshCw, Calculator,
+  CreditCard, Plus, Pencil, Trash2, Bell, ChevronDown, ChevronRight,
+  Box, FolderPlus, Folder, FolderOpen, GripVertical, RefreshCw, Loader2,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { billingApi, BillingServerData, BillingSettingsData } from '../api/client'
-import { useSettingsStore } from '../stores/settingsStore'
 import { Tooltip } from '../components/ui/Tooltip'
-import { FAQIcon, type FAQScreen } from '../components/FAQ'
+import { FAQIcon } from '../components/FAQ'
+import { BillingSummary } from '../components/billing/BillingSummary'
+import { ProjectCard } from '../components/billing/ProjectCard'
+import {
+  AddModal, CloudPlanModal, EditModal, ExtendModal, TopupModal,
+} from '../components/billing/ServerModals'
+import {
+  CreateFolderModal, MoveToFolderModal, RenameFolderModal,
+  SortableFolderItem, UnfolderDropZone,
+} from '../components/billing/FolderModals'
+import {
+  ToggleRow, formatDays, sortServers, statusColor, useBillingDateFormat,
+} from '../components/billing/shared'
 
 type ModalState =
   | { kind: 'none' }
@@ -44,7 +50,7 @@ type ModalState =
   | { kind: 'edit'; server: BillingServerData }
   | { kind: 'extend'; server: BillingServerData }
   | { kind: 'topup'; server: BillingServerData }
-  | { kind: 'yc-plan'; server: BillingServerData }
+  | { kind: 'plan'; server: BillingServerData }
   | { kind: 'create-folder' }
   | { kind: 'rename-folder'; folderName: string }
   | { kind: 'move-to-folder'; server: BillingServerData }
@@ -52,8 +58,8 @@ type ModalState =
 const COLLAPSED_KEY = 'billing_collapsed_folders'
 const FOLDER_ORDER_KEY = 'billing_folder_order'
 const SERVER_ORDER_KEY = 'billing_server_order'
-const MS_PER_DAY = 86_400_000
-const QUICK_DAYS = [7, 14, 30, 60, 90]
+const NOTIFY_DAY_OPTIONS = [1, 3, 7, 14, 30]
+const CHECK_INTERVAL_OPTIONS = [30, 60, 120, 360, 720]
 
 function loadCollapsed(): Set<string> {
   try {
@@ -86,33 +92,6 @@ function saveServerOrder(order: number[]) {
   localStorage.setItem(SERVER_ORDER_KEY, JSON.stringify(order))
 }
 
-function useBillingDateFormat() {
-  const tz = useSettingsStore(s => s.getEffectiveTimezone)()
-
-  const formatDate = useCallback((isoDate: string) => {
-    try {
-      return new Date(isoDate).toLocaleDateString(undefined, {
-        timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
-      })
-    } catch {
-      return new Date(isoDate).toLocaleDateString()
-    }
-  }, [tz])
-
-  const formatDateTime = useCallback((isoDate: string) => {
-    try {
-      return new Date(isoDate).toLocaleString(undefined, {
-        timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
-        hour: '2-digit', minute: '2-digit',
-      })
-    } catch {
-      return new Date(isoDate).toLocaleString()
-    }
-  }, [tz])
-
-  return { formatDate, formatDateTime }
-}
-
 export default function Billing() {
   const { t } = useTranslation()
   const { formatDateTime: formatBillingDateTime } = useBillingDateFormat()
@@ -129,6 +108,7 @@ export default function Billing() {
   const [dragType, setDragType] = useState<'server' | 'folder' | null>(null)
   const [activeId, setActiveId] = useState<string | number | null>(null)
   const [overFolderId, setOverFolderId] = useState<string | null>(null)
+  const [syncingIds, setSyncingIds] = useState<Set<number>>(new Set())
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
@@ -174,6 +154,11 @@ export default function Billing() {
     for (const s of servers) map.set(s.id, s.folder || null)
     return map
   }, [servers])
+
+  const cloudServers = useMemo(
+    () => servers.filter(s => s.billing_type === 'cloud'),
+    [servers]
+  )
 
   const toggleCollapsed = useCallback((folder: string) => {
     setCollapsed(prev => {
@@ -375,15 +360,43 @@ export default function Billing() {
     }
   }
 
-  const handleSync = async (server: BillingServerData) => {
+  const markSyncing = (id: number, active: boolean) => {
+    setSyncingIds(prev => {
+      const next = new Set(prev)
+      if (active) next.add(id)
+      else next.delete(id)
+      return next
+    })
+  }
+
+  const syncServer = async (id: number): Promise<boolean> => {
+    markSyncing(id, true)
     try {
-      const res = await billingApi.syncYc(server.id)
-      setServers(prev => prev.map(s => s.id === server.id ? res.data : s))
-      toast.success(t('billing.yc_synced'))
+      const res = await billingApi.syncServer(id)
+      setServers(prev => prev.map(s => s.id === id ? res.data : s))
+      return true
     } catch (e: unknown) {
       const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
       toast.error(detail || t('common.action_failed'))
+      return false
+    } finally {
+      markSyncing(id, false)
     }
+  }
+
+  const handleSync = async (server: BillingServerData) => {
+    if (await syncServer(server.id)) toast.success(t('billing.cloud_synced'))
+  }
+
+  // Последовательно, а не пачкой: у провайдеров лимиты на запросы, а обновление —
+  // операция не срочная, зато каждая ошибка остаётся привязанной к своему аккаунту
+  const handleSyncAll = async () => {
+    let failed = 0
+    for (const srv of cloudServers) {
+      if (!await syncServer(srv.id)) failed++
+    }
+    if (failed === 0) toast.success(t('billing.cloud_synced'))
+    else toast.error(t('billing.sync_all_failed', { count: failed }))
   }
 
   const handleSaveSettings = async (patch: Partial<BillingSettingsData>) => {
@@ -427,13 +440,14 @@ export default function Billing() {
         t={t}
         formatDateTime={formatBillingDateTime}
         sortable={sortable}
+        syncing={syncingIds.has(srv.id)}
         onExtend={() => setModal({ kind: 'extend', server: srv })}
         onTopup={() => setModal({ kind: 'topup', server: srv })}
         onEdit={() => setModal({ kind: 'edit', server: srv })}
         onDelete={() => handleDelete(srv.id)}
         onMoveToFolder={() => setModal({ kind: 'move-to-folder', server: srv })}
         onSync={() => handleSync(srv)}
-        onPlan={() => setModal({ kind: 'yc-plan', server: srv })}
+        onPlan={() => setModal({ kind: 'plan', server: srv })}
       />
     ))
 
@@ -449,6 +463,7 @@ export default function Billing() {
   }
 
   const unfolderedServers = grouped.get(null) || []
+  const syncingAll = cloudServers.some(s => syncingIds.has(s.id))
 
   const activeServer = dragType === 'server' && typeof activeId === 'number'
     ? servers.find(s => s.id === activeId) : null
@@ -472,6 +487,21 @@ export default function Billing() {
           </div>
         </div>
         <div className="flex items-center gap-2">
+          {cloudServers.length > 0 && (
+            <button
+              onClick={handleSyncAll}
+              disabled={syncingAll}
+              className="flex items-center gap-2 px-3 py-2 bg-dark-800 hover:bg-dark-700
+                         text-dark-300 hover:text-white rounded-xl text-sm font-medium transition
+                         border border-dark-700/50 disabled:opacity-60 disabled:cursor-not-allowed"
+            >
+              {syncingAll
+                ? <Loader2 className="w-4 h-4 animate-spin" />
+                : <RefreshCw className="w-4 h-4" />
+              }
+              {t('billing.sync_all')}
+            </button>
+          )}
           <button
             onClick={() => setModal({ kind: 'create-folder' })}
             className="flex items-center gap-2 px-3 py-2 bg-dark-800 hover:bg-dark-700
@@ -490,6 +520,8 @@ export default function Billing() {
           </button>
         </div>
       </div>
+
+      {servers.length > 0 && <BillingSummary servers={servers} t={t} />}
 
       {servers.length === 0 ? (
         <motion.div
@@ -517,7 +549,7 @@ export default function Billing() {
                 const worstDays = daysArr.length > 0 ? Math.min(...daysArr) : 9999
 
                 return (
-                  <BillingSortableFolderItem
+                  <SortableFolderItem
                     key={folderName}
                     folderId={folderName}
                     isDropOver={overFolderId === folderName && dragType === 'server'}
@@ -604,18 +636,18 @@ export default function Billing() {
                         </AnimatePresence>
                       </>
                     )}
-                  </BillingSortableFolderItem>
+                  </SortableFolderItem>
                 )
               })}
             </SortableContext>
 
-            <BillingUnfolderDropZone
+            <UnfolderDropZone
               isOver={overFolderId === '__unfolder__' && dragType === 'server'}
               hasServers={unfolderedServers.length > 0}
               hasFolders={folders.length > 0}
             >
               {renderServerCards(unfolderedServers, true)}
-            </BillingUnfolderDropZone>
+            </UnfolderDropZone>
           </div>
 
           <DragOverlay>
@@ -690,7 +722,7 @@ export default function Billing() {
                 <div className="space-y-2">
                   <span className="text-sm text-dark-300">{t('billing.notify_before_days')}</span>
                   <div className="flex flex-wrap gap-2">
-                    {[1, 3, 7, 14, 30].map(d => {
+                    {NOTIFY_DAY_OPTIONS.map(d => {
                       const active = settings.notify_days.includes(d)
                       return (
                         <button
@@ -716,7 +748,7 @@ export default function Billing() {
                 <div className="space-y-1">
                   <span className="text-sm text-dark-300">{t('billing.check_interval')}</span>
                   <div className="flex flex-wrap gap-2">
-                    {[30, 60, 120, 360, 720].map(m => {
+                    {CHECK_INTERVAL_OPTIONS.map(m => {
                       const active = settings.check_interval_minutes === m
                       const label = m < 60 ? `${m}m` : `${m / 60}h`
                       return (
@@ -788,8 +820,8 @@ export default function Billing() {
           }}
         />
       )}
-      {modal.kind === 'yc-plan' && (
-        <YcPlanModal t={t} server={modal.server} onClose={() => setModal({ kind: 'none' })} />
+      {modal.kind === 'plan' && (
+        <CloudPlanModal t={t} server={modal.server} onClose={() => setModal({ kind: 'none' })} />
       )}
       {modal.kind === 'create-folder' && (
         <CreateFolderModal
@@ -827,1463 +859,6 @@ export default function Billing() {
           }}
         />
       )}
-    </div>
-  )
-}
-
-function currencySymbol(currency: string): string {
-  switch (currency) {
-    case 'RUB': return '₽'
-    case 'USD': return '$'
-    case 'EUR': return '€'
-    default: return currency
-  }
-}
-
-function sortServers(a: BillingServerData, b: BillingServerData) {
-  const da = a.days_left ?? 9999
-  const db = b.days_left ?? 9999
-  return da - db
-}
-
-function statusColor(daysLeft: number | null): string {
-  if (daysLeft === null) return 'text-dark-500'
-  if (daysLeft <= 0) return 'text-red-400'
-  if (daysLeft <= 3) return 'text-red-400'
-  if (daysLeft <= 7) return 'text-yellow-400'
-  return 'text-emerald-400'
-}
-
-function barColor(daysLeft: number | null): string {
-  if (daysLeft === null) return 'bg-dark-600'
-  if (daysLeft <= 0) return 'bg-red-500'
-  if (daysLeft <= 3) return 'bg-red-500'
-  if (daysLeft <= 7) return 'bg-yellow-500'
-  return 'bg-emerald-500'
-}
-
-function formatDays(days: number | null, t: (k: string) => string): string {
-  if (days === null) return '—'
-  if (days <= 0) return t('billing.expired')
-  const totalHours = Math.round(days * 24)
-  const wholeDays = Math.floor(totalHours / 24)
-  const hours = totalHours % 24
-  if (wholeDays === 0) return `${hours}${t('billing.short_hours')}`
-  if (hours === 0) return `${wholeDays}${t('billing.short_days')}`
-  return `${wholeDays}${t('billing.short_days')} ${hours}${t('billing.short_hours')}`
-}
-
-/* ------------------------------------------------------------------ */
-/*  Project Card                                                       */
-/* ------------------------------------------------------------------ */
-
-function ProjectCard({ server, index, t, formatDateTime, sortable, onExtend, onTopup, onEdit, onDelete, onMoveToFolder, onSync, onPlan }: {
-  server: BillingServerData
-  index: number
-  t: (k: string, opts?: Record<string, unknown>) => string
-  formatDateTime: (iso: string) => string
-  sortable?: boolean
-  onExtend: () => void
-  onTopup: () => void
-  onEdit: () => void
-  onDelete: () => void
-  onMoveToFolder: () => void
-  onSync: () => void
-  onPlan: () => void
-}) {
-  const {
-    setNodeRef,
-    setActivatorNodeRef,
-    attributes,
-    listeners,
-    transform,
-    transition,
-    isDragging,
-  } = useSortable({ id: server.id, disabled: !sortable })
-
-  const style: React.CSSProperties = {
-    ...(sortable ? {
-      transform: CSS.Transform.toString(transform),
-      transition,
-      opacity: isDragging ? 0.3 : 1,
-    } : {}),
-    // Виртуализация без удаления из DOM: офф-скрин карточки не рендерятся (важно на большом флоте).
-    contentVisibility: isDragging ? 'visible' : 'auto',
-    containIntrinsicSize: 'auto 200px',
-  }
-
-  const dl = server.days_left
-  const maxDays = 30
-  const pct = dl !== null ? Math.min(100, Math.max(0, (dl / maxDays) * 100)) : 0
-  const dailyCost = server.monthly_cost ? server.monthly_cost / 30 : null
-
-  return (
-    <motion.div
-      ref={sortable ? setNodeRef : undefined}
-      style={style}
-      initial={{ opacity: 0, y: 12 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ delay: index * 0.04 }}
-      className="bg-dark-900/50 rounded-xl border border-dark-800/50 p-5"
-    >
-      <div className="flex items-start justify-between gap-4">
-        <div className="flex items-center gap-3 min-w-0">
-          {sortable && (
-            <div
-              ref={setActivatorNodeRef}
-              {...attributes}
-              {...listeners}
-              className="p-1 text-dark-600 hover:text-dark-400 cursor-grab active:cursor-grabbing transition rounded flex-shrink-0"
-            >
-              <GripVertical className="w-4 h-4" />
-            </div>
-          )}
-          <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${
-            server.billing_type === 'yandex_cloud'
-              ? 'bg-orange-500/20'
-              : server.billing_type === 'monthly'
-                ? 'bg-blue-500/20'
-                : 'bg-purple-500/20'
-          }`}>
-            {server.billing_type === 'yandex_cloud'
-              ? <Cloud className="w-5 h-5 text-orange-400" />
-              : server.billing_type === 'monthly'
-                ? <CalendarClock className="w-5 h-5 text-blue-400" />
-                : <Wallet className="w-5 h-5 text-purple-400" />
-            }
-          </div>
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <h3 className="text-sm font-semibold text-white truncate">{server.name}</h3>
-              <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium uppercase ${
-                server.billing_type === 'yandex_cloud'
-                  ? 'bg-orange-500/15 text-orange-400'
-                  : server.billing_type === 'monthly'
-                    ? 'bg-blue-500/15 text-blue-400'
-                    : 'bg-purple-500/15 text-purple-400'
-              }`}>
-                {t(`billing.type_${server.billing_type}`)}
-              </span>
-            </div>
-            <div className="flex items-center gap-3 mt-1 text-xs text-dark-400 flex-wrap">
-              {(server.billing_type === 'resource' || server.billing_type === 'yandex_cloud') && server.account_balance !== null && (
-                <span className="flex items-center gap-1">
-                  <DollarSign className="w-3 h-3" />
-                  {server.account_balance.toFixed(2)} {currencySymbol(server.currency)}
-                </span>
-              )}
-              {server.billing_type === 'yandex_cloud' && server.yc_daily_cost !== null && server.yc_daily_cost > 0 ? (
-                <span className="flex items-center gap-1 text-dark-500">
-                  ~{server.yc_daily_cost.toFixed(2)} {currencySymbol(server.currency)}{t('billing.per_day')}
-                </span>
-              ) : dailyCost !== null && dailyCost > 0 ? (
-                <span className="flex items-center gap-1 text-dark-500">
-                  {dailyCost.toFixed(2)} {currencySymbol(server.currency)}{t('billing.per_day')}
-                </span>
-              ) : null}
-              {server.billing_type === 'yandex_cloud' && server.yc_last_error && (
-                <Tooltip label={server.yc_last_error} maxWidth={320}>
-                  <span className="text-red-400 text-[10px] truncate max-w-[150px]">
-                    API error
-                  </span>
-                </Tooltip>
-              )}
-              {server.notes && (
-                <span className="truncate max-w-[200px]">{server.notes}</span>
-              )}
-            </div>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-2 flex-shrink-0">
-          <span className={`text-lg font-bold tabular-nums ${statusColor(dl)}`}>
-            {formatDays(dl, t)}
-          </span>
-        </div>
-      </div>
-
-      {server.paid_until && (
-        <div className={`mt-2.5 flex items-center gap-1.5 text-xs ${
-          dl !== null && dl <= 3 ? 'text-red-400/80' : dl !== null && dl <= 7 ? 'text-yellow-400/80' : 'text-dark-400'
-        }`}>
-          <CalendarX2 className="w-3.5 h-3.5" />
-          <span>{t('billing.expires_at')}:</span>
-          <span className="font-medium">{formatDateTime(server.paid_until)}</span>
-        </div>
-      )}
-
-      <div className="mt-2.5 h-1.5 bg-dark-800 rounded-full overflow-hidden">
-        <motion.div
-          className={`h-full rounded-full ${barColor(dl)}`}
-          initial={{ width: 0 }}
-          animate={{ width: `${pct}%` }}
-          transition={{ duration: 0.5, ease: 'easeOut' }}
-        />
-      </div>
-
-      <div className="flex items-center justify-between mt-3">
-        <div className="flex gap-2">
-          {server.billing_type === 'yandex_cloud' ? (
-            <>
-              <button
-                onClick={onSync}
-                className="flex items-center gap-1.5 px-4 py-2 text-xs font-semibold
-                           bg-gradient-to-r from-orange-500/20 to-amber-500/20 text-orange-400
-                           hover:from-orange-500/30 hover:to-amber-500/30
-                           border border-orange-500/20 hover:border-orange-500/40
-                           rounded-xl transition-all shadow-sm shadow-orange-500/5"
-              >
-                <RefreshCw className="w-4 h-4" />
-                {t('billing.sync')}
-              </button>
-              <button
-                onClick={onPlan}
-                className="flex items-center gap-1.5 px-4 py-2 text-xs font-semibold
-                           bg-dark-800 text-dark-300 hover:text-orange-400
-                           border border-dark-700/50 hover:border-orange-500/40
-                           rounded-xl transition-all"
-              >
-                <Calculator className="w-4 h-4" />
-                {t('billing.yc_plan')}
-              </button>
-            </>
-          ) : server.billing_type === 'monthly' ? (
-            <button
-              onClick={onExtend}
-              className="flex items-center gap-1.5 px-4 py-2 text-xs font-semibold
-                         bg-gradient-to-r from-emerald-500/20 to-teal-500/20 text-emerald-400
-                         hover:from-emerald-500/30 hover:to-teal-500/30
-                         border border-emerald-500/20 hover:border-emerald-500/40
-                         rounded-xl transition-all shadow-sm shadow-emerald-500/5"
-            >
-              <ArrowUpCircle className="w-4 h-4" />
-              {t('billing.extend')}
-            </button>
-          ) : (
-            <button
-              onClick={onTopup}
-              className="flex items-center gap-1.5 px-4 py-2 text-xs font-semibold
-                         bg-gradient-to-r from-purple-500/20 to-violet-500/20 text-purple-400
-                         hover:from-purple-500/30 hover:to-violet-500/30
-                         border border-purple-500/20 hover:border-purple-500/40
-                         rounded-xl transition-all shadow-sm shadow-purple-500/5"
-            >
-              <Wallet className="w-4 h-4" />
-              {t('billing.topup')}
-            </button>
-          )}
-        </div>
-        <div className="flex gap-1">
-          <Tooltip label={t('billing.move_to_folder')}>
-            <button
-              onClick={onMoveToFolder}
-              className="p-1.5 text-dark-500 hover:text-blue-400 transition rounded-lg hover:bg-dark-800/50"
-            >
-              <MoveRight className="w-3.5 h-3.5" />
-            </button>
-          </Tooltip>
-          <Tooltip label={t('common.edit')}>
-            <button
-              onClick={onEdit}
-              className="p-1.5 text-dark-500 hover:text-dark-300 transition rounded-lg hover:bg-dark-800/50"
-            >
-              <Pencil className="w-3.5 h-3.5" />
-            </button>
-          </Tooltip>
-          <Tooltip label={t('common.delete')}>
-            <button
-              onClick={onDelete}
-              className="p-1.5 text-dark-500 hover:text-red-400 transition rounded-lg hover:bg-dark-800/50"
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-            </button>
-          </Tooltip>
-        </div>
-      </div>
-    </motion.div>
-  )
-}
-
-/* ------------------------------------------------------------------ */
-/*  Modals                                                             */
-/* ------------------------------------------------------------------ */
-
-function Overlay({ children, onClose }: { children: React.ReactNode; onClose: () => void }) {
-  const mouseDownTarget = useRef<EventTarget | null>(null)
-
-  return (
-    <AnimatePresence>
-      <motion.div
-        className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
-        onMouseDown={e => { mouseDownTarget.current = e.target }}
-        onClick={e => {
-          if (e.target === e.currentTarget && mouseDownTarget.current === e.currentTarget) onClose()
-        }}
-      >
-        <motion.div
-          initial={{ opacity: 0, scale: 0.95, y: 20 }}
-          animate={{ opacity: 1, scale: 1, y: 0 }}
-          exit={{ opacity: 0, scale: 0.95, y: 20 }}
-          transition={{ duration: 0.2 }}
-          className="bg-dark-900 border border-dark-800 rounded-2xl shadow-2xl w-full max-w-md"
-          onClick={e => e.stopPropagation()}
-        >
-          {children}
-        </motion.div>
-      </motion.div>
-    </AnimatePresence>
-  )
-}
-
-function AddModal({ t, folders, onClose, onCreated }: {
-  t: (k: string) => string
-  folders: string[]
-  onClose: () => void
-  onCreated: (s: BillingServerData) => void
-}) {
-  const [name, setName] = useState('')
-  const [billingType, setBillingType] = useState<'monthly' | 'resource' | 'yandex_cloud'>('resource')
-  const [paidDays, setPaidDays] = useState(30)
-  const [paidUntilRaw, setPaidUntilRaw] = useState('')
-  const [monthlyMode, setMonthlyMode] = useState<'days' | 'date'>('days')
-  const [dailyCost, setDailyCost] = useState('')
-  const [balance, setBalance] = useState('')
-  const [currency, setCurrency] = useState('RUB')
-  const [notes, setNotes] = useState('')
-  const [folder, setFolder] = useState('')
-  const [saving, setSaving] = useState(false)
-  const [ycToken, setYcToken] = useState('')
-  const [ycAccountId, setYcAccountId] = useState('')
-  const [ycThreshold, setYcThreshold] = useState('0')
-
-  const submit = async () => {
-    if (!name.trim()) return
-    setSaving(true)
-    try {
-      const dailyNum = parseFloat(dailyCost) || 0
-      const res = await billingApi.createServer({
-        name: name.trim(),
-        billing_type: billingType,
-        paid_days: billingType === 'monthly' && monthlyMode === 'days' ? paidDays : undefined,
-        paid_until: billingType === 'monthly' && monthlyMode === 'date' ? paidUntilRaw : undefined,
-        monthly_cost: billingType === 'resource' ? dailyNum * 30 : undefined,
-        account_balance: billingType === 'resource' ? parseFloat(balance) || 0 : undefined,
-        currency,
-        notes: notes.trim() || undefined,
-        folder: folder || undefined,
-        yc_oauth_token: billingType === 'yandex_cloud' ? ycToken : undefined,
-        yc_billing_account_id: billingType === 'yandex_cloud' ? ycAccountId : undefined,
-        yc_balance_threshold: billingType === 'yandex_cloud' ? parseFloat(ycThreshold) || 0 : undefined,
-      })
-      onCreated(res.data.server)
-      toast.success(t('common.added'))
-    } catch {
-      toast.error(t('common.action_failed'))
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  return (
-    <Overlay onClose={onClose}>
-      <div className="p-6">
-        <div className="flex items-center justify-between mb-5">
-          <h2 className="text-lg font-semibold text-white">{t('billing.add')}</h2>
-          <button onClick={onClose} className="text-dark-500 hover:text-dark-300 transition">
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        <div className="space-y-4">
-          <Field label={t('billing.billing_type')}>
-            <div className="flex gap-2">
-              {(['monthly', 'resource', 'yandex_cloud'] as const).map(bt => (
-                <button
-                  key={bt}
-                  onClick={() => setBillingType(bt)}
-                  className={`flex-1 py-2.5 rounded-lg text-sm font-medium transition ${
-                    billingType === bt
-                      ? 'bg-accent-500/20 text-accent-400 border border-accent-500/30'
-                      : 'bg-dark-800 text-dark-400 border border-dark-700/50'
-                  }`}
-                >
-                  <div>{t(`billing.type_${bt}`)}</div>
-                  <div className={`text-[10px] mt-0.5 ${billingType === bt ? 'text-accent-400/60' : 'text-dark-500'}`}>
-                    {t(`billing.type_${bt}_hint`)}
-                  </div>
-                </button>
-              ))}
-            </div>
-          </Field>
-
-          <Field label={t('common.name')}>
-            <input
-              value={name}
-              onChange={e => setName(e.target.value)}
-              placeholder={t('billing.name_placeholder')}
-              className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200
-                         placeholder-dark-600 focus:border-accent-500/50 focus:outline-none transition"
-              autoFocus
-            />
-          </Field>
-
-          {billingType === 'monthly' ? (
-            <>
-              <Field label={t('billing.paid_until')} faqScreen="BILLING_QUOTA">
-                <div className="flex gap-2 mb-2">
-                  <button
-                    onClick={() => setMonthlyMode('days')}
-                    className={`flex-1 py-1.5 rounded-lg text-xs font-medium transition ${
-                      monthlyMode === 'days'
-                        ? 'bg-accent-500/20 text-accent-400 border border-accent-500/30'
-                        : 'bg-dark-800 text-dark-400 border border-dark-700/50'
-                    }`}
-                  >
-                    {t('billing.mode_days')}
-                  </button>
-                  <button
-                    onClick={() => setMonthlyMode('date')}
-                    className={`flex-1 py-1.5 rounded-lg text-xs font-medium transition ${
-                      monthlyMode === 'date'
-                        ? 'bg-accent-500/20 text-accent-400 border border-accent-500/30'
-                        : 'bg-dark-800 text-dark-400 border border-dark-700/50'
-                    }`}
-                  >
-                    {t('billing.mode_date')}
-                  </button>
-                </div>
-                {monthlyMode === 'days' ? (
-                  <input
-                    type="number"
-                    value={paidDays}
-                    onChange={e => setPaidDays(parseInt(e.target.value) || 0)}
-                    min={1}
-                    className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200
-                             placeholder-dark-600 focus:border-accent-500/50 focus:outline-none transition"
-                  />
-                ) : (
-                  <>
-                    <input
-                      type="text"
-                      value={paidUntilRaw}
-                      onChange={e => setPaidUntilRaw(e.target.value)}
-                      placeholder={t('billing.paid_until_placeholder')}
-                      className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200
-                               placeholder-dark-600 focus:border-accent-500/50 focus:outline-none transition"
-                    />
-                    <p className="text-xs text-dark-500 mt-1">{t('billing.paid_until_hint')}</p>
-                  </>
-                )}
-              </Field>
-            </>
-          ) : billingType === 'yandex_cloud' ? (
-            <>
-              <Field label={t('billing.yc_billing_account_id')}>
-                <input
-                  value={ycAccountId}
-                  onChange={e => setYcAccountId(e.target.value)}
-                  placeholder="dn2xxxxxx"
-                  className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200
-                         placeholder-dark-600 focus:border-accent-500/50 focus:outline-none transition"
-                />
-                <p className="text-[10px] text-dark-500 mt-1">
-                  {t('billing.yc_account_id_hint')}{' '}
-                  <a href="https://console.yandex.cloud/billing/accounts" target="_blank" rel="noopener noreferrer"
-                     className="text-accent-400 hover:text-accent-300 underline transition">
-                    console.yandex.cloud
-                  </a>
-                </p>
-              </Field>
-              <Field label={t('billing.yc_oauth_token')}>
-                <input
-                  type="password"
-                  value={ycToken}
-                  onChange={e => setYcToken(e.target.value)}
-                  placeholder="y0__xCr5em..."
-                  className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200
-                         placeholder-dark-600 focus:border-accent-500/50 focus:outline-none transition"
-                />
-                <p className="text-[10px] text-dark-500 mt-1">
-                  {t('billing.yc_oauth_token_hint')}{' '}
-                  <a href="https://oauth.yandex.ru/authorize?response_type=token&client_id=1a6990aa636648e9b2ef855fa7bec2fb" target="_blank" rel="noopener noreferrer"
-                     className="text-accent-400 hover:text-accent-300 underline transition">
-                    {t('billing.yc_get_token_link')}
-                  </a>
-                </p>
-              </Field>
-              <Field label={t('billing.yc_balance_threshold')}>
-                <input
-                  type="number"
-                  step="0.01"
-                  value={ycThreshold}
-                  onChange={e => setYcThreshold(e.target.value)}
-                  placeholder="-1000"
-                  className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200
-                         placeholder-dark-600 focus:border-accent-500/50 focus:outline-none transition"
-                />
-                <p className="text-[10px] text-dark-500 mt-1">{t('billing.yc_threshold_hint')}</p>
-              </Field>
-            </>
-          ) : (
-            <>
-              <Field label={t('billing.daily_cost')} faqScreen="BILLING_QUOTA">
-                <input
-                  type="number"
-                  step="0.01"
-                  value={dailyCost}
-                  onChange={e => setDailyCost(e.target.value)}
-                  placeholder="0.00"
-                  className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200
-                         placeholder-dark-600 focus:border-accent-500/50 focus:outline-none transition"
-                />
-              </Field>
-              <Field label={t('billing.account_balance')}>
-                <input
-                  type="number"
-                  step="0.01"
-                  value={balance}
-                  onChange={e => setBalance(e.target.value)}
-                  placeholder="0.00"
-                  className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200
-                         placeholder-dark-600 focus:border-accent-500/50 focus:outline-none transition"
-                />
-              </Field>
-            </>
-          )}
-
-          <Field label={t('billing.currency')}>
-            <div className="flex gap-2">
-              {(['RUB', 'USD', 'EUR'] as const).map(c => (
-                <button
-                  key={c}
-                  onClick={() => setCurrency(c)}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${
-                    currency === c
-                      ? 'bg-accent-500/20 text-accent-400 border border-accent-500/30'
-                      : 'bg-dark-800 text-dark-400 border border-dark-700/50'
-                  }`}
-                >
-                  {currencySymbol(c)} {c}
-                </button>
-              ))}
-            </div>
-          </Field>
-
-          <Field label={t('billing.notes') + ` (${t('common.optional')})`}>
-            <input
-              value={notes}
-              onChange={e => setNotes(e.target.value)}
-              placeholder={t('billing.notes_placeholder')}
-              className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200
-                         placeholder-dark-600 focus:border-accent-500/50 focus:outline-none transition"
-            />
-          </Field>
-
-          {folders.length > 0 && (
-            <Field label={t('billing.folder') + ` (${t('common.optional')})`}>
-              <select
-                value={folder}
-                onChange={e => setFolder(e.target.value)}
-                className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200
-                           focus:border-accent-500/50 focus:outline-none transition"
-              >
-                <option value="">{t('billing.no_folder')}</option>
-                {folders.map(f => <option key={f} value={f}>{f}</option>)}
-              </select>
-            </Field>
-          )}
-        </div>
-
-        <div className="flex gap-3 mt-6">
-          <button onClick={onClose} className="flex-1 py-2.5 bg-dark-800 text-dark-300 rounded-xl text-sm font-medium hover:bg-dark-700 transition">
-            {t('common.cancel')}
-          </button>
-          <button
-            onClick={submit}
-            disabled={!name.trim() || saving}
-            className="flex-1 py-2.5 bg-accent-500 text-white rounded-xl text-sm font-medium hover:bg-accent-600 transition
-                       disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-          >
-            {saving && <Loader2 className="w-4 h-4 animate-spin" />}
-            {t('common.add')}
-          </button>
-        </div>
-      </div>
-    </Overlay>
-  )
-}
-
-function EditModal({ t, server, folders, onClose, onSaved }: {
-  t: (k: string) => string
-  server: BillingServerData
-  folders: string[]
-  onClose: () => void
-  onSaved: (s: BillingServerData) => void
-}) {
-  const { formatDateTime } = useBillingDateFormat()
-  const [name, setName] = useState(server.name)
-  const currentDaily = server.monthly_cost ? (server.monthly_cost / 30) : 0
-  const [dailyCost, setDailyCost] = useState(currentDaily ? currentDaily.toFixed(2) : '')
-  const [balance, setBalance] = useState(server.account_balance?.toString() || '')
-  const [currency, setCurrency] = useState(server.currency)
-  const [notes, setNotes] = useState(server.notes || '')
-  const [folder, setFolder] = useState(server.folder || '')
-  const [paidUntil, setPaidUntil] = useState(
-    server.paid_until
-      ? new Date(server.paid_until).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' })
-      : ''
-  )
-  const [saving, setSaving] = useState(false)
-  const [ycToken, setYcToken] = useState('')
-  const [ycAccountId, setYcAccountId] = useState(server.yc_billing_account_id || '')
-  const [ycThreshold, setYcThreshold] = useState(server.yc_balance_threshold?.toString() || '0')
-
-  const submit = async () => {
-    setSaving(true)
-    try {
-      const payload: Record<string, unknown> = {
-        name, currency, notes: notes || null,
-        folder: folder || null,
-      }
-      if (server.billing_type === 'monthly') {
-        payload.paid_until = paidUntil || null
-      }
-      if (server.billing_type === 'resource') {
-        const dailyNum = parseFloat(dailyCost) || 0
-        payload.monthly_cost = dailyNum * 30
-        payload.account_balance = parseFloat(balance) || 0
-      }
-      if (server.billing_type === 'yandex_cloud') {
-        payload.yc_billing_account_id = ycAccountId
-        if (ycToken) payload.yc_oauth_token = ycToken
-        payload.yc_balance_threshold = parseFloat(ycThreshold) || 0
-      }
-      const res = await billingApi.updateServer(server.id, payload as never)
-      onSaved(res.data)
-      toast.success(t('common.saved'))
-    } catch {
-      toast.error(t('common.action_failed'))
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  return (
-    <Overlay onClose={onClose}>
-      <div className="p-6">
-        <div className="flex items-center justify-between mb-5">
-          <h2 className="text-lg font-semibold text-white">{t('common.edit')}</h2>
-          <button onClick={onClose} className="text-dark-500 hover:text-dark-300 transition">
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        <div className="space-y-4">
-          <Field label={t('common.name')}>
-            <input value={name} onChange={e => setName(e.target.value)} className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200
-                         placeholder-dark-600 focus:border-accent-500/50 focus:outline-none transition" />
-          </Field>
-
-          {server.billing_type === 'monthly' && (
-            <Field label={t('billing.paid_until')} faqScreen="BILLING_QUOTA">
-              <input
-                type="text"
-                value={paidUntil}
-                onChange={e => setPaidUntil(e.target.value)}
-                placeholder={t('billing.paid_until_placeholder')}
-                className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200
-                         placeholder-dark-600 focus:border-accent-500/50 focus:outline-none transition"
-              />
-              <p className="text-xs text-dark-500 mt-1">{t('billing.paid_until_hint')}</p>
-            </Field>
-          )}
-
-          {server.billing_type === 'resource' && (
-            <>
-              <Field label={t('billing.daily_cost')} faqScreen="BILLING_QUOTA">
-                <input
-                  type="number"
-                  step="0.01"
-                  value={dailyCost}
-                  onChange={e => setDailyCost(e.target.value)}
-                  className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200
-                         placeholder-dark-600 focus:border-accent-500/50 focus:outline-none transition"
-                />
-              </Field>
-              <Field label={t('billing.account_balance')}>
-                <input
-                  type="number"
-                  step="0.01"
-                  value={balance}
-                  onChange={e => setBalance(e.target.value)}
-                  className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200
-                         placeholder-dark-600 focus:border-accent-500/50 focus:outline-none transition"
-                />
-              </Field>
-            </>
-          )}
-
-          {server.billing_type === 'yandex_cloud' && (
-            <>
-              <Field label={t('billing.yc_billing_account_id')}>
-                <input
-                  value={ycAccountId}
-                  onChange={e => setYcAccountId(e.target.value)}
-                  className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200
-                         placeholder-dark-600 focus:border-accent-500/50 focus:outline-none transition"
-                />
-                <p className="text-[10px] text-dark-500 mt-1">
-                  {t('billing.yc_account_id_hint')}{' '}
-                  <a href="https://console.yandex.cloud/billing/accounts" target="_blank" rel="noopener noreferrer"
-                     className="text-accent-400 hover:text-accent-300 underline transition">
-                    console.yandex.cloud
-                  </a>
-                </p>
-              </Field>
-              <Field label={`${t('billing.yc_oauth_token')} (${t('billing.yc_token_change_hint')})`}>
-                <input
-                  type="password"
-                  value={ycToken}
-                  onChange={e => setYcToken(e.target.value)}
-                  placeholder={server.has_yc_token ? '••••••••' : 'y0__xCr5em...'}
-                  className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200
-                         placeholder-dark-600 focus:border-accent-500/50 focus:outline-none transition"
-                />
-                <p className="text-[10px] text-dark-500 mt-1">
-                  {t('billing.yc_oauth_token_hint')}{' '}
-                  <a href="https://oauth.yandex.ru/authorize?response_type=token&client_id=1a6990aa636648e9b2ef855fa7bec2fb" target="_blank" rel="noopener noreferrer"
-                     className="text-accent-400 hover:text-accent-300 underline transition">
-                    {t('billing.yc_get_token_link')}
-                  </a>
-                </p>
-              </Field>
-              <Field label={t('billing.yc_balance_threshold')}>
-                <input
-                  type="number"
-                  step="0.01"
-                  value={ycThreshold}
-                  onChange={e => setYcThreshold(e.target.value)}
-                  className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200
-                         placeholder-dark-600 focus:border-accent-500/50 focus:outline-none transition"
-                />
-                <p className="text-[10px] text-dark-500 mt-1">{t('billing.yc_threshold_hint')}</p>
-              </Field>
-              {server.yc_last_sync_at && (
-                <div className="text-xs text-dark-500">
-                  {t('billing.yc_last_sync')}: {formatDateTime(server.yc_last_sync_at)}
-                </div>
-              )}
-              {server.yc_last_error && (
-                <div className="text-xs text-red-400 bg-red-500/10 rounded-lg px-3 py-2">
-                  {server.yc_last_error}
-                </div>
-              )}
-            </>
-          )}
-
-          <Field label={t('billing.currency')}>
-            <div className="flex gap-2">
-              {(['RUB', 'USD', 'EUR'] as const).map(c => (
-                <button
-                  key={c}
-                  onClick={() => setCurrency(c)}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${
-                    currency === c
-                      ? 'bg-accent-500/20 text-accent-400 border border-accent-500/30'
-                      : 'bg-dark-800 text-dark-400 border border-dark-700/50'
-                  }`}
-                >
-                  {currencySymbol(c)} {c}
-                </button>
-              ))}
-            </div>
-          </Field>
-
-          <Field label={t('billing.notes') + ` (${t('common.optional')})`}>
-            <input value={notes} onChange={e => setNotes(e.target.value)} className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200
-                         placeholder-dark-600 focus:border-accent-500/50 focus:outline-none transition" />
-          </Field>
-
-          <Field label={t('billing.folder') + ` (${t('common.optional')})`}>
-            <select
-              value={folder}
-              onChange={e => setFolder(e.target.value)}
-              className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200
-                         focus:border-accent-500/50 focus:outline-none transition"
-            >
-              <option value="">{t('billing.no_folder')}</option>
-              {folders.map(f => <option key={f} value={f}>{f}</option>)}
-            </select>
-          </Field>
-        </div>
-
-        <div className="flex gap-3 mt-6">
-          <button onClick={onClose} className="flex-1 py-2.5 bg-dark-800 text-dark-300 rounded-xl text-sm font-medium hover:bg-dark-700 transition">
-            {t('common.cancel')}
-          </button>
-          <button
-            onClick={submit}
-            disabled={saving}
-            className="flex-1 py-2.5 bg-accent-500 text-white rounded-xl text-sm font-medium hover:bg-accent-600 transition
-                       disabled:opacity-40 flex items-center justify-center gap-2"
-          >
-            {saving && <Loader2 className="w-4 h-4 animate-spin" />}
-            {t('common.save')}
-          </button>
-        </div>
-      </div>
-    </Overlay>
-  )
-}
-
-function ExtendModal({ t, server, onClose, onDone }: {
-  t: (k: string) => string
-  server: BillingServerData
-  onClose: () => void
-  onDone: (s: BillingServerData) => void
-}) {
-  const [days, setDays] = useState(30)
-  const [saving, setSaving] = useState(false)
-  const { formatDateTime } = useBillingDateFormat()
-
-  // Бэкенд продлевает от текущей даты окончания, а если срок уже истёк — от «сейчас»
-  const totalDays = Math.max(server.days_left ?? 0, 0) + days
-
-  const submit = async () => {
-    if (days <= 0) return
-    setSaving(true)
-    try {
-      const res = await billingApi.extendServer(server.id, days)
-      onDone(res.data)
-      toast.success(t('billing.extended'))
-    } catch {
-      toast.error(t('common.action_failed'))
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  return (
-    <Overlay onClose={onClose}>
-      <div className="p-6">
-        <div className="flex items-center justify-between mb-5">
-          <h2 className="text-lg font-semibold text-white">{t('billing.extend')} — {server.name}</h2>
-          <button onClick={onClose} className="text-dark-500 hover:text-dark-300 transition">
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        <div className="space-y-4">
-          <Field label={t('billing.extend_days')}>
-            <input
-              type="number"
-              value={days}
-              onChange={e => setDays(parseInt(e.target.value) || 0)}
-              min={1}
-              className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200
-                         placeholder-dark-600 focus:border-accent-500/50 focus:outline-none transition"
-              autoFocus
-            />
-          </Field>
-          <div className="flex flex-wrap gap-2">
-            {QUICK_DAYS.map(d => (
-              <button
-                key={d}
-                onClick={() => setDays(d)}
-                className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${
-                  days === d
-                    ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
-                    : 'bg-dark-800 text-dark-400 border border-dark-700/50'
-                }`}
-              >
-                +{d}d
-              </button>
-            ))}
-          </div>
-          {days > 0 && (
-            <div className="text-xs text-emerald-400/80 bg-emerald-500/10 rounded-lg px-3 py-2">
-              <PaidTotalHint totalDays={totalDays} t={t} formatDateTime={formatDateTime} />
-            </div>
-          )}
-        </div>
-
-        <div className="flex gap-3 mt-6">
-          <button onClick={onClose} className="flex-1 py-2.5 bg-dark-800 text-dark-300 rounded-xl text-sm font-medium hover:bg-dark-700 transition">
-            {t('common.cancel')}
-          </button>
-          <button
-            onClick={submit}
-            disabled={days <= 0 || saving}
-            className="flex-1 py-2.5 bg-emerald-500 text-white rounded-xl text-sm font-medium hover:bg-emerald-600 transition
-                       disabled:opacity-40 flex items-center justify-center gap-2"
-          >
-            {saving && <Loader2 className="w-4 h-4 animate-spin" />}
-            {t('billing.extend')}
-          </button>
-        </div>
-      </div>
-    </Overlay>
-  )
-}
-
-function TopupModal({ t, server, onClose, onDone }: {
-  t: (k: string) => string
-  server: BillingServerData
-  onClose: () => void
-  onDone: (s: BillingServerData) => void
-}) {
-  const [amount, setAmount] = useState('')
-  const [saving, setSaving] = useState(false)
-  const { formatDateTime } = useBillingDateFormat()
-
-  const numAmount = parseFloat(amount) || 0
-  const monthlyCost = server.monthly_cost ?? 0
-  const addedDays = monthlyCost > 0 ? (numAmount / monthlyCost) * 30 : 0
-  // Как на бэкенде: срок считается от суммы текущего (уже «прожитого») баланса и пополнения
-  const totalDays = monthlyCost > 0 ? (((server.account_balance ?? 0) + numAmount) / monthlyCost) * 30 : 0
-
-  const submit = async () => {
-    if (numAmount <= 0) return
-    setSaving(true)
-    try {
-      const res = await billingApi.topupServer(server.id, numAmount)
-      onDone(res.data)
-      toast.success(t('billing.topped_up'))
-    } catch {
-      toast.error(t('common.action_failed'))
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  return (
-    <Overlay onClose={onClose}>
-      <div className="p-6">
-        <div className="flex items-center justify-between mb-5">
-          <h2 className="text-lg font-semibold text-white">{t('billing.topup')} — {server.name}</h2>
-          <button onClick={onClose} className="text-dark-500 hover:text-dark-300 transition">
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        <div className="space-y-4">
-          <div className="bg-dark-800/50 rounded-xl p-3 border border-dark-700/50">
-            <div className="flex items-center justify-between">
-              <span className="text-xs text-dark-500">{t('billing.current_balance')}</span>
-              <span className="text-lg font-bold text-dark-200">
-                {(server.account_balance ?? 0).toFixed(2)} {currencySymbol(server.currency)}
-              </span>
-            </div>
-            {server.monthly_cost && server.monthly_cost > 0 && (
-              <div className="flex items-center justify-between mt-1">
-                <span className="text-xs text-dark-500">{t('billing.daily_cost')}</span>
-                <span className="text-xs text-dark-400">{(server.monthly_cost / 30).toFixed(2)} {currencySymbol(server.currency)}{t('billing.per_day')}</span>
-              </div>
-            )}
-          </div>
-          <Field label={t('billing.topup_amount') + ` (${currencySymbol(server.currency)})`}>
-            <input
-              type="number"
-              step="0.01"
-              value={amount}
-              onChange={e => setAmount(e.target.value)}
-              placeholder="0.00"
-              className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200
-                         placeholder-dark-600 focus:border-accent-500/50 focus:outline-none transition"
-              autoFocus
-            />
-          </Field>
-          <div className="flex flex-wrap gap-2">
-            {[100, 500, 1000, 2000, 5000].map(v => (
-              <button
-                key={v}
-                onClick={() => setAmount(prev => {
-                  const current = parseFloat(prev) || 0
-                  return (current + v).toString()
-                })}
-                className="px-3 py-1.5 rounded-lg text-xs font-medium transition
-                  bg-dark-800 text-dark-400 border border-dark-700/50 hover:border-dark-600
-                  hover:bg-purple-500/10 hover:text-purple-400 hover:border-purple-500/30
-                  active:scale-95"
-              >
-                +{v} {currencySymbol(server.currency)}
-              </button>
-            ))}
-          </div>
-          {numAmount > 0 && monthlyCost > 0 && (
-            <div className="text-xs text-emerald-400/80 bg-emerald-500/10 rounded-lg px-3 py-2 space-y-1">
-              <div className="flex items-center gap-1">
-                <Clock className="w-3 h-3" />
-                ≈ +{Math.round(addedDays)} {t('common.days')}
-              </div>
-              <PaidTotalHint totalDays={totalDays} t={t} formatDateTime={formatDateTime} />
-            </div>
-          )}
-        </div>
-
-        <div className="flex gap-3 mt-6">
-          <button onClick={onClose} className="flex-1 py-2.5 bg-dark-800 text-dark-300 rounded-xl text-sm font-medium hover:bg-dark-700 transition">
-            {t('common.cancel')}
-          </button>
-          <button
-            onClick={submit}
-            disabled={numAmount <= 0 || saving}
-            className="flex-1 py-2.5 bg-purple-500 text-white rounded-xl text-sm font-medium hover:bg-purple-600 transition
-                       disabled:opacity-40 flex items-center justify-center gap-2"
-          >
-            {saving && <Loader2 className="w-4 h-4 animate-spin" />}
-            {t('billing.topup')}
-          </button>
-        </div>
-      </div>
-    </Overlay>
-  )
-}
-
-function PaidTotalHint({ totalDays, t, formatDateTime, labelKey = 'billing.total_paid' }: {
-  totalDays: number
-  t: (k: string) => string
-  formatDateTime: (iso: string) => string
-  labelKey?: string
-}) {
-  const paidUntil = new Date(Date.now() + totalDays * MS_PER_DAY).toISOString()
-  return (
-    <div className="flex items-center gap-1 flex-wrap">
-      <CalendarClock className="w-3 h-3" />
-      {t(labelKey)}: <span className="font-semibold">{formatDays(totalDays, t)}</span>
-      <span className="opacity-70">· {t('billing.until')} {formatDateTime(paidUntil)}</span>
-    </div>
-  )
-}
-
-function YcPlanModal({ t, server, onClose }: {
-  t: (k: string) => string
-  server: BillingServerData
-  onClose: () => void
-}) {
-  const { formatDateTime } = useBillingDateFormat()
-  const [plan, setPlan] = useState<{ by: 'days' | 'amount'; value: string }>({ by: 'days', value: '30' })
-  const currency = currencySymbol(server.currency)
-  const dailyCost = server.yc_daily_cost ?? 0
-  const canPlan = dailyCost > 0
-  // Как compute_yc_days_left на бэкенде: тратить можно только то, что выше порога
-  const usable = (server.account_balance ?? 0) - (server.yc_balance_threshold ?? 0)
-  const entered = parseFloat(plan.value) || 0
-  const targetDays = !canPlan ? 0 : plan.by === 'days' ? entered : Math.max(0, (usable + entered) / dailyCost)
-  const requiredAmount = plan.by === 'days' ? Math.max(0, targetDays * dailyCost - usable) : entered
-  const lastsDays = requiredAmount > 0 || !canPlan ? targetDays : usable / dailyCost
-  const daysField = plan.by === 'days' ? plan.value : targetDays.toFixed(1)
-  const amountField = plan.by === 'amount' ? plan.value : requiredAmount.toFixed(2)
-
-  const inputClass = `w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200
-                      placeholder-dark-600 focus:border-accent-500/50 focus:outline-none transition`
-
-  return (
-    <Overlay onClose={onClose}>
-      <div className="p-6">
-        <div className="flex items-center justify-between mb-5">
-          <h2 className="text-lg font-semibold text-white">{t('billing.yc_plan_title')} — {server.name}</h2>
-          <button onClick={onClose} className="text-dark-500 hover:text-dark-300 transition">
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        <div className="space-y-4">
-          <div className="bg-dark-800/50 rounded-xl p-3 border border-dark-700/50 space-y-1">
-            <div className="flex items-center justify-between">
-              <span className="text-xs text-dark-500">{t('billing.current_balance')}</span>
-              <span className="text-lg font-bold text-dark-200">
-                {(server.account_balance ?? 0).toFixed(2)} {currency}
-              </span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-xs text-dark-500">{t('billing.yc_balance_threshold')}</span>
-              <span className="text-xs text-dark-400">{(server.yc_balance_threshold ?? 0).toFixed(2)} {currency}</span>
-            </div>
-            {canPlan && (
-              <div className="flex items-center justify-between">
-                <span className="text-xs text-dark-500">{t('billing.daily_cost')}</span>
-                <span className="text-xs text-dark-400">{dailyCost.toFixed(2)} {currency}{t('billing.per_day')}</span>
-              </div>
-            )}
-            {server.days_left !== null && (
-              <div className="flex items-center justify-between">
-                <span className="text-xs text-dark-500">{t('billing.yc_plan_days_left')}</span>
-                <span className={`text-xs font-medium ${statusColor(server.days_left)}`}>{formatDays(server.days_left, t)}</span>
-              </div>
-            )}
-          </div>
-
-          {!canPlan ? (
-            <div className="text-xs text-yellow-400/80 bg-yellow-500/10 rounded-lg px-3 py-2">
-              {t('billing.yc_plan_no_cost')}
-            </div>
-          ) : (
-            <>
-              <Field label={t('billing.yc_plan_days')}>
-                <input
-                  type="number"
-                  min={1}
-                  step="1"
-                  value={daysField}
-                  onChange={e => setPlan({ by: 'days', value: e.target.value })}
-                  className={inputClass}
-                  autoFocus
-                />
-              </Field>
-              <div className="flex flex-wrap gap-2">
-                {QUICK_DAYS.map(d => (
-                  <button
-                    key={d}
-                    onClick={() => setPlan({ by: 'days', value: String(d) })}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${
-                      plan.by === 'days' && entered === d
-                        ? 'bg-orange-500/20 text-orange-400 border border-orange-500/30'
-                        : 'bg-dark-800 text-dark-400 border border-dark-700/50 hover:border-dark-600'
-                    }`}
-                  >
-                    {d}{t('billing.short_days')}
-                  </button>
-                ))}
-              </div>
-              <Field label={`${t('billing.yc_plan_amount')} (${currency})`}>
-                <input
-                  type="number"
-                  min={0}
-                  step="0.01"
-                  value={amountField}
-                  onChange={e => setPlan({ by: 'amount', value: e.target.value })}
-                  className={inputClass}
-                />
-              </Field>
-              {entered > 0 && (
-                <div className="text-xs text-orange-400/80 bg-orange-500/10 rounded-lg px-3 py-2 space-y-1">
-                  {requiredAmount > 0 ? (
-                    <div className="flex items-center gap-1">
-                      <Wallet className="w-3 h-3" />
-                      {t('billing.yc_plan_topup')}: <span className="font-semibold">{requiredAmount.toFixed(2)} {currency}</span>
-                    </div>
-                  ) : (
-                    <div>{t('billing.yc_plan_enough')}</div>
-                  )}
-                  <PaidTotalHint totalDays={lastsDays} labelKey="billing.yc_plan_lasts" t={t} formatDateTime={formatDateTime} />
-                </div>
-              )}
-              <p className="text-[11px] text-dark-500">{t('billing.yc_plan_hint')}</p>
-            </>
-          )}
-        </div>
-
-        <div className="mt-6">
-          <button onClick={onClose} className="w-full py-2.5 bg-dark-800 text-dark-300 rounded-xl text-sm font-medium hover:bg-dark-700 transition">
-            {t('common.close')}
-          </button>
-        </div>
-      </div>
-    </Overlay>
-  )
-}
-
-/* ------------------------------------------------------------------ */
-/*  Folder Modals                                                      */
-/* ------------------------------------------------------------------ */
-
-function CreateFolderModal({ t, existingFolders, onClose, onCreated }: {
-  t: (k: string) => string
-  existingFolders: string[]
-  onClose: () => void
-  onCreated: (name: string) => void
-}) {
-  const [name, setName] = useState('')
-  const trimmed = name.trim()
-  const duplicate = existingFolders.includes(trimmed)
-
-  const handleCreate = () => {
-    if (!trimmed || duplicate) return
-    onCreated(trimmed)
-    toast.success(t('billing.folder_created'))
-  }
-
-  return (
-    <Overlay onClose={onClose}>
-      <div className="p-6">
-        <div className="flex items-center justify-between mb-5">
-          <h2 className="text-lg font-semibold text-white">{t('billing.create_folder')}</h2>
-          <button onClick={onClose} className="text-dark-500 hover:text-dark-300 transition">
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-        <Field label={t('billing.folder_name')}>
-          <input
-            value={name}
-            onChange={e => setName(e.target.value)}
-            placeholder={t('billing.folder_name_placeholder')}
-            className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200
-                       placeholder-dark-600 focus:border-accent-500/50 focus:outline-none transition"
-            autoFocus
-            onKeyDown={e => { if (e.key === 'Enter') handleCreate() }}
-          />
-        </Field>
-        {duplicate && (
-          <p className="text-xs text-red-400 mt-2">{trimmed} — already exists</p>
-        )}
-        <div className="flex gap-3 mt-6">
-          <button onClick={onClose} className="flex-1 py-2.5 bg-dark-800 text-dark-300 rounded-xl text-sm font-medium hover:bg-dark-700 transition">
-            {t('common.cancel')}
-          </button>
-          <button
-            onClick={handleCreate}
-            disabled={!trimmed || duplicate}
-            className="flex-1 py-2.5 bg-accent-500 text-white rounded-xl text-sm font-medium hover:bg-accent-600 transition
-                       disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            {t('common.create')}
-          </button>
-        </div>
-      </div>
-    </Overlay>
-  )
-}
-
-function RenameFolderModal({ t, folderName, onClose, onRenamed }: {
-  t: (k: string) => string
-  folderName: string
-  onClose: () => void
-  onRenamed: (oldName: string, newName: string) => void
-}) {
-  const [name, setName] = useState(folderName)
-  const [saving, setSaving] = useState(false)
-
-  const submit = async () => {
-    const trimmed = name.trim()
-    if (!trimmed || trimmed === folderName) return
-    setSaving(true)
-    try {
-      await billingApi.renameFolder(folderName, trimmed)
-      onRenamed(folderName, trimmed)
-      toast.success(t('billing.folder_renamed'))
-    } catch {
-      toast.error(t('common.action_failed'))
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  return (
-    <Overlay onClose={onClose}>
-      <div className="p-6">
-        <div className="flex items-center justify-between mb-5">
-          <h2 className="text-lg font-semibold text-white">{t('billing.rename_folder')}</h2>
-          <button onClick={onClose} className="text-dark-500 hover:text-dark-300 transition">
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-        <Field label={t('billing.folder_name')}>
-          <input
-            value={name}
-            onChange={e => setName(e.target.value)}
-            className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200
-                       placeholder-dark-600 focus:border-accent-500/50 focus:outline-none transition"
-            autoFocus
-            onKeyDown={e => { if (e.key === 'Enter') submit() }}
-          />
-        </Field>
-        <div className="flex gap-3 mt-6">
-          <button onClick={onClose} className="flex-1 py-2.5 bg-dark-800 text-dark-300 rounded-xl text-sm font-medium hover:bg-dark-700 transition">
-            {t('common.cancel')}
-          </button>
-          <button
-            onClick={submit}
-            disabled={!name.trim() || name.trim() === folderName || saving}
-            className="flex-1 py-2.5 bg-accent-500 text-white rounded-xl text-sm font-medium hover:bg-accent-600 transition
-                       disabled:opacity-40 flex items-center justify-center gap-2"
-          >
-            {saving && <Loader2 className="w-4 h-4 animate-spin" />}
-            {t('common.save')}
-          </button>
-        </div>
-      </div>
-    </Overlay>
-  )
-}
-
-function MoveToFolderModal({ t, server, folders, onClose, onMoved }: {
-  t: (k: string) => string
-  server: BillingServerData
-  folders: string[]
-  onClose: () => void
-  onMoved: (serverId: number, folder: string | null) => void
-}) {
-  const [selected, setSelected] = useState(server.folder || '')
-
-  return (
-    <Overlay onClose={onClose}>
-      <div className="p-6">
-        <div className="flex items-center justify-between mb-5">
-          <h2 className="text-lg font-semibold text-white">{t('billing.move_to_folder')}</h2>
-          <button onClick={onClose} className="text-dark-500 hover:text-dark-300 transition">
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-        <p className="text-sm text-dark-400 mb-4">{server.name}</p>
-        <div className="space-y-1.5">
-          <button
-            onClick={() => setSelected('')}
-            className={`w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-sm transition ${
-              selected === ''
-                ? 'bg-accent-500/15 text-accent-400 border border-accent-500/30'
-                : 'bg-dark-800/50 text-dark-300 border border-dark-700/50 hover:border-dark-600'
-            }`}
-          >
-            <Box className="w-4 h-4" />
-            {t('billing.no_folder')}
-          </button>
-          {folders.map(f => (
-            <button
-              key={f}
-              onClick={() => setSelected(f)}
-              className={`w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-sm transition ${
-                selected === f
-                  ? 'bg-accent-500/15 text-accent-400 border border-accent-500/30'
-                  : 'bg-dark-800/50 text-dark-300 border border-dark-700/50 hover:border-dark-600'
-              }`}
-            >
-              <Folder className="w-4 h-4" />
-              {f}
-            </button>
-          ))}
-        </div>
-        <div className="flex gap-3 mt-6">
-          <button onClick={onClose} className="flex-1 py-2.5 bg-dark-800 text-dark-300 rounded-xl text-sm font-medium hover:bg-dark-700 transition">
-            {t('common.cancel')}
-          </button>
-          <button
-            onClick={() => onMoved(server.id, selected || null)}
-            className="flex-1 py-2.5 bg-accent-500 text-white rounded-xl text-sm font-medium hover:bg-accent-600 transition"
-          >
-            {t('common.save')}
-          </button>
-        </div>
-      </div>
-    </Overlay>
-  )
-}
-
-/* ------------------------------------------------------------------ */
-/*  Sortable folder with droppable zone                                */
-/* ------------------------------------------------------------------ */
-
-function BillingSortableFolderItem({ folderId, isDropOver, children }: {
-  folderId: string
-  isDropOver: boolean
-  children: (handleProps: { ref: (node: HTMLElement | null) => void; listeners: ReturnType<typeof useSortable>['listeners']; attributes: ReturnType<typeof useSortable>['attributes'] }) => React.ReactNode
-}) {
-  const {
-    setNodeRef: setSortableRef,
-    setActivatorNodeRef,
-    attributes,
-    listeners,
-    transform,
-    transition,
-    isDragging,
-  } = useSortable({ id: `sortable-folder:${folderId}` })
-  const { setNodeRef: setDropRef } = useDroppable({ id: `folder:${folderId}` })
-
-  const style = {
-    transform: CSS.Transform.toString(transform),
-    transition,
-    opacity: isDragging ? 0.3 : 1,
-  }
-
-  const combinedRef = useCallback((node: HTMLDivElement | null) => {
-    setSortableRef(node)
-    setDropRef(node)
-  }, [setSortableRef, setDropRef])
-
-  return (
-    <div
-      ref={combinedRef}
-      style={style}
-      className={`rounded-xl border overflow-hidden transition-colors duration-150 ${
-        isDropOver && !isDragging
-          ? 'bg-blue-500/10 border-blue-500/40 ring-2 ring-blue-500/30'
-          : 'bg-dark-900/50 border-dark-800/50'
-      }`}
-    >
-      {children({ ref: setActivatorNodeRef, listeners, attributes })}
-    </div>
-  )
-}
-
-/* ------------------------------------------------------------------ */
-/*  Unfolder drop zone                                                 */
-/* ------------------------------------------------------------------ */
-
-function BillingUnfolderDropZone({ isOver, hasServers, hasFolders, children }: {
-  isOver: boolean
-  hasServers: boolean
-  hasFolders: boolean
-  children: React.ReactNode
-}) {
-  const { setNodeRef } = useDroppable({ id: 'drop:unfolder' })
-
-  if (!hasServers && !hasFolders) return <>{children}</>
-
-  return (
-    <div
-      ref={setNodeRef}
-      className={`rounded-xl transition-all duration-150 min-h-[40px] ${
-        isOver
-          ? 'bg-accent-500/5 ring-2 ring-accent-500/30 p-3'
-          : ''
-      }`}
-    >
-      {children}
-    </div>
-  )
-}
-
-/* ------------------------------------------------------------------ */
-/*  Small helpers                                                      */
-/* ------------------------------------------------------------------ */
-
-function Field({ label, children, faqScreen }: {
-  label: string
-  children: React.ReactNode
-  faqScreen?: FAQScreen
-}) {
-  return (
-    <div className="space-y-1.5">
-      <label className="text-sm text-dark-300 flex items-center gap-1">
-        {label}
-        {faqScreen && <FAQIcon screen={faqScreen} size="sm" />}
-      </label>
-      {children}
-    </div>
-  )
-}
-
-function ToggleRow({ label, checked, onChange }: {
-  label: string
-  checked: boolean
-  onChange: (v: boolean) => void
-}) {
-  return (
-    <div className="flex items-center justify-between gap-3">
-      <span className="text-sm text-dark-300">{label}</span>
-      <button
-        onClick={() => onChange(!checked)}
-        className={`relative w-10 h-5 rounded-full transition-colors ${checked ? 'bg-accent-500' : 'bg-dark-700'}`}
-      >
-        <motion.div
-          className="absolute top-0.5 w-4 h-4 bg-white rounded-full shadow"
-          animate={{ left: checked ? 22 : 2 }}
-          transition={{ type: 'spring', stiffness: 500, damping: 30 }}
-        />
-      </button>
     </div>
   )
 }

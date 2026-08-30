@@ -1770,7 +1770,8 @@ async def _migrate_hwid_user_id(conn):
         raise
 
 
-async def _migrate_yandex_cloud_billing(conn):
+async def _migrate_cloud_billing(conn):
+    """Колонки облачного биллинга: yc_* → cloud_*, тип 'yandex_cloud' → 'cloud'."""
     result = await conn.execute(text("""
         SELECT column_name FROM information_schema.columns
         WHERE table_name = 'billing_servers'
@@ -1779,15 +1780,65 @@ async def _migrate_yandex_cloud_billing(conn):
     if not columns:
         return
 
-    yc_columns = [
-        ("yc_oauth_token", "VARCHAR(200)"),
-        ("yc_billing_account_id", "VARCHAR(100)"),
-        ("yc_balance_threshold", "DOUBLE PRECISION DEFAULT 0"),
-        ("yc_daily_cost", "DOUBLE PRECISION"),
-        ("yc_last_sync_at", "TIMESTAMP WITH TIME ZONE"),
-        ("yc_last_error", "VARCHAR(500)"),
+    # Учётка провайдера пережила два переименования (yc_service_key → yc_iam_token →
+    # yc_oauth_token); в cloud_credential переезжает первая найденная, остальные лишние.
+    legacy_credentials = [
+        c for c in ("yc_oauth_token", "yc_iam_token", "yc_service_key") if c in columns
     ]
-    for col_name, col_type in yc_columns:
+    if legacy_credentials and "cloud_credential" not in columns:
+        source = legacy_credentials.pop(0)
+        try:
+            await conn.execute(text(
+                f'ALTER TABLE billing_servers RENAME COLUMN "{source}" TO "cloud_credential"'
+            ))
+            columns.discard(source)
+            columns.add("cloud_credential")
+            logger.info(f"Renamed billing_servers.{source} → cloud_credential")
+        except Exception as e:
+            logger.warning(f"Rename {source} → cloud_credential failed: {e}")
+    for obsolete in legacy_credentials:
+        try:
+            await conn.execute(text(f'ALTER TABLE billing_servers DROP COLUMN "{obsolete}"'))
+            columns.discard(obsolete)
+            logger.info(f"Dropped obsolete column: billing_servers.{obsolete}")
+        except Exception:
+            pass
+
+    renames = [
+        ("yc_billing_account_id", "cloud_account_id"),
+        ("yc_balance_threshold", "cloud_balance_threshold"),
+        ("yc_daily_cost", "cloud_daily_cost"),
+        ("yc_last_sync_at", "cloud_last_sync_at"),
+        ("yc_last_error", "cloud_last_error"),
+    ]
+    for old_col, new_col in renames:
+        if old_col in columns and new_col not in columns:
+            try:
+                await conn.execute(text(
+                    f'ALTER TABLE billing_servers RENAME COLUMN "{old_col}" TO "{new_col}"'
+                ))
+                columns.discard(old_col)
+                columns.add(new_col)
+                logger.info(f"Renamed billing_servers.{old_col} → {new_col}")
+            except Exception as e:
+                logger.warning(f"Rename {old_col} → {new_col} failed: {e}")
+        elif old_col in columns:
+            try:
+                await conn.execute(text(f'ALTER TABLE billing_servers DROP COLUMN "{old_col}"'))
+                columns.discard(old_col)
+            except Exception:
+                pass
+
+    cloud_columns = [
+        ("cloud_provider", "VARCHAR(30)"),
+        ("cloud_credential", "TEXT"),
+        ("cloud_account_id", "VARCHAR(100)"),
+        ("cloud_balance_threshold", "DOUBLE PRECISION DEFAULT 0"),
+        ("cloud_daily_cost", "DOUBLE PRECISION"),
+        ("cloud_last_sync_at", "TIMESTAMP WITH TIME ZONE"),
+        ("cloud_last_error", "VARCHAR(500)"),
+    ]
+    for col_name, col_type in cloud_columns:
         if col_name not in columns:
             try:
                 await conn.execute(text(
@@ -1798,28 +1849,22 @@ async def _migrate_yandex_cloud_billing(conn):
                 if "already exists" not in str(e).lower():
                     logger.warning(f"Could not add billing_servers.{col_name}: {e}")
 
-    # Миграция: yc_iam_token / yc_service_key → yc_oauth_token
-    for old_col in ("yc_service_key", "yc_iam_token"):
-        if old_col in columns and "yc_oauth_token" in columns:
-            try:
-                await conn.execute(text(
-                    f'ALTER TABLE billing_servers DROP COLUMN "{old_col}"'
-                ))
-                logger.info(f"Dropped obsolete column: billing_servers.{old_col}")
-            except Exception:
-                pass
-        elif old_col in columns and "yc_oauth_token" not in columns:
-            try:
-                await conn.execute(text(
-                    f'ALTER TABLE billing_servers RENAME COLUMN "{old_col}" TO "yc_oauth_token"'
-                ))
-                await conn.execute(text(
-                    'ALTER TABLE billing_servers ALTER COLUMN "yc_oauth_token" TYPE VARCHAR(200)'
-                ))
-                logger.info(f"Renamed billing_servers.{old_col} → yc_oauth_token")
-            except Exception as e:
-                logger.warning(f"Rename {old_col} failed: {e}")
-            break
+    # Шифротекст длиннее исходного токена — VARCHAR(200) из старой схемы его обрежет.
+    try:
+        await conn.execute(text(
+            'ALTER TABLE billing_servers ALTER COLUMN "cloud_credential" TYPE TEXT'
+        ))
+    except Exception as e:
+        logger.warning(f"Could not widen billing_servers.cloud_credential: {e}")
+
+    try:
+        await conn.execute(text("""
+            UPDATE billing_servers
+            SET billing_type = 'cloud', cloud_provider = 'yandex_cloud'
+            WHERE billing_type = 'yandex_cloud'
+        """))
+    except Exception as e:
+        logger.warning(f"Could not convert yandex_cloud billing rows: {e}")
 
 
 async def _migrate_wildcard_ssl(conn):
@@ -2092,6 +2137,7 @@ _SECRET_COLUMNS = [
     ("node_install_keys", "key_pem"),
     ("servers", "api_key"),
     ("remnawave_cert_profiles", "secret_key"),
+    ("billing_servers", "cloud_credential"),
 ]
 
 
@@ -2137,7 +2183,7 @@ async def init_db():
         await _migrate_remnawave_anomaly_settings(conn)
         await _migrate_remnawave_ephemeral_ips(conn)
         await _migrate_hwid_user_id(conn)
-        await _migrate_yandex_cloud_billing(conn)
+        await _migrate_cloud_billing(conn)
         await _migrate_wildcard_ssl(conn)
         await _migrate_aggregated_metrics_unique(conn)
         await _migrate_bigint_pk_ids(conn)

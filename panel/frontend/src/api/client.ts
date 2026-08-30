@@ -1741,10 +1741,12 @@ export const alertsApi = {
 }
 
 // Billing types
+export type BillingType = 'monthly' | 'resource' | 'cloud'
+
 export interface BillingServerData {
   id: number
   name: string
-  billing_type: 'monthly' | 'resource' | 'yandex_cloud'
+  billing_type: BillingType
   paid_until: string | null
   days_left: number | null
   monthly_cost: number | null
@@ -1755,12 +1757,13 @@ export interface BillingServerData {
   folder: string | null
   created_at: string | null
   updated_at: string | null
-  yc_billing_account_id: string | null
-  yc_balance_threshold: number | null
-  yc_daily_cost: number | null
-  yc_last_sync_at: string | null
-  yc_last_error: string | null
-  has_yc_token: boolean
+  cloud_provider: string | null
+  cloud_account_id: string | null
+  cloud_balance_threshold: number | null
+  cloud_daily_cost: number | null
+  cloud_last_sync_at: string | null
+  cloud_last_error: string | null
+  has_cloud_credential: boolean
 }
 
 export interface BillingSettingsData {
@@ -1774,7 +1777,7 @@ export const billingApi = {
     api.get<{ servers: BillingServerData[]; count: number }>('/billing/servers'),
   createServer: (data: {
     name: string
-    billing_type: 'monthly' | 'resource' | 'yandex_cloud'
+    billing_type: BillingType
     paid_days?: number
     paid_until?: string
     monthly_cost?: number
@@ -1782,22 +1785,24 @@ export const billingApi = {
     currency?: string
     notes?: string
     folder?: string
-    yc_oauth_token?: string
-    yc_billing_account_id?: string
-    yc_balance_threshold?: number
+    cloud_provider?: string
+    cloud_credential?: string
+    cloud_account_id?: string
+    cloud_balance_threshold?: number
   }) => api.post<{ success: boolean; server: BillingServerData }>('/billing/servers', data),
   updateServer: (id: number, data: {
     name?: string
-    billing_type?: string
+    billing_type?: BillingType
     paid_until?: string
     monthly_cost?: number
     account_balance?: number
     currency?: string
     notes?: string
     folder?: string | null
-    yc_oauth_token?: string
-    yc_billing_account_id?: string
-    yc_balance_threshold?: number
+    cloud_provider?: string
+    cloud_credential?: string
+    cloud_account_id?: string | null
+    cloud_balance_threshold?: number
   }) => api.put<BillingServerData>(`/billing/servers/${id}`, data),
   deleteServer: (id: number) =>
     api.delete<{ success: boolean }>(`/billing/servers/${id}`),
@@ -1805,8 +1810,8 @@ export const billingApi = {
     api.post<BillingServerData>(`/billing/servers/${id}/extend`, { days }),
   topupServer: (id: number, amount: number) =>
     api.post<BillingServerData>(`/billing/servers/${id}/topup`, { amount }),
-  syncYc: (id: number) =>
-    api.post<BillingServerData>(`/billing/servers/${id}/yc-sync`),
+  syncServer: (id: number) =>
+    api.post<BillingServerData>(`/billing/servers/${id}/sync`),
   moveToFolder: (serverIds: number[], folder: string | null) =>
     api.post<{ success: boolean; moved: number }>('/billing/servers/move-to-folder', { server_ids: serverIds, folder }),
   renameFolder: (oldName: string, newName: string) =>
