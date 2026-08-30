@@ -99,7 +99,7 @@ export const PROVIDERS: Record<CloudProviderId, CloudProviderMeta> = {
         placeholder: 'xxxxxxxxxxxxxxxx',
         secret: true,
         link: {
-          url: 'https://my.selectel.ru/profile/apikeys',
+          url: 'https://my.selectel.ru/profile/access/api-keys',
           labelKey: 'billing.selectel_get_token_link',
         },
       },
