@@ -1,9 +1,9 @@
 """Selectel: остаток, фактический расход и запасной прогноз через Billing API.
 
 Статический API-ключ (заголовок X-Token) покрывает все три метода. Расход
-считается по реальным списаниям из истории транзакций — прогноз самого Selectel
-остаётся запасным вариантом, потому что его единица измерения расходится с
-документацией (см. _fetch_prediction_days).
+считается по реальным списаниям из истории транзакций за то же окно, что у
+Yandex Cloud, — прогноз самого Selectel остаётся запасным вариантом, потому что
+его единица измерения расходится с документацией (см. _fetch_prediction_days).
 """
 import asyncio
 import logging
@@ -27,9 +27,9 @@ TRANSACTIONS_PATH = "/v2/billing/transactions"
 
 # Суммы в Billing API приходят целыми числами в минимальных единицах (копейки).
 MINOR_UNITS = 100
-# Окно в месяц: разовые месячные списания (выделенные серверы) попадают в него
-# ровно один раз, поэтому среднесуточный расход не множится на них
-CONSUMPTION_WINDOW_DAYS = 30
+# Столько же, сколько у Yandex Cloud: свежая оценка важнее сглаживания. Разовое
+# месячное списание в окне завысит расход, пока не выйдет за его край
+CONSUMPTION_WINDOW_DAYS = 3
 TRANSACTIONS_PAGE_SIZE = 500
 TRANSACTIONS_MAX_PAGES = 20
 REQUEST_TIMEOUT = 20.0
@@ -73,7 +73,7 @@ class SelectelProvider(CloudProvider):
         return total_minor / MINOR_UNITS, currency, warning
 
     async def _fetch_daily_cost(self, token: str) -> Optional[float]:
-        """Средний расход в сутки по списаниям за окно потребления.
+        """Средний расход в сутки по списаниям за последние дни.
 
         Ошибка не фатальна: баланс уже получен, срок посчитается по прогнозу."""
         now = datetime.now(timezone.utc)
