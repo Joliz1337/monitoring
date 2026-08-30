@@ -64,7 +64,9 @@ async def sync_cloud_balance(server, now: datetime) -> CloudSnapshot:
 def _apply_snapshot(server, snapshot: CloudSnapshot, now: datetime) -> None:
     server.account_balance = snapshot.balance
     server.balance_updated_at = now
-    server.currency = snapshot.currency
+    # Провайдеры пишут код валюты по-разному (RUB у Yandex, rub у Selectel),
+    # а сводка группирует суммы по нему — без единого регистра рубли разъехались бы
+    server.currency = snapshot.currency.upper()
     server.cloud_last_sync_at = now
     server.cloud_last_error = snapshot.warning[:500] if snapshot.warning else None
 

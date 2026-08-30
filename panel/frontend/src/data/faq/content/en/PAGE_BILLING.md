@@ -30,7 +30,7 @@ Keys are stored encrypted and never returned to the interface: the field in the 
 
 - For the resource type an honest daily cost matters: the panel simply divides the remaining balance by it.
 - The balance threshold is the amount you don't want to spend below: the term is counted down to it, not to zero.
-- The Yandex Cloud forecast is smoothed over recent spending, while Selectel's own forecast is used as is — after a sharp increase the number adjusts over a few days rather than instantly.
+- Spending is measured from actual charges: recent consumption for Yandex Cloud, a month of transactions for Selectel (so one-off monthly payments don't inflate the daily average). After a sharp increase the number adjusts gradually rather than instantly.
 - The summary on top shows monthly spend, total balance and how many projects expire within a week. Different currencies are listed separately instead of being added up.
 - Overdue and expiring servers are highlighted — you see them the moment you open the page.
 - This is a ledger: it never pays or renews anything on its own.

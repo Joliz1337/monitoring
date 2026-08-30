@@ -155,7 +155,7 @@ def _server_to_dict(s: BillingServer) -> dict:
         "monthly_cost": s.monthly_cost,
         "account_balance": round(live_balance, 2) if live_balance is not None else s.account_balance,
         "balance_updated_at": s.balance_updated_at.isoformat() if s.balance_updated_at else None,
-        "currency": s.currency or "USD",
+        "currency": (s.currency or "USD").upper(),
         "notes": s.notes,
         "folder": s.folder,
         "created_at": s.created_at.isoformat() if s.created_at else None,
