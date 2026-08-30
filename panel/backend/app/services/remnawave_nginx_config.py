@@ -25,12 +25,27 @@
 в обрыв соединения (444), а всё, что заглушка может отдать за настоящий
 сайт (чужой путь, не-gRPC запрос по gRPC-локации, упавший Xray), уходит
 на неё проксированием.
+
+Проксирование заглушки по имени: если target цели — домен без пути (типичный
+случай маскировочного сайта за CDN), proxy_pass идёт через переменную
+`$rw_upstream`, чтобы http-resolver перечитывал DNS и смена IP не убивала
+маскировку до перезапуска; для https-доменов добавляется SNI
+(proxy_ssl_server_name/proxy_ssl_name с именем цели, не $host). Для целей-IP
+и доменов с путём (где переменная сломала бы подстановку URI) proxy_pass
+остаётся литеральным — поведение не меняется.
+
+Осознанно не добавляем:
+- limit_conn/limit_req — отдача 429 наружу сама по себе подпись прокси;
+  скорость на клиентском порту не режем;
+- HTTP/3 — только http2 on;
+- ssl_ciphers не трогаем — набор фиксирован ниже.
 """
 
 import ipaddress
 import re
 from dataclasses import dataclass, field
 from typing import Optional
+from urllib.parse import urlsplit
 
 DOMAIN_PLACEHOLDER = "{{DOMAIN}}"
 LOCATIONS_START_MARKER = "# === LOCATIONS START ==="
@@ -124,6 +139,13 @@ _PROXY_BLOCK_RE = re.compile(
 )
 _GRPC_PASS_RE = re.compile(r"grpc_pass\s+grpc://127\.0\.0\.1:(\d+)\s*;")
 _PROXY_PASS_RE = re.compile(r"proxy_pass\s+(\S+?)\s*;")
+# Доменная цель проксируется через set $rw_upstream <url>; исходный target
+# восстанавливается отсюда, а не из proxy_pass (там переменная)
+_PROXY_SET_RE = re.compile(r"set\s+\$rw_upstream\s+(\S+?)\s*;")
+
+# Каталог статической заглушки внутри контейнера remnawave-nginx: индекс отсюда
+# отдаётся при недоступности fallback, если опция включена (см. _fallback_locations)
+LOCAL_STUB_ROOT = "/usr/share/nginx/html"
 
 
 class RuleValidationError(ValueError):
@@ -197,6 +219,11 @@ class ProfileOptions:
     # Пусто = выключено
     client_tcp_keepalive: str = "30s:10s:3"
     access_log_enabled: bool = False
+    # Упавший fallback обычно даёт 502 → @drop → 444, и снаружи сервер выглядит
+    # как молчащий порт. С этой опцией 502/503/504 от заглушки уходят на
+    # статическую страницу из LOCAL_STUB_ROOT в контейнере. По умолчанию выкл —
+    # поведение прежнее
+    local_stub_enabled: bool = False
 
     @classmethod
     def from_dict(cls, data: Optional[dict]) -> "ProfileOptions":
@@ -224,6 +251,7 @@ class ProfileOptions:
             "tls_session_tickets": self.tls_session_tickets,
             "client_tcp_keepalive": self.client_tcp_keepalive,
             "access_log_enabled": self.access_log_enabled,
+            "local_stub_enabled": self.local_stub_enabled,
         }
 
     @property
@@ -406,6 +434,7 @@ def _xhttp_block(rule: XhttpRule, ip_var: str, has_fallback: bool, keepalive: bo
             {proxy_pass}
             proxy_request_buffering off;
             proxy_buffering off;
+            proxy_socket_keepalive on;
             proxy_intercept_errors on;
             error_page {XHTTP_FALLBACK_CODES} = {on_error};
             error_page {XHTTP_DROP_CODES} = {drop};
@@ -428,7 +457,7 @@ def _render_upstreams(rules: list[Rule]) -> str:
     """
     blocks = [f"""    upstream {xhttp_upstream_name(r)} {{
         server 127.0.0.1:{r.port};
-        keepalive 64;
+        keepalive 64;  {AUTO_MARKER}
         keepalive_requests 100000;
     }}""" for r in rules if isinstance(r, XhttpRule)]
     return "\n\n".join(blocks)
@@ -454,11 +483,51 @@ def _proxy_headers(ip_var: str, indent: str = "            ") -> str:
     return "\n".join(f"{indent}{line}" for line in lines)
 
 
+def _is_ip_host(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return False
+
+
+def _proxy_pass_lines(target_url: str) -> list[str]:
+    """proxy_pass (+ set/proxy_ssl_*) для цели.
+
+    Домен без пути идёт через переменную `$rw_upstream`, чтобы http-resolver
+    перечитывал DNS (смена IP заглушки за CDN не убивает маскировку до
+    рестарта). Для https-домена добавляется SNI с именем цели — иначе за CDN
+    уйдёт запрос без SNI и вернётся не тот сайт. Цель-IP и домен с путём
+    (переменная сломала бы подстановку URI локации) остаются на литеральном
+    proxy_pass — поведение не меняется.
+    """
+    parts = urlsplit(target_url)
+    host = parts.hostname or ""
+    is_ip = _is_ip_host(host)
+    lines: list[str] = []
+    if not is_ip and parts.path == "":
+        lines.append(f"set $rw_upstream {target_url};")
+        lines.append("proxy_pass $rw_upstream$request_uri;")
+    else:
+        lines.append(f"proxy_pass {target_url};")
+    if parts.scheme == "https" and not is_ip:
+        lines.append("proxy_ssl_server_name on;")
+        lines.append(f"proxy_ssl_name {host};")
+    return lines
+
+
+def _proxy_pass_body(target_url: str, ip_var: str, prefix_lines: tuple[str, ...] = ()) -> str:
+    """Тело локации-проксирования (12 пробелов отступа): служебные строки +
+    proxy_pass + заголовки."""
+    lines = [*prefix_lines, *_proxy_pass_lines(target_url)]
+    passed = "\n".join(f"            {line}" for line in lines)
+    return f"{passed}\n{_proxy_headers(ip_var)}"
+
+
 def _proxy_block(rule: ProxyRule, ip_var: str) -> str:
     return f"""        # rule: {rule.name} type=proxy
         location {rule.path} {{
-            proxy_pass {rule.target_url};
-{_proxy_headers(ip_var)}
+{_proxy_pass_body(rule.target_url, ip_var)}
         }}"""
 
 
@@ -487,18 +556,30 @@ def _replace_section(config: str, start_marker: str, end_marker: str,
 
 def _fallback_locations(options: "ProfileOptions") -> str:
     """Живут вне маркеров: весь не попавший в правила трафик и ошибки Xray
-    уходят на обычный сайт."""
-    headers = _proxy_headers(options.client_ip_var)
+    уходят на обычный сайт.
+
+    С local_stub_enabled недоступность самой заглушки (nginx-генерируемые
+    502/503/504 при неудачном коннекте — intercept_errors тут выключен, но на
+    свои ошибки коннекта он не влияет) уводит запрос на статическую страницу
+    из контейнера, а не в 444: снаружи сервер продолжает выглядеть сайтом.
+    Собственный 5xx, отданный заглушкой, по-прежнему проходит как есть.
+    """
+    prefix = ("error_page 502 503 504 = @stub;",) if options.local_stub_enabled else ()
+    body = _proxy_pass_body(options.fallback_url, options.client_ip_var, prefix)
+    stub = f"""
+
+        location @stub {{
+            root {LOCAL_STUB_ROOT};
+            rewrite ^ /index.html break;
+        }}""" if options.local_stub_enabled else ""
     return f"""
         location / {{
-            proxy_pass {options.fallback_url};
-{headers}
+{body}
         }}
 
         location @fallback {{
-            proxy_pass {options.fallback_url};
-{headers}
-        }}"""
+{body}
+        }}{stub}"""
 
 
 def _realip_maps(options: ProfileOptions) -> str:
@@ -612,6 +693,10 @@ def generate_full_config(options: ProfileOptions, rules: list[Rule]) -> str:
     return f"""# Managed by monitoring panel (Remnawave nginx profile)
 worker_processes auto;
 worker_rlimit_nofile 65536;  {AUTO_MARKER}
+# grpc_read_timeout/proxy_read_timeout 1h держат соединения старых воркеров
+# после каждого reload; панель синкает конфиг часто, и без потолка поколения
+# воркеров копились бы до часа, удерживая память и коннекты
+worker_shutdown_timeout 60s;
 error_log /var/log/nginx/error.log warn;
 pid /var/run/nginx.pid;
 
@@ -629,8 +714,19 @@ http {{
     tcp_nopush on;
     tcp_nodelay on;
     keepalive_timeout 75s;
-    keepalive_requests 10000;
+    # XHTTP packet-up шлёт запрос на каждый чанк (десятки в секунду на
+    # соединение); при 10000 лимит выбирается за минуты, nginx рвёт соединение,
+    # клиент переустанавливает TLS — шторм рукопожатий палит поведенческий DPI
+    # и выедает эфемерные порты промежуточных прокси. Для gRPC/WS это одно
+    # долгое соединение — им лимит безразличен
+    keepalive_requests 1000000;
     reset_timedout_connection on;
+
+    # Имя в proxy_pass через переменную ($rw_upstream) резолвится этим
+    # резолвером на каждом запросе — смена IP заглушки за CDN подхватывается
+    # без рестарта. ipv6=off: заглушки за CDN адресуются по A-записям
+    resolver 1.1.1.1 8.8.8.8 9.9.9.9 valid=300s ipv6=off;
+    resolver_timeout 5s;
 
     # gRPC-транспорт Xray — это один бесконечный поток в теле запроса.
     # Любой ненулевой лимит рано или поздно обрывает соединение
@@ -721,13 +817,21 @@ def parse_rules_from_config(config: str) -> list[Rule]:
         )))
 
     for match in _PROXY_BLOCK_RE.finditer(section):
-        pass_match = _PROXY_PASS_RE.search(match.group("body"))
-        if not pass_match:
-            continue
+        body = match.group("body")
+        # Доменная цель хранит исходный URL в set-строке, proxy_pass там —
+        # переменная; цель-IP и домен с путём — прямо в proxy_pass
+        set_match = _PROXY_SET_RE.search(body)
+        if set_match:
+            target_url = set_match.group(1)
+        else:
+            pass_match = _PROXY_PASS_RE.search(body)
+            if not pass_match:
+                continue
+            target_url = pass_match.group(1)
         found.append((match.start(), ProxyRule(
             name=match.group("name"),
             path=match.group("path"),
-            target_url=pass_match.group(1),
+            target_url=target_url,
         )))
 
     return [rule for _, rule in sorted(found, key=lambda item: item[0])]

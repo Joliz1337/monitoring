@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from app.services.remnawave_nginx_config import (  # noqa: E402
     AUTO_MARKER,
     DOMAIN_PLACEHOLDER,
+    LOCAL_STUB_ROOT,
     GrpcRule,
     MissingMarkersError,
     OptionsValidationError,
@@ -159,7 +160,9 @@ class ContentTests(unittest.TestCase):
         config = generate_full_config(
             ProfileOptions(fallback_url="https://example.com"), GRPC_RULES,
         )
-        self.assertIn("proxy_pass https://example.com;", config)
+        # Доменная цель проксируется через переменную, чтобы применялся resolver
+        self.assertIn("set $rw_upstream https://example.com;", config)
+        self.assertIn("proxy_pass $rw_upstream$request_uri;", config)
         self.assertIn("error_page 418 502 503 504 = @fallback;", config)
         self.assertIn("location @fallback {", config)
         self.assertIn("location / {", config)
@@ -437,6 +440,127 @@ class TlsAndConnectionsTests(unittest.TestCase):
         self.assertTrue(legacy.tls_session_tickets)
         self.assertEqual(legacy.client_tcp_keepalive, "30s:10s:3")
         self.assertFalse(legacy.access_log_enabled)
+
+
+class StabilityDirectivesTests(unittest.TestCase):
+    """Директивы стабильности в http/main-контексте — вне маркеров, парсер их
+    не касается; на gRPC/WS/проксирование они не влияют."""
+
+    def test_worker_shutdown_timeout_bounds_old_worker_generations(self):
+        # Без потолка старые воркеры живут до grpc_read_timeout 1h после reload
+        config = generate_full_config(ProfileOptions(), GRPC_RULES)
+        self.assertIn("worker_shutdown_timeout 60s;", config)
+
+    def test_client_keepalive_requests_raised_for_packet_up(self):
+        # packet-up выбирает 10000 за минуты и провоцирует шторм рукопожатий
+        config = generate_full_config(ProfileOptions(), XHTTP_RULES)
+        self.assertIn("keepalive_requests 1000000;", config)
+        self.assertNotIn("keepalive_requests 10000;", config)
+
+    def test_grpc_block_unchanged_by_keepalive_requests(self):
+        # У gRPC одно долгое соединение — лимит запросов ему безразличен,
+        # блок остаётся прежним
+        config = generate_full_config(ProfileOptions(), GRPC_RULES)
+        self.assertIn("grpc_pass grpc://127.0.0.1:8443;", config)
+        self.assertIn("grpc_read_timeout 1h;", config)
+
+    def test_resolver_present_with_ipv6_off(self):
+        config = generate_full_config(ProfileOptions(), GRPC_RULES)
+        self.assertIn("resolver ", config)
+        self.assertIn("ipv6=off", config)
+
+
+class UpstreamKeepaliveTests(unittest.TestCase):
+    def test_upstream_keepalive_is_marked_auto(self):
+        # Пул захардкожен безопасным минимумом, нода считает его от worker_connections
+        config = generate_full_config(ProfileOptions(), XHTTP_RULES)
+        line = next(l for l in config.splitlines() if l.strip().startswith("keepalive ")
+                    and "keepalive_requests" not in l)
+        self.assertIn("keepalive 64;", line)
+        self.assertIn(AUTO_MARKER, line)
+
+    def test_upstream_keepalive_requests_not_marked(self):
+        # keepalive_requests в upstream — счётчик запросов, от размера хоста не
+        # зависит, маркером не помечен
+        config = generate_full_config(ProfileOptions(), XHTTP_RULES)
+        line = next(l for l in config.splitlines() if "keepalive_requests 100000;" in l)
+        self.assertNotIn(AUTO_MARKER, line)
+
+    def test_xhttp_plain_location_reuses_loopback_socket(self):
+        section = XhttpTests._xhttp_section(generate_full_config(ProfileOptions(), XHTTP_RULES))
+        self.assertIn("proxy_socket_keepalive on;", section)
+
+
+class ProxyTargetResolutionTests(unittest.TestCase):
+    """Доменная цель проксируется через переменную (resolver перечитывает DNS)
+    и с SNI; цель-IP и домен с путём — литеральным proxy_pass без изменений."""
+
+    def _proxy_section(self, config: str) -> str:
+        return config[config.find("# rule:"):config.find("# === LOCATIONS END")]
+
+    def test_domain_target_uses_variable_and_sni(self):
+        rules = [ProxyRule(name="site", path="/site", target_url="https://cdn.example.com")]
+        section = self._proxy_section(generate_full_config(ProfileOptions(), rules))
+        self.assertIn("set $rw_upstream https://cdn.example.com;", section)
+        self.assertIn("proxy_pass $rw_upstream$request_uri;", section)
+        self.assertIn("proxy_ssl_server_name on;", section)
+        self.assertIn("proxy_ssl_name cdn.example.com;", section)
+
+    def test_domain_target_round_trips(self):
+        rules = [ProxyRule(name="site", path="/site", target_url="https://cdn.example.com")]
+        config = generate_full_config(ProfileOptions(), rules)
+        self.assertEqual(parse_rules_from_config(config), rules)
+        self.assertEqual(generate_full_config(ProfileOptions(), parse_rules_from_config(config)), config)
+
+    def test_ip_target_unchanged_no_sni(self):
+        rules = [ProxyRule(name="ip", path="/ip", target_url="https://1.2.3.4:8445")]
+        section = self._proxy_section(generate_full_config(ProfileOptions(), rules))
+        self.assertIn("proxy_pass https://1.2.3.4:8445;", section)
+        self.assertNotIn("set $rw_upstream", section)
+        self.assertNotIn("proxy_ssl_server_name", section)
+
+    def test_domain_target_with_path_stays_literal(self):
+        # Переменная сломала бы подстановку URI локации — остаёмся на литерале,
+        # SNI при этом добавляем
+        rules = [ProxyRule(name="base", path="/base", target_url="https://cdn.example.com/app")]
+        section = self._proxy_section(generate_full_config(ProfileOptions(), rules))
+        self.assertIn("proxy_pass https://cdn.example.com/app;", section)
+        self.assertNotIn("set $rw_upstream", section)
+        self.assertIn("proxy_ssl_name cdn.example.com;", section)
+
+    def test_http_domain_target_gets_no_proxy_ssl(self):
+        rules = [ProxyRule(name="plain", path="/p", target_url="http://cdn.example.com")]
+        section = self._proxy_section(generate_full_config(ProfileOptions(), rules))
+        self.assertIn("set $rw_upstream http://cdn.example.com;", section)
+        self.assertNotIn("proxy_ssl", section)
+
+    def test_ip_fallback_stays_literal(self):
+        config = generate_full_config(ProfileOptions(fallback_url="https://1.2.3.4:8445"), GRPC_RULES)
+        self.assertIn("proxy_pass https://1.2.3.4:8445;", config)
+        self.assertNotIn("set $rw_upstream", config)
+        self.assertNotIn("proxy_ssl_server_name", config)
+
+
+class LocalStubTests(unittest.TestCase):
+    def test_disabled_by_default(self):
+        config = generate_full_config(ProfileOptions(fallback_url="https://example.com"), GRPC_RULES)
+        self.assertNotIn("@stub", config)
+
+    def test_enabled_routes_stub_errors_to_static_page(self):
+        config = generate_full_config(
+            ProfileOptions(fallback_url="https://example.com", local_stub_enabled=True), GRPC_RULES,
+        )
+        self.assertIn("error_page 502 503 504 = @stub;", config)
+        self.assertIn("location @stub {", config)
+        self.assertIn(f"root {LOCAL_STUB_ROOT};", config)
+
+    def test_options_round_trip_dict(self):
+        options = ProfileOptions(local_stub_enabled=True)
+        self.assertEqual(ProfileOptions.from_dict(options.to_dict()), options)
+
+    def test_legacy_options_default_stub_off(self):
+        legacy = ProfileOptions.from_dict({"reject_default_server": True})
+        self.assertFalse(legacy.local_stub_enabled)
 
 
 class ValidationTests(unittest.TestCase):

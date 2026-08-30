@@ -45,6 +45,13 @@ events {{
 http {{
     ssl_session_cache shared:SSL:20m;  {AUTO_MARKER}
     keepalive_timeout 75s;
+    keepalive_requests 1000000;
+
+    upstream xhttp_vl {{
+        server 127.0.0.1:2081;
+        keepalive 64;  {AUTO_MARKER}
+        keepalive_requests 100000;
+    }}
 }}
 """
 
@@ -52,6 +59,7 @@ LIMITS = {
     "worker_rlimit_nofile": 262144,
     "worker_connections": 65536,
     "ssl_session_cache": 40,
+    "keepalive": 512,
 }
 
 
@@ -61,6 +69,18 @@ class PatchTests(unittest.TestCase):
         self.assertIn(f"worker_rlimit_nofile 262144;  {AUTO_MARKER}", result)
         self.assertIn(f"worker_connections 65536;  {AUTO_MARKER}", result)
         self.assertIn(f"ssl_session_cache shared:SSL:40m;  {AUTO_MARKER}", result)
+        self.assertIn(f"keepalive 512;  {AUTO_MARKER}", result)
+
+    def test_keepalive_requests_not_touched(self):
+        # keepalive_requests оканчивается на «_…» — под маркерную подстановку
+        # keepalive не подпадает ни в http-, ни в upstream-контексте
+        result = patch_host_limits(TEMPLATE, LIMITS)
+        self.assertIn("keepalive_requests 1000000;", result)
+        self.assertIn("keepalive_requests 100000;", result)
+
+    def test_keepalive_timeout_not_touched(self):
+        result = patch_host_limits(TEMPLATE, LIMITS)
+        self.assertIn("keepalive_timeout 75s;", result)
 
     def test_idempotent(self):
         once = patch_host_limits(TEMPLATE, LIMITS)
@@ -113,6 +133,14 @@ class ComputeTests(unittest.TestCase):
         self.assertLessEqual(limits["worker_connections"], 65536)
         self.assertGreaterEqual(limits["ssl_session_cache"], 10)
         self.assertLessEqual(limits["ssl_session_cache"], 100)
+        self.assertGreaterEqual(limits["keepalive"], 64)
+        self.assertLessEqual(limits["keepalive"], 512)
+
+    def test_keepalive_follows_worker_connections(self):
+        limits = compute_host_limits(compose_nofile=65536)
+        # keepalive = clamp(worker_connections // 64, 64, 512)
+        if limits["worker_connections"] == 16384:
+            self.assertEqual(limits["keepalive"], 256)
 
 
 if __name__ == "__main__":
