@@ -14,12 +14,9 @@ import { METRIC_COLORS, NETWORK_COLORS } from '../Charts/chartTheme'
 import PeriodSelector from '../ui/PeriodSelector'
 import { Tooltip } from '../ui/Tooltip'
 
+// Приём и отдача — одна метрика на двух плитках: график у них общий, поэтому
+// подсвечиваются обе, и клик по любой из подсвеченных сворачивает блок
 type FleetMetric = 'cpu' | 'memory' | 'network'
-type FleetTile = 'cpu' | 'memory' | 'rx' | 'tx'
-
-// Приём и отдача — один график с двумя линиями, но плитки разные: свернуть
-// должен только повторный клик по той же плитке, а не по соседней
-const TILE_METRIC: Record<FleetTile, FleetMetric> = { cpu: 'cpu', memory: 'memory', rx: 'network', tx: 'network' }
 
 // Историю перечитывать не чаще, чем в ней появляется новая точка;
 // 0 — шаг автообновления дашборда
@@ -34,16 +31,16 @@ interface StatTileProps {
   label: string
   value: string
   sub?: string
-  tile: FleetTile
+  metric: FleetMetric
   isActive: boolean
-  onSelect: (tile: FleetTile) => void
+  onSelect: (metric: FleetMetric) => void
 }
 
-function StatTile({ icon, iconBg, label, value, sub, tile, isActive, onSelect }: StatTileProps) {
+function StatTile({ icon, iconBg, label, value, sub, metric, isActive, onSelect }: StatTileProps) {
   return (
     <button
       type="button"
-      onClick={() => onSelect(tile)}
+      onClick={() => onSelect(metric)}
       aria-expanded={isActive}
       className={`bg-dark-900/50 border rounded-xl px-4 py-3 flex items-center gap-3 min-w-0 text-left transition-colors ${
         isActive ? 'border-accent-500/60 bg-dark-800/60' : 'border-dark-800/50 hover:border-dark-700'
@@ -67,7 +64,7 @@ function StatTile({ icon, iconBg, label, value, sub, tile, isActive, onSelect }:
 
 function FleetSummaryInner({ servers }: { servers: ServerWithMetrics[] }) {
   const { t } = useTranslation()
-  const [expanded, setExpanded] = useState<FleetTile | null>(null)
+  const [expanded, setExpanded] = useState<FleetMetric | null>(null)
   const [period, setPeriod] = useState('24h')
   const [history, setHistory] = useState<FleetHistoryResponse | null>(null)
   const [isHistoryLoading, setIsHistoryLoading] = useState(false)
@@ -185,12 +182,11 @@ function FleetSummaryInner({ servers }: { servers: ServerWithMetrics[] }) {
 
   if (!totals) return null
 
-  const toggle = (tile: FleetTile) => setExpanded(current => (current === tile ? null : tile))
+  const toggle = (target: FleetMetric) => setExpanded(current => (current === target ? null : target))
 
-  const metric = expanded && TILE_METRIC[expanded]
-  const isPercentMetric = metric !== 'network'
-  const chartTitle = metric ? t(`dashboard.fleet_chart_${metric}`) : ''
-  const chartDisplay = metric === 'cpu' ? cpuDisplay : metric === 'memory' ? memoryDisplay : networkDisplay
+  const isPercentMetric = expanded !== 'network'
+  const chartTitle = expanded ? t(`dashboard.fleet_chart_${expanded}`) : ''
+  const chartDisplay = expanded === 'cpu' ? cpuDisplay : expanded === 'memory' ? memoryDisplay : networkDisplay
 
   return (
     <div className="mb-6 fade-in">
@@ -201,7 +197,7 @@ function FleetSummaryInner({ servers }: { servers: ServerWithMetrics[] }) {
           label={t('common.cpu')}
           value={`${totals.cpuPercent.toFixed(0)}%`}
           sub={t('common.cores_count', { count: totals.cores })}
-          tile="cpu"
+          metric="cpu"
           isActive={expanded === 'cpu'}
           onSelect={toggle}
         />
@@ -211,7 +207,7 @@ function FleetSummaryInner({ servers }: { servers: ServerWithMetrics[] }) {
           label={t('common.ram')}
           value={`${formatBytes(totals.ramUsed, 0)} / ${formatBytes(totals.ramTotal, 0)}`}
           sub={`${totals.ramPercent.toFixed(0)}%`}
-          tile="memory"
+          metric="memory"
           isActive={expanded === 'memory'}
           onSelect={toggle}
         />
@@ -220,8 +216,8 @@ function FleetSummaryInner({ servers }: { servers: ServerWithMetrics[] }) {
           iconBg="bg-success/15"
           label={t('common.download')}
           value={formatBitsPerSecLocalized(totals.rx, t)}
-          tile="rx"
-          isActive={expanded === 'rx'}
+          metric="network"
+          isActive={expanded === 'network'}
           onSelect={toggle}
         />
         <StatTile
@@ -229,14 +225,14 @@ function FleetSummaryInner({ servers }: { servers: ServerWithMetrics[] }) {
           iconBg="bg-accent-500/15"
           label={t('common.upload')}
           value={formatBitsPerSecLocalized(totals.tx, t)}
-          tile="tx"
-          isActive={expanded === 'tx'}
+          metric="network"
+          isActive={expanded === 'network'}
           onSelect={toggle}
         />
       </div>
 
       <AnimatePresence>
-        {metric && (
+        {expanded && (
           // Постоянный key: без него AnimatePresence теряет уходящего ребёнка при
           // ререндере от поллинга дашборда и оставляет свёрнутый график в DOM
           <motion.div
@@ -258,7 +254,7 @@ function FleetSummaryInner({ servers }: { servers: ServerWithMetrics[] }) {
                 <PeriodSelector value={period} onChange={setPeriod} />
               </div>
               <MultiLineChart
-                series={series[metric]}
+                series={series[expanded]}
                 display={chartDisplay}
                 height={260}
                 period={period}
