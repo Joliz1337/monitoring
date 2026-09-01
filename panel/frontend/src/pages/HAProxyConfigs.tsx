@@ -57,9 +57,12 @@ const ALGORITHMS = [
 
 const ALGO_NEEDS_HASH = new Set(['source'])
 
+// maxconn 60000: к одному адресу:порту бэкенда физически не открыть больше
+// ~64k соединений (лимит исходящих портов балансера), запас оставлен на
+// TIME_WAIT и зарезервированные порты
 const DEFAULT_SERVER: BackendServer = {
   name: 'srv1', address: '', port: 0, weight: 1,
-  maxconn: 100000, check: true, inter: '5s', fall: 3, rise: 2,
+  maxconn: 60000, check: true, inter: '5s', fall: 3, rise: 2,
   send_proxy: false, send_proxy_v2: true,
   backup: false, slowstart: '60s', disabled: false,
 }
@@ -152,7 +155,10 @@ function BackendServerRow({
             <div>
               <label className="block text-[10px] text-dark-500 mb-0.5">{t('balancer.maxconn')}</label>
               <input type="number" value={srv.maxconn ?? ''} onChange={e => upd({ maxconn: e.target.value ? parseInt(e.target.value) : undefined })}
-                placeholder="500" className={inp} />
+                placeholder="60000" className={inp} />
+              {srv.maxconn != null && srv.maxconn > 64000 && (
+                <p className="text-[10px] text-amber-400 mt-0.5">{t('balancer.maxconn_warning')}</p>
+              )}
             </div>
             <div>
               <label className="block text-[10px] text-dark-500 mb-0.5">{t('balancer.slowstart')}</label>

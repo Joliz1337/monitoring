@@ -266,6 +266,45 @@ class GlobalMaxconnTests(unittest.TestCase):
         self.assertEqual(self.patch_config(once), once)
 
 
+class GlobalPipesizeTests(unittest.TestCase):
+    """tune.pipesize подставляется нодой по RAM хоста — профиль один на разные
+    машины, а страницы пайпа — невытесняемая память ядра."""
+
+    def compute(self, ram_mb: int):
+        manager = make_manager()
+        fake_mem = mock.Mock(total=ram_mb * 1024 * 1024)
+        with mock.patch("app.services.haproxy_manager.psutil.virtual_memory", return_value=fake_mem):
+            return manager._compute_pipesize()
+
+    def patch_config(self, content: str, pipesize=262144) -> str:
+        manager = make_manager()
+        with mock.patch.object(HAProxyManager, "_compute_pipesize", return_value=pipesize):
+            return manager._ensure_global_pipesize(content)
+
+    def test_tiers_by_ram(self):
+        self.assertEqual(self.compute(ram_mb=16384), 262144)
+        self.assertEqual(self.compute(ram_mb=4096), 262144)
+        self.assertEqual(self.compute(ram_mb=2048), 131072)
+        self.assertIsNone(self.compute(ram_mb=1024))
+
+    def test_inserted_when_absent(self):
+        result = self.patch_config("global\n    no log\n\ndefaults\n    mode tcp\n")
+        self.assertIn("    tune.pipesize 262144\n", result)
+        self.assertLess(result.index("tune.pipesize"), result.index("no log"))
+
+    def test_explicit_value_from_profile_is_left_alone(self):
+        content = "global\n    tune.pipesize 65536\n    no log\n"
+        self.assertEqual(self.patch_config(content), content)
+
+    def test_small_host_stays_on_system_default(self):
+        content = "global\n    no log\n"
+        self.assertEqual(self.patch_config(content, pipesize=None), content)
+
+    def test_idempotent(self):
+        once = self.patch_config("global\n    no log\n")
+        self.assertEqual(self.patch_config(once), once)
+
+
 class NofileLimitTests(unittest.TestCase):
     def test_reads_value_from_facts_file(self):
         manager = make_manager()

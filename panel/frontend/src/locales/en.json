@@ -2140,6 +2140,7 @@
     "weight": "Weight",
     "weight_hint": "1-256, higher = more traffic",
     "maxconn": "Max Connections",
+    "maxconn_warning": "Unreachable: a balancer cannot open more than ~64,000 connections to one address:port — it runs out of source ports first. 60000 is recommended; add a second backend port to go higher.",
     "inter": "Check Interval",
     "check": "Health Check",
     "backup": "Backup",

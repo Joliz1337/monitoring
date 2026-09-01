@@ -90,17 +90,17 @@ class HAProxyConfigGenerator:
     def generate_base_config(self) -> str:
         """Generate base HAProxy config for high-speed TCP proxying.
 
-        Без maxconn в global: профиль применяется на серверы с разной RAM,
-        поэтому потолок соединений вычисляет и подставляет нода при применении
-        (HAProxyManager._ensure_global_maxconn). По той же причине число ядер
-        задано маркером `# cpu-affinity (auto)`, а не готовым cpu-map: какие ядра
-        заняты прерываниями сетевой карты, знает только сама нода."""
+        Без maxconn и tune.pipesize в global: профиль применяется на серверы с
+        разной RAM, поэтому потолок соединений и размер splice-пайпа вычисляет и
+        подставляет нода при применении (HAProxyManager._ensure_global_maxconn /
+        _ensure_global_pipesize). По той же причине число ядер задано маркером
+        `# cpu-affinity (auto)`, а не готовым cpu-map: какие ядра заняты
+        прерываниями сетевой карты, знает только сама нода."""
         return f"""global
     stats socket /var/run/haproxy.sock mode 660 level admin expose-fd listeners
     no log
     tune.bufsize 16384
     tune.maxpollevents 1024
-    tune.recv_enough 16384
     hard-stop-after 1h
     # cpu-affinity (auto)
 
@@ -116,7 +116,8 @@ defaults
     option redispatch
     option tcp-smart-accept
     option tcp-smart-connect
-    option splice-auto
+    option splice-request
+    option splice-response
     option clitcpka
     clitcpka-idle 60s
     clitcpka-intvl 10s
