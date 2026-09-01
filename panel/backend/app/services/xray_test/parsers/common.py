@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 from dataclasses import dataclass
 from typing import Optional
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -48,7 +49,7 @@ TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 KNOWN_STREAM_KEYS = frozenset({
     "type", "security", "sni", "peer", "alpn", "fp", "allowinsecure", "insecure",
     "pbk", "sid", "spx", "path", "host", "servicename", "mode", "headertype",
-    "seed", "flow", "encryption", "servername", "authority",
+    "seed", "flow", "encryption", "servername", "authority", "extra",
 })
 
 
@@ -157,7 +158,26 @@ def build_transport(params: dict[str, list[str]]) -> TransportSettings:
         header_type=first(params, "headertype"),
         seed=first(params, "seed"),
         authority=unquote(first(params, "authority") or "") or None,
+        xhttp_extra=_xhttp_extra_from_link(kind, first(params, "extra")),
     )
+
+
+def _xhttp_extra_from_link(kind: Transport, raw: Optional[str]) -> Optional[str]:
+    """Параметр extra xhttp-ссылки: JSON, задающий формат трафика.
+
+    Сервер с кастомным extra не принимает клиентов без такого же блока,
+    поэтому он должен доехать до тестового конфига. Битый JSON игнорируется —
+    остальная ссылка от этого не перестаёт быть проверяемой.
+    """
+    if kind is not Transport.XHTTP or not raw:
+        return None
+    try:
+        extra = json.loads(unquote(raw))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(extra, dict) or not extra:
+        return None
+    return json.dumps(extra, ensure_ascii=False, sort_keys=True)
 
 
 def collect_extra(params: dict[str, list[str]]) -> tuple[tuple[str, str], ...]:
