@@ -21,7 +21,6 @@ from app.models import RemnawaveNginxProfile, RemnawaveNginxSyncLog, Server
 from app.services.haproxy_profile_sync import compute_config_hash, is_server_online
 from app.services.remnawave_nginx_config import (
     CLOUDFLARE_RANGES,
-    DOMAIN_PLACEHOLDER,
     DOMAIN_RE,
     GrpcRule,
     MissingMarkersError,
@@ -39,6 +38,8 @@ from app.services.remnawave_nginx_config import (
     splice_rules,
 )
 from app.services.remnawave_nginx_sync import (
+    NginxLinkError,
+    apply_server_link,
     get_remnawave_nginx_path,
     render_profile_for_server,
     sync_profile_to_servers,
@@ -49,10 +50,6 @@ from app.routers.proxy import get_server_by_id, proxy_request
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/remnawave-nginx-profiles", tags=["remnawave-nginx-profiles"])
-
-NODE_DOMAIN_REQUIRED_MESSAGE = (
-    "Укажите домен ноды — в профиле нет wildcard-домена, и подставить в {{DOMAIN}} нечего"
-)
 
 
 # ==================== Schemas ====================
@@ -494,15 +491,10 @@ async def link_server(
     if not server:
         raise HTTPException(404, "Server not found")
 
-    # Домен — свойство ноды: без нового значения прежний сохраняется,
-    # а обязателен он лишь когда шаблону есть что им заменить
-    if data.domain:
-        server.remnawave_nginx_domain = data.domain
-    elif DOMAIN_PLACEHOLDER in profile.config_content and not server.remnawave_nginx_domain:
-        raise HTTPException(400, NODE_DOMAIN_REQUIRED_MESSAGE)
-
-    server.active_remnawave_nginx_profile_id = profile_id
-    server.remnawave_nginx_sync_status = "pending"
+    try:
+        apply_server_link(profile, server, data.domain)
+    except NginxLinkError as e:
+        raise HTTPException(400, str(e))
     await db.commit()
 
     bg.add_task(_bg_sync_server, profile_id, server_id)

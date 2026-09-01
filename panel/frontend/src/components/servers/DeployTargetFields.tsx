@@ -1,8 +1,18 @@
-import { Terminal, KeyRound, Save, Loader2, Plus, X, Network, Shield, Route } from 'lucide-react'
+import { Terminal, KeyRound, Save, Loader2, Plus, X, Network, Shield, Route, Globe, Lock } from 'lucide-react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useTranslation } from 'react-i18next'
 import { Tooltip } from '../ui/Tooltip'
-import type { RemnawaveCertProfile, HAProxyConfigProfile, FirewallProfile, DnatProfile } from '../../api/client'
+import ReloadCmdPresetChips from '../wildcard/ReloadCmdPresetChips'
+import type {
+  RemnawaveCertProfile,
+  HAProxyConfigProfile,
+  FirewallProfile,
+  DnatProfile,
+  RemnawaveNginxProfile,
+  WildcardReloadCmdPreset,
+} from '../../api/client'
+
+export const NGINX_DOMAIN_PLACEHOLDER = '{{DOMAIN}}'
 
 export interface DeployFormData {
   enabled: boolean
@@ -28,6 +38,10 @@ export interface DeployFormData {
   haproxyProfileId: number | null
   firewallProfileId: number | null
   dnatProfileId: number | null
+  remnawaveNginxProfileId: number | null
+  remnawaveNginxDomain: string
+  wildcardSslEnabled: boolean
+  wildcardReloadCmd: string
 }
 
 export const DEPLOY_DEFAULTS: DeployFormData = {
@@ -54,6 +68,10 @@ export const DEPLOY_DEFAULTS: DeployFormData = {
   haproxyProfileId: null,
   firewallProfileId: null,
   dnatProfileId: null,
+  remnawaveNginxProfileId: null,
+  remnawaveNginxDomain: '',
+  wildcardSslEnabled: false,
+  wildcardReloadCmd: '',
 }
 
 interface Props {
@@ -63,9 +81,14 @@ interface Props {
   haproxyProfiles: HAProxyConfigProfile[]
   firewallProfiles: FirewallProfile[]
   dnatProfiles: DnatProfile[]
+  nginxProfiles: RemnawaveNginxProfile[]
+  reloadPresets: WildcardReloadCmdPreset[]
   savingCert: boolean
   onSaveCert: () => void
   onDeleteCert: (id: number) => void
+  savingReloadPreset: boolean
+  onSaveReloadPreset: (command: string) => void
+  onDeleteReloadPreset: (name: string) => void
   footerSlot?: React.ReactNode
 }
 
@@ -76,12 +99,21 @@ export default function DeployTargetFields({
   haproxyProfiles,
   firewallProfiles,
   dnatProfiles,
+  nginxProfiles,
+  reloadPresets,
   savingCert,
   onSaveCert,
   onDeleteCert,
+  savingReloadPreset,
+  onSaveReloadPreset,
+  onDeleteReloadPreset,
   footerSlot,
 }: Props) {
   const { t } = useTranslation()
+  const selectedNginxProfile = nginxProfiles.find(p => p.id === deploy.remnawaveNginxProfileId) ?? null
+  const nginxDomainRequired = Boolean(
+    selectedNginxProfile && selectedNginxProfile.config_content.includes(NGINX_DOMAIN_PLACEHOLDER),
+  )
 
   return (
     <div className="space-y-4">
@@ -347,6 +379,40 @@ export default function DeployTargetFields({
                   </button>
                 </>
               )}
+
+              <div>
+                <label className="block text-xs text-dark-400 mb-1.5 flex items-center gap-1.5">
+                  <Globe className="w-3.5 h-3.5" />
+                  {t('servers.deploy_nginx_profile')}
+                </label>
+                <select
+                  value={deploy.remnawaveNginxProfileId ?? ''}
+                  onChange={(e) => onChange({ remnawaveNginxProfileId: e.target.value ? Number(e.target.value) : null })}
+                  className="input"
+                >
+                  <option value="">{t('servers.deploy_profile_none')}</option>
+                  {nginxProfiles.map(p => (
+                    <option key={p.id} value={p.id}>{p.name}</option>
+                  ))}
+                </select>
+              </div>
+              {selectedNginxProfile && (
+                nginxDomainRequired ? (
+                  <div>
+                    <input
+                      type="text"
+                      value={deploy.remnawaveNginxDomain}
+                      onChange={(e) => onChange({ remnawaveNginxDomain: e.target.value })}
+                      placeholder={t('servers.deploy_nginx_domain_placeholder')}
+                      className="input"
+                      autoComplete="off"
+                    />
+                    <p className="text-xs text-dark-500 mt-1">{t('servers.deploy_nginx_domain_hint')}</p>
+                  </div>
+                ) : (
+                  <p className="text-xs text-dark-500">{t('servers.deploy_nginx_wildcard_hint')}</p>
+                )
+              )}
             </motion.div>
           )}
         </AnimatePresence>
@@ -428,6 +494,53 @@ export default function DeployTargetFields({
             ))}
           </select>
         </div>
+
+        <label className="flex items-start gap-2.5 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={deploy.wildcardSslEnabled}
+            onChange={(e) => onChange({ wildcardSslEnabled: e.target.checked })}
+            className="w-4 h-4 mt-0.5 rounded accent-accent-500 cursor-pointer"
+          />
+          <span className="text-sm text-dark-200">
+            <span className="flex items-center gap-1.5">
+              <Lock className="w-3.5 h-3.5 text-dark-400" />
+              {t('servers.deploy_wildcard_ssl')}
+            </span>
+            <span className="block text-xs text-dark-500">{t('servers.deploy_wildcard_ssl_hint')}</span>
+          </span>
+        </label>
+        <AnimatePresence>
+          {deploy.wildcardSslEnabled && (
+            <motion.div
+              className="ml-6 space-y-2 overflow-hidden"
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: 'auto', opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              transition={{ duration: 0.15 }}
+            >
+              <label className="block text-xs text-dark-400">{t('servers.deploy_wildcard_reload_cmd')}</label>
+              <ReloadCmdPresetChips
+                presets={reloadPresets}
+                value={deploy.wildcardReloadCmd}
+                onPick={(command) => onChange({ wildcardReloadCmd: command })}
+                onDelete={onDeleteReloadPreset}
+                onSaveCurrent={() => onSaveReloadPreset(deploy.wildcardReloadCmd.trim())}
+                saving={savingReloadPreset}
+              />
+              <input
+                type="text"
+                value={deploy.wildcardReloadCmd}
+                onChange={(e) => onChange({ wildcardReloadCmd: e.target.value })}
+                placeholder={t('wildcard_ssl.reload_cmd_placeholder')}
+                className="input font-mono text-xs"
+                maxLength={512}
+                autoComplete="off"
+              />
+              <p className="text-xs text-dark-500">{t('servers.deploy_wildcard_reload_hint')}</p>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
 
       {footerSlot}

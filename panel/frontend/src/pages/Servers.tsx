@@ -39,9 +39,13 @@ import {
   haproxyProfilesApi,
   firewallProfilesApi,
   dnatProfilesApi,
+  remnawaveNginxApi,
+  wildcardSSLApi,
   HAProxyConfigProfile,
   FirewallProfile,
   DnatProfile,
+  RemnawaveNginxProfile,
+  WildcardReloadCmdPreset,
 } from '../api/client'
 import { streamNdjsonGet, StreamUnauthorizedError } from '../utils/ndjsonStream'
 import InfraTree from '../components/Infra/InfraTree'
@@ -51,7 +55,7 @@ import { extractHost } from '../utils/format'
 import { describeAllowedDomains, nodeIsRestricted } from '../utils/nodeCapabilities'
 import { FAQIcon } from '../components/FAQ'
 import MigrationBanner from '../components/MigrationBanner'
-import DeployTargetFields, { DEPLOY_DEFAULTS, type DeployFormData } from '../components/servers/DeployTargetFields'
+import DeployTargetFields, { DEPLOY_DEFAULTS, NGINX_DOMAIN_PLACEHOLDER, type DeployFormData } from '../components/servers/DeployTargetFields'
 import ExtraServerCard, { type ExtraTarget, type DeployStatus } from '../components/servers/ExtraServerCard'
 import InstallKeysPanel from '../components/servers/InstallKeysPanel'
 import ManualInstallBlock from '../components/servers/ManualInstallBlock'
@@ -174,6 +178,9 @@ export default function Servers() {
   const [haproxyProfiles, setHaproxyProfiles] = useState<HAProxyConfigProfile[]>([])
   const [firewallProfiles, setFirewallProfiles] = useState<FirewallProfile[]>([])
   const [dnatProfiles, setDnatProfiles] = useState<DnatProfile[]>([])
+  const [nginxProfiles, setNginxProfiles] = useState<RemnawaveNginxProfile[]>([])
+  const [reloadPresets, setReloadPresets] = useState<WildcardReloadCmdPreset[]>([])
+  const [savingReloadPreset, setSavingReloadPreset] = useState(false)
   const [deployLog, setDeployLog] = useState<string[]>([])
   const [primaryStatus, setPrimaryStatus] = useState<DeployStatus>('idle')
   const [extras, setExtras] = useState<ExtraTarget[]>([])
@@ -282,6 +289,12 @@ export default function Servers() {
     dnatProfilesApi.list()
       .then(res => setDnatProfiles(res.data))
       .catch(() => {})
+    remnawaveNginxApi.getProfiles()
+      .then(res => setNginxProfiles(res.data))
+      .catch(() => {})
+    wildcardSSLApi.getReloadCmdPresets()
+      .then(res => setReloadPresets(res.data.presets))
+      .catch(() => {})
   }, [showForm, editingId])
 
   const handleSubmit = async (e: FormEvent) => {
@@ -357,6 +370,13 @@ export default function Servers() {
     }
     if (d.installProxy && !d.proxyUrl.trim()) return t('servers.deploy_no_proxy')
     if (d.changePassword && d.newPassword.length < 8) return t('servers.deploy_password_short')
+    if (d.wildcardSslEnabled && d.wildcardReloadCmd.trim().length > 512) return t('servers.deploy_wildcard_cmd_too_long')
+    if (d.installRemnawave && d.remnawaveNginxProfileId != null) {
+      const profile = nginxProfiles.find(p => p.id === d.remnawaveNginxProfileId)
+      if (profile && profile.config_content.includes(NGINX_DOMAIN_PLACEHOLDER) && !d.remnawaveNginxDomain.trim()) {
+        return t('servers.deploy_nginx_domain_required')
+      }
+    }
     return null
   }
 
@@ -386,6 +406,10 @@ export default function Servers() {
     haproxy_profile_id: d.haproxyProfileId ?? null,
     firewall_profile_id: d.firewallProfileId ?? null,
     dnat_profile_id: d.dnatProfileId ?? null,
+    wildcard_ssl_enabled: d.wildcardSslEnabled,
+    wildcard_ssl_reload_cmd: d.wildcardSslEnabled ? d.wildcardReloadCmd.trim() || null : null,
+    remnawave_nginx_profile_id: d.installRemnawave ? d.remnawaveNginxProfileId : null,
+    remnawave_nginx_domain: d.installRemnawave ? d.remnawaveNginxDomain.trim() || null : null,
     // Установщик на ноде говорит на языке интерфейса панели
     lang: i18n.language.startsWith('ru') ? 'ru' : 'en',
   })
@@ -699,6 +723,32 @@ export default function Servers() {
       setDeploy(d => (d.remnaCertProfileId === id ? { ...d, remnaCertProfileId: null } : d))
     } catch {
       toast.error(t('servers.deploy_remna_save_failed'))
+    }
+  }
+
+  const handleSaveReloadPreset = async (command: string) => {
+    if (!command) return
+    const name = window.prompt(t('wildcard_ssl.reload_preset_save_prompt'))
+    if (!name || !name.trim()) return
+    setSavingReloadPreset(true)
+    try {
+      const { data } = await wildcardSSLApi.saveReloadCmdPreset(name.trim(), command)
+      setReloadPresets(data.presets)
+      toast.success(t('wildcard_ssl.reload_preset_saved'))
+    } catch (e) {
+      const err = e as { response?: { data?: { detail?: string } } }
+      toast.error(err.response?.data?.detail || t('wildcard_ssl.reload_preset_save_failed'))
+    }
+    setSavingReloadPreset(false)
+  }
+
+  const handleDeleteReloadPreset = async (name: string) => {
+    if (!window.confirm(t('wildcard_ssl.reload_preset_delete_confirm'))) return
+    try {
+      const { data } = await wildcardSSLApi.deleteReloadCmdPreset(name)
+      setReloadPresets(data.presets)
+    } catch {
+      toast.error(t('wildcard_ssl.reload_preset_save_failed'))
     }
   }
 
@@ -1044,9 +1094,14 @@ export default function Servers() {
                         haproxyProfiles={haproxyProfiles}
                         firewallProfiles={firewallProfiles}
                         dnatProfiles={dnatProfiles}
+                        nginxProfiles={nginxProfiles}
+                        reloadPresets={reloadPresets}
                         savingCert={savingCert}
                         onSaveCert={handleSaveCert}
                         onDeleteCert={handleDeleteCert}
+                        savingReloadPreset={savingReloadPreset}
+                        onSaveReloadPreset={handleSaveReloadPreset}
+                        onDeleteReloadPreset={handleDeleteReloadPreset}
                         footerSlot={
                           <>
                             <ManualInstallBlock
@@ -1092,9 +1147,14 @@ export default function Servers() {
                         haproxyProfiles={haproxyProfiles}
                         firewallProfiles={firewallProfiles}
                         dnatProfiles={dnatProfiles}
+                        nginxProfiles={nginxProfiles}
+                        reloadPresets={reloadPresets}
                         savingCert={savingCert}
                         onSaveCert={handleSaveCert}
                         onDeleteCert={handleDeleteCert}
+                        savingReloadPreset={savingReloadPreset}
+                        onSaveReloadPreset={handleSaveReloadPreset}
+                        onDeleteReloadPreset={handleDeleteReloadPreset}
                         disabled={isDeploying}
                       />
                     ))}

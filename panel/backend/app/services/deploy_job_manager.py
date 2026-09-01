@@ -15,6 +15,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import AsyncIterator, Optional
 
 from sqlalchemy import select
@@ -43,6 +44,15 @@ NODE_ONLINE_TIMEOUT = 2400
 NODE_POLL_INTERVAL = 10
 
 
+def _wildcard_cert_expired(cert) -> bool:
+    if not cert.expiry_date:
+        return True
+    expiry = cert.expiry_date
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=timezone.utc)
+    return expiry <= datetime.now(timezone.utc)
+
+
 @dataclass
 class PostDeployOptions:
     """Постустановочные шаги, выполняемые после успешного развёртывания."""
@@ -51,6 +61,10 @@ class PostDeployOptions:
     haproxy_profile_id: Optional[int] = None
     firewall_profile_id: Optional[int] = None
     dnat_profile_id: Optional[int] = None
+    wildcard_ssl_enabled: bool = False
+    wildcard_ssl_reload_cmd: Optional[str] = None
+    remnawave_nginx_profile_id: Optional[int] = None
+    remnawave_nginx_domain: Optional[str] = None
 
 
 @dataclass
@@ -214,6 +228,10 @@ class DeployJobManager:
         job.server_id = server_id
         await self._post_install(job, server_id, post_opts)
         await self._bind_profiles(job, server_id, post_opts)
+        # Сертификат раскатывается строго до nginx-синка: конфиг профиля
+        # ссылается на пути сертификата, без него nginx -t на ноде провалится
+        await self._apply_wildcard_ssl(job, server_id, post_opts)
+        await self._bind_remnawave_nginx(job, server_id, post_opts)
         self._emit(job, {"type": "done", "exit_code": 0, "server_id": server_id})
         self._finish(job, "success")
 
@@ -460,6 +478,114 @@ class DeployJobManager:
                 self._emit(job, {"type": "log", "line": "[panel] Привязан к DNAT-профилю"})
             except Exception as exc:  # noqa: BLE001 — best-effort постшаг
                 self._emit(job, {"type": "log", "line": f"[panel] DNAT-профиль не привязан: {exc}"})
+
+    async def _apply_wildcard_ssl(
+        self,
+        job: DeployJob,
+        server_id: int,
+        post_opts: PostDeployOptions,
+    ) -> None:
+        """Включение сервера в Wildcard SSL и раскатка действующего сертификата.
+        Best-effort: настройки сохраняются в любом случае, раскатку можно повторить
+        со страницы Wildcard SSL."""
+        if not post_opts.wildcard_ssl_enabled:
+            return
+
+        # Ленивые импорты — как в _bind_profiles, чтобы не тянуть на уровне модуля
+        from app.models import WildcardCertificate
+        from app.services.node_capabilities import Capability, server_allows
+        from app.services.wildcard_ssl import get_wildcard_ssl_manager
+
+        try:
+            async with async_session_maker() as db:
+                result = await db.execute(select(Server).where(Server.id == server_id))
+                server = result.scalar_one_or_none()
+                if not server:
+                    return
+                server.wildcard_ssl_enabled = True
+                if post_opts.wildcard_ssl_reload_cmd:
+                    server.wildcard_ssl_reload_cmd = post_opts.wildcard_ssl_reload_cmd
+                # Коммит до раскатки: deploy_to_node читает команду из объекта сервера
+                await db.commit()
+
+                cert = (await db.execute(
+                    select(WildcardCertificate).order_by(WildcardCertificate.id)
+                )).scalars().first()
+            self._emit(job, {"type": "log", "line": "[panel] Сервер включён в Wildcard SSL"})
+
+            if not cert or _wildcard_cert_expired(cert):
+                self._emit(job, {
+                    "type": "log",
+                    "line": "[panel] Действующего wildcard-сертификата нет — "
+                            "раскатайте его позже со страницы Wildcard SSL",
+                })
+                return
+            if not server_allows(server, Capability.SSL, write=True):
+                self._emit(job, {
+                    "type": "log",
+                    "line": "[panel] Нода закрыла раздел SSL — раскатка сертификата пропущена",
+                })
+                return
+
+            result = await get_wildcard_ssl_manager().deploy_to_node(cert, server)
+            if result.get("success"):
+                self._emit(job, {"type": "log", "line": "[panel] Wildcard-сертификат раскатан"})
+            else:
+                self._emit(job, {
+                    "type": "log",
+                    "line": f"[panel] Wildcard-сертификат не раскатан: {result.get('message', '')}",
+                })
+        except Exception as exc:  # noqa: BLE001 — best-effort постшаг
+            self._emit(job, {"type": "log", "line": f"[panel] Wildcard SSL не настроен: {exc}"})
+
+    async def _bind_remnawave_nginx(
+        self,
+        job: DeployJob,
+        server_id: int,
+        post_opts: PostDeployOptions,
+    ) -> None:
+        """Привязка к nginx-профилю Remnawave и немедленный синк конфига. Best-effort."""
+        if post_opts.remnawave_nginx_profile_id is None:
+            return
+
+        from app.models import RemnawaveNginxProfile
+        from app.services.remnawave_nginx_sync import (
+            NginxLinkError,
+            apply_server_link,
+            sync_profile_to_servers,
+        )
+
+        try:
+            async with async_session_maker() as db:
+                profile = await db.get(RemnawaveNginxProfile, post_opts.remnawave_nginx_profile_id)
+                result = await db.execute(select(Server).where(Server.id == server_id))
+                server = result.scalar_one_or_none()
+                if not profile or not server:
+                    self._emit(job, {
+                        "type": "log",
+                        "line": "[panel] Nginx-профиль Remnawave не привязан: профиль не найден",
+                    })
+                    return
+                apply_server_link(profile, server, post_opts.remnawave_nginx_domain)
+                await db.commit()
+                self._emit(job, {"type": "log", "line": "[panel] Привязан к nginx-профилю Remnawave"})
+
+                # await вместо ensure_future: результат синка попадает в лог установки
+                results = await sync_profile_to_servers(
+                    profile, db, server_ids=[server_id], ensure_started=True
+                )
+            if results and results[0].success:
+                self._emit(job, {"type": "log", "line": "[panel] Nginx-конфиг Remnawave раскатан"})
+            else:
+                message = results[0].message if results else "нода не ответила"
+                self._emit(job, {
+                    "type": "log",
+                    "line": f"[panel] Nginx-конфиг Remnawave не раскатан: {message}",
+                })
+        except NginxLinkError as exc:
+            self._emit(job, {"type": "log", "line": f"[panel] Nginx-профиль Remnawave не привязан: {exc}"})
+        except Exception as exc:  # noqa: BLE001 — best-effort постшаг
+            self._emit(job, {"type": "log", "line": f"[panel] Nginx-профиль Remnawave не привязан: {exc}"})
 
     async def subscribe(self, job_id: str) -> AsyncIterator[dict]:
         """Поток событий задачи: реплей накопленного лога + live до завершения."""

@@ -382,6 +382,10 @@ Visibility effect пропускает первый mount через `mountedRef
 
 **Итог:** все infinite-анимации идут через CSS на GPU compositor; JS-анимации стоили бы при 30 online-серверах ~200+ постоянных таймеров на main thread (StatusBadge ×2 = 60, ProgressBar ×3–6 на карточку = 100+, live-mode = 1 и др.).
 
+### Frontend: emoji-флаги стран
+
+Emoji-флаги (🇷🇺, 🇩🇪) можно вводить в любые текстовые поля панели — имена серверов, папок и т.д. Chrome/Edge на Windows не рендерят такие emoji системно (показывают буквы кода страны вместо флага), поэтому фронтенд поставляет шрифт **Twemoji Country Flags** (`panel/frontend/src/assets/TwemojiCountryFlags.woff2`, ~78 КБ, из пакета `country-flag-emoji-polyfill`): `@font-face` в `index.css` с `unicode-range`, ограниченным кодовыми точками флагов (regional indicators + tag-последовательности), и первым элементом в стеках `sans`/`mono` (`tailwind.config.js`) и `body`. На остальной текст шрифт не влияет, грузится браузером только при наличии флагов на странице.
+
 ### nginx keepalive и TCP-оптимизации
 
 `panel/nginx/nginx.conf.template`:
@@ -1701,7 +1705,7 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 2. Вводит SSH-данные (порт, логин, пароль или приватный ключ + passphrase) и выбирает доп. компоненты. Поле «Порт» (monitoring_port, дефолт 9100) задаёт порт mTLS-API ноды: он попадает в URL создаваемого сервера, а при отличии от 9100 уезжает установщику как `NODE_API_PORT` (`_build_inner_command` в `deploy_service.py`, тест `tests/test_deploy_command.py`) — нода поднимает nginx и открывает UFW именно на нём
 3. Frontend отправляет `POST /api/servers/deploy` (в теле — ещё и текущий язык интерфейса `lang`: установщик на ноде и её меню `mon` будут на том же языке, что панель) → бэкенд немедленно возвращает `{"job_id": "<hex>"}` и запускает `asyncio.create_task`
 4. Frontend подписывается на лог через `GET /api/servers/deploy/{job_id}/stream` (NDJSON)
-5. При успехе backend создаёт запись `Server`, применяет SSH-пресет/пароль (`_post_install`) и привязывает к выбранным HAProxy/Firewall/DNAT-профилям (`_bind_profiles`)
+5. При успехе backend создаёт запись `Server`, применяет SSH-пресет/пароль (`_post_install`), привязывает к выбранным HAProxy/Firewall/DNAT-профилям (`_bind_profiles`), включает сервер в Wildcard SSL с раскаткой действующего сертификата (`_apply_wildcard_ssl`) и привязывает к nginx-профилю Remnawave с немедленным синком (`_bind_remnawave_nginx`). Порядок фиксирован: сертификат раскатывается строго до nginx-синка — конфиг профиля ссылается на пути сертификата, без него `nginx -t` на ноде провалился бы
 6. Завершённые задачи хранятся 600 секунд (`FINISHED_TTL_SECONDS`) для переподключения, затем удаляются из памяти
 
 **Ограничение:** перезапуск backend-контейнера во время установки прерывает её.
@@ -1720,6 +1724,8 @@ Singleton-сервис `panel/backend/app/services/deploy_job_manager.py`. Уп�
 - `_create_server` — создание записи `Server` после успешной установки
 - `_post_install` — постустановочные шаги (SSH-пресет, fail2ban, смена пароля root)
 - `_bind_profiles` — привязка к HAProxy/Firewall/DNAT-профилям (выполняется на бэке внутри задачи — срабатывает даже при закрытой странице)
+- `_apply_wildcard_ssl` — включение сервера в Wildcard SSL (`wildcard_ssl_enabled` + `wildcard_ssl_reload_cmd`) и немедленная раскатка действующего wildcard-сертификата через `deploy_to_node`; без сертификата или при закрытом ноде разделе `ssl` (`NODE_CAPABILITIES`) раскатка пропускается с записью в лог, настройки сохраняются
+- `_bind_remnawave_nginx` — привязка к nginx-профилю Remnawave через общий `apply_server_link` (сервис `remnawave_nginx_sync.py`, та же функция у роутера `link_server`) и синк конфига `sync_profile_to_servers(..., ensure_started=True)` с `await` — результат синка попадает в лог установки. Все три шага best-effort: ошибка не роняет job
 - `get_deploy_job_manager()` — dependency для получения singleton через FastAPI DI
 
 **SSH-подключение:**
@@ -1743,8 +1749,9 @@ Singleton-сервис `panel/backend/app/services/deploy_job_manager.py`. Уп�
 **Дополнительные компоненты (чекбоксы в форме):**
 - **Системные оптимизации** — устанавливается через `MON_INSTALL_OPTIMIZATIONS=1`; при включении появляются переключатель профиля и переключатель NIC-режима (см. ниже)
 - **Cloudflare WARP** — устанавливается через `MON_INSTALL_WARP=1`
-- **Нода Remnawave** — устанавливается через `MON_INSTALL_REMNAWAVE=1`; сертификат передаётся через `REMNAWAVE_CERT`; доступен ввод сертификата вручную или выбор сохранённого профиля; сохранённые сертификаты отображаются кликабельными чипами с именами (клик — выбор, крестик — удаление), рядом кнопка «Новый сертификат» переключает на ввод вручную
+- **Нода Remnawave** — устанавливается через `MON_INSTALL_REMNAWAVE=1`; сертификат передаётся через `REMNAWAVE_CERT`; доступен ввод сертификата вручную или выбор сохранённого профиля; сохранённые сертификаты отображаются кликабельными чипами с именами (клик — выбор, крестик — удаление), рядом кнопка «Новый сертификат» переключает на ввод вручную. В этой же секции — select «Nginx-профиль Remnawave»: при профиле с `{{DOMAIN}}` появляется обязательное поле домена сервера, при профиле с wildcard-доменом — подсказка, что домен не нужен
 - **HTTP-прокси** — передаётся через `MON_PROXY_URL` для окружений без прямого доступа
+- **Включить в Wildcard SSL** — чекбокс в блоке привязок: поле команды перезагрузки с чипами сохранённых пресетов (см. [Wildcard SSL](#wildcard-ssl)); постустановочный шаг панели, не env установщика
 
 **Профиль sysctl-оптимизаций (`opt_profile`) и NIC-режим (`nic_mode`):**
 
@@ -1783,6 +1790,10 @@ Singleton-сервис `panel/backend/app/services/deploy_job_manager.py`. Уп�
 - `nic_mode: str` — NIC-режим (`auto` по умолчанию, либо `multiqueue`/`hybrid`/`rps`)
 - `ssh_preset: str | None` — пресет защиты SSH: `None` / `recommended` / `maximum`
 - `new_root_password: str | None` — новый пароль root (минимум 8 символов)
+- `wildcard_ssl_enabled: bool` — включить сервер в Wildcard SSL после установки и сразу раскатать действующий сертификат
+- `wildcard_ssl_reload_cmd: str | None` — команда перезагрузки при обновлении сертификата (≤ 512 символов, зеркало лимита ноды); в форме выбирается из сохранённых пресетов или вводится вручную с сохранением в пресет
+- `remnawave_nginx_profile_id: int | None` — привязать к nginx-профилю Remnawave и синхронизировать конфиг (учитывается только при `install_remnawave`); профиль проверяется до старта джобы — 404 если не найден
+- `remnawave_nginx_domain: str | None` — домен сервера для профиля с `{{DOMAIN}}` (нормализуется, валидация `DOMAIN_RE`); обязателен, если у профиля нет wildcard-домена и домен не задан у сервера — иначе 400
 - `lang: "en" | "ru"` (`InstallerLanguage`, по умолчанию `en`) — язык интерфейса панели в момент запуска; всегда уезжает установщику как `MON_LANG` (явный `en` перебивает русский, оставшийся на сервере от прошлой ноды)
 - `manual: bool` — полуавтоматический режим: панель по SSH не ходит (пароль/ключ не обязательны), только ждёт ноду и выполняет постустановочные шаги
 
@@ -1841,6 +1852,8 @@ NODE_SECRET содержит долгоживущие PKI-сертификаты
 4. Если `haproxy_profile_id` задан — `POST /haproxy-profiles/{id}/servers/{server_id}`
 5. Если `firewall_profile_id` задан — `POST /firewall-profiles/{id}/servers/{server_id}`
 6. Если `dnat_profile_id` задан — привязка через `link_server_to_profile()` (общий хелпер с роутером DNAT: сервер встаёт в конец очереди `dnat_link_position`, чтобы у уже привязанных нод IP назначения не поехали) и фоновая раскатка только на этот сервер
+7. Если `wildcard_ssl_enabled` — включение в Wildcard SSL и раскатка действующего сертификата (`_apply_wildcard_ssl`)
+8. Если `remnawave_nginx_profile_id` задан — привязка к nginx-профилю Remnawave и синк конфига (`_bind_remnawave_nginx`); идёт строго после раскатки сертификата — конфиг ссылается на его пути
 
 Все шаги **best-effort**: ошибки пишутся в лог как NDJSON-события, нода считается успешно добавленной.
 
@@ -2027,6 +2040,11 @@ Frontend сохраняет незавершённые job_id в `localStorage` 
 | GET | /api/wildcard-ssl/servers | Конфигурация деплоя по серверам (+ `server_url` и `folder` для поиска в UI) |
 | PUT | /api/wildcard-ssl/servers/bulk | Массовое обновление настроек: `{server_ids, ...поля}`, один SQL-UPDATE; поле не передано — не менять, `""` — сбросить к дефолту. Объявлен до `/servers/{server_id}` |
 | PUT | /api/wildcard-ssl/servers/{server_id} | Настроить деплой для сервера (путь, reload_cmd, enabled); та же семантика пустой строки |
+| GET | /api/wildcard-ssl/reload-cmd-presets | Сохранённые пресеты reload-команд: `{presets: [{name, command}]}` |
+| POST | /api/wildcard-ssl/reload-cmd-presets | Сохранить пресет `{name, command}` (upsert по имени, команда ≤ 512 символов) → обновлённый список |
+| DELETE | /api/wildcard-ssl/reload-cmd-presets | Удалить пресет по имени (тело `{name}`) → обновлённый список |
+
+**Пресеты reload-команд** — именованные команды перезагрузки, хранятся JSON-списком в `panel_settings` (ключ `wildcard_reload_cmd_presets`, константа `RELOAD_CMD_PRESETS_KEY`), по образцу SSH-пресетов. В UI показываются чипами: на странице Wildcard SSL (настройки сервера в обоих режимах и массовое редактирование — общий компонент `components/wildcard/ReloadCmdPresetChips.tsx`) и в мастере автоустановки ноды; клик подставляет команду, кнопка «Сохранить как пресет» появляется у непустой несохранённой команды.
 
 **docker-compose.yml:**
 Volume `/etc/letsencrypt` смонтирован с `:rw` — backend записывает выпущенные сертификаты.
@@ -2039,7 +2057,7 @@ Volume `/etc/letsencrypt` смонтирован с `:rw` — backend запис
 - Продление и деплой существующих сертификатов
 - Настройки Cloudflare (API token, email)
 - Чекбокс «Использовать для панели» в той же карточке настроек — домен панели рядом с подпиской, подсказка, жёлтое предупреждение, если текущий сертификат не покрывает домен панели (локальная `wildcardCoversDomain`, зеркало серверной проверки); после сохранения с включением — toast с результатом применения (`panel_deploy`)
-- Конфигурация каждого сервера: включить деплой, путь, reload-команда
+- Конфигурация каждого сервера: включить деплой, путь, reload-команда (с чипами сохранённых пресетов)
 - **Поиск по серверам** — по имени, адресу (url) и папке (совпадение по имени папки показывает её целиком), с крестиком очистки; фильтрация клиентская, ввод в поиск выделение не сбрасывает
 - **Группировка по папкам** — как в Bulk Actions: сворачиваемые заголовки (по умолчанию свёрнуты, раскрытость в `localStorage['wildcard_expanded_folders']`), порядок папок из `dashboard_folder_order`, чекбокс папки выделяет/снимает её серверы (indeterminate при частичном выборе), счётчик «выбрано/всего», группа «Без папки» в конце; без папок список плоский
 - **Массовое выделение** — чекбокс в шапке каждой карточки + «Выбрать все» (indeterminate-чекбокс, действует только на отфильтрованные); выделение переживает refetch (исчезнувшие id вычищаются)
@@ -2060,6 +2078,7 @@ Volume `/etc/letsencrypt` смонтирован с `:rw` — backend запис
 - `panel/frontend/src/components/wildcard/WildcardDeployProgress.tsx` — панель живого прогресса деплоя
 - `panel/frontend/src/hooks/useBulkStream.ts` — generic-хук NDJSON-стрима (SSH Security использует его через адаптер `components/ssh/useSSHBulkStream.ts`)
 - `panel/frontend/src/components/wildcard/CertificateMaterials.tsx` — блок просмотра/копирования/скачивания PEM-материалов
+- `panel/frontend/src/components/wildcard/ReloadCmdPresetChips.tsx` — чипы пресетов reload-команд (используются на странице Wildcard SSL и в мастере автоустановки)
 - `panel/frontend/src/api/client.ts` — `wildcardSSLApi` с интерфейсами, включая `WildcardCertificateMaterial`
 - `panel/frontend/src/components/settings/PanelCertificateCard.tsx` — бейдж «Управляется Wildcard SSL» вместо кнопки «Продлить», когда сертификат панели покрыт wildcard-сертификатом (см. [SSL сертификаты](#ssl-сертификаты))
 - `panel/frontend/src/App.tsx` — роут `/wildcard-ssl`
@@ -2465,7 +2484,7 @@ Whitelist можно наполнять из внешних списков по 
 **Принцип работы:**
 1. В панели создаётся профиль с набором локаций (правил) — gRPC и XHTTP (проброс Xray-инбаундов) и/или произвольные proxy-локации — и опциями схемы передачи реального IP клиента
 2. `generate_full_config()` собирает из них полный `nginx.conf` с `{{DOMAIN}}` вместо `server_name`/путей сертификатов; локации лежат между маркерами `# === LOCATIONS START/END ===`
-3. Сервер привязывается к профилю через `Server.active_remnawave_nginx_profile_id` **и** обязан получить домен (`Server.remnawave_nginx_domain`) — без домена привязка/применение не имеют смысла, так как `{{DOMAIN}}` некому подставить. Исключение — профиль с опцией `wildcard_domain` (см. ниже): его шаблон плейсхолдера не содержит, и `POST /{id}/servers/{server_id}` принимает пустой `domain` (`LinkServerRequest.domain: Optional`; при наличии `{{DOMAIN}}` в шаблоне и отсутствии домена у ноды — `400 NODE_DOMAIN_REQUIRED_MESSAGE`). Ранее заданный домен ноды при привязке без нового значения сохраняется
+3. Сервер привязывается к профилю через `Server.active_remnawave_nginx_profile_id` **и** обязан получить домен (`Server.remnawave_nginx_domain`) — без домена привязка/применение не имеют смысла, так как `{{DOMAIN}}` некому подставить. Исключение — профиль с опцией `wildcard_domain` (см. ниже): его шаблон плейсхолдера не содержит, и `POST /{id}/servers/{server_id}` принимает пустой `domain` (`LinkServerRequest.domain: Optional`; при наличии `{{DOMAIN}}` в шаблоне и отсутствии домена у ноды — `400 NODE_DOMAIN_REQUIRED_MESSAGE`). Ранее заданный домен ноды при привязке без нового значения сохраняется. Сама логика привязки вынесена в `apply_server_link()` (`remnawave_nginx_sync.py`, там же `NginxLinkError` и `NODE_DOMAIN_REQUIRED_MESSAGE`) — её используют роутер `link_server` и постшаг автоустановки `_bind_remnawave_nginx`
 4. При sync панель рендерит шаблон под домен сервера (`render_for_server`) и только после этого считает SHA256-хэш — `Server.remnawave_nginx_config_hash` хранит хэш **отрендеренного** контента, отправленного панелью (иначе один и тот же профиль на двух доменах ложно выглядел бы одинаковым/разным)
 5. Нода принимает готовый (уже отрендеренный) контент через `POST /api/remnawave/nginx/config/apply` — сама рендерингом не занимается, `{{DOMAIN}}` ей не известен, но перед записью подставляет в него собственные host-специфичные лимиты (см. node/DOCUMENTATION.md); фактически записанный на диск файл поэтому отличается от отправленного панелью, а его хэш нода возвращает в ответе и панель сохраняет в `Server.remnawave_nginx_node_hash`
 

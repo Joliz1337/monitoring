@@ -18,10 +18,12 @@ from typing import Optional
 
 from app.auth import verify_auth
 from app.database import async_session_maker, get_db
-from app.models import RemnawaveCertProfile
+from app.models import RemnawaveCertProfile, RemnawaveNginxProfile
 from app.services.deploy_job_manager import PostDeployOptions, get_deploy_job_manager
 from app.services.deploy_service import DeployParams, InstallerLanguage, build_install_command
 from app.services.http_client import validate_proxy_input
+from app.services.remnawave_nginx_config import DOMAIN_PLACEHOLDER, DOMAIN_RE
+from app.services.remnawave_nginx_sync import NODE_DOMAIN_REQUIRED_MESSAGE
 from app.services.net_utils import resolve_panel_ip
 from app.services.pki import PKIKeygenData, build_installer_token
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -151,6 +153,10 @@ class DeployRequest(BaseModel):
     haproxy_profile_id: Optional[int] = None
     firewall_profile_id: Optional[int] = None
     dnat_profile_id: Optional[int] = None
+    wildcard_ssl_enabled: bool = False
+    wildcard_ssl_reload_cmd: Optional[str] = Field(None, max_length=512)
+    remnawave_nginx_profile_id: Optional[int] = None
+    remnawave_nginx_domain: Optional[str] = None
     # Язык интерфейса панели — установщик и меню `mon` на ноде будут на нём же
     lang: InstallerLanguage = InstallerLanguage.EN
     # Полуавтоматический режим: команду установки оператор запускает на сервере сам,
@@ -161,6 +167,16 @@ class DeployRequest(BaseModel):
     @classmethod
     def validate_socks5_proxy(cls, v: Optional[str]) -> Optional[str]:
         return validate_proxy_input(v)
+
+    @field_validator('remnawave_nginx_domain')
+    @classmethod
+    def validate_remnawave_nginx_domain(cls, v: Optional[str]) -> Optional[str]:
+        if not v or not v.strip():
+            return None
+        value = v.strip().lower()
+        if not DOMAIN_RE.match(value):
+            raise ValueError(f"Некорректный домен: {value!r}")
+        return value
 
 
 async def resolve_remnawave_cert(
@@ -199,6 +215,19 @@ async def resolve_remnawave_cert(
                 raise HTTPException(409, "Профиль с таким именем уже существует")
 
     return cert
+
+
+async def _validate_remnawave_nginx_option(req: DeployRequest) -> None:
+    """Профиль должен существовать, а без wildcard-домена в нём — нужен домен ноды.
+    Проверяется до старта джобы, чтобы оператор узнал об ошибке сразу, а не из лога."""
+    if not req.install_remnawave or req.remnawave_nginx_profile_id is None:
+        return
+    async with async_session_maker() as db:
+        profile = await db.get(RemnawaveNginxProfile, req.remnawave_nginx_profile_id)
+    if not profile:
+        raise HTTPException(404, "Nginx-профиль Remnawave не найден")
+    if DOMAIN_PLACEHOLDER in profile.config_content and not req.remnawave_nginx_domain:
+        raise HTTPException(400, NODE_DOMAIN_REQUIRED_MESSAGE)
 
 
 def _installer_proxy_url(req: DeployRequest) -> Optional[str]:
@@ -287,6 +316,8 @@ async def deploy_server(
     if req.new_root_password is not None and len(req.new_root_password) < 8:
         raise HTTPException(400, "Пароль root: минимум 8 символов")
 
+    await _validate_remnawave_nginx_option(req)
+
     params = await _build_deploy_params(
         req, host, request.app.state.pki, save_remnawave_cert=True,
     )
@@ -298,6 +329,12 @@ async def deploy_server(
         haproxy_profile_id=req.haproxy_profile_id,
         firewall_profile_id=req.firewall_profile_id,
         dnat_profile_id=req.dnat_profile_id,
+        wildcard_ssl_enabled=req.wildcard_ssl_enabled,
+        wildcard_ssl_reload_cmd=(req.wildcard_ssl_reload_cmd or "").strip() or None,
+        remnawave_nginx_profile_id=(
+            req.remnawave_nginx_profile_id if req.install_remnawave else None
+        ),
+        remnawave_nginx_domain=req.remnawave_nginx_domain,
     )
 
     job_id = get_deploy_job_manager().start(

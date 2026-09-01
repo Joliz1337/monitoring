@@ -1,10 +1,11 @@
 import asyncio
+import json
 import logging
 import re
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select, update
 
 from app.auth import verify_auth
@@ -26,6 +27,10 @@ router = APIRouter(prefix="/wildcard-ssl", tags=["wildcard-ssl"])
 PEM_CERT_BLOCK = re.compile(
     r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", re.DOTALL
 )
+
+RELOAD_CMD_PRESETS_KEY = "wildcard_reload_cmd_presets"
+# Зеркало MAX_RELOAD_COMMAND_LEN ноды (node/app/services/ssl_manager.py)
+MAX_RELOAD_CMD_LEN = 512
 
 
 # ─── Schemas ───
@@ -52,6 +57,23 @@ class BulkServerConfigUpdate(ServerConfigUpdate):
 
 class DeployStreamRequest(BaseModel):
     server_ids: Optional[list[int]] = None
+
+
+class ReloadCmdPreset(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    command: str = Field(..., min_length=1, max_length=MAX_RELOAD_CMD_LEN)
+
+    @field_validator("name", "command")
+    @classmethod
+    def _strip_nonempty(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("Значение не может быть пустым")
+        return v
+
+
+class ReloadCmdPresetDelete(BaseModel):
+    name: str
 
 
 class SettingsUpdate(BaseModel):
@@ -253,6 +275,59 @@ async def update_settings(req: SettingsUpdate, _: dict = Depends(verify_auth)):
         panel_deploy = await manager.apply_to_panel(panel_cert_domain)
 
     return {"success": True, "panel_deploy": panel_deploy}
+
+
+# ─── Пресеты reload-команд ───
+
+def _presets_to_response(presets: list[dict]) -> dict:
+    return {"presets": [{"name": p["name"], "command": p["command"]} for p in presets]}
+
+
+async def _load_reload_presets(db) -> list[dict]:
+    raw = await _get_setting(db, RELOAD_CMD_PRESETS_KEY)
+    if raw:
+        try:
+            return json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return []
+
+
+async def _save_reload_presets(db, presets: list[dict]) -> None:
+    await _set_setting(db, RELOAD_CMD_PRESETS_KEY, json.dumps(presets, ensure_ascii=False))
+    await db.commit()
+
+
+def upsert_reload_preset(presets: list[dict], name: str, command: str) -> list[dict]:
+    entry = {"name": name, "command": command}
+    idx = next((i for i, p in enumerate(presets) if p["name"] == name), None)
+    if idx is not None:
+        presets[idx] = entry
+    else:
+        presets.append(entry)
+    return presets
+
+
+@router.get("/reload-cmd-presets")
+async def list_reload_cmd_presets(_: dict = Depends(verify_auth)):
+    async with async_session() as db:
+        return _presets_to_response(await _load_reload_presets(db))
+
+
+@router.post("/reload-cmd-presets")
+async def save_reload_cmd_preset(req: ReloadCmdPreset, _: dict = Depends(verify_auth)):
+    async with async_session() as db:
+        presets = upsert_reload_preset(await _load_reload_presets(db), req.name, req.command)
+        await _save_reload_presets(db, presets)
+        return {"success": True, **_presets_to_response(presets)}
+
+
+@router.delete("/reload-cmd-presets")
+async def delete_reload_cmd_preset(req: ReloadCmdPresetDelete, _: dict = Depends(verify_auth)):
+    async with async_session() as db:
+        presets = [p for p in await _load_reload_presets(db) if p["name"] != req.name]
+        await _save_reload_presets(db, presets)
+        return {"success": True, **_presets_to_response(presets)}
 
 
 # ─── Server config ───

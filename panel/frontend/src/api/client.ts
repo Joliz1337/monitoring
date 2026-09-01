@@ -2165,6 +2165,11 @@ export type WildcardServerConfigPatch = Partial<
   Omit<WildcardServerConfig, 'server_id' | 'server_name' | 'server_url' | 'folder'>
 >
 
+export interface WildcardReloadCmdPreset {
+  name: string
+  command: string
+}
+
 // Стриминговый деплой не идёт через axios — нужен полный путь с /api для fetch
 export const wildcardDeployStreamUrl = (certId: number) =>
   `/api/wildcard-ssl/certificates/${certId}/deploy/stream`
@@ -2196,6 +2201,12 @@ export const wildcardSSLApi = {
     api.put(`/wildcard-ssl/servers/${serverId}`, data),
   updateServersBulk: (data: { server_ids: number[] } & WildcardServerConfigPatch) =>
     api.put<{ success: boolean; updated: number }>('/wildcard-ssl/servers/bulk', data),
+  getReloadCmdPresets: () =>
+    api.get<{ presets: WildcardReloadCmdPreset[] }>('/wildcard-ssl/reload-cmd-presets'),
+  saveReloadCmdPreset: (name: string, command: string) =>
+    api.post<{ success: boolean; presets: WildcardReloadCmdPreset[] }>('/wildcard-ssl/reload-cmd-presets', { name, command }),
+  deleteReloadCmdPreset: (name: string) =>
+    api.delete<{ success: boolean; presets: WildcardReloadCmdPreset[] }>('/wildcard-ssl/reload-cmd-presets', { data: { name } }),
 }
 
 // ==================== HAProxy Config Profiles ====================

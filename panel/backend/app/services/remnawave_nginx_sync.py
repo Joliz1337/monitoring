@@ -36,6 +36,31 @@ MIN_NODE_VERSION_MESSAGE = (
     "Нода не поддерживает управление nginx Remnawave — обновите агент ноды (нужна версия ≥ 10.7.0)"
 )
 
+NODE_DOMAIN_REQUIRED_MESSAGE = (
+    "Укажите домен ноды — в профиле нет wildcard-домена, и подставить в {{DOMAIN}} нечего"
+)
+
+
+class NginxLinkError(ValueError):
+    """Сервер нельзя привязать к профилю: шаблону нужен домен, а его нет."""
+
+
+def apply_server_link(
+    profile: RemnawaveNginxProfile, server: Server, domain: Optional[str] = None
+) -> None:
+    """Привязывает сервер к профилю, мутируя объект. Commit — на вызывающей стороне.
+
+    Домен — свойство ноды: без нового значения прежний сохраняется,
+    а обязателен он лишь когда шаблону есть что им заменить.
+    """
+    if domain:
+        server.remnawave_nginx_domain = domain
+    elif DOMAIN_PLACEHOLDER in profile.config_content and not server.remnawave_nginx_domain:
+        raise NginxLinkError(NODE_DOMAIN_REQUIRED_MESSAGE)
+
+    server.active_remnawave_nginx_profile_id = profile.id
+    server.remnawave_nginx_sync_status = "pending"
+
 
 @dataclass
 class SyncResult:

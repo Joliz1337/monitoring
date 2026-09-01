@@ -13,10 +13,12 @@ import {
   WildcardSSLSettings,
   WildcardServerConfig,
   WildcardServerConfigPatch,
+  WildcardReloadCmdPreset,
 } from '../api/client'
 import { FAQIcon } from '../components/FAQ'
 import { Checkbox } from '../components/ui/Checkbox'
 import CertificateMaterials from '../components/wildcard/CertificateMaterials'
+import ReloadCmdPresetChips from '../components/wildcard/ReloadCmdPresetChips'
 import { WildcardDeployProgress } from '../components/wildcard/WildcardDeployProgress'
 import { useBulkStream, BulkStreamState } from '../hooks/useBulkStream'
 
@@ -33,6 +35,56 @@ function wildcardCoversDomain(baseDomain: string, domain: string): boolean {
   const suffix = '.' + baseDomain
   return domain.endsWith(suffix) && !domain.slice(0, -suffix.length).includes('.')
 }
+
+// Пресеты избавляют от ручного ввода одной и той же команды на каждом сервере —
+// общий блок для обычного и custom-режимов карточки
+function ReloadCmdField({
+  value,
+  onChange,
+  presets,
+  savingPreset,
+  onSavePreset,
+  onDeletePreset,
+  t,
+}: {
+  value: string
+  onChange: (val: string) => void
+  presets: WildcardReloadCmdPreset[]
+  savingPreset: boolean
+  onSavePreset: (command: string) => void
+  onDeletePreset: (name: string) => void
+  t: (key: string, opts?: any) => string
+}) {
+  return (
+    <div>
+      <label className="block text-xs text-dark-400 mb-1">{t('wildcard_ssl.reload_cmd')}</label>
+      <div className="space-y-1.5">
+        <ReloadCmdPresetChips
+          presets={presets}
+          value={value}
+          onPick={onChange}
+          onDelete={onDeletePreset}
+          onSaveCurrent={() => onSavePreset(value.trim())}
+          saving={savingPreset}
+        />
+        <input
+          type="text"
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          placeholder={t('wildcard_ssl.reload_cmd_placeholder')}
+          maxLength={512}
+          className="w-full px-2.5 py-1.5 bg-dark-900 border border-dark-700 rounded-lg text-dark-200 text-sm placeholder-dark-600 focus:outline-none focus:border-accent-500 font-mono"
+        />
+      </div>
+      {!value ? (
+        <p className="text-[11px] text-dark-500 mt-1">{t('wildcard_ssl.reload_cmd_empty_hint')}</p>
+      ) : (
+        <p className="text-[11px] text-dark-500 mt-1">{t('wildcard_ssl.reload_cmd_hint')}</p>
+      )}
+    </div>
+  )
+}
+
 
 export interface ServerSavePayload {
   deploy_path: string
@@ -57,6 +109,10 @@ function ServerCard({
   onSave,
   onDeploy,
   restricted,
+  reloadPresets,
+  savingReloadPreset,
+  onSaveReloadPreset,
+  onDeleteReloadPreset,
   t,
 }: {
   srv: WildcardServerConfig
@@ -70,6 +126,10 @@ function ServerCard({
   onSave: (id: number, data: ServerSavePayload) => void
   onDeploy: (id: number) => void
   restricted: boolean
+  reloadPresets: WildcardReloadCmdPreset[]
+  savingReloadPreset: boolean
+  onSaveReloadPreset: (command: string) => void
+  onDeleteReloadPreset: (name: string) => void
   t: (key: string, opts?: any) => string
 }) {
   const [localPath, setLocalPath] = useState(srv.wildcard_ssl_deploy_path)
@@ -251,21 +311,15 @@ function ServerCard({
                         <p className="text-[11px] text-dark-500 mt-1">{t('wildcard_ssl.deploy_path_hint')}</p>
                       )}
                     </div>
-                    <div>
-                      <label className="block text-xs text-dark-400 mb-1">{t('wildcard_ssl.reload_cmd')}</label>
-                      <input
-                        type="text"
-                        value={localCmd}
-                        onChange={e => handleCmdChange(e.target.value)}
-                        placeholder={t('wildcard_ssl.reload_cmd_placeholder')}
-                        className="w-full px-2.5 py-1.5 bg-dark-900 border border-dark-700 rounded-lg text-dark-200 text-sm placeholder-dark-600 focus:outline-none focus:border-accent-500 font-mono"
-                      />
-                      {!localCmd ? (
-                        <p className="text-[11px] text-dark-500 mt-1">{t('wildcard_ssl.reload_cmd_empty_hint')}</p>
-                      ) : (
-                        <p className="text-[11px] text-dark-500 mt-1">{t('wildcard_ssl.reload_cmd_hint')}</p>
-                      )}
-                    </div>
+                    <ReloadCmdField
+                      value={localCmd}
+                      onChange={handleCmdChange}
+                      presets={reloadPresets}
+                      savingPreset={savingReloadPreset}
+                      onSavePreset={onSaveReloadPreset}
+                      onDeletePreset={onDeleteReloadPreset}
+                      t={t}
+                    />
                   </div>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div>
@@ -317,19 +371,15 @@ function ServerCard({
                     <p className="text-[11px] text-dark-500 mt-1">{t('wildcard_ssl.custom_privkey_path_hint')}</p>
                   </div>
                   <div className="sm:col-span-2">
-                    <label className="block text-xs text-dark-400 mb-1">{t('wildcard_ssl.reload_cmd')}</label>
-                    <input
-                      type="text"
+                    <ReloadCmdField
                       value={localCmd}
-                      onChange={e => handleCmdChange(e.target.value)}
-                      placeholder={t('wildcard_ssl.reload_cmd_placeholder')}
-                      className="w-full px-2.5 py-1.5 bg-dark-900 border border-dark-700 rounded-lg text-dark-200 text-sm placeholder-dark-600 focus:outline-none focus:border-accent-500 font-mono"
+                      onChange={handleCmdChange}
+                      presets={reloadPresets}
+                      savingPreset={savingReloadPreset}
+                      onSavePreset={onSaveReloadPreset}
+                      onDeletePreset={onDeleteReloadPreset}
+                      t={t}
                     />
-                    {!localCmd ? (
-                      <p className="text-[11px] text-dark-500 mt-1">{t('wildcard_ssl.reload_cmd_empty_hint')}</p>
-                    ) : (
-                      <p className="text-[11px] text-dark-500 mt-1">{t('wildcard_ssl.reload_cmd_hint')}</p>
-                    )}
                   </div>
                 </div>
               )}
@@ -401,12 +451,16 @@ function WildcardBulkEditForm({
   saving,
   onSave,
   onClose,
+  reloadPresets,
+  onDeleteReloadPreset,
   t,
 }: {
   count: number
   saving: boolean
   onSave: (patch: WildcardServerConfigPatch) => void
   onClose: () => void
+  reloadPresets: WildcardReloadCmdPreset[]
+  onDeleteReloadPreset: (name: string) => void
   t: (key: string, opts?: any) => string
 }) {
   const [customMode, setCustomMode] = useState(KEEP)
@@ -486,6 +540,19 @@ function WildcardBulkEditForm({
                   placeholder={field.placeholder || t('wildcard_ssl.reload_cmd_placeholder')}
                   className="w-full px-2.5 py-1.5 bg-dark-900 border border-dark-700 rounded-lg text-dark-200 text-sm placeholder-dark-600 focus:outline-none focus:border-accent-500 font-mono disabled:opacity-40"
                 />
+                {field.key === 'wildcard_ssl_reload_cmd' && reloadPresets.length > 0 && (
+                  <div className="mt-1.5">
+                    <ReloadCmdPresetChips
+                      presets={reloadPresets}
+                      value={state.on ? state.value : ''}
+                      onPick={command => setTexts(prev => ({
+                        ...prev,
+                        wildcard_ssl_reload_cmd: { on: true, value: command },
+                      }))}
+                      onDelete={onDeleteReloadPreset}
+                    />
+                  </div>
+                )}
               </div>
             )
           })}
@@ -538,6 +605,8 @@ export default function WildcardSSL() {
   const [serversLoading, setServersLoading] = useState(true)
   const [deployingServer, setDeployingServer] = useState<number | null>(null)
   const [expandedServer, setExpandedServer] = useState<number | null>(null)
+  const [reloadPresets, setReloadPresets] = useState<WildcardReloadCmdPreset[]>([])
+  const [savingReloadPreset, setSavingReloadPreset] = useState(false)
 
   // Search + bulk selection
   const [searchQuery, setSearchQuery] = useState('')
@@ -587,11 +656,19 @@ export default function WildcardSSL() {
     }
   }, [])
 
+  const fetchReloadPresets = useCallback(async () => {
+    try {
+      const res = await wildcardSSLApi.getReloadCmdPresets()
+      setReloadPresets(res.data.presets)
+    } catch { /* ignore */ }
+  }, [])
+
   useEffect(() => {
     fetchCert()
     fetchSettings()
     fetchServers()
-  }, [fetchCert, fetchSettings, fetchServers])
+    fetchReloadPresets()
+  }, [fetchCert, fetchSettings, fetchServers, fetchReloadPresets])
 
   useEffect(() => {
     return () => { if (pollRef.current) clearInterval(pollRef.current) }
@@ -722,6 +799,32 @@ export default function WildcardSSL() {
 
   const handleExpandServer = (serverId: number) => {
     setExpandedServer(prev => prev === serverId ? null : serverId)
+  }
+
+  const handleSaveReloadPreset = async (command: string) => {
+    if (!command) return
+    const name = window.prompt(t('wildcard_ssl.reload_preset_save_prompt'))
+    if (!name || !name.trim()) return
+    setSavingReloadPreset(true)
+    try {
+      const res = await wildcardSSLApi.saveReloadCmdPreset(name.trim(), command)
+      setReloadPresets(res.data.presets)
+      toast.success(t('wildcard_ssl.reload_preset_saved'))
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || t('wildcard_ssl.reload_preset_save_failed'))
+    } finally {
+      setSavingReloadPreset(false)
+    }
+  }
+
+  const handleDeleteReloadPreset = async (name: string) => {
+    if (!confirm(t('wildcard_ssl.reload_preset_delete_confirm'))) return
+    try {
+      const res = await wildcardSSLApi.deleteReloadCmdPreset(name)
+      setReloadPresets(res.data.presets)
+    } catch {
+      toast.error(t('wildcard_ssl.reload_preset_save_failed'))
+    }
   }
 
   // Toggle отправляется сразу, path/cmd — только по кнопке Save
@@ -900,6 +1003,10 @@ export default function WildcardSSL() {
       onSave={handleServerSave}
       onDeploy={handleDeployOne}
       restricted={!nodeAllows(allServers.find(s => s.id === srv.server_id), 'ssl', 'write')}
+      reloadPresets={reloadPresets}
+      savingReloadPreset={savingReloadPreset}
+      onSaveReloadPreset={handleSaveReloadPreset}
+      onDeleteReloadPreset={handleDeleteReloadPreset}
       t={t}
     />
   )
@@ -1312,6 +1419,8 @@ export default function WildcardSSL() {
                   saving={bulkSaving}
                   onSave={handleBulkEditSave}
                   onClose={() => setShowBulkEdit(false)}
+                  reloadPresets={reloadPresets}
+                  onDeleteReloadPreset={handleDeleteReloadPreset}
                   t={t}
                 />
               )}
