@@ -64,6 +64,47 @@ class CloneRequest(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=100)
 
 
+MAX_BULK_RULES = 200
+
+
+class BulkRulesAdd(BaseModel):
+    rules: list[FirewallRuleData] = Field(..., min_length=1, max_length=MAX_BULK_RULES)
+
+
+class BulkRuleDelete(BaseModel):
+    indexes: list[int] = Field(..., min_length=1)
+
+
+class BulkRulePatch(BaseModel):
+    """Частичное изменение правил: применяются только явно переданные поля
+    (различаем «не менять» и «сбросить» через model_fields_set)."""
+    protocol: Optional[Literal["tcp", "udp", "any"]] = None
+    action: Optional[Literal["allow", "deny"]] = None
+    direction: Optional[Literal["in", "out"]] = None
+    from_ip: Optional[str] = None
+    comment: Optional[str] = None
+
+    @field_validator("from_ip", mode="before")
+    @classmethod
+    def _empty_to_none(cls, v):
+        if v in ("", "any", "anywhere", "Anywhere"):
+            return None
+        return v
+
+
+class BulkRuleUpdate(BaseModel):
+    indexes: list[int] = Field(..., min_length=1)
+    patch: BulkRulePatch
+
+
+class BulkServerIds(BaseModel):
+    server_ids: list[int] = Field(..., min_length=1)
+
+
+class SyncRequest(BaseModel):
+    server_ids: Optional[list[int]] = None
+
+
 # ==================== Helpers ====================
 
 NODE_API_PORT = 9100
@@ -159,6 +200,21 @@ def _profile_to_dict(profile: FirewallProfile, *, linked: int = 0, synced: int =
         "created_at": profile.created_at.isoformat() if profile.created_at else None,
         "updated_at": profile.updated_at.isoformat() if profile.updated_at else None,
     }
+
+
+async def _mark_servers_pending(profile: FirewallProfile, db: AsyncSession) -> None:
+    """После изменения правил помечает привязанные серверы с устаревшим хэшем как pending."""
+    new_hash = compute_rules_hash(
+        profile.rules_json, profile.default_incoming, profile.default_outgoing
+    )
+    await db.execute(
+        update(Server)
+        .where(
+            Server.active_firewall_profile_id == profile.id,
+            Server.firewall_rules_hash != new_hash,
+        )
+        .values(firewall_sync_status="pending")
+    )
 
 
 async def _bg_sync_profile(
@@ -329,17 +385,7 @@ async def update_profile(
         rules_changed = True
 
     if rules_changed:
-        new_hash = compute_rules_hash(
-            profile.rules_json, profile.default_incoming, profile.default_outgoing
-        )
-        await db.execute(
-            update(Server)
-            .where(
-                Server.active_firewall_profile_id == profile_id,
-                Server.firewall_rules_hash != new_hash,
-            )
-            .values(firewall_sync_status="pending")
-        )
+        await _mark_servers_pending(profile, db)
 
     await db.commit()
     await db.refresh(profile)
@@ -429,15 +475,7 @@ async def add_rule(
     rules.append(new_rule)
     profile.rules_json = json.dumps(rules)
 
-    new_hash = compute_rules_hash(profile.rules_json, profile.default_incoming, profile.default_outgoing)
-    await db.execute(
-        update(Server)
-        .where(
-            Server.active_firewall_profile_id == profile_id,
-            Server.firewall_rules_hash != new_hash,
-        )
-        .values(firewall_sync_status="pending")
-    )
+    await _mark_servers_pending(profile, db)
     await db.commit()
 
     bg.add_task(_bg_sync_profile, profile_id)
@@ -466,15 +504,7 @@ async def update_rule(
     rules[rule_index] = new_rule
     profile.rules_json = json.dumps(rules)
 
-    new_hash = compute_rules_hash(profile.rules_json, profile.default_incoming, profile.default_outgoing)
-    await db.execute(
-        update(Server)
-        .where(
-            Server.active_firewall_profile_id == profile_id,
-            Server.firewall_rules_hash != new_hash,
-        )
-        .values(firewall_sync_status="pending")
-    )
+    await _mark_servers_pending(profile, db)
     await db.commit()
 
     bg.add_task(_bg_sync_profile, profile_id)
@@ -497,15 +527,104 @@ async def delete_rule(
     rules.pop(rule_index)
     profile.rules_json = json.dumps(rules)
 
-    new_hash = compute_rules_hash(profile.rules_json, profile.default_incoming, profile.default_outgoing)
-    await db.execute(
-        update(Server)
-        .where(
-            Server.active_firewall_profile_id == profile_id,
-            Server.firewall_rules_hash != new_hash,
-        )
-        .values(firewall_sync_status="pending")
-    )
+    await _mark_servers_pending(profile, db)
+    await db.commit()
+
+    bg.add_task(_bg_sync_profile, profile_id)
+    return {"success": True, "rules": rules}
+
+
+# ==================== Rules bulk ====================
+
+@router.post("/{profile_id}/rules/bulk")
+async def add_rules_bulk(
+    profile_id: int,
+    data: BulkRulesAdd,
+    bg: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(verify_auth),
+):
+    """Пакетное добавление правил: дубликаты пропускаются, раскатка одна на весь пакет."""
+    profile = await _get_profile(profile_id, db)
+    rules = _serialize_rules(profile)
+
+    existing_keys = {_rule_identity(r) for r in rules}
+    added = 0
+    skipped = 0
+    for rule in data.rules:
+        new_rule = rule.model_dump()
+        key = _rule_identity(new_rule)
+        if key in existing_keys:
+            skipped += 1
+            continue
+        existing_keys.add(key)
+        rules.append(new_rule)
+        added += 1
+
+    if added:
+        profile.rules_json = json.dumps(rules)
+        await _mark_servers_pending(profile, db)
+        await db.commit()
+        bg.add_task(_bg_sync_profile, profile_id)
+
+    return {"success": True, "added": added, "skipped": skipped, "rules": rules}
+
+
+@router.post("/{profile_id}/rules/bulk-update")
+async def update_rules_bulk(
+    profile_id: int,
+    data: BulkRuleUpdate,
+    bg: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(verify_auth),
+):
+    profile = await _get_profile(profile_id, db)
+    rules = _serialize_rules(profile)
+
+    indexes = set(data.indexes)
+    if any(not 0 <= i < len(rules) for i in indexes):
+        raise HTTPException(404, "Rule index out of range")
+
+    patch = {
+        k: v for k, v in data.patch.model_dump().items()
+        if k in data.patch.model_fields_set
+    }
+    if not patch:
+        raise HTTPException(400, "Не указано ни одного изменения")
+
+    for i in indexes:
+        rules[i] = {**rules[i], **patch}
+
+    keys = [_rule_identity(r) for r in rules]
+    if len(set(keys)) != len(keys):
+        raise HTTPException(409, "После изменения в профиле появились бы одинаковые правила")
+
+    profile.rules_json = json.dumps(rules)
+    await _mark_servers_pending(profile, db)
+    await db.commit()
+
+    bg.add_task(_bg_sync_profile, profile_id)
+    return {"success": True, "rules": rules}
+
+
+@router.post("/{profile_id}/rules/bulk-delete")
+async def delete_rules_bulk(
+    profile_id: int,
+    data: BulkRuleDelete,
+    bg: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(verify_auth),
+):
+    profile = await _get_profile(profile_id, db)
+    rules = _serialize_rules(profile)
+
+    indexes = set(data.indexes)
+    if any(not 0 <= i < len(rules) for i in indexes):
+        raise HTTPException(404, "Rule index out of range")
+
+    rules = [r for i, r in enumerate(rules) if i not in indexes]
+    profile.rules_json = json.dumps(rules)
+    await _mark_servers_pending(profile, db)
     await db.commit()
 
     bg.add_task(_bg_sync_profile, profile_id)
@@ -513,6 +632,61 @@ async def delete_rule(
 
 
 # ==================== Server bindings ====================
+
+# Bulk-маршруты объявлены раньше /{profile_id}/servers/{server_id},
+# иначе «bulk-link» пытался бы распарситься как server_id
+
+@router.post("/{profile_id}/servers/bulk-link")
+async def link_servers_bulk(
+    profile_id: int,
+    data: BulkServerIds,
+    bg: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(verify_auth),
+):
+    await _get_profile(profile_id, db)
+
+    result = await db.execute(select(Server.id).where(Server.id.in_(data.server_ids)))
+    found_ids = [row[0] for row in result.fetchall()]
+    if not found_ids:
+        raise HTTPException(404, "Servers not found")
+
+    await db.execute(
+        update(Server)
+        .where(Server.id.in_(found_ids))
+        .values(active_firewall_profile_id=profile_id, firewall_sync_status="pending")
+    )
+    await db.commit()
+
+    bg.add_task(_bg_sync_profile, profile_id, server_ids=found_ids)
+    return {"success": True, "linked": len(found_ids)}
+
+
+@router.post("/{profile_id}/servers/bulk-unlink")
+async def unlink_servers_bulk(
+    profile_id: int,
+    data: BulkServerIds,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(verify_auth),
+):
+    await _get_profile(profile_id, db)
+
+    result = await db.execute(
+        update(Server)
+        .where(
+            Server.id.in_(data.server_ids),
+            Server.active_firewall_profile_id == profile_id,
+        )
+        .values(
+            active_firewall_profile_id=None,
+            firewall_sync_status=None,
+            firewall_rules_hash=None,
+            firewall_last_sync_at=None,
+        )
+    )
+    await db.commit()
+    return {"success": True, "unlinked": result.rowcount}
+
 
 @router.post("/{profile_id}/servers/{server_id}")
 async def link_server(
@@ -558,11 +732,14 @@ async def unlink_server(profile_id: int, server_id: int, db: AsyncSession = Depe
 async def sync_all(
     profile_id: int,
     force: bool = False,
+    data: Optional[SyncRequest] = None,
     db: AsyncSession = Depends(get_db),
     _=Depends(verify_auth),
 ):
+    """Без тела — синхронизация всех привязанных серверов, с server_ids — только выбранных."""
     profile = await _get_profile(profile_id, db)
-    results = await sync_profile_to_servers(profile, db, force=force)
+    server_ids = data.server_ids if data and data.server_ids else None
+    results = await sync_profile_to_servers(profile, db, server_ids=server_ids, force=force)
     return {
         "results": [
             {

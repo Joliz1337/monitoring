@@ -28,6 +28,7 @@ import {
   Eye,
   EyeOff,
   Lock,
+  ListPlus,
 } from 'lucide-react'
 import { Tooltip } from '../components/ui/Tooltip'
 import {
@@ -35,7 +36,9 @@ import {
   FirewallProfile,
   FirewallProfileWithServers,
   FirewallProfileRuleData,
+  FirewallRuleBulkPatch,
   FirewallSyncLogEntry,
+  FirewallSyncResult,
   FirewallAvailableServer,
   FirewallProfileServerInfo,
   FirewallRuleProtocol,
@@ -109,6 +112,45 @@ const EMPTY_RULE: FirewallProfileRuleData = {
 
 const inputCls =
   'w-full px-3 py-1.5 rounded-lg bg-dark-800 border border-dark-700 text-dark-100 text-sm placeholder-dark-600 focus:outline-none focus:border-accent-500/50 transition-colors'
+
+const checkboxCls = 'w-3.5 h-3.5 accent-accent-500 cursor-pointer'
+
+// Потолок совпадает с MAX_BULK_RULES на бэкенде
+const MAX_BULK_PORTS = 200
+
+// «443, 8443, 10000-10010» → список портов; диапазоны разворачиваются в отдельные порты
+function parsePortsList(input: string): { ports: number[]; error: string | null } {
+  const tokens = input.split(/[\s,;]+/).filter(Boolean)
+  if (tokens.length === 0) return { ports: [], error: 'Укажите хотя бы один порт' }
+  const seen = new Set<number>()
+  const ports: number[] = []
+  for (const token of tokens) {
+    const range = token.match(/^(\d+)[-:](\d+)$/)
+    const single = token.match(/^\d+$/)
+    let from: number
+    let to: number
+    if (range) {
+      from = parseInt(range[1])
+      to = parseInt(range[2])
+    } else if (single) {
+      from = to = parseInt(token)
+    } else {
+      return { ports: [], error: `Не удалось разобрать «${token}» — ожидается порт или диапазон вида 10000-10010` }
+    }
+    if (from < 1 || to > 65535 || from > to) {
+      return { ports: [], error: `Неверный порт или диапазон «${token}»` }
+    }
+    for (let p = from; p <= to; p++) {
+      if (seen.has(p)) continue
+      seen.add(p)
+      ports.push(p)
+      if (ports.length > MAX_BULK_PORTS) {
+        return { ports: [], error: `Не больше ${MAX_BULK_PORTS} портов за один раз` }
+      }
+    }
+  }
+  return { ports, error: null }
+}
 
 function extractErrorMessage(err: unknown, fallback: string): string {
   const e = err as { response?: { data?: { detail?: unknown } }; message?: string }
@@ -290,6 +332,247 @@ function RuleForm({
           >
             {saving && <Loader2 className="w-3 h-3 animate-spin" />}
             {isEdit ? 'Сохранить' : 'Добавить'}
+          </button>
+        </div>
+      </div>
+    </motion.div>
+  )
+}
+
+
+function BulkAddForm({
+  saving,
+  onSave,
+  onCancel,
+}: {
+  saving: boolean
+  onSave: (rules: FirewallProfileRuleData[]) => void
+  onCancel: () => void
+}) {
+  const [portsText, setPortsText] = useState('')
+  const [action, setAction] = useState<FirewallRuleAction>('allow')
+  const [protocol, setProtocol] = useState<FirewallRuleProtocol>('tcp')
+  const [direction, setDirection] = useState<FirewallRuleDirection>('in')
+  const [fromIp, setFromIp] = useState('')
+  const [comment, setComment] = useState('')
+
+  const handleSubmit = () => {
+    const { ports, error } = parsePortsList(portsText)
+    if (error) {
+      toast.error(error)
+      return
+    }
+    const rules: FirewallProfileRuleData[] = ports.map(port => ({
+      port,
+      protocol,
+      action,
+      from_ip: fromIp.trim() ? fromIp.trim() : null,
+      direction,
+      comment: comment.trim() ? comment.trim() : null,
+    }))
+    onSave(rules)
+  }
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, height: 0 }}
+      animate={{ opacity: 1, height: 'auto' }}
+      exit={{ opacity: 0, height: 0 }}
+      className="overflow-hidden"
+    >
+      <div className="p-4 bg-dark-800/50 rounded-xl border border-dark-700/50 space-y-3">
+        <div className="flex items-center justify-between">
+          <h4 className="text-sm font-medium text-dark-200 flex items-center gap-2">
+            <ListPlus className="w-3.5 h-3.5 text-accent-400" /> Добавить правила списком
+          </h4>
+          <button onClick={onCancel} className="p-1 hover:bg-dark-700 rounded-lg text-dark-400 transition-colors">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div>
+          <label className="block text-xs text-dark-400 mb-1">Порты (через запятую, диапазоны через дефис)</label>
+          <input
+            type="text"
+            value={portsText}
+            onChange={e => setPortsText(e.target.value)}
+            placeholder="443, 8443, 10000-10010"
+            className={inputCls}
+          />
+        </div>
+
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+          <div>
+            <label className="block text-xs text-dark-400 mb-1">Действие</label>
+            <select value={action} onChange={e => setAction(e.target.value as FirewallRuleAction)} className={inputCls}>
+              {ACTION_OPTIONS.map(a => <option key={a} value={a}>{ACTION_LABELS[a]}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs text-dark-400 mb-1">Протокол</label>
+            <select value={protocol} onChange={e => setProtocol(e.target.value as FirewallRuleProtocol)} className={inputCls}>
+              {PROTOCOL_OPTIONS.map(p => <option key={p} value={p}>{p}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs text-dark-400 mb-1">Направление</label>
+            <select value={direction} onChange={e => setDirection(e.target.value as FirewallRuleDirection)} className={inputCls}>
+              {DIRECTION_OPTIONS.map(d => <option key={d} value={d}>{DIRECTION_LABELS[d]}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs text-dark-400 mb-1">Источник (IP / CIDR)</label>
+            <input
+              type="text"
+              value={fromIp}
+              onChange={e => setFromIp(e.target.value)}
+              placeholder="любой"
+              className={inputCls}
+            />
+          </div>
+          <div className="col-span-2">
+            <label className="block text-xs text-dark-400 mb-1">Комментарий (общий для всех)</label>
+            <input
+              type="text"
+              value={comment}
+              onChange={e => setComment(e.target.value)}
+              placeholder="Порты приложения"
+              className={inputCls}
+            />
+          </div>
+        </div>
+
+        <div className="flex justify-end gap-2 pt-1">
+          <button
+            onClick={onCancel}
+            className="px-3 py-1.5 rounded-lg text-xs text-dark-300 hover:text-dark-100 bg-dark-800 hover:bg-dark-700 border border-dark-700 transition-colors"
+          >
+            Отмена
+          </button>
+          <button
+            onClick={handleSubmit}
+            disabled={saving}
+            className="px-3 py-1.5 rounded-lg text-xs font-medium bg-accent-600 hover:bg-accent-500 text-white transition-colors disabled:opacity-50 flex items-center gap-1.5"
+          >
+            {saving && <Loader2 className="w-3 h-3 animate-spin" />}
+            Добавить
+          </button>
+        </div>
+      </div>
+    </motion.div>
+  )
+}
+
+
+const KEEP = '__keep__'
+
+function BulkEditForm({
+  count,
+  saving,
+  onSave,
+  onCancel,
+}: {
+  count: number
+  saving: boolean
+  onSave: (patch: FirewallRuleBulkPatch) => void
+  onCancel: () => void
+}) {
+  const [action, setAction] = useState<string>(KEEP)
+  const [protocol, setProtocol] = useState<string>(KEEP)
+  const [direction, setDirection] = useState<string>(KEEP)
+  const [fromIp, setFromIp] = useState('')
+  const [comment, setComment] = useState('')
+
+  const handleSubmit = () => {
+    const patch: FirewallRuleBulkPatch = {}
+    if (action !== KEEP) patch.action = action as FirewallRuleAction
+    if (protocol !== KEEP) patch.protocol = protocol as FirewallRuleProtocol
+    if (direction !== KEEP) patch.direction = direction as FirewallRuleDirection
+    const ip = fromIp.trim()
+    if (ip) patch.from_ip = ip.toLowerCase() === 'any' || ip.toLowerCase() === 'любой' ? null : ip
+    if (comment.trim()) patch.comment = comment.trim()
+    if (Object.keys(patch).length === 0) {
+      toast.error('Не указано ни одного изменения')
+      return
+    }
+    onSave(patch)
+  }
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, height: 0 }}
+      animate={{ opacity: 1, height: 'auto' }}
+      exit={{ opacity: 0, height: 0 }}
+      className="overflow-hidden"
+    >
+      <div className="p-4 bg-dark-800/50 rounded-xl border border-dark-700/50 space-y-3">
+        <div className="flex items-center justify-between">
+          <h4 className="text-sm font-medium text-dark-200 flex items-center gap-2">
+            <Edit3 className="w-3.5 h-3.5 text-accent-400" /> Изменить выбранные правила ({count})
+          </h4>
+          <button onClick={onCancel} className="p-1 hover:bg-dark-700 rounded-lg text-dark-400 transition-colors">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+          <div>
+            <label className="block text-xs text-dark-400 mb-1">Действие</label>
+            <select value={action} onChange={e => setAction(e.target.value)} className={inputCls}>
+              <option value={KEEP}>— не менять —</option>
+              {ACTION_OPTIONS.map(a => <option key={a} value={a}>{ACTION_LABELS[a]}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs text-dark-400 mb-1">Протокол</label>
+            <select value={protocol} onChange={e => setProtocol(e.target.value)} className={inputCls}>
+              <option value={KEEP}>— не менять —</option>
+              {PROTOCOL_OPTIONS.map(p => <option key={p} value={p}>{p}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs text-dark-400 mb-1">Направление</label>
+            <select value={direction} onChange={e => setDirection(e.target.value)} className={inputCls}>
+              <option value={KEEP}>— не менять —</option>
+              {DIRECTION_OPTIONS.map(d => <option key={d} value={d}>{DIRECTION_LABELS[d]}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs text-dark-400 mb-1">Источник (IP / CIDR)</label>
+            <input
+              type="text"
+              value={fromIp}
+              onChange={e => setFromIp(e.target.value)}
+              placeholder="пусто — не менять, any — сбросить"
+              className={inputCls}
+            />
+          </div>
+          <div className="col-span-2">
+            <label className="block text-xs text-dark-400 mb-1">Комментарий (пусто — не менять)</label>
+            <input
+              type="text"
+              value={comment}
+              onChange={e => setComment(e.target.value)}
+              placeholder="Новый комментарий"
+              className={inputCls}
+            />
+          </div>
+        </div>
+
+        <div className="flex justify-end gap-2 pt-1">
+          <button
+            onClick={onCancel}
+            className="px-3 py-1.5 rounded-lg text-xs text-dark-300 hover:text-dark-100 bg-dark-800 hover:bg-dark-700 border border-dark-700 transition-colors"
+          >
+            Отмена
+          </button>
+          <button
+            onClick={handleSubmit}
+            disabled={saving}
+            className="px-3 py-1.5 rounded-lg text-xs font-medium bg-accent-600 hover:bg-accent-500 text-white transition-colors disabled:opacity-50 flex items-center gap-1.5"
+          >
+            {saving && <Loader2 className="w-3 h-3 animate-spin" />}
+            Применить
           </button>
         </div>
       </div>
@@ -616,6 +899,9 @@ function RulesTab({
   onAddRule,
   onUpdateRule,
   onDeleteRule,
+  onBulkAdd,
+  onBulkUpdate,
+  onBulkDelete,
 }: {
   profile: FirewallProfileWithServers
   rules: FirewallProfileRuleData[]
@@ -625,10 +911,42 @@ function RulesTab({
   onAddRule: (rule: FirewallProfileRuleData) => Promise<void>
   onUpdateRule: (index: number, rule: FirewallProfileRuleData) => Promise<void>
   onDeleteRule: (index: number) => Promise<void>
+  onBulkAdd: (rules: FirewallProfileRuleData[]) => Promise<void>
+  onBulkUpdate: (indexes: number[], patch: FirewallRuleBulkPatch) => Promise<void>
+  onBulkDelete: (indexes: number[]) => Promise<void>
 }) {
   const [showForm, setShowForm] = useState(false)
+  const [showBulkForm, setShowBulkForm] = useState(false)
+  const [showBulkEdit, setShowBulkEdit] = useState(false)
   const [editingIndex, setEditingIndex] = useState<number | null>(null)
   const [saving, setSaving] = useState(false)
+  const [selected, setSelected] = useState<Set<number>>(new Set())
+
+  // Индексы выбранных правил после изменения списка теряют смысл.
+  // На сам массив завязываться нельзя — автообновление каждые 3 секунды
+  // пересоздаёт его и сбрасывало бы выбор
+  useEffect(() => {
+    setSelected(prev => (prev.size ? new Set() : prev))
+  }, [rules.length])
+
+  const toggleSelected = (index: number) => {
+    setSelected(prev => {
+      const next = new Set(prev)
+      if (next.has(index)) next.delete(index)
+      else next.add(index)
+      return next
+    })
+  }
+
+  const allSelected = rules.length > 0 && selected.size === rules.length
+  const toggleSelectAll = () => {
+    setSelected(allSelected ? new Set() : new Set(rules.map((_, i) => i)))
+  }
+
+  const selectedIndexes = useMemo(
+    () => [...selected].filter(i => i < rules.length),
+    [selected, rules.length]
+  )
 
   const handleAdd = async (rule: FirewallProfileRuleData) => {
     setSaving(true)
@@ -646,6 +964,40 @@ function RulesTab({
     try {
       await onUpdateRule(editingIndex, rule)
       setEditingIndex(null)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleBulkAdd = async (newRules: FirewallProfileRuleData[]) => {
+    setSaving(true)
+    try {
+      await onBulkAdd(newRules)
+      setShowBulkForm(false)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleBulkEdit = async (patch: FirewallRuleBulkPatch) => {
+    if (selectedIndexes.length === 0) return
+    setSaving(true)
+    try {
+      await onBulkUpdate(selectedIndexes, patch)
+      setShowBulkEdit(false)
+      setSelected(new Set())
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleBulkDelete = async () => {
+    if (selectedIndexes.length === 0) return
+    if (!confirm(`Удалить выбранные правила (${selectedIndexes.length})?`)) return
+    setSaving(true)
+    try {
+      await onBulkDelete(selectedIndexes)
+      setSelected(new Set())
     } finally {
       setSaving(false)
     }
@@ -694,15 +1046,23 @@ function RulesTab({
         </div>
       </div>
 
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
         <h3 className="text-sm font-medium text-dark-200">Правила ({rules.length})</h3>
-        {!showForm && editingIndex === null && (
-          <button
-            onClick={() => setShowForm(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-accent-600 hover:bg-accent-500 text-white transition-colors"
-          >
-            <Plus className="w-3.5 h-3.5" /> Добавить правило
-          </button>
+        {!showForm && !showBulkForm && editingIndex === null && (
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => { setShowBulkForm(true); setShowBulkEdit(false) }}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-accent-400 bg-accent-500/10 hover:bg-accent-500/20 transition-colors"
+            >
+              <ListPlus className="w-3.5 h-3.5" /> Добавить списком
+            </button>
+            <button
+              onClick={() => setShowForm(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-accent-600 hover:bg-accent-500 text-white transition-colors"
+            >
+              <Plus className="w-3.5 h-3.5" /> Добавить правило
+            </button>
+          </div>
         )}
       </div>
 
@@ -716,7 +1076,44 @@ function RulesTab({
             onCancel={() => setShowForm(false)}
           />
         )}
+        {showBulkForm && (
+          <BulkAddForm
+            saving={saving}
+            onSave={handleBulkAdd}
+            onCancel={() => setShowBulkForm(false)}
+          />
+        )}
+        {showBulkEdit && selectedIndexes.length > 0 && (
+          <BulkEditForm
+            count={selectedIndexes.length}
+            saving={saving}
+            onSave={handleBulkEdit}
+            onCancel={() => setShowBulkEdit(false)}
+          />
+        )}
       </AnimatePresence>
+
+      {selectedIndexes.length > 0 && (
+        <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-accent-500/10 border border-accent-500/30">
+          <span className="text-xs text-accent-300">Выбрано правил: {selectedIndexes.length}</span>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => { setShowBulkEdit(true); setShowForm(false); setShowBulkForm(false) }}
+              disabled={saving}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-dark-200 hover:text-dark-100 bg-dark-800/60 hover:bg-dark-700/60 border border-dark-700 transition-colors disabled:opacity-50"
+            >
+              <Edit3 className="w-3.5 h-3.5" /> Изменить
+            </button>
+            <button
+              onClick={handleBulkDelete}
+              disabled={saving}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-red-400 hover:text-red-300 bg-red-500/10 hover:bg-red-500/20 transition-colors disabled:opacity-50"
+            >
+              {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />} Удалить
+            </button>
+          </div>
+        </div>
+      )}
 
       {rules.length === 0 ? (
         <div className="text-center text-dark-500 text-sm py-6 bg-dark-900/30 rounded-lg border border-dark-800/50">
@@ -727,6 +1124,15 @@ function RulesTab({
           <table className="w-full text-sm">
             <thead className="bg-dark-900/40 text-dark-400 text-xs">
               <tr>
+                <th className="px-3 py-2 w-8">
+                  <input
+                    type="checkbox"
+                    checked={allSelected}
+                    onChange={toggleSelectAll}
+                    className={checkboxCls}
+                    title="Выбрать все"
+                  />
+                </th>
                 <th className="text-left px-3 py-2 font-medium">Действие</th>
                 <th className="text-left px-3 py-2 font-medium">Порт</th>
                 <th className="text-left px-3 py-2 font-medium">Протокол</th>
@@ -742,6 +1148,14 @@ function RulesTab({
                 return (
                   <Fragment key={index}>
                     <tr className="border-t border-dark-800/40 hover:bg-dark-800/30 transition-colors">
+                      <td className="px-3 py-2 w-8">
+                        <input
+                          type="checkbox"
+                          checked={selected.has(index)}
+                          onChange={() => toggleSelected(index)}
+                          className={checkboxCls}
+                        />
+                      </td>
                       <td className={`px-3 py-2 font-medium ${actionColor}`}>{ACTION_LABELS[rule.action]}</td>
                       <td className="px-3 py-2 font-mono text-dark-200">{rule.port}</td>
                       <td className="px-3 py-2 text-dark-300">{rule.protocol}</td>
@@ -773,7 +1187,7 @@ function RulesTab({
                     </tr>
                     {editingIndex === index && (
                       <tr>
-                        <td colSpan={7} className="px-3 py-2 bg-dark-900/40">
+                        <td colSpan={8} className="px-3 py-2 bg-dark-900/40">
                           <RuleForm
                             initial={rule}
                             isEdit={true}
@@ -801,20 +1215,30 @@ function ServersTab({
   availableServers,
   syncingServerId,
   forceSync,
+  bulkBusy,
   onSyncOne,
   onUnlink,
   onLink,
+  onBulkLink,
+  onBulkUnlink,
+  onSyncSelected,
 }: {
   profile: FirewallProfileWithServers
   availableServers: FirewallAvailableServer[]
   syncingServerId: number | null
   forceSync: boolean
+  bulkBusy: boolean
   onSyncOne: (serverId: number) => void
   onUnlink: (serverId: number) => void
   onLink: (serverId: number) => void
+  onBulkLink: (serverIds: number[]) => Promise<void>
+  onBulkUnlink: (serverIds: number[]) => Promise<void>
+  onSyncSelected: (serverIds: number[]) => Promise<void>
 }) {
   const [searchQuery, setSearchQuery] = useState('')
   const [showBusy, setShowBusy] = useState(false)
+  const [selectedLinked, setSelectedLinked] = useState<Set<number>>(new Set())
+  const [selectedCandidates, setSelectedCandidates] = useState<Set<number>>(new Set())
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(() => {
     try {
       const raw = localStorage.getItem('fw_add_expanded_folders')
@@ -891,6 +1315,55 @@ function ServersTab({
     return profile.servers.filter(s => matchesQuery(s.server_name, s.server_url, q))
   }, [searchQuery, profile.servers])
 
+  // Профиль автообновляется каждые 3 секунды — выбор храним по id серверов,
+  // а перед действием отфильтровываем то, что успело исчезнуть из списка
+  const selectedLinkedIds = useMemo(
+    () => [...selectedLinked].filter(id => linkedIds.has(id)),
+    [selectedLinked, linkedIds]
+  )
+  const visibleCandidateIds = useMemo(
+    () => new Set(visibleCandidates.map(s => s.id)),
+    [visibleCandidates]
+  )
+  const selectedCandidateIds = useMemo(
+    () => [...selectedCandidates].filter(id => visibleCandidateIds.has(id)),
+    [selectedCandidates, visibleCandidateIds]
+  )
+
+  const toggleInSet = (setter: React.Dispatch<React.SetStateAction<Set<number>>>, id: number) => {
+    setter(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const allLinkedSelected =
+    filteredLinked.length > 0 && filteredLinked.every(s => selectedLinked.has(s.server_id))
+  const toggleAllLinked = () => {
+    setSelectedLinked(allLinkedSelected ? new Set() : new Set(filteredLinked.map(s => s.server_id)))
+  }
+
+  const handleBulkLink = async () => {
+    if (selectedCandidateIds.length === 0) return
+    await onBulkLink(selectedCandidateIds)
+    setSelectedCandidates(new Set())
+  }
+
+  const handleBulkUnlink = async () => {
+    if (selectedLinkedIds.length === 0) return
+    if (!confirm(`Отвязать серверы (${selectedLinkedIds.length})? Правила на нодах НЕ откатываются.`)) return
+    await onBulkUnlink(selectedLinkedIds)
+    setSelectedLinked(new Set())
+  }
+
+  const handleSyncSelectedClick = async () => {
+    if (selectedLinkedIds.length === 0) return
+    await onSyncSelected(selectedLinkedIds)
+    setSelectedLinked(new Set())
+  }
+
   const searching = searchQuery.trim().length > 0
   const hasFolders = grouped.folders.size > 0
   const noCandidates = filteredGroups.folders.size === 0 && filteredGroups.noFolder.length === 0
@@ -905,6 +1378,12 @@ function ServersTab({
   const renderCandidate = (srv: FirewallAvailableServer) => (
     <div key={srv.id} className="flex items-center justify-between px-3 py-2 rounded-lg bg-dark-900/30 border border-dark-800/50">
       <div className="flex items-center gap-3 min-w-0">
+        <input
+          type="checkbox"
+          checked={selectedCandidates.has(srv.id)}
+          onChange={() => toggleInSet(setSelectedCandidates, srv.id)}
+          className={`${checkboxCls} shrink-0`}
+        />
         <Server className="w-4 h-4 text-dark-400 shrink-0" />
         <div className="min-w-0">
           <div className="text-sm text-dark-200 truncate">{srv.name}</div>
@@ -935,12 +1414,31 @@ function ServersTab({
           ? <Folder className="w-4 h-4 text-accent-400 shrink-0" />
           : <FolderOpen className="w-4 h-4 text-accent-400 shrink-0" />)
       : <Server className="w-4 h-4 text-dark-400 shrink-0" />
+    const allInGroupSelected = servers.every(s => selectedCandidates.has(s.id))
+    const toggleGroupSelected = () => {
+      setSelectedCandidates(prev => {
+        const next = new Set(prev)
+        for (const s of servers) {
+          if (allInGroupSelected) next.delete(s.id)
+          else next.add(s.id)
+        }
+        return next
+      })
+    }
     return (
       <div key={key} className="mb-1">
         <div
           className="flex items-center gap-2 p-2 rounded-lg hover:bg-dark-800/50 transition-colors cursor-pointer"
           onClick={() => toggleCollapsed(key)}
         >
+          <input
+            type="checkbox"
+            checked={allInGroupSelected}
+            onChange={toggleGroupSelected}
+            onClick={e => e.stopPropagation()}
+            className={`${checkboxCls} shrink-0`}
+            title="Выбрать всю группу"
+          />
           {icon}
           <span className={`font-medium text-sm truncate ${isFolder ? 'text-dark-200' : 'text-dark-400'}`}>{label}</span>
           <span className="text-xs text-dark-500 ml-auto shrink-0">{servers.length}</span>
@@ -981,9 +1479,42 @@ function ServersTab({
       </div>
 
       <div>
-        <h3 className="text-sm font-medium text-dark-200 mb-3">
-          Привязанные серверы ({searching ? `${filteredLinked.length}/${profile.servers.length}` : profile.servers.length})
-        </h3>
+        <div className="flex items-center justify-between gap-2 mb-3 flex-wrap">
+          <div className="flex items-center gap-2.5">
+            {filteredLinked.length > 0 && (
+              <Tooltip label="Выбрать все">
+                <input
+                  type="checkbox"
+                  checked={allLinkedSelected}
+                  onChange={toggleAllLinked}
+                  className={checkboxCls}
+                />
+              </Tooltip>
+            )}
+            <h3 className="text-sm font-medium text-dark-200">
+              Привязанные серверы ({searching ? `${filteredLinked.length}/${profile.servers.length}` : profile.servers.length})
+            </h3>
+          </div>
+          {selectedLinkedIds.length > 0 && (
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleSyncSelectedClick}
+                disabled={bulkBusy}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-accent-400 hover:text-accent-300 bg-accent-500/10 hover:bg-accent-500/20 transition-colors disabled:opacity-50"
+              >
+                {bulkBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                Синхронизировать выбранные ({selectedLinkedIds.length})
+              </button>
+              <button
+                onClick={handleBulkUnlink}
+                disabled={bulkBusy}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-red-400 hover:text-red-300 bg-red-500/10 hover:bg-red-500/20 transition-colors disabled:opacity-50"
+              >
+                <Unlink className="w-3.5 h-3.5" /> Отвязать ({selectedLinkedIds.length})
+              </button>
+            </div>
+          )}
+        </div>
         {profile.servers.length === 0 ? (
           <div className="text-center text-dark-500 text-sm py-6 bg-dark-900/30 rounded-lg border border-dark-800/50">
             Нет привязанных серверов
@@ -997,6 +1528,12 @@ function ServersTab({
             {filteredLinked.map((srv: FirewallProfileServerInfo) => (
               <div key={srv.server_id} className="flex items-center justify-between px-3 py-2 rounded-lg bg-dark-900/30 border border-dark-800/50">
                 <div className="flex items-center gap-3 min-w-0">
+                  <input
+                    type="checkbox"
+                    checked={selectedLinked.has(srv.server_id)}
+                    onChange={() => toggleInSet(setSelectedLinked, srv.server_id)}
+                    className={`${checkboxCls} shrink-0`}
+                  />
                   <Server className="w-4 h-4 text-dark-400 shrink-0" />
                   <div className="min-w-0">
                     <div className="text-sm text-dark-200 truncate">{srv.server_name}</div>
@@ -1035,8 +1572,18 @@ function ServersTab({
       </div>
 
       <div>
-        <div className="flex items-center justify-between gap-2 mb-3">
+        <div className="flex items-center justify-between gap-2 mb-3 flex-wrap">
           <h3 className="text-sm font-medium text-dark-200">Добавить серверы</h3>
+          {selectedCandidateIds.length > 0 && (
+            <button
+              onClick={handleBulkLink}
+              disabled={bulkBusy}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-accent-600 hover:bg-accent-500 text-white transition-colors disabled:opacity-50"
+            >
+              {bulkBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Link2 className="w-3.5 h-3.5" />}
+              Привязать выбранные ({selectedCandidateIds.length})
+            </button>
+          )}
           {hiddenBusy > 0 && (
             <Tooltip label="Серверы, привязанные к другим профилям">
               <button
@@ -1160,6 +1707,7 @@ function ProfileDetail({
   const [syncing, setSyncing] = useState(false)
   const [syncingServerId, setSyncingServerId] = useState<number | null>(null)
   const [forceSync, setForceSync] = useState(false)
+  const [bulkBusy, setBulkBusy] = useState(false)
 
   const fetchProfile = useCallback(async () => {
     try {
@@ -1280,25 +1828,43 @@ function ProfileDetail({
     )
   }
 
+  const reportSyncResults = (results: FirewallSyncResult[]) => {
+    const ok = results.filter(r => r.success).length
+    // Офлайн-сервер не сбой: профиль встал в очередь и раскатается сам при его возвращении
+    const queued = results.filter(r => r.queued).length
+    const fail = results.length - ok - queued
+    const queuedNote = queued > 0 ? `, ${queued} отложено (офлайн)` : ''
+    if (fail === 0) toast.success(`Синхронизация успешна: ${ok}/${results.length}${queuedNote}`)
+    else toast.warning(`Синхронизация: ${ok} успешно, ${fail} с ошибками${queuedNote}`)
+  }
+
   const handleSyncAll = async () => {
     if (!confirmSshLockout('все привязанные серверы')) return
     setSyncing(true)
     try {
       const res = await firewallProfilesApi.syncAll(profileId, forceSync)
-      const results = res.data.results
-      const ok = results.filter(r => r.success).length
-      // Офлайн-сервер не сбой: профиль встал в очередь и раскатается сам при его возвращении
-      const queued = results.filter(r => r.queued).length
-      const fail = results.length - ok - queued
-      const queuedNote = queued > 0 ? `, ${queued} отложено (офлайн)` : ''
-      if (fail === 0) toast.success(`Синхронизация успешна: ${ok}/${results.length}${queuedNote}`)
-      else toast.warning(`Синхронизация: ${ok} успешно, ${fail} с ошибками${queuedNote}`)
+      reportSyncResults(res.data.results)
       await fetchProfile()
       onProfileChanged()
     } catch (err) {
       toast.error(extractErrorMessage(err, 'Синхронизация не удалась'))
     } finally {
       setSyncing(false)
+    }
+  }
+
+  const handleSyncSelected = async (serverIds: number[]) => {
+    if (!confirmSshLockout(`выбранные серверы (${serverIds.length})`)) return
+    setBulkBusy(true)
+    try {
+      const res = await firewallProfilesApi.syncSelected(profileId, serverIds, forceSync)
+      reportSyncResults(res.data.results)
+      await fetchProfile()
+      onProfileChanged()
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Синхронизация не удалась'))
+    } finally {
+      setBulkBusy(false)
     }
   }
 
@@ -1339,6 +1905,34 @@ function ProfileDetail({
       onProfileChanged()
     } catch (err) {
       toast.error(extractErrorMessage(err, 'Не удалось отвязать'))
+    }
+  }
+
+  const handleBulkLink = async (serverIds: number[]) => {
+    setBulkBusy(true)
+    try {
+      const res = await firewallProfilesApi.linkServersBulk(profileId, serverIds)
+      toast.success(`Привязано серверов: ${res.data.linked}`)
+      await Promise.all([fetchProfile(), fetchAvailableServers()])
+      onProfileChanged()
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Не удалось привязать'))
+    } finally {
+      setBulkBusy(false)
+    }
+  }
+
+  const handleBulkUnlink = async (serverIds: number[]) => {
+    setBulkBusy(true)
+    try {
+      const res = await firewallProfilesApi.unlinkServersBulk(profileId, serverIds)
+      toast.success(`Отвязано серверов: ${res.data.unlinked}`)
+      await Promise.all([fetchProfile(), fetchAvailableServers()])
+      onProfileChanged()
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Не удалось отвязать'))
+    } finally {
+      setBulkBusy(false)
     }
   }
 
@@ -1385,6 +1979,42 @@ function ProfileDetail({
       onProfileChanged()
     } catch (err) {
       toast.error(extractErrorMessage(err, 'Не удалось удалить правило'))
+    }
+  }
+
+  const handleBulkAddRules = async (rules: FirewallProfileRuleData[]) => {
+    try {
+      const res = await firewallProfilesApi.addRulesBulk(profileId, rules)
+      const { added, skipped } = res.data
+      if (added === 0) toast.warning('Все эти правила уже есть в профиле')
+      else if (skipped > 0) toast.success(`Добавлено правил: ${added}, пропущено дубликатов: ${skipped}`)
+      else toast.success(`Добавлено правил: ${added}`)
+      setProfile(prev => prev ? withGuardFlags(prev, res.data.rules, prev.default_incoming) : prev)
+      onProfileChanged()
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Не удалось добавить правила'))
+    }
+  }
+
+  const handleBulkUpdateRules = async (indexes: number[], patch: FirewallRuleBulkPatch) => {
+    try {
+      const res = await firewallProfilesApi.updateRulesBulk(profileId, indexes, patch)
+      toast.success(`Изменено правил: ${indexes.length}`)
+      setProfile(prev => prev ? withGuardFlags(prev, res.data.rules, prev.default_incoming) : prev)
+      onProfileChanged()
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Не удалось изменить правила'))
+    }
+  }
+
+  const handleBulkDeleteRules = async (indexes: number[]) => {
+    try {
+      const res = await firewallProfilesApi.deleteRulesBulk(profileId, indexes)
+      toast.success(`Удалено правил: ${indexes.length}`)
+      setProfile(prev => prev ? withGuardFlags(prev, res.data.rules, prev.default_incoming) : prev)
+      onProfileChanged()
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Не удалось удалить правила'))
     }
   }
 
@@ -1445,6 +2075,9 @@ function ProfileDetail({
           onAddRule={handleAddRule}
           onUpdateRule={handleUpdateRule}
           onDeleteRule={handleDeleteRule}
+          onBulkAdd={handleBulkAddRules}
+          onBulkUpdate={handleBulkUpdateRules}
+          onBulkDelete={handleBulkDeleteRules}
         />
       )}
       {tab === 'servers' && (
@@ -1453,9 +2086,13 @@ function ProfileDetail({
           availableServers={availableServers}
           syncingServerId={syncingServerId}
           forceSync={forceSync}
+          bulkBusy={bulkBusy}
           onSyncOne={handleSyncOne}
           onUnlink={handleUnlink}
           onLink={handleLink}
+          onBulkLink={handleBulkLink}
+          onBulkUnlink={handleBulkUnlink}
+          onSyncSelected={handleSyncSelected}
         />
       )}
       {tab === 'log' && (

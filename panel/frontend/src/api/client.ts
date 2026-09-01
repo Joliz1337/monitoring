@@ -2535,6 +2535,15 @@ export interface FirewallProfileRuleData {
   comment: string | null
 }
 
+// Массовое изменение правил: отсутствующее поле — «не менять», from_ip: null — «сбросить на любой»
+export interface FirewallRuleBulkPatch {
+  protocol?: FirewallRuleProtocol
+  action?: FirewallRuleAction
+  direction?: FirewallRuleDirection
+  from_ip?: string | null
+  comment?: string
+}
+
 export interface FirewallProfile {
   id: number
   name: string
@@ -2635,13 +2644,37 @@ export const firewallProfilesApi = {
     api.delete<{ success: boolean; rules: FirewallProfileRuleData[] }>(
       `/firewall-profiles/${profileId}/rules/${index}`,
     ),
+  addRulesBulk: (profileId: number, rules: FirewallProfileRuleData[]) =>
+    api.post<{ success: boolean; added: number; skipped: number; rules: FirewallProfileRuleData[] }>(
+      `/firewall-profiles/${profileId}/rules/bulk`, { rules },
+    ),
+  updateRulesBulk: (profileId: number, indexes: number[], patch: FirewallRuleBulkPatch) =>
+    api.post<{ success: boolean; rules: FirewallProfileRuleData[] }>(
+      `/firewall-profiles/${profileId}/rules/bulk-update`, { indexes, patch },
+    ),
+  deleteRulesBulk: (profileId: number, indexes: number[]) =>
+    api.post<{ success: boolean; rules: FirewallProfileRuleData[] }>(
+      `/firewall-profiles/${profileId}/rules/bulk-delete`, { indexes },
+    ),
   linkServer: (profileId: number, serverId: number) =>
     api.post(`/firewall-profiles/${profileId}/servers/${serverId}`),
   unlinkServer: (profileId: number, serverId: number) =>
     api.delete(`/firewall-profiles/${profileId}/servers/${serverId}`),
+  linkServersBulk: (profileId: number, serverIds: number[]) =>
+    api.post<{ success: boolean; linked: number }>(
+      `/firewall-profiles/${profileId}/servers/bulk-link`, { server_ids: serverIds },
+    ),
+  unlinkServersBulk: (profileId: number, serverIds: number[]) =>
+    api.post<{ success: boolean; unlinked: number }>(
+      `/firewall-profiles/${profileId}/servers/bulk-unlink`, { server_ids: serverIds },
+    ),
   syncAll: (profileId: number, force = false) =>
     api.post<{ results: FirewallSyncResult[] }>(
       `/firewall-profiles/${profileId}/sync`, null, { params: { force } },
+    ),
+  syncSelected: (profileId: number, serverIds: number[], force = false) =>
+    api.post<{ results: FirewallSyncResult[] }>(
+      `/firewall-profiles/${profileId}/sync`, { server_ids: serverIds }, { params: { force } },
     ),
   syncOne: (profileId: number, serverId: number, force = false) =>
     api.post<FirewallSyncResult>(
