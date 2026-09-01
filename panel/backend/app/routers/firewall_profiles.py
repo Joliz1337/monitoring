@@ -1,7 +1,9 @@
 """Firewall (UFW) profiles — CRUD, привязка серверов, массовая синхронизация."""
 
+import asyncio
 import json
 import logging
+import time
 from typing import Optional, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
@@ -171,6 +173,54 @@ async def _linked_ssh_ports(profile_id: int, db: AsyncSession) -> list[int]:
     return [_effective_ssh_port(sshd, ssh) for sshd, ssh in result.fetchall()]
 
 
+# Пока порт sshd сервера не закэширован, проверка падает на фолбэк 22 и на
+# нестандартных портах ложно горит. Поэтому при просмотре профилей панель сама
+# фоном спрашивает порт у нод без кэша; повтор по офлайн-нодам — с троттлингом.
+SSHD_PROBE_RETRY_SECONDS = 600
+SSHD_PROBE_CONCURRENCY = 10
+
+_sshd_probe_attempts: dict[int, float] = {}
+
+
+def _servers_due_for_sshd_probe(rows: list[tuple[int, Optional[int]]]) -> list[int]:
+    """(server_id, sshd_port) → id серверов без кэша, которые пора опросить."""
+    now = time.monotonic()
+    due = []
+    for server_id, sshd_port in rows:
+        if sshd_port is not None:
+            continue
+        if now - _sshd_probe_attempts.get(server_id, 0.0) < SSHD_PROBE_RETRY_SECONDS:
+            continue
+        _sshd_probe_attempts[server_id] = now
+        due.append(server_id)
+    return due
+
+
+async def _bg_probe_sshd_ports(server_ids: list[int]) -> None:
+    """Фоново узнаёт у нод фактический порт sshd и кэширует его. Best-effort:
+    офлайн-нода, старая нода или закрытый раздел SSH просто пропускаются."""
+    # Ленивый импорт — как в deploy_job_manager, чтобы не связывать роутеры на уровне модулей
+    from app.routers.ssh_security import _cache_sshd_port, _valid_port
+    from app.services.ssh_manager import proxy_to_node
+
+    async with async_session_maker() as db:
+        result = await db.execute(select(Server).where(Server.id.in_(server_ids)))
+        servers = list(result.scalars().all())
+
+    sem = asyncio.Semaphore(SSHD_PROBE_CONCURRENCY)
+
+    async def probe(server: Server) -> None:
+        async with sem:
+            try:
+                status = await proxy_to_node(server, "GET", "/api/ssh/status", timeout=15.0)
+            except Exception:  # noqa: BLE001 — недоступность любой природы = попробуем позже
+                return
+        if isinstance(status, dict):
+            await _cache_sshd_port(server.id, _valid_port(status.get("sshd_port")))
+
+    await asyncio.gather(*(probe(s) for s in servers))
+
+
 async def _get_profile(profile_id: int, db: AsyncSession) -> FirewallProfile:
     result = await db.execute(
         select(FirewallProfile).where(FirewallProfile.id == profile_id)
@@ -278,7 +328,7 @@ async def get_available_servers(db: AsyncSession = Depends(get_db), _=Depends(ve
 # ==================== CRUD ====================
 
 @router.get("/")
-async def list_profiles(db: AsyncSession = Depends(get_db), _=Depends(verify_auth)):
+async def list_profiles(bg: BackgroundTasks, db: AsyncSession = Depends(get_db), _=Depends(verify_auth)):
     result = await db.execute(
         select(FirewallProfile).order_by(FirewallProfile.position, FirewallProfile.id)
     )
@@ -287,21 +337,28 @@ async def list_profiles(db: AsyncSession = Depends(get_db), _=Depends(verify_aut
     profile_ids = [p.id for p in profiles]
     counts: dict[int, dict] = {pid: {"total": 0, "synced": 0} for pid in profile_ids}
     ssh_ports: dict[int, list[int]] = {pid: [] for pid in profile_ids}
+    server_rows: list[tuple[int, Optional[int]]] = []
 
     if profile_ids:
         srv_result = await db.execute(
             select(
+                Server.id,
                 Server.active_firewall_profile_id,
                 Server.firewall_sync_status,
                 Server.sshd_port,
                 Server.ssh_port,
             ).where(Server.active_firewall_profile_id.in_(profile_ids))
         )
-        for prof_id, sync_st, sshd, ssh in srv_result.fetchall():
+        for srv_id, prof_id, sync_st, sshd, ssh in srv_result.fetchall():
             counts[prof_id]["total"] += 1
             if sync_st == "synced":
                 counts[prof_id]["synced"] += 1
             ssh_ports[prof_id].append(_effective_ssh_port(sshd, ssh))
+            server_rows.append((srv_id, sshd))
+
+    probe_ids = _servers_due_for_sshd_probe(server_rows)
+    if probe_ids:
+        bg.add_task(_bg_probe_sshd_ports, probe_ids)
 
     return [
         _profile_to_dict(
@@ -346,13 +403,22 @@ async def create_profile(data: ProfileCreate, db: AsyncSession = Depends(get_db)
 
 
 @router.get("/{profile_id}")
-async def get_profile(profile_id: int, db: AsyncSession = Depends(get_db), _=Depends(verify_auth)):
+async def get_profile(
+    profile_id: int,
+    bg: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(verify_auth),
+):
     profile = await _get_profile(profile_id, db)
 
     result = await db.execute(
         select(Server).where(Server.active_firewall_profile_id == profile_id).order_by(Server.name)
     )
     servers = list(result.scalars().all())
+
+    probe_ids = _servers_due_for_sshd_probe([(s.id, s.sshd_port) for s in servers])
+    if probe_ids:
+        bg.add_task(_bg_probe_sshd_ports, probe_ids)
 
     rules_hash = compute_rules_hash(
         profile.rules_json, profile.default_incoming, profile.default_outgoing

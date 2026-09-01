@@ -240,6 +240,8 @@ class CallSiteCoverageTest(unittest.TestCase):
 
     GATED = {
         "routers/bulk_actions.py",
+        # фоновый опрос порта sshd: гейт внутри proxy_to_node (раздел ssh), отказ = пропуск ноды
+        "routers/firewall_profiles.py",
         "routers/proxy.py",
         "routers/ssh_security.py",
         "services/antiddos_manager.py",

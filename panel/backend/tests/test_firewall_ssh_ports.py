@@ -17,6 +17,8 @@ try:
         SSH_DEFAULT_PORT,
         _effective_ssh_port,
         _profile_to_dict,
+        _servers_due_for_sshd_probe,
+        _sshd_probe_attempts,
     )
 except ImportError as e:  # рантайм панели не установлен
     raise unittest.SkipTest(f"firewall profiles require the panel runtime: {e}")
@@ -81,6 +83,21 @@ class SshWarningTest(unittest.TestCase):
     def test_any_protocol_covers(self):
         data = _profile_to_dict(make_profile([allow_rule(2222, protocol="any")]), ssh_ports=[2222])
         self.assertTrue(data["ssh_port_allowed"])
+
+
+class SshdProbeThrottleTest(unittest.TestCase):
+    def setUp(self):
+        _sshd_probe_attempts.clear()
+
+    def tearDown(self):
+        _sshd_probe_attempts.clear()
+
+    def test_only_servers_without_cache_selected(self):
+        self.assertEqual(_servers_due_for_sshd_probe([(1, 1794), (2, None), (3, None)]), [2, 3])
+
+    def test_repeat_within_interval_throttled(self):
+        self.assertEqual(_servers_due_for_sshd_probe([(2, None)]), [2])
+        self.assertEqual(_servers_due_for_sshd_probe([(2, None)]), [])
 
 
 if __name__ == "__main__":
