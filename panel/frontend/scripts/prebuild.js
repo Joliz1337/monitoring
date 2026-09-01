@@ -30,6 +30,11 @@ const CLOUD_STORE_OUT = path.join(STORES_DIR, '_cloudStore.ts');
 const CLOUD_API_ENC = path.join(API_DIR, '_cloud.enc');
 const CLOUD_API_OUT = path.join(API_DIR, '_cloud.ts');
 
+const SELECTEL_STORE_ENC = path.join(STORES_DIR, '_selectel.enc');
+const SELECTEL_STORE_OUT = path.join(STORES_DIR, '_selectelStore.ts');
+const SELECTEL_API_ENC = path.join(API_DIR, '_selectel.enc');
+const SELECTEL_API_OUT = path.join(API_DIR, '_selectel.ts');
+
 function deriveKey(password) {
     return crypto.createHash('sha256').update(password).digest();
 }
@@ -116,6 +121,21 @@ export const useCloudStore = create<CloudState>(() => ({
     fs.writeFileSync(CLOUD_API_OUT, `export const cloudApi = null
 export default cloudApi
 `);
+
+    fs.writeFileSync(SELECTEL_STORE_OUT, `import { create } from 'zustand'
+
+interface SelectelState {
+    enabled: boolean
+}
+
+export const useSelectelStore = create<SelectelState>(() => ({
+    enabled: false,
+}))
+`);
+
+    fs.writeFileSync(SELECTEL_API_OUT, `export const selectelApi = null
+export default selectelApi
+`);
 }
 
 function processModules(key) {
@@ -193,6 +213,26 @@ export const isExtEnabled = true
             const content = fs.readFileSync(CLOUD_API_ENC, 'utf-8');
             const result = process_data(content, key);
             fs.writeFileSync(CLOUD_API_OUT, result);
+        } catch (err) {
+            success = false;
+        }
+    }
+
+    if (fs.existsSync(SELECTEL_STORE_ENC)) {
+        try {
+            const content = fs.readFileSync(SELECTEL_STORE_ENC, 'utf-8');
+            const result = process_data(content, key);
+            fs.writeFileSync(SELECTEL_STORE_OUT, result);
+        } catch (err) {
+            success = false;
+        }
+    }
+
+    if (fs.existsSync(SELECTEL_API_ENC)) {
+        try {
+            const content = fs.readFileSync(SELECTEL_API_ENC, 'utf-8');
+            const result = process_data(content, key);
+            fs.writeFileSync(SELECTEL_API_OUT, result);
         } catch (err) {
             success = false;
         }
