@@ -31,6 +31,9 @@ class CloudProvider(ABC):
     id: str
     default_currency: str
     requires_account_id: bool = False
+    # У провайдера нет API истории списаний: расход считается по снижению
+    # баланса между синхронизациями, историю снимков ведёт панель
+    uses_balance_history: bool = False
 
     @abstractmethod
     async def fetch(self, credential: str, account_id: Optional[str]) -> CloudSnapshot:

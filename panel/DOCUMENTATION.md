@@ -12,7 +12,7 @@
 - **IP Blocklist** — блокировка IP/CIDR через ipset с автообновлением списков из GitHub; источники и ручные правила защищены от приватных/служебных диапазонов (bogons)
 - **Remnawave** — интеграция с Remnawave Panel: пользователи, IP-адреса, HWID-устройства, обнаружение аномалий (только ACTIVE пользователи)
 - **Alerts** — Telegram-уведомления о состоянии серверов (offline, CPU, RAM, сеть, TCP)
-- **Billing** — отслеживание оплаты серверов: помесячная, ресурсная и облачная модели (Yandex Cloud, Selectel); автосинхронизация баланса у провайдера, сводка расходов, уведомления об истечении через Telegram
+- **Billing** — отслеживание оплаты серверов: помесячная, ресурсная и облачная модели (Yandex Cloud, Selectel, Timeweb Cloud); автосинхронизация баланса у провайдера, сводка расходов, уведомления об истечении через Telegram
 - **Синхронизация времени** — автоматическая установка часового пояса и синхронизация NTP на всех серверах и хосте панели
 - **SSH Security** — управление SSH-безопасностью серверов: настройки sshd, fail2ban, SSH-ключи с пресетами безопасности и bulk-применением
 - **Infrastructure Tree** — двухуровневая иерархия серверов на странице Servers: Аккаунт (облачный email) → Проект (кластер) → Серверы; дерево встроено в существующую страницу, сворачивается, состояние сохраняется в localStorage
@@ -1530,7 +1530,7 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 Отслеживание сроков оплаты серверов. Три типа проектов:
 - **Помесячная** (`monthly`) — указать количество дней до следующей оплаты.
 - **Ресурсная** (`resource`) — баланс + стоимость в месяц → автоматический расчёт оставшегося срока.
-- **Облачная** (`cloud`) — баланс и срок тянутся из API провайдера. Провайдер выбирается при создании (`cloud_provider`): `yandex_cloud` или `selectel`.
+- **Облачная** (`cloud`) — баланс и срок тянутся из API провайдера. Провайдер выбирается при создании (`cloud_provider`): `yandex_cloud`, `selectel` или `timeweb`.
 
 Уведомления через Telegram бот из раздела Alerts.
 
@@ -1563,24 +1563,27 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 |-----------|--------|--------|----------------|
 | `yandex_cloud` | OAuth-токен + ID биллинг-аккаунта | REST `GET /billing/v1/billingAccounts/{id}` (Bearer IAM-токен, обмен в `yc_token_manager`) | gRPC `ConsumptionCoreService/GetBillingAccountUsageReport` за 3 дня → средний расход в сутки |
 | `selectel` | Статический API-ключ (заголовок `X-Token`) | `GET /v3/balances` — сумма `final_sum` по биллингам, делённая на 100 (API отдаёт копейки) | `GET /v2/billing/transactions` за 3 дня → сумма списаний ÷ 3; запасной вариант — `GET /v2/billing/prediction` |
+| `timeweb` | API-токен (Bearer) | `GET /api/v1/account/finances` — `total_balance` (точнее округлённого `balance`) | своя история снимков баланса (`uses_balance_history`, см. ниже); запасной вариант — тариф `hourly_fee × 24` (без него — `monthly_fee ÷ 30`) |
 
-Окно потребления у обоих провайдеров одинаковое — 3 дня (`CONSUMPTION_WINDOW_DAYS`): оценка держится свежей и реагирует на изменение нагрузки за те же трое суток. Плата за это — разовое месячное списание (выделенный сервер) завышает расход, пока не выйдет за край окна. Пагинация транзакций — по 500 записей, не более 20 страниц.
+Окно потребления у всех провайдеров одинаковое — 3 дня (`CONSUMPTION_WINDOW_DAYS` у Yandex/Selectel, `HISTORY_WINDOW_DAYS` у истории баланса): оценка держится свежей и реагирует на изменение нагрузки за те же трое суток. Плата за это — разовое месячное списание (выделенный сервер) завышает расход, пока не выйдет за край окна. Пагинация транзакций — по 500 записей, не более 20 страниц.
 
 Прогноз Selectel используется, только когда списаний в окне нет (свежий аккаунт), и трактуется как **дни**, хотя документация провайдера называет значения часами: на живом аккаунте `primary: 46` совпало с расчётом по транзакциям (53 дня), а прочтение «46 часов» разошлось бы с фактом в 28 раз. Пустые группы (`null`) и нули пропускаются, берётся ближайшее исчерпание среди остальных. Такой прогноз приводится к дневному расходу (`balance / days_left`) и пишется в `cloud_daily_cost` — дальше порог остатка, срок оплаты и калькулятор пополнения работают для обоих провайдеров по одной формуле `compute_days_left(balance, threshold, daily_cost)`. Ошибка получения расхода/прогноза не фатальна: баланс уже сохранён, в `cloud_last_error` остаётся причина, срок показывается как неизвестный. Ошибки провайдера — доменные `CloudBillingError`/`CloudAuthError`; запросы к Selectel повторяются 3 раза с экспоненциальной паузой на 5xx, на 4xx не повторяются.
+
+**Расход по истории баланса (`uses_balance_history`, Timeweb):** публичного API истории списаний у Timeweb нет, поэтому `_apply_snapshot` при каждой синхронизации дописывает точку `[iso_ts, balance]` в `cloud_balance_history` (JSON на сервере биллинга) и считает фактический дневной расход по снижению баланса. Точки старше `HISTORY_WINDOW_DAYS` (3 дня, то же окно, что у потребления Yandex/Selectel) отбрасываются; синхронизации чаще `HISTORY_MIN_GAP` (15 минут — ручные «Обновить») передвигают последнюю точку, а не плодят новые, так что история остаётся примерно почасовой при штатном интервале чекера. Интервалы, где баланс вырос (пополнение), выбрасываются целиком — из числителя и из знаменателя: сумма пополнения из API не видна, и расход внутри такого интервала восстановить нельзя. Пока покрытых списаниями интервалов меньше `HISTORY_MIN_SPAN` (6 часов), оценка считается шумом и используется тариф из снапшота (`hourly_fee × 24`) — тариф отражает только текущий набор ресурсов, история же ловит и плавающие услуги (трафик, S3).
 
 Код валюты приводится к верхнему регистру при записи и в ответе API: Yandex отдаёт `RUB`, Selectel — `rub`, а сводка группирует суммы по нему.
 
 **Схема BillingServer (облачные поля):**
-`cloud_provider`, `cloud_credential` (шифруется `EncryptedString`, в API не возвращается — только `has_cloud_credential: bool`), `cloud_account_id`, `cloud_balance_threshold`, `cloud_daily_cost`, `cloud_last_sync_at`, `cloud_last_error`.
+`cloud_provider`, `cloud_credential` (шифруется `EncryptedString`, в API не возвращается — только `has_cloud_credential: bool`), `cloud_account_id`, `cloud_balance_threshold`, `cloud_daily_cost`, `cloud_last_sync_at`, `cloud_last_error`, `cloud_balance_history` (JSON-снимки баланса для провайдеров с `uses_balance_history`).
 
 **Файлы:**
 - `panel/backend/app/routers/billing.py` — API роутер
 - `panel/backend/app/services/billing_checker.py` — фоновая проверка сроков + Telegram + синхронизация облаков
-- `panel/backend/app/services/cloud_billing/` — `base.py` (контракт, `compute_days_left`), `yandex.py`, `selectel.py`, `__init__.py` (реестр `PROVIDERS`, `sync_cloud_balance`)
+- `panel/backend/app/services/cloud_billing/` — `base.py` (контракт, `compute_days_left`), `yandex.py`, `selectel.py`, `timeweb.py`, `__init__.py` (реестр `PROVIDERS`, `sync_cloud_balance`, история баланса)
 - `panel/backend/app/services/yc_token_manager.py` — обмен OAuth-токена Yandex на IAM-токен с кэшем
 - `panel/backend/app/models.py` — `BillingServer`, `BillingSettings`
 - `panel/backend/app/database.py` — миграция `_migrate_cloud_billing()` (`yc_*` → `cloud_*`, тип `yandex_cloud` → `cloud`)
-- `panel/backend/tests/test_cloud_billing.py` — разбор ответов Selectel, расчёт срока, реестр провайдеров
+- `panel/backend/tests/test_cloud_billing.py` — разбор ответов Selectel и Timeweb, расход по истории баланса, расчёт срока, реестр провайдеров
 - `panel/frontend/src/pages/Billing.tsx` — страница: список, папки, drag-and-drop, настройки уведомлений
 - `panel/frontend/src/components/billing/` — `providers.ts` (реестр провайдеров: поля учётки, ссылки, цвета), `ProjectCard.tsx`, `ServerModals.tsx` (общая форма Add/Edit + продление/пополнение/калькулятор), `FolderModals.tsx`, `BillingSummary.tsx`, `shared.tsx` (формат дат, суммы по валютам, Overlay/Field/ToggleRow)
 - `panel/frontend/src/api/client.ts` — интерфейс `BillingServerData` и API методы

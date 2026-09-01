@@ -8,7 +8,7 @@ Tracking when each server needs paying so nothing shuts down unexpectedly.
 |---|---|
 | Monthly | You set the paid-until date or the number of paid days |
 | Resource | There's a balance and a daily cost — the panel works out how long it lasts |
-| Cloud | Balance and remaining time come from the provider's API: Yandex Cloud or Selectel |
+| Cloud | Balance and remaining time come from the provider's API: Yandex Cloud, Selectel or Timeweb Cloud |
 
 ## What you can do
 
@@ -23,6 +23,7 @@ Tracking when each server needs paying so nothing shuts down unexpectedly.
 
 - **Yandex Cloud** — an OAuth token (link is in the form) and the billing account ID from the cloud console.
 - **Selectel** — a single static API key: in the Selectel panel go to “Profile → Access → API keys”. The key is shown once, so copy it right away. The user owning the key must have access to the Billing section.
+- **Timeweb Cloud** — an API token from the “API & Terraform” section of the Timeweb Cloud panel.
 
 Keys are stored encrypted and never returned to the interface: the field in the edit form stays empty — leave it empty to keep the current key.
 
@@ -31,6 +32,7 @@ Keys are stored encrypted and never returned to the interface: the field in the 
 - For the resource type an honest daily cost matters: the panel simply divides the remaining balance by it.
 - The balance threshold is the amount you don't want to spend below: the term is counted down to it, not to zero.
 - Spending is measured over the last three days from actual data: consumption for Yandex Cloud, charges for Selectel. So after a sharp increase the number catches up within a couple of days, while a one-off monthly payment keeps the estimate high for those days.
+- Timeweb Cloud has no charge history in its API, so the panel remembers the balance on every check and derives spending from its decline; top-ups don't affect the math. For the first hours after adding, while there's little history, the current plan price is shown instead.
 - The summary on top shows monthly spend, total balance and how many projects expire within a week. Different currencies are listed separately instead of being added up.
 - Overdue and expiring servers are highlighted — you see them the moment you open the page.
 - This is a ledger: it never pays or renews anything on its own.

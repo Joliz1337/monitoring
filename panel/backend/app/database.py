@@ -1847,6 +1847,7 @@ async def _migrate_cloud_billing(conn):
         ("cloud_daily_cost", "DOUBLE PRECISION"),
         ("cloud_last_sync_at", "TIMESTAMP WITH TIME ZONE"),
         ("cloud_last_error", "VARCHAR(500)"),
+        ("cloud_balance_history", "TEXT"),
     ]
     for col_name, col_type in cloud_columns:
         if col_name not in columns:

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import sys
 import unittest
@@ -16,6 +17,10 @@ from app.services.cloud_billing import (  # noqa: E402
     sync_cloud_balance,
 )
 from app.services.cloud_billing.base import CloudSnapshot, compute_days_left  # noqa: E402
+from app.services.cloud_billing import (  # noqa: E402
+    HISTORY_WINDOW_DAYS,
+    _balance_history_daily_cost,
+)
 from app.services.cloud_billing.selectel import (  # noqa: E402
     CONSUMPTION_WINDOW_DAYS,
     SelectelProvider,
@@ -24,6 +29,7 @@ from app.services.cloud_billing.selectel import (  # noqa: E402
     _pick_prediction_days,
     _transaction_rows,
 )
+from app.services.cloud_billing.timeweb import TimewebProvider, _tariff_daily_cost  # noqa: E402
 
 
 class FakeResponse:
@@ -39,12 +45,13 @@ class FakeResponse:
 class FakeClient:
     """Отдаёт заранее заданные ответы по пути запроса (query отбрасывается)."""
 
-    def __init__(self, by_path: dict):
+    def __init__(self, by_path: dict, base: str = "https://api.selectel.ru"):
         self.by_path = by_path
+        self.base = base
         self.calls: list[tuple[str, dict]] = []
 
     async def get(self, url, headers=None, timeout=None):
-        target = url.replace("https://api.selectel.ru", "")
+        target = url.replace(self.base, "")
         path = target.split("?", 1)[0]
         self.calls.append((target, headers or {}))
         response = self.by_path[path]
@@ -81,6 +88,7 @@ def billing_server(**overrides):
         cloud_daily_cost=None,
         cloud_last_sync_at=None,
         cloud_last_error=None,
+        cloud_balance_history=None,
         account_balance=None,
         balance_updated_at=None,
         currency="RUB",
@@ -227,6 +235,139 @@ class SelectelProviderTests(unittest.TestCase):
         self.assertIsNone(snapshot.days_left)
 
 
+def finances_response(**finances):
+    return FakeResponse(200, {"finances": finances})
+
+
+class TimewebProviderTests(unittest.TestCase):
+    def _fetch(self, client):
+        with patch("app.services.cloud_billing.timeweb.get_external_client", return_value=client):
+            return asyncio.run(TimewebProvider().fetch("bearer-token", None))
+
+    def test_balance_and_tariff_estimate(self):
+        # Форма реального ответа: /account/finances → finances
+        client = FakeClient({
+            "/account/finances": finances_response(
+                balance=8.24, total_balance=8.24454143, currency="RUB",
+                hourly_fee=0.41, monthly_fee=300, hours_left=20,
+            ),
+        }, base="https://api.timeweb.cloud/api/v1")
+
+        snapshot = self._fetch(client)
+
+        self.assertEqual(snapshot.balance, 8.24454143)
+        self.assertEqual(snapshot.currency, "RUB")
+        self.assertEqual(snapshot.daily_cost, round(0.41 * 24, 4))
+        self.assertEqual(client.calls[0][1]["Authorization"], "Bearer bearer-token")
+
+    def test_monthly_fee_backs_up_missing_hourly(self):
+        self.assertEqual(_tariff_daily_cost({"hourly_fee": 0, "monthly_fee": 300}), 10.0)
+        self.assertIsNone(_tariff_daily_cost({"hourly_fee": 0, "monthly_fee": 0}))
+
+    def test_rounded_balance_is_the_fallback(self):
+        client = FakeClient({
+            "/account/finances": finances_response(balance=8.24, hourly_fee=0.41),
+        }, base="https://api.timeweb.cloud/api/v1")
+
+        self.assertEqual(self._fetch(client).balance, 8.24)
+
+    def test_bad_token_raises_auth_error(self):
+        client = FakeClient(
+            {"/account/finances": FakeResponse(401, None, "unauthorized")},
+            base="https://api.timeweb.cloud/api/v1",
+        )
+        with self.assertRaises(CloudAuthError):
+            self._fetch(client)
+
+    def test_missing_finances_is_an_error(self):
+        client = FakeClient(
+            {"/account/finances": FakeResponse(200, {"status": "ok"})},
+            base="https://api.timeweb.cloud/api/v1",
+        )
+        with self.assertRaises(CloudBillingError):
+            self._fetch(client)
+
+
+class BalanceHistoryTests(unittest.TestCase):
+    """Расход по снимкам баланса — для провайдеров без API истории списаний."""
+
+    def setUp(self):
+        self.now = datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc)
+
+    def _history(self, hours_and_balances):
+        return json.dumps([
+            [(self.now - timedelta(hours=h)).isoformat(), b]
+            for h, b in hours_and_balances
+        ])
+
+    def test_first_sync_gives_no_cost_but_stores_the_point(self):
+        server = billing_server()
+        self.assertIsNone(_balance_history_daily_cost(server, 1000.0, self.now))
+        self.assertEqual(json.loads(server.cloud_balance_history), [[self.now.isoformat(), 1000.0]])
+
+    def test_cost_from_steady_decline(self):
+        # 24 часа истории, -10 в час → 240 в сутки
+        server = billing_server(cloud_balance_history=self._history([(24, 1240), (12, 1120)]))
+        self.assertEqual(_balance_history_daily_cost(server, 1000.0, self.now), 240.0)
+
+    def test_topup_interval_is_discarded(self):
+        # Между -12ч и -6ч баланс вырос (пополнение) — интервал не считается,
+        # расход берётся из оставшихся 18 часов: 300 / 18ч → 400 в сутки
+        server = billing_server(cloud_balance_history=self._history([
+            (24, 1200), (12, 1000), (6, 5000),
+        ]))
+        self.assertEqual(_balance_history_daily_cost(server, 4900.0, self.now), 400.0)
+
+    def test_short_history_is_not_trusted(self):
+        server = billing_server(cloud_balance_history=self._history([(2, 1020)]))
+        self.assertIsNone(_balance_history_daily_cost(server, 1000.0, self.now))
+
+    def test_frequent_syncs_move_the_last_point(self):
+        server = billing_server(cloud_balance_history=self._history([(12, 1120), (0.1, 1001)]))
+        _balance_history_daily_cost(server, 1000.0, self.now)
+
+        points = json.loads(server.cloud_balance_history)
+        self.assertEqual(len(points), 2)
+        self.assertEqual(points[-1], [self.now.isoformat(), 1000.0])
+
+    def test_old_points_are_pruned(self):
+        stale_hours = HISTORY_WINDOW_DAYS * 24 + 1
+        server = billing_server(cloud_balance_history=self._history([
+            (stale_hours, 9999), (12, 1120),
+        ]))
+        _balance_history_daily_cost(server, 1000.0, self.now)
+        self.assertEqual(len(json.loads(server.cloud_balance_history)), 2)
+
+    def test_garbage_history_resets_cleanly(self):
+        server = billing_server(cloud_balance_history="not json")
+        self.assertIsNone(_balance_history_daily_cost(server, 1000.0, self.now))
+        self.assertEqual(len(json.loads(server.cloud_balance_history)), 1)
+
+    def test_history_cost_wins_over_tariff_estimate(self):
+        server = billing_server(
+            cloud_provider="timeweb",
+            cloud_balance_history=self._history([(24, 1240), (12, 1120)]),
+        )
+        _apply_snapshot(
+            server,
+            CloudSnapshot(balance=1000.0, currency="RUB", daily_cost=9.84),
+            self.now,
+            provider=get_provider("timeweb"),
+        )
+        self.assertEqual(server.cloud_daily_cost, 240.0)
+
+    def test_tariff_estimate_until_history_grows(self):
+        server = billing_server(cloud_provider="timeweb")
+        _apply_snapshot(
+            server,
+            CloudSnapshot(balance=1000.0, currency="RUB", daily_cost=9.84),
+            self.now,
+            provider=get_provider("timeweb"),
+        )
+        self.assertEqual(server.cloud_daily_cost, 9.84)
+        self.assertEqual(len(json.loads(server.cloud_balance_history)), 1)
+
+
 class ApplySnapshotTests(unittest.TestCase):
     def setUp(self):
         self.now = datetime(2026, 8, 30, 12, 0, tzinfo=timezone.utc)
@@ -302,10 +443,12 @@ class SyncCloudBalanceTests(unittest.TestCase):
 
         self.assertIn("Forbidden", server.cloud_last_error)
 
-    def test_registry_exposes_both_providers(self):
+    def test_registry_exposes_all_providers(self):
         self.assertTrue(get_provider("selectel").id == "selectel")
         self.assertTrue(get_provider("yandex_cloud").requires_account_id)
         self.assertFalse(get_provider("selectel").requires_account_id)
+        self.assertFalse(get_provider("timeweb").requires_account_id)
+        self.assertTrue(get_provider("timeweb").uses_balance_history)
 
 
 if __name__ == "__main__":

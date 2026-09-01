@@ -772,6 +772,9 @@ class BillingServer(Base):
     cloud_daily_cost = Column(Float, nullable=True)
     cloud_last_sync_at = Column(DateTime(timezone=True), nullable=True)
     cloud_last_error = Column(String(500), nullable=True)
+    # Снимки баланса [[iso_ts, balance], ...] для провайдеров без API истории
+    # списаний (Timeweb): расход считается по снижению баланса между синками
+    cloud_balance_history = Column(Text, nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())

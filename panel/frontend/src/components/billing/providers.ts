@@ -4,7 +4,7 @@
  * Карточка, формы и калькулятор читают провайдера отсюда — новый провайдер
  * добавляется записью в PROVIDERS, а не ветками по всему разделу.
  */
-export type CloudProviderId = 'yandex_cloud' | 'selectel'
+export type CloudProviderId = 'yandex_cloud' | 'selectel' | 'timeweb'
 
 export interface CloudCredentialField {
   /** Поле модели, куда уходит значение */
@@ -59,6 +59,19 @@ const SELECTEL_ACCENT = {
   hintBox: 'text-sky-400/80 bg-sky-500/10',
 }
 
+const TIMEWEB_ACCENT = {
+  iconBg: 'bg-indigo-500/20',
+  icon: 'text-indigo-400',
+  badge: 'bg-indigo-500/15 text-indigo-400',
+  primaryButton:
+    'bg-gradient-to-r from-indigo-500/20 to-violet-500/20 text-indigo-400 ' +
+    'hover:from-indigo-500/30 hover:to-violet-500/30 border border-indigo-500/20 ' +
+    'hover:border-indigo-500/40 shadow-sm shadow-indigo-500/5',
+  ghostButton: 'hover:text-indigo-400 hover:border-indigo-500/40',
+  quickActive: 'bg-indigo-500/20 text-indigo-400 border border-indigo-500/30',
+  hintBox: 'text-indigo-400/80 bg-indigo-500/10',
+}
+
 export const PROVIDERS: Record<CloudProviderId, CloudProviderMeta> = {
   yandex_cloud: {
     id: 'yandex_cloud',
@@ -101,6 +114,25 @@ export const PROVIDERS: Record<CloudProviderId, CloudProviderMeta> = {
         link: {
           url: 'https://my.selectel.ru/profile/access/api-keys',
           labelKey: 'billing.selectel_get_token_link',
+        },
+      },
+    ],
+  },
+  timeweb: {
+    id: 'timeweb',
+    nameKey: 'billing.provider_timeweb',
+    defaultCurrency: 'RUB',
+    accent: TIMEWEB_ACCENT,
+    fields: [
+      {
+        key: 'cloud_credential',
+        labelKey: 'billing.timeweb_token',
+        hintKey: 'billing.timeweb_token_hint',
+        placeholder: 'eyJhbGciOi...',
+        secret: true,
+        link: {
+          url: 'https://timeweb.cloud/my/api-keys',
+          labelKey: 'billing.timeweb_get_token_link',
         },
       },
     ],
