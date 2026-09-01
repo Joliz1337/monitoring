@@ -1,9 +1,7 @@
-import asyncio
 import json
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import verify_auth
 from app.database import get_db, async_session_maker
 from app.models import Server, PanelSettings
+from app.services.bulk_stream import stream_ndjson
 from app.services.node_capabilities import NodeCapabilityError, denial_headers
 from app.services.ssh_manager import proxy_to_node, RECOMMENDED_PRESET, MAXIMUM_PRESET
 
@@ -159,86 +158,12 @@ async def _fetch_ssh_status(server) -> dict:
         return {"server_id": server.id, "server_name": server.name, "reachable": False, "error": str(e)}
 
 
-def _ndjson(obj: dict) -> bytes:
-    return (json.dumps(obj, ensure_ascii=False) + "\n").encode()
-
-
-def _stream_ndjson(servers: list[Server], worker, log_action: str | None = None) -> StreamingResponse:
-    """Стримит NDJSON: start → result по каждой ноде (по мере готовности) → done."""
-    async def safe_worker(server):
-        # Граница стрима: необработанное исключение одной ноды не должно
-        # обрывать соединение — иначе остальные строки навсегда зависают в «загрузке»
-        try:
-            return await worker(server)
-        except Exception as e:
-            logger.exception("ssh_stream_worker_failed", extra={"server_id": server.id})
-            return {
-                "server_id": server.id,
-                "server_name": server.name,
-                "success": False,
-                "reachable": False,
-                "error": str(e) or e.__class__.__name__,
-            }
-
-    async def generate():
-        yield _ndjson({
-            "type": "start",
-            "total": len(servers),
-            "servers": [{"server_id": s.id, "server_name": s.name} for s in servers],
-        })
-        tasks = [asyncio.create_task(safe_worker(s)) for s in servers]
-        results: list[dict] = []
-        try:
-            for completed in asyncio.as_completed(tasks):
-                result = await completed
-                results.append(result)
-                yield _ndjson({"type": "result", **result})
-        except asyncio.CancelledError:
-            for task in tasks:
-                task.cancel()
-            raise
-        if log_action:
-            _log_bulk_summary(log_action, results)
-        ok = sum(1 for r in results if r.get("success", r.get("reachable", False)))
-        yield _ndjson({"type": "done", "total": len(servers), "ok": ok, "failed": len(servers) - ok})
-
-    return StreamingResponse(
-        generate(),
-        media_type="application/x-ndjson",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
-
-
 async def _get_servers_by_ids(server_ids: list[int], db: AsyncSession) -> list[Server]:
     result = await db.execute(select(Server).where(Server.id.in_(server_ids)))
     servers = result.scalars().all()
     if not servers:
         raise HTTPException(status_code=404, detail="No servers found")
     return list(servers)
-
-
-def _log_bulk_summary(action: str, results: list[dict]) -> None:
-    total = len(results)
-    ok = sum(1 for r in results if r.get("success"))
-    failed = total - ok
-    failed_names = [r["server_name"] for r in results if not r.get("success")]
-
-    if failed == 0:
-        logger.info(
-            "ssh_bulk_summary",
-            extra={"action": action, "total": total, "ok": ok, "failed": 0},
-        )
-    else:
-        logger.warning(
-            "ssh_bulk_summary",
-            extra={
-                "action": action,
-                "total": total,
-                "ok": ok,
-                "failed": failed,
-                "failed_servers": failed_names,
-            },
-        )
 
 
 # === SSH Config ===
@@ -415,7 +340,7 @@ async def bulk_apply(
             await _cache_sshd_port(server.id, new_ssh_port)
         return result
 
-    return _stream_ndjson(servers, worker, log_action="ssh_apply")
+    return stream_ndjson(servers, worker, log_action="ssh_apply")
 
 
 @router.post("/bulk/keys")
@@ -430,7 +355,7 @@ async def bulk_add_ssh_key(
     async def worker(server):
         return await _apply_steps(server, [("key", "POST", "/api/ssh/keys", key_data)])
 
-    return _stream_ndjson(servers, worker, log_action="ssh_keys")
+    return stream_ndjson(servers, worker, log_action="ssh_keys")
 
 
 @router.post("/bulk/password")
@@ -445,7 +370,7 @@ async def bulk_change_password(
     async def worker(server):
         return await _apply_steps(server, [("password", "POST", "/api/ssh/password", pwd_data)])
 
-    return _stream_ndjson(servers, worker, log_action="ssh_password")
+    return stream_ndjson(servers, worker, log_action="ssh_password")
 
 
 @router.post("/bulk/status")
@@ -456,7 +381,7 @@ async def bulk_status(
 ):
     """Собрать SSH-статус набора серверов для обзор-таблицы. Стримит результат по каждому."""
     servers = await _get_servers_by_ids(request.server_ids, db)
-    return _stream_ndjson(servers, _fetch_ssh_status)
+    return stream_ndjson(servers, _fetch_ssh_status)
 
 
 # === Presets ===

@@ -1666,7 +1666,7 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 
 Результаты поступают по мере завершения через `asyncio.as_completed` — порядок не гарантирован. При отмене (клиент оборвал соединение) висящие задачи отменяются. Каждый шаг (`ssh_config`, `fail2ban`, `key`, `password`) пишется отдельной записью с полями `success`, `message`, `error`, `warnings`.
 
-**Устойчивость стрима к транспортным ошибкам** — воркер каждой ноды в `_stream_ndjson()` обёрнут в `safe_worker`: любое необработанное исключение (в т.ч. нетипичные транспортные сбои httpx — `ReadError`, `RemoteProtocolError`, `ProxyError`, характерные для нод за SOCKS5-прокси) логируется (`ssh_stream_worker_failed`) и превращается в обычную NDJSON-запись `result` с `success:false`/`error`, а не рвёт весь поток. `ssh_manager.proxy_to_node()` со своей стороны маппит все прочие транспортные ошибки httpx через `httpx.HTTPError` в `ConnectionError` (с именем ноды) и невалидный JSON ответа — в `RuntimeError`; порядок обработки: `TimeoutException` → `ConnectError` → `HTTPStatusError` → `HTTPError` → `ValueError`. Frontend (`SSHOverviewTable.tsx`, `useSSHBulkStream.ts`) на случай, если поток всё же оборвётся раньше времени, помечает недогруженные строки в состоянии «загрузка»/«running» как недоступные с текстом ошибки — вместо вечного спиннера.
+**Устойчивость стрима к транспортным ошибкам** — воркер каждой ноды в `stream_ndjson()` (общий модуль `services/bulk_stream.py`) обёрнут в `safe_worker`: любое необработанное исключение (в т.ч. нетипичные транспортные сбои httpx — `ReadError`, `RemoteProtocolError`, `ProxyError`, характерные для нод за SOCKS5-прокси) логируется (`bulk_stream_worker_failed`) и превращается в обычную NDJSON-запись `result` с `success:false`/`error`, а не рвёт весь поток. `ssh_manager.proxy_to_node()` со своей стороны маппит все прочие транспортные ошибки httpx через `httpx.HTTPError` в `ConnectionError` (с именем ноды) и невалидный JSON ответа — в `RuntimeError`; порядок обработки: `TimeoutException` → `ConnectError` → `HTTPStatusError` → `HTTPError` → `ValueError`. Frontend (`SSHOverviewTable.tsx`, `useSSHBulkStream.ts`) на случай, если поток всё же оборвётся раньше времени, помечает недогруженные строки в состоянии «загрузка»/«running» как недоступные с текстом ошибки — вместо вечного спиннера.
 
 **Встроенные пресеты безопасности:**
 - `recommended` — вход только root по паролю: `permit_root_login: yes`, `password_authentication: true`, `pubkey_authentication: false`, `allow_users: [root]`, fail2ban с мягкими настройками
@@ -1690,7 +1690,7 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 
 **Файлы:**
 - `panel/backend/app/services/ssh_manager.py` — пресеты безопасности; `proxy_to_node()` с параметром `use_apply_client` (HTTP/1.1 для долгих шагов fail2ban/password)
-- `panel/backend/app/routers/ssh_security.py` — API роутер; хелперы: `_ndjson()`, `_apply_steps()`, `_fetch_ssh_status()`, `_stream_ndjson()`
+- `panel/backend/app/routers/ssh_security.py` — API роутер; хелперы: `_apply_steps()`, `_fetch_ssh_status()`; NDJSON-транспорт — общий `services/bulk_stream.py` (`stream_ndjson`)
 
 ### Авторазвёртывание ноды
 
@@ -1953,7 +1953,9 @@ Frontend сохраняет незавершённые job_id в `localStorage` 
 4. Нода валидирует файлы, делает бэкап текущих, записывает новые и вызывает `reload_cmd`
 5. Фоновая задача проверяет сроки сертификатов каждые 24ч и автоматически продлевает; при сбое отправляет Telegram-уведомление
 
-**Обработка ответа ноды:** до этой версии `response.json()` вызывался без проверки `status_code` — любой не-200 (в том числе честный `403` от закрытого домена `ssl`) давал `{"success": false, "message": "Unknown"}` и ложное «Unknown»-уведомление в Telegram вместо понятной причины. Теперь код ответа проверяется первым, а `detail` из тела ошибки идёт в сообщение как есть.
+**Обработка ответа ноды:** код ответа проверяется до разбора тела — при любом не-200 (в том числе `403` от закрытого домена `ssl`) в сообщение идёт `detail` из тела ошибки как есть, а не «Unknown».
+
+**Раскатка из UI — NDJSON-стрим:** `POST /certificates/{id}/deploy/stream` (тело `{server_ids: [...] | null}`) отдаёт поток событий `start → result (по каждой ноде по мере готовности) → done` через общий транспорт `services/bulk_stream.py` (используется также SSH Security). `null` — раскатка на все серверы с `wildcard_ssl_enabled`; явный список `server_ids` — выбранные в UI серверы, флаг включённости для них не требуется. В обоих случаях ноды без capability `ssl:write` отфильтровываются заранее (`WildcardSSLManager.get_deploy_targets`). Fan-out ограничен `asyncio.Semaphore(30)`. Автопродление раскатывает через сервисный `deploy_to_all` (без стрима). Одиночный `deploy_to_server` также проверяет capability и возвращает `success: false` с причиной для закрытой ноды.
 
 **Telegram-уведомления при сбоях автопродления:**
 
@@ -1997,13 +1999,15 @@ Frontend сохраняет незавершённые job_id в `localStorage` 
 - `wildcard_ssl_enabled` — деплоить ли wildcard SSL на этот сервер
 - `wildcard_ssl_deploy_path` — путь на хосте для записи файлов (например `/etc/nginx/ssl/`)
 - `wildcard_ssl_reload_cmd` — команда перезагрузки сервиса после деплоя (например `systemctl reload nginx`)
+- `wildcard_ssl_fullchain_name`, `wildcard_ssl_privkey_name` — имена файлов в папке деплоя (пусто = `fullchain.pem`/`privkey.pem`)
+- `wildcard_ssl_custom_path_enabled` + `wildcard_ssl_custom_fullchain_path`/`wildcard_ssl_custom_privkey_path` — режим абсолютных путей без папки с доменом (например для Proxmox)
 - `active_firewall_profile_id` — FK на активный профиль UFW (nullable; один профиль на сервер)
 - `firewall_sync_status` — статус последней синхронизации профиля (success/failed/rolled_back)
 - `firewall_rules_hash` — SHA256-хэш применённого профиля (для drift-детекции)
 - `firewall_last_sync_at` — время последней синхронизации
 
 **Настройки Cloudflare:**
-Хранятся в `panel_settings` (ключ `cloudflare_api_token` и `cloudflare_email`). Передаются certbot через временный credentials-файл.
+Хранятся в `panel_settings` (ключи `wildcard_cloudflare_api_token` и `wildcard_email`). Передаются certbot через временный credentials-файл.
 
 **API:**
 
@@ -2015,13 +2019,14 @@ Frontend сохраняет незавершённые job_id в `localStorage` 
 | POST | /api/wildcard-ssl/certificates/{id}/renew | Продлить сертификат |
 | GET | /api/wildcard-ssl/certificates/{id}/pem | PEM-материалы сертификата (fullchain/cert/chain/privkey) |
 | DELETE | /api/wildcard-ssl/certificates/{id} | Удалить сертификат |
-| POST | /api/wildcard-ssl/certificates/{id}/deploy | Задеплоить на все серверы |
+| POST | /api/wildcard-ssl/certificates/{id}/deploy/stream | NDJSON-стрим раскатки: тело `{server_ids: [...] \| null}`, null = все включённые |
 | POST | /api/wildcard-ssl/certificates/{id}/deploy/{server_id} | Задеплоить на конкретный сервер |
 | GET | /api/wildcard-ssl/settings | Настройки Cloudflare (токен маскирован), плюс `use_for_panel` и `panel_domain` |
 | GET | /api/wildcard-ssl/settings/token | Токен Cloudflare в открытом виде |
 | PUT | /api/wildcard-ssl/settings | Обновить настройки Cloudflare и `use_for_panel`; при переключении выкл→вкл сразу применяет к панели существующий подходящий сертификат — результат в поле ответа `panel_deploy` (`{success, message}` или `null`) |
-| GET | /api/wildcard-ssl/servers | Конфигурация деплоя по серверам |
-| PUT | /api/wildcard-ssl/servers/{server_id} | Настроить деплой для сервера (путь, reload_cmd, enabled) |
+| GET | /api/wildcard-ssl/servers | Конфигурация деплоя по серверам (+ `server_url` и `folder` для поиска в UI) |
+| PUT | /api/wildcard-ssl/servers/bulk | Массовое обновление настроек: `{server_ids, ...поля}`, один SQL-UPDATE; поле не передано — не менять, `""` — сбросить к дефолту. Объявлен до `/servers/{server_id}` |
+| PUT | /api/wildcard-ssl/servers/{server_id} | Настроить деплой для сервера (путь, reload_cmd, enabled); та же семантика пустой строки |
 
 **docker-compose.yml:**
 Volume `/etc/letsencrypt` смонтирован с `:rw` — backend записывает выпущенные сертификаты.
@@ -2035,16 +2040,24 @@ Volume `/etc/letsencrypt` смонтирован с `:rw` — backend запис
 - Настройки Cloudflare (API token, email)
 - Чекбокс «Использовать для панели» в той же карточке настроек — домен панели рядом с подпиской, подсказка, жёлтое предупреждение, если текущий сертификат не покрывает домен панели (локальная `wildcardCoversDomain`, зеркало серверной проверки); после сохранения с включением — toast с результатом применения (`panel_deploy`)
 - Конфигурация каждого сервера: включить деплой, путь, reload-команда
-- При частичном сбое «Раскидать по серверам» — toast с числом успешных/всего и списком упавших нод с причинами (ключ локализации `wildcard_ssl.deploy_partial`)
+- **Поиск по серверам** — по имени, адресу (url) и папке, с крестиком очистки; фильтрация клиентская, ввод в поиск выделение не сбрасывает
+- **Массовое выделение** — чекбокс в шапке каждой карточки + «Выбрать все» (indeterminate-чекбокс, действует только на отфильтрованные); выделение переживает refetch (исчезнувшие id вычищаются)
+- **Панель массовых действий** (появляется при выделении): включить/выключить выбранные (один `PUT /servers/bulk`, оптимистичное обновление), деплой на выбранные, массовое редактирование настроек, сброс выделения. Ноды с закрытым capability `ssl:write` выделять можно (тумблер и настройки живут в БД панели), но из деплоя они исключаются — панель показывает их число (`bulk_deploy_blocked`), кнопка деплоя блокируется, если исключены все
+- **Массовое редактирование** (`WildcardBulkEditForm`, инлайн-форма): режим кастомных путей — select «не менять / выключен / включён», текстовые поля — чекбокс «изменить» + input (не отмечено — поле не попадает в патч, отмечено и пусто — сброс к дефолту); пустой патч отклоняется
+- **Живой прогресс деплоя** (`components/wildcard/WildcardDeployProgress.tsx` + generic-хук `hooks/useBulkStream.ts`): полоса прогресса, строка на каждый сервер со статусом и сообщением, stderr reload-команды при ненулевом коде, отмена стрима; деплой идёт через fetch-стрим и не ограничен axios-таймаутом. Кнопка «Раскидать по серверам» использует тот же стрим с `server_ids: null`
+- При частичном сбое деплоя — toast с числом успешных/всего и списком упавших нод (ключ локализации `wildcard_ssl.deploy_partial`), детали по каждой ноде — в панели прогресса
 - **Файлы сертификата** (`components/wildcard/CertificateMaterials.tsx`) — раскрывающийся блок в карточке сертификата с четырьмя PEM-файлами (fullchain.pem, cert.pem, chain.pem, privkey.pem): кнопки «Копировать» и «Скачать» у каждого (скачивается как `<base_domain>-<имя файла>`); приватный ключ по умолчанию скрыт размытием и предупреждением, показывается по кнопке «Показать»; данные грузятся лениво при первом раскрытии через `GET /certificates/{id}/pem`; компонент пересоздаётся (`key` по `last_renewed`/`issued_at`) после продления, чтобы не показать закэшированный старый PEM
 
 **Файлы:**
 - `panel/backend/app/services/wildcard_ssl.py` — бизнес-логика: выпуск, продление, деплой, автопродление, Telegram-уведомления о сбоях
+- `panel/backend/app/services/bulk_stream.py` — общий NDJSON-стрим bulk-операций (`stream_ndjson`, используется Wildcard SSL и SSH Security)
 - `panel/backend/app/routers/wildcard_ssl.py` — API роутер
 - `panel/backend/app/models.py` — модель `WildcardCertificate`, поля `Server`
 - `panel/backend/app/database.py` — миграция `_migrate_wildcard_ssl`
 - `panel/backend/app/main.py` — подключение роутера, start/stop автопродления в lifespan
-- `panel/frontend/src/pages/WildcardSSL.tsx` — страница управления
+- `panel/frontend/src/pages/WildcardSSL.tsx` — страница управления (включая `WildcardBulkEditForm`)
+- `panel/frontend/src/components/wildcard/WildcardDeployProgress.tsx` — панель живого прогресса деплоя
+- `panel/frontend/src/hooks/useBulkStream.ts` — generic-хук NDJSON-стрима (SSH Security использует его через адаптер `components/ssh/useSSHBulkStream.ts`)
 - `panel/frontend/src/components/wildcard/CertificateMaterials.tsx` — блок просмотра/копирования/скачивания PEM-материалов
 - `panel/frontend/src/api/client.ts` — `wildcardSSLApi` с интерфейсами, включая `WildcardCertificateMaterial`
 - `panel/frontend/src/components/settings/PanelCertificateCard.tsx` — бейдж «Управляется Wildcard SSL» вместо кнопки «Продлить», когда сертификат панели покрыт wildcard-сертификатом (см. [SSL сертификаты](#ssl-сертификаты))

@@ -1985,11 +1985,6 @@ export interface SSHServerStatusRow {
 }
 
 // NDJSON-события стриминговых bulk-эндпоинтов
-export type SSHBulkEvent =
-  | { type: 'start'; total: number; servers: { server_id: number; server_name: string }[] }
-  | { type: 'result'; server_id: number; server_name: string; success: boolean; steps: SSHStepResult[] }
-  | { type: 'done'; total: number; ok: number; failed: number }
-
 export type SSHStatusEvent =
   | { type: 'start'; total: number; servers: { server_id: number; server_name: string }[] }
   | ({ type: 'result' } & SSHServerStatusRow)
@@ -2143,6 +2138,8 @@ export interface WildcardSSLSettings {
 export interface WildcardServerConfig {
   server_id: number
   server_name: string
+  server_url: string
+  folder: string | null
   wildcard_ssl_enabled: boolean
   wildcard_ssl_deploy_path: string
   wildcard_ssl_reload_cmd: string
@@ -2155,11 +2152,22 @@ export interface WildcardServerConfig {
 
 export interface WildcardDeployResult {
   success: boolean
-  message: string
+  message?: string
+  // Заполняется стрим-обёрткой бэкенда при неожиданном падении воркера
+  error?: string
   server_id?: number
   server_name?: string
   reload_result?: { exit_code: number; stdout: string; stderr: string } | null
 }
+
+// Настройки, допустимые в bulk-обновлении: всё кроме идентификации сервера
+export type WildcardServerConfigPatch = Partial<
+  Omit<WildcardServerConfig, 'server_id' | 'server_name' | 'server_url' | 'folder'>
+>
+
+// Стриминговый деплой не идёт через axios — нужен полный путь с /api для fetch
+export const wildcardDeployStreamUrl = (certId: number) =>
+  `/api/wildcard-ssl/certificates/${certId}/deploy/stream`
 
 export const wildcardSSLApi = {
   getCertificates: () =>
@@ -2174,8 +2182,6 @@ export const wildcardSSLApi = {
     api.get<WildcardCertificateMaterial>(`/wildcard-ssl/certificates/${id}/pem`),
   deleteCertificate: (id: number) =>
     api.delete(`/wildcard-ssl/certificates/${id}`),
-  deployToAll: (id: number) =>
-    api.post<{ results: WildcardDeployResult[] }>(`/wildcard-ssl/certificates/${id}/deploy`),
   deployToServer: (id: number, serverId: number) =>
     api.post<WildcardDeployResult>(`/wildcard-ssl/certificates/${id}/deploy/${serverId}`),
   getSettings: () =>
@@ -2188,6 +2194,8 @@ export const wildcardSSLApi = {
     api.get<{ servers: WildcardServerConfig[] }>('/wildcard-ssl/servers'),
   updateServer: (serverId: number, data: Partial<WildcardServerConfig>) =>
     api.put(`/wildcard-ssl/servers/${serverId}`, data),
+  updateServersBulk: (data: { server_ids: number[] } & WildcardServerConfigPatch) =>
+    api.put<{ success: boolean; updated: number }>('/wildcard-ssl/servers/bulk', data),
 }
 
 // ==================== HAProxy Config Profiles ====================

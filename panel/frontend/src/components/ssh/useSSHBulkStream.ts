@@ -1,6 +1,6 @@
-import { useCallback, useRef, useState } from 'react'
-import { SSHBulkEvent, SSHStepResult } from '../../api/client'
-import { streamNdjson, StreamUnauthorizedError } from '../../utils/ndjsonStream'
+import { useCallback, useMemo } from 'react'
+import { SSHStepResult } from '../../api/client'
+import { BulkStreamState, useBulkStream } from '../../hooks/useBulkStream'
 
 export interface BulkProgressRow {
   server_id: number
@@ -19,80 +19,35 @@ export interface BulkProgressState {
   error: string | null
 }
 
-const IDLE: BulkProgressState = {
-  active: false, finished: false, total: 0, ok: 0, failed: 0, rows: [], error: null,
+type SSHBulkResult = { success: boolean; steps?: SSHStepResult[] }
+
+function toProgressState(state: BulkStreamState<SSHBulkResult>): BulkProgressState {
+  return {
+    ...state,
+    rows: state.rows.map(r => ({
+      server_id: r.server_id,
+      server_name: r.server_name,
+      state: r.state,
+      steps: r.result?.steps ?? [],
+    })),
+  }
 }
 
 /**
- * Запускает стриминговую bulk-операцию SSH Security и собирает прогресс по серверам.
- * Строки заполняются на событии start и «загораются» success/error по мере прихода
- * каждого result — пользователь видит, какой сервер уже обработан.
+ * Адаптер SSH Security над общим useBulkStream: тот хранит результат ноды целиком,
+ * здесь он раскрывается в шаги применения для BulkProgressPanel.
  */
 export function useSSHBulkStream() {
-  const [progress, setProgress] = useState<BulkProgressState>(IDLE)
-  const abortRef = useRef<AbortController | null>(null)
+  const stream = useBulkStream<SSHBulkResult>()
 
-  const run = useCallback(async (url: string, body: unknown): Promise<BulkProgressState> => {
-    abortRef.current?.abort()
-    const controller = new AbortController()
-    abortRef.current = controller
+  const progress = useMemo(() => toProgressState(stream.progress), [stream.progress])
 
-    let state: BulkProgressState = { ...IDLE, active: true }
-    setProgress(state)
+  const { run: streamRun } = stream
+  const run = useCallback(
+    async (url: string, body: unknown): Promise<BulkProgressState> =>
+      toProgressState(await streamRun(url, body)),
+    [streamRun],
+  )
 
-    const handle = (ev: SSHBulkEvent) => {
-      if (ev.type === 'start') {
-        state = {
-          ...state,
-          total: ev.total,
-          rows: ev.servers.map(s => ({
-            server_id: s.server_id,
-            server_name: s.server_name,
-            state: 'running' as const,
-            steps: [],
-          })),
-        }
-      } else if (ev.type === 'result') {
-        state = {
-          ...state,
-          rows: state.rows.map(r =>
-            r.server_id === ev.server_id
-              ? { ...r, state: ev.success ? 'success' : 'error', steps: ev.steps ?? [] }
-              : r,
-          ),
-        }
-      } else {
-        state = { ...state, finished: true, ok: ev.ok, failed: ev.failed }
-      }
-      setProgress(state)
-    }
-
-    try {
-      await streamNdjson<SSHBulkEvent>(url, body, handle, controller.signal)
-    } catch (e) {
-      if (controller.signal.aborted || e instanceof StreamUnauthorizedError) {
-        state = { ...state, active: false }
-        setProgress(state)
-        return state
-      }
-      // Поток оборвался — серверы без результата помечаем ошибкой, а не вечным «running»
-      state = {
-        ...state,
-        error: e instanceof Error ? e.message : String(e),
-        rows: state.rows.map(r => (r.state === 'running' ? { ...r, state: 'error' as const } : r)),
-      }
-    }
-
-    state = { ...state, active: false }
-    setProgress(state)
-    return state
-  }, [])
-
-  const cancel = useCallback(() => abortRef.current?.abort(), [])
-  const reset = useCallback(() => {
-    abortRef.current?.abort()
-    setProgress(IDLE)
-  }, [])
-
-  return { progress, run, cancel, reset }
+  return { progress, run, cancel: stream.cancel, reset: stream.reset }
 }

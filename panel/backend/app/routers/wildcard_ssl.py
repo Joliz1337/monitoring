@@ -1,15 +1,17 @@
+import asyncio
 import logging
 import re
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.auth import verify_auth
 from app.config import get_settings as get_app_config
 from app.database import async_session
 from app.models import WildcardCertificate, Server, PanelSettings
+from app.services.bulk_stream import stream_ndjson
 from app.services.wildcard_ssl import (
     USE_FOR_PANEL_SETTING,
     get_wildcard_ssl_manager,
@@ -42,6 +44,14 @@ class ServerConfigUpdate(BaseModel):
     wildcard_ssl_custom_path_enabled: Optional[bool] = None
     wildcard_ssl_custom_fullchain_path: Optional[str] = None
     wildcard_ssl_custom_privkey_path: Optional[str] = None
+
+
+class BulkServerConfigUpdate(ServerConfigUpdate):
+    server_ids: list[int] = Field(..., min_length=1)
+
+
+class DeployStreamRequest(BaseModel):
+    server_ids: Optional[list[int]] = None
 
 
 class SettingsUpdate(BaseModel):
@@ -149,11 +159,29 @@ async def delete_certificate(cert_id: int, _: dict = Depends(verify_auth)):
 
 # ─── Deploy ───
 
-@router.post("/certificates/{cert_id}/deploy")
-async def deploy_to_all(cert_id: int, _: dict = Depends(verify_auth)):
+@router.post("/certificates/{cert_id}/deploy/stream")
+async def deploy_stream(
+    cert_id: int,
+    req: DeployStreamRequest,
+    _: dict = Depends(verify_auth),
+):
+    """NDJSON-стрим раскатки: server_ids — явный выбор, null — все включённые."""
     manager = get_wildcard_ssl_manager()
-    results = await manager.deploy_to_all(cert_id)
-    return {"results": results}
+    cert, servers = await manager.get_deploy_targets(cert_id, req.server_ids)
+    if not cert:
+        raise HTTPException(status_code=404, detail="Certificate not found")
+    if not servers:
+        raise HTTPException(status_code=400, detail="No eligible servers")
+
+    # stream_ndjson создаёт таски на все серверы разом — без семафора это
+    # сотни одновременных TLS-соединений на большом флоте
+    sem = asyncio.Semaphore(30)
+
+    async def worker(server):
+        async with sem:
+            return await manager.deploy_to_node(cert, server)
+
+    return stream_ndjson(servers, worker, log_action="wildcard_deploy")
 
 
 @router.post("/certificates/{cert_id}/deploy/{server_id}")
@@ -240,6 +268,8 @@ async def get_servers(_: dict = Depends(verify_auth)):
                 {
                     "server_id": s.id,
                     "server_name": s.name,
+                    "server_url": s.url or "",
+                    "folder": s.folder,
                     "wildcard_ssl_enabled": s.wildcard_ssl_enabled or False,
                     "wildcard_ssl_deploy_path": s.wildcard_ssl_deploy_path or "",
                     "wildcard_ssl_reload_cmd": s.wildcard_ssl_reload_cmd or "",
@@ -252,6 +282,30 @@ async def get_servers(_: dict = Depends(verify_auth)):
                 for s in servers
             ]
         }
+
+
+# Объявлен до /servers/{server_id}, иначе "bulk" парсится как server_id
+@router.put("/servers/bulk")
+async def update_servers_bulk(req: BulkServerConfigUpdate, _: dict = Depends(verify_auth)):
+    """Массовое обновление настроек: поле не передано — не менять, "" — сбросить."""
+    changes = {
+        k: v
+        for k, v in req.model_dump(exclude_unset=True, exclude={"server_ids"}).items()
+        if v is not None
+    }
+    if not changes:
+        raise HTTPException(status_code=400, detail="No changes specified")
+
+    async with async_session() as db:
+        found = list((await db.execute(
+            select(Server.id).where(Server.id.in_(req.server_ids))
+        )).scalars().all())
+        if not found:
+            raise HTTPException(status_code=404, detail="No servers found")
+
+        await db.execute(update(Server).where(Server.id.in_(found)).values(**changes))
+        await db.commit()
+    return {"success": True, "updated": len(found)}
 
 
 @router.put("/servers/{server_id}")
