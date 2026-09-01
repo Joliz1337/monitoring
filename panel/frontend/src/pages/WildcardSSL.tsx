@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useMemo, useRef, FormEvent } from 'react'
 import { useNodeCapabilities } from '../hooks/useNodeCapabilities'
 import { nodeAllows } from '../utils/nodeCapabilities'
-import { ShieldCheck, RefreshCw, Server, Upload, Globe, Loader2, CheckCircle2, XCircle, Trash2, Eye, EyeOff, Save, Search, Send, Settings2, Info, ChevronRight, ToggleLeft, ToggleRight, Lock, X } from 'lucide-react'
+import { ShieldCheck, RefreshCw, Server, Upload, Globe, Loader2, CheckCircle2, XCircle, Trash2, Eye, EyeOff, Save, Search, Send, Settings2, Info, ChevronDown, ChevronRight, Folder, FolderOpen, ToggleLeft, ToggleRight, Lock, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
@@ -23,6 +23,7 @@ import { useBulkStream, BulkStreamState } from '../hooks/useBulkStream'
 const DEFAULT_DEPLOY_PATH = '/etc/letsencrypt/live'
 const DEFAULT_FULLCHAIN_NAME = 'fullchain.pem'
 const DEFAULT_PRIVKEY_NAME = 'privkey.pem'
+const NO_FOLDER = '__no_folder__'
 
 // Wildcard действует ровно на один уровень: *.example.com покрывает
 // panel.example.com, но не a.b.example.com (та же логика на бэкенде)
@@ -175,17 +176,10 @@ function ServerCard({
           onClick={() => onExpand(srv.server_id)}
           className="flex-1 flex items-center justify-between min-w-0 group"
         >
-          <span className="flex items-center min-w-0">
-            <span className={`text-sm font-medium transition-colors truncate ${
-              isEnabled ? 'text-dark-100' : 'text-dark-500'
-            }`}>
-              {srv.server_name}
-            </span>
-            {srv.folder && (
-              <span className="ml-2 text-[10px] text-dark-500 bg-dark-800 px-1.5 py-0.5 rounded-full shrink-0">
-                {srv.folder}
-              </span>
-            )}
+          <span className={`text-sm font-medium transition-colors truncate ${
+            isEnabled ? 'text-dark-100' : 'text-dark-500'
+          }`}>
+            {srv.server_name}
           </span>
           {restricted && (
             <Lock className="w-3.5 h-3.5 text-purple shrink-0 ml-2" />
@@ -550,6 +544,12 @@ export default function WildcardSSL() {
   const [selectedIds, setSelectedIds] = useState<number[]>([])
   const [showBulkEdit, setShowBulkEdit] = useState(false)
   const [bulkSaving, setBulkSaving] = useState(false)
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem('wildcard_expanded_folders')
+      return raw ? new Set(JSON.parse(raw)) : new Set()
+    } catch { return new Set() }
+  })
   const { progress: deployProgress, run: runDeploy, cancel: cancelDeploy, reset: resetDeploy } =
     useBulkStream<WildcardDeployResult>()
 
@@ -763,15 +763,52 @@ export default function WildcardSSL() {
 
   const enabledCount = servers.filter(s => s.wildcard_ssl_enabled).length
 
-  const filteredServers = useMemo(() => {
+  const groupedServers = useMemo(() => {
+    const folders = new Map<string, WildcardServerConfig[]>()
+    const noFolder: WildcardServerConfig[] = []
+    for (const s of servers) {
+      if (s.folder) {
+        if (!folders.has(s.folder)) folders.set(s.folder, [])
+        folders.get(s.folder)!.push(s)
+      } else {
+        noFolder.push(s)
+      }
+    }
+    return { folders, noFolder }
+  }, [servers])
+
+  const sortedFolderNames = useMemo(() => {
+    const allNames = [...groupedServers.folders.keys()]
+    try {
+      const saved: string[] = JSON.parse(localStorage.getItem('dashboard_folder_order') || '[]')
+      const ordered = saved.filter(f => allNames.includes(f))
+      const rest = allNames.filter(f => !saved.includes(f)).sort()
+      return [...ordered, ...rest]
+    } catch {
+      return allNames.sort()
+    }
+  }, [groupedServers.folders])
+
+  const filteredGroups = useMemo(() => {
     const q = searchQuery.toLowerCase().trim()
-    if (!q) return servers
-    return servers.filter(s =>
-      s.server_name.toLowerCase().includes(q) ||
-      (s.server_url || '').toLowerCase().includes(q) ||
-      (s.folder || '').toLowerCase().includes(q)
-    )
-  }, [servers, searchQuery])
+    if (!q) return groupedServers
+    const matches = (s: WildcardServerConfig) =>
+      s.server_name.toLowerCase().includes(q) || (s.server_url || '').toLowerCase().includes(q)
+    const folders = new Map<string, WildcardServerConfig[]>()
+    for (const [name, svrs] of groupedServers.folders) {
+      // Совпадение по имени папки показывает всю папку целиком
+      const matched = name.toLowerCase().includes(q) ? svrs : svrs.filter(matches)
+      if (matched.length > 0) folders.set(name, matched)
+    }
+    return { folders, noFolder: groupedServers.noFolder.filter(matches) }
+  }, [searchQuery, groupedServers])
+
+  const filteredServers = useMemo(
+    () => [...Array.from(filteredGroups.folders.values()).flat(), ...filteredGroups.noFolder],
+    [filteredGroups]
+  )
+
+  const hasFolders = groupedServers.folders.size > 0
 
   const visibleIds = useMemo(() => filteredServers.map(s => s.server_id), [filteredServers])
   const allVisibleSelected = visibleIds.length > 0 && visibleIds.every(id => selectedIds.includes(id))
@@ -792,6 +829,33 @@ export default function WildcardSSL() {
   const clearSelection = () => {
     setSelectedIds([])
     setShowBulkEdit(false)
+  }
+
+  const toggleFolderSelect = (folderServers: WildcardServerConfig[]) => {
+    const folderIds = folderServers.map(s => s.server_id)
+    const allSelected = folderIds.every(id => selectedIds.includes(id))
+    if (allSelected) {
+      setSelectedIds(prev => prev.filter(id => !folderIds.includes(id)))
+    } else {
+      setSelectedIds(prev => [...new Set([...prev, ...folderIds])])
+    }
+  }
+
+  const getFolderCheckState = (folderServers: WildcardServerConfig[]): 'none' | 'some' | 'all' => {
+    const count = folderServers.filter(s => selectedIds.includes(s.server_id)).length
+    if (count === 0) return 'none'
+    if (count === folderServers.length) return 'all'
+    return 'some'
+  }
+
+  const toggleCollapsed = (folder: string) => {
+    setExpandedFolders(prev => {
+      const next = new Set(prev)
+      if (next.has(folder)) next.delete(folder)
+      else next.add(folder)
+      localStorage.setItem('wildcard_expanded_folders', JSON.stringify([...next]))
+      return next
+    })
   }
 
   // Ноды с закрытым разделом SSL можно выделять (настройки живут в БД панели),
@@ -821,6 +885,24 @@ export default function WildcardSSL() {
     const state = await runDeploy(wildcardDeployStreamUrl(cert.id), { server_ids: eligibleIds })
     notifyDeployFinished(state)
   }
+
+  const renderServerCard = (srv: WildcardServerConfig) => (
+    <ServerCard
+      key={srv.server_id}
+      srv={srv}
+      cert={cert}
+      deployingServer={deployingServer}
+      expanded={expandedServer === srv.server_id}
+      selected={selectedIds.includes(srv.server_id)}
+      onToggle={handleServerToggle}
+      onExpand={handleExpandServer}
+      onSelect={toggleSelect}
+      onSave={handleServerSave}
+      onDeploy={handleDeployOne}
+      restricted={!nodeAllows(allServers.find(s => s.id === srv.server_id), 'ssl', 'write')}
+      t={t}
+    />
+  )
 
   const handleBulkEditSave = async (patch: WildcardServerConfigPatch) => {
     setBulkSaving(true)
@@ -1251,24 +1333,104 @@ export default function WildcardSSL() {
                 <Search className="w-8 h-8 text-dark-600 mx-auto mb-2" />
                 <p className="text-dark-400 text-sm">{t('wildcard_ssl.search_empty')}</p>
               </div>
+            ) : !hasFolders ? (
+              filteredServers.map(renderServerCard)
             ) : (
-              filteredServers.map(srv => (
-                <ServerCard
-                  key={srv.server_id}
-                  srv={srv}
-                  cert={cert}
-                  deployingServer={deployingServer}
-                  expanded={expandedServer === srv.server_id}
-                  selected={selectedIds.includes(srv.server_id)}
-                  onToggle={handleServerToggle}
-                  onExpand={handleExpandServer}
-                  onSelect={toggleSelect}
-                  onSave={handleServerSave}
-                  onDeploy={handleDeployOne}
-                  restricted={!nodeAllows(allServers.find(s => s.id === srv.server_id), 'ssl', 'write')}
-                  t={t}
-                />
-              ))
+              <>
+                {sortedFolderNames
+                  .filter(name => filteredGroups.folders.has(name))
+                  .map(folderName => {
+                    const folderServers = filteredGroups.folders.get(folderName)!
+                    const allFolderServers = groupedServers.folders.get(folderName)!
+                    const checkState = getFolderCheckState(allFolderServers)
+                    const isCollapsed = !expandedFolders.has(folderName)
+                    const selectedInFolder = allFolderServers.filter(s => selectedIds.includes(s.server_id)).length
+
+                    return (
+                      <div key={folderName}>
+                        <div className="flex items-center gap-2 p-2 rounded-lg hover:bg-dark-800/50 transition-colors">
+                          <Checkbox
+                            checked={checkState === 'all'}
+                            indeterminate={checkState === 'some'}
+                            onChange={() => toggleFolderSelect(allFolderServers)}
+                          />
+                          <div
+                            className="flex items-center gap-2 flex-1 min-w-0 cursor-pointer"
+                            onClick={() => toggleCollapsed(folderName)}
+                          >
+                            {isCollapsed
+                              ? <Folder className="w-4 h-4 text-accent-400 shrink-0" />
+                              : <FolderOpen className="w-4 h-4 text-accent-400 shrink-0" />}
+                            <span className="font-medium text-sm text-dark-200 truncate">{folderName}</span>
+                            <span className="text-xs text-dark-500 ml-auto shrink-0">{selectedInFolder}/{allFolderServers.length}</span>
+                            <motion.div animate={{ rotate: isCollapsed ? -90 : 0 }} transition={{ duration: 0.15 }}>
+                              <ChevronDown className="w-3.5 h-3.5 text-dark-500" />
+                            </motion.div>
+                          </div>
+                        </div>
+                        <AnimatePresence initial={false}>
+                          {!isCollapsed && (
+                            <motion.div
+                              initial={{ height: 0, opacity: 0 }}
+                              animate={{ height: 'auto', opacity: 1 }}
+                              exit={{ height: 0, opacity: 0 }}
+                              transition={{ duration: 0.15 }}
+                              className="overflow-hidden"
+                            >
+                              <div className="pl-6 space-y-2 pt-1 pb-1">
+                                {folderServers.map(renderServerCard)}
+                              </div>
+                            </motion.div>
+                          )}
+                        </AnimatePresence>
+                      </div>
+                    )
+                  })}
+
+                {filteredGroups.noFolder.length > 0 && (() => {
+                  const checkState = getFolderCheckState(groupedServers.noFolder)
+                  const isCollapsed = !expandedFolders.has(NO_FOLDER)
+                  const selectedInGroup = groupedServers.noFolder.filter(s => selectedIds.includes(s.server_id)).length
+
+                  return (
+                    <div>
+                      <div className="flex items-center gap-2 p-2 rounded-lg hover:bg-dark-800/50 transition-colors">
+                        <Checkbox
+                          checked={checkState === 'all'}
+                          indeterminate={checkState === 'some'}
+                          onChange={() => toggleFolderSelect(groupedServers.noFolder)}
+                        />
+                        <div
+                          className="flex items-center gap-2 flex-1 min-w-0 cursor-pointer"
+                          onClick={() => toggleCollapsed(NO_FOLDER)}
+                        >
+                          <Server className="w-4 h-4 text-dark-400 shrink-0" />
+                          <span className="font-medium text-sm text-dark-400 truncate">{t('bulk_actions.no_folder')}</span>
+                          <span className="text-xs text-dark-500 ml-auto shrink-0">{selectedInGroup}/{groupedServers.noFolder.length}</span>
+                          <motion.div animate={{ rotate: isCollapsed ? -90 : 0 }} transition={{ duration: 0.15 }}>
+                            <ChevronDown className="w-3.5 h-3.5 text-dark-500" />
+                          </motion.div>
+                        </div>
+                      </div>
+                      <AnimatePresence initial={false}>
+                        {!isCollapsed && (
+                          <motion.div
+                            initial={{ height: 0, opacity: 0 }}
+                            animate={{ height: 'auto', opacity: 1 }}
+                            exit={{ height: 0, opacity: 0 }}
+                            transition={{ duration: 0.15 }}
+                            className="overflow-hidden"
+                          >
+                            <div className="pl-6 space-y-2 pt-1 pb-1">
+                              {filteredGroups.noFolder.map(renderServerCard)}
+                            </div>
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </div>
+                  )
+                })()}
+              </>
             )}
           </div>
         )}
