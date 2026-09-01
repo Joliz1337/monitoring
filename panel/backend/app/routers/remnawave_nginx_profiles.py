@@ -248,6 +248,7 @@ async def get_available_servers(db: AsyncSession = Depends(get_db), _=Depends(ve
             Server.remnawave_nginx_sync_status,
             Server.remnawave_nginx_detected,
             Server.remnawave_nginx_domain,
+            Server.folder,
         )
         .where(Server.is_active.is_(True))
         .order_by(Server.name)
@@ -261,6 +262,7 @@ async def get_available_servers(db: AsyncSession = Depends(get_db), _=Depends(ve
             "sync_status": row[4],
             "detected": row[5],
             "domain": row[6],
+            "folder": row[7],
         }
         for row in result.fetchall()
     ]

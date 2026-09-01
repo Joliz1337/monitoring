@@ -2499,6 +2499,7 @@ export interface RemnawaveNginxAvailableServer {
   sync_status: string | null
   detected: boolean
   domain: string | null
+  folder: string | null
 }
 
 export interface RemnawaveNginxServerStatus {

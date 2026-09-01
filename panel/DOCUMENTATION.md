@@ -2613,7 +2613,7 @@ Whitelist можно наполнять из внешних списков по 
 | POST | /remnawave-nginx-profiles/validate | Валидировать config_content без сохранения (pre-flight `nginx -t`) |
 | POST | /remnawave-nginx-profiles/import-from-node | Импорт конфига с ноды: `detect_domain` находит домен → `replace_domain_with_placeholder` превращает его обратно в `{{DOMAIN}}` |
 | GET | /remnawave-nginx-profiles/cloudflare-ranges | Диапазоны Cloudflare по умолчанию для схемы CDN |
-| GET | /remnawave-nginx-profiles/available-servers | Серверы доступные для привязки (+`detected`, +`domain`) |
+| GET | /remnawave-nginx-profiles/available-servers | Серверы доступные для привязки (+`detected`, +`domain`, +`folder`) |
 
 **Валидация на стороне панели:** `remnawave_nginx_validator.py` — pre-flight `nginx -t -q -c` (пакет `nginx` в `panel/backend/Dockerfile`), по образцу `haproxy_validator.py`: `{{DOMAIN}}` подменяется на `validate.invalid`, пути `ssl_certificate`/`ssl_certificate_key`/`ssl_client_certificate`/`ssl_trusted_certificate` — на dummy self-signed сертификат; если бинарь `nginx` недоступен — валидация мягко пропускается. Это диагностика на глаз для UI; авторитетная валидация всегда происходит на ноде перед apply (см. node/DOCUMENTATION.md).
 
@@ -2623,6 +2623,7 @@ Whitelist можно наполнять из внешних списков по 
 - Блок «Настройки» (кнопка у списка правил, i18n-ключ `remnawave_nginx.real_ip_options`): поле fallback (`remnawave_nginx.fallback_url` + `fallback_url_hint`), тумблеры CDN (textarea диапазонов + кнопка «Cloudflare по умолчанию») и PROXY protocol (порт + IP HAProxy, лейбл «IP HAProxy (необязательно)»), плюс редирект 80→443, ACME, `reject_default_server`, группа «TLS и соединения» (тумблеры `tls_session_tickets`, `client_keepalive` с текстовым полем значения `client_keepalive_value` — показывается только при включённом тумблере, выключение пишет пустую строку, — и `access_log`, каждый с подсказкой `*_hint`), пути сертификатов; предупреждающий блок с требованиями к Xray (i18n-ключ `remnawave_nginx.xray_requirements`)
 - Raw-модалка: Validate / Вставить шаблон / Импорт с ноды / Save; предупреждение, если открытый raw-конфиг не содержит маркеров локаций (правила через конструктор для него недоступны)
 - Привязанные серверы: инлайн-редактирование домена, live-статус контейнера через proxy-роутер, restart контейнера, sync, unlink; предупреждающий блок о замене nginx.conf и автопереводе фрагментного монтирования install.sh-установок на полный конфиг (i18n-ключ `remnawave_nginx.link_replaces_config_warning`)
+- Пикер «Добавить сервер» группирует кандидатов по папкам дашборда (по образцу `DnatProfiles.tsx`): сворачиваемые группы с порядком из `dashboard_folder_order`, раскрытые папки — в `localStorage` `remnawave_nginx_add_expanded_folders`, поиск раскрывает все группы, серверы без папки — в группе «Без папки»
 - Лог синхронизаций
 - Route `/{uid}/remnawave-nginx`, пункт меню «Remnawave Nginx» (иконка Waypoints, после Remnawave)
 - Настройка **Путь установок Remnawave** (`remnawave_nginx_path`, по умолчанию `/opt/remnawave`) — секция на вкладке «Ноды» в Настройках, применяется ко всем нодам как единый путь discover/apply
