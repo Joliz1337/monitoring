@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -98,6 +99,12 @@ class SshdProbeThrottleTest(unittest.TestCase):
     def test_repeat_within_interval_throttled(self):
         self.assertEqual(_servers_due_for_sshd_probe([(2, None)]), [2])
         self.assertEqual(_servers_due_for_sshd_probe([(2, None)]), [])
+
+    def test_first_probe_allowed_right_after_boot(self):
+        """monotonic сразу после загрузки близок к нулю — первый опрос не должен глушиться."""
+        with mock.patch("app.routers.firewall_profiles.time") as fake_time:
+            fake_time.monotonic.return_value = 5.0
+            self.assertEqual(_servers_due_for_sshd_probe([(2, None)]), [2])
 
 
 if __name__ == "__main__":

@@ -189,7 +189,10 @@ def _servers_due_for_sshd_probe(rows: list[tuple[int, Optional[int]]]) -> list[i
     for server_id, sshd_port in rows:
         if sshd_port is not None:
             continue
-        if now - _sshd_probe_attempts.get(server_id, 0.0) < SSHD_PROBE_RETRY_SECONDS:
+        # Сентинел None, не 0.0: monotonic на свежезагруженной машине близок к нулю,
+        # и «now - 0 < интервал» глушил бы первый опрос все 10 минут после старта
+        last_attempt = _sshd_probe_attempts.get(server_id)
+        if last_attempt is not None and now - last_attempt < SSHD_PROBE_RETRY_SECONDS:
             continue
         _sshd_probe_attempts[server_id] = now
         due.append(server_id)
