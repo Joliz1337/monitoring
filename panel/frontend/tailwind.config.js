@@ -38,8 +38,8 @@ export default {
         purple: '#a855f7',
       },
       fontFamily: {
-        sans: ['Outfit', 'system-ui', 'sans-serif'],
-        mono: ['JetBrains Mono', 'monospace'],
+        sans: ['Twemoji Country Flags', 'Outfit', 'system-ui', 'sans-serif'],
+        mono: ['Twemoji Country Flags', 'JetBrains Mono', 'monospace'],
       },
     },
   },
