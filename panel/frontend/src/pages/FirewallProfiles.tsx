@@ -31,6 +31,7 @@ import {
   ListPlus,
 } from 'lucide-react'
 import { Tooltip } from '../components/ui/Tooltip'
+import { Checkbox } from '../components/ui/Checkbox'
 import {
   firewallProfilesApi,
   FirewallProfile,
@@ -112,8 +113,6 @@ const EMPTY_RULE: FirewallProfileRuleData = {
 
 const inputCls =
   'w-full px-3 py-1.5 rounded-lg bg-dark-800 border border-dark-700 text-dark-100 text-sm placeholder-dark-600 focus:outline-none focus:border-accent-500/50 transition-colors'
-
-const checkboxCls = 'w-3.5 h-3.5 accent-accent-500 cursor-pointer'
 
 // Потолок совпадает с MAX_BULK_RULES на бэкенде
 const MAX_BULK_PORTS = 200
@@ -1125,13 +1124,13 @@ function RulesTab({
             <thead className="bg-dark-900/40 text-dark-400 text-xs">
               <tr>
                 <th className="px-3 py-2 w-8">
-                  <input
-                    type="checkbox"
-                    checked={allSelected}
-                    onChange={toggleSelectAll}
-                    className={checkboxCls}
-                    title="Выбрать все"
-                  />
+                  <Tooltip label="Выбрать все">
+                    <Checkbox
+                      checked={allSelected}
+                      indeterminate={!allSelected && selectedIndexes.length > 0}
+                      onChange={toggleSelectAll}
+                    />
+                  </Tooltip>
                 </th>
                 <th className="text-left px-3 py-2 font-medium">Действие</th>
                 <th className="text-left px-3 py-2 font-medium">Порт</th>
@@ -1149,11 +1148,9 @@ function RulesTab({
                   <Fragment key={index}>
                     <tr className="border-t border-dark-800/40 hover:bg-dark-800/30 transition-colors">
                       <td className="px-3 py-2 w-8">
-                        <input
-                          type="checkbox"
+                        <Checkbox
                           checked={selected.has(index)}
                           onChange={() => toggleSelected(index)}
-                          className={checkboxCls}
                         />
                       </td>
                       <td className={`px-3 py-2 font-medium ${actionColor}`}>{ACTION_LABELS[rule.action]}</td>
@@ -1378,11 +1375,9 @@ function ServersTab({
   const renderCandidate = (srv: FirewallAvailableServer) => (
     <div key={srv.id} className="flex items-center justify-between px-3 py-2 rounded-lg bg-dark-900/30 border border-dark-800/50">
       <div className="flex items-center gap-3 min-w-0">
-        <input
-          type="checkbox"
+        <Checkbox
           checked={selectedCandidates.has(srv.id)}
           onChange={() => toggleInSet(setSelectedCandidates, srv.id)}
-          className={`${checkboxCls} shrink-0`}
         />
         <Server className="w-4 h-4 text-dark-400 shrink-0" />
         <div className="min-w-0">
@@ -1431,14 +1426,14 @@ function ServersTab({
           className="flex items-center gap-2 p-2 rounded-lg hover:bg-dark-800/50 transition-colors cursor-pointer"
           onClick={() => toggleCollapsed(key)}
         >
-          <input
-            type="checkbox"
-            checked={allInGroupSelected}
-            onChange={toggleGroupSelected}
-            onClick={e => e.stopPropagation()}
-            className={`${checkboxCls} shrink-0`}
-            title="Выбрать всю группу"
-          />
+          <Tooltip label="Выбрать всю группу">
+            <Checkbox
+              checked={allInGroupSelected}
+              indeterminate={!allInGroupSelected && servers.some(s => selectedCandidates.has(s.id))}
+              onChange={toggleGroupSelected}
+              onClick={e => e.stopPropagation()}
+            />
+          </Tooltip>
           {icon}
           <span className={`font-medium text-sm truncate ${isFolder ? 'text-dark-200' : 'text-dark-400'}`}>{label}</span>
           <span className="text-xs text-dark-500 ml-auto shrink-0">{servers.length}</span>
@@ -1483,11 +1478,10 @@ function ServersTab({
           <div className="flex items-center gap-2.5">
             {filteredLinked.length > 0 && (
               <Tooltip label="Выбрать все">
-                <input
-                  type="checkbox"
+                <Checkbox
                   checked={allLinkedSelected}
+                  indeterminate={!allLinkedSelected && selectedLinkedIds.length > 0}
                   onChange={toggleAllLinked}
-                  className={checkboxCls}
                 />
               </Tooltip>
             )}
@@ -1528,11 +1522,9 @@ function ServersTab({
             {filteredLinked.map((srv: FirewallProfileServerInfo) => (
               <div key={srv.server_id} className="flex items-center justify-between px-3 py-2 rounded-lg bg-dark-900/30 border border-dark-800/50">
                 <div className="flex items-center gap-3 min-w-0">
-                  <input
-                    type="checkbox"
+                  <Checkbox
                     checked={selectedLinked.has(srv.server_id)}
                     onChange={() => toggleInSet(setSelectedLinked, srv.server_id)}
-                    className={`${checkboxCls} shrink-0`}
                   />
                   <Server className="w-4 h-4 text-dark-400 shrink-0" />
                   <div className="min-w-0">
