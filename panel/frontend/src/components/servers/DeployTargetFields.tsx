@@ -43,6 +43,7 @@ export interface DeployFormData {
   remnawaveNginxDomain: string
   wildcardSslEnabled: boolean
   wildcardReloadCmd: string
+  dedicatedCert: boolean
 }
 
 export const DEPLOY_DEFAULTS: DeployFormData = {
@@ -73,6 +74,7 @@ export const DEPLOY_DEFAULTS: DeployFormData = {
   remnawaveNginxDomain: '',
   wildcardSslEnabled: false,
   wildcardReloadCmd: '',
+  dedicatedCert: false,
 }
 
 interface Props {
@@ -225,6 +227,21 @@ export default function DeployTargetFields({
           </div>
         )}
       </div>
+
+      <label className="flex items-start gap-2.5 cursor-pointer">
+        <Checkbox
+          checked={deploy.dedicatedCert}
+          onChange={(e) => onChange({ dedicatedCert: e.target.checked })}
+          className="mt-0.5"
+        />
+        <span className="text-sm text-dark-200">
+          <span className="flex items-center gap-1.5">
+            <KeyRound className="w-3.5 h-3.5 text-dark-400" />
+            {t('servers.deploy_dedicated_cert')}
+          </span>
+          <span className="block text-xs text-dark-500">{t('servers.deploy_dedicated_cert_hint')}</span>
+        </span>
+      </label>
 
       <div className="space-y-3 pt-1">
         <p className="text-xs text-dark-400">{t('servers.deploy_extras')}</p>

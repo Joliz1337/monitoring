@@ -140,8 +140,11 @@ class Server(Base):
     # PKI (mTLS) — флаги типа авторизации с нодой
     # pki_enabled: нода работает по mTLS (false = legacy с api_key)
     # uses_shared_cert: нода уже мигрирована на общий shared cert
+    # dedicated_cert: осознанно на персональном сертификате (одноразовый ключ
+    # автоустановки) — миграция на общий cert такую ноду не трогает
     pki_enabled = Column(Boolean, default=False, server_default="false", nullable=False)
     uses_shared_cert = Column(Boolean, default=False, server_default="false", nullable=False)
+    dedicated_cert = Column(Boolean, default=False, server_default="false", nullable=False)
     haproxy_sync_status = Column(String(20), nullable=True)
 
     # Anti-DDoS emergency mode state (mirrored from node ddos-watchdog)

@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 NODE_SECRET_VERSION = 1
 DEDICATED_NODE_CN_PREFIX = "node-"
+DEDICATED_DEPLOY_VALIDITY_DAYS = 1095
 _CURVE = ec.SECP256R1()
 _SIGN_HASH = hashes.SHA256()
 
@@ -306,6 +307,20 @@ def build_installer_token(keygen: PKIKeygenData, panel_ip: str | None = None) ->
         keygen.shared_node_key,
         panel_ip=panel_ip,
     )
+
+
+def build_dedicated_installer_token(
+    keygen: PKIKeygenData,
+    panel_ip: str | None = None,
+    validity_days: int = DEDICATED_DEPLOY_VALIDITY_DAYS,
+) -> str:
+    """NODE_SECRET с персональным сертификатом под один сервер (без clientAuth)."""
+    _, cert_pem, key_pem = generate_dedicated_node_cert(
+        keygen.ca_cert,
+        keygen.ca_key,
+        validity_days,
+    )
+    return pack_node_secret(keygen.ca_cert, cert_pem, key_pem, panel_ip=panel_ip)
 
 
 def unpack_node_secret(secret: str) -> dict:

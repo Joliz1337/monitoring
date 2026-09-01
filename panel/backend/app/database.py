@@ -645,6 +645,7 @@ async def run_migrations(conn):
         pki_columns = [
             ("pki_enabled", "BOOLEAN NOT NULL DEFAULT FALSE"),
             ("uses_shared_cert", "BOOLEAN NOT NULL DEFAULT FALSE"),
+            ("dedicated_cert", "BOOLEAN NOT NULL DEFAULT FALSE"),
         ]
         for col_name, col_type in pki_columns:
             if col_name not in columns:

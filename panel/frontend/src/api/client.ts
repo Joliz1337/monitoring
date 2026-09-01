@@ -120,7 +120,7 @@ export interface Server {
   status?: 'online' | 'offline' | 'loading' | 'error'
   pki_enabled?: boolean
   uses_shared_cert?: boolean
-  auth_kind?: 'shared' | 'per_server' | 'legacy'
+  auth_kind?: 'shared' | 'dedicated' | 'per_server' | 'legacy'
   antiddos_emergency_mode?: boolean
   has_xray_node?: boolean
   node_capabilities?: NodeCapabilities | null
@@ -785,6 +785,7 @@ export const serversApi = {
     api.get<{
       total: number
       shared: number
+      dedicated: number
       per_server: number
       legacy: number
       needs_migration: number

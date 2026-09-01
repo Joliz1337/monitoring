@@ -65,6 +65,7 @@ class PostDeployOptions:
     wildcard_ssl_reload_cmd: Optional[str] = None
     remnawave_nginx_profile_id: Optional[int] = None
     remnawave_nginx_domain: Optional[str] = None
+    dedicated_cert: bool = False
 
 
 @dataclass
@@ -215,7 +216,8 @@ class DeployJobManager:
 
         try:
             server_id = await self._create_server(
-                job.name, job.server_url, job.proxy_url, job.ssh_port
+                job.name, job.server_url, job.proxy_url, job.ssh_port,
+                dedicated_cert=post_opts.dedicated_cert,
             )
         except Exception as exc:  # noqa: BLE001 — финальная граница создания сервера
             logger.error("Deploy job %s: create server failed: %s", job.id, exc)
@@ -336,8 +338,10 @@ class DeployJobManager:
         url: str,
         proxy_url: Optional[str],
         ssh_port: Optional[int] = None,
+        dedicated_cert: bool = False,
     ) -> int:
-        """Создаёт запись ноды после успешной установки (mTLS, shared cert)."""
+        """Создаёт запись ноды после успешной установки (mTLS: shared cert или
+        одноразовый персональный сертификат)."""
         async with async_session_maker() as db:
             result = await db.execute(select(Server).order_by(Server.position.desc()))
             last = result.scalars().first()
@@ -347,7 +351,8 @@ class DeployJobManager:
                 api_key=None,
                 proxy_url=proxy_url,
                 pki_enabled=True,
-                uses_shared_cert=True,
+                uses_shared_cert=not dedicated_cert,
+                dedicated_cert=dedicated_cert,
                 ssh_port=ssh_port,
                 position=(last.position + 1) if last else 0,
             )

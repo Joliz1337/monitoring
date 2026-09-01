@@ -411,6 +411,7 @@ export default function Servers() {
     wildcard_ssl_reload_cmd: d.wildcardSslEnabled ? d.wildcardReloadCmd.trim() || null : null,
     remnawave_nginx_profile_id: d.installRemnawave ? d.remnawaveNginxProfileId : null,
     remnawave_nginx_domain: d.installRemnawave ? d.remnawaveNginxDomain.trim() || null : null,
+    dedicated_cert: d.dedicatedCert,
     // Установщик на ноде говорит на языке интерфейса панели
     lang: i18n.language.startsWith('ru') ? 'ru' : 'en',
   })
@@ -1356,6 +1357,10 @@ export default function Servers() {
                           {server.uses_shared_cert ? (
                             <Tooltip label={t('servers.shared_cert_tooltip')}>
                               <ShieldCheck className="w-3.5 h-3.5 text-success flex-shrink-0" />
+                            </Tooltip>
+                          ) : server.auth_kind === 'dedicated' ? (
+                            <Tooltip label={t('servers.dedicated_cert_tooltip')}>
+                              <ShieldCheck className="w-3.5 h-3.5 text-accent-400 flex-shrink-0" />
                             </Tooltip>
                           ) : (
                             <Tooltip label={t('servers.needs_migration_tooltip')}>

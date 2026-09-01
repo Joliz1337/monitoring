@@ -25,7 +25,11 @@ from app.services.http_client import validate_proxy_input
 from app.services.remnawave_nginx_config import DOMAIN_PLACEHOLDER, DOMAIN_RE
 from app.services.remnawave_nginx_sync import NODE_DOMAIN_REQUIRED_MESSAGE
 from app.services.net_utils import resolve_panel_ip
-from app.services.pki import PKIKeygenData, build_installer_token
+from app.services.pki import (
+    PKIKeygenData,
+    build_dedicated_installer_token,
+    build_installer_token,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
@@ -157,6 +161,9 @@ class DeployRequest(BaseModel):
     wildcard_ssl_reload_cmd: Optional[str] = Field(None, max_length=512)
     remnawave_nginx_profile_id: Optional[int] = None
     remnawave_nginx_domain: Optional[str] = None
+    # Одноразовый персональный сертификат вместо общего ключа парка:
+    # компрометация такой ноды не даёт клиентского доступа к остальным
+    dedicated_cert: bool = False
     # Язык интерфейса панели — установщик и меню `mon` на ноде будут на нём же
     lang: InstallerLanguage = InstallerLanguage.EN
     # Полуавтоматический режим: команду установки оператор запускает на сервере сам,
@@ -257,11 +264,16 @@ async def _build_deploy_params(
         )
 
     panel_ip = await resolve_panel_ip()
+    node_secret = (
+        build_dedicated_installer_token(pki, panel_ip=panel_ip)
+        if req.dedicated_cert
+        else build_installer_token(pki, panel_ip=panel_ip)
+    )
     return DeployParams(
         host=host,
         ssh_port=req.ssh_port,
         ssh_user=req.ssh_user.strip() or "root",
-        node_secret=build_installer_token(pki, panel_ip=panel_ip),
+        node_secret=node_secret,
         panel_ip=panel_ip,
         node_api_port=req.monitoring_port,
         ssh_password=req.ssh_password,
@@ -335,6 +347,7 @@ async def deploy_server(
             req.remnawave_nginx_profile_id if req.install_remnawave else None
         ),
         remnawave_nginx_domain=req.remnawave_nginx_domain,
+        dedicated_cert=req.dedicated_cert,
     )
 
     job_id = get_deploy_job_manager().start(
