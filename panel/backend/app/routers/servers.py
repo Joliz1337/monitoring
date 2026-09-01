@@ -3,7 +3,7 @@ import hashlib
 import ipaddress
 import time
 from datetime import datetime, timedelta, timezone
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import select, update, bindparam, func
 from sqlalchemy.ext.asyncio import AsyncSession
 import re
@@ -23,6 +23,7 @@ from app.database import get_db
 from app.models import Server, MetricsSnapshot, ServerTraffic
 from app.auth import verify_auth
 from app.services.blocklist_manager import get_blocklist_manager
+from app.services.fleet_history import FleetPeriod, load_fleet_history
 from app.services.metrics_rates import enrich_metrics_with_speeds
 from app.services.server_status import get_offline_threshold, resolve_status
 from app.services.time_sync import get_time_sync_service
@@ -392,6 +393,16 @@ async def get_migration_status(
     counters["total"] = len(rows)
     counters["needs_migration"] = counters["per_server"] + counters["legacy"]
     return counters
+
+
+@router.get("/fleet/history")
+async def get_fleet_history(
+    period: FleetPeriod = Query(default="24h"),
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth),
+):
+    """Сводная история парка под плитками дашборда: CPU, память и скорости сети."""
+    return await load_fleet_history(db, period)
 
 
 @router.post("")

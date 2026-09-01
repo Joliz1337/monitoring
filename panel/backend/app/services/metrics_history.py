@@ -14,7 +14,7 @@ aware — поэтому параметры уходят в БД с явным U
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Any, Iterable, Literal, Mapping, Optional
+from typing import Any, Callable, Iterable, Literal, Mapping, Optional
 
 from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -295,14 +295,16 @@ def insert_gap_markers(
     points: list[dict[str, Any]],
     gaps: Iterable[tuple[datetime, datetime]],
     min_gap_sec: float,
+    make_empty: Callable[[datetime], dict[str, Any]] = empty_point,
 ) -> list[dict[str, Any]]:
     """Точка со всеми null посреди долгого простоя — чтобы линия там рвалась.
 
     Метки времени в фиксированном формате (UTC, миллисекунды, Z), поэтому
-    строки сравниваются как время.
+    строки сравниваются как время. `make_empty` — чтобы ряд с другой схемой
+    точки (сводка по парку) получал маркер своей формы, а не этой.
     """
     markers = [
-        empty_point(start + (end - start) / 2)
+        make_empty(start + (end - start) / 2)
         for start, end in gaps
         if (end - start).total_seconds() > min_gap_sec
     ]

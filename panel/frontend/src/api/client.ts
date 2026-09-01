@@ -824,6 +824,38 @@ export const serversApi = {
     }),
   deleteRemnawaveCert: (id: number) =>
     api.delete<{ success: boolean }>(`/servers/remnawave-certs/${id}`),
+  // Сводная история всего парка под плитками дашборда
+  getFleetHistory: (period: string) =>
+    api.get<FleetHistoryResponse>('/servers/fleet/history', { params: { period } }),
+}
+
+// Точка сводки по парку: CPU и память — средневзвешенные по ёмкости нод,
+// скорости — суммы. servers — сколько нод попало в точку; в маркере простоя
+// панели он 0, а все метрики null, чтобы линия там рвалась.
+export interface FleetHistoryPoint {
+  timestamp: string
+  servers: number
+  cpu_usage: number | null
+  max_cpu: number | null
+  memory_percent: number | null
+  max_memory_percent: number | null
+  memory_used: number | null
+  memory_total: number | null
+  net_rx_bytes_per_sec: number | null
+  max_net_rx_bytes_per_sec: number | null
+  net_tx_bytes_per_sec: number | null
+  max_net_tx_bytes_per_sec: number | null
+}
+
+export interface FleetHistoryResponse {
+  period: HistoryPeriod
+  data_source: HistoryDataSource
+  bucket_sec: number
+  from_time: string
+  to_time: string
+  count: number
+  data: FleetHistoryPoint[]
+  gaps: ChartGap[]
 }
 
 export interface NodeInstallKey {

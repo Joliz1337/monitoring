@@ -4,7 +4,7 @@ The whole fleet on one screen: what is online, where load is rising, what went d
 
 ## What you see
 
-- **Fleet summary on top** — total CPU, RAM and network speed across online servers. CPU is weighted by core count, so 100% on an eight-core node counts for more than on a dual-core one. Offline servers are excluded so stale numbers don't inflate the totals.
+- **Fleet summary on top** — total CPU, RAM and network speed across online servers. CPU is weighted by core count, so 100% on an eight-core node counts for more than on a dual-core one. Offline servers are excluded so stale numbers don't inflate the totals. Click a tile to expand a chart of that metric across the whole fleet — over an hour, a day, a week, a month or a year; click again to collapse.
 - **Server card** — status, CPU, RAM, disk, network speed, load average, IP (click copies it).
 - **Folders** — grouping for cards, collapsible to save space.
 - Clicking a card opens server details with charts, processes and a terminal.

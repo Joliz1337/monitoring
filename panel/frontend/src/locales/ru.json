@@ -126,7 +126,14 @@
     "folder_deleted": "Папка удалена",
     "server_moved": "Сервер перемещён",
     "search_placeholder": "Поиск по имени или IP...",
-    "search_drag_hint": "Перетаскивание отключено на время поиска"
+    "search_drag_hint": "Перетаскивание отключено на время поиска",
+    "fleet_chart_cpu": "CPU всего парка",
+    "fleet_chart_memory": "Память всего парка",
+    "fleet_chart_network": "Скорость сети всего парка",
+    "fleet_chart_scope_one": "по {{count}} серверу онлайн",
+    "fleet_chart_scope_few": "по {{count}} серверам онлайн",
+    "fleet_chart_scope_many": "по {{count}} серверам онлайн",
+    "fleet_chart_scope_other": "по {{count}} серверам онлайн"
   },
   "servers": {
     "title": "Серверы",

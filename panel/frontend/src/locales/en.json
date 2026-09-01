@@ -124,7 +124,12 @@
     "folder_deleted": "Folder deleted",
     "server_moved": "Server moved",
     "search_placeholder": "Search by name or IP...",
-    "search_drag_hint": "Drag-and-drop is disabled while searching"
+    "search_drag_hint": "Drag-and-drop is disabled while searching",
+    "fleet_chart_cpu": "Fleet CPU",
+    "fleet_chart_memory": "Fleet memory",
+    "fleet_chart_network": "Fleet network speed",
+    "fleet_chart_scope_one": "across {{count}} server online",
+    "fleet_chart_scope_other": "across {{count}} servers online"
   },
   "servers": {
     "title": "Servers",
