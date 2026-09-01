@@ -5,11 +5,11 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import verify_auth
-from app.database import get_db
+from app.database import get_db, async_session_maker
 from app.models import Server, PanelSettings
 from app.services.node_capabilities import NodeCapabilityError, denial_headers
 from app.services.ssh_manager import proxy_to_node, RECOMMENDED_PRESET, MAXIMUM_PRESET
@@ -80,6 +80,30 @@ async def _safe_proxy(server, method: str, path: str, json_data: dict | None = N
         raise HTTPException(status_code=503, detail=str(e))
 
 
+def _valid_port(value) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if 0 < value < 65536 else None
+
+
+async def _cache_sshd_port(server_id: int, port: int | None) -> None:
+    """Кэш фактического порта sshd — по нему firewall-профили проверяют allow-правило SSH.
+
+    Best-effort: своя сессия (вызывается и из конкурентных воркеров стрима),
+    ошибка БД не должна ломать ответ ноды.
+    """
+    if port is None:
+        return
+    try:
+        async with async_session_maker() as db:
+            await db.execute(
+                update(Server).where(Server.id == server_id).values(sshd_port=port)
+            )
+            await db.commit()
+    except Exception as e:
+        logger.warning("sshd_port_cache_failed", extra={"server_id": server_id, "error": str(e)})
+
+
 # Пути с долгой установкой (apt-get install fail2ban может занять 120с)
 _LONG_TIMEOUT_PATHS = frozenset({"/api/ssh/fail2ban/config", "/api/ssh/password"})
 
@@ -122,6 +146,8 @@ async def _fetch_ssh_status(server) -> dict:
     """Собрать SSH-статус одной ноды для обзор-таблицы."""
     try:
         status = await proxy_to_node(server, "GET", "/api/ssh/status", timeout=15.0)
+        if isinstance(status, dict):
+            await _cache_sshd_port(server.id, _valid_port(status.get("sshd_port")))
         return {"server_id": server.id, "server_name": server.name, "reachable": True, "status": status}
     except NodeCapabilityError as e:
         return {"server_id": server.id, "server_name": server.name, "reachable": False,
@@ -235,7 +261,10 @@ async def update_ssh_config(
     _: dict = Depends(verify_auth),
 ):
     server = await _get_server(server_id, db)
-    return await _safe_proxy(server, "POST", "/api/ssh/config", config)
+    result = await _safe_proxy(server, "POST", "/api/ssh/config", config)
+    if isinstance(result, dict) and result.get("success", True):
+        await _cache_sshd_port(server.id, _valid_port(config.get("port")))
+    return result
 
 
 # === Fail2ban ===
@@ -348,7 +377,10 @@ async def get_ssh_status(
     _: dict = Depends(verify_auth),
 ):
     server = await _get_server(server_id, db)
-    return await _safe_proxy(server, "GET", "/api/ssh/status")
+    status = await _safe_proxy(server, "GET", "/api/ssh/status")
+    if isinstance(status, dict):
+        await _cache_sshd_port(server.id, _valid_port(status.get("sshd_port")))
+    return status
 
 
 # === Bulk Operations (NDJSON-стриминг) ===
@@ -372,8 +404,16 @@ async def bulk_apply(
             steps.append(("fail2ban", "POST", "/api/ssh/fail2ban/config", request.fail2ban))
         return steps
 
+    new_ssh_port = _valid_port((request.ssh or {}).get("port"))
+
     async def worker(server):
-        return await _apply_steps(server, build_steps(server))
+        result = await _apply_steps(server, build_steps(server))
+        ssh_step_ok = any(
+            s["step"] == "ssh_config" and s["success"] for s in result["steps"]
+        )
+        if ssh_step_ok:
+            await _cache_sshd_port(server.id, new_ssh_port)
+        return result
 
     return _stream_ndjson(servers, worker, log_action="ssh_apply")
 

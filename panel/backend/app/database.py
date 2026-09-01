@@ -575,6 +575,15 @@ async def run_migrations(conn):
                     if "already exists" not in str(e).lower():
                         logger.warning(f"Could not add column {col_name}: {e}")
 
+    # Кэш фактического порта sshd с ноды (для проверки SSH в firewall-профилях)
+    if columns and "sshd_port" not in columns:
+        try:
+            await conn.execute(text('ALTER TABLE servers ADD COLUMN "sshd_port" INTEGER'))
+            logger.info("Added column: servers.sshd_port")
+        except Exception as e:
+            if "already exists" not in str(e).lower():
+                logger.warning(f"Could not add column sshd_port: {e}")
+
     # Remnawave nginx profile binding columns
     if columns:
         remnawave_nginx_columns = [

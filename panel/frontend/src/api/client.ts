@@ -2557,6 +2557,10 @@ export interface FirewallProfile {
   node_port_allowed: boolean
   node_api_port: number
   ssh_port_allowed: boolean
+  // Эффективные SSH-порты привязанных серверов (sshd с ноды → креды доставки → 22);
+  // без серверов — [ssh_default_port]
+  ssh_ports: number[]
+  ssh_ports_blocked: number[]
   ssh_default_port: number
   created_at: string | null
   updated_at: string | null
@@ -2566,6 +2570,7 @@ export interface FirewallProfileServerInfo {
   server_id: number
   server_name: string
   server_url: string
+  ssh_port: number
   sync_status: FirewallSyncStatus
   rules_hash: string | null
   is_synced: boolean

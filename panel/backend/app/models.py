@@ -103,6 +103,10 @@ class Server(Base):
     ssh_private_key = Column(EncryptedString, nullable=True)
     ssh_passphrase = Column(EncryptedString, nullable=True)
 
+    # Кэш фактического порта sshd с ноды (из /api/ssh/status и применений SSH-конфига).
+    # Не путать с ssh_port выше — это порт из кредов доставки образа.
+    sshd_port = Column(Integer, nullable=True)
+
     # Wildcard SSL deployment config
     wildcard_ssl_enabled = Column(Boolean, default=False, server_default="false")
     wildcard_ssl_deploy_path = Column(String(500), nullable=True)

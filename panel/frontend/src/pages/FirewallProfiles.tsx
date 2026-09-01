@@ -85,20 +85,24 @@ function computePortAllowed(
   )
 }
 
-const SSH_WARNING = 'Нет правила allow для SSH — применение профиля отрежет доступ к серверу'
+// Порты SSH берутся с привязанных серверов (фактический sshd с ноды → креды доставки → 22)
+const sshWarning = (ports: number[]) =>
+  `Нет правила allow для SSH (порт${ports.length > 1 ? 'ы' : ''} ${ports.join(', ')}) — применение профиля отрежет доступ к серверу`
 
-// Оба флага считает и бэкенд, но правки правил применяются оптимистично,
+// Флаги считает и бэкенд, но правки правил применяются оптимистично,
 // без перезагрузки профиля — иначе предупреждения отставали бы на один шаг
 function withGuardFlags(
   profile: FirewallProfileWithServers,
   rules: FirewallProfileRuleData[],
   defaultIn: FirewallDefaultPolicy,
 ): FirewallProfileWithServers {
+  const sshBlocked = profile.ssh_ports.filter(p => !computePortAllowed(rules, defaultIn, p))
   return {
     ...profile,
     rules,
     node_port_allowed: computePortAllowed(rules, defaultIn, profile.node_api_port),
-    ssh_port_allowed: computePortAllowed(rules, defaultIn, profile.ssh_default_port),
+    ssh_port_allowed: sshBlocked.length === 0,
+    ssh_ports_blocked: sshBlocked,
   }
 }
 
@@ -734,7 +738,7 @@ function ProfileListItem({
               </Tooltip>
             )}
             {!profile.ssh_port_allowed && (
-              <Tooltip label={SSH_WARNING}>
+              <Tooltip label={sshWarning(profile.ssh_ports_blocked)}>
                 <span className="shrink-0 text-red-400">
                   <ShieldAlert className="w-3.5 h-3.5" />
                 </span>
@@ -1008,7 +1012,12 @@ function RulesTab({
         <div className="flex items-start gap-3 p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-red-300">
           <AlertTriangle className="w-5 h-5 shrink-0 mt-0.5" />
           <div className="text-sm">
-            Нет правила allow для SSH ({profile.ssh_default_port}/tcp). Применение сбрасывает ufw и включает запрет входящих — доступ к серверу пропадёт, и вернуть его можно будет только через консоль хостера. Добавьте правило на свой SSH-порт: если он не {profile.ssh_default_port}, предупреждение останется, и это нормально.
+            Нет правила allow для SSH ({profile.ssh_ports_blocked.map(p => `${p}/tcp`).join(', ')}). Применение сбрасывает ufw и включает запрет входящих — доступ к серверу пропадёт, и вернуть его можно будет только через консоль хостера.
+            {(() => {
+              const affected = profile.servers.filter(s => profile.ssh_ports_blocked.includes(s.ssh_port))
+              if (affected.length === 0) return ' Порт определяется по привязанным серверам; без них проверка идёт по 22.'
+              return ` Затронуты: ${affected.map(s => `${s.server_name} (${s.ssh_port})`).join(', ')}. Порт определяется по фактическому порту sshd сервера.`
+            })()}
           </div>
         </div>
       )}
@@ -1814,9 +1823,12 @@ function ProfileDetail({
   // где это ещё можно остановить, — здесь
   const confirmSshLockout = (target: string): boolean => {
     if (!profile || profile.ssh_port_allowed) return true
+    const ports = profile.ssh_ports_blocked.map(p => `${p}/tcp`).join(', ')
+    const risk = profile.servers.length > 0
+      ? `На ${profile.ssh_ports_blocked.length > 1 ? 'этих портах' : 'этом порту'} слушает SSH привязанных серверов — после применения ${target} останется доступен только через консоль хостера.`
+      : `Если SSH слушает этот порт, после применения ${target} останется доступен только через консоль хостера.`
     return confirm(
-      `${SSH_WARNING}.\n\nПрофиль "${profile.name}" не разрешает входящие на ${profile.ssh_default_port}/tcp. ` +
-      `Если SSH слушает именно этот порт, после применения ${target} останется доступен только через консоль хостера.\n\nПродолжить?`
+      `${sshWarning(profile.ssh_ports_blocked)}.\n\nПрофиль "${profile.name}" не разрешает входящие на ${ports}. ${risk}\n\nПродолжить?`
     )
   }
 

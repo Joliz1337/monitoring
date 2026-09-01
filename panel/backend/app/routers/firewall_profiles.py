@@ -158,17 +158,17 @@ def _has_node_port_allow(rules: list[dict], default_in: str) -> bool:
     return _has_port_allow(rules, default_in, NODE_API_PORT)
 
 
-def _has_ssh_allow(rules: list[dict], default_in: str) -> bool:
-    """Профиль без allow на SSH отрезает администратора от сервера.
+def _effective_ssh_port(sshd_port: Optional[int], ssh_port: Optional[int]) -> int:
+    """SSH-порт сервера: фактический sshd с ноды (кэш) → креды доставки образа → 22."""
+    return sshd_port or ssh_port or SSH_DEFAULT_PORT
 
-    Применение идёт как `ufw --force reset` → default deny → правила → enable,
-    и все команды при этом отрабатывают успешно — откатывать нечего, а нода
-    остаётся на связи через 9100, так что панель ничего не замечает. Проверка
-    идёт по порту 22: реальный SSH-порт ноды панели неизвестен, поэтому это
-    предупреждение, а не запрет — на нестандартном порту оператор снимает его
-    сам, добавив правило на свой порт.
-    """
-    return _has_port_allow(rules, default_in, SSH_DEFAULT_PORT)
+
+async def _linked_ssh_ports(profile_id: int, db: AsyncSession) -> list[int]:
+    result = await db.execute(
+        select(Server.sshd_port, Server.ssh_port)
+        .where(Server.active_firewall_profile_id == profile_id)
+    )
+    return [_effective_ssh_port(sshd, ssh) for sshd, ssh in result.fetchall()]
 
 
 async def _get_profile(profile_id: int, db: AsyncSession) -> FirewallProfile:
@@ -181,8 +181,21 @@ async def _get_profile(profile_id: int, db: AsyncSession) -> FirewallProfile:
     return profile
 
 
-def _profile_to_dict(profile: FirewallProfile, *, linked: int = 0, synced: int = 0) -> dict:
+def _profile_to_dict(
+    profile: FirewallProfile,
+    *,
+    linked: int = 0,
+    synced: int = 0,
+    ssh_ports: Optional[list[int]] = None,
+) -> dict:
     rules = _serialize_rules(profile)
+    # Профиль без allow на SSH отрезает администратора от сервера: применение идёт
+    # как `ufw --force reset` → default deny → правила → enable, все команды успешны,
+    # а нода остаётся на связи через 9100 — панель сбой не заметит. Проверка идёт по
+    # фактическим SSH-портам привязанных серверов (_effective_ssh_port), для профиля
+    # без серверов — по 22. Это предупреждение, а не запрет.
+    ports = sorted(set(ssh_ports)) if ssh_ports else [SSH_DEFAULT_PORT]
+    blocked = [p for p in ports if not _has_port_allow(rules, profile.default_incoming, p)]
     return {
         "id": profile.id,
         "name": profile.name,
@@ -195,7 +208,9 @@ def _profile_to_dict(profile: FirewallProfile, *, linked: int = 0, synced: int =
         "synced_servers_count": synced,
         "node_port_allowed": _has_node_port_allow(rules, profile.default_incoming),
         "node_api_port": NODE_API_PORT,
-        "ssh_port_allowed": _has_ssh_allow(rules, profile.default_incoming),
+        "ssh_port_allowed": not blocked,
+        "ssh_ports": ports,
+        "ssh_ports_blocked": blocked,
         "ssh_default_port": SSH_DEFAULT_PORT,
         "created_at": profile.created_at.isoformat() if profile.created_at else None,
         "updated_at": profile.updated_at.isoformat() if profile.updated_at else None,
@@ -271,20 +286,30 @@ async def list_profiles(db: AsyncSession = Depends(get_db), _=Depends(verify_aut
 
     profile_ids = [p.id for p in profiles]
     counts: dict[int, dict] = {pid: {"total": 0, "synced": 0} for pid in profile_ids}
+    ssh_ports: dict[int, list[int]] = {pid: [] for pid in profile_ids}
 
     if profile_ids:
         srv_result = await db.execute(
-            select(Server.active_firewall_profile_id, Server.firewall_sync_status, func.count())
-            .where(Server.active_firewall_profile_id.in_(profile_ids))
-            .group_by(Server.active_firewall_profile_id, Server.firewall_sync_status)
+            select(
+                Server.active_firewall_profile_id,
+                Server.firewall_sync_status,
+                Server.sshd_port,
+                Server.ssh_port,
+            ).where(Server.active_firewall_profile_id.in_(profile_ids))
         )
-        for prof_id, sync_st, cnt in srv_result.fetchall():
-            counts[prof_id]["total"] += cnt
+        for prof_id, sync_st, sshd, ssh in srv_result.fetchall():
+            counts[prof_id]["total"] += 1
             if sync_st == "synced":
-                counts[prof_id]["synced"] += cnt
+                counts[prof_id]["synced"] += 1
+            ssh_ports[prof_id].append(_effective_ssh_port(sshd, ssh))
 
     return [
-        _profile_to_dict(p, linked=counts[p.id]["total"], synced=counts[p.id]["synced"])
+        _profile_to_dict(
+            p,
+            linked=counts[p.id]["total"],
+            synced=counts[p.id]["synced"],
+            ssh_ports=ssh_ports[p.id],
+        )
         for p in profiles
     ]
 
@@ -333,13 +358,17 @@ async def get_profile(profile_id: int, db: AsyncSession = Depends(get_db), _=Dep
         profile.rules_json, profile.default_incoming, profile.default_outgoing
     )
 
-    data = _profile_to_dict(profile)
+    data = _profile_to_dict(
+        profile,
+        ssh_ports=[_effective_ssh_port(s.sshd_port, s.ssh_port) for s in servers],
+    )
     data["rules_hash"] = rules_hash
     data["servers"] = [
         {
             "server_id": s.id,
             "server_name": s.name,
             "server_url": s.url,
+            "ssh_port": _effective_ssh_port(s.sshd_port, s.ssh_port),
             "sync_status": s.firewall_sync_status,
             "rules_hash": s.firewall_rules_hash,
             "is_synced": s.firewall_rules_hash == rules_hash,
@@ -393,7 +422,7 @@ async def update_profile(
     if rules_changed:
         bg.add_task(_bg_sync_profile, profile_id)
 
-    return _profile_to_dict(profile)
+    return _profile_to_dict(profile, ssh_ports=await _linked_ssh_ports(profile_id, db))
 
 
 @router.post("/{profile_id}/clone")

@@ -60,6 +60,7 @@ class DeployJob:
     host: str
     server_url: str
     proxy_url: Optional[str] = None  # SOCKS5 панель→нода, наследуется созданным сервером
+    ssh_port: Optional[int] = None  # порт, по которому шёл деплой — сохраняется в креды сервера
     status: str = "running"  # running | success | error
     log: list[str] = field(default_factory=list)
     exit_code: Optional[int] = None
@@ -121,6 +122,7 @@ class DeployJobManager:
             host=params.host,
             server_url=server_url,
             proxy_url=params.socks5_proxy,
+            ssh_port=None if wait_for_manual_install else params.ssh_port,
         )
         self._jobs[job_id] = job
         runner = (
@@ -198,7 +200,9 @@ class DeployJobManager:
             return
 
         try:
-            server_id = await self._create_server(job.name, job.server_url, job.proxy_url)
+            server_id = await self._create_server(
+                job.name, job.server_url, job.proxy_url, job.ssh_port
+            )
         except Exception as exc:  # noqa: BLE001 — финальная граница создания сервера
             logger.error("Deploy job %s: create server failed: %s", job.id, exc)
             message = f"Установка прошла, но не удалось добавить сервер: {exc}"
@@ -308,7 +312,13 @@ class DeployJobManager:
             await asyncio.sleep(NODE_POLL_INTERVAL)
         return False
 
-    async def _create_server(self, name: str, url: str, proxy_url: Optional[str]) -> int:
+    async def _create_server(
+        self,
+        name: str,
+        url: str,
+        proxy_url: Optional[str],
+        ssh_port: Optional[int] = None,
+    ) -> int:
         """Создаёт запись ноды после успешной установки (mTLS, shared cert)."""
         async with async_session_maker() as db:
             result = await db.execute(select(Server).order_by(Server.position.desc()))
@@ -320,6 +330,7 @@ class DeployJobManager:
                 proxy_url=proxy_url,
                 pki_enabled=True,
                 uses_shared_cert=True,
+                ssh_port=ssh_port,
                 position=(last.position + 1) if last else 0,
             )
             db.add(server)
@@ -357,6 +368,9 @@ class DeployJobManager:
             try:
                 await proxy_to_node(server, "POST", "/api/ssh/config", preset["ssh"], timeout=30.0)
                 self._emit(job, {"type": "log", "line": f"[panel] SSH-конфиг применён (пресет: {label})"})
+                # Ленивый импорт — как в _bind_profiles, чтобы не тянуть роутер на уровне модуля
+                from app.routers.ssh_security import _cache_sshd_port, _valid_port
+                await _cache_sshd_port(server_id, _valid_port(preset["ssh"].get("port")))
             except Exception as exc:  # noqa: BLE001 — best-effort постшаг
                 self._emit(job, {"type": "log", "line": f"[panel] SSH-конфиг не применён: {exc}"})
             try:
