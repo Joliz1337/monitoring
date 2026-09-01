@@ -2,6 +2,7 @@ import { Terminal, KeyRound, Save, Loader2, Plus, X, Network, Shield, Route, Glo
 import { AnimatePresence, motion } from 'framer-motion'
 import { useTranslation } from 'react-i18next'
 import { Tooltip } from '../ui/Tooltip'
+import { Checkbox } from '../ui/Checkbox'
 import ReloadCmdPresetChips from '../wildcard/ReloadCmdPresetChips'
 import type {
   RemnawaveCertProfile,
@@ -205,11 +206,9 @@ export default function DeployTargetFields({
         </div>
 
         <label className="flex items-center gap-2.5 cursor-pointer">
-          <input
-            type="checkbox"
+          <Checkbox
             checked={deploy.changePassword}
             onChange={(e) => onChange({ changePassword: e.target.checked })}
-            className="w-4 h-4 rounded accent-accent-500 cursor-pointer"
           />
           <span className="text-sm text-dark-200">{t('servers.deploy_change_password')}</span>
         </label>
@@ -231,21 +230,18 @@ export default function DeployTargetFields({
         <p className="text-xs text-dark-400">{t('servers.deploy_extras')}</p>
 
         <label className="flex items-center gap-2.5 cursor-pointer">
-          <input
-            type="checkbox"
+          <Checkbox
             checked={deploy.installWarp}
             onChange={(e) => onChange({ installWarp: e.target.checked })}
-            className="w-4 h-4 rounded accent-accent-500 cursor-pointer"
           />
           <span className="text-sm text-dark-200">{t('servers.deploy_install_warp')}</span>
         </label>
 
         <label className="flex items-start gap-2.5 cursor-pointer">
-          <input
-            type="checkbox"
+          <Checkbox
             checked={deploy.installOptimizations}
             onChange={(e) => onChange({ installOptimizations: e.target.checked })}
-            className="w-4 h-4 mt-0.5 rounded accent-accent-500 cursor-pointer"
+            className="mt-0.5"
           />
           <span className="text-sm text-dark-200">
             {t('servers.deploy_install_optimizations')}
@@ -288,14 +284,12 @@ export default function DeployTargetFields({
         )}
 
         <label className="flex items-center gap-2.5 cursor-pointer">
-          <input
-            type="checkbox"
+          <Checkbox
             checked={deploy.installRemnawave}
             onChange={(e) => onChange({
               installRemnawave: e.target.checked,
               remnaCertMode: e.target.checked && remnaCertProfiles.length > 0 ? 'saved' : 'inline',
             })}
-            className="w-4 h-4 rounded accent-accent-500 cursor-pointer"
           />
           <span className="text-sm text-dark-200">{t('servers.deploy_install_remnawave')}</span>
         </label>
@@ -418,11 +412,9 @@ export default function DeployTargetFields({
         </AnimatePresence>
 
         <label className="flex items-center gap-2.5 cursor-pointer">
-          <input
-            type="checkbox"
+          <Checkbox
             checked={deploy.installProxy}
             onChange={(e) => onChange({ installProxy: e.target.checked })}
-            className="w-4 h-4 rounded accent-accent-500 cursor-pointer"
           />
           <span className="text-sm text-dark-200">{t('servers.deploy_install_proxy')}</span>
         </label>
@@ -496,11 +488,10 @@ export default function DeployTargetFields({
         </div>
 
         <label className="flex items-start gap-2.5 cursor-pointer">
-          <input
-            type="checkbox"
+          <Checkbox
             checked={deploy.wildcardSslEnabled}
             onChange={(e) => onChange({ wildcardSslEnabled: e.target.checked })}
-            className="w-4 h-4 mt-0.5 rounded accent-accent-500 cursor-pointer"
+            className="mt-0.5"
           />
           <span className="text-sm text-dark-200">
             <span className="flex items-center gap-1.5">

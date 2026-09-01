@@ -50,6 +50,7 @@ import {
 import { streamNdjsonGet, StreamUnauthorizedError } from '../utils/ndjsonStream'
 import InfraTree from '../components/Infra/InfraTree'
 import { Tooltip } from '../components/ui/Tooltip'
+import { Checkbox } from '../components/ui/Checkbox'
 import { CopyableIp } from '../components/ui/CopyableIp'
 import { extractHost } from '../utils/format'
 import { describeAllowedDomains, nodeIsRestricted } from '../utils/nodeCapabilities'
@@ -1057,8 +1058,7 @@ export default function Servers() {
               {/* Авторазвёртывание по SSH */}
               <div className="rounded-xl border border-dark-700/50 bg-dark-800/30 overflow-hidden">
                 <label className="flex items-center gap-3 p-4 cursor-pointer">
-                  <input
-                    type="checkbox"
+                  <Checkbox
                     checked={deploy.enabled}
                     onChange={(e) => {
                       const enabled = e.target.checked
@@ -1069,7 +1069,6 @@ export default function Servers() {
                         setDeployLog([])
                       }
                     }}
-                    className="w-4 h-4 rounded accent-accent-500 cursor-pointer"
                   />
                   <Rocket className="w-4 h-4 text-accent-500 flex-shrink-0" />
                   <div>
