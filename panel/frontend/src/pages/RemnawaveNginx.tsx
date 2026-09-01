@@ -1118,7 +1118,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                       {noCandidates ? (
                         <div className="text-xs text-dark-500">{t('remnawave_nginx.no_available_servers')}</div>
                       ) : hasFolders ? (
-                        <div className="space-y-1 max-h-64 overflow-y-auto">
+                        <div className="space-y-1 max-h-[32rem] overflow-y-auto">
                           {sortedFolderNames
                             .filter(name => filteredCandidates.folders.has(name))
                             .map(name => renderCandidateGroup(name, name, filteredCandidates.folders.get(name)!, true))}
