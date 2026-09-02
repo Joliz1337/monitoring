@@ -2866,6 +2866,7 @@ export interface NetworkInterface {
   name: string
   is_up: boolean
   is_default: boolean
+  kind: 'physical' | 'bond' | 'vlan' | 'bridge'
   addresses: NetworkAddress[]
 }
 

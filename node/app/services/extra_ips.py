@@ -49,7 +49,7 @@ from app.models.network import (
 from app.services.cpu_affinity import default_interface
 from app.services.host_executor import ExecuteResult, HostExecutor
 from app.services.host_files import read_host_file_exact, write_host_file
-from app.services.net_interfaces import list_physical_interfaces
+from app.services.net_interfaces import InterfaceInfo, list_address_interfaces
 from app.services.time_sync import parse_key_values
 
 logger = logging.getLogger(__name__)
@@ -260,8 +260,11 @@ def parse_default_routes(json4: str, json6: str) -> dict[str, tuple[str, str]]:
         except ValueError:
             continue
         for entry in entries:
-            if entry.get("dev"):
-                routes[family] = (str(entry["dev"]), str(entry.get("prefsrc") or ""))
+            # Multipath-маршрут (два шлюза на bond0) держит dev внутри nexthops
+            nexthops = entry.get("nexthops") or [{}]
+            dev = entry.get("dev") or nexthops[0].get("dev")
+            if dev:
+                routes[family] = (str(dev), str(entry.get("prefsrc") or ""))
                 break
     return routes
 
@@ -505,7 +508,9 @@ def check_request(
     которые уже стоят и наши."""
     iface = request.interface
     if iface not in physical:
-        raise ExtraIpValidationError(f"'{iface}' is not a physical interface of this host")
+        raise ExtraIpValidationError(
+            f"'{iface}' cannot carry addresses on this host (needs a physical NIC that is not enslaved, a bond, a VLAN or a bridge)"
+        )
     if not physical[iface]:
         raise ExtraIpValidationError(f"interface '{iface}' is down")
     live = interfaces.get(iface) or LiveInterface(name=iface)
@@ -674,7 +679,7 @@ class ExtraIpManager:
 
     # ── живые данные ──
 
-    async def _live(self) -> tuple[dict[str, LiveInterface], dict[str, tuple[str, str]], dict[str, bool]]:
+    async def _live(self) -> tuple[dict[str, LiveInterface], dict[str, tuple[str, str]], list[InterfaceInfo]]:
         """Адреса и default-маршруты хоста. Маршруты читаются отдельно и без
         влияния на код выхода: на хосте с `ipv6.disable=1` команда `ip -6 route`
         падает, и раньше это молча обнуляло весь список адресов."""
@@ -691,8 +696,8 @@ class ExtraIpManager:
         )
         parts = routes_raw.stdout.split("@@")
         routes = parse_default_routes(parts[0] if parts else "", parts[1] if len(parts) > 1 else "")
-        physical = dict(await list_physical_interfaces(self._executor, include_down=True))
-        return interfaces, routes, physical
+        candidates = await list_address_interfaces(self._executor)
+        return interfaces, routes, candidates
 
     @staticmethod
     def _mac(iface: str) -> str:
@@ -714,7 +719,7 @@ class ExtraIpManager:
 
     async def state(self) -> NetworkStateResponse:
         try:
-            interfaces, routes, physical = await self._live()
+            interfaces, routes, candidates = await self._live()
         except ExtraIpUnsupportedError as exc:
             logger.warning("extra ips: cannot read host addresses: %s", exc)
             return NetworkStateResponse(
@@ -724,7 +729,8 @@ class ExtraIpManager:
         managed = self.read_managed()
         default = default_interface()
         states: list[InterfaceState] = []
-        for name, is_up in sorted(physical.items(), key=lambda item: (item[0] != default, item[0])):
+        for candidate in sorted(candidates, key=lambda item: (item.name != default, item.name)):
+            name, is_up = candidate.name, candidate.is_up
             live = interfaces.get(name) or LiveInterface(name=name)
             managed_here = {cidr for owner, cidr in managed if owner == name}
             primary = primary_addresses(live, routes, managed_here)
@@ -732,6 +738,7 @@ class ExtraIpManager:
                 name=name,
                 is_up=is_up,
                 is_default=name == default,
+                kind=candidate.kind,
                 addresses=[
                     LiveAddress(
                         address=addr.address, prefix=addr.prefix, family=addr.family, scope=addr.scope,
@@ -788,7 +795,8 @@ class ExtraIpManager:
             if current and current.status in ("pending", "applying"):
                 raise ExtraIpBusyError(current.id)
 
-            interfaces, routes, physical = await self._live()
+            interfaces, routes, candidates = await self._live()
+            physical = {candidate.name: candidate.is_up for candidate in candidates}
             backend = await self._detect(request.interface)
             if backend is None:
                 raise ExtraIpValidationError(f"cannot detect the network backend of {request.interface}")

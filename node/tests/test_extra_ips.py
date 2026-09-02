@@ -61,6 +61,7 @@ from app.services.extra_ips import (  # noqa: E402
     splice_ifupdown_block,
 )
 from app.services.host_executor import ExecuteResult  # noqa: E402
+from app.services.net_interfaces import parse_interface_listing  # noqa: E402
 
 
 @dataclass
@@ -107,6 +108,19 @@ IP_ADDR_JSON = """[
 
 ROUTE4_JSON = '[{"dst":"default","gateway":"203.0.113.1","dev":"eth0","protocol":"dhcp","prefsrc":"203.0.113.10"}]'
 ROUTE6_JSON = '[{"dst":"default","gateway":"fe80::1","dev":"eth0","protocol":"ra"}]'
+ROUTE6_MULTIPATH_JSON = ('[{"dst":"default","protocol":"ra","metric":1024,"nexthops":['
+                         '{"gateway":"fe80::1","dev":"bond0","weight":1},{"gateway":"fe80::2","dev":"bond0","weight":1}]}]')
+LISTING = """lo unknown other no
+eth0 up physical no
+eth1 up physical yes
+eth2 down physical no
+bond0 up bond no
+bond0.10 up vlan no
+docker0 up bridge no
+br0 up bridge no
+veth1234 up other yes
+wg0 unknown other no
+"""
 
 NETPLAN_GET = """version: 2
 ethernets:
@@ -153,6 +167,17 @@ class ParseIpAddrTests(unittest.TestCase):
         self.assertEqual(routes["ipv4"], ("eth0", "203.0.113.10"))
         self.assertEqual(routes["ipv6"], ("eth0", ""))
         self.assertEqual(parse_default_routes("", "garbage"), {})
+
+    def test_multipath_route_takes_dev_from_nexthops(self):
+        routes = parse_default_routes("", ROUTE6_MULTIPATH_JSON)
+        self.assertEqual(routes["ipv6"], ("bond0", ""))
+
+    def test_interface_listing_keeps_only_address_bearing_interfaces(self):
+        listing = parse_interface_listing(LISTING)
+        self.assertEqual([(i.name, i.is_up, i.kind) for i in listing], [
+            ("eth0", True, "physical"), ("eth2", False, "physical"),
+            ("bond0", True, "bond"), ("bond0.10", True, "vlan"), ("br0", True, "bridge"),
+        ])
 
 
 class PrimaryAddressTests(unittest.TestCase):
@@ -463,7 +488,7 @@ class ManagerTests(unittest.TestCase):
             "ip -j addr show": FakeResult(stdout=IP_ADDR_JSON),
             # Хост без IPv6: вторая команда падает, но код выхода блока всегда 0
             "route show default": FakeResult(stdout=ROUTE4_JSON + "\n@@\n"),
-            "/sys/class/net/*/device": FakeResult(stdout="eth0 up\neth1 up\n"),
+            "for d in /sys/class/net/*": FakeResult(stdout="eth0 up physical no\neth1 up physical no\n"),
             "extra-ips.sh detect": FakeResult(stdout="NETPLAN=yes\nNETPLAN_GET_B64=" + base64.b64encode(NETPLAN_GET.encode()).decode()),
         }
 

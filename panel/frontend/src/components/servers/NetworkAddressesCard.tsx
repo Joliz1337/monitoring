@@ -296,6 +296,7 @@ function InterfaceBlock({ iface, canRemove, onRemove }: {
     <div className={`mt-3 ${iface.is_up ? '' : 'opacity-60'}`}>
       <div className="flex items-center gap-2 text-sm text-dark-200 font-medium mb-1">
         <span className="font-mono">{iface.name}</span>
+        {iface.kind !== 'physical' && <Badge tone="muted">{iface.kind}</Badge>}
         {iface.is_default && <Badge tone="accent">{t('server_details.network_default_badge')}</Badge>}
         {!iface.is_up && <Badge tone="warning">{t('server_details.network_down_badge')}</Badge>}
       </div>

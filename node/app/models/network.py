@@ -104,6 +104,7 @@ class InterfaceState(BaseModel):
     name: str
     is_up: bool
     is_default: bool
+    kind: str  # physical | bond | vlan | bridge
     addresses: list[LiveAddress]
 
 
