@@ -223,7 +223,7 @@ panel/
 │       ├── routers/traffic.py           # Traffic API роутер: чтение истории трафика из базы панели
 │       └── services/
 │           ├── ssh_manager.py           # Пресеты безопасности SSH + proxy helper
-│           ├── net_utils.py             # Общие сетевые хелперы: is_public_range(), resolve_panel_ip(), host_to_ip()
+│           ├── net_utils.py             # Общие сетевые хелперы: внешний IP панели (panel_ip_info()/resolve_panel_ip()), is_public_range(), host_to_ip()
 │           ├── network_addresses.py     # Грамматика ввода доп. IP-адресов: IP, IP/маска, диапазон, подсеть целиком → список
 │           ├── network_transactions.py  # Транзакции доп. IP: фоновая задача apply → проверка связи новым соединением → confirm
 │           ├── update_channel.py        # Канал обновлений (main/dev): кэш ветки, GitHub-URL по каналу
@@ -367,7 +367,8 @@ Lifecycle управляется через `lifespan` в `main.py`. Выбор 
 ### Блокирующие вызовы вне event loop
 
 - **Docker SDK и статистика хоста.** `routers/system.py` — вызовы docker SDK в апдейтере (`get_docker_client`, `containers.get/run/wait/logs/remove`, `images.pull`) и сбор статистики CPU/RAM/диска панели (`_collect_host_stats()`, использует блокирующий `psutil.cpu_percent(interval=0.5)`) выполняются через `asyncio.to_thread` — синхронный docker-py (общается с сокетом через `requests`) и `psutil` иначе держали бы event loop панели на время своей работы, замораживая заодно и `/health`.
-- **DNS-резолв.** `resolve_host()`/`resolve_panel_ip()`/`host_to_ip()` (`app/services/net_utils.py`) резолвят через `asyncio.get_running_loop().getaddrinfo()`, а не блокирующий `socket.gethostbyname` — недоступный резолвер иначе держал бы вызов до системного таймаута, а резолв идёт в цикле по всем нодам (сборка allowlist блок-листа и анти-DDoS whitelist).
+- **DNS-резолв.** `resolve_host()`/`host_to_ip()` (`app/services/net_utils.py`) резолвят через `asyncio.get_running_loop().getaddrinfo()`, а не блокирующий `socket.gethostbyname` — недоступный резолвер иначе держал бы вызов до системного таймаута, а резолв идёт в цикле по всем нодам (сборка allowlist блок-листа и анти-DDoS whitelist).
+- **Внешний IP панели.** `panel_ip_info()`/`resolve_panel_ip()` (`app/services/net_utils.py`) определяют адрес, с которого панель ходит к нодам, тремя способами по порядку: ответ сервисов «какой у меня IP» (`PUBLIC_IP_SERVICES`: ipify, icanhazip, ifconfig.me, checkip.amazonaws.com, ident.me — по очереди, `PUBLIC_IP_SERVICE_TIMEOUT` 3 с на каждый; транспорт привязан к `local_address="0.0.0.0"`, чтобы сервис с AAAA-записью не ответил IPv6-адресом, `trust_env=False` — мимо HTTP_PROXY окружения) → адрес исходящего интерфейса по UDP-connect к `1.1.1.1` (пакеты не шлются, ядро лишь выбирает source-адрес; принимается только публичный — внутри docker-bridge это `172.18.x.x`) → A-запись домена из `DOMAIN` (последний резерв: за прокси Cloudflare даёт адрес Cloudflare). Любой кандидат проходит `_parse_public_ipv4()` — только IPv4 и только вне `NON_PUBLIC_NETS`. Результат кэшируется: успех — `PANEL_IP_CACHE_TTL` (10 мин), промах — `PANEL_IP_RETRY_TTL` (1 мин); `asyncio.Lock` не даёт параллельным вызовам опрашивать сервисы одновременно, смена адреса логируется. Потребители: токены установки нод (`panel_ip` в NODE_SECRET), allowlist блок-листов и whitelist анти-DDoS, Xray-тест, `GET /api/system/panel-ip` (отдаёт `ip`, `source` = `external`/`interface`/`dns`, `domain`). Тесты — `tests/test_panel_ip.py`.
 
 ### Frontend: авто-обновление данных
 
@@ -598,7 +599,7 @@ PK таблицы — `BigInteger` (не int32). При 500 нодах с инт
 
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
-| GET | /api/system/panel-ip | IP-адрес панели (резолвится из домена) |
+| GET | /api/system/panel-ip | Внешний IP панели и способ определения (`source`: external/interface/dns) |
 | GET | /api/system/version/base | Панель + GitHub-версии + список нод из БД, без запросов к нодам (мгновенный ответ) |
 | GET | /api/system/nodes/{id}/version | Версия и статус одной ноды (SSH/сетевой запрос к ней) — фронт догружает поштучно после `version/base` |
 | GET | /api/system/stats | Статистика сервера панели (CPU, RAM, диск) |
@@ -1299,7 +1300,7 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 
 Доверенные IP/CIDR, которые **всегда** проходят через ноду вне зависимости от любых блокировок. ACCEPT-правило для allowlist вставляется на позицию 1 в цепочке iptables — выше всех DROP. Только глобальная область (per-server allowlist не поддерживается).
 
-Список, рассылаемый на ноды (`get_allow_ips_global()`), собирается из ручных allow-правил (`list_type="allow"`) **плюс** автоматически IP панели (резолв домена) и IP всех активных нод — управляющий трафик панель↔нода никогда не попадёт под DROP, даже если в источнике блок-листа окажется мусор.
+Список, рассылаемый на ноды (`get_allow_ips_global()`), собирается из ручных allow-правил (`list_type="allow"`) **плюс** автоматически внешний IP панели (`resolve_panel_ip()`) и IP всех активных нод — управляющий трафик панель↔нода никогда не попадёт под DROP, даже если в источнике блок-листа окажется мусор.
 
 **Поле `list_type` в правилах:**
 
@@ -2324,7 +2325,7 @@ Bulk-эндпоинты правил и серверов существуют н
 
 **Два фоновых цикла (`AntiDdosManager`, singleton, `panel/backend/app/services/antiddos_manager.py`):**
 1. **Whitelist push** — раз в час (настраивается) собирает whitelist из трёх частей и рассылает его на каждую ноду через `POST /api/antiddos/whitelist/sync`:
-   - авто — IP всех активных нод + IP панели (резолвится из домена);
+   - авто — IP всех активных нод + внешний IP панели (`resolve_panel_ip()`);
    - ручная — `user_cidrs` из настроек;
    - авто-источники по URL — см. «Авто-источники whitelist» ниже.
 

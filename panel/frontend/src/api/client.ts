@@ -1353,6 +1353,7 @@ export const bulkApi = {
 
 export interface PanelIpInfo {
   ip: string | null
+  source: 'external' | 'interface' | 'dns' | null
   domain: string
 }
 

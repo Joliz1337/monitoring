@@ -21,7 +21,7 @@ from app.config import get_settings
 from app.database import get_db, async_session
 from app.models import Server, PanelSettings
 from app.services import update_channel
-from app.services.net_utils import resolve_host
+from app.services.net_utils import panel_ip_info
 from app.services.panel_host_metrics import HostHistoryPeriod, load_host_history
 from app.services.wildcard_ssl import USE_FOR_PANEL_SETTING
 
@@ -69,28 +69,14 @@ def invalidate_node_cache(server_id: int) -> None:
     invalidate_node_nic_info_cache(server_id)
 
 
-async def get_panel_ip() -> str | None:
-    """Get panel's IP address by resolving the configured domain"""
-    settings = get_settings()
-    domain = settings.domain
-
-    if not domain:
-        return None
-
-    ip = await resolve_host(domain)
-    if ip is None:
-        logger.warning(f"Failed to resolve domain: {domain}")
-    return ip
-
-
 @router.get("/panel-ip")
 async def get_panel_ip_endpoint(_: dict = Depends(verify_auth)):
-    """Get panel's IP address"""
-    ip = await get_panel_ip()
-    settings = get_settings()
+    """Внешний IP панели и способ, которым он определён (external/interface/dns)"""
+    found = await panel_ip_info()
     return {
-        "ip": ip,
-        "domain": settings.domain
+        "ip": found.ip if found else None,
+        "source": found.source.value if found else None,
+        "domain": get_settings().domain,
     }
 
 VERSION_FILE = Path("/app/VERSION")
