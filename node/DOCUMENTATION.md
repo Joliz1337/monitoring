@@ -18,6 +18,7 @@ API агент для сбора метрик сервера, отслежива
 - **Firewall Profiles** — атомарное применение UFW-профилей от панели: backup → reset → apply → enable, авторолбэк при ошибке, node-API-port-guard (порт из `NODE_API_PORT`), drift-детекция по SHA256-хэшу
 - **DNAT-маршрутизация** — проброс портов средствами netfilter (iptables nat DNAT + MASQUERADE + FORWARD ACCEPT) в собственных цепочках `MON_DNAT*`: атомарное применение набора правил от панели одним `iptables-restore --noflush`, счётчики соединений/байт по правилу, файл состояния и самолечение после ребута/`ufw reset`
 - **Дополнительные IP-адреса** — добавление/удаление IPv4/IPv6 на физическом интерфейсе транзакцией с таймером отката на хосте: бэкап → запись в конфиг того бэкенда, что владеет интерфейсом (netplan, systemd-networkd, NetworkManager, ifupdown; без них — свой oneshot-юнит) → живое применение → проверка → таймер; подтверждает панель, заново достучавшись до ноды, иначе хост сам возвращает бэкап, а незавершённую транзакцию при перезагрузке откатывает boot-guard до старта сети. Основной адрес и адреса хостера — только чтение
+- **Exit-прокси** — локальный SOCKS5 (`127.0.0.1:<port>`) в процессе агента для Google-трафика xray Remnawave: пул исходящих IPv4 ноды (основной и добавленные панелью) плюс WARP, проверки «как Google видит выход» curl'ом с хоста (страна, капча поиска, Gemini, свои URL), автономный липкий выбор здорового выхода со сбросом соединений старого при переключении, состояние переживает рестарт контейнера; панель только присылает конфиг и читает статус
 - **Анти-DDoS** — многослойная защита: дежурный режим без лимитов, аварийный режим (SYNPROXY + hashlimit в отдельной iptables-цепочке `ANTIDDOS`, пороги авто-масштабируются по CPU/RAM хоста), автодетект атаки по сигналам из `/proc` (watchdog), whitelist на ipset, переживающий ребут и недоступность панели, self-check доступности ноды во время аварийного режима
 - **Системные оптимизации** — sysctl/лимиты/HAProxy `maxconn` вычисляются на самой ноде из её MemTotal/nproc единым рендерером (`tune-sysctl.sh`), а не приходят готовыми от панели; авто-ре-рендер при каждой загрузке подхватывает ресайз VPS
 - **Права доступа панели (NODE_CAPABILITIES)** — владелец ноды опционально сужает, что панель может делать через API, строкой в `.env`: по доменам (traffic/haproxy/firewall/ipset/ssh/ssl/antiddos/remnawave/system/exec/dnat) и уровню доступа (без доступа/только чтение/чтение и запись); пусто — полный доступ
@@ -168,7 +169,13 @@ node/
 │       ├── remnawave_nginx_manager.py  # RemnawaveNginxManager: discover, get_config, status, logs, validate_content, apply_config, reload, restart
 │       ├── net_interfaces.py       # list_physical_interfaces() — физические интерфейсы хоста (общий для nic-info и доп. IP)
 │       ├── extra_ips.py            # Доп. IP-адреса: детект бэкенда, рендер конфигов, guard'ы, ExtraIpManager (см. «Дополнительные IP-адреса»)
-│       └── host_extra_ips.sh       # Host-скрипт транзакции (→ /opt/monitoring/scripts/extra-ips.sh): backup/apply/verify/timer/rollback/boot-guard
+│       ├── host_extra_ips.sh       # Host-скрипт транзакции (→ /opt/monitoring/scripts/extra-ips.sh): backup/apply/verify/timer/rollback/boot-guard
+│       └── exit_proxy/             # Exit-прокси (см. «Exit-прокси»)
+│           ├── models.py           # Pydantic: ExitProxyConfig (от панели), Candidate, CheckResult, ExitProxyStatus, ExitEvent
+│           ├── selection.py        # Чистые функции: слияние кандидатов, вердикт «здоров», липкий выбор выхода
+│           ├── socks_server.py     # SOCKS5-сервер на loopback (CONNECT), relay, сброс соединений чужого выхода, коннекторы direct/через socks
+│           ├── manager.py          # ExitProxyManager: состояние, цикл проверок, переключение, self-test, статус
+│           └── host_check.sh       # Host-скрипт проверок (→ /opt/monitoring/scripts/exit-proxy-check.sh): probe <ip|warp>, selftest
 ├── scripts/
 │   └── apply-update.sh   # Логика обновления (запускается из свежего репо)
 ├── tests/                # Юнит-тесты на stdlib unittest (перечислены в разделах ниже)
@@ -196,6 +203,7 @@ node/
 | Порт | Доступ | Описание |
 |------|--------|----------|
 | 9100 (`NODE_API_PORT`) | Только Panel IP | API мониторинга |
+| 7590 (порт задаёт панель) | Только loopback | Локальный SOCKS5 exit-прокси для xray Remnawave — поднимается лишь на нодах, включённых в раздел |
 | 80 | Все | Let's Encrypt верификация |
 | 22 | Все | SSH |
 
@@ -843,6 +851,32 @@ PEM разбирается в процессе агента через `cryptogr
 **Guard'ы (`check_request`)** до любого касания хоста: интерфейс — физический и up (`list_physical_interfaces`); remove — только из `managed.list`, не `protected`, не primary; add уже стоящего чужого адреса — отказ, стоящего нашего — молча пропускается (идемпотентность), адрес на другом интерфейсе — отказ; ≤256 адресов за транзакцию, `add ∩ remove = ∅` (модель). Роутер `routers/network.py` (prefix `/api/system/network` → домен `system` без правки карт capabilities): guard'ы → 400, занято → 409. nginx: `location /api/system/network/` с `proxy_read/send_timeout 180s` — `netplan apply` на медленном хосте до ~30 с плюс проверка DAD; таймаут не меньше `APPLY_TIMEOUT_SECONDS` панели (тест-инвариант с обеих сторон).
 
 **Файлы:** `node/app/services/host_extra_ips.sh`, `node/app/services/extra_ips.py`, `node/app/services/net_interfaces.py`, `node/app/models/network.py`, `node/app/routers/network.py`, `node/app/main.py` (роутер + `start()`), `node/nginx/templates/api.conf.template`. Тесты — `node/tests/test_extra_ips.py`: разбор `ip -j addr`/маршрутов и primary, резолв netplan-определений (имя/set-name/MAC/обёртка `network:`), выбор бэкенда, рендеры (netplan по разделам, networkd drop-in, ifupdown-стансы, `splice` — вставка/замена/удаление без изменения байт вне блока), guard'ы, round-trip файлов состояния и history, план и разбор вывода скрипта по кодам выхода, `bash -n` и наличие verbs/`AccuracySec=1s`, поля юнитов, инвариант nginx-таймаута, `ExtraIpManager` на FakeExecutor.
+
+### Exit-прокси (`exit_proxy/`)
+
+Google банит выходы WARP целыми диапазонами (капча «подозрительный трафик») и со временем относит IP серверов к RU по трафику российских клиентов — Gemini для такого адреса недоступен. Агент на включённых панелью нодах держит локальный SOCKS5 `127.0.0.1:<port>` (по умолчанию 7590), в который xray Remnawave отправляет Google-трафик, и сам решает, через какой исходящий адрес его выпускать. Контейнер агента в сети хоста, поэтому порт виден remnanode, а привязка исходящего адреса (`local_addr`) работает на любой IP ноды. Панель присылает конфиг (`PUT /config`) и читает статус — без неё прокси продолжает работать и переключаться.
+
+**Кандидаты-выходы.** IPv4 default-интерфейса из `ExtraIpManager.state()` (`scope=global`, с флагами `primary`/`managed`) и WARP (TCP-проба `127.0.0.1:9091`). `merge_candidates()` сохраняет порядок пользователя из конфига (`candidates_order`), новые адреса ставит перед WARP (запасной выход), исчезнувшие убирает, `candidates_disabled` снимает участие. Порядок = приоритет.
+
+**Проверки (`host_check.sh` → `/opt/monitoring/scripts/exit-proxy-check.sh`, ставится по sha256 как `extra-ips.sh`).** Все запросы — curl с хоста через nsenter: для IP `curl -4 --interface <ip>`, для WARP `curl --socks5-hostname 127.0.0.1:9091`. `probe <kind> <address> <timeout> <base64 payload>` печатает одну строку JSON: трасса `cloudflare.com/cdn-cgi/trace` (`ip`, `warp`; нет ответа — `ok:false`, дальше не идёт), страна по YouTube (`"GL":"XX"` в конфиге страницы, cookie `SOCS=CAI` обходит экран согласия) с подтверждением по подвалу поиска (`country_confirm`, на вердикт не влияет), капча поиска (429 или редирект на `/sorry/`), Gemini (`blocked` по тексту «isn't supported/available in your country/region» либо 403/429, `ok` при 200, иначе `error`), пользовательские проверки (`-L`, вердикт по `block_status`, `block_url_regex` на `url_effective`, `block_regex` на теле, `expect_status`; нет ответа — `status:null`). Payload — строки `BUILTIN`/`CHECK` с полями через `\x1f` (табуляция в bash схлопывает пустые поля). Кандидаты проверяются параллельно (семафор 4), таймаут исполнителя `check_timeout×7+15`. `selftest <port> <timeout>` — трасса через собственный socks.
+
+**Вердикт и выбор (`selection.py`).** `health()`: `False` — страна из `blocked_countries`, капча, Gemini `blocked`, сработавшая пользовательская проверка; `None` («не знаем») — проверки не было, трасса не прошла, страна не определилась, Gemini `error`, проверка без ответа; иначе `True`. Одиночный таймаут выход не переключает — только подтверждённый блок. `choose_exit()`: `manual` с валидным `pinned_candidate` → он; иначе score healthy=0 / unknown=1 / unhealthy=2 по включённым, текущий остаётся, если его score не хуже лучшего (липкость); лучший unhealthy у всех → первый включённый по приоритету (`no_healthy`).
+
+**SOCKS5 (`socks_server.py`).** RFC 1928 без аутентификации, только `CONNECT` (UDP/BIND → `0x07`; QUIC клиент глушит правилом в Remnawave), ATYP IPv4/домен/IPv6. Выход подставляет менеджер через `route()` на каждое новое соединение: IP → `asyncio.open_connection(..., local_addr=(ip, 0), family=AF_INET)` (домен резолвится только в A-записи), WARP → мини-клиент SOCKS5 к 9091 с передачей домена (DNS внутри туннеля). Relay по 64 КиБ с полузакрытием (EOF с одной стороны не рвёт ответ другой); лимит 4096 соединений. Каждое соединение помнит свой выход: `drop_connections(except_exit)` рвёт все чужие — при автоматическом и ручном переключении трафик, включая уже открытые сессии, сразу уходит на новый IP.
+
+**Менеджер (`manager.py`, `ExitProxyManager`, singleton, старт в lifespan).** Состояние — `exit_proxy.json` рядом с БД трафика (том агента; конфиг, кандидаты, результаты, текущий выход, self-test, хвост событий ≤200), атомарная запись. `apply_config()`: сохраняет, при первом включении сразу находит адреса и выбирает основной IP (проверки уточнят позже), поднимает/гасит/переносит socks по `enabled`/`port`, пересчитывает выбор по имеющимся результатам (страны, порядок, pin), при смене набора проверок будит цикл. Цикл: первая проверка через 20 с после старта, далее по `interval_minutes`; `run_checks()` под замком — обнаружение → пробы → `health` → `choose_exit` → при смене `current` сброс соединений и событие `switched` → self-test (ожидаемый IP — тот, что Google видел через этот выход, за NAT адрес интерфейса и внешний различаются; для WARP — `warp=on`). События: `switched`, `manual_switch`, `no_healthy` (один раз, пока держится), `recovered`, `started`, `stopped`, `check_failed`. Ошибка пробы одного кандидата — `error` в его результате, цикл не падает; порт занят — `listen_error` в статусе.
+
+| Метод | Endpoint | Описание |
+|-------|----------|----------|
+| GET | /api/system/exit-proxy/status | `enabled`, `listening`, `listen_error`, `port`, `current`, `select_mode`, `pinned_candidate`, `candidates[]` (+`healthy`, `last_check`), `warp_present`, `check_in_progress`, `last_check_at/error`, `self_test`, `stats` (активные/всего/неудачные соединения), `events` (последние 20), `script_installed` |
+| PUT | /api/system/exit-proxy/config | Полный конфиг `ExitProxyConfig` от панели → статус |
+| POST | /api/system/exit-proxy/check | Прогон в фоне → `202 {started}`; уже идёт → `409` |
+| POST | /api/system/exit-proxy/switch | `{candidate}` — ручное переключение (`manual` закрепляет, `auto` держит, пока здоров); неизвестный/отключённый → `400` |
+| GET | /api/system/exit-proxy/events | Последние события, `limit` ≤ 200 |
+
+Префикс `/api/system/` → домен `system` без правки карт capabilities. Ответы быстрые — своего `location` в nginx не нужно (общий 30 с). Ограничение: relay на Python рассчитан на Gemini, поиск и API, не на видео.
+
+**Файлы:** `node/app/services/exit_proxy/{models,selection,socks_server,manager}.py`, `host_check.sh`, `node/app/routers/exit_proxy.py`, `node/app/main.py`. Тесты: `test_exit_proxy_selection.py` (слияние, вердикт, липкость, manual, «ни одного здорового»), `test_exit_proxy_socks.py` (рукопожатие, CONNECT по IPv4/домену, отказ UDP/auth, сброс соединений только чужого выхода, цепочка через upstream-socks), `test_exit_proxy_manager.py` (FakeExecutor: прогон и выбор, переключение со сбросом живого соединения, `no_healthy` один раз, персистентность, смена порта/выключение, ручное переключение и pin, WARP-кандидат, payload проверок, установка скрипта).
 
 ### Анти-DDoS
 

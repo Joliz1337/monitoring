@@ -3058,4 +3058,180 @@ export const torrentBlockerApi = {
     }),
 }
 
+// ==================== Exit Proxy ====================
+// Локальный SOCKS5 на нодах с пулом исходящих IP; логика выбора выхода живёт на ноде
+
+export type ExitProxyInstallStatus = 'off' | 'pending' | 'active' | 'failed' | 'denied' | 'unsupported'
+export type ExitProxySelectMode = 'auto' | 'manual'
+export type ExitProxyBuiltinCheckKey = 'google_country' | 'google_captcha' | 'gemini'
+
+export interface ExitProxySettings {
+  enabled: boolean
+  check_interval_min: number
+  port: number
+  blocked_countries: string[]
+  notify_enabled: boolean
+  min_node_version: string
+  last_cycle_at: string | null
+  last_cycle_error: string | null
+}
+
+export type ExitProxySettingsPatch = Partial<Pick<
+  ExitProxySettings, 'enabled' | 'check_interval_min' | 'port' | 'blocked_countries' | 'notify_enabled'
+>>
+
+export interface ExitProxyStatus {
+  running: boolean
+  last_tick_at: string | null
+  last_error: string | null
+  enabled: boolean
+  port: number
+  min_node_version: string
+}
+
+export interface ExitCandidateCheck {
+  ok: boolean
+  status: number | null
+  detail: string
+}
+
+export interface ExitCandidate {
+  tag: string
+  kind: 'ip' | 'warp'
+  label: string
+  ip: string | null
+  primary: boolean
+  managed: boolean
+  priority: number
+  enabled: boolean
+  healthy: boolean | null
+  country: string | null
+  country_confirm: string | null
+  captcha: boolean
+  gemini: string | null
+  checks: Record<string, ExitCandidateCheck>
+  checked_at: string | null
+  error: string | null
+}
+
+export interface ExitProxyCurrentExit {
+  tag: string
+  label: string
+  ip: string | null
+  country: string | null
+  healthy: boolean | null
+}
+
+export interface ExitProxySelfTest {
+  ok: boolean
+  ip: string | null
+  expected: string | null
+  at: string | null
+  error: string | null
+}
+
+export interface ExitProxyNode {
+  server_id: number
+  name: string
+  folder: string | null
+  online: boolean
+  node_version: string | null
+  enabled: boolean
+  install_status: ExitProxyInstallStatus
+  sync_error: string | null
+  listening: boolean
+  listen_error: string | null
+  select_mode: ExitProxySelectMode
+  pinned_candidate: string | null
+  current_exit: ExitProxyCurrentExit | null
+  candidates: ExitCandidate[]
+  warp: { present: boolean }
+  check_in_progress: boolean
+  last_check_at: string | null
+  last_check_error: string | null
+  self_test: ExitProxySelfTest | null
+  stats: { active_connections: number; total_connections: number; failed_connections: number }
+  last_status_at: string | null
+}
+
+export interface ExitProxyNodePatch {
+  enabled?: boolean
+  select_mode?: ExitProxySelectMode
+  pinned_candidate?: string
+  candidates_order?: string[]
+  candidates_disabled?: string[]
+}
+
+export interface ExitProxyCustomCheck {
+  id: string
+  name: string
+  url: string
+  enabled: boolean
+  block_status: number[]
+  block_regex: string
+  block_url_regex: string
+  expect_status: number | null
+}
+
+export type ExitProxyCustomCheckInput = Omit<ExitProxyCustomCheck, 'id'>
+
+export interface ExitProxyChecks {
+  builtin: { key: ExitProxyBuiltinCheckKey; enabled: boolean }[]
+  custom: ExitProxyCustomCheck[]
+}
+
+export interface ExitProxyLogEntry {
+  id: number
+  at: string | null
+  server_id: number
+  server_name: string
+  kind: string
+  from: string | null
+  to: string | null
+  reason: string | null
+}
+
+export interface ExitProxySnippet {
+  outbound_json: string
+  rules_json: string
+  text: string
+}
+
+export const warpInstallStreamUrl = (jobId: string) =>
+  `/api/exit-proxy/warp-install/${jobId}/stream`
+
+// Проверка «сейчас» ждёт прогон на ноде (до 3 минут) — таймаут задан явно
+const EXIT_PROXY_CHECK_TIMEOUT_MS = 200_000
+const EXIT_PROXY_NODE_TIMEOUT_MS = 60_000
+
+export const exitProxyApi = {
+  getSettings: () => api.get<ExitProxySettings>('/exit-proxy/settings'),
+  updateSettings: (data: ExitProxySettingsPatch) =>
+    api.put<ExitProxySettings>('/exit-proxy/settings', data),
+  getStatus: () => api.get<ExitProxyStatus>('/exit-proxy/status'),
+  getNodes: () => api.get<{ nodes: ExitProxyNode[] }>('/exit-proxy/nodes'),
+  updateNode: (serverId: number, patch: ExitProxyNodePatch) =>
+    api.put<ExitProxyNode>(`/exit-proxy/nodes/${serverId}`, patch, { timeout: EXIT_PROXY_NODE_TIMEOUT_MS }),
+  checkNow: (serverId: number) =>
+    api.post<ExitProxyNode>(`/exit-proxy/nodes/${serverId}/check-now`, undefined, { timeout: EXIT_PROXY_CHECK_TIMEOUT_MS }),
+  switchExit: (serverId: number, tag: string) =>
+    api.post<ExitProxyNode>(`/exit-proxy/nodes/${serverId}/switch`, { tag }, { timeout: EXIT_PROXY_NODE_TIMEOUT_MS }),
+  installWarp: (serverId: number) =>
+    api.post<{ job_id: string }>(`/exit-proxy/nodes/${serverId}/install-warp`),
+  warpInstallJobs: () =>
+    api.get<{ jobs: RemnawaveInstallJobInfo[] }>('/exit-proxy/warp-install/jobs'),
+  getChecks: () => api.get<ExitProxyChecks>('/exit-proxy/checks'),
+  setBuiltinCheck: (key: ExitProxyBuiltinCheckKey, enabled: boolean) =>
+    api.put<ExitProxyChecks>(`/exit-proxy/checks/builtin/${key}`, { enabled }),
+  addCheck: (data: ExitProxyCustomCheckInput) =>
+    api.post<ExitProxyChecks>('/exit-proxy/checks/custom', data),
+  updateCheck: (id: string, data: ExitProxyCustomCheckInput) =>
+    api.put<ExitProxyChecks>(`/exit-proxy/checks/custom/${id}`, data),
+  deleteCheck: (id: string) =>
+    api.delete<ExitProxyChecks>(`/exit-proxy/checks/custom/${id}`),
+  getSnippet: () => api.get<ExitProxySnippet>('/exit-proxy/snippet'),
+  getLog: (limit = 100) =>
+    api.get<{ events: ExitProxyLogEntry[] }>('/exit-proxy/log', { params: { limit } }),
+}
+
 export default api

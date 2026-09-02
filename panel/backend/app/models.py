@@ -1187,3 +1187,63 @@ class ServerDowntime(Base):
     __table_args__ = (
         Index('idx_server_downtime_lookup', 'server_id', 'started_at'),
     )
+
+
+# ==================== Exit-прокси ====================
+
+class ExitProxySettings(Base):
+    """Singleton: общие настройки exit-прокси — порт локального socks, расписание
+    и набор проверок, одинаковые для всех включённых нод."""
+    __tablename__ = "exit_proxy_settings"
+
+    id = Column(Integer, primary_key=True)
+    enabled = Column(Boolean, default=False)
+    port = Column(Integer, default=7590)
+    check_interval_minutes = Column(Integer, default=30)
+    blocked_countries = Column(Text, nullable=True)  # JSON list
+    builtin_checks = Column(Text, nullable=True)     # JSON {google_country, google_captcha, gemini}
+    custom_checks = Column(Text, nullable=True)      # JSON list
+    telegram_enabled = Column(Boolean, default=True)
+    alert_cooldown_seconds = Column(Integer, default=1800)
+    last_cycle_at = Column(DateTime(timezone=True), nullable=True)
+    last_cycle_error = Column(Text, nullable=True)
+
+
+class ExitProxyNode(Base):
+    """Нода, включённая в exit-прокси: её правила выбора выхода и последний статус,
+    полученный с ноды. Строка остаётся и после выключения — порядок кандидатов
+    и pin не теряются."""
+    __tablename__ = "exit_proxy_nodes"
+
+    server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), primary_key=True)
+    enabled = Column(Boolean, default=True)
+    select_mode = Column(String(10), default="auto")
+    pinned_candidate = Column(String(64), nullable=True)
+    candidates_order = Column(Text, nullable=True)     # JSON list id
+    candidates_disabled = Column(Text, nullable=True)  # JSON list id
+    node_status = Column(Text, nullable=True)          # JSON — последний ответ /status ноды
+    current_candidate = Column(String(64), nullable=True)
+    self_test_ok = Column(Boolean, nullable=True)
+    last_event_at = Column(String(40), nullable=True)
+    config_hash = Column(String(64), nullable=True)
+    sync_status = Column(String(20), default="pending")  # pending | synced | failed | denied | unsupported
+    sync_error = Column(Text, nullable=True)
+    last_sync_at = Column(DateTime(timezone=True), nullable=True)
+    last_status_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class ExitProxyEvent(Base):
+    """Журнал exit-прокси: смены выхода, потеря здоровых кандидатов, self-test."""
+    __tablename__ = "exit_proxy_events"
+
+    id = Column(Integer, primary_key=True)
+    server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    kind = Column(String(40), nullable=False)
+    from_value = Column(String(64), nullable=True)
+    to_value = Column(String(64), nullable=True)
+    reason = Column(String(500), nullable=True)
+
+    __table_args__ = (
+        Index('idx_exit_proxy_events_server_created', 'server_id', 'created_at'),
+    )

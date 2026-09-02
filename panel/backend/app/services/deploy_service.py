@@ -154,6 +154,14 @@ def build_remnawave_install_command(remnawave_cert: str) -> str:
     return _render_unattended_command(env)
 
 
+def build_warp_install_command() -> str:
+    """Команда установки только Cloudflare WARP — кандидат-выход для exit-прокси."""
+    env = {"MON_INSTALL_WARP": "1"}
+    if update_channel.current_branch() != update_channel.STABLE_BRANCH:
+        env["MON_BRANCH"] = update_channel.current_branch()
+    return _render_unattended_command(env)
+
+
 def build_install_command(params: DeployParams) -> str:
     """Команда установки ноды мониторинга (+опции). Её же панель показывает
     оператору для полуавтоматического режима — запуск руками на сервере."""

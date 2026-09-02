@@ -1,9 +1,13 @@
-"""Установка ноды Remnawave на уже добавленный сервер через агента ноды.
+"""Установка компонентов на уже добавленный сервер через агента ноды.
 
-Панель запускает install.sh (MON_INSTALL_REMNAWAVE=1) на хосте через SSE-канал
-агента POST /api/system/execute-stream (nsenter) — SSH-креды не нужны. Установка
-идёт фоновой задачей, не привязанной к HTTP: обрыв вкладки её не прерывает; лог
+Панель запускает install.sh на хосте через SSE-канал агента
+POST /api/system/execute-stream (nsenter) — SSH-креды не нужны. Установка идёт
+фоновой задачей, не привязанной к HTTP: обрыв вкладки её не прерывает; лог
 стримится подписчикам и переигрывается при переподключении (как у деплоя).
+
+Менеджер общий: нода Remnawave (MON_INSTALL_REMNAWAVE=1) и WARP для exit-прокси
+(MON_INSTALL_WARP=1) отличаются только командой, стартовой строкой лога и тем,
+что делать после успеха.
 """
 from __future__ import annotations
 
@@ -13,7 +17,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator, Awaitable, Callable, Optional
 
 import httpx
 from sqlalchemy import update
@@ -104,7 +108,7 @@ async def run_install_on_node(server: Server, command: str) -> AsyncIterator[dic
 
 
 @dataclass
-class RemnawaveInstallJob:
+class HostInstallJob:
     id: str
     server_id: int
     server_name: str
@@ -118,11 +122,20 @@ class RemnawaveInstallJob:
     task: Optional[asyncio.Task] = None
 
 
-class RemnawaveInstallJobManager:
-    """In-memory реестр фоновых установок Remnawave с pub/sub лога."""
+OnSuccess = Callable[[int], Awaitable[None]]
 
-    def __init__(self) -> None:
-        self._jobs: dict[str, RemnawaveInstallJob] = {}
+
+class HostInstallJobManager:
+    """In-memory реестр фоновых установок через агента с pub/sub лога.
+
+    `start_message` — первая строка лога с подстановкой `{name}`; `on_success`
+    вызывается с id сервера после install.sh с нулевым кодом.
+    """
+
+    def __init__(self, start_message: str, on_success: Optional[OnSuccess] = None) -> None:
+        self._jobs: dict[str, HostInstallJob] = {}
+        self._start_message = start_message
+        self._on_success = on_success
 
     def _cleanup_finished(self) -> None:
         now = time.time()
@@ -132,7 +145,7 @@ class RemnawaveInstallJobManager:
         ]:
             self._jobs.pop(jid, None)
 
-    def get(self, job_id: str) -> Optional[RemnawaveInstallJob]:
+    def get(self, job_id: str) -> Optional[HostInstallJob]:
         return self._jobs.get(job_id)
 
     def list_jobs(self) -> list[dict]:
@@ -152,12 +165,12 @@ class RemnawaveInstallJobManager:
     def start(self, server: Server, command: str) -> str:
         self._cleanup_finished()
         job_id = uuid.uuid4().hex
-        job = RemnawaveInstallJob(id=job_id, server_id=server.id, server_name=server.name)
+        job = HostInstallJob(id=job_id, server_id=server.id, server_name=server.name)
         self._jobs[job_id] = job
         job.task = asyncio.create_task(self._run(job, server, command))
         return job_id
 
-    def _emit(self, job: RemnawaveInstallJob, event: dict) -> None:
+    def _emit(self, job: HostInstallJob, event: dict) -> None:
         if event.get("type") == "log":
             job.log.append(event.get("line", ""))
             if len(job.log) > LOG_BUFFER_LIMIT:
@@ -169,16 +182,16 @@ class RemnawaveInstallJobManager:
             except asyncio.QueueFull:
                 pass
 
-    def _finish(self, job: RemnawaveInstallJob, status: str, error: Optional[str] = None) -> None:
+    def _finish(self, job: HostInstallJob, status: str, error: Optional[str] = None) -> None:
         job.status = status
         job.error = error
         job.finished_at = time.time()
         self._emit(job, {"type": "done", "status": status, "exit_code": job.exit_code})
 
-    async def _run(self, job: RemnawaveInstallJob, server: Server, command: str) -> None:
+    async def _run(self, job: HostInstallJob, server: Server, command: str) -> None:
         try:
             self._emit(job, {"type": "start", "name": job.server_name})
-            self._emit(job, {"type": "log", "line": f"[panel] Устанавливаю ноду Remnawave на «{job.server_name}» через агента…"})
+            self._emit(job, {"type": "log", "line": "[panel] " + self._start_message.format(name=job.server_name)})
             async for event in run_install_on_node(server, command):
                 etype = event.get("type")
                 if etype == "error":
@@ -188,7 +201,8 @@ class RemnawaveInstallJobManager:
                 if etype == "done":
                     job.exit_code = event.get("exit_code")
                     if job.exit_code == 0:
-                        await self._mark_xray_installed(job.server_id)
+                        if self._on_success is not None:
+                            await self._on_success(job.server_id)
                         self._emit(job, {"type": "log", "line": "[panel] Установка завершена"})
                         self._finish(job, "success")
                     else:
@@ -200,20 +214,9 @@ class RemnawaveInstallJobManager:
             self._finish(job, "error", "Установка отменена")
             raise
         except Exception as exc:  # noqa: BLE001 — верхняя граница фоновой задачи
-            logger.error("Remnawave install job %s failed: %s", job.id, exc)
+            logger.error("Host install job %s failed: %s", job.id, exc)
             self._emit(job, {"type": "error", "message": str(exc)})
             self._finish(job, "error", str(exc))
-
-    async def _mark_xray_installed(self, server_id: int) -> None:
-        """Бейдж «xray» сразу, не дожидаясь 2-минутного цикла коллектора."""
-        try:
-            async with async_session_maker() as db:
-                await db.execute(
-                    update(Server).where(Server.id == server_id).values(has_xray_node=True)
-                )
-                await db.commit()
-        except Exception as exc:  # noqa: BLE001 — best-effort, коллектор поправит сам
-            logger.warning("Failed to mark has_xray_node for server %s: %s", server_id, exc)
 
     async def subscribe(self, job_id: str) -> AsyncIterator[dict]:
         job = self._jobs.get(job_id)
@@ -251,8 +254,23 @@ class RemnawaveInstallJobManager:
             job.subscribers.discard(queue)
 
 
-_manager = RemnawaveInstallJobManager()
+async def mark_xray_installed(server_id: int) -> None:
+    """Бейдж «xray» сразу, не дожидаясь 2-минутного цикла коллектора."""
+    try:
+        async with async_session_maker() as db:
+            await db.execute(
+                update(Server).where(Server.id == server_id).values(has_xray_node=True)
+            )
+            await db.commit()
+    except Exception as exc:  # noqa: BLE001 — best-effort, коллектор поправит сам
+        logger.warning("Failed to mark has_xray_node for server %s: %s", server_id, exc)
 
 
-def get_remnawave_install_manager() -> RemnawaveInstallJobManager:
+_manager = HostInstallJobManager(
+    start_message="Устанавливаю ноду Remnawave на «{name}» через агента…",
+    on_success=mark_xray_installed,
+)
+
+
+def get_remnawave_install_manager() -> HostInstallJobManager:
     return _manager

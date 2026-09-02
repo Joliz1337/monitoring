@@ -11,20 +11,9 @@ import {
   antiDdosApi, type AntiDdosSettings, type AntiDdosStatus, type NodeAntiDdosState,
   type AntiDdosSource,
 } from '../api/client'
+import { Toggle } from '../components/ui/Toggle'
 
 type TabType = 'control' | 'whitelist' | 'info'
-
-function Toggle({ on, onClick, disabled }: { on: boolean; onClick: () => void; disabled?: boolean }) {
-  return (
-    <button
-      onClick={onClick}
-      disabled={disabled}
-      className={`relative w-10 h-5 rounded-full transition-colors shrink-0 ${on ? 'bg-accent-500' : 'bg-dark-700'} ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
-    >
-      <div className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform ${on ? 'translate-x-5' : ''}`} />
-    </button>
-  )
-}
 
 function ModeBadge({ node }: { node: NodeAntiDdosState }) {
   const { t } = useTranslation()

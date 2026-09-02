@@ -49,6 +49,7 @@ const TorrentBlocker = lazyRetry(() => import('./pages/TorrentBlocker'))
 const AntiDdos = lazyRetry(() => import('./pages/AntiDdos'))
 const XrayTest = lazyRetry(() => import('./pages/XrayTest'))
 const RemnawaveNginx = lazyRetry(() => import('./pages/RemnawaveNginx'))
+const ExitProxy = lazyRetry(() => import('./pages/ExitProxy'))
 const DnatProfiles = lazyRetry(() => import('./pages/DnatProfiles'))
 const Dnat = lazyRetry(() => import('./pages/Dnat'))
 
@@ -221,6 +222,7 @@ export default function App() {
           <Route path="anti-ddos" element={<ModuleGuard id="anti-ddos"><SuspenseWithBoundary><AntiDdos /></SuspenseWithBoundary></ModuleGuard>} />
           <Route path="xray-test" element={<ModuleGuard id="xray-test"><SuspenseWithBoundary><XrayTest /></SuspenseWithBoundary></ModuleGuard>} />
           <Route path="remnawave-nginx" element={<ModuleGuard id="remnawave-nginx"><SuspenseWithBoundary><RemnawaveNginx /></SuspenseWithBoundary></ModuleGuard>} />
+          <Route path="exit-proxy" element={<ModuleGuard id="exit-proxy"><SuspenseWithBoundary><ExitProxy /></SuspenseWithBoundary></ModuleGuard>} />
           {ExtPageLazy && (
             <Route 
               path="ip-search"

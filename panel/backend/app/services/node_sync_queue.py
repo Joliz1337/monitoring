@@ -31,6 +31,7 @@ KIND_ANTIDDOS_WHITELIST = "antiddos_whitelist"
 KIND_FIREWALL_PROFILE = "firewall_profile"
 KIND_DNAT_PROFILE = "dnat_profile"
 KIND_RESERVED_PORTS = "reserved_ports"
+KIND_EXIT_PROXY = "exit_proxy"
 
 # Право, без которого долг неисполним. Все виды — запись на ноду; долг,
 # который нода не примет никогда, здесь не задерживается: потолка попыток нет,
@@ -41,6 +42,7 @@ KIND_CAPABILITIES: dict[str, Capability] = {
     KIND_FIREWALL_PROFILE: Capability.FIREWALL,
     KIND_DNAT_PROFILE: Capability.DNAT,
     KIND_RESERVED_PORTS: Capability.SYSTEM,
+    KIND_EXIT_PROXY: Capability.SYSTEM,
 }
 
 RETRY_BASE_SECONDS = 60
@@ -219,6 +221,7 @@ class NodeSyncQueue:
         from app.services.antiddos_manager import get_antiddos_manager
         from app.services.blocklist_manager import get_blocklist_manager
         from app.services.dnat_profile_sync import sync_dnat_to_servers
+        from app.services.exit_proxy.service import push_exit_proxy_to_servers
         from app.services.firewall_profile_sync import sync_firewall_to_servers
         from app.services.reserved_ports_sync import push_reserved_ports_to_servers
 
@@ -228,6 +231,7 @@ class NodeSyncQueue:
             KIND_FIREWALL_PROFILE: sync_firewall_to_servers,
             KIND_DNAT_PROFILE: sync_dnat_to_servers,
             KIND_RESERVED_PORTS: push_reserved_ports_to_servers,
+            KIND_EXIT_PROXY: push_exit_proxy_to_servers,
         }
 
     async def _loop(self):

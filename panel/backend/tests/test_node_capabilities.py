@@ -248,6 +248,8 @@ class CallSiteCoverageTest(unittest.TestCase):
         "services/blocklist_manager.py",
         "services/cpu_affinity_sync.py",
         "services/dnat_profile_sync.py",
+        # гейт ensure_node_ready(SYSTEM, write) внутри каждого запроса к ноде
+        "services/exit_proxy/node_client.py",
         "services/firewall_profile_sync.py",
         "services/haproxy_profile_sync.py",
         "services/metrics_collector.py",

@@ -18,6 +18,7 @@ import { Tooltip } from '../components/ui/Tooltip'
 import { FAQIcon } from '../components/FAQ'
 import { streamNdjsonGet, StreamUnauthorizedError } from '../utils/ndjsonStream'
 import { nodeAllows } from '../utils/nodeCapabilities'
+import { getFlag } from '../utils/format'
 
 type TabType = 'overview' | 'users' | 'anomalies' | 'install' | 'settings'
 
@@ -111,15 +112,6 @@ function Section({ title, icon, children, right }: {
       {children}
     </motion.div>
   )
-}
-
-function getFlag(code: string) {
-  if (!code || code === 'XX') return '\uD83C\uDF10'
-  return code
-    .toUpperCase()
-    .split('')
-    .map(c => String.fromCodePoint(0x1F1E6 + c.charCodeAt(0) - 65))
-    .join('')
 }
 
 function OverviewTab() {
