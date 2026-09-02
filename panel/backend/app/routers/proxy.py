@@ -9,6 +9,7 @@ import httpx
 import json
 import logging
 import time
+from pydantic import BaseModel, Field
 from app.services.http_client import get_node_client, node_auth_headers
 
 from app.database import get_db
@@ -29,6 +30,8 @@ from app.services.traffic_import import (
     MIN_NODE_VERSION_FOR_TRAFFIC_V2,
     node_supports_traffic_v2,
 )
+from app.services import network_transactions
+from app.services.network_addresses import AddressInputError, expand_entries, normalize_ref, preview
 
 logger = logging.getLogger(__name__)
 
@@ -529,6 +532,154 @@ async def set_bandwidth_limit(
 ):
     server = await get_server_by_id(server_id, db)
     return await proxy_request(server, "/api/system/bandwidth-limit", method="POST", json_data=data, timeout=40.0)
+
+
+# ==================== Network: extra IP addresses ====================
+# Нода применяет адреса транзакцией с таймером отката; панель подтверждает,
+# заново подключившись к ноде (см. services/network_transactions.py).
+
+
+class NetworkPreviewRequest(BaseModel):
+    add_text: str = ""
+
+
+class NetworkAddressRef(BaseModel):
+    address: str = Field(..., max_length=64)
+    prefix: int = Field(..., ge=0, le=128)
+
+
+class NetworkApplyRequest(BaseModel):
+    interface: str = Field(..., min_length=1, max_length=32)
+    add_text: str = Field("", max_length=20000)
+    remove: list[NetworkAddressRef] = Field(default_factory=list)
+
+
+class NetworkRollbackRequest(BaseModel):
+    transaction_id: str = Field(..., min_length=1, max_length=64)
+
+
+def _network_unsupported(server: Server) -> dict:
+    return {
+        "supported": False,
+        "min_node_version": network_transactions.MIN_NODE_VERSION_NETWORK,
+        "node_version": server.node_version,
+        "interfaces": [],
+        "managed": [],
+        "transaction": None,
+        "history": [],
+        "job": network_transactions.job_snapshot(server.id),
+    }
+
+
+def _require_network_support(server: Server) -> None:
+    if network_transactions.node_supports_network(server.node_version):
+        return
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            f"Node agent {server.node_version or 'unknown'} is too old for extra IP management "
+            f"(needs >= {network_transactions.MIN_NODE_VERSION_NETWORK}). Update the node agent first."
+        ),
+    )
+
+
+async def _raise_for_node_error(server: Server, exc: Exception) -> None:
+    if isinstance(exc, network_transactions.NodeUnreachableError):
+        raise HTTPException(status_code=504 if exc.timeout else 502, detail=exc.reason)
+    if isinstance(exc, network_transactions.NodeNetworkError):
+        if exc.status_code == 403:
+            await learn_from_denial(server.id, exc.status_code, exc.body)
+            raise HTTPException(status_code=409, detail=exc.detail or "Node closed this section (NODE_CAPABILITIES)")
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+    raise exc
+
+
+@router.get("/{server_id}/network/state")
+async def get_network_state(
+    server_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    server = await get_server_by_id(server_id, db)
+    require_capability(server, Capability.SYSTEM, write=False)
+    if not network_transactions.node_supports_network(server.node_version):
+        return _network_unsupported(server)
+    try:
+        state = await network_transactions.fetch_state(server)
+    except network_transactions.NodeNetworkError as exc:
+        if exc.status_code == 404:
+            return _network_unsupported(server)
+        await _raise_for_node_error(server, exc)
+    except network_transactions.NodeUnreachableError as exc:
+        await _raise_for_node_error(server, exc)
+    state.setdefault("supported", True)
+    state["min_node_version"] = network_transactions.MIN_NODE_VERSION_NETWORK
+    state["node_version"] = server.node_version
+    state["job"] = network_transactions.job_snapshot(server.id)
+    return state
+
+
+@router.post("/{server_id}/network/preview")
+async def preview_network_addresses(
+    server_id: int,
+    data: NetworkPreviewRequest,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    await get_server_by_id(server_id, db)
+    try:
+        return preview(data.add_text)
+    except AddressInputError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/{server_id}/network/apply")
+async def apply_network_addresses(
+    server_id: int,
+    data: NetworkApplyRequest,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    server = await get_server_by_id(server_id, db)
+    require_capability(server, Capability.SYSTEM, write=True)
+    _require_network_support(server)
+    try:
+        add = expand_entries(data.add_text) if data.add_text.strip() else []
+        remove = [normalize_ref(ref.address, ref.prefix) for ref in data.remove]
+    except AddressInputError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not add and not remove:
+        raise HTTPException(status_code=400, detail="Нечего применять: укажите адреса для добавления или удаления")
+    try:
+        job = await network_transactions.start_apply(server, interface=data.interface, add=add, remove=remove)
+    except network_transactions.PendingTransactionError:
+        raise HTTPException(status_code=409, detail="На ноде уже идёт транзакция — дождитесь её завершения")
+    except network_transactions.InterfaceNotFoundError as exc:
+        raise HTTPException(status_code=400, detail=f"Интерфейс {exc.interface} не найден на ноде")
+    except network_transactions.NothingToApplyError:
+        raise HTTPException(status_code=400, detail="Нечего применять: адреса уже настроены или не управляются панелью")
+    except network_transactions.ProtectedIpUnknownError:
+        raise HTTPException(status_code=400, detail="Не удалось определить адрес ноды из её URL — защитить его от удаления нельзя")
+    except (network_transactions.NodeNetworkError, network_transactions.NodeUnreachableError) as exc:
+        await _raise_for_node_error(server, exc)
+    await network_transactions.wait_for_job(job, network_transactions.INLINE_WAIT_SECONDS)
+    return job.snapshot()
+
+
+@router.post("/{server_id}/network/rollback")
+async def rollback_network_transaction(
+    server_id: int,
+    data: NetworkRollbackRequest,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    server = await get_server_by_id(server_id, db)
+    require_capability(server, Capability.SYSTEM, write=True)
+    _require_network_support(server)
+    try:
+        return await network_transactions.rollback(server, data.transaction_id)
+    except (network_transactions.NodeNetworkError, network_transactions.NodeUnreachableError) as exc:
+        await _raise_for_node_error(server, exc)
 
 
 # ==================== Traffic Tracking ====================

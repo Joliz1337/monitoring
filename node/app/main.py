@@ -15,12 +15,13 @@ from fastapi.middleware.gzip import GZipMiddleware
 
 from app.capabilities import CapabilityMiddleware, get_policy
 from app.config import get_settings
-from app.routers import haproxy, metrics, traffic, system, ipset, remnawave, ssh, ssl, firewall_profile, antiddos, dnat
+from app.routers import haproxy, metrics, traffic, system, ipset, remnawave, ssh, ssl, firewall_profile, antiddos, dnat, network
 from app.services.port_traffic_sampler import get_port_traffic_sampler
 from app.services.rate_sampler import get_rate_sampler
 from app.services.ipset_manager import get_ipset_manager
 from app.services.dnat_manager import get_dnat_manager
 from app.services.bandwidth_limit import get_bandwidth_limiter
+from app.services.extra_ips import get_extra_ip_manager
 
 logging.basicConfig(
     level=logging.INFO,
@@ -75,6 +76,11 @@ async def lifespan(app: FastAPI):
         await bandwidth_limiter.start()
     except Exception as e:
         logger.error(f"Bandwidth limiter start failed, shaping is not restored: {e}", exc_info=True)
+
+    try:
+        await get_extra_ip_manager().start()
+    except Exception as e:
+        logger.error(f"Extra IP manager start failed, a stale transaction may stay pending: {e}", exc_info=True)
 
     from app.services import cpu_affinity
     from app.services.host_executor import get_host_executor
@@ -154,6 +160,7 @@ app.include_router(ssl.router)
 app.include_router(firewall_profile.router)
 app.include_router(antiddos.router)
 app.include_router(dnat.router)
+app.include_router(network.router)
 
 
 @app.get("/health")

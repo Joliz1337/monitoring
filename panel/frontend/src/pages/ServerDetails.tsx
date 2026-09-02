@@ -45,6 +45,7 @@ import type { ChartGap } from '../utils/chartUtils'
 import Terminal from '../components/Terminal/Terminal'
 import NodeRestrictedNotice from '../components/servers/NodeRestrictedNotice'
 import BandwidthLimitCard from '../components/servers/BandwidthLimitCard'
+import NetworkAddressesCard from '../components/servers/NetworkAddressesCard'
 import { nodeAllows } from '../utils/nodeCapabilities'
 import { formatBytes, formatUptime, formatPercent, createBitsFormatter, formatTimeAgo } from '../utils/format'
 import { useCachedData, createServerCacheKey } from '../hooks/useCachedData'
@@ -822,6 +823,11 @@ export default function ServerDetails() {
             {/* Лимит полосы (tc на ноде) */}
             <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }} className="mt-6">
               <BandwidthLimitCard serverId={Number(serverId)} server={server} />
+            </motion.div>
+
+            {/* Дополнительные IP-адреса интерфейсов (транзакция с авто-откатом на ноде) */}
+            <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }} className="mt-6">
+              <NetworkAddressesCard serverId={Number(serverId)} server={server} />
             </motion.div>
 
             {/* Terminal section */}

@@ -32,6 +32,7 @@ from app.services.xray_test.startup import load_xray_test_versions
 from app.services.traffic_import import start_traffic_import, stop_traffic_import
 from app.services.panel_host_metrics import start_panel_host_sampler, stop_panel_host_sampler
 from app.services.http_client import init_http_clients, close_http_clients
+from app.services.network_transactions import cancel_all_jobs
 from app.services.pki import load_or_create_keygen
 from app.services.update_channel import load_branch_from_db
 from app.security import SecurityMiddleware
@@ -127,6 +128,8 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    # Неподтверждённую транзакцию доп. IP нода откатит сама по таймеру
+    await cancel_all_jobs()
     await close_http_clients()
     # Ядра прокси добиваются до остальных сервисов: это внешние процессы,
     # переживающие остановку панели, если их не убить явно.

@@ -988,6 +988,14 @@ export const proxyApi = {
   getBandwidthLimit: (serverId: number) => api.get<BandwidthLimitState>(`/proxy/${serverId}/system/bandwidth-limit`),
   setBandwidthLimit: (serverId: number, data: { enabled: boolean; mbit: number }) =>
     api.post<BandwidthLimitState & { message: string }>(`/proxy/${serverId}/system/bandwidth-limit`, data, { timeout: 45000 }),
+  // Доп. IP-адреса: apply на панели — фоновая задача, ответ ждёт её ≤ 20 с
+  getNetworkState: (serverId: number) => api.get<NetworkState>(`/proxy/${serverId}/network/state`),
+  previewNetworkAddresses: (serverId: number, add_text: string) =>
+    api.post<NetworkPreview>(`/proxy/${serverId}/network/preview`, { add_text }, { timeout: 10000 }),
+  applyNetworkAddresses: (serverId: number, data: { interface: string; add_text: string; remove: NetworkAddressRef[] }) =>
+    api.post<NetworkJobSnapshot>(`/proxy/${serverId}/network/apply`, data, { timeout: 45000 }),
+  rollbackNetworkTransaction: (serverId: number, transaction_id: string) =>
+    api.post<{ success: boolean; status: string | null; message: string }>(`/proxy/${serverId}/network/rollback`, { transaction_id }, { timeout: 45000 }),
 
   // DNAT (проброс портов через iptables nat)
   getDnatState: (serverId: number) => api.get<DnatNodeState>(`/proxy/${serverId}/dnat/state`),
@@ -2839,6 +2847,88 @@ export interface DnatTargetCounters {
   bytes_in: number
   packets_out: number
   bytes_out: number
+}
+
+export type NetworkAddressFamily = 'ipv4' | 'ipv6'
+
+export interface NetworkAddress {
+  address: string
+  prefix: number
+  family: NetworkAddressFamily
+  scope: string
+  managed: boolean
+  primary: boolean
+  dynamic: boolean
+}
+
+export interface NetworkInterface {
+  name: string
+  is_up: boolean
+  is_default: boolean
+  addresses: NetworkAddress[]
+}
+
+export interface NetworkAddressRef {
+  address: string
+  prefix: number
+}
+
+export type NetworkTxStatus = 'applying' | 'pending' | 'confirmed' | 'rolled_back' | 'failed'
+
+export interface NetworkTransaction {
+  id: string
+  status: NetworkTxStatus
+  interface: string
+  backend: string
+  added: string[]
+  removed: string[]
+  started_at: string | null
+  deadline_at: string | null
+  finished_at: string | null
+  message: string
+  warnings: string[]
+}
+
+export interface NetworkJobSnapshot {
+  id: string
+  phase: 'applying' | 'confirming' | 'done'
+  status: 'pending' | 'confirmed' | 'rolled_back' | 'failed'
+  transaction_id: string | null
+  interface: string
+  added: NetworkAddressRef[]
+  removed: NetworkAddressRef[]
+  started_at: string
+  deadline_at: string | null
+  attempts: number
+  last_error: string | null
+  message: string | null
+  error_log: string | null
+  rolled_back: boolean
+  warnings: string[]
+  reachability: Record<string, boolean> | null
+}
+
+export interface NetworkState {
+  supported: boolean
+  message?: string | null
+  min_node_version: string
+  node_version?: string | null
+  backend?: string | null
+  backend_detail?: string
+  default_interface?: string | null
+  interfaces: NetworkInterface[]
+  managed: { interface: string; address: string; prefix: number }[]
+  transaction: NetworkTransaction | null
+  history: NetworkTransaction[]
+  rollback_timeout_sec?: number
+  job: NetworkJobSnapshot | null
+}
+
+export interface NetworkPreview {
+  count: number
+  ipv4: number
+  ipv6: number
+  addresses: { address: string; prefix: number; family: NetworkAddressFamily }[]
 }
 
 export interface BandwidthLimitState {

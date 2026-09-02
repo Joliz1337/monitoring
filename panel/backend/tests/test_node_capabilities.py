@@ -251,6 +251,8 @@ class CallSiteCoverageTest(unittest.TestCase):
         "services/firewall_profile_sync.py",
         "services/haproxy_profile_sync.py",
         "services/metrics_collector.py",
+        # гейт в роутере proxy: require_capability(SYSTEM) до старта задачи
+        "services/network_transactions.py",
         "services/recovery_reconciler.py",
         "services/remnawave_nginx_sync.py",
         # гейт в роутере remnawave_install: require_capability(EXEC) до старта job
