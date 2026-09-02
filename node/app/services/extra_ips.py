@@ -675,13 +675,22 @@ class ExtraIpManager:
     # ── живые данные ──
 
     async def _live(self) -> tuple[dict[str, LiveInterface], dict[str, tuple[str, str]], dict[str, bool]]:
-        result = await self._executor.execute(
-            "ip -j addr show; echo '@@'; ip -j -4 route show default; echo '@@'; ip -j -6 route show default",
+        """Адреса и default-маршруты хоста. Маршруты читаются отдельно и без
+        влияния на код выхода: на хосте с `ipv6.disable=1` команда `ip -6 route`
+        падает, и раньше это молча обнуляло весь список адресов."""
+        addr = await self._executor.execute("ip -j addr show", timeout=10)
+        if not (addr.success and addr.stdout.strip()):
+            reason = addr.stderr.strip() or addr.error or "empty output"
+            raise ExtraIpUnsupportedError(f"ip -j addr show failed on the host: {reason}")
+        interfaces = parse_ip_addr(addr.stdout)
+        if not interfaces:
+            raise ExtraIpUnsupportedError("ip -j addr show returned no interfaces (iproute2 without JSON support?)")
+        routes_raw = await self._executor.execute(
+            "ip -j -4 route show default 2>/dev/null; echo '@@'; ip -j -6 route show default 2>/dev/null; true",
             timeout=10, shell="bash",
         )
-        parts = result.stdout.split("@@") if result.success else []
-        interfaces = parse_ip_addr(parts[0] if parts else "")
-        routes = parse_default_routes(parts[1] if len(parts) > 1 else "", parts[2] if len(parts) > 2 else "")
+        parts = routes_raw.stdout.split("@@")
+        routes = parse_default_routes(parts[0] if parts else "", parts[1] if len(parts) > 1 else "")
         physical = dict(await list_physical_interfaces(self._executor, include_down=True))
         return interfaces, routes, physical
 
@@ -704,7 +713,14 @@ class ExtraIpManager:
         return backend
 
     async def state(self) -> NetworkStateResponse:
-        interfaces, routes, physical = await self._live()
+        try:
+            interfaces, routes, physical = await self._live()
+        except ExtraIpUnsupportedError as exc:
+            logger.warning("extra ips: cannot read host addresses: %s", exc)
+            return NetworkStateResponse(
+                supported=False, message=str(exc), default_interface=default_interface(),
+                interfaces=[], managed=[], transaction=None, history=[],
+            )
         managed = self.read_managed()
         default = default_interface()
         states: list[InterfaceState] = []

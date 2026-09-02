@@ -460,7 +460,9 @@ class ManagerTests(unittest.TestCase):
 
     def live_answers(self) -> dict[str, FakeResult]:
         return {
-            "ip -j addr show": FakeResult(stdout=f"{IP_ADDR_JSON}\n@@\n{ROUTE4_JSON}\n@@\n{ROUTE6_JSON}"),
+            "ip -j addr show": FakeResult(stdout=IP_ADDR_JSON),
+            # Хост без IPv6: вторая команда падает, но код выхода блока всегда 0
+            "route show default": FakeResult(stdout=ROUTE4_JSON + "\n@@\n"),
             "/sys/class/net/*/device": FakeResult(stdout="eth0 up\neth1 up\n"),
             "extra-ips.sh detect": FakeResult(stdout="NETPLAN=yes\nNETPLAN_GET_B64=" + base64.b64encode(NETPLAN_GET.encode()).decode()),
         }
@@ -478,6 +480,15 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(state.backend, "netplan")
         self.assertEqual(state.managed[0].address, "203.0.113.11")
         self.assertIsNone(state.transaction)
+
+    def test_addr_read_failure_is_reported_not_hidden(self):
+        answers = self.live_answers()
+        answers["ip -j addr show"] = FakeResult(success=False, exit_code=2, stderr="Cannot open netlink socket")
+        manager, _ = self.manager(answers)
+        state = run(manager.state())
+        self.assertFalse(state.supported)
+        self.assertIn("Cannot open netlink socket", state.message)
+        self.assertEqual(state.interfaces, [])
 
     def test_apply_builds_plan_and_calls_script(self):
         answers = self.live_answers()
