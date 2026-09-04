@@ -1,5 +1,8 @@
-import { useEffect, useState, useCallback, useRef } from 'react'
-import { FileCode2, Plus, Play, RefreshCw, Trash2, Server, ChevronDown, ChevronRight, Edit3, Link2, Unlink, Loader2, CheckCircle2, XCircle, AlertCircle, Clock, History, X, Code, Save, AlertTriangle, Activity, Scale, Cpu, Lock } from 'lucide-react'
+import { useEffect, useState, useCallback, useRef, forwardRef, type ForwardedRef, type ReactNode } from 'react'
+import { DndContext, closestCenter, KeyboardSensor, PointerSensor, TouchSensor, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core'
+import { arrayMove, SortableContext, sortableKeyboardCoordinates, verticalListSortingStrategy, useSortable } from '@dnd-kit/sortable'
+import { CSS } from '@dnd-kit/utilities'
+import { FileCode2, Plus, Play, RefreshCw, Trash2, Server, ChevronDown, ChevronRight, Edit3, Link2, Unlink, Loader2, CheckCircle2, XCircle, AlertCircle, Clock, History, X, Code, Save, AlertTriangle, Activity, Scale, Cpu, Lock, GripVertical } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
@@ -578,12 +581,18 @@ function RuleForm({
 }
 
 
-// ==================== Profile Card (unchanged) ====================
+// ==================== Profile Card ====================
+
+interface DragHandleProps {
+  ref: (node: HTMLElement | null) => void
+  listeners: ReturnType<typeof useSortable>['listeners']
+  attributes: ReturnType<typeof useSortable>['attributes']
+}
 
 function ProfileCard({
-  profile, expanded, onExpand, onEdit, onDelete,
+  profile, expanded, dragHandle, onExpand, onEdit, onDelete,
 }: {
-  profile: HAProxyConfigProfile; expanded: boolean
+  profile: HAProxyConfigProfile; expanded: boolean; dragHandle: DragHandleProps
   onExpand: (id: number) => void; onEdit: (p: HAProxyConfigProfile) => void; onDelete: (id: number) => void
 }) {
   const { t } = useTranslation()
@@ -594,10 +603,16 @@ function ProfileCard({
   const hasNet = profile.linked_servers_count > 0 && totalNet > 0
 
   return (
-    <motion.div layout initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }}
+    <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }}
       className="rounded-xl border bg-dark-800/60 border-dark-700/80 transition-all duration-200 hover:border-dark-600/80">
       <div className="flex items-center justify-between px-4 py-3 cursor-pointer select-none" onClick={() => onExpand(profile.id)}>
         <div className="flex items-center gap-3 min-w-0">
+          <Tooltip label={t('haproxy_configs.drag_to_reorder')}>
+            <div ref={dragHandle.ref} {...dragHandle.listeners} {...dragHandle.attributes} onClick={e => e.stopPropagation()}
+              className="p-1 -ml-2 rounded text-dark-600 hover:text-dark-400 cursor-grab active:cursor-grabbing transition-colors shrink-0">
+              <GripVertical className="w-4 h-4" />
+            </div>
+          </Tooltip>
           {expanded ? <ChevronDown className="w-4 h-4 text-dark-400 shrink-0" /> : <ChevronRight className="w-4 h-4 text-dark-400 shrink-0" />}
           <FileCode2 className="w-5 h-5 text-accent-400 shrink-0" />
           <div className="min-w-0">
@@ -634,6 +649,29 @@ function ProfileCard({
     </motion.div>
   )
 }
+
+
+// ==================== Sortable list item ====================
+
+const SortableProfileItem = forwardRef(function SortableProfileItem(
+  { profileId, children }: { profileId: number; children: (dragHandle: DragHandleProps) => ReactNode },
+  forwardedRef: ForwardedRef<HTMLDivElement>,
+) {
+  const { setNodeRef, setActivatorNodeRef, attributes, listeners, transform, transition, isDragging } = useSortable({ id: profileId })
+
+  const combinedRef = useCallback((node: HTMLDivElement | null) => {
+    setNodeRef(node)
+    if (typeof forwardedRef === 'function') forwardedRef(node)
+    else if (forwardedRef) forwardedRef.current = node
+  }, [setNodeRef, forwardedRef])
+
+  return (
+    <div ref={combinedRef}
+      style={{ transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.4 : 1, position: 'relative', zIndex: isDragging ? 10 : undefined }}>
+      {children({ ref: setActivatorNodeRef, listeners, attributes })}
+    </div>
+  )
+})
 
 
 // ==================== Profile Detail Panel (with rules GUI) ====================
@@ -1316,11 +1354,21 @@ export default function HAProxyConfigs() {
   const [modalProfile, setModalProfile] = useState<HAProxyConfigProfile | null | 'new'>(null)
 
   const initialLoadDone = useRef(false)
+  // Растёт при каждом локальном изменении порядка: ответ опроса, ушедшего в сеть раньше,
+  // принёс бы старый порядок и карточки прыгнули бы назад
+  const listGeneration = useRef(0)
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 200, tolerance: 8 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  )
 
   const fetchProfiles = useCallback(async () => {
+    const generation = listGeneration.current
     try {
       const res = await haproxyProfilesApi.getProfiles()
-      setProfiles(res.data)
+      if (generation === listGeneration.current) setProfiles(res.data)
     } catch {
       if (!initialLoadDone.current) toast.error(t('haproxy_configs.fetch_error'))
     } finally {
@@ -1336,6 +1384,24 @@ export default function HAProxyConfigs() {
   }, [fetchProfiles])
 
   const handleExpand = (id: number) => setExpandedId(prev => prev === id ? null : id)
+
+  const handleDragEnd = async ({ active, over }: DragEndEvent) => {
+    if (!over || active.id === over.id) return
+    const oldIndex = profiles.findIndex(p => p.id === active.id)
+    const newIndex = profiles.findIndex(p => p.id === over.id)
+    if (oldIndex === -1 || newIndex === -1) return
+
+    const reordered = arrayMove(profiles, oldIndex, newIndex)
+    listGeneration.current += 1
+    setProfiles(reordered)
+    try {
+      await haproxyProfilesApi.reorderProfiles(reordered.map(p => p.id))
+    } catch {
+      toast.error(t('haproxy_configs.reorder_error'))
+    }
+    listGeneration.current += 1
+    await fetchProfiles()
+  }
 
   const handleDelete = async (id: number) => {
     try {
@@ -1380,18 +1446,26 @@ export default function HAProxyConfigs() {
           <p className="text-sm mt-1">{t('haproxy_configs.no_profiles_hint')}</p>
         </div>
       ) : (
-        <div className="space-y-2">
-          <AnimatePresence mode="popLayout">
-            {profiles.map(p => (
-              <div key={p.id}>
-                <ProfileCard profile={p} expanded={expandedId === p.id} onExpand={handleExpand} onEdit={setModalProfile} onDelete={handleDelete} />
-                <AnimatePresence>
-                  {expandedId === p.id && <ProfileDetailPanel profileId={p.id} onRefreshList={fetchProfiles} />}
-                </AnimatePresence>
-              </div>
-            ))}
-          </AnimatePresence>
-        </div>
+        <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+          <SortableContext items={profiles.map(p => p.id)} strategy={verticalListSortingStrategy}>
+            <div className="space-y-2">
+              <AnimatePresence mode="popLayout">
+                {profiles.map(p => (
+                  <SortableProfileItem key={p.id} profileId={p.id}>
+                    {dragHandle => (
+                      <>
+                        <ProfileCard profile={p} expanded={expandedId === p.id} dragHandle={dragHandle} onExpand={handleExpand} onEdit={setModalProfile} onDelete={handleDelete} />
+                        <AnimatePresence>
+                          {expandedId === p.id && <ProfileDetailPanel profileId={p.id} onRefreshList={fetchProfiles} />}
+                        </AnimatePresence>
+                      </>
+                    )}
+                  </SortableProfileItem>
+                ))}
+              </AnimatePresence>
+            </div>
+          </SortableContext>
+        </DndContext>
       )}
 
       <AnimatePresence>

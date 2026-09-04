@@ -2488,6 +2488,7 @@ Whitelist можно наполнять из внешних списков по 
 | POST | /haproxy-profiles | Создать профиль |
 | PUT | /haproxy-profiles/{id} | Обновить профиль (с валидацией config_content) |
 | DELETE | /haproxy-profiles/{id} | Удалить профиль |
+| POST | /haproxy-profiles/reorder | Сохранить порядок профилей: массив id в нужном порядке → `position` (один executemany, как `servers/reorder`) |
 | GET | /haproxy-profiles/{id} | Детали профиля (правила + серверы) |
 | POST | /haproxy-profiles/{id}/rules | Добавить правило |
 | PUT | /haproxy-profiles/{id}/rules/{index} | Обновить правило |
@@ -2505,8 +2506,8 @@ Whitelist можно наполнять из внешних списков по 
 **SyncResult.status:** `success` | `failed` | `queued` (офлайн-нода, синхронизация отложена) | `denied` (закрытый на ноде домен `haproxy`, `NODE_CAPABILITIES` — см. «Права ноды» выше; в очередь на ретрай не попадает).
 
 **Frontend (`panel/frontend/src/pages/HAProxyConfigs.tsx`):**
-- Двухколоночный layout: список профилей слева + детали справа
-- Детали: три вкладки — Rules (список правил с CRUD), Servers (привязанные серверы + управление), Log (история синхронизаций)
+- Аккордеон профилей: карточка, под ней детальная панель — правила с CRUD, привязанные серверы с управлением, история синхронизаций
+- Порядок карточек меняется перетаскиванием за ручку (`@dnd-kit` sortable, ручка `GripVertical` слева от шеврона, сенсоры pointer/touch/keyboard как на дашборде) — `POST /reorder`, позиция хранится в `position`. Список опрашивается каждые 3 с, поэтому ответ опроса, ушедшего в сеть до drop или до ответа `reorder`, отбрасывается по счётчику поколения списка — иначе карточки прыгали бы назад до сохранения. `AnimatePresence mode="popLayout"` вешает ref на прямого ребёнка, поэтому sortable-обёртка карточки — `forwardRef`; у `motion.div` карточки нет `layout` — layout-анимация framer спорила бы с трансформами dnd-kit
 - Route: `/{uid}/haproxy-configs` (lazy-import)
 - Навигация: пункт «HAProxy Configs» с иконкой FileCode2
 
@@ -2524,7 +2525,7 @@ Whitelist можно наполнять из внешних списков по 
 - **Тосты sync** (`handleSyncAll`/`handleSyncOne`) раздельно считают synced/queued/failed и показывают корректный текст (включая «отложено (офлайн)»).
 - **Кнопка «Проверить конфиг»** в модалке сырого конфига — вызывает `POST /haproxy-profiles/validate` и показывает результат валидации.
 
-**i18n-ключи** (`haproxy_configs.*`): `start_haproxy`, `start_all_stopped`, `haproxy_started`, `haproxy_start_error`, `haproxy_start_bulk_success`, `haproxy_start_bulk_partial`, `sync_queued`, `sync_one_queued`, `waiting_server`, `server_online`, `server_offline`, `haproxy_running`, `haproxy_stopped`, `validate_config`, `config_valid`, `config_invalid`, `validate_error`, `unlink_confirm`.
+**i18n-ключи** (`haproxy_configs.*`): `drag_to_reorder`, `reorder_error`, `start_haproxy`, `start_all_stopped`, `haproxy_started`, `haproxy_start_error`, `haproxy_start_bulk_success`, `haproxy_start_bulk_partial`, `sync_queued`, `sync_one_queued`, `waiting_server`, `server_online`, `server_offline`, `haproxy_running`, `haproxy_stopped`, `validate_config`, `config_valid`, `config_invalid`, `validate_error`, `unlink_confirm`.
 
 **Файлы:**
 - `panel/backend/app/routers/haproxy_profiles.py` — API роутер; `PUT /{id}` с валидацией; `POST /validate`
@@ -2533,7 +2534,7 @@ Whitelist можно наполнять из внешних списков по 
 - `panel/backend/app/services/metrics_collector.py` — фоновый цикл `_haproxy_pending_sync_loop` (интервал `HAPROXY_RETRY_INTERVAL=30` сек)
 - `panel/backend/Dockerfile` — пакет `haproxy` для локальной валидации
 - `panel/frontend/src/pages/HAProxyConfigs.tsx` — страница управления; индикаторы online/offline; `SyncStatusBadge`; кнопка «Проверить конфиг»
-- `panel/frontend/src/api/client.ts` — `haproxyProfilesApi.validateConfig()`, `HAProxyServerStatus.online`, `HAProxySyncResult.status`
+- `panel/frontend/src/api/client.ts` — `haproxyProfilesApi.validateConfig()`, `haproxyProfilesApi.reorderProfiles()`, `HAProxyServerStatus.online`, `HAProxySyncResult.status`
 - `panel/frontend/src/App.tsx` — роут `haproxy-configs`
 - `panel/frontend/src/components/Layout/Layout.tsx` — пункт навигации «HAProxy Configs»
 - `panel/frontend/src/locales/ru.json`, `en.json` — i18n ключи пространства имён `haproxy_configs`

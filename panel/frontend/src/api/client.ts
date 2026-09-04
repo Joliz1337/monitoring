@@ -2392,6 +2392,8 @@ export const haproxyProfilesApi = {
     api.put<{ success: boolean; id: number }>(`/haproxy-profiles/${id}`, data),
   deleteProfile: (id: number) =>
     api.delete(`/haproxy-profiles/${id}`),
+  reorderProfiles: (profileIds: number[]) =>
+    api.post('/haproxy-profiles/reorder', { profile_ids: profileIds }),
   linkServer: (profileId: number, serverId: number) =>
     api.post(`/haproxy-profiles/${profileId}/servers/${serverId}`),
   unlinkServer: (profileId: number, serverId: number) =>
