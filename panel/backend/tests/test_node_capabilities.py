@@ -250,6 +250,8 @@ class CallSiteCoverageTest(unittest.TestCase):
         "services/dnat_profile_sync.py",
         # гейт ensure_node_ready(SYSTEM, write) внутри каждого запроса к ноде
         "services/exit_proxy/node_client.py",
+        # тот же гейт ensure_node_ready(SYSTEM, write) на каждый запрос
+        "services/source_pool/node_client.py",
         "services/firewall_profile_sync.py",
         "services/haproxy_profile_sync.py",
         "services/metrics_collector.py",

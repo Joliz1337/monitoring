@@ -3238,4 +3238,55 @@ export const exitProxyApi = {
     api.get<{ events: ExitProxyLogEntry[] }>('/exit-proxy/log', { params: { limit } }),
 }
 
+// ── Пул исходящих адресов ──
+
+export type SourcePoolInstallStatus = 'off' | 'pending' | 'active' | 'drift' | 'failed' | 'denied' | 'unsupported'
+
+export interface SourcePoolAddress {
+  address: string
+  excluded: boolean
+  marks: number
+}
+
+export interface SourcePoolNodeView {
+  server_id: number
+  name: string
+  online: boolean
+  node_version: string | null
+  min_node_version: string
+  supported_by_node: boolean
+  enabled: boolean
+  install_status: SourcePoolInstallStatus
+  sync_error: string | null
+  interface: string | null
+  addresses: SourcePoolAddress[]
+  excluded: string[]
+  active_count: number
+  mark_count: number | null
+  mark_base: number | null
+  in_sync: boolean
+  missing_marks: number[]
+  conflict: string | null
+  node_error: string | null
+  last_state_at: string | null
+}
+
+export interface SourcePoolSnippet {
+  outbounds_json: string
+  routing_json: string
+  text: string
+}
+
+const SOURCE_POOL_NODE_TIMEOUT_MS = 40000
+
+export const sourcePoolApi = {
+  getNodes: () => api.get<{ nodes: SourcePoolNodeView[] }>('/source-pool/nodes'),
+  getNode: (serverId: number) => api.get<SourcePoolNodeView>(`/source-pool/nodes/${serverId}`),
+  updateNode: (serverId: number, patch: { enabled?: boolean; excluded?: string[] }) =>
+    api.put<SourcePoolNodeView>(`/source-pool/nodes/${serverId}`, patch, { timeout: SOURCE_POOL_NODE_TIMEOUT_MS }),
+  refreshNode: (serverId: number) =>
+    api.post<SourcePoolNodeView>(`/source-pool/nodes/${serverId}/refresh`, undefined, { timeout: SOURCE_POOL_NODE_TIMEOUT_MS }),
+  getSnippet: () => api.get<SourcePoolSnippet>('/source-pool/snippet'),
+}
+
 export default api

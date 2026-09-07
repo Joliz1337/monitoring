@@ -340,6 +340,13 @@ async def update_node(
                 detail=f"агент {server.node_version or 'unknown'} старше {MIN_NODE_VERSION_EXIT_PROXY} — обновите ноду",
             )
         require_capability(server, Capability.SYSTEM, write=True)
+        # Пул исходящих адресов и exit-прокси оба решают, с какого IP нода выходит наружу
+        from app.routers.source_pool import source_pool_enabled_on
+        if await source_pool_enabled_on(db, server_id):
+            raise HTTPException(
+                status_code=409,
+                detail="на этой ноде включён пул исходящих адресов — выключите его на странице сервера",
+            )
 
     if node is None:
         if body.enabled is not True:

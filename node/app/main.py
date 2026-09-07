@@ -15,7 +15,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 
 from app.capabilities import CapabilityMiddleware, get_policy
 from app.config import get_settings
-from app.routers import haproxy, metrics, traffic, system, ipset, remnawave, ssh, ssl, firewall_profile, antiddos, dnat, network, exit_proxy
+from app.routers import haproxy, metrics, traffic, system, ipset, remnawave, ssh, ssl, firewall_profile, antiddos, dnat, network, exit_proxy, source_pool
 from app.services.port_traffic_sampler import get_port_traffic_sampler
 from app.services.rate_sampler import get_rate_sampler
 from app.services.ipset_manager import get_ipset_manager
@@ -23,6 +23,7 @@ from app.services.dnat_manager import get_dnat_manager
 from app.services.bandwidth_limit import get_bandwidth_limiter
 from app.services.extra_ips import get_extra_ip_manager
 from app.services.exit_proxy.manager import get_exit_proxy_manager
+from app.services.source_pool import get_source_pool_manager
 
 logging.basicConfig(
     level=logging.INFO,
@@ -89,6 +90,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Exit proxy start failed, local SOCKS5 exit is not available: {e}", exc_info=True)
 
+    source_pool_manager = get_source_pool_manager()
+    try:
+        await source_pool_manager.start()
+    except Exception as e:
+        logger.error(f"Source pool start failed, outbound traffic stays on one address: {e}", exc_info=True)
+
     from app.services import cpu_affinity
     from app.services.host_executor import get_host_executor
     affinity_sync = cpu_affinity.ContainerAffinitySync(
@@ -137,6 +144,10 @@ async def lifespan(app: FastAPI):
         await exit_proxy_manager.stop()
     except Exception as e:
         logger.error(f"Exit proxy stop failed: {e}", exc_info=True)
+    try:
+        await source_pool_manager.stop()
+    except Exception as e:
+        logger.error(f"Source pool stop failed: {e}", exc_info=True)
     logger.info("Shutdown complete")
 
 
@@ -173,6 +184,7 @@ app.include_router(antiddos.router)
 app.include_router(dnat.router)
 app.include_router(network.router)
 app.include_router(exit_proxy.router)
+app.include_router(source_pool.router)
 
 
 @app.get("/health")

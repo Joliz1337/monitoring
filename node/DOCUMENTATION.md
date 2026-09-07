@@ -19,6 +19,7 @@ API агент для сбора метрик сервера, отслежива
 - **DNAT-маршрутизация** — проброс портов средствами netfilter (iptables nat DNAT + MASQUERADE + FORWARD ACCEPT) в собственных цепочках `MON_DNAT*`: атомарное применение набора правил от панели одним `iptables-restore --noflush`, счётчики соединений/байт по правилу, файл состояния и самолечение после ребута/`ufw reset`
 - **Дополнительные IP-адреса** — добавление/удаление IPv4/IPv6 на физическом интерфейсе транзакцией с таймером отката на хосте: бэкап → запись в конфиг того бэкенда, что владеет интерфейсом (netplan, systemd-networkd, NetworkManager, ifupdown; без них — свой oneshot-юнит) → живое применение → проверка → таймер; подтверждает панель, заново достучавшись до ноды, иначе хост сам возвращает бэкап, а незавершённую транзакцию при перезагрузке откатывает boot-guard до старта сети. Основной адрес и адреса хостера — только чтение
 - **Exit-прокси** — локальный SOCKS5 (`127.0.0.1:<port>`) в процессе агента для Google-трафика xray Remnawave: пул исходящих IPv4 ноды (основной и добавленные панелью) плюс WARP, проверки «как Google видит выход» curl'ом с хоста (страна, капча поиска, Gemini, свои URL), автономный липкий выбор здорового выхода со сбросом соединений старого при переключении, состояние переживает рестарт контейнера; панель только присылает конфиг и читает статус
+- **Пул исходящих адресов** — раскладка исходящего TCP по всем IPv4 ноды через policy routing: Xray помечает соединения фиксированным набором из 30 меток fwmark (101–130, конфиг один на весь парк), а нода сама раскладывает метки по своим адресам по кругу — таблица маршрутизации со `src` на каждый адрес плюс правило на каждую метку; поднимает потолок исходящих портов на одно назначение кратно числу адресов, состояние самолечится раз в 30 с; взаимоисключается с exit-прокси
 - **Анти-DDoS** — многослойная защита: дежурный режим без лимитов, аварийный режим (SYNPROXY + hashlimit в отдельной iptables-цепочке `ANTIDDOS`, пороги авто-масштабируются по CPU/RAM хоста), автодетект атаки по сигналам из `/proc` (watchdog), whitelist на ipset, переживающий ребут и недоступность панели, self-check доступности ноды во время аварийного режима
 - **Системные оптимизации** — sysctl/лимиты/HAProxy `maxconn` вычисляются на самой ноде из её MemTotal/nproc единым рендерером (`tune-sysctl.sh`), а не приходят готовыми от панели; авто-ре-рендер при каждой загрузке подхватывает ресайз VPS
 - **Права доступа панели (NODE_CAPABILITIES)** — владелец ноды опционально сужает, что панель может делать через API, строкой в `.env`: по доменам (traffic/haproxy/firewall/ipset/ssh/ssl/antiddos/remnawave/system/exec/dnat) и уровню доступа (без доступа/только чтение/чтение и запись); пусто — полный доступ
@@ -155,6 +156,7 @@ node/
 │   │   ├── firewall_profile.py  # Pydantic модели: ProfileRule, ProfileApplyRequest/Response, ProfileStateResponse
 │   │   ├── dnat.py              # Pydantic модели: DnatRule, DnatApplyRequest/Response, DnatStateResponse, DnatRuleCounters
 │   │   ├── remnawave_nginx.py   # Pydantic модели: NginxDiscoverResponse, NginxConfigResponse, NginxStatusResponse, NginxApplyRequest/Response, NginxActionResponse
+│   │   ├── source_pool.py       # Pydantic модели: SourcePoolConfig, SourcePoolState, MarkBinding; константы меток
 │   │   └── network.py           # Pydantic модели: AddressSpec, NetworkApplyRequest, TransactionRequest, NetworkStateResponse, NetworkApplyResponse
 │   ├── routers/          # API эндпоинты (metrics, haproxy, traffic, ssh, ssl, firewall, antiddos, remnawave и др.)
 │   └── services/         # Сбор метрик, HAProxy, трафик, SSH менеджер
@@ -170,6 +172,7 @@ node/
 │       ├── net_interfaces.py       # list_physical_interfaces() для nic-info; list_address_interfaces() — интерфейсы, способные нести адрес (доп. IP)
 │       ├── extra_ips.py            # Доп. IP-адреса: детект бэкенда, рендер конфигов, guard'ы, ExtraIpManager (см. «Дополнительные IP-адреса»)
 │       ├── host_extra_ips.sh       # Host-скрипт транзакции (→ /opt/monitoring/scripts/extra-ips.sh): backup/apply/verify/timer/rollback/boot-guard
+│       ├── source_pool.py          # Пул исходящих адресов: раскладка меток по IP, `ip rule`/`ip route`, самолечение (см. «Пул исходящих адресов»)
 │       └── exit_proxy/             # Exit-прокси (см. «Exit-прокси»)
 │           ├── models.py           # Pydantic: ExitProxyConfig (от панели), Candidate, CheckResult, ExitProxyStatus, ExitEvent
 │           ├── selection.py        # Чистые функции: слияние кандидатов, вердикт «здоров», липкий выбор выхода
@@ -877,6 +880,25 @@ Google банит выходы WARP целыми диапазонами (кап�
 Префикс `/api/system/` → домен `system` без правки карт capabilities. Ответы быстрые — своего `location` в nginx не нужно (общий 30 с). Ограничение: relay на Python рассчитан на Gemini, поиск и API, не на видео.
 
 **Файлы:** `node/app/services/exit_proxy/{models,selection,socks_server,manager}.py`, `host_check.sh`, `node/app/routers/exit_proxy.py`, `node/app/main.py`. Тесты: `test_exit_proxy_selection.py` (слияние, вердикт, липкость, manual, «ни одного здорового»), `test_exit_proxy_socks.py` (рукопожатие, CONNECT по IPv4/домену, отказ UDP/auth, сброс соединений только чужого выхода, цепочка через upstream-socks), `test_exit_proxy_manager.py` (FakeExecutor: прогон и выбор, переключение со сбросом живого соединения, `no_healthy` один раз, персистентность, смена порта/выключение, ручное переключение и pin, WARP-кандидат, payload проверок, установка скрипта).
+
+### Пул исходящих адресов (`source_pool.py`)
+
+Пространство исходящих TCP-соединений ограничено четвёркой (src ip, src port, dst ip, dst port): на пару «адрес ноды → адрес:порт цели» приходится только диапазон эфемерных портов — 64 512 штук. Нода, через которую десятки тысяч клиентов идут на один популярный адрес, упирается в этот потолок: каждый новый `connect()` заставляет ядро перебирать почти весь диапазон под спинлоком (`__inet_check_established` в профиле), процессор уходит в system time, а трафик не растёт. Потолок кратен числу исходящих адресов и двигается только их добавлением — SNAT не помогает, потому что переписывает адрес уже после подбора порта.
+
+**Как устроено.** Xray в Remnawave помечает исходящие соединения фиксированным набором меток `MARK_BASE..MARK_BASE+MARK_COUNT-1` (101–130; 30 outbound'ов `freedom` с `sockopt.mark` и балансировщик `roundRobin` — сниппет отдаёт панель). Конфиг один на весь парк, потому что метки везде одинаковы; какой метке какой адрес — решает нода: `build_bindings()` раскладывает метки по адресам **по кругу** (`mark i → адрес i % N`), так 30 меток делятся ровно на любое число адресов, а нода с одним адресом правил не ставит вовсе (любая метка и так уйдёт по основной таблице с него). На каждый адрес — таблица `TABLE_BASE + j` с `default via <gw> dev <iface> src <addr>` (без `via` на point-to-point линках), на каждую метку — `ip rule fwmark M lookup T priority P`. Выбор источника происходит при `connect()` до подбора порта, поэтому порт ищется уже в пустом пространстве другого адреса. Только IPv4 и только TCP: на UDP метки Xray не действуют, а потолок портов касается только TCP.
+
+**Адреса** — global-IPv4 default-интерфейса из `ExtraIpManager.state()` (тот же источник, что у карточки «Сетевые адреса» и exit-прокси) минус список исключений из конфига панели. **Самолечение** — цикл `SELF_HEAL_INTERVAL_SEC = 30`: один запрос к хосту (`ip -j -4 rule show` + `route show table all` + `route show default`, три вывода разделены маркерами), разбор только своих меток/таблиц (`parse_rules`, `parse_table_routes`), `plan_commands()` выдаёт лишь расхождения — в устоявшемся состоянии на хост ничего не пишется; лишние метки/таблицы от прежней раскладки снимаются, выключение чистит всё своё (`clear_commands`). Ребут переживается тем же циклом: агент стартует при загрузке и в течение цикла возвращает правила. Чужие правила не трогаются: удаление идёт точным совпадением селектора (`fwmark M priority P`), таблицы `main`/`local` и метки вне диапазона игнорируются. Известное ограничение: если оператор сам использует метки 101–130 или таблицы 101–130 под свой policy routing, раскладка на такой ноде будет неверной — нода это не ломает, но и не чинит.
+
+**Взаимоисключение с exit-прокси.** Оба решают, с какого IP нода выходит наружу, вместе они дали бы неопределённый результат. Роутер пула отвечает `409`, если включён exit-прокси, роутер exit-прокси — `409`, если включён пул (`source_pool_enabled()`); менеджер пула проверяет конфликт и сам (`EXIT_PROXY_CONFLICT` в `state.conflict`).
+
+| Метод | Endpoint | Описание |
+|-------|----------|----------|
+| GET | /api/system/source-pool/state | `enabled`, `supported`/`reason`, `interface`, `gateway`, `addresses[]` (все найденные), `excluded[]`, `active_addresses[]`, `mark_base`, `mark_count`, `bindings[] {mark, address, table}`, `missing_marks[]`, `in_sync`, `last_error`, `conflict` |
+| PUT | /api/system/source-pool/config | `SourcePoolConfig {enabled, excluded[] (IPv4, ≤64)}` → состояние; включение при работающем exit-прокси → `409` |
+
+Префикс `/api/system/` → домен `system` без правки карт capabilities. Состояние (конфиг от панели) — `source_pool.json` рядом с БД трафика, атомарная запись; раскладка в ядре восстанавливается из него при старте.
+
+**Файлы:** `node/app/models/source_pool.py`, `node/app/services/source_pool.py`, `node/app/routers/source_pool.py`, `node/app/routers/exit_proxy.py` (встречный `409`), `node/app/main.py`. Тесты — `node/tests/test_source_pool.py`: ровная раскладка по кругу (30 на 3 адреса = по 10), один адрес → ничего, разбор `ip -j` (hex/int/с маской, чужие правила и таблицы игнорируются), шлюз point-to-point, план команд только по расхождениям и пустой в покое, `clear_commands` только своё, менеджер на FakeExecutor: правила на каждую метку, отказ при включённом exit-прокси.
 
 ### Анти-DDoS
 

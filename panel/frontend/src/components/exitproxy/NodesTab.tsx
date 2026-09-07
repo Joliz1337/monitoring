@@ -6,6 +6,7 @@ import { useExitProxyStore } from '../../stores/exitProxyStore'
 import { orderFolders } from '../../utils/folders'
 import NodeRow from './NodeRow'
 import SnippetBlock from './SnippetBlock'
+import SourcePoolSnippetBlock from './SourcePoolSnippetBlock'
 
 const NO_FOLDER = '__no_folder__'
 
@@ -91,6 +92,7 @@ export default function NodesTab() {
       ))}
 
       <SnippetBlock />
+      <SourcePoolSnippetBlock />
     </div>
   )
 }

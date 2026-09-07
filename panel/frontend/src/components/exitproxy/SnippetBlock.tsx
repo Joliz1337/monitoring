@@ -17,7 +17,7 @@ async function copyText(value: string) {
   }
 }
 
-function CopyField({ label, value, rows }: { label: string; value: string; rows: number }) {
+export function CopyField({ label, value, rows }: { label: string; value: string; rows: number }) {
   const { t } = useTranslation()
   const [copied, setCopied] = useState(false)
 

@@ -23,7 +23,17 @@ async def get_status() -> ExitProxyStatus:
 
 @router.put("/config", response_model=ExitProxyStatus)
 async def put_config(config: ExitProxyConfig) -> ExitProxyStatus:
-    """Полный конфиг от панели: поднимает/гасит socks, при смене проверок запускает прогон."""
+    """Полный конфиг от панели: поднимает/гасит socks, при смене проверок запускает прогон.
+
+    Включение при работающем пуле исходящих адресов отклоняется: оба управляют
+    тем, с какого IP нода выходит наружу, и вместе дали бы неопределённый результат."""
+    from app.services.source_pool import source_pool_enabled
+
+    if config.enabled and source_pool_enabled():
+        raise HTTPException(
+            status_code=409,
+            detail="пул исходящих адресов включён: он сам распределяет исходящий трафик по IP",
+        )
     return await get_exit_proxy_manager().apply_config(config)
 
 

@@ -3056,6 +3056,32 @@ Google банит выходы Cloudflare WARP целым диапазоном (
 - `panel/backend/app/routers/exit_proxy.py`; `main.py` (роутер, `start_exit_proxy`/`stop_exit_proxy`, GZip-обход стрима); `services/node_sync_queue.py` (`KIND_EXIT_PROXY`); `services/reserved_ports_sync.py` (`service_entries`); `services/deploy_service.py` (`build_warp_install_command`); `services/remnawave_node_install.py` (`HostInstallJobManager`)
 - Тесты: `tests/test_exit_proxy.py` (конфиг и хэш, сниппет, представления и статусы, новые события, тексты алертов, гейт версии/прав, инвариант nginx-таймаута, порты сервисов, команда WARP); `tests/test_node_capabilities.py` — `services/exit_proxy/node_client.py` в `GATED`
 
+## Пул исходящих адресов
+
+На одну пару «адрес ноды → адрес:порт цели» приходится 64 512 исходящих портов; нода, через которую десятки тысяч клиентов идут на один популярный адрес, упирается в этот потолок, и процессор уходит в перебор портов в ядре. Раздел раскладывает исходящий TCP по всем IPv4-адресам ноды: Xray в Remnawave помечает соединения 30 метками (общий сниппет для всего парка), а нода сама решает, какой метке какой адрес — см. [node/DOCUMENTATION.md](../node/DOCUMENTATION.md#пул-исходящих-адресов-source_poolpy). Панель присылает лишь `enabled` и список исключённых адресов, забирает состояние раскладки и показывает его на странице сервера.
+
+**Модель (`app/models.py`, через `create_all`):** `SourcePoolNode` (PK `server_id`) — `enabled`, `excluded` (JSON list IPv4), последнее состояние ноды целиком (`node_state`, JSON), `config_hash`, `sync_status` (`pending`/`synced`/`failed`/`denied`/`unsupported`), `sync_error`, `last_sync_at`, `last_state_at`. Строка остаётся после выключения — исключения не теряются.
+
+**Цикл (`services/source_pool/service.py`, `SourcePoolService`, тик 60 с, стартовая пауза 45 с):** для каждой включённой ноды (и выключенной с долгом `pending` — ей ещё надо отвезти `enabled=false`), онлайн по `is_server_online`: гейт версии (`MIN_NODE_VERSION_SOURCE_POOL = 10.29.0`) и прав (`system:write`) → `unsupported`/`denied`; `build_node_config()` (`render.py`) → `config_hash()`; хэш отличается или статус не `synced` → `PUT /api/system/source-pool/config` → `synced`; затем `GET /state` (или ответ на `PUT`) сохраняется целиком. Офлайн и сорвавшийся запрос → долг `KIND_SOURCE_POOL` в `node_sync_queue`; `409` от ноды (на ней включён exit-прокси) → `failed` с текстом причины без долга — следующий тик попробует снова. Таймаут запросов к ноде 25 с — у `/api/system/source-pool/*` нет своего `location` в nginx ноды, действует общий 30 с (тест-инвариант).
+
+**Взаимоисключение с exit-прокси** — с обеих сторон и на обоих уровнях: `PUT /source-pool/nodes/{id}` с `enabled=true` отвечает `409`, если у сервера включён `ExitProxyNode`; `PUT /exit-proxy/nodes/{id}` — `409`, если включён `SourcePoolNode` (`source_pool_enabled_on()`); нода дублирует обе проверки у себя.
+
+| Метод | Endpoint | Описание |
+|-------|----------|----------|
+| GET | /api/source-pool/nodes | `{nodes: [...]}` по всем активным серверам — см. `views.node_view()` |
+| GET | /api/source-pool/nodes/{id} | Карточка сервера: `install_status` (`off`/`pending`/`active`/`drift`/`failed`/`denied`/`unsupported`), `addresses[] {address, excluded, marks}`, `active_count`, `mark_base`, `mark_count`, `in_sync`, `missing_marks[]`, `conflict`, `node_error`, `supported_by_node`, `min_node_version` |
+| PUT | /api/source-pool/nodes/{id} | `{enabled?, excluded?}` (IPv4, ≤64); включение — `409` при старом агенте, закрытом домене `system` или включённом exit-прокси; после сохранения конфиг доставляется сразу (`sync_one`) |
+| POST | /api/source-pool/nodes/{id}/refresh | Забрать состояние с ноды сейчас, без доставки конфига |
+| GET | /api/source-pool/snippet | `{outbounds_json, routing_json, text}` — 30 outbound'ов `freedom` с тегами `pool-01..pool-30` и `sockopt.mark` 101–130, балансировщик `source-pool` (`selector: ["pool-"]`, `roundRobin`) и правило `network: tcp` → `balancerTag`, которое ставится последним в `routing.rules`; константы меток сверяются с нодой тестом |
+
+**Frontend:** страница сервера → кнопка «Исходящие адреса» рядом с DNAT → `pages/SourcePool.tsx` (`/server/:id/source-pool`): карточка статуса с тумблером включения и подсказкой о механике, список адресов интерфейса с галочками участия (снятая = исключён) и числом меток на адрес, ссылка в раздел Exit-прокси за конфигом; поллинг раз в 10 с, кнопка обновления опрашивает ноду (`refresh`). Сниппет Xray — сворачиваемый блок «Конфиг для Remnawave: пул исходящих адресов» на вкладке «Ноды» раздела Exit-прокси (`components/exitproxy/SourcePoolSnippetBlock.tsx`, `CopyField` общий с блоком exit-прокси). `api/client.ts`: `sourcePoolApi`, типы `SourcePoolNodeView`, `SourcePoolSnippet`.
+
+**Файлы:**
+- `panel/backend/app/models.py` — `SourcePoolNode`
+- `panel/backend/app/services/source_pool/` — `node_client.py`, `render.py`, `service.py`, `views.py`
+- `panel/backend/app/routers/source_pool.py`; `routers/exit_proxy.py` (встречный `409`); `main.py` (роутер, `start_source_pool`/`stop_source_pool`); `services/node_sync_queue.py` (`KIND_SOURCE_POOL`)
+- Тесты: `tests/test_source_pool.py` (конфиг и хэш, сниппет и совпадение меток с нодой, лестница статусов, представление, гейт версии, инвариант nginx-таймаута); `tests/test_node_capabilities.py` — `services/source_pool/node_client.py` в `GATED`
+
 ## Диагностика
 
 ### Проблема: "Login failed" при правильном пароле

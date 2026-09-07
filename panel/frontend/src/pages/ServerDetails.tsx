@@ -9,6 +9,7 @@ import {
   HardDrive,
   Network,
   Route,
+  Shuffle,
   Activity,
   Clock,
   Server,
@@ -503,6 +504,16 @@ export default function ServerDetails() {
             >
               <Route className="w-4 h-4" />
               {t('dnat.title')}
+            </motion.div>
+          </Link>
+          <Link to={`/${uid}/server/${serverId}/source-pool`}>
+            <motion.div
+              className="btn btn-secondary"
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.98 }}
+            >
+              <Shuffle className="w-4 h-4" />
+              {t('server_details.source_pool')}
             </motion.div>
           </Link>
           <Link to={`/${uid}/server/${serverId}/haproxy`}>
