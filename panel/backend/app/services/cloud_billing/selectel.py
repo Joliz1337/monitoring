@@ -1,16 +1,13 @@
-"""Selectel: остаток, расход и запасной прогноз через Billing API.
+"""Selectel: остаток и срок жизни баланса через Billing API.
 
-Статический API-ключ (заголовок X-Token) покрывает все три метода. Расход
-берётся готовым из статистики биллинга — той же, что Selectel показывает в
-своём разделе «Статистика», — за то же окно, что у Yandex Cloud. Прогноз
-самого Selectel остаётся запасным вариантом, потому что его единица измерения
-расходится с документацией (см. _fetch_prediction_days).
+Статический API-ключ (заголовок X-Token) покрывает оба метода. Сколько дней
+проживёт баланс, считает сам Selectel (/v2/billing/prediction) — панель эту
+цифру не пересчитывает, а только приводит к дневному расходу, чтобы порог
+остатка и калькулятор пополнения работали как у других провайдеров.
 """
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
 from typing import Optional
-from urllib.parse import urlencode
 
 from app.services.cloud_billing.base import (
     CloudAuthError,
@@ -25,19 +22,9 @@ logger = logging.getLogger(__name__)
 SELECTEL_BASE = "https://api.selectel.ru"
 BALANCES_PATH = "/v3/balances"
 PREDICTION_PATH = "/v2/billing/prediction"
-SUMMARY_STATS_PATH = "/v1/cloud_billing/statistic/summary_stats"
-
-# Статистика отдаётся только по перечисленным продуктам, а нужен расход по
-# аккаунту целиком — поэтому перечислены все ключи из спецификации API
-PROVIDER_KEYS = (
-    "vpc", "serverless", "mks", "dbaas", "storage", "cdn",
-    "vmware", "craas", "ones", "mobfarm", "ses",
-)
 
 # Суммы в Billing API приходят целыми числами в минимальных единицах (копейки).
 MINOR_UNITS = 100
-# Столько же, сколько у Yandex Cloud: свежая оценка важнее сглаживания
-CONSUMPTION_WINDOW_DAYS = 3
 REQUEST_TIMEOUT = 20.0
 RETRY_ATTEMPTS = 3
 RETRY_BASE_DELAY = 1.0
@@ -50,15 +37,14 @@ class SelectelProvider(CloudProvider):
 
     async def fetch(self, credential: str, account_id: Optional[str]) -> CloudSnapshot:
         balance, currency, warning = await self._fetch_balance(credential)
-        daily_cost = await self._fetch_daily_cost(credential)
-        days_left = None if daily_cost else await self._fetch_prediction_days(credential)
+        days_left, prediction_warning = await self._fetch_prediction_days(credential)
 
         return CloudSnapshot(
             balance=balance,
             currency=currency,
-            daily_cost=daily_cost,
             days_left=days_left,
-            warning=warning,
+            # Долг важнее: он объясняет и нулевой остаток, и отсутствие прогноза
+            warning=warning or prediction_warning,
         )
 
     async def _fetch_balance(self, token: str) -> tuple[float, str, Optional[str]]:
@@ -78,56 +64,25 @@ class SelectelProvider(CloudProvider):
 
         return total_minor / MINOR_UNITS, currency, warning
 
-    async def _fetch_daily_cost(self, token: str) -> Optional[float]:
-        """Средний расход в сутки по статистике биллинга за последние дни.
+    async def _fetch_prediction_days(
+        self, token: str
+    ) -> tuple[Optional[float], Optional[str]]:
+        """Прогноз Selectel: на сколько дней хватит баланса.
 
-        Ошибка не фатальна: баланс уже получен, срок посчитается по прогнозу."""
-        now = datetime.now(timezone.utc)
-        start = now - timedelta(days=CONSUMPTION_WINDOW_DAYS)
-
-        try:
-            spent_minor = await self._fetch_spent(token, start, now)
-        except CloudBillingError as e:
-            logger.warning("Selectel billing statistics unavailable: %s", e)
-            return None
-
-        if spent_minor <= 0:
-            return None
-
-        return round(spent_minor / MINOR_UNITS / CONSUMPTION_WINDOW_DAYS, 4)
-
-    async def _fetch_spent(self, token: str, start: datetime, end: datetime) -> float:
-        """Расход за период в копейках, посчитанный самим Selectel."""
-        query = "?" + urlencode(
-            {
-                "provider_keys": PROVIDER_KEYS,
-                "start": f"{start:%Y-%m-%dT%H:%M:%S}",
-                "end": f"{end:%Y-%m-%dT%H:%M:%S}",
-                "group_type": "project",
-                "period_group_type": "all",
-                "items_count_period_group_type": "all",
-            },
-            doseq=True,
-        )
-        data = await self._get(token, SUMMARY_STATS_PATH, query)
-        return sum(_as_number(row.get("value")) for row in _statistic_rows(data))
-
-    async def _fetch_prediction_days(self, token: str) -> Optional[float]:
-        """Запасной прогноз, когда расхода в окне нет (свежий аккаунт).
-
-        Документация Selectel называет значения часами, но на реальном аккаунте
-        число совпадает с расчётом по списаниям только как дни: 46 против
-        посчитанных 53 дней, тогда как «46 часов» разошлось бы в 28 раз."""
+        Ошибка не фатальна — баланс уже получен, без прогноза теряется только срок.
+        Документация называет значения часами, но на реальном аккаунте число
+        сходится с фактическими списаниями только как дни: 46 против посчитанных
+        53 дней, тогда как «46 часов» разошлось бы в 28 раз."""
         try:
             data = await self._get(token, PREDICTION_PATH)
         except CloudBillingError as e:
             logger.warning("Selectel prediction unavailable: %s", e)
-            return None
+            return None, f"Prediction unavailable: {e}"
 
-        return _pick_prediction_days(data)
+        return _pick_prediction_days(data), None
 
-    async def _get(self, token: str, path: str, query: str = "") -> dict | list:
-        url = f"{SELECTEL_BASE}{path}{query}"
+    async def _get(self, token: str, path: str) -> dict:
+        url = f"{SELECTEL_BASE}{path}"
         headers = {"X-Token": token, "Accept": "application/json"}
         last_error = "no attempts"
 
@@ -158,20 +113,13 @@ class SelectelProvider(CloudProvider):
         raise CloudBillingError(last_error)
 
 
-def _payload(body: dict) -> dict | list:
+def _payload(body) -> dict:
     if not isinstance(body, dict):
         raise CloudBillingError("Unexpected response shape")
     data = body.get("data")
-    if data is None:
+    if not isinstance(data, dict):
         raise CloudBillingError("Response has no data")
     return data
-
-
-def _statistic_rows(data) -> list[dict]:
-    """Сводка расхода — массив строк: по одной на период и группу."""
-    if not isinstance(data, list):
-        raise CloudBillingError("Unexpected statistics shape")
-    return [row for row in data if isinstance(row, dict)]
 
 
 def _as_number(value) -> float:
@@ -191,8 +139,6 @@ def _billing_sum(billing: dict) -> float:
 def _pick_prediction_days(data: dict) -> Optional[float]:
     """Дни жизни баланса. Пустая или нулевая группа значит «услуг нет» или
     «прогноз не считается», поэтому берётся ближайшее исчерпание среди остальных."""
-    if not isinstance(data, dict):
-        return None
     positive = [_as_number(v) for v in data.values() if _as_number(v) > 0]
     if not positive:
         return None
