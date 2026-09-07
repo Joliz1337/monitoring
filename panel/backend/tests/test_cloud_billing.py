@@ -23,11 +23,12 @@ from app.services.cloud_billing import (  # noqa: E402
 )
 from app.services.cloud_billing.selectel import (  # noqa: E402
     CONSUMPTION_WINDOW_DAYS,
+    PROVIDER_KEYS,
     SelectelProvider,
     _billing_sum,
     _payload,
     _pick_prediction_days,
-    _transaction_rows,
+    _statistic_rows,
 )
 from app.services.cloud_billing.timeweb import TimewebProvider, _tariff_daily_cost  # noqa: E402
 
@@ -70,10 +71,20 @@ def balances_response(final_sum: float, debt_sum: float = 0, currency: str = "RU
     })
 
 
-def transactions_response(*prices):
+def summary_stats_response(*values):
+    """Форма ответа /v1/cloud_billing/statistic/summary_stats: строка на период."""
     return FakeResponse(200, {
         "status": "success",
-        "data": [{"price": p, "state": "PAID"} for p in prices],
+        "data": [
+            {
+                "account_id": "5633235",
+                "period_start": "2026-08-27T12:00:00",
+                "period_end": "2026-08-30T12:00:00",
+                "value": v,
+                "items_count": 3,
+            }
+            for v in values
+        ],
     })
 
 
@@ -145,10 +156,10 @@ class SelectelParsingTests(unittest.TestCase):
     def test_prediction_all_zero_means_no_forecast(self):
         self.assertIsNone(_pick_prediction_days({"primary": 0, "storage": None}))
 
-    def test_transaction_rows_accepts_both_shapes(self):
-        self.assertEqual(_transaction_rows([{"price": -1}]), [{"price": -1}])
-        self.assertEqual(_transaction_rows({"transactions": [{"price": -1}]}), [{"price": -1}])
-        self.assertEqual(_transaction_rows({"total": 0}), [])
+    def test_statistic_rows_require_a_list(self):
+        self.assertEqual(_statistic_rows([{"value": 10}, "junk"]), [{"value": 10}])
+        with self.assertRaises(CloudBillingError):
+            _statistic_rows({"value": 10})
 
 
 class SelectelProviderTests(unittest.TestCase):
@@ -157,26 +168,42 @@ class SelectelProviderTests(unittest.TestCase):
             return asyncio.run(SelectelProvider().fetch("static-token", None))
 
     def test_balance_and_daily_cost_come_from_minor_units(self):
-        # Форма реального ответа аккаунта: остаток 17 824,41 ₽, списания за месяц
+        # Форма реального ответа аккаунта: остаток 17 824,41 ₽, расход 1 009,74 ₽ за окно
         client = FakeClient({
             "/v3/balances": balances_response(1782441),
-            "/v2/billing/transactions": transactions_response(-235609, -773000, 500000),
+            "/v1/cloud_billing/statistic/summary_stats": summary_stats_response(100974),
         })
 
         snapshot = self._fetch(client)
 
         self.assertEqual(snapshot.balance, 17824.41)
         self.assertEqual(snapshot.currency, "RUB")
-        # Пополнение (+5000) в расход не идёт: (2356.09 + 7730.00) / 30
-        self.assertEqual(snapshot.daily_cost, round(10086.09 / CONSUMPTION_WINDOW_DAYS, 4))
+        self.assertEqual(snapshot.daily_cost, round(1009.74 / CONSUMPTION_WINDOW_DAYS, 4))
         self.assertIsNone(snapshot.days_left)
         self.assertIsNone(snapshot.warning)
         self.assertEqual(client.calls[0][1]["X-Token"], "static-token")
 
+    def test_statistics_cover_every_product_over_the_window(self):
+        client = FakeClient({
+            "/v3/balances": balances_response(1000000),
+            "/v1/cloud_billing/statistic/summary_stats": summary_stats_response(60000, 30000),
+        })
+
+        snapshot = self._fetch(client)
+
+        stats_call = next(c[0] for c in client.calls if c[0].startswith("/v1/cloud_billing"))
+        for key in PROVIDER_KEYS:
+            self.assertIn(f"provider_keys={key}", stats_call)
+        self.assertIn("period_group_type=all", stats_call)
+        self.assertIn("start=", stats_call)
+        self.assertIn("end=", stats_call)
+        # Строки сводки складываются: (600 + 300) / 3
+        self.assertEqual(snapshot.daily_cost, 300.0)
+
     def test_prediction_is_the_fallback_without_charges(self):
         client = FakeClient({
             "/v3/balances": balances_response(1782441),
-            "/v2/billing/transactions": transactions_response(),
+            "/v1/cloud_billing/statistic/summary_stats": summary_stats_response(),
             "/v2/billing/prediction": FakeResponse(200, {
                 "status": "success",
                 "data": {"primary": 46, "storage": None, "vmware": None, "vpc": None},
@@ -188,25 +215,10 @@ class SelectelProviderTests(unittest.TestCase):
         self.assertIsNone(snapshot.daily_cost)
         self.assertEqual(snapshot.days_left, 46)
 
-    def test_transactions_are_paginated(self):
-        page = transactions_response(*([-100] * 500))
-        client = FakeClient({
-            "/v3/balances": balances_response(1000000),
-            "/v2/billing/transactions": page,
-        })
-
-        with patch("app.services.cloud_billing.selectel.TRANSACTIONS_MAX_PAGES", 3):
-            snapshot = self._fetch(client)
-
-        transaction_calls = [c for c in client.calls if c[0].startswith("/v2/billing/transactions")]
-        self.assertEqual(len(transaction_calls), 3)
-        self.assertIn("offset=1000", transaction_calls[-1][0])
-        self.assertEqual(snapshot.daily_cost, round(1500.0 / CONSUMPTION_WINDOW_DAYS, 4))
-
     def test_debt_is_reported_as_warning(self):
         client = FakeClient({
             "/v3/balances": balances_response(0, debt_sum=50000),
-            "/v2/billing/transactions": transactions_response(),
+            "/v1/cloud_billing/statistic/summary_stats": summary_stats_response(),
             "/v2/billing/prediction": FakeResponse(200, {"status": "ok", "data": {}}),
         })
 
@@ -224,7 +236,7 @@ class SelectelProviderTests(unittest.TestCase):
     def test_cost_sources_failure_keeps_balance(self):
         client = FakeClient({
             "/v3/balances": balances_response(100000),
-            "/v2/billing/transactions": FakeResponse(400, None, "bad request"),
+            "/v1/cloud_billing/statistic/summary_stats": FakeResponse(400, None, "bad request"),
             "/v2/billing/prediction": FakeResponse(400, None, "bad request"),
         })
 

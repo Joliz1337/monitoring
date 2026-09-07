@@ -1,14 +1,16 @@
-"""Selectel: остаток, фактический расход и запасной прогноз через Billing API.
+"""Selectel: остаток, расход и запасной прогноз через Billing API.
 
 Статический API-ключ (заголовок X-Token) покрывает все три метода. Расход
-считается по реальным списаниям из истории транзакций за то же окно, что у
-Yandex Cloud, — прогноз самого Selectel остаётся запасным вариантом, потому что
-его единица измерения расходится с документацией (см. _fetch_prediction_days).
+берётся готовым из статистики биллинга — той же, что Selectel показывает в
+своём разделе «Статистика», — за то же окно, что у Yandex Cloud. Прогноз
+самого Selectel остаётся запасным вариантом, потому что его единица измерения
+расходится с документацией (см. _fetch_prediction_days).
 """
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from urllib.parse import urlencode
 
 from app.services.cloud_billing.base import (
     CloudAuthError,
@@ -23,15 +25,19 @@ logger = logging.getLogger(__name__)
 SELECTEL_BASE = "https://api.selectel.ru"
 BALANCES_PATH = "/v3/balances"
 PREDICTION_PATH = "/v2/billing/prediction"
-TRANSACTIONS_PATH = "/v2/billing/transactions"
+SUMMARY_STATS_PATH = "/v1/cloud_billing/statistic/summary_stats"
+
+# Статистика отдаётся только по перечисленным продуктам, а нужен расход по
+# аккаунту целиком — поэтому перечислены все ключи из спецификации API
+PROVIDER_KEYS = (
+    "vpc", "serverless", "mks", "dbaas", "storage", "cdn",
+    "vmware", "craas", "ones", "mobfarm", "ses",
+)
 
 # Суммы в Billing API приходят целыми числами в минимальных единицах (копейки).
 MINOR_UNITS = 100
-# Столько же, сколько у Yandex Cloud: свежая оценка важнее сглаживания. Разовое
-# месячное списание в окне завысит расход, пока не выйдет за его край
+# Столько же, сколько у Yandex Cloud: свежая оценка важнее сглаживания
 CONSUMPTION_WINDOW_DAYS = 3
-TRANSACTIONS_PAGE_SIZE = 500
-TRANSACTIONS_MAX_PAGES = 20
 REQUEST_TIMEOUT = 20.0
 RETRY_ATTEMPTS = 3
 RETRY_BASE_DELAY = 1.0
@@ -73,49 +79,44 @@ class SelectelProvider(CloudProvider):
         return total_minor / MINOR_UNITS, currency, warning
 
     async def _fetch_daily_cost(self, token: str) -> Optional[float]:
-        """Средний расход в сутки по списаниям за последние дни.
+        """Средний расход в сутки по статистике биллинга за последние дни.
 
         Ошибка не фатальна: баланс уже получен, срок посчитается по прогнозу."""
         now = datetime.now(timezone.utc)
         start = now - timedelta(days=CONSUMPTION_WINDOW_DAYS)
 
         try:
-            rows = await self._fetch_transactions(token, start, now)
+            spent_minor = await self._fetch_spent(token, start, now)
         except CloudBillingError as e:
-            logger.warning("Selectel transactions unavailable: %s", e)
+            logger.warning("Selectel billing statistics unavailable: %s", e)
             return None
 
-        spent_minor = sum(
-            -_as_number(row.get("price")) for row in rows if _as_number(row.get("price")) < 0
-        )
         if spent_minor <= 0:
             return None
 
         return round(spent_minor / MINOR_UNITS / CONSUMPTION_WINDOW_DAYS, 4)
 
-    async def _fetch_transactions(self, token: str, start: datetime, end: datetime) -> list[dict]:
-        rows: list[dict] = []
-        for page in range(TRANSACTIONS_MAX_PAGES):
-            query = (
-                f"?created_from={start:%Y-%m-%dT%H:%M:%S}"
-                f"&created_to={end:%Y-%m-%dT%H:%M:%S}"
-                f"&limit={TRANSACTIONS_PAGE_SIZE}"
-                f"&offset={page * TRANSACTIONS_PAGE_SIZE}"
-                f"&without_removed=true"
-            )
-            batch = _transaction_rows(await self._get(token, TRANSACTIONS_PATH, query))
-            rows.extend(batch)
-            if len(batch) < TRANSACTIONS_PAGE_SIZE:
-                break
-        else:
-            logger.warning("Selectel transactions truncated at %d pages", TRANSACTIONS_MAX_PAGES)
-        return rows
+    async def _fetch_spent(self, token: str, start: datetime, end: datetime) -> float:
+        """Расход за период в копейках, посчитанный самим Selectel."""
+        query = "?" + urlencode(
+            {
+                "provider_keys": PROVIDER_KEYS,
+                "start": f"{start:%Y-%m-%dT%H:%M:%S}",
+                "end": f"{end:%Y-%m-%dT%H:%M:%S}",
+                "group_type": "project",
+                "period_group_type": "all",
+                "items_count_period_group_type": "all",
+            },
+            doseq=True,
+        )
+        data = await self._get(token, SUMMARY_STATS_PATH, query)
+        return sum(_as_number(row.get("value")) for row in _statistic_rows(data))
 
     async def _fetch_prediction_days(self, token: str) -> Optional[float]:
-        """Запасной прогноз, когда списаний в окне нет (свежий аккаунт).
+        """Запасной прогноз, когда расхода в окне нет (свежий аккаунт).
 
         Документация Selectel называет значения часами, но на реальном аккаунте
-        число совпадает с расчётом по транзакциям только как дни: 46 против
+        число совпадает с расчётом по списаниям только как дни: 46 против
         посчитанных 53 дней, тогда как «46 часов» разошлось бы в 28 раз."""
         try:
             data = await self._get(token, PREDICTION_PATH)
@@ -166,15 +167,11 @@ def _payload(body: dict) -> dict | list:
     return data
 
 
-def _transaction_rows(data) -> list[dict]:
-    """Список операций: у Selectel это либо сам data, либо ключ внутри него."""
-    if isinstance(data, list):
-        return [row for row in data if isinstance(row, dict)]
-    if isinstance(data, dict):
-        rows = data.get("transactions")
-        if isinstance(rows, list):
-            return [row for row in rows if isinstance(row, dict)]
-    return []
+def _statistic_rows(data) -> list[dict]:
+    """Сводка расхода — массив строк: по одной на период и группу."""
+    if not isinstance(data, list):
+        raise CloudBillingError("Unexpected statistics shape")
+    return [row for row in data if isinstance(row, dict)]
 
 
 def _as_number(value) -> float:

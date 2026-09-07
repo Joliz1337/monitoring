@@ -31,7 +31,7 @@ Keys are stored encrypted and never returned to the interface: the field in the 
 
 - For the resource type an honest daily cost matters: the panel simply divides the remaining balance by it.
 - The balance threshold is the amount you don't want to spend below: the term is counted down to it, not to zero.
-- Spending is measured over the last three days from actual data: consumption for Yandex Cloud, charges for Selectel. So after a sharp increase the number catches up within a couple of days, while a one-off monthly payment keeps the estimate high for those days.
+- Spending is measured over the last three days from actual data: consumption for Yandex Cloud, and Selectel's own expense statistics — the same figure as in the “Statistics” section of the Selectel panel. So after a sharp increase the number catches up within a couple of days.
 - Timeweb Cloud has no charge history in its API, so the panel remembers the balance on every check and derives spending from its decline; top-ups don't affect the math. For the first hours after adding, while there's little history, the current plan price is shown instead.
 - The summary on top shows monthly spend, total balance and how many projects expire within a week. Different currencies are listed separately instead of being added up.
 - Overdue and expiring servers are highlighted — you see them the moment you open the page.
