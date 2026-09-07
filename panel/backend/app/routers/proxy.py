@@ -10,7 +10,7 @@ import json
 import logging
 import time
 from pydantic import BaseModel, Field
-from app.services.http_client import get_node_client, node_auth_headers
+from app.services.http_client import get_node_client, get_node_apply_client, node_auth_headers
 
 from app.database import get_db
 from app.models import Server, ServerCache, MetricsSnapshot
@@ -32,6 +32,7 @@ from app.services.traffic_import import (
 )
 from app.services import network_transactions
 from app.services.network_addresses import AddressInputError, expand_entries, normalize_ref, preview
+from app.services.reserved_ports_sync import _version_tuple
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +129,8 @@ async def proxy_request(
     method: str = "GET",
     json_data: dict = None,
     params: dict = None,
-    timeout: float = 15.0
+    timeout: float = 15.0,
+    apply: bool = False,
 ) -> dict:
     _require_endpoint(server, endpoint, method)
 
@@ -136,7 +138,9 @@ async def proxy_request(
     started = time.perf_counter()
 
     try:
-        client = get_node_client(server)
+        # apply=True — долгие операции (apt purge и т.п.): отдельный пул с read=300s,
+        # чтобы не конкурировать с потоком коротких запросов метрик.
+        client = get_node_apply_client(server) if apply else get_node_client(server)
         headers = node_auth_headers(server)
 
         if method == "GET":
@@ -532,6 +536,73 @@ async def set_bandwidth_limit(
 ):
     server = await get_server_by_id(server_id, db)
     return await proxy_request(server, "/api/system/bandwidth-limit", method="POST", json_data=data, timeout=40.0)
+
+
+# ==================== Hoster access (разведка и вырезание доступов хостера) ====================
+# scan — read-only, purge — необратимо (apt purge, стирание ключей/юзеров/репо).
+# Домен `system` (префикс /api/system/), гейт версии ноды 10.29.0.
+
+MIN_NODE_VERSION_HOSTER = "10.29.0"
+# Не больше proxy_read_timeout у location /api/system/hoster-access/ на ноде.
+HOSTER_PURGE_TIMEOUT = 280.0
+
+
+class HosterPurgeBody(BaseModel):
+    finding_ids: list[str] = Field(default_factory=list, max_length=200)
+    confirm: bool = False
+
+
+def _node_supports_hoster(server: Server) -> bool:
+    if not server.node_version:
+        return False
+    return _version_tuple(server.node_version) >= _version_tuple(MIN_NODE_VERSION_HOSTER)
+
+
+@router.get("/{server_id}/hoster-access/scan")
+async def hoster_access_scan(
+    server_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth),
+):
+    server = await get_server_by_id(server_id, db)
+    require_capability(server, Capability.SYSTEM, write=False)
+    if not _node_supports_hoster(server):
+        return {
+            "supported": False,
+            "min_node_version": MIN_NODE_VERSION_HOSTER,
+            "node_version": server.node_version,
+            "hoster_hint": None,
+            "generated_at": None,
+            "findings": [],
+        }
+    return await proxy_request(server, "/api/system/hoster-access/scan", timeout=60.0)
+
+
+@router.post("/{server_id}/hoster-access/purge")
+async def hoster_access_purge(
+    server_id: int,
+    body: HosterPurgeBody,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth),
+):
+    server = await get_server_by_id(server_id, db)
+    require_capability(server, Capability.SYSTEM, write=True)
+    if not _node_supports_hoster(server):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Node agent {server.node_version or 'unknown'} is too old for hoster-access "
+                f"removal (needs >= {MIN_NODE_VERSION_HOSTER}). Update the node agent first."
+            ),
+        )
+    return await proxy_request(
+        server,
+        "/api/system/hoster-access/purge",
+        method="POST",
+        json_data=body.model_dump(),
+        timeout=HOSTER_PURGE_TIMEOUT,
+        apply=True,
+    )
 
 
 # ==================== Network: extra IP addresses ====================

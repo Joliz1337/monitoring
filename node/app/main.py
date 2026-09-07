@@ -15,7 +15,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 
 from app.capabilities import CapabilityMiddleware, get_policy
 from app.config import get_settings
-from app.routers import haproxy, metrics, traffic, system, ipset, remnawave, ssh, ssl, firewall_profile, antiddos, dnat, network, exit_proxy, source_pool
+from app.routers import haproxy, metrics, traffic, system, ipset, remnawave, ssh, ssl, firewall_profile, antiddos, dnat, network, exit_proxy, source_pool, hoster_access
 from app.services.port_traffic_sampler import get_port_traffic_sampler
 from app.services.rate_sampler import get_rate_sampler
 from app.services.ipset_manager import get_ipset_manager
@@ -185,6 +185,7 @@ app.include_router(dnat.router)
 app.include_router(network.router)
 app.include_router(exit_proxy.router)
 app.include_router(source_pool.router)
+app.include_router(hoster_access.router)
 
 
 @app.get("/health")

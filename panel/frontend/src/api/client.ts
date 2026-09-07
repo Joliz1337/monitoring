@@ -1018,6 +1018,12 @@ export const proxyApi = {
   
   // Get SSE URL for streaming command execution
   getExecuteStreamUrl: (serverId: number) => `/api/proxy/${serverId}/system/execute-stream`,
+
+  // Разведка и вырезание средств доступа хостера (агенты, cloud-init, чужие ключи, репо)
+  scanHosterAccess: (serverId: number) =>
+    api.get<HosterScanState>(`/proxy/${serverId}/hoster-access/scan`, { timeout: 60000 }),
+  purgeHosterAccess: (serverId: number, finding_ids: string[]) =>
+    api.post<HosterPurgeResponse>(`/proxy/${serverId}/hoster-access/purge`, { finding_ids, confirm: true }, { timeout: 290000 }),
 }
 
 // История трафика хранится в PostgreSQL панели — эти запросы не ходят на ноды
@@ -2943,6 +2949,37 @@ export interface BandwidthLimitState {
   applied_mbit: number | null
   qdisc: 'cake' | 'tbf' | null
   in_sync: boolean
+}
+
+export interface HosterFinding {
+  id: string
+  category: string
+  title: string
+  detail: string
+  severity: 'info' | 'warning' | 'danger'
+  access_critical: boolean
+  default_selected: boolean
+  remove_hint: string
+}
+
+export interface HosterScanState {
+  supported: boolean
+  min_node_version?: string
+  node_version?: string | null
+  hoster_hint?: string | null
+  generated_at?: string | null
+  findings: HosterFinding[]
+}
+
+export interface HosterPurgeResultItem {
+  id: string
+  ok: boolean
+  message: string
+}
+
+export interface HosterPurgeResponse {
+  results: HosterPurgeResultItem[]
+  reboot_recommended: boolean
 }
 
 export interface DnatRuleCounters {
