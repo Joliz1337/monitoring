@@ -23,6 +23,7 @@ from app.models import Server, PanelSettings
 from app.services import update_channel
 from app.services.net_utils import panel_ip_info
 from app.services.panel_host_metrics import HostHistoryPeriod, load_host_history
+from app.services.server_status import get_offline_threshold, resolve_status
 from app.services.wildcard_ssl import USE_FOR_PANEL_SETTING
 
 router = APIRouter(prefix="/system", tags=["system"])
@@ -333,13 +334,25 @@ async def get_version_base(
     }
 
 
+def _node_version_payload(server: Server, versions_data: Optional[dict]) -> dict:
+    no_optimizations = {"installed": False, "version": None}
+    return {
+        "id": server.id,
+        "name": server.name,
+        "url": server.url,
+        "version": versions_data.get("node_version") if versions_data else None,
+        "status": "online" if versions_data else "offline",
+        "optimizations": versions_data.get("optimizations", no_optimizations) if versions_data else no_optimizations,
+    }
+
+
 @router.get("/nodes/{node_id}/version")
 async def get_single_node_version(
     node_id: int,
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    """Получить версию одной ноды (SSH-запрос к серверу)."""
+    """Версия ноды + статус оптимизаций одним запросом к её API."""
     result = await db.execute(
         select(Server).where(Server.id == node_id, Server.is_active == True)
     )
@@ -347,21 +360,12 @@ async def get_single_node_version(
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
 
-    versions_data = await get_node_all_versions(server)
-    is_online = versions_data is not None
+    # Ноду, которую коллектор метрик уже считает офлайн, не дёргаем: запрос всё равно
+    # упёрся бы в таймаут, а страницы «Обновления»/«Оптимизации» ждали бы его зря
+    if resolve_status(server, await get_offline_threshold(db)) == "offline":
+        return _node_version_payload(server, None)
 
-    return {
-        "id": server.id,
-        "name": server.name,
-        "url": server.url,
-        "version": versions_data.get("node_version") if versions_data else None,
-        "status": "online" if is_online else "offline",
-        "optimizations": (
-            versions_data.get("optimizations", {"installed": False, "version": None})
-            if versions_data
-            else {"installed": False, "version": None}
-        ),
-    }
+    return _node_version_payload(server, await get_node_all_versions(server))
 
 
 async def run_panel_update_in_container(target_ref: str | None = None):
