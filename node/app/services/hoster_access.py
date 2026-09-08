@@ -137,6 +137,7 @@ class HostFacts:
     vendor: str = ""
     packages: set[str] = field(default_factory=set)
     unit_files: set[str] = field(default_factory=set)
+    unit_states: dict[str, str] = field(default_factory=dict)  # base-имя юнита → состояние
     qemu_active: str = ""
     qemu_ports: list[str] = field(default_factory=list)
     cloudinit_disabled: bool = False
@@ -185,9 +186,9 @@ echo "@@VENDOR"
 cat /sys/class/dmi/id/sys_vendor 2>/dev/null
 cat /sys/class/dmi/id/product_name 2>/dev/null
 echo "@@PKGS"
-dpkg-query -W -f='${Package}\n' 2>/dev/null
+dpkg-query -W -f='${db:Status-Abbrev}\t${Package}\n' 2>/dev/null
 echo "@@UNITS"
-systemctl list-unit-files --type=service --no-legend 2>/dev/null | awk '{print $1}'
+systemctl list-unit-files --type=service --no-legend 2>/dev/null | awk '{print $1"\t"$2}'
 echo "@@QEMU_ACTIVE"
 systemctl is-active qemu-guest-agent 2>/dev/null
 echo "@@QEMU_PORT"
@@ -252,12 +253,22 @@ def parse_scan_output(raw: str) -> HostFacts:
             if line.strip():
                 vendor_parts.append(line.strip())
         elif section == "PKGS":
-            if line.strip():
-                facts.packages.add(line.strip())
+            # `${db:Status-Abbrev}` — напр. `ii`/`hi` (установлен), `rc` (снят,
+            # остались конфиги), `un`. Считаем установленным только 2-й символ 'i'.
+            parts = line.split("\t")
+            if len(parts) == 2:
+                status, pkg = parts[0].strip(), parts[1].strip()
+                if pkg and len(status) >= 2 and status[1] == "i":
+                    facts.packages.add(pkg)
         elif section == "UNITS":
-            unit = line.strip()
-            if unit:
-                facts.unit_files.add(unit)
+            parts = line.split("\t")
+            name = parts[0].strip()
+            if not name:
+                continue
+            base = name[:-8] if name.endswith(".service") else name
+            state = parts[1].strip() if len(parts) > 1 else ""
+            facts.unit_files.add(base)
+            facts.unit_states[base] = state
         elif section == "QEMU_ACTIVE":
             if line.strip():
                 facts.qemu_active = line.strip()
@@ -433,15 +444,24 @@ def neutralize_apt_source(content: str) -> tuple[str, bool]:
     return _neutralize_oneline(content)
 
 
+def _unit_live(facts: HostFacts, base: str) -> bool:
+    """Юнит присутствует и не обезврежен. Замаскированный (mask → symlink на
+    /dev/null) остаётся в list-unit-files как `masked`, но запуститься не может —
+    угрозой не считается, иначе purge+mask давал бы вечную находку."""
+    state = facts.unit_states.get(base)
+    if state is None:
+        return False
+    return state not in ("masked", "masked-runtime")
+
+
 def _agent_items(facts: HostFacts) -> list[DetectedItem]:
     """Найденные агенты — одна находка на сигнатуру, даже если имя пакета и юнита
     различаются (zabbix-agent-timeweb / zabbix-agent). Purge гасит все юниты и
     вычищает все пакеты группы."""
-    unit_bases = {u[:-8] if u.endswith(".service") else u for u in facts.unit_files}
     items: list[DetectedItem] = []
     for sig in AGENT_SIGS:
         pkgs = [p for p in sig.packages if p in facts.packages]
-        units = [u for u in sig.units if u in unit_bases]
+        units = [u for u in sig.units if _unit_live(facts, u)]
         if not pkgs and not units:
             continue
         commands = [f"systemctl disable --now {u} 2>/dev/null || true" for u in sig.units]
@@ -472,7 +492,10 @@ def detect(facts: HostFacts) -> list[DetectedItem]:
     items: list[DetectedItem] = []
 
     # --- qemu-guest-agent ---
-    if "qemu-guest-agent" in facts.packages or facts.qemu_ports:
+    # Триггер — установленный пакет или живой юнит, но НЕ голый virtio-порт:
+    # порт даёт гипервизор, изнутри гостя он не убирается, и после purge агента
+    # угрозы уже нет — иначе находка «возвращалась» бы навсегда.
+    if "qemu-guest-agent" in facts.packages or _unit_live(facts, "qemu-guest-agent"):
         state = "работает" if facts.qemu_active == "active" else "установлен"
         items.append(DetectedItem(
             id="qemu_guest_agent",

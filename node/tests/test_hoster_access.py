@@ -29,8 +29,10 @@ def _b(text: str) -> str:
 def build_dump(
     *,
     vendor="cmpt\nOpenStack Compute",
-    packages=(),
-    units=(),
+    packages=(),  # установленные (ii)
+    removed_config_packages=(),  # rc — сняты, остались конфиги
+    units=(),  # включённые юниты (name.service)
+    masked_units=(),  # замаскированные (name.service)
     qemu_active="",
     qemu_port=False,
     cloudinit_disabled=False,
@@ -42,7 +44,12 @@ def build_dump(
     sshd=(),  # raw "key value" lines
     dropins=(),  # (file, content)
 ) -> str:
-    lines = ["@@VENDOR", vendor, "@@PKGS", *packages, "@@UNITS", *units]
+    lines = ["@@VENDOR", vendor, "@@PKGS"]
+    lines += [f"ii\t{p}" for p in packages]
+    lines += [f"rc\t{p}" for p in removed_config_packages]
+    lines.append("@@UNITS")
+    lines += [f"{u}\tenabled" for u in units]
+    lines += [f"{u}\tmasked" for u in masked_units]
     lines += ["@@QEMU_ACTIVE", qemu_active, "@@QEMU_PORT"]
     if qemu_port:
         lines.append("org.qemu.guest_agent.0")
@@ -181,6 +188,27 @@ class DetectTests(unittest.TestCase):
         self.assertIn("cloud_init", cats)
         self.assertEqual(cats.count("monitoring_agent"), 1)  # zabbix одной находкой
         self.assertEqual(cats.count("hoster_apt_repo"), 2)   # оба репозитория Timeweb
+
+    def test_qemu_bare_virtio_port_without_package_not_flagged(self):
+        # Порт даёт гипервизор, изнутри не убирается; после purge пакета угрозы нет.
+        facts = parse_scan_output(build_dump(packages=(), qemu_port=True))
+        self.assertNotIn("qemu_guest_agent", {i.category for i in detect(facts)})
+
+    def test_purged_and_masked_agent_not_flagged(self):
+        # После purge+mask: пакета нет, юнит остаётся в list-unit-files как masked —
+        # находка не должна возвращаться (регресс на «не удаляется»).
+        facts = parse_scan_output(build_dump(
+            packages=(),
+            masked_units=("qemu-guest-agent.service", "telegraf.service"),
+            qemu_port=True,
+        ))
+        cats = {i.category for i in detect(facts)}
+        self.assertNotIn("qemu_guest_agent", cats)
+        self.assertNotIn("monitoring_agent", cats)
+
+    def test_removed_config_package_not_flagged(self):
+        facts = parse_scan_output(build_dump(removed_config_packages=("telegraf",)))
+        self.assertNotIn("monitoring_agent", {i.category for i in detect(facts)})
 
     def test_cloud_init_disabled_not_flagged(self):
         facts = parse_scan_output(build_dump(packages=("cloud-init",), cloudinit_disabled=True))
