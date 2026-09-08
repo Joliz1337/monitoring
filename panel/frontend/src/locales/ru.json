@@ -1726,9 +1726,9 @@
     "summary_monthly_hint": "По всем проектам с известной стоимостью",
     "summary_balance": "Баланс",
     "summary_balance_hint": "Сумма остатков на счетах",
-    "summary_expiring": "Истекает за {{days}} дн.",
-    "summary_expiring_hint": "Всё оплачено с запасом",
-    "summary_expired": "Из них уже истекло: {{count}}"
+    "summary_due": "Срок оплаты",
+    "summary_nearest_in": "ближайший через {{value}}",
+    "summary_no_upcoming": "Ближайших истечений нет"
   },
   "ssh_security": {
     "title": "SSH-безопасность",

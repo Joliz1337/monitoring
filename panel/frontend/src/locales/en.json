@@ -1722,9 +1722,9 @@
     "summary_monthly_hint": "Across projects with a known cost",
     "summary_balance": "Balance",
     "summary_balance_hint": "Total left on accounts",
-    "summary_expiring": "Expiring in {{days}}d",
-    "summary_expiring_hint": "Everything is paid ahead",
-    "summary_expired": "Already expired: {{count}}"
+    "summary_due": "Payment due",
+    "summary_nearest_in": "next in {{value}}",
+    "summary_no_upcoming": "Nothing due next"
   },
   "ssh_security": {
     "title": "SSH Security",

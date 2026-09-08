@@ -521,7 +521,7 @@ export default function Billing() {
         </div>
       </div>
 
-      {servers.length > 0 && <BillingSummary servers={servers} t={t} />}
+      {servers.length > 0 && <BillingSummary servers={servers} t={t} formatDateTime={formatBillingDateTime} />}
 
       {servers.length === 0 ? (
         <motion.div

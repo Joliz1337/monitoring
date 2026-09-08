@@ -1,18 +1,63 @@
 import { motion } from 'framer-motion'
 import { AlertTriangle, TrendingDown, Wallet } from 'lucide-react'
 import { BillingServerData } from '../../api/client'
-import { Translate, formatMoneyTotals, sumByCurrency } from './shared'
+import {
+  Translate, formatDays, formatMoneyTotals, sortServers, statusColor, sumByCurrency,
+} from './shared'
 
-const SOON_DAYS = 7
+const URGENT_DAYS = 7
 
-export function BillingSummary({ servers, t }: { servers: BillingServerData[]; t: Translate }) {
+type Tone = 'red' | 'yellow' | 'muted'
+
+const TONE_ICON: Record<Tone, string> = {
+  red: 'text-red-400',
+  yellow: 'text-yellow-400',
+  muted: 'text-dark-500',
+}
+
+const TONE_ICON_BG: Record<Tone, string> = {
+  red: 'bg-red-500/15',
+  yellow: 'bg-yellow-500/15',
+  muted: 'bg-dark-800',
+}
+
+function expiredLabel(count: number, t: Translate): string {
+  const label = t('billing.expired')
+  return count > 1 ? `${label} (${count})` : label
+}
+
+function dueTone(expired: number, nearest: BillingServerData | null): Tone {
+  if (expired > 0) return 'red'
+  if (nearest !== null && (nearest.days_left ?? 0) <= URGENT_DAYS) return 'yellow'
+  return 'muted'
+}
+
+export function BillingSummary({ servers, t, formatDateTime }: {
+  servers: BillingServerData[]
+  t: Translate
+  formatDateTime: (iso: string) => string
+}) {
   const monthly = sumByCurrency(servers, s => s.monthly_cost)
   const balances = sumByCurrency(
     servers,
     s => (s.billing_type === 'monthly' ? null : s.account_balance),
   )
-  const expiringSoon = servers.filter(s => s.days_left !== null && s.days_left <= SOON_DAYS)
-  const expired = expiringSoon.filter(s => (s.days_left ?? 0) <= 0).length
+  const expired = servers.filter(s => s.days_left !== null && s.days_left <= 0).length
+  const nearest = servers
+    .filter(s => s.days_left !== null && s.days_left > 0)
+    .sort(sortServers)[0] ?? null
+  const nearestDays = nearest?.days_left ?? null
+  const tone = dueTone(expired, nearest)
+
+  const dueValue = expired > 0
+    ? expiredLabel(expired, t)
+    : formatDays(nearestDays, t)
+  const dueAside = expired > 0 && nearest
+    ? t('billing.summary_nearest_in', { value: formatDays(nearestDays, t) })
+    : null
+  const dueHint = nearest
+    ? [nearest.name, nearest.paid_until && formatDateTime(nearest.paid_until)].filter(Boolean).join(' · ')
+    : t('billing.summary_no_upcoming')
 
   const tiles = [
     {
@@ -22,6 +67,8 @@ export function BillingSummary({ servers, t }: { servers: BillingServerData[]; t
       label: t('billing.summary_monthly'),
       value: formatMoneyTotals(monthly),
       valueClass: 'text-white',
+      aside: null,
+      asideClass: '',
       hint: t('billing.summary_monthly_hint'),
     },
     {
@@ -31,16 +78,20 @@ export function BillingSummary({ servers, t }: { servers: BillingServerData[]; t
       label: t('billing.summary_balance'),
       value: formatMoneyTotals(balances),
       valueClass: 'text-white',
+      aside: null,
+      asideClass: '',
       hint: t('billing.summary_balance_hint'),
     },
     {
-      key: 'expiring',
-      icon: <AlertTriangle className={`w-4 h-4 ${expiringSoon.length > 0 ? 'text-yellow-400' : 'text-dark-500'}`} />,
-      iconBg: expiringSoon.length > 0 ? 'bg-yellow-500/15' : 'bg-dark-800',
-      label: t('billing.summary_expiring', { days: SOON_DAYS }),
-      value: String(expiringSoon.length),
-      valueClass: expiringSoon.length > 0 ? 'text-yellow-400' : 'text-dark-400',
-      hint: expired > 0 ? t('billing.summary_expired', { count: expired }) : t('billing.summary_expiring_hint'),
+      key: 'due',
+      icon: <AlertTriangle className={`w-4 h-4 ${TONE_ICON[tone]}`} />,
+      iconBg: TONE_ICON_BG[tone],
+      label: t('billing.summary_due'),
+      value: dueValue,
+      valueClass: expired > 0 ? 'text-red-400' : statusColor(nearestDays),
+      aside: dueAside,
+      asideClass: statusColor(nearestDays),
+      hint: dueHint,
     },
   ]
 
@@ -58,8 +109,13 @@ export function BillingSummary({ servers, t }: { servers: BillingServerData[]; t
             </div>
             <span className="text-xs text-dark-400">{tile.label}</span>
           </div>
-          <div className={`mt-2 text-lg font-bold tabular-nums ${tile.valueClass}`}>{tile.value}</div>
-          <div className="text-[11px] text-dark-500 mt-0.5">{tile.hint}</div>
+          <div className="mt-2 flex items-baseline gap-2 flex-wrap">
+            <span className={`text-lg font-bold tabular-nums ${tile.valueClass}`}>{tile.value}</span>
+            {tile.aside && (
+              <span className={`text-xs font-medium tabular-nums ${tile.asideClass}`}>{tile.aside}</span>
+            )}
+          </div>
+          <div className="text-[11px] text-dark-500 mt-0.5 truncate">{tile.hint}</div>
         </div>
       ))}
     </motion.div>
