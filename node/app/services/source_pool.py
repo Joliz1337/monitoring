@@ -110,13 +110,18 @@ def parse_rules(text: str) -> dict[int, tuple[int, int]]:
     return rules
 
 
-def parse_table_routes(text: str) -> dict[int, str]:
-    """`ip -j route show table all` → {таблица: исходящий адрес} по нашим таблицам."""
+TableRoute = tuple[Optional[str], str]
+
+
+def parse_table_routes(text: str) -> dict[int, TableRoute]:
+    """`ip -j route show table all` → {таблица: (шлюз, исходящий адрес)} по нашим
+    таблицам. Шлюз сравнивается наравне с адресом: маршрут без `via` с виду
+    рабочий, а на деле шлёт пакеты напрямую в линк, и соединения по метке гибнут."""
     try:
         entries = json.loads(text or "[]")
     except ValueError:
         return {}
-    routes: dict[int, str] = {}
+    routes: dict[int, TableRoute] = {}
     for entry in entries if isinstance(entries, list) else []:
         table = _as_int(entry.get("table"))
         if table is None or not TABLE_BASE <= table < TABLE_BASE + MARK_COUNT:
@@ -125,7 +130,8 @@ def parse_table_routes(text: str) -> dict[int, str]:
             continue
         source = entry.get("prefsrc") or entry.get("src")
         if source:
-            routes[table] = str(source)
+            gateway = entry.get("gateway")
+            routes[table] = (str(gateway) if gateway else None, str(source))
     return routes
 
 
@@ -171,10 +177,13 @@ def split_probe(text: str) -> tuple[str, str, str]:
 
 
 def probe_command() -> str:
+    """Маркеры в кавычках: голый `#` bash читает как начало комментария и
+    обрезал бы всю остальную строку — опрос возвращал бы пустоту, а нода
+    считала бы, что правил нет, и не знала бы шлюз."""
     return (
-        f"echo {MARK_RULES}; ip -j -4 rule show; "
-        f"echo {MARK_TABLES}; ip -j -4 route show table all; "
-        f"echo {MARK_DEFAULT}; ip -j -4 route show default"
+        f"echo '{MARK_RULES}'; ip -j -4 rule show; "
+        f"echo '{MARK_TABLES}'; ip -j -4 route show table all; "
+        f"echo '{MARK_DEFAULT}'; ip -j -4 route show default"
     )
 
 
@@ -196,7 +205,7 @@ def rule_commands(binding: MarkBinding, index: int) -> list[str]:
 def plan_commands(
     bindings: list[MarkBinding],
     current_rules: dict[int, tuple[int, int]],
-    current_routes: dict[int, str],
+    current_routes: dict[int, TableRoute],
     interface: str,
     gateway: Optional[str],
 ) -> list[str]:
@@ -204,7 +213,7 @@ def plan_commands(
     commands: list[str] = []
     wanted_routes = {b.table: b.address for b in bindings}
     for table, address in sorted(wanted_routes.items()):
-        if current_routes.get(table) != address:
+        if current_routes.get(table) != (gateway, address):
             commands.append(route_command(table, address, interface, gateway))
     for index, binding in enumerate(bindings):
         expected = (RULE_PRIORITY_BASE + index, binding.table)
@@ -213,7 +222,7 @@ def plan_commands(
     return commands
 
 
-def clear_commands(current_rules: dict[int, tuple[int, int]], current_routes: dict[int, str]) -> list[str]:
+def clear_commands(current_rules: dict[int, tuple[int, int]], current_routes: dict[int, TableRoute]) -> list[str]:
     """Снимаем только своё: правила с нашими метками и маршруты в наших таблицах."""
     commands = [
         f"ip rule del fwmark {mark} priority {priority} 2>/dev/null || true"
@@ -304,10 +313,14 @@ class SourcePoolManager:
 
     # ── чтение хоста ──
 
-    async def _probe(self) -> tuple[dict[int, tuple[int, int]], dict[int, str], str]:
+    async def _probe(self) -> tuple[dict[int, tuple[int, int]], dict[int, TableRoute], str]:
         result = await self._executor.execute(probe_command(), timeout=IP_TIMEOUT_SEC, shell="bash")
         if not (result.success and result.exit_code == 0):
             raise RuntimeError(result.stderr or result.error or "ip command failed")
+        # Без маркеров вывод нельзя трактовать как «правил нет»: так мы бы
+        # переписали таблицы маршрутами без шлюза и сломали трафик по меткам
+        if MARK_DEFAULT not in (result.stdout or ""):
+            raise RuntimeError("probe output malformed: section markers missing")
         rules_text, tables_text, default_text = split_probe(result.stdout)
         return parse_rules(rules_text), parse_table_routes(tables_text), default_text
 
@@ -345,7 +358,7 @@ class SourcePoolManager:
             return state
         expected = {b.mark: (RULE_PRIORITY_BASE + i, b.table) for i, b in enumerate(bindings)}
         state.missing_marks = sorted(mark for mark, value in expected.items() if current_rules.get(mark) != value)
-        routes_ok = all(current_routes.get(b.table) == b.address for b in bindings)
+        routes_ok = all(current_routes.get(b.table) == (state.gateway, b.address) for b in bindings)
         state.in_sync = not state.missing_marks and routes_ok
         return state
 

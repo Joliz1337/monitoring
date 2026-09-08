@@ -130,7 +130,7 @@ export default function SourcePool() {
             : t('source_pool.single_address') }
       case 'drift':
         return { ...base, icon: <AlertTriangle className="w-6 h-6 text-warning" />, color: 'border-warning/30',
-          hint: t('source_pool.status_drift_hint', { items: view.missing_marks.join(', ') }) }
+          hint: [t('source_pool.status_drift_hint', { items: view.missing_marks.join(', ') }), view.node_error].filter(Boolean).join(' · ') }
       case 'pending':
         return { ...base, icon: <Clock className="w-6 h-6 text-accent-400" />, color: 'border-accent-500/30', hint: view.sync_error ?? '' }
       case 'off':

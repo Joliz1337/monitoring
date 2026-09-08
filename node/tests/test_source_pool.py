@@ -11,6 +11,7 @@
 import asyncio
 import json
 import os
+import subprocess
 import sys
 import unittest
 from dataclasses import dataclass
@@ -101,7 +102,14 @@ class ParseRoutesTest(unittest.TestCase):
             {"dst": "default", "gateway": "1.2.3.1", "dev": "bond0", "prefsrc": "1.2.3.4", "table": str(TABLE_BASE)},
             {"dst": "default", "gateway": "1.2.3.1", "dev": "bond0", "src": "1.2.3.5", "table": TABLE_BASE + 1},
         ])
-        self.assertEqual(parse_table_routes(text), {TABLE_BASE: "1.2.3.4", TABLE_BASE + 1: "1.2.3.5"})
+        self.assertEqual(
+            parse_table_routes(text),
+            {TABLE_BASE: ("1.2.3.1", "1.2.3.4"), TABLE_BASE + 1: ("1.2.3.1", "1.2.3.5")},
+        )
+
+    def test_route_without_via_keeps_none_gateway(self):
+        text = json.dumps([{"dst": "default", "dev": "eth0", "prefsrc": "1.2.3.4", "table": str(TABLE_BASE)}])
+        self.assertEqual(parse_table_routes(text), {TABLE_BASE: (None, "1.2.3.4")})
 
     def test_foreign_tables_and_non_default_routes_ignored(self):
         text = json.dumps([
@@ -139,6 +147,14 @@ class SplitProbeTest(unittest.TestCase):
         self.assertIn("ip -j -4 route show table all", command)
         self.assertIn("ip -j -4 route show default", command)
 
+    def test_probe_markers_survive_real_bash(self):
+        """Голый `#` в echo bash принял бы за комментарий и обрезал бы всю строку —
+        опрос возвращал бы пустоту. Прогон через настоящий bash закрепляет кавычки."""
+        result = subprocess.run(["bash", "-c", probe_command()], capture_output=True, text=True)
+        positions = [result.stdout.find(marker) for marker in ("#RULES", "#TABLES", "#DEFAULT")]
+        self.assertTrue(all(pos >= 0 for pos in positions), result.stdout)
+        self.assertEqual(positions, sorted(positions))
+
 
 class PlanCommandsTest(unittest.TestCase):
     def setUp(self):
@@ -148,7 +164,8 @@ class PlanCommandsTest(unittest.TestCase):
             b.mark: (RULE_PRIORITY_BASE + index, b.table)
             for index, b in enumerate(self.bindings)
         }
-        self.routes = {b.table: b.address for b in self.bindings}
+        self.gateway = "1.2.3.1"
+        self.routes = {b.table: (self.gateway, b.address) for b in self.bindings}
 
     def test_steady_state_writes_nothing(self):
         self.assertEqual(
@@ -168,16 +185,27 @@ class PlanCommandsTest(unittest.TestCase):
         self.assertTrue(any(f"ip rule add fwmark {MARK_BASE} lookup {TABLE_BASE} " in c for c in commands))
 
     def test_route_with_wrong_source_is_replaced(self):
-        self.routes[TABLE_BASE] = "9.9.9.9"
-        commands = plan_commands(self.bindings, self.rules, self.routes, "bond0", "1.2.3.1")
+        self.routes[TABLE_BASE] = (self.gateway, "9.9.9.9")
+        commands = plan_commands(self.bindings, self.rules, self.routes, "bond0", self.gateway)
+        self.assertEqual(
+            commands,
+            [f"ip route replace default via 1.2.3.1 dev bond0 src 1.2.3.4 table {TABLE_BASE}"],
+        )
+
+    def test_route_without_via_is_replaced_when_gateway_known(self):
+        """Маршрут без шлюза выглядит рабочим по адресу, но пакеты по нему уходят
+        в линк напрямую — его надо переписать, а не считать совпавшим."""
+        self.routes[TABLE_BASE] = (None, "1.2.3.4")
+        commands = plan_commands(self.bindings, self.rules, self.routes, "bond0", self.gateway)
         self.assertEqual(
             commands,
             [f"ip route replace default via 1.2.3.1 dev bond0 src 1.2.3.4 table {TABLE_BASE}"],
         )
 
     def test_route_without_gateway(self):
-        self.routes.pop(TABLE_BASE)
-        commands = plan_commands(self.bindings, self.rules, self.routes, "eth0", None)
+        routes = {b.table: (None, b.address) for b in self.bindings}
+        routes.pop(TABLE_BASE)
+        commands = plan_commands(self.bindings, self.rules, routes, "eth0", None)
         self.assertEqual(
             commands, [f"ip route replace default dev eth0 src 1.2.3.4 table {TABLE_BASE}"]
         )
@@ -185,7 +213,7 @@ class PlanCommandsTest(unittest.TestCase):
 
 class ClearCommandsTest(unittest.TestCase):
     def test_removes_only_our_rules_and_tables(self):
-        commands = clear_commands({MARK_BASE: (RULE_PRIORITY_BASE, TABLE_BASE)}, {TABLE_BASE: "1.2.3.4"})
+        commands = clear_commands({MARK_BASE: (RULE_PRIORITY_BASE, TABLE_BASE)}, {TABLE_BASE: ("1.2.3.1", "1.2.3.4")})
         self.assertEqual(
             commands,
             [
