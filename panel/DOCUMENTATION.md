@@ -382,7 +382,7 @@ Visibility effect пропускает первый mount через `mountedRef
 
 **Компоненты:**
 
-- `panel/frontend/src/index.css` — CSS-классы: `.btn-scale` (hover/tap), `.live-mode-pulse`, `.status-ping`, `.status-ping-delay`, `.status-blink`, `.card-enter` (entrance с inline `animation-delay`), `.fade-in`, `.pb-track/.pb-fill/.pb-fill-shimmer/.pb-fill-pulse` (прогресс-бар), `.cpu-core-fill` (ядра CPU, `transition: width`), `.loading-blob/.loading-logo-wobble/.loading-text-pulse` (LoadingScreen), `.icon-float` (empty state). `.card` использует непрозрачный фон `bg-dark-900/80` без `backdrop-blur-md` — backdrop-blur пересчитывается GPU на каждый кадр под слоем при N карточках.
+- `panel/frontend/src/index.css` — CSS-классы: `.btn-scale` (hover/tap), `.live-mode-pulse`, `.status-ping`, `.status-ping-delay`, `.status-blink`, `.card-enter` (entrance с inline `animation-delay`), `.fade-in`, `.pb-track/.pb-fill/.pb-fill-shimmer/.pb-fill-pulse` (прогресс-бар), `.cpu-core-fill` (ядра CPU, `transition: width`), `.loading-blob/.loading-logo-wobble/.loading-text-pulse` (LoadingScreen), `.icon-float` (empty state), `.bg-blob-drift-a`/`.bg-blob-drift-b` (фоновые пятна Layout). `.card` использует непрозрачный фон `bg-dark-900/80` без `backdrop-blur-md` — backdrop-blur пересчитывается GPU на каждый кадр под слоем при N карточках.
 
 - `panel/frontend/src/components/ui/ProgressBar.tsx` — ширина обновляется через `transition: width`, анимированный режим — через CSS pseudo-элементы shimmer/pulse.
 
@@ -395,6 +395,8 @@ Visibility effect пропускает первый mount через `mountedRef
 - `panel/frontend/src/pages/Dashboard.tsx` — кнопки — `<button>` + `.btn-scale`; live-mode бейдж — `.live-mode-pulse`; motion-обёртки используются только там, где JS-анимация неизбежна (collapsible folder height, ModalOverlay); toggle-группы header без `backdrop-blur-sm`.
 
 - `panel/frontend/src/App.tsx` — LoadingScreen на чистом CSS: фоновые пятна — `.loading-blob` с `blur(48px)` (нагрузка на GPU квадратична по радиусу блюра), 3 кольца спиннера — CSS `.icon-spin` с `animation-duration` через inline style.
+
+- `panel/frontend/src/components/Layout/Layout.tsx` — два фоновых пятна (`blur-[100px]`, 500 и 400 px) дрейфуют CSS-keyframes `.bg-blob-drift-a`/`.bg-blob-drift-b` (только `transform`, 20 и 15 с). Размытый слой нельзя двигать JS-анимацией (framer-motion пишет inline `transform` на каждом кадре, WAAPI не использует): Chrome тогда пересчитывает blur на каждом кадре монитора — на 240 Гц это 40–80 % GPU на любой странице панели, и карточные анимации тут ни при чём. CSS-анимация `transform` идёт на композиторе, размытие кэшируется, стоимость ≈ 0. Замер: headed Chrome + CDP `Tracing` (`disabled-by-default-devtools.timeline`), GPU busy = Σ `GPUTask` / окно.
 
 **Итог:** все infinite-анимации идут через CSS на GPU compositor; JS-анимации стоили бы при 30 online-серверах ~200+ постоянных таймеров на main thread (StatusBadge ×2 = 60, ProgressBar ×3–6 на карточку = 100+, live-mode = 1 и др.).
 

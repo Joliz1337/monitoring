@@ -88,24 +88,8 @@ export default function Layout() {
       {/* Animated background */}
       <div className="fixed inset-0 z-0 pointer-events-none">
         <div className="absolute inset-0 bg-gradient-to-br from-accent-500/5 via-transparent to-purple/5" />
-        <motion.div
-          className="absolute top-0 left-0 w-[500px] h-[500px] bg-accent-500/10 rounded-full blur-[100px]"
-          animate={{
-            x: [0, 100, 0],
-            y: [0, 50, 0],
-            scale: [1, 1.1, 1],
-          }}
-          transition={{ duration: 20, repeat: Infinity, ease: 'easeInOut' }}
-        />
-        <motion.div
-          className="absolute bottom-0 right-0 w-[400px] h-[400px] bg-purple/10 rounded-full blur-[100px]"
-          animate={{
-            x: [0, -50, 0],
-            y: [0, -100, 0],
-            scale: [1, 1.2, 1],
-          }}
-          transition={{ duration: 15, repeat: Infinity, ease: 'easeInOut' }}
-        />
+        <div className="absolute top-0 left-0 w-[500px] h-[500px] bg-accent-500/10 rounded-full blur-[100px] bg-blob-drift-a" />
+        <div className="absolute bottom-0 right-0 w-[400px] h-[400px] bg-purple/10 rounded-full blur-[100px] bg-blob-drift-b" />
       </div>
       
       {/* Mobile overlay */}
