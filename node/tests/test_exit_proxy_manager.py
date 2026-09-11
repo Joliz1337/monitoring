@@ -267,6 +267,41 @@ class ManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status.self_test.expected, "warp=on")
         self.assertTrue(status.self_test.ok)
 
+    async def test_custom_failure_switches_only_after_the_next_run_confirms(self):
+        await self.manager.apply_config(self._config())
+        await self.manager.run_checks()
+        failed = json.dumps([{"name": "Claude", "ok": False, "status": 403, "detail": "blocked: status 403"}])
+        self.executor.probes[PRIMARY] = probe_json(PRIMARY, checks=failed)
+
+        await self.manager.run_checks()
+        status = self.manager.status()
+        self.assertEqual(status.current, f"ip:{PRIMARY}")
+        self.assertEqual(status.pending_switch, f"ip:{EXTRA}")
+        deferred = [event for event in status.events if event.kind == manager_module.EVENT_DEFERRED]
+        self.assertEqual([(e.from_candidate, e.to_candidate) for e in deferred], [(f"ip:{PRIMARY}", f"ip:{EXTRA}")])
+        reloaded = self._new_manager()
+        reloaded.load_state()
+        self.assertEqual(reloaded.status().pending_switch, f"ip:{EXTRA}")
+
+        self.executor.selftest_ip = EXTRA
+        await self.manager.run_checks()
+        status = self.manager.status()
+        self.assertEqual(status.current, f"ip:{EXTRA}")
+        self.assertIsNone(status.pending_switch)
+        self.assertEqual(sum(1 for e in status.events if e.kind == manager_module.EVENT_DEFERRED), 1)
+
+    async def test_settings_change_does_not_confirm_a_pending_switch(self):
+        await self.manager.apply_config(self._config())
+        await self.manager.run_checks()
+        failed = json.dumps([{"name": "Claude", "ok": False, "status": 403, "detail": "blocked: status 403"}])
+        self.executor.probes[PRIMARY] = probe_json(PRIMARY, checks=failed)
+        await self.manager.run_checks()
+        self.assertEqual(self.manager.status().pending_switch, f"ip:{EXTRA}")
+
+        await self.manager.apply_config(self._config(blocked_countries=["RU", "BY"]))
+        self.assertEqual(self.manager.current, f"ip:{PRIMARY}")
+        self.assertEqual(self.manager.status().pending_switch, f"ip:{EXTRA}")
+
     async def test_check_payload_carries_builtin_flags_and_enabled_custom_checks(self):
         checks = [
             CustomCheck(id="claude", name="Claude", url="https://claude.ai/login", block_url_regex="unavailable"),
@@ -278,11 +313,17 @@ class ManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(lines[1].split(FIELD_SEPARATOR), ["CHECK", "Claude", "https://claude.ai/login", "", "", "unavailable", ""])
         self.assertEqual(len(lines), 2)
 
-    async def test_custom_check_failure_marks_candidate_sick(self):
+    async def test_custom_check_failure_marks_candidate_sick_but_switches_only_when_confirmed(self):
         checks = [CustomCheck(id="claude", name="Claude", url="https://claude.ai/login", block_url_regex="unavailable")]
         await self.manager.apply_config(self._config(custom_checks=checks))
         failed = '[{"name":"Claude","ok":false,"status":302,"detail":"blocked: redirected"}]'
         self.executor.probes[PRIMARY] = probe_json(PRIMARY, checks=failed)
+        await self.manager.run_checks()
+        status = self.manager.status()
+        primary = next(c for c in status.candidates if c.address == PRIMARY)
+        self.assertIs(primary.healthy, False)
+        self.assertEqual((status.current, status.pending_switch), (f"ip:{PRIMARY}", f"ip:{EXTRA}"))
+        self.executor.selftest_ip = EXTRA
         await self.manager.run_checks()
         self.assertEqual(self.manager.current, f"ip:{EXTRA}")
 
@@ -311,6 +352,7 @@ class ManagerTest(unittest.IsolatedAsyncioTestCase):
 class FakeSiteHandler(BaseHTTPRequestHandler):
     """Сайт для проверок: трасса, челлендж Cloudflare, честный 403 и обычная страница."""
 
+    flaky_hits = 0
     PAGES = {
         "/trace": (200, "ip=127.0.0.1\nwarp=off\n"),
         "/challenge": (403, "<html><title>Just a moment...</title><script>window._cf_chl_opt={}</script></html>"),
@@ -320,6 +362,10 @@ class FakeSiteHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):  # noqa: N802 — имя задаёт http.server
         status, body = self.PAGES.get(self.path, (404, "nope"))
+        if self.path == "/flaky-trace":
+            # Первый запрос — «занято», как у выхода под нагрузкой; второй отвечает трассой
+            FakeSiteHandler.flaky_hits += 1
+            status, body = (503, "busy") if FakeSiteHandler.flaky_hits == 1 else self.PAGES["/trace"]
         data = body.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/html")
@@ -337,6 +383,27 @@ class HostScriptTest(unittest.TestCase):
         # Скрипт уходит байтами: текстовый stdin на Windows подменил бы LF на CRLF
         check = subprocess.run(["bash", "-n"], input=HOST_SCRIPT.encode("utf-8"), capture_output=True)
         self.assertEqual(check.returncode, 0, check.stderr.decode("utf-8", "replace"))
+
+    @unittest.skipUnless(shutil.which("bash") and shutil.which("curl"), "bash and curl required")
+    @unittest.skipIf(sys.platform == "win32", "the script's curl --interface and coreutils need a POSIX host")
+    def test_trace_is_retried_once(self):
+        site = ThreadingHTTPServer(("127.0.0.1", 0), FakeSiteHandler)
+        threading.Thread(target=site.serve_forever, daemon=True).start()
+        self.addCleanup(site.shutdown)
+        FakeSiteHandler.flaky_hits = 0
+        base = f"http://127.0.0.1:{site.server_address[1]}"
+        payload = FIELD_SEPARATOR.join(["BUILTIN", "0", "0", "0"]) + "\n"
+        encoded = base64.b64encode(payload.encode("utf-8")).decode("ascii")
+        run = subprocess.run(
+            ["bash", "-s", "probe", "ip", "127.0.0.1", "5", encoded],
+            input=HOST_SCRIPT.encode("utf-8"), capture_output=True,
+            env={**os.environ, "EXIT_PROXY_TRACE_URL": f"{base}/flaky-trace"},
+        )
+        self.assertEqual(run.returncode, 0, run.stderr.decode("utf-8", "replace"))
+        result = json.loads(run.stdout.decode("utf-8").strip().splitlines()[-1])
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["ip"], "127.0.0.1")
+        self.assertEqual(FakeSiteHandler.flaky_hits, 2)
 
     @unittest.skipUnless(shutil.which("bash") and shutil.which("curl"), "bash and curl required")
     @unittest.skipIf(sys.platform == "win32", "the script's curl --interface and coreutils need a POSIX host")

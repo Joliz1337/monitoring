@@ -170,6 +170,8 @@ class ExitProxyStatus(BaseModel):
     current: Optional[str]
     select_mode: SelectMode
     pinned_candidate: Optional[str]
+    # Кандидат, на который нода перейдёт, если следующий прогон подтвердит его преимущество
+    pending_switch: Optional[str] = None
     candidates: list[CandidateStatus]
     warp_present: bool
     check_in_progress: bool

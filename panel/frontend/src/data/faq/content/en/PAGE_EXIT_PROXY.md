@@ -11,7 +11,7 @@ On enabled nodes the agent runs a local SOCKS5 (127.0.0.1:port) that you point G
 | Gemini | The Gemini page says the service is not available in your region |
 | Custom checks | The URL answers with a forbidden status, redirect or text matching the pattern |
 
-The exit that passes the most checks wins; on a tie the current one stays (selection is sticky) and among new ones the first by your priority is taken. When another exit scores higher, the node switches to it and drops the old exit's connections so all traffic moves at once. If no exit passes every check, traffic still goes through the best-scoring one and the panel sends a notification.
+The exit that passes the most checks wins. On a tie between healthy exits the first by your priority wins: WARP, unless you moved it lower, so Google never learns your own addresses from the traffic. If the current exit stops answering or Google blocks it (country, captcha, Gemini), the node leaves it at once. If it merely lost on your own checks, or another exit is equal but higher in priority, the switch waits for the next run to confirm it, so one flaky check does not cut user sessions; the log shows this as “Switch deferred”. On a switch the node drops the old exit's connections so all traffic moves at once. If no exit passes every check, traffic still goes through the best-scoring one and the panel sends a notification.
 
 ## Good to know
 

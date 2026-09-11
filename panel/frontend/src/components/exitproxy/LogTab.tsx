@@ -7,6 +7,7 @@ import { BADGE, TONE } from './badges'
 const LIMITS = [100, 500]
 const KIND_TONE: Record<string, keyof typeof TONE> = {
   switched: 'yellow',
+  deferred: 'dark',
   manual_switch: 'dark',
   no_healthy: 'red',
   recovered: 'green',

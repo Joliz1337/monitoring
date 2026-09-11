@@ -58,8 +58,8 @@ HOST_SCRIPT_PATH = "/opt/monitoring/scripts/exit-proxy-check.sh"
 EVENTS_LIMIT = 200
 STATUS_EVENTS = 20
 CHECK_CONCURRENCY = 4
-# Один прогон — до семи запросов по check_timeout каждый, плюс запас на запуск curl
-PROBE_REQUESTS = 7
+# Один прогон — до восьми запросов по check_timeout каждый (трасса может повториться), плюс запас на запуск curl
+PROBE_REQUESTS = 8
 PROBE_GRACE_SEC = 15
 SELFTEST_TIMEOUT_SEC = 20
 WARP_PROBE_TIMEOUT_SEC = 0.3
@@ -74,6 +74,7 @@ EVENT_RECOVERED = "recovered"
 EVENT_STARTED = "started"
 EVENT_STOPPED = "stopped"
 EVENT_CHECK_FAILED = "check_failed"
+EVENT_DEFERRED = "deferred"
 
 DiscoverIps = Callable[[], Awaitable[list[DiscoveredIp]]]
 WarpProbe = Callable[[], Awaitable[bool]]
@@ -156,6 +157,7 @@ class ExitProxyManager:
         self._check_requested = False
         self._installed_hash: Optional[str] = None
         self._no_healthy = False
+        self._pending_switch: Optional[str] = None
 
     # ── состояние на диске ──
 
@@ -175,6 +177,7 @@ class ExitProxyManager:
             self._discovered = [DiscoveredIp(**item) for item in data.get("discovered", [])]
             self._warp_present = bool(data.get("warp_present"))
             self._no_healthy = bool(data.get("no_healthy"))
+            self._pending_switch = data.get("pending_switch")
         except (OSError, ValueError, TypeError) as exc:
             logger.error("Exit proxy state %s is unreadable, starting clean: %s", self._state_path, exc)
             self.config = ExitProxyConfig()
@@ -193,6 +196,7 @@ class ExitProxyManager:
             "discovered": [ip.__dict__ for ip in self._discovered],
             "warp_present": self._warp_present,
             "no_healthy": self._no_healthy,
+            "pending_switch": self._pending_switch,
             "saved_at": _now(),
         }
         try:
@@ -281,8 +285,8 @@ class ExitProxyManager:
         previous = self.config
         self.config = config
         if config.enabled and not self._discovered:
-            # Первый прогон проверок займёт минуту; выход нужен сразу — основной IP
-            # выбирается по одному лишь списку адресов, проверки уточнят его позже
+            # Первый прогон проверок займёт минуту; выход нужен сразу — первый по
+            # приоритету выбирается по одному лишь списку адресов, проверки уточнят позже
             await self._discover()
         self.candidates = merge_candidates(
             self._discovered, self._warp_present, config.candidates_order, config.candidates_disabled,
@@ -381,7 +385,7 @@ class ExitProxyManager:
         self.last_check_at = _now()
         self.last_check_error = "; ".join(errors) or None
 
-        self._reselect()
+        self._reselect(confirm=True)
         if self.config.enabled:
             await self._self_test()
         self._save_state()
@@ -474,9 +478,11 @@ class ExitProxyManager:
             for candidate in self.candidates
         }
 
-    def _reselect(self) -> None:
+    def _reselect(self, confirm: bool = False) -> None:
+        # Подтвердить отложенную смену может только новый прогон проверок — не правка настроек
         decision = choose_exit(
             self.candidates, self._tally_map(), self.current, self.config.select_mode, self.config.pinned_candidate,
+            pending=self._pending_switch if confirm else None,
         )
         self._apply_decision(decision)
 
@@ -494,6 +500,12 @@ class ExitProxyManager:
                 "Exit proxy: exit %s -> %s (%s), dropped %s connections",
                 previous, self.current, decision.reason, dropped,
             )
+        if decision.pending and decision.pending != self._pending_switch:
+            self._event(
+                EVENT_DEFERRED, from_candidate=self.current, to_candidate=decision.pending,
+                reason="scored better once; switching if the next run confirms it",
+            )
+        self._pending_switch = decision.pending
         no_healthy = decision.reason == REASON_NO_HEALTHY
         if no_healthy and not self._no_healthy:
             self._event(
@@ -513,6 +525,7 @@ class ExitProxyManager:
         if self.config.select_mode == "manual":
             self.config = self.config.model_copy(update={"pinned_candidate": candidate_id})
         previous = self.current
+        self._pending_switch = None
         if previous != candidate_id:
             self.current = candidate_id
             dropped = self._server.drop_connections(except_exit=candidate_id) if self._server else 0
@@ -545,6 +558,7 @@ class ExitProxyManager:
             current=self.current,
             select_mode=self.config.select_mode,
             pinned_candidate=self.config.pinned_candidate,
+            pending_switch=self._pending_switch,
             candidates=[
                 CandidateStatus(
                     **candidate.model_dump(), healthy=tally_by_id.get(candidate.id, NO_RESULT).verdict,

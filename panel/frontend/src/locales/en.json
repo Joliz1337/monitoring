@@ -2536,6 +2536,7 @@
     "col_from_to": "From → to",
     "col_reason": "Reason",
     "event_switched": "Exit switched",
+    "event_deferred": "Switch deferred",
     "event_manual_switch": "Manual switch",
     "event_no_healthy": "No healthy exits",
     "event_recovered": "Exit recovered",

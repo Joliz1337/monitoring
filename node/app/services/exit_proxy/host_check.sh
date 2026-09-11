@@ -147,6 +147,11 @@ probe() {
     local trace ip warp
     trace=$(via "$TRACE_URL" 2>/dev/null)
     ip=$(trace_field "$trace" ip)
+    if [ -z "$ip" ]; then
+        # Загруженный выход (WARP под тысячами соединений) может не ответить с первого раза
+        trace=$(via "$TRACE_URL" 2>/dev/null)
+        ip=$(trace_field "$trace" ip)
+    fi
     warp=$(trace_field "$trace" warp)
     if [ -z "$ip" ]; then
         emit_result false "" "" "" false skipped "" "[]" "no route through this exit (trace failed)" "$started"

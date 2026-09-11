@@ -89,6 +89,7 @@ def node_view(server: Server, row: Optional[ExitProxyNode], online: bool) -> dic
         "select_mode": (row.select_mode if row is not None else None) or "auto",
         "pinned_candidate": row.pinned_candidate if row is not None else None,
         "current_exit": current_exit_view(node_status),
+        "pending_switch": node_status.get("pending_switch"),
         "candidates": [candidate_view(candidate) for candidate in node_status.get("candidates", [])],
         "warp": {"present": bool(node_status.get("warp_present"))},
         "check_in_progress": bool(node_status.get("check_in_progress")),

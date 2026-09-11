@@ -2540,6 +2540,7 @@
     "col_from_to": "Было → стало",
     "col_reason": "Причина",
     "event_switched": "Смена выхода",
+    "event_deferred": "Смена выхода отложена",
     "event_manual_switch": "Ручное переключение",
     "event_no_healthy": "Нет здоровых выходов",
     "event_recovered": "Выход восстановился",

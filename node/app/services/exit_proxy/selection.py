@@ -30,6 +30,10 @@ class CheckTally:
     passed: int = 0
     failed: int = 0
     unknown: int = 0
+    # Провалы именно Google (страна, капча, Gemini) — ради них прокси и существует
+    google_failed: int = 0
+    # False — трасса через выход не прошла, в интернет он не ходит
+    reachable: bool = True
 
     @property
     def verdict(self) -> Optional[bool]:
@@ -41,12 +45,17 @@ class CheckTally:
         return True
 
     @property
-    def rank(self) -> tuple[int, int]:
-        """Меньше — лучше: сначала больше пройденных, при равенстве меньше проваленных."""
-        return (-self.passed, self.failed)
+    def rank(self) -> tuple[int, int, int]:
+        """Меньше — лучше: больше пройденных, затем меньше провалов Google, затем меньше провалов вообще."""
+        return (-self.passed, self.google_failed, self.failed)
+
+    @property
+    def urgent(self) -> bool:
+        """С такого текущего выхода уходят сразу, без подтверждения: он не отвечает или его режет Google."""
+        return not self.reachable or self.google_failed > 0
 
 
-NO_RESULT = CheckTally(unknown=1)
+NO_RESULT = CheckTally(unknown=1, reachable=False)
 
 
 @dataclass(frozen=True)
@@ -60,6 +69,8 @@ class DiscoveredIp:
 class Decision:
     candidate: Optional[str]
     reason: str
+    # Кандидат лучше текущего, но смена ждёт подтверждения следующим прогоном
+    pending: Optional[str] = None
 
 
 def ip_candidate_id(address: str) -> str:
@@ -74,8 +85,10 @@ def merge_candidates(
 ) -> list[Candidate]:
     """Живые адреса ноды в порядке приоритета пользователя.
 
-    Порядок из конфига сохраняется; новые IP встают перед WARP (он в пуле —
-    запасной выход), исчезнувшие с интерфейса пропадают из списка.
+    Порядок из конфига сохраняется. WARP, которого пользователь не расставлял,
+    встаёт первым: при равном счёте он предпочтительнее — через него Google не
+    запоминает трафик за собственными адресами ноды. Новые IP встают в конец,
+    исчезнувшие с интерфейса пропадают из списка.
     """
     pool: dict[str, Candidate] = {}
     for ip in discovered:
@@ -99,13 +112,8 @@ def merge_candidates(
     # Основной адрес — самый очевидный дефолт, он первым среди новых
     new_ips.sort(key=lambda candidate: (not candidate.primary, candidate.address))
 
-    warp_position = next((index for index, candidate in enumerate(ordered) if candidate.kind == "warp"), None)
-    if warp_position is None:
-        merged = ordered + new_ips
-        if WARP_CANDIDATE_ID in pool and WARP_CANDIDATE_ID not in known:
-            merged.append(pool[WARP_CANDIDATE_ID])
-    else:
-        merged = ordered[:warp_position] + new_ips + ordered[warp_position:]
+    warp_unplaced = WARP_CANDIDATE_ID in pool and WARP_CANDIDATE_ID not in known
+    merged = ([pool[WARP_CANDIDATE_ID]] if warp_unplaced else []) + ordered + new_ips
 
     disabled_ids = set(disabled)
     return [
@@ -129,22 +137,25 @@ def tally(
     if result is None or not result.ok:
         return NO_RESULT
 
-    passed = failed = unknown = 0
+    passed = failed = unknown = google_failed = 0
     if builtin.google_country:
         if not result.country:
             unknown += 1
         elif result.country in blocked_countries:
             failed += 1
+            google_failed += 1
         else:
             passed += 1
     if builtin.google_captcha:
         if result.captcha:
             failed += 1
+            google_failed += 1
         else:
             passed += 1
     if builtin.gemini:
         if result.gemini == "blocked":
             failed += 1
+            google_failed += 1
         elif result.gemini == "error":
             unknown += 1
         else:
@@ -156,7 +167,7 @@ def tally(
             passed += 1
         else:
             failed += 1
-    return CheckTally(passed=passed, failed=failed, unknown=unknown)
+    return CheckTally(passed=passed, failed=failed, unknown=unknown, google_failed=google_failed)
 
 
 def choose_exit(
@@ -165,14 +176,20 @@ def choose_exit(
     current: Optional[str],
     mode: SelectMode,
     pinned: Optional[str],
+    pending: Optional[str] = None,
 ) -> Decision:
-    """Выход, прошедший больше всего проверок; при равном счёте выбор липкий.
+    """Выход с наибольшим числом пройденных проверок; при равном счёте — первый по приоритету.
 
-    Ранг — (пройдено ↓, провалено ↑): 3 из 3 бьёт 2 из 3, а при равном числе
-    пройденных таймаут («не знаем») лучше подтверждённого блока. Текущий
-    остаётся, пока никто не набрал ранг строго лучше; среди равных новых —
-    первый по приоритету. Никто не прошёл всё — всё равно берётся лучший по
-    счёту, а причина `no_healthy` держит событие «нет здоровых».
+    Ранг — (пройдено ↓, провалов Google ↑, провалов ↑): 3 из 3 бьёт 2 из 3, а при
+    равном числе пройденных таймаут («не знаем») лучше подтверждённого блока.
+    Лучший при равном ранге — первый по приоритету пользователя (WARP по умолчанию).
+
+    Смена сразу — если текущий не отвечает или его режет Google, а лучший строго
+    лучше по рангу. Иначе (текущий проиграл по своим проверкам, либо равный ему
+    выше по приоритету) смена ждёт подтверждения: `pending` из прошлого прогона
+    должен совпасть с лучшим — одна флаки-проверка выход не дёргает. Равный
+    ранг среди нездоровых выход не меняет. Никто не прошёл всё — всё равно
+    берётся лучший по счёту, а причина `no_healthy` держит событие «нет здоровых».
     """
     enabled_ids = [candidate.id for candidate in candidates if candidate.enabled]
     if not enabled_ids:
@@ -180,17 +197,24 @@ def choose_exit(
     if mode == "manual" and pinned in enabled_ids:
         return Decision(pinned, REASON_PINNED)
 
-    def rank(candidate_id: str) -> tuple[int, int]:
+    def rank(candidate_id: str) -> tuple[int, int, int]:
         return tallies.get(candidate_id, NO_RESULT).rank
 
-    best = min(rank(candidate_id) for candidate_id in enabled_ids)
-    if current in enabled_ids and rank(current) == best:
-        chosen = current
-    else:
-        chosen = next(candidate_id for candidate_id in enabled_ids if rank(candidate_id) == best)
-    verdict = tallies.get(chosen, NO_RESULT).verdict
-    if verdict is False:
-        return Decision(chosen, REASON_NO_HEALTHY)
-    if chosen == current:
-        return Decision(chosen, REASON_KEEP)
-    return Decision(chosen, REASON_SWITCHED if verdict is True else REASON_UNKNOWN)
+    best = min(enabled_ids, key=lambda candidate_id: (rank(candidate_id), enabled_ids.index(candidate_id)))
+    best_verdict = tallies.get(best, NO_RESULT).verdict
+    reason_no_healthy = best_verdict is False
+    if best == current:
+        return Decision(current, REASON_NO_HEALTHY if reason_no_healthy else REASON_KEEP)
+
+    switch_reason = REASON_NO_HEALTHY if reason_no_healthy else (REASON_SWITCHED if best_verdict else REASON_UNKNOWN)
+    if current not in enabled_ids:
+        return Decision(best, switch_reason)
+    current_tally = tallies.get(current, NO_RESULT)
+    strictly_better = rank(best) < current_tally.rank
+    if strictly_better and current_tally.urgent:
+        return Decision(best, switch_reason)
+    if not strictly_better and best_verdict is not True:
+        return Decision(current, REASON_NO_HEALTHY if reason_no_healthy else REASON_KEEP)
+    if pending == best:
+        return Decision(best, switch_reason)
+    return Decision(current, REASON_NO_HEALTHY if reason_no_healthy else REASON_KEEP, pending=best)
