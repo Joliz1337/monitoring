@@ -3088,12 +3088,13 @@ Google банит выходы Cloudflare WARP целым диапазоном (
 | POST | /api/source-pool/nodes/{id}/refresh | Забрать состояние с ноды сейчас, без доставки конфига |
 | GET | /api/source-pool/snippet | `{outbounds_json, routing_json, text}` — 30 outbound'ов `freedom` с тегами `pool-01..pool-30` и `sockopt.mark` 101–130, балансировщик `source-pool` (`selector: ["pool-"]`, `roundRobin`) и правило `network: tcp` → `balancerTag`, которое ставится последним в `routing.rules`; константы меток сверяются с нодой тестом |
 
-**Frontend:** страница сервера → кнопка «Исходящие адреса» рядом с DNAT → `pages/SourcePool.tsx` (`/server/:id/source-pool`): карточка статуса с тумблером включения и подсказкой о механике, список адресов интерфейса с галочками участия (снятая = исключён) и числом меток на адрес, ссылка в раздел Exit-прокси за конфигом; поллинг раз в 10 с, кнопка обновления опрашивает ноду (`refresh`). Сниппет Xray — сворачиваемый блок «Конфиг для Remnawave: пул исходящих адресов» на вкладке «Ноды» раздела Exit-прокси (`components/exitproxy/SourcePoolSnippetBlock.tsx`, `CopyField` общий с блоком exit-прокси). `api/client.ts`: `sourcePoolApi`, типы `SourcePoolNodeView`, `SourcePoolSnippet`.
+**Frontend:** страница сервера → кнопка «Исходящие адреса» рядом с DNAT → `pages/SourcePool.tsx` (`/server/:id/source-pool`): карточка статуса с тумблером включения и подсказкой о механике, список адресов интерфейса с галочками участия (снятая = исключён) и числом меток на адрес, ссылка в раздел Exit-прокси за конфигом; поллинг раз в 10 с, кнопка обновления опрашивает ноду (`refresh`). Сниппет Xray — сворачиваемый блок «Конфиг для Remnawave: пул исходящих адресов» на вкладке «Ноды» раздела Exit-прокси (`components/exitproxy/SourcePoolSnippetBlock.tsx`, `CopyField` общий с блоком exit-прокси). `api/client.ts`: `sourcePoolApi`, типы `SourcePoolNodeView`, `SourcePoolSnippet`. FAQ `PAGE_SOURCE_POOL` — значок у заголовка страницы: механика, порядок настройки, пример конфига Xray (балансировщик `source-pool`, правило `balancerTag` последним), требования к remnanode (`network_mode: host` + `NET_ADMIN`), смысл статусов и проверка на ноде.
 
 **Файлы:**
 - `panel/backend/app/models.py` — `SourcePoolNode`
 - `panel/backend/app/services/source_pool/` — `node_client.py`, `render.py`, `service.py`, `views.py`
 - `panel/backend/app/routers/source_pool.py`; `routers/exit_proxy.py` (встречный `409`); `main.py` (роутер, `start_source_pool`/`stop_source_pool`); `services/node_sync_queue.py` (`KIND_SOURCE_POOL`)
+- `panel/frontend/src/pages/SourcePool.tsx`, `components/exitproxy/SourcePoolSnippetBlock.tsx`, `components/FAQ/faq.types.ts` (`PAGE_SOURCE_POOL`), `data/faq/content/{ru,en}/PAGE_SOURCE_POOL.md`
 - Тесты: `tests/test_source_pool.py` (конфиг и хэш, сниппет и совпадение меток с нодой, лестница статусов, представление, гейт версии, инвариант nginx-таймаута); `tests/test_node_capabilities.py` — `services/source_pool/node_client.py` в `GATED`
 
 ## Диагностика

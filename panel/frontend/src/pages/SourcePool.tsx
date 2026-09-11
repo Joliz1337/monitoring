@@ -22,6 +22,7 @@ import { useAutoRefresh } from '../hooks/useAutoRefresh'
 import { useModuleEnabled } from '../hooks/useModuleEnabled'
 import { Tooltip } from '../components/ui/Tooltip'
 import { Toggle } from '../components/ui/Toggle'
+import { FAQIcon } from '../components/FAQ'
 
 const REFRESH_INTERVAL_MS = 10000
 
@@ -171,6 +172,7 @@ export default function SourcePool() {
           >
             <Shuffle className="w-7 h-7 text-accent-400" />
             {t('source_pool.title')}
+            <FAQIcon screen="PAGE_SOURCE_POOL" />
             {isRefreshing && (
               <motion.div initial={{ opacity: 0, scale: 0.8 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0 }}>
                 <Loader2 className="w-5 h-5 text-accent-400 animate-spin" />
