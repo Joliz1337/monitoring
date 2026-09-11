@@ -42,6 +42,12 @@ LOG_BUFFER_LIMIT = 5000
 # на медленном канале) и в полуавтоматическом режиме, где команду запускает оператор
 NODE_ONLINE_TIMEOUT = 2400
 NODE_POLL_INTERVAL = 10
+# Сколько ждать, пока установленная нода начнёт отвечать самой панели. Установщик
+# считает ноду готовой по внутреннему API (127.0.0.1:7500), а панель ходит через
+# nginx на 9100 — compose поднимает его только после healthcheck агента, то есть
+# заведомо позже выхода установщика. Окно короткое: агент уже здоров, ждём минуты.
+NODE_READY_TIMEOUT = 180
+NODE_READY_POLL_INTERVAL = 3
 
 
 def _wildcard_cert_expired(cert) -> bool:
@@ -207,6 +213,7 @@ class DeployJobManager:
         job: DeployJob,
         exit_code: int,
         post_opts: PostDeployOptions,
+        node_online: bool = False,
     ) -> None:
         job.exit_code = exit_code
         if exit_code != 0:
@@ -228,6 +235,9 @@ class DeployJobManager:
             return
 
         job.server_id = server_id
+        # Постшаги ходят к ноде по mTLS — сперва убеждаемся, что она отвечает
+        if not node_online:
+            await self._wait_node_ready(job, server_id)
         await self._post_install(job, server_id, post_opts)
         await self._bind_profiles(job, server_id, post_opts)
         # Сертификат раскатывается строго до nginx-синка: конфиг профиля
@@ -305,12 +315,43 @@ class DeployJobManager:
             return
 
         # Нода онлайн — дальше тот же путь, что и при обычном успешном деплое
-        await self._on_install_done(job, 0, post_opts)
+        await self._on_install_done(job, 0, post_opts, node_online=True)
 
-    async def _wait_node_online(self, job: DeployJob, server: Server) -> bool:
+    async def _wait_node_ready(self, job: DeployJob, server_id: int) -> None:
+        """Ждёт, пока свежепоставленная нода начнёт отвечать панели по mTLS.
+
+        Установщик выходит, как только ему ответил внутренний API ноды на 7500,
+        а панель ходит через nginx на 9100 — тот стартует только после
+        healthcheck агента и в этот момент ещё не слушает. Без ожидания постшаги
+        уходят в закрытый порт, и раскатка wildcard-сертификата теряется совсем:
+        повторов у неё, в отличие от синхронизации профилей, нет.
+        """
+        async with async_session_maker() as db:
+            result = await db.execute(select(Server).where(Server.id == server_id))
+            server = result.scalar_one_or_none()
+        if not server:
+            return
+
+        ready = await self._wait_node_online(
+            job, server, timeout=NODE_READY_TIMEOUT, interval=NODE_READY_POLL_INTERVAL,
+        )
+        if not ready:
+            self._emit(job, {
+                "type": "log",
+                "line": f"[panel] Нода не ответила панели за {NODE_READY_TIMEOUT // 60} мин — "
+                        "продолжаю настройку, часть шагов может не примениться",
+            })
+
+    async def _wait_node_online(
+        self,
+        job: DeployJob,
+        server: Server,
+        timeout: float = NODE_ONLINE_TIMEOUT,
+        interval: float = NODE_POLL_INTERVAL,
+    ) -> bool:
         """Поллит /api/version ноды до ответа или таймаута. True — нода поднялась.
         Периодический лог служит и keepalive для NDJSON-стрима."""
-        deadline = time.time() + NODE_ONLINE_TIMEOUT
+        deadline = time.time() + timeout
         attempt = 0
         while time.time() < deadline:
             try:
@@ -326,10 +367,10 @@ class DeployJobManager:
             except Exception:  # noqa: BLE001 — нода ещё грузится, любой сбой = ещё не готова
                 pass
             attempt += 1
-            if attempt % 3 == 0:  # ~раз в 30 c
+            if attempt % 3 == 0:
                 remaining = max(0, int(deadline - time.time()))
                 self._emit(job, {"type": "log", "line": f"[panel] Жду ноду... осталось ~{remaining // 60} мин"})
-            await asyncio.sleep(NODE_POLL_INTERVAL)
+            await asyncio.sleep(interval)
         return False
 
     async def _create_server(
@@ -381,8 +422,6 @@ class DeployJobManager:
         if not server:
             return
 
-        # Дать ноде подняться и принять mTLS-подключение панели
-        await asyncio.sleep(8)
         self._emit(job, {"type": "log", "line": "[panel] Применение SSH-настроек через API ноды..."})
 
         if post_opts.ssh_preset:
