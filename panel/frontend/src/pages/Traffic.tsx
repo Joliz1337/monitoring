@@ -35,6 +35,7 @@ import MultiLineChart from '../components/Charts/MultiLineChart'
 import TcpStatesHistoryChart from '../components/Charts/TcpStatesHistoryChart'
 import { NETWORK_COLORS } from '../components/Charts/chartTheme'
 import TrafficUnsupportedNotice from '../components/Traffic/TrafficUnsupportedNotice'
+import EphemeralPorts from '../components/Traffic/EphemeralPorts'
 
 const SUMMARY_DAYS = 30
 
@@ -540,6 +541,13 @@ export default function Traffic() {
               </div>
             </motion.div>
           )}
+        </motion.div>
+      )}
+
+      {/* Занятость эфемерных портов — из живых метрик, сводка трафика для неё не нужна */}
+      {metrics?.system?.ephemeral_ports && (
+        <motion.div className="mb-6" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }}>
+          <EphemeralPorts data={metrics.system.ephemeral_ports} />
         </motion.div>
       )}
 

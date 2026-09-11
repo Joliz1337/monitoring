@@ -180,6 +180,35 @@ class ConnectionsDetailed(BaseModel):
     udp: UDPStats
 
 
+class EphemeralDestination(BaseModel):
+    ip: str
+    port: int
+    used: int
+    time_wait: int
+    held: int
+    free: int
+
+
+class EphemeralSource(BaseModel):
+    """Остаток до потолка есть только у направления: у адреса с тремя
+    направлениями суммарно занято втрое больше портов, чем потолок."""
+    ip: str
+    used: int
+    time_wait: int
+    destinations_total: int
+    destinations: list[EphemeralDestination] = Field(default_factory=list)
+
+
+class EphemeralPorts(BaseModel):
+    """Занятость эфемерных портов: потолок один на пару «наш адрес → адрес:порт цели»."""
+    range_low: int
+    range_high: int
+    reserved: int
+    capacity: int
+    tw_reuse: int
+    sources: list[EphemeralSource] = Field(default_factory=list)
+
+
 class TimezoneInfo(BaseModel):
     name: str
     offset: str
@@ -197,6 +226,7 @@ class SystemInfo(BaseModel):
     open_files: int
     connections: ConnectionStats
     connections_detailed: Optional[ConnectionsDetailed] = None
+    ephemeral_ports: Optional[EphemeralPorts] = None
     server_name: str
     timezone: Optional[TimezoneInfo] = None
     # Меняется только с перезагрузкой хоста — по нему панель точно отличает

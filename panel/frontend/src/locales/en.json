@@ -803,6 +803,15 @@
     "import_in_progress": "Migrating history from the node — it will appear shortly",
     "gaps_note": "Node unreachable periods: {{count}}. Traffic there is spread evenly, not measured"
   },
+  "ephemeral": {
+    "title": "Ephemeral ports",
+    "range": "Range {{low}}–{{high}} · ceiling {{capacity}} per route",
+    "destinations_count_one": "{{count}} route",
+    "destinations_count_other": "{{count}} routes",
+    "peak_usage": "Busiest route: {{used}}",
+    "free": "{{free}} free",
+    "more_destinations": "and {{count}} more routes"
+  },
   "imageDelivery": {
     "title": "Deliver image over SSH",
     "desc": "For blocked nodes (no access to the image registry): the panel uploads the image to the node over SSH and updates it. Requires root access.",

@@ -154,6 +154,35 @@ export interface NodeWindow {
   disk_write_avg: number
 }
 
+export interface EphemeralDestination {
+  ip: string
+  port: number
+  used: number
+  time_wait: number
+  held: number
+  free: number
+}
+
+// Направления отсортированы по занятому: первое — ближайшее к потолку.
+// Остатка у самого адреса нет — он есть только у направления
+export interface EphemeralSource {
+  ip: string
+  used: number
+  time_wait: number
+  destinations_total: number
+  destinations: EphemeralDestination[]
+}
+
+// Потолок исходящих соединений — на пару «наш адрес → адрес:порт цели», а не на хост
+export interface EphemeralPorts {
+  range_low: number
+  range_high: number
+  reserved: number
+  capacity: number
+  tw_reuse: number
+  sources: EphemeralSource[]
+}
+
 export interface ServerMetrics {
   timestamp: string
   server_name: string
@@ -255,6 +284,7 @@ export interface ServerMetrics {
         total: number
       }
     }
+    ephemeral_ports?: EphemeralPorts | null
   }
   processes: {
     total: number
