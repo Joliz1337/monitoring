@@ -103,10 +103,16 @@ class RenderTest(unittest.TestCase):
         self.assertIn('"port": 7590', snippet["outbound_json"])
         self.assertIn('"127.0.0.1"', snippet["outbound_json"])
         rules = remnawave_rules()
-        self.assertEqual(rules[0]["network"], "udp")
-        self.assertEqual(rules[0]["port"], 443)
-        self.assertIn("geosite:google", rules[1]["domain"])
-        self.assertIn("geosite:google-gemini", rules[1]["domain"])
+        bypass, quic, google = rules
+        # Обход стоит первым: geosite:google включает youtube и googlefcm, а первое совпавшее правило побеждает
+        self.assertEqual(bypass["outboundTag"], "DIRECT")
+        for category in ("geosite:youtube", "geosite:googlefcm", "geosite:google-play"):
+            self.assertIn(category, bypass["domain"])
+        self.assertEqual((quic["network"], quic["port"], quic["outboundTag"]), ("udp", 443, "BLOCK"))
+        self.assertEqual(google["outboundTag"], "exit-proxy")
+        self.assertIn("geosite:google", google["domain"])
+        self.assertIn("geosite:google-gemini", google["domain"])
+        self.assertIn("DIRECT", snippet["text"])
 
 
 class ViewsTest(unittest.TestCase):

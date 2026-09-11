@@ -19,4 +19,4 @@ The exit that passes the most checks wins; on a tie the current one stays (selec
 - A single failed probe (timeout) never switches the exit — only a confirmed block does.
 - The stock Claude and ChatGPT checks talk to their APIs, not the websites: claude.ai and chatgpt.com sit behind Cloudflare bot protection and answer server IPs with a browser-check page regardless of country. Such an answer in any custom check counts as "not tested", not as a block. Reddit turns away server addresses in every country, so it is not in the stock set.
 - The self-test goes through the socks itself and shows which IP the traffic really leaves from.
-- The proxy is meant for Gemini, search and APIs — do not send YouTube or video into this outbound.
+- The proxy is meant for Gemini, search and APIs. The first rule of the snippet sends YouTube, Android push connections and Play Store downloads through the direct outbound: they need no geo, and through the proxy they would be thousands of connections and gigabits. Do not send video into the proxy.

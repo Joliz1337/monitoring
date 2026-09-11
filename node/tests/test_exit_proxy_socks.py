@@ -17,6 +17,7 @@ from functools import partial
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.services.exit_proxy.socks_server import (  # noqa: E402
+    IP_BIND_ADDRESS_NO_PORT,
     REP_COMMAND_NOT_SUPPORTED,
     REP_GENERAL_FAILURE,
     REP_SUCCESS,
@@ -93,6 +94,22 @@ class SocksServerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.server.active_connections, 1)
         writer.close()
         await writer.wait_closed()
+
+    async def test_direct_connection_binds_ip_and_defers_port_to_connect(self):
+        reader, writer = await connect_direct(LOOPBACK, self.echo_port, LOOPBACK)
+        sock = writer.get_extra_info("socket")
+        self.assertEqual(sock.getsockname()[0], LOOPBACK)
+        if sys.platform.startswith("linux"):
+            self.assertEqual(sock.getsockopt(socket.IPPROTO_IP, IP_BIND_ADDRESS_NO_PORT), 1)
+        writer.write(b"pong")
+        await writer.drain()
+        self.assertEqual(await reader.readexactly(4), b"pong")
+        writer.close()
+        await writer.wait_closed()
+
+    async def test_direct_connection_to_unresolvable_family_fails_cleanly(self):
+        with self.assertRaises(OSError):
+            await connect_direct("::1", self.echo_port, LOOPBACK)
 
     async def test_connect_by_domain_resolves_only_ipv4(self):
         reply, reader, writer = await socks_connect(self.server.port, "localhost", self.echo_port)

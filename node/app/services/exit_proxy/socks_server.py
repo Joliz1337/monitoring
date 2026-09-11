@@ -10,6 +10,7 @@ import asyncio
 import ipaddress
 import logging
 import socket
+import sys
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional
 
@@ -34,9 +35,16 @@ REP_ADDRESS_NOT_SUPPORTED = 0x08
 HANDSHAKE_TIMEOUT_SEC = 10
 CONNECT_TIMEOUT_SEC = 15
 PIPE_CHUNK = 64 * 1024
-MAX_CONNECTIONS = 4096
+# По два дескриптора на соединение при nofile 65 536 у контейнера агента
+MAX_CONNECTIONS = 25_000
 MAX_DOMAIN_LENGTH = 255
-LISTEN_BACKLOG = 512
+# При смене выхода рвутся все соединения, и клиенты переподключаются разом
+LISTEN_BACKLOG = 4096
+# Linux ≥ 4.2: bind() с портом 0 не резервирует порт — его выберет connect() по четвёрке.
+# Без опции порт занят «на любое назначение» и минуту TIME_WAIT после закрытия, то есть на
+# один выходной IP остаётся 64 512 соединений на все адреса вместе. Значение из linux/in.h,
+# в socket Python 3.12 константы нет
+IP_BIND_ADDRESS_NO_PORT = getattr(socket, "IP_BIND_ADDRESS_NO_PORT", 24)
 
 Connector = Callable[[str, int], Awaitable[tuple[asyncio.StreamReader, asyncio.StreamWriter]]]
 # Текущий выход: (id, как через него соединяться); None — выхода нет
@@ -262,7 +270,28 @@ def _close(writer: Optional[asyncio.StreamWriter]) -> None:
 async def connect_direct(host: str, port: int, bind_ip: str) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
     """Соединение с привязкой исходящего адреса; домен резолвится только в записи семейства адреса."""
     family = socket.AF_INET6 if ":" in bind_ip else socket.AF_INET
-    return await asyncio.open_connection(host, port, family=family, local_addr=(bind_ip, 0))
+    loop = asyncio.get_running_loop()
+    infos = await loop.getaddrinfo(host, port, family=family, type=socket.SOCK_STREAM)
+    if not infos:
+        raise OSError(f"{host} has no {'AAAA' if family == socket.AF_INET6 else 'A'} record")
+    last_error: Optional[OSError] = None
+    for *_, address in infos:
+        sock = socket.socket(family, socket.SOCK_STREAM)
+        try:
+            sock.setblocking(False)
+            if sys.platform.startswith("linux"):
+                sock.setsockopt(socket.IPPROTO_IP, IP_BIND_ADDRESS_NO_PORT, 1)
+            sock.bind((bind_ip, 0))
+            await loop.sock_connect(sock, address)
+        except OSError as exc:
+            sock.close()
+            last_error = exc
+            continue
+        except BaseException:
+            sock.close()
+            raise
+        return await asyncio.open_connection(sock=sock)
+    raise last_error  # type: ignore[misc] — infos не пуст, значит хотя бы одна попытка была
 
 
 async def connect_via_socks(

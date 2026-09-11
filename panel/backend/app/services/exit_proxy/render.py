@@ -10,6 +10,9 @@ from app.services.exit_proxy.settings import SettingsSnapshot, load_json
 
 CHECK_TIMEOUT_SEC = 15
 REMNAWAVE_OUTBOUND_TAG = "exit-proxy"
+# Теги outbound'ов из конфига Remnawave по умолчанию
+DIRECT_OUTBOUND_TAG = "DIRECT"
+BLOCK_OUTBOUND_TAG = "BLOCK"
 # Весь Google одним путём: половинчатая маршрутизация даёт «IP A ≠ IP B» в одной сессии
 GOOGLE_DOMAINS = [
     "geosite:google",
@@ -18,6 +21,10 @@ GOOGLE_DOMAINS = [
     "domain:gstatic.com",
     "domain:googleusercontent.com",
 ]
+# geosite:google тянет за собой include:youtube, include:googlefcm и include:google-play:
+# видео, постоянное push-соединение каждого Android-устройства и загрузки Play гео не
+# нужно, а через релей это тысячи соединений и гигабиты — они уходят прямым outbound'ом
+GOOGLE_BYPASS_DOMAINS = ["geosite:youtube", "geosite:googlefcm", "geosite:google-play"]
 
 
 @dataclass(frozen=True)
@@ -71,7 +78,8 @@ def remnawave_outbound(port: int) -> dict:
 
 def remnawave_rules() -> list[dict]:
     return [
-        {"type": "field", "network": "udp", "port": 443, "outboundTag": "block"},
+        {"type": "field", "domain": list(GOOGLE_BYPASS_DOMAINS), "outboundTag": DIRECT_OUTBOUND_TAG},
+        {"type": "field", "network": "udp", "port": 443, "outboundTag": BLOCK_OUTBOUND_TAG},
         {"type": "field", "domain": list(GOOGLE_DOMAINS), "outboundTag": REMNAWAVE_OUTBOUND_TAG},
     ]
 
@@ -82,10 +90,13 @@ def remnawave_snippet(port: int) -> dict:
     text = (
         f"1. В конфиге Xray (Remnawave → Config Profiles) добавьте outbound в массив \"outbounds\":\n{outbound}\n\n"
         f"2. В \"routing\".\"rules\" добавьте правила выше остальных правил для Google "
-        f"(первое глушит QUIC — socks не несёт UDP, второе ведёт весь Google в exit-прокси):\n{rules}\n\n"
-        "3. Убедитесь, что есть outbound с тегом \"block\" (protocol \"blackhole\") "
+        f"(первое выпускает YouTube, push-соединения Android и загрузки Play Store прямым outbound'ом — "
+        f"им гео не нужно, а через прокси это тысячи соединений; второе глушит QUIC — socks не несёт UDP; "
+        f"третье ведёт остальной Google в exit-прокси):\n{rules}\n\n"
+        f"3. Убедитесь, что есть outbound'ы с тегами \"{DIRECT_OUTBOUND_TAG}\" (protocol \"freedom\") и "
+        f"\"{BLOCK_OUTBOUND_TAG}\" (protocol \"blackhole\") — если у вас они называются иначе, подставьте свои теги — "
         "и что sniffing на inbound включён (destOverride http, tls) — иначе доменные правила не сработают.\n\n"
         f"Порт {port} одинаков на всех нодах, поэтому кусок конфига общий. "
-        "YouTube и видео в этот outbound не отправляйте: прокси рассчитан на Gemini, поиск и API."
+        "Прокси рассчитан на Gemini, поиск и API; видео в него не отправляйте — YouTube уже выведен первым правилом."
     )
     return {"outbound_json": outbound, "rules_json": rules, "text": text}
