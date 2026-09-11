@@ -27,7 +27,7 @@ from app.services.exit_proxy.alerts import (
 )
 from app.services.exit_proxy.node_client import ExitProxyNodeDenied, ExitProxyNodeError, ExitProxyNodeUnsupported
 from app.services.exit_proxy.render import NodePrefs, build_node_config, config_hash
-from app.services.exit_proxy.settings import SettingsSnapshot, get_or_create_settings
+from app.services.exit_proxy.settings import SettingsSnapshot, get_or_create_settings, upgrade_stored_stock_checks
 from app.services.exit_proxy.views import new_node_events
 from app.services.haproxy_profile_sync import is_server_online
 
@@ -311,6 +311,9 @@ def get_exit_proxy_service() -> ExitProxyService:
 
 
 async def start_exit_proxy() -> None:
+    async with async_session() as db:
+        if await upgrade_stored_stock_checks(db):
+            logger.info("Exit proxy: stock checks moved from sites to API endpoints")
     await get_exit_proxy_service().start()
 
 

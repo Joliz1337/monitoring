@@ -30,8 +30,10 @@ try:
     )
     from app.services.exit_proxy.settings import (  # noqa: E402
         DEFAULT_CUSTOM_CHECKS,
+        LEGACY_STOCK_CHECKS,
         RESERVED_SERVICE_PORTS,
         SettingsSnapshot,
+        upgrade_stock_checks,
     )
     from app.services.exit_proxy.views import (  # noqa: E402
         STATUS_ACTIVE,
@@ -224,6 +226,45 @@ class IntegrationPointsTest(unittest.TestCase):
         self.assertIn("--unattended", command)
         self.assertNotIn("MON_INSTALL_REMNAWAVE", command)
         self.assertNotIn("MON_INSTALL_NODE", command)
+
+
+class StockChecksUpgradeTest(unittest.TestCase):
+    @staticmethod
+    def legacy(check_id: str, **overrides) -> dict:
+        check = {"id": check_id, "name": check_id.title(), "enabled": True, **LEGACY_STOCK_CHECKS[check_id]}
+        check.update(overrides)
+        return check
+
+    def test_untouched_stock_checks_move_to_api_and_reddit_is_disabled(self):
+        upgraded = upgrade_stock_checks([
+            self.legacy("claude", name="Claude AI"), self.legacy("chatgpt", enabled=False), self.legacy("reddit"),
+        ])
+        self.assertEqual([check["id"] for check in upgraded], ["claude", "chatgpt", "reddit"])
+        by_id = {check["id"]: check for check in upgraded}
+        self.assertEqual(by_id["claude"]["url"], "https://api.anthropic.com/v1/models")
+        self.assertEqual(by_id["claude"]["name"], "Claude AI")
+        self.assertTrue(by_id["claude"]["enabled"])
+        self.assertEqual(by_id["chatgpt"]["url"], "https://api.openai.com/compliance/cookie_requirements")
+        self.assertEqual(by_id["chatgpt"]["block_status"], [])
+        self.assertEqual(by_id["chatgpt"]["block_regex"], "unsupported_country")
+        self.assertFalse(by_id["chatgpt"]["enabled"])
+        self.assertEqual(by_id["reddit"]["url"], "https://www.reddit.com/")
+        self.assertFalse(by_id["reddit"]["enabled"])
+
+    def test_user_edited_and_own_checks_are_left_alone(self):
+        edited = self.legacy("chatgpt", block_status=[403, 451])
+        own = {
+            "id": "a1b2c3d4", "name": "Mine", "url": "https://example.com/", "enabled": True,
+            "block_status": [403], "block_regex": "", "block_url_regex": "", "expect_status": None,
+        }
+        upgraded = upgrade_stock_checks([edited, own, self.legacy("claude")])
+        self.assertEqual(upgraded[0], edited)
+        self.assertEqual(upgraded[1], own)
+        self.assertEqual(upgraded[2]["url"], "https://api.anthropic.com/v1/models")
+
+    def test_current_stock_needs_no_upgrade(self):
+        self.assertIsNone(upgrade_stock_checks([dict(check) for check in DEFAULT_CUSTOM_CHECKS]))
+        self.assertIsNone(upgrade_stock_checks([]))
 
 
 if __name__ == "__main__":

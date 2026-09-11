@@ -17,7 +17,8 @@
 set -uo pipefail
 
 UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36'
-TRACE_URL="https://cloudflare.com/cdn-cgi/trace"
+# Переменная окружения — только для тестов: подставляют локальный сервер
+TRACE_URL="${EXIT_PROXY_TRACE_URL:-https://cloudflare.com/cdn-cgi/trace}"
 # YouTube отдаёт страну по IP прямо в конфиге страницы; cookie SOCS обходит
 # европейский экран согласия, за которым конфига нет
 YOUTUBE_URL="https://www.youtube.com/"
@@ -26,6 +27,9 @@ CAPTCHA_URL="https://www.google.com/search?q=exit+proxy+check"
 GEMINI_URL="https://gemini.google.com/"
 # Апостроф в «isn't» бывает и прямым, и типографским — любой байт между n и t
 GEMINI_BLOCK_RE="isn.{0,3}t (currently )?(supported|available) in your (country|region)"
+# Челлендж Cloudflare — ответ края, а не сервиса за ним; имена переменных его
+# скрипта стабильнее формулировок на странице
+CHALLENGE_RE="cf_chl_opt|_cf_chl|just a moment|cf-browser-verification|enable javascript and cookies to continue"
 COUNTRY_NAMES="Netherlands|Russia|Germany|Finland|France|Sweden|Norway|Poland|Latvia|Lithuania|Estonia|Kazakhstan|Turkey|Spain|Italy|Austria|Switzerland|Czechia|United Kingdom|United States|Canada|Japan|Singapore|Hong Kong"
 
 FS=$'\x1f'
@@ -70,6 +74,13 @@ via() {
     fi
 }
 
+is_challenge() {
+    case "$1" in
+        403|429|503) grep -qiaE -- "$CHALLENGE_RE" "$2" 2>/dev/null ;;
+        *) return 1 ;;
+    esac
+}
+
 CHECK_JSON=""
 run_check() {
     local name="$1" url="$2" block_status="$3" block_regex="$4" block_url_regex="$5" expect="$6"
@@ -79,6 +90,10 @@ run_check() {
     final=${out#*$'\t'}
     if [ -z "$code" ] || [ "$code" = "000" ]; then
         ok=false; detail="no response"
+    elif is_challenge "$code" "$body"; then
+        # Хостинговым IP Cloudflare отдаёт челлендж вместо сайта: проверки не было,
+        # status остаётся null — для вердикта это «не знаем», а не блок
+        ok=false; detail="cloudflare challenge, not tested"
     else
         status=$code
         detail="status $code"

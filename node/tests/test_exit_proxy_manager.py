@@ -8,15 +8,20 @@
 """
 
 import asyncio
+import base64
 import hashlib
 import json
 import os
+import shutil
 import socket
+import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 import unittest.mock
 from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -301,6 +306,67 @@ class ManagerTest(unittest.IsolatedAsyncioTestCase):
             await self.manager.run_checks()
         self.assertEqual(installed, [manager_module.HOST_SCRIPT_PATH])
         self.assertTrue(self.manager.status().script_installed)
+
+
+class FakeSiteHandler(BaseHTTPRequestHandler):
+    """Сайт для проверок: трасса, челлендж Cloudflare, честный 403 и обычная страница."""
+
+    PAGES = {
+        "/trace": (200, "ip=127.0.0.1\nwarp=off\n"),
+        "/challenge": (403, "<html><title>Just a moment...</title><script>window._cf_chl_opt={}</script></html>"),
+        "/blocked": (403, "forbidden"),
+        "/fine": (200, "hello"),
+    }
+
+    def do_GET(self):  # noqa: N802 — имя задаёт http.server
+        status, body = self.PAGES.get(self.path, (404, "nope"))
+        data = body.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *_):
+        pass
+
+
+class HostScriptTest(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("bash"), "bash not available")
+    def test_script_has_valid_bash_syntax(self):
+        # Скрипт уходит байтами: текстовый stdin на Windows подменил бы LF на CRLF
+        check = subprocess.run(["bash", "-n"], input=HOST_SCRIPT.encode("utf-8"), capture_output=True)
+        self.assertEqual(check.returncode, 0, check.stderr.decode("utf-8", "replace"))
+
+    @unittest.skipUnless(shutil.which("bash") and shutil.which("curl"), "bash and curl required")
+    @unittest.skipIf(sys.platform == "win32", "the script's curl --interface and coreutils need a POSIX host")
+    def test_cloudflare_challenge_is_untested_not_blocked(self):
+        site = ThreadingHTTPServer(("127.0.0.1", 0), FakeSiteHandler)
+        threading.Thread(target=site.serve_forever, daemon=True).start()
+        self.addCleanup(site.shutdown)
+        base = f"http://127.0.0.1:{site.server_address[1]}"
+        payload = "\n".join([
+            FIELD_SEPARATOR.join(["BUILTIN", "0", "0", "0"]),
+            FIELD_SEPARATOR.join(["CHECK", "Challenge", f"{base}/challenge", "403", "", "", ""]),
+            FIELD_SEPARATOR.join(["CHECK", "Blocked", f"{base}/blocked", "403", "", "", ""]),
+            FIELD_SEPARATOR.join(["CHECK", "Fine", f"{base}/fine", "403", "", "", ""]),
+        ]) + "\n"
+        encoded = base64.b64encode(payload.encode("utf-8")).decode("ascii")
+        run = subprocess.run(
+            ["bash", "-s", "probe", "ip", "127.0.0.1", "5", encoded],
+            input=HOST_SCRIPT.encode("utf-8"), capture_output=True,
+            env={**os.environ, "EXIT_PROXY_TRACE_URL": f"{base}/trace"},
+        )
+        self.assertEqual(run.returncode, 0, run.stderr.decode("utf-8", "replace"))
+        result = json.loads(run.stdout.decode("utf-8").strip().splitlines()[-1])
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["ip"], "127.0.0.1")
+        by_name = {item["name"]: item for item in result["checks"]}
+        self.assertEqual(
+            by_name["Challenge"], {"name": "Challenge", "ok": False, "status": None, "detail": "cloudflare challenge, not tested"},
+        )
+        self.assertEqual(by_name["Blocked"], {"name": "Blocked", "ok": False, "status": 403, "detail": "blocked: status 403"})
+        self.assertEqual(by_name["Fine"], {"name": "Fine", "ok": True, "status": 200, "detail": "status 200"})
 
 
 if __name__ == "__main__":

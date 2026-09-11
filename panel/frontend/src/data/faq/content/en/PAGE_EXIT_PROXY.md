@@ -17,5 +17,6 @@ Selection is sticky: the current exit stays while it passes checks and changes o
 
 - The port is the same on every node, so the Remnawave snippet is shared — it sits below the node list. Route all of Google with one rule, otherwise Google sees one session from different IPs.
 - A single failed probe (timeout) never switches the exit — only a confirmed block does.
+- The stock Claude and ChatGPT checks talk to their APIs, not the websites: claude.ai and chatgpt.com sit behind Cloudflare bot protection and answer server IPs with a browser-check page regardless of country. Such an answer in any custom check counts as "not tested", not as a block. Reddit turns away server addresses in every country, so it is not in the stock set.
 - The self-test goes through the socks itself and shows which IP the traffic really leaves from.
 - The proxy is meant for Gemini, search and APIs — do not send YouTube or video into this outbound.
