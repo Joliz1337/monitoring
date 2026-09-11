@@ -37,12 +37,14 @@ from app.services.exit_proxy.models import (
     SelfTest,
 )
 from app.services.exit_proxy.selection import (
+    NO_RESULT,
     REASON_NO_HEALTHY,
+    CheckTally,
     Decision,
     DiscoveredIp,
     choose_exit,
-    health,
     merge_candidates,
+    tally,
 )
 from app.services.exit_proxy.socks_server import Connector, SocksServer, connect_direct, connect_via_socks
 from app.services.host_executor import HostExecutor
@@ -466,15 +468,15 @@ class ExitProxyManager:
 
     # ── выбор выхода ──
 
-    def _health_map(self) -> dict[str, Optional[bool]]:
+    def _tally_map(self) -> dict[str, CheckTally]:
         return {
-            candidate.id: health(self.results.get(candidate.id), self.config.blocked_countries, self.config.builtin_checks)
+            candidate.id: tally(self.results.get(candidate.id), self.config.blocked_countries, self.config.builtin_checks)
             for candidate in self.candidates
         }
 
     def _reselect(self) -> None:
         decision = choose_exit(
-            self.candidates, self._health_map(), self.current, self.config.select_mode, self.config.pinned_candidate,
+            self.candidates, self._tally_map(), self.current, self.config.select_mode, self.config.pinned_candidate,
         )
         self._apply_decision(decision)
 
@@ -494,7 +496,10 @@ class ExitProxyManager:
             )
         no_healthy = decision.reason == REASON_NO_HEALTHY
         if no_healthy and not self._no_healthy:
-            self._event(EVENT_NO_HEALTHY, to_candidate=self.current, reason="every candidate failed its checks; first by priority is in use")
+            self._event(
+                EVENT_NO_HEALTHY, to_candidate=self.current,
+                reason="no candidate passed every check; the one with most passed checks is in use",
+            )
         elif self._no_healthy and not no_healthy and not switched:
             self._event(EVENT_RECOVERED, to_candidate=self.current, reason=decision.reason)
         self._no_healthy = no_healthy
@@ -530,7 +535,7 @@ class ExitProxyManager:
         return list(reversed(self._events))[:limit]
 
     def status(self) -> ExitProxyStatus:
-        health_by_id = self._health_map()
+        tally_by_id = self._tally_map()
         server = self._server
         return ExitProxyStatus(
             enabled=self.config.enabled,
@@ -542,7 +547,7 @@ class ExitProxyManager:
             pinned_candidate=self.config.pinned_candidate,
             candidates=[
                 CandidateStatus(
-                    **candidate.model_dump(), healthy=health_by_id.get(candidate.id),
+                    **candidate.model_dump(), healthy=tally_by_id.get(candidate.id, NO_RESULT).verdict,
                     last_check=self.results.get(candidate.id),
                 )
                 for candidate in self.candidates

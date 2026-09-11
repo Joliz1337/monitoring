@@ -1,10 +1,11 @@
-"""Exit-прокси: слияние кандидатов, вердикт «здоров», липкий выбор выхода.
+"""Exit-прокси: слияние кандидатов, счёт проверок, выбор выхода по счёту.
 
 Запуск из node/:  python -m unittest discover -s tests -p "test_*.py"
 
 Закреплённые инварианты: порядок пользователя важнее порядка обнаружения,
-новые адреса встают перед WARP, одиночный сетевой сбой (unknown) не
-переключает выход, а полное отсутствие здоровых даёт первого по приоритету.
+новые адреса встают перед WARP, выигрывает выход с наибольшим числом
+пройденных проверок, при равном счёте текущий остаётся, а одиночный сетевой
+сбой (unknown) сам по себе выход не переключает.
 """
 
 import os
@@ -15,21 +16,27 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.services.exit_proxy.models import BuiltinChecks, CheckItem, CheckResult  # noqa: E402
 from app.services.exit_proxy.selection import (  # noqa: E402
+    NO_RESULT,
     REASON_KEEP,
     REASON_NO_CANDIDATES,
     REASON_NO_HEALTHY,
     REASON_PINNED,
     REASON_SWITCHED,
     REASON_UNKNOWN,
+    CheckTally,
     DiscoveredIp,
     choose_exit,
-    health,
     merge_candidates,
+    tally,
 )
 
 PRIMARY = DiscoveredIp("5.255.127.33", primary=True)
 EXTRA = DiscoveredIp("5.255.127.34", managed=True)
 BUILTIN = BuiltinChecks()
+
+ALL_PASSED = CheckTally(passed=3)
+ONE_FAILED = CheckTally(passed=2, failed=1)
+ONE_UNKNOWN = CheckTally(passed=2, unknown=1)
 
 
 def result(**overrides) -> CheckResult:
@@ -63,30 +70,50 @@ class MergeCandidatesTest(unittest.TestCase):
         self.assertTrue(by_id["ip:5.255.127.33"].primary)
 
 
-class HealthTest(unittest.TestCase):
+class TallyTest(unittest.TestCase):
     def test_no_result_or_failed_transport_is_unknown(self):
-        self.assertIsNone(health(None, ["RU"], BUILTIN))
-        self.assertIsNone(health(result(ok=False, error="trace failed"), ["RU"], BUILTIN))
+        self.assertEqual(tally(None, ["RU"], BUILTIN), NO_RESULT)
+        self.assertEqual(tally(result(ok=False, error="trace failed"), ["RU"], BUILTIN), NO_RESULT)
+        self.assertIsNone(NO_RESULT.verdict)
 
     def test_blocked_country_captcha_gemini_and_custom_fail(self):
-        self.assertFalse(health(result(country="RU"), ["RU"], BUILTIN))
-        self.assertFalse(health(result(captcha=True), ["RU"], BUILTIN))
-        self.assertFalse(health(result(gemini="blocked"), ["RU"], BUILTIN))
+        self.assertIs(tally(result(country="RU"), ["RU"], BUILTIN).verdict, False)
+        self.assertIs(tally(result(captcha=True), ["RU"], BUILTIN).verdict, False)
+        self.assertIs(tally(result(gemini="blocked"), ["RU"], BUILTIN).verdict, False)
         failed = [CheckItem(name="Claude", ok=False, status=403)]
-        self.assertFalse(health(result(checks=failed), ["RU"], BUILTIN))
+        self.assertIs(tally(result(checks=failed), ["RU"], BUILTIN).verdict, False)
 
     def test_transient_errors_are_unknown_not_unhealthy(self):
-        self.assertIsNone(health(result(country=None), ["RU"], BUILTIN))
-        self.assertIsNone(health(result(gemini="error"), ["RU"], BUILTIN))
+        self.assertIsNone(tally(result(country=None), ["RU"], BUILTIN).verdict)
+        self.assertIsNone(tally(result(gemini="error"), ["RU"], BUILTIN).verdict)
         timed_out = [CheckItem(name="Claude", ok=False, status=None, detail="no response")]
-        self.assertIsNone(health(result(checks=timed_out), ["RU"], BUILTIN))
+        self.assertIsNone(tally(result(checks=timed_out), ["RU"], BUILTIN).verdict)
 
     def test_disabled_builtin_checks_are_ignored(self):
         lenient = BuiltinChecks(google_country=False, google_captcha=False, gemini=False)
-        self.assertTrue(health(result(country="RU", captcha=True, gemini="blocked"), ["RU"], lenient))
+        counted = tally(result(country="RU", captcha=True, gemini="blocked"), ["RU"], lenient)
+        self.assertEqual(counted, CheckTally())
+        self.assertIs(counted.verdict, True)
+
+    def test_every_enabled_check_is_counted(self):
+        checks = [
+            CheckItem(name="Claude", ok=True, status=200),
+            CheckItem(name="ChatGPT", ok=False, status=403),
+            CheckItem(name="Mine", ok=False, status=None, detail="cloudflare challenge, not tested"),
+        ]
+        counted = tally(result(gemini="error", checks=checks), ["RU"], BUILTIN)
+        self.assertEqual(counted, CheckTally(passed=3, failed=1, unknown=2))
+        self.assertIs(counted.verdict, False)
 
     def test_healthy(self):
-        self.assertTrue(health(result(checks=[CheckItem(name="Claude", ok=True, status=200)]), ["RU"], BUILTIN))
+        counted = tally(result(checks=[CheckItem(name="Claude", ok=True, status=200)]), ["RU"], BUILTIN)
+        self.assertEqual(counted, CheckTally(passed=4))
+        self.assertIs(counted.verdict, True)
+
+    def test_rank_prefers_more_passed_then_fewer_failed(self):
+        self.assertLess(ALL_PASSED.rank, ONE_FAILED.rank)
+        self.assertLess(ONE_UNKNOWN.rank, ONE_FAILED.rank)
+        self.assertLess(ONE_FAILED.rank, NO_RESULT.rank)
 
 
 class ChooseExitTest(unittest.TestCase):
@@ -98,47 +125,62 @@ class ChooseExitTest(unittest.TestCase):
         disabled = merge_candidates([PRIMARY], warp_present=False, order=[], disabled=["ip:5.255.127.33"])
         self.assertEqual(choose_exit(disabled, {}, None, "auto", None).reason, REASON_NO_CANDIDATES)
 
-    def test_manual_pin_wins_over_health(self):
-        verdicts = {self.ids[0]: True, "warp": False}
-        decision = choose_exit(self.candidates, verdicts, self.ids[0], "manual", "warp")
+    def test_manual_pin_wins_over_score(self):
+        tallies = {self.ids[0]: ALL_PASSED, "warp": ONE_FAILED}
+        decision = choose_exit(self.candidates, tallies, self.ids[0], "manual", "warp")
         self.assertEqual((decision.candidate, decision.reason), ("warp", REASON_PINNED))
 
     def test_manual_without_valid_pin_falls_back_to_auto(self):
-        decision = choose_exit(self.candidates, {self.ids[0]: True}, None, "manual", "ip:9.9.9.9")
+        decision = choose_exit(self.candidates, {self.ids[0]: ALL_PASSED}, None, "manual", "ip:9.9.9.9")
         self.assertEqual(decision.candidate, self.ids[0])
 
-    def test_sticky_current_stays_while_healthy(self):
-        verdicts = {self.ids[0]: True, self.ids[1]: True}
-        decision = choose_exit(self.candidates, verdicts, self.ids[1], "auto", None)
+    def test_sticky_current_stays_at_equal_score(self):
+        tallies = {self.ids[0]: ALL_PASSED, self.ids[1]: ALL_PASSED}
+        decision = choose_exit(self.candidates, tallies, self.ids[1], "auto", None)
         self.assertEqual((decision.candidate, decision.reason), (self.ids[1], REASON_KEEP))
 
-    def test_unknown_current_stays_when_nobody_is_confirmed_healthy(self):
+    def test_unknown_current_stays_when_nobody_scored_better(self):
         decision = choose_exit(self.candidates, {}, self.ids[1], "auto", None)
         self.assertEqual((decision.candidate, decision.reason), (self.ids[1], REASON_KEEP))
 
-    def test_unhealthy_current_switches_to_first_healthy_by_priority(self):
-        verdicts = {self.ids[0]: False, self.ids[1]: True, "warp": True}
-        decision = choose_exit(self.candidates, verdicts, self.ids[0], "auto", None)
+    def test_more_passed_checks_beat_the_primary(self):
+        tallies = {self.ids[0]: ONE_FAILED, self.ids[1]: ALL_PASSED, "warp": ONE_FAILED}
+        decision = choose_exit(self.candidates, tallies, None, "auto", None)
         self.assertEqual((decision.candidate, decision.reason), (self.ids[1], REASON_SWITCHED))
 
-    def test_healthy_beats_unknown_current(self):
-        verdicts = {self.ids[0]: None, "warp": True}
-        decision = choose_exit(self.candidates, verdicts, self.ids[0], "auto", None)
+    def test_current_with_a_failure_switches_to_first_full_score_by_priority(self):
+        tallies = {self.ids[0]: ONE_FAILED, self.ids[1]: ALL_PASSED, "warp": ALL_PASSED}
+        decision = choose_exit(self.candidates, tallies, self.ids[0], "auto", None)
+        self.assertEqual((decision.candidate, decision.reason), (self.ids[1], REASON_SWITCHED))
+
+    def test_full_score_beats_unknown_current(self):
+        tallies = {self.ids[0]: ONE_UNKNOWN, "warp": ALL_PASSED}
+        decision = choose_exit(self.candidates, tallies, self.ids[0], "auto", None)
         self.assertEqual((decision.candidate, decision.reason), ("warp", REASON_SWITCHED))
 
-    def test_unhealthy_current_prefers_unknown_over_unhealthy(self):
-        verdicts = {self.ids[0]: False, self.ids[1]: None, "warp": False}
-        decision = choose_exit(self.candidates, verdicts, self.ids[0], "auto", None)
+    def test_at_equal_passed_a_timeout_beats_a_confirmed_block(self):
+        tallies = {self.ids[0]: ONE_FAILED, self.ids[1]: ONE_UNKNOWN, "warp": ONE_FAILED}
+        decision = choose_exit(self.candidates, tallies, self.ids[0], "auto", None)
         self.assertEqual((decision.candidate, decision.reason), (self.ids[1], REASON_UNKNOWN))
 
-    def test_nobody_healthy_gives_first_enabled_by_priority(self):
-        verdicts = {cid: False for cid in self.ids}
-        decision = choose_exit(self.candidates, verdicts, "warp", "auto", None)
+    def test_confirmed_passes_beat_a_never_checked_candidate(self):
+        tallies = {self.ids[0]: ONE_FAILED, "warp": ONE_FAILED}
+        decision = choose_exit(self.candidates, tallies, self.ids[0], "auto", None)
         self.assertEqual((decision.candidate, decision.reason), (self.ids[0], REASON_NO_HEALTHY))
+
+    def test_nobody_full_keeps_current_at_equal_score_and_reports_no_healthy(self):
+        tallies = {cid: ONE_FAILED for cid in self.ids}
+        decision = choose_exit(self.candidates, tallies, "warp", "auto", None)
+        self.assertEqual((decision.candidate, decision.reason), ("warp", REASON_NO_HEALTHY))
+
+    def test_nobody_full_takes_the_best_score_not_the_primary(self):
+        tallies = {self.ids[0]: CheckTally(passed=1, failed=2), self.ids[1]: ONE_FAILED, "warp": ONE_FAILED}
+        decision = choose_exit(self.candidates, tallies, self.ids[0], "auto", None)
+        self.assertEqual((decision.candidate, decision.reason), (self.ids[1], REASON_NO_HEALTHY))
 
     def test_disabled_candidates_never_chosen(self):
         candidates = merge_candidates([PRIMARY, EXTRA], warp_present=False, order=[], disabled=["ip:5.255.127.33"])
-        decision = choose_exit(candidates, {"ip:5.255.127.33": True, "ip:5.255.127.34": True}, None, "auto", None)
+        decision = choose_exit(candidates, {"ip:5.255.127.33": ALL_PASSED, "ip:5.255.127.34": ALL_PASSED}, None, "auto", None)
         self.assertEqual(decision.candidate, "ip:5.255.127.34")
 
 

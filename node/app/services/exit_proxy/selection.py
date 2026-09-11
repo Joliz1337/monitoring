@@ -23,9 +23,30 @@ REASON_UNKNOWN = "unknown"
 REASON_NO_HEALTHY = "no_healthy"
 REASON_NO_CANDIDATES = "no_candidates"
 
-SCORE_HEALTHY = 0
-SCORE_UNKNOWN = 1
-SCORE_UNHEALTHY = 2
+@dataclass(frozen=True)
+class CheckTally:
+    """Счёт кандидата по включённым проверкам: сколько прошёл, провалил и не смог проверить."""
+
+    passed: int = 0
+    failed: int = 0
+    unknown: int = 0
+
+    @property
+    def verdict(self) -> Optional[bool]:
+        """True — здоров, False — подтверждённый блок, None — не знаем."""
+        if self.failed:
+            return False
+        if self.unknown:
+            return None
+        return True
+
+    @property
+    def rank(self) -> tuple[int, int]:
+        """Меньше — лучше: сначала больше пройденных, при равенстве меньше проваленных."""
+        return (-self.passed, self.failed)
+
+
+NO_RESULT = CheckTally(unknown=1)
 
 
 @dataclass(frozen=True)
@@ -93,62 +114,65 @@ def merge_candidates(
     ]
 
 
-def health(
+def tally(
     result: Optional[CheckResult],
     blocked_countries: list[str],
     builtin: BuiltinChecks,
-) -> Optional[bool]:
-    """Вердикт по кандидату: True — здоров, False — Google его режет, None — не знаем.
+) -> CheckTally:
+    """Счёт по кандидату.
 
-    «Не знаем» — когда проверки не было или отдельный запрос не дошёл (таймаут):
-    одиночный сетевой сбой не должен переключать выход и рвать пользователям
-    сессии. Переключает только подтверждённый блок: страна из чёрного списка,
-    капча, отказ Gemini, сработавшая пользовательская проверка.
+    Проверки не было или трасса не прошла — всё «не знаем»: одиночный сетевой
+    сбой не должен сам по себе переключать выход и рвать пользователям сессии.
+    Провал — только подтверждённый блок: страна из чёрного списка, капча,
+    отказ Gemini, сработавшая пользовательская проверка.
     """
     if result is None or not result.ok:
-        return None
+        return NO_RESULT
 
-    unknown = False
+    passed = failed = unknown = 0
     if builtin.google_country:
         if not result.country:
-            unknown = True
+            unknown += 1
         elif result.country in blocked_countries:
-            return False
-    if builtin.google_captcha and result.captcha:
-        return False
+            failed += 1
+        else:
+            passed += 1
+    if builtin.google_captcha:
+        if result.captcha:
+            failed += 1
+        else:
+            passed += 1
     if builtin.gemini:
         if result.gemini == "blocked":
-            return False
-        if result.gemini == "error":
-            unknown = True
+            failed += 1
+        elif result.gemini == "error":
+            unknown += 1
+        else:
+            passed += 1
     for item in result.checks:
         if item.status is None:
-            unknown = True
-            continue
-        if not item.ok:
-            return False
-    return None if unknown else True
-
-
-def _score(verdict: Optional[bool]) -> int:
-    if verdict is True:
-        return SCORE_HEALTHY
-    if verdict is None:
-        return SCORE_UNKNOWN
-    return SCORE_UNHEALTHY
+            unknown += 1
+        elif item.ok:
+            passed += 1
+        else:
+            failed += 1
+    return CheckTally(passed=passed, failed=failed, unknown=unknown)
 
 
 def choose_exit(
     candidates: list[Candidate],
-    health_by_id: dict[str, Optional[bool]],
+    tallies: dict[str, CheckTally],
     current: Optional[str],
     mode: SelectMode,
     pinned: Optional[str],
 ) -> Decision:
-    """Липкий выбор: текущий выход остаётся, пока он не хуже лучшего из доступных.
+    """Выход, прошедший больше всего проверок; при равном счёте выбор липкий.
 
-    Здоровых нет вовсе — первый включённый по приоритету (решение владельца:
-    хоть какой-то выход лучше никакого).
+    Ранг — (пройдено ↓, провалено ↑): 3 из 3 бьёт 2 из 3, а при равном числе
+    пройденных таймаут («не знаем») лучше подтверждённого блока. Текущий
+    остаётся, пока никто не набрал ранг строго лучше; среди равных новых —
+    первый по приоритету. Никто не прошёл всё — всё равно берётся лучший по
+    счёту, а причина `no_healthy` держит событие «нет здоровых».
     """
     enabled_ids = [candidate.id for candidate in candidates if candidate.enabled]
     if not enabled_ids:
@@ -156,10 +180,17 @@ def choose_exit(
     if mode == "manual" and pinned in enabled_ids:
         return Decision(pinned, REASON_PINNED)
 
-    best = min(_score(health_by_id.get(candidate_id)) for candidate_id in enabled_ids)
-    if best == SCORE_UNHEALTHY:
-        return Decision(enabled_ids[0], REASON_NO_HEALTHY)
-    if current in enabled_ids and _score(health_by_id.get(current)) == best:
-        return Decision(current, REASON_KEEP)
-    chosen = next(candidate_id for candidate_id in enabled_ids if _score(health_by_id.get(candidate_id)) == best)
-    return Decision(chosen, REASON_SWITCHED if best == SCORE_HEALTHY else REASON_UNKNOWN)
+    def rank(candidate_id: str) -> tuple[int, int]:
+        return tallies.get(candidate_id, NO_RESULT).rank
+
+    best = min(rank(candidate_id) for candidate_id in enabled_ids)
+    if current in enabled_ids and rank(current) == best:
+        chosen = current
+    else:
+        chosen = next(candidate_id for candidate_id in enabled_ids if rank(candidate_id) == best)
+    verdict = tallies.get(chosen, NO_RESULT).verdict
+    if verdict is False:
+        return Decision(chosen, REASON_NO_HEALTHY)
+    if chosen == current:
+        return Decision(chosen, REASON_KEEP)
+    return Decision(chosen, REASON_SWITCHED if verdict is True else REASON_UNKNOWN)

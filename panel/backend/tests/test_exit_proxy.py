@@ -177,7 +177,7 @@ class AlertsTest(unittest.TestCase):
         text = alert_text("switched", "<nl>", "ip:1.1.1.1", "warp", "switched")
         self.assertIn("&lt;nl&gt;", text)
         self.assertIn("1.1.1.1 → <b>WARP</b>", text)
-        self.assertIn("не прошёл проверки", text)
+        self.assertIn("больше пройденных проверок", text)
 
     def test_only_meaningful_kinds_reach_telegram(self):
         self.assertIn("switched", ALERT_KINDS)

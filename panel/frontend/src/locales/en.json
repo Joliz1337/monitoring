@@ -2544,8 +2544,8 @@
     "event_check_failed": "Check failed",
     "event_started": "Enabled",
     "event_stopped": "Disabled",
-    "reason_switched": "current exit failed the checks",
-    "reason_unknown": "current exit could not be checked",
+    "reason_switched": "the new exit passes more checks",
+    "reason_unknown": "the new exit passes more checks, some could not be tested",
     "reason_no_healthy": "no exit passed the checks",
     "reason_keep": "exit unchanged",
     "reason_pinned": "pinned manually"

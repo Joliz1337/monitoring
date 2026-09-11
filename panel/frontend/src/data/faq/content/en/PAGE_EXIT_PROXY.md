@@ -11,7 +11,7 @@ On enabled nodes the agent runs a local SOCKS5 (127.0.0.1:port) that you point G
 | Gemini | The Gemini page says the service is not available in your region |
 | Custom checks | The URL answers with a forbidden status, redirect or text matching the pattern |
 
-Selection is sticky: the current exit stays while it passes checks and changes only when it goes bad — the node then takes the first healthy one by your priority and drops the old exit's connections so all traffic moves at once. With no healthy exits the first by priority is used and the panel sends a notification.
+The exit that passes the most checks wins; on a tie the current one stays (selection is sticky) and among new ones the first by your priority is taken. When another exit scores higher, the node switches to it and drops the old exit's connections so all traffic moves at once. If no exit passes every check, traffic still goes through the best-scoring one and the panel sends a notification.
 
 ## Good to know
 
