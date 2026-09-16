@@ -30,11 +30,11 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { useServersStore } from '../stores/serversStore'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
+import { isAxiosError } from 'axios'
 import {
   serversApi,
   systemApi,
-  serverDeployJobStreamUrl,
-  ServerDeployEvent,
+  DeployJobStatus,
   RemnawaveCertProfile,
   haproxyProfilesApi,
   firewallProfilesApi,
@@ -47,7 +47,6 @@ import {
   RemnawaveNginxProfile,
   WildcardReloadCmdPreset,
 } from '../api/client'
-import { streamNdjsonGet, StreamUnauthorizedError } from '../utils/ndjsonStream'
 import InfraTree from '../components/Infra/InfraTree'
 import { Tooltip } from '../components/ui/Tooltip'
 import { Checkbox } from '../components/ui/Checkbox'
@@ -111,6 +110,17 @@ const AUTO_HIDE_MS = 6000
 // Команда полуавтоматической установки пересобирается на бэке при каждом изменении
 // опций — пауза, чтобы не дёргать API на каждый символ в поле
 const MANUAL_COMMAND_DEBOUNCE_MS = 400
+
+// Установка идёт на бэке, браузер только опрашивает статус и подтягивает новые
+// строки лога по смещению — обрыв сети у клиента ничего не прерывает
+const DEPLOY_POLL_INTERVAL_MS = 2000
+
+const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
+
+type DeployJobOutcome =
+  | { finished: true; ok: boolean; error: string | null; serverId: number | null }
+  // Ушли на логин — статус в интерфейсе не трогаем
+  | { finished: false }
 
 // Незавершённые задачи установки храним в localStorage, чтобы переподключить
 // их лог после перезагрузки страницы (SSH держит бэкенд, фон не прерывается)
@@ -416,36 +426,42 @@ export default function Servers() {
     lang: i18n.language.startsWith('ru') ? 'ru' : 'en',
   })
 
-  // Читает NDJSON-лог фоновой задачи. finished=true только если дошли до 'done'
-  // (терминал). Обрыв соединения без done — задача продолжается на бэке.
-  const consumeStream = async (
+  // Опрашивает задачу до завершения. Сбой сети — не провал установки: она идёт
+  // на бэке, опрос просто повторяется. 404 означает, что задачи на бэке больше
+  // нет (панель перезапускалась) — тогда это уже ошибка.
+  const pollDeployJob = async (
     jobId: string,
-    onEvent: (ev: ServerDeployEvent) => void,
-  ): Promise<{ ok: boolean; error: string | null; finished: boolean }> => {
-    let ok = false
-    let err: string | null = null
-    let finished = false
-    try {
-      await streamNdjsonGet<ServerDeployEvent>(
-        serverDeployJobStreamUrl(jobId),
-        (ev) => {
-          onEvent(ev)
-          if (ev.type === 'done') {
-            ok = ev.exit_code === 0
-            finished = true
-          }
-          if (ev.type === 'error') err = ev.message
-        },
-        new AbortController().signal,
-      )
-    } catch (e) {
-      if (e instanceof StreamUnauthorizedError) {
-        err = null
-      } else {
-        err = e instanceof Error ? e.message : String(e)
+    onLines: (lines: string[]) => void,
+  ): Promise<DeployJobOutcome> => {
+    let offset = 0
+    let offline = false
+    for (;;) {
+      let data: DeployJobStatus
+      try {
+        data = (await serversApi.deployJobStatus(jobId, offset)).data
+      } catch (e) {
+        if (isAxiosError(e) && e.response?.status === 401) return { finished: false }
+        if (isAxiosError(e) && e.response?.status === 404) {
+          return { finished: true, ok: false, error: t('servers.deploy_job_lost'), serverId: null }
+        }
+        if (!offline) {
+          offline = true
+          onLines([t('servers.deploy_poll_offline')])
+        }
+        await sleep(DEPLOY_POLL_INTERVAL_MS)
+        continue
       }
+      if (offline) {
+        offline = false
+        onLines([t('servers.deploy_poll_online')])
+      }
+      if (data.lines.length > 0) onLines(data.lines.map(cleanLogLine))
+      offset = data.next_offset
+      if (data.status !== 'running') {
+        return { finished: true, ok: data.status === 'success', error: data.error, serverId: data.server_id }
+      }
+      await sleep(DEPLOY_POLL_INTERVAL_MS)
     }
-    return { ok, error: err, finished }
   }
 
   const schedulePrimaryHide = () => {
@@ -459,52 +475,33 @@ export default function Servers() {
     setTimeout(() => removeExtra(id), AUTO_HIDE_MS)
   }
 
-  const attachPrimaryStream = async (jobId: string): Promise<boolean> => {
-    const { ok, error: err, finished } = await consumeStream(jobId, (ev) => {
-      if (ev.type === 'log') {
-        setDeployLog(prev => [...prev, cleanLogLine(ev.line)])
-      } else if (ev.type === 'start') {
-        setDeployLog(prev => [...prev, `--- ${ev.host} ---`])
-      } else if (ev.type === 'error') {
-        setDeployLog(prev => [...prev, `[ERROR] ${ev.message}`])
-      }
-    })
-    if (finished) {
-      removeStoredJob(jobId)
-      setPrimaryStatus(ok ? 'success' : 'error')
-      if (ok) schedulePrimaryHide()
-      else if (err) setError(err)
-    } else if (err !== null) {
-      setPrimaryStatus('error')
-      setError(err)
-    }
-    return ok
+  const followPrimaryJob = async (jobId: string): Promise<boolean> => {
+    const outcome = await pollDeployJob(jobId, lines => setDeployLog(prev => [...prev, ...lines]))
+    if (!outcome.finished) return false
+    removeStoredJob(jobId)
+    setPrimaryStatus(outcome.ok ? 'success' : 'error')
+    if (outcome.ok) schedulePrimaryHide()
+    else if (outcome.error) setError(outcome.error)
+    return outcome.ok
   }
 
-  const attachExtraStream = async (id: string, jobId: string): Promise<boolean> => {
-    const { ok, error: err, finished } = await consumeStream(jobId, (ev) => {
-      if (ev.type === 'log') {
-        setExtras(prev => prev.map(x => x.id === id ? { ...x, log: [...x.log, cleanLogLine(ev.line)] } : x))
-      } else if (ev.type === 'start') {
-        setExtras(prev => prev.map(x => x.id === id ? { ...x, log: [...x.log, `--- ${ev.host} ---`] } : x))
-      } else if (ev.type === 'error') {
-        setExtras(prev => prev.map(x => x.id === id ? { ...x, log: [...x.log, `[ERROR] ${ev.message}`], error: ev.message } : x))
-      } else if (ev.type === 'done' && ev.server_id != null) {
-        const sid = ev.server_id
-        setExtras(prev => prev.map(x => x.id === id ? { ...x, serverId: sid } : x))
-      }
-    })
-    if (finished) {
-      removeStoredJob(jobId)
-      setExtras(prev => prev.map(x => x.id === id
-        ? { ...x, status: ok ? 'success' : 'error', error: ok ? null : (err ?? x.error) }
-        : x,
-      ))
-      if (ok) scheduleExtraHide(id)
-    } else if (err !== null) {
-      setExtras(prev => prev.map(x => x.id === id ? { ...x, status: 'error', error: err } : x))
-    }
-    return ok
+  const followExtraJob = async (id: string, jobId: string): Promise<boolean> => {
+    const outcome = await pollDeployJob(jobId, lines =>
+      setExtras(prev => prev.map(x => x.id === id ? { ...x, log: [...x.log, ...lines] } : x)),
+    )
+    if (!outcome.finished) return false
+    removeStoredJob(jobId)
+    setExtras(prev => prev.map(x => x.id === id
+      ? {
+          ...x,
+          status: outcome.ok ? 'success' : 'error',
+          error: outcome.ok ? null : outcome.error,
+          serverId: outcome.serverId ?? x.serverId,
+        }
+      : x,
+    ))
+    if (outcome.ok) scheduleExtraHide(id)
+    return outcome.ok
   }
 
   const deployPrimary = async (manual = false): Promise<boolean> => {
@@ -519,7 +516,7 @@ export default function Servers() {
       return false
     }
     storeJob({ jobId, kind: 'primary', name: formData.name, host: formData.host, port: formData.port })
-    return attachPrimaryStream(jobId)
+    return followPrimaryJob(jobId)
   }
 
   const deployExtra = async (id: string): Promise<boolean> => {
@@ -539,7 +536,7 @@ export default function Servers() {
     }
     setExtras(prev => prev.map(x => x.id === id ? { ...x, jobId } : x))
     storeJob({ jobId, kind: 'extra', extraId: id, name: target.name, host: target.host, port: target.port })
-    return attachExtraStream(id, jobId)
+    return followExtraJob(id, jobId)
   }
 
   // Переподключение к незавершённым задачам установки после перезагрузки страницы
@@ -567,7 +564,7 @@ export default function Servers() {
         setFormData({ name: s.name, host: s.host, port: s.port, proxy: '' })
         setPrimaryStatus('running')
         setDeployLog([])
-        void attachPrimaryStream(s.jobId)
+        void followPrimaryJob(s.jobId)
       } else {
         const extraId = s.extraId || s.jobId
         setExtras(prev => prev.some(x => x.id === extraId) ? prev : [...prev, {
@@ -582,7 +579,7 @@ export default function Servers() {
           error: null,
           jobId: s.jobId,
         }])
-        void attachExtraStream(extraId, s.jobId)
+        void followExtraJob(extraId, s.jobId)
       }
     }
   }

@@ -739,7 +739,7 @@ interface NicInfo {
 | POST | /api/servers/{id}/test | Тест подключения |
 | POST | /api/servers/deploy | Запустить авторазвёртывание ноды (возвращает `{"job_id": "..."}`) |
 | GET | /api/servers/deploy/jobs | Список активных и недавно завершённых задач деплоя |
-| GET | /api/servers/deploy/{job_id}/stream | NDJSON-стрим лога задачи (переподключаемый) |
+| GET | /api/servers/deploy/{job_id}/status?offset=N | Статус задачи установки и строки лога начиная с N |
 | GET | /api/servers/remnawave-certs | Список сохранённых сертификатов Remnawave (без секретов) |
 | POST | /api/servers/remnawave-certs | Сохранить сертификат {name, secret_key} |
 | DELETE | /api/servers/remnawave-certs/{id} | Удалить сохранённый сертификат |
@@ -1757,7 +1757,7 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 - `panel/frontend/src/components/ssh/BulkProgressPanel.tsx` — live-список прогресса: статус ✓/✗ по серверу, разбивка по шагам с текстом ошибок, прогресс-бар
 - `panel/frontend/src/components/ssh/SSHOverviewTable.tsx` — обзор-таблица состояния SSH всех серверов (порт, метод авторизации, fail2ban, кол-во ключей, доступность ноды); данные через `/bulk/status`
 - `panel/frontend/src/components/ssh/useSSHBulkStream.ts` — хук запуска стриминговой bulk-операции и сбора прогресса
-- `panel/frontend/src/utils/ndjsonStream.ts` — `streamNdjson()`: чтение NDJSON-потока через `fetch` + `ReadableStream`, обработка 401 (редирект на логин) и обрыва
+- `panel/frontend/src/utils/ndjsonStream.ts` — `streamNdjson()`: чтение NDJSON-потока через `fetch` + `ReadableStream`, обработка 401 (редирект на логин) и обрыва; `streamNdjsonGet()` — то же для GET-стримов фоновых задач (установка Remnawave/WARP, доставка образа, Xray-тест); общая логика чтения — `readNdjsonResponse`
 
 **Файлы:**
 - `panel/backend/app/services/ssh_manager.py` — пресеты безопасности; `proxy_to_node()` с параметром `use_apply_client` (HTTP/1.1 для долгих шагов fail2ban/password)
@@ -1765,13 +1765,13 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 
 ### Авторазвёртывание ноды
 
-Установка ноды мониторинга на новый сервер прямо из вкладки «Серверы» панели. Подключается к целевому серверу по SSH, скачивает `install.sh` и запускает его в режиме `--unattended`. Установка выполняется в **фоновой asyncio-задаче** — закрытие вкладки браузера не прерывает процесс (SSH-сессию держит backend).
+Установка ноды мониторинга на новый сервер прямо из вкладки «Серверы» панели. Подключается к целевому серверу по SSH, скачивает `install.sh` и запускает его в режиме `--unattended`. Установка выполняется в **фоновой asyncio-задаче** — закрытие вкладки браузера не прерывает процесс (SSH-сессию держит backend). Браузер не держит долгого соединения: раз в 2 с он запрашивает статус задачи и новые строки лога по смещению, поэтому лаг сети у клиента установку не трогает и не выглядит как её провал.
 
 **Принцип работы (job-модель):**
 1. Пользователь открывает форму «Добавить сервер», включает чекбокс «Автоустановка ноды по SSH»
 2. Вводит SSH-данные (порт, логин, пароль или приватный ключ + passphrase) и выбирает доп. компоненты. Поле «Порт» (monitoring_port, дефолт 9100) задаёт порт mTLS-API ноды: он попадает в URL создаваемого сервера, а при отличии от 9100 уезжает установщику как `NODE_API_PORT` (`_build_inner_command` в `deploy_service.py`, тест `tests/test_deploy_command.py`) — нода поднимает nginx и открывает UFW именно на нём
 3. Frontend отправляет `POST /api/servers/deploy` (в теле — ещё и текущий язык интерфейса `lang`: установщик на ноде и её меню `mon` будут на том же языке, что панель) → бэкенд немедленно возвращает `{"job_id": "<hex>"}` и запускает `asyncio.create_task`
-4. Frontend подписывается на лог через `GET /api/servers/deploy/{job_id}/stream` (NDJSON)
+4. Frontend опрашивает `GET /api/servers/deploy/{job_id}/status?offset=N` каждые `DEPLOY_POLL_INTERVAL_MS` (2 с): в ответе статус задачи и строки лога начиная с `offset`, `next_offset` уходит в следующий запрос. Сетевой сбой — не ошибка: в лог добавляется строка «нет связи с панелью», опрос продолжается, после восстановления лог дописывается с того же места; 404 (панель перезапустилась, задача потеряна) — ошибка с подсказкой повторить
 5. При успехе backend создаёт запись `Server`, дожидается ответа ноды (`_wait_node_ready`, см. ниже), применяет SSH-пресет/пароль (`_post_install`), привязывает к выбранным HAProxy/Firewall/DNAT-профилям (`_bind_profiles`), включает сервер в Wildcard SSL с раскаткой действующего сертификата (`_apply_wildcard_ssl`) и привязывает к nginx-профилю Remnawave с немедленным синком (`_bind_remnawave_nginx`). Порядок фиксирован: сертификат раскатывается строго до nginx-синка — конфиг профиля ссылается на пути сертификата, без него `nginx -t` на ноде провалился бы
 6. Завершённые задачи хранятся 600 секунд (`FINISHED_TTL_SECONDS`) для переподключения, затем удаляются из памяти
 
@@ -1786,8 +1786,9 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 **Менеджер фоновых задач (`DeployJobManager`):**
 
 Singleton-сервис `panel/backend/app/services/deploy_job_manager.py`. Управляет задачами установки нод:
-- Лог буферизуется в памяти (лимит 5000 строк) и раздаётся подписчикам через pub/sub (`asyncio.Queue`)
-- Дедупликация строк между реплеем и live-потоком — по индексу `_idx`
+- Лог копится в памяти (лимит `LOG_BUFFER_LIMIT` 5000 строк) со сквозной нумерацией: `DeployJob.log_offset` — номер первой строки в буфере; при переполнении `_log` выбрасывает старые строки и сдвигает смещение, так что позиции клиентов остаются валидными
+- `snapshot(job_id, offset)` — статус задачи, строки с номера `offset` и `next_offset` для следующего запроса; клиент, отставший сильнее размера буфера, получает всё, что ещё хранится
+- `_fail(job, message)` — единственный путь завершить задачу ошибкой: причина попадает и в лог строкой `[ERROR] …`, и в поле `error` (первая причина не перетирается)
 - `_create_server` — создание записи `Server` после успешной установки
 - `_wait_node_ready` — ожидание, пока нода начнёт отвечать самой панели (`GET /api/version` по mTLS, окно `NODE_READY_TIMEOUT` 180 с с шагом 3 с). Обязательный шлюз перед всеми постшагами: установщик выходит, как только ему ответил внутренний API ноды на `127.0.0.1:7500`, а панель ходит через nginx на 9100 — тот по `depends_on: condition: service_healthy` стартует только после healthcheck агента и в этот момент ещё не слушает. Шлюз критичен для раскатки wildcard-сертификата: она уходит одним запросом без повторов, и запрос в закрытый порт означал бы, что на ноде сертификата не будет до следующего продления. По исчерпании окна установка продолжается с предупреждением в логе. На пути полуавтомата и Hetzner Rescue шаг пропускается — там ноды уже дождался `_wait_node_online`
 - `_post_install` — постустановочные шаги (SSH-пресет, fail2ban, смена пароля root)
@@ -1884,18 +1885,15 @@ Singleton-сервис `panel/backend/app/services/deploy_job_manager.py`. Уп�
 | POST | /api/servers/deploy | Запустить задачу деплоя → `{"job_id": "..."}` |
 | POST | /api/servers/deploy/command | Команда установки для ручного запуска из тех же полей → `{"command": "..."}` |
 | GET | /api/servers/deploy/jobs | Список задач: job_id, name, host, status, exit_code, server_id, error |
-| GET | /api/servers/deploy/{job_id}/stream | Переподключаемый NDJSON-стрим лога (реплей + live) |
+| GET | /api/servers/deploy/{job_id}/status?offset=N | Статус задачи и строки лога начиная с N (+ `next_offset`); 404 — задачи нет |
 
-**NDJSON-протокол стрима (`GET /api/servers/deploy/{job_id}/stream`):**
+**Ответ опроса (`GET /api/servers/deploy/{job_id}/status?offset=N`):**
 
 ```json
-{"type": "start"}
-{"type": "log", "line": "Installing monitoring node...", "_idx": 0}
-{"type": "log", "line": "[OK] Node installed", "_idx": 1}
-{"type": "done", "success": true, "server_id": 42}
+{"job_id": "…", "name": "node-1", "host": "203.0.113.10", "status": "running", "exit_code": null, "server_id": null, "error": null, "lines": ["Installing monitoring node...", "[OK] Node installed"], "next_offset": 2}
 ```
 
-При ошибке: `{"type": "error", "line": "..."}` и `{"type": "done", "success": false}`. Клиент дедуплицирует строки по полю `_idx` — при переподключении реплей не создаёт дублей. GZip-middleware пропускает путь `/servers/deploy/.../stream` без буферизации.
+`status` — `running` / `success` / `error`. При ошибке `error` — причина (она же последней строкой лога с префиксом `[ERROR]`), при успехе `server_id` — созданная запись. Клиент запоминает `next_offset` и следующий запрос делает с него, поэтому переподключение после обрыва не создаёт дублей и не теряет строк.
 
 **Поддержка Hetzner Rescue System:**
 
@@ -1906,13 +1904,13 @@ Singleton-сервис `panel/backend/app/services/deploy_job_manager.py`. Уп�
 3. `deploy_service.py` обнаруживает маркер и интерпретирует последующий обрыв SSH не как ошибку, а как ожидаемое событие («сервер ушёл в ребут») — порождает событие `{"type": "done", "exit_code": 0, "rescue": True}`.
 4. `deploy_job_manager.py` при получении `rescue=True` вызывает `_on_rescue_reboot()` вместо обычного `_on_install_done()`.
 5. `_on_rescue_reboot()` → `_await_node_then_finish()` создаёт транзиентный объект `Server` (без записи в БД, `pki_enabled=True`, `uses_shared_cert=True`) и ожидает ноду через `_wait_node_online()`.
-6. `_wait_node_online()` поллит `GET /api/version` ноды через `proxy_to_node`; интервал и таймаут — параметры (по умолчанию 10 с и 2400 с = 40 мин, константы `NODE_POLL_INTERVAL`/`NODE_ONLINE_TIMEOUT`; коротким окном тот же цикл переиспользует `_wait_node_ready`), периодический лог (каждый третий опрос) служит keepalive для NDJSON-стрима.
+6. `_wait_node_online()` поллит `GET /api/version` ноды через `proxy_to_node`; интервал и таймаут — параметры (по умолчанию 10 с и 2400 с = 40 мин, константы `NODE_POLL_INTERVAL`/`NODE_ONLINE_TIMEOUT`; коротким окном тот же цикл переиспользует `_wait_node_ready`), периодический лог (каждый третий опрос) показывает оператору, что ожидание идёт.
 7. При появлении ноды вызывается обычный `_on_install_done` — создание записи `Server`, SSH-пресет, смена пароля, привязка HAProxy/Firewall-профилей.
 8. При таймауте задача помечается ошибкой с пояснением; ОС на сервере уже установлена, нода должна появиться самостоятельно — оператор может проверить сервер вручную.
 
 NODE_SECRET содержит долгоживущие PKI-сертификаты (shared cert), поэтому отложенная установка через `mon-firstboot` корректно работает без повторного обращения к панели.
 
-Поведение фронтенда не меняется: задача остаётся в статусе «running», стримит лог-строки про ожидание, в конце приходит `done` (success при появлении ноды, error по таймауту). Восстановление при перезагрузке страницы работает штатно.
+Поведение фронтенда не меняется: задача остаётся в статусе `running`, в лог идут строки про ожидание, в конце статус становится `success` (нода появилась) или `error` (таймаут). Восстановление при перезагрузке страницы работает штатно.
 
 **Сценарий работы:** оператор вводит IP сервера Hetzner в Rescue System и SSH-данные (root + пароль из письма Hetzner). Панель устанавливает Ubuntu 24.04, сервер перезагружается, панель ждёт ноду до 40 минут. После появления ноды автоматически создаётся запись сервера и применяются постустановочные шаги. SSH-доступ в новой ОС сохраняется таким же, как в Rescue System (installimage переносит учётные данные).
 
@@ -1952,7 +1950,7 @@ Frontend сохраняет незавершённые job_id в `localStorage` 
 - Выбор сертификата Remnawave: кликабельные чипы с именами
 - Раздел **«Защита SSH»**: переключатель пресета + смена пароля root
 - Внизу — блок полуавтоматической установки (`ManualInstallBlock`): команда для ручного запуска + кнопка «Ждать ноду»
-- При submit: POST startDeploy → job_id → подписка через `streamNdjsonGet`; живой лог в форме
+- При submit: POST startDeploy → job_id → опрос `pollDeployJob` (`serversApi.deployJobStatus`, каждые 2 с); живой лог в форме
 
 **Массовый авто-деплой (multi-target):**
 
@@ -1960,15 +1958,10 @@ Frontend сохраняет незавершённые job_id в `localStorage` 
 
 При нажатии «Развернуть ноды (N)»:
 - `handleDeployAll` запускает `Promise.all` — каждый таргет деплоится параллельно
-- Каждый таргет: POST startDeploy → job_id → `streamNdjsonGet` для чтения лога
+- Каждый таргет: POST startDeploy → job_id → `pollDeployJob` для чтения лога
 - Незавершённые job_id сохраняются в `localStorage` и переподключаются при перезагрузке страницы
 - Уже успешные таргеты при повторном запуске пропускаются
 - Retry-кнопки: per-target (`retryExtra(id)` / `retryPrimary`)
-
-**NDJSON-утилиты (`panel/frontend/src/utils/ndjsonStream.ts`):**
-- `streamNdjson(url, body, onEvent)` — POST-стрим (SSH bulk-операции)
-- `streamNdjsonGet(url, onEvent)` — GET-стрим (подписка на лог задачи деплоя)
-- `readNdjsonResponse` — общая логика чтения для обеих функций
 
 **Компоненты:**
 - `panel/frontend/src/components/servers/DeployTargetFields.tsx` — переиспользуемые поля SSH/опций/прокси/Remnawave/SSH-пресета/смены пароля; блок «Привязать к профилям» (HAProxy + Firewall + DNAT); экспортирует `DEPLOY_DEFAULTS` и тип `DeployFormData`
@@ -1980,14 +1973,13 @@ Frontend сохраняет незавершённые job_id в `localStorage` 
 - `asyncssh` (`panel/backend/requirements.txt`)
 
 **Файлы:**
-- `panel/backend/app/services/deploy_job_manager.py` — `DeployJobManager`: singleton, in-memory буфер лога, pub/sub, `_create_server`, `_post_install`, `_bind_profiles`; `PostDeployOptions` dataclass; `get_deploy_job_manager()`
+- `panel/backend/app/services/deploy_job_manager.py` — `DeployJobManager`: singleton, in-memory буфер лога со сквозной нумерацией (`log_offset`), `snapshot`, `_log`/`_fail`, `_create_server`, `_post_install`, `_bind_profiles`; `PostDeployOptions` dataclass; `get_deploy_job_manager()`
+- `panel/backend/tests/test_deploy_job_status.py` — выдача лога по смещению, сохранность смещений при усечении буфера, `_fail` в лог и `error`
 - `panel/backend/app/services/deploy_service.py` — SSH-подключение через `asyncssh`, скачивание и запуск `install.sh --unattended`, построчный стриминг лога; автодетект и смена просроченного пароля root через PTY (`_run_install_once`, `_change_expired_password`, `_generate_strong_password`)
-- `panel/backend/app/routers/server_deploy.py` — роутер (prefix `/servers`): `POST /deploy`, `GET /deploy/jobs`, `GET /deploy/{job_id}/stream`, remnawave-certs CRUD
+- `panel/backend/app/routers/server_deploy.py` — роутер (prefix `/servers`): `POST /deploy`, `GET /deploy/jobs`, `GET /deploy/{job_id}/status`, remnawave-certs CRUD
 - `panel/backend/app/models.py` — модель `RemnawaveCertProfile` (таблица `remnawave_cert_profiles`)
-- `panel/backend/app/main.py` — `GZipMiddlewareNoSSE`: bypass для `/servers/deploy/.../stream`
-- `panel/frontend/src/pages/Servers.tsx` — job-модель деплоя, `restoreDeployJobs`, `AUTO_HIDE_MS`
-- `panel/frontend/src/utils/ndjsonStream.ts` — `streamNdjson`, `streamNdjsonGet`, `readNdjsonResponse`
-- `panel/frontend/src/api/client.ts` — `serversApi.startDeploy()`, `serversApi.listDeployJobs()`, `serverDeployJobStreamUrl(jobId)`, интерфейс `DeployJobInfo`
+- `panel/frontend/src/pages/Servers.tsx` — job-модель деплоя, `pollDeployJob`, `DEPLOY_POLL_INTERVAL_MS`, `restoreDeployJobs`, `AUTO_HIDE_MS`
+- `panel/frontend/src/api/client.ts` — `serversApi.startDeploy()`, `serversApi.listDeployJobs()`, `serversApi.deployJobStatus(jobId, offset)`, интерфейсы `DeployJobInfo`, `DeployJobStatus`
 - `panel/frontend/src/locales/ru.json`, `en.json` — ключи `servers.deploy_*`
 
 ### Backup & Restore

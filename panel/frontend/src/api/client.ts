@@ -491,13 +491,6 @@ export interface RemnawaveCertProfile {
   created_at: string | null
 }
 
-// События NDJSON-стрима лога установки ноды (GET /servers/deploy/{job_id}/stream)
-export type ServerDeployEvent =
-  | { type: 'start'; host: string }
-  | { type: 'log'; line: string }
-  | { type: 'error'; message: string }
-  | { type: 'done'; exit_code: number; server_id: number | null }
-
 // Фоновая задача установки ноды (GET /servers/deploy/jobs)
 export interface DeployJobInfo {
   job_id: string
@@ -509,9 +502,12 @@ export interface DeployJobInfo {
   error: string | null
 }
 
-// Стрим лога читается не через axios — нужен полный путь с /api для fetch
-export const serverDeployJobStreamUrl = (jobId: string) =>
-  `/api/servers/deploy/${jobId}/stream`
+// Опрос задачи (GET /servers/deploy/{job_id}/status?offset=N): статус плюс строки
+// лога начиная с offset; next_offset передаётся в следующий запрос
+export interface DeployJobStatus extends DeployJobInfo {
+  lines: string[]
+  next_offset: number
+}
 
 // Установка ноды Remnawave на уже добавленный сервер через агента ноды
 export type RemnawaveInstallEvent =
@@ -846,6 +842,8 @@ export const serversApi = {
     api.post<{ command: string }>('/servers/deploy/command', body),
   listDeployJobs: () =>
     api.get<{ jobs: DeployJobInfo[] }>('/servers/deploy/jobs'),
+  deployJobStatus: (jobId: string, offset: number) =>
+    api.get<DeployJobStatus>(`/servers/deploy/${jobId}/status`, { params: { offset } }),
   remnawaveCerts: () =>
     api.get<{ profiles: RemnawaveCertProfile[] }>('/servers/remnawave-certs'),
   saveRemnawaveCert: (name: string, secretKey: string) =>

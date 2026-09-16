@@ -290,6 +290,9 @@
     "deploy_manual_copy": "Copy command",
     "deploy_manual_wait_btn": "Wait for node",
     "deploy_manual_command_failed": "Could not build the command — check the filled-in fields",
+    "deploy_job_lost": "Install job not found — the panel may have restarted. Check the server and retry the install if needed.",
+    "deploy_poll_offline": "Lost connection to the panel — the install continues on the server, waiting to reconnect...",
+    "deploy_poll_online": "Connection to the panel restored",
     "restricted_badge": "Restricted",
     "open_dashboard": "Open server dashboard"
   },

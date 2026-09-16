@@ -1,16 +1,14 @@
 """Авторазвёртывание ноды по SSH и хранилище сертификатов Remnawave.
 
 POST /servers/deploy — запускает фоновую задачу установки ноды (+опции) и
-возвращает её job_id. Сама установка идёт независимо от HTTP-соединения: лог
-читается через GET /servers/deploy/{job_id}/stream (NDJSON), список активных
-и недавних задач — через GET /servers/deploy/jobs.
+возвращает её job_id. Сама установка идёт независимо от HTTP-соединения:
+браузер опрашивает GET /servers/deploy/{job_id}/status и забирает новые строки
+лога по смещению, список активных и недавних задач — GET /servers/deploy/jobs.
 """
 import ipaddress
-import json
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -51,10 +49,6 @@ def _validate_host(raw: str) -> str:
     if ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified:
         raise HTTPException(400, f"Disallowed host: {host}")
     return host
-
-
-def _ndjson(obj: dict) -> bytes:
-    return (json.dumps(obj, ensure_ascii=False) + "\n").encode()
 
 
 # ==================== Профили сертификатов Remnawave ====================
@@ -316,7 +310,7 @@ async def deploy_server(
     полуавтоматическом режиме (`manual`), только ожидание ноды, которую оператор
     ставит сам скопированной командой.
 
-    Возвращает job_id — лог читается отдельным запросом к /deploy/{job_id}/stream.
+    Возвращает job_id — статус и лог читаются опросом /deploy/{job_id}/status.
     """
     host = _validate_host(req.host)
 
@@ -362,19 +356,16 @@ async def list_deploy_jobs(_: dict = Depends(verify_auth)):
     return {"jobs": get_deploy_job_manager().list_jobs()}
 
 
-@router.get("/deploy/{job_id}/stream")
-async def stream_deploy_job(job_id: str, _: dict = Depends(verify_auth)):
-    """NDJSON-стрим лога задачи установки. Переподключаемый."""
-    manager = get_deploy_job_manager()
-    if manager.get(job_id) is None:
+@router.get("/deploy/{job_id}/status")
+async def deploy_job_status(
+    job_id: str,
+    offset: int = Query(0, ge=0),
+    _: dict = Depends(verify_auth),
+):
+    """Статус задачи и строки лога начиная с `offset`. Короткий запрос вместо
+    долгоживущего стрима: обрыв связи у клиента ничего не теряет — следующий
+    опрос продолжит с `next_offset` из последнего ответа."""
+    snapshot = get_deploy_job_manager().snapshot(job_id, offset)
+    if snapshot is None:
         raise HTTPException(404, "Задача установки не найдена")
-
-    async def generate():
-        async for event in manager.subscribe(job_id):
-            yield _ndjson(event)
-
-    return StreamingResponse(
-        generate(),
-        media_type="application/x-ndjson",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+    return snapshot

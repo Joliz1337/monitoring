@@ -199,8 +199,7 @@ class GZipMiddlewareNoSSE:
         if scope["type"] == "http":
             path = scope.get("path", "")
             if (path.endswith("/execute-stream") or path.endswith("/notes/stream")
-                    or "/ssh-security/bulk/" in path or path.endswith("/servers/deploy")
-                    or ("/servers/deploy/" in path and path.endswith("/stream"))
+                    or "/ssh-security/bulk/" in path
                     or ("/servers/remnawave-install/" in path and path.endswith("/stream"))
                     or ("/exit-proxy/warp-install/" in path and path.endswith("/stream"))
                     or ("/xray-test/jobs/" in path and path.endswith("/stream"))):
