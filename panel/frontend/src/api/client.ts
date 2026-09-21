@@ -120,7 +120,7 @@ export interface Server {
   status?: 'online' | 'offline' | 'loading' | 'error'
   pki_enabled?: boolean
   uses_shared_cert?: boolean
-  auth_kind?: 'shared' | 'per_server' | 'legacy'
+  auth_kind?: 'shared' | 'dedicated' | 'per_server' | 'legacy'
   antiddos_emergency_mode?: boolean
   has_xray_node?: boolean
   node_capabilities?: NodeCapabilities | null
@@ -152,6 +152,35 @@ export interface NodeWindow {
   net_tx_max: number
   disk_read_avg: number
   disk_write_avg: number
+}
+
+export interface EphemeralDestination {
+  ip: string
+  port: number
+  used: number
+  time_wait: number
+  held: number
+  free: number
+}
+
+// Направления отсортированы по занятому: первое — ближайшее к потолку.
+// Остатка у самого адреса нет — он есть только у направления
+export interface EphemeralSource {
+  ip: string
+  used: number
+  time_wait: number
+  destinations_total: number
+  destinations: EphemeralDestination[]
+}
+
+// Потолок исходящих соединений — на пару «наш адрес → адрес:порт цели», а не на хост
+export interface EphemeralPorts {
+  range_low: number
+  range_high: number
+  reserved: number
+  capacity: number
+  tw_reuse: number
+  sources: EphemeralSource[]
 }
 
 export interface ServerMetrics {
@@ -255,6 +284,7 @@ export interface ServerMetrics {
         total: number
       }
     }
+    ephemeral_ports?: EphemeralPorts | null
   }
   processes: {
     total: number
@@ -461,13 +491,6 @@ export interface RemnawaveCertProfile {
   created_at: string | null
 }
 
-// События NDJSON-стрима лога установки ноды (GET /servers/deploy/{job_id}/stream)
-export type ServerDeployEvent =
-  | { type: 'start'; host: string }
-  | { type: 'log'; line: string }
-  | { type: 'error'; message: string }
-  | { type: 'done'; exit_code: number; server_id: number | null }
-
 // Фоновая задача установки ноды (GET /servers/deploy/jobs)
 export interface DeployJobInfo {
   job_id: string
@@ -479,9 +502,12 @@ export interface DeployJobInfo {
   error: string | null
 }
 
-// Стрим лога читается не через axios — нужен полный путь с /api для fetch
-export const serverDeployJobStreamUrl = (jobId: string) =>
-  `/api/servers/deploy/${jobId}/stream`
+// Опрос задачи (GET /servers/deploy/{job_id}/status?offset=N): статус плюс строки
+// лога начиная с offset; next_offset передаётся в следующий запрос
+export interface DeployJobStatus extends DeployJobInfo {
+  lines: string[]
+  next_offset: number
+}
 
 // Установка ноды Remnawave на уже добавленный сервер через агента ноды
 export type RemnawaveInstallEvent =
@@ -785,6 +811,7 @@ export const serversApi = {
     api.get<{
       total: number
       shared: number
+      dedicated: number
       per_server: number
       legacy: number
       needs_migration: number
@@ -810,8 +837,13 @@ export const serversApi = {
     api.delete<{ success: boolean; unfoldered: number }>(`/servers/folders/${encodeURIComponent(folderName)}`),
   startDeploy: (body: unknown) =>
     api.post<{ job_id: string }>('/servers/deploy', body),
+  // Команда установки для запуска руками — с теми же опциями, что в форме автоустановки
+  deployCommand: (body: unknown) =>
+    api.post<{ command: string }>('/servers/deploy/command', body),
   listDeployJobs: () =>
     api.get<{ jobs: DeployJobInfo[] }>('/servers/deploy/jobs'),
+  deployJobStatus: (jobId: string, offset: number) =>
+    api.get<DeployJobStatus>(`/servers/deploy/${jobId}/status`, { params: { offset } }),
   remnawaveCerts: () =>
     api.get<{ profiles: RemnawaveCertProfile[] }>('/servers/remnawave-certs'),
   saveRemnawaveCert: (name: string, secretKey: string) =>
@@ -821,6 +853,38 @@ export const serversApi = {
     }),
   deleteRemnawaveCert: (id: number) =>
     api.delete<{ success: boolean }>(`/servers/remnawave-certs/${id}`),
+  // Сводная история всего парка под плитками дашборда
+  getFleetHistory: (period: string) =>
+    api.get<FleetHistoryResponse>('/servers/fleet/history', { params: { period } }),
+}
+
+// Точка сводки по парку: CPU и память — средневзвешенные по ёмкости нод,
+// скорости — суммы. servers — сколько нод попало в точку; в маркере простоя
+// панели он 0, а все метрики null, чтобы линия там рвалась.
+export interface FleetHistoryPoint {
+  timestamp: string
+  servers: number
+  cpu_usage: number | null
+  max_cpu: number | null
+  memory_percent: number | null
+  max_memory_percent: number | null
+  memory_used: number | null
+  memory_total: number | null
+  net_rx_bytes_per_sec: number | null
+  max_net_rx_bytes_per_sec: number | null
+  net_tx_bytes_per_sec: number | null
+  max_net_tx_bytes_per_sec: number | null
+}
+
+export interface FleetHistoryResponse {
+  period: HistoryPeriod
+  data_source: HistoryDataSource
+  bucket_sec: number
+  from_time: string
+  to_time: string
+  count: number
+  data: FleetHistoryPoint[]
+  gaps: ChartGap[]
 }
 
 export interface NodeInstallKey {
@@ -952,6 +1016,14 @@ export const proxyApi = {
   getBandwidthLimit: (serverId: number) => api.get<BandwidthLimitState>(`/proxy/${serverId}/system/bandwidth-limit`),
   setBandwidthLimit: (serverId: number, data: { enabled: boolean; mbit: number }) =>
     api.post<BandwidthLimitState & { message: string }>(`/proxy/${serverId}/system/bandwidth-limit`, data, { timeout: 45000 }),
+  // Доп. IP-адреса: apply на панели — фоновая задача, ответ ждёт её ≤ 20 с
+  getNetworkState: (serverId: number) => api.get<NetworkState>(`/proxy/${serverId}/network/state`),
+  previewNetworkAddresses: (serverId: number, add_text: string) =>
+    api.post<NetworkPreview>(`/proxy/${serverId}/network/preview`, { add_text }, { timeout: 10000 }),
+  applyNetworkAddresses: (serverId: number, data: { interface: string; add_text: string; remove: NetworkAddressRef[] }) =>
+    api.post<NetworkJobSnapshot>(`/proxy/${serverId}/network/apply`, data, { timeout: 45000 }),
+  rollbackNetworkTransaction: (serverId: number, transaction_id: string) =>
+    api.post<{ success: boolean; status: string | null; message: string }>(`/proxy/${serverId}/network/rollback`, { transaction_id }, { timeout: 45000 }),
 
   // DNAT (проброс портов через iptables nat)
   getDnatState: (serverId: number) => api.get<DnatNodeState>(`/proxy/${serverId}/dnat/state`),
@@ -974,6 +1046,12 @@ export const proxyApi = {
   
   // Get SSE URL for streaming command execution
   getExecuteStreamUrl: (serverId: number) => `/api/proxy/${serverId}/system/execute-stream`,
+
+  // Разведка и вырезание средств доступа хостера (агенты, cloud-init, чужие ключи, репо)
+  scanHosterAccess: (serverId: number) =>
+    api.get<HosterScanState>(`/proxy/${serverId}/hoster-access/scan`, { timeout: 60000 }),
+  purgeHosterAccess: (serverId: number, finding_ids: string[]) =>
+    api.post<HosterPurgeResponse>(`/proxy/${serverId}/hoster-access/purge`, { finding_ids, confirm: true }, { timeout: 290000 }),
 }
 
 // История трафика хранится в PostgreSQL панели — эти запросы не ходят на ноды
@@ -1309,6 +1387,7 @@ export const bulkApi = {
 
 export interface PanelIpInfo {
   ip: string | null
+  source: 'external' | 'interface' | 'dns' | null
   domain: string
 }
 
@@ -1738,10 +1817,12 @@ export const alertsApi = {
 }
 
 // Billing types
+export type BillingType = 'monthly' | 'resource' | 'cloud'
+
 export interface BillingServerData {
   id: number
   name: string
-  billing_type: 'monthly' | 'resource' | 'yandex_cloud'
+  billing_type: BillingType
   paid_until: string | null
   days_left: number | null
   monthly_cost: number | null
@@ -1752,12 +1833,13 @@ export interface BillingServerData {
   folder: string | null
   created_at: string | null
   updated_at: string | null
-  yc_billing_account_id: string | null
-  yc_balance_threshold: number | null
-  yc_daily_cost: number | null
-  yc_last_sync_at: string | null
-  yc_last_error: string | null
-  has_yc_token: boolean
+  cloud_provider: string | null
+  cloud_account_id: string | null
+  cloud_balance_threshold: number | null
+  cloud_daily_cost: number | null
+  cloud_last_sync_at: string | null
+  cloud_last_error: string | null
+  has_cloud_credential: boolean
 }
 
 export interface BillingSettingsData {
@@ -1771,7 +1853,7 @@ export const billingApi = {
     api.get<{ servers: BillingServerData[]; count: number }>('/billing/servers'),
   createServer: (data: {
     name: string
-    billing_type: 'monthly' | 'resource' | 'yandex_cloud'
+    billing_type: BillingType
     paid_days?: number
     paid_until?: string
     monthly_cost?: number
@@ -1779,22 +1861,24 @@ export const billingApi = {
     currency?: string
     notes?: string
     folder?: string
-    yc_oauth_token?: string
-    yc_billing_account_id?: string
-    yc_balance_threshold?: number
+    cloud_provider?: string
+    cloud_credential?: string
+    cloud_account_id?: string
+    cloud_balance_threshold?: number
   }) => api.post<{ success: boolean; server: BillingServerData }>('/billing/servers', data),
   updateServer: (id: number, data: {
     name?: string
-    billing_type?: string
+    billing_type?: BillingType
     paid_until?: string
     monthly_cost?: number
     account_balance?: number
     currency?: string
     notes?: string
     folder?: string | null
-    yc_oauth_token?: string
-    yc_billing_account_id?: string
-    yc_balance_threshold?: number
+    cloud_provider?: string
+    cloud_credential?: string
+    cloud_account_id?: string | null
+    cloud_balance_threshold?: number
   }) => api.put<BillingServerData>(`/billing/servers/${id}`, data),
   deleteServer: (id: number) =>
     api.delete<{ success: boolean }>(`/billing/servers/${id}`),
@@ -1802,8 +1886,8 @@ export const billingApi = {
     api.post<BillingServerData>(`/billing/servers/${id}/extend`, { days }),
   topupServer: (id: number, amount: number) =>
     api.post<BillingServerData>(`/billing/servers/${id}/topup`, { amount }),
-  syncYc: (id: number) =>
-    api.post<BillingServerData>(`/billing/servers/${id}/yc-sync`),
+  syncServer: (id: number) =>
+    api.post<BillingServerData>(`/billing/servers/${id}/sync`),
   moveToFolder: (serverIds: number[], folder: string | null) =>
     api.post<{ success: boolean; moved: number }>('/billing/servers/move-to-folder', { server_ids: serverIds, folder }),
   renameFolder: (oldName: string, newName: string) =>
@@ -1977,11 +2061,6 @@ export interface SSHServerStatusRow {
 }
 
 // NDJSON-события стриминговых bulk-эндпоинтов
-export type SSHBulkEvent =
-  | { type: 'start'; total: number; servers: { server_id: number; server_name: string }[] }
-  | { type: 'result'; server_id: number; server_name: string; success: boolean; steps: SSHStepResult[] }
-  | { type: 'done'; total: number; ok: number; failed: number }
-
 export type SSHStatusEvent =
   | { type: 'start'; total: number; servers: { server_id: number; server_name: string }[] }
   | ({ type: 'result' } & SSHServerStatusRow)
@@ -2135,6 +2214,8 @@ export interface WildcardSSLSettings {
 export interface WildcardServerConfig {
   server_id: number
   server_name: string
+  server_url: string
+  folder: string | null
   wildcard_ssl_enabled: boolean
   wildcard_ssl_deploy_path: string
   wildcard_ssl_reload_cmd: string
@@ -2147,11 +2228,27 @@ export interface WildcardServerConfig {
 
 export interface WildcardDeployResult {
   success: boolean
-  message: string
+  message?: string
+  // Заполняется стрим-обёрткой бэкенда при неожиданном падении воркера
+  error?: string
   server_id?: number
   server_name?: string
   reload_result?: { exit_code: number; stdout: string; stderr: string } | null
 }
+
+// Настройки, допустимые в bulk-обновлении: всё кроме идентификации сервера
+export type WildcardServerConfigPatch = Partial<
+  Omit<WildcardServerConfig, 'server_id' | 'server_name' | 'server_url' | 'folder'>
+>
+
+export interface WildcardReloadCmdPreset {
+  name: string
+  command: string
+}
+
+// Стриминговый деплой не идёт через axios — нужен полный путь с /api для fetch
+export const wildcardDeployStreamUrl = (certId: number) =>
+  `/api/wildcard-ssl/certificates/${certId}/deploy/stream`
 
 export const wildcardSSLApi = {
   getCertificates: () =>
@@ -2166,8 +2263,6 @@ export const wildcardSSLApi = {
     api.get<WildcardCertificateMaterial>(`/wildcard-ssl/certificates/${id}/pem`),
   deleteCertificate: (id: number) =>
     api.delete(`/wildcard-ssl/certificates/${id}`),
-  deployToAll: (id: number) =>
-    api.post<{ results: WildcardDeployResult[] }>(`/wildcard-ssl/certificates/${id}/deploy`),
   deployToServer: (id: number, serverId: number) =>
     api.post<WildcardDeployResult>(`/wildcard-ssl/certificates/${id}/deploy/${serverId}`),
   getSettings: () =>
@@ -2180,6 +2275,14 @@ export const wildcardSSLApi = {
     api.get<{ servers: WildcardServerConfig[] }>('/wildcard-ssl/servers'),
   updateServer: (serverId: number, data: Partial<WildcardServerConfig>) =>
     api.put(`/wildcard-ssl/servers/${serverId}`, data),
+  updateServersBulk: (data: { server_ids: number[] } & WildcardServerConfigPatch) =>
+    api.put<{ success: boolean; updated: number }>('/wildcard-ssl/servers/bulk', data),
+  getReloadCmdPresets: () =>
+    api.get<{ presets: WildcardReloadCmdPreset[] }>('/wildcard-ssl/reload-cmd-presets'),
+  saveReloadCmdPreset: (name: string, command: string) =>
+    api.post<{ success: boolean; presets: WildcardReloadCmdPreset[] }>('/wildcard-ssl/reload-cmd-presets', { name, command }),
+  deleteReloadCmdPreset: (name: string) =>
+    api.delete<{ success: boolean; presets: WildcardReloadCmdPreset[] }>('/wildcard-ssl/reload-cmd-presets', { data: { name } }),
 }
 
 // ==================== HAProxy Config Profiles ====================
@@ -2323,6 +2426,8 @@ export const haproxyProfilesApi = {
     api.put<{ success: boolean; id: number }>(`/haproxy-profiles/${id}`, data),
   deleteProfile: (id: number) =>
     api.delete(`/haproxy-profiles/${id}`),
+  reorderProfiles: (profileIds: number[]) =>
+    api.post('/haproxy-profiles/reorder', { profile_ids: profileIds }),
   linkServer: (profileId: number, serverId: number) =>
     api.post(`/haproxy-profiles/${profileId}/servers/${serverId}`),
   unlinkServer: (profileId: number, serverId: number) =>
@@ -2364,6 +2469,7 @@ export interface RemnawaveNginxOptions {
   reject_default_server: boolean
   ssl_cert_path: string
   ssl_key_path: string
+  wildcard_domain: string
   fallback_url: string
   tls_session_tickets: boolean
   client_tcp_keepalive: string
@@ -2439,6 +2545,7 @@ export interface RemnawaveNginxAvailableServer {
   sync_status: string | null
   detected: boolean
   domain: string | null
+  folder: string | null
 }
 
 export interface RemnawaveNginxServerStatus {
@@ -2480,7 +2587,7 @@ export const remnawaveNginxApi = {
     api.get<{ ranges: string[] }>('/remnawave-nginx-profiles/cloudflare-ranges'),
   getAvailableServers: () =>
     api.get<RemnawaveNginxAvailableServer[]>('/remnawave-nginx-profiles/available-servers'),
-  linkServer: (profileId: number, serverId: number, domain: string) =>
+  linkServer: (profileId: number, serverId: number, domain: string | null) =>
     api.post(`/remnawave-nginx-profiles/${profileId}/servers/${serverId}`, { domain }),
   updateServerDomain: (profileId: number, serverId: number, domain: string) =>
     api.put(`/remnawave-nginx-profiles/${profileId}/servers/${serverId}/domain`, { domain }),
@@ -2526,6 +2633,15 @@ export interface FirewallProfileRuleData {
   comment: string | null
 }
 
+// Массовое изменение правил: отсутствующее поле — «не менять», from_ip: null — «сбросить на любой»
+export interface FirewallRuleBulkPatch {
+  protocol?: FirewallRuleProtocol
+  action?: FirewallRuleAction
+  direction?: FirewallRuleDirection
+  from_ip?: string | null
+  comment?: string
+}
+
 export interface FirewallProfile {
   id: number
   name: string
@@ -2539,6 +2655,10 @@ export interface FirewallProfile {
   node_port_allowed: boolean
   node_api_port: number
   ssh_port_allowed: boolean
+  // Эффективные SSH-порты привязанных серверов (sshd с ноды → креды доставки → 22);
+  // без серверов — [ssh_default_port]
+  ssh_ports: number[]
+  ssh_ports_blocked: number[]
   ssh_default_port: number
   created_at: string | null
   updated_at: string | null
@@ -2548,6 +2668,7 @@ export interface FirewallProfileServerInfo {
   server_id: number
   server_name: string
   server_url: string
+  ssh_port: number
   sync_status: FirewallSyncStatus
   rules_hash: string | null
   is_synced: boolean
@@ -2626,13 +2747,37 @@ export const firewallProfilesApi = {
     api.delete<{ success: boolean; rules: FirewallProfileRuleData[] }>(
       `/firewall-profiles/${profileId}/rules/${index}`,
     ),
+  addRulesBulk: (profileId: number, rules: FirewallProfileRuleData[]) =>
+    api.post<{ success: boolean; added: number; skipped: number; rules: FirewallProfileRuleData[] }>(
+      `/firewall-profiles/${profileId}/rules/bulk`, { rules },
+    ),
+  updateRulesBulk: (profileId: number, indexes: number[], patch: FirewallRuleBulkPatch) =>
+    api.post<{ success: boolean; rules: FirewallProfileRuleData[] }>(
+      `/firewall-profiles/${profileId}/rules/bulk-update`, { indexes, patch },
+    ),
+  deleteRulesBulk: (profileId: number, indexes: number[]) =>
+    api.post<{ success: boolean; rules: FirewallProfileRuleData[] }>(
+      `/firewall-profiles/${profileId}/rules/bulk-delete`, { indexes },
+    ),
   linkServer: (profileId: number, serverId: number) =>
     api.post(`/firewall-profiles/${profileId}/servers/${serverId}`),
   unlinkServer: (profileId: number, serverId: number) =>
     api.delete(`/firewall-profiles/${profileId}/servers/${serverId}`),
+  linkServersBulk: (profileId: number, serverIds: number[]) =>
+    api.post<{ success: boolean; linked: number }>(
+      `/firewall-profiles/${profileId}/servers/bulk-link`, { server_ids: serverIds },
+    ),
+  unlinkServersBulk: (profileId: number, serverIds: number[]) =>
+    api.post<{ success: boolean; unlinked: number }>(
+      `/firewall-profiles/${profileId}/servers/bulk-unlink`, { server_ids: serverIds },
+    ),
   syncAll: (profileId: number, force = false) =>
     api.post<{ results: FirewallSyncResult[] }>(
       `/firewall-profiles/${profileId}/sync`, null, { params: { force } },
+    ),
+  syncSelected: (profileId: number, serverIds: number[], force = false) =>
+    api.post<{ results: FirewallSyncResult[] }>(
+      `/firewall-profiles/${profileId}/sync`, { server_ids: serverIds }, { params: { force } },
     ),
   syncOne: (profileId: number, serverId: number, force = false) =>
     api.post<FirewallSyncResult>(
@@ -2741,6 +2886,89 @@ export interface DnatTargetCounters {
   bytes_out: number
 }
 
+export type NetworkAddressFamily = 'ipv4' | 'ipv6'
+
+export interface NetworkAddress {
+  address: string
+  prefix: number
+  family: NetworkAddressFamily
+  scope: string
+  managed: boolean
+  primary: boolean
+  dynamic: boolean
+}
+
+export interface NetworkInterface {
+  name: string
+  is_up: boolean
+  is_default: boolean
+  kind: 'physical' | 'bond' | 'vlan' | 'bridge'
+  addresses: NetworkAddress[]
+}
+
+export interface NetworkAddressRef {
+  address: string
+  prefix: number
+}
+
+export type NetworkTxStatus = 'applying' | 'pending' | 'confirmed' | 'rolled_back' | 'failed'
+
+export interface NetworkTransaction {
+  id: string
+  status: NetworkTxStatus
+  interface: string
+  backend: string
+  added: string[]
+  removed: string[]
+  started_at: string | null
+  deadline_at: string | null
+  finished_at: string | null
+  message: string
+  warnings: string[]
+}
+
+export interface NetworkJobSnapshot {
+  id: string
+  phase: 'applying' | 'confirming' | 'done'
+  status: 'pending' | 'confirmed' | 'rolled_back' | 'failed'
+  transaction_id: string | null
+  interface: string
+  added: NetworkAddressRef[]
+  removed: NetworkAddressRef[]
+  started_at: string
+  deadline_at: string | null
+  attempts: number
+  last_error: string | null
+  message: string | null
+  error_log: string | null
+  rolled_back: boolean
+  warnings: string[]
+  reachability: Record<string, boolean> | null
+}
+
+export interface NetworkState {
+  supported: boolean
+  message?: string | null
+  min_node_version: string
+  node_version?: string | null
+  backend?: string | null
+  backend_detail?: string
+  default_interface?: string | null
+  interfaces: NetworkInterface[]
+  managed: { interface: string; address: string; prefix: number }[]
+  transaction: NetworkTransaction | null
+  history: NetworkTransaction[]
+  rollback_timeout_sec?: number
+  job: NetworkJobSnapshot | null
+}
+
+export interface NetworkPreview {
+  count: number
+  ipv4: number
+  ipv6: number
+  addresses: { address: string; prefix: number; family: NetworkAddressFamily }[]
+}
+
 export interface BandwidthLimitState {
   enabled: boolean
   mbit: number
@@ -2749,6 +2977,37 @@ export interface BandwidthLimitState {
   applied_mbit: number | null
   qdisc: 'cake' | 'tbf' | null
   in_sync: boolean
+}
+
+export interface HosterFinding {
+  id: string
+  category: string
+  title: string
+  detail: string
+  severity: 'info' | 'warning' | 'danger'
+  access_critical: boolean
+  default_selected: boolean
+  remove_hint: string
+}
+
+export interface HosterScanState {
+  supported: boolean
+  min_node_version?: string
+  node_version?: string | null
+  hoster_hint?: string | null
+  generated_at?: string | null
+  findings: HosterFinding[]
+}
+
+export interface HosterPurgeResultItem {
+  id: string
+  ok: boolean
+  message: string
+}
+
+export interface HosterPurgeResponse {
+  results: HosterPurgeResultItem[]
+  reboot_recommended: boolean
 }
 
 export interface DnatRuleCounters {
@@ -2866,6 +3125,233 @@ export const torrentBlockerApi = {
       webhook_url: webhookUrl,
       webhook_secret: webhookSecret || null,
     }),
+}
+
+// ==================== Exit Proxy ====================
+// Локальный SOCKS5 на нодах с пулом исходящих IP; логика выбора выхода живёт на ноде
+
+export type ExitProxyInstallStatus = 'off' | 'pending' | 'active' | 'failed' | 'denied' | 'unsupported'
+export type ExitProxySelectMode = 'auto' | 'manual'
+export type ExitProxyBuiltinCheckKey = 'google_country' | 'google_captcha' | 'gemini'
+
+export interface ExitProxySettings {
+  enabled: boolean
+  check_interval_min: number
+  port: number
+  blocked_countries: string[]
+  notify_enabled: boolean
+  min_node_version: string
+  last_cycle_at: string | null
+  last_cycle_error: string | null
+}
+
+export type ExitProxySettingsPatch = Partial<Pick<
+  ExitProxySettings, 'enabled' | 'check_interval_min' | 'port' | 'blocked_countries' | 'notify_enabled'
+>>
+
+export interface ExitProxyStatus {
+  running: boolean
+  last_tick_at: string | null
+  last_error: string | null
+  enabled: boolean
+  port: number
+  min_node_version: string
+}
+
+export interface ExitCandidateCheck {
+  ok: boolean
+  status: number | null
+  detail: string
+}
+
+export interface ExitCandidate {
+  tag: string
+  kind: 'ip' | 'warp'
+  label: string
+  ip: string | null
+  primary: boolean
+  managed: boolean
+  priority: number
+  enabled: boolean
+  healthy: boolean | null
+  country: string | null
+  country_confirm: string | null
+  captcha: boolean
+  gemini: string | null
+  checks: Record<string, ExitCandidateCheck>
+  checked_at: string | null
+  error: string | null
+}
+
+export interface ExitProxyCurrentExit {
+  tag: string
+  label: string
+  ip: string | null
+  country: string | null
+  healthy: boolean | null
+}
+
+export interface ExitProxySelfTest {
+  ok: boolean
+  ip: string | null
+  expected: string | null
+  at: string | null
+  error: string | null
+}
+
+export interface ExitProxyNode {
+  server_id: number
+  name: string
+  folder: string | null
+  online: boolean
+  node_version: string | null
+  enabled: boolean
+  install_status: ExitProxyInstallStatus
+  sync_error: string | null
+  listening: boolean
+  listen_error: string | null
+  select_mode: ExitProxySelectMode
+  pinned_candidate: string | null
+  current_exit: ExitProxyCurrentExit | null
+  candidates: ExitCandidate[]
+  warp: { present: boolean }
+  check_in_progress: boolean
+  last_check_at: string | null
+  last_check_error: string | null
+  self_test: ExitProxySelfTest | null
+  stats: { active_connections: number; total_connections: number; failed_connections: number }
+  last_status_at: string | null
+}
+
+export interface ExitProxyNodePatch {
+  enabled?: boolean
+  select_mode?: ExitProxySelectMode
+  pinned_candidate?: string
+  candidates_order?: string[]
+  candidates_disabled?: string[]
+}
+
+export interface ExitProxyCustomCheck {
+  id: string
+  name: string
+  url: string
+  enabled: boolean
+  block_status: number[]
+  block_regex: string
+  block_url_regex: string
+  expect_status: number | null
+}
+
+export type ExitProxyCustomCheckInput = Omit<ExitProxyCustomCheck, 'id'>
+
+export interface ExitProxyChecks {
+  builtin: { key: ExitProxyBuiltinCheckKey; enabled: boolean }[]
+  custom: ExitProxyCustomCheck[]
+}
+
+export interface ExitProxyLogEntry {
+  id: number
+  at: string | null
+  server_id: number
+  server_name: string
+  kind: string
+  from: string | null
+  to: string | null
+  reason: string | null
+}
+
+export interface ExitProxySnippet {
+  outbound_json: string
+  rules_json: string
+  text: string
+}
+
+export const warpInstallStreamUrl = (jobId: string) =>
+  `/api/exit-proxy/warp-install/${jobId}/stream`
+
+// Проверка «сейчас» ждёт прогон на ноде (до 3 минут) — таймаут задан явно
+const EXIT_PROXY_CHECK_TIMEOUT_MS = 200_000
+const EXIT_PROXY_NODE_TIMEOUT_MS = 60_000
+
+export const exitProxyApi = {
+  getSettings: () => api.get<ExitProxySettings>('/exit-proxy/settings'),
+  updateSettings: (data: ExitProxySettingsPatch) =>
+    api.put<ExitProxySettings>('/exit-proxy/settings', data),
+  getStatus: () => api.get<ExitProxyStatus>('/exit-proxy/status'),
+  getNodes: () => api.get<{ nodes: ExitProxyNode[] }>('/exit-proxy/nodes'),
+  updateNode: (serverId: number, patch: ExitProxyNodePatch) =>
+    api.put<ExitProxyNode>(`/exit-proxy/nodes/${serverId}`, patch, { timeout: EXIT_PROXY_NODE_TIMEOUT_MS }),
+  checkNow: (serverId: number) =>
+    api.post<ExitProxyNode>(`/exit-proxy/nodes/${serverId}/check-now`, undefined, { timeout: EXIT_PROXY_CHECK_TIMEOUT_MS }),
+  switchExit: (serverId: number, tag: string) =>
+    api.post<ExitProxyNode>(`/exit-proxy/nodes/${serverId}/switch`, { tag }, { timeout: EXIT_PROXY_NODE_TIMEOUT_MS }),
+  installWarp: (serverId: number) =>
+    api.post<{ job_id: string }>(`/exit-proxy/nodes/${serverId}/install-warp`),
+  warpInstallJobs: () =>
+    api.get<{ jobs: RemnawaveInstallJobInfo[] }>('/exit-proxy/warp-install/jobs'),
+  getChecks: () => api.get<ExitProxyChecks>('/exit-proxy/checks'),
+  setBuiltinCheck: (key: ExitProxyBuiltinCheckKey, enabled: boolean) =>
+    api.put<ExitProxyChecks>(`/exit-proxy/checks/builtin/${key}`, { enabled }),
+  addCheck: (data: ExitProxyCustomCheckInput) =>
+    api.post<ExitProxyChecks>('/exit-proxy/checks/custom', data),
+  updateCheck: (id: string, data: ExitProxyCustomCheckInput) =>
+    api.put<ExitProxyChecks>(`/exit-proxy/checks/custom/${id}`, data),
+  deleteCheck: (id: string) =>
+    api.delete<ExitProxyChecks>(`/exit-proxy/checks/custom/${id}`),
+  getSnippet: () => api.get<ExitProxySnippet>('/exit-proxy/snippet'),
+  getLog: (limit = 100) =>
+    api.get<{ events: ExitProxyLogEntry[] }>('/exit-proxy/log', { params: { limit } }),
+}
+
+// ── Пул исходящих адресов ──
+
+export type SourcePoolInstallStatus = 'off' | 'pending' | 'active' | 'drift' | 'failed' | 'denied' | 'unsupported'
+
+export interface SourcePoolAddress {
+  address: string
+  excluded: boolean
+  marks: number
+}
+
+export interface SourcePoolNodeView {
+  server_id: number
+  name: string
+  online: boolean
+  node_version: string | null
+  min_node_version: string
+  supported_by_node: boolean
+  enabled: boolean
+  install_status: SourcePoolInstallStatus
+  sync_error: string | null
+  interface: string | null
+  addresses: SourcePoolAddress[]
+  excluded: string[]
+  active_count: number
+  mark_count: number | null
+  mark_base: number | null
+  in_sync: boolean
+  missing_marks: number[]
+  conflict: string | null
+  node_error: string | null
+  last_state_at: string | null
+}
+
+export interface SourcePoolSnippet {
+  outbounds_json: string
+  routing_json: string
+  text: string
+}
+
+const SOURCE_POOL_NODE_TIMEOUT_MS = 40000
+
+export const sourcePoolApi = {
+  getNodes: () => api.get<{ nodes: SourcePoolNodeView[] }>('/source-pool/nodes'),
+  getNode: (serverId: number) => api.get<SourcePoolNodeView>(`/source-pool/nodes/${serverId}`),
+  updateNode: (serverId: number, patch: { enabled?: boolean; excluded?: string[] }) =>
+    api.put<SourcePoolNodeView>(`/source-pool/nodes/${serverId}`, patch, { timeout: SOURCE_POOL_NODE_TIMEOUT_MS }),
+  refreshNode: (serverId: number) =>
+    api.post<SourcePoolNodeView>(`/source-pool/nodes/${serverId}/refresh`, undefined, { timeout: SOURCE_POOL_NODE_TIMEOUT_MS }),
+  getSnippet: () => api.get<SourcePoolSnippet>('/source-pool/snippet'),
 }
 
 export default api

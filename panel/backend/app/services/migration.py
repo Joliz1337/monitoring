@@ -53,9 +53,16 @@ async def push_shared_cert_to_node(server: Server, keygen: PKIKeygenData) -> Non
 
 
 def classify_server(server: Server) -> str:
-    """shared / per_server / legacy — для отображения в баннере миграции."""
+    """shared / dedicated / per_server / legacy — для баннера миграции.
+
+    dedicated — осознанный выбор одноразового персонального сертификата при
+    автоустановке: миграция на общий cert такие ноды не трогает, иначе один клик
+    по баннеру вернул бы на ноду общий ключ с clientAuth и уничтожил изоляцию.
+    """
     if server.uses_shared_cert:
         return "shared"
+    if server.dedicated_cert:
+        return "dedicated"
     if server.pki_enabled:
         return "per_server"
     return "legacy"

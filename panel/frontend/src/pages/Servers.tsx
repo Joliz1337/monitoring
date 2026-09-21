@@ -30,30 +30,35 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { useServersStore } from '../stores/serversStore'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
+import { isAxiosError } from 'axios'
 import {
   serversApi,
   systemApi,
-  serverDeployJobStreamUrl,
-  ServerDeployEvent,
+  DeployJobStatus,
   RemnawaveCertProfile,
   haproxyProfilesApi,
   firewallProfilesApi,
   dnatProfilesApi,
+  remnawaveNginxApi,
+  wildcardSSLApi,
   HAProxyConfigProfile,
   FirewallProfile,
   DnatProfile,
+  RemnawaveNginxProfile,
+  WildcardReloadCmdPreset,
 } from '../api/client'
-import { streamNdjsonGet, StreamUnauthorizedError } from '../utils/ndjsonStream'
 import InfraTree from '../components/Infra/InfraTree'
 import { Tooltip } from '../components/ui/Tooltip'
+import { Checkbox } from '../components/ui/Checkbox'
 import { CopyableIp } from '../components/ui/CopyableIp'
 import { extractHost } from '../utils/format'
 import { describeAllowedDomains, nodeIsRestricted } from '../utils/nodeCapabilities'
 import { FAQIcon } from '../components/FAQ'
 import MigrationBanner from '../components/MigrationBanner'
-import DeployTargetFields, { DEPLOY_DEFAULTS, type DeployFormData } from '../components/servers/DeployTargetFields'
+import DeployTargetFields, { DEPLOY_DEFAULTS, NGINX_DOMAIN_PLACEHOLDER, type DeployFormData } from '../components/servers/DeployTargetFields'
 import ExtraServerCard, { type ExtraTarget, type DeployStatus } from '../components/servers/ExtraServerCard'
 import InstallKeysPanel from '../components/servers/InstallKeysPanel'
+import ManualInstallBlock from '../components/servers/ManualInstallBlock'
 
 interface ServerFormData {
   name: string
@@ -101,6 +106,21 @@ const cleanLogLine = (line: string): string => {
 
 // Установка идёт в фоне на бэке — после успеха показываем результат и убираем
 const AUTO_HIDE_MS = 6000
+
+// Команда полуавтоматической установки пересобирается на бэке при каждом изменении
+// опций — пауза, чтобы не дёргать API на каждый символ в поле
+const MANUAL_COMMAND_DEBOUNCE_MS = 400
+
+// Установка идёт на бэке, браузер только опрашивает статус и подтягивает новые
+// строки лога по смещению — обрыв сети у клиента ничего не прерывает
+const DEPLOY_POLL_INTERVAL_MS = 2000
+
+const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
+
+type DeployJobOutcome =
+  | { finished: true; ok: boolean; error: string | null; serverId: number | null }
+  // Ушли на логин — статус в интерфейсе не трогаем
+  | { finished: false }
 
 // Незавершённые задачи установки храним в localStorage, чтобы переподключить
 // их лог после перезагрузки страницы (SSH держит бэкенд, фон не прерывается)
@@ -169,10 +189,16 @@ export default function Servers() {
   const [haproxyProfiles, setHaproxyProfiles] = useState<HAProxyConfigProfile[]>([])
   const [firewallProfiles, setFirewallProfiles] = useState<FirewallProfile[]>([])
   const [dnatProfiles, setDnatProfiles] = useState<DnatProfile[]>([])
+  const [nginxProfiles, setNginxProfiles] = useState<RemnawaveNginxProfile[]>([])
+  const [reloadPresets, setReloadPresets] = useState<WildcardReloadCmdPreset[]>([])
+  const [savingReloadPreset, setSavingReloadPreset] = useState(false)
   const [deployLog, setDeployLog] = useState<string[]>([])
   const [primaryStatus, setPrimaryStatus] = useState<DeployStatus>('idle')
   const [extras, setExtras] = useState<ExtraTarget[]>([])
   const [savingCert, setSavingCert] = useState(false)
+  const [manualOpen, setManualOpen] = useState(false)
+  const [manualCommand, setManualCommand] = useState<string | null>(null)
+  const [manualCommandLoading, setManualCommandLoading] = useState(false)
   const deployLogRef = useRef<HTMLPreElement>(null)
 
   const isDeploying = primaryStatus === 'running' || extras.some(e => e.status === 'running')
@@ -197,6 +223,8 @@ export default function Servers() {
     setDeployLog([])
     setPrimaryStatus('idle')
     setExtras([])
+    setManualOpen(false)
+    setManualCommand(null)
     setError('')
   }, [])
 
@@ -272,6 +300,12 @@ export default function Servers() {
     dnatProfilesApi.list()
       .then(res => setDnatProfiles(res.data))
       .catch(() => {})
+    remnawaveNginxApi.getProfiles()
+      .then(res => setNginxProfiles(res.data))
+      .catch(() => {})
+    wildcardSSLApi.getReloadCmdPresets()
+      .then(res => setReloadPresets(res.data.presets))
+      .catch(() => {})
   }, [showForm, editingId])
 
   const handleSubmit = async (e: FormEvent) => {
@@ -327,17 +361,19 @@ export default function Servers() {
     setIsSubmitting(false)
   }
 
+  // manual — полуавтоматический режим: SSH-доступ панели не нужен, остальное проверяется как обычно
   const validateDeployForm = (
     name: string,
     host: string,
     d: DeployFormData,
     proxy: string,
+    manual = false,
   ): string | null => {
     if (!name.trim()) return t('servers.server_name_placeholder')
     if (!host.trim()) return t('servers.server_host_placeholder')
     if (proxy.trim() && !PROXY_RE.test(proxy.trim())) return t('servers.proxy_invalid')
-    if (d.sshAuth === 'password' && !d.sshPassword.trim()) return t('servers.deploy_no_password')
-    if (d.sshAuth === 'key' && !d.sshPrivateKey.trim()) return t('servers.deploy_no_key')
+    if (!manual && d.sshAuth === 'password' && !d.sshPassword.trim()) return t('servers.deploy_no_password')
+    if (!manual && d.sshAuth === 'key' && !d.sshPrivateKey.trim()) return t('servers.deploy_no_key')
     if (d.installRemnawave) {
       const hasInline = d.remnaCertMode === 'inline' && d.remnaCertInline.trim()
       const hasSaved = d.remnaCertMode === 'saved' && d.remnaCertProfileId != null
@@ -345,6 +381,13 @@ export default function Servers() {
     }
     if (d.installProxy && !d.proxyUrl.trim()) return t('servers.deploy_no_proxy')
     if (d.changePassword && d.newPassword.length < 8) return t('servers.deploy_password_short')
+    if (d.wildcardSslEnabled && d.wildcardReloadCmd.trim().length > 512) return t('servers.deploy_wildcard_cmd_too_long')
+    if (d.installRemnawave && d.remnawaveNginxProfileId != null) {
+      const profile = nginxProfiles.find(p => p.id === d.remnawaveNginxProfileId)
+      if (profile && profile.config_content.includes(NGINX_DOMAIN_PLACEHOLDER) && !d.remnawaveNginxDomain.trim()) {
+        return t('servers.deploy_nginx_domain_required')
+      }
+    }
     return null
   }
 
@@ -374,40 +417,51 @@ export default function Servers() {
     haproxy_profile_id: d.haproxyProfileId ?? null,
     firewall_profile_id: d.firewallProfileId ?? null,
     dnat_profile_id: d.dnatProfileId ?? null,
+    wildcard_ssl_enabled: d.wildcardSslEnabled,
+    wildcard_ssl_reload_cmd: d.wildcardSslEnabled ? d.wildcardReloadCmd.trim() || null : null,
+    remnawave_nginx_profile_id: d.installRemnawave ? d.remnawaveNginxProfileId : null,
+    remnawave_nginx_domain: d.installRemnawave ? d.remnawaveNginxDomain.trim() || null : null,
+    dedicated_cert: d.dedicatedCert,
     // Установщик на ноде говорит на языке интерфейса панели
     lang: i18n.language.startsWith('ru') ? 'ru' : 'en',
   })
 
-  // Читает NDJSON-лог фоновой задачи. finished=true только если дошли до 'done'
-  // (терминал). Обрыв соединения без done — задача продолжается на бэке.
-  const consumeStream = async (
+  // Опрашивает задачу до завершения. Сбой сети — не провал установки: она идёт
+  // на бэке, опрос просто повторяется. 404 означает, что задачи на бэке больше
+  // нет (панель перезапускалась) — тогда это уже ошибка.
+  const pollDeployJob = async (
     jobId: string,
-    onEvent: (ev: ServerDeployEvent) => void,
-  ): Promise<{ ok: boolean; error: string | null; finished: boolean }> => {
-    let ok = false
-    let err: string | null = null
-    let finished = false
-    try {
-      await streamNdjsonGet<ServerDeployEvent>(
-        serverDeployJobStreamUrl(jobId),
-        (ev) => {
-          onEvent(ev)
-          if (ev.type === 'done') {
-            ok = ev.exit_code === 0
-            finished = true
-          }
-          if (ev.type === 'error') err = ev.message
-        },
-        new AbortController().signal,
-      )
-    } catch (e) {
-      if (e instanceof StreamUnauthorizedError) {
-        err = null
-      } else {
-        err = e instanceof Error ? e.message : String(e)
+    onLines: (lines: string[]) => void,
+  ): Promise<DeployJobOutcome> => {
+    let offset = 0
+    let offline = false
+    for (;;) {
+      let data: DeployJobStatus
+      try {
+        data = (await serversApi.deployJobStatus(jobId, offset)).data
+      } catch (e) {
+        if (isAxiosError(e) && e.response?.status === 401) return { finished: false }
+        if (isAxiosError(e) && e.response?.status === 404) {
+          return { finished: true, ok: false, error: t('servers.deploy_job_lost'), serverId: null }
+        }
+        if (!offline) {
+          offline = true
+          onLines([t('servers.deploy_poll_offline')])
+        }
+        await sleep(DEPLOY_POLL_INTERVAL_MS)
+        continue
       }
+      if (offline) {
+        offline = false
+        onLines([t('servers.deploy_poll_online')])
+      }
+      if (data.lines.length > 0) onLines(data.lines.map(cleanLogLine))
+      offset = data.next_offset
+      if (data.status !== 'running') {
+        return { finished: true, ok: data.status === 'success', error: data.error, serverId: data.server_id }
+      }
+      await sleep(DEPLOY_POLL_INTERVAL_MS)
     }
-    return { ok, error: err, finished }
   }
 
   const schedulePrimaryHide = () => {
@@ -421,56 +475,37 @@ export default function Servers() {
     setTimeout(() => removeExtra(id), AUTO_HIDE_MS)
   }
 
-  const attachPrimaryStream = async (jobId: string): Promise<boolean> => {
-    const { ok, error: err, finished } = await consumeStream(jobId, (ev) => {
-      if (ev.type === 'log') {
-        setDeployLog(prev => [...prev, cleanLogLine(ev.line)])
-      } else if (ev.type === 'start') {
-        setDeployLog(prev => [...prev, `--- ${ev.host} ---`])
-      } else if (ev.type === 'error') {
-        setDeployLog(prev => [...prev, `[ERROR] ${ev.message}`])
-      }
-    })
-    if (finished) {
-      removeStoredJob(jobId)
-      setPrimaryStatus(ok ? 'success' : 'error')
-      if (ok) schedulePrimaryHide()
-      else if (err) setError(err)
-    } else if (err !== null) {
-      setPrimaryStatus('error')
-      setError(err)
-    }
-    return ok
+  const followPrimaryJob = async (jobId: string): Promise<boolean> => {
+    const outcome = await pollDeployJob(jobId, lines => setDeployLog(prev => [...prev, ...lines]))
+    if (!outcome.finished) return false
+    removeStoredJob(jobId)
+    setPrimaryStatus(outcome.ok ? 'success' : 'error')
+    if (outcome.ok) schedulePrimaryHide()
+    else if (outcome.error) setError(outcome.error)
+    return outcome.ok
   }
 
-  const attachExtraStream = async (id: string, jobId: string): Promise<boolean> => {
-    const { ok, error: err, finished } = await consumeStream(jobId, (ev) => {
-      if (ev.type === 'log') {
-        setExtras(prev => prev.map(x => x.id === id ? { ...x, log: [...x.log, cleanLogLine(ev.line)] } : x))
-      } else if (ev.type === 'start') {
-        setExtras(prev => prev.map(x => x.id === id ? { ...x, log: [...x.log, `--- ${ev.host} ---`] } : x))
-      } else if (ev.type === 'error') {
-        setExtras(prev => prev.map(x => x.id === id ? { ...x, log: [...x.log, `[ERROR] ${ev.message}`], error: ev.message } : x))
-      } else if (ev.type === 'done' && ev.server_id != null) {
-        const sid = ev.server_id
-        setExtras(prev => prev.map(x => x.id === id ? { ...x, serverId: sid } : x))
-      }
-    })
-    if (finished) {
-      removeStoredJob(jobId)
-      setExtras(prev => prev.map(x => x.id === id
-        ? { ...x, status: ok ? 'success' : 'error', error: ok ? null : (err ?? x.error) }
-        : x,
-      ))
-      if (ok) scheduleExtraHide(id)
-    } else if (err !== null) {
-      setExtras(prev => prev.map(x => x.id === id ? { ...x, status: 'error', error: err } : x))
-    }
-    return ok
+  const followExtraJob = async (id: string, jobId: string): Promise<boolean> => {
+    const outcome = await pollDeployJob(jobId, lines =>
+      setExtras(prev => prev.map(x => x.id === id ? { ...x, log: [...x.log, ...lines] } : x)),
+    )
+    if (!outcome.finished) return false
+    removeStoredJob(jobId)
+    setExtras(prev => prev.map(x => x.id === id
+      ? {
+          ...x,
+          status: outcome.ok ? 'success' : 'error',
+          error: outcome.ok ? null : outcome.error,
+          serverId: outcome.serverId ?? x.serverId,
+        }
+      : x,
+    ))
+    if (outcome.ok) scheduleExtraHide(id)
+    return outcome.ok
   }
 
-  const deployPrimary = async (): Promise<boolean> => {
-    const body = buildDeployBody(formData.name, formData.host, formData.port, deploy, formData.proxy)
+  const deployPrimary = async (manual = false): Promise<boolean> => {
+    const body = { ...buildDeployBody(formData.name, formData.host, formData.port, deploy, formData.proxy), manual }
     let jobId: string
     try {
       const res = await serversApi.startDeploy(body)
@@ -481,7 +516,7 @@ export default function Servers() {
       return false
     }
     storeJob({ jobId, kind: 'primary', name: formData.name, host: formData.host, port: formData.port })
-    return attachPrimaryStream(jobId)
+    return followPrimaryJob(jobId)
   }
 
   const deployExtra = async (id: string): Promise<boolean> => {
@@ -501,7 +536,7 @@ export default function Servers() {
     }
     setExtras(prev => prev.map(x => x.id === id ? { ...x, jobId } : x))
     storeJob({ jobId, kind: 'extra', extraId: id, name: target.name, host: target.host, port: target.port })
-    return attachExtraStream(id, jobId)
+    return followExtraJob(id, jobId)
   }
 
   // Переподключение к незавершённым задачам установки после перезагрузки страницы
@@ -529,7 +564,7 @@ export default function Servers() {
         setFormData({ name: s.name, host: s.host, port: s.port, proxy: '' })
         setPrimaryStatus('running')
         setDeployLog([])
-        void attachPrimaryStream(s.jobId)
+        void followPrimaryJob(s.jobId)
       } else {
         const extraId = s.extraId || s.jobId
         setExtras(prev => prev.some(x => x.id === extraId) ? prev : [...prev, {
@@ -544,7 +579,7 @@ export default function Servers() {
           error: null,
           jobId: s.jobId,
         }])
-        void attachExtraStream(extraId, s.jobId)
+        void followExtraJob(extraId, s.jobId)
       }
     }
   }
@@ -612,6 +647,42 @@ export default function Servers() {
     else toast.error(t('servers.deploy_failed'))
   }
 
+  // Полуавтоматический режим: оператор сам запустил команду на сервере,
+  // панель ждёт ноду и применяет SSH-настройки/профили через её API
+  const waitManualPrimary = async () => {
+    const err = validateDeployForm(formData.name, formData.host, deploy, formData.proxy, true)
+    if (err) {
+      setError(err)
+      return
+    }
+    setError('')
+    setDeployLog([])
+    setPrimaryStatus('running')
+    const ok = await deployPrimary(true)
+    await fetchServersWithMetrics()
+    if (ok) toast.success(t('servers.deploy_success'))
+    else toast.error(t('servers.deploy_failed'))
+  }
+
+  // Команда для ручного запуска собирается на бэке из тех же опций, что и автоустановка
+  useEffect(() => {
+    if (!showForm || !deploy.enabled || !manualOpen) return
+    const body = buildDeployBody(formData.name, formData.host, formData.port, deploy, formData.proxy)
+    let cancelled = false
+    setManualCommandLoading(true)
+    const timer = setTimeout(() => {
+      serversApi.deployCommand(body)
+        .then(res => { if (!cancelled) setManualCommand(res.data.command) })
+        .catch(() => { if (!cancelled) setManualCommand(null) })
+        .finally(() => { if (!cancelled) setManualCommandLoading(false) })
+    }, MANUAL_COMMAND_DEBOUNCE_MS)
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showForm, manualOpen, deploy, formData.host, formData.port, i18n.language])
+
   const retryExtra = async (id: string) => {
     const target = extras.find(t => t.id === id)
     if (!target) return
@@ -651,6 +722,32 @@ export default function Servers() {
       setDeploy(d => (d.remnaCertProfileId === id ? { ...d, remnaCertProfileId: null } : d))
     } catch {
       toast.error(t('servers.deploy_remna_save_failed'))
+    }
+  }
+
+  const handleSaveReloadPreset = async (command: string) => {
+    if (!command) return
+    const name = window.prompt(t('wildcard_ssl.reload_preset_save_prompt'))
+    if (!name || !name.trim()) return
+    setSavingReloadPreset(true)
+    try {
+      const { data } = await wildcardSSLApi.saveReloadCmdPreset(name.trim(), command)
+      setReloadPresets(data.presets)
+      toast.success(t('wildcard_ssl.reload_preset_saved'))
+    } catch (e) {
+      const err = e as { response?: { data?: { detail?: string } } }
+      toast.error(err.response?.data?.detail || t('wildcard_ssl.reload_preset_save_failed'))
+    }
+    setSavingReloadPreset(false)
+  }
+
+  const handleDeleteReloadPreset = async (name: string) => {
+    if (!window.confirm(t('wildcard_ssl.reload_preset_delete_confirm'))) return
+    try {
+      const { data } = await wildcardSSLApi.deleteReloadCmdPreset(name)
+      setReloadPresets(data.presets)
+    } catch {
+      toast.error(t('wildcard_ssl.reload_preset_save_failed'))
     }
   }
 
@@ -959,8 +1056,7 @@ export default function Servers() {
               {/* Авторазвёртывание по SSH */}
               <div className="rounded-xl border border-dark-700/50 bg-dark-800/30 overflow-hidden">
                 <label className="flex items-center gap-3 p-4 cursor-pointer">
-                  <input
-                    type="checkbox"
+                  <Checkbox
                     checked={deploy.enabled}
                     onChange={(e) => {
                       const enabled = e.target.checked
@@ -971,7 +1067,6 @@ export default function Servers() {
                         setDeployLog([])
                       }
                     }}
-                    className="w-4 h-4 rounded accent-accent-500 cursor-pointer"
                   />
                   <Rocket className="w-4 h-4 text-accent-500 flex-shrink-0" />
                   <div>
@@ -996,19 +1091,34 @@ export default function Servers() {
                         haproxyProfiles={haproxyProfiles}
                         firewallProfiles={firewallProfiles}
                         dnatProfiles={dnatProfiles}
+                        nginxProfiles={nginxProfiles}
+                        reloadPresets={reloadPresets}
                         savingCert={savingCert}
                         onSaveCert={handleSaveCert}
                         onDeleteCert={handleDeleteCert}
+                        savingReloadPreset={savingReloadPreset}
+                        onSaveReloadPreset={handleSaveReloadPreset}
+                        onDeleteReloadPreset={handleDeleteReloadPreset}
                         footerSlot={
-                          <button
-                            type="button"
-                            onClick={addExtra}
-                            disabled={isDeploying}
-                            className="btn btn-secondary text-sm w-full mt-2"
-                          >
-                            <PlusCircle className="w-4 h-4" />
-                            {t('servers.deploy_add_extra')}
-                          </button>
+                          <>
+                            <ManualInstallBlock
+                              open={manualOpen}
+                              onToggle={() => setManualOpen(v => !v)}
+                              command={manualCommand}
+                              loading={manualCommandLoading}
+                              onWait={waitManualPrimary}
+                              disabled={isDeploying}
+                            />
+                            <button
+                              type="button"
+                              onClick={addExtra}
+                              disabled={isDeploying}
+                              className="btn btn-secondary text-sm w-full mt-2"
+                            >
+                              <PlusCircle className="w-4 h-4" />
+                              {t('servers.deploy_add_extra')}
+                            </button>
+                          </>
                         }
                       />
                     </motion.div>
@@ -1034,9 +1144,14 @@ export default function Servers() {
                         haproxyProfiles={haproxyProfiles}
                         firewallProfiles={firewallProfiles}
                         dnatProfiles={dnatProfiles}
+                        nginxProfiles={nginxProfiles}
+                        reloadPresets={reloadPresets}
                         savingCert={savingCert}
                         onSaveCert={handleSaveCert}
                         onDeleteCert={handleDeleteCert}
+                        savingReloadPreset={savingReloadPreset}
+                        onSaveReloadPreset={handleSaveReloadPreset}
+                        onDeleteReloadPreset={handleDeleteReloadPreset}
                         disabled={isDeploying}
                       />
                     ))}
@@ -1239,6 +1354,10 @@ export default function Servers() {
                           {server.uses_shared_cert ? (
                             <Tooltip label={t('servers.shared_cert_tooltip')}>
                               <ShieldCheck className="w-3.5 h-3.5 text-success flex-shrink-0" />
+                            </Tooltip>
+                          ) : server.auth_kind === 'dedicated' ? (
+                            <Tooltip label={t('servers.dedicated_cert_tooltip')}>
+                              <ShieldCheck className="w-3.5 h-3.5 text-accent-400 flex-shrink-0" />
                             </Tooltip>
                           ) : (
                             <Tooltip label={t('servers.needs_migration_tooltip')}>

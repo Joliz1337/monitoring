@@ -80,6 +80,26 @@ class VlessTest(unittest.TestCase):
         ep = parse_link("vless://u@h.io:443?type=splithttp&security=tls#x")
         self.assertEqual(ep.transport.kind, Transport.XHTTP)
 
+    def test_xhttp_extra_preserved(self):
+        """extra задаёт формат трафика: сервер отвечает 403 клиенту без него."""
+        ep = parse_link(
+            "vless://u@h.io:443?type=xhttp&security=tls&path=%2Fx"
+            "&extra=%7B%22uplinkHTTPMethod%22%3A%22GET%22%2C%22seqKey%22%3A%22offset%22%7D#x"
+        )
+        self.assertEqual(
+            ep.transport.xhttp_extra,
+            '{"seqKey": "offset", "uplinkHTTPMethod": "GET"}',
+        )
+        self.assertNotIn("extra", dict(ep.extra))
+
+    def test_xhttp_broken_extra_ignored(self):
+        ep = parse_link("vless://u@h.io:443?type=xhttp&security=tls&extra=%7Bnot-json#x")
+        self.assertIsNone(ep.transport.xhttp_extra)
+
+    def test_extra_param_ignored_for_other_transports(self):
+        ep = parse_link("vless://u@h.io:443?type=ws&security=tls&extra=%7B%22a%22%3A1%7D#x")
+        self.assertIsNone(ep.transport.xhttp_extra)
+
     def test_ipv6_host(self):
         ep = parse_link("vless://u@[2001:db8::1]:443?security=tls#v6")
         self.assertEqual(ep.address, "2001:db8::1")

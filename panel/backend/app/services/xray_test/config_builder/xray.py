@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from app.services.xray_test.config_builder.batch import BatchEntry
@@ -181,6 +182,9 @@ def _transport_settings(transport: TransportSettings, sni: str) -> dict[str, Any
             settings["host"] = transport.host
         if transport.mode:
             settings["mode"] = transport.mode
+        if transport.xhttp_extra:
+            # Без extra сервер с кастомным форматом трафика ответит 403
+            settings["extra"] = json.loads(transport.xhttp_extra)
         return settings
 
     if transport.kind is Transport.GRPC:

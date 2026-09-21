@@ -1,17 +1,31 @@
-import { useEffect, useState, useCallback, useRef, FormEvent } from 'react'
+import { useEffect, useState, useCallback, useMemo, useRef, FormEvent } from 'react'
 import { useNodeCapabilities } from '../hooks/useNodeCapabilities'
 import { nodeAllows } from '../utils/nodeCapabilities'
-import { ShieldCheck, RefreshCw, Server, Upload, Globe, Loader2, CheckCircle2, XCircle, Trash2, Eye, EyeOff, Save, Send, Info, ChevronRight, ToggleLeft, ToggleRight, Lock } from 'lucide-react'
+import { ShieldCheck, RefreshCw, Server, Upload, Globe, Loader2, CheckCircle2, XCircle, Trash2, Eye, EyeOff, Save, Search, Send, Settings2, Info, ChevronDown, ChevronRight, Folder, FolderOpen, ToggleLeft, ToggleRight, Lock, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
-import { wildcardSSLApi, WildcardCertificate, WildcardSSLSettings, WildcardServerConfig } from '../api/client'
+import {
+  wildcardSSLApi,
+  wildcardDeployStreamUrl,
+  WildcardCertificate,
+  WildcardDeployResult,
+  WildcardSSLSettings,
+  WildcardServerConfig,
+  WildcardServerConfigPatch,
+  WildcardReloadCmdPreset,
+} from '../api/client'
 import { FAQIcon } from '../components/FAQ'
+import { Checkbox } from '../components/ui/Checkbox'
 import CertificateMaterials from '../components/wildcard/CertificateMaterials'
+import ReloadCmdPresetChips from '../components/wildcard/ReloadCmdPresetChips'
+import { WildcardDeployProgress } from '../components/wildcard/WildcardDeployProgress'
+import { useBulkStream, BulkStreamState } from '../hooks/useBulkStream'
 
 const DEFAULT_DEPLOY_PATH = '/etc/letsencrypt/live'
 const DEFAULT_FULLCHAIN_NAME = 'fullchain.pem'
 const DEFAULT_PRIVKEY_NAME = 'privkey.pem'
+const NO_FOLDER = '__no_folder__'
 
 // Wildcard действует ровно на один уровень: *.example.com покрывает
 // panel.example.com, но не a.b.example.com (та же логика на бэкенде)
@@ -21,6 +35,56 @@ function wildcardCoversDomain(baseDomain: string, domain: string): boolean {
   const suffix = '.' + baseDomain
   return domain.endsWith(suffix) && !domain.slice(0, -suffix.length).includes('.')
 }
+
+// Пресеты избавляют от ручного ввода одной и той же команды на каждом сервере —
+// общий блок для обычного и custom-режимов карточки
+function ReloadCmdField({
+  value,
+  onChange,
+  presets,
+  savingPreset,
+  onSavePreset,
+  onDeletePreset,
+  t,
+}: {
+  value: string
+  onChange: (val: string) => void
+  presets: WildcardReloadCmdPreset[]
+  savingPreset: boolean
+  onSavePreset: (command: string) => void
+  onDeletePreset: (name: string) => void
+  t: (key: string, opts?: any) => string
+}) {
+  return (
+    <div>
+      <label className="block text-xs text-dark-400 mb-1">{t('wildcard_ssl.reload_cmd')}</label>
+      <div className="space-y-1.5">
+        <ReloadCmdPresetChips
+          presets={presets}
+          value={value}
+          onPick={onChange}
+          onDelete={onDeletePreset}
+          onSaveCurrent={() => onSavePreset(value.trim())}
+          saving={savingPreset}
+        />
+        <input
+          type="text"
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          placeholder={t('wildcard_ssl.reload_cmd_placeholder')}
+          maxLength={512}
+          className="w-full px-2.5 py-1.5 bg-dark-900 border border-dark-700 rounded-lg text-dark-200 text-sm placeholder-dark-600 focus:outline-none focus:border-accent-500 font-mono"
+        />
+      </div>
+      {!value ? (
+        <p className="text-[11px] text-dark-500 mt-1">{t('wildcard_ssl.reload_cmd_empty_hint')}</p>
+      ) : (
+        <p className="text-[11px] text-dark-500 mt-1">{t('wildcard_ssl.reload_cmd_hint')}</p>
+      )}
+    </div>
+  )
+}
+
 
 export interface ServerSavePayload {
   deploy_path: string
@@ -38,22 +102,34 @@ function ServerCard({
   cert,
   deployingServer,
   expanded,
+  selected,
   onToggle,
   onExpand,
+  onSelect,
   onSave,
   onDeploy,
   restricted,
+  reloadPresets,
+  savingReloadPreset,
+  onSaveReloadPreset,
+  onDeleteReloadPreset,
   t,
 }: {
   srv: WildcardServerConfig
   cert: WildcardCertificate | null
   deployingServer: number | null
   expanded: boolean
+  selected: boolean
   onToggle: (id: number, enabled: boolean) => void
   onExpand: (id: number) => void
+  onSelect: (id: number) => void
   onSave: (id: number, data: ServerSavePayload) => void
   onDeploy: (id: number) => void
   restricted: boolean
+  reloadPresets: WildcardReloadCmdPreset[]
+  savingReloadPreset: boolean
+  onSaveReloadPreset: (command: string) => void
+  onDeleteReloadPreset: (name: string) => void
   t: (key: string, opts?: any) => string
 }) {
   const [localPath, setLocalPath] = useState(srv.wildcard_ssl_deploy_path)
@@ -129,12 +205,20 @@ function ServerCard({
 
   return (
     <div className={`rounded-xl border transition-all duration-200 ${
-      isEnabled
-        ? 'bg-dark-800/60 border-dark-700/80'
-        : 'bg-dark-800/20 border-dark-800/50'
+      selected
+        ? 'bg-accent-500/10 border-accent-500/30'
+        : isEnabled
+          ? 'bg-dark-800/60 border-dark-700/80'
+          : 'bg-dark-800/20 border-dark-800/50'
     }`}>
-      {/* Header: toggle | clickable area (name) | deploy button */}
+      {/* Header: checkbox | toggle | clickable area (name) | deploy button */}
       <div className="flex items-center px-4 py-3 gap-3">
+        <Checkbox
+          checked={selected}
+          onClick={e => e.stopPropagation()}
+          onChange={() => onSelect(srv.server_id)}
+        />
+
         {/* Toggle — только вкл/выкл */}
         <button
           onClick={e => { e.stopPropagation(); onToggle(srv.server_id, !isEnabled) }}
@@ -227,21 +311,15 @@ function ServerCard({
                         <p className="text-[11px] text-dark-500 mt-1">{t('wildcard_ssl.deploy_path_hint')}</p>
                       )}
                     </div>
-                    <div>
-                      <label className="block text-xs text-dark-400 mb-1">{t('wildcard_ssl.reload_cmd')}</label>
-                      <input
-                        type="text"
-                        value={localCmd}
-                        onChange={e => handleCmdChange(e.target.value)}
-                        placeholder={t('wildcard_ssl.reload_cmd_placeholder')}
-                        className="w-full px-2.5 py-1.5 bg-dark-900 border border-dark-700 rounded-lg text-dark-200 text-sm placeholder-dark-600 focus:outline-none focus:border-accent-500 font-mono"
-                      />
-                      {!localCmd ? (
-                        <p className="text-[11px] text-dark-500 mt-1">{t('wildcard_ssl.reload_cmd_empty_hint')}</p>
-                      ) : (
-                        <p className="text-[11px] text-dark-500 mt-1">{t('wildcard_ssl.reload_cmd_hint')}</p>
-                      )}
-                    </div>
+                    <ReloadCmdField
+                      value={localCmd}
+                      onChange={handleCmdChange}
+                      presets={reloadPresets}
+                      savingPreset={savingReloadPreset}
+                      onSavePreset={onSaveReloadPreset}
+                      onDeletePreset={onDeleteReloadPreset}
+                      t={t}
+                    />
                   </div>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div>
@@ -293,19 +371,15 @@ function ServerCard({
                     <p className="text-[11px] text-dark-500 mt-1">{t('wildcard_ssl.custom_privkey_path_hint')}</p>
                   </div>
                   <div className="sm:col-span-2">
-                    <label className="block text-xs text-dark-400 mb-1">{t('wildcard_ssl.reload_cmd')}</label>
-                    <input
-                      type="text"
+                    <ReloadCmdField
                       value={localCmd}
-                      onChange={e => handleCmdChange(e.target.value)}
-                      placeholder={t('wildcard_ssl.reload_cmd_placeholder')}
-                      className="w-full px-2.5 py-1.5 bg-dark-900 border border-dark-700 rounded-lg text-dark-200 text-sm placeholder-dark-600 focus:outline-none focus:border-accent-500 font-mono"
+                      onChange={handleCmdChange}
+                      presets={reloadPresets}
+                      savingPreset={savingReloadPreset}
+                      onSavePreset={onSaveReloadPreset}
+                      onDeletePreset={onDeleteReloadPreset}
+                      t={t}
                     />
-                    {!localCmd ? (
-                      <p className="text-[11px] text-dark-500 mt-1">{t('wildcard_ssl.reload_cmd_empty_hint')}</p>
-                    ) : (
-                      <p className="text-[11px] text-dark-500 mt-1">{t('wildcard_ssl.reload_cmd_hint')}</p>
-                    )}
                   </div>
                 </div>
               )}
@@ -351,6 +425,157 @@ function ServerCard({
 }
 
 
+const KEEP = '__keep__'
+
+type BulkTextFieldKey =
+  | 'wildcard_ssl_deploy_path'
+  | 'wildcard_ssl_reload_cmd'
+  | 'wildcard_ssl_fullchain_name'
+  | 'wildcard_ssl_privkey_name'
+  | 'wildcard_ssl_custom_fullchain_path'
+  | 'wildcard_ssl_custom_privkey_path'
+
+const BULK_TEXT_FIELDS: { key: BulkTextFieldKey; labelKey: string; placeholder: string }[] = [
+  { key: 'wildcard_ssl_deploy_path', labelKey: 'wildcard_ssl.deploy_path', placeholder: DEFAULT_DEPLOY_PATH },
+  { key: 'wildcard_ssl_reload_cmd', labelKey: 'wildcard_ssl.reload_cmd', placeholder: '' },
+  { key: 'wildcard_ssl_fullchain_name', labelKey: 'wildcard_ssl.fullchain_filename', placeholder: DEFAULT_FULLCHAIN_NAME },
+  { key: 'wildcard_ssl_privkey_name', labelKey: 'wildcard_ssl.privkey_filename', placeholder: DEFAULT_PRIVKEY_NAME },
+  { key: 'wildcard_ssl_custom_fullchain_path', labelKey: 'wildcard_ssl.custom_fullchain_path', placeholder: '/etc/pve/local/pveproxy-ssl.pem' },
+  { key: 'wildcard_ssl_custom_privkey_path', labelKey: 'wildcard_ssl.custom_privkey_path', placeholder: '/etc/pve/local/pveproxy-ssl.key' },
+]
+
+// Массовое редактирование: невключённое поле не попадает в патч («не менять»),
+// включённое и пустое — сбрасывает значение к дефолту
+function WildcardBulkEditForm({
+  count,
+  saving,
+  onSave,
+  onClose,
+  reloadPresets,
+  onDeleteReloadPreset,
+  t,
+}: {
+  count: number
+  saving: boolean
+  onSave: (patch: WildcardServerConfigPatch) => void
+  onClose: () => void
+  reloadPresets: WildcardReloadCmdPreset[]
+  onDeleteReloadPreset: (name: string) => void
+  t: (key: string, opts?: any) => string
+}) {
+  const [customMode, setCustomMode] = useState(KEEP)
+  const [texts, setTexts] = useState<Record<BulkTextFieldKey, { on: boolean; value: string }>>(
+    () => Object.fromEntries(
+      BULK_TEXT_FIELDS.map(f => [f.key, { on: false, value: '' }])
+    ) as Record<BulkTextFieldKey, { on: boolean; value: string }>
+  )
+
+  const setFieldOn = (key: BulkTextFieldKey, on: boolean) =>
+    setTexts(prev => ({ ...prev, [key]: { ...prev[key], on } }))
+  const setFieldValue = (key: BulkTextFieldKey, value: string) =>
+    setTexts(prev => ({ ...prev, [key]: { ...prev[key], value } }))
+
+  const handleSubmit = () => {
+    const patch: WildcardServerConfigPatch = {}
+    if (customMode !== KEEP) patch.wildcard_ssl_custom_path_enabled = customMode === 'on'
+    for (const field of BULK_TEXT_FIELDS) {
+      const state = texts[field.key]
+      if (state.on) patch[field.key] = state.value.trim()
+    }
+    if (Object.keys(patch).length === 0) {
+      toast.error(t('wildcard_ssl.bulk_no_changes'))
+      return
+    }
+    onSave(patch)
+  }
+
+  return (
+    <motion.div
+      initial={{ height: 0, opacity: 0 }}
+      animate={{ height: 'auto', opacity: 1 }}
+      exit={{ height: 0, opacity: 0 }}
+      transition={{ duration: 0.2 }}
+      className="overflow-hidden"
+    >
+      <div className="p-4 bg-dark-900/60 border border-dark-700 rounded-xl space-y-3">
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-dark-100">
+            {t('wildcard_ssl.bulk_edit_title', { count })}
+          </h3>
+          <button onClick={onClose} className="text-dark-500 hover:text-dark-300">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div>
+          <label className="block text-xs text-dark-400 mb-1">{t('wildcard_ssl.custom_path_mode')}</label>
+          <select
+            value={customMode}
+            onChange={e => setCustomMode(e.target.value)}
+            className="w-full sm:w-64 px-2.5 py-1.5 bg-dark-900 border border-dark-700 rounded-lg text-dark-200 text-sm focus:outline-none focus:border-accent-500"
+          >
+            <option value={KEEP}>{t('wildcard_ssl.bulk_keep')}</option>
+            <option value="off">{t('wildcard_ssl.bulk_custom_off')}</option>
+            <option value="on">{t('wildcard_ssl.bulk_custom_on')}</option>
+          </select>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {BULK_TEXT_FIELDS.map(field => {
+            const state = texts[field.key]
+            return (
+              <div key={field.key}>
+                <label className="flex items-center gap-2 text-xs text-dark-400 mb-1 cursor-pointer w-fit">
+                  <Checkbox
+                    checked={state.on}
+                    onChange={() => setFieldOn(field.key, !state.on)}
+                  />
+                  {t(field.labelKey)}
+                </label>
+                <input
+                  type="text"
+                  value={state.value}
+                  disabled={!state.on}
+                  onChange={e => setFieldValue(field.key, e.target.value)}
+                  placeholder={field.placeholder || t('wildcard_ssl.reload_cmd_placeholder')}
+                  className="w-full px-2.5 py-1.5 bg-dark-900 border border-dark-700 rounded-lg text-dark-200 text-sm placeholder-dark-600 focus:outline-none focus:border-accent-500 font-mono disabled:opacity-40"
+                />
+                {field.key === 'wildcard_ssl_reload_cmd' && reloadPresets.length > 0 && (
+                  <div className="mt-1.5">
+                    <ReloadCmdPresetChips
+                      presets={reloadPresets}
+                      value={state.on ? state.value : ''}
+                      onPick={command => setTexts(prev => ({
+                        ...prev,
+                        wildcard_ssl_reload_cmd: { on: true, value: command },
+                      }))}
+                      onDelete={onDeleteReloadPreset}
+                    />
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+
+        <p className="text-[11px] text-dark-500">{t('wildcard_ssl.bulk_field_clear_hint')}</p>
+
+        <div className="flex justify-end">
+          <button
+            onClick={handleSubmit}
+            disabled={saving}
+            className="px-3 py-1.5 bg-accent-500 text-white rounded-lg text-xs hover:bg-accent-600 transition-colors disabled:opacity-50 flex items-center gap-1.5"
+          >
+            {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+            {t('wildcard_ssl.bulk_apply', { count })}
+          </button>
+        </div>
+      </div>
+    </motion.div>
+  )
+}
+
+
 export default function WildcardSSL() {
   const { t } = useTranslation()
 
@@ -359,7 +584,6 @@ export default function WildcardSSL() {
   const [certLoading, setCertLoading] = useState(true)
   const [issuing, setIssuing] = useState(false)
   const [renewing, setRenewing] = useState(false)
-  const [deploying, setDeploying] = useState(false)
   const [issueDomain, setIssueDomain] = useState('')
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -381,6 +605,22 @@ export default function WildcardSSL() {
   const [serversLoading, setServersLoading] = useState(true)
   const [deployingServer, setDeployingServer] = useState<number | null>(null)
   const [expandedServer, setExpandedServer] = useState<number | null>(null)
+  const [reloadPresets, setReloadPresets] = useState<WildcardReloadCmdPreset[]>([])
+  const [savingReloadPreset, setSavingReloadPreset] = useState(false)
+
+  // Search + bulk selection
+  const [searchQuery, setSearchQuery] = useState('')
+  const [selectedIds, setSelectedIds] = useState<number[]>([])
+  const [showBulkEdit, setShowBulkEdit] = useState(false)
+  const [bulkSaving, setBulkSaving] = useState(false)
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem('wildcard_expanded_folders')
+      return raw ? new Set(JSON.parse(raw)) : new Set()
+    } catch { return new Set() }
+  })
+  const { progress: deployProgress, run: runDeploy, cancel: cancelDeploy, reset: resetDeploy } =
+    useBulkStream<WildcardDeployResult>()
 
   // Fetch all data
   const fetchCert = useCallback(async () => {
@@ -410,16 +650,25 @@ export default function WildcardSSL() {
     try {
       const res = await wildcardSSLApi.getServers()
       setServers(res.data.servers)
+      setSelectedIds(prev => prev.filter(id => res.data.servers.some(s => s.server_id === id)))
     } catch { /* ignore */ } finally {
       setServersLoading(false)
     }
+  }, [])
+
+  const fetchReloadPresets = useCallback(async () => {
+    try {
+      const res = await wildcardSSLApi.getReloadCmdPresets()
+      setReloadPresets(res.data.presets)
+    } catch { /* ignore */ }
   }, [])
 
   useEffect(() => {
     fetchCert()
     fetchSettings()
     fetchServers()
-  }, [fetchCert, fetchSettings, fetchServers])
+    fetchReloadPresets()
+  }, [fetchCert, fetchSettings, fetchServers, fetchReloadPresets])
 
   useEffect(() => {
     return () => { if (pollRef.current) clearInterval(pollRef.current) }
@@ -472,26 +721,26 @@ export default function WildcardSSL() {
     }
   }
 
+  // Итоговый тост по done-состоянию стрима; детали ошибок видны в панели прогресса
+  const notifyDeployFinished = (state: BulkStreamState<WildcardDeployResult>) => {
+    if (state.error) {
+      toast.error(state.error, { duration: 8000 })
+      return
+    }
+    if (!state.finished) return
+    const failedRows = state.rows.filter(r => r.state === 'error')
+    if (failedRows.length === 0) {
+      toast.success(t('wildcard_ssl.deploy_success', { success: state.ok, total: state.total }))
+    } else {
+      const names = failedRows.map(r => r.server_name).join(', ')
+      toast.error(t('wildcard_ssl.deploy_partial', { success: state.ok, total: state.total, failed: names }), { duration: 8000 })
+    }
+  }
+
   const handleDeployAll = async () => {
     if (!cert) return
-    setDeploying(true)
-    try {
-      const res = await wildcardSSLApi.deployToAll(cert.id)
-      const nodeResults = res.data.results.filter(r => r.server_id != null)
-      const failed = nodeResults.filter(r => !r.success)
-      const ok = nodeResults.length - failed.length
-      if (failed.length === 0) {
-        toast.success(t('wildcard_ssl.deploy_success', { success: ok, total: nodeResults.length }))
-      } else {
-        const names = failed.map(r => r.server_name || `#${r.server_id}`).join(', ')
-        toast.error(t('wildcard_ssl.deploy_partial', { success: ok, total: nodeResults.length, failed: names }), { duration: 8000 })
-        failed.forEach(r => toast.error(`${r.server_name || `#${r.server_id}`}: ${r.message}`, { duration: 8000 }))
-      }
-    } catch {
-      toast.error('Deploy failed')
-    } finally {
-      setDeploying(false)
-    }
+    const state = await runDeploy(wildcardDeployStreamUrl(cert.id), { server_ids: null })
+    notifyDeployFinished(state)
   }
 
   const handleDeployOne = async (serverId: number) => {
@@ -552,14 +801,29 @@ export default function WildcardSSL() {
     setExpandedServer(prev => prev === serverId ? null : serverId)
   }
 
-  const handleToggleAll = async (enabled: boolean) => {
-    setServers(prev => prev.map(s => ({ ...s, wildcard_ssl_enabled: enabled })))
+  const handleSaveReloadPreset = async (command: string) => {
+    if (!command) return
+    const name = window.prompt(t('wildcard_ssl.reload_preset_save_prompt'))
+    if (!name || !name.trim()) return
+    setSavingReloadPreset(true)
     try {
-      await Promise.all(
-        servers.map(s => wildcardSSLApi.updateServer(s.server_id, { wildcard_ssl_enabled: enabled }))
-      )
+      const res = await wildcardSSLApi.saveReloadCmdPreset(name.trim(), command)
+      setReloadPresets(res.data.presets)
+      toast.success(t('wildcard_ssl.reload_preset_saved'))
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || t('wildcard_ssl.reload_preset_save_failed'))
+    } finally {
+      setSavingReloadPreset(false)
+    }
+  }
+
+  const handleDeleteReloadPreset = async (name: string) => {
+    if (!confirm(t('wildcard_ssl.reload_preset_delete_confirm'))) return
+    try {
+      const res = await wildcardSSLApi.deleteReloadCmdPreset(name)
+      setReloadPresets(res.data.presets)
     } catch {
-      fetchServers()
+      toast.error(t('wildcard_ssl.reload_preset_save_failed'))
     }
   }
 
@@ -601,6 +865,165 @@ export default function WildcardSSL() {
   }
 
   const enabledCount = servers.filter(s => s.wildcard_ssl_enabled).length
+
+  const groupedServers = useMemo(() => {
+    const folders = new Map<string, WildcardServerConfig[]>()
+    const noFolder: WildcardServerConfig[] = []
+    for (const s of servers) {
+      if (s.folder) {
+        if (!folders.has(s.folder)) folders.set(s.folder, [])
+        folders.get(s.folder)!.push(s)
+      } else {
+        noFolder.push(s)
+      }
+    }
+    return { folders, noFolder }
+  }, [servers])
+
+  const sortedFolderNames = useMemo(() => {
+    const allNames = [...groupedServers.folders.keys()]
+    try {
+      const saved: string[] = JSON.parse(localStorage.getItem('dashboard_folder_order') || '[]')
+      const ordered = saved.filter(f => allNames.includes(f))
+      const rest = allNames.filter(f => !saved.includes(f)).sort()
+      return [...ordered, ...rest]
+    } catch {
+      return allNames.sort()
+    }
+  }, [groupedServers.folders])
+
+  const filteredGroups = useMemo(() => {
+    const q = searchQuery.toLowerCase().trim()
+    if (!q) return groupedServers
+    const matches = (s: WildcardServerConfig) =>
+      s.server_name.toLowerCase().includes(q) || (s.server_url || '').toLowerCase().includes(q)
+    const folders = new Map<string, WildcardServerConfig[]>()
+    for (const [name, svrs] of groupedServers.folders) {
+      // Совпадение по имени папки показывает всю папку целиком
+      const matched = name.toLowerCase().includes(q) ? svrs : svrs.filter(matches)
+      if (matched.length > 0) folders.set(name, matched)
+    }
+    return { folders, noFolder: groupedServers.noFolder.filter(matches) }
+  }, [searchQuery, groupedServers])
+
+  const filteredServers = useMemo(
+    () => [...Array.from(filteredGroups.folders.values()).flat(), ...filteredGroups.noFolder],
+    [filteredGroups]
+  )
+
+  const hasFolders = groupedServers.folders.size > 0
+
+  const visibleIds = useMemo(() => filteredServers.map(s => s.server_id), [filteredServers])
+  const allVisibleSelected = visibleIds.length > 0 && visibleIds.every(id => selectedIds.includes(id))
+  const someVisibleSelected = visibleIds.some(id => selectedIds.includes(id))
+
+  const toggleSelect = (id: number) => {
+    setSelectedIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id])
+  }
+
+  const toggleSelectAllVisible = () => {
+    if (allVisibleSelected) {
+      setSelectedIds(prev => prev.filter(id => !visibleIds.includes(id)))
+    } else {
+      setSelectedIds(prev => [...new Set([...prev, ...visibleIds])])
+    }
+  }
+
+  const clearSelection = () => {
+    setSelectedIds([])
+    setShowBulkEdit(false)
+  }
+
+  const toggleFolderSelect = (folderServers: WildcardServerConfig[]) => {
+    const folderIds = folderServers.map(s => s.server_id)
+    const allSelected = folderIds.every(id => selectedIds.includes(id))
+    if (allSelected) {
+      setSelectedIds(prev => prev.filter(id => !folderIds.includes(id)))
+    } else {
+      setSelectedIds(prev => [...new Set([...prev, ...folderIds])])
+    }
+  }
+
+  const getFolderCheckState = (folderServers: WildcardServerConfig[]): 'none' | 'some' | 'all' => {
+    const count = folderServers.filter(s => selectedIds.includes(s.server_id)).length
+    if (count === 0) return 'none'
+    if (count === folderServers.length) return 'all'
+    return 'some'
+  }
+
+  const toggleCollapsed = (folder: string) => {
+    setExpandedFolders(prev => {
+      const next = new Set(prev)
+      if (next.has(folder)) next.delete(folder)
+      else next.add(folder)
+      localStorage.setItem('wildcard_expanded_folders', JSON.stringify([...next]))
+      return next
+    })
+  }
+
+  // Ноды с закрытым разделом SSL можно выделять (настройки живут в БД панели),
+  // но деплой на них панель не отправит
+  const eligibleIds = useMemo(
+    () => selectedIds.filter(id => nodeAllows(allServers.find(s => s.id === id), 'ssl', 'write')),
+    [selectedIds, allServers]
+  )
+  const blockedCount = selectedIds.length - eligibleIds.length
+
+  const handleBulkToggle = async (enabled: boolean) => {
+    const ids = new Set(selectedIds)
+    setServers(prev => prev.map(s => ids.has(s.server_id) ? { ...s, wildcard_ssl_enabled: enabled } : s))
+    try {
+      await wildcardSSLApi.updateServersBulk({ server_ids: selectedIds, wildcard_ssl_enabled: enabled })
+    } catch {
+      fetchServers()
+    }
+  }
+
+  const handleBulkDeploy = async () => {
+    if (!cert) return
+    if (eligibleIds.length === 0) {
+      toast.error(t('wildcard_ssl.bulk_deploy_blocked', { count: blockedCount }))
+      return
+    }
+    const state = await runDeploy(wildcardDeployStreamUrl(cert.id), { server_ids: eligibleIds })
+    notifyDeployFinished(state)
+  }
+
+  const renderServerCard = (srv: WildcardServerConfig) => (
+    <ServerCard
+      key={srv.server_id}
+      srv={srv}
+      cert={cert}
+      deployingServer={deployingServer}
+      expanded={expandedServer === srv.server_id}
+      selected={selectedIds.includes(srv.server_id)}
+      onToggle={handleServerToggle}
+      onExpand={handleExpandServer}
+      onSelect={toggleSelect}
+      onSave={handleServerSave}
+      onDeploy={handleDeployOne}
+      restricted={!nodeAllows(allServers.find(s => s.id === srv.server_id), 'ssl', 'write')}
+      reloadPresets={reloadPresets}
+      savingReloadPreset={savingReloadPreset}
+      onSaveReloadPreset={handleSaveReloadPreset}
+      onDeleteReloadPreset={handleDeleteReloadPreset}
+      t={t}
+    />
+  )
+
+  const handleBulkEditSave = async (patch: WildcardServerConfigPatch) => {
+    setBulkSaving(true)
+    try {
+      const res = await wildcardSSLApi.updateServersBulk({ server_ids: selectedIds, ...patch })
+      toast.success(t('wildcard_ssl.bulk_updated', { count: res.data.updated }))
+      setShowBulkEdit(false)
+      fetchServers()
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || 'Error')
+    } finally {
+      setBulkSaving(false)
+    }
+  }
 
   return (
     <motion.div
@@ -662,10 +1085,10 @@ export default function WildcardSSL() {
                     {renewing ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
                     {renewing ? t('wildcard_ssl.renewing') : t('wildcard_ssl.renew')}
                   </button>
-                  <button onClick={handleDeployAll} disabled={deploying || enabledCount === 0}
+                  <button onClick={handleDeployAll} disabled={deployProgress.active || enabledCount === 0}
                     className="px-3 py-1.5 bg-blue-500/20 text-blue-400 rounded-lg text-sm hover:bg-blue-500/30 transition-colors disabled:opacity-50 flex items-center gap-1.5">
-                    {deploying ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
-                    {deploying ? t('wildcard_ssl.deploying') : t('wildcard_ssl.deploy_all')}
+                    {deployProgress.active ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+                    {deployProgress.active ? t('wildcard_ssl.deploying') : t('wildcard_ssl.deploy_all')}
                   </button>
                   <button onClick={handleDelete}
                     className="px-3 py-1.5 bg-red-500/20 text-red-400 rounded-lg text-sm hover:bg-red-500/30 transition-colors flex items-center gap-1.5">
@@ -871,9 +1294,9 @@ export default function WildcardSSL() {
             )}
           </div>
           {cert && enabledCount > 0 && (
-            <button onClick={handleDeployAll} disabled={deploying}
+            <button onClick={handleDeployAll} disabled={deployProgress.active}
               className="px-3 py-1.5 bg-blue-500/20 text-blue-400 rounded-lg text-sm hover:bg-blue-500/30 transition-colors disabled:opacity-50 flex items-center gap-1.5">
-              {deploying ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+              {deployProgress.active ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
               {t('wildcard_ssl.deploy_all')}
             </button>
           )}
@@ -892,42 +1315,232 @@ export default function WildcardSSL() {
           <p className="text-dark-400 text-sm py-4">{t('wildcard_ssl.no_servers')}</p>
         ) : (
           <div className="space-y-2">
-            {/* Toggle all bar */}
-            <div className="flex items-center justify-end gap-2 pb-1">
-              {enabledCount < servers.length ? (
-                <button
-                  onClick={() => handleToggleAll(true)}
-                  className="px-2.5 py-1 text-xs text-dark-400 hover:text-accent-400 transition-colors flex items-center gap-1.5"
-                >
-                  <ToggleRight className="w-4 h-4" />
-                  {t('wildcard_ssl.enable_all')}
-                </button>
-              ) : (
-                <button
-                  onClick={() => handleToggleAll(false)}
-                  className="px-2.5 py-1 text-xs text-dark-400 hover:text-red-400 transition-colors flex items-center gap-1.5"
-                >
-                  <ToggleLeft className="w-4 h-4" />
-                  {t('wildcard_ssl.disable_all')}
+            {/* Search */}
+            <div className="flex items-center gap-2 bg-dark-800 border border-dark-600 rounded-lg px-3 py-1.5">
+              <Search className="w-4 h-4 text-dark-400 shrink-0" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={e => setSearchQuery(e.target.value)}
+                placeholder={t('wildcard_ssl.search_placeholder')}
+                className="bg-transparent text-sm text-dark-100 placeholder-dark-500 outline-none w-full"
+              />
+              {searchQuery && (
+                <button onClick={() => setSearchQuery('')} className="text-dark-500 hover:text-dark-300 shrink-0">
+                  <X className="w-4 h-4" />
                 </button>
               )}
             </div>
 
-            {servers.map(srv => (
-              <ServerCard
-                key={srv.server_id}
-                srv={srv}
-                cert={cert}
-                deployingServer={deployingServer}
-                expanded={expandedServer === srv.server_id}
-                onToggle={handleServerToggle}
-                onExpand={handleExpandServer}
-                onSave={handleServerSave}
-                onDeploy={handleDeployOne}
-                restricted={!nodeAllows(allServers.find(s => s.id === srv.server_id), 'ssl', 'write')}
-                t={t}
-              />
-            ))}
+            {/* Select all */}
+            <div className="flex items-center justify-between px-1 pb-1">
+              <label className="flex items-center gap-2 cursor-pointer text-xs text-dark-400 hover:text-dark-200 transition-colors">
+                <Checkbox
+                  checked={allVisibleSelected}
+                  indeterminate={someVisibleSelected && !allVisibleSelected}
+                  onChange={toggleSelectAllVisible}
+                />
+                {t('wildcard_ssl.select_all')}
+                <span className="text-dark-600">({filteredServers.length})</span>
+              </label>
+            </div>
+
+            {/* Bulk actions bar */}
+            <AnimatePresence>
+              {selectedIds.length > 0 && (
+                <motion.div
+                  initial={{ opacity: 0, y: -5 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -5 }}
+                  className="flex items-center justify-between gap-2 flex-wrap px-3 py-2 rounded-lg bg-accent-500/10 border border-accent-500/30"
+                >
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xs text-accent-300">
+                      {t('wildcard_ssl.bulk_selected', { count: selectedIds.length })}
+                    </span>
+                    {blockedCount > 0 && (
+                      <span className="text-[11px] text-purple flex items-center gap-1">
+                        <Lock className="w-3 h-3" />
+                        {t('wildcard_ssl.bulk_deploy_blocked', { count: blockedCount })}
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <button
+                      onClick={() => handleBulkToggle(true)}
+                      className="px-2.5 py-1 text-xs rounded-lg text-dark-300 hover:text-accent-400 hover:bg-dark-800/60 transition-colors flex items-center gap-1.5"
+                    >
+                      <ToggleRight className="w-4 h-4" />
+                      {t('wildcard_ssl.bulk_enable')}
+                    </button>
+                    <button
+                      onClick={() => handleBulkToggle(false)}
+                      className="px-2.5 py-1 text-xs rounded-lg text-dark-300 hover:text-red-400 hover:bg-dark-800/60 transition-colors flex items-center gap-1.5"
+                    >
+                      <ToggleLeft className="w-4 h-4" />
+                      {t('wildcard_ssl.bulk_disable')}
+                    </button>
+                    {cert && (
+                      <button
+                        onClick={handleBulkDeploy}
+                        disabled={eligibleIds.length === 0 || deployProgress.active}
+                        className="px-2.5 py-1 text-xs rounded-lg bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 transition-colors disabled:opacity-50 flex items-center gap-1.5"
+                      >
+                        {deployProgress.active
+                          ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          : <Upload className="w-3.5 h-3.5" />}
+                        {t('wildcard_ssl.bulk_deploy')}
+                      </button>
+                    )}
+                    <button
+                      onClick={() => setShowBulkEdit(v => !v)}
+                      className={`px-2.5 py-1 text-xs rounded-lg transition-colors flex items-center gap-1.5 ${
+                        showBulkEdit
+                          ? 'bg-accent-500/20 text-accent-300'
+                          : 'text-dark-300 hover:text-accent-400 hover:bg-dark-800/60'
+                      }`}
+                    >
+                      <Settings2 className="w-3.5 h-3.5" />
+                      {t('wildcard_ssl.bulk_edit')}
+                    </button>
+                    <button onClick={clearSelection} className="p-1 text-dark-400 hover:text-dark-200 transition-colors">
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            {/* Bulk edit form */}
+            <AnimatePresence>
+              {showBulkEdit && selectedIds.length > 0 && (
+                <WildcardBulkEditForm
+                  count={selectedIds.length}
+                  saving={bulkSaving}
+                  onSave={handleBulkEditSave}
+                  onClose={() => setShowBulkEdit(false)}
+                  reloadPresets={reloadPresets}
+                  onDeleteReloadPreset={handleDeleteReloadPreset}
+                  t={t}
+                />
+              )}
+            </AnimatePresence>
+
+            {/* Deploy progress */}
+            <AnimatePresence>
+              {(deployProgress.active || deployProgress.total > 0) && (
+                <WildcardDeployProgress
+                  progress={deployProgress}
+                  onClose={resetDeploy}
+                  onCancel={cancelDeploy}
+                />
+              )}
+            </AnimatePresence>
+
+            {filteredServers.length === 0 ? (
+              <div className="text-center py-6">
+                <Search className="w-8 h-8 text-dark-600 mx-auto mb-2" />
+                <p className="text-dark-400 text-sm">{t('wildcard_ssl.search_empty')}</p>
+              </div>
+            ) : !hasFolders ? (
+              filteredServers.map(renderServerCard)
+            ) : (
+              <>
+                {sortedFolderNames
+                  .filter(name => filteredGroups.folders.has(name))
+                  .map(folderName => {
+                    const folderServers = filteredGroups.folders.get(folderName)!
+                    const allFolderServers = groupedServers.folders.get(folderName)!
+                    const checkState = getFolderCheckState(allFolderServers)
+                    const isCollapsed = !expandedFolders.has(folderName)
+                    const selectedInFolder = allFolderServers.filter(s => selectedIds.includes(s.server_id)).length
+
+                    return (
+                      <div key={folderName}>
+                        <div className="flex items-center gap-2 p-2 rounded-lg hover:bg-dark-800/50 transition-colors">
+                          <Checkbox
+                            checked={checkState === 'all'}
+                            indeterminate={checkState === 'some'}
+                            onChange={() => toggleFolderSelect(allFolderServers)}
+                          />
+                          <div
+                            className="flex items-center gap-2 flex-1 min-w-0 cursor-pointer"
+                            onClick={() => toggleCollapsed(folderName)}
+                          >
+                            {isCollapsed
+                              ? <Folder className="w-4 h-4 text-accent-400 shrink-0" />
+                              : <FolderOpen className="w-4 h-4 text-accent-400 shrink-0" />}
+                            <span className="font-medium text-sm text-dark-200 truncate">{folderName}</span>
+                            <span className="text-xs text-dark-500 ml-auto shrink-0">{selectedInFolder}/{allFolderServers.length}</span>
+                            <motion.div animate={{ rotate: isCollapsed ? -90 : 0 }} transition={{ duration: 0.15 }}>
+                              <ChevronDown className="w-3.5 h-3.5 text-dark-500" />
+                            </motion.div>
+                          </div>
+                        </div>
+                        <AnimatePresence initial={false}>
+                          {!isCollapsed && (
+                            <motion.div
+                              initial={{ height: 0, opacity: 0 }}
+                              animate={{ height: 'auto', opacity: 1 }}
+                              exit={{ height: 0, opacity: 0 }}
+                              transition={{ duration: 0.15 }}
+                              className="overflow-hidden"
+                            >
+                              <div className="pl-6 space-y-2 pt-1 pb-1">
+                                {folderServers.map(renderServerCard)}
+                              </div>
+                            </motion.div>
+                          )}
+                        </AnimatePresence>
+                      </div>
+                    )
+                  })}
+
+                {filteredGroups.noFolder.length > 0 && (() => {
+                  const checkState = getFolderCheckState(groupedServers.noFolder)
+                  const isCollapsed = !expandedFolders.has(NO_FOLDER)
+                  const selectedInGroup = groupedServers.noFolder.filter(s => selectedIds.includes(s.server_id)).length
+
+                  return (
+                    <div>
+                      <div className="flex items-center gap-2 p-2 rounded-lg hover:bg-dark-800/50 transition-colors">
+                        <Checkbox
+                          checked={checkState === 'all'}
+                          indeterminate={checkState === 'some'}
+                          onChange={() => toggleFolderSelect(groupedServers.noFolder)}
+                        />
+                        <div
+                          className="flex items-center gap-2 flex-1 min-w-0 cursor-pointer"
+                          onClick={() => toggleCollapsed(NO_FOLDER)}
+                        >
+                          <Server className="w-4 h-4 text-dark-400 shrink-0" />
+                          <span className="font-medium text-sm text-dark-400 truncate">{t('bulk_actions.no_folder')}</span>
+                          <span className="text-xs text-dark-500 ml-auto shrink-0">{selectedInGroup}/{groupedServers.noFolder.length}</span>
+                          <motion.div animate={{ rotate: isCollapsed ? -90 : 0 }} transition={{ duration: 0.15 }}>
+                            <ChevronDown className="w-3.5 h-3.5 text-dark-500" />
+                          </motion.div>
+                        </div>
+                      </div>
+                      <AnimatePresence initial={false}>
+                        {!isCollapsed && (
+                          <motion.div
+                            initial={{ height: 0, opacity: 0 }}
+                            animate={{ height: 'auto', opacity: 1 }}
+                            exit={{ height: 0, opacity: 0 }}
+                            transition={{ duration: 0.15 }}
+                            className="overflow-hidden"
+                          >
+                            <div className="pl-6 space-y-2 pt-1 pb-1">
+                              {filteredGroups.noFolder.map(renderServerCard)}
+                            </div>
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </div>
+                  )
+                })()}
+              </>
+            )}
           </div>
         )}
       </motion.div>

@@ -2,6 +2,15 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Chrome/Edge на Windows не рисуют emoji-флаги стран (показывают буквы вместо флага).
+   Шрифт покрывает только кодовые точки флагов — остальной текст не затрагивает. */
+@font-face {
+  font-family: 'Twemoji Country Flags';
+  src: url('./assets/TwemojiCountryFlags.woff2') format('woff2');
+  font-display: swap;
+  unicode-range: U+1F1E6-1F1FF, U+1F3F4, U+E0062-E0063, U+E0065, U+E0067, U+E006C, U+E006E, U+E0073-E0074, U+E0077, U+E007F;
+}
+
 :root {
   --bg-primary: #0a0a0c;
   --bg-tertiary: #1c1c21;
@@ -22,7 +31,7 @@ html, body, #root {
 body {
   background: var(--bg-primary);
   color: var(--text-primary);
-  font-family: 'Outfit', system-ui, sans-serif;
+  font-family: 'Twemoji Country Flags', 'Outfit', system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -375,6 +384,28 @@ body {
 
 .loading-text-pulse {
   animation: live-pulse 1.5s ease-in-out infinite;
+}
+
+/* ========== ФОНОВЫЕ ПЯТНА LAYOUT ========== */
+/* Размытый слой двигать только CSS-анимацией: композитор кэширует blur и лишь сдвигает
+   готовую картинку. JS-запись transform на каждом кадре (framer-motion) заставляла Chrome
+   заново считать blur(100px) на каждом кадре монитора — десятки процентов GPU на любой странице. */
+.bg-blob-drift-a {
+  animation: bg-blob-drift-a 20s ease-in-out infinite;
+}
+
+.bg-blob-drift-b {
+  animation: bg-blob-drift-b 15s ease-in-out infinite;
+}
+
+@keyframes bg-blob-drift-a {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(100px, 50px) scale(1.1); }
+}
+
+@keyframes bg-blob-drift-b {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(-50px, -100px) scale(1.2); }
 }
 
 /* ========== COLLAPSIBLE SECTION (CSS Grid trick) ========== */

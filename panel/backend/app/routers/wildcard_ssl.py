@@ -1,15 +1,18 @@
+import asyncio
+import json
 import logging
 import re
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
-from pydantic import BaseModel, Field
-from sqlalchemy import select
+from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import select, update
 
 from app.auth import verify_auth
 from app.config import get_settings as get_app_config
 from app.database import async_session
 from app.models import WildcardCertificate, Server, PanelSettings
+from app.services.bulk_stream import stream_ndjson
 from app.services.wildcard_ssl import (
     USE_FOR_PANEL_SETTING,
     get_wildcard_ssl_manager,
@@ -24,6 +27,10 @@ router = APIRouter(prefix="/wildcard-ssl", tags=["wildcard-ssl"])
 PEM_CERT_BLOCK = re.compile(
     r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", re.DOTALL
 )
+
+RELOAD_CMD_PRESETS_KEY = "wildcard_reload_cmd_presets"
+# Зеркало MAX_RELOAD_COMMAND_LEN ноды (node/app/services/ssl_manager.py)
+MAX_RELOAD_CMD_LEN = 512
 
 
 # ─── Schemas ───
@@ -42,6 +49,31 @@ class ServerConfigUpdate(BaseModel):
     wildcard_ssl_custom_path_enabled: Optional[bool] = None
     wildcard_ssl_custom_fullchain_path: Optional[str] = None
     wildcard_ssl_custom_privkey_path: Optional[str] = None
+
+
+class BulkServerConfigUpdate(ServerConfigUpdate):
+    server_ids: list[int] = Field(..., min_length=1)
+
+
+class DeployStreamRequest(BaseModel):
+    server_ids: Optional[list[int]] = None
+
+
+class ReloadCmdPreset(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    command: str = Field(..., min_length=1, max_length=MAX_RELOAD_CMD_LEN)
+
+    @field_validator("name", "command")
+    @classmethod
+    def _strip_nonempty(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("Значение не может быть пустым")
+        return v
+
+
+class ReloadCmdPresetDelete(BaseModel):
+    name: str
 
 
 class SettingsUpdate(BaseModel):
@@ -149,11 +181,29 @@ async def delete_certificate(cert_id: int, _: dict = Depends(verify_auth)):
 
 # ─── Deploy ───
 
-@router.post("/certificates/{cert_id}/deploy")
-async def deploy_to_all(cert_id: int, _: dict = Depends(verify_auth)):
+@router.post("/certificates/{cert_id}/deploy/stream")
+async def deploy_stream(
+    cert_id: int,
+    req: DeployStreamRequest,
+    _: dict = Depends(verify_auth),
+):
+    """NDJSON-стрим раскатки: server_ids — явный выбор, null — все включённые."""
     manager = get_wildcard_ssl_manager()
-    results = await manager.deploy_to_all(cert_id)
-    return {"results": results}
+    cert, servers = await manager.get_deploy_targets(cert_id, req.server_ids)
+    if not cert:
+        raise HTTPException(status_code=404, detail="Certificate not found")
+    if not servers:
+        raise HTTPException(status_code=400, detail="No eligible servers")
+
+    # stream_ndjson создаёт таски на все серверы разом — без семафора это
+    # сотни одновременных TLS-соединений на большом флоте
+    sem = asyncio.Semaphore(30)
+
+    async def worker(server):
+        async with sem:
+            return await manager.deploy_to_node(cert, server)
+
+    return stream_ndjson(servers, worker, log_action="wildcard_deploy")
 
 
 @router.post("/certificates/{cert_id}/deploy/{server_id}")
@@ -227,6 +277,59 @@ async def update_settings(req: SettingsUpdate, _: dict = Depends(verify_auth)):
     return {"success": True, "panel_deploy": panel_deploy}
 
 
+# ─── Пресеты reload-команд ───
+
+def _presets_to_response(presets: list[dict]) -> dict:
+    return {"presets": [{"name": p["name"], "command": p["command"]} for p in presets]}
+
+
+async def _load_reload_presets(db) -> list[dict]:
+    raw = await _get_setting(db, RELOAD_CMD_PRESETS_KEY)
+    if raw:
+        try:
+            return json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return []
+
+
+async def _save_reload_presets(db, presets: list[dict]) -> None:
+    await _set_setting(db, RELOAD_CMD_PRESETS_KEY, json.dumps(presets, ensure_ascii=False))
+    await db.commit()
+
+
+def upsert_reload_preset(presets: list[dict], name: str, command: str) -> list[dict]:
+    entry = {"name": name, "command": command}
+    idx = next((i for i, p in enumerate(presets) if p["name"] == name), None)
+    if idx is not None:
+        presets[idx] = entry
+    else:
+        presets.append(entry)
+    return presets
+
+
+@router.get("/reload-cmd-presets")
+async def list_reload_cmd_presets(_: dict = Depends(verify_auth)):
+    async with async_session() as db:
+        return _presets_to_response(await _load_reload_presets(db))
+
+
+@router.post("/reload-cmd-presets")
+async def save_reload_cmd_preset(req: ReloadCmdPreset, _: dict = Depends(verify_auth)):
+    async with async_session() as db:
+        presets = upsert_reload_preset(await _load_reload_presets(db), req.name, req.command)
+        await _save_reload_presets(db, presets)
+        return {"success": True, **_presets_to_response(presets)}
+
+
+@router.delete("/reload-cmd-presets")
+async def delete_reload_cmd_preset(req: ReloadCmdPresetDelete, _: dict = Depends(verify_auth)):
+    async with async_session() as db:
+        presets = [p for p in await _load_reload_presets(db) if p["name"] != req.name]
+        await _save_reload_presets(db, presets)
+        return {"success": True, **_presets_to_response(presets)}
+
+
 # ─── Server config ───
 
 @router.get("/servers")
@@ -240,6 +343,8 @@ async def get_servers(_: dict = Depends(verify_auth)):
                 {
                     "server_id": s.id,
                     "server_name": s.name,
+                    "server_url": s.url or "",
+                    "folder": s.folder,
                     "wildcard_ssl_enabled": s.wildcard_ssl_enabled or False,
                     "wildcard_ssl_deploy_path": s.wildcard_ssl_deploy_path or "",
                     "wildcard_ssl_reload_cmd": s.wildcard_ssl_reload_cmd or "",
@@ -252,6 +357,30 @@ async def get_servers(_: dict = Depends(verify_auth)):
                 for s in servers
             ]
         }
+
+
+# Объявлен до /servers/{server_id}, иначе "bulk" парсится как server_id
+@router.put("/servers/bulk")
+async def update_servers_bulk(req: BulkServerConfigUpdate, _: dict = Depends(verify_auth)):
+    """Массовое обновление настроек: поле не передано — не менять, "" — сбросить."""
+    changes = {
+        k: v
+        for k, v in req.model_dump(exclude_unset=True, exclude={"server_ids"}).items()
+        if v is not None
+    }
+    if not changes:
+        raise HTTPException(status_code=400, detail="No changes specified")
+
+    async with async_session() as db:
+        found = list((await db.execute(
+            select(Server.id).where(Server.id.in_(req.server_ids))
+        )).scalars().all())
+        if not found:
+            raise HTTPException(status_code=404, detail="No servers found")
+
+        await db.execute(update(Server).where(Server.id.in_(found)).values(**changes))
+        await db.commit()
+    return {"success": True, "updated": len(found)}
 
 
 @router.put("/servers/{server_id}")

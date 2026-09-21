@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from app.services.deploy_service import (  # noqa: E402
     DeployParams,
     InstallerLanguage,
-    _build_inner_command,
+    build_install_command,
 )
 
 
@@ -24,21 +24,21 @@ def params(**kwargs) -> DeployParams:
 
 class DeployCommandTests(unittest.TestCase):
     def test_custom_port_is_exported_to_the_installer(self):
-        command = _build_inner_command(params(node_api_port=12345))
+        command = build_install_command(params(node_api_port=12345))
         self.assertIn("NODE_API_PORT=12345", command)
 
     def test_default_port_is_not_exported(self):
         # Дефолт не тащим в env: .env ноды не засоряется, поведение старых установок не меняется
-        command = _build_inner_command(params(node_api_port=9100))
+        command = build_install_command(params(node_api_port=9100))
         self.assertNotIn("NODE_API_PORT", command)
 
     def test_panel_language_is_exported_to_the_installer(self):
-        command = _build_inner_command(params(lang=InstallerLanguage.RU))
+        command = build_install_command(params(lang=InstallerLanguage.RU))
         self.assertIn("MON_LANG=ru", command)
 
     def test_language_defaults_to_english(self):
         # Явный en важен: при переустановке перебивает русский, оставшийся от прошлой ноды
-        command = _build_inner_command(params())
+        command = build_install_command(params())
         self.assertIn("MON_LANG=en", command)
 
 

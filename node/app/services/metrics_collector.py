@@ -19,6 +19,11 @@ from typing import Iterable, Optional
 import psutil
 
 from app.config import get_settings
+from app.services.ephemeral_ports import (
+    EphemeralPortsAggregator,
+    read_kernel_settings,
+    scan_listening_ports,
+)
 from app.services.port_traffic_sampler import get_port_traffic_sampler
 from app.services.rate_sampler import (
     RateSample,
@@ -415,7 +420,7 @@ class MetricsCollector:
             '0A': 'listen',
             '0B': 'closing',
         }
-        
+
         tcp_stats = {
             'total': 0,
             'established': 0,
@@ -428,37 +433,44 @@ class MetricsCollector:
             'other': 0,
         }
         udp_stats = {'total': 0}
-        
-        # Read TCP (IPv4 + IPv6)
+
+        # Оба файла целиком — по ним идут и счётчики состояний, и учёт эфемерных
+        # портов; читать их дважды на ноде с сотней тысяч сокетов незачем
+        tcp_dumps = []
         for tcp_file in ['/proc/net/tcp', '/proc/net/tcp6']:
             host_path = Path(self.settings.host_proc) / tcp_file.removeprefix('/proc/')
             try:
                 if host_path.exists():
-                    content = host_path.read_text()
-                    for line in content.strip().split('\n')[1:]:  # Skip header
-                        parts = line.split()
-                        if len(parts) >= 4:
-                            state = parts[3].upper()
-                            tcp_stats['total'] += 1
-                            state_name = tcp_states.get(state, 'other')
-                            if state_name == 'established':
-                                tcp_stats['established'] += 1
-                            elif state_name == 'listen':
-                                tcp_stats['listen'] += 1
-                            elif state_name == 'time_wait':
-                                tcp_stats['time_wait'] += 1
-                            elif state_name == 'close_wait':
-                                tcp_stats['close_wait'] += 1
-                            elif state_name == 'syn_sent':
-                                tcp_stats['syn_sent'] += 1
-                            elif state_name == 'syn_recv':
-                                tcp_stats['syn_recv'] += 1
-                            elif state_name in ('fin_wait1', 'fin_wait2'):
-                                tcp_stats['fin_wait'] += 1
-                            else:
-                                tcp_stats['other'] += 1
+                    tcp_dumps.append(host_path.read_text())
             except OSError as e:
                 logger.warning(f"Failed to read {host_path}, TCP connection counters are incomplete: {e}")
+
+        aggregator = self._ephemeral_aggregator(tcp_dumps)
+        for content in tcp_dumps:
+            for line in content.strip().split('\n')[1:]:  # Skip header
+                parts = line.split()
+                if len(parts) >= 4:
+                    state = parts[3].upper()
+                    tcp_stats['total'] += 1
+                    state_name = tcp_states.get(state, 'other')
+                    if state_name == 'established':
+                        tcp_stats['established'] += 1
+                    elif state_name == 'listen':
+                        tcp_stats['listen'] += 1
+                    elif state_name == 'time_wait':
+                        tcp_stats['time_wait'] += 1
+                    elif state_name == 'close_wait':
+                        tcp_stats['close_wait'] += 1
+                    elif state_name == 'syn_sent':
+                        tcp_stats['syn_sent'] += 1
+                    elif state_name == 'syn_recv':
+                        tcp_stats['syn_recv'] += 1
+                    elif state_name in ('fin_wait1', 'fin_wait2'):
+                        tcp_stats['fin_wait'] += 1
+                    else:
+                        tcp_stats['other'] += 1
+                    if aggregator is not None:
+                        aggregator.add(parts[1], parts[2], state)
 
         # Read UDP (IPv4 + IPv6)
         for udp_file in ['/proc/net/udp', '/proc/net/udp6']:
@@ -474,7 +486,35 @@ class MetricsCollector:
         return {
             'tcp': tcp_stats,
             'udp': udp_stats,
+            'ephemeral_ports': self._summarize_ephemeral(aggregator),
         }
+
+    def _ephemeral_aggregator(self, tcp_dumps: list) -> Optional[EphemeralPortsAggregator]:
+        """Слушающие порты нужны до разбора сокетов: по ним отсеиваются входящие
+        соединения, у которых локальный порт — не выданный ядром эфемерный."""
+        if not tcp_dumps:
+            return None
+        try:
+            settings = read_kernel_settings(Path(self.settings.host_proc))
+            listening = set()
+            for content in tcp_dumps:
+                listening |= scan_listening_ports(content)
+            return EphemeralPortsAggregator(settings, listening)
+        except Exception as e:
+            logger.error(f"Ephemeral port accounting unavailable: {e}")
+            return None
+
+    @staticmethod
+    def _summarize_ephemeral(aggregator: Optional[EphemeralPortsAggregator]) -> Optional[dict]:
+        """Перехват широкий по той же причине, что у счётчиков портов: /api/metrics —
+        единственный признак живости ноды, и учёт портов не стоит ухода в offline."""
+        if aggregator is None:
+            return None
+        try:
+            return aggregator.summarize()
+        except Exception as e:
+            logger.error(f"Ephemeral port summary failed: {e}")
+            return None
     
     def get_system_info(self) -> dict:
         """Get general system information with caching for heavy operations"""
@@ -511,7 +551,8 @@ class MetricsCollector:
         
         # Get connections from host /proc/net/* (heavy operation)
         conn_stats = self._read_host_connections()
-        
+        ephemeral_ports = conn_stats.pop('ephemeral_ports', None)
+
         # Legacy format for backward compatibility
         connections = {
             "established": conn_stats['tcp']['established'],
@@ -531,6 +572,7 @@ class MetricsCollector:
             "open_files": open_files,
             "connections": connections,
             "connections_detailed": conn_stats,
+            "ephemeral_ports": ephemeral_ports,
             "server_name": self.settings.node_name,
             "timezone": self._get_timezone_info(),
             "boot_id": self._get_boot_id(),

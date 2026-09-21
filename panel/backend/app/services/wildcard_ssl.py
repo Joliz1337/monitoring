@@ -215,7 +215,34 @@ class WildcardSSLManager:
             if not server:
                 return {"success": False, "message": "Server not found", "server_id": server_id}
 
-            return await self._deploy_to_node(cert, server)
+            if not server_allows(server, Capability.SSL, write=True):
+                return {"success": False, "message": "Node restricts SSL section",
+                        "server_id": server.id, "server_name": server.name}
+
+            return await self.deploy_to_node(cert, server)
+
+    async def get_deploy_targets(
+        self, cert_id: int, server_ids: Optional[list[int]] = None
+    ) -> tuple[Optional[WildcardCertificate], list[Server]]:
+        """Сертификат и серверы для раскатки: явный список или все включённые.
+
+        Явный выбор пользователя не требует wildcard_ssl_enabled — он и есть согласие.
+        """
+        async with async_session() as db:
+            cert = (await db.execute(
+                select(WildcardCertificate).where(WildcardCertificate.id == cert_id)
+            )).scalar_one_or_none()
+            if not cert:
+                return None, []
+
+            query = select(Server).where(Server.is_active == True)
+            if server_ids is None:
+                query = query.where(Server.wildcard_ssl_enabled == True)
+            else:
+                query = query.where(Server.id.in_(server_ids))
+            servers = list((await db.execute(query.order_by(Server.position))).scalars().all())
+
+        return cert, [s for s in servers if server_allows(s, Capability.SSL, write=True)]
 
     async def deploy_to_all(self, cert_id: int) -> list[dict]:
         # Читаем cert и серверы в короткой сессии и закрываем её до сетевого fan-out:
@@ -246,11 +273,11 @@ class WildcardSSLManager:
 
         async def _guarded(s):
             async with sem:
-                return await self._deploy_to_node(cert, s)
+                return await self.deploy_to_node(cert, s)
 
         return await asyncio.gather(*[_guarded(s) for s in servers], return_exceptions=False)
 
-    async def _deploy_to_node(self, cert: WildcardCertificate, server: Server) -> dict:
+    async def deploy_to_node(self, cert: WildcardCertificate, server: Server) -> dict:
         payload = {
             "fullchain_pem": cert.fullchain_pem,
             "privkey_pem": cert.privkey_pem,

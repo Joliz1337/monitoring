@@ -16,7 +16,14 @@ import {
 import { useTranslation } from 'react-i18next'
 import { Tooltip } from '../ui/Tooltip'
 import DeployTargetFields, { type DeployFormData } from './DeployTargetFields'
-import type { RemnawaveCertProfile, HAProxyConfigProfile, FirewallProfile, DnatProfile } from '../../api/client'
+import type {
+  RemnawaveCertProfile,
+  HAProxyConfigProfile,
+  FirewallProfile,
+  DnatProfile,
+  RemnawaveNginxProfile,
+  WildcardReloadCmdPreset,
+} from '../../api/client'
 
 export type DeployStatus = 'idle' | 'running' | 'success' | 'error'
 
@@ -46,9 +53,14 @@ interface Props {
   haproxyProfiles: HAProxyConfigProfile[]
   firewallProfiles: FirewallProfile[]
   dnatProfiles: DnatProfile[]
+  nginxProfiles: RemnawaveNginxProfile[]
+  reloadPresets: WildcardReloadCmdPreset[]
   savingCert: boolean
   onSaveCert: () => void
   onDeleteCert: (id: number) => void
+  savingReloadPreset: boolean
+  onSaveReloadPreset: (command: string) => void
+  onDeleteReloadPreset: (name: string) => void
   disabled: boolean
 }
 
@@ -64,9 +76,14 @@ export default function ExtraServerCard({
   haproxyProfiles,
   firewallProfiles,
   dnatProfiles,
+  nginxProfiles,
+  reloadPresets,
   savingCert,
   onSaveCert,
   onDeleteCert,
+  savingReloadPreset,
+  onSaveReloadPreset,
+  onDeleteReloadPreset,
   disabled,
 }: Props) {
   const { t } = useTranslation()
@@ -195,9 +212,14 @@ export default function ExtraServerCard({
             haproxyProfiles={haproxyProfiles}
             firewallProfiles={firewallProfiles}
             dnatProfiles={dnatProfiles}
+            nginxProfiles={nginxProfiles}
+            reloadPresets={reloadPresets}
             savingCert={savingCert}
             onSaveCert={onSaveCert}
             onDeleteCert={onDeleteCert}
+            savingReloadPreset={savingReloadPreset}
+            onSaveReloadPreset={onSaveReloadPreset}
+            onDeleteReloadPreset={onDeleteReloadPreset}
           />
         </div>
 

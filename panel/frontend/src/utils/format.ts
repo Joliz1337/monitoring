@@ -73,6 +73,16 @@ export function formatDate(date: string | Date): string {
   })
 }
 
+/** Эмодзи-флаг по ISO-2 коду страны; неизвестная страна — глобус */
+export function getFlag(code: string | null | undefined): string {
+  if (!code || code === 'XX') return '🌐'
+  return code
+    .toUpperCase()
+    .split('')
+    .map(c => String.fromCodePoint(0x1F1E6 + c.charCodeAt(0) - 65))
+    .join('')
+}
+
 export function formatTimeAgo(date: string | Date | null | undefined): string {
   if (!date) return 'Never'
 

@@ -114,6 +114,44 @@ class XrayConfigTest(unittest.TestCase):
         )
         self.assertEqual(stream["tlsSettings"]["alpn"], ["h2", "http/1.1"])
 
+    def test_xhttp_extra_travels_from_json_to_config(self):
+        """extra — часть протокола xhttp: без него сервер с кастомным
+        форматом трафика (аплоад GET-ом, свои ключи query) отвечает 403."""
+        extra = {
+            "uplinkHTTPMethod": "GET", "uplinkDataPlacement": "header",
+            "sessionIDKey": "uploadId", "seqKey": "offset",
+            "xmux": {"maxConnections": "2"},
+        }
+        raw = json.dumps({"outbounds": [{
+            "protocol": "vless", "tag": "p",
+            "settings": {"vnext": [{"address": "h.io", "port": 443, "users": [
+                {"id": UUID, "encryption": "none"}]}]},
+            "streamSettings": {
+                "network": "xhttp", "security": "tls",
+                "tlsSettings": {"serverName": "cdn.io"},
+                "xhttpSettings": {"path": "/obj.bin", "host": "cdn.io",
+                                  "mode": "packet-up", "extra": extra},
+            },
+        }]})
+        endpoints, _ = parse_config(raw)
+        stream = build_config(endpoints[0], Core.XRAY, 1080)["outbounds"][0]["streamSettings"]
+
+        self.assertEqual(stream["xhttpSettings"]["extra"], extra)
+        self.assertEqual(stream["xhttpSettings"]["path"], "/obj.bin")
+        self.assertEqual(stream["xhttpSettings"]["mode"], "packet-up")
+
+    def test_xhttp_without_extra_has_no_extra_key(self):
+        raw = json.dumps({"outbounds": [{
+            "protocol": "vless", "tag": "p",
+            "settings": {"vnext": [{"address": "h.io", "port": 443, "users": [
+                {"id": UUID, "encryption": "none"}]}]},
+            "streamSettings": {"network": "xhttp", "security": "tls",
+                               "xhttpSettings": {"path": "/x"}},
+        }]})
+        endpoints, _ = parse_config(raw)
+        stream = build_config(endpoints[0], Core.XRAY, 1080)["outbounds"][0]["streamSettings"]
+        self.assertNotIn("extra", stream["xhttpSettings"])
+
     def test_grpc_multi_mode(self):
         stream = self._stream(
             f"vless://{UUID}@h.io:443?type=grpc&serviceName=svc&mode=multi&security=tls#x"

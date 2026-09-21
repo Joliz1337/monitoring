@@ -1,7 +1,9 @@
 """Firewall (UFW) profiles — CRUD, привязка серверов, массовая синхронизация."""
 
+import asyncio
 import json
 import logging
+import time
 from typing import Optional, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
@@ -64,6 +66,47 @@ class CloneRequest(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=100)
 
 
+MAX_BULK_RULES = 200
+
+
+class BulkRulesAdd(BaseModel):
+    rules: list[FirewallRuleData] = Field(..., min_length=1, max_length=MAX_BULK_RULES)
+
+
+class BulkRuleDelete(BaseModel):
+    indexes: list[int] = Field(..., min_length=1)
+
+
+class BulkRulePatch(BaseModel):
+    """Частичное изменение правил: применяются только явно переданные поля
+    (различаем «не менять» и «сбросить» через model_fields_set)."""
+    protocol: Optional[Literal["tcp", "udp", "any"]] = None
+    action: Optional[Literal["allow", "deny"]] = None
+    direction: Optional[Literal["in", "out"]] = None
+    from_ip: Optional[str] = None
+    comment: Optional[str] = None
+
+    @field_validator("from_ip", mode="before")
+    @classmethod
+    def _empty_to_none(cls, v):
+        if v in ("", "any", "anywhere", "Anywhere"):
+            return None
+        return v
+
+
+class BulkRuleUpdate(BaseModel):
+    indexes: list[int] = Field(..., min_length=1)
+    patch: BulkRulePatch
+
+
+class BulkServerIds(BaseModel):
+    server_ids: list[int] = Field(..., min_length=1)
+
+
+class SyncRequest(BaseModel):
+    server_ids: Optional[list[int]] = None
+
+
 # ==================== Helpers ====================
 
 NODE_API_PORT = 9100
@@ -117,17 +160,68 @@ def _has_node_port_allow(rules: list[dict], default_in: str) -> bool:
     return _has_port_allow(rules, default_in, NODE_API_PORT)
 
 
-def _has_ssh_allow(rules: list[dict], default_in: str) -> bool:
-    """Профиль без allow на SSH отрезает администратора от сервера.
+def _effective_ssh_port(sshd_port: Optional[int], ssh_port: Optional[int]) -> int:
+    """SSH-порт сервера: фактический sshd с ноды (кэш) → креды доставки образа → 22."""
+    return sshd_port or ssh_port or SSH_DEFAULT_PORT
 
-    Применение идёт как `ufw --force reset` → default deny → правила → enable,
-    и все команды при этом отрабатывают успешно — откатывать нечего, а нода
-    остаётся на связи через 9100, так что панель ничего не замечает. Проверка
-    идёт по порту 22: реальный SSH-порт ноды панели неизвестен, поэтому это
-    предупреждение, а не запрет — на нестандартном порту оператор снимает его
-    сам, добавив правило на свой порт.
-    """
-    return _has_port_allow(rules, default_in, SSH_DEFAULT_PORT)
+
+async def _linked_ssh_ports(profile_id: int, db: AsyncSession) -> list[int]:
+    result = await db.execute(
+        select(Server.sshd_port, Server.ssh_port)
+        .where(Server.active_firewall_profile_id == profile_id)
+    )
+    return [_effective_ssh_port(sshd, ssh) for sshd, ssh in result.fetchall()]
+
+
+# Пока порт sshd сервера не закэширован, проверка падает на фолбэк 22 и на
+# нестандартных портах ложно горит. Поэтому при просмотре профилей панель сама
+# фоном спрашивает порт у нод без кэша; повтор по офлайн-нодам — с троттлингом.
+SSHD_PROBE_RETRY_SECONDS = 600
+SSHD_PROBE_CONCURRENCY = 10
+
+_sshd_probe_attempts: dict[int, float] = {}
+
+
+def _servers_due_for_sshd_probe(rows: list[tuple[int, Optional[int]]]) -> list[int]:
+    """(server_id, sshd_port) → id серверов без кэша, которые пора опросить."""
+    now = time.monotonic()
+    due = []
+    for server_id, sshd_port in rows:
+        if sshd_port is not None:
+            continue
+        # Сентинел None, не 0.0: monotonic на свежезагруженной машине близок к нулю,
+        # и «now - 0 < интервал» глушил бы первый опрос все 10 минут после старта
+        last_attempt = _sshd_probe_attempts.get(server_id)
+        if last_attempt is not None and now - last_attempt < SSHD_PROBE_RETRY_SECONDS:
+            continue
+        _sshd_probe_attempts[server_id] = now
+        due.append(server_id)
+    return due
+
+
+async def _bg_probe_sshd_ports(server_ids: list[int]) -> None:
+    """Фоново узнаёт у нод фактический порт sshd и кэширует его. Best-effort:
+    офлайн-нода, старая нода или закрытый раздел SSH просто пропускаются."""
+    # Ленивый импорт — как в deploy_job_manager, чтобы не связывать роутеры на уровне модулей
+    from app.routers.ssh_security import _cache_sshd_port, _valid_port
+    from app.services.ssh_manager import proxy_to_node
+
+    async with async_session_maker() as db:
+        result = await db.execute(select(Server).where(Server.id.in_(server_ids)))
+        servers = list(result.scalars().all())
+
+    sem = asyncio.Semaphore(SSHD_PROBE_CONCURRENCY)
+
+    async def probe(server: Server) -> None:
+        async with sem:
+            try:
+                status = await proxy_to_node(server, "GET", "/api/ssh/status", timeout=15.0)
+            except Exception:  # noqa: BLE001 — недоступность любой природы = попробуем позже
+                return
+        if isinstance(status, dict):
+            await _cache_sshd_port(server.id, _valid_port(status.get("sshd_port")))
+
+    await asyncio.gather(*(probe(s) for s in servers))
 
 
 async def _get_profile(profile_id: int, db: AsyncSession) -> FirewallProfile:
@@ -140,8 +234,21 @@ async def _get_profile(profile_id: int, db: AsyncSession) -> FirewallProfile:
     return profile
 
 
-def _profile_to_dict(profile: FirewallProfile, *, linked: int = 0, synced: int = 0) -> dict:
+def _profile_to_dict(
+    profile: FirewallProfile,
+    *,
+    linked: int = 0,
+    synced: int = 0,
+    ssh_ports: Optional[list[int]] = None,
+) -> dict:
     rules = _serialize_rules(profile)
+    # Профиль без allow на SSH отрезает администратора от сервера: применение идёт
+    # как `ufw --force reset` → default deny → правила → enable, все команды успешны,
+    # а нода остаётся на связи через 9100 — панель сбой не заметит. Проверка идёт по
+    # фактическим SSH-портам привязанных серверов (_effective_ssh_port), для профиля
+    # без серверов — по 22. Это предупреждение, а не запрет.
+    ports = sorted(set(ssh_ports)) if ssh_ports else [SSH_DEFAULT_PORT]
+    blocked = [p for p in ports if not _has_port_allow(rules, profile.default_incoming, p)]
     return {
         "id": profile.id,
         "name": profile.name,
@@ -154,11 +261,28 @@ def _profile_to_dict(profile: FirewallProfile, *, linked: int = 0, synced: int =
         "synced_servers_count": synced,
         "node_port_allowed": _has_node_port_allow(rules, profile.default_incoming),
         "node_api_port": NODE_API_PORT,
-        "ssh_port_allowed": _has_ssh_allow(rules, profile.default_incoming),
+        "ssh_port_allowed": not blocked,
+        "ssh_ports": ports,
+        "ssh_ports_blocked": blocked,
         "ssh_default_port": SSH_DEFAULT_PORT,
         "created_at": profile.created_at.isoformat() if profile.created_at else None,
         "updated_at": profile.updated_at.isoformat() if profile.updated_at else None,
     }
+
+
+async def _mark_servers_pending(profile: FirewallProfile, db: AsyncSession) -> None:
+    """После изменения правил помечает привязанные серверы с устаревшим хэшем как pending."""
+    new_hash = compute_rules_hash(
+        profile.rules_json, profile.default_incoming, profile.default_outgoing
+    )
+    await db.execute(
+        update(Server)
+        .where(
+            Server.active_firewall_profile_id == profile.id,
+            Server.firewall_rules_hash != new_hash,
+        )
+        .values(firewall_sync_status="pending")
+    )
 
 
 async def _bg_sync_profile(
@@ -207,7 +331,7 @@ async def get_available_servers(db: AsyncSession = Depends(get_db), _=Depends(ve
 # ==================== CRUD ====================
 
 @router.get("/")
-async def list_profiles(db: AsyncSession = Depends(get_db), _=Depends(verify_auth)):
+async def list_profiles(bg: BackgroundTasks, db: AsyncSession = Depends(get_db), _=Depends(verify_auth)):
     result = await db.execute(
         select(FirewallProfile).order_by(FirewallProfile.position, FirewallProfile.id)
     )
@@ -215,20 +339,37 @@ async def list_profiles(db: AsyncSession = Depends(get_db), _=Depends(verify_aut
 
     profile_ids = [p.id for p in profiles]
     counts: dict[int, dict] = {pid: {"total": 0, "synced": 0} for pid in profile_ids}
+    ssh_ports: dict[int, list[int]] = {pid: [] for pid in profile_ids}
+    server_rows: list[tuple[int, Optional[int]]] = []
 
     if profile_ids:
         srv_result = await db.execute(
-            select(Server.active_firewall_profile_id, Server.firewall_sync_status, func.count())
-            .where(Server.active_firewall_profile_id.in_(profile_ids))
-            .group_by(Server.active_firewall_profile_id, Server.firewall_sync_status)
+            select(
+                Server.id,
+                Server.active_firewall_profile_id,
+                Server.firewall_sync_status,
+                Server.sshd_port,
+                Server.ssh_port,
+            ).where(Server.active_firewall_profile_id.in_(profile_ids))
         )
-        for prof_id, sync_st, cnt in srv_result.fetchall():
-            counts[prof_id]["total"] += cnt
+        for srv_id, prof_id, sync_st, sshd, ssh in srv_result.fetchall():
+            counts[prof_id]["total"] += 1
             if sync_st == "synced":
-                counts[prof_id]["synced"] += cnt
+                counts[prof_id]["synced"] += 1
+            ssh_ports[prof_id].append(_effective_ssh_port(sshd, ssh))
+            server_rows.append((srv_id, sshd))
+
+    probe_ids = _servers_due_for_sshd_probe(server_rows)
+    if probe_ids:
+        bg.add_task(_bg_probe_sshd_ports, probe_ids)
 
     return [
-        _profile_to_dict(p, linked=counts[p.id]["total"], synced=counts[p.id]["synced"])
+        _profile_to_dict(
+            p,
+            linked=counts[p.id]["total"],
+            synced=counts[p.id]["synced"],
+            ssh_ports=ssh_ports[p.id],
+        )
         for p in profiles
     ]
 
@@ -265,7 +406,12 @@ async def create_profile(data: ProfileCreate, db: AsyncSession = Depends(get_db)
 
 
 @router.get("/{profile_id}")
-async def get_profile(profile_id: int, db: AsyncSession = Depends(get_db), _=Depends(verify_auth)):
+async def get_profile(
+    profile_id: int,
+    bg: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(verify_auth),
+):
     profile = await _get_profile(profile_id, db)
 
     result = await db.execute(
@@ -273,17 +419,25 @@ async def get_profile(profile_id: int, db: AsyncSession = Depends(get_db), _=Dep
     )
     servers = list(result.scalars().all())
 
+    probe_ids = _servers_due_for_sshd_probe([(s.id, s.sshd_port) for s in servers])
+    if probe_ids:
+        bg.add_task(_bg_probe_sshd_ports, probe_ids)
+
     rules_hash = compute_rules_hash(
         profile.rules_json, profile.default_incoming, profile.default_outgoing
     )
 
-    data = _profile_to_dict(profile)
+    data = _profile_to_dict(
+        profile,
+        ssh_ports=[_effective_ssh_port(s.sshd_port, s.ssh_port) for s in servers],
+    )
     data["rules_hash"] = rules_hash
     data["servers"] = [
         {
             "server_id": s.id,
             "server_name": s.name,
             "server_url": s.url,
+            "ssh_port": _effective_ssh_port(s.sshd_port, s.ssh_port),
             "sync_status": s.firewall_sync_status,
             "rules_hash": s.firewall_rules_hash,
             "is_synced": s.firewall_rules_hash == rules_hash,
@@ -329,17 +483,7 @@ async def update_profile(
         rules_changed = True
 
     if rules_changed:
-        new_hash = compute_rules_hash(
-            profile.rules_json, profile.default_incoming, profile.default_outgoing
-        )
-        await db.execute(
-            update(Server)
-            .where(
-                Server.active_firewall_profile_id == profile_id,
-                Server.firewall_rules_hash != new_hash,
-            )
-            .values(firewall_sync_status="pending")
-        )
+        await _mark_servers_pending(profile, db)
 
     await db.commit()
     await db.refresh(profile)
@@ -347,7 +491,7 @@ async def update_profile(
     if rules_changed:
         bg.add_task(_bg_sync_profile, profile_id)
 
-    return _profile_to_dict(profile)
+    return _profile_to_dict(profile, ssh_ports=await _linked_ssh_ports(profile_id, db))
 
 
 @router.post("/{profile_id}/clone")
@@ -429,15 +573,7 @@ async def add_rule(
     rules.append(new_rule)
     profile.rules_json = json.dumps(rules)
 
-    new_hash = compute_rules_hash(profile.rules_json, profile.default_incoming, profile.default_outgoing)
-    await db.execute(
-        update(Server)
-        .where(
-            Server.active_firewall_profile_id == profile_id,
-            Server.firewall_rules_hash != new_hash,
-        )
-        .values(firewall_sync_status="pending")
-    )
+    await _mark_servers_pending(profile, db)
     await db.commit()
 
     bg.add_task(_bg_sync_profile, profile_id)
@@ -466,15 +602,7 @@ async def update_rule(
     rules[rule_index] = new_rule
     profile.rules_json = json.dumps(rules)
 
-    new_hash = compute_rules_hash(profile.rules_json, profile.default_incoming, profile.default_outgoing)
-    await db.execute(
-        update(Server)
-        .where(
-            Server.active_firewall_profile_id == profile_id,
-            Server.firewall_rules_hash != new_hash,
-        )
-        .values(firewall_sync_status="pending")
-    )
+    await _mark_servers_pending(profile, db)
     await db.commit()
 
     bg.add_task(_bg_sync_profile, profile_id)
@@ -497,15 +625,104 @@ async def delete_rule(
     rules.pop(rule_index)
     profile.rules_json = json.dumps(rules)
 
-    new_hash = compute_rules_hash(profile.rules_json, profile.default_incoming, profile.default_outgoing)
-    await db.execute(
-        update(Server)
-        .where(
-            Server.active_firewall_profile_id == profile_id,
-            Server.firewall_rules_hash != new_hash,
-        )
-        .values(firewall_sync_status="pending")
-    )
+    await _mark_servers_pending(profile, db)
+    await db.commit()
+
+    bg.add_task(_bg_sync_profile, profile_id)
+    return {"success": True, "rules": rules}
+
+
+# ==================== Rules bulk ====================
+
+@router.post("/{profile_id}/rules/bulk")
+async def add_rules_bulk(
+    profile_id: int,
+    data: BulkRulesAdd,
+    bg: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(verify_auth),
+):
+    """Пакетное добавление правил: дубликаты пропускаются, раскатка одна на весь пакет."""
+    profile = await _get_profile(profile_id, db)
+    rules = _serialize_rules(profile)
+
+    existing_keys = {_rule_identity(r) for r in rules}
+    added = 0
+    skipped = 0
+    for rule in data.rules:
+        new_rule = rule.model_dump()
+        key = _rule_identity(new_rule)
+        if key in existing_keys:
+            skipped += 1
+            continue
+        existing_keys.add(key)
+        rules.append(new_rule)
+        added += 1
+
+    if added:
+        profile.rules_json = json.dumps(rules)
+        await _mark_servers_pending(profile, db)
+        await db.commit()
+        bg.add_task(_bg_sync_profile, profile_id)
+
+    return {"success": True, "added": added, "skipped": skipped, "rules": rules}
+
+
+@router.post("/{profile_id}/rules/bulk-update")
+async def update_rules_bulk(
+    profile_id: int,
+    data: BulkRuleUpdate,
+    bg: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(verify_auth),
+):
+    profile = await _get_profile(profile_id, db)
+    rules = _serialize_rules(profile)
+
+    indexes = set(data.indexes)
+    if any(not 0 <= i < len(rules) for i in indexes):
+        raise HTTPException(404, "Rule index out of range")
+
+    patch = {
+        k: v for k, v in data.patch.model_dump().items()
+        if k in data.patch.model_fields_set
+    }
+    if not patch:
+        raise HTTPException(400, "Не указано ни одного изменения")
+
+    for i in indexes:
+        rules[i] = {**rules[i], **patch}
+
+    keys = [_rule_identity(r) for r in rules]
+    if len(set(keys)) != len(keys):
+        raise HTTPException(409, "После изменения в профиле появились бы одинаковые правила")
+
+    profile.rules_json = json.dumps(rules)
+    await _mark_servers_pending(profile, db)
+    await db.commit()
+
+    bg.add_task(_bg_sync_profile, profile_id)
+    return {"success": True, "rules": rules}
+
+
+@router.post("/{profile_id}/rules/bulk-delete")
+async def delete_rules_bulk(
+    profile_id: int,
+    data: BulkRuleDelete,
+    bg: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(verify_auth),
+):
+    profile = await _get_profile(profile_id, db)
+    rules = _serialize_rules(profile)
+
+    indexes = set(data.indexes)
+    if any(not 0 <= i < len(rules) for i in indexes):
+        raise HTTPException(404, "Rule index out of range")
+
+    rules = [r for i, r in enumerate(rules) if i not in indexes]
+    profile.rules_json = json.dumps(rules)
+    await _mark_servers_pending(profile, db)
     await db.commit()
 
     bg.add_task(_bg_sync_profile, profile_id)
@@ -513,6 +730,61 @@ async def delete_rule(
 
 
 # ==================== Server bindings ====================
+
+# Bulk-маршруты объявлены раньше /{profile_id}/servers/{server_id},
+# иначе «bulk-link» пытался бы распарситься как server_id
+
+@router.post("/{profile_id}/servers/bulk-link")
+async def link_servers_bulk(
+    profile_id: int,
+    data: BulkServerIds,
+    bg: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(verify_auth),
+):
+    await _get_profile(profile_id, db)
+
+    result = await db.execute(select(Server.id).where(Server.id.in_(data.server_ids)))
+    found_ids = [row[0] for row in result.fetchall()]
+    if not found_ids:
+        raise HTTPException(404, "Servers not found")
+
+    await db.execute(
+        update(Server)
+        .where(Server.id.in_(found_ids))
+        .values(active_firewall_profile_id=profile_id, firewall_sync_status="pending")
+    )
+    await db.commit()
+
+    bg.add_task(_bg_sync_profile, profile_id, server_ids=found_ids)
+    return {"success": True, "linked": len(found_ids)}
+
+
+@router.post("/{profile_id}/servers/bulk-unlink")
+async def unlink_servers_bulk(
+    profile_id: int,
+    data: BulkServerIds,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(verify_auth),
+):
+    await _get_profile(profile_id, db)
+
+    result = await db.execute(
+        update(Server)
+        .where(
+            Server.id.in_(data.server_ids),
+            Server.active_firewall_profile_id == profile_id,
+        )
+        .values(
+            active_firewall_profile_id=None,
+            firewall_sync_status=None,
+            firewall_rules_hash=None,
+            firewall_last_sync_at=None,
+        )
+    )
+    await db.commit()
+    return {"success": True, "unlinked": result.rowcount}
+
 
 @router.post("/{profile_id}/servers/{server_id}")
 async def link_server(
@@ -558,11 +830,14 @@ async def unlink_server(profile_id: int, server_id: int, db: AsyncSession = Depe
 async def sync_all(
     profile_id: int,
     force: bool = False,
+    data: Optional[SyncRequest] = None,
     db: AsyncSession = Depends(get_db),
     _=Depends(verify_auth),
 ):
+    """Без тела — синхронизация всех привязанных серверов, с server_ids — только выбранных."""
     profile = await _get_profile(profile_id, db)
-    results = await sync_profile_to_servers(profile, db, force=force)
+    server_ids = data.server_ids if data and data.server_ids else None
+    results = await sync_profile_to_servers(profile, db, server_ids=server_ids, force=force)
     return {
         "results": [
             {

@@ -259,7 +259,23 @@ def _xray_transport(stream: dict[str, Any]) -> TransportSettings:
         header_type=_str_or_none(header.get("type")),
         seed=_str_or_none(raw.get("seed")),
         authority=_str_or_none(raw.get("authority")),
+        xhttp_extra=_xhttp_extra(kind, raw),
     )
+
+
+def _xhttp_extra(kind: Transport, raw: dict[str, Any]) -> Optional[str]:
+    """xhttpSettings.extra — часть протокола, а не тюнинг.
+
+    Кастомные ключи query, аплоад GET-ом, паддинг: сервер с зеркальной
+    настройкой отвечает 403 клиенту без такого же extra, поэтому блок едет в
+    тестовый конфиг без изменений.
+    """
+    if kind is not Transport.XHTTP:
+        return None
+    extra = raw.get("extra")
+    if not isinstance(extra, dict) or not extra:
+        return None
+    return json.dumps(extra, ensure_ascii=False, sort_keys=True)
 
 
 def _grpc_mode(raw: dict[str, Any]) -> Optional[str]:

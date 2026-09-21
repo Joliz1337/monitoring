@@ -33,6 +33,11 @@ MAXCONN_PER_RAM_MB = 10
 MAXCONN_MIN = 10000
 MAXCONN_MAX = 500000
 
+# Splice-пайп больше системных 64 КБ снижает число syscall на гигабитных
+# потоках, но страницы пайпа — память ядра на каждый активный сплайс,
+# поэтому размер ступенчатый от RAM, а не константа.
+PIPESIZE_RAM_TIERS_MB = ((4096, 262144), (2048, 131072))
+
 OPENSSL_TIMEOUT_SEC = 10
 CERTBOT_ISSUE_TIMEOUT_SEC = 120
 CERTBOT_RENEW_TIMEOUT_SEC = 300
@@ -251,23 +256,49 @@ class HAProxyManager:
 
         Конфиг из панельного профиля один на много серверов с разной RAM,
         поэтому потолок соединений вычисляется на ноде при применении."""
+        return self._ensure_global_setting(content, "maxconn", f"maxconn {self._compute_maxconn()}")
+
+    def _compute_pipesize(self) -> Optional[int]:
+        """Размер пайпа для splice по RAM хоста; None — оставить системный (64 КБ).
+
+        Ниже 2 ГБ увеличение не оправдано: каждая страница пайпа — невытесняемая
+        память ядра, а профит от экономии syscall заметен только на потоках,
+        которых на таком хосте не бывает."""
+        ram_mb = psutil.virtual_memory().total // (1024 * 1024)
+        for min_ram_mb, pipesize in PIPESIZE_RAM_TIERS_MB:
+            if ram_mb >= min_ram_mb:
+                return pipesize
+        return None
+
+    def _ensure_global_pipesize(self, content: str) -> str:
+        """Вставляет tune.pipesize по RAM хоста, если он не задан явно —
+        по той же причине, что и maxconn: профиль один на разные машины."""
+        pipesize = self._compute_pipesize()
+        if pipesize is None:
+            return content
+        return self._ensure_global_setting(content, r"tune\.pipesize", f"tune.pipesize {pipesize}")
+
+    @staticmethod
+    def _ensure_global_setting(content: str, key_re: str, line: str) -> str:
+        """Вставляет строку в начало секции global, если ключ ещё не задан."""
         global_match = re.search(r'^global[ \t]*\n((?:[ \t]+\S.*\n?)*)', content, re.MULTILINE)
         if not global_match:
             return content
-        if re.search(r'^[ \t]+maxconn\b', global_match.group(1), re.MULTILINE):
+        if re.search(rf'^[ \t]+{key_re}\b', global_match.group(1), re.MULTILINE):
             return content
         insert_pos = global_match.start(1)
-        return content[:insert_pos] + f"    maxconn {self._compute_maxconn()}\n" + content[insert_pos:]
+        return content[:insert_pos] + f"    {line}\n" + content[insert_pos:]
 
     def _generate_base_config(self) -> str:
         """Generate base HAProxy config for high-speed TCP relay"""
+        pipesize = self._compute_pipesize()
+        pipesize_line = f"\n    tune.pipesize {pipesize}" if pipesize else ""
         return f"""global
     stats socket /var/run/haproxy.sock mode 660 level admin expose-fd listeners
     no log
     maxconn {self._compute_maxconn()}
     tune.bufsize 16384
-    tune.maxpollevents 1024
-    tune.recv_enough 16384
+    tune.maxpollevents 1024{pipesize_line}
     hard-stop-after 1h
     # cpu-affinity (auto)
 
@@ -283,7 +314,8 @@ defaults
     option redispatch
     option tcp-smart-accept
     option tcp-smart-connect
-    option splice-auto
+    option splice-request
+    option splice-response
     option clitcpka
     clitcpka-idle 60s
     clitcpka-intvl 10s
@@ -1287,6 +1319,7 @@ backend {backend_name}
             try:
                 config_content = self._patch_dns_resolvers(config_content)
                 config_content = self._ensure_global_maxconn(config_content)
+                config_content = self._ensure_global_pipesize(config_content)
                 config_content = cpu_affinity.apply(config_content, psutil.cpu_count() or 1)
                 self._write_config(config_content)
             except Exception as e:

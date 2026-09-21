@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { ChevronDown, Folder, FolderOpen, Lock, Plus, Search, Server as ServerIcon, X } from 'lucide-react'
 import type { Server } from '../../api/client'
+import { orderFolders } from '../../utils/folders'
 import { Tooltip } from '../ui/Tooltip'
 
 const NO_FOLDER = '__no_folder__'
@@ -38,17 +39,6 @@ function readExpanded(storageKey: string): Set<string> {
     return raw ? new Set(JSON.parse(raw)) : new Set()
   } catch {
     return new Set()
-  }
-}
-
-function orderFolders(names: string[]): string[] {
-  try {
-    const saved: string[] = JSON.parse(localStorage.getItem('dashboard_folder_order') || '[]')
-    const ordered = saved.filter(f => names.includes(f))
-    const rest = names.filter(f => !saved.includes(f)).sort()
-    return [...ordered, ...rest]
-  } catch {
-    return [...names].sort()
   }
 }
 

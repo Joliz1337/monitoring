@@ -3,7 +3,7 @@ import hashlib
 import ipaddress
 import time
 from datetime import datetime, timedelta, timezone
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import select, update, bindparam, func
 from sqlalchemy.ext.asyncio import AsyncSession
 import re
@@ -23,6 +23,7 @@ from app.database import get_db
 from app.models import Server, MetricsSnapshot, ServerTraffic
 from app.auth import verify_auth
 from app.services.blocklist_manager import get_blocklist_manager
+from app.services.fleet_history import FleetPeriod, load_fleet_history
 from app.services.metrics_rates import enrich_metrics_with_speeds
 from app.services.server_status import get_offline_threshold, resolve_status
 from app.services.time_sync import get_time_sync_service
@@ -382,16 +383,29 @@ async def get_migration_status(
     _: dict = Depends(verify_auth),
 ):
     """Сколько нод ещё не на shared cert — для условного показа баннера."""
-    # Проекция двух колонок вместо полных ORM-объектов (с тяжёлыми TEXT last_metrics
+    # Проекция трёх колонок вместо полных ORM-объектов (с тяжёлыми TEXT last_metrics
     # и т.п.) — classify_server читает только их; Row даёт доступ по имени.
-    result = await db.execute(select(Server.uses_shared_cert, Server.pki_enabled))
+    result = await db.execute(
+        select(Server.uses_shared_cert, Server.pki_enabled, Server.dedicated_cert)
+    )
     rows = result.all()
-    counters = {"shared": 0, "per_server": 0, "legacy": 0}
+    counters = {"shared": 0, "dedicated": 0, "per_server": 0, "legacy": 0}
     for r in rows:
         counters[classify_server(r)] += 1
     counters["total"] = len(rows)
+    # dedicated — осознанный выбор персонального ключа, мигрировать его не надо
     counters["needs_migration"] = counters["per_server"] + counters["legacy"]
     return counters
+
+
+@router.get("/fleet/history")
+async def get_fleet_history(
+    period: FleetPeriod = Query(default="24h"),
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth),
+):
+    """Сводная история парка под плитками дашборда: CPU, память и скорости сети."""
+    return await load_fleet_history(db, period)
 
 
 @router.post("")
@@ -543,8 +557,11 @@ async def migrate_all_servers(
     servers = result.scalars().all()
     keygen = request.app.state.pki
 
-    auto_targets = [s for s in servers if not s.uses_shared_cert and s.pki_enabled]
-    manual_targets = [s for s in servers if not s.uses_shared_cert and not s.pki_enabled]
+    # Ноды на осознанном персональном сертификате (dedicated_cert) не трогаем —
+    # заливка shared cert с clientAuth уничтожила бы их изоляцию от парка
+    candidates = [s for s in servers if not s.uses_shared_cert and not s.dedicated_cert]
+    auto_targets = [s for s in candidates if s.pki_enabled]
+    manual_targets = [s for s in candidates if not s.pki_enabled]
 
     auto_migrated: list[dict] = []
     failed: list[dict] = []

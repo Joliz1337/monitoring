@@ -23,6 +23,10 @@ Before saving, the panel validates the config with real HAProxy: certificate pat
 - **Single target** — one destination address. Supports PROXY protocol to the backend, accepting PROXY protocol from an upstream balancer, TLS to the backend and wildcard certificates.
 - **Balancer** — a pool of servers with a distribution algorithm, health checks, weights and client stickiness.
 
+## Per-backend connection limit
+
+A balancer physically cannot open more than ~64,000 connections to one backend address:port — each one takes a source port, and there are only 65,535 of them. So keep a balancer server's "Max Connections" around 60000: when it fills up, HAProxy gracefully moves extra clients to another server or queues them, instead of failing with errors and delays on exhausted ports. Need more on the same machine — add it as a second server with a different port (each port gets its own 64k), or use DNAT routing, which has no such limit. Incoming client connections are unaffected — their ceiling is computed automatically from the node's RAM.
+
 ## Good to know
 
 - Unbinding a server stops HAProxy on it; the config file stays on disk.

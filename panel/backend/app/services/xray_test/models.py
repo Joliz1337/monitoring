@@ -108,6 +108,10 @@ class TransportSettings:
     header_type: Optional[str] = None
     seed: Optional[str] = None
     authority: Optional[str] = None
+    # xhttpSettings.extra как JSON-строка: задаёт формат трафика (кастомные
+    # ключи query, аплоад GET-ом, паддинг), сервер с зеркальной настройкой
+    # чужой формат не принимает. Строка, а не dict — модель заморожена.
+    xhttp_extra: Optional[str] = None
 
 
 @dataclass(frozen=True)

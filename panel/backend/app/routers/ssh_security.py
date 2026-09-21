@@ -1,16 +1,15 @@
-import asyncio
 import json
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import verify_auth
-from app.database import get_db
+from app.database import get_db, async_session_maker
 from app.models import Server, PanelSettings
+from app.services.bulk_stream import stream_ndjson
 from app.services.node_capabilities import NodeCapabilityError, denial_headers
 from app.services.ssh_manager import proxy_to_node, RECOMMENDED_PRESET, MAXIMUM_PRESET
 
@@ -80,6 +79,30 @@ async def _safe_proxy(server, method: str, path: str, json_data: dict | None = N
         raise HTTPException(status_code=503, detail=str(e))
 
 
+def _valid_port(value) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if 0 < value < 65536 else None
+
+
+async def _cache_sshd_port(server_id: int, port: int | None) -> None:
+    """Кэш фактического порта sshd — по нему firewall-профили проверяют allow-правило SSH.
+
+    Best-effort: своя сессия (вызывается и из конкурентных воркеров стрима),
+    ошибка БД не должна ломать ответ ноды.
+    """
+    if port is None:
+        return
+    try:
+        async with async_session_maker() as db:
+            await db.execute(
+                update(Server).where(Server.id == server_id).values(sshd_port=port)
+            )
+            await db.commit()
+    except Exception as e:
+        logger.warning("sshd_port_cache_failed", extra={"server_id": server_id, "error": str(e)})
+
+
 # Пути с долгой установкой (apt-get install fail2ban может занять 120с)
 _LONG_TIMEOUT_PATHS = frozenset({"/api/ssh/fail2ban/config", "/api/ssh/password"})
 
@@ -122,6 +145,8 @@ async def _fetch_ssh_status(server) -> dict:
     """Собрать SSH-статус одной ноды для обзор-таблицы."""
     try:
         status = await proxy_to_node(server, "GET", "/api/ssh/status", timeout=15.0)
+        if isinstance(status, dict):
+            await _cache_sshd_port(server.id, _valid_port(status.get("sshd_port")))
         return {"server_id": server.id, "server_name": server.name, "reachable": True, "status": status}
     except NodeCapabilityError as e:
         return {"server_id": server.id, "server_name": server.name, "reachable": False,
@@ -133,86 +158,12 @@ async def _fetch_ssh_status(server) -> dict:
         return {"server_id": server.id, "server_name": server.name, "reachable": False, "error": str(e)}
 
 
-def _ndjson(obj: dict) -> bytes:
-    return (json.dumps(obj, ensure_ascii=False) + "\n").encode()
-
-
-def _stream_ndjson(servers: list[Server], worker, log_action: str | None = None) -> StreamingResponse:
-    """Стримит NDJSON: start → result по каждой ноде (по мере готовности) → done."""
-    async def safe_worker(server):
-        # Граница стрима: необработанное исключение одной ноды не должно
-        # обрывать соединение — иначе остальные строки навсегда зависают в «загрузке»
-        try:
-            return await worker(server)
-        except Exception as e:
-            logger.exception("ssh_stream_worker_failed", extra={"server_id": server.id})
-            return {
-                "server_id": server.id,
-                "server_name": server.name,
-                "success": False,
-                "reachable": False,
-                "error": str(e) or e.__class__.__name__,
-            }
-
-    async def generate():
-        yield _ndjson({
-            "type": "start",
-            "total": len(servers),
-            "servers": [{"server_id": s.id, "server_name": s.name} for s in servers],
-        })
-        tasks = [asyncio.create_task(safe_worker(s)) for s in servers]
-        results: list[dict] = []
-        try:
-            for completed in asyncio.as_completed(tasks):
-                result = await completed
-                results.append(result)
-                yield _ndjson({"type": "result", **result})
-        except asyncio.CancelledError:
-            for task in tasks:
-                task.cancel()
-            raise
-        if log_action:
-            _log_bulk_summary(log_action, results)
-        ok = sum(1 for r in results if r.get("success", r.get("reachable", False)))
-        yield _ndjson({"type": "done", "total": len(servers), "ok": ok, "failed": len(servers) - ok})
-
-    return StreamingResponse(
-        generate(),
-        media_type="application/x-ndjson",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
-
-
 async def _get_servers_by_ids(server_ids: list[int], db: AsyncSession) -> list[Server]:
     result = await db.execute(select(Server).where(Server.id.in_(server_ids)))
     servers = result.scalars().all()
     if not servers:
         raise HTTPException(status_code=404, detail="No servers found")
     return list(servers)
-
-
-def _log_bulk_summary(action: str, results: list[dict]) -> None:
-    total = len(results)
-    ok = sum(1 for r in results if r.get("success"))
-    failed = total - ok
-    failed_names = [r["server_name"] for r in results if not r.get("success")]
-
-    if failed == 0:
-        logger.info(
-            "ssh_bulk_summary",
-            extra={"action": action, "total": total, "ok": ok, "failed": 0},
-        )
-    else:
-        logger.warning(
-            "ssh_bulk_summary",
-            extra={
-                "action": action,
-                "total": total,
-                "ok": ok,
-                "failed": failed,
-                "failed_servers": failed_names,
-            },
-        )
 
 
 # === SSH Config ===
@@ -235,7 +186,10 @@ async def update_ssh_config(
     _: dict = Depends(verify_auth),
 ):
     server = await _get_server(server_id, db)
-    return await _safe_proxy(server, "POST", "/api/ssh/config", config)
+    result = await _safe_proxy(server, "POST", "/api/ssh/config", config)
+    if isinstance(result, dict) and result.get("success", True):
+        await _cache_sshd_port(server.id, _valid_port(config.get("port")))
+    return result
 
 
 # === Fail2ban ===
@@ -348,7 +302,10 @@ async def get_ssh_status(
     _: dict = Depends(verify_auth),
 ):
     server = await _get_server(server_id, db)
-    return await _safe_proxy(server, "GET", "/api/ssh/status")
+    status = await _safe_proxy(server, "GET", "/api/ssh/status")
+    if isinstance(status, dict):
+        await _cache_sshd_port(server.id, _valid_port(status.get("sshd_port")))
+    return status
 
 
 # === Bulk Operations (NDJSON-стриминг) ===
@@ -372,10 +329,18 @@ async def bulk_apply(
             steps.append(("fail2ban", "POST", "/api/ssh/fail2ban/config", request.fail2ban))
         return steps
 
-    async def worker(server):
-        return await _apply_steps(server, build_steps(server))
+    new_ssh_port = _valid_port((request.ssh or {}).get("port"))
 
-    return _stream_ndjson(servers, worker, log_action="ssh_apply")
+    async def worker(server):
+        result = await _apply_steps(server, build_steps(server))
+        ssh_step_ok = any(
+            s["step"] == "ssh_config" and s["success"] for s in result["steps"]
+        )
+        if ssh_step_ok:
+            await _cache_sshd_port(server.id, new_ssh_port)
+        return result
+
+    return stream_ndjson(servers, worker, log_action="ssh_apply")
 
 
 @router.post("/bulk/keys")
@@ -390,7 +355,7 @@ async def bulk_add_ssh_key(
     async def worker(server):
         return await _apply_steps(server, [("key", "POST", "/api/ssh/keys", key_data)])
 
-    return _stream_ndjson(servers, worker, log_action="ssh_keys")
+    return stream_ndjson(servers, worker, log_action="ssh_keys")
 
 
 @router.post("/bulk/password")
@@ -405,7 +370,7 @@ async def bulk_change_password(
     async def worker(server):
         return await _apply_steps(server, [("password", "POST", "/api/ssh/password", pwd_data)])
 
-    return _stream_ndjson(servers, worker, log_action="ssh_password")
+    return stream_ndjson(servers, worker, log_action="ssh_password")
 
 
 @router.post("/bulk/status")
@@ -416,7 +381,7 @@ async def bulk_status(
 ):
     """Собрать SSH-статус набора серверов для обзор-таблицы. Стримит результат по каждому."""
     servers = await _get_servers_by_ids(request.server_ids, db)
-    return _stream_ndjson(servers, _fetch_ssh_status)
+    return stream_ndjson(servers, _fetch_ssh_status)
 
 
 # === Presets ===

@@ -9,6 +9,7 @@ import {
   HardDrive,
   Network,
   Route,
+  Shuffle,
   Activity,
   Clock,
   Server,
@@ -45,6 +46,8 @@ import type { ChartGap } from '../utils/chartUtils'
 import Terminal from '../components/Terminal/Terminal'
 import NodeRestrictedNotice from '../components/servers/NodeRestrictedNotice'
 import BandwidthLimitCard from '../components/servers/BandwidthLimitCard'
+import NetworkAddressesCard from '../components/servers/NetworkAddressesCard'
+import HosterAccessCard from '../components/servers/HosterAccessCard'
 import { nodeAllows } from '../utils/nodeCapabilities'
 import { formatBytes, formatUptime, formatPercent, createBitsFormatter, formatTimeAgo } from '../utils/format'
 import { useCachedData, createServerCacheKey } from '../hooks/useCachedData'
@@ -504,6 +507,16 @@ export default function ServerDetails() {
               {t('dnat.title')}
             </motion.div>
           </Link>
+          <Link to={`/${uid}/server/${serverId}/source-pool`}>
+            <motion.div
+              className="btn btn-secondary"
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.98 }}
+            >
+              <Shuffle className="w-4 h-4" />
+              {t('server_details.source_pool')}
+            </motion.div>
+          </Link>
           <Link to={`/${uid}/server/${serverId}/haproxy`}>
             <motion.div
               className="btn btn-primary"
@@ -822,6 +835,16 @@ export default function ServerDetails() {
             {/* Лимит полосы (tc на ноде) */}
             <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }} className="mt-6">
               <BandwidthLimitCard serverId={Number(serverId)} server={server} />
+            </motion.div>
+
+            {/* Дополнительные IP-адреса интерфейсов (транзакция с авто-откатом на ноде) */}
+            <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }} className="mt-6">
+              <NetworkAddressesCard serverId={Number(serverId)} server={server} />
+            </motion.div>
+
+            {/* Доступы хостера: разведка и вырезание (агенты, cloud-init, чужие ключи, репо) */}
+            <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }} className="mt-6">
+              <HosterAccessCard serverId={Number(serverId)} server={server} />
             </motion.div>
 
             {/* Terminal section */}

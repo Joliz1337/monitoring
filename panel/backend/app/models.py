@@ -103,6 +103,10 @@ class Server(Base):
     ssh_private_key = Column(EncryptedString, nullable=True)
     ssh_passphrase = Column(EncryptedString, nullable=True)
 
+    # Кэш фактического порта sshd с ноды (из /api/ssh/status и применений SSH-конфига).
+    # Не путать с ssh_port выше — это порт из кредов доставки образа.
+    sshd_port = Column(Integer, nullable=True)
+
     # Wildcard SSL deployment config
     wildcard_ssl_enabled = Column(Boolean, default=False, server_default="false")
     wildcard_ssl_deploy_path = Column(String(500), nullable=True)
@@ -136,8 +140,11 @@ class Server(Base):
     # PKI (mTLS) — флаги типа авторизации с нодой
     # pki_enabled: нода работает по mTLS (false = legacy с api_key)
     # uses_shared_cert: нода уже мигрирована на общий shared cert
+    # dedicated_cert: осознанно на персональном сертификате (одноразовый ключ
+    # автоустановки) — миграция на общий cert такую ноду не трогает
     pki_enabled = Column(Boolean, default=False, server_default="false", nullable=False)
     uses_shared_cert = Column(Boolean, default=False, server_default="false", nullable=False)
+    dedicated_cert = Column(Boolean, default=False, server_default="false", nullable=False)
     haproxy_sync_status = Column(String(20), nullable=True)
 
     # Anti-DDoS emergency mode state (mirrored from node ddos-watchdog)
@@ -743,7 +750,7 @@ class BillingServer(Base):
     
     id = Column(Integer, primary_key=True)
     name = Column(String(200), nullable=False)
-    billing_type = Column(String(20), nullable=False)  # 'monthly' | 'resource' | 'yandex_cloud'
+    billing_type = Column(String(20), nullable=False)  # 'monthly' | 'resource' | 'cloud'
     
     paid_until = Column(DateTime(timezone=True), nullable=True)
     
@@ -757,13 +764,17 @@ class BillingServer(Base):
     
     last_notified_days = Column(Text, nullable=True)  # JSON: which day-thresholds already sent
 
-    # Yandex Cloud
-    yc_oauth_token = Column(String(200), nullable=True)
-    yc_billing_account_id = Column(String(100), nullable=True)
-    yc_balance_threshold = Column(Float, nullable=True, default=0)
-    yc_daily_cost = Column(Float, nullable=True)
-    yc_last_sync_at = Column(DateTime(timezone=True), nullable=True)
-    yc_last_error = Column(String(500), nullable=True)
+    # Облачный провайдер (billing_type='cloud'): Yandex Cloud, Selectel
+    cloud_provider = Column(String(30), nullable=True)
+    cloud_credential = Column(EncryptedString, nullable=True)
+    cloud_account_id = Column(String(100), nullable=True)
+    cloud_balance_threshold = Column(Float, nullable=True, default=0)
+    cloud_daily_cost = Column(Float, nullable=True)
+    cloud_last_sync_at = Column(DateTime(timezone=True), nullable=True)
+    cloud_last_error = Column(String(500), nullable=True)
+    # Снимки баланса [[iso_ts, balance], ...] для провайдеров без API истории
+    # списаний (Timeweb): расход считается по снижению баланса между синками
+    cloud_balance_history = Column(Text, nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
@@ -1176,3 +1187,82 @@ class ServerDowntime(Base):
     __table_args__ = (
         Index('idx_server_downtime_lookup', 'server_id', 'started_at'),
     )
+
+
+# ==================== Exit-прокси ====================
+
+class ExitProxySettings(Base):
+    """Singleton: общие настройки exit-прокси — порт локального socks, расписание
+    и набор проверок, одинаковые для всех включённых нод."""
+    __tablename__ = "exit_proxy_settings"
+
+    id = Column(Integer, primary_key=True)
+    enabled = Column(Boolean, default=False)
+    port = Column(Integer, default=7590)
+    check_interval_minutes = Column(Integer, default=30)
+    blocked_countries = Column(Text, nullable=True)  # JSON list
+    builtin_checks = Column(Text, nullable=True)     # JSON {google_country, google_captcha, gemini}
+    custom_checks = Column(Text, nullable=True)      # JSON list
+    telegram_enabled = Column(Boolean, default=True)
+    alert_cooldown_seconds = Column(Integer, default=1800)
+    last_cycle_at = Column(DateTime(timezone=True), nullable=True)
+    last_cycle_error = Column(Text, nullable=True)
+
+
+class ExitProxyNode(Base):
+    """Нода, включённая в exit-прокси: её правила выбора выхода и последний статус,
+    полученный с ноды. Строка остаётся и после выключения — порядок кандидатов
+    и pin не теряются."""
+    __tablename__ = "exit_proxy_nodes"
+
+    server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), primary_key=True)
+    enabled = Column(Boolean, default=True)
+    select_mode = Column(String(10), default="auto")
+    pinned_candidate = Column(String(64), nullable=True)
+    candidates_order = Column(Text, nullable=True)     # JSON list id
+    candidates_disabled = Column(Text, nullable=True)  # JSON list id
+    node_status = Column(Text, nullable=True)          # JSON — последний ответ /status ноды
+    current_candidate = Column(String(64), nullable=True)
+    self_test_ok = Column(Boolean, nullable=True)
+    last_event_at = Column(String(40), nullable=True)
+    config_hash = Column(String(64), nullable=True)
+    sync_status = Column(String(20), default="pending")  # pending | synced | failed | denied | unsupported
+    sync_error = Column(Text, nullable=True)
+    last_sync_at = Column(DateTime(timezone=True), nullable=True)
+    last_status_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class ExitProxyEvent(Base):
+    """Журнал exit-прокси: смены выхода, потеря здоровых кандидатов, self-test."""
+    __tablename__ = "exit_proxy_events"
+
+    id = Column(Integer, primary_key=True)
+    server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    kind = Column(String(40), nullable=False)
+    from_value = Column(String(64), nullable=True)
+    to_value = Column(String(64), nullable=True)
+    reason = Column(String(500), nullable=True)
+
+    __table_args__ = (
+        Index('idx_exit_proxy_events_server_created', 'server_id', 'created_at'),
+    )
+
+
+# ==================== Пул исходящих адресов ====================
+
+class SourcePoolNode(Base):
+    """Нода, на которой исходящий TCP раскладывается по всем её IPv4 через метки
+    fwmark: исключённые адреса и последнее состояние раскладки с ноды. Строка
+    остаётся после выключения — список исключений не теряется."""
+    __tablename__ = "source_pool_nodes"
+
+    server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), primary_key=True)
+    enabled = Column(Boolean, default=True)
+    excluded = Column(Text, nullable=True)     # JSON list адресов
+    node_state = Column(Text, nullable=True)   # JSON — последний ответ /state ноды
+    config_hash = Column(String(64), nullable=True)
+    sync_status = Column(String(20), default="pending")  # pending | synced | failed | denied | unsupported
+    sync_error = Column(Text, nullable=True)
+    last_sync_at = Column(DateTime(timezone=True), nullable=True)
+    last_state_at = Column(DateTime(timezone=True), nullable=True)

@@ -8,7 +8,6 @@ server-блока и пересобирают конфиг целиком.
 
 import json
 import logging
-import re
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
@@ -22,6 +21,7 @@ from app.models import RemnawaveNginxProfile, RemnawaveNginxSyncLog, Server
 from app.services.haproxy_profile_sync import compute_config_hash, is_server_online
 from app.services.remnawave_nginx_config import (
     CLOUDFLARE_RANGES,
+    DOMAIN_RE,
     GrpcRule,
     MissingMarkersError,
     OptionsValidationError,
@@ -38,6 +38,8 @@ from app.services.remnawave_nginx_config import (
     splice_rules,
 )
 from app.services.remnawave_nginx_sync import (
+    NginxLinkError,
+    apply_server_link,
     get_remnawave_nginx_path,
     render_profile_for_server,
     sync_profile_to_servers,
@@ -48,10 +50,6 @@ from app.routers.proxy import get_server_by_id, proxy_request
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/remnawave-nginx-profiles", tags=["remnawave-nginx-profiles"])
-
-_DOMAIN_RE = re.compile(
-    r"^(?=.{4,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$", re.IGNORECASE
-)
 
 
 # ==================== Schemas ====================
@@ -85,16 +83,33 @@ class ImportFromNodeRequest(BaseModel):
     server_id: int
 
 
+def _normalize_domain(value: str) -> str:
+    value = value.strip().lower()
+    if not DOMAIN_RE.match(value):
+        raise ValueError(f"Некорректный домен: {value!r}")
+    return value
+
+
 class LinkServerRequest(BaseModel):
+    """Домен нужен, только если шаблон профиля содержит {{DOMAIN}} —
+    при wildcard-домене профиля ноде свой домен не требуется."""
+    domain: Optional[str] = None
+
+    @field_validator("domain")
+    @classmethod
+    def _check_domain(cls, v: Optional[str]) -> Optional[str]:
+        if not v or not v.strip():
+            return None
+        return _normalize_domain(v)
+
+
+class ServerDomainRequest(BaseModel):
     domain: str
 
     @field_validator("domain")
     @classmethod
     def _check_domain(cls, v: str) -> str:
-        v = v.strip().lower()
-        if not _DOMAIN_RE.match(v):
-            raise ValueError(f"Некорректный домен: {v!r}")
-        return v
+        return _normalize_domain(v)
 
 
 class RuleData(BaseModel):
@@ -233,6 +248,7 @@ async def get_available_servers(db: AsyncSession = Depends(get_db), _=Depends(ve
             Server.remnawave_nginx_sync_status,
             Server.remnawave_nginx_detected,
             Server.remnawave_nginx_domain,
+            Server.folder,
         )
         .where(Server.is_active.is_(True))
         .order_by(Server.name)
@@ -246,6 +262,7 @@ async def get_available_servers(db: AsyncSession = Depends(get_db), _=Depends(ve
             "sync_status": row[4],
             "detected": row[5],
             "domain": row[6],
+            "folder": row[7],
         }
         for row in result.fetchall()
     ]
@@ -470,15 +487,16 @@ async def link_server(
     profile_id: int, server_id: int, data: LinkServerRequest, bg: BackgroundTasks,
     db: AsyncSession = Depends(get_db), _=Depends(verify_auth),
 ):
-    await _get_profile(profile_id, db)
+    profile = await _get_profile(profile_id, db)
 
     server = await db.get(Server, server_id)
     if not server:
         raise HTTPException(404, "Server not found")
 
-    server.active_remnawave_nginx_profile_id = profile_id
-    server.remnawave_nginx_domain = data.domain
-    server.remnawave_nginx_sync_status = "pending"
+    try:
+        apply_server_link(profile, server, data.domain)
+    except NginxLinkError as e:
+        raise HTTPException(400, str(e))
     await db.commit()
 
     bg.add_task(_bg_sync_server, profile_id, server_id)
@@ -487,7 +505,7 @@ async def link_server(
 
 @router.put("/{profile_id}/servers/{server_id}/domain")
 async def update_server_domain(
-    profile_id: int, server_id: int, data: LinkServerRequest, bg: BackgroundTasks,
+    profile_id: int, server_id: int, data: ServerDomainRequest, bg: BackgroundTasks,
     db: AsyncSession = Depends(get_db), _=Depends(verify_auth),
 ):
     await _get_profile(profile_id, db)

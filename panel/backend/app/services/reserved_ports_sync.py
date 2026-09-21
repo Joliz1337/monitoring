@@ -12,7 +12,7 @@
 
 import asyncio
 import logging
-from typing import Optional
+from typing import Optional, Sequence
 
 from sqlalchemy import select
 
@@ -72,9 +72,12 @@ def parse_ports_value(value: Optional[str]) -> list[str]:
     return [str(s) if s == e else f"{s}-{e}" for s, e in parsed]
 
 
-def merged_entries(global_value: Optional[str], server_value: Optional[str]) -> list[str]:
-    """Объединённый список для отправки на ноду: общий + серверный, без дублей."""
-    return parse_ports_value(f"{global_value or ''} {server_value or ''}")
+def merged_entries(
+    global_value: Optional[str], server_value: Optional[str], service_entries: Sequence[str] = (),
+) -> list[str]:
+    """Объединённый список для отправки на ноду: общий + серверный + порты
+    сервисов панели (exit-прокси), без дублей."""
+    return parse_ports_value(" ".join([global_value or "", server_value or "", *service_entries]))
 
 
 def _version_tuple(value: str) -> tuple[int, ...]:
@@ -125,9 +128,11 @@ async def push_reserved_ports_to_servers(server_ids: list[int]) -> dict[int, Opt
     серверный из БД) — за время простоя ноды устаревшие команды не копятся.
     """
     from app.routers.settings import RESERVED_PORTS_KEY, get_setting
+    from app.services.exit_proxy.settings import service_ports
 
     async with async_session() as db:
         global_value = await get_setting(RESERVED_PORTS_KEY, db)
+        service_entries = await service_ports(db)
         result = await db.execute(select(Server).where(Server.id.in_(server_ids)))
         servers = list(result.scalars().all())
 
@@ -136,7 +141,7 @@ async def push_reserved_ports_to_servers(server_ids: list[int]) -> dict[int, Opt
 
     async def _one(server: Server) -> None:
         try:
-            entries = merged_entries(global_value, server.reserved_ports)
+            entries = merged_entries(global_value, server.reserved_ports, service_entries)
         except ValueError as e:
             # Битое значение в БД (правка руками) — внятная ошибка вместо 400 от ноды
             results[server.id] = str(e)

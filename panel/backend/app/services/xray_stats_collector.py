@@ -14,17 +14,19 @@ import logging
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from urllib.parse import urlparse
 
 from sqlalchemy import select, delete, func as sql_func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.database import async_session
-from app.models import RemnawaveSettings, XrayStats, RemnawaveUserCache, RemnawaveHwidDevice, AlertSettings
+from app.models import RemnawaveSettings, XrayStats, RemnawaveUserCache, RemnawaveHwidDevice, AlertSettings, Server
 from app.services.remnawave_api import get_remnawave_api, RemnawaveAPIError
 from app.services.asn_lookup import lookup_ips_cached, group_ips_by_asn, effective_ip_count, enrich_with_names
 from app.services import ip_anomaly_state
 from app.services.known_clients import build_ua_pattern
+from app.services.net_utils import host_to_ip
 
 logger = logging.getLogger(__name__)
 
@@ -596,6 +598,18 @@ class XrayStatsCollector:
                 return alert.telegram_bot_token, alert.telegram_chat_id
             return None, None
 
+    async def _get_node_ips(self) -> set[str]:
+        """IP всех нод парка: транзитная нода (DNAT-релей) светится в Xray-логах
+        как source_ip клиента и не должна считаться устройством пользователя."""
+        async with async_session() as db:
+            urls = (await db.execute(select(Server.url))).scalars().all()
+        ips: set[str] = set()
+        for url in urls:
+            ip = await host_to_ip(urlparse(url).hostname or "")
+            if ip:
+                ips.add(ip)
+        return ips
+
     async def _check_anomalies(self, settings: RemnawaveSettings):
         if not settings.anomaly_enabled:
             return
@@ -627,10 +641,16 @@ class XrayStatsCollector:
         devdata_smart_bytes = int(devdata_smart_gb * 1024 ** 3)
         ua_pattern = build_ua_pattern(settings.anomaly_ua_patterns)
 
+        node_ips = await self._get_node_ips() if ip_check_on else set()
+
         async with async_session() as db:
+            ip_count_stmt = select(
+                XrayStats.email, sql_func.count(sql_func.distinct(XrayStats.source_ip)).label("cnt")
+            )
+            if node_ips:
+                ip_count_stmt = ip_count_stmt.where(XrayStats.source_ip.not_in(node_ips))
             ip_rows = (await db.execute(
-                select(XrayStats.email, sql_func.count(sql_func.distinct(XrayStats.source_ip)).label("cnt"))
-                .group_by(XrayStats.email)
+                ip_count_stmt.group_by(XrayStats.email)
             )).all() if ip_check_on else []
 
             hwid_rows = (await db.execute(
@@ -690,7 +710,7 @@ class XrayStatsCollector:
                     r[0] for r in (await db.execute(
                         select(XrayStats.source_ip).where(XrayStats.email == email)
                     )).all()
-                }
+                } - node_ips
                 state = await ip_anomaly_state.get_or_create(db, email)
                 known = ip_anomaly_state.parse_ips(state.known_ips)
                 since = ip_anomaly_state.seconds_since_last(state, now)

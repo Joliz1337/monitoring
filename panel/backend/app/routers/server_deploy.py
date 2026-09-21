@@ -1,16 +1,14 @@
 """Авторазвёртывание ноды по SSH и хранилище сертификатов Remnawave.
 
 POST /servers/deploy — запускает фоновую задачу установки ноды (+опции) и
-возвращает её job_id. Сама установка идёт независимо от HTTP-соединения: лог
-читается через GET /servers/deploy/{job_id}/stream (NDJSON), список активных
-и недавних задач — через GET /servers/deploy/jobs.
+возвращает её job_id. Сама установка идёт независимо от HTTP-соединения:
+браузер опрашивает GET /servers/deploy/{job_id}/status и забирает новые строки
+лога по смещению, список активных и недавних задач — GET /servers/deploy/jobs.
 """
 import ipaddress
-import json
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -18,12 +16,18 @@ from typing import Optional
 
 from app.auth import verify_auth
 from app.database import async_session_maker, get_db
-from app.models import RemnawaveCertProfile
+from app.models import RemnawaveCertProfile, RemnawaveNginxProfile
 from app.services.deploy_job_manager import PostDeployOptions, get_deploy_job_manager
-from app.services.deploy_service import DeployParams, InstallerLanguage
+from app.services.deploy_service import DeployParams, InstallerLanguage, build_install_command
 from app.services.http_client import validate_proxy_input
+from app.services.remnawave_nginx_config import DOMAIN_PLACEHOLDER, DOMAIN_RE
+from app.services.remnawave_nginx_sync import NODE_DOMAIN_REQUIRED_MESSAGE
 from app.services.net_utils import resolve_panel_ip
-from app.services.pki import build_installer_token
+from app.services.pki import (
+    PKIKeygenData,
+    build_dedicated_installer_token,
+    build_installer_token,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
@@ -45,10 +49,6 @@ def _validate_host(raw: str) -> str:
     if ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified:
         raise HTTPException(400, f"Disallowed host: {host}")
     return host
-
-
-def _ndjson(obj: dict) -> bytes:
-    return (json.dumps(obj, ensure_ascii=False) + "\n").encode()
 
 
 # ==================== Профили сертификатов Remnawave ====================
@@ -151,13 +151,33 @@ class DeployRequest(BaseModel):
     haproxy_profile_id: Optional[int] = None
     firewall_profile_id: Optional[int] = None
     dnat_profile_id: Optional[int] = None
+    wildcard_ssl_enabled: bool = False
+    wildcard_ssl_reload_cmd: Optional[str] = Field(None, max_length=512)
+    remnawave_nginx_profile_id: Optional[int] = None
+    remnawave_nginx_domain: Optional[str] = None
+    # Одноразовый персональный сертификат вместо общего ключа парка:
+    # компрометация такой ноды не даёт клиентского доступа к остальным
+    dedicated_cert: bool = False
     # Язык интерфейса панели — установщик и меню `mon` на ноде будут на нём же
     lang: InstallerLanguage = InstallerLanguage.EN
+    # Полуавтоматический режим: команду установки оператор запускает на сервере сам,
+    # панель по SSH не ходит — ждёт появления ноды и выполняет постустановочные шаги
+    manual: bool = False
 
     @field_validator('socks5_proxy')
     @classmethod
     def validate_socks5_proxy(cls, v: Optional[str]) -> Optional[str]:
         return validate_proxy_input(v)
+
+    @field_validator('remnawave_nginx_domain')
+    @classmethod
+    def validate_remnawave_nginx_domain(cls, v: Optional[str]) -> Optional[str]:
+        if not v or not v.strip():
+            return None
+        value = v.strip().lower()
+        if not DOMAIN_RE.match(value):
+            raise ValueError(f"Некорректный домен: {value!r}")
+        return value
 
 
 async def resolve_remnawave_cert(
@@ -198,46 +218,52 @@ async def resolve_remnawave_cert(
     return cert
 
 
-@router.post("/deploy")
-async def deploy_server(
+async def _validate_remnawave_nginx_option(req: DeployRequest) -> None:
+    """Профиль должен существовать, а без wildcard-домена в нём — нужен домен ноды.
+    Проверяется до старта джобы, чтобы оператор узнал об ошибке сразу, а не из лога."""
+    if not req.install_remnawave or req.remnawave_nginx_profile_id is None:
+        return
+    async with async_session_maker() as db:
+        profile = await db.get(RemnawaveNginxProfile, req.remnawave_nginx_profile_id)
+    if not profile:
+        raise HTTPException(404, "Nginx-профиль Remnawave не найден")
+    if DOMAIN_PLACEHOLDER in profile.config_content and not req.remnawave_nginx_domain:
+        raise HTTPException(400, NODE_DOMAIN_REQUIRED_MESSAGE)
+
+
+def _installer_proxy_url(req: DeployRequest) -> Optional[str]:
+    if not req.install_proxy:
+        return None
+    proxy_url = (req.proxy_url or "").strip()
+    if not proxy_url:
+        raise HTTPException(400, "Не указан адрес прокси")
+    return proxy_url
+
+
+async def _build_deploy_params(
     req: DeployRequest,
-    request: Request,
-    _: dict = Depends(verify_auth),
-):
-    """Запустить фоновую установку ноды на удалённом сервере по SSH.
-
-    Возвращает job_id — лог читается отдельным запросом к /deploy/{job_id}/stream.
-    """
-    host = _validate_host(req.host)
-
-    if not req.ssh_password and not req.ssh_private_key:
-        raise HTTPException(400, "Укажите пароль или приватный SSH-ключ")
-
+    host: str,
+    pki: PKIKeygenData,
+    save_remnawave_cert: bool,
+) -> DeployParams:
+    """Параметры установки из запроса: общий NODE_SECRET, сертификат Remnawave,
+    HTTP-прокси установщика. Сохранение сертификата — только при реальном запуске."""
     remnawave_cert: Optional[str] = None
     if req.install_remnawave:
         remnawave_cert = await resolve_remnawave_cert(
             req.remnawave_cert_inline,
             req.remnawave_cert_profile_id,
-            save=req.save_remnawave_cert,
+            save=save_remnawave_cert and req.save_remnawave_cert,
             save_name=req.save_remnawave_cert_name,
         )
 
-    proxy_url: Optional[str] = None
-    if req.install_proxy:
-        proxy_url = (req.proxy_url or "").strip()
-        if not proxy_url:
-            raise HTTPException(400, "Не указан адрес прокси")
-
-    if req.ssh_preset and req.ssh_preset not in ("recommended", "maximum"):
-        raise HTTPException(400, "Некорректный SSH-пресет")
-    if req.new_root_password is not None and len(req.new_root_password) < 8:
-        raise HTTPException(400, "Пароль root: минимум 8 символов")
-
     panel_ip = await resolve_panel_ip()
-    node_secret = build_installer_token(request.app.state.pki, panel_ip=panel_ip)
-    server_url = f"https://{host}:{req.monitoring_port}"
-
-    params = DeployParams(
+    node_secret = (
+        build_dedicated_installer_token(pki, panel_ip=panel_ip)
+        if req.dedicated_cert
+        else build_installer_token(pki, panel_ip=panel_ip)
+    )
+    return DeployParams(
         host=host,
         ssh_port=req.ssh_port,
         ssh_user=req.ssh_user.strip() or "root",
@@ -253,11 +279,55 @@ async def deploy_server(
         nic_mode=req.nic_mode if req.nic_mode in ("multiqueue", "hybrid", "rps") else "auto",
         install_remnawave=req.install_remnawave,
         remnawave_cert=remnawave_cert,
-        proxy_url=proxy_url,
+        proxy_url=_installer_proxy_url(req),
         socks5_proxy=req.socks5_proxy,
         new_password=req.new_root_password,
         lang=req.lang,
     )
+
+
+@router.post("/deploy/command")
+async def deploy_command(
+    req: DeployRequest,
+    request: Request,
+    _: dict = Depends(verify_auth),
+):
+    """Команда установки для запуска руками — с теми же компонентами и
+    настройками, что выбраны в форме автоустановки. Ничего не запускает."""
+    params = await _build_deploy_params(
+        req, req.host.strip(), request.app.state.pki, save_remnawave_cert=False,
+    )
+    return {"command": build_install_command(params)}
+
+
+@router.post("/deploy")
+async def deploy_server(
+    req: DeployRequest,
+    request: Request,
+    _: dict = Depends(verify_auth),
+):
+    """Запустить фоновую установку ноды на удалённом сервере по SSH — или, в
+    полуавтоматическом режиме (`manual`), только ожидание ноды, которую оператор
+    ставит сам скопированной командой.
+
+    Возвращает job_id — статус и лог читаются опросом /deploy/{job_id}/status.
+    """
+    host = _validate_host(req.host)
+
+    if not req.manual and not req.ssh_password and not req.ssh_private_key:
+        raise HTTPException(400, "Укажите пароль или приватный SSH-ключ")
+
+    if req.ssh_preset and req.ssh_preset not in ("recommended", "maximum"):
+        raise HTTPException(400, "Некорректный SSH-пресет")
+    if req.new_root_password is not None and len(req.new_root_password) < 8:
+        raise HTTPException(400, "Пароль root: минимум 8 символов")
+
+    await _validate_remnawave_nginx_option(req)
+
+    params = await _build_deploy_params(
+        req, host, request.app.state.pki, save_remnawave_cert=True,
+    )
+    server_url = f"https://{host}:{req.monitoring_port}"
 
     post_opts = PostDeployOptions(
         ssh_preset=req.ssh_preset,
@@ -265,9 +335,18 @@ async def deploy_server(
         haproxy_profile_id=req.haproxy_profile_id,
         firewall_profile_id=req.firewall_profile_id,
         dnat_profile_id=req.dnat_profile_id,
+        wildcard_ssl_enabled=req.wildcard_ssl_enabled,
+        wildcard_ssl_reload_cmd=(req.wildcard_ssl_reload_cmd or "").strip() or None,
+        remnawave_nginx_profile_id=(
+            req.remnawave_nginx_profile_id if req.install_remnawave else None
+        ),
+        remnawave_nginx_domain=req.remnawave_nginx_domain,
+        dedicated_cert=req.dedicated_cert,
     )
 
-    job_id = get_deploy_job_manager().start(params, req.name, server_url, post_opts)
+    job_id = get_deploy_job_manager().start(
+        params, req.name, server_url, post_opts, wait_for_manual_install=req.manual,
+    )
     return {"job_id": job_id}
 
 
@@ -277,19 +356,16 @@ async def list_deploy_jobs(_: dict = Depends(verify_auth)):
     return {"jobs": get_deploy_job_manager().list_jobs()}
 
 
-@router.get("/deploy/{job_id}/stream")
-async def stream_deploy_job(job_id: str, _: dict = Depends(verify_auth)):
-    """NDJSON-стрим лога задачи установки. Переподключаемый."""
-    manager = get_deploy_job_manager()
-    if manager.get(job_id) is None:
+@router.get("/deploy/{job_id}/status")
+async def deploy_job_status(
+    job_id: str,
+    offset: int = Query(0, ge=0),
+    _: dict = Depends(verify_auth),
+):
+    """Статус задачи и строки лога начиная с `offset`. Короткий запрос вместо
+    долгоживущего стрима: обрыв связи у клиента ничего не теряет — следующий
+    опрос продолжит с `next_offset` из последнего ответа."""
+    snapshot = get_deploy_job_manager().snapshot(job_id, offset)
+    if snapshot is None:
         raise HTTPException(404, "Задача установки не найдена")
-
-    async def generate():
-        async for event in manager.subscribe(job_id):
-            yield _ndjson(event)
-
-    return StreamingResponse(
-        generate(),
-        media_type="application/x-ndjson",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+    return snapshot

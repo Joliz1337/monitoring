@@ -69,8 +69,10 @@ FULL_CONFIG_MOUNT = "/etc/nginx/nginx.conf"
 # а нода пересчитывает под конкретный хост при каждом применении. Убрал
 # маркер — значение считается заданным вручную и не трогается.
 AUTO_MARKER = "# auto: node"
+# keepalive перечислен последним и требует пробел после имени: keepalive_requests
+# и keepalive_timeout заканчиваются на «_…», под `keepalive[ \t]+` не подпадают
 _AUTO_LINE_RE = re.compile(
-    r"^(?P<head>[ \t]*(?P<directive>worker_rlimit_nofile|worker_connections|ssl_session_cache)[ \t]+)"
+    r"^(?P<head>[ \t]*(?P<directive>worker_rlimit_nofile|worker_connections|ssl_session_cache|keepalive)[ \t]+)"
     r"(?P<value>[^;]+);(?P<tail>[ \t]*" + re.escape(AUTO_MARKER) + r".*)$",
     re.MULTILINE,
 )
@@ -90,6 +92,12 @@ SSL_CACHE_MB_MIN = 10
 SSL_CACHE_MB_MAX = 100
 # ~1 МБ кэша TLS-сессий на каждые 100 МБ RAM хоста
 SSL_CACHE_RAM_DIVISOR = 100
+# Пул keepalive к XHTTP-инбаунду: при packet-by-packet аплоаде 64 не покрывают
+# крупную ноду, и запросы начинают открывать новые коннекты к 127.0.0.1 с
+# TIME_WAIT на loopback. Считаем от worker_connections, потолок 512
+UPSTREAM_KEEPALIVE_MIN = 64
+UPSTREAM_KEEPALIVE_MAX = 512
+UPSTREAM_KEEPALIVE_DIVISOR = 64
 
 _DOCKER_TIMEOUT = 30
 _RELOAD_TIMEOUT = 30
@@ -176,13 +184,18 @@ def compute_host_limits(compose_nofile: Optional[int] = None) -> dict:
     nofile = _read_fact("DOCKER_NOFILE") or _read_fact("NOFILE_LIMIT") \
         or compose_nofile or DEFAULT_NOFILE
     mem_mb = _read_mem_mb() or 1024
+    worker_connections = _clamp(
+        nofile // FD_PER_CONNECTION, WORKER_CONNECTIONS_MIN, WORKER_CONNECTIONS_MAX
+    )
     return {
         "worker_rlimit_nofile": nofile,
-        "worker_connections": _clamp(
-            nofile // FD_PER_CONNECTION, WORKER_CONNECTIONS_MIN, WORKER_CONNECTIONS_MAX
-        ),
+        "worker_connections": worker_connections,
         "ssl_session_cache": _clamp(
             mem_mb // SSL_CACHE_RAM_DIVISOR, SSL_CACHE_MB_MIN, SSL_CACHE_MB_MAX
+        ),
+        "keepalive": _clamp(
+            worker_connections // UPSTREAM_KEEPALIVE_DIVISOR,
+            UPSTREAM_KEEPALIVE_MIN, UPSTREAM_KEEPALIVE_MAX,
         ),
     }
 

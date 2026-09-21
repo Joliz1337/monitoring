@@ -240,15 +240,23 @@ class CallSiteCoverageTest(unittest.TestCase):
 
     GATED = {
         "routers/bulk_actions.py",
+        # фоновый опрос порта sshd: гейт внутри proxy_to_node (раздел ssh), отказ = пропуск ноды
+        "routers/firewall_profiles.py",
         "routers/proxy.py",
         "routers/ssh_security.py",
         "services/antiddos_manager.py",
         "services/blocklist_manager.py",
         "services/cpu_affinity_sync.py",
         "services/dnat_profile_sync.py",
+        # гейт ensure_node_ready(SYSTEM, write) внутри каждого запроса к ноде
+        "services/exit_proxy/node_client.py",
+        # тот же гейт ensure_node_ready(SYSTEM, write) на каждый запрос
+        "services/source_pool/node_client.py",
         "services/firewall_profile_sync.py",
         "services/haproxy_profile_sync.py",
         "services/metrics_collector.py",
+        # гейт в роутере proxy: require_capability(SYSTEM) до старта задачи
+        "services/network_transactions.py",
         "services/recovery_reconciler.py",
         "services/remnawave_nginx_sync.py",
         # гейт в роутере remnawave_install: require_capability(EXEC) до старта job

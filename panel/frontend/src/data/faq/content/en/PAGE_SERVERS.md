@@ -29,6 +29,8 @@ When someone else installs the node — the owner of a server you rent — the s
 - It installs like any token: `mon` → `Install Node`. The **Install command** button copies a ready one-liner you can simply forward.
 - An issued key cannot be revoked from an already installed node — deleting it in the panel only removes it from the list. Limit the lifetime instead of counting on revocation.
 
+The **"One-time (personal) key"** checkbox in auto-install does the same thing on its own: the panel issues such a key, uses it for the install and stores it nowhere — nothing to issue upfront or copy around. The node ends up on a personal certificate, and the migrate-to-shared-key prompt leaves it alone.
+
 ## A node under blocking (no access to the image registry)
 
 If a server is behind heavy DPI (e.g. Russia's TSPU) and cannot pull the node image from the registry, the panel ships the image over SSH itself.

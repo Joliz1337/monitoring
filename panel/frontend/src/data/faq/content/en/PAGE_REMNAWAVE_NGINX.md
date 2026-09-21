@@ -50,13 +50,15 @@ Not allowed: duplicate rule names or paths; a rule with path `/` while fallback 
 
 **Reject unknown SNI** — the server stops answering with your certificate on connections with a foreign or empty SNI, i.e. on bare-IP scanning. Enable only if every client connects with the node's domain.
 
-**Certificate paths** — with a wildcard certificate remove `{{DOMAIN}}` from them: the directory is named after the base domain (`/etc/letsencrypt/live/example.com/`), not after the node's subdomain. Keep the placeholder only when each node has its own separate certificate.
+**Wildcard domain (one for all nodes)** — the base domain without `*.`, e.g. `example.com`. nginx on every node accepts it and any subdomain (`server_name example.com *.example.com`), and `{{DOMAIN}}` in the certificate paths becomes this domain. No per-node domain is needed when linking — set the base domain once in the profile. Works **only with a wildcard certificate** `*.example.com`: a regular single-subdomain certificate would be served for every name and clients would get a TLS error. The certificate must already exist on every node — the easiest way is to deploy it via the Wildcard SSL section, which by default writes to `/etc/letsencrypt/live/example.com/`, exactly where the paths below point.
+
+**Certificate paths** — with a wildcard certificate and no wildcard domain in the profile, remove `{{DOMAIN}}` from them: the directory is named after the base domain (`/etc/letsencrypt/live/example.com/`), not after the node's subdomain. Keep the placeholder only when each node has its own separate certificate.
 
 The certificate itself must already exist on the node — before applying, the node checks the files on the host and returns a clear error if they are missing, instead of raw `nginx -t` output. No need to mount the certificate directory into the container manually: if the directory (including custom paths) is not mounted yet, the node adds the volume to the installation's `docker-compose.yml` itself and recreates the container.
 
 ## Node domain
 
-Set when linking and substituted for `{{DOMAIN}}` — in `server_name` and, if the placeholder is left there, in the certificate paths. Use the domain clients actually connect to on that node.
+Set when linking and substituted for `{{DOMAIN}}` — in `server_name` and, if the placeholder is left there, in the certificate paths. Use the domain clients actually connect to on that node. If the profile options set a wildcard domain, the field is hidden — every node serves its subdomains.
 
 ## For Xray to see the real IP
 

@@ -30,6 +30,7 @@ from app.services import cpu_affinity, reserved_ports
 from app.services.bandwidth_limit import MAX_MBIT, MIN_MBIT, get_bandwidth_limiter
 from app.services.host_executor import get_host_executor, MAX_TIMEOUT, DEFAULT_TIMEOUT
 from app.services.host_files import read_host_file, write_host_file
+from app.services.net_interfaces import list_physical_interfaces
 from app.services.sysctl_verify import (
     TUNING_FACTS_PATH,
     cleanup_conflicting_configs,
@@ -778,36 +779,19 @@ async def get_nic_info():
 
     nic_mode = await detect_nic_mode(executor)
 
-    # Реальные физические интерфейсы с активным линком (operstate=up).
-    # Исключаем bridge/bond/loopback (нет device/) и DOWN-карты (не несут трафик).
-    ifaces_result = await executor.execute(
-        "for dev in /sys/class/net/*/device; do "
-        "iface=$(basename $(dirname $dev)); "
-        "[ -d /sys/class/net/$iface/bridge ] && continue; "
-        "[ -f /sys/class/net/$iface/bonding/slaves ] && continue; "
-        "[ \"$(cat /sys/class/net/$iface/operstate 2>/dev/null)\" = \"up\" ] || continue; "
-        "echo $iface; done 2>/dev/null",
-        timeout=5, shell="bash"
-    )
-
     interfaces = []
     multiqueue_supported = False
 
-    if ifaces_result.success and ifaces_result.stdout.strip():
-        for iface in ifaces_result.stdout.strip().split("\n"):
-            iface = iface.strip()
-            if not iface:
-                continue
+    for iface, _ in await list_physical_interfaces(executor):
+        max_hw, current_hw = await detect_iface_hw_queues(executor, iface)
+        if max_hw > 1:
+            multiqueue_supported = True
 
-            max_hw, current_hw = await detect_iface_hw_queues(executor, iface)
-            if max_hw > 1:
-                multiqueue_supported = True
-
-            interfaces.append({
-                "name": iface,
-                "max_hw_queues": max_hw,
-                "current_hw_queues": current_hw,
-            })
+        interfaces.append({
+            "name": iface,
+            "max_hw_queues": max_hw,
+            "current_hw_queues": current_hw,
+        })
 
     # CPU: логические потоки (nproc) и физические ядра (lscpu) — для ручного
     # выбора режима оператором, без авто-рекомендации

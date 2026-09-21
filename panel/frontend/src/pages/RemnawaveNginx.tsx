@@ -1,6 +1,6 @@
-import { useEffect, useState, useCallback, useRef } from 'react'
+import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { useNodeCapabilities } from '../hooks/useNodeCapabilities'
-import { Waypoints, Plus, RefreshCw, Trash2, Server, ChevronDown, ChevronRight, Edit3, Link2, Unlink, Loader2, CheckCircle2, XCircle, AlertCircle, Clock, History, X, Code, Save, AlertTriangle, Activity, Globe, Lock, RotateCw, Download, Settings2, Power } from 'lucide-react'
+import { Waypoints, Plus, RefreshCw, Trash2, Server, ChevronDown, ChevronRight, Edit3, Link2, Unlink, Loader2, CheckCircle2, XCircle, AlertCircle, Clock, History, X, Code, Save, AlertTriangle, Activity, Globe, Lock, RotateCw, Download, Settings2, Power, Folder, FolderOpen } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
@@ -306,6 +306,20 @@ function OptionsSection({
         <p className="text-[10px] text-dark-500">{t('remnawave_nginx.access_log_hint')}</p>
       </div>
 
+      {/* Wildcard-домен: один на все ноды профиля */}
+      <div className="space-y-1.5">
+        <label className="block text-xs text-dark-400">{t('remnawave_nginx.wildcard_domain')}</label>
+        <input type="text" value={opts.wildcard_domain} onChange={e => upd({ wildcard_domain: e.target.value })}
+          placeholder="example.com" className={`${inp} font-mono text-xs`} spellCheck={false} />
+        <p className="text-[10px] text-dark-500">{t('remnawave_nginx.wildcard_domain_hint')}</p>
+        {opts.wildcard_domain.trim() !== '' && (
+          <div className="flex items-start gap-2 px-3 py-2 rounded-lg text-xs text-yellow-400 bg-yellow-500/10 border border-yellow-500/20">
+            <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+            {t('remnawave_nginx.wildcard_domain_warning', { domain: opts.wildcard_domain.trim() })}
+          </div>
+        )}
+      </div>
+
       {/* Пути сертификатов */}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <div>
@@ -388,6 +402,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
   const [detail, setDetail] = useState<RemnawaveNginxProfileDetail | null>(null)
   const [rules, setRules] = useState<RemnawaveNginxRule[]>([])
   const [hasMarkers, setHasMarkers] = useState(true)
+  const wildcardDomain = detail?.options.wildcard_domain || ''
   const [availableServers, setAvailableServers] = useState<RemnawaveNginxAvailableServer[]>([])
   const [serversStatus, setServersStatus] = useState<RemnawaveNginxServerStatus[]>([])
   const [nodeStatuses, setNodeStatuses] = useState<Record<number, RemnawaveNginxNodeStatus>>({})
@@ -413,6 +428,12 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
   const [showImport, setShowImport] = useState(false)
   const [importing, setImporting] = useState(false)
   const [serverSearch, setServerSearch] = useState('')
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem('remnawave_nginx_add_expanded_folders')
+      return raw ? new Set(JSON.parse(raw)) : new Set()
+    } catch { return new Set() }
+  })
   const [configModalMouseDown, setConfigModalMouseDown] = useState(false)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const prevSyncedRef = useRef<string>('')
@@ -642,9 +663,9 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
   // ---- Server binding ----
   const handleLinkServer = async () => {
     if (!linkingServer) return
-    if (!linkDomain.trim()) { toast.error(t('remnawave_nginx.domain_required')); return }
+    if (!wildcardDomain && !linkDomain.trim()) { toast.error(t('remnawave_nginx.domain_required')); return }
     try {
-      await remnawaveNginxApi.linkServer(profileId, linkingServer.id, linkDomain.trim())
+      await remnawaveNginxApi.linkServer(profileId, linkingServer.id, wildcardDomain ? null : linkDomain.trim())
       toast.success(t('remnawave_nginx.server_linked'))
       setLinkingServer(null); setLinkDomain(''); setShowAddServer(false)
       await fetchDetail(); onRefreshList()
@@ -680,13 +701,120 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
   }
   const toggleLog = () => { if (!showLog) fetchLog(); setShowLog(!showLog) }
 
-  const unlinkedServers = availableServers
-    .filter(s => s.active_profile_id === null || s.active_profile_id !== profileId)
-    .filter(s => {
-      if (!serverSearch) return true
-      const q = serverSearch.toLowerCase()
-      return s.name.toLowerCase().includes(q) || s.url.toLowerCase().includes(q)
+  const toggleCollapsed = (folder: string) => {
+    setExpandedFolders(prev => {
+      const next = new Set(prev)
+      if (next.has(folder)) next.delete(folder)
+      else next.add(folder)
+      localStorage.setItem('remnawave_nginx_add_expanded_folders', JSON.stringify([...next]))
+      return next
     })
+  }
+
+  const unlinkedServers = useMemo(
+    () => availableServers.filter(s => s.active_profile_id !== profileId),
+    [availableServers, profileId]
+  )
+
+  const groupedCandidates = useMemo(() => {
+    const folders = new Map<string, RemnawaveNginxAvailableServer[]>()
+    const noFolder: RemnawaveNginxAvailableServer[] = []
+    for (const s of unlinkedServers) {
+      if (s.folder) {
+        if (!folders.has(s.folder)) folders.set(s.folder, [])
+        folders.get(s.folder)!.push(s)
+      } else {
+        noFolder.push(s)
+      }
+    }
+    return { folders, noFolder }
+  }, [unlinkedServers])
+
+  const sortedFolderNames = useMemo(() => {
+    const allNames = [...groupedCandidates.folders.keys()]
+    try {
+      const saved: string[] = JSON.parse(localStorage.getItem('dashboard_folder_order') || '[]')
+      const ordered = saved.filter(f => allNames.includes(f))
+      const rest = allNames.filter(f => !saved.includes(f)).sort()
+      return [...ordered, ...rest]
+    } catch {
+      return allNames.sort()
+    }
+  }, [groupedCandidates.folders])
+
+  const filteredCandidates = useMemo(() => {
+    const q = serverSearch.toLowerCase().trim()
+    if (!q) return groupedCandidates
+    const matches = (s: RemnawaveNginxAvailableServer) =>
+      s.name.toLowerCase().includes(q) || s.url.toLowerCase().includes(q)
+    const folders = new Map<string, RemnawaveNginxAvailableServer[]>()
+    for (const [name, svrs] of groupedCandidates.folders) {
+      const matched = svrs.filter(matches)
+      if (matched.length > 0) folders.set(name, matched)
+    }
+    return { folders, noFolder: groupedCandidates.noFolder.filter(matches) }
+  }, [serverSearch, groupedCandidates])
+
+  const searchingServers = serverSearch.trim().length > 0
+  const hasFolders = groupedCandidates.folders.size > 0
+  const noCandidates = filteredCandidates.folders.size === 0 && filteredCandidates.noFolder.length === 0
+
+  const renderCandidate = (s: RemnawaveNginxAvailableServer) => (
+    <button key={s.id} onClick={() => { setLinkingServer(s); setLinkDomain(s.domain || '') }}
+      className="w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm text-dark-200 hover:bg-dark-700/50 transition-colors">
+      <span className="flex items-center gap-2">
+        <Server className="w-3.5 h-3.5 text-dark-400" />{s.name}
+        {s.detected && (
+          <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-green-500/10 text-green-400 border border-green-500/20">
+            {t('remnawave_nginx.detected')}
+          </span>
+        )}
+      </span>
+      <span className="flex items-center gap-2 text-xs text-dark-500">
+        {s.domain && <span className="font-mono">{s.domain}</span>}
+        {s.active_profile_id && <span>{t('remnawave_nginx.has_other_profile')}</span>}
+      </span>
+    </button>
+  )
+
+  const renderCandidateGroup = (key: string, label: string, servers: RemnawaveNginxAvailableServer[], isFolder: boolean) => {
+    const isCollapsed = !searchingServers && !expandedFolders.has(key)
+    const icon = isFolder
+      ? (isCollapsed
+          ? <Folder className="w-4 h-4 text-accent-400 shrink-0" />
+          : <FolderOpen className="w-4 h-4 text-accent-400 shrink-0" />)
+      : <Server className="w-4 h-4 text-dark-400 shrink-0" />
+    return (
+      <div key={key} className="mb-1">
+        <div
+          className="flex items-center gap-2 p-2 rounded-lg hover:bg-dark-800/50 transition-colors cursor-pointer"
+          onClick={() => toggleCollapsed(key)}
+        >
+          {icon}
+          <span className={`font-medium text-sm truncate ${isFolder ? 'text-dark-200' : 'text-dark-400'}`}>{label}</span>
+          <span className="text-xs text-dark-500 ml-auto shrink-0">{servers.length}</span>
+          <motion.div animate={{ rotate: isCollapsed ? -90 : 0 }} transition={{ duration: 0.15 }}>
+            <ChevronDown className="w-3.5 h-3.5 text-dark-500" />
+          </motion.div>
+        </div>
+        <AnimatePresence initial={false}>
+          {!isCollapsed && (
+            <motion.div
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: 'auto', opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              transition={{ duration: 0.15 }}
+              className="overflow-hidden"
+            >
+              <div className="pl-4 space-y-1 pt-1">
+                {servers.map(renderCandidate)}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+    )
+  }
 
   const linkedDetectedServers = availableServers.filter(s => s.detected)
 
@@ -950,18 +1078,33 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                         </span>
                         <button onClick={() => { setLinkingServer(null); setLinkDomain('') }} className="p-1 text-dark-400 hover:text-dark-200"><X className="w-3.5 h-3.5" /></button>
                       </div>
-                      <label className="block text-xs text-dark-400">{t('remnawave_nginx.node_domain')}</label>
-                      <div className="flex items-center gap-2">
-                        <input type="text" value={linkDomain} onChange={e => setLinkDomain(e.target.value)}
-                          placeholder="node1.example.com" autoFocus
-                          onKeyDown={e => { if (e.key === 'Enter') handleLinkServer() }}
-                          className="flex-1 px-3 py-1.5 rounded-lg bg-dark-800 border border-dark-700 text-dark-100 text-sm font-mono focus:outline-none focus:border-accent-500/50" />
-                        <button onClick={handleLinkServer}
-                          className="px-3 py-1.5 rounded-lg text-xs font-medium bg-accent-600 hover:bg-accent-500 text-white transition-colors">
-                          {t('remnawave_nginx.link')}
-                        </button>
-                      </div>
-                      <p className="text-[10px] text-dark-500">{t('remnawave_nginx.node_domain_hint')}</p>
+                      {wildcardDomain ? (
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="flex items-center gap-1.5 text-xs text-dark-400">
+                            <Globe className="w-3 h-3" />
+                            {t('remnawave_nginx.wildcard_link_hint', { domain: wildcardDomain })}
+                          </span>
+                          <button onClick={handleLinkServer} autoFocus
+                            className="px-3 py-1.5 rounded-lg text-xs font-medium bg-accent-600 hover:bg-accent-500 text-white transition-colors">
+                            {t('remnawave_nginx.link')}
+                          </button>
+                        </div>
+                      ) : (
+                        <>
+                          <label className="block text-xs text-dark-400">{t('remnawave_nginx.node_domain')}</label>
+                          <div className="flex items-center gap-2">
+                            <input type="text" value={linkDomain} onChange={e => setLinkDomain(e.target.value)}
+                              placeholder="node1.example.com" autoFocus
+                              onKeyDown={e => { if (e.key === 'Enter') handleLinkServer() }}
+                              className="flex-1 px-3 py-1.5 rounded-lg bg-dark-800 border border-dark-700 text-dark-100 text-sm font-mono focus:outline-none focus:border-accent-500/50" />
+                            <button onClick={handleLinkServer}
+                              className="px-3 py-1.5 rounded-lg text-xs font-medium bg-accent-600 hover:bg-accent-500 text-white transition-colors">
+                              {t('remnawave_nginx.link')}
+                            </button>
+                          </div>
+                          <p className="text-[10px] text-dark-500">{t('remnawave_nginx.node_domain_hint')}</p>
+                        </>
+                      )}
                       <div className="flex items-start gap-2 px-2.5 py-2 rounded-lg text-[10px] text-yellow-400 bg-yellow-500/10 border border-yellow-500/20">
                         <AlertTriangle className="w-3 h-3 shrink-0 mt-0.5" /> {t('remnawave_nginx.link_replaces_config_warning')}
                       </div>
@@ -972,27 +1115,19 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                       <input type="text" value={serverSearch} onChange={e => setServerSearch(e.target.value)}
                         placeholder={t('remnawave_nginx.search_server')}
                         className="w-full px-3 py-1.5 mb-2 rounded-lg bg-dark-800 border border-dark-700 text-dark-100 text-sm focus:outline-none focus:border-accent-500/50 transition-colors" autoFocus />
-                      {unlinkedServers.length === 0 ? (
+                      {noCandidates ? (
                         <div className="text-xs text-dark-500">{t('remnawave_nginx.no_available_servers')}</div>
+                      ) : hasFolders ? (
+                        <div className="space-y-1 max-h-[32rem] overflow-y-auto">
+                          {sortedFolderNames
+                            .filter(name => filteredCandidates.folders.has(name))
+                            .map(name => renderCandidateGroup(name, name, filteredCandidates.folders.get(name)!, true))}
+                          {filteredCandidates.noFolder.length > 0 &&
+                            renderCandidateGroup('__no_folder__', t('bulk_actions.no_folder'), filteredCandidates.noFolder, false)}
+                        </div>
                       ) : (
                         <div className="space-y-1 max-h-48 overflow-y-auto">
-                          {unlinkedServers.map(s => (
-                            <button key={s.id} onClick={() => { setLinkingServer(s); setLinkDomain(s.domain || '') }}
-                              className="w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm text-dark-200 hover:bg-dark-700/50 transition-colors">
-                              <span className="flex items-center gap-2">
-                                <Server className="w-3.5 h-3.5 text-dark-400" />{s.name}
-                                {s.detected && (
-                                  <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-green-500/10 text-green-400 border border-green-500/20">
-                                    {t('remnawave_nginx.detected')}
-                                  </span>
-                                )}
-                              </span>
-                              <span className="flex items-center gap-2 text-xs text-dark-500">
-                                {s.domain && <span className="font-mono">{s.domain}</span>}
-                                {s.active_profile_id && <span>{t('remnawave_nginx.has_other_profile')}</span>}
-                              </span>
-                            </button>
-                          ))}
+                          {filteredCandidates.noFolder.map(renderCandidate)}
                         </div>
                       )}
                     </>
@@ -1029,7 +1164,11 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                           <AlertTriangle className="w-3.5 h-3.5 text-yellow-400/70 shrink-0" />
                         </Tooltip>
                       )}
-                      {editingDomainId === s.server_id ? (
+                      {wildcardDomain ? (
+                        <span className="flex items-center gap-1 text-xs font-mono text-dark-400">
+                          <Globe className="w-3 h-3" /> *.{wildcardDomain}
+                        </span>
+                      ) : editingDomainId === s.server_id ? (
                         <span className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
                           <input type="text" value={domainEdit} onChange={e => setDomainEdit(e.target.value)}
                             onKeyDown={e => { if (e.key === 'Enter') handleSaveDomain(s.server_id); if (e.key === 'Escape') setEditingDomainId(null) }}

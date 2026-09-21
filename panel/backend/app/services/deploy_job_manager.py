@@ -2,8 +2,10 @@
 
 Установка ноды по SSH выполняется в фоновой asyncio-задаче, не привязанной к
 HTTP-соединению клиента: закрытие вкладки браузера установку не прерывает.
-Лог буферизуется в памяти и стримится подписчикам построчно; при переоткрытии
-страницы можно переподключиться к идущей или недавно завершённой задаче.
+Лог копится в памяти со сквозной нумерацией строк: браузер периодически
+запрашивает статус задачи и забирает новые строки по смещению, поэтому обрыв
+связи у клиента на установку не влияет — следующий запрос просто продолжит
+с того же места.
 
 Ограничение: задача живёт в процессе backend — перезапуск контейнера прервёт
 установку (SSH-сессию держит сам backend).
@@ -15,7 +17,8 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import AsyncIterator, Optional
+from datetime import datetime, timezone
+from typing import Optional
 
 from sqlalchemy import select
 
@@ -36,10 +39,26 @@ logger = logging.getLogger(__name__)
 FINISHED_TTL_SECONDS = 600
 # Защита от разрастания памяти на очень длинных логах установки
 LOG_BUFFER_LIMIT = 5000
-# Сколько ждать появления ноды после ребута из Rescue System (firstboot ставит
-# ОС → нода → docker pull может занять ~30 мин на медленном канале)
-RESCUE_ONLINE_TIMEOUT = 2400
-RESCUE_POLL_INTERVAL = 10
+# Сколько ждать появления ноды, которую панель не ставит сама: после ребута из
+# Rescue System (firstboot ставит ОС → нода → docker pull может занять ~30 мин
+# на медленном канале) и в полуавтоматическом режиме, где команду запускает оператор
+NODE_ONLINE_TIMEOUT = 2400
+NODE_POLL_INTERVAL = 10
+# Сколько ждать, пока установленная нода начнёт отвечать самой панели. Установщик
+# считает ноду готовой по внутреннему API (127.0.0.1:7500), а панель ходит через
+# nginx на 9100 — compose поднимает его только после healthcheck агента, то есть
+# заведомо позже выхода установщика. Окно короткое: агент уже здоров, ждём минуты.
+NODE_READY_TIMEOUT = 180
+NODE_READY_POLL_INTERVAL = 3
+
+
+def _wildcard_cert_expired(cert) -> bool:
+    if not cert.expiry_date:
+        return True
+    expiry = cert.expiry_date
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=timezone.utc)
+    return expiry <= datetime.now(timezone.utc)
 
 
 @dataclass
@@ -50,6 +69,11 @@ class PostDeployOptions:
     haproxy_profile_id: Optional[int] = None
     firewall_profile_id: Optional[int] = None
     dnat_profile_id: Optional[int] = None
+    wildcard_ssl_enabled: bool = False
+    wildcard_ssl_reload_cmd: Optional[str] = None
+    remnawave_nginx_profile_id: Optional[int] = None
+    remnawave_nginx_domain: Optional[str] = None
+    dedicated_cert: bool = False
 
 
 @dataclass
@@ -59,19 +83,34 @@ class DeployJob:
     host: str
     server_url: str
     proxy_url: Optional[str] = None  # SOCKS5 панель→нода, наследуется созданным сервером
+    ssh_port: Optional[int] = None  # порт, по которому шёл деплой — сохраняется в креды сервера
     status: str = "running"  # running | success | error
     log: list[str] = field(default_factory=list)
+    # Сквозной номер первой строки в буфере: при переполнении старые строки
+    # выбрасываются, а смещения клиентов остаются валидными
+    log_offset: int = 0
     exit_code: Optional[int] = None
     server_id: Optional[int] = None
     error: Optional[str] = None
     started_at: float = field(default_factory=time.time)
     finished_at: Optional[float] = None
-    subscribers: set[asyncio.Queue] = field(default_factory=set)
     task: Optional[asyncio.Task] = None
 
 
+def _job_info(job: DeployJob) -> dict:
+    return {
+        "job_id": job.id,
+        "name": job.name,
+        "host": job.host,
+        "status": job.status,
+        "exit_code": job.exit_code,
+        "server_id": job.server_id,
+        "error": job.error,
+    }
+
+
 class DeployJobManager:
-    """In-memory реестр фоновых задач развёртывания с pub/sub лога."""
+    """In-memory реестр фоновых задач развёртывания; лог отдаётся по смещению."""
 
     def __init__(self) -> None:
         self._jobs: dict[str, DeployJob] = {}
@@ -85,24 +124,29 @@ class DeployJobManager:
         for jid in expired:
             self._jobs.pop(jid, None)
 
-    def get(self, job_id: str) -> Optional[DeployJob]:
-        return self._jobs.get(job_id)
-
     def list_jobs(self) -> list[dict]:
         """Активные и недавно завершённые задачи — для восстановления на фронте."""
         self._cleanup_finished()
         return [
-            {
-                "job_id": job.id,
-                "name": job.name,
-                "host": job.host,
-                "status": job.status,
-                "exit_code": job.exit_code,
-                "server_id": job.server_id,
-                "error": job.error,
-            }
+            _job_info(job)
             for job in sorted(self._jobs.values(), key=lambda j: j.started_at)
         ]
+
+    def snapshot(self, job_id: str, offset: int) -> Optional[dict]:
+        """Статус задачи и строки лога начиная со сквозного номера `offset`.
+
+        `next_offset` в ответе клиент передаёт в следующий запрос. Если он
+        отстал сильнее, чем помещается в буфер, отдаём всё, что ещё хранится.
+        """
+        job = self._jobs.get(job_id)
+        if job is None:
+            return None
+        start = max(offset - job.log_offset, 0)
+        return {
+            **_job_info(job),
+            "lines": job.log[start:],
+            "next_offset": job.log_offset + len(job.log),
+        }
 
     def start(
         self,
@@ -110,6 +154,7 @@ class DeployJobManager:
         name: str,
         server_url: str,
         post_opts: PostDeployOptions,
+        wait_for_manual_install: bool = False,
     ) -> str:
         self._cleanup_finished()
         job_id = uuid.uuid4().hex
@@ -119,28 +164,34 @@ class DeployJobManager:
             host=params.host,
             server_url=server_url,
             proxy_url=params.socks5_proxy,
+            ssh_port=None if wait_for_manual_install else params.ssh_port,
         )
         self._jobs[job_id] = job
-        job.task = asyncio.create_task(self._run(job, params, post_opts))
+        runner = (
+            self._run_manual(job, post_opts)
+            if wait_for_manual_install
+            else self._run(job, params, post_opts)
+        )
+        job.task = asyncio.create_task(runner)
         return job_id
 
-    def _emit(self, job: DeployJob, event: dict) -> None:
-        if event.get("type") == "log":
-            job.log.append(event.get("line", ""))
-            if len(job.log) > LOG_BUFFER_LIMIT:
-                del job.log[: len(job.log) - LOG_BUFFER_LIMIT]
-            event = {**event, "_idx": len(job.log) - 1}
-        for queue in list(job.subscribers):
-            try:
-                queue.put_nowait(event)
-            except asyncio.QueueFull:
-                pass
+    def _log(self, job: DeployJob, line: str) -> None:
+        job.log.append(line)
+        overflow = len(job.log) - LOG_BUFFER_LIMIT
+        if overflow > 0:
+            del job.log[:overflow]
+            job.log_offset += overflow
 
     def _finish(self, job: DeployJob, status: str, error: Optional[str] = None) -> None:
         job.status = status
         if error and not job.error:
             job.error = error
         job.finished_at = time.time()
+
+    def _fail(self, job: DeployJob, message: str) -> None:
+        """Завершает задачу ошибкой: причина видна и в логе, и в поле error."""
+        self._log(job, f"[ERROR] {message}")
+        self._finish(job, "error", message)
 
     async def _run(
         self,
@@ -149,7 +200,6 @@ class DeployJobManager:
         post_opts: PostDeployOptions,
     ) -> None:
         try:
-            self._emit(job, {"type": "start", "host": params.host})
             async for event in deploy_node(params):
                 etype = event.get("type")
                 if etype == "done":
@@ -159,52 +209,71 @@ class DeployJobManager:
                         await self._on_install_done(job, event.get("exit_code", 1), post_opts)
                     return
                 if etype == "error":
-                    job.error = event.get("message")
-                    self._emit(job, event)
-                    self._emit(job, {"type": "done", "exit_code": 1, "server_id": None})
-                    self._finish(job, "error")
+                    self._fail(job, event.get("message", "Неизвестная ошибка"))
                     return
-                self._emit(job, event)
+                self._log(job, event.get("line", ""))
             # Поток закончился без терминального события — трактуем как сбой
-            self._emit(job, {"type": "error", "message": "Установка прервалась без кода завершения"})
-            self._emit(job, {"type": "done", "exit_code": 1, "server_id": None})
-            self._finish(job, "error", "Установка прервалась без кода завершения")
+            self._fail(job, "Установка прервалась без кода завершения")
         except asyncio.CancelledError:
-            self._finish(job, "error", "Установка отменена")
+            self._fail(job, "Установка отменена")
             raise
         except Exception as exc:  # noqa: BLE001 — верхняя граница фоновой задачи
             logger.error("Deploy job %s failed: %s", job.id, exc)
-            self._emit(job, {"type": "error", "message": str(exc)})
-            self._emit(job, {"type": "done", "exit_code": 1, "server_id": None})
-            self._finish(job, "error", str(exc))
+            self._fail(job, str(exc))
 
     async def _on_install_done(
         self,
         job: DeployJob,
         exit_code: int,
         post_opts: PostDeployOptions,
+        node_online: bool = False,
     ) -> None:
         job.exit_code = exit_code
         if exit_code != 0:
-            self._emit(job, {"type": "done", "exit_code": exit_code, "server_id": None})
             self._finish(job, "error")
             return
 
         try:
-            server_id = await self._create_server(job.name, job.server_url, job.proxy_url)
+            server_id = await self._create_server(
+                job.name, job.server_url, job.proxy_url, job.ssh_port,
+                dedicated_cert=post_opts.dedicated_cert,
+            )
         except Exception as exc:  # noqa: BLE001 — финальная граница создания сервера
             logger.error("Deploy job %s: create server failed: %s", job.id, exc)
-            message = f"Установка прошла, но не удалось добавить сервер: {exc}"
-            self._emit(job, {"type": "error", "message": message})
-            self._emit(job, {"type": "done", "exit_code": exit_code, "server_id": None})
-            self._finish(job, "error", message)
+            self._fail(job, f"Установка прошла, но не удалось добавить сервер: {exc}")
             return
 
         job.server_id = server_id
+        # Постшаги ходят к ноде по mTLS — сперва убеждаемся, что она отвечает
+        if not node_online:
+            await self._wait_node_ready(job, server_id)
         await self._post_install(job, server_id, post_opts)
         await self._bind_profiles(job, server_id, post_opts)
-        self._emit(job, {"type": "done", "exit_code": 0, "server_id": server_id})
+        # Сертификат раскатывается строго до nginx-синка: конфиг профиля
+        # ссылается на пути сертификата, без него nginx -t на ноде провалится
+        await self._apply_wildcard_ssl(job, server_id, post_opts)
+        await self._bind_remnawave_nginx(job, server_id, post_opts)
         self._finish(job, "success")
+
+    async def _run_manual(self, job: DeployJob, post_opts: PostDeployOptions) -> None:
+        """Полуавтоматический режим: команду установки оператор запускает на сервере
+        сам, панель по SSH не ходит — ждёт ноду и доделывает то, что скриптом не
+        ставится (SSH-пресет, пароль root, привязка к профилям)."""
+        try:
+            await self._await_node_then_finish(
+                job, post_opts,
+                intro="[panel] Жду, пока нода установится по скопированной команде "
+                      "(до 40 мин). После её появления применю SSH-настройки и профили...",
+                timeout_message="Нода не появилась за отведённое время (~40 мин). "
+                                "Проверьте, что команда установки выполнена на сервере, "
+                                "и нажмите «Ждать ноду» ещё раз.",
+            )
+        except asyncio.CancelledError:
+            self._fail(job, "Ожидание отменено")
+            raise
+        except Exception as exc:  # noqa: BLE001 — верхняя граница фоновой задачи
+            logger.error("Manual deploy job %s failed: %s", job.id, exc)
+            self._fail(job, str(exc))
 
     async def _on_rescue_reboot(
         self,
@@ -213,13 +282,25 @@ class DeployJobManager:
         post_opts: PostDeployOptions,
     ) -> None:
         """Rescue-сценарий: ОС поставлена, сервер ушёл в ребут. Нода доустановится
-        сама (firstboot) с тем же NODE_SECRET. Ждём её появления, затем выполняем
+        сама (firstboot) с тем же NODE_SECRET."""
+        await self._await_node_then_finish(
+            job, post_opts,
+            intro="[panel] ОС установлена, сервер перезагружается. Нода доустановится "
+                  "автоматически — ожидаю её появления (до 40 мин)...",
+            timeout_message="Нода не появилась за отведённое время (~40 мин). "
+                            "ОС установлена — проверьте сервер вручную.",
+        )
+
+    async def _await_node_then_finish(
+        self,
+        job: DeployJob,
+        post_opts: PostDeployOptions,
+        intro: str,
+        timeout_message: str,
+    ) -> None:
+        """Ждёт появления ноды, которую панель не ставила сама, затем выполняет
         обычные постустановочные шаги (создание записи, SSH-пресет, профили)."""
-        self._emit(job, {
-            "type": "log",
-            "line": "[panel] ОС установлена, сервер перезагружается. Нода доустановится "
-                    "автоматически — ожидаю её появления (до 40 мин)...",
-        })
+        self._log(job, intro)
 
         # Транзиентный объект (без записи в БД) — только чтобы поллить ноду по mTLS.
         # Реальную запись создаём через _create_server, когда нода ответит.
@@ -233,20 +314,44 @@ class DeployJobManager:
         )
 
         if not await self._wait_node_online(job, probe):
-            message = ("Нода не появилась за отведённое время (~40 мин). "
-                       "ОС установлена — проверьте сервер вручную.")
-            self._emit(job, {"type": "error", "message": message})
-            self._emit(job, {"type": "done", "exit_code": 1, "server_id": None})
-            self._finish(job, "error", message)
+            self._fail(job, timeout_message)
             return
 
         # Нода онлайн — дальше тот же путь, что и при обычном успешном деплое
-        await self._on_install_done(job, 0, post_opts)
+        await self._on_install_done(job, 0, post_opts, node_online=True)
 
-    async def _wait_node_online(self, job: DeployJob, server: Server) -> bool:
+    async def _wait_node_ready(self, job: DeployJob, server_id: int) -> None:
+        """Ждёт, пока свежепоставленная нода начнёт отвечать панели по mTLS.
+
+        Установщик выходит, как только ему ответил внутренний API ноды на 7500,
+        а панель ходит через nginx на 9100 — тот стартует только после
+        healthcheck агента и в этот момент ещё не слушает. Без ожидания постшаги
+        уходят в закрытый порт, и раскатка wildcard-сертификата теряется совсем:
+        повторов у неё, в отличие от синхронизации профилей, нет.
+        """
+        async with async_session_maker() as db:
+            result = await db.execute(select(Server).where(Server.id == server_id))
+            server = result.scalar_one_or_none()
+        if not server:
+            return
+
+        ready = await self._wait_node_online(
+            job, server, timeout=NODE_READY_TIMEOUT, interval=NODE_READY_POLL_INTERVAL,
+        )
+        if not ready:
+            self._log(job, f"[panel] Нода не ответила панели за {NODE_READY_TIMEOUT // 60} мин — "
+                           "продолжаю настройку, часть шагов может не примениться")
+
+    async def _wait_node_online(
+        self,
+        job: DeployJob,
+        server: Server,
+        timeout: float = NODE_ONLINE_TIMEOUT,
+        interval: float = NODE_POLL_INTERVAL,
+    ) -> bool:
         """Поллит /api/version ноды до ответа или таймаута. True — нода поднялась.
-        Периодический лог служит и keepalive для NDJSON-стрима."""
-        deadline = time.time() + RESCUE_ONLINE_TIMEOUT
+        Периодическая строка в логе показывает оператору, что ожидание идёт."""
+        deadline = time.time() + timeout
         attempt = 0
         while time.time() < deadline:
             try:
@@ -257,19 +362,27 @@ class DeployJobManager:
                 found, caps = capabilities_from_version(info)
                 if found:
                     await remember_capabilities(server.id, caps)
-                self._emit(job, {"type": "log", "line": "[panel] Нода онлайн — продолжаю настройку"})
+                self._log(job, "[panel] Нода онлайн — продолжаю настройку")
                 return True
             except Exception:  # noqa: BLE001 — нода ещё грузится, любой сбой = ещё не готова
                 pass
             attempt += 1
-            if attempt % 3 == 0:  # ~раз в 30 c
+            if attempt % 3 == 0:
                 remaining = max(0, int(deadline - time.time()))
-                self._emit(job, {"type": "log", "line": f"[panel] Жду ноду... осталось ~{remaining // 60} мин"})
-            await asyncio.sleep(RESCUE_POLL_INTERVAL)
+                self._log(job, f"[panel] Жду ноду... осталось ~{remaining // 60} мин")
+            await asyncio.sleep(interval)
         return False
 
-    async def _create_server(self, name: str, url: str, proxy_url: Optional[str]) -> int:
-        """Создаёт запись ноды после успешной установки (mTLS, shared cert)."""
+    async def _create_server(
+        self,
+        name: str,
+        url: str,
+        proxy_url: Optional[str],
+        ssh_port: Optional[int] = None,
+        dedicated_cert: bool = False,
+    ) -> int:
+        """Создаёт запись ноды после успешной установки (mTLS: shared cert или
+        одноразовый персональный сертификат)."""
         async with async_session_maker() as db:
             result = await db.execute(select(Server).order_by(Server.position.desc()))
             last = result.scalars().first()
@@ -279,7 +392,9 @@ class DeployJobManager:
                 api_key=None,
                 proxy_url=proxy_url,
                 pki_enabled=True,
-                uses_shared_cert=True,
+                uses_shared_cert=not dedicated_cert,
+                dedicated_cert=dedicated_cert,
+                ssh_port=ssh_port,
                 position=(last.position + 1) if last else 0,
             )
             db.add(server)
@@ -307,26 +422,27 @@ class DeployJobManager:
         if not server:
             return
 
-        # Дать ноде подняться и принять mTLS-подключение панели
-        await asyncio.sleep(8)
-        self._emit(job, {"type": "log", "line": "[panel] Применение SSH-настроек через API ноды..."})
+        self._log(job, "[panel] Применение SSH-настроек через API ноды...")
 
         if post_opts.ssh_preset:
             preset = RECOMMENDED_PRESET if post_opts.ssh_preset == "recommended" else MAXIMUM_PRESET
             label = "рекомендуемый" if post_opts.ssh_preset == "recommended" else "максимальный"
             try:
                 await proxy_to_node(server, "POST", "/api/ssh/config", preset["ssh"], timeout=30.0)
-                self._emit(job, {"type": "log", "line": f"[panel] SSH-конфиг применён (пресет: {label})"})
+                self._log(job, f"[panel] SSH-конфиг применён (пресет: {label})")
+                # Ленивый импорт — как в _bind_profiles, чтобы не тянуть роутер на уровне модуля
+                from app.routers.ssh_security import _cache_sshd_port, _valid_port
+                await _cache_sshd_port(server_id, _valid_port(preset["ssh"].get("port")))
             except Exception as exc:  # noqa: BLE001 — best-effort постшаг
-                self._emit(job, {"type": "log", "line": f"[panel] SSH-конфиг не применён: {exc}"})
+                self._log(job, f"[panel] SSH-конфиг не применён: {exc}")
             try:
                 await proxy_to_node(
                     server, "POST", "/api/ssh/fail2ban/config", preset["fail2ban"],
                     timeout=120.0, use_apply_client=True,
                 )
-                self._emit(job, {"type": "log", "line": "[panel] fail2ban настроен"})
+                self._log(job, "[panel] fail2ban настроен")
             except Exception as exc:  # noqa: BLE001 — best-effort постшаг
-                self._emit(job, {"type": "log", "line": f"[panel] fail2ban не настроен: {exc}"})
+                self._log(job, f"[panel] fail2ban не настроен: {exc}")
 
         if post_opts.new_root_password:
             try:
@@ -335,9 +451,9 @@ class DeployJobManager:
                     {"user": "root", "password": post_opts.new_root_password},
                     timeout=120.0, use_apply_client=True,
                 )
-                self._emit(job, {"type": "log", "line": "[panel] Пароль root изменён"})
+                self._log(job, "[panel] Пароль root изменён")
             except Exception as exc:  # noqa: BLE001 — best-effort постшаг
-                self._emit(job, {"type": "log", "line": f"[panel] Не удалось сменить пароль root: {exc}"})
+                self._log(job, f"[panel] Не удалось сменить пароль root: {exc}")
 
     async def _bind_profiles(
         self,
@@ -345,7 +461,7 @@ class DeployJobManager:
         server_id: int,
         post_opts: PostDeployOptions,
     ) -> None:
-        """Привязка к HAProxy/Firewall/DNAT-профилям. Best-effort, лог в стрим."""
+        """Привязка к HAProxy/Firewall/DNAT-профилям. Best-effort, результат в лог."""
         if (
             post_opts.haproxy_profile_id is None
             and post_opts.firewall_profile_id is None
@@ -372,9 +488,9 @@ class DeployJobManager:
                 asyncio.ensure_future(
                     haproxy_sync_server(post_opts.haproxy_profile_id, server_id)
                 )
-                self._emit(job, {"type": "log", "line": "[panel] Привязан к HAProxy-профилю"})
+                self._log(job, "[panel] Привязан к HAProxy-профилю")
             except Exception as exc:  # noqa: BLE001 — best-effort постшаг
-                self._emit(job, {"type": "log", "line": f"[panel] HAProxy-профиль не привязан: {exc}"})
+                self._log(job, f"[panel] HAProxy-профиль не привязан: {exc}")
 
         if post_opts.firewall_profile_id is not None:
             try:
@@ -388,9 +504,9 @@ class DeployJobManager:
                 asyncio.ensure_future(
                     firewall_sync(post_opts.firewall_profile_id, server_ids=[server_id])
                 )
-                self._emit(job, {"type": "log", "line": "[panel] Привязан к Firewall-профилю"})
+                self._log(job, "[panel] Привязан к Firewall-профилю")
             except Exception as exc:  # noqa: BLE001 — best-effort постшаг
-                self._emit(job, {"type": "log", "line": f"[panel] Firewall-профиль не привязан: {exc}"})
+                self._log(job, f"[panel] Firewall-профиль не привязан: {exc}")
 
         if post_opts.dnat_profile_id is not None:
             try:
@@ -403,63 +519,102 @@ class DeployJobManager:
                 asyncio.ensure_future(
                     dnat_sync(post_opts.dnat_profile_id, server_ids=[server_id])
                 )
-                self._emit(job, {"type": "log", "line": "[panel] Привязан к DNAT-профилю"})
+                self._log(job, "[panel] Привязан к DNAT-профилю")
             except Exception as exc:  # noqa: BLE001 — best-effort постшаг
-                self._emit(job, {"type": "log", "line": f"[panel] DNAT-профиль не привязан: {exc}"})
+                self._log(job, f"[panel] DNAT-профиль не привязан: {exc}")
 
-    async def subscribe(self, job_id: str) -> AsyncIterator[dict]:
-        """Поток событий задачи: реплей накопленного лога + live до завершения."""
-        job = self._jobs.get(job_id)
-        if job is None:
+    async def _apply_wildcard_ssl(
+        self,
+        job: DeployJob,
+        server_id: int,
+        post_opts: PostDeployOptions,
+    ) -> None:
+        """Включение сервера в Wildcard SSL и раскатка действующего сертификата.
+        Best-effort: настройки сохраняются в любом случае, раскатку можно повторить
+        со страницы Wildcard SSL."""
+        if not post_opts.wildcard_ssl_enabled:
             return
 
-        queue: asyncio.Queue = asyncio.Queue(maxsize=2000)
-        # Подписку добавляем ДО снимка лога — иначе строка между снимком и
-        # подпиской потеряется. Дубли отсекаются по _idx.
-        live = job.finished_at is None
-        if live:
-            job.subscribers.add(queue)
-        backlog = list(job.log)
-        last_idx = len(backlog) - 1
+        # Ленивые импорты — как в _bind_profiles, чтобы не тянуть на уровне модуля
+        from app.models import WildcardCertificate
+        from app.services.node_capabilities import Capability, server_allows
+        from app.services.wildcard_ssl import get_wildcard_ssl_manager
 
         try:
-            yield {"type": "start", "host": job.host}
-            for line in backlog:
-                yield {"type": "log", "line": line}
+            async with async_session_maker() as db:
+                result = await db.execute(select(Server).where(Server.id == server_id))
+                server = result.scalar_one_or_none()
+                if not server:
+                    return
+                server.wildcard_ssl_enabled = True
+                if post_opts.wildcard_ssl_reload_cmd:
+                    server.wildcard_ssl_reload_cmd = post_opts.wildcard_ssl_reload_cmd
+                # Коммит до раскатки: deploy_to_node читает команду из объекта сервера
+                await db.commit()
 
-            if not live:
-                async for event in self._drain_terminal(job):
-                    yield event
+                cert = (await db.execute(
+                    select(WildcardCertificate).order_by(WildcardCertificate.id)
+                )).scalars().first()
+            self._log(job, "[panel] Сервер включён в Wildcard SSL")
+
+            if not cert or _wildcard_cert_expired(cert):
+                self._log(job, "[panel] Действующего wildcard-сертификата нет — "
+                               "раскатайте его позже со страницы Wildcard SSL")
+                return
+            if not server_allows(server, Capability.SSL, write=True):
+                self._log(job, "[panel] Нода закрыла раздел SSL — раскатка сертификата пропущена")
                 return
 
-            while True:
-                event = await queue.get()
-                etype = event.get("type")
-                if etype == "start":
-                    continue
-                if etype == "log":
-                    if event.get("_idx", -1) <= last_idx:
-                        continue
-                    yield {"type": "log", "line": event.get("line", "")}
-                    continue
-                yield event
-                if etype == "done":
-                    return
-        finally:
-            job.subscribers.discard(queue)
+            result = await get_wildcard_ssl_manager().deploy_to_node(cert, server)
+            if result.get("success"):
+                self._log(job, "[panel] Wildcard-сертификат раскатан")
+            else:
+                self._log(job, f"[panel] Wildcard-сертификат не раскатан: {result.get('message', '')}")
+        except Exception as exc:  # noqa: BLE001 — best-effort постшаг
+            self._log(job, f"[panel] Wildcard SSL не настроен: {exc}")
 
-    async def _drain_terminal(self, job: DeployJob) -> AsyncIterator[dict]:
-        """Финальные события для уже завершённой задачи (реплей результата)."""
-        if job.status == "success":
-            yield {"type": "done", "exit_code": job.exit_code or 0, "server_id": job.server_id}
+    async def _bind_remnawave_nginx(
+        self,
+        job: DeployJob,
+        server_id: int,
+        post_opts: PostDeployOptions,
+    ) -> None:
+        """Привязка к nginx-профилю Remnawave и немедленный синк конфига. Best-effort."""
+        if post_opts.remnawave_nginx_profile_id is None:
             return
-        if job.error:
-            yield {"type": "error", "message": job.error}
-        yield {
-            "type": "done",
-            "exit_code": job.exit_code if job.exit_code is not None else 1,
-            "server_id": job.server_id,
-        }
+
+        from app.models import RemnawaveNginxProfile
+        from app.services.remnawave_nginx_sync import (
+            NginxLinkError,
+            apply_server_link,
+            sync_profile_to_servers,
+        )
+
+        try:
+            async with async_session_maker() as db:
+                profile = await db.get(RemnawaveNginxProfile, post_opts.remnawave_nginx_profile_id)
+                result = await db.execute(select(Server).where(Server.id == server_id))
+                server = result.scalar_one_or_none()
+                if not profile or not server:
+                    self._log(job, "[panel] Nginx-профиль Remnawave не привязан: профиль не найден")
+                    return
+                apply_server_link(profile, server, post_opts.remnawave_nginx_domain)
+                await db.commit()
+                self._log(job, "[panel] Привязан к nginx-профилю Remnawave")
+
+                # await вместо ensure_future: результат синка попадает в лог установки
+                results = await sync_profile_to_servers(
+                    profile, db, server_ids=[server_id], ensure_started=True
+                )
+            if results and results[0].success:
+                self._log(job, "[panel] Nginx-конфиг Remnawave раскатан")
+            else:
+                message = results[0].message if results else "нода не ответила"
+                self._log(job, f"[panel] Nginx-конфиг Remnawave не раскатан: {message}")
+        except NginxLinkError as exc:
+            self._log(job, f"[panel] Nginx-профиль Remnawave не привязан: {exc}")
+        except Exception as exc:  # noqa: BLE001 — best-effort постшаг
+            self._log(job, f"[panel] Nginx-профиль Remnawave не привязан: {exc}")
 
 
 _manager = DeployJobManager()

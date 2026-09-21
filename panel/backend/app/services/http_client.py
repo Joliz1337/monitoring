@@ -276,6 +276,25 @@ def get_node_apply_client(server: "Server | None" = None) -> httpx.AsyncClient:
     return _node_apply_client_legacy
 
 
+def new_node_probe_client(server: "Server") -> httpx.AsyncClient:
+    """Одноразовый клиент без keepalive для проверки связи после смены адресов
+    на ноде: соединение из пула могло пережить изменение и «доказать» ложное,
+    проба обязана открыть TCP заново. Использовать через `async with`."""
+    mtls = bool(getattr(server, "pki_enabled", False))
+    if mtls and _mtls_ctx is None:
+        raise RuntimeError("mTLS context is not initialized — PKI keygen missing at startup")
+    proxy_raw = getattr(server, "proxy_url", None)
+    return httpx.AsyncClient(
+        proxy=_proxy_raw_to_url(proxy_raw) if proxy_raw else None,
+        verify=_mtls_ctx if mtls else False,
+        timeout=_NODE_TIMEOUT,
+        limits=httpx.Limits(max_connections=1, max_keepalive_connections=0),
+        follow_redirects=False,
+        http2=False,
+        trust_env=False,
+    )
+
+
 def node_auth_headers(server: "Server") -> dict[str, str]:
     """Заголовок X-API-Key только для legacy-нод; mTLS уже аутентифицирован TLS-слоем."""
     if getattr(server, "pki_enabled", False):

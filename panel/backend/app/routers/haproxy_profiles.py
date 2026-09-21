@@ -2,7 +2,7 @@ import asyncio
 import socket
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
-from sqlalchemy import select, update, func, and_
+from sqlalchemy import select, update, func, and_, bindparam
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 from typing import Optional
@@ -323,6 +323,25 @@ async def create_profile(data: ProfileCreate, db: AsyncSession = Depends(get_db)
         "created_at": profile.created_at.isoformat() if profile.created_at else None,
         "updated_at": profile.updated_at.isoformat() if profile.updated_at else None,
     }
+
+
+@router.post("/reorder")
+async def reorder_profiles(data: ReorderRequest, db: AsyncSession = Depends(get_db), _=Depends(verify_auth)):
+    """Порядок карточек в списке: позиция профиля равна его индексу в переданном массиве."""
+    if not data.profile_ids:
+        return {"success": True}
+
+    # Один executemany вместо UPDATE на каждый профиль — через connection(), потому что
+    # ORM-путь bulk-by-PK требует id внутри values, а нам нужен WHERE по bindparam
+    conn = await db.connection()
+    await conn.execute(
+        update(HAProxyConfigProfile)
+        .where(HAProxyConfigProfile.id == bindparam("pid"))
+        .values(position=bindparam("pos")),
+        [{"pid": profile_id, "pos": position} for position, profile_id in enumerate(data.profile_ids)],
+    )
+    await db.commit()
+    return {"success": True}
 
 
 @router.get("/{profile_id}")

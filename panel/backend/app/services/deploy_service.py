@@ -154,8 +154,17 @@ def build_remnawave_install_command(remnawave_cert: str) -> str:
     return _render_unattended_command(env)
 
 
-def _build_inner_command(params: DeployParams) -> str:
-    """Команда установки ноды мониторинга (+опции) для SSH-деплоя."""
+def build_warp_install_command() -> str:
+    """Команда установки только Cloudflare WARP — кандидат-выход для exit-прокси."""
+    env = {"MON_INSTALL_WARP": "1"}
+    if update_channel.current_branch() != update_channel.STABLE_BRANCH:
+        env["MON_BRANCH"] = update_channel.current_branch()
+    return _render_unattended_command(env)
+
+
+def build_install_command(params: DeployParams) -> str:
+    """Команда установки ноды мониторинга (+опции). Её же панель показывает
+    оператору для полуавтоматического режима — запуск руками на сервере."""
     env: dict[str, str] = {
         "MON_INSTALL_NODE": "1",
         "NODE_SECRET": params.node_secret,
@@ -186,7 +195,7 @@ def _build_inner_command(params: DeployParams) -> str:
 
 def _build_command(params: DeployParams) -> str:
     """Оборачивает команду установки в sudo, если вход не под root."""
-    inner = _build_inner_command(params)
+    inner = build_install_command(params)
     if params.ssh_user.strip() == "root":
         return inner
     # с паролем — sudo -S читает его из stdin; без пароля — sudo -n (нужен NOPASSWD)
