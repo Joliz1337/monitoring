@@ -38,8 +38,9 @@ from app.services.extra_ips import (  # noqa: E402
     Backend,
     BackendKind,
     ExtraIpBusyError,
-    ExtraIpValidationError,
     ExtraIpManager,
+    ExtraIpUnsupportedError,
+    ExtraIpValidationError,
     PlanFile,
     build_plan,
     check_request,
@@ -532,6 +533,33 @@ class ManagerTests(unittest.TestCase):
         file_line = next(line for line in plan.splitlines() if line.startswith("FILE=600 /etc/netplan/60-monitoring-extra-ips.yaml "))
         yaml = base64.b64decode(file_line.split()[2]).decode()
         self.assertIn("    eth0:\n      addresses:\n        - \"203.0.113.12/32\"\n", yaml)
+
+    def test_apply_detects_backend_afresh_after_state_saw_no_script(self):
+        # Скрипт уезжает на хост лениво, в apply(); опрос state() до этого
+        # получает от bash «No such file» — этот провал не должен доживать в кэше до apply
+        answers = self.live_answers()
+        answers["extra-ips.sh detect"] = FakeResult(
+            success=False, exit_code=127, stderr="bash: /opt/monitoring/scripts/extra-ips.sh: No such file or directory",
+        )
+        answers["extra-ips.sh apply"] = FakeResult(stdout="TX_ID=20260902-101500-ab12\nTX_STATUS=pending\n")
+        manager, _ = self.manager(answers)
+        with unittest.mock.patch.object(extra_ips, "default_interface", return_value="eth0"):
+            state = run(manager.state())
+        self.assertIsNone(state.backend)
+        answers["extra-ips.sh detect"] = self.live_answers()["extra-ips.sh detect"]
+        request = NetworkApplyRequest(interface="eth0", add=[{"address": "203.0.113.12", "prefix": 32}], protected=["203.0.113.10"])
+        with unittest.mock.patch.object(ExtraIpManager, "_mac", return_value=""):
+            response = run(manager.apply(request))
+        self.assertTrue(response.success)
+
+    def test_detect_failure_reason_reaches_the_error(self):
+        answers = self.live_answers()
+        answers["extra-ips.sh detect"] = FakeResult(success=False, exit_code=127, stderr="bash: extra-ips.sh: No such file or directory")
+        manager, _ = self.manager(answers)
+        request = NetworkApplyRequest(interface="eth0", add=[{"address": "203.0.113.12", "prefix": 32}])
+        with self.assertRaises(ExtraIpUnsupportedError) as ctx:
+            run(manager.apply(request))
+        self.assertIn("No such file or directory", str(ctx.exception))
 
     def test_pending_transaction_blocks_apply(self):
         (self.state_dir / "transaction.env").write_text("TX_ID=20260902-101500-ab12\nTX_STATUS=pending\n")
