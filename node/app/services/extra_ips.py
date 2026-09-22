@@ -623,7 +623,8 @@ class ExtraIpManager:
         self._lock = asyncio.Lock()
         self._installed_hash: Optional[str] = None
         self._support: tuple[bool, str] = (True, "")
-        self._detect_cache: dict[str, tuple[float, Optional[Backend]]] = {}
+        # iface → (когда, Backend или причина провала)
+        self._detect_cache: dict[str, tuple[float, Backend | str]] = {}
 
     # ── состояние с диска (ro-mount) ──
 
@@ -706,16 +707,27 @@ class ExtraIpManager:
         except OSError:
             return ""
 
-    async def _detect(self, iface: str) -> Optional[Backend]:
-        """Бэкенд интерфейса; None — скрипт ещё не установлен или детект упал.
-        Кэш на минуту: панель поллит состояние каждые 3 с во время транзакции."""
+    async def _detect(self, iface: str, use_cache: bool = True) -> Backend:
+        """Бэкенд интерфейса. Кэш на минуту, провалы тоже: панель поллит
+        состояние каждые 3 с во время транзакции. apply читает мимо кэша — он
+        только что поставил скрипт на хост, а опрос state до этого закэшировал
+        бы «No such file or directory»."""
         cached = self._detect_cache.get(iface)
-        if cached and time.monotonic() - cached[0] < DETECT_CACHE_SEC:
-            return cached[1]
+        if use_cache and cached and time.monotonic() - cached[0] < DETECT_CACHE_SEC:
+            outcome = cached[1]
+        else:
+            outcome = await self._run_detect(iface)
+            self._detect_cache[iface] = (time.monotonic(), outcome)
+        if isinstance(outcome, Backend):
+            return outcome
+        raise ExtraIpUnsupportedError(f"cannot detect the network backend of {iface}: {outcome}")
+
+    async def _run_detect(self, iface: str) -> Backend | str:
         result = await self._run("detect", iface, timeout=DETECT_TIMEOUT_SEC)
-        backend = choose_backend(parse_key_values(result.stdout), iface, self._mac(iface)) if result.success else None
-        self._detect_cache[iface] = (time.monotonic(), backend)
-        return backend
+        if result.success:
+            return choose_backend(parse_key_values(result.stdout), iface, self._mac(iface))
+        stderr_tail = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else ""
+        return stderr_tail or result.error or f"exit code {result.exit_code}"
 
     async def state(self) -> NetworkStateResponse:
         try:
@@ -747,7 +759,12 @@ class ExtraIpManager:
                     for addr in live.addresses
                 ],
             ))
-        backend = await self._detect(default) if default else None
+        backend: Optional[Backend] = None
+        if default:
+            try:
+                backend = await self._detect(default)
+            except ExtraIpUnsupportedError as exc:
+                logger.debug("extra ips: %s", exc)
         transaction = self.read_transaction()
         supported, message = self._support
         return NetworkStateResponse(
@@ -797,9 +814,7 @@ class ExtraIpManager:
 
             interfaces, routes, candidates = await self._live()
             physical = {candidate.name: candidate.is_up for candidate in candidates}
-            backend = await self._detect(request.interface)
-            if backend is None:
-                raise ExtraIpValidationError(f"cannot detect the network backend of {request.interface}")
+            backend = await self._detect(request.interface, use_cache=False)
             managed = self.read_managed()
             managed_here = {cidr for owner, cidr in managed if owner == request.interface}
             live = interfaces.get(request.interface) or LiveInterface(name=request.interface)
