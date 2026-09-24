@@ -48,9 +48,17 @@ class SwapInfo(BaseModel):
     percent: float
 
 
+class NumaNode(BaseModel):
+    node: int
+    cpus: int
+    memory_total: int
+
+
 class MemoryInfo(BaseModel):
     ram: RAMInfo
     swap: SwapInfo
+    # Память по процессорным сокетам — по ней панель ловит перекос раскладки
+    numa_nodes: list[NumaNode] = []
 
 
 class DiskPartition(BaseModel):

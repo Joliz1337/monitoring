@@ -416,6 +416,8 @@ data: {"message": "error description"}
 
 Дельты и историю байт из этих значений считает панель — см. [panel/DOCUMENTATION.md](../panel/DOCUMENTATION.md#traffic).
 
+**Раскладка памяти по процессорам — `memory.numa_nodes`.** Список NUMA-узлов `{node, cpus, memory_total}` (байты) из `/host/sys/devices/system/node/node*/{cpulist,meminfo}`, модуль `services/numa.py`. Читается один раз за жизнь процесса — без смены железа не меняется. На VPS обычно один узел; пустой список — ядро узлов не отдаёт. Перекос оценивает панель. Тесты — `tests/test_numa.py`.
+
 **Скорости — за последнюю секунду, считает нода.** Фоновый посекундный семплер (`services/rate_sampler.py`, см. «Производительность») даёт в том же ответе:
 
 - `network.interfaces[].rx_bytes_per_sec`/`tx_bytes_per_sec` — по каждому интерфейсу; `network.total.*_bytes_per_sec` — сумма по физическим (без veth/docker/br-*/bond-слейвов — их трафик уже есть на физических).

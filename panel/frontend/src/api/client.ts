@@ -183,6 +183,13 @@ export interface EphemeralPorts {
   sources: EphemeralSource[]
 }
 
+// Память по процессорным сокетам; на VPS обычно один узел
+export interface NumaNode {
+  node: number
+  cpus: number
+  memory_total: number
+}
+
 export interface ServerMetrics {
   timestamp: string
   server_name: string
@@ -217,6 +224,7 @@ export interface ServerMetrics {
       free: number
       percent: number
     }
+    numa_nodes?: NumaNode[]
   }
   disk: {
     partitions: Array<{
