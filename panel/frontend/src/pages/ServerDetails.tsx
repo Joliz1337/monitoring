@@ -48,6 +48,7 @@ import NodeRestrictedNotice from '../components/servers/NodeRestrictedNotice'
 import BandwidthLimitCard from '../components/servers/BandwidthLimitCard'
 import NetworkAddressesCard from '../components/servers/NetworkAddressesCard'
 import HosterAccessCard from '../components/servers/HosterAccessCard'
+import NumaMemoryWarning from '../components/servers/NumaMemoryWarning'
 import { nodeAllows } from '../utils/nodeCapabilities'
 import { formatBytes, formatUptime, formatPercent, createBitsFormatter, formatTimeAgo } from '../utils/format'
 import { useCachedData, createServerCacheKey } from '../hooks/useCachedData'
@@ -570,7 +571,9 @@ export default function ServerDetails() {
                 <CachedDataBanner cachedAt={cachedAt} />
               )}
             </AnimatePresence>
-            
+
+            <NumaMemoryWarning nodes={metrics.memory.numa_nodes} />
+
             {/* Metric cards */}
             <motion.div 
               className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6"

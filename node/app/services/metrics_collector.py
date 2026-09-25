@@ -24,6 +24,7 @@ from app.services.ephemeral_ports import (
     read_kernel_settings,
     scan_listening_ports,
 )
+from app.services.numa import read_numa_nodes
 from app.services.port_traffic_sampler import get_port_traffic_sampler
 from app.services.rate_sampler import (
     RateSample,
@@ -54,6 +55,8 @@ class MetricsCollector:
         self._system_cache_ttl: float = 5.0  # 5 seconds
         # boot_id не меняется в пределах жизни хоста — читаем лениво один раз
         self._boot_id: Optional[str] = None
+        # Раскладка памяти по сокетам меняется только сменой железа — с ребутом
+        self._numa_nodes: Optional[list[dict]] = None
         # Роутер системы уже читает /app/VERSION, а NODE_VERSION из app.main
         # импортировать нельзя — main сам импортирует этот модуль
         from app.routers.system import get_current_version
@@ -185,9 +188,16 @@ class MetricsCollector:
                 "used": swap.used,
                 "free": swap.free,
                 "percent": swap.percent
-            }
+            },
+            "numa_nodes": self._get_numa_nodes(),
         }
-    
+
+    def _get_numa_nodes(self) -> list[dict]:
+        if self._numa_nodes is None:
+            host_sys = Path(self.settings.host_proc).parent / "sys"
+            self._numa_nodes = read_numa_nodes(host_sys if host_sys.is_dir() else Path("/sys"))
+        return self._numa_nodes
+
     def get_disk_info(self, rates: Optional[RateSample]) -> dict:
         """Get disk partitions, usage, cumulative I/O counters and per-second rates"""
         partitions = []

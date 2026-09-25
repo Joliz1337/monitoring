@@ -48,9 +48,17 @@ class SwapInfo(BaseModel):
     percent: float
 
 
+class NumaNode(BaseModel):
+    node: int
+    cpus: int
+    memory_total: int
+
+
 class MemoryInfo(BaseModel):
     ram: RAMInfo
     swap: SwapInfo
+    # Память по процессорным сокетам — по ней панель ловит перекос раскладки
+    numa_nodes: list[NumaNode] = []
 
 
 class DiskPartition(BaseModel):
@@ -186,6 +194,7 @@ class EphemeralDestination(BaseModel):
     used: int
     time_wait: int
     held: int
+    fast_held: int
     free: int
 
 
@@ -200,11 +209,13 @@ class EphemeralSource(BaseModel):
 
 
 class EphemeralPorts(BaseModel):
-    """Занятость эфемерных портов: потолок один на пару «наш адрес → адрес:порт цели»."""
+    """Занятость эфемерных портов: потолок один на пару «наш адрес → адрес:порт цели».
+    fast_capacity — порты первого прохода connect(), остаток free считается до него."""
     range_low: int
     range_high: int
     reserved: int
     capacity: int
+    fast_capacity: int
     tw_reuse: int
     sources: list[EphemeralSource] = Field(default_factory=list)
 

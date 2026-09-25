@@ -11,6 +11,14 @@ Xray, у которого все клиенты идут на один адре�
 исходящем адресе всего и на каждом направлении, чтобы панель показала
 остаток до потолка.
 
+Потолок, после которого начинаются проблемы, — половина диапазона, а не весь.
+connect() (__inet_hash_connect) первым проходом перебирает только порты
+чётности нижней границы, а к другой чётности переходит, лишь провалив весь
+первый проход. Пока на направлении есть свободный порт «быстрой» половины,
+connect() находит его за несколько шагов; когда она кончилась, каждое новое
+соединение перебирает её целиком под спинлоками — при свободной второй
+половине. Поэтому остаток считается до конца быстрой половины.
+
 Входящие соединения из учёта исключаются по локальному порту: у них это порт
 слушающего сокета, а не выданный ядром эфемерный. Адреса держатся в hex-виде
 из /proc до самой выдачи — на ноде с сотней тысяч сокетов разбирать текст
@@ -52,21 +60,42 @@ class KernelPortSettings:
     low: int
     high: int
     reserved_in_range: int
+    reserved_fast: int
     tw_reuse: int
 
     @property
     def capacity(self) -> int:
         return self.high - self.low + 1 - self.reserved_in_range
 
+    @property
+    def fast_high(self) -> int:
+        """Последний порт первого прохода: ядро округляет длину диапазона вниз до
+        чётной, и при нечётной длине верхний порт в первый проход не попадает."""
+        return fast_pass_high(self.low, self.high)
+
+    @property
+    def fast_capacity(self) -> int:
+        return (self.fast_high - self.low) // 2 + 1 - self.reserved_fast
+
+    def is_fast_port(self, port: int) -> bool:
+        return port <= self.fast_high and (port - self.low) % 2 == 0
+
 
 @dataclass
 class _Bucket:
     used: int = 0
     time_wait: int = 0
+    fast_used: int = 0
+    fast_time_wait: int = 0
 
     @property
     def total(self) -> int:
         return self.used + self.time_wait
+
+
+def fast_pass_high(low: int, high: int) -> int:
+    length = high - low + 1
+    return low + (length & ~1) - 2 if length > 1 else low
 
 
 def parse_port_range(text: str) -> tuple[int, int] | None:
@@ -79,30 +108,49 @@ def parse_port_range(text: str) -> tuple[int, int] | None:
     return low, high
 
 
-def count_reserved_in_range(text: str, low: int, high: int) -> int:
-    """ip_local_reserved_ports («7500,7501-7564,2222») → сколько портов попало в диапазон."""
-    total = 0
+def parse_reserved_ports(text: str) -> list[tuple[int, int]]:
+    """ip_local_reserved_ports («7500,7501-7564,2222») → отрезки портов."""
+    ranges = []
     for token in text.split(","):
-        token = token.strip()
-        start_text, _, end_text = token.partition("-")
+        start_text, _, end_text = token.strip().partition("-")
         if not start_text.isdigit() or (end_text and not end_text.isdigit()):
             continue
         start = int(start_text)
-        end = int(end_text) if end_text else start
-        overlap = min(end, high) - max(start, low) + 1
-        if overlap > 0:
-            total += overlap
+        ranges.append((start, int(end_text) if end_text else start))
+    return ranges
+
+
+def count_reserved_in_range(reserved: list[tuple[int, int]], low: int, high: int) -> int:
+    return sum(max(min(end, high) - max(start, low) + 1, 0) for start, end in reserved)
+
+
+def count_reserved_fast(reserved: list[tuple[int, int]], low: int, high: int) -> int:
+    """Зарезервированные порты быстрой половины: чётности low, не выше fast_pass_high."""
+    fast_high = fast_pass_high(low, high)
+    total = 0
+    for start, end in reserved:
+        first = max(start, low)
+        first += (first - low) % 2
+        last = min(end, fast_high)
+        if last >= first:
+            total += (last - first) // 2 + 1
     return total
 
 
 def read_kernel_settings(proc_root: Path) -> KernelPortSettings:
     sysctl_dir = proc_root / "sys/net/ipv4"
     low, high = _read_text(sysctl_dir / "ip_local_port_range", parse_port_range) or DEFAULT_PORT_RANGE
-    reserved = _read_text(sysctl_dir / "ip_local_reserved_ports", lambda text: count_reserved_in_range(text, low, high)) or 0
+    reserved = _read_text(sysctl_dir / "ip_local_reserved_ports", parse_reserved_ports) or []
     tw_reuse = _read_text(sysctl_dir / "tcp_tw_reuse", lambda text: int(text.strip()))
     if tw_reuse is None:
         tw_reuse = DEFAULT_TW_REUSE
-    return KernelPortSettings(low=low, high=high, reserved_in_range=reserved, tw_reuse=tw_reuse)
+    return KernelPortSettings(
+        low=low,
+        high=high,
+        reserved_in_range=count_reserved_in_range(reserved, low, high),
+        reserved_fast=count_reserved_fast(reserved, low, high),
+        tw_reuse=tw_reuse,
+    )
 
 
 def _read_text(path: Path, parse):
@@ -173,12 +221,15 @@ class EphemeralPortsAggregator:
             remote_ip = remote_ip[len(_MAPPED_V4_PREFIX):]
         source = self._sources[local_ip]
         destination = self._destinations[(local_ip, remote_ip, remote_port)]
+        fast = self._settings.is_fast_port(port)
         if state == STATE_TIME_WAIT:
             source.time_wait += 1
             destination.time_wait += 1
+            destination.fast_time_wait += int(fast)
         else:
             source.used += 1
             destination.used += 1
+            destination.fast_used += int(fast)
 
     def summarize(self) -> dict:
         settings = self._settings
@@ -191,11 +242,12 @@ class EphemeralPortsAggregator:
         for local_ip, bucket in top_sources:
             tw_reusable = self._time_wait_reusable(local_ip)
             destinations = by_source.get(local_ip, [])
-            # Направления ранжируются по занятому, а не по числу сокетов: при
-            # tcp_tw_reuse=1 направление с горой TIME_WAIT потолок не подпирает,
-            # и первым должно стоять то, которому до него реально ближе всех
+            # Направления ранжируются по занятому в быстрой половине, а не по
+            # числу сокетов: при tcp_tw_reuse=1 направление с горой TIME_WAIT
+            # потолок не подпирает, и первым должно стоять то, которому до
+            # полного перебора в connect() реально ближе всех
             top_destinations = heapq.nlargest(
-                MAX_DESTINATIONS, destinations, key=lambda item: self._held(item[1], tw_reusable)
+                MAX_DESTINATIONS, destinations, key=lambda item: self._fast_held(item[1], tw_reusable)
             )
             sources.append({
                 "ip": decode_address(local_ip),
@@ -213,6 +265,7 @@ class EphemeralPortsAggregator:
             "range_high": settings.high,
             "reserved": settings.reserved_in_range,
             "capacity": settings.capacity,
+            "fast_capacity": settings.fast_capacity,
             "tw_reuse": settings.tw_reuse,
             "sources": sources,
         }
@@ -225,18 +278,22 @@ class EphemeralPortsAggregator:
         return self._settings.tw_reuse == TW_REUSE_LOOPBACK and _is_loopback(local_ip)
 
     def _describe(self, remote_ip: str, remote_port: str, bucket: _Bucket, tw_reusable: bool) -> dict:
-        held = self._held(bucket, tw_reusable)
+        fast_held = self._fast_held(bucket, tw_reusable)
         return {
             "ip": decode_address(remote_ip),
             "port": int(remote_port, 16),
             "used": bucket.used,
             "time_wait": bucket.time_wait,
-            "held": held,
-            "free": max(self._settings.capacity - held, 0),
+            "held": bucket.used if tw_reusable else bucket.total,
+            "fast_held": fast_held,
+            "free": max(self._settings.fast_capacity - fast_held, 0),
         }
 
     @staticmethod
-    def _held(bucket: _Bucket, tw_reusable: bool) -> int:
-        """Сколько номеров направление реально держит: при tcp_tw_reuse ядро отдаёт
-        порты из TIME_WAIT новым исходящим сразу, и занятыми они не считаются."""
-        return bucket.used if tw_reusable else bucket.total
+    def _fast_held(bucket: _Bucket, tw_reusable: bool) -> int:
+        """Сколько портов быстрой половины направление реально держит: при
+        tcp_tw_reuse ядро отдаёт порты из TIME_WAIT новым исходящим сразу,
+        и занятыми они не считаются."""
+        if tw_reusable:
+            return bucket.fast_used
+        return bucket.fast_used + bucket.fast_time_wait

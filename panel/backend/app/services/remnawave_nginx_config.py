@@ -50,10 +50,22 @@ from urllib.parse import urlsplit
 DOMAIN_PLACEHOLDER = "{{DOMAIN}}"
 LOCATIONS_START_MARKER = "# === LOCATIONS START ==="
 LOCATIONS_END_MARKER = "# === LOCATIONS END ==="
-# Секция в http-контексте для keepalive-пулов XHTTP; в конфигах, собранных
-# до её появления, отсутствует — тогда XHTTP-правило проксирует напрямую
+# Секция в http-контексте для keepalive-пулов XHTTP и раскладки адресов
+# источника; в конфигах, собранных до её появления, отсутствует — тогда
+# правила подключаются к инбаунду напрямую с 127.0.0.1
 UPSTREAMS_START_MARKER = "# === UPSTREAMS START ==="
 UPSTREAMS_END_MARKER = "# === UPSTREAMS END ==="
+
+# Адреса, с которых nginx подключается к инбаундам Xray. Потолок соединений
+# считается на пару «адрес источника → адрес:порт цели», и с одного 127.0.0.1
+# к одному инбаунду быстро открывается лишь половина эфемерного диапазона:
+# connect() сначала перебирает порты одной чётности и, только исчерпав их,
+# берётся за вторую — уже полным перебором на каждое соединение. Весь
+# 127.0.0.0/8 локален на lo, поэтому каждый адрес добавляет свой запас,
+# а listen инбаунда остаётся на 127.0.0.1. 16 адресов — ~515 тыс. потоков
+# на инбаунд, с запасом на ноды в 10–20 Гбит; лишний адрес ничего не стоит
+LOOPBACK_SOURCES = tuple(f"127.0.0.{octet}" for octet in range(1, 17))
+LOOPBACK_SOURCE_VAR = "$xray_source"
 
 # Строки с этим маркером нода пересчитывает под свой хост при применении
 # (потолок дескрипторов контейнера и RAM у нод разные). Значения ниже —
@@ -353,7 +365,21 @@ def validate_options(options: ProfileOptions) -> None:
             )
 
 
-def _grpc_block(rule: GrpcRule, ip_var: str, has_fallback: bool) -> str:
+def _grpc_pass_lines(rule: GrpcRule | XhttpRule, has_upstreams: bool) -> str:
+    """nginx не мультиплексирует потоки к апстриму: каждый gRPC-запрос клиента
+    держит своё h2c-соединение к инбаунду, так что потолок портов с одного
+    адреса источника — это потолок одновременных потоков.
+
+    keepalive-пул тут не поможет: nginx возвращает h2c-соединение в кэш, только
+    если тело запроса дослано к моменту конца ответа, а у прокси-потока первым
+    обычно заканчивается ответ — соединение всё равно закрывается."""
+    grpc_pass = f"grpc_pass grpc://127.0.0.1:{rule.port};"
+    if not has_upstreams:
+        return grpc_pass
+    return f"{grpc_pass}\n            grpc_bind {LOOPBACK_SOURCE_VAR};"
+
+
+def _grpc_block(rule: GrpcRule, ip_var: str, has_fallback: bool, has_upstreams: bool) -> str:
     """Блок живёт между маркерами и попадает в том числе в конфиги с ручными
     правками, поэтому ссылаться отсюда можно только на @fallback — её наличие
     известно по опциям, а @drop может не существовать.
@@ -373,7 +399,7 @@ def _grpc_block(rule: GrpcRule, ip_var: str, has_fallback: bool) -> str:
         guard = f"            {not_grpc} {{ return 444; }}\n"
     return f"""        # rule: {rule.name} type=grpc
         location ^~ /{rule.service_path} {{
-{guard}            grpc_pass grpc://127.0.0.1:{rule.port};
+{guard}            {_grpc_pass_lines(rule, has_upstreams)}
             grpc_set_header Host $host;
             grpc_set_header X-Forwarded-For {ip_var};
             grpc_read_timeout 1h;
@@ -382,7 +408,7 @@ def _grpc_block(rule: GrpcRule, ip_var: str, has_fallback: bool) -> str:
         }}"""
 
 
-def _xhttp_block(rule: XhttpRule, ip_var: str, has_fallback: bool, keepalive: bool) -> str:
+def _xhttp_block(rule: XhttpRule, ip_var: str, has_fallback: bool, has_upstreams: bool) -> str:
     """Одно правило обслуживает все режимы XHTTP, разводя их по Content-Type.
 
     `stream-one` и аплоад `stream-up` приходят с `application/grpc` (Xray сам
@@ -406,8 +432,9 @@ def _xhttp_block(rule: XhttpRule, ip_var: str, has_fallback: bool, keepalive: bo
     plain = f"@xhttp_{rule.name}"
     drop = f"@xhttp_{rule.name}_drop"
     on_error = "@fallback" if has_fallback else drop
-    if keepalive:
+    if has_upstreams:
         proxy_pass = (f"proxy_pass http://{xhttp_upstream_name(rule)};\n"
+                      f"            proxy_bind {LOOPBACK_SOURCE_VAR};\n"
                       f"            proxy_http_version 1.1;\n"
                       f'            proxy_set_header Connection "";')
     else:
@@ -420,7 +447,7 @@ def _xhttp_block(rule: XhttpRule, ip_var: str, has_fallback: bool, keepalive: bo
             error_page {XHTTP_FALLBACK_CODES} = {on_error};
             error_page {XHTTP_DROP_CODES} = {drop};
             if ($content_type !~* "^application/grpc") {{ return {NOT_GRPC_CODE}; }}
-            grpc_pass grpc://127.0.0.1:{rule.port};
+            {_grpc_pass_lines(rule, has_upstreams)}
             grpc_intercept_errors on;
             grpc_set_header Host $host;
             grpc_set_header X-Forwarded-For {ip_var};
@@ -450,17 +477,35 @@ def _xhttp_block(rule: XhttpRule, ip_var: str, has_fallback: bool, keepalive: bo
         }}"""
 
 
+def _loopback_source_split() -> str:
+    """Раскладка новых соединений к Xray по адресам LOOPBACK_SOURCES. Ключ —
+    $request_id: он случаен на каждый запрос, и адреса нагружаются ровно. Порт
+    ядро выбирает уже в connect() — nginx ставит на сокет IP_BIND_ADDRESS_NO_PORT,
+    — поэтому запас портов у каждого адреса свой."""
+    # split_clients принимает проценты с двумя знаками после точки: 16 → 6.25%
+    share = f"{100 / len(LOOPBACK_SOURCES):g}%"
+    *shared, last = LOOPBACK_SOURCES
+    lines = [f"        {share} {address};" for address in shared]
+    lines.append(f"        *   {last};")
+    body = "\n".join(lines)
+    return f"""    split_clients "$request_id" {LOOPBACK_SOURCE_VAR} {{
+{body}
+    }}"""
+
+
 def _render_upstreams(rules: list[Rule]) -> str:
-    """Keepalive-пул к XHTTP-инбаунду. packet-up шлёт отдельный POST на каждый
-    чанк, и без пула каждый из них — новый TCP-коннект к 127.0.0.1 с TIME_WAIT
-    на стороне nginx. gRPC-ветке пул не нужен: там одно долгое h2c-соединение.
+    """Раскладка адресов источника для всех правил Xray и keepalive-пул к
+    XHTTP-инбаунду. packet-up шлёт отдельный POST на каждый чанк, и без пула
+    каждый из них — новый TCP-коннект к 127.0.0.1 с TIME_WAIT на стороне nginx.
     """
-    blocks = [f"""    upstream {xhttp_upstream_name(r)} {{
+    if not any(isinstance(r, (GrpcRule, XhttpRule)) for r in rules):
+        return ""
+    pools = [f"""    upstream {xhttp_upstream_name(r)} {{
         server 127.0.0.1:{r.port};
         keepalive 64;  {AUTO_MARKER}
         keepalive_requests 100000;
     }}""" for r in rules if isinstance(r, XhttpRule)]
-    return "\n\n".join(blocks)
+    return "\n\n".join([_loopback_source_split(), *pools])
 
 
 def _proxy_headers(ip_var: str, indent: str = "            ") -> str:
@@ -531,18 +576,18 @@ def _proxy_block(rule: ProxyRule, ip_var: str) -> str:
         }}"""
 
 
-def _render_rule(rule: Rule, ip_var: str, has_fallback: bool, keepalive: bool) -> str:
+def _render_rule(rule: Rule, ip_var: str, has_fallback: bool, has_upstreams: bool) -> str:
     if isinstance(rule, GrpcRule):
-        return _grpc_block(rule, ip_var, has_fallback)
+        return _grpc_block(rule, ip_var, has_fallback, has_upstreams)
     if isinstance(rule, XhttpRule):
-        return _xhttp_block(rule, ip_var, has_fallback, keepalive)
+        return _xhttp_block(rule, ip_var, has_fallback, has_upstreams)
     return _proxy_block(rule, ip_var)
 
 
-def _render_locations(rules: list[Rule], options: "ProfileOptions", keepalive: bool) -> str:
+def _render_locations(rules: list[Rule], options: "ProfileOptions", has_upstreams: bool) -> str:
     ip_var = options.client_ip_var
     has_fallback = bool(options.fallback_url)
-    return "\n\n".join(_render_rule(r, ip_var, has_fallback, keepalive) for r in rules)
+    return "\n\n".join(_render_rule(r, ip_var, has_fallback, has_upstreams) for r in rules)
 
 
 def _replace_section(config: str, start_marker: str, end_marker: str,
@@ -660,7 +705,7 @@ def generate_full_config(options: ProfileOptions, rules: list[Rule]) -> str:
     pp_realip = (f"        set_real_ip_from {options.haproxy_ip or '0.0.0.0/0'};\n"
                  f"        real_ip_header proxy_protocol;\n\n"
                  if options.proxy_protocol_enabled else "")
-    locations = _render_locations(rules, options, keepalive=True)
+    locations = _render_locations(rules, options, has_upstreams=True)
     fallback = _fallback_locations(options) if options.fallback_url else ""
 
     # Своих заголовков в ответ не добавляем: клиент должен получать ровно то,
@@ -760,20 +805,21 @@ http {{
 def splice_rules(config: str, rules: list[Rule], options: ProfileOptions) -> str:
     """Заменяет секции между маркерами, сохраняя ручные правки вне их.
 
-    Секция UPSTREAMS появилась позже LOCATIONS: в конфиге без неё XHTTP-правила
-    проксируют напрямую, без keepalive-пула — пул придёт после «Вставить шаблон».
+    Секция UPSTREAMS появилась позже LOCATIONS: в конфиге без неё правила Xray
+    подключаются к инбаунду напрямую, без пулов и раскладки адресов источника —
+    всё это придёт после «Вставить шаблон».
     """
     validate_rules(rules)
     if not has_markers(config):
         raise MissingMarkersError(
             "В конфиге нет маркеров LOCATIONS — воспользуйтесь «Вставить шаблон»"
         )
-    keepalive = has_upstream_markers(config)
+    has_upstreams = has_upstream_markers(config)
     result = _replace_section(
         config, LOCATIONS_START_MARKER, LOCATIONS_END_MARKER,
-        _render_locations(rules, options, keepalive), indent="        ",
+        _render_locations(rules, options, has_upstreams), indent="        ",
     )
-    if keepalive:
+    if has_upstreams:
         result = _replace_section(
             result, UPSTREAMS_START_MARKER, UPSTREAMS_END_MARKER,
             _render_upstreams(rules), indent="    ",

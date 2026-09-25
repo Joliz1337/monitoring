@@ -154,12 +154,15 @@ export interface NodeWindow {
   disk_write_avg: number
 }
 
+// free — остаток быстрой половины (fast_capacity − fast_held); у нод до 10.30.0
+// fast_* нет, и free там считан от всего диапазона
 export interface EphemeralDestination {
   ip: string
   port: number
   used: number
   time_wait: number
   held: number
+  fast_held?: number
   free: number
 }
 
@@ -173,14 +176,24 @@ export interface EphemeralSource {
   destinations: EphemeralDestination[]
 }
 
-// Потолок исходящих соединений — на пару «наш адрес → адрес:порт цели», а не на хост
+// Потолок исходящих соединений — на пару «наш адрес → адрес:порт цели», а не на хост.
+// fast_capacity — порты первого прохода connect() (чётности нижней границы):
+// когда они кончаются, каждое соединение перебирает их целиком
 export interface EphemeralPorts {
   range_low: number
   range_high: number
   reserved: number
   capacity: number
+  fast_capacity?: number
   tw_reuse: number
   sources: EphemeralSource[]
+}
+
+// Память по процессорным сокетам; на VPS обычно один узел
+export interface NumaNode {
+  node: number
+  cpus: number
+  memory_total: number
 }
 
 export interface ServerMetrics {
@@ -217,6 +230,7 @@ export interface ServerMetrics {
       free: number
       percent: number
     }
+    numa_nodes?: NumaNode[]
   }
   disk: {
     partitions: Array<{
@@ -2338,6 +2352,7 @@ export interface HAProxyAvailableServer {
   url: string
   active_profile_id: number | null
   sync_status: string | null
+  folder: string | null
 }
 
 export interface HAProxyServerStatus {

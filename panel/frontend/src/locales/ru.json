@@ -336,6 +336,9 @@
     "server_unavailable": "Сервер недоступен",
     "error_code": "Код ошибки",
     "last_online": "Был онлайн",
+    "numa_imbalance_title": "Память стоит неравномерно между процессорами",
+    "numa_imbalance_hint": "Ядра процессора с меньшей памятью обращаются к памяти соседнего — задержки выше. Разложите планки поровну по слотам каждого процессора.",
+    "numa_node": "Процессор {{node}} ({{cpus}} потоков)",
     "connection_timeout": "Таймаут соединения",
     "connection_refused": "Соединение отклонено",
     "auth_failed": "Ошибка аутентификации",
@@ -813,6 +816,7 @@
   "ephemeral": {
     "title": "Эфемерные порты",
     "range": "Диапазон {{low}}–{{high}} · потолок {{capacity}} на направление",
+    "range_fast": "Диапазон {{low}}–{{high}} · быстрый запас {{fast}} из {{capacity}} на направление",
     "destinations_count_one": "{{count}} направление",
     "destinations_count_few": "{{count}} направления",
     "destinations_count_many": "{{count}} направлений",

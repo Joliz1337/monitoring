@@ -3,7 +3,7 @@ import { ChevronRight, Hash } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import ProgressBar from '../ui/ProgressBar'
 import { FAQIcon } from '../FAQ'
-import type { EphemeralPorts as EphemeralPortsData } from '../../api/client'
+import type { EphemeralDestination, EphemeralPorts as EphemeralPortsData } from '../../api/client'
 
 interface EphemeralPortsProps {
   data: EphemeralPortsData
@@ -18,6 +18,10 @@ const freeColor = (held: number, capacity: number): string => {
   return 'text-success'
 }
 
+// Нода до 10.30.0 не знает о быстрой половине — считаем от всего диапазона
+const occupied = (destination: EphemeralDestination): number =>
+  destination.fast_held ?? destination.held
+
 export default function EphemeralPorts({ data }: EphemeralPortsProps) {
   const { t } = useTranslation()
   const [expanded, setExpanded] = useState<string | null>(data.sources[0]?.ip ?? null)
@@ -25,6 +29,9 @@ export default function EphemeralPorts({ data }: EphemeralPortsProps) {
   if (data.sources.length === 0) return null
 
   const format = (value: number) => value.toLocaleString()
+  // Проблемы начинаются не на полном диапазоне, а когда кончаются порты
+  // первого прохода connect(): дальше каждое соединение перебирает их целиком
+  const ceiling = data.fast_capacity ?? data.capacity
 
   return (
     <div className="card">
@@ -34,11 +41,18 @@ export default function EphemeralPorts({ data }: EphemeralPortsProps) {
         <FAQIcon screen="TRAFFIC_EPHEMERAL_PORTS" size="sm" />
       </h3>
       <p className="text-xs text-dark-400 mb-4">
-        {t('ephemeral.range', {
-          low: data.range_low,
-          high: data.range_high,
-          capacity: format(data.capacity),
-        })}
+        {data.fast_capacity === undefined
+          ? t('ephemeral.range', {
+              low: data.range_low,
+              high: data.range_high,
+              capacity: format(data.capacity),
+            })
+          : t('ephemeral.range_fast', {
+              low: data.range_low,
+              high: data.range_high,
+              fast: format(data.fast_capacity),
+              capacity: format(data.capacity),
+            })}
       </p>
 
       <div className="space-y-2">
@@ -49,6 +63,7 @@ export default function EphemeralPorts({ data }: EphemeralPortsProps) {
           // сумма адреса: с тремя направлениями она втрое больше потолка.
           // Занятое и остаток считает нода — там учтён tcp_tw_reuse
           const tightest = source.destinations[0]
+          const tightestLoad = tightest ? occupied(tightest) : 0
           return (
             <div key={source.ip} className="bg-dark-800/50 rounded-lg overflow-hidden">
               <button
@@ -65,13 +80,13 @@ export default function EphemeralPorts({ data }: EphemeralPortsProps) {
                     {t('ephemeral.destinations_count', { count: source.destinations_total })}
                   </span>
                 </div>
-                <ProgressBar value={tightest?.held ?? 0} max={data.capacity} size="sm" />
+                <ProgressBar value={tightestLoad} max={ceiling} size="sm" />
                 <div className="flex items-center justify-between mt-1.5 text-xs">
                   <span className="text-dark-400">
-                    {t('ephemeral.peak_usage', { used: format(tightest?.held ?? 0) })}
+                    {t('ephemeral.peak_usage', { used: format(tightestLoad) })}
                   </span>
-                  <span className={`font-mono ${freeColor(tightest?.held ?? 0, data.capacity)}`}>
-                    {t('ephemeral.free', { free: format(tightest?.free ?? data.capacity) })}
+                  <span className={`font-mono ${freeColor(tightestLoad, ceiling)}`}>
+                    {t('ephemeral.free', { free: format(tightest?.free ?? ceiling) })}
                   </span>
                 </div>
               </button>
@@ -85,10 +100,10 @@ export default function EphemeralPorts({ data }: EphemeralPortsProps) {
                           {destination.ip}:{destination.port}
                         </span>
                         <span className="font-mono text-dark-400 whitespace-nowrap">
-                          {format(destination.held)} / {format(data.capacity)}
+                          {format(occupied(destination))} / {format(ceiling)}
                         </span>
                       </div>
-                      <ProgressBar value={destination.held} max={data.capacity} size="sm" />
+                      <ProgressBar value={occupied(destination)} max={ceiling} size="sm" />
                     </div>
                   ))}
                   {source.destinations_total > source.destinations.length && (
