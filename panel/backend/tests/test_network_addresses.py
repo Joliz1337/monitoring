@@ -23,8 +23,10 @@ try:
         expand_entries,
         expand_entry,
         normalize_ref,
+        parse_gateway,
         preview,
         split_entries,
+        with_gateway,
     )
 except ImportError as e:  # pragma: no cover
     raise unittest.SkipTest(f"network_addresses requires the panel runtime: {e}")
@@ -144,6 +146,33 @@ class PreviewAndRefTests(unittest.TestCase):
         with self.assertRaises(AddressInputError) as ctx:
             expand_entry("1.2.3.4/33")
         self.assertTrue(str(ctx.exception).startswith("«1.2.3.4/33»"))
+
+
+class GatewayTests(unittest.TestCase):
+    def test_parse(self):
+        self.assertIsNone(parse_gateway("  "))
+        self.assertEqual(parse_gateway(" 5.6.7.1 "), "5.6.7.1")
+        self.assertEqual(parse_gateway("FE80::1"), "fe80::1")
+        for bad in ("gw", "127.0.0.1", "224.0.0.1", "0.0.0.0", "::", "ff02::1"):
+            with self.assertRaises(AddressInputError, msg=bad):
+                parse_gateway(bad)
+
+    def test_applies_to_the_whole_batch_of_one_family(self):
+        specs = with_gateway(expand_entries("5.6.7.8 5.6.7.10-11"), "5.6.7.1")
+        self.assertEqual({spec.gateway for spec in specs}, {"5.6.7.1"})
+        self.assertEqual(len(specs), 3)
+        self.assertEqual(with_gateway(expand_entries("5.6.7.8"), None)[0].gateway, None)
+
+    def test_mixed_families_and_self_gateway_are_refused(self):
+        with self.assertRaises(AddressInputError):
+            with_gateway(expand_entries("5.6.7.8 2001:db8::2"), "5.6.7.1")
+        with self.assertRaises(AddressInputError):
+            with_gateway(expand_entries("5.6.7.0/30"), "5.6.7.1")
+
+    def test_preview_validates_gateway(self):
+        self.assertEqual(preview("5.6.7.8", "5.6.7.1")["count"], 1)
+        with self.assertRaises(AddressInputError):
+            preview("5.6.7.8", "2001:db8::1")
 
 
 if __name__ == "__main__":

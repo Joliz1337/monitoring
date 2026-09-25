@@ -15,9 +15,17 @@ boot-guard), живёт в bash-скрипте на хосте (`host_extra_ips.
 рендер конфигов и разбор состояния. Скрипт конфиги не рендерит: он получает
 готовый план (файлы в base64 + списки адресов).
 
+Свой шлюз адреса (хостер выдал адрес из другой сети) — policy routing: правило
+`from <адрес> lookup <таблица>` и в таблице `default via <шлюз> onlink`. В
+конфиги бэкендов оно не пишется: у каждого свой синтаксис, а ошибка в маршруте
+netplan стоит сети после ребута. Правила живут в ядре, после загрузки их
+поднимает `mon-extra-ips.service`, а разъезд (networkd сносит чужие маршруты при
+переконфигурации линка) чинит цикл агента.
+
 Состояние — строчные файлы в `/opt/monitoring/network/` (каталог примонтирован
 в контейнер только на чтение, пишет их скрипт): `managed.list` (наши адреса),
-`transaction.env` (текущая транзакция), `history.log`, `backups/<tx>/`.
+`routes.list` (шлюзы наших адресов), `transaction.env` (текущая транзакция),
+`history.log`, `backups/<tx>/`.
 """
 
 import asyncio
@@ -81,7 +89,7 @@ WantedBy=sysinit.target
 """
 
 PERSIST_UNIT = """[Unit]
-Description=Monitoring node: re-add panel-managed extra IP addresses (hosts without a config backend)
+Description=Monitoring node: re-add panel-managed extra IP addresses and their gateway routes
 After=network-online.target
 Wants=network-online.target
 
@@ -95,6 +103,7 @@ WantedBy=multi-user.target
 
 STATE_DIR = Path("/opt/monitoring/network")
 MANAGED_FILE_NAME = "managed.list"
+ROUTES_FILE_NAME = "routes.list"
 TRANSACTION_FILE_NAME = "transaction.env"
 HISTORY_FILE_NAME = "history.log"
 SYS_CLASS_NET = Path("/sys/class/net")
@@ -115,6 +124,12 @@ DETECT_TIMEOUT_SEC = 20
 DETECT_CACHE_SEC = 60
 HISTORY_LIMIT = 20
 TX_ID_RE = re.compile(r"^[0-9]{8}-[0-9]{6}-[0-9a-f]{4}$")
+
+# Таблицы маршрутизации под шлюзы адресов, по одной на пару (интерфейс, шлюз).
+# Диапазон тот же в host-скрипте; пул исходящих адресов занимает 101–130.
+GATEWAY_TABLE_MIN = 1001
+GATEWAY_TABLE_MAX = 1100
+ROUTES_SYNC_INTERVAL_SEC = 30
 
 EXIT_BUSY = 3
 EXIT_ROLLED_BACK = 4
@@ -172,6 +187,22 @@ class LiveAddr:
 class LiveInterface:
     name: str
     addresses: list[LiveAddr] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class DefaultRoute:
+    interface: str
+    prefsrc: str = ""
+    gateway: str = ""
+
+
+@dataclass(frozen=True)
+class GatewayRoute:
+    """Строка routes.list: трафик с адреса уходит через свой шлюз по таблице."""
+    interface: str
+    address: str
+    gateway: str
+    table: int
 
 
 @dataclass
@@ -251,33 +282,37 @@ def parse_ip_addr(text: str) -> dict[str, LiveInterface]:
     return interfaces
 
 
-def parse_default_routes(json4: str, json6: str) -> dict[str, tuple[str, str]]:
-    """family → (интерфейс default-маршрута, prefsrc или '')."""
-    routes: dict[str, tuple[str, str]] = {}
+def parse_default_routes(json4: str, json6: str) -> dict[str, DefaultRoute]:
+    """family → default-маршрут (интерфейс, prefsrc, шлюз; последних может не быть)."""
+    routes: dict[str, DefaultRoute] = {}
     for family, text in (("ipv4", json4), ("ipv6", json6)):
         try:
             entries = json.loads(text or "[]")
         except ValueError:
             continue
         for entry in entries:
-            # Multipath-маршрут (два шлюза на bond0) держит dev внутри nexthops
+            # Multipath-маршрут (два шлюза на bond0) держит dev и шлюз внутри nexthops
             nexthops = entry.get("nexthops") or [{}]
             dev = entry.get("dev") or nexthops[0].get("dev")
             if dev:
-                routes[family] = (str(dev), str(entry.get("prefsrc") or ""))
+                routes[family] = DefaultRoute(
+                    interface=str(dev),
+                    prefsrc=str(entry.get("prefsrc") or ""),
+                    gateway=str(entry.get("gateway") or nexthops[0].get("gateway") or ""),
+                )
                 break
     return routes
 
 
-def primary_addresses(iface: LiveInterface, routes: dict[str, tuple[str, str]], managed: set[str]) -> set[str]:
+def primary_addresses(iface: LiveInterface, routes: dict[str, DefaultRoute], managed: set[str]) -> set[str]:
     """Основной адрес каждого семейства: prefsrc default-маршрута, иначе первый
     global-адрес, который не добавляла панель."""
     primary: set[str] = set()
     for family in ("ipv4", "ipv6"):
         candidates = [addr for addr in iface.addresses if addr.family == family]
         route = routes.get(family)
-        if route and route[0] == iface.name and route[1]:
-            matched = [addr for addr in candidates if addr.address == route[1]]
+        if route and route.interface == iface.name and route.prefsrc:
+            matched = [addr for addr in candidates if addr.address == route.prefsrc]
             if matched:
                 primary.add(matched[0].cidr)
                 continue
@@ -302,6 +337,20 @@ def parse_managed(text: str) -> list[tuple[str, str]]:
 
 def render_managed(entries: list[tuple[str, str]]) -> str:
     return "".join(f"{iface} {cidr}\n" for iface, cidr in entries)
+
+
+def parse_routes(text: str) -> list[GatewayRoute]:
+    routes: list[GatewayRoute] = []
+    for line in (text or "").splitlines():
+        parts = line.split()
+        if len(parts) != 4 or not parts[3].isdigit():
+            continue
+        routes.append(GatewayRoute(interface=parts[0], address=parts[1], gateway=parts[2], table=int(parts[3])))
+    return routes
+
+
+def render_routes(routes: list[GatewayRoute]) -> str:
+    return "".join(f"{r.interface} {r.address} {r.gateway} {r.table}\n" for r in routes)
 
 
 def _split_list(value: str, separator: str = " ") -> list[str]:
@@ -497,12 +546,20 @@ def splice_ifupdown_block(interfaces_text: str, stanzas: str) -> str:
 # ---------------------------------------------------------- проверки и план
 
 
+def without_default_gateways(specs: list[AddressSpec], defaults: dict[str, DefaultRoute]) -> list[AddressSpec]:
+    """Шлюз, совпадающий со шлюзом default-маршрута, — это «как у основного
+    адреса»: своя таблица ему не нужна, хватает основной."""
+    gateways = {route.gateway for route in defaults.values() if route.gateway}
+    return [spec.model_copy(update={"gateway": None}) if spec.gateway in gateways else spec for spec in specs]
+
+
 def check_request(
     request: NetworkApplyRequest,
     interfaces: dict[str, LiveInterface],
     physical: dict[str, bool],
     managed: list[tuple[str, str]],
     primary: set[str],
+    routes: list[GatewayRoute],
 ) -> tuple[list[AddressSpec], list[AddressSpec]]:
     """Guard'ы до любого касания хоста. Возвращает (add, remove) без адресов,
     которые уже стоят и наши."""
@@ -529,20 +586,55 @@ def check_request(
         if spec.cidr in primary:
             raise ExtraIpValidationError(f"{spec.cidr} is the primary address of {iface}")
 
+    gateway_of = {route.address: route.gateway for route in routes if route.interface == iface}
+    host_ips = {addr.address for live_iface in interfaces.values() for addr in live_iface.addresses}
     add: list[AddressSpec] = []
     for spec in request.add:
         if spec.cidr in managed_here and spec.cidr in present:
+            current = gateway_of.get(spec.address)
+            if current != spec.gateway:
+                was = f"via {current}" if current else "without a gateway"
+                raise ExtraIpValidationError(
+                    f"{spec.cidr} is already added {was}; remove it and add it again to change the gateway"
+                )
             continue
         if spec.address in present_ips:
             raise ExtraIpValidationError(f"{spec.address} is already configured on {iface} (not by the panel)")
         for name, other in interfaces.items():
             if name != iface and any(addr.address == spec.address for addr in other.addresses):
                 raise ExtraIpValidationError(f"{spec.address} is already configured on {name}")
+        if spec.gateway in host_ips:
+            raise ExtraIpValidationError(f"gateway {spec.gateway} is an address of this host")
         add.append(spec)
 
     if not add and not request.remove:
         raise ExtraIpValidationError("nothing to do: all addresses are already configured")
     return add, list(request.remove)
+
+
+def plan_routes(
+    current: list[GatewayRoute], iface: str, add: list[AddressSpec], remove: list[AddressSpec]
+) -> list[GatewayRoute]:
+    """routes.list после транзакции. Адреса с общим шлюзом делят одну таблицу:
+    таблица отвечает на «куда слать», а правило `from адрес` у каждого своё."""
+    dropped = {spec.address for spec in remove} | {spec.address for spec in add}
+    routes = [r for r in current if not (r.interface == iface and r.address in dropped)]
+    for spec in add:
+        if not spec.gateway:
+            continue
+        table = next((r.table for r in routes if r.interface == iface and r.gateway == spec.gateway), None)
+        routes.append(GatewayRoute(iface, spec.address, spec.gateway, table or free_gateway_table(routes)))
+    return routes
+
+
+def free_gateway_table(routes: list[GatewayRoute]) -> int:
+    used = {route.table for route in routes}
+    for table in range(GATEWAY_TABLE_MIN, GATEWAY_TABLE_MAX + 1):
+        if table not in used:
+            return table
+    raise ExtraIpValidationError(
+        f"too many different gateways: at most {GATEWAY_TABLE_MAX - GATEWAY_TABLE_MIN + 1} per node"
+    )
 
 
 def new_transaction_id() -> str:
@@ -558,6 +650,7 @@ def build_plan(
     protected: list[str],
     timeout_sec: int,
     managed_text: str,
+    routes_text: str,
     files: list[PlanFile],
 ) -> str:
     """Текст плана для `extra-ips.sh apply` — KEY=value, файлы в base64."""
@@ -571,6 +664,7 @@ def build_plan(
         f"REMOVE={' '.join(spec.cidr for spec in remove)}",
         f"PROTECTED={' '.join(protected)}",
         f"MANAGED_B64={_b64(managed_text)}",
+        f"ROUTES_B64={_b64(routes_text)}",
     ]
     if backend.kind == BackendKind.NETWORKMANAGER:
         lines.append(f"NM_CONNECTION={backend.nm_connection}")
@@ -625,6 +719,7 @@ class ExtraIpManager:
         self._support: tuple[bool, str] = (True, "")
         # iface → (когда, Backend или причина провала)
         self._detect_cache: dict[str, tuple[float, Backend | str]] = {}
+        self._task: Optional[asyncio.Task] = None
 
     # ── состояние с диска (ro-mount) ──
 
@@ -636,6 +731,9 @@ class ExtraIpManager:
 
     def read_managed(self) -> list[tuple[str, str]]:
         return parse_managed(self._read(MANAGED_FILE_NAME))
+
+    def read_routes(self) -> list[GatewayRoute]:
+        return parse_routes(self._read(ROUTES_FILE_NAME))
 
     def read_transaction(self) -> Optional[Transaction]:
         return parse_transaction(self._read(TRANSACTION_FILE_NAME))
@@ -680,7 +778,7 @@ class ExtraIpManager:
 
     # ── живые данные ──
 
-    async def _live(self) -> tuple[dict[str, LiveInterface], dict[str, tuple[str, str]], list[InterfaceInfo]]:
+    async def _live(self) -> tuple[dict[str, LiveInterface], dict[str, DefaultRoute], list[InterfaceInfo]]:
         """Адреса и default-маршруты хоста. Маршруты читаются отдельно и без
         влияния на код выхода: на хосте с `ipv6.disable=1` команда `ip -6 route`
         падает, и раньше это молча обнуляло весь список адресов."""
@@ -739,6 +837,7 @@ class ExtraIpManager:
                 interfaces=[], managed=[], transaction=None, history=[],
             )
         managed = self.read_managed()
+        gateway_of = {(route.interface, route.address): route.gateway for route in self.read_routes()}
         default = default_interface()
         states: list[InterfaceState] = []
         for candidate in sorted(candidates, key=lambda item: (item.name != default, item.name)):
@@ -755,6 +854,7 @@ class ExtraIpManager:
                     LiveAddress(
                         address=addr.address, prefix=addr.prefix, family=addr.family, scope=addr.scope,
                         managed=addr.cidr in managed_here, primary=addr.cidr in primary, dynamic=addr.dynamic,
+                        gateway=gateway_of.get((name, addr.address)) if addr.cidr in managed_here else None,
                     )
                     for addr in live.addresses
                 ],
@@ -773,9 +873,15 @@ class ExtraIpManager:
             backend=backend.kind.value if backend else None,
             backend_detail=backend.detail if backend else "",
             default_interface=default,
+            default_gateway={family: route.gateway for family, route in routes.items() if route.gateway},
             interfaces=states,
-            managed=[ManagedAddress(interface=owner, address=cidr.split("/")[0], prefix=int(cidr.split("/")[1]))
-                     for owner, cidr in managed],
+            managed=[
+                ManagedAddress(
+                    interface=owner, address=cidr.split("/")[0], prefix=int(cidr.split("/")[1]),
+                    gateway=gateway_of.get((owner, cidr.split("/")[0])),
+                )
+                for owner, cidr in managed
+            ],
             transaction=transaction.to_info() if transaction else None,
             history=[entry.to_info() for entry in self.read_history()],
         )
@@ -816,10 +922,12 @@ class ExtraIpManager:
             physical = {candidate.name: candidate.is_up for candidate in candidates}
             backend = await self._detect(request.interface, use_cache=False)
             managed = self.read_managed()
+            current_routes = self.read_routes()
             managed_here = {cidr for owner, cidr in managed if owner == request.interface}
             live = interfaces.get(request.interface) or LiveInterface(name=request.interface)
             primary = primary_addresses(live, routes, managed_here)
-            add, remove = check_request(request, interfaces, physical, managed, primary)
+            request = request.model_copy(update={"add": without_default_gateways(request.add, routes)})
+            add, remove = check_request(request, interfaces, physical, managed, primary, current_routes)
             if (backend.kind == BackendKind.NETWORKMANAGER and backend.nm_ipv6_method in ("disabled", "ignore")
                     and any(spec.family == "ipv6" for spec in add)):
                 raise ExtraIpValidationError(
@@ -830,10 +938,11 @@ class ExtraIpManager:
             managed_after = [(owner, cidr) for owner, cidr in managed
                              if not (owner == request.interface and cidr in removed)]
             managed_after.extend((request.interface, spec.cidr) for spec in add)
+            routes_after = plan_routes(current_routes, request.interface, add, remove)
             files = await self._render_files(backend, request.interface, managed_after)
             plan = build_plan(
                 new_transaction_id(), request.interface, backend, add, remove, request.protected,
-                request.rollback_timeout_sec, render_managed(managed_after), files,
+                request.rollback_timeout_sec, render_managed(managed_after), render_routes(routes_after), files,
             )
             result = await self._executor.execute(
                 f"printf '%s' '{_b64(plan)}' | base64 -d | {HOST_SCRIPT_PATH} apply",
@@ -846,7 +955,9 @@ class ExtraIpManager:
             response = parse_apply_output(result, backend.kind)
             logger.info(
                 "extra ips apply: iface=%s backend=%s add=%s remove=%s status=%s",
-                request.interface, backend.kind.value, [s.cidr for s in add], [s.cidr for s in remove], response.status,
+                request.interface, backend.kind.value,
+                [f"{s.cidr} via {s.gateway}" if s.gateway else s.cidr for s in add],
+                [s.cidr for s in remove], response.status,
             )
             return response
 
@@ -871,7 +982,49 @@ class ExtraIpManager:
                 raise ExtraIpValidationError(result.stderr.strip() or result.error or "rollback failed")
             return NetworkActionResponse(success=True, status=values.get("TX_STATUS"), message=values.get("TX_MESSAGE", ""))
 
+    async def sync_routes(self) -> None:
+        """Вернуть в ядро правила и маршруты шлюзов из routes.list. networkd при
+        переконфигурации линка сносит чужие маршруты, `ip rule flush` — правила;
+        без этого адрес со своим шлюзом тихо отвечал бы через основной."""
+        if not self.read_routes():
+            return
+        await self.ensure_installed()
+        result = await self._run("sync-routes")
+        if result.exit_code == EXIT_BUSY:
+            return
+        if not result.success:
+            logger.warning("extra ips: gateway routes sync failed: %s", result.stderr.strip() or result.error)
+            return
+        changed = parse_key_values(result.stdout).get("ROUTES_CHANGED", "0")
+        if changed != "0":
+            logger.warning("extra ips: restored %s gateway rules/routes that went missing", changed)
+
     async def start(self) -> None:
+        # Цикл — раньше отката: сбой отката не должен оставить шлюзы без самолечения
+        if self._task is None or self._task.done():
+            self._task = asyncio.create_task(self._routes_loop())
+        await self._rollback_stale_transaction()
+
+    async def stop(self) -> None:
+        if not self._task:
+            return
+        self._task.cancel()
+        try:
+            await self._task
+        except asyncio.CancelledError:
+            pass
+        self._task = None
+
+    async def _routes_loop(self) -> None:
+        while True:
+            await asyncio.sleep(ROUTES_SYNC_INTERVAL_SEC)
+            try:
+                async with self._lock:
+                    await self.sync_routes()
+            except Exception as exc:
+                logger.error("extra ips: gateway routes self-heal failed: %s", exc, exc_info=True)
+
+    async def _rollback_stale_transaction(self) -> None:
         """Страховка на старте агента: транзакция, зависшая в `applying` (контейнер
         убили посреди apply) или просроченная `pending` (nohup-таймер погиб вместе
         с контейнером), откатывается здесь."""

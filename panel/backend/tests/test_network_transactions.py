@@ -16,16 +16,19 @@ try:
     from app.services.network_transactions import (
         DEADLINE_GRACE_SECONDS,
         MIN_NODE_VERSION_NETWORK,
+        MIN_NODE_VERSION_NETWORK_GATEWAY,
         ROLLBACK_TIMEOUT_SEC,
         JobPhase,
         NetworkJob,
         TransactionStatus,
         deadline_passed,
+        gateway_conflicts,
         managed_on_interface,
         missing_on_interface,
         node_api_port,
         node_host,
         node_supports_network,
+        node_supports_network_gateway,
         parse_deadline,
     )
 except ImportError as e:  # pragma: no cover
@@ -80,6 +83,43 @@ class InterfaceFilterTests(unittest.TestCase):
         self.assertEqual([s.cidr for s in missing_on_interface(specs, self.IFACE)], ["1.2.3.6/32"])
         self.assertEqual([s.cidr for s in managed_on_interface(specs, self.IFACE)], ["1.2.3.5/32"])
         self.assertEqual(missing_on_interface(specs, {"name": "eth0"}), specs)
+
+
+class GatewayTests(unittest.TestCase):
+    IFACE = {"name": "eth0", "addresses": [
+        {"address": "1.2.3.4", "prefix": 24, "managed": False},
+        {"address": "5.6.7.8", "prefix": 32, "managed": True, "gateway": "5.6.7.1"},
+        {"address": "1.2.3.9", "prefix": 32, "managed": True},
+    ]}
+    DEFAULTS = {"ipv4": "1.2.3.1"}
+
+    def conflicts(self, *specs: AddressSpec) -> list[str]:
+        return gateway_conflicts(list(specs), self.IFACE, self.DEFAULTS)
+
+    def test_same_gateway_or_new_address_is_fine(self):
+        self.assertEqual(self.conflicts(AddressSpec("5.6.7.8", 32, "5.6.7.1"), AddressSpec("9.9.9.9", 32, "9.9.9.1")), [])
+        # Шлюз основного адреса — то же самое, что без шлюза
+        self.assertEqual(self.conflicts(AddressSpec("1.2.3.9", 32, "1.2.3.1"), AddressSpec("1.2.3.4", 24)), [])
+
+    def test_changing_gateway_of_a_present_address_is_refused(self):
+        problems = self.conflicts(AddressSpec("5.6.7.8", 32, "5.6.7.9"), AddressSpec("5.6.7.8", 32),
+                                  AddressSpec("1.2.3.9", 32, "1.2.3.254"))
+        self.assertEqual(len(problems), 3)
+        self.assertIn("через шлюз 5.6.7.1", problems[0])
+        self.assertIn("без своего шлюза", problems[2])
+
+    def test_hoster_address_cannot_get_a_gateway(self):
+        problems = self.conflicts(AddressSpec("1.2.3.4", 24, "1.2.3.254"))
+        self.assertEqual(len(problems), 1)
+        self.assertIn("не панелью", problems[0])
+
+    def test_version_gate_and_payload(self):
+        self.assertTrue(node_supports_network_gateway(MIN_NODE_VERSION_NETWORK_GATEWAY))
+        self.assertFalse(node_supports_network_gateway("10.30.0"))
+        self.assertFalse(node_supports_network_gateway(None))
+        self.assertEqual(AddressSpec("5.6.7.8", 32, "5.6.7.1").payload(),
+                         {"address": "5.6.7.8", "prefix": 32, "gateway": "5.6.7.1"})
+        self.assertEqual(AddressSpec("5.6.7.8", 32).payload(), {"address": "5.6.7.8", "prefix": 32})
 
 
 class SnapshotTests(unittest.TestCase):

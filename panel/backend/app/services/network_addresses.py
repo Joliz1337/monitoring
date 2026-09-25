@@ -3,13 +3,15 @@
 Хостеры выдают адреса по-разному: одиночный IP, IP с маской, диапазон
 `a-b`, целая подсеть `x.x.x.0/29`. Всё это принимается одним текстовым полем
 и превращается в плоский список (адрес, префикс), который уходит на ноду.
+Необязательный шлюз задаётся на всю пачку: адреса из другой сети хостер
+обычно выдаёт блоком с общим шлюзом.
 """
 
 import ipaddress
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
-from typing import Union
+from typing import Optional, Union
 
 MAX_ADDRESSES = 256
 # /31 — оба адреса (RFC 3021), /32 — один; ниже /30 разворачиваются hosts()
@@ -23,6 +25,10 @@ IPV6_HOST_PREFIX = 128
 UNASSIGNABLE_NETS = tuple(ipaddress.ip_network(net) for net in (
     "0.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16", "224.0.0.0/4", "240.0.0.0/4",
     "::/128", "::1/128", "fe80::/10", "ff00::/8",
+))
+# Шлюзу link-local можно: у IPv6 это обычное дело (`fe80::1` у Hetzner)
+UNUSABLE_GATEWAY_NETS = tuple(ipaddress.ip_network(net) for net in (
+    "0.0.0.0/8", "127.0.0.0/8", "224.0.0.0/4", "240.0.0.0/4", "::/128", "::1/128", "ff00::/8",
 ))
 
 _SPLIT_RE = re.compile(r"[\s,;]+")
@@ -39,6 +45,7 @@ class AddressFamily(str, Enum):
 class AddressSpec:
     address: str  # канонический вид (IPv6 сжат)
     prefix: int
+    gateway: Optional[str] = None
 
     @property
     def family(self) -> AddressFamily:
@@ -49,7 +56,10 @@ class AddressSpec:
         return f"{self.address}/{self.prefix}"
 
     def payload(self) -> dict:
-        return {"address": self.address, "prefix": self.prefix}
+        payload: dict = {"address": self.address, "prefix": self.prefix}
+        if self.gateway:
+            payload["gateway"] = self.gateway
+        return payload
 
 
 class AddressInputError(ValueError):
@@ -168,6 +178,35 @@ def expand_entries(text: str) -> list[AddressSpec]:
     return result
 
 
+def parse_gateway(text: str) -> Optional[str]:
+    text = (text or "").strip()
+    if not text:
+        return None
+    try:
+        ip = ipaddress.ip_address(text)
+    except ValueError:
+        raise AddressInputError(text, "шлюз не похож на IP-адрес")
+    if any(ip.version == net.version and ip in net for net in UNUSABLE_GATEWAY_NETS):
+        raise AddressInputError(text, "этот адрес не может быть шлюзом")
+    return str(ip)
+
+
+def with_gateway(specs: list[AddressSpec], gateway: Optional[str]) -> list[AddressSpec]:
+    """Шлюз одного семейства на всю пачку: смешанный список с шлюзом — ошибка,
+    а не молчаливый шлюз только для части адресов."""
+    if not gateway:
+        return specs
+    family = AddressFamily.IPV6 if ":" in gateway else AddressFamily.IPV4
+    if any(spec.family != family for spec in specs):
+        other = "IPv4" if family == AddressFamily.IPV6 else "IPv6"
+        raise AddressInputError(
+            gateway, f"в списке есть адреса {other}, а шлюз — для другого семейства; добавьте их отдельно"
+        )
+    if any(spec.address == gateway for spec in specs):
+        raise AddressInputError(gateway, "шлюз совпадает с одним из добавляемых адресов")
+    return [replace(spec, gateway=gateway) for spec in specs]
+
+
 def normalize_ref(address: str, prefix: int) -> AddressSpec:
     """Адрес из UI (удаление) в канонический вид — тот же, что у ноды."""
     try:
@@ -177,8 +216,8 @@ def normalize_ref(address: str, prefix: int) -> AddressSpec:
     return AddressSpec(str(interface.ip), interface.network.prefixlen)
 
 
-def preview(text: str) -> dict:
-    specs = expand_entries(text)
+def preview(text: str, gateway_text: str = "") -> dict:
+    specs = with_gateway(expand_entries(text), parse_gateway(gateway_text))
     return {
         "count": len(specs),
         "ipv4": sum(1 for spec in specs if spec.family == AddressFamily.IPV4),

@@ -79,8 +79,9 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Bandwidth limiter start failed, shaping is not restored: {e}", exc_info=True)
 
+    extra_ip_manager = get_extra_ip_manager()
     try:
-        await get_extra_ip_manager().start()
+        await extra_ip_manager.start()
     except Exception as e:
         logger.error(f"Extra IP manager start failed, a stale transaction may stay pending: {e}", exc_info=True)
 
@@ -148,6 +149,10 @@ async def lifespan(app: FastAPI):
         await source_pool_manager.stop()
     except Exception as e:
         logger.error(f"Source pool stop failed: {e}", exc_info=True)
+    try:
+        await extra_ip_manager.stop()
+    except Exception as e:
+        logger.error(f"Extra IP manager stop failed: {e}", exc_info=True)
     logger.info("Shutdown complete")
 
 

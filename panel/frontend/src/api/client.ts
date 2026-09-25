@@ -1032,9 +1032,12 @@ export const proxyApi = {
     api.post<BandwidthLimitState & { message: string }>(`/proxy/${serverId}/system/bandwidth-limit`, data, { timeout: 45000 }),
   // Доп. IP-адреса: apply на панели — фоновая задача, ответ ждёт её ≤ 20 с
   getNetworkState: (serverId: number) => api.get<NetworkState>(`/proxy/${serverId}/network/state`),
-  previewNetworkAddresses: (serverId: number, add_text: string) =>
-    api.post<NetworkPreview>(`/proxy/${serverId}/network/preview`, { add_text }, { timeout: 10000 }),
-  applyNetworkAddresses: (serverId: number, data: { interface: string; add_text: string; remove: NetworkAddressRef[] }) =>
+  previewNetworkAddresses: (serverId: number, add_text: string, gateway: string) =>
+    api.post<NetworkPreview>(`/proxy/${serverId}/network/preview`, { add_text, gateway }, { timeout: 10000 }),
+  applyNetworkAddresses: (
+    serverId: number,
+    data: { interface: string; add_text: string; gateway?: string; remove: NetworkAddressRef[] },
+  ) =>
     api.post<NetworkJobSnapshot>(`/proxy/${serverId}/network/apply`, data, { timeout: 45000 }),
   rollbackNetworkTransaction: (serverId: number, transaction_id: string) =>
     api.post<{ success: boolean; status: string | null; message: string }>(`/proxy/${serverId}/network/rollback`, { transaction_id }, { timeout: 45000 }),
@@ -2911,6 +2914,7 @@ export interface NetworkAddress {
   managed: boolean
   primary: boolean
   dynamic: boolean
+  gateway?: string | null
 }
 
 export interface NetworkInterface {
@@ -2924,6 +2928,7 @@ export interface NetworkInterface {
 export interface NetworkAddressRef {
   address: string
   prefix: number
+  gateway?: string | null
 }
 
 export type NetworkTxStatus = 'applying' | 'pending' | 'confirmed' | 'rolled_back' | 'failed'
@@ -2965,12 +2970,14 @@ export interface NetworkState {
   supported: boolean
   message?: string | null
   min_node_version: string
+  min_node_version_gateway?: string
   node_version?: string | null
   backend?: string | null
   backend_detail?: string
   default_interface?: string | null
+  default_gateway?: Partial<Record<NetworkAddressFamily, string>>
   interfaces: NetworkInterface[]
-  managed: { interface: string; address: string; prefix: number }[]
+  managed: { interface: string; address: string; prefix: number; gateway?: string | null }[]
   transaction: NetworkTransaction | null
   history: NetworkTransaction[]
   rollback_timeout_sec?: number

@@ -26,7 +26,7 @@
 import asyncio
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -187,9 +187,12 @@ def probe_command() -> str:
     )
 
 
-def route_command(table: int, address: str, interface: str, gateway: Optional[str]) -> str:
+def route_command(table: int, address: str, interface: str, gateway: Optional[str], onlink: bool = False) -> str:
+    """`onlink` — для собственного шлюза адреса: он часто вне подсети адреса
+    (адрес /32), и без флага ядро отказалось бы ставить маршрут."""
     via = f"via {gateway} " if gateway else ""
-    return f"ip route replace default {via}dev {interface} src {address} table {table}"
+    flags = " onlink" if onlink else ""
+    return f"ip route replace default {via}dev {interface} src {address} table {table}{flags}"
 
 
 def rule_commands(binding: MarkBinding, index: int) -> list[str]:
@@ -208,13 +211,16 @@ def plan_commands(
     current_routes: dict[int, TableRoute],
     interface: str,
     gateway: Optional[str],
+    own_gateways: dict[str, str],
 ) -> list[str]:
-    """Только расхождения: в устоявшемся состоянии цикл самолечения ничего не пишет."""
+    """Только расхождения: в устоявшемся состоянии цикл самолечения ничего не пишет.
+    Адрес со своим шлюзом (задан при добавлении адреса) выходит через него."""
     commands: list[str] = []
     wanted_routes = {b.table: b.address for b in bindings}
     for table, address in sorted(wanted_routes.items()):
-        if current_routes.get(table) != (gateway, address):
-            commands.append(route_command(table, address, interface, gateway))
+        own = own_gateways.get(address)
+        if current_routes.get(table) != (own or gateway, address):
+            commands.append(route_command(table, address, interface, own or gateway, onlink=bool(own)))
     for index, binding in enumerate(bindings):
         expected = (RULE_PRIORITY_BASE + index, binding.table)
         if current_rules.get(binding.mark) != expected:
@@ -241,6 +247,8 @@ class _Discovery:
     interface: Optional[str]
     addresses: list[str]
     reason: Optional[str]
+    # адрес → собственный шлюз, заданный при добавлении адреса в панели
+    gateways: dict[str, str] = field(default_factory=dict)
 
 
 async def discover_addresses() -> _Discovery:
@@ -256,11 +264,15 @@ async def discover_addresses() -> _Discovery:
     if interface is None:
         return _Discovery(None, [], "no interface capable of carrying addresses")
     addresses = [
-        addr.address
-        for addr in interface.addresses
+        addr for addr in interface.addresses
         if addr.family == "ipv4" and addr.scope == "global"
     ]
-    return _Discovery(interface.name, addresses, None)
+    return _Discovery(
+        interface.name,
+        [addr.address for addr in addresses],
+        None,
+        {addr.address: addr.gateway for addr in addresses if addr.gateway},
+    )
 
 
 def source_pool_enabled() -> bool:
@@ -358,7 +370,10 @@ class SourcePoolManager:
             return state
         expected = {b.mark: (RULE_PRIORITY_BASE + i, b.table) for i, b in enumerate(bindings)}
         state.missing_marks = sorted(mark for mark, value in expected.items() if current_rules.get(mark) != value)
-        routes_ok = all(current_routes.get(b.table) == (state.gateway, b.address) for b in bindings)
+        routes_ok = all(
+            current_routes.get(b.table) == (discovery.gateways.get(b.address) or state.gateway, b.address)
+            for b in bindings
+        )
         state.in_sync = not state.missing_marks and routes_ok
         return state
 
@@ -399,7 +414,7 @@ class SourcePoolManager:
             return "source pool cleared"
 
         gateway = parse_default_gateway(default_text, discovery.interface)
-        commands = plan_commands(bindings, current_rules, current_routes, discovery.interface, gateway)
+        commands = plan_commands(bindings, current_rules, current_routes, discovery.interface, gateway, discovery.gateways)
         # Метки, оставшиеся от прежней раскладки с бо́льшим числом адресов
         stale = {mark: value for mark, value in current_rules.items() if mark not in {b.mark for b in bindings}}
         stale_tables = {

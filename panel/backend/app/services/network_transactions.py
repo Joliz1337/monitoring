@@ -36,6 +36,8 @@ from app.services.reserved_ports_sync import _version_tuple
 logger = logging.getLogger(__name__)
 
 MIN_NODE_VERSION_NETWORK = "10.29.0"
+# Старая нода молча проигнорировала бы поле gateway и поставила адрес без шлюза
+MIN_NODE_VERSION_NETWORK_GATEWAY = "10.31.0"
 ROLLBACK_TIMEOUT_SEC = 120
 STATE_TIMEOUT_SECONDS = 10.0
 # Не больше proxy_read_timeout у location /api/system/network/ на ноде (тест-инвариант)
@@ -105,6 +107,12 @@ class ProtectedIpUnknownError(Exception):
     pass
 
 
+class GatewayConflictError(Exception):
+    def __init__(self, problems: list[str]):
+        super().__init__("; ".join(problems))
+        self.problems = problems
+
+
 @dataclass
 class NetworkJob:
     id: str
@@ -167,6 +175,12 @@ def node_supports_network(node_version: Optional[str]) -> bool:
     return _version_tuple(node_version) >= _version_tuple(MIN_NODE_VERSION_NETWORK)
 
 
+def node_supports_network_gateway(node_version: Optional[str]) -> bool:
+    if not node_version:
+        return False
+    return _version_tuple(node_version) >= _version_tuple(MIN_NODE_VERSION_NETWORK_GATEWAY)
+
+
 def node_host(server_url: str) -> Optional[str]:
     return urlparse(server_url or "").hostname or None
 
@@ -209,6 +223,29 @@ def managed_on_interface(specs: list[AddressSpec], iface_state: dict) -> list[Ad
         if addr.get("managed")
     }
     return [spec for spec in specs if (spec.address, spec.prefix) in managed]
+
+
+def gateway_conflicts(specs: list[AddressSpec], iface_state: dict, default_gateway: dict) -> list[str]:
+    """Уже стоящий адрес пропускается молча — но не когда для него просят другой
+    шлюз: тихий пропуск выглядел бы как «шлюз задан». Шлюз основного адреса
+    нода приравнивает к отсутствию своего шлюза — здесь так же."""
+    main = {gateway for gateway in (default_gateway or {}).values() if gateway}
+    present = {(addr.get("address"), addr.get("prefix")): addr for addr in iface_state.get("addresses") or []}
+    problems: list[str] = []
+    for spec in specs:
+        addr = present.get((spec.address, spec.prefix))
+        if addr is None:
+            continue
+        wanted = None if spec.gateway in main else spec.gateway
+        if not addr.get("managed"):
+            if wanted:
+                problems.append(f"{spec.cidr} настроен не панелью — задать ему шлюз нельзя")
+            continue
+        current = addr.get("gateway") or None
+        if current != wanted:
+            was = f"через шлюз {current}" if current else "без своего шлюза"
+            problems.append(f"{spec.cidr} уже добавлен {was} — чтобы сменить шлюз, удалите адрес и добавьте заново")
+    return problems
 
 
 def _status_from(value: Optional[str]) -> Optional[TransactionStatus]:
@@ -323,6 +360,9 @@ async def start_apply(server: Server, *, interface: str, add: list[AddressSpec],
         iface_state = next((i for i in state.get("interfaces") or [] if i.get("name") == interface), None)
         if iface_state is None:
             raise InterfaceNotFoundError(interface)
+        conflicts = gateway_conflicts(add, iface_state, state.get("default_gateway") or {})
+        if conflicts:
+            raise GatewayConflictError(conflicts)
         add = missing_on_interface(add, iface_state)
         remove = managed_on_interface(remove, iface_state)
         if not add and not remove:

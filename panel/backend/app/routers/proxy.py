@@ -31,7 +31,14 @@ from app.services.traffic_import import (
     node_supports_traffic_v2,
 )
 from app.services import network_transactions
-from app.services.network_addresses import AddressInputError, expand_entries, normalize_ref, preview
+from app.services.network_addresses import (
+    AddressInputError,
+    expand_entries,
+    normalize_ref,
+    parse_gateway,
+    preview,
+    with_gateway,
+)
 from app.services.reserved_ports_sync import _version_tuple
 
 logger = logging.getLogger(__name__)
@@ -612,6 +619,7 @@ async def hoster_access_purge(
 
 class NetworkPreviewRequest(BaseModel):
     add_text: str = ""
+    gateway: str = Field("", max_length=64)
 
 
 class NetworkAddressRef(BaseModel):
@@ -622,6 +630,8 @@ class NetworkAddressRef(BaseModel):
 class NetworkApplyRequest(BaseModel):
     interface: str = Field(..., min_length=1, max_length=32)
     add_text: str = Field("", max_length=20000)
+    # Пусто — адреса ходят через шлюз основного адреса
+    gateway: str = Field("", max_length=64)
     remove: list[NetworkAddressRef] = Field(default_factory=list)
 
 
@@ -685,6 +695,7 @@ async def get_network_state(
         await _raise_for_node_error(server, exc)
     state.setdefault("supported", True)
     state["min_node_version"] = network_transactions.MIN_NODE_VERSION_NETWORK
+    state["min_node_version_gateway"] = network_transactions.MIN_NODE_VERSION_NETWORK_GATEWAY
     state["node_version"] = server.node_version
     state["job"] = network_transactions.job_snapshot(server.id)
     return state
@@ -699,7 +710,7 @@ async def preview_network_addresses(
 ):
     await get_server_by_id(server_id, db)
     try:
-        return preview(data.add_text)
+        return preview(data.add_text, data.gateway)
     except AddressInputError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -715,12 +726,21 @@ async def apply_network_addresses(
     require_capability(server, Capability.SYSTEM, write=True)
     _require_network_support(server)
     try:
-        add = expand_entries(data.add_text) if data.add_text.strip() else []
+        gateway = parse_gateway(data.gateway)
+        add = with_gateway(expand_entries(data.add_text), gateway) if data.add_text.strip() else []
         remove = [normalize_ref(ref.address, ref.prefix) for ref in data.remove]
     except AddressInputError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     if not add and not remove:
         raise HTTPException(status_code=400, detail="Нечего применять: укажите адреса для добавления или удаления")
+    if gateway and not network_transactions.node_supports_network_gateway(server.node_version):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Свой шлюз адреса поддерживает нода {network_transactions.MIN_NODE_VERSION_NETWORK_GATEWAY} "
+                f"и новее (сейчас {server.node_version or 'неизвестно'}) — обновите ноду или оставьте поле шлюза пустым"
+            ),
+        )
     try:
         job = await network_transactions.start_apply(server, interface=data.interface, add=add, remove=remove)
     except network_transactions.PendingTransactionError:
@@ -729,6 +749,8 @@ async def apply_network_addresses(
         raise HTTPException(status_code=400, detail=f"Интерфейс {exc.interface} не найден на ноде")
     except network_transactions.NothingToApplyError:
         raise HTTPException(status_code=400, detail="Нечего применять: адреса уже настроены или не управляются панелью")
+    except network_transactions.GatewayConflictError as exc:
+        raise HTTPException(status_code=400, detail="; ".join(exc.problems))
     except network_transactions.ProtectedIpUnknownError:
         raise HTTPException(status_code=400, detail="Не удалось определить адрес ноды из её URL — защитить его от удаления нельзя")
     except (network_transactions.NodeNetworkError, network_transactions.NodeUnreachableError) as exc:

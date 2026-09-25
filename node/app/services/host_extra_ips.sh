@@ -12,6 +12,11 @@
 # the deadline -> the timer restores the backup. Unconfirmed at reboot ->
 # boot-guard restores the backup before the network comes up.
 #
+# An address with its own gateway (the hoster routes it via another subnet) gets
+# policy routing instead of backend config: `from <addr> lookup <table>` and
+# `default via <gw> onlink` in that table. routes.list is the desired state;
+# routes_sync makes the kernel match it (apply, rollback, boot, agent self-heal).
+#
 # Verbs:
 #   detect <iface>             backend facts (netplan/networkd/NetworkManager/ifupdown)
 #   apply                      plan on stdin (KEY=value lines)
@@ -19,7 +24,8 @@
 #   rollback <tx>              manual rollback of a pending transaction
 #   rollback-unconfirmed <tx>  timer target: roll back if still unconfirmed
 #   boot-guard                 systemd unit: roll back a transaction left over from the previous boot
-#   restore-runtime            systemd unit (fallback backend): re-add managed addresses after boot
+#   restore-runtime            systemd unit: re-add managed addresses and gateway routes after boot
+#   sync-routes                agent self-heal: restore gateway rules/routes, print ROUTES_CHANGED=n
 #   self-test                  check tooling, print SELFTEST=ok
 #
 # Exit codes: 0 ok, 2 bad arguments/plan/status, 3 busy (a transaction is pending),
@@ -28,8 +34,11 @@
 set -u
 
 SELF="/opt/monitoring/scripts/extra-ips.sh"
-STATE_DIR="/opt/monitoring/network"
+# Overridable only for tests (a scratch dir inside a network namespace)
+STATE_DIR="${EXTRA_IPS_STATE_DIR:-/opt/monitoring/network}"
 MANAGED_FILE="$STATE_DIR/managed.list"
+ROUTES_FILE="$STATE_DIR/routes.list"
+ROUTES_NEXT="$STATE_DIR/routes.list.next"
 TX_FILE="$STATE_DIR/transaction.env"
 HISTORY_FILE="$STATE_DIR/history.log"
 BACKUP_ROOT="$STATE_DIR/backups"
@@ -44,6 +53,18 @@ VERIFY_SLEEP=0.5
 # After this many attempts a missing static address is re-added by hand:
 # networkd flushes addresses it does not own when it reconfigures a link.
 READD_AFTER_ATTEMPT=6
+
+# Gateway routes: one table per (interface, gateway) from this range (the agent
+# allocates them), one `from <addr>` rule per address. The source pool owns
+# tables and priorities 101-130.
+GW_TABLE_MIN=1001
+GW_TABLE_MAX=1100
+GW_RULE_PRIORITY=1000
+# `lookup main suppress_prefixlength 0` ahead of the per-address rules: every
+# specific route (own subnet, docker bridges, tunnels) still wins, only the
+# default route is picked by source address.
+GW_SUPPRESS_PRIORITY=999
+ROUTES_CHANGED=0
 
 # Transaction fields (mirrored in transaction.env)
 TX_ID=""; TX_STATUS=""; TX_IFACE=""; TX_BACKEND=""; TX_DETAIL=""
@@ -193,6 +214,106 @@ has_default_route() {
     ip "-$1" route show default 2>/dev/null | grep -q .
 }
 
+# ------------------------------------------------- gateway routes (policy routing)
+
+# Lines of a routes file (`<iface> <addr> <gateway> <table>`) for one family
+routes_of_family() {
+    [ -f "$1" ] || return 0
+    awk -v fam="$2" -v lo="$GW_TABLE_MIN" -v hi="$GW_TABLE_MAX" '
+        NF == 4 && $4 ~ /^[0-9]+$/ && $4 + 0 >= lo + 0 && $4 + 0 <= hi + 0 {
+            six = index($2, ":") > 0
+            if ((fam == 6) == six) print
+        }' "$1"
+}
+
+# "<addr> <table>" of our per-address rules; other priorities and tables are not ours
+gw_rules() {
+    ip "-$1" rule show 2>/dev/null | awk -v p="$GW_RULE_PRIORITY:" -v lo="$GW_TABLE_MIN" -v hi="$GW_TABLE_MAX" '
+        $1 == p {
+            f = ""; t = ""
+            for (i = 2; i < NF; i++) { if ($i == "from") f = $(i + 1); if ($i == "lookup") t = $(i + 1) }
+            if (f != "" && t ~ /^[0-9]+$/ && t + 0 >= lo + 0 && t + 0 <= hi + 0) print f, t
+        }'
+}
+
+has_suppress_rule() {
+    ip "-$1" rule show 2>/dev/null | awk -v p="$GW_SUPPRESS_PRIORITY:" \
+        '$1 == p && / lookup main / && / suppress_prefixlength 0/ {found = 1} END {exit !found}'
+}
+
+# Tables of our range that hold any route
+gw_tables() {
+    ip "-$1" route show table all 2>/dev/null | awk -v lo="$GW_TABLE_MIN" -v hi="$GW_TABLE_MAX" '
+        { for (i = 1; i < NF; i++) if ($i == "table" && $(i + 1) ~ /^[0-9]+$/ && $(i + 1) + 0 >= lo + 0 && $(i + 1) + 0 <= hi + 0) print $(i + 1) }' \
+        | sort -u
+}
+
+gw_route_ok() {
+    local family="$1" table="$2" gateway="$3" iface="$4"
+    ip "-$family" route show table "$table" 2>/dev/null | awk -v g="$gateway" -v d="$iface" \
+        '$1 == "default" && $2 == "via" && $3 == g && $4 == "dev" && $5 == d {found = 1} END {exit !found}'
+}
+
+route_cmd() {
+    local family="$1" out
+    shift
+    if out=$(ip "-$family" "$@" 2>&1); then
+        ROUTES_CHANGED=$((ROUTES_CHANGED + 1))
+        return 0
+    fi
+    case "$out" in *"File exists"*) return 0 ;; esac
+    log "ip -$family $*: $out"
+    return 1
+}
+
+# Make the kernel match a routes file: add what is missing, drop our rules and
+# tables the file no longer lists. Writes nothing when everything is in place.
+routes_sync() {
+    local file="$1" family desired current iface addr gateway table failed=0
+    for family in 4 6; do
+        desired=$(routes_of_family "$file" "$family")
+        current=$(gw_rules "$family")
+        if [ -n "$desired" ] && ! has_suppress_rule "$family"; then
+            route_cmd "$family" rule add lookup main suppress_prefixlength 0 priority "$GW_SUPPRESS_PRIORITY" || failed=1
+        fi
+        while read -r iface addr gateway table; do
+            [ -n "$table" ] || continue
+            if ! gw_route_ok "$family" "$table" "$gateway" "$iface"; then
+                route_cmd "$family" route replace default via "$gateway" dev "$iface" onlink table "$table" || failed=1
+            fi
+            if ! printf '%s\n' "$current" | grep -qxF "$addr $table"; then
+                route_cmd "$family" rule add from "$addr" lookup "$table" priority "$GW_RULE_PRIORITY" || failed=1
+            fi
+        done <<< "$desired"
+        while read -r addr table; do
+            [ -n "$table" ] || continue
+            printf '%s\n' "$desired" | awk -v a="$addr" -v t="$table" '$2 == a && $4 == t {found = 1} END {exit !found}' && continue
+            route_cmd "$family" rule del from "$addr" lookup "$table" priority "$GW_RULE_PRIORITY" || failed=1
+        done <<< "$current"
+        for table in $(gw_tables "$family"); do
+            printf '%s\n' "$desired" | awk -v t="$table" '$4 == t {found = 1} END {exit !found}' && continue
+            route_cmd "$family" route flush table "$table" || failed=1
+        done
+        if [ -z "$desired" ] && has_suppress_rule "$family"; then
+            route_cmd "$family" rule del lookup main suppress_prefixlength 0 priority "$GW_SUPPRESS_PRIORITY" || failed=1
+        fi
+    done
+    return "$failed"
+}
+
+# Space-separated list of what a routes file wants but the kernel lacks
+routes_missing() {
+    local file="$1" family rules iface addr gateway table
+    for family in 4 6; do
+        rules=$(gw_rules "$family")
+        while read -r iface addr gateway table; do
+            [ -n "$table" ] || continue
+            printf '%s\n' "$rules" | grep -qxF "$addr $table" || printf ' rule:%s' "$addr"
+            gw_route_ok "$family" "$table" "$gateway" "$iface" || printf ' route:%s' "$addr"
+        done <<< "$(routes_of_family "$file" "$family")"
+    done
+}
+
 # ------------------------------------------------------------------- backends
 
 # Prints facts for every backend that is present; the agent picks the one that
@@ -298,10 +419,12 @@ backend_restore() {
     esac
 }
 
+# The unit re-adds fallback addresses and gateway routes after boot. restore-runtime
+# is idempotent (addresses a backend already set are skipped), so the unit is
+# simply enabled while there is anything to restore.
 sync_persist_unit() {
-    [ "$TX_BACKEND" = fallback ] || return 0
     command -v systemctl >/dev/null 2>&1 || return 0
-    if [ -s "$MANAGED_FILE" ]; then
+    if [ -s "$MANAGED_FILE" ] || [ -s "$ROUTES_FILE" ]; then
         systemctl enable "$PERSIST_UNIT" >/dev/null 2>&1
     else
         systemctl disable "$PERSIST_UNIT" >/dev/null 2>&1
@@ -313,6 +436,7 @@ sync_persist_unit() {
 PLAN_FILES=()
 PLAN_ABSENT=()
 PLAN_MANAGED_B64=""
+PLAN_ROUTES_B64=""
 NM_CONNECTION=""; NM_KEYFILE=""; NM_IPV4_ADDRESSES=""; NM_IPV6_ADDRESSES=""
 BEFORE_ALL=""; BEFORE_STATIC=""; DEFAULT4=no; DEFAULT6=no
 
@@ -328,6 +452,7 @@ read_plan() {
             ADD=*) TX_ADD="${line#*=}" ;;
             REMOVE=*) TX_REMOVE="${line#*=}" ;;
             MANAGED_B64=*) PLAN_MANAGED_B64="${line#*=}" ;;
+            ROUTES_B64=*) PLAN_ROUTES_B64="${line#*=}" ;;
             NM_CONNECTION=*) NM_CONNECTION="${line#*=}" ;;
             NM_KEYFILE=*) NM_KEYFILE="${line#*=}" ;;
             FILE=*) PLAN_FILES+=("${line#FILE=}") ;;
@@ -398,6 +523,7 @@ backup_transaction() {
     for path in "${PLAN_ABSENT[@]}"; do backup_path "$dir" "$path" || return 1; done
     if [ -n "$NM_KEYFILE" ]; then backup_path "$dir" "$NM_KEYFILE" || return 1; fi
     if [ -f "$MANAGED_FILE" ]; then cp -p "$MANAGED_FILE" "$dir/managed.list.bak" || return 1; fi
+    if [ -f "$ROUTES_FILE" ]; then cp -p "$ROUTES_FILE" "$dir/routes.list.bak" || return 1; fi
     {
         printf 'BACKEND=%s\nIFACE=%s\nADD=%s\nREMOVE=%s\n' "$TX_BACKEND" "$TX_IFACE" "$TX_ADD" "$TX_REMOVE"
         printf 'BEFORE_ALL=%s\nBEFORE_STATIC=%s\nDEFAULT4=%s\nDEFAULT6=%s\n' "$BEFORE_ALL" "$BEFORE_STATIC" "$DEFAULT4" "$DEFAULT6"
@@ -453,6 +579,12 @@ restore_files() {
     else
         rm -f "$MANAGED_FILE"
     fi
+    if [ -f "$dir/routes.list.bak" ]; then
+        cp -p "$dir/routes.list.bak" "$ROUTES_FILE"
+    else
+        rm -f "$ROUTES_FILE"
+    fi
+    rm -f "$ROUTES_NEXT"
 }
 
 readd_lost_static() {
@@ -468,11 +600,13 @@ readd_lost_static() {
 }
 
 # Every added address is up (IPv6 past DAD), nothing that was there before is
-# gone, removed ones are gone, default routes that existed still exist.
+# gone, removed ones are gone, default routes that existed still exist, every
+# gateway rule and route is in place.
 verify_apply() {
-    local attempt=1 addr missing
+    local attempt=1 addr missing routes_gap
     while :; do
-        missing=""
+        routes_gap=$(routes_missing "$ROUTES_NEXT")
+        missing="$routes_gap"
         for addr in $TX_ADD; do
             if addr_dadfailed "$TX_IFACE" "$addr"; then
                 VERIFY_ERROR="$addr failed duplicate address detection (already used in the segment)"
@@ -495,6 +629,8 @@ verify_apply() {
             return 1
         fi
         [ "$attempt" -eq "$READD_AFTER_ATTEMPT" ] && readd_lost_static
+        # networkd drops foreign routes and rules while it reconfigures the link after a reload
+        [ -n "$routes_gap" ] && routes_sync "$ROUTES_NEXT"
         attempt=$((attempt + 1))
         sleep "$VERIFY_SLEEP"
     done
@@ -507,7 +643,9 @@ arm_timer() {
         TX_TIMER="unit:$unit"
         return 0
     fi
-    nohup setsid sh -c "sleep $TX_TIMEOUT; $SELF rollback-unconfirmed $TX_ID" >/dev/null 2>&1 &
+    # 9>&- — the lock fd must not outlive this call in the sleeper, or confirm
+    # and rollback would find the lock taken until the timer fires
+    nohup setsid sh -c "sleep $TX_TIMEOUT; $SELF rollback-unconfirmed $TX_ID" >/dev/null 2>&1 9>&- &
     TX_TIMER="pid:$!"
 }
 
@@ -529,6 +667,7 @@ restore_transaction() {
         for addr in $TX_REMOVE; do ip_add "$addr" "$TX_IFACE" || failed=1; done
         backend_restore
         readd_lost_static
+        routes_sync "$ROUTES_FILE" || failed=1
     elif [ "$TX_BACKEND" = netplan ]; then
         # The generator already ran before the guard: regenerate from the restored files
         netplan generate >/dev/null 2>&1 || log "netplan generate during boot rollback failed"
@@ -577,11 +716,18 @@ cmd_apply() {
     fi
     for addr in $TX_ADD; do ip_add "$addr" "$TX_IFACE" || fail_apply "ip addr add $addr failed"; done
     for addr in $TX_REMOVE; do ip_del "$addr" "$TX_IFACE" || fail_apply "ip addr del $addr failed"; done
+    if ! printf '%s' "$PLAN_ROUTES_B64" | base64 -d > "$ROUTES_NEXT"; then
+        fail_apply "cannot write gateway routes"
+    fi
+    # A failed `ip` here is logged; verification decides — a rule networkd removed
+    # a moment ago makes `ip rule del` fail harmlessly
+    routes_sync "$ROUTES_NEXT"
     if ! verify_apply; then
         fail_apply "$VERIFY_ERROR"
     fi
 
-    if ! { printf '%s' "$PLAN_MANAGED_B64" | base64 -d > "$MANAGED_FILE.tmp" && mv -f "$MANAGED_FILE.tmp" "$MANAGED_FILE"; }; then
+    if ! { printf '%s' "$PLAN_MANAGED_B64" | base64 -d > "$MANAGED_FILE.tmp" && mv -f "$MANAGED_FILE.tmp" "$MANAGED_FILE" \
+            && mv -f "$ROUTES_NEXT" "$ROUTES_FILE"; }; then
         fail_apply "cannot write managed list"
     fi
     sync_persist_unit
@@ -640,12 +786,26 @@ cmd_boot_guard() {
 
 cmd_restore_runtime() {
     local iface addr
-    [ -f "$MANAGED_FILE" ] || exit 0
-    while read -r iface addr; do
-        [ -n "$iface" ] && [ -n "$addr" ] || continue
-        [ -d "/sys/class/net/$iface" ] || { log "restore-runtime: $iface is missing"; continue; }
-        ip_add "$addr" "$iface"
-    done < "$MANAGED_FILE"
+    take_lock
+    if [ -f "$MANAGED_FILE" ]; then
+        while read -r iface addr; do
+            [ -n "$iface" ] && [ -n "$addr" ] || continue
+            [ -d "/sys/class/net/$iface" ] || { log "restore-runtime: $iface is missing"; continue; }
+            ip_add "$addr" "$iface"
+        done < "$MANAGED_FILE"
+    fi
+    routes_sync "$ROUTES_FILE"
+}
+
+cmd_sync_routes() {
+    local status=0
+    ensure_state_dir || die 2 "cannot create $STATE_DIR"
+    exec 9>"$LOCK_FILE"
+    # Non-blocking: a running transaction holds the lock and syncs routes itself
+    flock -n 9 || die 3 "busy: another extra-ips operation holds the lock"
+    routes_sync "$ROUTES_FILE" || status=1
+    echo "ROUTES_CHANGED=$ROUTES_CHANGED"
+    return "$status"
 }
 
 cmd_self_test() {
@@ -666,6 +826,7 @@ case "${1:-}" in
     rollback-unconfirmed) [ -n "${2:-}" ] || die 2 "usage: $0 rollback-unconfirmed <tx>"; cmd_rollback "$2" "not confirmed by the panel in time, restored from backup" yes ;;
     boot-guard) cmd_boot_guard ;;
     restore-runtime) cmd_restore_runtime ;;
+    sync-routes) cmd_sync_routes ;;
     self-test) cmd_self_test ;;
-    *) die 2 "usage: $0 detect <iface> | apply | confirm <tx> | rollback <tx> | rollback-unconfirmed <tx> | boot-guard | restore-runtime | self-test" ;;
+    *) die 2 "usage: $0 detect <iface> | apply | confirm <tx> | rollback <tx> | rollback-unconfirmed <tx> | boot-guard | restore-runtime | sync-routes | self-test" ;;
 esac

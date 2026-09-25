@@ -14,6 +14,10 @@ Your hoster gave the node another address or a block of addresses — attach the
 
 At most 256 addresses per apply. Addresses already present on the interface are skipped.
 
+## Gateway
+
+Usually the field stays empty: replies from the new address leave through the primary address gateway. A gateway is needed when the hoster gave addresses from another network and told you which gateway to send them through. Traffic from those addresses then goes through that gateway, while the primary address keeps working as before. One gateway covers the whole list; addresses with other gateways are added in separate runs and all work at the same time. To change the gateway of an address, remove it and add it again. Requires node 10.31.0 or newer.
+
 ## How the change is applied
 
 1. The node backs up its config, writes the addresses, applies them and starts a 120-second rollback timer.

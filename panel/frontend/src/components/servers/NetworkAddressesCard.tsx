@@ -6,6 +6,7 @@ import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, Loader2, Lock, 
 import {
   proxyApi,
   type NetworkAddress,
+  type NetworkAddressFamily,
   type NetworkAddressRef,
   type NetworkInterface,
   type NetworkJobSnapshot,
@@ -15,6 +16,7 @@ import {
   type Server,
 } from '../../api/client'
 import { nodeAllows } from '../../utils/nodeCapabilities'
+import { versionAtLeast } from '../../utils/version'
 import { Tooltip } from '../ui/Tooltip'
 import { CopyableIp } from '../ui/CopyableIp'
 import { FAQIcon } from '../FAQ'
@@ -22,6 +24,7 @@ import { FAQIcon } from '../FAQ'
 const POLL_INTERVAL_MS = 3000
 const PREVIEW_DEBOUNCE_MS = 400
 const DEFAULT_ROLLBACK_SEC = 120
+const MIN_NODE_VERSION_GATEWAY = '10.31.0'
 
 interface Props {
   serverId: number
@@ -122,10 +125,12 @@ export default function NetworkAddressesCard({ serverId, server }: Props) {
     previousPhase.current = job.phase
   }, [job, load, t])
 
-  const runApply = async (iface: string, addText: string, remove: NetworkAddressRef[]): Promise<string | null> => {
+  const runApply = async (
+    iface: string, addText: string, gateway: string, remove: NetworkAddressRef[],
+  ): Promise<string | null> => {
     setBusy(true)
     try {
-      const res = await proxyApi.applyNetworkAddresses(serverId, { interface: iface, add_text: addText, remove })
+      const res = await proxyApi.applyNetworkAddresses(serverId, { interface: iface, add_text: addText, gateway, remove })
       previousPhase.current = res.data.phase === 'done' ? null : res.data.phase
       setJob(res.data)
       setShowProgress(true)
@@ -170,6 +175,8 @@ export default function NetworkAddressesCard({ serverId, server }: Props) {
   }
 
   const rollbackTimeout = state?.rollback_timeout_sec ?? DEFAULT_ROLLBACK_SEC
+  const minGatewayVersion = state?.min_node_version_gateway ?? MIN_NODE_VERSION_GATEWAY
+  const gatewaySupported = versionAtLeast(state?.node_version, minGatewayVersion)
 
   if (!readable || unsupported) {
     return (
@@ -256,11 +263,14 @@ export default function NetworkAddressesCard({ serverId, server }: Props) {
             serverId={serverId}
             interfaces={state.interfaces}
             defaultInterface={state.default_interface ?? state.interfaces[0]?.name ?? ''}
+            defaultGateway={state.default_gateway ?? {}}
+            gatewaySupported={gatewaySupported}
+            minGatewayVersion={minGatewayVersion}
             rollbackTimeout={rollbackTimeout}
             busy={busy}
             onClose={() => setAddOpen(false)}
-            onApply={async (iface, text) => {
-              const error = await runApply(iface, text, [])
+            onApply={async (iface, text, gateway) => {
+              const error = await runApply(iface, text, gateway, [])
               if (!error) setAddOpen(false)
               return error
             }}
@@ -275,7 +285,7 @@ export default function NetworkAddressesCard({ serverId, server }: Props) {
             busy={busy}
             onClose={() => setRemoveTarget(null)}
             onConfirm={async () => {
-              const error = await runApply(removeTarget.iface, '', [removeTarget.ref])
+              const error = await runApply(removeTarget.iface, '', '', [removeTarget.ref])
               if (error) toast.error(error)
               setRemoveTarget(null)
             }}
@@ -326,6 +336,11 @@ function AddressRow({ addr, canRemove, onRemove }: {
       {addr.primary && <Badge tone="accent">{t('server_details.network_primary_badge')}</Badge>}
       {addr.dynamic && <Badge tone="muted">DHCP</Badge>}
       {addr.managed && <Badge tone="success">{t('server_details.network_managed_badge')}</Badge>}
+      {addr.gateway && (
+        <Tooltip label={t('server_details.network_gateway_badge_hint', { gateway: addr.gateway })} maxWidth={320}>
+          <span className="text-xs font-mono text-dark-400 cursor-help">via {addr.gateway}</span>
+        </Tooltip>
+      )}
       {locked && (
         <Tooltip label={t('server_details.network_locked_hint')} maxWidth={320}>
           <Lock className="w-3.5 h-3.5 text-dark-500 cursor-help" />
@@ -501,22 +516,30 @@ function RollbackWarning({ seconds }: { seconds: number }) {
   )
 }
 
-function AddAddressesModal({ serverId, interfaces, defaultInterface, rollbackTimeout, busy, onClose, onApply }: {
+function AddAddressesModal({
+  serverId, interfaces, defaultInterface, defaultGateway, gatewaySupported, minGatewayVersion,
+  rollbackTimeout, busy, onClose, onApply,
+}: {
   serverId: number
   interfaces: NetworkInterface[]
   defaultInterface: string
+  defaultGateway: Partial<Record<NetworkAddressFamily, string>>
+  gatewaySupported: boolean
+  minGatewayVersion: string
   rollbackTimeout: number
   busy: boolean
   onClose: () => void
-  onApply: (iface: string, text: string) => Promise<string | null>
+  onApply: (iface: string, text: string, gateway: string) => Promise<string | null>
 }) {
   const { t } = useTranslation()
   const [iface, setIface] = useState(defaultInterface)
   const [text, setText] = useState('')
+  const [gateway, setGateway] = useState('')
   const [preview, setPreview] = useState<NetworkPreview | null>(null)
   const [previewError, setPreviewError] = useState<string | null>(null)
   const [previewing, setPreviewing] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
+  const gatewayValue = gatewaySupported ? gateway.trim() : ''
 
   useEffect(() => {
     if (!text.trim()) {
@@ -527,7 +550,7 @@ function AddAddressesModal({ serverId, interfaces, defaultInterface, rollbackTim
     setPreviewing(true)
     const timer = setTimeout(async () => {
       try {
-        const res = await proxyApi.previewNetworkAddresses(serverId, text)
+        const res = await proxyApi.previewNetworkAddresses(serverId, text, gatewayValue)
         setPreview(res.data)
         setPreviewError(null)
       } catch (err) {
@@ -538,7 +561,12 @@ function AddAddressesModal({ serverId, interfaces, defaultInterface, rollbackTim
       }
     }, PREVIEW_DEBOUNCE_MS)
     return () => clearTimeout(timer)
-  }, [text, serverId, t])
+  }, [text, gatewayValue, serverId, t])
+
+  // Шлюз основного адреса того семейства, что в списке: его и подразумевает пустое поле
+  const family: NetworkAddressFamily = preview && preview.ipv6 > 0 && preview.ipv4 === 0 ? 'ipv6' : 'ipv4'
+  const mainGateway = defaultGateway[family]
+  const sameAsMain = !!gatewayValue && gatewayValue.toLowerCase() === mainGateway?.toLowerCase()
 
   const present = useMemo(() => {
     const target = interfaces.find(i => i.name === iface)
@@ -549,7 +577,7 @@ function AddAddressesModal({ serverId, interfaces, defaultInterface, rollbackTim
 
   const submit = async () => {
     setSubmitError(null)
-    const error = await onApply(iface, text)
+    const error = await onApply(iface, text, gatewayValue)
     if (error) setSubmitError(error)
   }
 
@@ -578,12 +606,33 @@ function AddAddressesModal({ serverId, interfaces, defaultInterface, rollbackTim
       />
       <p className="text-xs text-dark-500 mt-1 mb-3">{t('server_details.network_format_hint')}</p>
 
+      <label className="block text-xs text-dark-400 mb-1">{t('server_details.network_gateway_label')}</label>
+      <input
+        value={gatewaySupported ? gateway : ''}
+        onChange={e => setGateway(e.target.value)}
+        disabled={!gatewaySupported}
+        placeholder={mainGateway
+          ? t('server_details.network_gateway_placeholder', { gateway: mainGateway })
+          : t('server_details.network_gateway_placeholder_unknown')}
+        className="w-full font-mono text-sm px-3 py-2 rounded-lg bg-dark-900 border border-dark-700 text-dark-100 placeholder-dark-600 focus:outline-none focus:border-accent-500/50 disabled:opacity-50"
+      />
+      <p className="text-xs text-dark-500 mt-1 mb-3">
+        {!gatewaySupported
+          ? t('server_details.network_gateway_needs_node', { version: minGatewayVersion })
+          : sameAsMain
+            ? t('server_details.network_gateway_same_as_main')
+            : t('server_details.network_gateway_hint')}
+      </p>
+
       <div className="min-h-[1.5rem] text-xs mb-3">
         {previewing && <span className="text-dark-500 flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" />{t('server_details.network_preview_wait')}</span>}
         {!previewing && previewError && <span className="text-danger">{previewError}</span>}
         {!previewing && preview && (
           <span className="text-dark-300">
             {t('server_details.network_preview_count', { count: willAdd, ipv4: preview.ipv4, ipv6: preview.ipv6 })}
+            {gatewayValue && !sameAsMain && (
+              <span className="text-dark-500"> · {t('server_details.network_preview_via', { gateway: gatewayValue })}</span>
+            )}
             {alreadyPresent > 0 && <span className="text-dark-500"> · {t('server_details.network_already_present', { count: alreadyPresent })}</span>}
           </span>
         )}
