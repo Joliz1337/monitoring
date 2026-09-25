@@ -19,9 +19,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.services.ephemeral_ports import (  # noqa: E402
     EphemeralPortsAggregator,
     KernelPortSettings,
+    count_reserved_fast,
     count_reserved_in_range,
     decode_address,
     parse_port_range,
+    parse_reserved_ports,
     read_kernel_settings,
     scan_listening_ports,
 )
@@ -61,8 +63,10 @@ TCP6_DUMP = TCP_HEADER + "".join([
     tcp_row(f"{V6_NODE}:9C61", f"{V6_PEER}:01BB", "01"),
 ])
 
-SETTINGS = KernelPortSettings(low=1024, high=65535, reserved_in_range=12, tw_reuse=1)
+SETTINGS = KernelPortSettings(low=1024, high=65535, reserved_in_range=12, reserved_fast=6, tw_reuse=1)
 CAPACITY = 65535 - 1024 + 1 - 12
+# Первый проход connect() — чётные порты 1024..65534
+FAST_CAPACITY = 32256 - 6
 
 
 def summarize(dumps, settings=SETTINGS):
@@ -106,11 +110,20 @@ class KernelSettingsTests(unittest.TestCase):
 
     def test_reserved_ports_counted_only_inside_range(self):
         # 7500 и 7501-7564 внутри, 80 ниже пола, 70000 — мусор
-        value = "80,7500,7501-7564,70000"
-        self.assertEqual(count_reserved_in_range(value, 1024, 65535), 1 + 64)
+        reserved = parse_reserved_ports("80,7500,7501-7564,70000")
+        self.assertEqual(count_reserved_in_range(reserved, 1024, 65535), 1 + 64)
 
     def test_reserved_range_clipped_by_window(self):
-        self.assertEqual(count_reserved_in_range("1000-1030", 1024, 65535), 7)
+        self.assertEqual(count_reserved_in_range(parse_reserved_ports("1000-1030"), 1024, 65535), 7)
+
+    def test_fast_reserved_counts_only_first_pass_parity(self):
+        # Чётные 7500..7564 — 33 порта; 2223 нечётный, в первый проход не входит
+        reserved = parse_reserved_ports("2223,7500,7501-7564")
+        self.assertEqual(count_reserved_fast(reserved, 1024, 65535), 33)
+
+    def test_fast_reserved_follows_parity_of_range_floor(self):
+        # Нижняя граница нечётная — первым проходом идут нечётные порты
+        self.assertEqual(count_reserved_fast(parse_reserved_ports("32769-32772"), 32769, 60999), 2)
 
     def test_read_from_proc(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -122,6 +135,8 @@ class KernelSettingsTests(unittest.TestCase):
             settings = read_kernel_settings(Path(tmp))
         self.assertEqual((settings.low, settings.high), (1024, 65535))
         self.assertEqual(settings.reserved_in_range, 65)
+        self.assertEqual(settings.reserved_fast, 33)
+        self.assertEqual(settings.fast_capacity, 32256 - 33)
         self.assertEqual(settings.capacity, 65535 - 1024 + 1 - 65)
         self.assertEqual(settings.tw_reuse, 1)
 
@@ -172,13 +187,15 @@ class AggregationTests(unittest.TestCase):
         self.assertEqual(google["used"], 2)
         self.assertEqual(google["time_wait"], 1)
         self.assertEqual(google["held"], 2)
-        self.assertEqual(google["free"], CAPACITY - 2)
+        # Нечётный 9C41 выдан вторым проходом — быструю половину держит только 9C40
+        self.assertEqual(google["fast_held"], 1)
+        self.assertEqual(google["free"], FAST_CAPACITY - 1)
 
     def test_second_source_has_its_own_ceiling(self):
         summary = summarize([TCP_DUMP])
         node_b = source_by_ip(summary, "203.0.113.11")
         self.assertEqual(node_b["used"], 1)
-        self.assertEqual(node_b["destinations"][0]["free"], CAPACITY - 1)
+        self.assertEqual(node_b["destinations"][0]["free"], FAST_CAPACITY - 1)
 
     def test_source_carries_no_free_of_its_own(self):
         # Остаток есть только у направления: сумма по адресу может превышать потолок
@@ -218,42 +235,44 @@ class AggregationTests(unittest.TestCase):
         self.assertEqual(node_v6["destinations"][0]["ip"], "2001:db8::2")
 
     def test_time_wait_holds_a_port_without_tw_reuse(self):
-        no_reuse = KernelPortSettings(low=1024, high=65535, reserved_in_range=12, tw_reuse=0)
+        no_reuse = KernelPortSettings(low=1024, high=65535, reserved_in_range=12, reserved_fast=6, tw_reuse=0)
         summary = summarize([TCP_DUMP], no_reuse)
         node_a = source_by_ip(summary, "203.0.113.10")
         google = next(d for d in node_a["destinations"] if d["ip"] == "142.250.185.78")
-        self.assertEqual(google["free"], CAPACITY - 3)
+        self.assertEqual(google["free"], FAST_CAPACITY - 2)
 
     def test_loopback_only_tw_reuse_does_not_free_public_addresses(self):
         # tcp_tw_reuse=2 — дефолт ядра: переиспользование только для loopback
-        loopback_only = KernelPortSettings(low=1024, high=65535, reserved_in_range=12, tw_reuse=2)
+        loopback_only = KernelPortSettings(low=1024, high=65535, reserved_in_range=12, reserved_fast=6, tw_reuse=2)
         summary = summarize([TCP_DUMP], loopback_only)
         node_a = source_by_ip(summary, "203.0.113.10")
         google = next(d for d in node_a["destinations"] if d["ip"] == "142.250.185.78")
-        self.assertEqual(google["free"], CAPACITY - 3)
+        self.assertEqual(google["free"], FAST_CAPACITY - 2)
 
     def test_capacity_subtracts_reserved_ports(self):
         summary = summarize([TCP_DUMP])
         self.assertEqual(summary["capacity"], CAPACITY)
+        self.assertEqual(summary["fast_capacity"], FAST_CAPACITY)
         self.assertEqual(summary["reserved"], 12)
         self.assertEqual((summary["range_low"], summary["range_high"]), (1024, 65535))
 
     def test_free_never_goes_negative(self):
         # Диапазон 40000-40003 целиком зарезервирован: потолок 0, а сокеты в нём есть
-        exhausted = KernelPortSettings(low=40000, high=40003, reserved_in_range=4, tw_reuse=1)
+        exhausted = KernelPortSettings(low=40000, high=40003, reserved_in_range=4, reserved_fast=2, tw_reuse=1)
         summary = summarize([TCP_DUMP], exhausted)
         node_a = source_by_ip(summary, "203.0.113.10")
         self.assertEqual(summary["capacity"], 0)
+        self.assertEqual(summary["fast_capacity"], 0)
         self.assertTrue(all(d["free"] == 0 for d in node_a["destinations"]))
 
-    def test_held_and_free_always_add_up_to_capacity(self):
+    def test_fast_held_and_free_always_add_up_to_fast_capacity(self):
         summary = summarize([TCP_DUMP])
         for source in summary["sources"]:
             for destination in source["destinations"]:
-                self.assertEqual(destination["held"] + destination["free"], summary["capacity"])
+                self.assertEqual(destination["fast_held"] + destination["free"], summary["fast_capacity"])
 
     def test_ports_outside_a_narrow_range_are_ignored(self):
-        narrow = KernelPortSettings(low=40000, high=40001, reserved_in_range=0, tw_reuse=1)
+        narrow = KernelPortSettings(low=40000, high=40001, reserved_in_range=0, reserved_fast=0, tw_reuse=1)
         summary = summarize([TCP_DUMP], narrow)
         node_a = source_by_ip(summary, "203.0.113.10")
         self.assertEqual(node_a["used"], 2)
@@ -263,6 +282,58 @@ class AggregationTests(unittest.TestCase):
         summary = summarize([TCP_HEADER])
         self.assertEqual(summary["sources"], [])
         self.assertEqual(summary["capacity"], CAPACITY)
+
+
+class FastHalfTests(unittest.TestCase):
+    """connect() первым проходом перебирает только порты чётности нижней границы;
+    когда они кончаются, каждое соединение перебирает их целиком — остаток
+    считается до конца этой половины, а не всего диапазона."""
+
+    @staticmethod
+    def _google_from(ports: list[int], settings: KernelPortSettings) -> dict:
+        rows = [TCP_HEADER] + [tcp_row(f"{NODE_A}:{port:04X}", f"{GOOGLE}:01BB", "01") for port in ports]
+        summary = summarize(["".join(rows)], settings)
+        return source_by_ip(summary, "203.0.113.10")["destinations"][0], summary
+
+    def test_fast_half_exhausted_while_range_is_half_free(self):
+        # 8 портов: в первый проход входят 40000/40002/40004/40006 — все заняты
+        settings = KernelPortSettings(low=40000, high=40007, reserved_in_range=0, reserved_fast=0, tw_reuse=1)
+        google, summary = self._google_from([40000, 40002, 40004, 40006], settings)
+        self.assertEqual(summary["capacity"], 8)
+        self.assertEqual(summary["fast_capacity"], 4)
+        self.assertEqual(google["held"], 4)
+        self.assertEqual(google["fast_held"], 4)
+        self.assertEqual(google["free"], 0)
+
+    def test_second_pass_ports_do_not_eat_fast_half(self):
+        # Порты другой чётности выдаёт bind() или второй проход — быстрый запас цел
+        settings = KernelPortSettings(low=40000, high=40007, reserved_in_range=0, reserved_fast=0, tw_reuse=1)
+        google, _ = self._google_from([40001, 40003], settings)
+        self.assertEqual(google["held"], 2)
+        self.assertEqual(google["fast_held"], 0)
+        self.assertEqual(google["free"], 4)
+
+    def test_odd_length_range_drops_top_port_from_fast_half(self):
+        # Ядро округляет длину диапазона до чётной: 40004 в первый проход не входит
+        settings = KernelPortSettings(low=40000, high=40004, reserved_in_range=0, reserved_fast=0, tw_reuse=1)
+        self.assertEqual(settings.fast_high, 40002)
+        self.assertEqual(settings.fast_capacity, 2)
+        self.assertFalse(settings.is_fast_port(40004))
+
+    def test_fast_parity_follows_range_floor(self):
+        settings = KernelPortSettings(low=32769, high=60999, reserved_in_range=0, reserved_fast=0, tw_reuse=1)
+        self.assertTrue(settings.is_fast_port(32769))
+        self.assertFalse(settings.is_fast_port(32770))
+
+    def test_destinations_ranked_by_fast_half(self):
+        # Больше сокетов у Cloudflare, но все на второй половине — ближе к
+        # полному перебору Google
+        rows = [TCP_HEADER]
+        rows += [tcp_row(f"{NODE_A}:{port:04X}", f"{GOOGLE}:01BB", "01") for port in (40000, 40002)]
+        rows += [tcp_row(f"{NODE_A}:{port:04X}", f"{CLOUDFLARE}:01BB", "01") for port in (40001, 40003, 40005)]
+        summary = summarize(["".join(rows)])
+        node_a = source_by_ip(summary, "203.0.113.10")
+        self.assertEqual(node_a["destinations"][0]["ip"], "142.250.185.78")
 
 
 class LimitsTests(unittest.TestCase):

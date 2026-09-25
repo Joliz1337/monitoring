@@ -816,6 +816,7 @@
   "ephemeral": {
     "title": "Эфемерные порты",
     "range": "Диапазон {{low}}–{{high}} · потолок {{capacity}} на направление",
+    "range_fast": "Диапазон {{low}}–{{high}} · быстрый запас {{fast}} из {{capacity}} на направление",
     "destinations_count_one": "{{count}} направление",
     "destinations_count_few": "{{count}} направления",
     "destinations_count_many": "{{count}} направлений",

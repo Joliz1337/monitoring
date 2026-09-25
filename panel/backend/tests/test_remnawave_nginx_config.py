@@ -17,6 +17,7 @@ from app.services.remnawave_nginx_config import (  # noqa: E402
     AUTO_MARKER,
     DOMAIN_PLACEHOLDER,
     LOCAL_STUB_ROOT,
+    LOOPBACK_SOURCES,
     GrpcRule,
     MissingMarkersError,
     OptionsValidationError,
@@ -122,6 +123,8 @@ class RoundTripTests(unittest.TestCase):
         spliced = splice_rules(legacy, XHTTP_RULES, ProfileOptions())
         self.assertNotIn("upstream xhttp_", spliced)
         self.assertIn("proxy_pass http://127.0.0.1:2081;", spliced)
+        # Переменная раскладки объявлена в той же секции — без неё nginx не стартует
+        self.assertNotIn("$xray_source", spliced)
         self.assertEqual(parse_rules_from_config(spliced), XHTTP_RULES)
 
 
@@ -489,6 +492,44 @@ class UpstreamKeepaliveTests(unittest.TestCase):
     def test_xhttp_plain_location_reuses_loopback_socket(self):
         section = XhttpTests._xhttp_section(generate_full_config(ProfileOptions(), XHTTP_RULES))
         self.assertIn("proxy_socket_keepalive on;", section)
+
+
+class LoopbackSourceTests(unittest.TestCase):
+    """Потолок портов — на пару «адрес источника → инбаунд», поэтому nginx
+    раскладывает соединения к Xray по нескольким адресам 127.0.0.x."""
+
+    def test_split_declares_every_source(self):
+        config = generate_full_config(ProfileOptions(), ALL_RULES)
+        upstreams = config[config.find("# === UPSTREAMS START"):config.find("# === UPSTREAMS END")]
+        self.assertIn('split_clients "$request_id" $xray_source {', upstreams)
+        self.assertEqual(len(LOOPBACK_SOURCES), 16)
+        for address in LOOPBACK_SOURCES[:-1]:
+            self.assertIn(f"6.25% {address};", upstreams)
+        self.assertIn("*   127.0.0.16;", upstreams)
+
+    def test_split_shares_cover_whole_range(self):
+        # Доли плюс остаток «*» должны давать ровно 100%, иначе адреса нагружены неровно
+        config = generate_full_config(ProfileOptions(), XHTTP_RULES)
+        shares = [float(line.split("%")[0]) for line in config.splitlines() if "% 127.0.0." in line]
+        self.assertAlmostEqual(sum(shares) + 100 / len(LOOPBACK_SOURCES), 100)
+
+    def test_every_xray_branch_binds_to_split_source(self):
+        config = generate_full_config(ProfileOptions(), [*GRPC_RULES, *XHTTP_RULES])
+        grpc_passes = config.count("grpc_pass grpc://127.0.0.1:")
+        self.assertEqual(config.count("grpc_bind $xray_source;"), grpc_passes)
+        self.assertEqual(config.count("proxy_bind $xray_source;"), len(XHTTP_RULES))
+
+    def test_inbound_listen_address_stays_loopback(self):
+        # Меняется адрес источника, а не цели — listen инбаунда трогать не нужно
+        config = generate_full_config(ProfileOptions(), [*GRPC_RULES, *XHTTP_RULES])
+        self.assertIn("grpc_pass grpc://127.0.0.1:8443;", config)
+        self.assertIn("server 127.0.0.1:2081;", config)
+
+    def test_proxy_only_profile_has_no_split(self):
+        # Заглушке и сайтам адрес источника не раскладывается — переменная не нужна
+        config = generate_full_config(ProfileOptions(), PROXY_RULES)
+        self.assertNotIn("split_clients", config)
+        self.assertNotIn("$xray_source", config)
 
 
 class ProxyTargetResolutionTests(unittest.TestCase):

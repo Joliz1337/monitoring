@@ -812,6 +812,7 @@
   "ephemeral": {
     "title": "Ephemeral ports",
     "range": "Range {{low}}–{{high}} · ceiling {{capacity}} per route",
+    "range_fast": "Range {{low}}–{{high}} · fast pool {{fast}} of {{capacity}} per route",
     "destinations_count_one": "{{count}} route",
     "destinations_count_other": "{{count}} routes",
     "peak_usage": "Busiest route: {{used}}",
