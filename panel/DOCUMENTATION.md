@@ -2514,13 +2514,14 @@ Whitelist можно наполнять из внешних списков по 
 | POST | /haproxy-profiles/{id}/regenerate-config | Перегенерировать конфиг из текущих правил (актуальный базовый шаблон) |
 | GET | /haproxy-profiles/{id}/servers-status | Статусы серверов профиля (включая `online: bool`) |
 | POST | /haproxy-profiles/validate | Валидировать config_content без сохранения → `{valid, message}` |
-| GET | /haproxy-profiles/available-servers | Серверы доступные для привязки |
+| GET | /haproxy-profiles/available-servers | Серверы доступные для привязки (`active_profile_id`, `sync_status`, `folder`) |
 
 **SyncResult.status:** `success` | `failed` | `queued` (офлайн-нода, синхронизация отложена) | `denied` (закрытый на ноде домен `haproxy`, `NODE_CAPABILITIES` — см. «Права ноды» выше; в очередь на ретрай не попадает).
 
 **Frontend (`panel/frontend/src/pages/HAProxyConfigs.tsx`):**
 - Аккордеон профилей: карточка, под ней детальная панель — правила с CRUD, привязанные серверы с управлением, история синхронизаций
 - Порядок карточек меняется перетаскиванием за ручку (`@dnd-kit` sortable, ручка `GripVertical` слева от шеврона, сенсоры pointer/touch/keyboard как на дашборде) — `POST /reorder`, позиция хранится в `position`. Список опрашивается каждые 3 с, поэтому ответ опроса, ушедшего в сеть до drop или до ответа `reorder`, отбрасывается по счётчику поколения списка — иначе карточки прыгали бы назад до сохранения. `AnimatePresence mode="popLayout"` вешает ref на прямого ребёнка, поэтому sortable-обёртка карточки — `forwardRef`; у `motion.div` карточки нет `layout` — layout-анимация framer спорила бы с трансформами dnd-kit
+- Пикер «Добавить сервер» — общий `components/servers/FolderedServerPicker.tsx`: кандидаты по папкам дашборда, раскрытые папки — в `localStorage` `haproxy_add_expanded_folders`, поиск по имени/адресу раскрывает все группы, без папок — плоский список; уже привязанные к этому профилю скрыты
 - Route: `/{uid}/haproxy-configs` (lazy-import)
 - Навигация: пункт «HAProxy Configs» с иконкой FileCode2
 
@@ -2688,7 +2689,7 @@ Whitelist можно наполнять из внешних списков по 
 - Блок «Настройки» (кнопка у списка правил, i18n-ключ `remnawave_nginx.real_ip_options`): поле fallback (`remnawave_nginx.fallback_url` + `fallback_url_hint`), тумблеры CDN (textarea диапазонов + кнопка «Cloudflare по умолчанию») и PROXY protocol (порт + IP HAProxy, лейбл «IP HAProxy (необязательно)»), плюс редирект 80→443, ACME, `reject_default_server`, группа «TLS и соединения» (тумблеры `tls_session_tickets`, `client_keepalive` с текстовым полем значения `client_keepalive_value` — показывается только при включённом тумблере, выключение пишет пустую строку, — и `access_log`, каждый с подсказкой `*_hint`), пути сертификатов; предупреждающий блок с требованиями к Xray (i18n-ключ `remnawave_nginx.xray_requirements`)
 - Raw-модалка: Validate / Вставить шаблон / Импорт с ноды / Save; предупреждение, если открытый raw-конфиг не содержит маркеров локаций (правила через конструктор для него недоступны)
 - Привязанные серверы: инлайн-редактирование домена, live-статус контейнера через proxy-роутер, restart контейнера, sync, unlink; предупреждающий блок о замене nginx.conf и автопереводе фрагментного монтирования install.sh-установок на полный конфиг (i18n-ключ `remnawave_nginx.link_replaces_config_warning`)
-- Пикер «Добавить сервер» группирует кандидатов по папкам дашборда (по образцу `DnatProfiles.tsx`): сворачиваемые группы с порядком из `dashboard_folder_order`, раскрытые папки — в `localStorage` `remnawave_nginx_add_expanded_folders`, поиск раскрывает все группы, серверы без папки — в группе «Без папки»
+- Пикер «Добавить сервер» — общий `components/servers/FolderedServerPicker.tsx` (тот же, что у HAProxy Configs): сворачиваемые группы с порядком из `dashboard_folder_order`, раскрытые папки — в `localStorage` `remnawave_nginx_add_expanded_folders`, поиск раскрывает все группы, серверы без папки — в группе «Без папки»; строку сервера (метка `detected`, домен) рисует страница через `renderServer`
 - Лог синхронизаций
 - Route `/{uid}/remnawave-nginx`, пункт меню «Remnawave Nginx» (иконка Waypoints, после Remnawave)
 - Настройка **Путь установок Remnawave** (`remnawave_nginx_path`, по умолчанию `/opt/remnawave`) — секция на вкладке «Ноды» в Настройках, применяется ко всем нодам как единый путь discover/apply
@@ -2917,6 +2918,7 @@ SSE-события: `note_update` — `{"content": "...", "version": N}`, `tasks
 - `panel/frontend/src/api/client.ts` — тип `TorrentBlockerActiveBan {ip, banned_at, expires_at}`; метод `getActiveBans`; метод `testWebhook`
 - `panel/frontend/src/stores/torrentBlockerStore.ts` — состояние `activeBans/activeBansTotal`; action `fetchActiveBans`; action `testWebhook`
 - `panel/frontend/src/pages/TorrentBlocker.tsx` — блок «Webhook-предупреждение»; таблица «Заблокированные сейчас IP» с пагинацией и авто-обновлением 5 сек; хелпер `formatRemaining`; исключённые серверы — чипы выбранных + `ServerAddDropdown`
+- `panel/frontend/src/components/servers/FolderedServerPicker.tsx` — одиночный выбор сервера для привязки к профилю (HAProxy Configs, Remnawave nginx): поиск по имени/адресу и список по папкам дашборда (`orderFolders`), раскрытые папки — в `localStorage` по `storageKey`, при поиске раскрыты все, без папок — плоский список; строку сервера и действие по клику задаёт страница (`renderServer`)
 - `panel/frontend/src/components/servers/ServerAddDropdown.tsx` — поиск с выпадающим списком серверов по папкам для добавления в список: уже добавленные (`excludeIds`) скрыты, у папки кнопка «добавить всю папку», при поиске папки раскрыты, раскрытые папки запоминаются в `localStorage` по `storageKey`, порядок папок — из `dashboard_folder_order`; `isRestricted` помечает замком ноды, которые действие не примут
 - `panel/frontend/src/locales/ru.json`, `en.json` — ключи `torrent_blocker.active_bans`, `no_active_bans`, `col_banned_at`, `col_expires_in`, `webhook_*`
 - `panel/frontend/src/data/faq/content/ru/PAGE_TORRENT_BLOCKER.md` — краткое описание вебхука в общем FAQ страницы

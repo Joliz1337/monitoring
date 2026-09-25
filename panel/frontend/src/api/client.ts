@@ -2352,6 +2352,7 @@ export interface HAProxyAvailableServer {
   url: string
   active_profile_id: number | null
   sync_status: string | null
+  folder: string | null
 }
 
 export interface HAProxyServerStatus {

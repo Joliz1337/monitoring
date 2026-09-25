@@ -182,7 +182,12 @@ async def get_server_cores(
 @router.get("/available-servers")
 async def get_available_servers(db: AsyncSession = Depends(get_db), _=Depends(verify_auth)):
     result = await db.execute(
-        select(Server.id, Server.name, Server.url, Server.active_haproxy_profile_id, Server.haproxy_sync_status)
+        select(
+            Server.id, Server.name, Server.url,
+            Server.active_haproxy_profile_id,
+            Server.haproxy_sync_status,
+            Server.folder,
+        )
         .order_by(Server.name)
     )
     return [
@@ -192,6 +197,7 @@ async def get_available_servers(db: AsyncSession = Depends(get_db), _=Depends(ve
             "url": row[2],
             "active_profile_id": row[3],
             "sync_status": row[4],
+            "folder": row[5],
         }
         for row in result.fetchall()
     ]

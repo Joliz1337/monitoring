@@ -22,6 +22,7 @@ import {
 } from '../api/client'
 import { Tooltip } from '../components/ui/Tooltip'
 import { FAQIcon } from '../components/FAQ'
+import FolderedServerPicker from '../components/servers/FolderedServerPicker'
 
 
 function SyncStatusBadge({ status, online }: { status: string | null; online?: boolean }) {
@@ -697,7 +698,6 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
   const [configEdit, setConfigEdit] = useState('')
   const [configSaving, setConfigSaving] = useState(false)
   const [configValidating, setConfigValidating] = useState(false)
-  const [serverSearch, setServerSearch] = useState('')
   const [configModalMouseDown, setConfigModalMouseDown] = useState(false)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const prevSyncedRef = useRef<string>('')
@@ -934,13 +934,15 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
   }
   const toggleLog = () => { if (!showLog) fetchLog(); setShowLog(!showLog) }
 
-  const unlinkedServers = availableServers
-    .filter(s => s.active_profile_id === null || s.active_profile_id !== profileId)
-    .filter(s => {
-      if (!serverSearch) return true
-      const q = serverSearch.toLowerCase()
-      return s.name.toLowerCase().includes(q) || s.url.toLowerCase().includes(q)
-    })
+  const unlinkedServers = availableServers.filter(s => s.active_profile_id !== profileId)
+
+  const renderCandidate = (s: HAProxyAvailableServer) => (
+    <button key={s.id} onClick={() => handleLinkServer(s.id)}
+      className="w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm text-dark-200 hover:bg-dark-700/50 transition-colors">
+      <span className="flex items-center gap-2"><Server className="w-3.5 h-3.5 text-dark-400" />{s.name}</span>
+      {s.active_profile_id && <span className="text-xs text-dark-500">{t('haproxy_configs.has_other_profile')}</span>}
+    </button>
+  )
 
   if (loading) return <div className="flex items-center justify-center py-12"><Loader2 className="w-6 h-6 text-accent-400 animate-spin" /></div>
   if (!detail) return null
@@ -1157,22 +1159,16 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
               <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="mb-3 overflow-hidden">
                 <div className="rounded-lg border border-dark-700/50 bg-dark-900/50 p-3">
                   <div className="text-xs text-dark-400 mb-2">{t('haproxy_configs.select_server')}</div>
-                  <input type="text" value={serverSearch} onChange={e => setServerSearch(e.target.value)}
-                    placeholder={t('haproxy_configs.search_server')}
-                    className="w-full px-3 py-1.5 mb-2 rounded-lg bg-dark-800 border border-dark-700 text-dark-100 text-sm focus:outline-none focus:border-accent-500/50 transition-colors" autoFocus />
-                  {unlinkedServers.length === 0 ? (
-                    <div className="text-xs text-dark-500">{t('haproxy_configs.no_available_servers')}</div>
-                  ) : (
-                    <div className="space-y-1 max-h-48 overflow-y-auto">
-                      {unlinkedServers.map(s => (
-                        <button key={s.id} onClick={() => handleLinkServer(s.id)}
-                          className="w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm text-dark-200 hover:bg-dark-700/50 transition-colors">
-                          <span className="flex items-center gap-2"><Server className="w-3.5 h-3.5 text-dark-400" />{s.name}</span>
-                          {s.active_profile_id && <span className="text-xs text-dark-500">{t('haproxy_configs.has_other_profile')}</span>}
-                        </button>
-                      ))}
-                    </div>
-                  )}
+                  <FolderedServerPicker
+                    servers={unlinkedServers}
+                    renderServer={renderCandidate}
+                    storageKey="haproxy_add_expanded_folders"
+                    labels={{
+                      searchPlaceholder: t('haproxy_configs.search_server'),
+                      empty: t('haproxy_configs.no_available_servers'),
+                      noFolder: t('bulk_actions.no_folder'),
+                    }}
+                  />
                 </div>
               </motion.div>
             )}
