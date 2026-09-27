@@ -582,6 +582,42 @@ class ProxyTargetResolutionTests(unittest.TestCase):
         self.assertNotIn("proxy_ssl_server_name", config)
 
 
+class GrpcCustomPathTests(unittest.TestCase):
+    """serviceName со слэшем в начале — свой путь gRPC: Xray шлёт запрос ровно
+    на него, без /Tun, и локация должна совпадать с ним один в один."""
+
+    CUSTOM = GrpcRule(name="seg", service_path="/v1/segment/9f3c1a7be04d2856/Fetch", port=8443)
+
+    def test_location_is_path_as_is(self):
+        config = generate_full_config(ProfileOptions(), [self.CUSTOM])
+        self.assertIn("location ^~ /v1/segment/9f3c1a7be04d2856/Fetch {", config)
+        self.assertNotIn("location ^~ //", config)
+
+    def test_classic_name_keeps_prefix_location(self):
+        config = generate_full_config(ProfileOptions(), GRPC_RULES)
+        self.assertIn("location ^~ /trgrpc {", config)
+
+    def test_round_trip_next_to_classic_rules(self):
+        rules = [*GRPC_RULES, self.CUSTOM, *XHTTP_RULES]
+        config = generate_full_config(ProfileOptions(), rules)
+        self.assertEqual(parse_rules_from_config(config), rules)
+        self.assertEqual(splice_rules(config, rules, ProfileOptions()), config)
+
+    def test_malformed_custom_paths_rejected(self):
+        # Один сегмент Xray склеит в «//метод»; пустой сегмент или хвостовой
+        # слэш дают пустое имя метода; «|» — два пути, а локация одна
+        for service_path in ("/Fetch", "/v1/segment/", "/v1//Fetch", "/v1/Up|Down", "/v1/Fe tch"):
+            with self.subTest(service_path=service_path), self.assertRaises(RuleValidationError):
+                validate_rules([GrpcRule(name="a", service_path=service_path, port=8443)])
+
+    def test_custom_path_clashes_with_same_xhttp_path(self):
+        with self.assertRaises(RuleValidationError):
+            validate_rules([
+                GrpcRule(name="a", service_path="/v1/stream", port=8443),
+                XhttpRule(name="b", path="/v1/stream", port=2081),
+            ])
+
+
 class LocalStubTests(unittest.TestCase):
     def test_disabled_by_default(self):
         config = generate_full_config(ProfileOptions(fallback_url="https://example.com"), GRPC_RULES)

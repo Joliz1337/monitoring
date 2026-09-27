@@ -2591,7 +2591,7 @@ UI: строка во вкладке «Привязанные серверы» �
 
 | Тип | Что генерирует |
 |-----|----------------|
-| gRPC (`GrpcRule`) | `location ^~ /{serviceName}` с `grpc_pass grpc://127.0.0.1:{порт}` и проверкой Content-Type |
+| gRPC (`GrpcRule`) | `location ^~ /{serviceName}` с `grpc_pass grpc://127.0.0.1:{порт}` и проверкой Content-Type. serviceName со слэшем в начале (`/api/v1/Stream`, минимум два сегмента) — свой путь gRPC: Xray шлёт запрос ровно на него без `/Tun`, и локация получает его как есть; обратный парсер отличает его от классического имени по слэшу внутри. Серверная форма с `|` не принимается — одна локация на два пути, заводится двумя правилами |
 | XHTTP (`XhttpRule`) | Пара локаций на один инбаунд: основная с `grpc_pass` и именованная `@xhttp_{имя}` с потоковым `proxy_pass` (см. ниже) |
 | Proxy (`ProxyRule`) | Обычная `location {путь}` с `proxy_pass` на произвольный адрес |
 
@@ -2702,7 +2702,7 @@ UI: строка во вкладке «Привязанные серверы» �
 
 **Frontend (`panel/frontend/src/pages/RemnawaveNginx.tsx`):**
 - По образцу `HAProxyConfigs.tsx`: аккордеон профилей → детальная панель с поллингом статусов серверов (3 сек)
-- Конструктор правил: gRPC (имя сервиса + порт Xray), XHTTP (путь инбаунда + порт Xray) и Proxy (путь + target URL)
+- Конструктор правил: gRPC (serviceName — имя или свой путь — + порт Xray), XHTTP (путь инбаунда + порт Xray) и Proxy (путь + target URL)
 - Блок «Настройки» (кнопка у списка правил, i18n-ключ `remnawave_nginx.real_ip_options`): поле fallback (`remnawave_nginx.fallback_url` + `fallback_url_hint`), тумблеры CDN (textarea диапазонов + кнопка «Cloudflare по умолчанию») и PROXY protocol (порт + IP HAProxy, лейбл «IP HAProxy (необязательно)»), плюс редирект 80→443, ACME, `reject_default_server`, группа «TLS и соединения» (тумблеры `tls_session_tickets`, `client_keepalive` с текстовым полем значения `client_keepalive_value` — показывается только при включённом тумблере, выключение пишет пустую строку, — и `access_log`, каждый с подсказкой `*_hint`), пути сертификатов; предупреждающий блок с требованиями к Xray (i18n-ключ `remnawave_nginx.xray_requirements`)
 - Raw-модалка: Validate / Вставить шаблон / Импорт с ноды / Save; предупреждение, если открытый raw-конфиг не содержит маркеров локаций (правила через конструктор для него недоступны)
 - Привязанные серверы: инлайн-редактирование домена, live-статус контейнера через proxy-роутер, restart контейнера, sync, unlink; предупреждающий блок о замене nginx.conf и автопереводе фрагментного монтирования install.sh-установок на полный конфиг (i18n-ключ `remnawave_nginx.link_replaces_config_warning`)

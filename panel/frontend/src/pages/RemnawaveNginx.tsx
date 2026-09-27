@@ -76,6 +76,10 @@ const EMPTY_RULE_FORM: RuleFormData = {
   name: '', rule_type: 'grpc', service_path: '', port: '', path: '/', target_url: '',
 }
 
+// Свой путь gRPC уже начинается со слэша, классическому имени сервиса его дописывает локация
+const grpcLocationPath = (servicePath: string) =>
+  servicePath.startsWith('/') ? servicePath : `/${servicePath}`
+
 function RuleForm({
   initial, isEdit, saving, onSave, onCancel,
 }: {
@@ -812,7 +816,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                         {r.rule_type === 'grpc' ? (
                           <>
                             <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-accent-500/10 text-accent-400 border border-accent-500/20">gRPC</span>
-                            <span className="text-xs text-dark-500">/{r.service_path} → 127.0.0.1:{r.port}</span>
+                            <span className="text-xs text-dark-500 truncate">{grpcLocationPath(r.service_path ?? '')} → 127.0.0.1:{r.port}</span>
                           </>
                         ) : r.rule_type === 'xhttp' ? (
                           <>
