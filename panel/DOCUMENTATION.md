@@ -19,7 +19,7 @@
 - **Infrastructure Tree** — двухуровневая иерархия серверов на странице Servers: Аккаунт (облачный email) → Проект (кластер) → Серверы; дерево встроено в существующую страницу, сворачивается, состояние сохраняется в localStorage
 - **Shared Notes & Tasks** — совместный блокнот и список задач с синхронизацией в реальном времени через SSE; открывается через плавающий жёлтый таб на правом крае экрана (amber-500); две вкладки: «Блокнот» и «Задачи»
 - **Wildcard SSL** — выпуск wildcard сертификатов через certbot + Cloudflare DNS challenge, продление, деплой на ноды через API порта 9100; фоновое автопродление каждые 24ч с Telegram-уведомлениями при сбое; настройка пути деплоя и reload-команды для каждого сервера; просмотр и копирование/скачивание PEM-материалов сертификата (fullchain/cert/chain/privkey) для ручного переноса в CDN и сторонние панели
-- **HAProxy Configs** — централизованные профили конфигурации HAProxy с массовой раскаткой на серверы: CRUD профилей и правил, балансировщик нагрузки, привязка серверов, history синхронизаций; запуск HAProxy per-server и bulk-запуск всех остановленных нод одним кликом; **авто-запуск при привязке** (start + enable autostart) и **авто-остановка при отвязке** (stop + disable autostart) сервера
+- **HAProxy Configs** — централизованные профили конфигурации HAProxy с массовой раскаткой на серверы: CRUD профилей и правил, балансировщик нагрузки, привязка серверов с выбором входных и выходных IP каждого сервера при общем профиле, history синхронизаций; запуск HAProxy per-server и bulk-запуск всех остановленных нод одним кликом; **авто-запуск при привязке** (start + enable autostart) и **авто-остановка при отвязке** (stop + disable autostart) сервера
 - **Remnawave Nginx** — централизованные профили конфигурации nginx перед Remnawave-нодой (каталог на хосте, по умолчанию `/opt/remnawave`), как HAProxy Configs: конструктор правил (gRPC-локации, произвольные proxy-локации), raw-редактор с pre-flight валидацией `nginx -t`, четыре схемы передачи реального IP клиента в Xray (напрямую, за CDN, за HAProxy по PROXY protocol, универсальная), привязка серверов с доменом на каждый (шаблон конфига хранит `{{DOMAIN}}`), sync с drift-детекцией по хэшу отрендеренного контента, retry для офлайн-нод, импорт существующего конфига с ноды
 - **Firewall Profiles** — шаблоны UFW с массовой раскаткой на серверы: CRUD профилей, привязка 1 сервер ↔ 1 активный профиль, history синхронизаций, node-API-port-guard (защита связи панели с нодой через порт 9100), drift-детекция по SHA256-хэшу; массовые действия — добавление правил списком портов с диапазонами, чекбоксы для пакетного изменения/удаления правил и привязки/отвязки/синхронизации серверов (включая выбор целой папки); вкладка «Серверы» — поиск по имени/адресу, группировка доступных серверов по папкам со сворачиванием, скрытие занятых серверов с переключателем «Показать занятые»
 - **DNAT-маршрутизация** — профили проброса портов средствами ядра нод (iptables nat DNAT + MASQUERADE + FORWARD): та же модель, что у Firewall Profiles (CRUD профилей и правил, 1 сервер ↔ 1 профиль, sync с drift-детекцией по SHA256, очередь отложенной раскатки для офлайн-нод, история), плюс страница сервера с живыми счётчиками соединений/трафика по каждому правилу и кнопками «Переприменить»/«Снять правила»; TCP, UDP и диапазоны портов, без userspace-прокси
@@ -2447,7 +2447,7 @@ Whitelist можно наполнять из внешних списков по 
 | Подсистема | Что проверяется | Источник ожидаемого | Действие при drift |
 |-----------|----------------|---------------------|--------------------|
 | **Firewall (UFW)** | `GET /api/firewall/profile/state` → `rules_hash` + флаг `active` | `compute_rules_hash` профиля | `firewall_profile_sync.sync_profile_to_servers` |
-| **HAProxy конфиг** | `GET /api/haproxy/config` → хэш конфига (после нормализации CRLF/трейлинга) | `compute_config_hash` профиля | `haproxy_profile_sync.sync_profile_to_servers` (graceful reload) |
+| **HAProxy конфиг** | `GET /api/haproxy/config` → хэш конфига (после нормализации CRLF/трейлинга) | `compute_config_hash` профиля, собранного с адресами сервера | `haproxy_profile_sync.sync_profile_to_servers` (graceful reload) |
 | **HAProxy автозапуск** | `GET /api/haproxy/status` → `running` | `ServerCache.last_haproxy_data` (состояние до падения) | `POST /api/haproxy/start` если был запущен и конфиг валиден |
 | **IP Blocklist** | — | — | Всегда переотправляет permanent-списки обоих направлений через `blocklist_manager.sync_single_node_by_id` |
 | **Remnawave Nginx** | `GET /api/remnawave/nginx/config` с ноды → sha256 нормализованного контента | ожидаемый hash отрендеренного (per-domain) конфига профиля, привязанного к серверу | `remnawave_nginx_sync.sync_profile_to_servers` на один сервер, только если сервер привязан к профилю и есть домен |
@@ -2473,7 +2473,7 @@ Whitelist можно наполнять из внешних списков по 
 **Принцип работы:**
 1. В панели создаётся профиль с набором правил (TCP/HTTPS, одиночный режим или балансировщик)
 2. Серверы привязываются к профилю через `active_haproxy_profile_id` в модели `Server`
-3. `POST /{id}/sync` раскатывает конфиг на все привязанные серверы параллельно; офлайн-ноды не опрашиваются — им выставляется статус `pending`, досинхронизация происходит автоматически когда нода ожила
+3. `POST /{id}/sync` раскатывает конфиг на все привязанные серверы параллельно — каждому свой, собранный с его адресами (см. «Адреса сервера» ниже); офлайн-ноды не опрашиваются — им выставляется статус `pending`, досинхронизация происходит автоматически когда нода ожила
 4. Для одиночного сервера — `POST /{id}/sync/{server_id}` — точечная синхронизация
 5. Статус синхронизации (synced/pending/failed) и история хранятся в `haproxy_sync_logs`
 
@@ -2493,6 +2493,20 @@ Whitelist можно наполнять из внешних списков по 
 
 Каждый сервер синхронизируется с **собственной сессией БД** (не шареной) — статусы обновляются по мере готовности, а не разом в конце.
 
+**Адреса сервера — вход и выход (`services/haproxy_addresses.py`):**
+
+Профиль — один текст на все привязанные серверы, а IP у каждого сервера свои. Поля `Server.haproxy_listen_ips` / `haproxy_source_ips` (JSON-списки IPv4 в `Text`, не больше `MAX_ADDRESSES = 16`) — свойство сервера, при отвязке не стираются. Перед раскаткой `render_for_server()` собирает конфиг под сервер, только в области правил между маркерами `RULES START/END` (без маркеров — во всём тексте):
+- `frontend`/`listen`: `bind *:PORT` (и `:PORT`, `0.0.0.0:PORT`) → `bind IP1:PORT,IP2:PORT`, параметры строки сохраняются; явный адрес, unix-сокет и IPv6 не трогаются;
+- `backend`/`listen`: каждая строка `server` копируется на каждый выходной IP с `source IP`; первая копия сохраняет имя, остальные получают суффикс `_oN` — он же дописывается к значению `cookie`, иначе sticky-сессии склеивались бы на первой копии. Копии делят соединения по кругу (у одиночного правила нет `balance` — действует дефолтный roundrobin), health-check идёт с каждого адреса, потолок ~64k исходящих портов к бэкенду считается на каждый выходной адрес. Строка со своим `source` и бэкенд с директивой `source` остаются как есть.
+
+Без адресов собранный текст байт-в-байт равен профилю, поэтому хэш таких серверов не меняется. Хэш сервера везде считается от собранного под него конфига: `expected_config_hash()` — `is_synced` в `GET /{id}`, `mark_outdated_pending()` — пометка `pending` после правок профиля и правил, `sync_profile_to_servers` рендерит и хэширует каждый сервер отдельно, `_reconcile_haproxy_config` сравнивает конфиг ноды с собранным.
+
+Проверка до отправки — `check_addresses_on_node()`: `haproxy -c` адреса не проверяет, а `systemctl reload` с IP, которого нет на сервере, возвращает успех, хотя мастер HAProxy оставляет старых воркеров. Поэтому у сервера с адресами перед каждым apply панель запрашивает `GET /api/system/network/state` ноды (права `system:read`) и сверяет IPv4 её интерфейсов; отсутствующий адрес, закрытый раздел или недоступность ноды → `failed` с причиной в логе синхронизации. Запрос прямой, а не через `network_transactions.fetch_state`: модуль транзакций через `reserved_ports_sync` импортирует `haproxy_profile_sync`, обратный импорт замкнул бы цикл.
+
+`PUT /{id}/servers/{server_id}/addresses` `{listen_ips, source_ips}`: нормализация (только IPv4, дубли убираются, порядок сохраняется) → `400`; гейт `MIN_NODE_VERSION_HAPROXY_ADDRESSES = 10.31.0` (нода младше разбирает только `bind *:PORT` и показала бы порт правила нулём) → `409`; та же сверка с нодой → `400`. Сброс (оба списка пусты) проверок не требует и работает для офлайн-сервера. После сохранения — синхронная раскатка только на этот сервер, ответ `{listen_ips, source_ips, sync}`.
+
+UI: строка во вкладке «Привязанные серверы» раскрывается шевроном (`expandedServers`) → `components/haproxy/ServerAddressesEditor.tsx` — IPv4-адреса интерфейсов из `GET /proxy/{id}/network/state` с галочками «Слушает»/«Выходит». Сохранённые адреса, которых уже нет на сервере, остаются в списке зачёркнутыми с пометкой «нет на сервере», чтобы их можно было снять; отправляются в порядке строк (первый отмеченный выходной IP получает исходное имя `server`). В свёрнутой строке — сводка `вход … · выход …` (от ширины `md`). `servers-status` отдаёт по серверу `listen_ips`, `source_ips`, `addresses_supported`, `addresses_min_node_version`.
+
 **API:**
 
 | Метод | Endpoint | Описание |
@@ -2508,11 +2522,12 @@ Whitelist можно наполнять из внешних списков по 
 | DELETE | /haproxy-profiles/{id}/rules/{index} | Удалить правило |
 | POST | /haproxy-profiles/{id}/servers/{server_id} | Привязать сервер |
 | DELETE | /haproxy-profiles/{id}/servers/{server_id} | Отвязать сервер |
+| PUT | /haproxy-profiles/{id}/servers/{server_id}/addresses | Входные и выходные IP сервера `{listen_ips, source_ips}` + раскатка на этот сервер |
 | POST | /haproxy-profiles/{id}/sync | Синхронизировать профиль на все привязанные серверы |
 | POST | /haproxy-profiles/{id}/sync/{server_id} | Синхронизировать на один сервер |
 | GET | /haproxy-profiles/{id}/log | История синхронизаций |
 | POST | /haproxy-profiles/{id}/regenerate-config | Перегенерировать конфиг из текущих правил (актуальный базовый шаблон) |
-| GET | /haproxy-profiles/{id}/servers-status | Статусы серверов профиля (включая `online: bool`) |
+| GET | /haproxy-profiles/{id}/servers-status | Статусы серверов профиля (включая `online: bool` и адреса сервера) |
 | POST | /haproxy-profiles/validate | Валидировать config_content без сохранения → `{valid, message}` |
 | GET | /haproxy-profiles/available-servers | Серверы доступные для привязки (`active_profile_id`, `sync_status`, `folder`) |
 
@@ -2539,15 +2554,17 @@ Whitelist можно наполнять из внешних списков по 
 - **Тосты sync** (`handleSyncAll`/`handleSyncOne`) раздельно считают synced/queued/failed и показывают корректный текст (включая «отложено (офлайн)»).
 - **Кнопка «Проверить конфиг»** в модалке сырого конфига — вызывает `POST /haproxy-profiles/validate` и показывает результат валидации.
 
-**i18n-ключи** (`haproxy_configs.*`): `drag_to_reorder`, `reorder_error`, `start_haproxy`, `start_all_stopped`, `haproxy_started`, `haproxy_start_error`, `haproxy_start_bulk_success`, `haproxy_start_bulk_partial`, `sync_queued`, `sync_one_queued`, `waiting_server`, `server_online`, `server_offline`, `haproxy_running`, `haproxy_stopped`, `validate_config`, `config_valid`, `config_invalid`, `validate_error`, `unlink_confirm`.
+**i18n-ключи** (`haproxy_configs.*`): `drag_to_reorder`, `reorder_error`, `start_haproxy`, `start_all_stopped`, `haproxy_started`, `haproxy_start_error`, `haproxy_start_bulk_success`, `haproxy_start_bulk_partial`, `sync_queued`, `sync_one_queued`, `waiting_server`, `server_online`, `server_offline`, `haproxy_running`, `haproxy_stopped`, `validate_config`, `config_valid`, `config_invalid`, `validate_error`, `unlink_confirm`, `addresses_*` (редактор адресов сервера).
 
 **Файлы:**
 - `panel/backend/app/routers/haproxy_profiles.py` — API роутер; `PUT /{id}` с валидацией; `POST /validate`
 - `panel/backend/app/services/haproxy_validator.py` — `validate_config(config_content)`: запуск `haproxy -c -f`, замена путей `crt` на dummy-сертификат
-- `panel/backend/app/services/haproxy_profile_sync.py` — `is_server_online`, `_sync_single_server` (отдельная DB-сессия, принимает `ensure_started`), `SyncResult` (`status: success|failed|queued`), `retry_pending_haproxy_syncs` (с `ensure_started=True`), `stop_haproxy_on_server` (POST `/api/haproxy/stop`, graceful при офлайн)
+- `panel/backend/app/services/haproxy_profile_sync.py` — `is_server_online`, `_sync_single_server` (отдельная DB-сессия, принимает `ensure_started`), `SyncResult` (`status: success|failed|queued`), `retry_pending_haproxy_syncs` (с `ensure_started=True`), `stop_haproxy_on_server` (POST `/api/haproxy/stop`, graceful при офлайн), `render_profile_for_server`/`expected_config_hash`/`mark_outdated_pending`/`check_addresses_on_node` (адреса сервера)
+- `panel/backend/app/services/haproxy_addresses.py` — `ServerAddresses`, `render_for_server`, `normalize_ips`, `missing_on_node`; тесты — `panel/backend/tests/test_haproxy_addresses.py`
 - `panel/backend/app/services/metrics_collector.py` — фоновый цикл `_haproxy_pending_sync_loop` (интервал `HAPROXY_RETRY_INTERVAL=30` сек)
 - `panel/backend/Dockerfile` — пакет `haproxy` для локальной валидации
-- `panel/frontend/src/pages/HAProxyConfigs.tsx` — страница управления; индикаторы online/offline; `SyncStatusBadge`; кнопка «Проверить конфиг»
+- `panel/frontend/src/pages/HAProxyConfigs.tsx` — страница управления; индикаторы online/offline; `SyncStatusBadge`; кнопка «Проверить конфиг»; раскрытие строки сервера
+- `panel/frontend/src/components/haproxy/ServerAddressesEditor.tsx` — редактор входных/выходных IP сервера
 - `panel/frontend/src/api/client.ts` — `haproxyProfilesApi.validateConfig()`, `haproxyProfilesApi.reorderProfiles()`, `HAProxyServerStatus.online`, `HAProxySyncResult.status`
 - `panel/frontend/src/App.tsx` — роут `haproxy-configs`
 - `panel/frontend/src/components/Layout/Layout.tsx` — пункт навигации «HAProxy Configs»

@@ -919,7 +919,8 @@ resolvers mydns
         frontends = {}
         for match in frontend_pattern.finditer(content):
             rule_type, name, block = match.groups()
-            port_match = re.search(r'bind\s+\*:(\d+)', block)
+            # Панель может привязать правило к IP сервера: `bind 1.1.1.1:443,1.1.1.2:443`
+            port_match = re.search(r'^\s*bind\s+[^\s:,]*:(\d+)', block, re.MULTILINE)
             cert_match = re.search(r'ssl\s+crt\s+/etc/letsencrypt/live/([^/]+)/combined\.pem', block) if rule_type == "https" else None
             bind_line_match = re.search(r'^\s*bind\s+.+$', block, re.MULTILINE)
             accept_proxy = bool(bind_line_match and 'accept-proxy' in bind_line_match.group(0))

@@ -4,7 +4,7 @@ import socket
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy import select, update, func, and_, bindparam
 from sqlalchemy.ext.asyncio import AsyncSession
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 import json
 import logging
@@ -12,13 +12,32 @@ import logging
 from app.database import get_db, async_session_maker
 from app.models import Server, HAProxyConfigProfile, HAProxySyncLog, ServerCache, MetricsSnapshot, PanelSettings
 from app.auth import verify_auth
-from app.services.haproxy_profile_sync import sync_profile_to_servers, compute_config_hash, is_server_online, stop_haproxy_on_server
+from app.services.haproxy_addresses import MAX_ADDRESSES, InvalidAddressError, ServerAddresses, dump_ips, normalize_ips
+from app.services.haproxy_profile_sync import (
+    check_addresses_on_node,
+    expected_config_hash,
+    is_server_online,
+    mark_outdated_pending,
+    server_addresses,
+    stop_haproxy_on_server,
+    sync_profile_to_servers,
+)
 from app.services.haproxy_config import HAProxyRule, BackendServer, BalancerOptions, get_config_generator
 from app.services.haproxy_validator import validate_config
+from app.services.reserved_ports_sync import _version_tuple
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/haproxy-profiles", tags=["haproxy-profiles"])
+
+# Нода младше разбирает только `bind *:PORT` — порт правила с адресом читался бы нулём
+MIN_NODE_VERSION_HAPROXY_ADDRESSES = "10.31.0"
+
+
+def _addresses_supported(server: Server) -> bool:
+    if not server.node_version:
+        return False
+    return _version_tuple(server.node_version) >= _version_tuple(MIN_NODE_VERSION_HAPROXY_ADDRESSES)
 
 
 # ==================== Schemas ====================
@@ -75,6 +94,11 @@ class BalancerOptionsData(BaseModel):
     allbackups: bool = False
     fullconn: Optional[int] = None
     timeout_queue: Optional[str] = None
+
+
+class ServerAddressesUpdate(BaseModel):
+    listen_ips: list[str] = Field(default_factory=list, max_length=MAX_ADDRESSES)
+    source_ips: list[str] = Field(default_factory=list, max_length=MAX_ADDRESSES)
 
 
 class RuleData(BaseModel):
@@ -359,8 +383,6 @@ async def get_profile(profile_id: int, db: AsyncSession = Depends(get_db), _=Dep
     )
     servers = result.scalars().all()
 
-    config_hash = compute_config_hash(profile.config_content)
-
     return {
         "id": profile.id,
         "name": profile.name,
@@ -375,7 +397,7 @@ async def get_profile(profile_id: int, db: AsyncSession = Depends(get_db), _=Dep
                 "server_name": s.name,
                 "sync_status": s.haproxy_sync_status,
                 "config_hash": s.haproxy_config_hash,
-                "is_synced": s.haproxy_config_hash == config_hash,
+                "is_synced": s.haproxy_config_hash == expected_config_hash(profile.config_content, s),
                 "last_sync_at": s.haproxy_last_sync_at.isoformat() if s.haproxy_last_sync_at else None,
             }
             for s in servers
@@ -407,16 +429,7 @@ async def update_profile(profile_id: int, data: ProfileUpdate, bg: BackgroundTas
             raise HTTPException(400, f"Конфиг не прошёл проверку HAProxy: {message}")
         profile.config_content = data.config_content
         config_changed = True
-
-        new_hash = compute_config_hash(data.config_content)
-        await db.execute(
-            update(Server)
-            .where(
-                Server.active_haproxy_profile_id == profile_id,
-                Server.haproxy_config_hash != new_hash,
-            )
-            .values(haproxy_sync_status="pending")
-        )
+        await mark_outdated_pending(db, profile)
 
     await db.commit()
     await db.refresh(profile)
@@ -484,6 +497,54 @@ async def unlink_server(profile_id: int, server_id: int, bg: BackgroundTasks, db
     # Отвязали от профиля — гасим HAProxy на ноде (stop + disable autostart)
     bg.add_task(_bg_stop_haproxy, server_id)
     return {"success": True}
+
+
+@router.put("/{profile_id}/servers/{server_id}/addresses")
+async def update_server_addresses(
+    profile_id: int, server_id: int, data: ServerAddressesUpdate,
+    db: AsyncSession = Depends(get_db), _=Depends(verify_auth),
+):
+    """Входные и выходные IP сервера; сохраняет и сразу раскатывает конфиг на этот сервер."""
+    profile = await _get_profile(profile_id, db)
+    server = await db.get(Server, server_id)
+    if not server or server.active_haproxy_profile_id != profile_id:
+        raise HTTPException(404, "Server not linked to this profile")
+
+    try:
+        addresses = ServerAddresses(listen=normalize_ips(data.listen_ips), source=normalize_ips(data.source_ips))
+    except InvalidAddressError as e:
+        raise HTTPException(400, str(e))
+
+    # Сброс адресов проверять незачем — он возвращает сервер к общему конфигу профиля
+    if not addresses.is_empty:
+        if not _addresses_supported(server):
+            raise HTTPException(
+                409,
+                f"Агент ноды {server.node_version or 'unknown'} не умеет привязку HAProxy к IP — "
+                f"обновите ноду до {MIN_NODE_VERSION_HAPROXY_ADDRESSES}",
+            )
+        # Коннект пула не держим на время запроса к ноде
+        await db.commit()
+        problem = await check_addresses_on_node(server, addresses)
+        if problem:
+            raise HTTPException(400, problem)
+
+    server.haproxy_listen_ips = dump_ips(addresses.listen)
+    server.haproxy_source_ips = dump_ips(addresses.source)
+    server.haproxy_sync_status = "pending"
+    await db.commit()
+    logger.info(
+        "HAProxy addresses updated: server=%s listen=%s source=%s",
+        server.name, list(addresses.listen), list(addresses.source),
+    )
+
+    results = await sync_profile_to_servers(profile, db, server_ids=[server_id])
+    sync = results[0] if results else None
+    return {
+        "listen_ips": list(addresses.listen),
+        "source_ips": list(addresses.source),
+        "sync": {"success": sync.success, "message": sync.message, "status": sync.status} if sync else None,
+    }
 
 
 # ==================== Sync ====================
@@ -685,13 +746,7 @@ async def add_rule(profile_id: int, data: RuleData, bg: BackgroundTasks, db: Asy
 
     existing_rules.append(rule)
     profile.config_content = gen.generate_full_config(existing_rules)
-
-    new_hash = compute_config_hash(profile.config_content)
-    await db.execute(
-        update(Server)
-        .where(Server.active_haproxy_profile_id == profile_id, Server.haproxy_config_hash != new_hash)
-        .values(haproxy_sync_status="pending")
-    )
+    await mark_outdated_pending(db, profile)
     await db.commit()
 
     bg.add_task(_bg_sync_profile, profile_id)
@@ -715,13 +770,7 @@ async def update_rule(profile_id: int, rule_name: str, data: RuleData, bg: Backg
 
     existing_rules[idx] = rule
     profile.config_content = gen.generate_full_config(existing_rules)
-
-    new_hash = compute_config_hash(profile.config_content)
-    await db.execute(
-        update(Server)
-        .where(Server.active_haproxy_profile_id == profile_id, Server.haproxy_config_hash != new_hash)
-        .values(haproxy_sync_status="pending")
-    )
+    await mark_outdated_pending(db, profile)
     await db.commit()
 
     bg.add_task(_bg_sync_profile, profile_id)
@@ -739,13 +788,7 @@ async def delete_rule(profile_id: int, rule_name: str, bg: BackgroundTasks, db: 
         raise HTTPException(404, f"Rule '{rule_name}' not found")
 
     profile.config_content = gen.generate_full_config(new_rules)
-
-    new_hash = compute_config_hash(profile.config_content)
-    await db.execute(
-        update(Server)
-        .where(Server.active_haproxy_profile_id == profile_id, Server.haproxy_config_hash != new_hash)
-        .values(haproxy_sync_status="pending")
-    )
+    await mark_outdated_pending(db, profile)
     await db.commit()
 
     bg.add_task(_bg_sync_profile, profile_id)
@@ -829,6 +872,7 @@ async def get_servers_status(profile_id: int, db: AsyncSession = Depends(get_db)
             except (json.JSONDecodeError, AttributeError):
                 pass
 
+        addresses = server_addresses(s)
         items.append({
             "server_id": s.id,
             "server_name": s.name,
@@ -839,6 +883,10 @@ async def get_servers_status(profile_id: int, db: AsyncSession = Depends(get_db)
             "last_sync_at": s.haproxy_last_sync_at.isoformat() if s.haproxy_last_sync_at else None,
             "haproxy_running": haproxy_running,
             "metrics": metrics,
+            "listen_ips": list(addresses.listen),
+            "source_ips": list(addresses.source),
+            "addresses_supported": _addresses_supported(s),
+            "addresses_min_node_version": MIN_NODE_VERSION_HAPROXY_ADDRESSES,
         })
 
     return items

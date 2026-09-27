@@ -4,6 +4,7 @@ import logging
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Optional
 
 import httpx
 from sqlalchemy import select, update
@@ -11,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import async_session_maker
 from app.models import Server, HAProxyConfigProfile, HAProxySyncLog
+from app.services.haproxy_addresses import ServerAddresses, load_ips, missing_on_node, render_for_server
 from app.services.http_client import get_node_client, node_auth_headers
 from app.services.node_capabilities import Capability, denied_message, server_allows
 
@@ -21,6 +23,9 @@ MAX_CONCURRENT_SYNCS = 10
 # Сервер считается живым, если метрики обновлялись не дольше этого порога назад.
 # Чуть шире окна сбора метрик (10-15с × 3 + запас), чтобы не считать мёртвым из-за одного пропуска.
 ONLINE_THRESHOLD_SECONDS = 90
+
+NETWORK_STATE_PATH = "/api/system/network/state"
+ADDRESS_CHECK_TIMEOUT = 10.0
 
 
 @dataclass
@@ -34,6 +39,63 @@ class SyncResult:
 
 def compute_config_hash(config_content: str) -> str:
     return hashlib.sha256(config_content.encode()).hexdigest()
+
+
+def server_addresses(server: Server) -> ServerAddresses:
+    return ServerAddresses(listen=load_ips(server.haproxy_listen_ips), source=load_ips(server.haproxy_source_ips))
+
+
+def render_profile_for_server(config_content: str, server: Server) -> str:
+    return render_for_server(config_content, server_addresses(server))
+
+
+def expected_config_hash(config_content: str, server: Server) -> str:
+    """Хэш конфига, который должен стоять именно на этом сервере (с его адресами)."""
+    return compute_config_hash(render_profile_for_server(config_content, server))
+
+
+async def mark_outdated_pending(db: AsyncSession, profile: HAProxyConfigProfile) -> None:
+    """Помечает pending привязанные серверы, чей конфиг разошёлся с профилем. Commit — на вызывающей стороне."""
+    result = await db.execute(select(Server).where(Server.active_haproxy_profile_id == profile.id))
+    outdated = [
+        s.id for s in result.scalars().all()
+        if s.haproxy_config_hash != expected_config_hash(profile.config_content, s)
+    ]
+    if outdated:
+        await db.execute(update(Server).where(Server.id.in_(outdated)).values(haproxy_sync_status="pending"))
+
+
+async def check_addresses_on_node(server: Server, addresses: ServerAddresses) -> Optional[str]:
+    """Причина не раскатывать конфиг с выбранными IP либо None.
+
+    `haproxy -c` адреса не проверяет, а reload с IP, которого на сервере нет, не
+    применится: мастер HAProxy оставит старых воркеров, а `systemctl reload` вернёт
+    успех — панель показала бы «синхронизировано» при старом конфиге. Поэтому
+    адреса сверяются с интерфейсами ноды до отправки."""
+    if addresses.is_empty:
+        return None
+    if not server_allows(server, Capability.SYSTEM, write=False):
+        return "Раздел «система» закрыт на ноде — панель не может проверить её IP-адреса"
+    try:
+        response = await get_node_client(server).get(
+            f"{server.url}{NETWORK_STATE_PATH}",
+            headers=node_auth_headers(server),
+            timeout=ADDRESS_CHECK_TIMEOUT,
+        )
+        network_state = response.json() if response.status_code == 200 else None
+    except httpx.TimeoutException:
+        return "Не удалось получить адреса сервера: таймаут"
+    except httpx.RequestError as e:
+        return f"Не удалось получить адреса сервера: {e}"
+    except ValueError:
+        network_state = None
+    if not isinstance(network_state, dict):
+        return f"Не удалось получить адреса сервера: HTTP {response.status_code}"
+
+    missing = missing_on_node(addresses, network_state)
+    if missing:
+        return f"На сервере нет адресов {', '.join(missing)} — уберите их в настройках сервера в профиле"
+    return None
 
 
 def is_server_online(server: Server, threshold: int = ONLINE_THRESHOLD_SECONDS) -> bool:
@@ -58,6 +120,10 @@ async def _sync_single_server(
     url = f"{server.url}/api/haproxy/config/apply"
 
     async with async_session_maker() as db:
+        address_problem = await check_addresses_on_node(server, server_addresses(server))
+        if address_problem:
+            return await _record_failure(db, server, profile_id, config_hash, address_problem)
+
         try:
             client = get_node_client(server)
             response = await client.post(
@@ -144,8 +210,6 @@ async def sync_profile_to_servers(
     server_ids: list[int] | None = None,
     ensure_started: bool = False,
 ) -> list[SyncResult]:
-    config_hash = compute_config_hash(profile.config_content)
-
     query = select(Server).where(
         Server.active_haproxy_profile_id == profile.id,
         Server.is_active.is_(True),
@@ -169,12 +233,16 @@ async def sync_profile_to_servers(
         await db.commit()
         servers = [s for s in servers if s not in denied]
 
+    # У каждого сервера свой конфиг: профиль, собранный с его адресами
+    rendered = {s.id: render_profile_for_server(profile.config_content, s) for s in servers}
+    hashes = {server_id: compute_config_hash(text) for server_id, text in rendered.items()}
+
     online = [s for s in servers if is_server_online(s)]
     offline = [s for s in servers if not is_server_online(s)]
 
     # Живой офлайн уже синхронизированный сервер не трогаем — он не «ждёт».
-    offline_pending = [s for s in offline if s.haproxy_config_hash != config_hash]
-    offline_synced = [s for s in offline if s.haproxy_config_hash == config_hash]
+    offline_pending = [s for s in offline if s.haproxy_config_hash != hashes[s.id]]
+    offline_synced = [s for s in offline if s.haproxy_config_hash == hashes[s.id]]
 
     # Все, кого реально будем менять, помечаем pending в общей сессии (видно сразу при опросе).
     pending_ids = [s.id for s in online] + [s.id for s in offline_pending]
@@ -194,7 +262,7 @@ async def sync_profile_to_servers(
     )
 
     offline_results = await asyncio.gather(
-        *[_queue_offline_server(s, profile.id, config_hash) for s in offline_pending]
+        *[_queue_offline_server(s, profile.id, hashes[s.id]) for s in offline_pending]
     )
     results.extend(offline_results)
 
@@ -202,7 +270,9 @@ async def sync_profile_to_servers(
 
     async def _guarded(server: Server) -> SyncResult:
         async with semaphore:
-            return await _sync_single_server(server, profile.config_content, config_hash, profile.id, ensure_started)
+            return await _sync_single_server(
+                server, rendered[server.id], hashes[server.id], profile.id, ensure_started,
+            )
 
     online_results = await asyncio.gather(*[_guarded(s) for s in online])
     results.extend(online_results)

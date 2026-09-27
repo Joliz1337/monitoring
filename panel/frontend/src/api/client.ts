@@ -2375,6 +2375,16 @@ export interface HAProxyServerStatus {
     la1: number | null
     cores: number | null
   } | null
+  listen_ips: string[]
+  source_ips: string[]
+  addresses_supported: boolean
+  addresses_min_node_version: string
+}
+
+export interface HAProxyServerAddressesResult {
+  listen_ips: string[]
+  source_ips: string[]
+  sync: Pick<HAProxySyncResult, 'success' | 'message' | 'status'> | null
 }
 
 export interface BackendServer {
@@ -2450,6 +2460,8 @@ export const haproxyProfilesApi = {
     api.post(`/haproxy-profiles/${profileId}/servers/${serverId}`),
   unlinkServer: (profileId: number, serverId: number) =>
     api.delete(`/haproxy-profiles/${profileId}/servers/${serverId}`),
+  updateServerAddresses: (profileId: number, serverId: number, data: { listen_ips: string[]; source_ips: string[] }) =>
+    api.put<HAProxyServerAddressesResult>(`/haproxy-profiles/${profileId}/servers/${serverId}/addresses`, data, { timeout: 60000 }),
   syncAll: (profileId: number) =>
     api.post<{ results: HAProxySyncResult[] }>(`/haproxy-profiles/${profileId}/sync`),
   syncOne: (profileId: number, serverId: number) =>

@@ -31,6 +31,7 @@ from app.services.firewall_profile_sync import (
 )
 from app.services.haproxy_profile_sync import (
     compute_config_hash,
+    render_profile_for_server as render_haproxy_config,
     sync_profile_to_servers as sync_haproxy_profile,
 )
 from app.services.http_client import get_node_client, node_auth_headers
@@ -163,7 +164,7 @@ async def _reconcile_haproxy_config(server_id: int) -> str:
         if not profile:
             return "no_profile"
 
-        expected = compute_config_hash(_normalize_config(profile.config_content))
+        expected = compute_config_hash(_normalize_config(render_haproxy_config(profile.config_content, server)))
         data = await _node_get(server, "/api/haproxy/config")
         if data is None or data.get("content") is None:
             return "node_unreachable"

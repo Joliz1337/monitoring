@@ -121,6 +121,10 @@ class Server(Base):
     active_haproxy_profile_id = Column(Integer, ForeignKey("haproxy_config_profiles.id", ondelete="SET NULL"), nullable=True)
     haproxy_config_hash = Column(String(64), nullable=True)
     haproxy_last_sync_at = Column(DateTime(timezone=True), nullable=True)
+    # Адреса сервера для профиля (JSON-списки IPv4): входные — в bind правил,
+    # выходные — source к бэкендам; пусто = все адреса / выбор системы
+    haproxy_listen_ips = Column(Text, nullable=True)
+    haproxy_source_ips = Column(Text, nullable=True)
 
     # Firewall (UFW) profile binding
     active_firewall_profile_id = Column(Integer, ForeignKey("firewall_profiles.id", ondelete="SET NULL"), nullable=True)

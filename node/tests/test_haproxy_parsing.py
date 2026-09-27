@@ -197,6 +197,17 @@ class RuleParsingTests(unittest.TestCase):
         self.assertEqual([s.name for s in web.servers], ["web1", "web2"])
         self.assertTrue(web.servers[1].backup)
 
+    def test_listen_port_is_read_from_ip_bound_bind(self):
+        # Панель собирает конфиг под сервер: вместо `*` — его входные IP
+        for bind in ("bind 1.1.1.1:8443", "bind 1.1.1.1:8443,1.1.1.2:8443 accept-proxy"):
+            with self.subTest(bind=bind):
+                content = (
+                    f"frontend tcp_relay\n    {bind}\n    default_backend backend_tcp_relay\n\n"
+                    "backend backend_tcp_relay\n    server srv1 10.0.0.5:443 source 2.2.2.1\n"
+                )
+                [rule] = self.parse(content)
+                self.assertEqual(rule.listen_port, 8443)
+
     def test_backend_without_frontend_is_ignored(self):
         content = "backend backend_tcp_orphan\n    server s 10.0.0.1:443\n"
         self.assertEqual(self.parse(content), [])
