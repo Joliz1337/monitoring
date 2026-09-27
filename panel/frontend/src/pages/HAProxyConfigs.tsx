@@ -929,6 +929,12 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
     })
   }
 
+  // Кнопки строки (запуск, синхронизация, отвязка) делают своё и строку не раскрывают
+  const handleServerRowClick = (e: React.MouseEvent, serverId: number) => {
+    if ((e.target as HTMLElement).closest('button')) return
+    toggleServerExpanded(serverId)
+  }
+
   const handleAddressesSaved = () => { fetchServersStatus(); onRefreshList() }
 
   const handleUnlinkServer = async (serverId: number) => {
@@ -1202,7 +1208,8 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                 const hasAddresses = s.listen_ips.length > 0 || s.source_ips.length > 0
                 return (
                   <div key={s.server_id}>
-                    <div className={`flex items-center justify-between px-3 py-2 rounded-lg bg-dark-900/30 border border-dark-800/50 ${s.online ? '' : 'opacity-60'}`}>
+                    <div onClick={e => handleServerRowClick(e, s.server_id)}
+                      className={`flex items-center justify-between px-3 py-2 rounded-lg bg-dark-900/30 border border-dark-800/50 hover:border-dark-700 cursor-pointer transition-colors ${s.online ? '' : 'opacity-60'}`}>
                       <div className="flex items-center gap-2.5 min-w-0">
                         <Tooltip label={t('haproxy_configs.addresses_toggle')}>
                           <button onClick={() => toggleServerExpanded(s.server_id)}
