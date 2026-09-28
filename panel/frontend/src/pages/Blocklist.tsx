@@ -549,8 +549,7 @@ export default function Blocklist() {
 
       setNewAllowIps('')
       await fetchAllAllowRules()
-      startSyncToast()
-      toast.success(t('blocklist.sync_success'))
+      toast.success(t('blocklist.allow_pushing'))
     } catch (err: any) {
       console.error('Failed to add allow rules:', err)
       toast.error(err.response?.data?.detail || 'Failed to add rules')
@@ -563,8 +562,7 @@ export default function Blocklist() {
     try {
       await blocklistApi.deleteGlobal(ruleId)
       await fetchAllAllowRules()
-      startSyncToast()
-      toast.success(t('common.deleted'))
+      toast.success(t('blocklist.allow_pushing'))
     } catch (err: any) {
       console.error('Failed to delete allow rule:', err)
       toast.error(t('common.action_failed'))
@@ -575,7 +573,6 @@ export default function Blocklist() {
     try {
       const response = await blocklistApi.deleteGlobalBulk(ruleIds)
       await fetchAllAllowRules()
-      startSyncToast()
       toast.success(t('blocklist.deleted_count', { count: response.data.deleted }))
     } catch (err: any) {
       console.error('Failed to bulk delete allow rules:', err)

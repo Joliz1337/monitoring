@@ -402,7 +402,9 @@ class DeployJobManager:
             await db.refresh(server)
             server_id = server.id
 
-        asyncio.ensure_future(get_blocklist_manager().sync_single_node_by_id(server_id))
+        blocklist = get_blocklist_manager()
+        asyncio.ensure_future(blocklist.sync_single_node_by_id(server_id))
+        blocklist.request_allowlist_push()
         asyncio.ensure_future(get_time_sync_service().sync_single_server(server_id))
         return server_id
 

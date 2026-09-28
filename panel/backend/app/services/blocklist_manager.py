@@ -38,9 +38,19 @@ MAX_LIST_BYTES = 256 * 1024 * 1024  # потолок размера скачив
 NODE_MAX_IPSET_ENTRIES = 1_000_000  # maxelem ipset на нодах — больше нода физически не примет
 SYNC_BASE_TIMEOUT = 20.0
 ALLOW_SYNC_TIMEOUT = 20.0
+# Жёсткий потолок на ноду поверх таймаутов httpx: повисшее SOCKS-рукопожатие
+# их не соблюдает и держало бы рассылку белого списка бесконечно
+ALLOW_PUSH_BUDGET = 2 * ALLOW_SYNC_TIMEOUT + 5
 SYNC_TIMEOUT_IPS_PER_SEC = 40_000  # +1 сек к таймауту синка на каждые 40k IP
+# Страховочная сверка белого списка: IP ноды по DNS-имени или IP панели
+# меняются без единой правки в панели
+ALLOWLIST_CHECK_INTERVAL = 300
+ALLOWLIST_PUSH_DEBOUNCE = 3.0  # пачка правок серверов (массовое удаление, деплой) — одна рассылка
+ALLOWLIST_START_DELAY = 60  # после рестарта last_seen протухший — весь парк сочли бы офлайн
+DIRECTIONS = ("in", "out")
 QUEUED_MESSAGE = "Сервер офлайн — синхронизация отложена до восстановления"
 DENIED_MESSAGE = "Нода закрыла блокировку IP в своих настройках"
+ALLOW_FAILED_MESSAGE = "Нода не приняла белый список"
 
 DEFAULT_SOURCES = [
     {
@@ -96,6 +106,17 @@ class BlocklistManager:
         # Отдельные JSON-тела нужны только нодам со своими правилами; при списках
         # в миллионы IP каждое тело ~70 МБ — больше двух одновременно не собираем
         self._extra_body_sem = asyncio.Semaphore(2)
+        # Свой семафор: рассылка белого списка не ждёт, пока полный синк
+        # на миллионах адресов отпустит общие слоты
+        self._allow_http_sem = asyncio.Semaphore(self.HTTP_CONCURRENCY)
+        self._allowlist_task: Optional[asyncio.Task] = None
+        self._allowlist_requested = asyncio.Event()
+        # Хэш белого списка, разосланного на весь парк; None — разослать заново
+        self._allowlist_pushed_hash: Optional[str] = None
+        self._allowlist_inflight_hash: Optional[str] = None
+        # Растёт, когда синк блок-листа доставил части нод белый список,
+        # отличный от разосланного на весь парк
+        self._allowlist_epoch = 0
     
     def _validate_ip_cidr(self, ip: str) -> bool:
         ip = ip.strip()
@@ -251,26 +272,37 @@ class BlocklistManager:
         rules = result.scalars().all()
         return [r.ip_cidr for r in rules]
 
-    async def get_allow_ips_global(self, db: AsyncSession, direction: str = "in") -> list[str]:
-        """Белый список для синка: ручные allow-правила + авто (IP панели и всех нод).
+    async def build_allow_lists(self) -> dict[str, list[str]]:
+        """Белый список по направлениям: ручные allow-правила + авто (IP панели и всех нод).
 
         IP панели и нод всегда в allowlist — ACCEPT стоит первым в цепочке,
         поэтому управляющий трафик не попадёт под DROP даже при плохом блок-листе."""
-        ips = set(await self.get_global_rules(db, direction, list_type="allow"))
+        async with async_session() as db:
+            urls = (await db.execute(
+                select(Server.url).where(Server.is_active == True)  # noqa: E712
+            )).scalars().all()
+            manual = {
+                direction: await self.get_global_rules(db, direction, list_type="allow")
+                for direction in DIRECTIONS
+            }
 
-        servers = (await db.execute(
-            select(Server).where(Server.is_active == True)
-        )).scalars().all()
-        for srv in servers:
-            ip = await host_to_ip(urlparse(srv.url).hostname or "")
-            if ip:
-                ips.add(ip)
-
+        # Резолв — после закрытия сессии: медленный DNS не держит коннект пула
+        resolved = await asyncio.gather(
+            *(host_to_ip(urlparse(url).hostname or "") for url in urls)
+        )
+        auto = {ip for ip in resolved if ip}
         panel_ip = await resolve_panel_ip()
         if panel_ip:
-            ips.add(panel_ip)
+            auto.add(panel_ip)
 
-        return self.deduplicate_ips(sorted(ips))
+        return {
+            direction: self.deduplicate_ips(sorted(auto.union(manual[direction])))
+            for direction in DIRECTIONS
+        }
+
+    @staticmethod
+    def allow_digest(allow: dict[str, list[str]]) -> str:
+        return hashlib.sha256(json.dumps(allow, sort_keys=True).encode()).hexdigest()
     
     async def get_server_rules(self, server_id: int, db: AsyncSession, direction: str = "in") -> list[str]:
         result = await db.execute(
@@ -368,10 +400,11 @@ class BlocklistManager:
         JSON-тело запроса тоже собирается один раз на направление и переиспользуется
         всеми нодами без своих правил: сериализация списка на каждую ноду держала
         в памяти десятки тел по ~70 МБ одновременно — OOM панели на списке в 4 млн IP."""
-        shared = {}
+        allow = await self.build_allow_lists()
+        shared = {"allow_hash": self.allow_digest(allow)}
         async with async_session() as db:
             await self._prune_last_good(db)
-            for direction in ("in", "out"):
+            for direction in DIRECTIONS:
                 global_ips = await self.get_global_rules(db, direction)
                 auto_ips = await self.get_auto_list_ips(db, direction)
                 # auto_ips уже нормализованы и отфильтрованы при парсинге; ручные
@@ -394,7 +427,7 @@ class BlocklistManager:
                     "block_set": block_set,
                     "count": len(block),
                     "body": body,
-                    "allow": await self.get_allow_ips_global(db, direction),
+                    "allow": allow[direction],
                 }
         return shared
     
@@ -678,6 +711,7 @@ class BlocklistManager:
 
                     for sr in done:
                         results[sr["server_id"]] = sr
+                    self._note_allow_sent(shared["allow_hash"])
 
                     # Живая нода тоже могла не принять список (таймаут, ошибка ноды) —
                     # без очереди эта потеря так и осталась бы незамеченной.
@@ -736,6 +770,7 @@ class BlocklistManager:
             return {**results, **{s.id: str(e) for s in servers}}
 
         done = await asyncio.gather(*[self._sync_one_server_safe(s, shared) for s in servers])
+        self._note_allow_sent(shared["allow_hash"])
         for sr in done:
             results[sr["server_id"]] = None if sr.get("success") else self._first_error(sr)
         self._merge_sync_results({sr["server_id"]: sr for sr in done})
@@ -792,6 +827,7 @@ class BlocklistManager:
 
             shared = await self.build_shared_lists()
             sr = await self._sync_one_server_safe(server, shared)
+            self._note_allow_sent(shared["allow_hash"])
             if not sr.get("success"):
                 await enqueue([server_id], KIND_BLOCKLIST, "Нода не приняла блок-лист")
             prev = self._last_sync.get("servers", {}) if self._last_sync else {}
@@ -807,7 +843,104 @@ class BlocklistManager:
             logger.error(f"sync_single_node_by_id failed: {e}")
             self._sync_in_progress = False
             return {}
-    
+
+    def request_allowlist_push(self) -> None:
+        """Попросить разослать белый список: изменился состав серверов или allow-правил.
+
+        Не ждёт рассылки. Правки, пришедшие пачкой, схлопываются в одну
+        рассылку, а список, который не изменился, не рассылается вовсе."""
+        self._allowlist_requested.set()
+
+    def _note_allow_sent(self, digest: str) -> None:
+        """Синк блок-листа доставил своим нодам белый список из своего снимка.
+
+        Снимок, не совпавший с разосланным на весь парк, мог устареть за время
+        долгого синка и лечь на ноду поверх свежего — тогда разослать заново."""
+        if digest in (self._allowlist_pushed_hash, self._allowlist_inflight_hash):
+            return
+        self._allowlist_pushed_hash = None
+        self._allowlist_epoch += 1
+        self._allowlist_requested.set()
+
+    async def push_allowlist_if_changed(self) -> None:
+        epoch = self._allowlist_epoch
+        allow = await self.build_allow_lists()
+        digest = self.allow_digest(allow)
+        if digest == self._allowlist_pushed_hash:
+            return
+        self._allowlist_inflight_hash = digest
+        try:
+            await self._push_allowlist(allow)
+        finally:
+            self._allowlist_inflight_hash = None
+        if epoch == self._allowlist_epoch:
+            self._allowlist_pushed_hash = digest
+
+    async def _push_allowlist(self, allow: dict[str, list[str]]) -> None:
+        """Разослать на все активные ноды только белый список.
+
+        Белый список — сотни адресов, блок-лист — до миллиона: гонять весь
+        блок-лист по парку ради одного нового IP ноды незачем."""
+        async with async_session() as db:
+            servers = list((await db.execute(
+                select(Server).where(Server.is_active == True)  # noqa: E712
+            )).scalars().all())
+        servers, _ = self._split_denied(servers)
+        online = [s for s in servers if is_server_online(s)]
+        offline = [s.id for s in servers if not is_server_online(s)]
+
+        # Долг офлайн-ноды закрывает полный синк блок-листа: он соберёт
+        # белый список, актуальный на момент её возвращения
+        if offline:
+            await enqueue(offline, KIND_BLOCKLIST, QUEUED_MESSAGE)
+
+        done = await asyncio.gather(*(self._push_allow_one(s, allow) for s in online))
+        failed = [server_id for server_id, ok in done if not ok]
+        if failed:
+            await enqueue(failed, KIND_BLOCKLIST, ALLOW_FAILED_MESSAGE)
+
+        logger.info(
+            f"Allowlist pushed (in={len(allow['in'])}, out={len(allow['out'])}): "
+            f"{len(online) - len(failed)} ok, {len(failed)} failed, {len(offline)} queued"
+        )
+
+    async def _push_allow_one(self, server: Server, allow: dict[str, list[str]]) -> tuple[int, bool]:
+        async with self._allow_http_sem:
+            try:
+                ok = await asyncio.wait_for(
+                    self._send_allow(server, allow), timeout=ALLOW_PUSH_BUDGET
+                )
+            except asyncio.TimeoutError:
+                logger.warning(f"Allowlist push to {server.name} timed out")
+                ok = False
+        return server.id, ok
+
+    async def _send_allow(self, server: Server, allow: dict[str, list[str]]) -> bool:
+        for direction in DIRECTIONS:
+            ok, message, _ = await self.sync_allow_to_node(
+                server, allow[direction], direction=direction
+            )
+            if not ok:
+                logger.warning(f"Allowlist {direction} to {server.name} failed: {message}")
+                return False
+        return True
+
+    async def _allowlist_loop(self) -> None:
+        await asyncio.sleep(ALLOWLIST_START_DELAY)
+        while self._running:
+            try:
+                await asyncio.wait_for(
+                    self._allowlist_requested.wait(), timeout=ALLOWLIST_CHECK_INTERVAL
+                )
+                await asyncio.sleep(ALLOWLIST_PUSH_DEBOUNCE)
+            except asyncio.TimeoutError:
+                pass
+            self._allowlist_requested.clear()
+            try:
+                await self.push_allowlist_if_changed()
+            except Exception as e:
+                logger.error(f"Allowlist push failed: {e}")
+
     async def refresh_source(self, source_id: int) -> tuple[bool, str, int, bool]:
         async with async_session() as db:
             result = await db.execute(
@@ -929,14 +1062,17 @@ class BlocklistManager:
         self._running = True
         await self.init_default_sources()
         self._update_task = asyncio.create_task(self._update_loop())
+        self._allowlist_task = asyncio.create_task(self._allowlist_loop())
         logger.info("BlocklistManager started")
-    
+
     async def stop(self):
         self._running = False
-        if self._update_task:
-            self._update_task.cancel()
+        for task in (self._update_task, self._allowlist_task):
+            if not task:
+                continue
+            task.cancel()
             try:
-                await self._update_task
+                await task
             except asyncio.CancelledError:
                 pass
         logger.info("BlocklistManager stopped")

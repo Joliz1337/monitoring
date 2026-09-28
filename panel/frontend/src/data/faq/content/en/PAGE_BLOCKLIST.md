@@ -20,7 +20,7 @@ Address filtering across all nodes at once: blacklists, an allowlist and automat
 
 ## Good to know
 
-- Rules reach nodes in the background; a freshly added node gets the current lists on the next sync.
+- The allowlist is updated on every node as soon as something changes: a server is added, removed or disabled, its address changes, or you edit the allowlist by hand. Blacklists from sources refresh once a day; a freshly added node gets all lists right away.
 - The same address can sit in both the blocklist and the allowlist — the allowlist wins.
 - Blocking a subnet is cheaper than a hundred addresses from it: `1.2.3.0/24` is a single entry.
 - This isn't the same as firewall rules: those describe ports and services, the blocklist only addresses — but across the whole fleet.

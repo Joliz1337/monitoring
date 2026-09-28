@@ -1,7 +1,8 @@
 """Blocklist management router for IP/CIDR blocking (incoming + outgoing)
 
 All rule mutations (add/delete global, server, source toggle) trigger
-background sync so changes are applied to nodes automatically.
+background sync so changes are applied to nodes automatically. Allow
+(whitelist) rules go out as a separate lightweight allowlist push.
 """
 
 import asyncio
@@ -209,7 +210,7 @@ async def add_global_rules_bulk(
 
     if added > 0:
         invalidate_all_server_rules_cache()
-        bg.add_task(manager.sync_all_nodes)
+        _apply_global_change(bg, {request.list_type})
 
     return {
         "success": True,
@@ -242,25 +243,28 @@ async def delete_global_rule(
     if not rule:
         raise HTTPException(status_code=404, detail="Rule not found")
 
+    list_type = rule.list_type or "block"
     await db.delete(rule)
     await db.commit()
 
     invalidate_all_server_rules_cache()
-    bg.add_task(manager_sync_all)
+    _apply_global_change(bg, {list_type})
 
     return {"success": True, "message": "Rule deleted"}
 
 
-async def _bulk_delete_rules(db: AsyncSession, rule_ids: list[int], server_id: Optional[int]) -> int:
-    """Delete rules by ID within scope (global if server_id is None). Returns deleted count."""
+async def _bulk_delete_rules(db: AsyncSession, rule_ids: list[int], server_id: Optional[int]) -> list[str]:
+    """Delete rules by ID within scope (global if server_id is None). Returns list_type of each deleted rule."""
     scope = BlocklistRule.server_id.is_(None) if server_id is None else BlocklistRule.server_id == server_id
-    deleted = 0
+    deleted: list[str] = []
     for start in range(0, len(rule_ids), EXISTING_LOOKUP_CHUNK):
         chunk = rule_ids[start:start + EXISTING_LOOKUP_CHUNK]
         result = await db.execute(
-            delete(BlocklistRule).where(and_(BlocklistRule.id.in_(chunk), scope))
+            delete(BlocklistRule)
+            .where(and_(BlocklistRule.id.in_(chunk), scope))
+            .returning(BlocklistRule.list_type)
         )
-        deleted += result.rowcount or 0
+        deleted.extend(list_type or "block" for list_type in result.scalars())
     await db.commit()
     return deleted
 
@@ -274,13 +278,23 @@ async def delete_global_rules_bulk(
 ):
     """Delete multiple global blocklist rules. One background sync per call."""
     ids = list(dict.fromkeys(request.rule_ids))
-    deleted = await _bulk_delete_rules(db, ids, server_id=None)
+    deleted_types = await _bulk_delete_rules(db, ids, server_id=None)
 
-    if deleted > 0:
+    if deleted_types:
         invalidate_all_server_rules_cache()
-        bg.add_task(manager_sync_all)
+        _apply_global_change(bg, set(deleted_types))
 
+    deleted = len(deleted_types)
     return {"success": True, "deleted": deleted, "not_found": len(ids) - deleted}
+
+
+def _apply_global_change(bg: BackgroundTasks, list_types: set[str]) -> None:
+    """Белый список — сотни адресов, его рассылка не тянет за собой блок-лист
+    на миллион записей; полный синк нужен только при смене блок-правил."""
+    if "allow" in list_types:
+        get_blocklist_manager().request_allowlist_push()
+    if "block" in list_types:
+        bg.add_task(manager_sync_all)
 
 
 async def manager_sync_all():
@@ -478,7 +492,7 @@ async def delete_server_rules_bulk(
         raise HTTPException(status_code=404, detail="Server not found")
 
     ids = list(dict.fromkeys(request.rule_ids))
-    deleted = await _bulk_delete_rules(db, ids, server_id=server_id)
+    deleted = len(await _bulk_delete_rules(db, ids, server_id=server_id))
 
     if deleted > 0:
         invalidate_server_rules_cache(server_id)

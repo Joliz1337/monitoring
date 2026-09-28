@@ -1476,6 +1476,7 @@
     "sync_error": "Error applying rules on: {{servers}}",
     "sync_queued": "Rules applied. Offline servers will receive them once back online: {{servers}}",
     "sync_cancelled": "Sync cancelled, servers left unchanged: {{reason}}",
+    "allow_pushing": "The allowlist is being pushed to servers. Offline servers will get it once back online",
     "loading_rules": "Loading...",
     "search_placeholder": "Search: IP, prefix or CIDR",
     "select_all": "Select all",

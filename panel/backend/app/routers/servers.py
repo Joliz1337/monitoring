@@ -432,9 +432,9 @@ async def create_server(
     await db.refresh(new_server)
     _invalidate_list_cache()
 
-    asyncio.ensure_future(
-        get_blocklist_manager().sync_single_node_by_id(new_server.id)
-    )
+    blocklist = get_blocklist_manager()
+    asyncio.ensure_future(blocklist.sync_single_node_by_id(new_server.id))
+    blocklist.request_allowlist_push()
     asyncio.ensure_future(
         get_time_sync_service().sync_single_server(new_server.id)
     )
@@ -603,7 +603,7 @@ async def update_server(
     if not server:
         raise HTTPException(status_code=404)
     
-    was_inactive = not server.is_active
+    was_active = server.is_active
     old_url = server.url
     old_api_key = server.api_key
     old_proxy = server.proxy_url
@@ -623,13 +623,15 @@ async def update_server(
         or server.api_key != old_api_key
         or server.proxy_url != old_proxy
     )
-    activated = was_inactive and server.is_active
+    activated = not was_active and server.is_active
 
+    blocklist = get_blocklist_manager()
     if server.is_active and (activated or node_changed):
-        asyncio.ensure_future(
-            get_blocklist_manager().sync_single_node_by_id(server_id)
-        )
-    
+        asyncio.ensure_future(blocklist.sync_single_node_by_id(server_id))
+    # Адрес или активность сервера меняют набор IP нод в белом списке всего парка
+    if server.url != old_url or server.is_active != was_active:
+        blocklist.request_allowlist_push()
+
     return {"success": True, "message": "Server updated"}
 
 
@@ -647,7 +649,9 @@ async def delete_server(
     
     await db.delete(server)
     await db.commit()
-    
+    # IP удалённой ноды мог уйти хостеру и достаться чужому — из белого списка его убрать сразу
+    get_blocklist_manager().request_allowlist_push()
+
     return {"success": True, "message": "Server deleted"}
 
 
