@@ -35,9 +35,11 @@ The **"One-time (personal) key"** checkbox in auto-install does the same thing o
 
 If a server is behind heavy DPI (e.g. Russia's TSPU) and cannot pull the node image from the registry, the panel ships the image over SSH itself.
 
+**Install a node via auto-install.** Turn on **"Download everything through the panel"** in the auto-install form: the server gets the installer, code, Docker, images and packages through the panel. The panel forwards a proxy inside the SSH session for the duration of the install only, and the installer removes it afterwards. SSH port forwarding must be allowed on the server — on Ubuntu it is by default.
+
 **Update an already installed node.** On the **Updates** page each node has a **"Deliver image over SSH"** button: the panel pulls the fresh image to itself, uploads it to the node over SSH and brings it up — nothing is downloaded on the node itself. Requires root access; SSH credentials can be saved (stored encrypted) or entered each time. Progress is shown as a live log.
 
-**Install a node on a bare/blocked server:**
+**Install a node manually on a bare/blocked server:**
 
 1. Copy the NODE_SECRET (the "Add server" button).
 2. On the server, run the installer in blocked mode — it installs Docker, files, certificates and `.env`, then stops quickly at the image instead of hanging on the download:

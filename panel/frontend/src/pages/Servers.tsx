@@ -410,6 +410,7 @@ export default function Servers() {
       d.installRemnawave && d.remnaCertMode === 'saved' ? d.remnaCertProfileId : null,
     remnawave_cert_inline:
       d.installRemnawave && d.remnaCertMode === 'inline' ? d.remnaCertInline : null,
+    via_panel: d.viaPanel,
     install_proxy: d.installProxy,
     proxy_url: d.installProxy ? d.proxyUrl : null,
     ssh_preset: d.sshPreset === 'none' ? null : d.sshPreset,

@@ -239,6 +239,8 @@
     "deploy_nic_hybrid": "Hybrid",
     "deploy_nic_rps": "RPS",
     "deploy_install_remnawave": "Remnawave node",
+    "deploy_via_panel": "Download everything through the panel",
+    "deploy_via_panel_hint": "For servers that can't reach GitHub and Docker (e.g. behind DPI blocking). The panel forwards a proxy inside the SSH session for the duration of the install only; install traffic goes through the panel. Not used in semi-automatic mode.",
     "deploy_install_proxy": "Installer HTTP proxy (apt/docker via proxy)",
     "deploy_remna_new": "New certificate",
     "deploy_remna_delete_confirm": "Delete this saved certificate?",

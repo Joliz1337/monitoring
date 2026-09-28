@@ -9,7 +9,7 @@ import ipaddress
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from typing import Optional
@@ -143,6 +143,9 @@ class DeployRequest(BaseModel):
     save_remnawave_cert_name: Optional[str] = None
     install_proxy: bool = False
     proxy_url: Optional[str] = None
+    # Сервер за ТСПУ: install.sh и всё, что он тянет, качается через панель по
+    # SSH-туннелю. В полуавтоматическом режиме (без SSH) не действует
+    via_panel: bool = False
     # SOCKS5-прокси панель→сервер: используется для SSH-подключения при установке
     # и сохраняется у созданного сервера (вся дальнейшая связь — тоже через него)
     socks5_proxy: Optional[str] = None
@@ -168,6 +171,12 @@ class DeployRequest(BaseModel):
     @classmethod
     def validate_socks5_proxy(cls, v: Optional[str]) -> Optional[str]:
         return validate_proxy_input(v)
+
+    @model_validator(mode='after')
+    def check_single_installer_proxy(self) -> 'DeployRequest':
+        if self.via_panel and self.install_proxy:
+            raise ValueError("«Качать всё через панель» и HTTP-прокси установщика — выберите что-то одно")
+        return self
 
     @field_validator('remnawave_nginx_domain')
     @classmethod
@@ -283,6 +292,7 @@ async def _build_deploy_params(
         socks5_proxy=req.socks5_proxy,
         new_password=req.new_root_password,
         lang=req.lang,
+        via_panel=req.via_panel,
     )
 
 

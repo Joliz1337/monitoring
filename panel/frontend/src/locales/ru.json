@@ -243,6 +243,8 @@
     "deploy_nic_hybrid": "Hybrid",
     "deploy_nic_rps": "RPS",
     "deploy_install_remnawave": "Нода Remnawave",
+    "deploy_via_panel": "Качать всё через панель",
+    "deploy_via_panel_hint": "Для серверов, где GitHub и Docker недоступны (ТСПУ). Панель пробрасывает прокси внутри SSH-сессии только на время установки, трафик установки идёт через панель. В полуавтоматическом режиме не действует.",
     "deploy_install_proxy": "HTTP-прокси установщика (apt/docker через прокси)",
     "deploy_remna_new": "Новый сертификат",
     "deploy_remna_delete_confirm": "Удалить этот сохранённый сертификат?",

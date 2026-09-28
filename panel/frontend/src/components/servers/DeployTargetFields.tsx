@@ -34,6 +34,7 @@ export interface DeployFormData {
   remnaCertMode: 'inline' | 'saved'
   remnaCertInline: string
   remnaCertProfileId: number | null
+  viaPanel: boolean
   installProxy: boolean
   proxyUrl: string
   haproxyProfileId: number | null
@@ -65,6 +66,7 @@ export const DEPLOY_DEFAULTS: DeployFormData = {
   remnaCertMode: 'inline',
   remnaCertInline: '',
   remnaCertProfileId: null,
+  viaPanel: false,
   installProxy: false,
   proxyUrl: '',
   haproxyProfileId: null,
@@ -428,10 +430,21 @@ export default function DeployTargetFields({
           )}
         </AnimatePresence>
 
+        <div>
+          <label className="flex items-center gap-2.5 cursor-pointer">
+            <Checkbox
+              checked={deploy.viaPanel}
+              onChange={(e) => onChange({ viaPanel: e.target.checked, installProxy: false })}
+            />
+            <span className="text-sm text-dark-200">{t('servers.deploy_via_panel')}</span>
+          </label>
+          <p className="text-xs text-dark-500 mt-1 ml-6">{t('servers.deploy_via_panel_hint')}</p>
+        </div>
+
         <label className="flex items-center gap-2.5 cursor-pointer">
           <Checkbox
             checked={deploy.installProxy}
-            onChange={(e) => onChange({ installProxy: e.target.checked })}
+            onChange={(e) => onChange({ installProxy: e.target.checked, viaPanel: false })}
           />
           <span className="text-sm text-dark-200">{t('servers.deploy_install_proxy')}</span>
         </label>

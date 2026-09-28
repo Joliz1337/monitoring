@@ -63,13 +63,17 @@ release_lock() {
 
 cleanup() {
     local exit_code=$?
-    
+
     # Disable trap to prevent recursion
-    trap - EXIT INT TERM
-    
+    trap - EXIT INT TERM HUP
+    # stdout мог закрыться вместе с SSH-сессией — запись в него не должна оборвать уборку
+    trap '' PIPE
+
     # Release lock
     release_lock
-    
+
+    [ "$TEMP_PROXY_ACTIVE" = "1" ] && remove_temporary_proxy
+
     if [ $exit_code -ne 0 ] && [ $exit_code -ne 130 ] && [ $exit_code -ne 143 ]; then
         echo ""
         echo -e "\033[0;31m[ERROR] Script failed (exit code: $exit_code)\033[0m"
@@ -114,6 +118,9 @@ LANG_CODE="en"
 
 # Неинтерактивный режим (--unattended): подтверждения переустановки берут дефолт "y"
 UNATTENDED=0
+
+# Прокси панели на время установки (MON_PROXY_TEMPORARY=1) — cleanup() снимает его на выходе
+TEMP_PROXY_ACTIVE=0
 
 # ==================== Proxy Support ====================
 
@@ -1526,6 +1533,24 @@ remove_proxy_configs() {
         timeout 60 systemctl daemon-reload >/dev/null 2>&1 || true
         timeout 60 systemctl restart docker >/dev/null 2>&1 || true
     fi
+}
+
+# Рестарт Docker внутри remove_proxy_configs обязателен: демон держит адрес прокси
+# в окружении процесса, и без рестарта следующий pull ушёл бы в мёртвый порт
+remove_temporary_proxy() {
+    log_info "Removing temporary installer proxy"
+    remove_proxy_configs
+    rm -f /etc/monitoring/proxy.conf 2>/dev/null || true
+    unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
+    TEMP_PROXY_ACTIVE=0
+}
+
+# Панель упала посреди установки, и cleanup() не отработал — адрес временного
+# прокси остался в apt/Docker/git. Любой следующий запуск установщика его снимает.
+clear_stale_temporary_proxy() {
+    [ "${MON_PROXY_TEMPORARY:-0}" = "1" ] && return 0
+    grep -qs '^PROXY_TEMPORARY=1' /etc/monitoring/proxy.conf || return 0
+    remove_temporary_proxy
 }
 
 setup_proxy() {
@@ -3040,6 +3065,14 @@ run_unattended() {
 PROXY_ENABLED=1
 PROXY_URL=${MON_PROXY_URL}
 PROXYEOF
+        if [ "${MON_PROXY_TEMPORARY:-0}" = "1" ]; then
+            # Прокси панели живёт внутри SSH-сессии установки: после неё его адрес мёртв.
+            # HUP/PIPE — обрыв SSH: выходим через cleanup(), который снимет прокси
+            echo "PROXY_TEMPORARY=1" >> /etc/monitoring/proxy.conf
+            TEMP_PROXY_ACTIVE=1
+            trap 'exit 129' HUP
+            trap 'exit 141' PIPE
+        fi
         chmod 600 /etc/monitoring/proxy.conf 2>/dev/null || true
         load_proxy
         configure_apt_proxy
@@ -3132,6 +3165,8 @@ collect_firstboot_env() {
                MON_INSTALL_NODE MON_INSTALL_OPTIMIZATIONS MON_INSTALL_WARP \
                MON_INSTALL_REMNAWAVE MON_NIC_MODE MON_OPT_PROFILE \
                MON_NODE_CAPABILITIES REMNAWAVE_CERT; do
+        # Временный прокси панели живёт только в SSH-сессии — после ребута его нет
+        [ "$var" = "MON_PROXY_URL" ] && [ "${MON_PROXY_TEMPORARY:-0}" = "1" ] && continue
         [ -n "${!var:-}" ] && printf '%s=%q\n' "$var" "${!var}"
     done
 }
@@ -3325,6 +3360,7 @@ main() {
     acquire_lock
 
     check_root
+    clear_stale_temporary_proxy
 
     # ---- Quick auto-install:
     #   bash install.sh <NODE_SECRET>                       — устанавливает ноду
