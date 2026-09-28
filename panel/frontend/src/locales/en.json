@@ -2150,7 +2150,7 @@
     "sni_filter_hint": "HAProxy passes only TLS connections with an allowed SNI to the backend. Connections with another SNI, without SNI or not using TLS (scanners, probes by IP) get no reply at all — to them the server looks as if nothing is behind the port. The list applies to every rule of the profile unless the rule says otherwise.",
     "sni_filter_enable": "Allow only listed SNI",
     "sni_domains": "Allowed SNI",
-    "sni_domains_hint": "One per line, or separated by spaces or commas. Exact match, case-insensitive. Up to 100.",
+    "sni_domains_hint": "One per line, or separated by spaces or commas, case-insensitive. *.example.com allows example.com itself and all its subdomains. Up to 100.",
     "sni_saved": "SNI filter saved",
     "sni_save_error": "Failed to save the SNI filter",
     "sni_domains_required": "Enter at least one SNI",

@@ -31,7 +31,7 @@ Before rolling out, the panel checks the selected IPs against the server's addre
 
 ## SNI filter
 
-Off by default. The "SNI filter" button above the rules sets a list for the whole profile: HAProxy passes only TLS connections with these SNI to the backend. Connections with another SNI, without SNI or not using TLS (scanners, probes by IP) get no reply at all — no certificate, no refusal, the connection just hangs as if nothing were behind the port. The filter cannot hide the fact that the port is open: the system accepts the connection before the client names the SNI. Every rule has its own setting: "Profile default" uses the shared list, "Own list" replaces it for that rule, "Off" accepts any connection even when the profile filter is on. Turn the filter off in rules that carry non-TLS traffic, otherwise that traffic stops getting through.
+Off by default. The "SNI filter" button above the rules sets a list for the whole profile: HAProxy passes only TLS connections with these SNI to the backend. Connections with another SNI, without SNI or not using TLS (scanners, probes by IP) get no reply at all — no certificate, no refusal, the connection just hangs as if nothing were behind the port. The filter cannot hide the fact that the port is open: the system accepts the connection before the client names the SNI. An entry `*.example.com` allows `example.com` itself and all its subdomains. Every rule has its own setting: "Profile default" uses the shared list, "Own list" replaces it for that rule, "Off" accepts any connection even when the profile filter is on. Turn the filter off in rules that carry non-TLS traffic, otherwise that traffic stops getting through.
 
 ## Per-backend connection limit
 

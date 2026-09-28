@@ -110,6 +110,37 @@ class RuleOverrideTests(unittest.TestCase):
         self.assertEqual(tuple(d for line in acl_lines for d in line.split()[4:]), domains)
 
 
+class WildcardTests(unittest.TestCase):
+    def block(self, *domains: str) -> str:
+        rule = tcp_rule("a", 443, sni_mode=SniMode.CUSTOM, sni_domains=domains)
+        return frontend(generate([rule], ProfileOptions()), "a")
+
+    def test_wildcard_allows_apex_and_subdomains(self):
+        block = self.block("vk.com", "*.nexyonn.com")
+        self.assertIn("acl sni_allowed req.ssl_sni -i vk.com nexyonn.com", block)
+        self.assertIn("acl sni_allowed req.ssl_sni -i -m end .nexyonn.com", block)
+
+    def test_suffix_keeps_leading_dot(self):
+        # Без точки -m end пропустил бы и evilnexyonn.com
+        suffix_lines = [line for line in self.block("*.nexyonn.com").splitlines() if "-m end" in line]
+        self.assertTrue(all(pattern.startswith(".") for line in suffix_lines for pattern in line.split()[6:]))
+
+    def test_explicit_apex_next_to_wildcard_is_not_duplicated(self):
+        self.assertEqual(self.block("nexyonn.com", "*.nexyonn.com").count(" nexyonn.com"), 1)
+
+    def test_profile_list_supports_wildcards(self):
+        options = ProfileOptions(sni_filter_enabled=True, sni_filter_domains=("*.nexyonn.com",))
+        self.assertIn("-m end .nexyonn.com", frontend(generate([tcp_rule("a", 443)], options), "a"))
+
+    def test_wildcards_survive_parsing(self):
+        domains = ("vk.com",) + tuple(f"*.z{i}.io" for i in range(SNI_DOMAINS_PER_LINE + 2))
+        rule = tcp_rule("a", 443, sni_mode=SniMode.CUSTOM, sni_domains=domains)
+        config = generate([rule], ProfileOptions())
+        parsed = get_config_generator().parse_rules_from_config(config)
+        self.assertEqual(parsed[0].sni_domains, domains)
+        self.assertEqual(generate(parsed, ProfileOptions()), config)
+
+
 class RoundTripTests(unittest.TestCase):
     RULES = [
         tcp_rule("inherit", 443),
@@ -158,10 +189,16 @@ class ValidationTests(unittest.TestCase):
         )
 
     def test_normalize_rejects_values_that_break_acl(self):
-        for bad in ("two words", "evil#comment", "a..b", "{x}", "*.example.com"):
+        for bad in ("two words", "evil#comment", "a..b", "{x}", "*", "*.com", "a.*.com", "**.x.com", "*x.com"):
             with self.subTest(value=bad):
                 with self.assertRaises(InvalidSniError):
                     normalize_sni_domains([bad])
+
+    def test_normalize_drops_apex_covered_by_wildcard(self):
+        self.assertEqual(
+            normalize_sni_domains(["nexyonn.com", "*.NEXYONN.com", "vk.com"]),
+            ("*.nexyonn.com", "vk.com"),
+        )
 
     def test_normalize_limits_list_size(self):
         with self.assertRaises(InvalidSniError):

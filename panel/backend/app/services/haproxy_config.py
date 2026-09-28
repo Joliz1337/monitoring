@@ -21,10 +21,11 @@ SNI_FILTER_ACL = "sni_allowed"
 SNI_INSPECT_DELAY = "5s"
 SNI_DOMAINS_PER_LINE = 10
 MAX_SNI_DOMAINS = 100
+SNI_WILDCARD_PREFIX = "*."
 
 _SNI_DOMAIN = re.compile(r"^(?=.{1,253}$)[a-z0-9_-]+(\.[a-z0-9_-]+)*$")
 _SNI_MARKER = re.compile(r"^\s*# sni-filter \((profile|custom|off)\)\s*$", re.MULTILINE)
-_SNI_ACL = re.compile(rf"^\s*acl\s+{SNI_FILTER_ACL}\s+req\.ssl_sni\s+-i\s+(.+)$", re.MULTILINE)
+_SNI_ACL = re.compile(rf"^\s*acl\s+{SNI_FILTER_ACL}\s+req\.ssl_sni\s+-i\s+(-m\s+end\s+)?(.+)$", re.MULTILINE)
 
 
 class SniMode(str, Enum):
@@ -37,16 +38,40 @@ class InvalidSniError(ValueError):
     """SNI нельзя вписать в ACL HAProxy."""
 
 
+def _is_valid_sni(domain: str) -> bool:
+    if not domain.startswith(SNI_WILDCARD_PREFIX):
+        return bool(_SNI_DOMAIN.match(domain))
+    base = domain[len(SNI_WILDCARD_PREFIX):]
+    # *.com пропустил бы целую доменную зону
+    return "." in base and bool(_SNI_DOMAIN.match(base))
+
+
+def _wildcard_base(domain: str) -> Optional[str]:
+    return domain[len(SNI_WILDCARD_PREFIX):] if domain.startswith(SNI_WILDCARD_PREFIX) else None
+
+
+def _sni_acl_lines(patterns: list[str], match_flags: str) -> list[str]:
+    # Одноимённые acl объединяются по ИЛИ — длинный список не упирается в лимит длины строки
+    return [
+        f"    acl {SNI_FILTER_ACL} req.ssl_sni -i{match_flags} {' '.join(patterns[start:start + SNI_DOMAINS_PER_LINE])}"
+        for start in range(0, len(patterns), SNI_DOMAINS_PER_LINE)
+    ]
+
+
 def normalize_sni_domains(values: Iterable[str]) -> tuple[str, ...]:
+    """`*.example.com` — сам example.com и поддомены любой глубины; отдельная
+    запись example.com рядом с ним лишняя и убирается."""
     result: list[str] = []
     for raw in values:
         domain = raw.strip().lower().rstrip(".")
         if not domain:
             continue
-        if not _SNI_DOMAIN.match(domain):
+        if not _is_valid_sni(domain):
             raise InvalidSniError(f"Invalid SNI: {raw.strip()}")
         if domain not in result:
             result.append(domain)
+    wildcard_bases = {base for base in map(_wildcard_base, result) if base}
+    result = [domain for domain in result if domain not in wildcard_bases]
     if len(result) > MAX_SNI_DOMAINS:
         raise InvalidSniError(f"Too many SNI values (max {MAX_SNI_DOMAINS})")
     return tuple(result)
@@ -259,14 +284,18 @@ resolvers mydns
         if not domains:
             return ""
 
+        wildcard_bases = [base for base in map(_wildcard_base, domains) if base]
+        # *.example.com: сам домен — точным совпадением, поддомены — по окончанию
+        # с точкой, иначе прошёл бы и evilexample.com
+        exact = list(dict.fromkeys([d for d in domains if not _wildcard_base(d)] + wildcard_bases))
+        suffixes = [f".{base}" for base in wildcard_bases]
+
         lines = [
             f"    # sni-filter ({rule.sni_mode.value})",
             f"    tcp-request inspect-delay {SNI_INSPECT_DELAY}",
         ]
-        # Одноимённые acl объединяются по ИЛИ — длинный список не упирается в лимит длины строки
-        for start in range(0, len(domains), SNI_DOMAINS_PER_LINE):
-            chunk = " ".join(domains[start:start + SNI_DOMAINS_PER_LINE])
-            lines.append(f"    acl {SNI_FILTER_ACL} req.ssl_sni -i {chunk}")
+        lines += _sni_acl_lines(exact, "")
+        lines += _sni_acl_lines(suffixes, " -m end")
         lines.append(f"    tcp-request content silent-drop unless {SNI_FILTER_ACL}")
         return "\n".join(lines) + "\n"
 
@@ -482,8 +511,17 @@ backend {backend_name}
         mode = SniMode(marker.group(1)) if marker else SniMode.PROFILE
         if mode != SniMode.CUSTOM:
             return mode, ()
-        domains = tuple(domain for line in _SNI_ACL.findall(block) for domain in line.split())
-        return mode, domains
+        exact: list[str] = []
+        wildcards: list[str] = []
+        for suffix_match, patterns in _SNI_ACL.findall(block):
+            for pattern in patterns.split():
+                if suffix_match:
+                    wildcards.append(f"*{pattern}")
+                else:
+                    exact.append(pattern)
+        # Точный домен, вписанный за *.домен, — часть той же записи, а не отдельная
+        bases = {wildcard[len(SNI_WILDCARD_PREFIX):] for wildcard in wildcards}
+        return mode, tuple(d for d in exact if d not in bases) + tuple(wildcards)
     
     @staticmethod
     def _parse_server_opt(opts: str, name: str, cast=str, default=None):

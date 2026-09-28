@@ -383,7 +383,7 @@ function SniDomainsInput({ value, onChange }: { value: string; onChange: (v: str
     <div className="pl-2 border-l-2 border-dark-700/40 space-y-1">
       <label className="block text-xs text-dark-400">{t('haproxy_configs.sni_domains')}</label>
       <textarea value={value} onChange={e => onChange(e.target.value)} spellCheck={false} rows={4}
-        placeholder={'www.google.com\nyahoo.com'}
+        placeholder={'www.google.com\n*.example.com'}
         className="w-full px-3 py-2 rounded-lg bg-dark-950 border border-dark-700 text-dark-200 text-xs font-mono focus:outline-none focus:border-accent-500/50 resize-y" />
       <p className="text-[10px] text-dark-500">{t('haproxy_configs.sni_domains_hint')}</p>
     </div>
