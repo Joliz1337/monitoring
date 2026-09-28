@@ -19,7 +19,7 @@
 - **Infrastructure Tree** — двухуровневая иерархия серверов на странице Servers: Аккаунт (облачный email) → Проект (кластер) → Серверы; дерево встроено в существующую страницу, сворачивается, состояние сохраняется в localStorage
 - **Shared Notes & Tasks** — совместный блокнот и список задач с синхронизацией в реальном времени через SSE; открывается через плавающий жёлтый таб на правом крае экрана (amber-500); две вкладки: «Блокнот» и «Задачи»
 - **Wildcard SSL** — выпуск wildcard сертификатов через certbot + Cloudflare DNS challenge, продление, деплой на ноды через API порта 9100; фоновое автопродление каждые 24ч с Telegram-уведомлениями при сбое; настройка пути деплоя и reload-команды для каждого сервера; просмотр и копирование/скачивание PEM-материалов сертификата (fullchain/cert/chain/privkey) для ручного переноса в CDN и сторонние панели
-- **HAProxy Configs** — централизованные профили конфигурации HAProxy с массовой раскаткой на серверы: CRUD профилей и правил, балансировщик нагрузки, привязка серверов с выбором входных и выходных IP каждого сервера при общем профиле, history синхронизаций; запуск HAProxy per-server и bulk-запуск всех остановленных нод одним кликом; **авто-запуск при привязке** (start + enable autostart) и **авто-остановка при отвязке** (stop + disable autostart) сервера
+- **HAProxy Configs** — централизованные профили конфигурации HAProxy с массовой раскаткой на серверы: CRUD профилей и правил, балансировщик нагрузки, привязка серверов с выбором входных и выходных IP каждого сервера при общем профиле, фильтр SNI (общий список профиля и свой у правила), history синхронизаций; запуск HAProxy per-server и bulk-запуск всех остановленных нод одним кликом; **авто-запуск при привязке** (start + enable autostart) и **авто-остановка при отвязке** (stop + disable autostart) сервера
 - **Remnawave Nginx** — централизованные профили конфигурации nginx перед Remnawave-нодой (каталог на хосте, по умолчанию `/opt/remnawave`), как HAProxy Configs: конструктор правил (gRPC-локации, произвольные proxy-локации), raw-редактор с pre-flight валидацией `nginx -t`, четыре схемы передачи реального IP клиента в Xray (напрямую, за CDN, за HAProxy по PROXY protocol, универсальная), привязка серверов с доменом на каждый (шаблон конфига хранит `{{DOMAIN}}`), sync с drift-детекцией по хэшу отрендеренного контента, retry для офлайн-нод, импорт существующего конфига с ноды
 - **Firewall Profiles** — шаблоны UFW с массовой раскаткой на серверы: CRUD профилей, привязка 1 сервер ↔ 1 активный профиль, history синхронизаций, node-API-port-guard (защита связи панели с нодой через порт 9100), drift-детекция по SHA256-хэшу; массовые действия — добавление правил списком портов с диапазонами, чекбоксы для пакетного изменения/удаления правил и привязки/отвязки/синхронизации серверов (включая выбор целой папки); вкладка «Серверы» — поиск по имени/адресу, группировка доступных серверов по папкам со сворачиванием, скрытие занятых серверов с переключателем «Показать занятые»
 - **DNAT-маршрутизация** — профили проброса портов средствами ядра нод (iptables nat DNAT + MASQUERADE + FORWARD): та же модель, что у Firewall Profiles (CRUD профилей и правил, 1 сервер ↔ 1 профиль, sync с drift-детекцией по SHA256, очередь отложенной раскатки для офлайн-нод, история), плюс страница сервера с живыми счётчиками соединений/трафика по каждому правилу и кнопками «Переприменить»/«Снять правила»; TCP, UDP и диапазоны портов, без userspace-прокси
@@ -1128,6 +1128,7 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 - `rule_type` — `tcp` или `https`
 - `send_proxy: bool` — включить PROXY protocol к backend. При `True` генерируется `send-proxy check-send-proxy`: `check-send-proxy` обязателен, чтобы health check также передавал PROXY protocol header (иначе backend разрывает соединение и HAProxy помечает сервер как DOWN).
 - `accept_proxy: bool` — принять PROXY protocol от вышестоящего HAProxy. При `True` добавляет `accept-proxy` к bind-строке frontend. Используется для цепочек HAProxy → HAProxy → итоговый сервер, когда первый HAProxy передаёт реальный IP клиента через PROXY protocol. Применяется к TCP и HTTPS правилам (одиночный режим и балансировщик).
+- `sni_mode` (`profile`/`custom`/`off`) и `sni_domains` — фильтр SNI TCP-правила, см. «Фильтр SNI» в разделе HAProxy Configs ниже.
 
 **Нормализация конфига при применении шаблона (`patchSendProxy` в `HAProxy.tsx`):**
 
@@ -2519,6 +2520,26 @@ Whitelist можно наполнять из внешних списков по 
 
 UI: строка во вкладке «Привязанные серверы» раскрывается кликом в любом месте или шевроном (`expandedServers`; `handleServerRowClick` пропускает клики по кнопкам строки — запуск, синхронизация, отвязка) → `components/haproxy/ServerAddressesEditor.tsx` — IPv4-адреса интерфейсов из `GET /proxy/{id}/network/state` с галочками «Слушает»/«Выходит». Сохранённые адреса, которых уже нет на сервере, остаются в списке зачёркнутыми с пометкой «нет на сервере», чтобы их можно было снять; отправляются в порядке строк (первый отмеченный выходной IP получает исходное имя `server`). В свёрнутой строке — сводка `вход … · выход …` (от ширины `md`). `servers-status` отдаёт по серверу `listen_ips`, `source_ips`, `addresses_supported`, `addresses_min_node_version`.
 
+**Фильтр SNI (`ProfileOptions`, `SniMode` в `services/haproxy_config.py`):**
+
+Выключен по умолчанию. Общий список профиля лежит в `HAProxyConfigProfile.options` (JSON `{sni_filter_enabled, sni_filter_domains}`) и из конфига не восстанавливается — генератор вписывает его во frontend каждого TCP-правила. У правила поле `sni_mode`: `profile` (по умолчанию — общий список, если фильтр профиля включён), `custom` (свой `sni_domains`, перекрывает профиль), `off` (без фильтра, даже если в профиле он включён). Строки во frontend:
+
+```
+    # sni-filter (profile)
+    tcp-request inspect-delay 5s
+    acl sni_allowed req.ssl_sni -i www.google.com yahoo.com
+    tcp-request content silent-drop unless sni_allowed
+```
+
+- `req.ssl_sni` читает ClientHello из сырого потока, поэтому фильтр есть только у TCP-правил — HTTPS-правила, где TLS терминирует сам HAProxy, не фильтруются. Пока ClientHello не дочитан, выборка «может измениться» и правило ждёт до `inspect-delay` (`SNI_INSPECT_DELAY`); чужой SNI, ClientHello без SNI, не-TLS поток и соединение без данных (через 5 с) бросаются и до бэкенда не доходят. Совпадение точное, без учёта регистра.
+- `silent-drop`, а не `reject`: смысл фильтра — чтобы сканер решил, что за портом ничего нет. `reject` обрывает соединение, и клиент видит, что его отвергли. `silent-drop` снимает сокет через `TCP_REPAIR` без FIN и RST — клиент видит повисшее соединение. Шаблон конфига не задаёт `user`, HAProxy работает от root, и `TCP_REPAIR` доступен; без прав HAProxy шлёт RST с TTL 1, который умирает на первом маршрутизаторе и до клиента тоже не доходит. Скрыть открытый порт фильтр не может: SYN-ACK отдаёт ядро до того, как клиент пришлёт SNI. Если потом клиент сам закроет соединение, ядро ответит на его FIN RST-ом — сокета уже нет. Запись conntrack брошенного соединения живёт до закрытия клиентом или до `nf_conntrack_tcp_timeout_established`.
+- Одноимённые `acl` объединяются по ИЛИ: список режется по `SNI_DOMAINS_PER_LINE = 10` имён на строку, чтобы длинный список не упирался в лимит длины строки конфига; максимум `MAX_SNI_DOMAINS = 100`. `normalize_sni_domains()` приводит к нижнему регистру, снимает точку в конце и дубли; пробел, `#`, `*` и прочее, что сломало бы ACL, — `400`.
+- Маркер `# sni-filter (<режим>)` — единственное, по чему `_parse_sni_filter()` при разборе конфига отличает свой список правила от вписанного общего; режим `off` записывается одним маркером. Без маркера правило считается `profile`. При выключенном фильтре профиля правила `profile` не получают ни строки — конфиг байт-в-байт прежний, хэши серверов не меняются.
+- `PUT /{id}/options`: нормализация → `validate_options()` (включённый фильтр без SNI — `400`) → конфиг пересобирается из разобранных правил с новыми настройками; если текст изменился — `mark_outdated_pending` и фоновая раскатка. Профиль без разобранных правил не пересобирается: фильтру не к чему применяться, а пересборка заменила бы написанный вручную конфиг шаблоном. Добавление, правка и удаление правил и «Перегенерировать конфиг» тоже собирают конфиг с настройками профиля (`_profile_options()`).
+- Ноде изменения не нужны: её `parse_rules()` строки фильтра во frontend пропускает, `render_for_server()` их не трогает.
+
+UI: кнопка «Фильтр SNI» (иконка `ShieldCheck`, зелёная при включённом фильтре) в шапке правил раскрывает `SniFilterSection` — тумблер и список (строки, пробелы или запятые). В `RuleForm` — переключатель из трёх режимов, для «Свой список» — поле списка, под ним подсказка с текущим состоянием профиля. В строке правила метка `SNI`, если фильтр на нём действует.
+
 **API:**
 
 | Метод | Endpoint | Описание |
@@ -2528,7 +2549,8 @@ UI: строка во вкладке «Привязанные серверы» �
 | PUT | /haproxy-profiles/{id} | Обновить профиль (с валидацией config_content) |
 | DELETE | /haproxy-profiles/{id} | Удалить профиль |
 | POST | /haproxy-profiles/reorder | Сохранить порядок профилей: массив id в нужном порядке → `position` (один executemany, как `servers/reorder`) |
-| GET | /haproxy-profiles/{id} | Детали профиля (правила + серверы) |
+| GET | /haproxy-profiles/{id} | Детали профиля (серверы + `options` — фильтр SNI) |
+| PUT | /haproxy-profiles/{id}/options | Фильтр SNI профиля `{sni_filter_enabled, sni_filter_domains}` + пересборка конфига и раскатка |
 | POST | /haproxy-profiles/{id}/rules | Добавить правило |
 | PUT | /haproxy-profiles/{id}/rules/{index} | Обновить правило |
 | DELETE | /haproxy-profiles/{id}/rules/{index} | Удалить правило |
@@ -2566,10 +2588,11 @@ UI: строка во вкладке «Привязанные серверы» �
 - **Тосты sync** (`handleSyncAll`/`handleSyncOne`) раздельно считают synced/queued/failed и показывают корректный текст (включая «отложено (офлайн)»).
 - **Кнопка «Проверить конфиг»** в модалке сырого конфига — вызывает `POST /haproxy-profiles/validate` и показывает результат валидации.
 
-**i18n-ключи** (`haproxy_configs.*`): `drag_to_reorder`, `reorder_error`, `start_haproxy`, `start_all_stopped`, `haproxy_started`, `haproxy_start_error`, `haproxy_start_bulk_success`, `haproxy_start_bulk_partial`, `sync_queued`, `sync_one_queued`, `waiting_server`, `server_online`, `server_offline`, `haproxy_running`, `haproxy_stopped`, `validate_config`, `config_valid`, `config_invalid`, `validate_error`, `unlink_confirm`, `addresses_*` (редактор адресов сервера).
+**i18n-ключи** (`haproxy_configs.*`): `drag_to_reorder`, `reorder_error`, `start_haproxy`, `start_all_stopped`, `haproxy_started`, `haproxy_start_error`, `haproxy_start_bulk_success`, `haproxy_start_bulk_partial`, `sync_queued`, `sync_one_queued`, `waiting_server`, `server_online`, `server_offline`, `haproxy_running`, `haproxy_stopped`, `validate_config`, `config_valid`, `config_invalid`, `validate_error`, `unlink_confirm`, `addresses_*` (редактор адресов сервера), `sni_*` (фильтр SNI).
 
 **Файлы:**
-- `panel/backend/app/routers/haproxy_profiles.py` — API роутер; `PUT /{id}` с валидацией; `POST /validate`
+- `panel/backend/app/routers/haproxy_profiles.py` — API роутер; `PUT /{id}` с валидацией; `POST /validate`; `PUT /{id}/options`
+- `panel/backend/app/services/haproxy_config.py` — генератор и разбор правил; `ProfileOptions`, `SniMode`, `normalize_sni_domains` (фильтр SNI); тесты — `panel/backend/tests/test_haproxy_sni_filter.py`
 - `panel/backend/app/services/haproxy_validator.py` — `validate_config(config_content)`: запуск `haproxy -c -f`, замена путей `crt` на dummy-сертификат
 - `panel/backend/app/services/haproxy_profile_sync.py` — `is_server_online`, `_sync_single_server` (отдельная DB-сессия, принимает `ensure_started`), `SyncResult` (`status: success|failed|queued`), `retry_pending_haproxy_syncs` (с `ensure_started=True`), `stop_haproxy_on_server` (POST `/api/haproxy/stop`, graceful при офлайн), `render_profile_for_server`/`expected_config_hash`/`mark_outdated_pending`/`check_addresses_on_node` (адреса сервера)
 - `panel/backend/app/services/haproxy_addresses.py` — `ServerAddresses`, `render_for_server`, `normalize_ips`, `missing_on_node`; тесты — `panel/backend/tests/test_haproxy_addresses.py`

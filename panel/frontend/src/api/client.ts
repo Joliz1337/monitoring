@@ -2327,7 +2327,13 @@ export interface HAProxyProfileServer {
   last_sync_at: string | null
 }
 
+export interface HAProxyProfileOptions {
+  sni_filter_enabled: boolean
+  sni_filter_domains: string[]
+}
+
 export interface HAProxyProfileDetail extends Omit<HAProxyConfigProfile, 'linked_servers_count' | 'synced_servers_count'> {
+  options: HAProxyProfileOptions
   servers: HAProxyProfileServer[]
 }
 
@@ -2439,7 +2445,12 @@ export interface HAProxyProfileRule {
   is_balancer?: boolean
   servers?: BackendServer[]
   balancer_options?: BalancerOptions | null
+  sni_mode?: HAProxySniMode
+  sni_domains?: string[]
 }
+
+// profile — общий список профиля, custom — свой список правила, off — без фильтра
+export type HAProxySniMode = 'profile' | 'custom' | 'off'
 
 export const haproxyProfilesApi = {
   getServerCores: (profileId: number, addresses: string[]) =>
@@ -2482,6 +2493,8 @@ export const haproxyProfilesApi = {
     api.delete<{ success: boolean; rules: HAProxyProfileRule[] }>(`/haproxy-profiles/${profileId}/rules/${ruleName}`),
   regenerateConfig: (profileId: number) =>
     api.post<{ config_content: string }>(`/haproxy-profiles/${profileId}/regenerate-config`),
+  updateOptions: (profileId: number, options: HAProxyProfileOptions) =>
+    api.put<{ success: boolean; options: HAProxyProfileOptions; config_content: string }>(`/haproxy-profiles/${profileId}/options`, options),
   validateConfig: (config_content: string) =>
     api.post<{ valid: boolean; message: string }>('/haproxy-profiles/validate', { config_content }),
 }

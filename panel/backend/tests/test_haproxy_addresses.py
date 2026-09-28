@@ -27,12 +27,13 @@ from app.services.haproxy_config import (  # noqa: E402
     BackendServer,
     BalancerOptions,
     HAProxyRule,
+    ProfileOptions,
     get_config_generator,
 )
 
 
 def profile_config(*rules: HAProxyRule) -> str:
-    return get_config_generator().generate_full_config(list(rules))
+    return get_config_generator().generate_full_config(list(rules), ProfileOptions())
 
 
 SINGLE_RULE = HAProxyRule(

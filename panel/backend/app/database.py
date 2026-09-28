@@ -2142,6 +2142,22 @@ async def _migrate_metrics_window_peaks(conn):
                     logger.warning(f"Could not add {table}.{col_name}: {e}")
 
 
+async def _migrate_haproxy_profile_options(conn):
+    result = await conn.execute(text("""
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'haproxy_config_profiles'
+    """))
+    columns = {row[0] for row in result.fetchall()}
+    if not columns or "options" in columns:
+        return
+    try:
+        await conn.execute(text('ALTER TABLE haproxy_config_profiles ADD COLUMN "options" TEXT'))
+        logger.info("Added column: haproxy_config_profiles.options")
+    except Exception as e:
+        if "already exists" not in str(e).lower():
+            logger.warning(f"Could not add haproxy_config_profiles.options: {e}")
+
+
 # (таблица, колонка) — целевые секреты: приватные ключи, не публичные сертификаты
 _SECRET_COLUMNS = [
     ("keygen", "ca_key_pem"),
@@ -2205,6 +2221,7 @@ async def init_db():
         await _migrate_traffic_v2(conn)
         await _migrate_node_capabilities(conn)
         await _migrate_metrics_window_peaks(conn)
+        await _migrate_haproxy_profile_options(conn)
         await _migrate_encrypt_secrets(conn)
 
     await _warmup_pool()

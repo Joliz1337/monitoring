@@ -29,6 +29,10 @@ If a server has several IPs, expand its row under "Linked Servers" and check whi
 
 Before rolling out, the panel checks the selected IPs against the server's addresses. If one is gone, the server gets the Failed status with a clear reason instead of silently staying on the old config.
 
+## SNI filter
+
+Off by default. The "SNI filter" button above the rules sets a list for the whole profile: HAProxy passes only TLS connections with these SNI to the backend. Connections with another SNI, without SNI or not using TLS (scanners, probes by IP) get no reply at all — no certificate, no refusal, the connection just hangs as if nothing were behind the port. The filter cannot hide the fact that the port is open: the system accepts the connection before the client names the SNI. Every rule has its own setting: "Profile default" uses the shared list, "Own list" replaces it for that rule, "Off" accepts any connection even when the profile filter is on. Turn the filter off in rules that carry non-TLS traffic, otherwise that traffic stops getting through.
+
 ## Per-backend connection limit
 
 A balancer physically cannot open more than ~64,000 connections to one backend address:port — each one takes a source port, and there are only 65,535 of them. So keep a balancer server's "Max Connections" around 60000: when it fills up, HAProxy gracefully moves extra clients to another server or queues them, instead of failing with errors and delays on exhausted ports. Need more on the same machine — add it as a second server with a different port (each port gets its own 64k), give the profile's server several outgoing addresses (each also gets its own 64k), or use DNAT routing, which has no such limit. Incoming client connections are unaffected — their ceiling is computed automatically from the node's RAM.

@@ -2109,7 +2109,22 @@
     "apply_template": "Apply Template",
     "template_applied": "Template applied to current rules. Click Save to apply.",
     "drag_to_reorder": "Drag to reorder",
-    "reorder_error": "Failed to save profile order"
+    "reorder_error": "Failed to save profile order",
+    "sni_filter": "SNI filter",
+    "sni_filter_hint": "HAProxy passes only TLS connections with an allowed SNI to the backend. Connections with another SNI, without SNI or not using TLS (scanners, probes by IP) get no reply at all — to them the server looks as if nothing is behind the port. The list applies to every rule of the profile unless the rule says otherwise.",
+    "sni_filter_enable": "Allow only listed SNI",
+    "sni_domains": "Allowed SNI",
+    "sni_domains_hint": "One per line, or separated by spaces or commas. Exact match, case-insensitive. Up to 100.",
+    "sni_saved": "SNI filter saved",
+    "sni_save_error": "Failed to save the SNI filter",
+    "sni_domains_required": "Enter at least one SNI",
+    "sni_mode_profile": "Profile default",
+    "sni_mode_custom": "Own list",
+    "sni_mode_off": "Off",
+    "sni_profile_off": "The profile filter is off — the rule accepts any connection",
+    "sni_profile_on": "From profile: {{domains}}",
+    "sni_custom_hint": "The rule's own list replaces the profile list for this rule.",
+    "sni_off_hint": "The rule accepts any connection even when the profile filter is on. Use it for rules that carry non-TLS traffic."
   },
   "firewall_profiles": {
     "title": "Firewall profiles"

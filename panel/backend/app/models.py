@@ -867,6 +867,9 @@ class HAProxyConfigProfile(Base):
     name = Column(String(200), nullable=False, unique=True)
     description = Column(Text, nullable=True)
     config_content = Column(Text, nullable=False)
+    # Настройки уровня профиля (фильтр SNI) — JSON. Генератор вписывает их в
+    # каждое правило, из конфига они не восстанавливаются
+    options = Column(Text, nullable=True)
     position = Column(Integer, default=0)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
