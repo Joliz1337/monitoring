@@ -593,7 +593,7 @@ data: {"message": "error description"}
 - `node/tests/test_haproxy_parsing.py` — чистые части `haproxy_manager`: разбор server-строк со всеми опциями (`send-proxy-v2` не выставляет заодно `send-proxy`), подстановка `resolvers` только доменным таргетам и только один раз, разбор опций балансировщика, распознавание правил в конфиге (балансировщик против одиночного таргета, backend без frontend игнорируется), расчёт `maxconn` от RAM с потолком по лимиту дескрипторов, вставка `maxconn` в `global` без затирания явного значения
 - `node/tests/test_sshd_config.py` — сборка `sshd_config`: закомментированные директивы не оживают, содержимое `Match`-блоков копируется дословно, недостающие ключи встают перед первым `Match`, повторный прогон ничего не меняет; разбор конфига по правилу первого вхождения, преобразование значений туда-обратно, разбор секции fail2ban и единиц времени бана
 - `node/tests/test_update_ref_validation.py` — валидация ссылки обновления и адреса прокси: пропускает ветки, теги версий и хеши коммитов (путь отката), отклоняет метасимволы shell и ведущий дефис
-- Всего тестов ноды — 548 (`python -m unittest discover -s node/tests`)
+- Всего тестов ноды — 614 (`python -m unittest discover -s node/tests`)
 
 ### IPSet Blocklist
 
@@ -619,12 +619,15 @@ data: {"message": "error description"}
 | PUT | /api/ipset/timeout | Изменить timeout temp списка |
 | POST | /api/ipset/sync | Синхронизация блок-списка (замена всего списка, атомарный diff через `ipset restore`) |
 | POST | /api/ipset/allowlist/sync | Синхронизация белого списка (замена) |
+| POST | /api/ipset/ping-block | Закрыть/открыть входящий ping для всех, кроме белого списка (`{"enabled": bool}`) |
 
 **`POST /api/ipset/allowlist/sync`** — принимает `AllowSyncRequest`:
 - `ips` — массив IP/CIDR для белого списка
 - `direction` — `"in"` или `"out"`
 
-**Поля в `GET /api/ipset/status`** — `incoming.allow_count` и `outgoing.allow_count` (количество записей в allowlist).
+**Поля в `GET /api/ipset/status`** — `incoming.allow_count` и `outgoing.allow_count` (количество записей в allowlist), `ping_blocked` (стоит ли в INPUT правило закрытого ping — проверяется живым `iptables -C`, а не по сохранённому флагу).
+
+**Закрытый ping (`set_ping_block()`):** правило `PING_RULE_V4` — `INPUT -p icmp --icmp-type echo-request -m set ! --match-set allowlist src -j DROP`: молчаливый DROP ping'а от всех, кроме белого списка, поэтому сканер не отличает сервер от выключенного, а панель (её IP всегда в allowlist) продолжает пинговать ноду для диагностики алертов. Исключение белого списка — внутри самого правила, от его позиции в INPUT ничего не зависит. `PING_RULE_V6` — `INPUT -p ipv6-icmp --icmpv6-type echo-request -j DROP` для всех (белый список — IPv4); ставится по возможности: отказ `ip6tables` (IPv6 выключен на хосте) логируется warning'ом и не отменяет IPv4. Закрывается только echo-request — остальной ICMP (fragmentation needed и т.п.) нужен сети, без него ломается PMTU discovery. `_sync_rule()` идемпотентен: не вставляет второе правило и при выключении снимает все копии. Флаг `block_ping` лежит в `blocklist.json`; `init_sets()` после создания allowlist вызывает `_apply_ping_rules(self._block_ping)` — после ребута хоста правило возвращается само. Правила в INPUT переживают `ufw --force reset` (применение профиля фаервола): при `MANAGE_BUILTINS=no` (умолчание UFW) он сносит только свои цепочки `ufw-*`. Проверено на настоящем ядре в netns (iptables-nft 1.8.11): чужой адрес — ping теряется молча, адрес из allowlist — отвечает, TCP не затронут, после снятия ping отвечает снова. Тесты — `node/tests/test_ipset_ping.py` (iptables в памяти).
 
 `POST /api/ipset/sync` и `/bulk-add` дополнительно отдают `skipped_non_public` — сколько записей отброшено как приватные/служебные (см. «Защита от приватных диапазонов» выше).
 
@@ -632,7 +635,7 @@ data: {"message": "error description"}
 - Тип ipset: `hash:net` (поддержка IP и CIDR)
 - Правила iptables блок-списка: `INPUT/OUTPUT -m set --match-set blocklist_* src/dst -j DROP`
 - Правила allowlist: `-I INPUT 1 ... -j ACCEPT` / `-I OUTPUT 1 ... -j ACCEPT` (позиция 1, выше DROP)
-- Все постоянные правила сохраняются в `/var/lib/monitoring/blocklist.json` (ключи `in_allow`, `out_allow` для белого списка)
+- Все постоянные правила сохраняются в `/var/lib/monitoring/blocklist.json` (ключи `in_allow`, `out_allow` для белого списка, `block_ping` — флаг закрытого ping)
 - При старте ноды: постоянные правила восстанавливаются, временный список пустой, allowlist загружается из персиста
 - Массовые операции (`sync`, `bulk_add`, `bulk_remove`, `sync_allow`, загрузка permanent/allow из `blocklist.json` при старте) применяются одним вызовом `ipset -exist restore` вместо по-IP `ipset add`/`del` — десятки тысяч записей применяются за доли секунды; мутации сериализованы `threading.Lock` (`_mutate_lock`), взятым во всех операциях записи: `add_ip`/`remove_ip`/`clear_set`/`set_timeout`/`sync`/`sync_allow`/`bulk_add`/`bulk_remove` — параллельные запросы с панели не перемешивают друг другу diff
 - Счётчики в `GET /api/ipset/status` читаются из заголовка `ipset list -t` (`Number of entries`), без выгрузки всего сета

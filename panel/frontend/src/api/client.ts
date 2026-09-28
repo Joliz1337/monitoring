@@ -1189,6 +1189,20 @@ export interface BlocklistSource {
   error_message: string | null
 }
 
+export type PingBlockMode = 'off' | 'all' | 'selected'
+
+export interface PingBlockScope {
+  mode: PingBlockMode
+  folders: string[]
+  server_ids: number[]
+}
+
+export interface BlocklistSettings {
+  ping_block: PingBlockScope
+  min_node_version: string
+  outdated_servers: string[]
+}
+
 export interface SyncServerResult {
   server_id: number
   server_name: string
@@ -1242,7 +1256,12 @@ export const blocklistApi = {
   
   // Sync status
   getSyncStatus: () => api.get<SyncStatus>('/blocklist/sync/status'),
-  
+
+  // Settings
+  getSettings: () => api.get<BlocklistSettings>('/blocklist/settings'),
+  updateSettings: (data: { ping_block: PingBlockScope }) =>
+    api.put<BlocklistSettings>('/blocklist/settings', data),
+
 }
 
 export interface NodeOptimizationsInfo {

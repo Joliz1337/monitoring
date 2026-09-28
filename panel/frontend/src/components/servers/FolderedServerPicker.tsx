@@ -22,9 +22,12 @@ interface Props<T extends FolderedServer> {
   servers: T[]
   /** Строка сервера — у каждого раздела своя: домен, метка «уже в профиле» и т.п. */
   renderServer: (server: T) => ReactNode
+  /** Элемент в заголовке папки (например, выбор папки целиком); клик по нему папку не сворачивает */
+  renderFolderAction?: (folder: string, members: T[]) => ReactNode
   labels: Labels
   /** Ключ localStorage для раскрытых папок */
   storageKey: string
+  autoFocus?: boolean
 }
 
 interface Groups<T> {
@@ -57,7 +60,7 @@ function groupByFolder<T extends FolderedServer>(servers: T[]): Groups<T> {
 
 /** Выбор сервера из списка, разложенного по папкам дашборда, с поиском по имени и адресу */
 export default function FolderedServerPicker<T extends FolderedServer>({
-  servers, renderServer, labels, storageKey,
+  servers, renderServer, renderFolderAction, labels, storageKey, autoFocus = true,
 }: Props<T>) {
   const [search, setSearch] = useState('')
   const [expanded, setExpanded] = useState<Set<string>>(() => readExpanded(storageKey))
@@ -91,6 +94,11 @@ export default function FolderedServerPicker<T extends FolderedServer>({
           className="flex items-center gap-2 p-2 rounded-lg hover:bg-dark-800/50 transition-colors cursor-pointer"
           onClick={() => toggle(key)}
         >
+          {isFolder && renderFolderAction && (
+            <span className="inline-flex" onClick={e => e.stopPropagation()}>
+              {renderFolderAction(key, members)}
+            </span>
+          )}
           {isFolder
             ? <FolderIcon className="w-4 h-4 text-accent-400 shrink-0" />
             : <ServerIcon className="w-4 h-4 text-dark-400 shrink-0" />}
@@ -125,7 +133,7 @@ export default function FolderedServerPicker<T extends FolderedServer>({
     <>
       <input type="text" value={search} onChange={e => setSearch(e.target.value)}
         placeholder={labels.searchPlaceholder}
-        className="w-full px-3 py-1.5 mb-2 rounded-lg bg-dark-800 border border-dark-700 text-dark-100 text-sm focus:outline-none focus:border-accent-500/50 transition-colors" autoFocus />
+        className="w-full px-3 py-1.5 mb-2 rounded-lg bg-dark-800 border border-dark-700 text-dark-100 text-sm focus:outline-none focus:border-accent-500/50 transition-colors" autoFocus={autoFocus} />
       {isEmpty ? (
         <div className="text-xs text-dark-500">{labels.empty}</div>
       ) : groups.folders.size > 0 ? (

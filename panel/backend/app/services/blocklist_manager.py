@@ -12,6 +12,7 @@ import ipaddress
 import json
 import logging
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -24,6 +25,7 @@ from app.services.http_client import get_node_client, get_external_client, node_
 from app.services.net_utils import is_public_range, resolve_panel_ip, host_to_ip
 from app.services.node_capabilities import Capability, server_allows
 from app.services.node_sync_queue import KIND_BLOCKLIST, enqueue
+from app.services.ping_block import PingBlockScope, load_scope
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import async_session
@@ -39,8 +41,9 @@ NODE_MAX_IPSET_ENTRIES = 1_000_000  # maxelem ipset на нодах — боль
 SYNC_BASE_TIMEOUT = 20.0
 ALLOW_SYNC_TIMEOUT = 20.0
 # Жёсткий потолок на ноду поверх таймаутов httpx: повисшее SOCKS-рукопожатие
-# их не соблюдает и держало бы рассылку белого списка бесконечно
-ALLOW_PUSH_BUDGET = 2 * ALLOW_SYNC_TIMEOUT + 5
+# их не соблюдает и держало бы рассылку белого списка бесконечно.
+# Три запроса: белый список in, out и настройка ping
+ALLOW_PUSH_BUDGET = 3 * ALLOW_SYNC_TIMEOUT + 5
 SYNC_TIMEOUT_IPS_PER_SEC = 40_000  # +1 сек к таймауту синка на каждые 40k IP
 # Страховочная сверка белого списка: IP ноды по DNS-имени или IP панели
 # меняются без единой правки в панели
@@ -66,6 +69,24 @@ DEFAULT_SOURCES = [
         "direction": "in"
     }
 ]
+
+
+@dataclass(frozen=True)
+class AllowPolicy:
+    """Что нода пропускает всегда: белый список по направлениям и закрытый
+    для всех остальных ping. Рассылаются и сверяются по хэшу вместе."""
+    ips: dict[str, list[str]]
+    ping_scope: PingBlockScope
+    # Кому ping закрыт на момент сборки: хэш по ним, а не по настройке —
+    # перенос сервера в выбранную папку настройку не меняет, а ноду менять надо
+    ping_blocked_ids: frozenset[int]
+
+    def blocks_ping(self, server: Server) -> bool:
+        return self.ping_scope.covers(server.id, server.folder)
+
+    def digest(self) -> str:
+        payload = {"ips": self.ips, "ping_blocked": sorted(self.ping_blocked_ids)}
+        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
 class BlocklistSourceUnavailableError(Exception):
@@ -272,37 +293,38 @@ class BlocklistManager:
         rules = result.scalars().all()
         return [r.ip_cidr for r in rules]
 
-    async def build_allow_lists(self) -> dict[str, list[str]]:
+    async def build_allow_policy(self) -> AllowPolicy:
         """Белый список по направлениям: ручные allow-правила + авто (IP панели и всех нод).
 
         IP панели и нод всегда в allowlist — ACCEPT стоит первым в цепочке,
         поэтому управляющий трафик не попадёт под DROP даже при плохом блок-листе."""
         async with async_session() as db:
-            urls = (await db.execute(
-                select(Server.url).where(Server.is_active == True)  # noqa: E712
-            )).scalars().all()
+            servers = (await db.execute(
+                select(Server.id, Server.url, Server.folder).where(Server.is_active == True)  # noqa: E712
+            )).all()
             manual = {
                 direction: await self.get_global_rules(db, direction, list_type="allow")
                 for direction in DIRECTIONS
             }
+            ping_scope = await load_scope(db)
 
         # Резолв — после закрытия сессии: медленный DNS не держит коннект пула
         resolved = await asyncio.gather(
-            *(host_to_ip(urlparse(url).hostname or "") for url in urls)
+            *(host_to_ip(urlparse(url).hostname or "") for _, url, _ in servers)
         )
         auto = {ip for ip in resolved if ip}
         panel_ip = await resolve_panel_ip()
         if panel_ip:
             auto.add(panel_ip)
 
-        return {
+        ips = {
             direction: self.deduplicate_ips(sorted(auto.union(manual[direction])))
             for direction in DIRECTIONS
         }
-
-    @staticmethod
-    def allow_digest(allow: dict[str, list[str]]) -> str:
-        return hashlib.sha256(json.dumps(allow, sort_keys=True).encode()).hexdigest()
+        blocked = frozenset(
+            server_id for server_id, _, folder in servers if ping_scope.covers(server_id, folder)
+        )
+        return AllowPolicy(ips=ips, ping_scope=ping_scope, ping_blocked_ids=blocked)
     
     async def get_server_rules(self, server_id: int, db: AsyncSession, direction: str = "in") -> list[str]:
         result = await db.execute(
@@ -400,8 +422,8 @@ class BlocklistManager:
         JSON-тело запроса тоже собирается один раз на направление и переиспользуется
         всеми нодами без своих правил: сериализация списка на каждую ноду держала
         в памяти десятки тел по ~70 МБ одновременно — OOM панели на списке в 4 млн IP."""
-        allow = await self.build_allow_lists()
-        shared = {"allow_hash": self.allow_digest(allow)}
+        policy = await self.build_allow_policy()
+        shared = {"allow_policy": policy}
         async with async_session() as db:
             await self._prune_last_good(db)
             for direction in DIRECTIONS:
@@ -427,7 +449,7 @@ class BlocklistManager:
                     "block_set": block_set,
                     "count": len(block),
                     "body": body,
-                    "allow": allow[direction],
+                    "allow": policy.ips[direction],
                 }
         return shared
     
@@ -497,6 +519,28 @@ class BlocklistManager:
         except Exception as e:
             logger.error(f"Failed to sync allowlist to {server.name}: {e}")
             return False, str(e), {}
+
+    async def sync_ping_to_node(self, server: Server, block: bool) -> tuple[bool, str]:
+        """Закрыть или открыть ping на ноде.
+
+        Агент старше MIN_NODE_VERSION_PING_BLOCK эндпоинта не знает — это не
+        сбой: повтор из очереди ответил бы тем же 404."""
+        try:
+            response = await get_node_client(server).post(
+                f"{server.url}/api/ipset/ping-block",
+                headers=node_auth_headers(server),
+                json={"enabled": block},
+                timeout=ALLOW_SYNC_TIMEOUT,
+            )
+        except httpx.TimeoutException:
+            return False, "Timeout"
+        except httpx.RequestError as e:
+            return False, f"Request error: {e}"
+        if response.status_code == 404:
+            return True, "Ping block not supported by node"
+        if response.status_code != 200:
+            return False, f"HTTP {response.status_code}"
+        return True, "Ping blocked" if block else "Ping allowed"
 
     async def _sync_one_server(self, server: Server, shared: dict) -> dict:
         """Sync both directions for a single server.
@@ -585,13 +629,20 @@ class BlocklistManager:
                         "ip_count": 0,
                     }
                     server_result["success"] = False
+
+            # Правило ping ссылается на белый список — после него
+            block_ping = shared["allow_policy"].blocks_ping(server)
+            ping_ok, ping_msg = await self.sync_ping_to_node(server, block_ping)
+            server_result["ping"] = {"success": ping_ok, "message": ping_msg, "blocked": block_ping}
+            if not ping_ok:
+                server_result["success"] = False
         return server_result
 
     async def _sync_one_server_safe(self, server: Server, shared: dict) -> dict:
         """Sync one server with a global timeout wrapper — never raises."""
         # Бюджет масштабируется под размер списков: фиксированные 30с обрубали
         # синк крупных блок-листов на середине
-        budget = 10.0 + sum(
+        budget = 10.0 + ALLOW_SYNC_TIMEOUT + sum(
             self._sync_timeout(shared[d]["count"]) + ALLOW_SYNC_TIMEOUT
             for d in ("in", "out")
         )
@@ -711,7 +762,7 @@ class BlocklistManager:
 
                     for sr in done:
                         results[sr["server_id"]] = sr
-                    self._note_allow_sent(shared["allow_hash"])
+                    self._note_allow_sent(shared["allow_policy"].digest())
 
                     # Живая нода тоже могла не принять список (таймаут, ошибка ноды) —
                     # без очереди эта потеря так и осталась бы незамеченной.
@@ -770,7 +821,7 @@ class BlocklistManager:
             return {**results, **{s.id: str(e) for s in servers}}
 
         done = await asyncio.gather(*[self._sync_one_server_safe(s, shared) for s in servers])
-        self._note_allow_sent(shared["allow_hash"])
+        self._note_allow_sent(shared["allow_policy"].digest())
         for sr in done:
             results[sr["server_id"]] = None if sr.get("success") else self._first_error(sr)
         self._merge_sync_results({sr["server_id"]: sr for sr in done})
@@ -778,9 +829,9 @@ class BlocklistManager:
 
     @staticmethod
     def _first_error(server_result: dict) -> str:
-        for direction in ("in", "out"):
-            message = server_result.get(direction, {}).get("message")
-            if message and not server_result[direction].get("success", True):
+        for part in ("in", "out", "ping"):
+            message = server_result.get(part, {}).get("message")
+            if message and not server_result[part].get("success", True):
                 return message
         return "Sync failed"
 
@@ -827,7 +878,7 @@ class BlocklistManager:
 
             shared = await self.build_shared_lists()
             sr = await self._sync_one_server_safe(server, shared)
-            self._note_allow_sent(shared["allow_hash"])
+            self._note_allow_sent(shared["allow_policy"].digest())
             if not sr.get("success"):
                 await enqueue([server_id], KIND_BLOCKLIST, "Нода не приняла блок-лист")
             prev = self._last_sync.get("servers", {}) if self._last_sync else {}
@@ -864,20 +915,20 @@ class BlocklistManager:
 
     async def push_allowlist_if_changed(self) -> None:
         epoch = self._allowlist_epoch
-        allow = await self.build_allow_lists()
-        digest = self.allow_digest(allow)
+        policy = await self.build_allow_policy()
+        digest = policy.digest()
         if digest == self._allowlist_pushed_hash:
             return
         self._allowlist_inflight_hash = digest
         try:
-            await self._push_allowlist(allow)
+            await self._push_allowlist(policy)
         finally:
             self._allowlist_inflight_hash = None
         if epoch == self._allowlist_epoch:
             self._allowlist_pushed_hash = digest
 
-    async def _push_allowlist(self, allow: dict[str, list[str]]) -> None:
-        """Разослать на все активные ноды только белый список.
+    async def _push_allowlist(self, policy: AllowPolicy) -> None:
+        """Разослать на все активные ноды только белый список и настройку ping.
 
         Белый список — сотни адресов, блок-лист — до миллиона: гонять весь
         блок-лист по парку ради одного нового IP ноды незачем."""
@@ -894,36 +945,41 @@ class BlocklistManager:
         if offline:
             await enqueue(offline, KIND_BLOCKLIST, QUEUED_MESSAGE)
 
-        done = await asyncio.gather(*(self._push_allow_one(s, allow) for s in online))
+        done = await asyncio.gather(*(self._push_allow_one(s, policy) for s in online))
         failed = [server_id for server_id, ok in done if not ok]
         if failed:
             await enqueue(failed, KIND_BLOCKLIST, ALLOW_FAILED_MESSAGE)
 
         logger.info(
-            f"Allowlist pushed (in={len(allow['in'])}, out={len(allow['out'])}): "
+            f"Allowlist pushed (in={len(policy.ips['in'])}, out={len(policy.ips['out'])}, "
+            f"ping blocked on {len(policy.ping_blocked_ids)}): "
             f"{len(online) - len(failed)} ok, {len(failed)} failed, {len(offline)} queued"
         )
 
-    async def _push_allow_one(self, server: Server, allow: dict[str, list[str]]) -> tuple[int, bool]:
+    async def _push_allow_one(self, server: Server, policy: AllowPolicy) -> tuple[int, bool]:
         async with self._allow_http_sem:
             try:
                 ok = await asyncio.wait_for(
-                    self._send_allow(server, allow), timeout=ALLOW_PUSH_BUDGET
+                    self._send_allow(server, policy), timeout=ALLOW_PUSH_BUDGET
                 )
             except asyncio.TimeoutError:
                 logger.warning(f"Allowlist push to {server.name} timed out")
                 ok = False
         return server.id, ok
 
-    async def _send_allow(self, server: Server, allow: dict[str, list[str]]) -> bool:
+    async def _send_allow(self, server: Server, policy: AllowPolicy) -> bool:
         for direction in DIRECTIONS:
             ok, message, _ = await self.sync_allow_to_node(
-                server, allow[direction], direction=direction
+                server, policy.ips[direction], direction=direction
             )
             if not ok:
                 logger.warning(f"Allowlist {direction} to {server.name} failed: {message}")
                 return False
-        return True
+        # Правило ping ссылается на белый список — после него
+        ok, message = await self.sync_ping_to_node(server, policy.blocks_ping(server))
+        if not ok:
+            logger.warning(f"Ping block to {server.name} failed: {message}")
+        return ok
 
     async def _allowlist_loop(self) -> None:
         await asyncio.sleep(ALLOWLIST_START_DELAY)

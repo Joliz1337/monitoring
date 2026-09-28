@@ -41,6 +41,10 @@ class AllowSyncRequest(BaseModel):
     direction: str = Field("in", pattern="^(in|out)$", description="Traffic direction: in or out")
 
 
+class PingBlockRequest(BaseModel):
+    enabled: bool = Field(..., description="Drop incoming ping from everyone except the allowlist")
+
+
 class TimeoutRequest(BaseModel):
     timeout: int = Field(..., ge=1, le=2592000, description="Timeout in seconds (1-2592000)")
 
@@ -64,6 +68,7 @@ def get_status():
             "allow_count": status.outgoing.allow_count,
         },
         "temp_timeout": status.temp_timeout,
+        "ping_blocked": status.ping_blocked,
         # Backward compat fields (incoming totals)
         "permanent_count": status.incoming.permanent_count,
         "temp_count": status.incoming.temp_count,
@@ -256,3 +261,15 @@ def sync_allowlist(request: AllowSyncRequest):
         "removed": result['removed'],
         "invalid": result['invalid'][:10] if result['invalid'] else []
     }
+
+
+@router.post("/ping-block")
+def set_ping_block(request: PingBlockRequest):
+    """Close incoming ping (ICMP echo-request) for everyone except the allowlist."""
+    manager = get_ipset_manager()
+    success, message = manager.set_ping_block(request.enabled)
+
+    if not success:
+        raise HTTPException(status_code=500, detail=message)
+
+    return {"success": True, "message": message, "enabled": request.enabled}

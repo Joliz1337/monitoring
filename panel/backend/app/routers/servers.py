@@ -22,6 +22,7 @@ from app.services.node_capabilities import (
 from app.database import get_db
 from app.models import Server, MetricsSnapshot, ServerTraffic
 from app.auth import verify_auth
+from app.services import ping_block
 from app.services.blocklist_manager import get_blocklist_manager
 from app.services.fleet_history import FleetPeriod, load_fleet_history
 from app.services.metrics_rates import enrich_metrics_with_speeds
@@ -467,6 +468,8 @@ async def move_servers_to_folder(
         s.folder = folder_value
     await db.commit()
     _invalidate_list_cache()
+    # Папка может быть выбрана для закрытого ping — у перенесённых он меняется
+    get_blocklist_manager().request_allowlist_push()
     return {"success": True, "moved": len(servers)}
 
 
@@ -484,7 +487,10 @@ async def rename_server_folder(
     for s in servers:
         s.folder = new_name
     await db.commit()
+    await ping_block.rename_folder(db, data.old_name, new_name)
     _invalidate_list_cache()
+    # При слиянии с уже выбранной папкой ping закрывается и у пришедших серверов
+    get_blocklist_manager().request_allowlist_push()
     return {"success": True, "renamed": len(servers)}
 
 
@@ -499,7 +505,9 @@ async def delete_server_folder(
     for s in servers:
         s.folder = None
     await db.commit()
+    await ping_block.forget_folder(db, folder_name)
     _invalidate_list_cache()
+    get_blocklist_manager().request_allowlist_push()
     return {"success": True, "unfoldered": len(servers)}
 
 
@@ -604,6 +612,7 @@ async def update_server(
         raise HTTPException(status_code=404)
     
     was_active = server.is_active
+    old_folder = server.folder
     old_url = server.url
     old_api_key = server.api_key
     old_proxy = server.proxy_url
@@ -628,8 +637,9 @@ async def update_server(
     blocklist = get_blocklist_manager()
     if server.is_active and (activated or node_changed):
         asyncio.ensure_future(blocklist.sync_single_node_by_id(server_id))
-    # Адрес или активность сервера меняют набор IP нод в белом списке всего парка
-    if server.url != old_url or server.is_active != was_active:
+    # Адрес или активность сервера меняют набор IP нод в белом списке всего парка,
+    # папка — закрыт ли на нём ping
+    if server.url != old_url or server.is_active != was_active or server.folder != old_folder:
         blocklist.request_allowlist_push()
 
     return {"success": True, "message": "Server updated"}

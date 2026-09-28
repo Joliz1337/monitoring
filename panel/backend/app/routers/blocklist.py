@@ -17,8 +17,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import verify_auth
 from app.database import get_db
 from app.models import BlocklistRule, BlocklistSource, Server
+from app.services import ping_block
 from app.services.blocklist_manager import get_blocklist_manager
 from app.services.net_utils import is_public_range
+from app.services.ping_block import PingBlockMode, PingBlockScope
 
 NON_PUBLIC_BLOCK_ERROR = (
     "Blocking private/reserved ranges is not allowed: "
@@ -696,6 +698,42 @@ async def refresh_all_sources(
 
 
 # === Settings ===
+
+class PingBlockScopeRequest(BaseModel):
+    mode: PingBlockMode
+    folders: list[str] = Field(default_factory=list, max_length=1000)
+    server_ids: list[int] = Field(default_factory=list, max_length=10000)
+
+
+class BlocklistSettingsUpdate(BaseModel):
+    ping_block: PingBlockScopeRequest
+
+
+@router.get("/settings")
+async def get_blocklist_settings(
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Ping block scope and servers in it whose agent is too old to apply it."""
+    return await ping_block.describe(db)
+
+
+@router.put("/settings")
+async def update_blocklist_settings(
+    request: BlocklistSettingsUpdate,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Close ping (except the allowlist) nowhere, everywhere or on chosen folders/servers."""
+    scope = request.ping_block
+    await ping_block.save_scope(db, PingBlockScope(
+        mode=scope.mode,
+        folders=frozenset(f.strip() for f in scope.folders if f.strip()),
+        server_ids=frozenset(scope.server_ids),
+    ))
+    get_blocklist_manager().request_allowlist_push()
+    return await ping_block.describe(db)
+
 
 # === Sync ===
 

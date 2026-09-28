@@ -6,6 +6,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
 import { blocklistApi, serversApi, Server as ServerType, BlocklistRule, BlocklistSource, BlocklistDirection } from '../api/client'
 import { Skeleton } from '../components/ui/Skeleton'
+import PingBlockCard from '../components/blocklist/PingBlockCard'
 import { Tooltip } from '../components/ui/Tooltip'
 import { Checkbox } from '../components/ui/Checkbox'
 import { CopyableIp } from '../components/ui/CopyableIp'
@@ -842,6 +843,8 @@ export default function Blocklist() {
             exit={{ opacity: 0, x: 20 }}
             className="space-y-4"
           >
+            <PingBlockCard servers={servers} />
+
             {/* Add Form */}
             <div className="card">
               <h3 className="text-lg font-semibold text-dark-100 mb-2">
