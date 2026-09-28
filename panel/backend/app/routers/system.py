@@ -317,7 +317,14 @@ async def get_version_base(
         panel_update_available = latest_version != current_version
 
     nodes = [
-        {"id": s.id, "name": s.name, "url": s.url}
+        {
+            "id": s.id,
+            "name": s.name,
+            "url": s.url,
+            "folder": s.folder,
+            # для массовой доставки образа по SSH: кому хватит сохранённых кредов
+            "has_ssh_creds": bool(s.ssh_password or s.ssh_private_key),
+        }
         for s in servers
     ]
 

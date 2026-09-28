@@ -847,7 +847,27 @@
     "deliver": "Deliver",
     "done": "Image delivered, node updated",
     "error": "Delivery failed",
-    "failed": "Delivery error"
+    "failed": "Delivery error",
+    "background_hint": "You can close this window — the update keeps running in the background",
+    "deliver_again": "Run again",
+    "open_log": "Open the SSH update log",
+    "status_queued": "SSH: queued",
+    "status_running": "SSH: updating",
+    "status_success": "SSH: updated",
+    "status_error": "SSH: failed",
+    "bulk_title": "Update over SSH — servers: {{count}}",
+    "bulk_desc": "The panel uploads the node image to each server over SSH and brings the node up on it. At most 5 servers update at the same time, the rest wait in a queue. The window closes right away — each server's status and log are on its card.",
+    "bulk_with_creds": "With saved SSH credentials: {{count}}",
+    "bulk_without_creds": "Without saved credentials: {{count}}",
+    "bulk_and_more": "and {{count}} more",
+    "bulk_form_hint": "Enter SSH access for them — the host is the node address. Leave empty to skip these servers.",
+    "bulk_start": "Start ({{count}})",
+    "bulk_started": "SSH update started: {{count}}",
+    "bulk_skipped": "Skipped: {{count}}",
+    "skip_no_creds": "no SSH credentials",
+    "skip_no_host": "could not determine the SSH host",
+    "skip_not_root": "root user required",
+    "skip_not_found": "server not found"
   },
   "backup": {
     "auto": {
@@ -913,7 +933,13 @@
     "all_up_to_date": "All components are up to date",
     "all_up_to_date_desc": "Panel and all nodes are running the latest versions. No updates required.",
     "duration_title": "Update Duration",
-    "duration_text": "Updates may take 5-10 minutes to complete. Do not close the page and wait for the process to finish."
+    "duration_text": "Updates may take 5-10 minutes to complete. Do not close the page and wait for the process to finish.",
+    "select_all": "Select all",
+    "selected_count": "Selected: {{count}}",
+    "update_selected": "Update ({{count}})",
+    "update_selected_hint": "Regular update through the node agent — for online nodes with a newer version available",
+    "update_selected_ssh": "Update over SSH ({{count}})",
+    "clear_selection": "Clear selection"
   },
   "remnawave_nginx": {
     "title": "Remnawave nginx",

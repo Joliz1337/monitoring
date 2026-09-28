@@ -778,7 +778,7 @@ export type NodeImageDeliveryEvent =
   | { type: 'start'; host: string }
   | { type: 'log'; line: string }
   | { type: 'error'; message: string }
-  | { type: 'done'; status?: string; message?: string }
+  | { type: 'done'; status: 'success' | 'error' }
 
 export const imageDeliveryJobStreamUrl = (jobId: string) =>
   `/api/servers/deliver-image/${jobId}/stream`
@@ -801,6 +801,26 @@ export interface ImageDeliveryCreds {
   ssh_passphrase?: string
 }
 
+export type ImageDeliveryJobStatus = 'queued' | 'running' | 'success' | 'error'
+
+export interface ImageDeliveryJobInfo {
+  job_id: string
+  server_id: number
+  name: string
+  host: string
+  status: ImageDeliveryJobStatus
+  error: string | null
+  started_at: number
+  finished_at: number | null
+}
+
+export type ImageDeliverySkipReason = 'no_creds' | 'no_host' | 'not_root' | 'not_found'
+
+export interface ImageDeliveryBulkResult {
+  started: { server_id: number; job_id: string }[]
+  skipped: { server_id: number; name: string | null; reason: ImageDeliverySkipReason }[]
+}
+
 export const nodeImageApi = {
   getSettings: (id: number) =>
     api.get<ImageDeliverySettings>(`/servers/${id}/image-delivery`),
@@ -808,6 +828,11 @@ export const nodeImageApi = {
     api.patch(`/servers/${id}/image-delivery`, data),
   deliver: (id: number, creds: ImageDeliveryCreds) =>
     api.post<{ job_id: string }>(`/servers/${id}/deliver-image`, creds),
+  deliverBulk: (serverIds: number[], creds: Omit<ImageDeliveryCreds, 'ssh_host'>, saveCreds: boolean) =>
+    api.post<ImageDeliveryBulkResult>('/servers/deliver-image/bulk', {
+      server_ids: serverIds, save_creds: saveCreds, ...creds,
+    }),
+  jobs: () => api.get<{ jobs: ImageDeliveryJobInfo[] }>('/servers/deliver-image/jobs'),
 }
 
 export const serversApi = {
@@ -1302,6 +1327,8 @@ export interface VersionBaseNode {
   id: number
   name: string
   url: string
+  folder: string | null
+  has_ssh_creds: boolean
 }
 
 export interface VersionBaseInfo {

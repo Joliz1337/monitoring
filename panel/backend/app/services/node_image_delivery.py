@@ -30,6 +30,7 @@ LOAD_TIMEOUT = 3600
 UPDATE_TIMEOUT = 7200
 REMOTE_TAR = "/tmp/mon-node-img.tar.gz"
 FINISHED_TTL_SECONDS = 600
+DELIVERY_CONCURRENCY = 5
 LOG_BUFFER_LIMIT = 5000
 
 
@@ -159,9 +160,10 @@ async def deliver_image(target: SSHTarget, tag: str) -> AsyncIterator[dict]:
 @dataclass
 class DeliveryJob:
     id: str
+    server_id: int
     name: str
     host: str
-    status: str = "running"  # running | success | error
+    status: str = "queued"  # queued | running | success | error
     log: list[str] = field(default_factory=list)
     error: Optional[str] = None
     started_at: float = field(default_factory=time.time)
@@ -173,8 +175,12 @@ class DeliveryJob:
 class ImageDeliveryJobManager:
     """In-memory реестр фоновых задач доставки образа с pub/sub лога."""
 
-    def __init__(self) -> None:
+    def __init__(self, concurrency: int = DELIVERY_CONCURRENCY) -> None:
         self._jobs: dict[str, DeliveryJob] = {}
+        self._concurrency = concurrency
+        # Все заливки идут с одного аплинка панели: без потолка массовый запуск
+        # поделил бы канал на всех и не довёз бы образ ни до одной ноды за разумное время
+        self._slots = asyncio.Semaphore(concurrency)
 
     def _cleanup_finished(self) -> None:
         now = time.time()
@@ -187,17 +193,36 @@ class ImageDeliveryJobManager:
     def get(self, job_id: str) -> Optional[DeliveryJob]:
         return self._jobs.get(job_id)
 
+    def _active_job_for(self, server_id: int) -> Optional[DeliveryJob]:
+        return next(
+            (j for j in self._jobs.values() if j.server_id == server_id and j.finished_at is None),
+            None,
+        )
+
     def list_jobs(self) -> list[dict]:
         self._cleanup_finished()
         return [
-            {"job_id": j.id, "name": j.name, "host": j.host, "status": j.status, "error": j.error}
+            {
+                "job_id": j.id,
+                "server_id": j.server_id,
+                "name": j.name,
+                "host": j.host,
+                "status": j.status,
+                "error": j.error,
+                "started_at": j.started_at,
+                "finished_at": j.finished_at,
+            }
             for j in sorted(self._jobs.values(), key=lambda x: x.started_at)
         ]
 
-    def start(self, name: str, target: SSHTarget, tag: str) -> str:
+    def start(self, server_id: int, name: str, target: SSHTarget, tag: str) -> str:
+        """Запустить доставку. Если по серверу уже идёт задача — вернуть её, вторую не плодить."""
         self._cleanup_finished()
+        active = self._active_job_for(server_id)
+        if active is not None:
+            return active.id
         job_id = uuid.uuid4().hex
-        job = DeliveryJob(id=job_id, name=name, host=target.host)
+        job = DeliveryJob(id=job_id, server_id=server_id, name=name, host=target.host)
         self._jobs[job_id] = job
         job.task = asyncio.create_task(self._run(job, target, tag))
         return job_id
@@ -214,42 +239,41 @@ class ImageDeliveryJobManager:
             except asyncio.QueueFull:
                 pass
 
+    def _finish(self, job: DeliveryJob, status: str, error: Optional[str] = None) -> None:
+        if error:
+            self._emit(job, {"type": "error", "message": error})
+        job.status = status
+        job.error = error
+        job.finished_at = time.time()
+        self._emit(job, {"type": "done", "status": status})
+
     async def _run(self, job: DeliveryJob, target: SSHTarget, tag: str) -> None:
         try:
             self._emit(job, {"type": "start", "host": job.host})
-            async for event in deliver_image(target, tag):
-                etype = event.get("type")
-                if etype == "error":
-                    job.error = event.get("message")
+            if self._slots.locked():
+                self._emit(job, {
+                    "type": "log",
+                    "line": f"[panel] В очереди: одновременно обновляется не больше {self._concurrency} нод",
+                })
+            async with self._slots:
+                job.status = "running"
+                async for event in deliver_image(target, tag):
+                    etype = event.get("type")
+                    if etype == "error":
+                        self._finish(job, "error", event.get("message"))
+                        return
+                    if etype == "done":
+                        self._emit(job, {"type": "log", "line": f"[panel] {event.get('message')}"})
+                        self._finish(job, "success")
+                        return
                     self._emit(job, event)
-                    self._emit(job, {"type": "done", "status": "error"})
-                    job.status = "error"
-                    job.finished_at = time.time()
-                    return
-                if etype == "done":
-                    self._emit(job, event)
-                    self._emit(job, {"type": "done", "status": "success"})
-                    job.status = "success"
-                    job.finished_at = time.time()
-                    return
-                self._emit(job, event)
-            self._emit(job, {"type": "error", "message": "Доставка прервалась без результата"})
-            self._emit(job, {"type": "done", "status": "error"})
-            job.status = "error"
-            job.error = "Доставка прервалась без результата"
-            job.finished_at = time.time()
+            self._finish(job, "error", "Доставка прервалась без результата")
         except asyncio.CancelledError:
-            job.status = "error"
-            job.error = "Доставка отменена"
-            job.finished_at = time.time()
+            self._finish(job, "error", "Доставка отменена")
             raise
         except Exception as exc:  # noqa: BLE001 — верхняя граница фоновой задачи
             logger.error("Delivery job %s failed: %s", job.id, exc)
-            self._emit(job, {"type": "error", "message": str(exc)})
-            self._emit(job, {"type": "done", "status": "error"})
-            job.status = "error"
-            job.error = str(exc)
-            job.finished_at = time.time()
+            self._finish(job, "error", str(exc))
 
     async def subscribe(self, job_id: str) -> AsyncIterator[dict]:
         job = self._jobs.get(job_id)
