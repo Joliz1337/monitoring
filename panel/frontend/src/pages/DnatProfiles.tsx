@@ -47,6 +47,7 @@ import {
 } from '../api/client'
 import { FAQIcon } from '../components/FAQ'
 import { formatListen, formatTarget, protocolLabel, splitTargets } from '../utils/dnat'
+import { uniqueCopyName } from '../utils/ruleClone'
 
 type TabKey = 'rules' | 'servers' | 'log'
 type TranslateFn = (key: string, options?: Record<string, unknown>) => string
@@ -138,15 +139,22 @@ function syncStatusBadge(status: DnatSyncStatus, t: TranslateFn) {
 }
 
 
+// Порты копии пустые: у включённых правил с общим протоколом они не должны пересекаться
+function cloneRule(rule: DnatRuleData, takenNames: string[]): DnatRuleData {
+  return { ...rule, name: uniqueCopyName(rule.name, takenNames), listen_port: 0, listen_port_end: null }
+}
+
 function RuleForm({
   initial,
   isEdit,
+  cloneOf,
   saving,
   onSave,
   onCancel,
 }: {
   initial: DnatRuleData
   isEdit: boolean
+  cloneOf?: string
   saving: boolean
   onSave: (rule: DnatRuleData) => void
   onCancel: () => void
@@ -202,7 +210,9 @@ function RuleForm({
           <h4 className="text-sm font-medium text-dark-200 flex items-center gap-2">
             {isEdit
               ? <><Edit3 className="w-3.5 h-3.5 text-accent-400" /> {t('dnat_profiles.edit_rule')}</>
-              : <><Plus className="w-3.5 h-3.5 text-accent-400" /> {t('dnat_profiles.new_rule')}</>}
+              : cloneOf
+                ? <><Copy className="w-3.5 h-3.5 text-accent-400" /> {t('dnat_profiles.clone_rule_title', { name: cloneOf })}</>
+                : <><Plus className="w-3.5 h-3.5 text-accent-400" /> {t('dnat_profiles.new_rule')}</>}
           </h4>
           <button onClick={onCancel} className="p-1 hover:bg-dark-700 rounded-lg text-dark-400 transition-colors">
             <X className="w-4 h-4" />
@@ -219,7 +229,7 @@ function RuleForm({
               placeholder="vless-de1"
               className={inputCls}
               disabled={isEdit}
-              autoFocus={!isEdit}
+              autoFocus={!isEdit && !cloneOf}
             />
           </div>
           <div>
@@ -247,6 +257,7 @@ function RuleForm({
               onChange={e => update({ listen_port: parseInt(e.target.value) || 0 })}
               placeholder="443"
               className={inputCls}
+              autoFocus={!!cloneOf}
             />
           </div>
           <div>
@@ -621,15 +632,28 @@ function RulesTab({
   const { t } = useTranslation()
   const [showForm, setShowForm] = useState(false)
   const [editingIndex, setEditingIndex] = useState<number | null>(null)
+  const [cloningIndex, setCloningIndex] = useState<number | null>(null)
   const [saving, setSaving] = useState(false)
 
-  const handleAdd = async (rule: DnatRuleData) => {
+  const handleAdd = async (rule: DnatRuleData, closeForm: () => void) => {
     setSaving(true)
     try {
-      if (await onAddRule(rule)) setShowForm(false)
+      if (await onAddRule(rule)) closeForm()
     } finally {
       setSaving(false)
     }
+  }
+
+  const openEdit = (index: number) => {
+    setEditingIndex(index)
+    setCloningIndex(null)
+    setShowForm(false)
+  }
+
+  const openClone = (index: number) => {
+    setCloningIndex(index)
+    setEditingIndex(null)
+    setShowForm(false)
   }
 
   const handleUpdate = async (rule: DnatRuleData) => {
@@ -662,7 +686,7 @@ function RulesTab({
 
       <div className="flex items-center justify-between">
         <h3 className="text-sm font-medium text-dark-200">{t('dnat_profiles.rules')} ({rules.length})</h3>
-        {!showForm && editingIndex === null && (
+        {!showForm && editingIndex === null && cloningIndex === null && (
           <button
             onClick={() => setShowForm(true)}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-accent-600 hover:bg-accent-500 text-white transition-colors"
@@ -678,7 +702,7 @@ function RulesTab({
             initial={EMPTY_RULE}
             isEdit={false}
             saving={saving}
-            onSave={handleAdd}
+            onSave={rule => handleAdd(rule, () => setShowForm(false))}
             onCancel={() => setShowForm(false)}
           />
         )}
@@ -754,10 +778,18 @@ function RulesTab({
                         </Tooltip>
                         <Tooltip label={t('common.edit')}>
                           <button
-                            onClick={() => { setEditingIndex(index); setShowForm(false) }}
+                            onClick={() => openEdit(index)}
                             className="p-1.5 rounded-lg text-dark-400 hover:text-dark-200 hover:bg-dark-700/50 transition-colors"
                           >
                             <Edit3 className="w-3.5 h-3.5" />
+                          </button>
+                        </Tooltip>
+                        <Tooltip label={t('dnat_profiles.clone_rule')}>
+                          <button
+                            onClick={() => openClone(index)}
+                            className="p-1.5 rounded-lg text-dark-400 hover:text-dark-200 hover:bg-dark-700/50 transition-colors"
+                          >
+                            <Copy className="w-3.5 h-3.5" />
                           </button>
                         </Tooltip>
                         <Tooltip label={t('common.delete')}>
@@ -782,6 +814,20 @@ function RulesTab({
                           saving={saving}
                           onSave={handleUpdate}
                           onCancel={() => setEditingIndex(null)}
+                        />
+                      </td>
+                    </tr>
+                  )}
+                  {cloningIndex === index && (
+                    <tr>
+                      <td colSpan={7} className="px-3 py-2 bg-dark-900/40">
+                        <RuleForm
+                          initial={cloneRule(rule, rules.map(r => r.name))}
+                          isEdit={false}
+                          cloneOf={rule.name}
+                          saving={saving}
+                          onSave={copy => handleAdd(copy, () => setCloningIndex(null))}
+                          onCancel={() => setCloningIndex(null)}
                         />
                       </td>
                     </tr>

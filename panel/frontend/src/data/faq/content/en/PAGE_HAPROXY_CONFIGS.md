@@ -23,6 +23,8 @@ Before saving, the panel validates the config with real HAProxy: certificate pat
 - **Single target** — one destination address. Supports PROXY protocol to the backend, accepting PROXY protocol from an upstream balancer, TLS to the backend and wildcard certificates.
 - **Balancer** — a pool of servers with a distribution algorithm, health checks, weights and client stickiness.
 
+To add a similar rule, clone an existing one with the copy button in its row: the form opens with all of the original's settings, and you only set a new port.
+
 ## Server addresses
 
 If a server has several IPs, expand its row under "Linked Servers" and check which addresses HAProxy listens on and which it uses to reach the backends. For example, one IP only accepts clients while another only goes out. The setting covers every rule in the profile, and the profile itself stays shared: the panel builds a separate config for each server. With nothing checked, HAProxy listens on all addresses and the system picks the outgoing one.

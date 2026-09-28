@@ -2,11 +2,12 @@ import { useEffect, useState, useCallback, useRef, forwardRef, type ForwardedRef
 import { DndContext, closestCenter, KeyboardSensor, PointerSensor, TouchSensor, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core'
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, verticalListSortingStrategy, useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { FileCode2, Plus, Play, RefreshCw, Trash2, Server, ChevronDown, ChevronRight, Edit3, Link2, Unlink, Loader2, CheckCircle2, XCircle, AlertCircle, Clock, History, X, Code, Save, AlertTriangle, Activity, Scale, Cpu, Lock, GripVertical, ShieldCheck } from 'lucide-react'
+import { FileCode2, Plus, Play, RefreshCw, Trash2, Server, ChevronDown, ChevronRight, Edit3, Link2, Unlink, Loader2, CheckCircle2, XCircle, AlertCircle, Clock, History, X, Code, Save, AlertTriangle, Activity, Scale, Cpu, Lock, GripVertical, ShieldCheck, Copy } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
 import { formatBitsPerSec } from '../utils/format'
+import { uniqueCopyName } from '../utils/ruleClone'
 import {
   haproxyProfilesApi,
   proxyApi,
@@ -457,9 +458,28 @@ const EMPTY_RULE_FORM: RuleFormData = {
   sni_mode: 'profile', sni_domains: '',
 }
 
+function ruleToForm(r: HAProxyProfileRule): RuleFormData {
+  return {
+    name: r.name, listen_port: String(r.listen_port),
+    target_ip: r.target_ip, target_port: String(r.target_port),
+    send_proxy: r.send_proxy, accept_proxy: r.accept_proxy ?? false,
+    is_balancer: r.is_balancer ?? false,
+    servers: r.servers ?? [],
+    balancer_options: r.balancer_options ? { ...DEFAULT_BALANCER_OPTIONS, ...r.balancer_options } : { ...DEFAULT_BALANCER_OPTIONS },
+    sni_mode: r.sni_mode ?? 'profile',
+    sni_domains: (r.sni_domains ?? []).join('\n'),
+  }
+}
+
+// Порт копии пустой: два правила на одном порту конфликтуют, а занятость порта при добавлении никто не проверяет
+function cloneRuleForm(r: HAProxyProfileRule, takenNames: string[]): RuleFormData {
+  return { ...ruleToForm(r), name: uniqueCopyName(r.name, takenNames), listen_port: '' }
+}
+
 function RuleForm({
   initial,
   isEdit,
+  cloneOf,
   saving,
   onSave,
   onCancel,
@@ -468,6 +488,7 @@ function RuleForm({
 }: {
   initial: RuleFormData
   isEdit: boolean
+  cloneOf?: string
   saving: boolean
   onSave: (data: RuleFormData) => void
   onCancel: () => void
@@ -560,7 +581,11 @@ function RuleForm({
     >
       <div className="flex items-center justify-between mb-3">
         <h4 className="text-sm font-medium text-dark-200 flex items-center gap-2">
-          {isEdit ? <><Edit3 className="w-3.5 h-3.5 text-accent-500" /> {t('haproxy_configs.edit_rule')}</> : <><Plus className="w-3.5 h-3.5 text-accent-500" /> {t('haproxy_configs.new_rule')}</>}
+          {isEdit
+            ? <><Edit3 className="w-3.5 h-3.5 text-accent-500" /> {t('haproxy_configs.edit_rule')}</>
+            : cloneOf
+              ? <><Copy className="w-3.5 h-3.5 text-accent-500" /> {t('haproxy_configs.clone_rule_title', { name: cloneOf })}</>
+              : <><Plus className="w-3.5 h-3.5 text-accent-500" /> {t('haproxy_configs.new_rule')}</>}
         </h4>
         <button onClick={onCancel} className="p-1 hover:bg-dark-700 rounded-lg text-dark-400 transition-colors">
           <X className="w-4 h-4" />
@@ -801,6 +826,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
   const [showRuleForm, setShowRuleForm] = useState(false)
   const [showSni, setShowSni] = useState(false)
   const [editingRules, setEditingRules] = useState<Set<string>>(new Set())
+  const [cloningRule, setCloningRule] = useState<string | null>(null)
   const [ruleSaving, setRuleSaving] = useState(false)
   const [showConfig, setShowConfig] = useState(false)
   const [configEdit, setConfigEdit] = useState('')
@@ -877,29 +903,30 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
 
   const sniListMissing = (form: RuleFormData) => form.sni_mode === 'custom' && parseSniList(form.sni_domains).length === 0
 
-  const handleAddRule = async (form: RuleFormData) => {
+  const handleAddRule = async (form: RuleFormData): Promise<boolean> => {
     if (!form.name || !form.listen_port) {
-      toast.error(t('haproxy_configs.rule_fields_required')); return
+      toast.error(t('haproxy_configs.rule_fields_required')); return false
     }
     if (!form.is_balancer && (!form.target_ip || !form.target_port)) {
-      toast.error(t('haproxy_configs.rule_fields_required')); return
+      toast.error(t('haproxy_configs.rule_fields_required')); return false
     }
     if (form.is_balancer && form.servers.length === 0) {
-      toast.error(t('balancer.min_one_server')); return
+      toast.error(t('balancer.min_one_server')); return false
     }
     if (sniListMissing(form)) {
-      toast.error(t('haproxy_configs.sni_domains_required')); return
+      toast.error(t('haproxy_configs.sni_domains_required')); return false
     }
     setRuleSaving(true)
     try {
       const res = await haproxyProfilesApi.addRule(profileId, buildRulePayload(form))
       setRules(res.data.rules)
-      setShowRuleForm(false)
       toast.success(t('haproxy_configs.rule_added'))
       fetchDetail()
       onRefreshList()
+      return true
     } catch (err: any) {
       toast.error(err?.response?.data?.detail || t('haproxy_configs.rule_error'))
+      return false
     } finally { setRuleSaving(false) }
   }
 
@@ -939,6 +966,12 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
       else next.add(rule.name)
       return next
     })
+    setCloningRule(prev => (prev === rule.name ? null : prev))
+  }
+
+  const startCloneRule = (rule: HAProxyProfileRule) => {
+    setEditingRules(prev => { const next = new Set(prev); next.delete(rule.name); return next })
+    setCloningRule(rule.name)
   }
 
   // ---- Config raw edit ----
@@ -1131,7 +1164,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                   initial={EMPTY_RULE_FORM}
                   isEdit={false}
                   saving={ruleSaving}
-                  onSave={handleAddRule}
+                  onSave={async form => { if (await handleAddRule(form)) setShowRuleForm(false) }}
                   onCancel={() => { setShowRuleForm(false) }}
                   profileId={profileId}
                   profileOptions={detail.options}
@@ -1149,16 +1182,6 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
             <div className="space-y-1.5">
               {rules.map(r => {
                 const isEditing = editingRules.has(r.name)
-                const editInitial: RuleFormData = {
-                  name: r.name, listen_port: String(r.listen_port),
-                  target_ip: r.target_ip, target_port: String(r.target_port),
-                  send_proxy: r.send_proxy, accept_proxy: r.accept_proxy ?? false,
-                  is_balancer: r.is_balancer ?? false,
-                  servers: r.servers ?? [],
-                  balancer_options: r.balancer_options ? { ...DEFAULT_BALANCER_OPTIONS, ...r.balancer_options } : { ...DEFAULT_BALANCER_OPTIONS },
-                  sni_mode: r.sni_mode ?? 'profile',
-                  sni_domains: (r.sni_domains ?? []).join('\n'),
-                }
                 const sniActive = r.sni_mode === 'custom' || (r.sni_mode !== 'off' && detail.options.sni_filter_enabled)
                 return (
                   <div key={r.name}>
@@ -1191,6 +1214,11 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                         {sniActive && <span className="text-[10px] text-green-400/60 hidden sm:block">SNI</span>}
                       </div>
                       <div className="flex items-center gap-1 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <Tooltip label={t('haproxy_configs.clone_rule')}>
+                          <button onClick={e => { e.stopPropagation(); startCloneRule(r) }} className="p-1.5 rounded-lg text-dark-400 hover:text-dark-200 hover:bg-dark-700/50 transition-colors">
+                            <Copy className="w-3.5 h-3.5" />
+                          </button>
+                        </Tooltip>
                         <Tooltip label={t('common.delete')}>
                           <button onClick={e => { e.stopPropagation(); handleDeleteRule(r.name) }} className="p-1.5 rounded-lg text-dark-400 hover:text-red-400 hover:bg-red-500/10 transition-colors">
                             <Trash2 className="w-3.5 h-3.5" />
@@ -1200,14 +1228,30 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                     </div>
                     <AnimatePresence>
                       {isEditing && (
-                        <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="overflow-hidden">
+                        <motion.div key="edit" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="overflow-hidden">
                           <div className="mt-1">
                             <RuleForm
-                              initial={editInitial}
+                              initial={ruleToForm(r)}
                               isEdit={true}
                               saving={ruleSaving}
                               onSave={handleUpdateRule}
                               onCancel={() => setEditingRules(prev => { const next = new Set(prev); next.delete(r.name); return next })}
+                              profileId={profileId}
+                              profileOptions={detail.options}
+                            />
+                          </div>
+                        </motion.div>
+                      )}
+                      {cloningRule === r.name && (
+                        <motion.div key="clone" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="overflow-hidden">
+                          <div className="mt-1">
+                            <RuleForm
+                              initial={cloneRuleForm(r, rules.map(rule => rule.name))}
+                              isEdit={false}
+                              cloneOf={r.name}
+                              saving={ruleSaving}
+                              onSave={async form => { if (await handleAddRule(form)) setCloningRule(null) }}
+                              onCancel={() => setCloningRule(null)}
                               profileId={profileId}
                               profileOptions={detail.options}
                             />

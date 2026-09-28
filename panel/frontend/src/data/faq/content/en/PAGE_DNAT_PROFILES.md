@@ -68,6 +68,7 @@ Turn it off only if such return routing is already in place. Need the real clien
 
 - The node API port (9100/tcp) cannot be forwarded. A rule on the SSH port gets a warning: after apply, SSH to the node goes to the target.
 - The “Rule enabled” checkbox is a pause without deleting: a disabled rule stays in the profile but is removed from the nodes and no traffic is forwarded through it; tick it again and it is re-applied.
+- The copy button in a rule's row opens the form with that rule's settings under a new name — you only set the listen port.
 - Unlinking a server from a profile (and deleting a profile) removes all DNAT rules from the node; an offline node gets this once it is back online. Rules can also be removed manually with the button on the server page.
 - Permissions: the `dnat` domain in the node's NODE_CAPABILITIES.
 - An artificial bandwidth limit for the node (a flat ceiling on the hoster's counters) is on the server page, "Bandwidth limit" card.
