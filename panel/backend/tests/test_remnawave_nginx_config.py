@@ -403,14 +403,30 @@ class TlsAndConnectionsTests(unittest.TestCase):
         config = generate_full_config(
             ProfileOptions(proxy_protocol_enabled=True, proxy_protocol_port=8449), GRPC_RULES,
         )
-        self.assertIn("listen 443 ssl so_keepalive=30s:10s:3;", config)
-        self.assertIn("listen 8449 ssl proxy_protocol so_keepalive=30s:10s:3;", config)
+        self.assertIn("listen 443 ssl backlog=65535 so_keepalive=30s:10s:3;", config)
+        self.assertIn("listen 8449 ssl proxy_protocol backlog=65535 so_keepalive=30s:10s:3;", config)
         self.assertIn("listen 80;", self._listen_lines(config))
 
     def test_client_keepalive_empty_omits_parameter(self):
         config = generate_full_config(ProfileOptions(client_tcp_keepalive=""), GRPC_RULES)
         self.assertNotIn("so_keepalive", config)
-        self.assertIn("listen 443 ssl;", config)
+        self.assertIn("listen 443 ssl backlog=65535;", config)
+
+    def test_client_listens_get_full_backlog(self):
+        """Со своими 511 порт nginx — самая узкая SYN-очередь на ноде: недоделанные
+        рукопожатия релеев переполняют её, ядро шлёт cookies, и вотчдог
+        принимает это за SYN-флуд. Параметр сокета nginx принимает один раз на
+        адрес:порт, поэтому у блока default_server на 443 его нет."""
+        config = generate_full_config(
+            ProfileOptions(proxy_protocol_enabled=True, reject_default_server=True), GRPC_RULES,
+        )
+        listens = self._listen_lines(config)
+        for port in ("443", "8449"):
+            with self.subTest(port=port):
+                on_port = [l for l in listens if l.startswith(f"listen {port} ")]
+                self.assertEqual(sum("backlog=65535" in l for l in on_port), 1)
+        self.assertIn("listen 443 ssl default_server;", listens)
+        self.assertIn("listen 80;", listens)
 
     def test_client_keepalive_bad_format_rejected(self):
         for bad in ("30:10", "abc", "30s:10s:0", "30s:10s:101", "30h:10s:3"):

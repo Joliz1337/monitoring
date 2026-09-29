@@ -67,6 +67,13 @@ UPSTREAMS_END_MARKER = "# === UPSTREAMS END ==="
 LOOPBACK_SOURCES = tuple(f"127.0.0.{octet}" for octet in range(1, 17))
 LOOPBACK_SOURCE_VAR = "$xray_source"
 
+# Очередь клиентских listen. Без параметра nginx просит у ядра 511 — самую
+# узкую SYN-очередь на ноде (Xray берёт somaxconn): при потерях на пути от
+# релеев недоделанные рукопожатия переполняют её, ядро переходит на
+# SYN-cookies, и анти-DDoS вотчдог видит «SYN-флуд». Ядро само урезает
+# значение до net.core.somaxconn хоста
+LISTEN_BACKLOG = 65535
+
 # Строки с этим маркером нода пересчитывает под свой хост при применении
 # (потолок дескрипторов контейнера и RAM у нод разные). Значения ниже —
 # безопасный минимум, который работает даже на самом маленьком сервере
@@ -718,9 +725,12 @@ def generate_full_config(options: ProfileOptions, rules: list[Rule]) -> str:
     }}
 """)
 
+    # Параметры сокета nginx принимает один раз на адрес:порт — поэтому только
+    # здесь, а у блока default_server на том же 443 их нет
     so_keepalive = (f" so_keepalive={options.client_tcp_keepalive}"
                     if options.client_tcp_keepalive else "")
-    pp_listen = (f"        listen {options.proxy_protocol_port} ssl proxy_protocol{so_keepalive};\n"
+    socket_params = f" backlog={LISTEN_BACKLOG}{so_keepalive}"
+    pp_listen = (f"        listen {options.proxy_protocol_port} ssl proxy_protocol{socket_params};\n"
                  if options.proxy_protocol_enabled else "")
     pp_realip = (f"        set_real_ip_from {options.haproxy_ip or '0.0.0.0/0'};\n"
                  f"        real_ip_header proxy_protocol;\n\n"
@@ -732,7 +742,7 @@ def generate_full_config(options: ProfileOptions, rules: list[Rule]) -> str:
     # что отдала бы заглушка при прямом обращении — любой лишний или
     # продублированный заголовок выдаёт, что перед сайтом стоит прокси
     http_parts.append(f"""    server {{
-        listen 443 ssl{so_keepalive};
+        listen 443 ssl{socket_params};
 {pp_listen}        http2 on;
         server_name {options.server_names};
 
