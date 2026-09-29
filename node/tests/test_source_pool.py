@@ -26,6 +26,7 @@ from app.models.source_pool import (  # noqa: E402
     SourcePoolConfig,
 )
 from app.services.source_pool import (  # noqa: E402
+    DefaultGateway,
     build_bindings,
     clear_commands,
     parse_default_gateway,
@@ -126,11 +127,16 @@ class GatewayTest(unittest.TestCase):
             {"dst": "default", "gateway": "10.0.0.1", "dev": "eth1"},
             {"dst": "default", "gateway": "1.2.3.1", "dev": "bond0"},
         ])
-        self.assertEqual(parse_default_gateway(text, "bond0"), "1.2.3.1")
+        self.assertEqual(parse_default_gateway(text, "bond0"), DefaultGateway("1.2.3.1"))
 
     def test_point_to_point_has_no_gateway(self):
         text = json.dumps([{"dst": "default", "dev": "eth0"}])
-        self.assertIsNone(parse_default_gateway(text, "eth0"))
+        self.assertEqual(parse_default_gateway(text, "eth0"), DefaultGateway())
+
+    def test_onlink_flag_is_kept(self):
+        """Hetzner раздаёт адрес /32, и шлюз стоит в основной таблице с `onlink`."""
+        text = json.dumps([{"dst": "default", "gateway": "77.42.4.1", "dev": "enp35s0", "flags": ["onlink"]}])
+        self.assertEqual(parse_default_gateway(text, "enp35s0"), DefaultGateway("77.42.4.1", onlink=True))
 
 
 class SplitProbeTest(unittest.TestCase):
@@ -164,28 +170,28 @@ class PlanCommandsTest(unittest.TestCase):
             b.mark: (RULE_PRIORITY_BASE + index, b.table)
             for index, b in enumerate(self.bindings)
         }
-        self.gateway = "1.2.3.1"
-        self.routes = {b.table: (self.gateway, b.address) for b in self.bindings}
+        self.gateway = DefaultGateway("1.2.3.1")
+        self.routes = {b.table: (self.gateway.address, b.address) for b in self.bindings}
 
     def test_steady_state_writes_nothing(self):
         self.assertEqual(
-            plan_commands(self.bindings, self.rules, self.routes, "bond0", "1.2.3.1", {}), []
+            plan_commands(self.bindings, self.rules, self.routes, "bond0", self.gateway, {}), []
         )
 
     def test_missing_rule_is_added(self):
         self.rules.pop(MARK_BASE + 5)
-        commands = plan_commands(self.bindings, self.rules, self.routes, "bond0", "1.2.3.1", {})
+        commands = plan_commands(self.bindings, self.rules, self.routes, "bond0", self.gateway, {})
         self.assertEqual(len(commands), 2)
         self.assertIn(f"ip rule del fwmark {MARK_BASE + 5}", commands[0])
         self.assertIn(f"ip rule add fwmark {MARK_BASE + 5}", commands[1])
 
     def test_rule_pointing_at_wrong_table_is_rebound(self):
         self.rules[MARK_BASE] = (RULE_PRIORITY_BASE, TABLE_BASE + 1)
-        commands = plan_commands(self.bindings, self.rules, self.routes, "bond0", "1.2.3.1", {})
+        commands = plan_commands(self.bindings, self.rules, self.routes, "bond0", self.gateway, {})
         self.assertTrue(any(f"ip rule add fwmark {MARK_BASE} lookup {TABLE_BASE} " in c for c in commands))
 
     def test_route_with_wrong_source_is_replaced(self):
-        self.routes[TABLE_BASE] = (self.gateway, "9.9.9.9")
+        self.routes[TABLE_BASE] = (self.gateway.address, "9.9.9.9")
         commands = plan_commands(self.bindings, self.rules, self.routes, "bond0", self.gateway, {})
         self.assertEqual(
             commands,
@@ -202,6 +208,16 @@ class PlanCommandsTest(unittest.TestCase):
             [f"ip route replace default via 1.2.3.1 dev bond0 src 1.2.3.4 table {TABLE_BASE}"],
         )
 
+    def test_onlink_main_gateway_keeps_flag(self):
+        """Без `onlink` ядро не примет шлюз вне подсети адреса /32:
+        «Nexthop has invalid gateway», и ни один адрес пула не заработает."""
+        routes = dict(self.routes)
+        routes.pop(TABLE_BASE)
+        commands = plan_commands(self.bindings, self.rules, routes, "bond0", DefaultGateway("1.2.3.1", onlink=True), {})
+        self.assertEqual(
+            commands, [f"ip route replace default via 1.2.3.1 dev bond0 src 1.2.3.4 table {TABLE_BASE} onlink"]
+        )
+
     def test_address_with_own_gateway_leaves_through_it(self):
         own = {"1.2.3.5": "5.6.7.1"}
         commands = plan_commands(self.bindings, self.rules, self.routes, "bond0", self.gateway, own)
@@ -214,7 +230,7 @@ class PlanCommandsTest(unittest.TestCase):
     def test_route_without_gateway(self):
         routes = {b.table: (None, b.address) for b in self.bindings}
         routes.pop(TABLE_BASE)
-        commands = plan_commands(self.bindings, self.rules, routes, "eth0", None, {})
+        commands = plan_commands(self.bindings, self.rules, routes, "eth0", DefaultGateway(), {})
         self.assertEqual(
             commands, [f"ip route replace default dev eth0 src 1.2.3.4 table {TABLE_BASE}"]
         )

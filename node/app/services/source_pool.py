@@ -135,21 +135,26 @@ def parse_table_routes(text: str) -> dict[int, TableRoute]:
     return routes
 
 
-def parse_default_gateway(text: str, interface: str) -> Optional[str]:
+@dataclass(frozen=True)
+class DefaultGateway:
+    address: Optional[str] = None
+    onlink: bool = False
+
+
+def parse_default_gateway(text: str, interface: str) -> DefaultGateway:
     """Шлюз дефолтного маршрута. Его может не быть — на point-to-point линках
-    маршрут выглядит как `default dev eth0`, и это законно."""
+    маршрут выглядит как `default dev eth0`, и это законно. Флаг `onlink`
+    переносится как есть: там, где адрес выдан /32 (Hetzner), шлюз лежит вне
+    подсети адреса, и без флага ядро не примет его в нашей таблице."""
     try:
         entries = json.loads(text or "[]")
     except ValueError:
-        return None
-    candidates = [e for e in entries if isinstance(e, dict)] if isinstance(entries, list) else []
-    for entry in candidates:
-        if entry.get("dev") == interface and entry.get("gateway"):
-            return str(entry["gateway"])
-    for entry in candidates:
-        if entry.get("gateway"):
-            return str(entry["gateway"])
-    return None
+        return DefaultGateway()
+    candidates = [e for e in entries if isinstance(e, dict) and e.get("gateway")] if isinstance(entries, list) else []
+    route = next((e for e in candidates if e.get("dev") == interface), candidates[0] if candidates else None)
+    if route is None:
+        return DefaultGateway()
+    return DefaultGateway(str(route["gateway"]), "onlink" in (route.get("flags") or []))
 
 
 def split_probe(text: str) -> tuple[str, str, str]:
@@ -188,8 +193,9 @@ def probe_command() -> str:
 
 
 def route_command(table: int, address: str, interface: str, gateway: Optional[str], onlink: bool = False) -> str:
-    """`onlink` — для собственного шлюза адреса: он часто вне подсети адреса
-    (адрес /32), и без флага ядро отказалось бы ставить маршрут."""
+    """`onlink` — когда шлюз вне подсети адреса (адрес /32): так бывает у
+    собственного шлюза адреса и у основного шлюза на Hetzner. Без флага ядро
+    отказывается ставить маршрут: «Nexthop has invalid gateway»."""
     via = f"via {gateway} " if gateway else ""
     flags = " onlink" if onlink else ""
     return f"ip route replace default {via}dev {interface} src {address} table {table}{flags}"
@@ -210,7 +216,7 @@ def plan_commands(
     current_rules: dict[int, tuple[int, int]],
     current_routes: dict[int, TableRoute],
     interface: str,
-    gateway: Optional[str],
+    gateway: DefaultGateway,
     own_gateways: dict[str, str],
 ) -> list[str]:
     """Только расхождения: в устоявшемся состоянии цикл самолечения ничего не пишет.
@@ -219,8 +225,9 @@ def plan_commands(
     wanted_routes = {b.table: b.address for b in bindings}
     for table, address in sorted(wanted_routes.items()):
         own = own_gateways.get(address)
-        if current_routes.get(table) != (own or gateway, address):
-            commands.append(route_command(table, address, interface, own or gateway, onlink=bool(own)))
+        via, onlink = (own, True) if own else (gateway.address, gateway.onlink)
+        if current_routes.get(table) != (via, address):
+            commands.append(route_command(table, address, interface, via, onlink))
     for index, binding in enumerate(bindings):
         expected = (RULE_PRIORITY_BASE + index, binding.table)
         if current_rules.get(binding.mark) != expected:
@@ -363,7 +370,7 @@ class SourcePoolManager:
         except RuntimeError as exc:
             state.last_error = str(exc)
             return state
-        state.gateway = parse_default_gateway(default_text, discovery.interface or "")
+        state.gateway = parse_default_gateway(default_text, discovery.interface or "").address
         if not self._config.enabled or not bindings:
             state.in_sync = not current_rules and not current_routes
             state.missing_marks = []
