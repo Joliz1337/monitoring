@@ -50,6 +50,10 @@ async def lifespan(app: FastAPI):
     haproxy_manager = get_haproxy_manager()
     success, msg = haproxy_manager.full_init()
     logger.info(f"HAProxy initialization: {msg}")
+    try:
+        await asyncio.to_thread(haproxy_manager.restore_silent_drop_guard)
+    except Exception as e:
+        logger.error(f"Silent-drop RST guard restore failed, scanners may fill conntrack: {e}", exc_info=True)
 
     port_sampler = get_port_traffic_sampler()
     try:
