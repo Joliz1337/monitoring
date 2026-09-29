@@ -53,6 +53,7 @@ import {
   Loader2,
   GripVertical,
   Search,
+  type LucideIcon,
 } from 'lucide-react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useServersStore, type ServerWithMetrics } from '../stores/serversStore'
@@ -70,9 +71,17 @@ import { writeStorage } from '../utils/storage'
 const COLLAPSED_KEY = 'dashboard_collapsed_folders'
 const FOLDER_ORDER_KEY = 'dashboard_folder_order'
 
-// Без сенсоров drag не стартует: при активном поиске список отфильтрован,
+// Без сенсоров drag не стартует: при поиске или фильтре по статусу список отфильтрован,
 // и сохранение порядка отправило бы на бэк неполный набор id
 const NO_SENSORS: SensorDescriptor<object>[] = []
+
+type StatusFilter = 'online' | 'offline' | 'disabled'
+
+const STATUS_FILTERS: { key: StatusFilter; Icon: LucideIcon; text: string; active: string }[] = [
+  { key: 'online', Icon: Wifi, text: 'text-success', active: 'bg-success/15 ring-1 ring-success/40' },
+  { key: 'offline', Icon: WifiOff, text: 'text-danger', active: 'bg-danger/15 ring-1 ring-danger/40' },
+  { key: 'disabled', Icon: PowerOff, text: 'text-dark-500', active: 'bg-dark-700/60 ring-1 ring-dark-500/50' },
+]
 
 const matchesSearch = (server: ServerWithMetrics, query: string): boolean =>
   server.name.toLowerCase().includes(query) || server.url.toLowerCase().includes(query)
@@ -118,6 +127,7 @@ export default function Dashboard() {
   const [emptyFolders, setEmptyFolders] = useState<string[]>([])
   const [folderOrder, setFolderOrder] = useState<string[]>(loadFolderOrder)
   const [searchQuery, setSearchQuery] = useState('')
+  const [statusFilter, setStatusFilter] = useState<StatusFilter | null>(null)
   const [modalState, setModalState] = useState<
     | { kind: 'none' }
     | { kind: 'create-folder' }
@@ -156,34 +166,49 @@ export default function Dashboard() {
 
   const displayedServers = dragServers ?? servers
 
-  const { activeServers, onlineCount, offlineCount, disabledCount } = useMemo(() => {
+  const { activeServers, disabledServers, statusCounts } = useMemo(() => {
     const active = displayedServers.filter(s => s.is_active)
+    const disabled = displayedServers.filter(s => !s.is_active)
     return {
       activeServers: active,
-      onlineCount: active.filter(s => s.status === 'online').length,
-      offlineCount: active.filter(s => s.status === 'offline').length,
-      disabledCount: displayedServers.filter(s => !s.is_active).length,
+      disabledServers: disabled,
+      statusCounts: {
+        online: active.filter(s => s.status === 'online').length,
+        offline: active.filter(s => s.status === 'offline').length,
+        disabled: disabled.length,
+      } satisfies Record<StatusFilter, number>,
     }
   }, [displayedServers])
 
   const normalizedQuery = searchQuery.toLowerCase().trim()
   const isSearching = normalizedQuery.length > 0
+  const isFiltering = isSearching || statusFilter !== null
+
+  const toggleStatusFilter = (filter: StatusFilter) =>
+    setStatusFilter(prev => (prev === filter ? null : filter))
+
+  // Отключённые серверы на дашборде видны только через свой фильтр
+  const statusServers = useMemo(() => {
+    if (statusFilter === 'disabled') return disabledServers
+    if (statusFilter) return activeServers.filter(s => s.status === statusFilter)
+    return activeServers
+  }, [activeServers, disabledServers, statusFilter])
 
   const visibleServers = useMemo(
-    () => (isSearching ? activeServers.filter(s => matchesSearch(s, normalizedQuery)) : activeServers),
-    [activeServers, isSearching, normalizedQuery],
+    () => (isSearching ? statusServers.filter(s => matchesSearch(s, normalizedQuery)) : statusServers),
+    [statusServers, isSearching, normalizedQuery],
   )
 
-  // При поиске пустые папки не показываем — в них нечего искать
+  // При поиске и фильтре пустые папки не показываем — в них нечего искать
   const folders = useMemo(() => {
     const allFolders = new Set<string>()
     for (const s of visibleServers) if (s.folder) allFolders.add(s.folder)
-    if (!isSearching) for (const f of emptyFolders) allFolders.add(f)
+    if (!isFiltering) for (const f of emptyFolders) allFolders.add(f)
 
     const ordered = folderOrder.filter(f => allFolders.has(f))
     const remaining = [...allFolders].filter(f => !folderOrder.includes(f)).sort()
     return [...ordered, ...remaining]
-  }, [visibleServers, isSearching, emptyFolders, folderOrder])
+  }, [visibleServers, isFiltering, emptyFolders, folderOrder])
 
   const folderSortableIds = useMemo(
     () => folders.map(f => `sortable-folder:${f}`),
@@ -447,25 +472,27 @@ export default function Dashboard() {
             {t('dashboard.title')}
             <FAQIcon screen="PAGE_DASHBOARD" />
           </h1>
-          <p className="text-dark-400 mt-1 flex items-center gap-3">
-            <span>{subtitle}</span>
-            <span className="flex items-center gap-1.5">
-              <Wifi className="w-3.5 h-3.5 text-success" />
-              <span className="text-success">{onlineCount}</span>
-            </span>
-            {offlineCount > 0 && (
-              <span className="flex items-center gap-1.5">
-                <WifiOff className="w-3.5 h-3.5 text-danger" />
-                <span className="text-danger">{offlineCount}</span>
-              </span>
-            )}
-            {disabledCount > 0 && (
-              <span className="flex items-center gap-1.5">
-                <PowerOff className="w-3.5 h-3.5 text-dark-500" />
-                <span className="text-dark-500">{disabledCount}</span>
-              </span>
-            )}
-          </p>
+          <div className="text-dark-400 mt-1 flex items-center gap-1">
+            <span className="mr-1">{subtitle}</span>
+            {STATUS_FILTERS.map(({ key, Icon, text, active }) => {
+              const count = statusCounts[key]
+              const isActive = statusFilter === key
+              // Кнопка активного фильтра не пропадает, когда счётчик обнулился, — иначе его нечем снять
+              if (key !== 'online' && count === 0 && !isActive) return null
+              return (
+                <Tooltip key={key} label={t(isActive ? 'dashboard.filter_reset' : `dashboard.filter_${key}`)}>
+                  <button
+                    onClick={() => toggleStatusFilter(key)}
+                    aria-pressed={isActive}
+                    className={`flex items-center gap-1.5 px-2 py-0.5 rounded-md transition-colors ${isActive ? active : 'hover:bg-dark-800/60'}`}
+                  >
+                    <Icon className={`w-3.5 h-3.5 ${text}`} />
+                    <span className={text}>{count}</span>
+                  </button>
+                </Tooltip>
+              )
+            })}
+          </div>
         </div>
 
         <div className="flex items-center gap-3">
@@ -559,7 +586,7 @@ export default function Dashboard() {
       <FleetSummary servers={servers} />
 
       {/* Search */}
-      {activeServers.length > 0 && (
+      {(activeServers.length > 0 || statusFilter !== null) && (
         <div className="flex items-center gap-3 mb-4">
           <div className="flex-1 flex items-center gap-2 bg-dark-800/50 border border-dark-700/50 rounded-xl px-3 py-2">
             <Search className="w-4 h-4 text-dark-400 shrink-0" />
@@ -579,20 +606,20 @@ export default function Dashboard() {
               </button>
             )}
           </div>
-          {isSearching && (
-            <span className="text-xs text-dark-500 hidden sm:inline">{t('dashboard.search_drag_hint')}</span>
+          {isFiltering && (
+            <span className="text-xs text-dark-500 hidden sm:inline">{t('dashboard.filter_drag_hint')}</span>
           )}
         </div>
       )}
 
       {/* Content */}
-      {isLoading && activeServers.length === 0 ? (
+      {isLoading && servers.length === 0 ? (
         <div className={`${gridClass} fade-in`} key="loading">
           {Array.from({ length: 6 }).map((_, i) => (
             <ServerCardSkeleton key={i} compact={compactView} />
           ))}
         </div>
-      ) : activeServers.length === 0 ? (
+      ) : activeServers.length === 0 && statusFilter === null ? (
         <div className="card text-center py-20 fade-in" key="empty">
           <div>
             <div className="icon-float inline-block">
@@ -606,14 +633,14 @@ export default function Dashboard() {
             </button>
           </div>
         </div>
-      ) : isSearching && visibleServers.length === 0 ? (
+      ) : isFiltering && visibleServers.length === 0 ? (
         <div className="card text-center py-16 fade-in" key="no-results">
           <Search className="w-12 h-12 text-dark-600 mx-auto mb-3" />
           <p className="text-dark-400">{t('common.no_results')}</p>
         </div>
       ) : (
         <DndContext
-          sensors={isSearching ? NO_SENSORS : sensors}
+          sensors={isFiltering ? NO_SENSORS : sensors}
           collisionDetection={collisionDetection}
           onDragStart={handleDragStart}
           onDragOver={handleDragOver}
@@ -624,7 +651,7 @@ export default function Dashboard() {
               {/* Sortable folder list */}
               <SortableContext items={folderSortableIds} strategy={verticalListSortingStrategy}>
                 {folders.map(folderName => {
-                  const isCollapsed = !isSearching && collapsed.has(folderName)
+                  const isCollapsed = !isFiltering && collapsed.has(folderName)
                   const folderServers = grouped.get(folderName) || []
                   return (
                     <SortableFolderItem
