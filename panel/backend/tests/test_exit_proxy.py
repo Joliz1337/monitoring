@@ -5,7 +5,8 @@
 
 Закреплённые инварианты: хэш конфига не зависит от порядка ключей; первый
 сбор статуса не шлёт алерты за старые события ноды; таймаут запросов к ноде
-короче `location /` в nginx ноды (своего location у exit-прокси нет).
+короче `location /` в nginx ноды (своего location у exit-прокси нет); свежий
+статус снимает «статус недоступен» прошлых тиков, но не ошибку доставки конфига.
 """
 
 import os
@@ -14,6 +15,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -45,7 +47,9 @@ try:
         new_node_events,
         node_view,
     )
+    from app.services.exit_proxy import service as service_module  # noqa: E402
     from app.services.reserved_ports_sync import merged_entries  # noqa: E402
+    from sqlalchemy.dialects import postgresql  # noqa: E402
 except ImportError as e:  # рантайм панели (sqlalchemy, httpx) не установлен
     raise unittest.SkipTest(f"exit_proxy requires the panel runtime: {e}")
 
@@ -213,6 +217,44 @@ class NodeClientTest(unittest.TestCase):
         read_timeout = re.search(r"proxy_read_timeout\s+(\d+)s;", match.group(1))
         self.assertIsNotNone(read_timeout)
         self.assertLess(node_client.NODE_TIMEOUT_SEC, int(read_timeout.group(1)))
+
+
+class RecordingSession:
+    """Подмена async_session: копит выполненные запросы вместо PostgreSQL."""
+
+    def __init__(self, statements: list):
+        self._statements = statements
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+    async def execute(self, statement):
+        self._statements.append(statement.compile(dialect=postgresql.dialect()))
+
+    def add(self, _row) -> None:
+        pass
+
+    async def commit(self) -> None:
+        pass
+
+
+class StatusAbsorbTest(unittest.IsolatedAsyncioTestCase):
+    async def test_fresh_status_clears_only_status_error_of_synced_node(self):
+        statements: list = []
+        with patch.object(service_module, "async_session", lambda: RecordingSession(statements)):
+            await service_module.ExitProxyService().absorb_status(
+                settings(), node_row(last_event_at=None, self_test_ok=None), server(), {"current": "warp"},
+            )
+        clearing = [
+            compiled for compiled in statements
+            if "sync_error" in compiled.params and compiled.params["sync_error"] is None
+        ]
+        self.assertEqual(len(clearing), 1, "успешный статус должен стирать sync_error")
+        # Ошибку доставки конфига (sync_status=failed) стирает только следующая успешная доставка
+        self.assertIn("synced", clearing[0].params.values())
 
 
 class IntegrationPointsTest(unittest.TestCase):
