@@ -556,6 +556,15 @@ export const remnawaveInstallApi = {
   jobs: () => api.get<{ jobs: RemnawaveInstallJobInfo[] }>('/servers/remnawave-install/jobs'),
 }
 
+// Обновление HAProxy до новейшей официальной LTS-сборки — такая же фоновая задача, как установка Remnawave
+export const haproxyUpgradeStreamUrl = (jobId: string) =>
+  `/api/servers/haproxy-upgrade/${jobId}/stream`
+
+export const haproxyUpgradeApi = {
+  start: (serverId: number) => api.post<{ job_id: string }>(`/servers/${serverId}/haproxy-upgrade`),
+  jobs: () => api.get<{ jobs: RemnawaveInstallJobInfo[] }>('/servers/haproxy-upgrade/jobs'),
+}
+
 // Проверка прокси-конфигураций: ссылки, JSON-конфиги и подписки
 export type XrayTestSource = 'links' | 'json' | 'subscription'
 export type XrayTestVerdict = 'ok' | 'degraded' | 'fail'
@@ -1353,6 +1362,12 @@ export interface VersionBaseInfo {
   update_in_progress: boolean
 }
 
+// target_branch — LTS-ветка новее установленной, собранная под релиз сервера
+export interface NodeHAProxyInfo {
+  version: string | null
+  target_branch: string | null
+}
+
 export interface SingleNodeVersion {
   id: number
   name: string
@@ -1360,6 +1375,7 @@ export interface SingleNodeVersion {
   version: string | null
   status: 'online' | 'offline'
   optimizations: NodeOptimizationsInfo
+  haproxy: NodeHAProxyInfo | null
 }
 
 export interface UpdateResponse {

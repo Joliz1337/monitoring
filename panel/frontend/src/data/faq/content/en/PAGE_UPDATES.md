@@ -8,6 +8,7 @@ Panel and node versions in one place, updates in one click.
 - See every node's version and update any of them — one by one or all at once.
 - Select nodes — one by one, by dashboard folder, or all — and update the selected ones the regular way or over SSH.
 - Update everything with one button: the panel starts updating all nodes, then updates itself — the page reloads automatically.
+- Upgrade HAProxy on nodes to the newest official LTS version for their OS: when one exists, a badge with the branch, e.g. "↑ 3.2", appears next to the HAProxy version on the card. Works for one node or for the selected ones.
 - Force a check for new versions.
 
 ## Update order
@@ -23,3 +24,4 @@ Updating pulls ready-made images, keeps configuration and data, and restarts the
 - A node that won't update: check that it is online and can reach the image registry; behind a SOCKS5 proxy, the proxy needs that access too.
 - If the node can't reach the registry, update it over SSH: the panel uploads the image itself. This runs in the background — you can close the log window, the status stays on the node's card. Up to 5 nodes update this way at once, the rest wait in a queue.
 - Some panel features require a minimum node version and will say so plainly if the agent is too old.
+- HAProxy switches to the new version without dropping connections: current clients finish on the old one. If that doesn't work, HAProxy restarts and clients reconnect; if the new version rejects the config, the server rolls back to the previous one.

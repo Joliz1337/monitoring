@@ -54,7 +54,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/in
 
 ## HAProxy
 
-HAProxy работает как **нативный systemd сервис** на хосте (не в Docker). При установке ноды HAProxy устанавливается автоматически если не установлен.
+HAProxy работает как **нативный systemd сервис** на хосте (не в Docker). При установке ноды HAProxy устанавливается автоматически, если его нет: `install.sh` берёт новейшую LTS-ветку из официальных сборок под релиз хоста (Ubuntu 26.04 — 3.4, 24.04 — 3.2, 22.04 — 3.0), а без них — системный пакет. Уже работающий HAProxy обновляется кнопкой на странице «Обновления» панели (см. [panel/DOCUMENTATION.md](../panel/DOCUMENTATION.md#обновление-haproxy)).
+
+Для этой кнопки `GET /api/system/versions` отдаёт блок `haproxy`: `version` — версия из `haproxy -v` целиком (`HAProxyManager.installed_version()`, например `2.8.16-0ubuntu0.24.04.3`, `null` без HAProxy), `os_id` и `os_codename` — `ID` и `VERSION_CODENAME` из `/etc/os-release` хоста (`services/haproxy_info.py`). По релизу панель сама решает, есть ли сборка новее.
 
 **Конфиг**: `/etc/haproxy/haproxy.cfg`
 
@@ -271,7 +273,7 @@ node/
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
 | GET | /api/version | Версия ноды |
-| GET | /api/system/versions | Объединённый endpoint: версия ноды + оптимизации |
+| GET | /api/system/versions | Объединённый endpoint: версия ноды, оптимизации, версия HAProxy и релиз ОС |
 | POST | /api/system/update | Запуск обновления (target_ref: branch/tag/commit, по умолчанию main; при вызове через панель панель подставляет выбранный канал обновлений — main/dev) |
 | GET | /api/system/update/status | Статус обновления |
 | GET | /api/system/optimizations/version | Версия системных оптимизаций (installed + version) |

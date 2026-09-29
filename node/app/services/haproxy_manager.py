@@ -53,7 +53,8 @@ _SILENT_DROP_WITHOUT_TTL = re.compile(
     r"^([ \t]*(?:tcp-request|http-request|http-response)\s[^#\n]*?\bsilent-drop\b)(?![ \t]+rst-ttl\b)",
     re.MULTILINE,
 )
-_HAPROXY_VERSION = re.compile(r"version (\d+)\.(\d+)")
+_HAPROXY_VERSION = re.compile(r"version (\d+\.\d+\S*)")
+_HAPROXY_BRANCH = re.compile(r"(\d+)\.(\d+)")
 
 OPENSSL_TIMEOUT_SEC = 10
 CERTBOT_ISSUE_TIMEOUT_SEC = 120
@@ -306,9 +307,14 @@ class HAProxyManager:
         insert_pos = global_match.start(1)
         return content[:insert_pos] + f"    {line}\n" + content[insert_pos:]
 
-    def _haproxy_version(self) -> Optional[tuple[int, int]]:
+    def installed_version(self) -> Optional[str]:
+        """Версия из `haproxy -v` целиком, например 2.8.16-0ubuntu0.24.04.3."""
         result = self._executor.execute_sync("haproxy -v", timeout=10)
         match = _HAPROXY_VERSION.search(result.stdout or "") if result.success else None
+        return match.group(1) if match else None
+
+    def _haproxy_version(self) -> Optional[tuple[int, int]]:
+        match = _HAPROXY_BRANCH.match(self.installed_version() or "")
         return (int(match.group(1)), int(match.group(2))) if match else None
 
     def _add_silent_drop_rst_ttl(self, content: str) -> str:

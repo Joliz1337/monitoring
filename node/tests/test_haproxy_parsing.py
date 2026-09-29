@@ -404,6 +404,23 @@ class SilentDropRstTtlTests(unittest.TestCase):
         self.assertEqual(executor.commands, [])
 
 
+class InstalledVersionTests(unittest.TestCase):
+    """Полная версия уходит в панель: по ней решается, есть ли сборка новее."""
+
+    def version(self, version_line: str):
+        return manager_with(FakeExecutor(version_line)).installed_version()
+
+    def test_package_version_is_kept_whole(self):
+        line = "HAProxy version 2.8.16-0ubuntu0.24.04.3 2026/06/19 - https://haproxy.org/"
+        self.assertEqual(self.version(line), "2.8.16-0ubuntu0.24.04.3")
+
+    def test_old_banner_spelling(self):
+        self.assertEqual(self.version("HA-Proxy version 2.4.24-0ubuntu0.22.04.1 2023/12/04"), "2.4.24-0ubuntu0.22.04.1")
+
+    def test_not_installed(self):
+        self.assertIsNone(self.version(""))
+
+
 class SilentDropGuardTests(unittest.TestCase):
     """RST с TTL 1 режется в mangle OUTPUT: conntrack успевает его увидеть и
     закрыть запись, а сканер не получает ни одного пакета."""

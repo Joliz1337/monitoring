@@ -945,7 +945,21 @@
     "update_selected": "Update ({{count}})",
     "update_selected_hint": "Regular update through the node agent — for online nodes with a newer version available",
     "update_selected_ssh": "Update over SSH ({{count}})",
-    "clear_selection": "Clear selection"
+    "clear_selection": "Clear selection",
+    "haproxy_title": "HAProxy upgrade",
+    "haproxy_desc": "HAProxy is upgraded to the newest official LTS build for the server's OS. The switch uses a reload: current connections are kept and finish on the old version. If that doesn't work, HAProxy restarts and clients reconnect. If the new version rejects the config or fails to start, the server rolls back to the previous one.",
+    "haproxy_start": "Upgrade",
+    "haproxy_started": "HAProxy upgrade started, servers: {{count}}. Status is shown on the cards",
+    "haproxy_background_hint": "The upgrade runs on the server — you can close this window",
+    "haproxy_done": "HAProxy upgraded",
+    "haproxy_failed": "HAProxy upgrade failed",
+    "haproxy_open_log": "Open the HAProxy upgrade log",
+    "haproxy_status_running": "upgrading",
+    "haproxy_status_success": "upgraded",
+    "haproxy_status_error": "failed",
+    "haproxy_upgrade_hint": "LTS branch {{branch}} is available — click to upgrade",
+    "haproxy_selected": "HAProxy ({{count}})",
+    "haproxy_selected_hint": "Upgrade HAProxy on selected online servers that have a newer branch available"
   },
   "remnawave_nginx": {
     "title": "Remnawave nginx",

@@ -8,10 +8,12 @@ import {
   Clock,
   Check,
   Upload,
+  ArrowUpCircle,
   type LucideIcon,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import type { ImageDeliveryJobInfo, ImageDeliveryJobStatus } from '../../api/client'
+import type { ImageDeliveryJobInfo, ImageDeliveryJobStatus, RemnawaveInstallJobInfo } from '../../api/client'
+import { shortHAProxyVersion } from './HAProxyUpgradeModal'
 import { Skeleton } from '../ui/Skeleton'
 import { Tooltip } from '../ui/Tooltip'
 import { Checkbox } from '../ui/Checkbox'
@@ -27,6 +29,8 @@ export interface NodeState {
   loadState: NodeLoadState
   version: string | null
   status: 'online' | 'offline'
+  haproxyVersion: string | null
+  haproxyTarget: string | null
 }
 
 const DELIVERY_CHIP: Record<ImageDeliveryJobStatus, { icon: LucideIcon; spin?: boolean; className: string }> = {
@@ -44,15 +48,17 @@ interface Props {
   isUpdating: boolean
   updateResult?: { success: boolean; message: string }
   deliveryJob?: ImageDeliveryJobInfo
+  haproxyJob?: RemnawaveInstallJobInfo
   selected: boolean
   onToggleSelect: () => void
   onUpdate: () => void
   onOpenDelivery: () => void
+  onOpenHAProxy: () => void
 }
 
 export default function NodeUpdateCard({
-  node, index, needsUpdate, isDevChannel, isUpdating, updateResult, deliveryJob,
-  selected, onToggleSelect, onUpdate, onOpenDelivery,
+  node, index, needsUpdate, isDevChannel, isUpdating, updateResult, deliveryJob, haproxyJob,
+  selected, onToggleSelect, onUpdate, onOpenDelivery, onOpenHAProxy,
 }: Props) {
   const { t } = useTranslation()
   const isNodeLoading = node.loadState === 'pending' || node.loadState === 'loading'
@@ -69,6 +75,33 @@ export default function NodeUpdateCard({
         >
           <Icon className={`w-3.5 h-3.5 ${chip.spin ? 'animate-spin' : ''}`} />
           <span className="truncate max-w-[140px]">{t(`imageDelivery.status_${job.status}`)}</span>
+        </button>
+      </Tooltip>
+    )
+  }
+
+  const renderHAProxyAction = () => {
+    if (haproxyJob) {
+      const chip = DELIVERY_CHIP[haproxyJob.status]
+      const Icon = chip.icon
+      return (
+        <Tooltip label={haproxyJob.error || t('updates.haproxy_open_log')} maxWidth={320}>
+          <button onClick={onOpenHAProxy} className={`flex items-center gap-1 px-1.5 py-0.5 rounded-md hover:brightness-125 transition ${chip.className}`}>
+            <Icon className={`w-3 h-3 ${chip.spin ? 'animate-spin' : ''}`} />
+            {t(`updates.haproxy_status_${haproxyJob.status}`)}
+          </button>
+        </Tooltip>
+      )
+    }
+    if (!node.haproxyTarget || !isOnline) return null
+    return (
+      <Tooltip label={t('updates.haproxy_upgrade_hint', { branch: node.haproxyTarget })} maxWidth={300}>
+        <button
+          onClick={onOpenHAProxy}
+          className="flex items-center gap-1 px-1.5 py-0.5 rounded-md font-mono text-accent-400 bg-accent-500/10 hover:bg-accent-500/20 transition"
+        >
+          <ArrowUpCircle className="w-3 h-3" />
+          {node.haproxyTarget}
         </button>
       </Tooltip>
     )
@@ -172,6 +205,15 @@ export default function NodeUpdateCard({
                 {node.version ? `v${node.version}` : t('updates.unknown')}
               </span>
             </span>
+          )}
+          {!isNodeLoading && (node.haproxyVersion || node.haproxyTarget || haproxyJob) && (
+            <div className="flex items-center gap-1.5 text-xs text-dark-500 mt-0.5">
+              <span>HAProxy</span>
+              <Tooltip label={node.haproxyVersion ?? t('updates.unknown')}>
+                <span className="font-mono text-dark-300">{shortHAProxyVersion(node.haproxyVersion) ?? '—'}</span>
+              </Tooltip>
+              {renderHAProxyAction()}
+            </div>
           )}
         </div>
       </div>

@@ -22,7 +22,9 @@ import {
   X,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import { systemApi, nodeImageApi, VersionBaseInfo, SingleNodeVersion, ImageDeliveryJobInfo } from '../api/client'
+import {
+  systemApi, nodeImageApi, haproxyUpgradeApi, VersionBaseInfo, SingleNodeVersion, ImageDeliveryJobInfo, RemnawaveInstallJobInfo,
+} from '../api/client'
 import { Skeleton } from '../components/ui/Skeleton'
 import { Tooltip } from '../components/ui/Tooltip'
 import { Checkbox } from '../components/ui/Checkbox'
@@ -32,10 +34,11 @@ import { orderFolders } from '../utils/folders'
 import DeliverImageModal from '../components/servers/DeliverImageModal'
 import BulkDeliverImageModal from '../components/servers/BulkDeliverImageModal'
 import NodeUpdateCard, { NodeState } from '../components/updates/NodeUpdateCard'
+import HAProxyUpgradeModal, { HAProxyUpgradeTarget } from '../components/updates/HAProxyUpgradeModal'
 import { writeStorage } from '../utils/storage'
 
-// Пока идёт SSH-доставка хоть на одну ноду — статусы на карточках обновляются с этим шагом
-const DELIVERY_POLL_INTERVAL_MS = 3_000
+// Пока идёт SSH-доставка или обновление HAProxy хоть на одной ноде — статусы на карточках обновляются с этим шагом
+const JOB_POLL_INTERVAL_MS = 3_000
 const COLLAPSED_FOLDERS_KEY = 'updates_collapsed_folders'
 const NODE_GRID_CLASS = 'grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3'
 
@@ -54,6 +57,10 @@ const PANEL_REBOOT_POLL_INTERVAL_MS = 5_000
 const PANEL_PROBE_TIMEOUT_MS = 4_000
 
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
+
+const toHAProxyTarget = (node: NodeState): HAProxyUpgradeTarget => ({
+  id: node.id, name: node.name, version: node.haproxyVersion, targetBranch: node.haproxyTarget,
+})
 
 // /health из браузера недоступен (nginx отдаёт его только внутренним IP), поэтому живость
 // бэкенда проверяем лёгким /api/auth/check напрямую через fetch — минуя axios-интерсепторы
@@ -101,12 +108,16 @@ export default function Updates() {
   const [bulkDeliverOpen, setBulkDeliverOpen] = useState(false)
   // Последняя SSH-доставка по каждому серверу: идущая или завершённая недавно
   const [deliveryJobs, setDeliveryJobs] = useState<Map<number, ImageDeliveryJobInfo>>(new Map())
+  // Последнее обновление HAProxy по каждому серверу: идущее или завершённое недавно
+  const [haproxyJobs, setHaproxyJobs] = useState<Map<number, RemnawaveInstallJobInfo>>(new Map())
+  const [haproxyModal, setHaproxyModal] = useState<{ targets: HAProxyUpgradeTarget[]; jobId: string | null } | null>(null)
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(readCollapsedFolders)
 
   const abortRef = useRef(false)
   const rebootWaitCancelRef = useRef(false)
   const deliveryStatusRef = useRef<Map<string, ImageDeliveryJobInfo['status']>>(new Map())
+  const haproxyStatusRef = useRef<Map<string, RemnawaveInstallJobInfo['status']>>(new Map())
   const lastActivityRef = useRef(Date.now())
   const IDLE_THRESHOLD = 5000
   const AUTO_REFRESH_INTERVAL = 12000
@@ -143,6 +154,8 @@ export default function Updates() {
           loadState: 'loaded',
           version: data.version,
           status: data.status,
+          haproxyVersion: data.haproxy?.version ?? null,
+          haproxyTarget: data.haproxy?.target_branch ?? null,
         })
         return next
       })
@@ -179,6 +192,8 @@ export default function Updates() {
           loadState: 'pending',
           version: null,
           status: 'offline',
+          haproxyVersion: null,
+          haproxyTarget: null,
         })
       }
       setNodes(initialNodes)
@@ -235,9 +250,36 @@ export default function Updates() {
 
   useEffect(() => {
     if (!hasActiveDelivery) return
-    const id = setInterval(fetchDeliveryJobs, DELIVERY_POLL_INTERVAL_MS)
+    const id = setInterval(fetchDeliveryJobs, JOB_POLL_INTERVAL_MS)
     return () => clearInterval(id)
   }, [hasActiveDelivery, fetchDeliveryJobs])
+
+  const fetchHaproxyJobs = useCallback(async () => {
+    try {
+      const { data } = await haproxyUpgradeApi.jobs()
+      const byServer = new Map<number, RemnawaveInstallJobInfo>()
+      for (const job of data.jobs) {
+        byServer.set(job.server_id, job)
+        const prevStatus = haproxyStatusRef.current.get(job.job_id)
+        // Обновление HAProxy только что закончилось — показать новую версию на карточке
+        if (job.status !== 'running' && prevStatus === 'running') fetchNodeVersion(job.server_id)
+        haproxyStatusRef.current.set(job.job_id, job.status)
+      }
+      setHaproxyJobs(byServer)
+    } catch {
+      // статусы обновлений HAProxy — дополнение к странице, без них она работает как раньше
+    }
+  }, [fetchNodeVersion])
+
+  useEffect(() => { fetchHaproxyJobs() }, [fetchHaproxyJobs])
+
+  const hasActiveHaproxyUpgrade = Array.from(haproxyJobs.values()).some(j => j.status === 'running')
+
+  useEffect(() => {
+    if (!hasActiveHaproxyUpgrade) return
+    const id = setInterval(fetchHaproxyJobs, JOB_POLL_INTERVAL_MS)
+    return () => clearInterval(id)
+  }, [hasActiveHaproxyUpgrade, fetchHaproxyJobs])
 
   useEffect(() => {
     const id = setInterval(() => {
@@ -254,7 +296,8 @@ export default function Updates() {
     setUpdateResults({})
     fetchBase(true)
     fetchDeliveryJobs()
-  }, [fetchBase, fetchDeliveryJobs])
+    fetchHaproxyJobs()
+  }, [fetchBase, fetchDeliveryJobs, fetchHaproxyJobs])
 
   // Дожидаемся, пока панель сначала уйдёт в перезапуск (бэкенд недоступен), а затем снова
   // поднимется, и только тогда перезагружаем страницу. Требование "сначала увидеть падение"
@@ -429,6 +472,9 @@ export default function Updates() {
 
   const selectedNodes = loadedNodes.filter(n => selected.has(n.id))
   const selectedAgentTargets = selectedNodes.filter(canAgentUpdate)
+  const selectedHaproxyTargets = selectedNodes.filter(n =>
+    n.status === 'online' && n.haproxyTarget && haproxyJobs.get(n.id)?.status !== 'running'
+  )
   const allSelected = loadedNodes.length > 0 && selectedNodes.length === loadedNodes.length
 
   // Папки — как на дашборде: порядок пользователя, внутри папки — порядок серверов
@@ -469,10 +515,12 @@ export default function Updates() {
       isUpdating={updatingNodes.has(node.id)}
       updateResult={updateResults[`node-${node.id}`]}
       deliveryJob={deliveryJobs.get(node.id)}
+      haproxyJob={haproxyJobs.get(node.id)}
       selected={selected.has(node.id)}
       onToggleSelect={() => toggleSelected([node.id], !selected.has(node.id))}
       onUpdate={() => handleUpdateNode(node.id, node.name)}
       onOpenDelivery={() => setDeliverTarget({ id: node.id, name: node.name })}
+      onOpenHAProxy={() => setHaproxyModal({ targets: [toHAProxyTarget(node)], jobId: haproxyJobs.get(node.id)?.job_id ?? null })}
     />
   )
 
@@ -796,6 +844,16 @@ export default function Updates() {
                     {t('updates.update_selected_ssh', { count: selectedNodes.length })}
                   </button>
                 </Tooltip>
+                <Tooltip label={t('updates.haproxy_selected_hint')} maxWidth={300}>
+                  <button
+                    onClick={() => setHaproxyModal({ targets: selectedHaproxyTargets.map(toHAProxyTarget), jobId: null })}
+                    disabled={selectedHaproxyTargets.length === 0}
+                    className="btn btn-secondary text-sm"
+                  >
+                    <ArrowUpCircle className="w-4 h-4" />
+                    {t('updates.haproxy_selected', { count: selectedHaproxyTargets.length })}
+                  </button>
+                </Tooltip>
                 <Tooltip label={t('updates.clear_selection')}>
                   <button
                     onClick={() => setSelected(new Set())}
@@ -892,6 +950,18 @@ export default function Updates() {
           jobId={deliveryJobs.get(deliverTarget.id)?.job_id ?? null}
           onStarted={fetchDeliveryJobs}
           onClose={() => setDeliverTarget(null)}
+        />
+      )}
+
+      {haproxyModal && (
+        <HAProxyUpgradeModal
+          targets={haproxyModal.targets}
+          jobId={haproxyModal.jobId}
+          onStarted={() => {
+            if (haproxyModal.targets.length > 1) setSelected(new Set())
+            fetchHaproxyJobs()
+          }}
+          onClose={() => setHaproxyModal(null)}
         />
       )}
 

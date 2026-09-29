@@ -21,6 +21,7 @@ from app.config import get_settings
 from app.database import get_db, async_session
 from app.models import Server, PanelSettings
 from app.services import update_channel
+from app.services.haproxy_upgrade import describe_haproxy
 from app.services.net_utils import panel_ip_info
 from app.services.panel_host_metrics import HostHistoryPeriod, load_host_history
 from app.services.server_status import get_offline_threshold, resolve_status
@@ -341,7 +342,7 @@ async def get_version_base(
     }
 
 
-def _node_version_payload(server: Server, versions_data: Optional[dict]) -> dict:
+async def _node_version_payload(server: Server, versions_data: Optional[dict]) -> dict:
     no_optimizations = {"installed": False, "version": None}
     return {
         "id": server.id,
@@ -350,6 +351,7 @@ def _node_version_payload(server: Server, versions_data: Optional[dict]) -> dict
         "version": versions_data.get("node_version") if versions_data else None,
         "status": "online" if versions_data else "offline",
         "optimizations": versions_data.get("optimizations", no_optimizations) if versions_data else no_optimizations,
+        "haproxy": await describe_haproxy(versions_data.get("haproxy")) if versions_data else None,
     }
 
 
@@ -370,9 +372,9 @@ async def get_single_node_version(
     # Ноду, которую коллектор метрик уже считает офлайн, не дёргаем: запрос всё равно
     # упёрся бы в таймаут, а страницы «Обновления»/«Оптимизации» ждали бы его зря
     if resolve_status(server, await get_offline_threshold(db)) == "offline":
-        return _node_version_payload(server, None)
+        return await _node_version_payload(server, None)
 
-    return _node_version_payload(server, await get_node_all_versions(server))
+    return await _node_version_payload(server, await get_node_all_versions(server))
 
 
 async def run_panel_update_in_container(target_ref: str | None = None):

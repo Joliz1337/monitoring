@@ -254,6 +254,23 @@ MSG_EN[warp_reinstall_confirm]="WARP already installed. Reinstall? (y/N)"
 MSG_EN[warp_codename_fallback]="Release not supported by Cloudflare, using fallback"
 MSG_EN[warp_install_failed]="Failed to install cloudflare-warp. Check Cloudflare repository availability"
 MSG_EN[warp_svc_limit]="warp-svc memory limit and auto-restart configured"
+MSG_EN[haproxy_branch_selected]="Newest HAProxy LTS branch built for this release"
+MSG_EN[haproxy_key_failed]="Could not verify the HAProxy repository key — repository not added"
+MSG_EN[haproxy_no_repo_install]="No official HAProxy LTS build for this release or the repository is unreachable — installing the system package"
+MSG_EN[haproxy_no_repo_upgrade]="No official HAProxy LTS build for this release or the repository is unreachable — HAProxy left as is"
+MSG_EN[haproxy_repo_failed]="Could not install HAProxy from the official repository — installing the system package"
+MSG_EN[haproxy_up_to_date]="HAProxy is already the newest available"
+MSG_EN[haproxy_install_failed]="Failed to install the new HAProxy — the running one is untouched"
+MSG_EN[haproxy_config_rejected]="The new HAProxy rejected the current config"
+MSG_EN[haproxy_not_running]="HAProxy is not running — the new version starts with the next config apply"
+MSG_EN[haproxy_reloading]="Switching HAProxy to the new version via reload, connections are kept..."
+MSG_EN[haproxy_reload_switched]="HAProxy runs the new version; current connections finish on the old processes"
+MSG_EN[haproxy_restarting]="Reload did not switch the version — restarting HAProxy, clients will reconnect"
+MSG_EN[haproxy_restarted]="HAProxy restarted on the new version"
+MSG_EN[haproxy_start_failed]="HAProxy did not start on the new version"
+MSG_EN[haproxy_rolling_back]="Rolling back to HAProxy"
+MSG_EN[haproxy_rolled_back]="Rolled back to HAProxy"
+MSG_EN[haproxy_rollback_failed]="Rollback failed — check: systemctl status haproxy"
 MSG_EN[menu_speed_test]="Speed test"
 MSG_EN[speedtest_menu_title]="Speed test — choose tool"
 MSG_EN[speedtest_opt_ookla]="Ookla Speedtest (snap)"
@@ -413,6 +430,23 @@ MSG_RU[warp_reinstall_confirm]="WARP уже установлен. Переуст
 MSG_RU[warp_codename_fallback]="Релиз не поддерживается Cloudflare, используется запасной"
 MSG_RU[warp_install_failed]="Не удалось установить cloudflare-warp. Проверьте доступность репозитория Cloudflare"
 MSG_RU[warp_svc_limit]="Ограничение памяти warp-svc и авторестарт настроены"
+MSG_RU[haproxy_branch_selected]="Новейшая LTS-ветка HAProxy, собранная под этот релиз"
+MSG_RU[haproxy_key_failed]="Не удалось проверить ключ репозитория HAProxy — репозиторий не подключён"
+MSG_RU[haproxy_no_repo_install]="Официальной LTS-сборки HAProxy под этот релиз нет или репозиторий недоступен — ставлю системный пакет"
+MSG_RU[haproxy_no_repo_upgrade]="Официальной LTS-сборки HAProxy под этот релиз нет или репозиторий недоступен — HAProxy оставлен как есть"
+MSG_RU[haproxy_repo_failed]="Не удалось поставить HAProxy из официального репозитория — ставлю системный пакет"
+MSG_RU[haproxy_up_to_date]="HAProxy уже новейший из доступных"
+MSG_RU[haproxy_install_failed]="Не удалось установить новый HAProxy — работающий не тронут"
+MSG_RU[haproxy_config_rejected]="Новый HAProxy не принял текущий конфиг"
+MSG_RU[haproxy_not_running]="HAProxy не запущен — новая версия заработает при следующей раскатке конфига"
+MSG_RU[haproxy_reloading]="Переключаю HAProxy на новую версию через reload, соединения не рвутся..."
+MSG_RU[haproxy_reload_switched]="HAProxy работает на новой версии, текущие соединения дорабатывают старые процессы"
+MSG_RU[haproxy_restarting]="Reload не переключил версию — перезапускаю HAProxy, клиенты переподключатся"
+MSG_RU[haproxy_restarted]="HAProxy перезапущен на новой версии"
+MSG_RU[haproxy_start_failed]="HAProxy не запустился на новой версии"
+MSG_RU[haproxy_rolling_back]="Откатываю HAProxy на"
+MSG_RU[haproxy_rolled_back]="HAProxy откачен на"
+MSG_RU[haproxy_rollback_failed]="Откат не удался — проверьте: systemctl status haproxy"
 MSG_RU[menu_speed_test]="Проверка скорости"
 MSG_RU[speedtest_menu_title]="Проверка скорости — выбор инструмента"
 MSG_RU[speedtest_opt_ookla]="Ookla Speedtest (snap)"
@@ -1869,6 +1903,234 @@ EOF
     fi
 }
 
+# ==================== HAProxy (official LTS builds) ====================
+#
+# Системный пакет отстаёт на несколько веток (Ubuntu 24.04 — 2.8, 22.04 — 2.4),
+# поэтому HAProxy ставится из репозиториев сборщика пакетов Debian/Ubuntu
+# (PPA vbernat, haproxy.debian.net) — новейшая LTS-ветка, собранная под этот
+# релиз. Свежую ветку собирают не под все релизы (3.4 есть для 26.04, но не для
+# 24.04), поэтому ветка выбирается по наличию репозитория. Тот же список веток —
+# в panel/backend/app/services/haproxy_upgrade.py, менять вместе.
+
+HAPROXY_LTS_BRANCHES="3.4 3.2 3.0"
+HAPROXY_PPA_KEY_FPR="3D653970FBAB0A890E4E4E9A0F14D8B0CF4EFE96"
+HAPROXY_HDN_KEY_FPR="AEF2348766F371C689A7360095A42FE8353525F9"
+HAPROXY_KEYRING="/etc/apt/keyrings/haproxy-archive-keyring.gpg"
+HAPROXY_SOURCES="/etc/apt/sources.list.d/haproxy.list"
+HAPROXY_CONFIG="/etc/haproxy/haproxy.cfg"
+HAPROXY_SWITCH_WAIT_SEC=15
+
+# Печатает "URL дистрибутив" репозитория ветки под этот релиз, если он есть
+haproxy_repo_for_branch() {
+    local os_id="$1" codename="$2" branch="$3" base dist
+    case "$os_id" in
+        ubuntu) base="https://ppa.launchpadcontent.net/vbernat/haproxy-${branch}/ubuntu"; dist="$codename" ;;
+        debian) base="https://haproxy.debian.net"; dist="${codename}-backports-${branch}" ;;
+        *) return 1 ;;
+    esac
+    curl -fsS --max-time 20 -o /dev/null "${base}/dists/${dist}/Release" 2>/dev/null || return 1
+    echo "$base $dist"
+}
+
+# Ключ сборщика закреплён отпечатком: в доверенные apt уходит только он,
+# даже если по дороге ключ подменили или подложили лишний
+haproxy_install_key() {
+    local os_id="$1" url fpr gnupg_home
+    case "$os_id" in
+        ubuntu) url="https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x${HAPROXY_PPA_KEY_FPR}"; fpr="$HAPROXY_PPA_KEY_FPR" ;;
+        debian) url="https://haproxy.debian.net/haproxy-archive-keyring.gpg"; fpr="$HAPROXY_HDN_KEY_FPR" ;;
+        *) return 1 ;;
+    esac
+    command -v gpg &>/dev/null || apt_install_safe gnupg || return 1
+
+    gnupg_home=$(mktemp -d)
+    local rc=1
+    if curl -fsSL --max-time "$TIMEOUT_CURL" "$url" -o "$gnupg_home/key" \
+        && GNUPGHOME="$gnupg_home" gpg --batch --quiet --import "$gnupg_home/key" 2>/dev/null \
+        && GNUPGHOME="$gnupg_home" gpg --batch --with-colons --list-keys 2>/dev/null \
+            | awk -F: '$1 == "fpr" {print $10}' | grep -qx "$fpr"; then
+        mkdir -p "$(dirname "$HAPROXY_KEYRING")"
+        GNUPGHOME="$gnupg_home" gpg --batch --export "$fpr" > "$HAPROXY_KEYRING" && rc=0
+    fi
+    rm -rf "$gnupg_home"
+    [ $rc -eq 0 ] || log_error "$(msg haproxy_key_failed)"
+    return $rc
+}
+
+# Подключает репозиторий новейшей LTS-ветки под этот релиз и кладёт её в
+# HAPROXY_BRANCH. Код 1 — подходящего репозитория нет или он недоступен
+haproxy_setup_repo() {
+    local os_id codename branch repo=""
+    os_id=$(. /etc/os-release 2>/dev/null && echo "${ID:-}")
+    codename=$(. /etc/os-release 2>/dev/null && echo "${VERSION_CODENAME:-}")
+    [ -n "$codename" ] || return 1
+
+    for branch in $HAPROXY_LTS_BRANCHES; do
+        repo=$(haproxy_repo_for_branch "$os_id" "$codename" "$branch") && break
+    done
+    [ -n "$repo" ] || return 1
+
+    haproxy_install_key "$os_id" || return 1
+    echo "deb [signed-by=${HAPROXY_KEYRING}] ${repo} main" > "$HAPROXY_SOURCES"
+    HAPROXY_BRANCH="$branch"
+    log_info "$(msg haproxy_branch_selected): ${HAPROXY_BRANCH}"
+}
+
+haproxy_package_version() {
+    dpkg-query -W -f='${Version}' haproxy 2>/dev/null
+}
+
+# 2.8.16-0ubuntu0.24.04.3 → 2.8
+haproxy_branch_of() {
+    local version="${1#*:}"
+    echo "$version" | grep -oE '^[0-9]+\.[0-9]+'
+}
+
+haproxy_restore_sources() {
+    local backup="$1"
+    if [ -n "$backup" ] && [ -f "$backup" ]; then
+        mv -f "$backup" "$HAPROXY_SOURCES"
+    else
+        rm -f "$HAPROXY_SOURCES"
+    fi
+}
+
+haproxy_rollback() {
+    local old_version="$1" backup="$2"
+    log_warn "$(msg haproxy_rolling_back) ${old_version}"
+    haproxy_restore_sources "$backup"
+    apt_update_safe || true
+    if apt_install_safe --allow-downgrades "haproxy=${old_version}"; then
+        log_success "$(msg haproxy_rolled_back) ${old_version}"
+        return 0
+    fi
+    log_error "$(msg haproxy_rollback_failed)"
+    return 1
+}
+
+# После reload master исполняет себя заново — уже новым бинарником. Пока этого
+# не случилось, /proc/PID/exe указывает на удалённый dpkg'ом старый файл
+haproxy_master_on_new_binary() {
+    local pid
+    pid=$(systemctl show -p MainPID --value haproxy 2>/dev/null)
+    [ -n "$pid" ] && [ "$pid" != "0" ] || return 1
+    [[ "$(readlink "/proc/$pid/exe" 2>/dev/null)" != *"(deleted)" ]]
+}
+
+haproxy_wait_new_binary() {
+    local i
+    for ((i = 0; i < HAPROXY_SWITCH_WAIT_SEC; i++)); do
+        systemctl is-active --quiet haproxy && haproxy_master_on_new_binary && return 0
+        sleep 1
+    done
+    return 1
+}
+
+# Пакет при обновлении работающий HAProxy не трогает (--no-restart-after-upgrade
+# в debian/rules), так что переключение — наше: reload без обрыва соединений,
+# старые процессы дорабатывают текущие; если не вышло — перезапуск
+haproxy_switch_running() {
+    systemctl daemon-reload >/dev/null 2>&1
+    log_info "$(msg haproxy_reloading)"
+    timeout "$TIMEOUT_SYSTEMCTL" systemctl reload haproxy >/dev/null 2>&1
+    if haproxy_wait_new_binary; then
+        log_success "$(msg haproxy_reload_switched)"
+        return 0
+    fi
+    log_warn "$(msg haproxy_restarting)"
+    timeout "$TIMEOUT_SYSTEMCTL" systemctl restart haproxy >/dev/null 2>&1
+    if haproxy_wait_new_binary; then
+        log_success "$(msg haproxy_restarted)"
+        return 0
+    fi
+    log_error "$(msg haproxy_start_failed)"
+    return 1
+}
+
+# Новая нода: новейшая LTS-сборка, без неё — системный пакет. Конфиг ещё
+# пустой, поэтому HAProxy остановлен до первой раскатки из панели
+install_haproxy() {
+    apt_update_safe || log_warn "apt update had issues"
+    local installed=0
+    if haproxy_setup_repo; then
+        if apt_update_safe && apt_install_safe "haproxy=${HAPROXY_BRANCH}.*"; then
+            installed=1
+        else
+            log_warn "$(msg haproxy_repo_failed)"
+            rm -f "$HAPROXY_SOURCES"
+            apt_update_safe || true
+        fi
+    else
+        log_warn "$(msg haproxy_no_repo_install)"
+    fi
+    if [ $installed -eq 0 ]; then
+        apt_install_safe haproxy || { log_error "Failed to install HAProxy"; return 1; }
+    fi
+
+    timeout "$TIMEOUT_SYSTEMCTL" systemctl stop haproxy >/dev/null 2>&1 || true
+    timeout "$TIMEOUT_SYSTEMCTL" systemctl disable haproxy >/dev/null 2>&1 || true
+    log_success "HAProxy $(haproxy_package_version) installed (stopped, will start when configured via panel)"
+}
+
+# Кнопка «Обновить HAProxy» в панели (MON_INSTALL_HAPROXY=1): новейшая LTS-ветка
+# под этот релиз или свежий патч текущей; при любой ошибке — откат на прежнюю версию
+upgrade_haproxy() {
+    command -v haproxy &>/dev/null || { install_haproxy; return; }
+
+    local old_version sources_backup=""
+    old_version=$(haproxy_package_version)
+    if [ -f "$HAPROXY_SOURCES" ]; then
+        sources_backup=$(mktemp)
+        cp -f "$HAPROXY_SOURCES" "$sources_backup"
+    fi
+
+    if ! haproxy_setup_repo; then
+        log_error "$(msg haproxy_no_repo_upgrade)"
+        haproxy_restore_sources "$sources_backup"
+        return 1
+    fi
+    if dpkg --compare-versions "$(haproxy_branch_of "$old_version")" gt "$HAPROXY_BRANCH"; then
+        log_success "$(msg haproxy_up_to_date): ${old_version}"
+        haproxy_restore_sources "$sources_backup"
+        return 0
+    fi
+
+    if ! { apt_update_safe && apt_install_safe "haproxy=${HAPROXY_BRANCH}.*"; }; then
+        log_error "$(msg haproxy_install_failed)"
+        haproxy_restore_sources "$sources_backup"
+        apt_update_safe || true
+        return 1
+    fi
+
+    local new_version
+    new_version=$(haproxy_package_version)
+    if [ "$new_version" = "$old_version" ]; then
+        rm -f "$sources_backup"
+        log_success "$(msg haproxy_up_to_date): ${new_version}"
+        return 0
+    fi
+    log_success "HAProxy ${old_version} → ${new_version}"
+
+    if [ -f "$HAPROXY_CONFIG" ] && ! haproxy -c -f "$HAPROXY_CONFIG"; then
+        log_error "$(msg haproxy_config_rejected)"
+        haproxy_rollback "$old_version" "$sources_backup"
+        return 1
+    fi
+
+    if ! systemctl is-active --quiet haproxy; then
+        rm -f "$sources_backup"
+        log_info "$(msg haproxy_not_running)"
+        return 0
+    fi
+
+    if ! haproxy_switch_running; then
+        haproxy_rollback "$old_version" "$sources_backup"
+        timeout "$TIMEOUT_SYSTEMCTL" systemctl restart haproxy >/dev/null 2>&1
+        return 1
+    fi
+    rm -f "$sources_backup"
+}
+
 # ==================== Node Functions ====================
 
 install_node() {
@@ -1893,17 +2155,8 @@ install_node() {
         rm -rf "$NODE_DIR"
     fi
     
-    # Install HAProxy
     if ! command -v haproxy &>/dev/null; then
-        apt_update_safe || log_warn "apt update had issues"
-        apt_install_safe haproxy || {
-            log_error "Failed to install HAProxy"
-            return 1
-        }
-        # Fresh install — stop and disable: config is empty, user will enable via panel
-        timeout "$TIMEOUT_SYSTEMCTL" systemctl stop haproxy >/dev/null 2>&1 || true
-        timeout "$TIMEOUT_SYSTEMCTL" systemctl disable haproxy >/dev/null 2>&1 || true
-        log_success "HAProxy installed (stopped, will start when configured via panel)"
+        install_haproxy || return 1
     else
         log_success "HAProxy already installed"
     fi
@@ -3108,6 +3361,10 @@ PROXYEOF
 
     if [ "${MON_INSTALL_REMNAWAVE:-0}" = "1" ]; then
         install_remnawave || { log_error "Remnawave installation failed"; exit 1; }
+    fi
+
+    if [ "${MON_INSTALL_HAPROXY:-0}" = "1" ]; then
+        upgrade_haproxy || { log_error "HAProxy upgrade failed"; exit 1; }
     fi
 
     log_success "Unattended installation complete"

@@ -950,7 +950,21 @@
     "update_selected": "Обновить ({{count}})",
     "update_selected_hint": "Обычное обновление через агента ноды — для онлайн-нод, которым доступна новая версия",
     "update_selected_ssh": "Обновить по SSH ({{count}})",
-    "clear_selection": "Снять выбор"
+    "clear_selection": "Снять выбор",
+    "haproxy_title": "Обновление HAProxy",
+    "haproxy_desc": "HAProxy обновится до новейшей официальной LTS-сборки для системы сервера. Переключение идёт через reload: текущие соединения не рвутся и дорабатывают на старой версии. Если так не выйдет, HAProxy перезапустится и клиенты переподключатся. Если новая версия не примет конфиг или не запустится, сервер вернёт прежнюю.",
+    "haproxy_start": "Обновить",
+    "haproxy_started": "Обновление HAProxy запущено, серверов: {{count}}. Статус — на карточках",
+    "haproxy_background_hint": "Обновление идёт на сервере — окно можно закрыть",
+    "haproxy_done": "HAProxy обновлён",
+    "haproxy_failed": "Обновление HAProxy не удалось",
+    "haproxy_open_log": "Открыть лог обновления HAProxy",
+    "haproxy_status_running": "обновляется",
+    "haproxy_status_success": "обновлён",
+    "haproxy_status_error": "ошибка",
+    "haproxy_upgrade_hint": "Доступна LTS-ветка {{branch}} — нажмите, чтобы обновить",
+    "haproxy_selected": "HAProxy ({{count}})",
+    "haproxy_selected_hint": "Обновить HAProxy на выбранных онлайн-серверах, где доступна ветка новее"
   },
   "remnawave_nginx": {
     "title": "Remnawave nginx",

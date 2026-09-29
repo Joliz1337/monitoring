@@ -28,6 +28,7 @@ from requests.exceptions import ReadTimeout, RequestException
 from app.capabilities import get_policy
 from app.services import cpu_affinity, reserved_ports
 from app.services.bandwidth_limit import MAX_MBIT, MIN_MBIT, get_bandwidth_limiter
+from app.services.haproxy_info import read_haproxy_info
 from app.services.host_executor import get_host_executor, MAX_TIMEOUT, DEFAULT_TIMEOUT
 from app.services.host_files import read_host_file, write_host_file
 from app.services.net_interfaces import list_physical_interfaces
@@ -828,12 +829,13 @@ async def get_all_versions():
     executor = get_host_executor()
     node_version = get_current_version()
 
-    opt_version, sysctl_content, nic_mode, opt_profile, tuning = await asyncio.gather(
+    opt_version, sysctl_content, nic_mode, opt_profile, tuning, haproxy = await asyncio.gather(
         read_optimizations_version(),
         read_host_file(SYSCTL_CONFIG_PATH),
         detect_nic_mode(executor),
         read_opt_profile(),
         read_tuning_drift(executor),
+        read_haproxy_info(),
     )
 
     opt_installed = sysctl_content is not None
@@ -843,6 +845,7 @@ async def get_all_versions():
         "node_version": node_version if node_version != "unknown" else None,
         "capabilities": policy.published(),
         "capabilities_unknown": list(policy.unknown_tokens),
+        "haproxy": haproxy,
         "optimizations": {
             "installed": opt_installed,
             "version": opt_version,
