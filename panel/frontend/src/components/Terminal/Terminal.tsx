@@ -84,9 +84,12 @@ export default function Terminal({ serverId }: TerminalProps) {
     }
   }, [serverId])
 
-  // Save history to localStorage
+  // Переполненный localStorage не должен ронять страницу сервера —
+  // история тогда живёт только до перезагрузки
   const saveHistory = useCallback((newHistory: CommandHistory[]) => {
-    localStorage.setItem(`${HISTORY_KEY}_${serverId}`, JSON.stringify(newHistory))
+    try {
+      localStorage.setItem(`${HISTORY_KEY}_${serverId}`, JSON.stringify(newHistory))
+    } catch { /* квота исчерпана или хранилище отключено */ }
   }, [serverId])
 
   // Auto-scroll output
@@ -98,14 +101,11 @@ export default function Terminal({ serverId }: TerminalProps) {
 
   const addToHistory = useCallback((cmd: string) => {
     const newEntry = { command: cmd, timestamp: new Date() }
-    setHistory(prev => {
-      const filtered = prev.filter(h => h.command !== cmd)
-      const updated = [newEntry, ...filtered].slice(0, MAX_HISTORY)
-      saveHistory(updated)
-      return updated
-    })
+    const updated = [newEntry, ...history.filter(h => h.command !== cmd)].slice(0, MAX_HISTORY)
+    setHistory(updated)
+    saveHistory(updated)
     setHistoryIndex(-1)
-  }, [saveHistory])
+  }, [history, saveHistory])
 
   const executeCommand = useCallback(async () => {
     if (!command.trim() || isRunning) return
