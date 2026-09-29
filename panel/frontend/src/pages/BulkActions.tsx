@@ -33,6 +33,7 @@ import { serversApi, bulkApi, BulkJob, BulkJobAction, BulkResult, BulkTerminalRe
 import { Skeleton } from '../components/ui/Skeleton'
 import { Checkbox } from '../components/ui/Checkbox'
 import { FAQIcon } from '../components/FAQ'
+import { writeStorage } from '../utils/storage'
 
 type ActionType = 'haproxy_service' | 'traffic' | 'firewall' | 'terminal'
 
@@ -223,7 +224,7 @@ export default function BulkActions() {
       const next = new Set(prev)
       if (next.has(folder)) next.delete(folder)
       else next.add(folder)
-      localStorage.setItem('bulk_expanded_folders', JSON.stringify([...next]))
+      writeStorage('bulk_expanded_folders', JSON.stringify([...next]))
       return next
     })
   }

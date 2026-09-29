@@ -65,6 +65,7 @@ import { Tooltip } from '../components/ui/Tooltip'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { FAQIcon } from '../components/FAQ'
+import { writeStorage } from '../utils/storage'
 
 const COLLAPSED_KEY = 'dashboard_collapsed_folders'
 const FOLDER_ORDER_KEY = 'dashboard_folder_order'
@@ -84,7 +85,7 @@ function loadCollapsed(): Set<string> {
 }
 
 function saveCollapsed(set: Set<string>) {
-  localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...set]))
+  writeStorage(COLLAPSED_KEY, JSON.stringify([...set]))
 }
 
 function loadFolderOrder(): string[] {
@@ -94,7 +95,7 @@ function loadFolderOrder(): string[] {
 }
 
 function saveFolderOrder(order: string[]) {
-  localStorage.setItem(FOLDER_ORDER_KEY, JSON.stringify(order))
+  writeStorage(FOLDER_ORDER_KEY, JSON.stringify(order))
 }
 
 export default function Dashboard() {

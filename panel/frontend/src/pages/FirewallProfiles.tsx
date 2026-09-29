@@ -49,6 +49,7 @@ import {
   FirewallSyncStatus,
 } from '../api/client'
 import { FAQIcon } from '../components/FAQ'
+import { writeStorage } from '../utils/storage'
 
 type TabKey = 'rules' | 'servers' | 'log'
 
@@ -1257,7 +1258,7 @@ function ServersTab({
       const next = new Set(prev)
       if (next.has(folder)) next.delete(folder)
       else next.add(folder)
-      localStorage.setItem('fw_add_expanded_folders', JSON.stringify([...next]))
+      writeStorage('fw_add_expanded_folders', JSON.stringify([...next]))
       return next
     })
   }

@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { useTranslation } from 'react-i18next'
 import { Tooltip } from '../ui/Tooltip'
 import { FAQIcon } from '../FAQ'
+import { readStorage, writeStorage } from '../../utils/storage'
 import {
   Terminal as TerminalIcon,
   Play,
@@ -70,7 +71,7 @@ export default function Terminal({ serverId }: TerminalProps) {
 
   // Load history from localStorage
   useEffect(() => {
-    const saved = localStorage.getItem(`${HISTORY_KEY}_${serverId}`)
+    const saved = readStorage(`${HISTORY_KEY}_${serverId}`)
     if (saved) {
       try {
         const parsed = JSON.parse(saved)
@@ -84,12 +85,8 @@ export default function Terminal({ serverId }: TerminalProps) {
     }
   }, [serverId])
 
-  // Переполненный localStorage не должен ронять страницу сервера —
-  // история тогда живёт только до перезагрузки
   const saveHistory = useCallback((newHistory: CommandHistory[]) => {
-    try {
-      localStorage.setItem(`${HISTORY_KEY}_${serverId}`, JSON.stringify(newHistory))
-    } catch { /* квота исчерпана или хранилище отключено */ }
+    writeStorage(`${HISTORY_KEY}_${serverId}`, JSON.stringify(newHistory))
   }, [serverId])
 
   // Auto-scroll output

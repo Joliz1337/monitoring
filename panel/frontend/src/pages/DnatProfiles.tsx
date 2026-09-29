@@ -48,6 +48,7 @@ import {
 import { FAQIcon } from '../components/FAQ'
 import { formatListen, formatTarget, protocolLabel, splitTargets } from '../utils/dnat'
 import { uniqueCopyName } from '../utils/ruleClone'
+import { writeStorage } from '../utils/storage'
 
 type TabKey = 'rules' | 'servers' | 'log'
 type TranslateFn = (key: string, options?: Record<string, unknown>) => string
@@ -874,7 +875,7 @@ function ServersTab({
       const next = new Set(prev)
       if (next.has(folder)) next.delete(folder)
       else next.add(folder)
-      localStorage.setItem('dnat_add_expanded_folders', JSON.stringify([...next]))
+      writeStorage('dnat_add_expanded_folders', JSON.stringify([...next]))
       return next
     })
   }

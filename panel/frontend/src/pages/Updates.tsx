@@ -32,6 +32,7 @@ import { orderFolders } from '../utils/folders'
 import DeliverImageModal from '../components/servers/DeliverImageModal'
 import BulkDeliverImageModal from '../components/servers/BulkDeliverImageModal'
 import NodeUpdateCard, { NodeState } from '../components/updates/NodeUpdateCard'
+import { writeStorage } from '../utils/storage'
 
 // Пока идёт SSH-доставка хоть на одну ноду — статусы на карточках обновляются с этим шагом
 const DELIVERY_POLL_INTERVAL_MS = 3_000
@@ -407,7 +408,7 @@ export default function Updates() {
       const next = new Set(prev)
       if (next.has(folder)) next.delete(folder)
       else next.add(folder)
-      try { localStorage.setItem(COLLAPSED_FOLDERS_KEY, JSON.stringify([...next])) } catch { /* приватный режим */ }
+      writeStorage(COLLAPSED_FOLDERS_KEY, JSON.stringify([...next]))
       return next
     })
   }

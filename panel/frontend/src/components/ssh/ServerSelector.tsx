@@ -5,6 +5,7 @@ import { Server, Search, ChevronDown, Folder, FolderOpen, Eye } from 'lucide-rea
 import { Server as ServerType } from '../../api/client'
 import { Checkbox } from '../ui/Checkbox'
 import { Tooltip } from '../ui/Tooltip'
+import { writeStorage } from '../../utils/storage'
 
 const EXPANDED_FOLDERS_KEY = 'ssh_expanded_folders'
 const NO_FOLDER = '__no_folder__'
@@ -97,7 +98,7 @@ export function ServerSelector({ servers, selectedIds, onChange, activeId, onOpe
       const next = new Set(prev)
       if (next.has(folder)) next.delete(folder)
       else next.add(folder)
-      localStorage.setItem(EXPANDED_FOLDERS_KEY, JSON.stringify([...next]))
+      writeStorage(EXPANDED_FOLDERS_KEY, JSON.stringify([...next]))
       return next
     })
   }

@@ -21,6 +21,7 @@ import CertificateMaterials from '../components/wildcard/CertificateMaterials'
 import ReloadCmdPresetChips from '../components/wildcard/ReloadCmdPresetChips'
 import { WildcardDeployProgress } from '../components/wildcard/WildcardDeployProgress'
 import { useBulkStream, BulkStreamState } from '../hooks/useBulkStream'
+import { writeStorage } from '../utils/storage'
 
 const DEFAULT_DEPLOY_PATH = '/etc/letsencrypt/live'
 const DEFAULT_FULLCHAIN_NAME = 'fullchain.pem'
@@ -956,7 +957,7 @@ export default function WildcardSSL() {
       const next = new Set(prev)
       if (next.has(folder)) next.delete(folder)
       else next.add(folder)
-      localStorage.setItem('wildcard_expanded_folders', JSON.stringify([...next]))
+      writeStorage('wildcard_expanded_folders', JSON.stringify([...next]))
       return next
     })
   }

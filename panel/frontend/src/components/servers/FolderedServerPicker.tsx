@@ -2,6 +2,7 @@ import { useMemo, useState, type ReactNode } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { ChevronDown, Folder, FolderOpen, Server as ServerIcon } from 'lucide-react'
 import { orderFolders } from '../../utils/folders'
+import { writeStorage } from '../../utils/storage'
 
 const NO_FOLDER = '__no_folder__'
 
@@ -79,7 +80,7 @@ export default function FolderedServerPicker<T extends FolderedServer>({
       const next = new Set(prev)
       if (next.has(key)) next.delete(key)
       else next.add(key)
-      try { localStorage.setItem(storageKey, JSON.stringify([...next])) } catch { /* приватный режим */ }
+      writeStorage(storageKey, JSON.stringify([...next]))
       return next
     })
   }

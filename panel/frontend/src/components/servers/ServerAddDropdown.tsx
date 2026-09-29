@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { ChevronDown, Folder, FolderOpen, Lock, Plus, Search, Server as ServerIcon, X } from 'lucide-react'
 import type { Server } from '../../api/client'
 import { orderFolders } from '../../utils/folders'
+import { writeStorage } from '../../utils/storage'
 import { Tooltip } from '../ui/Tooltip'
 
 const NO_FOLDER = '__no_folder__'
@@ -105,11 +106,7 @@ export function ServerAddDropdown({ servers, excludeIds, onAdd, labels, storageK
       const next = new Set(prev)
       if (next.has(key)) next.delete(key)
       else next.add(key)
-      try {
-        localStorage.setItem(storageKey, JSON.stringify([...next]))
-      } catch {
-        // приватный режим — просто не запомним раскрытые папки
-      }
+      writeStorage(storageKey, JSON.stringify([...next]))
       return next
     })
   }

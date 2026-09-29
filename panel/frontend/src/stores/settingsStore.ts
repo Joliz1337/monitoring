@@ -15,6 +15,7 @@ import {
   type ChartModeOverrides,
   type LiveValuesMode,
 } from '../config/chartDisplay'
+import { writeStorage } from '../utils/storage'
 
 // Зеркало списка скрытых разделов в браузере: меню рисуется до ответа
 // /settings, иначе при каждой загрузке страницы мигал бы полный список вкладок.
@@ -29,9 +30,7 @@ function readCachedHiddenModules(): string[] {
 }
 
 function cacheHiddenModules(ids: string[]): void {
-  try {
-    localStorage.setItem(HIDDEN_MODULES_CACHE_KEY, serializeHiddenModules(ids))
-  } catch { /* приватный режим браузера */ }
+  writeStorage(HIDDEN_MODULES_CACHE_KEY, serializeHiddenModules(ids))
 }
 
 // Смещение часового пояса браузера в формате "+03:00" / "-05:00"

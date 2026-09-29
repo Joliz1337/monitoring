@@ -30,6 +30,7 @@ import {
 import { toast } from 'sonner'
 import { billingApi, BillingServerData, BillingSettingsData } from '../api/client'
 import { Tooltip } from '../components/ui/Tooltip'
+import { writeStorage } from '../utils/storage'
 import { FAQIcon } from '../components/FAQ'
 import { BillingSummary } from '../components/billing/BillingSummary'
 import { ProjectCard } from '../components/billing/ProjectCard'
@@ -69,7 +70,7 @@ function loadCollapsed(): Set<string> {
 }
 
 function saveCollapsed(set: Set<string>) {
-  localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...set]))
+  writeStorage(COLLAPSED_KEY, JSON.stringify([...set]))
 }
 
 function loadFolderOrder(): string[] {
@@ -79,7 +80,7 @@ function loadFolderOrder(): string[] {
 }
 
 function saveFolderOrder(order: string[]) {
-  localStorage.setItem(FOLDER_ORDER_KEY, JSON.stringify(order))
+  writeStorage(FOLDER_ORDER_KEY, JSON.stringify(order))
 }
 
 function loadServerOrder(): number[] {
@@ -89,7 +90,7 @@ function loadServerOrder(): number[] {
 }
 
 function saveServerOrder(order: number[]) {
-  localStorage.setItem(SERVER_ORDER_KEY, JSON.stringify(order))
+  writeStorage(SERVER_ORDER_KEY, JSON.stringify(order))
 }
 
 export default function Billing() {

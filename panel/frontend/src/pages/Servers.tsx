@@ -59,6 +59,7 @@ import DeployTargetFields, { DEPLOY_DEFAULTS, NGINX_DOMAIN_PLACEHOLDER, type Dep
 import ExtraServerCard, { type ExtraTarget, type DeployStatus } from '../components/servers/ExtraServerCard'
 import InstallKeysPanel from '../components/servers/InstallKeysPanel'
 import ManualInstallBlock from '../components/servers/ManualInstallBlock'
+import { writeStorage } from '../utils/storage'
 
 interface ServerFormData {
   name: string
@@ -145,11 +146,7 @@ const readStoredJobs = (): StoredDeployJob[] => {
 }
 
 const writeStoredJobs = (jobs: StoredDeployJob[]) => {
-  try {
-    localStorage.setItem(DEPLOY_JOBS_KEY, JSON.stringify(jobs))
-  } catch {
-    // localStorage недоступен — восстановление после перезагрузки просто не сработает
-  }
+  writeStorage(DEPLOY_JOBS_KEY, JSON.stringify(jobs))
 }
 
 const storeJob = (job: StoredDeployJob) => {

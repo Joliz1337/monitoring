@@ -7,6 +7,7 @@ import { useInfraStore } from '../../stores/infraStore'
 import { useServersStore } from '../../stores/serversStore'
 import AccountNode from './AccountNode'
 import InfraServerRow from './InfraServerRow'
+import { readStorage, writeStorage } from '../../utils/storage'
 
 const COLLAPSED_KEY = 'infra_collapsed'
 
@@ -18,7 +19,7 @@ function loadCollapsed(): Set<string> {
 }
 
 function saveCollapsed(set: Set<string>) {
-  localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...set]))
+  writeStorage(COLLAPSED_KEY, JSON.stringify([...set]))
 }
 
 export default function InfraTree() {
@@ -29,11 +30,11 @@ export default function InfraTree() {
   const [collapsed, setCollapsed] = useState(loadCollapsed)
   const [showAddAccount, setShowAddAccount] = useState(false)
   const [newAccountName, setNewAccountName] = useState('')
-  const [treeVisible, setTreeVisible] = useState(() => localStorage.getItem('infra_visible') !== 'false')
+  const [treeVisible, setTreeVisible] = useState(() => readStorage('infra_visible') !== 'false')
 
   useEffect(() => { fetchTree() }, [fetchTree])
 
-  useEffect(() => { localStorage.setItem('infra_visible', String(treeVisible)) }, [treeVisible])
+  useEffect(() => { writeStorage('infra_visible', String(treeVisible)) }, [treeVisible])
 
   const toggle = useCallback((key: string) => {
     setCollapsed(prev => {
