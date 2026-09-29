@@ -94,7 +94,8 @@ class Server(Base):
 
     # Доставка образа ноды с панели (для нод под ТСПУ, без доступа к GHCR).
     # image_delivery: auto — нода тянет GHCR, при провале доставка по SSH; ssh — сразу SSH.
-    # SSH-креды для доставки хранятся зашифрованными (EncryptedString), заполняются опционально.
+    # SSH-креды для доставки хранятся зашифрованными (EncryptedString), заполняются опционально;
+    # ими же ставится нода Remnawave, когда сервер качает всё через панель.
     image_delivery = Column(String(10), nullable=False, server_default="auto")
     ssh_host = Column(String(255), nullable=True)
     ssh_port = Column(Integer, nullable=True)

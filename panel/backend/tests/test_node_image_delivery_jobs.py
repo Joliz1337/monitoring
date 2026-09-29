@@ -15,7 +15,8 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.services import node_image_delivery as module  # noqa: E402
-from app.services.node_image_delivery import ImageDeliveryJobManager, SSHTarget  # noqa: E402
+from app.services.node_image_delivery import ImageDeliveryJobManager  # noqa: E402
+from app.services.ssh_target import SSHTarget  # noqa: E402
 
 
 def target(host: str) -> SSHTarget:

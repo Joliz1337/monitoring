@@ -1539,6 +1539,8 @@
     "install_button": "Install",
     "install_already": "installed",
     "install_exec_denied": "command execution disabled by node",
+    "install_via_panel_hint": "For servers that can't reach GitHub and Docker (e.g. behind DPI blocking). The install runs over SSH: the panel forwards a proxy inside the SSH session for the duration of the install only; install traffic goes through the panel. Root SSH access is required.",
+    "install_ssh_save": "Save SSH access on the server (encrypted)",
     "install_reinstall_warning": "This server already has a Remnawave node — installing will stop and remove it along with container data, then reinstall from scratch.",
     "install_success": "Remnawave node installed",
     "install_failed": "Installation failed",

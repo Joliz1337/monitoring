@@ -3,6 +3,8 @@
 Панель подключается к серверу, скачивает install.sh и запускает его в режиме
 `--unattended`: ставится нода мониторинга и, по желанию, WARP / нода Remnawave /
 HTTP-прокси установщика. Пароль SSH живёт только в памяти на время установки.
+Тем же SSH-прогоном ставится нода Remnawave на уже добавленный сервер, когда
+тот качает всё через панель (install_via_panel).
 
 Свежие образы OVH (и ряда других хостеров) отдают root с просроченным паролем —
 PAM форсирует смену при первом входе. Без TTY команда не выполняется
@@ -19,7 +21,7 @@ import string
 from contextlib import nullcontext
 from dataclasses import dataclass
 from enum import Enum
-from typing import AsyncIterator
+from typing import AsyncIterator, Callable
 
 import asyncssh
 from python_socks import ProxyType
@@ -28,6 +30,7 @@ from python_socks.async_.asyncio import Proxy as SocksProxy
 
 from app.services.http_client import parse_proxy_input, sanitize_proxy
 from app.services.install_tunnel import InstallTunnel, TunnelForwardingDenied, open_install_tunnel
+from app.services.ssh_target import SSHTarget, ssh_connect_kwargs
 from app.services import update_channel
 
 REMOTE_SCRIPT = "/tmp/mon-install.sh"
@@ -157,13 +160,21 @@ def _escape_remnawave_cert(cert: str) -> str:
     return cert.replace("\r\n", "\n").replace("\n", "\\n")
 
 
-def build_remnawave_install_command(remnawave_cert: str) -> str:
-    """Команда установки только ноды Remnawave — для запуска через агента ноды."""
+def _temporary_proxy_env(tunnel_proxy: str) -> dict[str, str]:
+    # Прокси панели живёт только в SSH-сессии — установщик снимает его по завершении
+    return {"MON_PROXY_URL": tunnel_proxy, "MON_PROXY_TEMPORARY": "1"}
+
+
+def build_remnawave_install_command(remnawave_cert: str, tunnel_proxy: str | None = None) -> str:
+    """Команда установки только ноды Remnawave — через агента ноды или, с
+    tunnel_proxy, по SSH с загрузкой всего через панель."""
     env = {"MON_INSTALL_REMNAWAVE": "1"}
     if update_channel.current_branch() != update_channel.STABLE_BRANCH:
         env["MON_BRANCH"] = update_channel.current_branch()
+    if tunnel_proxy:
+        env.update(_temporary_proxy_env(tunnel_proxy))
     env["REMNAWAVE_CERT"] = _escape_remnawave_cert(remnawave_cert)
-    return _render_unattended_command(env)
+    return _render_unattended_command(env, download_proxy=tunnel_proxy)
 
 
 def build_warp_install_command() -> str:
@@ -193,8 +204,7 @@ def build_install_command(params: DeployParams, tunnel_proxy: str | None = None)
     if params.node_api_port != 9100:
         env["NODE_API_PORT"] = str(params.node_api_port)
     if tunnel_proxy:
-        env["MON_PROXY_URL"] = tunnel_proxy
-        env["MON_PROXY_TEMPORARY"] = "1"
+        env.update(_temporary_proxy_env(tunnel_proxy))
     elif params.proxy_url:
         env["MON_PROXY_URL"] = params.proxy_url
     if params.install_optimizations:
@@ -267,26 +277,69 @@ async def _ssh_connect(
     return await asyncssh.connect(**connect_kwargs, sock=sock)
 
 
-async def _run_install_once(connect_kwargs: dict, params: DeployParams) -> AsyncIterator[dict]:
-    """Один прогон установки. Стримит лог построчно, в конце отдаёт служебное
+# Адрес прокси панели на сервере (None без туннеля) → команда установки
+CommandForProxy = Callable[[str | None], str]
+
+
+def _run_install_once(connect_kwargs: dict, params: DeployParams) -> AsyncIterator[dict]:
+    needs_sudo = params.ssh_user.strip() != "root"
+    return _stream_ssh_install(
+        connect_kwargs,
+        params.socks5_proxy,
+        params.via_panel,
+        lambda tunnel_proxy: _build_command(params, tunnel_proxy),
+        sudo_password=params.ssh_password if needs_sudo else None,
+    )
+
+
+async def install_via_panel(
+    target: SSHTarget, socks5_proxy: str | None, command_for: CommandForProxy
+) -> AsyncIterator[dict]:
+    """Установка на уже добавленный сервер по SSH, всё качается через панель.
+
+    Через агента ноды так нельзя: установщик перезапускает Docker, чтобы тот
+    тянул образы через прокси, и вместе с Docker погиб бы агент, а с ним и
+    команда. Стримит события {type: log|error|done}.
+    """
+    try:
+        connect_kwargs = ssh_connect_kwargs(target)
+    except (asyncssh.KeyImportError, ValueError) as exc:
+        yield {"type": "error", "message": f"Некорректный SSH-ключ: {exc}"}
+        return
+
+    async for event in _stream_ssh_install(connect_kwargs, socks5_proxy, True, command_for):
+        if event["type"] == "_result":
+            yield {"type": "done", "exit_code": event["exit_code"]}
+        else:
+            yield event
+
+
+async def _stream_ssh_install(
+    connect_kwargs: dict,
+    socks5_proxy: str | None,
+    via_panel: bool,
+    command_for: CommandForProxy,
+    sudo_password: str | None = None,
+) -> AsyncIterator[dict]:
+    """Один прогон установки по SSH. Стримит лог построчно, в конце отдаёт служебное
     событие {"type": "_result", "exit_code", "expired"}. Фатальные сбои
     соединения отдаются как {"type": "error"} без `_result`.
 
     `_result` отдаётся уже после закрытия SSH-сессии — вместе с ней закрывается
     и туннель панели, он не должен жить дольше самой установки.
     """
-    needs_sudo = params.ssh_user.strip() != "root"
     expired = False
     result: dict | None = None
 
     try:
-        async with await _ssh_connect(connect_kwargs, params.socks5_proxy) as conn:
-            via_proxy = f" через SOCKS5 {sanitize_proxy(params.socks5_proxy)}" if params.socks5_proxy else ""
+        async with await _ssh_connect(connect_kwargs, socks5_proxy) as conn:
+            via_proxy = f" через SOCKS5 {sanitize_proxy(socks5_proxy)}" if socks5_proxy else ""
             yield {
                 "type": "log",
-                "line": f"[panel] SSH-подключение к {params.host}:{params.ssh_port} установлено{via_proxy}",
+                "line": f"[panel] SSH-подключение к {connect_kwargs['host']}:{connect_kwargs['port']} "
+                        f"установлено{via_proxy}",
             }
-            tunnel_scope = open_install_tunnel(conn) if params.via_panel else nullcontext()
+            tunnel_scope = open_install_tunnel(conn) if via_panel else nullcontext()
             async with tunnel_scope as tunnel:
                 tunnel_proxy = tunnel.proxy_url if tunnel else None
                 if tunnel:
@@ -295,12 +348,10 @@ async def _run_install_once(connect_kwargs: dict, params: DeployParams) -> Async
                         "line": f"[panel] Сервер качает всё через панель: прокси {tunnel_proxy} "
                                 "внутри SSH-сессии, закроется вместе с ней",
                     }
-                process = await conn.create_process(
-                    _build_command(params, tunnel_proxy), stderr=asyncssh.STDOUT
-                )
+                process = await conn.create_process(command_for(tunnel_proxy), stderr=asyncssh.STDOUT)
 
-                if needs_sudo and params.ssh_password:
-                    process.stdin.write(params.ssh_password + "\n")
+                if sudo_password:
+                    process.stdin.write(sudo_password + "\n")
 
                 loop = asyncio.get_event_loop()
                 deadline = loop.time() + DEPLOY_TIMEOUT

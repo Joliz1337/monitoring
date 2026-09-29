@@ -1,5 +1,5 @@
 import { useTranslation } from 'react-i18next'
-import type { ImageDeliveryCreds } from '../../api/client'
+import type { ImageDeliveryCreds, ImageDeliverySettings } from '../../api/client'
 
 export interface SshCredsValue {
   host: string
@@ -19,6 +19,21 @@ export const SSH_CREDS_DEFAULTS: SshCredsValue = {
   password: '',
   privateKey: '',
   passphrase: '',
+}
+
+/** Сохранённый у сервера SSH-доступ → поля формы; секреты бэк не отдаёт, они остаются пустыми */
+export function credsFromSettings(settings: ImageDeliverySettings): SshCredsValue {
+  return {
+    ...SSH_CREDS_DEFAULTS,
+    host: settings.ssh_host || '',
+    port: String(settings.ssh_port || 22),
+    user: settings.ssh_user || 'root',
+    authMethod: settings.has_ssh_private_key ? 'key' : 'password',
+  }
+}
+
+export function hasStoredSshSecret(settings: ImageDeliverySettings): boolean {
+  return settings.has_ssh_password || settings.has_ssh_private_key
 }
 
 export function hasSshSecret(value: SshCredsValue): boolean {

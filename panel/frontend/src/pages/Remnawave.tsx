@@ -6,7 +6,7 @@ import {
   Loader2, Smartphone, Globe, ArrowUp, ArrowDown, AlertTriangle, Shield, ExternalLink,
   Download, Plus, Save, Terminal
 } from 'lucide-react'
-import { remnawaveApi, serversApi, remnawaveInstallApi, remnawaveInstallStreamUrl } from '../api/client'
+import { remnawaveApi, serversApi, remnawaveInstallApi, remnawaveInstallStreamUrl, nodeImageApi } from '../api/client'
 import type {
   RemnawaveApiNode, RemnawaveHwidDevice, RemnawaveAnomaly,
   Server as ServerInfo, RemnawaveCertProfile, RemnawaveInstallEvent,
@@ -19,6 +19,10 @@ import { FAQIcon } from '../components/FAQ'
 import { streamNdjsonGet, StreamUnauthorizedError } from '../utils/ndjsonStream'
 import { nodeAllows } from '../utils/nodeCapabilities'
 import { getFlag } from '../utils/format'
+import { Checkbox } from '../components/ui/Checkbox'
+import SshCredsFields, {
+  SSH_CREDS_DEFAULTS, SshCredsValue, credsFromSettings, hasSshSecret, hasStoredSshSecret, toDeliveryCreds,
+} from '../components/servers/SshCredsFields'
 
 type TabType = 'overview' | 'users' | 'anomalies' | 'install' | 'settings'
 
@@ -1010,6 +1014,14 @@ function InstallTab() {
   const [phase, setPhase] = useState<'idle' | 'running' | 'success' | 'error'>('idle')
   const [log, setLog] = useState<string[]>([])
   const [jobName, setJobName] = useState('')
+  const [viaPanel, setViaPanel] = useState(false)
+  const [sshCreds, setSshCreds] = useState<SshCredsValue>(SSH_CREDS_DEFAULTS)
+  const [hasStoredSsh, setHasStoredSsh] = useState(false)
+  const [editSsh, setEditSsh] = useState(false)
+  const [saveSsh, setSaveSsh] = useState(false)
+  // Сервер, чей сохранённый SSH-доступ уже загружен: до ответа форму не показываем,
+  // а ответ по прошлому выбранному серверу не перетрёт текущий
+  const [sshLoadedFor, setSshLoadedFor] = useState<number | null>(null)
   const logRef = useRef<HTMLPreElement>(null)
   const restoredRef = useRef(false)
 
@@ -1027,6 +1039,29 @@ function InstallTab() {
   }, [])
 
   useEffect(() => { fetchData(true) }, [fetchData])
+
+  useEffect(() => {
+    if (!viaPanel || selectedId === null) return
+    let cancelled = false
+    setSshLoadedFor(null)
+    nodeImageApi.getSettings(selectedId)
+      .then(({ data }) => {
+        if (cancelled) return
+        setSshCreds(credsFromSettings(data))
+        setHasStoredSsh(hasStoredSshSecret(data))
+      })
+      .catch(() => {
+        if (cancelled) return
+        setSshCreds(SSH_CREDS_DEFAULTS)
+        setHasStoredSsh(false)
+      })
+      .finally(() => {
+        if (cancelled) return
+        setEditSsh(false)
+        setSshLoadedFor(selectedId)
+      })
+    return () => { cancelled = true }
+  }, [viaPanel, selectedId])
 
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
@@ -1107,9 +1142,16 @@ function InstallTab() {
     setLog([])
     setJobName(server.name)
     try {
-      const body = certMode === 'saved'
+      const cert = certMode === 'saved'
         ? { remnawave_cert_profile_id: certProfileId }
         : { remnawave_cert_inline: certInline.trim() }
+      // Пустое ssh — бэк возьмёт сохранённый у сервера доступ
+      const useSshForm = !hasStoredSsh || editSsh
+      const ssh = useSshForm ? toDeliveryCreds(sshCreds) : {}
+      if (viaPanel && useSshForm && saveSsh) {
+        await nodeImageApi.setSettings(server.id, ssh)
+      }
+      const body = viaPanel ? { ...cert, via_panel: true, ssh } : cert
       const { data } = await remnawaveInstallApi.start(server.id, body)
       writeStoredInstallJob({ jobId: data.job_id, serverId: server.id, name: server.name })
       await attachStream(data.job_id)
@@ -1154,8 +1196,11 @@ function InstallTab() {
     ? servers.filter(s => s.name.toLowerCase().includes(query) || s.url.toLowerCase().includes(query))
     : servers
   const certReady = certMode === 'saved' ? certProfileId !== null : certInline.trim().length > 0
+  const sshReady = sshLoadedFor === selectedId && ((hasStoredSsh && !editSsh) || hasSshSecret(sshCreds))
+  // По SSH агент не участвует — закрытый нодой exec установке через панель не мешает
+  const canUseServer = (s: ServerInfo) => viaPanel || nodeAllows(s, 'exec', 'write')
   const canInstall = !!selectedServer && certReady && phase !== 'running'
-    && nodeAllows(selectedServer, 'exec', 'write')
+    && canUseServer(selectedServer) && (!viaPanel || sshReady)
 
   return (
     <motion.div
@@ -1186,19 +1231,19 @@ function InstallTab() {
           ) : (
             <div className="space-y-1.5 max-h-80 overflow-y-auto pr-1">
               {visibleServers.map(s => {
-                const execAllowed = nodeAllows(s, 'exec', 'write')
+                const usable = canUseServer(s)
                 const active = selectedId === s.id
                 return (
                   <button
                     key={s.id}
                     type="button"
-                    disabled={!execAllowed}
+                    disabled={!usable}
                     onClick={() => setSelectedId(s.id)}
                     className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg border text-left transition-colors ${
                       active
                         ? 'border-accent-500/50 bg-accent-500/10'
                         : 'border-dark-700/50 bg-dark-800/30 hover:bg-dark-800/60'
-                    } ${execAllowed ? '' : 'opacity-50 cursor-not-allowed'}`}
+                    } ${usable ? '' : 'opacity-50 cursor-not-allowed'}`}
                   >
                     <span className={`w-2 h-2 rounded-full shrink-0 ${
                       s.status === 'online' ? 'bg-success' : 'bg-dark-600'
@@ -1209,7 +1254,7 @@ function InstallTab() {
                       </span>
                       <span className="block text-xs text-dark-500 truncate">{s.url}</span>
                     </span>
-                    {!execAllowed ? (
+                    {!usable ? (
                       <span className="text-[10px] text-dark-500 shrink-0">{t('remnawave.install_exec_denied')}</span>
                     ) : s.has_xray_node ? (
                       <span className="text-[10px] px-1.5 py-0.5 rounded bg-success/10 text-success shrink-0">
@@ -1292,6 +1337,47 @@ function InstallTab() {
             )}
           </div>
         </Section>
+      </div>
+
+      <div className="card space-y-3">
+        <div>
+          <label className="flex items-center gap-2.5 cursor-pointer">
+            <Checkbox
+              checked={viaPanel}
+              onChange={e => setViaPanel(e.target.checked)}
+              disabled={phase === 'running'}
+            />
+            <span className="text-sm text-dark-200">{t('servers.deploy_via_panel')}</span>
+          </label>
+          <p className="text-xs text-dark-500 mt-1 ml-6">{t('remnawave.install_via_panel_hint')}</p>
+        </div>
+
+        {viaPanel && selectedServer && (
+          sshLoadedFor !== selectedId ? (
+            <Loader2 className="w-4 h-4 animate-spin text-dark-500" />
+          ) : hasStoredSsh && !editSsh ? (
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+              <span className="text-dark-300">
+                {t('imageDelivery.using_stored', { user: sshCreds.user, host: sshCreds.host, port: sshCreds.port })}
+              </span>
+              <button type="button" onClick={() => setEditSsh(true)} className="text-xs text-accent-400 hover:underline">
+                {t('imageDelivery.change_creds')}
+              </button>
+            </div>
+          ) : (
+            <div className="space-y-3 max-w-xl">
+              <SshCredsFields
+                value={sshCreds}
+                onChange={patch => setSshCreds(prev => ({ ...prev, ...patch }))}
+                disabled={phase === 'running'}
+              />
+              <label className="flex items-center gap-2.5 cursor-pointer">
+                <Checkbox checked={saveSsh} onChange={e => setSaveSsh(e.target.checked)} />
+                <span className="text-sm text-dark-300">{t('remnawave.install_ssh_save')}</span>
+              </label>
+            </div>
+          )
+        )}
       </div>
 
       {selectedServer?.has_xray_node && (

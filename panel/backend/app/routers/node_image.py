@@ -21,7 +21,8 @@ from app.auth import verify_auth
 from app.database import get_db
 from app.models import Server
 from app.services import update_channel
-from app.services.node_image_delivery import SSHTarget, get_image_delivery_manager
+from app.services.node_image_delivery import get_image_delivery_manager
+from app.services.ssh_target import SSHTarget
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/servers", tags=["node-image"])
@@ -50,12 +51,13 @@ class SSHCreds(BaseModel):
     ssh_passphrase: Optional[str] = None
 
 
-class DeliverImageRequest(SSHCreds):
-    """Разовые SSH-креды, если у сервера не сохранены."""
+class SSHAccessRequest(SSHCreds):
+    """Разовые SSH-креды поверх сохранённых у сервера. Ими же ставится нода
+    Remnawave, когда сервер качает всё через панель."""
     ssh_host: Optional[str] = None
 
 
-class ImageDeliverySettings(DeliverImageRequest):
+class ImageDeliverySettings(SSHAccessRequest):
     image_delivery: Optional[str] = None  # auto | ssh
 
 
@@ -65,7 +67,7 @@ class BulkDeliverRequest(SSHCreds):
     save_creds: bool = False
 
 
-class DeliveryTargetError(Exception):
+class SSHTargetError(Exception):
     def __init__(self, reason: str, message: str):
         super().__init__(message)
         self.reason = reason
@@ -75,8 +77,8 @@ def _has_stored_creds(server: Server) -> bool:
     return bool(server.ssh_password or server.ssh_private_key)
 
 
-def _resolve_target(server: Server, req: DeliverImageRequest) -> SSHTarget:
-    """SSH-цель доставки: поля запроса поверх сохранённых у сервера."""
+def resolve_ssh_target(server: Server, req: SSHAccessRequest) -> SSHTarget:
+    """SSH-цель сервера: поля запроса поверх сохранённых у сервера."""
     host = (req.ssh_host or server.ssh_host or _host_from_url(server.url)).strip()
     port = req.ssh_port or server.ssh_port or 22
     user = (req.ssh_user or server.ssh_user or "root").strip()
@@ -85,11 +87,11 @@ def _resolve_target(server: Server, req: DeliverImageRequest) -> SSHTarget:
     passphrase = req.ssh_passphrase if req.ssh_passphrase is not None else server.ssh_passphrase
 
     if not host:
-        raise DeliveryTargetError("no_host", "Не удалось определить SSH-хост ноды")
+        raise SSHTargetError("no_host", "Не удалось определить SSH-хост ноды")
     if user != "root":
-        raise DeliveryTargetError("not_root", "Доставка образа поддерживает только root-доступ по SSH")
+        raise SSHTargetError("not_root", "Нужен root-доступ по SSH")
     if not password and not private_key:
-        raise DeliveryTargetError("no_creds", "Нет SSH-кредов: сохраните их у сервера или укажите в запросе")
+        raise SSHTargetError("no_creds", "Нет SSH-кредов: сохраните их у сервера или укажите в запросе")
 
     return SSHTarget(
         host=host, port=port, user=user,
@@ -97,7 +99,7 @@ def _resolve_target(server: Server, req: DeliverImageRequest) -> SSHTarget:
     )
 
 
-def _store_creds(server: Server, req: DeliverImageRequest) -> None:
+def _store_creds(server: Server, req: SSHAccessRequest) -> None:
     """Write-only: обновляем только переданные поля; пустая строка — очистить."""
     if req.ssh_host is not None:
         server.ssh_host = req.ssh_host.strip() or None
@@ -161,15 +163,15 @@ async def set_image_delivery(
 @router.post("/{server_id}/deliver-image")
 async def deliver_image_to_server(
     server_id: int,
-    req: DeliverImageRequest,
+    req: SSHAccessRequest,
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth),
 ):
     """Доставить образ ноды по SSH и обновить её. Возвращает job_id — лог в стриме."""
     server = await _get_server(server_id, db)
     try:
-        target = _resolve_target(server, req)
-    except DeliveryTargetError as exc:
+        target = resolve_ssh_target(server, req)
+    except SSHTargetError as exc:
         raise HTTPException(400, str(exc)) from exc
 
     job_id = get_image_delivery_manager().start(server.id, server.name, target, _target_tag())
@@ -188,7 +190,7 @@ async def deliver_image_bulk(
     )).scalars().all()
     found_ids = {s.id for s in servers}
 
-    fallback = DeliverImageRequest(**req.model_dump(include=set(SSHCreds.model_fields)))
+    fallback = SSHAccessRequest(**req.model_dump(include=set(SSHCreds.model_fields)))
     targets: list[tuple[Server, SSHTarget]] = []
     skipped = [
         {"server_id": sid, "name": None, "reason": "not_found"}
@@ -197,8 +199,8 @@ async def deliver_image_bulk(
     for server in servers:
         uses_fallback = not _has_stored_creds(server)
         try:
-            target = _resolve_target(server, fallback if uses_fallback else DeliverImageRequest())
-        except DeliveryTargetError as exc:
+            target = resolve_ssh_target(server, fallback if uses_fallback else SSHAccessRequest())
+        except SSHTargetError as exc:
             skipped.append({"server_id": server.id, "name": server.name, "reason": exc.reason})
             continue
         if uses_fallback and req.save_creds:

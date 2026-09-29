@@ -9,7 +9,9 @@ import {
   NodeImageDeliveryEvent,
 } from '../../api/client'
 import { streamNdjsonGet } from '../../utils/ndjsonStream'
-import SshCredsFields, { SSH_CREDS_DEFAULTS, SshCredsValue, toDeliveryCreds } from './SshCredsFields'
+import SshCredsFields, {
+  SSH_CREDS_DEFAULTS, SshCredsValue, credsFromSettings, hasStoredSshSecret, toDeliveryCreds,
+} from './SshCredsFields'
 
 interface Props {
   serverId: number
@@ -39,14 +41,8 @@ export default function DeliverImageModal({ serverId, serverName, jobId: initial
     nodeImageApi
       .getSettings(serverId)
       .then(({ data }) => {
-        setCreds(prev => ({
-          ...prev,
-          host: data.ssh_host || '',
-          port: String(data.ssh_port || 22),
-          user: data.ssh_user || 'root',
-          authMethod: data.has_ssh_private_key ? 'key' : 'password',
-        }))
-        setHasStoredCreds(data.has_ssh_password || data.has_ssh_private_key)
+        setCreds(credsFromSettings(data))
+        setHasStoredCreds(hasStoredSshSecret(data))
       })
       .catch(() => {})
   }, [serverId])

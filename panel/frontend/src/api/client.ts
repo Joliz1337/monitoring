@@ -523,7 +523,7 @@ export interface DeployJobStatus extends DeployJobInfo {
   next_offset: number
 }
 
-// Установка ноды Remnawave на уже добавленный сервер через агента ноды
+// Установка ноды Remnawave на уже добавленный сервер: через агента ноды или по SSH через панель
 export type RemnawaveInstallEvent =
   | { type: 'start'; name?: string }
   | { type: 'log'; line: string }
@@ -543,9 +543,15 @@ export const remnawaveInstallStreamUrl = (jobId: string) =>
   `/api/servers/remnawave-install/${jobId}/stream`
 
 export const remnawaveInstallApi = {
+  // via_panel — по SSH, всё качается через панель; ssh — разовые креды поверх сохранённых у сервера
   start: (
     serverId: number,
-    body: { remnawave_cert_profile_id?: number | null; remnawave_cert_inline?: string | null },
+    body: {
+      remnawave_cert_profile_id?: number | null
+      remnawave_cert_inline?: string | null
+      via_panel?: boolean
+      ssh?: ImageDeliveryCreds
+    },
   ) => api.post<{ job_id: string }>(`/servers/${serverId}/install-remnawave`, body),
   jobs: () => api.get<{ jobs: RemnawaveInstallJobInfo[] }>('/servers/remnawave-install/jobs'),
 }

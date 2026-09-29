@@ -22,45 +22,16 @@ from typing import AsyncIterator, Optional
 import asyncssh
 
 from app.services.node_image_cache import ensure_image
+from app.services.ssh_target import SSHTarget, ssh_connect_kwargs
 
 logger = logging.getLogger(__name__)
 
-CONNECT_TIMEOUT = 30
 LOAD_TIMEOUT = 3600
 UPDATE_TIMEOUT = 7200
 REMOTE_TAR = "/tmp/mon-node-img.tar.gz"
 FINISHED_TTL_SECONDS = 600
 DELIVERY_CONCURRENCY = 5
 LOG_BUFFER_LIMIT = 5000
-
-
-@dataclass
-class SSHTarget:
-    host: str
-    port: int = 22
-    user: str = "root"
-    password: Optional[str] = None
-    private_key: Optional[str] = None
-    passphrase: Optional[str] = None
-
-
-def _connect_kwargs(t: SSHTarget) -> dict:
-    kwargs: dict = {
-        "host": t.host,
-        "port": t.port,
-        "username": t.user,
-        "known_hosts": None,
-        "connect_timeout": CONNECT_TIMEOUT,
-        # Долгая заливка образа по медленному/throttled-каналу: keepalive держит
-        # SSH-сессию живой в паузах между шагами.
-        "keepalive_interval": 15,
-        "keepalive_count_max": 8,
-    }
-    if t.private_key:
-        kwargs["client_keys"] = [asyncssh.import_private_key(t.private_key, t.passphrase or None)]
-    elif t.password:
-        kwargs["password"] = t.password
-    return kwargs
 
 
 async def _run_streamed(conn, command: str, timeout: int) -> AsyncIterator[dict]:
@@ -99,7 +70,7 @@ async def deliver_image(target: SSHTarget, tag: str) -> AsyncIterator[dict]:
 
     size_mb = tar.stat().st_size // (1024 * 1024)
     try:
-        async with await asyncssh.connect(**_connect_kwargs(target)) as conn:
+        async with await asyncssh.connect(**ssh_connect_kwargs(target)) as conn:
             yield {"type": "log", "line": f"[panel] SSH к {target.host}:{target.port} установлен"}
             yield {"type": "log", "line": f"[panel] Заливаю образ ({size_mb} МБ) — на медленном канале это несколько минут…"}
             async with conn.start_sftp_client() as sftp:
