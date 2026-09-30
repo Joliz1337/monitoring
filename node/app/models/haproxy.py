@@ -4,6 +4,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from app.models.loss_probe import ProbeStats
+
 # target_ip и cert_domain подставляются прямо в текст haproxy.cfg, а домен
 # сертификата ещё и в путь к файлу. Опасны здесь пробел и перевод строки
 # (произвольная директива в конфиге) плюс «..» и слэш (выход за каталог
@@ -332,6 +334,7 @@ class HAProxyStatRow(BaseModel):
     backup: bool = False
     lastchg: Optional[int] = None  # seconds since last state change
     downtime: Optional[int] = None
+    probe: Optional[ProbeStats] = None  # потери до addr, только у серверов
 
 
 class HAProxyProxyStats(BaseModel):

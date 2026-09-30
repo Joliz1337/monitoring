@@ -11,6 +11,13 @@ from sqlalchemy import select, delete, func
 from app.database import async_session
 from app.models import Server, AlertSettings, AlertHistory
 from app.services.http_client import get_node_client, node_auth_headers
+from app.services.loss_alerts import (
+    LossAlertState,
+    alert_message,
+    parse_readings,
+    readings_details,
+    recovery_message,
+)
 from app.services.traffic_ingest import get_traffic_ingest
 
 ALERT_HISTORY_RETENTION_DAYS = 30
@@ -50,6 +57,7 @@ class ServerAlertState:
 
         self.alert_start: dict[str, float] = {}
         self.last_alert: dict[str, float] = {}
+        self.loss = LossAlertState()
 
     def update_ema(self, attr: str, value: float):
         current = getattr(self, attr)
@@ -237,6 +245,7 @@ class ServerAlerter:
             "tcp": self._parse_id_list(settings.tcp_excluded_server_ids),
             "load_avg": self._parse_id_list(settings.load_avg_excluded_server_ids),
             "conntrack": self._parse_id_list(settings.conntrack_excluded_server_ids),
+            "packet_loss": self._parse_id_list(settings.packet_loss_excluded_server_ids),
         }
 
         async with async_session() as db:
@@ -290,6 +299,12 @@ class ServerAlerter:
 
         # --- Anti-DDoS (состояние, не ресурс — EMA не нужна) ---
         await self._check_antiddos(srv, state, settings, now, metrics)
+
+        # --- Потери с релея до адресов назначения (окно считает нода) ---
+        if settings.packet_loss_enabled and srv.id not in tex.get("packet_loss", set()):
+            await self._check_packet_loss(srv, state, settings, now, metrics)
+        else:
+            state.loss.reset()
 
         cpu_val = self._extract_cpu(metrics)
         ram_val = self._extract_ram(metrics)
@@ -611,6 +626,36 @@ class ServerAlerter:
                     "count": ad.get("conntrack_count"),
                     "max": ad.get("conntrack_max"),
                 },
+            )
+
+    # ------------------------------------------------------------------
+    # Packet loss (relay → destinations)
+    # ------------------------------------------------------------------
+    async def _check_packet_loss(
+        self,
+        srv: Server,
+        state: ServerAlertState,
+        settings: AlertSettings,
+        now: float,
+        metrics: dict,
+    ):
+        threshold = settings.packet_loss_threshold or 20.0
+        sustained = settings.packet_loss_sustained_seconds or 300
+        evaluation = state.loss.evaluate(
+            parse_readings(metrics), threshold, sustained, settings.alert_cooldown or 1800, now,
+        )
+        lang = self._lang(settings)
+        if evaluation.fired:
+            await self._send_and_save(
+                srv, settings, "packet_loss", "warning",
+                alert_message(srv.name, evaluation.fired, threshold, sustained, lang),
+                {"threshold": threshold, "targets": readings_details(evaluation.fired)},
+            )
+        if evaluation.recovered:
+            await self._send_and_save(
+                srv, settings, "packet_loss_recovery", "info",
+                recovery_message(srv.name, evaluation.recovered, lang),
+                {"targets": readings_details(evaluation.recovered)},
             )
 
     # ------------------------------------------------------------------

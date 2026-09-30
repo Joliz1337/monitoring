@@ -390,6 +390,20 @@ async def run_migrations(conn):
                 except Exception:
                     pass
 
+        packet_loss_columns = [
+            ("packet_loss_enabled", "BOOLEAN DEFAULT TRUE"),
+            ("packet_loss_threshold", "FLOAT DEFAULT 20.0"),
+            ("packet_loss_sustained_seconds", "INTEGER DEFAULT 300"),
+            ("packet_loss_excluded_server_ids", "TEXT"),
+        ]
+        for col_name, col_type in packet_loss_columns:
+            if col_name not in alert_columns:
+                try:
+                    await conn.execute(text(f'ALTER TABLE alert_settings ADD COLUMN "{col_name}" {col_type}'))
+                    logger.info(f"Added column: alert_settings.{col_name}")
+                except Exception:
+                    pass
+
         # Подтянуть старые дефолты шумовых порогов к новым значениям.
         # Срабатывает только если пользователь не менял значения вручную —
         # т.е. они точно равны предыдущим встроенным дефолтам.

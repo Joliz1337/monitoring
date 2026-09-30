@@ -5,7 +5,7 @@ import {
   Bell, Bot, Send, CheckCircle2, XCircle, Loader2,
   ChevronDown, ChevronRight, Trash2, Server, ShieldOff,
   Cpu, MemoryStick, Network, Cable, Power, Activity, Layers,
-  RefreshCw, Clock, X,
+  RefreshCw, Clock, X, Radar,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { alertsApi, serversApi, AlertSettingsData, AlertHistoryItem, AlertStatus, Server as ServerType } from '../api/client'
@@ -13,7 +13,7 @@ import { formatBitsPerSec } from '../utils/format'
 import { Tooltip } from '../components/ui/Tooltip'
 import { FAQIcon, type FAQScreen } from '../components/FAQ'
 
-type TriggerSection = 'offline' | 'cpu' | 'ram' | 'network' | 'load_avg' | 'conntrack' | 'tcp'
+type TriggerSection = 'offline' | 'cpu' | 'ram' | 'network' | 'load_avg' | 'conntrack' | 'packet_loss' | 'tcp'
 
 export default function Alerts() {
   const { t } = useTranslation()
@@ -167,6 +167,8 @@ export default function Alerts() {
       tcp_finwait_spike: t('alerts.type_tcp_finwait_spike'),
       load_avg_high: t('alerts.type_load_avg_high'),
       conntrack_high: t('alerts.type_conntrack_high'),
+      packet_loss: t('alerts.type_packet_loss'),
+      packet_loss_recovery: t('alerts.type_packet_loss_recovery'),
     }
     return map[t_] || t_
   }
@@ -451,6 +453,26 @@ export default function Alerts() {
           />
         </TriggerBlock>
 
+        {/* Потери с релеев */}
+        <TriggerBlock
+          title={t('alerts.trigger_packet_loss')}
+          icon={<Radar className="w-4 h-4" />}
+          enabled={settings.packet_loss_enabled}
+          onToggle={v => save({ packet_loss_enabled: v })}
+          expanded={expanded.has('packet_loss')}
+          onExpand={() => toggle('packet_loss')}
+        >
+          <p className="text-xs text-dark-500">{t('alerts.packet_loss_hint')}</p>
+          <SliderRow label={t('alerts.packet_loss_threshold')} value={settings.packet_loss_threshold} min={5} max={90} step={5} format={v => `${v}%`} onSave={v => save({ packet_loss_threshold: v })} />
+          <SliderRow label={t('alerts.sustained')} value={settings.packet_loss_sustained_seconds} min={60} max={1800} step={60} format={v => `${v / 60} ${t('alerts.minutes_short')}`} onSave={v => save({ packet_loss_sustained_seconds: v })} />
+          <TriggerIgnoreList
+            ids={settings.packet_loss_excluded_server_ids}
+            allServers={allServers}
+            onSave={ids => save({ packet_loss_excluded_server_ids: ids })}
+            t={t}
+          />
+        </TriggerBlock>
+
         {/* TCP */}
         <TriggerBlock
           title={t('alerts.trigger_tcp')}
@@ -584,6 +606,8 @@ export default function Alerts() {
               <option value="tcp_finwait_spike">{t('alerts.type_tcp_finwait_spike')}</option>
               <option value="load_avg_high">{t('alerts.type_load_avg_high')}</option>
               <option value="conntrack_high">{t('alerts.type_conntrack_high')}</option>
+              <option value="packet_loss">{t('alerts.type_packet_loss')}</option>
+              <option value="packet_loss_recovery">{t('alerts.type_packet_loss_recovery')}</option>
             </select>
             <button
               onClick={handleClearHistory}

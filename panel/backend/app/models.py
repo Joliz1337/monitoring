@@ -710,6 +710,11 @@ class AlertSettings(Base):
     conntrack_enabled = Column(Boolean, default=True)
     conntrack_threshold = Column(Float, default=80.0)
 
+    # Потери с релея до его адресов назначения (проверка на ноде, % неответов)
+    packet_loss_enabled = Column(Boolean, default=True)
+    packet_loss_threshold = Column(Float, default=20.0)
+    packet_loss_sustained_seconds = Column(Integer, default=300)
+
     # Excluded servers (JSON array of server IDs)
     excluded_server_ids = Column(Text, nullable=True)
 
@@ -721,6 +726,7 @@ class AlertSettings(Base):
     tcp_excluded_server_ids = Column(Text, nullable=True)
     load_avg_excluded_server_ids = Column(Text, nullable=True)
     conntrack_excluded_server_ids = Column(Text, nullable=True)
+    packet_loss_excluded_server_ids = Column(Text, nullable=True)
 
 
 class AlertHistory(Base):

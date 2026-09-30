@@ -24,6 +24,7 @@ from app.services.bandwidth_limit import get_bandwidth_limiter
 from app.services.extra_ips import get_extra_ip_manager
 from app.services.exit_proxy.manager import get_exit_proxy_manager
 from app.services.source_pool import get_source_pool_manager
+from app.services.loss_probe import get_loss_probe
 
 logging.basicConfig(
     level=logging.INFO,
@@ -101,6 +102,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Source pool start failed, outbound traffic stays on one address: {e}", exc_info=True)
 
+    loss_probe = get_loss_probe()
+    try:
+        await loss_probe.start()
+    except Exception as e:
+        logger.error(f"Loss probe start failed, backend loss is not measured: {e}", exc_info=True)
+
     from app.services import cpu_affinity
     from app.services.host_executor import get_host_executor
     affinity_sync = cpu_affinity.ContainerAffinitySync(
@@ -153,6 +160,10 @@ async def lifespan(app: FastAPI):
         await source_pool_manager.stop()
     except Exception as e:
         logger.error(f"Source pool stop failed: {e}", exc_info=True)
+    try:
+        await loss_probe.stop()
+    except Exception as e:
+        logger.error(f"Loss probe stop failed: {e}", exc_info=True)
     try:
         await extra_ip_manager.stop()
     except Exception as e:

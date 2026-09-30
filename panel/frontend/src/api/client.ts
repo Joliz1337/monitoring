@@ -373,6 +373,14 @@ export interface HAProxyStatRow {
   backup: boolean
   lastchg: number | null
   downtime: number | null
+  // Потери до addr по проверке с ноды; нет у старых нод и у не-серверов
+  probe?: LossProbeStats | null
+}
+
+export interface LossProbeStats {
+  loss_pct: number
+  rtt_ms: number | null
+  samples: number
 }
 
 export interface HAProxyProxyStats {
@@ -1865,6 +1873,9 @@ export interface AlertSettingsData {
   load_avg_sustained_checks: number
   conntrack_enabled: boolean
   conntrack_threshold: number
+  packet_loss_enabled: boolean
+  packet_loss_threshold: number
+  packet_loss_sustained_seconds: number
   excluded_server_ids: number[]
   offline_excluded_server_ids: number[]
   cpu_excluded_server_ids: number[]
@@ -1873,6 +1884,7 @@ export interface AlertSettingsData {
   tcp_excluded_server_ids: number[]
   load_avg_excluded_server_ids: number[]
   conntrack_excluded_server_ids: number[]
+  packet_loss_excluded_server_ids: number[]
 }
 
 export interface AlertHistoryItem {
@@ -3007,6 +3019,7 @@ export interface DnatTargetCounters {
   bytes_in: number
   packets_out: number
   bytes_out: number
+  probe?: LossProbeStats | null
 }
 
 export type NetworkAddressFamily = 'ipv4' | 'ipv6'

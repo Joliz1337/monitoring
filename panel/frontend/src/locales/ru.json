@@ -691,6 +691,11 @@
     "failed_enable": "Не удалось включить файрвол",
     "failed_disable": "Не удалось выключить файрвол"
   },
+  "loss_probe": {
+    "column": "Потери",
+    "ms": "мс",
+    "tooltip": "Сколько попыток подключения с этой ноды к адресу осталось без ответа за последние {{samples}} проверок (раз в 2 секунды) и средняя задержка ответа"
+  },
   "haproxy": {
     "title": "Настройки сервера",
     "server_settings": "Настройки сервера",
@@ -1678,6 +1683,10 @@
     "load_avg_offset": "Смещение порога от кол-ва ядер",
     "load_avg_checks": "Проверок подряд до алерта",
     "conntrack_threshold": "Порог заполнения",
+    "trigger_packet_loss": "Потери с релеев",
+    "packet_loss_hint": "Релей сам проверяет свои бэкенды HAProxy и цели DNAT. Одно сообщение приходит со списком адресов, где потери выше порога держатся заданное время, второе — когда они спадут ниже половины порога. Нужна нода 10.31.0.",
+    "packet_loss_threshold": "Порог потерь",
+    "minutes_short": "мин",
     "sustained": "Длительность удержания",
     "history": "История алертов",
     "all_types": "Все типы",
@@ -1704,6 +1713,8 @@
     "type_tcp_finwait_spike": "TCP FIN Wait скачок",
     "type_load_avg_high": "Load Avg высокий",
     "type_conntrack_high": "Conntrack заполнен",
+    "type_packet_loss": "Потери с релея",
+    "type_packet_loss_recovery": "Потери снизились",
     "settings_saved": "Настройки алертов сохранены",
     "settings_save_failed": "Не удалось сохранить настройки",
     "excluded_servers": "Исключённые серверы",

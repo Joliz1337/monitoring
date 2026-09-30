@@ -27,6 +27,7 @@ import { formatListen, formatTarget, protocolLabel } from '../utils/dnat'
 import { useAutoRefresh } from '../hooks/useAutoRefresh'
 import { useModuleEnabled } from '../hooks/useModuleEnabled'
 import { Tooltip } from '../components/ui/Tooltip'
+import LossProbeBadge from '../components/ui/LossProbeBadge'
 import { FAQIcon } from '../components/FAQ'
 
 const REFRESH_INTERVAL_MS = 5000
@@ -394,6 +395,7 @@ export default function Dnat() {
                       <tr>
                         <th className="text-left px-3 py-2 font-medium">{t('dnat.col_rule')}</th>
                         <th className="text-left px-3 py-2 font-medium">{t('dnat.col_route')}</th>
+                        <th className="text-left px-3 py-2 font-medium">{t('loss_probe.column')}</th>
                         <th className="text-right px-3 py-2 font-medium">{t('dnat.col_conns')}</th>
                         <th className="text-right px-3 py-2 font-medium">
                           <span className="inline-flex items-center gap-1"><ArrowDownToLine className="w-3 h-3" /> {t('dnat.col_in')}</span>
@@ -409,6 +411,7 @@ export default function Dnat() {
                         const counters = countersByName[rule.name]
                         const rate = rates[rule.name]
                         const targetRows = (counters?.targets ?? []).length > 1 ? counters.targets : []
+                        const singleTarget = counters?.targets.length === 1 ? counters.targets[0] : null
                         return (
                           <Fragment key={rule.name}>
                           <tr className={`border-t border-dark-800/40 hover:bg-dark-800/30 transition-colors ${rule.enabled ? '' : 'opacity-50'}`}>
@@ -424,6 +427,9 @@ export default function Dnat() {
                                   {t('dnat_profiles.no_masq_badge')}
                                 </span>
                               )}
+                            </td>
+                            <td className="px-3 py-2">
+                              {singleTarget && <LossProbeBadge probe={singleTarget.probe} />}
                             </td>
                             <td className="px-3 py-2 text-right font-mono text-dark-200 whitespace-nowrap">
                               {counters ? counters.conns.toLocaleString() : '—'}
@@ -463,6 +469,7 @@ export default function Dnat() {
                             <tr key={`${rule.name}@${target.ip}`} className="bg-dark-900/30 text-xs">
                               <td className="px-3 py-1 text-dark-500 pl-8">↳ {t(`dnat_profiles.distribution_${rule.distribution ?? 'per_server'}`)}</td>
                               <td className="px-3 py-1 font-mono text-dark-300">→ {target.ip}</td>
+                              <td className="px-3 py-1"><LossProbeBadge probe={target.probe} /></td>
                               <td className="px-3 py-1 text-right font-mono text-dark-300">{target.conns.toLocaleString()}</td>
                               <td className="px-3 py-1 text-right font-mono text-dark-300">{formatBytes(target.bytes_in)}</td>
                               <td className="px-3 py-1 text-right font-mono text-dark-300">{formatBytes(target.bytes_out)}</td>

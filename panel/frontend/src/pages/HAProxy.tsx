@@ -40,6 +40,7 @@ import { useModuleEnabled } from '../hooks/useModuleEnabled'
 import { useCachedData, createServerCacheKey } from '../hooks/useCachedData'
 import CachedDataBanner from '../components/ui/CachedDataBanner'
 import { Tooltip } from '../components/ui/Tooltip'
+import LossProbeBadge from '../components/ui/LossProbeBadge'
 import { FAQIcon } from '../components/FAQ'
 
 // Статусы show stat с суффиксами вида "UP 1/3" — сравниваем по префиксу
@@ -1202,6 +1203,7 @@ export default function HAProxy() {
                                 <th className="px-4 py-2 font-medium">{t('haproxy.stats_col_server')}</th>
                                 <th className="px-4 py-2 font-medium">{t('haproxy.stats_col_status')}</th>
                                 <th className="px-4 py-2 font-medium">{t('haproxy.stats_col_check')}</th>
+                                <th className="px-4 py-2 font-medium">{t('loss_probe.column')}</th>
                                 <th className="px-4 py-2 font-medium">{t('haproxy.stats_col_sessions')}</th>
                                 <th className="px-4 py-2 font-medium">{t('haproxy.stats_col_rate')}</th>
                                 <th className="px-4 py-2 font-medium">{t('haproxy.stats_col_in')}</th>
@@ -1230,6 +1232,9 @@ export default function HAProxy() {
                                     </span>
                                   </td>
                                   <td className="px-4 py-2 text-xs text-dark-400">{row.check_status || '—'}</td>
+                                  <td className="px-4 py-2">
+                                    {row.kind === 'server' && <LossProbeBadge probe={row.probe} />}
+                                  </td>
                                   <td className="px-4 py-2 text-dark-200">
                                     {row.scur}<span className="text-dark-500"> / {row.smax}</span>
                                   </td>

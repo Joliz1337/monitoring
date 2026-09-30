@@ -687,6 +687,11 @@
     "failed_enable": "Failed to enable firewall",
     "failed_disable": "Failed to disable firewall"
   },
+  "loss_probe": {
+    "column": "Loss",
+    "ms": "ms",
+    "tooltip": "Share of connection attempts from this node to the address that got no reply over the last {{samples}} checks (one every 2 seconds), and the average reply time"
+  },
   "haproxy": {
     "title": "Server Settings",
     "server_settings": "Server Settings",
@@ -1673,6 +1678,10 @@
     "load_avg_offset": "Threshold offset above cores",
     "load_avg_checks": "Consecutive checks before alert",
     "conntrack_threshold": "Fill threshold",
+    "trigger_packet_loss": "Relay packet loss",
+    "packet_loss_hint": "The relay probes its own HAProxy backends and DNAT targets. One message lists the addresses where loss stays above the threshold for the set time, another comes when it drops below half the threshold. Requires node 10.31.0.",
+    "packet_loss_threshold": "Loss threshold",
+    "minutes_short": "min",
     "sustained": "Sustained duration",
     "history": "Alert History",
     "all_types": "All types",
@@ -1699,6 +1708,8 @@
     "type_tcp_finwait_spike": "TCP FIN Wait Spike",
     "type_load_avg_high": "Load Avg High",
     "type_conntrack_high": "Conntrack High",
+    "type_packet_loss": "Relay packet loss",
+    "type_packet_loss_recovery": "Packet loss recovered",
     "settings_saved": "Alert settings saved",
     "settings_save_failed": "Failed to save settings",
     "excluded_servers": "Excluded Servers",

@@ -11,6 +11,7 @@ from app.models.dnat import (
     DnatStateResponse,
 )
 from app.services.dnat_manager import get_dnat_manager
+from app.services.loss_probe import get_loss_probe
 
 logger = logging.getLogger(__name__)
 
@@ -19,8 +20,9 @@ router = APIRouter(prefix="/api/dnat", tags=["dnat"])
 
 @router.get("/state", response_model=DnatStateResponse)
 async def get_state() -> DnatStateResponse:
-    """Желаемые правила, их наличие в ядре и счётчики соединений/байт."""
-    return DnatStateResponse(**await get_dnat_manager().state_async())
+    """Желаемые правила, их наличие в ядре, счётчики соединений/байт и потери до целей."""
+    state = DnatStateResponse(**await get_dnat_manager().state_async())
+    return get_loss_probe().annotate_dnat(state)
 
 
 @router.post("/apply", response_model=DnatApplyResponse)
