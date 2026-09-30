@@ -34,6 +34,7 @@ from app.services.loss_probe import (  # noqa: E402
     LossProbe,
     Source,
     attempt,
+    discover_targets,
     dnat_targets,
     haproxy_targets,
     parse_addr,
@@ -204,7 +205,7 @@ class LossProbeTests(unittest.TestCase):
         asyncio.run(probe.run_round())
         self.assertEqual(len(fake.calls), MAX_TARGETS)
 
-    def test_annotate_haproxy_marks_servers_and_leaves_input_intact(self):
+    def test_annotate_haproxy_marks_servers_only(self):
         probe, _ = self.probe({("10.0.0.5", 443): {Source.HAPROXY}}, {("10.0.0.5", 443): [8.0]})
         asyncio.run(probe.run_round())
         stats = stats_with("10.0.0.5:443", "10.0.0.9:443")
@@ -213,8 +214,6 @@ class LossProbeTests(unittest.TestCase):
         self.assertEqual(servers[0].probe.rtt_ms, 8.0)
         self.assertIsNone(servers[1].probe)
         self.assertIsNone(annotated.proxies[0].backend.probe)
-        # Ответ show stat кэшируется в менеджере — его нельзя портить
-        self.assertIsNone(stats.proxies[0].servers[0].probe)
 
     def test_annotate_dnat_uses_rule_target_port(self):
         probe, _ = self.probe({("10.0.0.5", 9443): {Source.DNAT}}, {("10.0.0.5", 9443): [4.0]})
@@ -240,6 +239,39 @@ class LossProbeTests(unittest.TestCase):
             probe.snapshot({Source.HAPROXY}),
             [{"ip": "10.0.0.5", "port": 443, "loss_pct": 0.0, "rtt_ms": 6.0, "samples": 1}],
         )
+
+
+# Ровно то, что отдаёт HAProxyManager.get_stats(): словарь, а не модель —
+# на нём и упали первые ноды с новой проверкой
+STATS_DICT = {
+    "available": True,
+    "proxies": [{
+        "name": "backend_tcp_relay",
+        "backend": {"name": "BACKEND", "kind": "backend", "status": "UP"},
+        "servers": [{"name": "srv1", "kind": "server", "status": "UP", "addr": "10.0.0.5:443"}],
+    }],
+}
+
+
+class RealDataPathTests(unittest.TestCase):
+    def test_discovery_reads_manager_dict_and_dnat_state(self):
+        haproxy = mock.Mock(get_stats=mock.Mock(return_value=STATS_DICT))
+        dnat = mock.Mock(load_state=mock.Mock(return_value=([dnat_rule(target_ip="10.0.0.6")], None)))
+        with mock.patch("app.services.haproxy_manager.get_haproxy_manager", return_value=haproxy),              mock.patch("app.services.dnat_manager.get_dnat_manager", return_value=dnat):
+            found = discover_targets()
+        self.assertEqual(found, {("10.0.0.5", 443): {Source.HAPROXY}, ("10.0.0.6", 443): {Source.DNAT}})
+
+    def test_stats_route_annotates_manager_dict(self):
+        from app.routers import haproxy as haproxy_router
+
+        probe, _ = LossProbeTests().probe({("10.0.0.5", 443): {Source.HAPROXY}}, {("10.0.0.5", 443): [7.0]})
+        asyncio.run(probe.run_round())
+        manager = mock.Mock(get_stats=mock.Mock(return_value=STATS_DICT))
+        with mock.patch.object(haproxy_router, "get_haproxy_manager", return_value=manager),              mock.patch.object(haproxy_router, "get_loss_probe", return_value=probe):
+            response = asyncio.run(haproxy_router.get_haproxy_stats())
+        self.assertEqual(response.proxies[0].servers[0].probe.rtt_ms, 7.0)
+        # Кэш менеджера — тот же словарь, его разметка не трогает
+        self.assertNotIn("probe", STATS_DICT["proxies"][0]["servers"][0])
 
 
 class ReadableSourcesTests(unittest.TestCase):

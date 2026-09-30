@@ -11,3 +11,9 @@ class ProbeStats(BaseModel):
     # Средняя задержка ответивших попыток; None — не ответила ни одна
     rtt_ms: Optional[float] = None
     samples: int
+
+
+class LossProbeEntry(ProbeStats):
+    """Строка блока `loss_probe` в метриках."""
+    ip: str
+    port: int

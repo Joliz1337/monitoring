@@ -98,7 +98,8 @@ async def get_haproxy_status():
 async def get_haproxy_stats():
     """Live stats from the HAProxy stats socket (show stat) plus loss per server, read-only"""
     manager = get_haproxy_manager()
-    stats = await asyncio.to_thread(manager.get_stats)
+    # Менеджер отдаёт свой кэш словарём: модель — свежая копия, разметка его не трогает
+    stats = HAProxyStatsResponse.model_validate(await asyncio.to_thread(manager.get_stats))
     return get_loss_probe().annotate_haproxy(stats)
 
 

@@ -172,11 +172,10 @@ class LossProbe:
         return window.stats() if window else None
 
     def annotate_haproxy(self, stats: HAProxyStatsResponse) -> HAProxyStatsResponse:
-        annotated = stats.model_copy(deep=True)
-        for proxy in annotated.proxies:
+        for proxy in stats.proxies:
             for server in proxy.servers:
                 server.probe = self.stats_for(parse_addr(server.addr or ""))
-        return annotated
+        return stats
 
     def annotate_dnat(self, state: DnatStateResponse) -> DnatStateResponse:
         ports = {rule.name: dnat_rule_port(rule) for rule in state.rules}
@@ -232,7 +231,7 @@ def discover_targets() -> dict[Target, set[Source]]:
     found: dict[Target, set[Source]] = {}
     rules, _ = get_dnat_manager().load_state()
     for source, targets in (
-        (Source.HAPROXY, haproxy_targets(get_haproxy_manager().get_stats())),
+        (Source.HAPROXY, haproxy_targets(HAProxyStatsResponse.model_validate(get_haproxy_manager().get_stats()))),
         (Source.DNAT, dnat_targets(rules)),
     ):
         for target in targets:
