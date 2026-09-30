@@ -394,6 +394,8 @@ async def run_migrations(conn):
             ("packet_loss_enabled", "BOOLEAN DEFAULT TRUE"),
             ("packet_loss_threshold", "FLOAT DEFAULT 20.0"),
             ("packet_loss_sustained_seconds", "INTEGER DEFAULT 300"),
+            ("packet_loss_calm_seconds", "INTEGER DEFAULT 900"),
+            ("packet_loss_reminder_hours", "INTEGER DEFAULT 0"),
             ("packet_loss_excluded_server_ids", "TEXT"),
         ]
         for col_name, col_type in packet_loss_columns:

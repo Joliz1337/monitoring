@@ -84,6 +84,8 @@ class AlertSettingsUpdate(BaseModel):
     packet_loss_enabled: Optional[bool] = None
     packet_loss_threshold: Optional[float] = Field(None, ge=1, le=100)
     packet_loss_sustained_seconds: Optional[int] = Field(None, ge=60, le=3600)
+    packet_loss_calm_seconds: Optional[int] = Field(None, ge=60, le=7200)
+    packet_loss_reminder_hours: Optional[int] = Field(None, ge=0, le=168)
 
     excluded_server_ids: Optional[list[int]] = None
 
@@ -159,6 +161,8 @@ def _settings_to_dict(s: AlertSettings) -> dict:
         "packet_loss_enabled": s.packet_loss_enabled,
         "packet_loss_threshold": s.packet_loss_threshold,
         "packet_loss_sustained_seconds": s.packet_loss_sustained_seconds,
+        "packet_loss_calm_seconds": s.packet_loss_calm_seconds,
+        "packet_loss_reminder_hours": s.packet_loss_reminder_hours,
         "excluded_server_ids": json.loads(s.excluded_server_ids) if s.excluded_server_ids else [],
         "offline_excluded_server_ids": json.loads(s.offline_excluded_server_ids) if s.offline_excluded_server_ids else [],
         "cpu_excluded_server_ids": json.loads(s.cpu_excluded_server_ids) if s.cpu_excluded_server_ids else [],

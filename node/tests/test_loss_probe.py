@@ -28,12 +28,14 @@ from app.models.haproxy import (  # noqa: E402
     HAProxyStatRow,
     HAProxyStatsResponse,
 )
+from app.models.loss_probe import CHECK_ATTEMPTS_MAX, LossCheckRequest  # noqa: E402
 from app.services.loss_probe import (  # noqa: E402
     MAX_TARGETS,
     AttemptWindow,
     LossProbe,
     Source,
     attempt,
+    check_target,
     discover_targets,
     dnat_targets,
     haproxy_targets,
@@ -272,6 +274,35 @@ class RealDataPathTests(unittest.TestCase):
         self.assertEqual(response.proxies[0].servers[0].probe.rtt_ms, 7.0)
         # Кэш менеджера — тот же словарь, его разметка не трогает
         self.assertNotIn("probe", STATS_DICT["proxies"][0]["servers"][0])
+
+
+class ManualCheckTests(unittest.TestCase):
+    """Проверка адреса по запросу панели: разовая серия попыток с этой ноды."""
+
+    def test_series_counts_loss_and_rtt(self):
+        answers = iter([10.0, None, 30.0, None])
+
+        async def fake(ip, port):
+            return next(answers)
+
+        stats = asyncio.run(check_target("10.0.0.5", 443, attempts=4, attempt_fn=fake, spacing=0))
+        self.assertEqual((stats.loss_pct, stats.rtt_ms, stats.samples), (50.0, 20.0, 4))
+
+    def test_request_defaults_and_limits(self):
+        request = LossCheckRequest(ip="62.50.146.225")
+        self.assertEqual((request.port, request.attempts), (443, 20))
+        for bad in ({"ip": "example.com"}, {"ip": "0.0.0.0"}, {"ip": "224.0.0.1"},
+                    {"ip": "10.0.0.5", "port": 0}, {"ip": "10.0.0.5", "attempts": CHECK_ATTEMPTS_MAX + 1}):
+            with self.subTest(payload=bad), self.assertRaises(ValueError):
+                LossCheckRequest(**bad)
+
+    def test_needs_full_system_access_on_restricted_node(self):
+        # Нода по запросу подключается к любому адресу — на ограниченной ноде
+        # это право полного доступа к «Системе», а не чтения
+        path = "/api/loss-probe/check"
+        self.assertIsNone(parse_capabilities("").check("POST", path))
+        self.assertIsNone(parse_capabilities("system").check("POST", path))
+        self.assertIsNotNone(parse_capabilities("system:ro haproxy").check("POST", path))
 
 
 class ReadableSourcesTests(unittest.TestCase):

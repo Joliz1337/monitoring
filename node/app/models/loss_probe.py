@@ -1,8 +1,14 @@
 """Потери до адресов назначения релея (см. services/loss_probe)."""
 
+import ipaddress
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
+
+# Разовая проверка по запросу панели: 20 попыток — пара секунд, и этого хватает,
+# чтобы отличить 40% потерь от одного случайного пропуска
+CHECK_ATTEMPTS_DEFAULT = 20
+CHECK_ATTEMPTS_MAX = 50
 
 
 class ProbeStats(BaseModel):
@@ -17,3 +23,17 @@ class LossProbeEntry(ProbeStats):
     """Строка блока `loss_probe` в метриках."""
     ip: str
     port: int
+
+
+class LossCheckRequest(BaseModel):
+    ip: str
+    port: int = Field(443, ge=1, le=65535)
+    attempts: int = Field(CHECK_ATTEMPTS_DEFAULT, ge=1, le=CHECK_ATTEMPTS_MAX)
+
+    @field_validator("ip")
+    @classmethod
+    def _unicast_ip(cls, value: str) -> str:
+        address = ipaddress.ip_address(value.strip())
+        if address.is_unspecified or address.is_multicast:
+            raise ValueError("ip must be a unicast address")
+        return str(address)

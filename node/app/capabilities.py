@@ -67,6 +67,9 @@ DOMAIN_PREFIXES: dict[str, Domain] = {
     "/api/system/execute": Domain.EXEC,
     "/api/system/execute-stream": Domain.EXEC,
     "/api/dnat": Domain.DNAT,
+    # Нода по запросу подключается к любому адресу — это «Система», и POST
+    # требует полного доступа, а не чтения
+    "/api/loss-probe": Domain.SYSTEM,
 }
 
 # Эти адреса не закрываются ничем. Без метрик панель перестаёт обновлять

@@ -254,6 +254,7 @@ class CallSiteCoverageTest(unittest.TestCase):
         "services/source_pool/node_client.py",
         "services/firewall_profile_sync.py",
         "services/haproxy_profile_sync.py",
+        "services/loss_overview.py",
         "services/metrics_collector.py",
         # гейт в роутере proxy: require_capability(SYSTEM) до старта задачи
         "services/network_transactions.py",

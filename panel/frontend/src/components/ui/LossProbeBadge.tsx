@@ -3,7 +3,7 @@ import type { LossProbeStats } from '../../api/client'
 import { Tooltip } from './Tooltip'
 
 // До 2% — фон любой сети, выше 10% — адрес уже заметно деградирует для клиентов
-const LOSS_WARN_PCT = 2
+export const LOSS_WARN_PCT = 2
 const LOSS_BAD_PCT = 10
 
 function lossClass(lossPct: number): string {

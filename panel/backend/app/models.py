@@ -714,6 +714,10 @@ class AlertSettings(Base):
     packet_loss_enabled = Column(Boolean, default=True)
     packet_loss_threshold = Column(Float, default=20.0)
     packet_loss_sustained_seconds = Column(Integer, default=300)
+    # «Снизились» — только после стольких секунд затишья у всех релеев
+    packet_loss_calm_seconds = Column(Integer, default=900)
+    # Напоминание об открытых эпизодах; 0 — выключено
+    packet_loss_reminder_hours = Column(Integer, default=0)
 
     # Excluded servers (JSON array of server IDs)
     excluded_server_ids = Column(Text, nullable=True)
@@ -727,6 +731,21 @@ class AlertSettings(Base):
     load_avg_excluded_server_ids = Column(Text, nullable=True)
     conntrack_excluded_server_ids = Column(Text, nullable=True)
     packet_loss_excluded_server_ids = Column(Text, nullable=True)
+
+
+class PacketLossEpisode(Base):
+    """Открытый эпизод потерь до адреса назначения релеев (см. loss_alerts).
+
+    Хранится, чтобы перезапуск панели не присылал уже известные потери заново.
+    Время — unix epoch, как в состоянии алертера."""
+    __tablename__ = "packet_loss_episodes"
+
+    target = Column(String(64), primary_key=True)  # ip:port
+    level = Column(Integer, nullable=False)
+    opened_at = Column(Float, nullable=False)
+    last_data_at = Column(Float, nullable=False)
+    notified_at = Column(Float, nullable=False)
+    calm_since = Column(Float, nullable=True)
 
 
 class AlertHistory(Base):

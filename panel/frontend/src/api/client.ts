@@ -1876,6 +1876,8 @@ export interface AlertSettingsData {
   packet_loss_enabled: boolean
   packet_loss_threshold: number
   packet_loss_sustained_seconds: number
+  packet_loss_calm_seconds: number
+  packet_loss_reminder_hours: number
   excluded_server_ids: number[]
   offline_excluded_server_ids: number[]
   cpu_excluded_server_ids: number[]
@@ -1905,6 +1907,44 @@ export interface AlertStatus {
   next_check_in: number | null
   monitored_servers: number
   active_conditions: Record<number, string[]>
+}
+
+export interface LossRelay {
+  server_id: number
+  name: string
+  loss_pct: number
+  rtt_ms: number | null
+  samples: number
+}
+
+export interface LossTarget {
+  target: string
+  ip: string
+  port: number
+  owner: string | null
+  worst_loss: number
+  relays: LossRelay[]
+  episode: { level: number; opened_at: number } | null
+}
+
+export type LossCheckStatus = 'ok' | 'unsupported' | 'denied' | 'unreachable'
+
+export interface LossCheckResult {
+  server_id: number
+  name: string
+  status: LossCheckStatus
+  loss_pct?: number | null
+  rtt_ms?: number | null
+  samples?: number | null
+}
+
+export const lossApi = {
+  overview: () => api.get<{ targets: LossTarget[] }>('/loss/overview'),
+  check: (target: string, serverIds: number[]) =>
+    api.post<{ ip: string; port: number; results: LossCheckResult[] }>('/loss/check', {
+      target,
+      server_ids: serverIds,
+    }),
 }
 
 export const alertsApi = {

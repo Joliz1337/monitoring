@@ -38,6 +38,9 @@ TARGETS_REFRESH_SEC = 10.0
 # ограниченной при любом размере парка
 MAX_TARGETS = 256
 MAX_CONCURRENT_ATTEMPTS = 64
+# Ручная проверка стартует попытки с паузой: поток, а не один всплеск SYN,
+# который сам мог бы упереться в ограничители на пути
+CHECK_SPACING_SEC = 0.05
 
 Target = tuple[str, int]
 
@@ -113,6 +116,24 @@ async def attempt(ip: str, port: int, timeout: float = ATTEMPT_TIMEOUT_SEC) -> O
     elapsed_ms = (time.perf_counter() - started) * 1000
     writer.transport.abort()
     return elapsed_ms
+
+
+async def check_target(
+    ip: str,
+    port: int,
+    attempts: int,
+    attempt_fn: Callable[[str, int], Awaitable[Optional[float]]] = attempt,
+    spacing: float = CHECK_SPACING_SEC,
+) -> ProbeStats:
+    """Разовая серия попыток по запросу панели (страница «Потери»)."""
+    async def spaced(index: int) -> Optional[float]:
+        await asyncio.sleep(index * spacing)
+        return await attempt_fn(ip, port)
+
+    window = AttemptWindow(size=attempts)
+    for rtt_ms in await asyncio.gather(*(spaced(index) for index in range(attempts))):
+        window.record(rtt_ms)
+    return window.stats()
 
 
 class AttemptWindow:

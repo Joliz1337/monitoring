@@ -19,6 +19,7 @@ import {
   Settings2,
   Siren,
   Settings,
+  Radar,
   type LucideIcon,
 } from 'lucide-react'
 
@@ -38,6 +39,7 @@ export const PANEL_MODULES: PanelModule[] = [
   { id: 'haproxy-configs', path: 'haproxy-configs', icon: FileCode2, labelKey: 'haproxy_configs.title' },
   { id: 'firewall-profiles', path: 'firewall-profiles', icon: Flame, labelKey: 'firewall_profiles.title' },
   { id: 'dnat-profiles', path: 'dnat-profiles', icon: Route, labelKey: 'dnat_profiles.title' },
+  { id: 'loss', path: 'loss', icon: Radar, labelKey: 'loss.title' },
   { id: 'alerts', path: 'alerts', icon: Bell, labelKey: 'common.alerts' },
   { id: 'billing', path: 'billing', icon: CreditCard, labelKey: 'common.billing' },
   { id: 'blocklist', path: 'blocklist', icon: Shield, labelKey: 'common.blocklist' },

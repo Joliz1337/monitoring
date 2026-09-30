@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import time
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 from typing import Optional
@@ -9,15 +10,19 @@ from typing import Optional
 from sqlalchemy import select, delete, func
 
 from app.database import async_session
-from app.models import Server, AlertSettings, AlertHistory
+from app.models import Server, AlertSettings, AlertHistory, PacketLossEpisode
 from app.services.http_client import get_node_client, node_auth_headers
 from app.services.loss_alerts import (
-    LossAlertState,
-    alert_message,
-    parse_readings,
-    readings_details,
-    recovery_message,
+    Episode,
+    EventKind,
+    LossEvent,
+    LossPolicy,
+    LossTracker,
+    collect_observations,
+    format_digest,
+    history_text,
 )
+from app.services.loss_registry import get_loss_registry
 from app.services.traffic_ingest import get_traffic_ingest
 
 ALERT_HISTORY_RETENTION_DAYS = 30
@@ -57,7 +62,6 @@ class ServerAlertState:
 
         self.alert_start: dict[str, float] = {}
         self.last_alert: dict[str, float] = {}
-        self.loss = LossAlertState()
 
     def update_ema(self, attr: str, value: float):
         current = getattr(self, attr)
@@ -80,6 +84,10 @@ class ServerAlerter:
         self._check_interval = 60
         self._last_check: Optional[datetime] = None
         self._time_since_check = 0
+        # Эпизоды потерь — на весь парк, по адресу назначения; в базе
+        # хранится последний записанный набор, чтобы писать только изменения
+        self._loss = LossTracker()
+        self._loss_persisted: Optional[dict] = None
 
     async def start(self):
         if self._running:
@@ -171,6 +179,7 @@ class ServerAlerter:
         first_run = True
 
         await self._restore_state_from_history()
+        await self._restore_loss_episodes()
 
         while self._running:
             try:
@@ -268,6 +277,8 @@ class ServerAlerter:
         for k in stale:
             del self._states[k]
 
+        await self._check_packet_loss(settings, excluded_ids, now)
+
     async def _check_server(
         self,
         srv: Server,
@@ -299,12 +310,6 @@ class ServerAlerter:
 
         # --- Anti-DDoS (состояние, не ресурс — EMA не нужна) ---
         await self._check_antiddos(srv, state, settings, now, metrics)
-
-        # --- Потери с релея до адресов назначения (окно считает нода) ---
-        if settings.packet_loss_enabled and srv.id not in tex.get("packet_loss", set()):
-            await self._check_packet_loss(srv, state, settings, now, metrics)
-        else:
-            state.loss.reset()
 
         cpu_val = self._extract_cpu(metrics)
         ram_val = self._extract_ram(metrics)
@@ -629,34 +634,109 @@ class ServerAlerter:
             )
 
     # ------------------------------------------------------------------
-    # Packet loss (relay → destinations)
+    # Packet loss (relays -> destination addresses), весь парк разом
     # ------------------------------------------------------------------
-    async def _check_packet_loss(
-        self,
-        srv: Server,
-        state: ServerAlertState,
-        settings: AlertSettings,
-        now: float,
-        metrics: dict,
-    ):
-        threshold = settings.packet_loss_threshold or 20.0
-        sustained = settings.packet_loss_sustained_seconds or 300
-        evaluation = state.loss.evaluate(
-            parse_readings(metrics), threshold, sustained, settings.alert_cooldown or 1800, now,
+    def loss_episodes(self) -> dict[str, Episode]:
+        return self._loss.episodes
+
+    @staticmethod
+    def _loss_policy(settings: AlertSettings) -> LossPolicy:
+        return LossPolicy(
+            threshold=settings.packet_loss_threshold or 20.0,
+            sustained_sec=settings.packet_loss_sustained_seconds or 300,
+            calm_sec=settings.packet_loss_calm_seconds or 900,
+            reminder_sec=(settings.packet_loss_reminder_hours or 0) * 3600,
         )
+
+    async def _check_packet_loss(self, settings: AlertSettings, excluded_ids: set[int], now: float):
+        if not settings.packet_loss_enabled:
+            if self._loss.episodes:
+                self._loss.reset()
+                await self._save_loss_episodes()
+            return
+        registry = get_loss_registry()
+        excluded = excluded_ids | self._trigger_excluded.get("packet_loss", set())
+        policy = self._loss_policy(settings)
+        events = self._loss.evaluate(collect_observations(registry.fresh(), excluded), policy, now)
+        await self._save_loss_episodes()
+        if events:
+            await self._send_loss_digest(settings, events, registry.owners(), policy)
+
+    async def _send_loss_digest(self, settings: AlertSettings, events: list[LossEvent],
+                                owners: dict[str, str], policy: LossPolicy):
         lang = self._lang(settings)
-        if evaluation.fired:
-            await self._send_and_save(
-                srv, settings, "packet_loss", "warning",
-                alert_message(srv.name, evaluation.fired, threshold, sustained, lang),
-                {"threshold": threshold, "targets": readings_details(evaluation.fired)},
+        notified = False
+        if settings.telegram_bot_token and settings.telegram_chat_id:
+            from app.services.telegram_bot import get_telegram_bot_service
+            service = get_telegram_bot_service()
+            sent = [
+                await service.send_message(settings.telegram_bot_token, settings.telegram_chat_id, text)
+                for text in format_digest(events, owners, policy, lang)
+            ]
+            notified = all(sent)
+
+        # История — по строке на адрес, за релеем с худшими потерями: так её
+        # видно в фильтре по серверу. Напоминания — не события, в историю не идут
+        entries = [
+            AlertHistory(
+                server_id=event.relays[0].relay_id,
+                server_name=event.relays[0].relay_name,
+                alert_type="packet_loss_recovery" if event.kind is EventKind.RECOVERED else "packet_loss",
+                severity="info" if event.kind is EventKind.RECOVERED else "warning",
+                message=history_text(event, owners, lang),
+                details=json.dumps({
+                    "kind": event.kind.value,
+                    "target": event.target,
+                    "level": event.level,
+                    "owner": owners.get(event.target.rpartition(":")[0]),
+                    "relays": [
+                        {"server_id": r.relay_id, "name": r.relay_name,
+                         "loss_pct": r.reading.loss_pct, "rtt_ms": r.reading.rtt_ms}
+                        for r in event.relays
+                    ],
+                }, ensure_ascii=False),
+                notified=notified,
             )
-        if evaluation.recovered:
-            await self._send_and_save(
-                srv, settings, "packet_loss_recovery", "info",
-                recovery_message(srv.name, evaluation.recovered, lang),
-                {"targets": readings_details(evaluation.recovered)},
+            for event in events
+            if event.kind is not EventKind.STILL and event.relays
+        ]
+        if not entries:
+            return
+        try:
+            async with async_session() as db:
+                db.add_all(entries)
+                await db.commit()
+        except Exception as e:
+            logger.error(f"Failed to save packet loss history: {e}")
+
+    async def _restore_loss_episodes(self):
+        try:
+            async with async_session() as db:
+                rows = (await db.execute(select(PacketLossEpisode))).scalars().all()
+        except Exception as e:
+            logger.warning(f"Packet loss episodes restore failed: {e}")
+            return
+        self._loss.episodes = {
+            row.target: Episode(
+                level=row.level, opened_at=row.opened_at, last_data_at=row.last_data_at,
+                notified_at=row.notified_at, calm_since=row.calm_since,
             )
+            for row in rows
+        }
+        self._loss_persisted = {target: asdict(e) for target, e in self._loss.episodes.items()}
+
+    async def _save_loss_episodes(self):
+        current = {target: asdict(e) for target, e in self._loss.episodes.items()}
+        if current == self._loss_persisted:
+            return
+        try:
+            async with async_session() as db:
+                await db.execute(delete(PacketLossEpisode))
+                db.add_all([PacketLossEpisode(target=target, **fields) for target, fields in current.items()])
+                await db.commit()
+            self._loss_persisted = current
+        except Exception as e:
+            logger.error(f"Failed to save packet loss episodes: {e}")
 
     # ------------------------------------------------------------------
     # Load Average
