@@ -2,16 +2,35 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type FormE
 import { motion } from 'framer-motion'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
-import { ChevronDown, ChevronRight, Loader2, Radar, Search } from 'lucide-react'
-import { lossApi, LossCheckResult, LossTarget } from '../api/client'
+import { ChevronDown, ChevronRight, ListChecks, Loader2, Radar, Search, Trash2 } from 'lucide-react'
+import { lossApi, type BackendEditJob, type LossCheckResult, type LossTarget } from '../api/client'
 import { useServersStore } from '../stores/serversStore'
 import { useAutoRefresh } from '../hooks/useAutoRefresh'
 import LossProbeBadge, { LOSS_WARN_PCT } from '../components/ui/LossProbeBadge'
+import { Checkbox } from '../components/ui/Checkbox'
 import { ServerSelector } from '../components/ssh/ServerSelector'
 import BackendEditModal from '../components/loss/BackendEditModal'
+import BatchEditModal, { type BatchMode } from '../components/loss/BatchEditModal'
+import ActivityStrip, { type RunningCheck } from '../components/loss/ActivityStrip'
+import { readStorage, writeStorage } from '../utils/storage'
 
 // Нода обновляет окно каждые 2 с, панель собирает метрики раз в ~10 с
 const REFRESH_INTERVAL_MS = 10_000
+// Пока задание идёт — полоска обновляется часто, иначе только подхватывает новые
+const JOBS_ACTIVE_INTERVAL_MS = 2_000
+const JOBS_IDLE_INTERVAL_MS = 15_000
+// Завершённое задание висит в полоске, пока его не закроют, но не дольше этого
+const FINISHED_JOB_VISIBLE_SEC = 30 * 60
+const DISMISSED_JOBS_KEY = 'loss_dismissed_jobs'
+const DISMISSED_JOBS_KEEP = 50
+
+function readDismissed(): Set<string> {
+  try {
+    return new Set(JSON.parse(readStorage(DISMISSED_JOBS_KEY) ?? '[]'))
+  } catch {
+    return new Set()
+  }
+}
 
 const inputCls = 'w-full px-3 py-2 bg-dark-800 border border-dark-700 rounded-lg text-sm text-dark-100 placeholder-dark-500 focus:outline-none focus:border-accent-500/50'
 
@@ -33,6 +52,11 @@ export default function Loss() {
   const [checkResult, setCheckResult] = useState<{ ip: string; port: number; results: LossCheckResult[] } | null>(null)
   const checkBlockRef = useRef<HTMLDivElement>(null)
   const [editing, setEditing] = useState<LossTarget | null>(null)
+  const [batch, setBatch] = useState<{ mode: BatchMode; targets: LossTarget[] } | null>(null)
+  const [picked, setPicked] = useState<Set<string>>(new Set())
+  const [jobs, setJobs] = useState<BackendEditJob[]>([])
+  const [dismissed, setDismissed] = useState<Set<string>>(readDismissed)
+  const [runningCheck, setRunningCheck] = useState<RunningCheck | null>(null)
 
   const fetchOverview = useCallback(async () => {
     try {
@@ -44,6 +68,36 @@ export default function Loss() {
   }, [])
 
   useAutoRefresh(fetchOverview, { customInterval: REFRESH_INTERVAL_MS })
+
+  const fetchJobs = useCallback(async () => {
+    try {
+      const { data } = await lossApi.jobs()
+      setJobs(data.jobs)
+    } catch { /* полоска покажет прошлое состояние до следующего опроса */ }
+  }, [])
+
+  const anyJobRunning = jobs.some(job => job.stage === 'editing' || job.stage === 'rollout')
+  useAutoRefresh(fetchJobs, { customInterval: anyJobRunning ? JOBS_ACTIVE_INTERVAL_MS : JOBS_IDLE_INTERVAL_MS })
+
+  const visibleJobs = useMemo(() => {
+    const now = Date.now() / 1000
+    return jobs.filter(job =>
+      job.stage === 'editing' || job.stage === 'rollout'
+      || (!dismissed.has(job.id) && now - (job.finished_at ?? job.created_at) < FINISHED_JOB_VISIBLE_SEC))
+  }, [jobs, dismissed])
+
+  const dismissJob = (id: string) => {
+    setDismissed(prev => {
+      const next = new Set([...prev, id])
+      writeStorage(DISMISSED_JOBS_KEY, JSON.stringify([...next].slice(-DISMISSED_JOBS_KEEP)))
+      return next
+    })
+  }
+
+  const onJobStarted = (job: BackendEditJob) => {
+    setJobs(prev => [job, ...prev.filter(existing => existing.id !== job.id)])
+    setPicked(new Set())
+  }
 
   useEffect(() => {
     fetchServers()
@@ -62,6 +116,23 @@ export default function Loss() {
     () => (targets ?? []).filter(target => showAll || isLossy(target.worst_loss)),
     [targets, showAll],
   )
+  // Правка профилей — только IPv4: DNAT других адресов не держит
+  const editable = useMemo(() => visible.filter(target => target.ip.includes('.')), [visible])
+  const pickedTargets = useMemo(() => (targets ?? []).filter(target => picked.has(target.target)), [targets, picked])
+  const allPicked = editable.length > 0 && editable.every(target => picked.has(target.target))
+
+  const togglePicked = (key: string) => {
+    setPicked(prev => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
+  const togglePickAll = () => {
+    setPicked(allPicked ? new Set() : new Set(editable.map(target => target.target)))
+  }
 
   const toggleExpanded = (key: string) => {
     setExpanded(prev => {
@@ -81,6 +152,7 @@ export default function Loss() {
     e.preventDefault()
     if (!checkTarget.trim() || effectiveSelection.length === 0) return
     setChecking(true)
+    setRunningCheck({ target: checkTarget.trim(), nodes: effectiveSelection.length })
     try {
       const { data } = await lossApi.check(checkTarget.trim(), effectiveSelection)
       setCheckResult(data)
@@ -89,6 +161,7 @@ export default function Loss() {
       toast.error(detail ? `${t('loss.check_failed')}: ${detail}` : t('loss.check_failed'))
     } finally {
       setChecking(false)
+      setRunningCheck(null)
     }
   }
 
@@ -106,15 +179,25 @@ export default function Loss() {
         </div>
       </div>
 
+      <ActivityStrip jobs={visibleJobs} check={runningCheck} onDismiss={dismissJob} />
+
       <div className="bg-dark-900/50 rounded-xl border border-dark-800/50">
         <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-dark-800/50 flex-wrap">
           <h2 className="text-sm font-medium text-dark-200">{t('loss.overview_title')}</h2>
-          {targets && targets.length > 0 && (
-            <label className="flex items-center gap-2 text-xs text-dark-400 cursor-pointer">
-              <input type="checkbox" checked={showAll} onChange={e => setShowAll(e.target.checked)} className="accent-accent-500" />
-              {t('loss.show_all', { count: targets.length })}
-            </label>
-          )}
+          <div className="flex items-center gap-4 flex-wrap">
+            {targets && targets.length > 0 && (
+              <label className="flex items-center gap-2 text-xs text-dark-400 cursor-pointer">
+                <input type="checkbox" checked={showAll} onChange={e => setShowAll(e.target.checked)} className="accent-accent-500" />
+                {t('loss.show_all', { count: targets.length })}
+              </label>
+            )}
+            <button
+              onClick={() => setBatch({ mode: 'replace', targets: pickedTargets })}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs text-accent-400 hover:bg-accent-500/10 transition-colors"
+            >
+              <ListChecks className="w-3.5 h-3.5" /> {t('loss.batch_replace_open')}
+            </button>
+          </div>
         </div>
 
         {targets === null ? (
@@ -130,6 +213,15 @@ export default function Loss() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-left text-xs text-dark-500">
+                  <th className="pl-4 py-2 w-8">
+                    {editable.length > 0 && (
+                      <Checkbox
+                        checked={allPicked}
+                        indeterminate={!allPicked && editable.some(target => picked.has(target.target))}
+                        onChange={togglePickAll}
+                      />
+                    )}
+                  </th>
                   <th className="px-4 py-2 font-medium">{t('loss.col_address')}</th>
                   <th className="px-4 py-2 font-medium">{t('loss.col_worst')}</th>
                   <th className="px-4 py-2 font-medium">{t('loss.col_relays')}</th>
@@ -146,10 +238,15 @@ export default function Loss() {
                       <tr
                         className="border-t border-dark-800/50 hover:bg-dark-800/30 cursor-pointer"
                         onClick={e => {
-                          if ((e.target as HTMLElement).closest('button')) return
+                          if ((e.target as HTMLElement).closest('button, input, label')) return
                           toggleExpanded(target.target)
                         }}
                       >
+                        <td className="pl-4 py-2">
+                          {target.ip.includes('.') && (
+                            <Checkbox checked={picked.has(target.target)} onChange={() => togglePicked(target.target)} onClick={e => e.stopPropagation()} />
+                          )}
+                        </td>
                         <td className="px-4 py-2 whitespace-nowrap">
                           <div className="flex items-center gap-2">
                             {isOpen ? <ChevronDown className="w-4 h-4 text-dark-500" /> : <ChevronRight className="w-4 h-4 text-dark-500" />}
@@ -169,7 +266,6 @@ export default function Loss() {
                             : <span className="text-dark-500">—</span>}
                         </td>
                         <td className="px-4 py-2 text-right whitespace-nowrap">
-                          {/* Правка профилей — только IPv4: DNAT других адресов не держит */}
                           {target.ip.includes('.') && (
                             <button
                               onClick={() => setEditing(target)}
@@ -188,7 +284,8 @@ export default function Loss() {
                       </tr>
                       {isOpen && target.relays.map(relay => (
                         <tr key={`${target.target}@${relay.server_id}`} className="bg-dark-900/30 text-xs">
-                          <td className="px-4 py-1.5 pl-12 text-dark-300">{relay.name}</td>
+                          <td />
+                          <td className="px-4 py-1.5 pl-10 text-dark-300">{relay.name}</td>
                           <td className="px-4 py-1.5"><LossProbeBadge probe={relay} /></td>
                           <td className="px-4 py-1.5 text-dark-500" colSpan={3}>{t('loss.samples', { count: relay.samples })}</td>
                         </tr>
@@ -250,7 +347,33 @@ export default function Loss() {
         )}
       </div>
 
-      {editing && <BackendEditModal ip={editing.ip} port={editing.port} onClose={() => setEditing(null)} />}
+      {picked.size > 0 && (
+        <div className="sticky bottom-4 z-40 flex items-center gap-3 flex-wrap rounded-xl border border-accent-500/30 bg-dark-900/95 backdrop-blur px-4 py-3 shadow-lg">
+          <span className="text-sm text-dark-200">{t('loss.picked', { count: picked.size })}</span>
+          <button
+            onClick={() => setBatch({ mode: 'delete', targets: pickedTargets })}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm text-danger hover:bg-danger/10 transition-colors"
+          >
+            <Trash2 className="w-4 h-4" /> {t('loss.batch_delete_open')}
+          </button>
+          <button
+            onClick={() => setBatch({ mode: 'replace', targets: pickedTargets })}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm text-accent-400 hover:bg-accent-500/10 transition-colors"
+          >
+            <ListChecks className="w-4 h-4" /> {t('loss.batch_replace_open')}
+          </button>
+          <button onClick={() => setPicked(new Set())} className="ml-auto text-xs text-dark-400 hover:text-dark-200">
+            {t('loss.picked_clear')}
+          </button>
+        </div>
+      )}
+
+      {editing && (
+        <BackendEditModal ip={editing.ip} port={editing.port} onClose={() => setEditing(null)} onJobStarted={onJobStarted} />
+      )}
+      {batch && (
+        <BatchEditModal mode={batch.mode} targets={batch.targets} onClose={() => setBatch(null)} onJobStarted={onJobStarted} />
+      )}
     </motion.div>
   )
 }

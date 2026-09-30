@@ -1968,12 +1968,39 @@ export interface LossSuggestion {
   worst_loss: number | null
 }
 
+export interface EditJobProfileProgress {
+  kind: 'haproxy' | 'dnat'
+  profile_id: number
+  profile_name: string
+  total: number
+  synced: number
+  pending: number
+  failed: number
+  denied: number
+}
+
+export interface BackendEditJob {
+  id: string
+  stage: 'editing' | 'rollout' | 'done' | 'failed'
+  created_at: number
+  finished_at: number | null
+  current: string | null
+  error: string | null
+  failures: string[]
+  edits: BackendEditBody[]
+  items: { changed: number; skipped: number }[]
+  profiles: EditJobProfileProgress[]
+}
+
 export const lossApi = {
   overview: () => api.get<{ targets: LossTarget[] }>('/loss/overview'),
-  backendsPreview: (body: BackendEditBody) =>
-    api.post<{ profiles: BackendEditProfile[]; suggestions: LossSuggestion[] }>('/loss/backends/preview', body),
-  backendsApply: (body: BackendEditBody) =>
-    api.post<{ profiles: BackendEditProfile[] }>('/loss/backends/apply', body),
+  backendsPreview: (edits: BackendEditBody[]) =>
+    api.post<{ items: BackendEditProfile[][]; suggestions: Record<string, LossSuggestion[]> }>(
+      '/loss/backends/preview', { edits },
+    ),
+  backendsApply: (edits: BackendEditBody[]) =>
+    api.post<{ job: BackendEditJob }>('/loss/backends/apply', { edits }),
+  jobs: () => api.get<{ jobs: BackendEditJob[] }>('/loss/jobs'),
   check: (target: string, serverIds: number[]) =>
     api.post<{ ip: string; port: number; results: LossCheckResult[] }>('/loss/check', {
       target,

@@ -25,8 +25,10 @@ from app.services.backend_address import (  # noqa: E402
     Outcome,
     SkipReason,
     edit_dnat_rules,
+    ProfileRef,
     edit_haproxy_config,
-    plan_edit,
+    plan_batch,
+    rollout_progress,
     suggest_addresses,
     validate_edit,
 )
@@ -200,19 +202,46 @@ class PlanTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_preview_does_not_touch_profiles(self):
         before = (self.haproxy.config_content, self.dnat.rules_json)
-        changes = await plan_edit(self.db, edit())
-        self.assertEqual([(c.kind, c.profile_name, c.servers) for c in changes], [("haproxy", "NL relays", 4), ("dnat", "VK", 4)])
+        plan = await plan_batch(self.db, [edit()])
+        self.assertEqual([(c.kind, c.profile_name, c.servers) for c in plan.items[0]],
+                         [("haproxy", "NL relays", 4), ("dnat", "VK", 4)])
         self.assertEqual((self.haproxy.config_content, self.dnat.rules_json), before)
 
     async def test_save_rewrites_and_marks_pending(self):
         server = SimpleNamespace(dnat_rules_hash="stale", dnat_sync_status="synced")
         with mock.patch.object(backend_address.haproxy_profile_sync, "mark_outdated_pending", mock.AsyncMock()) as mark, \
              mock.patch.object(backend_address.dnat_profile_sync, "ordered_linked_servers", mock.AsyncMock(return_value=[server])):
-            await plan_edit(self.db, edit(), save=True)
+            plan = await plan_batch(self.db, [edit()], save=True)
         self.assertIn(f"server srv1 {NEW}:8449", self.haproxy.config_content)
         self.assertIn(NEW, json.loads(self.dnat.rules_json)[0]["target_ip"])
         mark.assert_awaited_once()
         self.assertEqual(server.dnat_sync_status, "pending")
+        self.assertEqual(plan.changed, [ProfileRef("haproxy", 1, "NL relays"), ProfileRef("dnat", 2, "VK")])
+
+    async def test_edits_see_each_other(self):
+        # Три удаления из одного балансировщика: третье оставило бы его пустым
+        deletes = [edit(ip=ip, action=Action.DELETE, new_ip=None) for ip in (OLD, "62.50.146.227", NEIGHBOUR)]
+        plan = await plan_batch(self.db, deletes)
+        lb = [rule for change in plan.items[2] for rule in change.rules if rule.rule == "lb"]
+        self.assertEqual(lb, [backend_address.RuleOutcome("lb", Outcome.SKIPPED, SkipReason.LAST_BACKEND)])
+        first_lb = [rule for change in plan.items[0] for rule in change.rules if rule.rule == "lb"]
+        self.assertEqual(first_lb[0].outcome, Outcome.CHANGED)
+
+    async def test_preview_of_unchanged_profiles_changes_nothing(self):
+        plan = await plan_batch(self.db, [edit(ip="10.9.9.9")])
+        self.assertEqual((plan.items, plan.changed), ([[]], []))
+
+
+class RolloutProgressTests(unittest.IsolatedAsyncioTestCase):
+    async def test_counts_statuses_of_linked_nodes(self):
+        db = mock.Mock()
+        db.execute = mock.AsyncMock(return_value=SimpleNamespace(
+            all=lambda: [("synced", 3), ("pending", 1), (None, 2), ("failed", 1)]))
+        progress = await rollout_progress(db, [ProfileRef("haproxy", 1, "NL relays")])
+        self.assertEqual(progress, [{
+            "kind": "haproxy", "profile_id": 1, "profile_name": "NL relays",
+            "total": 7, "synced": 3, "failed": 1, "denied": 0, "pending": 3,
+        }])
 
 
 if __name__ == "__main__":

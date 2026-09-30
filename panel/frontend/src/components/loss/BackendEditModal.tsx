@@ -7,21 +7,18 @@ import {
   lossApi,
   type BackendEditAction,
   type BackendEditBody,
+  type BackendEditJob,
   type BackendEditProfile,
-  type BackendEditRule,
   type LossSuggestion,
 } from '../../api/client'
 import LossProbeBadge from '../ui/LossProbeBadge'
-
-const PREVIEW_DEBOUNCE_MS = 400
-const IPV4_RE = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/
-
-const inputCls = 'w-full px-3 py-2 bg-dark-800 border border-dark-700 rounded-lg text-sm text-dark-100 font-mono placeholder-dark-500 focus:outline-none focus:border-accent-500/50'
+import { IPV4_RE, PREVIEW_DEBOUNCE_MS, inputCls, outcomeText } from './editShared'
 
 interface Props {
   ip: string
   port: number
   onClose: () => void
+  onJobStarted: (job: BackendEditJob) => void
 }
 
 function parsePort(value: string): number | null {
@@ -29,7 +26,7 @@ function parsePort(value: string): number | null {
   return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : null
 }
 
-export default function BackendEditModal({ ip, port, onClose }: Props) {
+export default function BackendEditModal({ ip, port, onClose, onJobStarted }: Props) {
   const { t } = useTranslation()
   const [action, setAction] = useState<BackendEditAction>('replace')
   const [newIp, setNewIp] = useState(ip)
@@ -66,9 +63,9 @@ export default function BackendEditModal({ ip, port, onClose }: Props) {
     const timer = setTimeout(async () => {
       setLoadingPreview(true)
       try {
-        const { data } = await lossApi.backendsPreview(body)
-        setProfiles(data.profiles)
-        setSuggestions(data.suggestions)
+        const { data } = await lossApi.backendsPreview([body])
+        setProfiles(data.items[0] ?? [])
+        setSuggestions(data.suggestions[ip] ?? [])
       } catch {
         setProfiles(null)
       } finally {
@@ -76,16 +73,16 @@ export default function BackendEditModal({ ip, port, onClose }: Props) {
       }
     }, PREVIEW_DEBOUNCE_MS)
     return () => clearTimeout(timer)
-  }, [body, inputsValid])
+  }, [body, inputsValid, ip])
 
   const affected = (profiles ?? []).flatMap(p => p.rules).filter(r => r.outcome !== 'skipped').length
 
   const apply = async () => {
     setApplying(true)
     try {
-      const { data } = await lossApi.backendsApply(body)
-      const changed = data.profiles.flatMap(p => p.rules).filter(r => r.outcome !== 'skipped').length
-      toast.success(t('loss.edit_done', { count: changed }))
+      const { data } = await lossApi.backendsApply([body])
+      onJobStarted(data.job)
+      toast.success(t('loss.job_started'))
       onClose()
     } catch (err) {
       const detail = (err as { response?: { data?: { detail?: string } } }).response?.data?.detail
@@ -93,13 +90,6 @@ export default function BackendEditModal({ ip, port, onClose }: Props) {
     } finally {
       setApplying(false)
     }
-  }
-
-  const outcomeText = (rule: BackendEditRule) => {
-    if (rule.outcome === 'skipped') return t(`loss.reason_${rule.reason}`)
-    if (rule.outcome === 'merged') return t('loss.outcome_merged')
-    if (noop) return t('loss.outcome_found')
-    return action === 'delete' ? t('loss.outcome_deleted') : t('loss.outcome_changed')
   }
 
   return (
@@ -208,7 +198,7 @@ export default function BackendEditModal({ ip, port, onClose }: Props) {
                         <li key={rule.rule} className="text-xs flex gap-2">
                           <span className="font-mono text-dark-300">{rule.rule}</span>
                           <span className={rule.outcome === 'skipped' ? 'text-warning' : 'text-dark-400'}>
-                            {outcomeText(rule)}
+                            {outcomeText(rule, action, noop, t)}
                           </span>
                         </li>
                       ))}

@@ -17,11 +17,12 @@ from app.services.backend_address import (
     Action,
     AddressEdit,
     AddressEditError,
-    plan_edit,
+    plan_batch,
+    rollout_progress,
     suggest_addresses,
-    sync_changed_profiles,
     validate_edit,
 )
+from app.services.backend_edit_jobs import get_edit_jobs
 from app.services.loss_overview import TargetParseError, build_overview, check_from_servers, parse_target
 from app.services.loss_registry import get_loss_registry
 from app.services.server_alerter import get_server_alerter
@@ -31,6 +32,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/loss", tags=["loss"], dependencies=[Depends(verify_auth)])
 
 MAX_CHECK_SERVERS = 500
+MAX_BATCH_EDITS = 200
 
 
 class LossCheckRequest(BaseModel):
@@ -64,6 +66,10 @@ class BackendEditRequest(BaseModel):
         )
 
 
+class BackendEditBatch(BaseModel):
+    edits: list[BackendEditRequest] = Field(..., min_length=1, max_length=MAX_BATCH_EDITS)
+
+
 @router.get("/overview")
 async def get_overview():
     registry = get_loss_registry()
@@ -88,30 +94,35 @@ async def check_target(data: LossCheckRequest, db: AsyncSession = Depends(get_db
 
 
 @router.post("/backends/preview")
-async def preview_backend_edit(data: BackendEditRequest, db: AsyncSession = Depends(get_db)):
-    """Где стоит адрес и что с каждым правилом сделает правка; ничего не сохраняет."""
-    edit = data.to_edit()
-    changes = await plan_edit(db, edit)
+async def preview_backend_edits(data: BackendEditBatch, db: AsyncSession = Depends(get_db)):
+    """Где стоят адреса и что сделает каждая правка списка; ничего не сохраняет."""
+    edits = [item.to_edit() for item in data.edits]
+    plan = await plan_batch(db, edits)
+    snapshots = get_loss_registry().fresh()
     return {
-        "profiles": [change.to_dict() for change in changes],
-        "suggestions": suggest_addresses(get_loss_registry().fresh(), edit.ip),
+        "items": [[change.to_dict() for change in changes] for changes in plan.items],
+        "suggestions": {ip: suggest_addresses(snapshots, ip) for ip in dict.fromkeys(e.ip for e in edits)},
     }
 
 
 @router.post("/backends/apply")
-async def apply_backend_edit(data: BackendEditRequest, bg: BackgroundTasks, db: AsyncSession = Depends(get_db)):
-    edit = data.to_edit()
-    try:
-        validate_edit(edit)
-    except AddressEditError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    changes = await plan_edit(db, edit, save=True)
-    await db.commit()
-    changed = [change for change in changes if change.changed]
-    logger.info(
-        "backend_address_edited action=%s ip=%s port=%s all_ports=%s new_ip=%s new_port=%s profiles=%s",
-        edit.action.value, edit.ip, edit.port, edit.all_ports, edit.new_ip, edit.new_port,
-        [f"{c.kind}:{c.profile_id}" for c in changed],
-    )
-    bg.add_task(sync_changed_profiles, changed)
-    return {"profiles": [change.to_dict() for change in changes]}
+async def apply_backend_edits(data: BackendEditBatch, bg: BackgroundTasks):
+    """Запускает задание: правка профилей, затем раскатка изменённых — прогресс в /loss/jobs."""
+    edits = [item.to_edit() for item in data.edits]
+    for index, edit in enumerate(edits):
+        try:
+            validate_edit(edit)
+        except AddressEditError as exc:
+            raise HTTPException(status_code=400, detail=f"#{index + 1} {edit.ip}:{edit.port}: {exc}")
+    jobs = get_edit_jobs()
+    job = jobs.create(edits)
+    logger.info("backend_edit_job_started job=%s edits=%s", job.id, len(edits))
+    bg.add_task(jobs.run, job)
+    return {"job": job.to_dict(progress=[])}
+
+
+@router.get("/jobs")
+async def list_edit_jobs(db: AsyncSession = Depends(get_db)):
+    return {
+        "jobs": [job.to_dict(await rollout_progress(db, job.changed)) for job in get_edit_jobs().recent()],
+    }

@@ -259,55 +259,103 @@ class ProfileChange:
         }
 
 
-async def _linked_count(db: AsyncSession, column, profile_id: int) -> int:
-    return int((await db.execute(select(func.count()).where(column == profile_id))).scalar() or 0)
+@dataclass(frozen=True)
+class ProfileRef:
+    kind: str
+    profile_id: int
+    profile_name: str
 
 
-async def plan_edit(db: AsyncSession, edit: AddressEdit, save: bool = False) -> list[ProfileChange]:
-    """Что изменится в каждом профиле; с save=True — ещё и сохранить, отметив
-    разъехавшиеся серверы pending. Коммит — за вызывающим."""
-    changes: list[ProfileChange] = []
+@dataclass
+class BatchPlan:
+    # По каждой правке списка — что она делает в каждом профиле
+    items: list[list[ProfileChange]]
+    # Профили, текст или правила которых в итоге изменились — их и раскатывать
+    changed: list[ProfileRef]
 
-    for profile in (await db.execute(select(HAProxyConfigProfile).order_by(HAProxyConfigProfile.id))).scalars():
-        config, outcomes = edit_haproxy_config(profile.config_content or "", edit)
-        if not outcomes:
-            continue
-        change = ProfileChange("haproxy", profile.id, profile.name,
-                               await _linked_count(db, Server.active_haproxy_profile_id, profile.id), outcomes)
-        changes.append(change)
-        if save and change.changed:
-            profile.config_content = config
+
+LINK_COLUMNS = {"haproxy": Server.active_haproxy_profile_id, "dnat": Server.active_dnat_profile_id}
+SYNC_STATUS_COLUMNS = {"haproxy": Server.haproxy_sync_status, "dnat": Server.dnat_sync_status}
+
+
+async def _linked_count(db: AsyncSession, kind: str, profile_id: int) -> int:
+    return int((await db.execute(select(func.count()).where(LINK_COLUMNS[kind] == profile_id))).scalar() or 0)
+
+
+async def plan_batch(db: AsyncSession, edits: list[AddressEdit], save: bool = False) -> BatchPlan:
+    """Правки применяются по очереди к одним и тем же текстам профилей, поэтому
+    каждая видит результат предыдущих: два удаления из одного балансировщика не
+    оставят его пустым. С save=True итог сохраняется, разъехавшиеся серверы —
+    pending; коммит — за вызывающим."""
+    haproxy = list((await db.execute(select(HAProxyConfigProfile).order_by(HAProxyConfigProfile.id))).scalars())
+    dnat = list((await db.execute(select(DnatProfile).order_by(DnatProfile.id))).scalars())
+    texts = {p.id: p.config_content or "" for p in haproxy}
+    rules = {p.id: dnat_profile_sync.load_rules(p) for p in dnat}
+    servers: dict[tuple[str, int], int] = {}
+
+    async def change_for(kind: str, profile, outcomes: list[RuleOutcome]) -> ProfileChange:
+        key = (kind, profile.id)
+        if key not in servers:
+            servers[key] = await _linked_count(db, kind, profile.id)
+        return ProfileChange(kind, profile.id, profile.name, servers[key], outcomes)
+
+    items: list[list[ProfileChange]] = []
+    for edit in edits:
+        changes = []
+        for profile in haproxy:
+            text, outcomes = edit_haproxy_config(texts[profile.id], edit)
+            if outcomes:
+                changes.append(await change_for("haproxy", profile, outcomes))
+                texts[profile.id] = text
+        for profile in dnat:
+            updated, outcomes = edit_dnat_rules(rules[profile.id], edit)
+            if outcomes:
+                changes.append(await change_for("dnat", profile, outcomes))
+                rules[profile.id] = updated
+        items.append(changes)
+
+    dirty_haproxy = [p for p in haproxy if texts[p.id] != (p.config_content or "")]
+    dirty_dnat = [p for p in dnat if rules[p.id] != dnat_profile_sync.load_rules(p)]
+    if save:
+        for profile in dirty_haproxy:
+            profile.config_content = texts[profile.id]
             await haproxy_profile_sync.mark_outdated_pending(db, profile)
-
-    for profile in (await db.execute(select(DnatProfile).order_by(DnatProfile.id))).scalars():
-        rules, outcomes = edit_dnat_rules(dnat_profile_sync.load_rules(profile), edit)
-        if not outcomes:
-            continue
-        change = ProfileChange("dnat", profile.id, profile.name,
-                               await _linked_count(db, Server.active_dnat_profile_id, profile.id), outcomes)
-        changes.append(change)
-        if save and change.changed:
-            profile.rules_json = json.dumps(rules)
+        for profile in dirty_dnat:
+            profile.rules_json = json.dumps(rules[profile.id])
             linked = await dnat_profile_sync.ordered_linked_servers(profile.id, db)
             for index, server in enumerate(linked):
-                expected = dnat_profile_sync.compute_rules_hash(dnat_profile_sync.render_rules_for_server(rules, index))
+                expected = dnat_profile_sync.compute_rules_hash(
+                    dnat_profile_sync.render_rules_for_server(rules[profile.id], index))
                 if server.dnat_rules_hash != expected:
                     server.dnat_sync_status = "pending"
-    return changes
+    changed = [ProfileRef("haproxy", p.id, p.name) for p in dirty_haproxy] + \
+              [ProfileRef("dnat", p.id, p.name) for p in dirty_dnat]
+    return BatchPlan(items, changed)
 
 
-async def sync_changed_profiles(changes: list[ProfileChange]) -> None:
-    """Раскатка изменённых профилей — тем же путём, что и сохранение в их разделах."""
-    for change in changes:
-        if not change.changed:
-            continue
-        model = HAProxyConfigProfile if change.kind == "haproxy" else DnatProfile
-        sync = (haproxy_profile_sync if change.kind == "haproxy" else dnat_profile_sync).sync_profile_to_servers
-        async with async_session_maker() as db:
-            try:
-                profile = await db.get(model, change.profile_id)
-                if profile:
-                    await sync(profile, db)
-            except Exception as exc:
-                logger.error("backend_edit_sync_failed kind=%s profile_id=%s error=%s",
-                             change.kind, change.profile_id, exc)
+async def sync_profile(ref: ProfileRef) -> None:
+    """Раскатка профиля — тем же путём, что и сохранение в его разделе."""
+    model = HAProxyConfigProfile if ref.kind == "haproxy" else DnatProfile
+    sync = (haproxy_profile_sync if ref.kind == "haproxy" else dnat_profile_sync).sync_profile_to_servers
+    async with async_session_maker() as db:
+        profile = await db.get(model, ref.profile_id)
+        if profile:
+            await sync(profile, db)
+
+
+async def rollout_progress(db: AsyncSession, refs: list[ProfileRef]) -> list[dict]:
+    """Сколько привязанных нод каждого профиля уже получили конфиг — по статусам в базе."""
+    progress = []
+    for ref in refs:
+        status = SYNC_STATUS_COLUMNS[ref.kind]
+        rows = (await db.execute(
+            select(status, func.count()).where(LINK_COLUMNS[ref.kind] == ref.profile_id).group_by(status)
+        )).all()
+        counts = {"synced": 0, "failed": 0, "denied": 0, "pending": 0}
+        for value, count in rows:
+            counts[value if value in ("synced", "failed", "denied") else "pending"] += count
+        progress.append({
+            "kind": ref.kind, "profile_id": ref.profile_id, "profile_name": ref.profile_name,
+            "total": sum(counts.values()), **counts,
+        })
+    return progress
