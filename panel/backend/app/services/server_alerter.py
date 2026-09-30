@@ -11,7 +11,7 @@ from sqlalchemy import select, delete, func
 
 from app.database import async_session
 from app.models import Server, AlertSettings, AlertHistory, PacketLossEpisode
-from app.services.http_client import get_node_client, node_auth_headers
+from app.services.http_client import get_node_client, node_auth_headers, sanitize_proxy
 from app.services.loss_alerts import (
     Episode,
     EventKind,
@@ -23,9 +23,31 @@ from app.services.loss_alerts import (
     history_text,
 )
 from app.services.loss_registry import get_loss_registry
+from app.services.socks_probe import ProxyFault, find_proxy_fault
 from app.services.traffic_ingest import get_traffic_ingest
 
 ALERT_HISTORY_RETENTION_DAYS = 30
+
+API_PROBE_TIMEOUT = 5.0
+# Рукопожатие SOCKS5 таймаутами httpx не покрыто: без потолка зависший прокси
+# подвесил бы пробу, а с ней и проверку всех серверов
+API_PROBE_HARD_TIMEOUT = 10.0
+PROXY_CHECK_TIMEOUT = 5.0
+
+PROXY_FAULT_REASONS = {
+    "ru": {
+        ProxyFault.UNREACHABLE: "SOCKS5-прокси {proxy} не принимает подключения",
+        ProxyFault.SILENT: "SOCKS5-прокси {proxy} принимает подключение, но не отвечает",
+        ProxyFault.AUTH_REJECTED: "SOCKS5-прокси {proxy} отклоняет авторизацию — проверьте логин и пароль",
+        ProxyFault.NOT_SOCKS5: "по адресу {proxy} отвечает не SOCKS5-прокси",
+    },
+    "en": {
+        ProxyFault.UNREACHABLE: "SOCKS5 proxy {proxy} does not accept connections",
+        ProxyFault.SILENT: "SOCKS5 proxy {proxy} accepts connections but does not respond",
+        ProxyFault.AUTH_REJECTED: "SOCKS5 proxy {proxy} rejects authentication — check the login and password",
+        ProxyFault.NOT_SOCKS5: "{proxy} does not answer as a SOCKS5 proxy",
+    },
+}
 
 logger = logging.getLogger(__name__)
 
@@ -502,6 +524,13 @@ class ServerAlerter:
             return f"Сервер {srv.name} недоступен (API не отвечает, ICMP доступен)"
         return f"Server {srv.name} is offline (API unreachable, ICMP reachable)"
 
+    def _msg_offline_proxy(self, srv: Server, settings: AlertSettings, fault: ProxyFault) -> str:
+        lang = "ru" if self._lang(settings) == "ru" else "en"
+        reason = PROXY_FAULT_REASONS[lang][fault].format(proxy=sanitize_proxy(srv.proxy_url))
+        if lang == "ru":
+            return f"Сервер {srv.name} недоступен из-за прокси: {reason}"
+        return f"Server {srv.name} is offline because of its proxy: {reason}"
+
     def _msg_recovery(self, srv: Server, settings: AlertSettings) -> str:
         if self._lang(settings) == "ru":
             return f"Сервер {srv.name} снова онлайн"
@@ -799,17 +828,21 @@ class ServerAlerter:
 
                 if self._cooldown_ok(state, "offline", now, cooldown):
                     state.last_alert["offline"] = now
+                    details = {"icmp_reachable": icmp_reachable}
 
-                    if icmp_reachable:
+                    proxy_fault = None
+                    if srv.proxy_url:
+                        proxy_fault = await find_proxy_fault(srv.proxy_url, PROXY_CHECK_TIMEOUT)
+
+                    if proxy_fault:
+                        message = self._msg_offline_proxy(srv, settings, proxy_fault)
+                        details["proxy_fault"] = proxy_fault.value
+                    elif icmp_reachable:
                         message = self._msg_offline_api_only(srv, settings)
                     else:
                         message = self._msg_offline_full(srv, settings)
 
-                    await self._send_and_save(
-                        srv, settings, "offline", "critical",
-                        message,
-                        {"icmp_reachable": icmp_reachable},
-                    )
+                    await self._send_and_save(srv, settings, "offline", "critical", message, details)
         else:
             if state.was_offline and settings.offline_recovery_notify:
                 if self._cooldown_ok(state, "recovery", now, cooldown):
@@ -1037,10 +1070,13 @@ class ServerAlerter:
     async def _api_probe(srv: Server) -> bool:
         try:
             client = get_node_client(srv)
-            response = await client.get(
-                f"{srv.url}/api/metrics",
-                headers=node_auth_headers(srv),
-                timeout=5.0,
+            response = await asyncio.wait_for(
+                client.get(
+                    f"{srv.url}/api/metrics",
+                    headers=node_auth_headers(srv),
+                    timeout=API_PROBE_TIMEOUT,
+                ),
+                API_PROBE_HARD_TIMEOUT,
             )
             return response.status_code == 200
         except Exception:

@@ -871,6 +871,7 @@ interface NicInfo {
 **Ограничения:**
 - IPv6-адрес прокси форматом ввода не поддерживается
 - Недоступный прокси при HTTP-запросах: нода отображается offline с `last_error = "Proxy connection error"` — `metrics_collector.py` перехватывает `httpx.ProxyError` отдельно от `ConnectError` (`ErrorTypes.PROXY_ERROR`), чтобы оператор отличал мёртвый прокси от мёртвой ноды; текст SOCKS-ошибки в лог не пишется (может содержать креды)
+- Алерт «сервер недоступен» у ноды с прокси сам проверяет прокси и, если сбоит он, пишет «недоступен из-за прокси» с причиной — см. «Server Alerts»
 
 **Frontend:**
 - `pages/Servers.tsx` — поле «SOCKS5-прокси» видно в форме добавления сервера всегда, включая режим SSH-деплоя; `buildDeployBody` передаёт `socks5_proxy`; `validateDeployForm` проверяет формат прокси (`PROXY_RE`) и для основного сервера, и для каждой дополнительной цели массового деплоя; поле также есть в inline-форме редактирования сервера и в retry-деплое
@@ -885,6 +886,7 @@ interface NicInfo {
 - `panel/backend/app/database.py` (миграция колонки `proxy_url`)
 - `panel/backend/app/routers/servers.py`
 - `panel/backend/app/services/metrics_collector.py`
+- `panel/backend/app/services/socks_probe.py`, `server_alerter.py` — причина в алерте offline
 - `panel/backend/requirements.txt` (`python-socks==2.8.2`)
 - `panel/frontend/src/pages/Servers.tsx`
 - `panel/frontend/src/components/servers/ExtraServerCard.tsx`
@@ -1607,7 +1609,8 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 Система алертов мониторинга серверов с Telegram-уведомлениями. Фоновый сервис `ServerAlerter` проверяет серверы каждые N секунд (default 60) и отправляет уведомления при проблемах.
 
 **Логика:**
-- **Offline**: сервер считается недоступным после N последовательных неответов (default 3). Уведомление о восстановлении.
+- **Offline**: сервер считается недоступным после N последовательных неответов (default 3). Перед алертом `_active_probe_sequence` сам опрашивает API ноды (`_api_probe`, поверх httpx-таймаута потолок `API_PROBE_HARD_TIMEOUT` — рукопожатие SOCKS5 таймаутами httpx не покрыто, и зависший прокси подвесил бы проверку всего парка) и пингует её по ICMP. Уведомление о восстановлении.
+  - **Виноват прокси.** У сервера с `proxy_url` перед отправкой алерта `services/socks_probe.py` (`find_proxy_fault`) проверяет сам прокси: TCP-подключение, приветствие и авторизацию SOCKS5 — шаги, которые прокси выполняет без обращения к ноде. `CONNECT` не шлётся: его отказ или зависание не отличить от мёртвой ноды. Сбой (`ProxyFault`: `unreachable` — не принимает подключения, `silent` — принял и молчит или оборвал, `auth_rejected` — отверг способ входа или логин/пароль, `not_socks5` — отвечает не по SOCKS5) заменяет текст алерта на «Сервер X недоступен из-за прокси: <причина>» с адресом прокси без кредов (`sanitize_proxy`) и пишется в `details.proxy_fault`. Прокси исправен — текст прежний (API/ICMP).
 - **CPU/RAM**: критический порог (default 90%) — алерт при длительном превышении. Адаптивное EMA-отслеживание скачков.
 - **Network**: спайк/падение трафика относительно EMA baseline. Скорость алертер не считает сам, а берёт у учёта трафика (`TrafficIngest.speed_for()`) — единственного владельца дельт по счётчикам интерфейсов; вторая своя формула расходилась бы с историей после ребута ноды, где сброс счётчика трактовался бы по-другому. Значение запрашивается по `collected_at` — моменту сбора метрик коллектором (тот же таймстемп, что и на дашборде, см. «Метрики»), а не по тику самого алертера, и протухает через 2 минуты: молчащая нода не должна выглядеть как нода со стабильным трафиком.
 - **TCP**: отслеживание Established, Listen, Time Wait, Close Wait, SYN Sent, SYN Recv, FIN Wait по отдельности.
@@ -1638,6 +1641,7 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 
 **Файлы:**
 - `panel/backend/app/services/server_alerter.py` — фоновый сервис
+- `panel/backend/app/services/socks_probe.py` — проверка SOCKS5-прокси для алерта offline (тесты `tests/test_socks_probe.py` — на прокси, поднятых в тесте на localhost)
 - `panel/backend/app/services/loss_alerts.py` — эпизоды и тексты алерта о потерях с релеев; `loss_registry.py` — данные потерь парка в памяти (тесты `tests/test_loss_alerts.py`)
 - `panel/backend/app/routers/alerts.py` — API роутер
 - `panel/backend/app/models.py` — `AlertSettings`, `AlertHistory`
