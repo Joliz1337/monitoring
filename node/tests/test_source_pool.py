@@ -4,8 +4,10 @@
 
 Инварианты, которые здесь закреплены: метки раскладываются по адресам по кругу
 (иначе на ноде с 3 адресами 27 из 30 меток свалились бы по основной таблице на
-один IP, и потолок портов не сдвинулся бы); нода трогает только свои метки и
-таблицы; в устоявшемся состоянии цикл самолечения не пишет на хост ничего.
+один IP, и потолок портов не сдвинулся бы); в ручном режиме правила стоят ровно
+на назначенных метках, а приоритет правила зависит от номера метки, не от места
+в списке; нода трогает только свои метки и таблицы; в устоявшемся состоянии цикл
+самолечения не пишет на хост ничего.
 """
 
 import asyncio
@@ -24,17 +26,21 @@ from app.models.source_pool import (  # noqa: E402
     RULE_PRIORITY_BASE,
     TABLE_BASE,
     SourcePoolConfig,
+    SourcePoolMode,
 )
 from app.services.source_pool import (  # noqa: E402
     DefaultGateway,
     build_bindings,
+    build_manual_bindings,
     clear_commands,
     parse_default_gateway,
     parse_rules,
     parse_table_routes,
     plan_commands,
     probe_command,
+    rule_priority,
     split_probe,
+    unavailable_marks,
 )
 
 
@@ -64,6 +70,39 @@ class BuildBindingsTest(unittest.TestCase):
         for binding in bindings:
             same_table = [b.address for b in bindings if b.table == binding.table]
             self.assertEqual(set(same_table), {binding.address})
+
+
+class ManualBindingsTest(unittest.TestCase):
+    ADDRESSES = ["10.0.0.1", "10.0.0.2", "10.0.0.3"]
+
+    def test_only_assigned_marks_are_bound(self):
+        assignments = {MARK_BASE: "10.0.0.3", MARK_BASE + 7: "10.0.0.1", MARK_BASE + 8: "10.0.0.3"}
+        bindings = build_manual_bindings(assignments, self.ADDRESSES)
+        self.assertEqual([(b.mark, b.address) for b in bindings], sorted(assignments.items()))
+
+    def test_tables_follow_interface_order_of_used_addresses(self):
+        """Незадействованный 10.0.0.2 таблицу не занимает — их не больше числа меток."""
+        bindings = build_manual_bindings({MARK_BASE: "10.0.0.3", MARK_BASE + 1: "10.0.0.1"}, self.ADDRESSES)
+        self.assertEqual({b.address: b.table for b in bindings}, {"10.0.0.1": TABLE_BASE, "10.0.0.3": TABLE_BASE + 1})
+
+    def test_single_address_is_honoured(self):
+        """Вручную оператор может отдать метку и единственному адресу — это его решение."""
+        bindings = build_manual_bindings({MARK_BASE: "10.0.0.1"}, ["10.0.0.1"])
+        self.assertEqual([(b.mark, b.address, b.table) for b in bindings], [(MARK_BASE, "10.0.0.1", TABLE_BASE)])
+
+    def test_absent_address_is_skipped_and_reported(self):
+        assignments = {MARK_BASE: "10.0.0.1", MARK_BASE + 1: "10.9.9.9"}
+        self.assertEqual([b.mark for b in build_manual_bindings(assignments, self.ADDRESSES)], [MARK_BASE])
+        self.assertEqual(unavailable_marks(assignments, self.ADDRESSES), [MARK_BASE + 1])
+
+    def test_priority_depends_on_mark_not_position(self):
+        bindings = build_manual_bindings({MARK_BASE + 5: "10.0.0.1", MARK_BASE + 20: "10.0.0.2"}, self.ADDRESSES)
+        plan = plan_commands(bindings, {}, {}, "bond0", DefaultGateway("10.0.0.254"), {})
+        self.assertIn(
+            f"ip rule add fwmark {MARK_BASE + 20} lookup {TABLE_BASE + 1} priority {rule_priority(MARK_BASE + 20)}",
+            plan,
+        )
+        self.assertEqual(rule_priority(MARK_BASE + 20), RULE_PRIORITY_BASE + 20)
 
 
 class ParseRulesTest(unittest.TestCase):
@@ -257,6 +296,27 @@ class ConfigValidationTest(unittest.TestCase):
         with self.assertRaises(Exception):
             SourcePoolConfig(excluded=["not-an-ip"])
 
+    def test_old_panel_config_means_auto(self):
+        config = SourcePoolConfig(enabled=True, excluded=[])
+        self.assertEqual(config.mode, SourcePoolMode.AUTO)
+        self.assertEqual(config.assignments, {})
+
+    def test_assignments_from_json_keys(self):
+        """JSON отдаёт ключи строками — метки должны стать числами."""
+        config = SourcePoolConfig.model_validate_json(
+            json.dumps({"mode": "manual", "assignments": {str(MARK_BASE + 1): " 1.2.3.4 ", str(MARK_BASE): "1.2.3.5"}})
+        )
+        self.assertEqual(config.assignments, {MARK_BASE: "1.2.3.5", MARK_BASE + 1: "1.2.3.4"})
+
+    def test_mark_outside_pool_rejected(self):
+        for mark in (MARK_BASE - 1, MARK_BASE + MARK_COUNT):
+            with self.assertRaises(Exception):
+                SourcePoolConfig(mode="manual", assignments={mark: "1.2.3.4"})
+
+    def test_assignment_to_non_ipv4_rejected(self):
+        with self.assertRaises(Exception):
+            SourcePoolConfig(mode="manual", assignments={MARK_BASE: "::1"})
+
 
 @dataclass
 class FakeResult:
@@ -318,6 +378,46 @@ class ManagerReconcileTest(unittest.TestCase):
                 self.assertIn(f"ip rule add fwmark {MARK_BASE + index} ", written)
             self.assertIn(f"src 1.2.3.4 table {TABLE_BASE}", written)
             self.assertIn(f"src 1.2.3.5 table {TABLE_BASE + 1}", written)
+
+    def test_manual_mode_replaces_auto_layout(self):
+        """Переход с авто на ручную: лишние метки прежней раскладки снимаются,
+        назначенные остаются, состояние сообщает режим и пропавший адрес."""
+        import tempfile
+        import unittest.mock
+
+        auto = build_bindings(["1.2.3.4", "1.2.3.5"])
+        rules = [
+            {"priority": rule_priority(b.mark), "fwmark": hex(b.mark), "table": str(b.table)} for b in auto
+        ]
+        routes = [
+            {"dst": "default", "gateway": "1.2.3.1", "dev": "bond0", "prefsrc": address, "table": str(TABLE_BASE + index)}
+            for index, address in enumerate(["1.2.3.4", "1.2.3.5"])
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            manager, executor = self._manager(os.path.join(tmp, "source_pool.json"), self._probe_output(rules, routes))
+
+            from app.services import source_pool as module
+
+            discovery = module._Discovery("bond0", ["1.2.3.4", "1.2.3.5"], None)
+            config = SourcePoolConfig(
+                enabled=True, mode="manual",
+                assignments={MARK_BASE + 1: "1.2.3.5", MARK_BASE + 2: "1.2.3.9"},
+            )
+            with unittest.mock.patch.object(module, "discover_addresses", _fake_discover(discovery)), \
+                 unittest.mock.patch.object(module, "exit_proxy_enabled", return_value=False):
+                state = asyncio.run(manager.apply_config(config))
+
+            written = "\n".join(c for c in executor.commands if "rule show" not in c)
+            self.assertEqual(written.count("ip rule add"), 1)
+            self.assertIn(f"ip rule add fwmark {MARK_BASE + 1} lookup {TABLE_BASE} ", written)
+            self.assertIn(f"ip rule del fwmark {MARK_BASE} priority {rule_priority(MARK_BASE)}", written)
+            self.assertIn(f"ip rule del fwmark {MARK_BASE + 29} priority {rule_priority(MARK_BASE + 29)}", written)
+            self.assertIn(f"src 1.2.3.5 table {TABLE_BASE}", written)
+            self.assertIn(f"ip route flush table {TABLE_BASE + 1}", written)
+            self.assertEqual(state.mode, SourcePoolMode.MANUAL)
+            self.assertEqual([(b.mark, b.address) for b in state.bindings], [(MARK_BASE + 1, "1.2.3.5")])
+            self.assertEqual(state.active_addresses, ["1.2.3.5"])
+            self.assertEqual(state.unavailable_marks, [MARK_BASE + 2])
 
     def test_exit_proxy_blocks_enabling(self):
         import tempfile

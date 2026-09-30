@@ -1285,14 +1285,16 @@ class ExitProxyEvent(Base):
 # ==================== Пул исходящих адресов ====================
 
 class SourcePoolNode(Base):
-    """Нода, на которой исходящий TCP раскладывается по всем её IPv4 через метки
-    fwmark: исключённые адреса и последнее состояние раскладки с ноды. Строка
-    остаётся после выключения — список исключений не теряется."""
+    """Нода, на которой исходящий TCP раскладывается по её IPv4 через метки
+    fwmark: режим раскладки, исключённые адреса, ручная раскладка и последнее
+    состояние с ноды. Строка остаётся после выключения — настройки не теряются."""
     __tablename__ = "source_pool_nodes"
 
     server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), primary_key=True)
     enabled = Column(Boolean, default=True)
+    mode = Column(String(10), default="auto")  # auto — по кругу | manual — по assignments
     excluded = Column(Text, nullable=True)     # JSON list адресов
+    assignments = Column(Text, nullable=True)  # JSON {метка: адрес}; хранится и в авто — не теряется при переключении
     node_state = Column(Text, nullable=True)   # JSON — последний ответ /state ноды
     config_hash = Column(String(64), nullable=True)
     sync_status = Column(String(20), default="pending")  # pending | synced | failed | denied | unsupported

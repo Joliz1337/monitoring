@@ -15,6 +15,10 @@
 делит трафик поровну между метками, значит и между адресами — на любой ноде, без
 правки конфига под неё.
 
+В ручном режиме раскладку задаёт оператор: метка → адрес. Правила ставятся только
+на назначенные метки, остальные уходят по основной таблице — так одну метку можно
+отдать под отдельное направление в Xray и на каждой ноде выбрать ей свой IP.
+
 Выбор источника адреса определяется маршрутом, а маршрут — меткой на сокете, и
 всё это происходит при connect(), до подбора локального порта. Тем и отличается
 от SNAT, который переписывает адрес уже после подбора и потолок не двигает.
@@ -38,6 +42,7 @@ from app.models.source_pool import (
     TABLE_BASE,
     MarkBinding,
     SourcePoolConfig,
+    SourcePoolMode,
     SourcePoolState,
 )
 from app.services.host_executor import HostExecutor
@@ -75,6 +80,33 @@ def build_bindings(addresses: list[str]) -> list[MarkBinding]:
         )
         for index in range(MARK_COUNT)
     ]
+
+
+def build_manual_bindings(assignments: dict[int, str], addresses: list[str]) -> list[MarkBinding]:
+    """Раскладка оператора. Метка, чей адрес пропал с интерфейса, пропускается:
+    маршрут с `src` чужого адреса ядро не примет. Таблица — по порядку адреса
+    на интерфейсе среди задействованных, так их не больше числа меток."""
+    used = set(assignments.values())
+    tables = {
+        address: TABLE_BASE + index
+        for index, address in enumerate(address for address in addresses if address in used)
+    }
+    return [
+        MarkBinding(mark=mark, address=address, table=tables[address])
+        for mark, address in sorted(assignments.items())
+        if address in tables
+    ]
+
+
+def unavailable_marks(assignments: dict[int, str], addresses: list[str]) -> list[int]:
+    present = set(addresses)
+    return sorted(mark for mark, address in assignments.items() if address not in present)
+
+
+def rule_priority(mark: int) -> int:
+    """Приоритет привязан к номеру метки, а не к её месту в раскладке: в ручном
+    режиме метки идут с пропусками, и снятие одной не должно сдвигать остальные."""
+    return RULE_PRIORITY_BASE + (mark - MARK_BASE)
 
 
 def _as_int(value) -> Optional[int]:
@@ -201,10 +233,10 @@ def route_command(table: int, address: str, interface: str, gateway: Optional[st
     return f"ip route replace default {via}dev {interface} src {address} table {table}{flags}"
 
 
-def rule_commands(binding: MarkBinding, index: int) -> list[str]:
+def rule_commands(binding: MarkBinding) -> list[str]:
     """Снять прежнюю привязку метки и поставить свою. Удаление без совпадения —
     не ошибка сценария, поэтому его вывод глушится."""
-    priority = RULE_PRIORITY_BASE + index
+    priority = rule_priority(binding.mark)
     return [
         f"ip rule del fwmark {binding.mark} priority {priority} 2>/dev/null || true",
         f"ip rule add fwmark {binding.mark} lookup {binding.table} priority {priority}",
@@ -228,10 +260,9 @@ def plan_commands(
         via, onlink = (own, True) if own else (gateway.address, gateway.onlink)
         if current_routes.get(table) != (via, address):
             commands.append(route_command(table, address, interface, via, onlink))
-    for index, binding in enumerate(bindings):
-        expected = (RULE_PRIORITY_BASE + index, binding.table)
-        if current_rules.get(binding.mark) != expected:
-            commands.extend(rule_commands(binding, index))
+    for binding in bindings:
+        if current_rules.get(binding.mark) != (rule_priority(binding.mark), binding.table):
+            commands.extend(rule_commands(binding))
     return commands
 
 
@@ -318,7 +349,7 @@ class SourcePoolManager:
             logger.warning("source pool: broken state file, ignoring config: %s", exc)
 
     def _save_state(self) -> None:
-        payload = {"config": self._config.model_dump()}
+        payload = {"config": self._config.model_dump(mode="json")}
         tmp = self._state_path.with_suffix(".tmp")
         try:
             self._state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -343,16 +374,22 @@ class SourcePoolManager:
         rules_text, tables_text, default_text = split_probe(result.stdout)
         return parse_rules(rules_text), parse_table_routes(tables_text), default_text
 
-    def _active_addresses(self, addresses: list[str]) -> list[str]:
+    def _layout(self, addresses: list[str]) -> tuple[list[str], list[MarkBinding]]:
+        """Участвующие адреса и раскладка меток по ним для текущего режима.
+        Исключения действуют только в авто: вручную оператор сам назначает адреса."""
+        if self._config.mode == SourcePoolMode.MANUAL:
+            bindings = build_manual_bindings(self._config.assignments, addresses)
+            return list(dict.fromkeys(b.address for b in bindings)), bindings
         excluded = set(self._config.excluded)
-        return [address for address in addresses if address not in excluded]
+        active = [address for address in addresses if address not in excluded]
+        return active, build_bindings(active)
 
     async def state(self) -> SourcePoolState:
         discovery = await discover_addresses()
-        active = self._active_addresses(discovery.addresses)
-        bindings = build_bindings(active)
+        active, bindings = self._layout(discovery.addresses)
         state = SourcePoolState(
             enabled=self._config.enabled,
+            mode=self._config.mode,
             supported=discovery.interface is not None,
             reason=discovery.reason,
             interface=discovery.interface,
@@ -363,6 +400,8 @@ class SourcePoolManager:
             last_error=self._last_error,
             conflict=EXIT_PROXY_CONFLICT if exit_proxy_enabled() else None,
         )
+        if self._config.mode == SourcePoolMode.MANUAL and discovery.interface is not None:
+            state.unavailable_marks = unavailable_marks(self._config.assignments, discovery.addresses)
         if not state.supported:
             return state
         try:
@@ -375,8 +414,9 @@ class SourcePoolManager:
             state.in_sync = not current_rules and not current_routes
             state.missing_marks = []
             return state
-        expected = {b.mark: (RULE_PRIORITY_BASE + i, b.table) for i, b in enumerate(bindings)}
-        state.missing_marks = sorted(mark for mark, value in expected.items() if current_rules.get(mark) != value)
+        state.missing_marks = sorted(
+            b.mark for b in bindings if current_rules.get(b.mark) != (rule_priority(b.mark), b.table)
+        )
         routes_ok = all(
             current_routes.get(b.table) == (discovery.gateways.get(b.address) or state.gateway, b.address)
             for b in bindings
@@ -412,8 +452,9 @@ class SourcePoolManager:
             self._last_error = str(exc)
             return None
 
-        active = self._active_addresses(discovery.addresses)
-        bindings = build_bindings(active) if self._config.enabled else []
+        active, bindings = self._layout(discovery.addresses)
+        if not self._config.enabled:
+            bindings = []
         if not bindings:
             if not current_rules and not current_routes:
                 return None

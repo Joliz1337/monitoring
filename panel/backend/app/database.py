@@ -2174,6 +2174,25 @@ async def _migrate_haproxy_profile_options(conn):
             logger.warning(f"Could not add haproxy_config_profiles.options: {e}")
 
 
+async def _migrate_source_pool_manual(conn):
+    result = await conn.execute(text("""
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'source_pool_nodes'
+    """))
+    columns = {row[0] for row in result.fetchall()}
+    if not columns:
+        return
+    for col_name, col_type in (("mode", "VARCHAR(10) DEFAULT 'auto'"), ("assignments", "TEXT")):
+        if col_name in columns:
+            continue
+        try:
+            await conn.execute(text(f'ALTER TABLE source_pool_nodes ADD COLUMN "{col_name}" {col_type}'))
+            logger.info(f"Added column: source_pool_nodes.{col_name}")
+        except Exception as e:
+            if "already exists" not in str(e).lower():
+                logger.warning(f"Could not add source_pool_nodes.{col_name}: {e}")
+
+
 # (таблица, колонка) — целевые секреты: приватные ключи, не публичные сертификаты
 _SECRET_COLUMNS = [
     ("keygen", "ca_key_pem"),
@@ -2238,6 +2257,7 @@ async def init_db():
         await _migrate_node_capabilities(conn)
         await _migrate_metrics_window_peaks(conn)
         await _migrate_haproxy_profile_options(conn)
+        await _migrate_source_pool_manual(conn)
         await _migrate_encrypt_secrets(conn)
 
     await _warmup_pool()

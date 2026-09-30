@@ -3551,10 +3551,20 @@ export const exitProxyApi = {
 
 export type SourcePoolInstallStatus = 'off' | 'pending' | 'active' | 'drift' | 'failed' | 'denied' | 'unsupported'
 
+export type SourcePoolMode = 'auto' | 'manual'
+
+// Метка (строкой, как в JSON) → адрес
+export type SourcePoolAssignments = Record<string, string>
+
 export interface SourcePoolAddress {
   address: string
   excluded: boolean
   marks: number
+}
+
+export interface SourcePoolBinding {
+  mark: number
+  address: string
 }
 
 export interface SourcePoolNodeView {
@@ -3563,8 +3573,14 @@ export interface SourcePoolNodeView {
   online: boolean
   node_version: string | null
   min_node_version: string
+  min_node_version_manual: string
   supported_by_node: boolean
+  supports_manual: boolean
   enabled: boolean
+  mode: SourcePoolMode
+  assignments: SourcePoolAssignments
+  bindings: SourcePoolBinding[]
+  unavailable_marks: number[]
   install_status: SourcePoolInstallStatus
   sync_error: string | null
   interface: string | null
@@ -3588,10 +3604,17 @@ export interface SourcePoolSnippet {
 
 const SOURCE_POOL_NODE_TIMEOUT_MS = 40000
 
+export interface SourcePoolNodePatch {
+  enabled?: boolean
+  mode?: SourcePoolMode
+  excluded?: string[]
+  assignments?: SourcePoolAssignments
+}
+
 export const sourcePoolApi = {
   getNodes: () => api.get<{ nodes: SourcePoolNodeView[] }>('/source-pool/nodes'),
   getNode: (serverId: number) => api.get<SourcePoolNodeView>(`/source-pool/nodes/${serverId}`),
-  updateNode: (serverId: number, patch: { enabled?: boolean; excluded?: string[] }) =>
+  updateNode: (serverId: number, patch: SourcePoolNodePatch) =>
     api.put<SourcePoolNodeView>(`/source-pool/nodes/${serverId}`, patch, { timeout: SOURCE_POOL_NODE_TIMEOUT_MS }),
   refreshNode: (serverId: number) =>
     api.post<SourcePoolNodeView>(`/source-pool/nodes/${serverId}/refresh`, undefined, { timeout: SOURCE_POOL_NODE_TIMEOUT_MS }),

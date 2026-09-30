@@ -5,7 +5,13 @@ from typing import Any, Optional
 from app.models import Server, SourcePoolNode
 from app.services.exit_proxy.settings import load_json
 from app.services.node_capabilities import Capability, server_allows
-from app.services.source_pool.node_client import MIN_NODE_VERSION_SOURCE_POOL, node_supports_source_pool
+from app.services.source_pool.node_client import (
+    MIN_NODE_VERSION_SOURCE_POOL,
+    MIN_NODE_VERSION_SOURCE_POOL_MANUAL,
+    node_supports_manual_marks,
+    node_supports_source_pool,
+)
+from app.services.source_pool.render import SourcePoolMode, load_assignments, node_mode
 
 STATUS_OFF = "off"
 STATUS_PENDING = "pending"
@@ -40,9 +46,12 @@ def marks_per_address(node_state: dict) -> dict[str, int]:
 
 def node_view(server: Server, row: Optional[SourcePoolNode], online: bool) -> dict[str, Any]:
     node_state = load_json(row.node_state, {}) if row is not None else {}
+    mode = node_mode(row)
     status = install_status(row, node_state)
     if row is not None and row.enabled and status != STATUS_OFF:
         if not node_supports_source_pool(server.node_version):
+            status = STATUS_UNSUPPORTED
+        elif mode == SourcePoolMode.MANUAL and not node_supports_manual_marks(server.node_version):
             status = STATUS_UNSUPPORTED
         elif not server_allows(server, Capability.SYSTEM, write=True):
             status = STATUS_DENIED
@@ -54,8 +63,17 @@ def node_view(server: Server, row: Optional[SourcePoolNode], online: bool) -> di
         "online": online,
         "node_version": server.node_version,
         "min_node_version": MIN_NODE_VERSION_SOURCE_POOL,
+        "min_node_version_manual": MIN_NODE_VERSION_SOURCE_POOL_MANUAL,
         "supported_by_node": node_supports_source_pool(server.node_version),
+        "supports_manual": node_supports_manual_marks(server.node_version),
         "enabled": bool(row.enabled) if row is not None else False,
+        "mode": mode.value,
+        "assignments": {str(mark): address for mark, address in load_assignments(row).items()},
+        "bindings": [
+            {"mark": binding.get("mark"), "address": binding.get("address")}
+            for binding in node_state.get("bindings") or []
+        ],
+        "unavailable_marks": node_state.get("unavailable_marks") or [],
         "install_status": status,
         "sync_error": row.sync_error if row is not None else None,
         "interface": node_state.get("interface"),

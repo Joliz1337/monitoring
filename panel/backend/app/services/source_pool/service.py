@@ -1,7 +1,8 @@
 """Фоновый цикл пула исходящих адресов: доставка конфига на ноды и сбор состояния раскладки.
 
-Раскладку меток по адресам делает нода — панель присылает лишь `enabled` и
-список исключений (по хэшу, когда он изменился) и забирает состояние. Нода,
+Раскладку меток по адресам делает нода — панель присылает лишь `enabled`, режим,
+список исключений и ручную раскладку (по хэшу, когда он изменился) и забирает
+состояние. Нода,
 лежавшая в момент изменения, получает конфиг через очередь долгов
 (`node_sync_queue`, вид `source_pool`).
 """
@@ -25,7 +26,7 @@ from app.services.source_pool.node_client import (
     SourcePoolNodeError,
     SourcePoolNodeUnsupported,
 )
-from app.services.source_pool.render import build_node_config, config_hash
+from app.services.source_pool.render import SourcePoolMode, build_node_config, config_hash
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +147,11 @@ class SourcePoolService:
             return SyncOutcome(str(exc))
 
         desired = build_node_config(node)
+        manual = desired["mode"] == SourcePoolMode.MANUAL.value
+        if manual and not node_client.node_supports_manual_marks(server.node_version):
+            message = node_client.manual_marks_unsupported_message(server.node_version)
+            await self._set_sync(server.id, SYNC_UNSUPPORTED, message)
+            return SyncOutcome(message)
         digest = config_hash(desired)
         state: Optional[dict] = None
         if digest != node.config_hash or node.sync_status != SYNC_SYNCED:
@@ -165,6 +171,12 @@ class SourcePoolService:
             except SourcePoolNodeError as exc:
                 await self._set_sync(server.id, SYNC_FAILED, str(exc))
                 return SyncOutcome(str(exc), retry=True)
+            # Агент без поля mode в ответе не знает ручной раскладки и разложил по кругу
+            if manual and "mode" not in state:
+                message = node_client.manual_marks_unsupported_message(server.node_version)
+                await self._set_sync(server.id, SYNC_UNSUPPORTED, message)
+                await self._store_state(server.id, state)
+                return SyncOutcome(message)
             await self._set_sync(server.id, SYNC_SYNCED, None, digest)
 
         if state is None:

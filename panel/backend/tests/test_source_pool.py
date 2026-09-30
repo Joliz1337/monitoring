@@ -26,8 +26,10 @@ try:
         MARK_BASE,
         MARK_COUNT,
         OUTBOUND_TAG_PREFIX,
+        SourcePoolMode,
         build_node_config,
         config_hash,
+        load_assignments,
         xray_outbounds,
         xray_routing,
         xray_snippet,
@@ -53,7 +55,7 @@ NODE_NGINX_TEMPLATE = REPO_ROOT / "node" / "nginx" / "templates" / "api.conf.tem
 
 def row(**overrides) -> SimpleNamespace:
     base = dict(
-        enabled=True, excluded=None, node_state=None, config_hash=None,
+        enabled=True, mode="auto", excluded=None, assignments=None, node_state=None, config_hash=None,
         sync_status="synced", sync_error=None, last_sync_at=None, last_state_at=None,
     )
     base.update(overrides)
@@ -68,11 +70,34 @@ def server(**overrides) -> SimpleNamespace:
 
 class NodeConfigTest(unittest.TestCase):
     def test_missing_row_means_disabled(self):
-        self.assertEqual(build_node_config(None), {"enabled": False, "excluded": []})
+        self.assertEqual(
+            build_node_config(None), {"enabled": False, "excluded": [], "mode": "auto", "assignments": {}}
+        )
 
     def test_excluded_sorted_and_deduplicated(self):
         config = build_node_config(row(excluded=json.dumps(["1.2.3.5", "1.2.3.4", "1.2.3.5"])))
         self.assertEqual(config["excluded"], ["1.2.3.4", "1.2.3.5"])
+
+    def test_row_before_migration_is_auto(self):
+        """Строка, записанная до появления режима, остаётся раскладкой по кругу."""
+        self.assertEqual(build_node_config(row(mode=None))["mode"], SourcePoolMode.AUTO.value)
+
+    def test_manual_assignments_go_with_string_keys(self):
+        stored = json.dumps({str(MARK_BASE + 2): "1.2.3.5", str(MARK_BASE): "1.2.3.4"})
+        config = build_node_config(row(mode="manual", assignments=stored))
+        self.assertEqual(config["mode"], "manual")
+        self.assertEqual(config["assignments"], {str(MARK_BASE): "1.2.3.4", str(MARK_BASE + 2): "1.2.3.5"})
+        json.dumps(config)
+
+    def test_assignments_kept_while_in_auto(self):
+        """Переключение в авто не стирает ручную раскладку — вернуться можно без перенастройки."""
+        stored = json.dumps({str(MARK_BASE): "1.2.3.4"})
+        self.assertEqual(build_node_config(row(assignments=stored))["assignments"], {str(MARK_BASE): "1.2.3.4"})
+
+    def test_broken_assignments_dropped(self):
+        stored = json.dumps({"x": "1.2.3.4", str(MARK_BASE - 1): "1.2.3.4", str(MARK_BASE): 5, str(MARK_BASE + 1): "1.2.3.4"})
+        self.assertEqual(load_assignments(row(assignments=stored)), {MARK_BASE + 1: "1.2.3.4"})
+        self.assertEqual(load_assignments(row(assignments="[1, 2]")), {})
 
     def test_hash_ignores_key_order(self):
         a = config_hash({"enabled": True, "excluded": ["1.2.3.4"]})
@@ -143,6 +168,31 @@ class ViewsTest(unittest.TestCase):
         self.assertEqual(old["install_status"], STATUS_UNSUPPORTED)
         self.assertFalse(old["supported_by_node"])
 
+    def test_node_view_manual_layout(self):
+        state = {
+            "supported": True, "in_sync": True, "mode": "manual", "addresses": ["1.2.3.4", "1.2.3.5"],
+            "bindings": [{"mark": MARK_BASE, "address": "1.2.3.5", "table": 101}],
+            "unavailable_marks": [MARK_BASE + 1],
+        }
+        manual = row(
+            mode="manual", node_state=json.dumps(state),
+            assignments=json.dumps({str(MARK_BASE): "1.2.3.5", str(MARK_BASE + 1): "9.9.9.9"}),
+        )
+        view = node_view(server(node_version="10.31.0"), manual, True)
+        self.assertEqual(view["install_status"], STATUS_ACTIVE)
+        self.assertEqual(view["mode"], "manual")
+        self.assertEqual(view["bindings"], [{"mark": MARK_BASE, "address": "1.2.3.5"}])
+        self.assertEqual(view["assignments"], {str(MARK_BASE): "1.2.3.5", str(MARK_BASE + 1): "9.9.9.9"})
+        self.assertEqual(view["unavailable_marks"], [MARK_BASE + 1])
+        self.assertTrue(view["supports_manual"])
+
+    def test_manual_on_agent_without_it_is_unsupported(self):
+        """Пул агент знает, а ручную раскладку — нет: он бы молча раскладывал по кругу."""
+        view = node_view(server(node_version="10.30.0"), row(mode="manual"), True)
+        self.assertEqual(view["install_status"], STATUS_UNSUPPORTED)
+        self.assertTrue(view["supported_by_node"])
+        self.assertFalse(view["supports_manual"])
+
 
 class NodeClientTest(unittest.TestCase):
     def test_version_gate(self):
@@ -150,6 +200,14 @@ class NodeClientTest(unittest.TestCase):
         self.assertTrue(node_client.node_supports_source_pool("10.30.1"))
         self.assertFalse(node_client.node_supports_source_pool("10.28.9"))
         self.assertFalse(node_client.node_supports_source_pool(None))
+
+    def test_manual_version_gate_matches_node_version(self):
+        """Гейт ручной раскладки — версия агента, в которой она появилась."""
+        self.assertTrue(node_client.node_supports_manual_marks(node_client.MIN_NODE_VERSION_SOURCE_POOL_MANUAL))
+        self.assertFalse(node_client.node_supports_manual_marks("10.30.9"))
+        self.assertFalse(node_client.node_supports_manual_marks(None))
+        node_version = (REPO_ROOT / "node" / "VERSION").read_text(encoding="utf-8").strip()
+        self.assertTrue(node_client.node_supports_manual_marks(node_version))
 
     def test_timeout_below_node_nginx_default(self):
         """У /api/system/source-pool/* нет своего location — действует общий proxy_read_timeout."""
