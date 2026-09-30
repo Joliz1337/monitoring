@@ -83,6 +83,30 @@ class RegistryTests(unittest.TestCase):
         now[0] += 91
         self.assertEqual((registry.fresh(), registry.owners()), ([], {}))
 
+    def test_excluded_servers_drop_out_as_relays_and_as_destinations(self):
+        registry = LossRegistry(clock=lambda: 0.0)
+        registry.update(1, "relay", {"loss_probe": [
+            {"ip": "62.50.146.225", "port": 443, "loss_pct": 40.0, "rtt_ms": 1.0, "samples": 60},
+            {"ip": "45.145.56.96", "port": 8449, "loss_pct": 8.0, "rtt_ms": 1.0, "samples": 60},
+        ]})
+        registry.update(2, "bot", {
+            "loss_probe": [{"ip": "62.50.146.225", "port": 443, "loss_pct": 90.0, "rtt_ms": None, "samples": 60}],
+            "network": {"interfaces": [{"addresses": [{"type": "ipv4", "address": "45.145.56.96"}]}]},
+        })
+        registry.set_excluded({2})
+        self.assertEqual([s.server_id for s in registry.fresh()], [1])
+        self.assertEqual(registry.hidden_addresses(), frozenset({"45.145.56.96"}))
+        observations = collect_observations(registry.fresh(), set(), registry.hidden_addresses())
+        self.assertEqual({k: [r.relay_id for r in v] for k, v in observations.items()}, {"62.50.146.225:443": [1]})
+        rows = build_overview(registry.fresh(), registry.owners(), {}, registry.hidden_addresses())
+        self.assertEqual([r["target"] for r in rows], ["62.50.146.225:443"])
+
+    def test_exclusion_list_round_trip(self):
+        from app.services.loss_exclusions import format_ids, parse_ids
+        self.assertEqual(parse_ids(format_ids([7, 3, 3])), {3, 7})
+        self.assertEqual(parse_ids(" 5, x ,, 9"), {5, 9})
+        self.assertEqual(parse_ids(None), set())
+
     def test_observations_skip_short_windows_and_excluded_relays(self):
         snapshots = [
             RelaySnapshot(1, "a", (LossReading("10.0.0.5", 443, 40.0, 1.0, MIN_SAMPLES),

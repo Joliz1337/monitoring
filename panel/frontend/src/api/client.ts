@@ -1981,7 +1981,7 @@ export interface EditJobProfileProgress {
 
 export interface BackendEditJob {
   id: string
-  stage: 'editing' | 'rollout' | 'done' | 'failed'
+  stage: 'editing' | 'rollout' | 'refresh' | 'done' | 'failed'
   created_at: number
   finished_at: number | null
   current: string | null
@@ -2001,6 +2001,9 @@ export const lossApi = {
   backendsApply: (edits: BackendEditBody[]) =>
     api.post<{ job: BackendEditJob }>('/loss/backends/apply', { edits }),
   jobs: () => api.get<{ jobs: BackendEditJob[] }>('/loss/jobs'),
+  settings: () => api.get<{ excluded_server_ids: number[] }>('/loss/settings'),
+  updateSettings: (excludedServerIds: number[]) =>
+    api.put<{ excluded_server_ids: number[] }>('/loss/settings', { excluded_server_ids: excludedServerIds }),
   check: (target: string, serverIds: number[]) =>
     api.post<{ ip: string; port: number; results: LossCheckResult[] }>('/loss/check', {
       target,

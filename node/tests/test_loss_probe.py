@@ -30,7 +30,9 @@ from app.models.haproxy import (  # noqa: E402
 )
 from app.models.loss_probe import CHECK_ATTEMPTS_MAX, LossCheckRequest  # noqa: E402
 from app.services.loss_probe import (  # noqa: E402
+    APPLY_SETTLE_SEC,
     MAX_TARGETS,
+    TARGETS_REFRESH_SEC,
     AttemptWindow,
     LossProbe,
     Source,
@@ -303,6 +305,36 @@ class ManualCheckTests(unittest.TestCase):
         self.assertIsNone(parse_capabilities("").check("POST", path))
         self.assertIsNone(parse_capabilities("system").check("POST", path))
         self.assertIsNotNone(parse_capabilities("system:ro haproxy").check("POST", path))
+
+
+class RefreshScheduleTests(unittest.TestCase):
+    """Адреса перечитываются раз в TARGETS_REFRESH_SEC, а после смены конфига — сразу по паузе."""
+
+    def setUp(self):
+        self.discovered = []
+
+        def discover():
+            self.discovered.append(1)
+            return {("10.0.0.5", 443): {Source.HAPROXY}}
+
+        self.probe = LossProbe(discover=discover, attempt_fn=FakeAttempts({}))
+
+    def test_regular_cadence(self):
+        asyncio.run(self.probe.tick(100.0))
+        asyncio.run(self.probe.tick(100.0 + TARGETS_REFRESH_SEC - 1))
+        self.assertEqual(len(self.discovered), 1)
+        asyncio.run(self.probe.tick(100.0 + TARGETS_REFRESH_SEC))
+        self.assertEqual(len(self.discovered), 2)
+
+    def test_config_change_brings_refresh_forward(self):
+        import time
+        now = time.monotonic()
+        asyncio.run(self.probe.tick(now))
+        self.probe.request_refresh()
+        asyncio.run(self.probe.tick(now + APPLY_SETTLE_SEC - 0.5))
+        self.assertEqual(len(self.discovered), 1)
+        asyncio.run(self.probe.tick(now + APPLY_SETTLE_SEC + 0.5))
+        self.assertEqual(len(self.discovered), 2)
 
 
 class ReadableSourcesTests(unittest.TestCase):

@@ -756,6 +756,7 @@
     "job_started": "Job started — progress is shown at the top of the page",
     "job_editing": "Editing profiles — addresses in the job: {{count}}",
     "job_rollout": "Rolling out to nodes: {{synced}} of {{total}} done",
+    "job_refresh": "Refreshing the loss list — relays are re-reading the config…",
     "job_done": "Done: rules changed — {{rules}}, profiles — {{profiles}}",
     "job_failed": "Job failed: {{error}}",
     "job_current": "now: {{name}}",
@@ -765,7 +766,13 @@
     "job_failures": "Rollout crashed: {{names}}",
     "job_item": "changed {{changed}}, skipped {{skipped}}",
     "job_edit_delete": "delete {{source}}",
-    "job_check": "Checking {{target}} — nodes: {{count}}…"
+    "job_check": "Checking {{target}} — nodes: {{count}}…",
+    "settings_title": "Settings",
+    "excluded_title": "Servers excluded from loss tracking",
+    "excluded_hint": "Checks made by these servers are ignored, and addresses hosted on them are not shown in the table and never trigger alerts. The node keeps probing — the panel just ignores its data.",
+    "excluded_count": "excluded: {{count}}",
+    "settings_saved": "Settings saved",
+    "settings_save_failed": "Could not save settings"
   },
   "loss_probe": {
     "column": "Loss",

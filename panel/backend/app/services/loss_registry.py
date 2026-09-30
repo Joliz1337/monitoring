@@ -8,7 +8,7 @@
 
 import time
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, Iterable, Optional
 
 # Нода, не отвечавшая дольше этого, считается без данных: её старые цифры
 # не должны ни открывать, ни закрывать эпизод потерь
@@ -71,6 +71,12 @@ class LossRegistry:
     def __init__(self, clock: Callable[[], float] = time.time):
         self._clock = clock
         self._snapshots: dict[int, RelaySnapshot] = {}
+        # Серверы вне учёта потерь (loss_exclusions): снимки их храним — нужны их
+        # адреса, чтобы спрятать и адреса назначения на них
+        self._excluded: frozenset[int] = frozenset()
+
+    def set_excluded(self, server_ids: Iterable[int]) -> None:
+        self._excluded = frozenset(server_ids)
 
     def update(self, server_id: int, name: str, metrics: dict) -> None:
         self._snapshots[server_id] = RelaySnapshot(
@@ -84,13 +90,23 @@ class LossRegistry:
     def forget(self, server_id: int) -> None:
         self._snapshots.pop(server_id, None)
 
-    def fresh(self, max_age: float = STALE_AFTER_SEC) -> list[RelaySnapshot]:
+    def _recent(self, max_age: float) -> list[RelaySnapshot]:
         now = self._clock()
         return [s for s in self._snapshots.values() if now - s.updated_at <= max_age]
 
+    def fresh(self, max_age: float = STALE_AFTER_SEC) -> list[RelaySnapshot]:
+        """Релеи, чьи проверки учитываются: свежие и не исключённые."""
+        return [s for s in self._recent(max_age) if s.server_id not in self._excluded]
+
     def owners(self, max_age: float = STALE_AFTER_SEC) -> dict[str, str]:
         """IP → имя ноды, на которой он висит."""
-        return {address: s.name for s in self.fresh(max_age) for address in s.addresses}
+        return {address: s.name for s in self._recent(max_age) for address in s.addresses}
+
+    def hidden_addresses(self, max_age: float = STALE_AFTER_SEC) -> frozenset[str]:
+        """Адреса исключённых серверов — как адреса назначения они не показываются."""
+        return frozenset(
+            address for s in self._recent(max_age) if s.server_id in self._excluded for address in s.addresses
+        )
 
 
 _registry: Optional[LossRegistry] = None

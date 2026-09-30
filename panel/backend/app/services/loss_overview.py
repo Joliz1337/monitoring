@@ -40,11 +40,14 @@ class TargetParseError(ValueError):
 
 
 def build_overview(snapshots: list[RelaySnapshot], owners: dict[str, str],
-                   episodes: dict[str, Episode]) -> list[dict]:
-    """Адрес → что видит каждый релей; худшие потери сверху."""
+                   episodes: dict[str, Episode], hidden_ips: frozenset[str] = frozenset()) -> list[dict]:
+    """Адрес → что видит каждый релей; худшие потери сверху. Адреса
+    исключённых серверов (hidden_ips) не показываются."""
     targets: dict[str, dict] = {}
     for snapshot in snapshots:
         for reading in snapshot.readings:
+            if reading.ip in hidden_ips:
+                continue
             entry = targets.setdefault(reading.key, {
                 "target": reading.key,
                 "ip": reading.ip,

@@ -79,14 +79,16 @@ class LossEvent:
     relays: tuple[RelayReading, ...]
 
 
-def collect_observations(snapshots: list[RelaySnapshot], excluded: set[int]) -> dict[str, list[RelayReading]]:
-    """Адрес → что видит каждый релей; окно короче MIN_SAMPLES не считается."""
+def collect_observations(snapshots: list[RelaySnapshot], excluded: set[int],
+                         hidden_ips: frozenset[str] = frozenset()) -> dict[str, list[RelayReading]]:
+    """Адрес → что видит каждый релей; окно короче MIN_SAMPLES и адреса
+    исключённых серверов (hidden_ips) не считаются."""
     observations: dict[str, list[RelayReading]] = {}
     for snapshot in snapshots:
         if snapshot.server_id in excluded:
             continue
         for reading in snapshot.readings:
-            if reading.samples < MIN_SAMPLES:
+            if reading.samples < MIN_SAMPLES or reading.ip in hidden_ips:
                 continue
             observations.setdefault(reading.key, []).append(
                 RelayReading(snapshot.server_id, snapshot.name, reading)

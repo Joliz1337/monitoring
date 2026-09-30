@@ -38,6 +38,10 @@ TARGETS_REFRESH_SEC = 10.0
 # ограниченной при любом размере парка
 MAX_TARGETS = 256
 MAX_CONCURRENT_ATTEMPTS = 64
+# После применения конфига HAProxy/DNAT список адресов перечитывается не в
+# обычный срок, а через эту паузу: reload HAProxy возвращается раньше, чем новый
+# процесс займёт stats socket, а удалённый адрес не должен висеть в потерях
+APPLY_SETTLE_SEC = 3.0
 # Ручная проверка стартует попытки с паузой: поток, а не один всплеск SYN,
 # который сам мог бы упереться в ограничители на пути
 CHECK_SPACING_SEC = 0.05
@@ -167,6 +171,7 @@ class LossProbe:
         self._sources: dict[Target, set[Source]] = {}
         self._semaphore = asyncio.Semaphore(MAX_CONCURRENT_ATTEMPTS)
         self._task: Optional[asyncio.Task] = None
+        self._next_refresh = 0.0
 
     def refresh_targets(self, targets: dict[Target, set[Source]]) -> None:
         """История адреса переживает обновление списка; пропавший адрес забывается."""
@@ -175,6 +180,16 @@ class LossProbe:
         wanted = dict(sorted(targets.items())[:MAX_TARGETS])
         self._windows = {target: self._windows.get(target) or AttemptWindow() for target in wanted}
         self._sources = wanted
+
+    def request_refresh(self) -> None:
+        """Конфиг HAProxy или DNAT только что сменился — перечитать адреса скоро."""
+        self._next_refresh = min(self._next_refresh, time.monotonic() + APPLY_SETTLE_SEC)
+
+    async def tick(self, now: float) -> None:
+        if now >= self._next_refresh:
+            self.refresh_targets(await asyncio.to_thread(self._discover))
+            self._next_refresh = now + TARGETS_REFRESH_SEC
+        await self.run_round()
 
     async def run_round(self) -> None:
         targets = list(self._windows)
@@ -232,14 +247,10 @@ class LossProbe:
         self._task = None
 
     async def _loop(self) -> None:
-        next_refresh = 0.0
         while True:
             started = time.monotonic()
             try:
-                if started >= next_refresh:
-                    self.refresh_targets(await asyncio.to_thread(self._discover))
-                    next_refresh = started + TARGETS_REFRESH_SEC
-                await self.run_round()
+                await self.tick(started)
             except Exception as exc:
                 logger.error("Loss probe round failed: %s", exc, exc_info=True)
             await asyncio.sleep(max(0.0, ATTEMPT_INTERVAL_SEC - (time.monotonic() - started)))

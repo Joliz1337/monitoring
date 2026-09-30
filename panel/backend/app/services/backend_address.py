@@ -343,6 +343,17 @@ async def sync_profile(ref: ProfileRef) -> None:
             await sync(profile, db)
 
 
+async def synced_server_ids(db: AsyncSession, refs: list[ProfileRef]) -> list[int]:
+    """Ноды изменённых профилей, которые уже получили новый конфиг."""
+    ids: set[int] = set()
+    for ref in refs:
+        rows = await db.execute(
+            select(Server.id).where(LINK_COLUMNS[ref.kind] == ref.profile_id, SYNC_STATUS_COLUMNS[ref.kind] == "synced")
+        )
+        ids.update(rows.scalars())
+    return sorted(ids)
+
+
 async def rollout_progress(db: AsyncSession, refs: list[ProfileRef]) -> list[dict]:
     """Сколько привязанных нод каждого профиля уже получили конфиг — по статусам в базе."""
     progress = []

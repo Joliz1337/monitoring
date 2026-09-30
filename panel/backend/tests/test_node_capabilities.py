@@ -278,6 +278,7 @@ class CallSiteCoverageTest(unittest.TestCase):
     UNGATED = {
         "routers/servers.py",          # /api/version, кнопка «Тест»
         "routers/system.py",           # /api/system/versions
+        "services/backend_edit_jobs.py",  # /api/metrics после раскатки — список потерь
         "services/deploy_job_manager.py",  # установка новой ноды
         "services/http_client.py",     # сами клиенты
         "services/migration.py",       # /api/system/replace-node-cert

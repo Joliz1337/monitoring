@@ -20,6 +20,7 @@ from app.services.metrics_collector import start_collector, stop_collector
 from app.services.blocklist_manager import get_blocklist_manager
 from app.services.xray_stats_collector import start_xray_stats_collector, stop_xray_stats_collector
 from app.services.server_alerter import start_server_alerter, stop_server_alerter
+from app.services.loss_exclusions import load_loss_exclusions
 from app.services.billing_checker import start_billing_checker, stop_billing_checker
 from app.services.telegram_bot import start_telegram_bot_service, stop_telegram_bot_service
 from app.services.time_sync import start_time_sync, stop_time_sync
@@ -95,6 +96,7 @@ async def lifespan(app: FastAPI):
     async with async_session() as db:
         branch = await load_branch_from_db(db)
         await load_xray_test_versions(db)
+        await load_loss_exclusions(db)
     logger.info(f"Update channel: {branch}")
     
     await _init_optional_module("app.services._ext", "init_ext_db")

@@ -11,7 +11,8 @@ import { Checkbox } from '../components/ui/Checkbox'
 import { ServerSelector } from '../components/ssh/ServerSelector'
 import BackendEditModal from '../components/loss/BackendEditModal'
 import BatchEditModal, { type BatchMode } from '../components/loss/BatchEditModal'
-import ActivityStrip, { type RunningCheck } from '../components/loss/ActivityStrip'
+import ActivityStrip, { isJobRunning, type RunningCheck } from '../components/loss/ActivityStrip'
+import LossSettings from '../components/loss/LossSettings'
 import { readStorage, writeStorage } from '../utils/storage'
 
 // Нода обновляет окно каждые 2 с, панель собирает метрики раз в ~10 с
@@ -69,20 +70,29 @@ export default function Loss() {
 
   useAutoRefresh(fetchOverview, { customInterval: REFRESH_INTERVAL_MS })
 
+  // Задания, которые видели идущими: их завершение — повод сразу перечитать таблицу
+  const runningJobIds = useRef<Set<string>>(new Set())
+
   const fetchJobs = useCallback(async () => {
     try {
       const { data } = await lossApi.jobs()
       setJobs(data.jobs)
+      let finished = false
+      for (const job of data.jobs) {
+        if (isJobRunning(job)) runningJobIds.current.add(job.id)
+        else if (runningJobIds.current.delete(job.id)) finished = true
+      }
+      if (finished) fetchOverview()
     } catch { /* полоска покажет прошлое состояние до следующего опроса */ }
-  }, [])
+  }, [fetchOverview])
 
-  const anyJobRunning = jobs.some(job => job.stage === 'editing' || job.stage === 'rollout')
+  const anyJobRunning = jobs.some(isJobRunning)
   useAutoRefresh(fetchJobs, { customInterval: anyJobRunning ? JOBS_ACTIVE_INTERVAL_MS : JOBS_IDLE_INTERVAL_MS })
 
   const visibleJobs = useMemo(() => {
     const now = Date.now() / 1000
     return jobs.filter(job =>
-      job.stage === 'editing' || job.stage === 'rollout'
+      isJobRunning(job)
       || (!dismissed.has(job.id) && now - (job.finished_at ?? job.created_at) < FINISHED_JOB_VISIBLE_SEC))
   }, [jobs, dismissed])
 
@@ -95,6 +105,7 @@ export default function Loss() {
   }
 
   const onJobStarted = (job: BackendEditJob) => {
+    runningJobIds.current.add(job.id)
     setJobs(prev => [job, ...prev.filter(existing => existing.id !== job.id)])
     setPicked(new Set())
   }
@@ -346,6 +357,8 @@ export default function Loss() {
           </div>
         )}
       </div>
+
+      <LossSettings servers={activeServers} onSaved={fetchOverview} />
 
       {/* fixed, а не sticky: длинную страницу прокручивает окно, sticky внутри <main> не прилипал.
           По центру области страницы — на десктопе слева статичное меню шириной 18rem */}

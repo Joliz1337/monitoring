@@ -284,6 +284,7 @@ async def apply_config(request: ConfigApplyRequest):
 
     if success:
         logger.info(f"HAProxy config applied from panel (reloaded: {reloaded})")
+        get_loss_probe().request_refresh()
     
     return ConfigApplyResponse(
         success=success,

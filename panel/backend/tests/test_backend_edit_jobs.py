@@ -48,12 +48,15 @@ class FakeSession:
 
 
 class JobTests(unittest.IsolatedAsyncioTestCase):
-    def manager(self, planner=None, syncer=None, clock=None):
+    def manager(self, planner=None, syncer=None, clock=None, refresher=None):
         self.session = FakeSession()
+        self.refresher = refresher or mock.AsyncMock()
         return EditJobManager(
             session_factory=lambda: self.session,
             planner=planner or mock.AsyncMock(return_value=PLAN),
             syncer=syncer or mock.AsyncMock(),
+            relay_lookup=mock.AsyncMock(return_value=[3, 7]),
+            refresher=self.refresher,
             clock=clock or (lambda: 1000.0),
         )
 
@@ -67,6 +70,14 @@ class JobTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([call.args[0] for call in syncer.await_args_list], REFS)
         self.assertEqual((job.stage, job.current, job.items), (JobStage.DONE, None, [{"changed": 1, "skipped": 1}]))
         self.assertEqual(job.finished_at, 1000.0)
+        # Перед «Готово» — свежие данные о потерях с релеев, получивших конфиг
+        self.refresher.assert_awaited_once_with([3, 7])
+
+    async def test_refresh_failure_does_not_fail_the_job(self):
+        manager = self.manager(refresher=mock.AsyncMock(side_effect=RuntimeError("node timeout")))
+        job = manager.create([EDIT])
+        await manager.run(job)
+        self.assertEqual(job.stage, JobStage.DONE)
 
     async def test_one_failed_rollout_does_not_stop_others(self):
         syncer = mock.AsyncMock(side_effect=[RuntimeError("node api down"), None])

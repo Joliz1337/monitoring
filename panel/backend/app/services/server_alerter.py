@@ -657,7 +657,8 @@ class ServerAlerter:
         registry = get_loss_registry()
         excluded = excluded_ids | self._trigger_excluded.get("packet_loss", set())
         policy = self._loss_policy(settings)
-        events = self._loss.evaluate(collect_observations(registry.fresh(), excluded), policy, now)
+        observations = collect_observations(registry.fresh(), excluded, registry.hidden_addresses())
+        events = self._loss.evaluate(observations, policy, now)
         await self._save_loss_episodes()
         if events:
             await self._send_loss_digest(settings, events, registry.owners(), policy)

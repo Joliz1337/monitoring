@@ -7,10 +7,15 @@
 считается по статусам нод в базе, а не рисуется. Каждый профиль раскатывается
 один раз, сколько бы адресов в нём ни поменялось.
 
+Последний шаг — свежие данные о потерях с релеев, получивших конфиг: иначе
+«Готово» показывалось бы рядом с уже удалёнными адресами до следующего сбора
+метрик.
+
 Задания живут в памяти единственного процесса бэкенда; завершённые хранятся
 час — полоска подхватывает их и после перезагрузки страницы.
 """
 
+import asyncio
 import logging
 import time
 import uuid
@@ -18,7 +23,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Awaitable, Callable, Optional
 
+import httpx
+from sqlalchemy import select
+
 from app.database import async_session_maker
+from app.models import Server
 from app.services.backend_address import (
     AddressEdit,
     BatchPlan,
@@ -27,17 +36,26 @@ from app.services.backend_address import (
     ProfileRef,
     plan_batch,
     sync_profile,
+    synced_server_ids,
 )
+from app.services.http_client import get_node_client, node_auth_headers
+from app.services.loss_registry import get_loss_registry
 
 logger = logging.getLogger(__name__)
 
 JOB_TTL_SEC = 3600
 MAX_JOBS = 20
+# Нода перечитывает адреса через ~3 с после применения конфига и за 2 с делает
+# первую попытку до новых — раньше забирать данные нет смысла
+NODE_SETTLE_SEC = 5.0
+REFRESH_CONCURRENCY = 20
+REFRESH_TIMEOUT_SEC = 10.0
 
 
 class JobStage(str, Enum):
     EDITING = "editing"
     ROLLOUT = "rollout"
+    REFRESH = "refresh"
     DONE = "done"
     FAILED = "failed"
 
@@ -65,7 +83,7 @@ class EditJob:
 
     @property
     def running(self) -> bool:
-        return self.stage in (JobStage.EDITING, JobStage.ROLLOUT)
+        return self.stage in (JobStage.EDITING, JobStage.ROLLOUT, JobStage.REFRESH)
 
     def to_dict(self, progress: list[dict]) -> dict:
         return {
@@ -86,17 +104,46 @@ class EditJob:
         }
 
 
+async def refresh_relays(server_ids: list[int]) -> None:
+    """Свежие метрики с релеев — в реестр потерь, не дожидаясь очередного сбора."""
+    if not server_ids:
+        return
+    await asyncio.sleep(NODE_SETTLE_SEC)
+    async with async_session_maker() as db:
+        servers = list((await db.execute(select(Server).where(Server.id.in_(server_ids)))).scalars())
+    registry = get_loss_registry()
+    semaphore = asyncio.Semaphore(REFRESH_CONCURRENCY)
+
+    async def refresh(server: Server) -> None:
+        async with semaphore:
+            try:
+                response = await get_node_client(server).get(
+                    f"{server.url}/api/metrics", headers=node_auth_headers(server), timeout=REFRESH_TIMEOUT_SEC,
+                )
+            except httpx.HTTPError as exc:
+                logger.info("loss_refresh_unreachable server_id=%s error=%s", server.id, exc)
+                return
+            if response.status_code == 200:
+                registry.update(server.id, server.name, response.json())
+
+    await asyncio.gather(*(refresh(server) for server in servers))
+
+
 class EditJobManager:
     def __init__(
         self,
         session_factory=async_session_maker,
         planner: Callable[..., Awaitable[BatchPlan]] = plan_batch,
         syncer: Callable[[ProfileRef], Awaitable[None]] = sync_profile,
+        relay_lookup: Callable[..., Awaitable[list[int]]] = synced_server_ids,
+        refresher: Callable[[list[int]], Awaitable[None]] = refresh_relays,
         clock: Callable[[], float] = time.time,
     ):
         self._session_factory = session_factory
         self._planner = planner
         self._syncer = syncer
+        self._relay_lookup = relay_lookup
+        self._refresher = refresher
         self._clock = clock
         self._jobs: dict[str, EditJob] = {}
 
@@ -136,6 +183,9 @@ class EditJobManager:
                     job.failures.append(ref.profile_name)
                     logger.error("backend_edit_rollout_failed job=%s kind=%s profile_id=%s error=%s",
                                  job.id, ref.kind, ref.profile_id, exc)
+            job.stage = JobStage.REFRESH
+            job.current = None
+            await self._refresh_losses(job)
             job.stage = JobStage.DONE
             logger.info("backend_edit_job_done job=%s edits=%s profiles=%s failures=%s",
                         job.id, len(job.edits), len(job.changed), len(job.failures))
@@ -146,6 +196,16 @@ class EditJobManager:
         finally:
             job.current = None
             job.finished_at = self._clock()
+
+
+    async def _refresh_losses(self, job: EditJob) -> None:
+        # Сбой здесь не отменяет сделанного — данные подтянет обычный сбор метрик
+        try:
+            async with self._session_factory() as db:
+                relay_ids = await self._relay_lookup(db, job.changed)
+            await self._refresher(relay_ids)
+        except Exception as exc:
+            logger.warning("backend_edit_refresh_failed job=%s error=%s", job.id, exc)
 
 
 _manager: Optional[EditJobManager] = None

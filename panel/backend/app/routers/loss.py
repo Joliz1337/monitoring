@@ -23,6 +23,7 @@ from app.services.backend_address import (
     validate_edit,
 )
 from app.services.backend_edit_jobs import get_edit_jobs
+from app.services.loss_exclusions import load_loss_exclusions, save_loss_exclusions
 from app.services.loss_overview import TargetParseError, build_overview, check_from_servers, parse_target
 from app.services.loss_registry import get_loss_registry
 from app.services.server_alerter import get_server_alerter
@@ -66,6 +67,10 @@ class BackendEditRequest(BaseModel):
         )
 
 
+class LossSettingsUpdate(BaseModel):
+    excluded_server_ids: list[int] = Field(default_factory=list, max_length=5000)
+
+
 class BackendEditBatch(BaseModel):
     edits: list[BackendEditRequest] = Field(..., min_length=1, max_length=MAX_BATCH_EDITS)
 
@@ -74,8 +79,22 @@ class BackendEditBatch(BaseModel):
 async def get_overview():
     registry = get_loss_registry()
     return {
-        "targets": build_overview(registry.fresh(), registry.owners(), get_server_alerter().loss_episodes()),
+        "targets": build_overview(
+            registry.fresh(), registry.owners(), get_server_alerter().loss_episodes(), registry.hidden_addresses(),
+        ),
     }
+
+
+@router.get("/settings")
+async def get_loss_settings(db: AsyncSession = Depends(get_db)):
+    return {"excluded_server_ids": sorted(await load_loss_exclusions(db))}
+
+
+@router.put("/settings")
+async def update_loss_settings(data: LossSettingsUpdate, db: AsyncSession = Depends(get_db)):
+    excluded = await save_loss_exclusions(db, data.excluded_server_ids)
+    logger.info("loss_exclusions_updated servers=%s", len(excluded))
+    return {"excluded_server_ids": sorted(excluded)}
 
 
 @router.post("/check")

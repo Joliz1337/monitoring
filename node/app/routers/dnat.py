@@ -31,6 +31,7 @@ async def apply_rules(request: DnatApplyRequest) -> DnatApplyResponse:
     result = await get_dnat_manager().apply_async(request.rules)
     if result["success"]:
         logger.info("DNAT profile applied from panel: %s rules", len(request.rules))
+        get_loss_probe().request_refresh()
     return DnatApplyResponse(**result)
 
 

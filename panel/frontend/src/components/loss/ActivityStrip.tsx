@@ -14,6 +14,10 @@ interface Props {
   onDismiss: (jobId: string) => void
 }
 
+export function isJobRunning(job: BackendEditJob): boolean {
+  return job.stage === 'editing' || job.stage === 'rollout' || job.stage === 'refresh'
+}
+
 function describeEdit(edit: BackendEditBody, t: (key: string, options?: Record<string, unknown>) => string): string {
   const source = edit.all_ports ? edit.ip : `${edit.ip}:${edit.port}`
   if (edit.action === 'delete') return t('loss.job_edit_delete', { source })
@@ -34,7 +38,7 @@ function JobCard({ job, onDismiss }: { job: BackendEditJob; onDismiss: (id: stri
     { total: 0, synced: 0, pending: 0, failed: 0 },
   )
   const changedRules = job.items.reduce((sum, item) => sum + item.changed, 0)
-  const running = job.stage === 'editing' || job.stage === 'rollout'
+  const running = isJobRunning(job)
   const donePct = totals.total ? Math.round(((totals.synced + totals.failed) / totals.total) * 100) : 0
 
   let icon = <Loader2 className="w-4 h-4 text-accent-400 animate-spin" />
@@ -42,6 +46,8 @@ function JobCard({ job, onDismiss }: { job: BackendEditJob; onDismiss: (id: stri
   let tone = 'border-accent-500/30 bg-accent-500/5'
   if (job.stage === 'rollout') {
     title = t('loss.job_rollout', { synced: totals.synced, total: totals.total })
+  } else if (job.stage === 'refresh') {
+    title = t('loss.job_refresh')
   } else if (job.stage === 'done') {
     icon = totals.failed || job.failures.length
       ? <AlertTriangle className="w-4 h-4 text-warning" />
