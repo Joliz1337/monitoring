@@ -168,7 +168,7 @@ export default function Loss() {
   const levelName = (level: number) => t(`loss.level_${level}`)
 
   return (
-    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-6">
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className={`space-y-6 ${picked.size > 0 ? 'pb-24' : ''}`}>
       <div className="flex items-center gap-3">
         <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-accent-500/20 to-accent-600/20 flex items-center justify-center border border-accent-500/20">
           <Radar className="w-5 h-5 text-accent-400" />
@@ -347,8 +347,10 @@ export default function Loss() {
         )}
       </div>
 
+      {/* fixed, а не sticky: длинную страницу прокручивает окно, sticky внутри <main> не прилипал.
+          По центру области страницы — на десктопе слева статичное меню шириной 18rem */}
       {picked.size > 0 && (
-        <div className="sticky bottom-4 z-40 flex items-center gap-3 flex-wrap rounded-xl border border-accent-500/30 bg-dark-900/95 backdrop-blur px-4 py-3 shadow-lg">
+        <div className="fixed bottom-6 z-40 left-1/2 -translate-x-1/2 lg:left-[calc(50%+9rem)] w-[calc(100vw-2rem)] lg:w-[calc(100vw-22rem)] max-w-4xl flex items-center gap-3 flex-wrap rounded-xl border border-accent-500/30 bg-dark-900/95 backdrop-blur px-4 py-3 shadow-2xl shadow-black/50">
           <span className="text-sm text-dark-200">{t('loss.picked', { count: picked.size })}</span>
           <button
             onClick={() => setBatch({ mode: 'delete', targets: pickedTargets })}
