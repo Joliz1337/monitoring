@@ -1938,8 +1938,42 @@ export interface LossCheckResult {
   samples?: number | null
 }
 
+export type BackendEditAction = 'replace' | 'delete'
+
+export interface BackendEditBody {
+  ip: string
+  port: number
+  all_ports: boolean
+  action: BackendEditAction
+  new_ip: string | null
+  new_port: number | null
+}
+
+export interface BackendEditRule {
+  rule: string
+  outcome: 'changed' | 'merged' | 'skipped'
+  reason: 'last_backend' | 'shared_port' | null
+}
+
+export interface BackendEditProfile {
+  kind: 'haproxy' | 'dnat'
+  profile_id: number
+  profile_name: string
+  servers: number
+  rules: BackendEditRule[]
+}
+
+export interface LossSuggestion {
+  ip: string
+  worst_loss: number | null
+}
+
 export const lossApi = {
   overview: () => api.get<{ targets: LossTarget[] }>('/loss/overview'),
+  backendsPreview: (body: BackendEditBody) =>
+    api.post<{ profiles: BackendEditProfile[]; suggestions: LossSuggestion[] }>('/loss/backends/preview', body),
+  backendsApply: (body: BackendEditBody) =>
+    api.post<{ profiles: BackendEditProfile[] }>('/loss/backends/apply', body),
   check: (target: string, serverIds: number[]) =>
     api.post<{ ip: string; port: number; results: LossCheckResult[] }>('/loss/check', {
       target,

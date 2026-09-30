@@ -8,6 +8,7 @@ import { useServersStore } from '../stores/serversStore'
 import { useAutoRefresh } from '../hooks/useAutoRefresh'
 import LossProbeBadge, { LOSS_WARN_PCT } from '../components/ui/LossProbeBadge'
 import { ServerSelector } from '../components/ssh/ServerSelector'
+import BackendEditModal from '../components/loss/BackendEditModal'
 
 // Нода обновляет окно каждые 2 с, панель собирает метрики раз в ~10 с
 const REFRESH_INTERVAL_MS = 10_000
@@ -31,6 +32,7 @@ export default function Loss() {
   const [checking, setChecking] = useState(false)
   const [checkResult, setCheckResult] = useState<{ ip: string; port: number; results: LossCheckResult[] } | null>(null)
   const checkBlockRef = useRef<HTMLDivElement>(null)
+  const [editing, setEditing] = useState<LossTarget | null>(null)
 
   const fetchOverview = useCallback(async () => {
     try {
@@ -166,7 +168,16 @@ export default function Loss() {
                             ? <span className="px-2 py-0.5 rounded border bg-warning/10 text-warning border-warning/20">{levelName(target.episode.level)}</span>
                             : <span className="text-dark-500">—</span>}
                         </td>
-                        <td className="px-4 py-2 text-right">
+                        <td className="px-4 py-2 text-right whitespace-nowrap">
+                          {/* Правка профилей — только IPv4: DNAT других адресов не держит */}
+                          {target.ip.includes('.') && (
+                            <button
+                              onClick={() => setEditing(target)}
+                              className="px-2.5 py-1 rounded-lg text-xs text-accent-400 hover:bg-accent-500/10 transition-colors"
+                            >
+                              {t('loss.edit_open')}
+                            </button>
+                          )}
                           <button
                             onClick={() => prefillCheck(target.target)}
                             className="px-2.5 py-1 rounded-lg text-xs text-accent-400 hover:bg-accent-500/10 transition-colors"
@@ -238,6 +249,8 @@ export default function Loss() {
           </div>
         )}
       </div>
+
+      {editing && <BackendEditModal ip={editing.ip} port={editing.port} onClose={() => setEditing(null)} />}
     </motion.div>
   )
 }
