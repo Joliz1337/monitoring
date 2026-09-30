@@ -1,4 +1,5 @@
-import { useEffect, useState, useCallback, useMemo } from 'react'
+import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
+import { isAxiosError } from 'axios'
 import NodeRestrictedNotice from '../components/servers/NodeRestrictedNotice'
 import { nodeAllows } from '../utils/nodeCapabilities'
 import { KeyRound, Shield, Lock, Loader2, Trash2, Plus, AlertTriangle, ChevronDown, ChevronUp, Info, Copy, RefreshCw, Save, Eye, EyeOff, LayoutGrid, SlidersHorizontal } from 'lucide-react'
@@ -16,6 +17,25 @@ import { useSSHBulkStream, BulkProgressState } from '../components/ssh/useSSHBul
 
 type TabType = 'ssh' | 'fail2ban' | 'keys'
 type PageMode = 'overview' | 'manage'
+
+// 409 — раздел закрыт владельцем ноды, 501 — агент без управления SSH
+const UNSUPPORTED_STATUSES = new Set([409, 501])
+const NO_RESPONSE_STATUSES = new Set([502, 503, 504])
+
+interface LoadError {
+  noResponse: boolean
+  detail: string
+}
+
+function describeLoadError(err: unknown): LoadError {
+  if (!isAxiosError(err)) return { noResponse: false, detail: String(err) }
+  const status = err.response?.status
+  const detail = err.response?.data?.detail
+  return {
+    noResponse: status === undefined || NO_RESPONSE_STATUSES.has(status),
+    detail: typeof detail === 'string' && detail ? detail : err.message,
+  }
+}
 
 type DurationUnit = 'seconds' | 'minutes' | 'hours' | 'days'
 
@@ -101,6 +121,41 @@ function NumberInput({ value, onChange, min, max }: { value: number; onChange: (
                  focus:outline-none focus:border-accent-500 [appearance:textfield]
                  [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
     />
+  )
+}
+
+interface NodeLoadStateProps {
+  loading: boolean
+  error: LoadError | null
+  onRetry: () => void
+  t: (key: string) => string
+}
+
+function NodeLoadState({ loading, error, onRetry, t }: NodeLoadStateProps) {
+  if (loading || !error) {
+    return (
+      <div className="flex items-center justify-center gap-2 py-8 text-sm text-dark-400">
+        <Loader2 className="w-4 h-4 animate-spin" />
+        {t('ssh_security.loading_config')}
+      </div>
+    )
+  }
+  return (
+    <div className="flex items-start gap-3 p-4 bg-red-500/10 border border-red-500/20 rounded-lg">
+      <AlertTriangle className="w-5 h-5 text-red-400 mt-0.5 shrink-0" />
+      <div className="flex-1 min-w-0">
+        <div className="text-sm font-medium text-red-300">
+          {error.noResponse ? t('ssh_security.server_no_response') : t('ssh_security.server_load_failed')}
+        </div>
+        <p className="text-xs text-dark-400 mt-1">
+          {error.noResponse ? t('ssh_security.server_no_response_desc') : error.detail}
+        </p>
+      </div>
+      <button onClick={onRetry} className="btn btn-secondary text-xs px-3 py-1.5 shrink-0">
+        <RefreshCw className="w-3.5 h-3.5" />
+        {t('ssh_security.retry')}
+      </button>
+    </div>
   )
 }
 
@@ -335,7 +390,8 @@ export default function SSHSecurity() {
   const [unbanningIp, setUnbanningIp] = useState<string | null>(null)
   const [unbanningAll, setUnbanningAll] = useState(false)
 
-  const [sshKeys, setSshKeys] = useState<SSHKey[]>([])
+  // null — ключи с ноды не получены (грузятся или нода не ответила)
+  const [sshKeys, setSshKeys] = useState<SSHKey[] | null>(null)
   const [newKeyText, setNewKeyText] = useState('')
   const [addingKey, setAddingKey] = useState(false)
   const [removingKey, setRemovingKey] = useState<string | null>(null)
@@ -355,6 +411,10 @@ export default function SSHSecurity() {
   const [savingPreset, setSavingPreset] = useState(false)
 
   const [nodeUnsupported, setNodeUnsupported] = useState(false)
+  const [serverLoading, setServerLoading] = useState(false)
+  const [loadError, setLoadError] = useState<LoadError | null>(null)
+  // Ответ сервера, с которого уже переключились, не должен лечь поверх текущего
+  const activeServerRef = useRef<number | null>(null)
 
   const bulk = useSSHBulkStream()
   const bulkDisabled = selectedServerIds.length === 0 || bulk.progress.active
@@ -387,70 +447,58 @@ export default function SSHSecurity() {
     }
   }, [t])
 
+  const fetchBannedIps = useCallback(async (serverId: number) => {
+    let ips: Fail2banBannedIP[] = []
+    try {
+      ips = (await sshSecurityApi.getBanned(serverId)).data.ips
+    } catch {
+      // список банов вторичен — без него остальная вкладка работает
+    }
+    if (activeServerRef.current === serverId) setBannedIps(ips)
+  }, [])
+
+  // Запросы независимы: сервер со сбоящей связью может отдать часть данных,
+  // а что не пришло — показывается как «не ответил», а не пустым местом
   const fetchServerData = useCallback(async (serverId: number) => {
-    setNodeUnsupported(false)
     // В закрытую ноду не идём вовсе: четыре запроса за гарантированным отказом
-    if (!nodeAllows(servers.find(s => s.id === serverId), 'ssh', 'read')) {
-      setSshConfig(null)
-      setFail2ban(null)
-      setSshKeys([])
-      setStatus(null)
+    if (!nodeAllows(servers.find(s => s.id === serverId), 'ssh', 'read')) return
+
+    setServerLoading(true)
+    const [configRes, fail2banRes, keysRes, statusRes] = await Promise.allSettled([
+      sshSecurityApi.getConfig(serverId),
+      sshSecurityApi.getFail2ban(serverId),
+      sshSecurityApi.getKeys(serverId),
+      sshSecurityApi.getStatus(serverId),
+    ])
+    if (activeServerRef.current !== serverId) return
+    setServerLoading(false)
+
+    if (
+      configRes.status === 'rejected' &&
+      isAxiosError(configRes.reason) &&
+      UNSUPPORTED_STATUSES.has(configRes.reason.response?.status ?? 0)
+    ) {
+      setNodeUnsupported(true)
       return
     }
-    try {
-      const [configRes, fail2banRes, keysRes, statusRes] = await Promise.all([
-        sshSecurityApi.getConfig(serverId),
-        sshSecurityApi.getFail2ban(serverId).catch(() => null),
-        sshSecurityApi.getKeys(serverId).catch(() => null),
-        sshSecurityApi.getStatus(serverId).catch(() => null),
-      ])
 
-      setSshConfig(configRes.data.config)
-      setEditedConfig({})
+    const failed = [configRes, fail2banRes, keysRes].find(r => r.status === 'rejected')
+    setLoadError(failed?.status === 'rejected' ? describeLoadError(failed.reason) : null)
 
-      if (fail2banRes) {
-        setFail2ban(fail2banRes.data)
-        setEditedFail2ban({})
-      } else {
-        setFail2ban(null)
-        setEditedFail2ban({})
-      }
+    setSshConfig(configRes.status === 'fulfilled' ? configRes.value.data.config : null)
+    setEditedConfig({})
+    const f2b = fail2banRes.status === 'fulfilled' ? fail2banRes.value.data : null
+    setFail2ban(f2b)
+    setEditedFail2ban({})
+    setSshKeys(keysRes.status === 'fulfilled' ? keysRes.value.data.keys : null)
+    setStatus(statusRes.status === 'fulfilled' ? statusRes.value.data : null)
 
-      setSshKeys(keysRes ? keysRes.data.keys : [])
-      setStatus(statusRes ? statusRes.data : null)
-
-      if (fail2banRes?.data?.installed && fail2banRes.data.enabled) {
-        try {
-          const bannedRes = await sshSecurityApi.getBanned(serverId)
-          setBannedIps(bannedRes.data.ips)
-        } catch {
-          setBannedIps([])
-        }
-      } else {
-        setBannedIps([])
-      }
-    } catch (err: any) {
-      const statusCode = err.response?.status
-      if (statusCode === 409 || statusCode === 501 || statusCode === 503) {
-        setNodeUnsupported(true)
-        setSshConfig(null)
-        setFail2ban(null)
-        setSshKeys([])
-        setStatus(null)
-      } else {
-        toast.error(t('ssh_security.config_failed'))
-      }
-    }
-  }, [servers, t])
-
-  const fetchBannedIps = useCallback(async (serverId: number) => {
-    try {
-      const res = await sshSecurityApi.getBanned(serverId)
-      setBannedIps(res.data.ips)
-    } catch {
+    if (f2b?.installed && f2b.enabled) {
+      await fetchBannedIps(serverId)
+    } else {
       setBannedIps([])
     }
-  }, [])
+  }, [servers, fetchBannedIps])
 
   const fetchPresets = useCallback(async () => {
     try {
@@ -470,10 +518,26 @@ export default function SSHSecurity() {
     init()
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Смена сервера сбрасывает прежние данные и правки: пока новый не ответил,
+  // на экране не должно оставаться чужого конфига под его именем
   useEffect(() => {
-    if (!activeServerId) return
-    fetchServerData(activeServerId)
+    activeServerRef.current = activeServerId
+    setNodeUnsupported(false)
+    setServerLoading(false)
+    setLoadError(null)
+    setSshConfig(null)
+    setEditedConfig({})
+    setFail2ban(null)
+    setEditedFail2ban({})
+    setSshKeys(null)
+    setStatus(null)
+    setBannedIps([])
+    if (activeServerId) fetchServerData(activeServerId)
   }, [activeServerId, fetchServerData])
+
+  const retryActive = () => {
+    if (activeServerId) fetchServerData(activeServerId)
+  }
 
   const updateSSHField = <K extends keyof SSHConfig>(key: K, value: SSHConfig[K]) => {
     if (sshConfig && sshConfig[key] === value) {
@@ -517,7 +581,6 @@ export default function SSHSecurity() {
   const refreshActive = async () => {
     if (!activeServerId) return
     await fetchServerData(activeServerId)
-    await fetchBannedIps(activeServerId)
   }
 
   const handleApply = async () => {
@@ -989,7 +1052,7 @@ export default function SSHSecurity() {
             {activeServerId && sshAllowed && !nodeUnsupported && (
               <AnimatePresence mode="wait">
                 {/* SSH Settings Tab */}
-                {activeTab === 'ssh' && mergedConfig && (
+                {activeTab === 'ssh' && (
                   <motion.div
                     key="ssh"
                     initial={{ opacity: 0, x: -20 }}
@@ -997,124 +1060,128 @@ export default function SSHSecurity() {
                     exit={{ opacity: 0, x: 20 }}
                     className="space-y-4"
                   >
-                    <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-                      {/* Access section */}
-                      <div className="card">
-                        <h3 className="text-lg font-semibold text-dark-100 mb-1 flex items-center gap-2">
-                          {t('ssh_security.section_access')}
-                          <FAQIcon screen="SSH_SECURITY_SSHD" size="sm" />
-                        </h3>
-                        <div className="divide-y divide-dark-800">
-                          <SettingRow label={t('ssh_security.port')} description={t('ssh_security.port_desc')}>
-                            <NumberInput
-                              value={mergedConfig.port}
-                              onChange={v => updateSSHField('port', v)}
-                              min={1}
-                              max={65535}
-                            />
-                          </SettingRow>
+                    {mergedConfig ? (
+                      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                        {/* Access section */}
+                        <div className="card">
+                          <h3 className="text-lg font-semibold text-dark-100 mb-1 flex items-center gap-2">
+                            {t('ssh_security.section_access')}
+                            <FAQIcon screen="SSH_SECURITY_SSHD" size="sm" />
+                          </h3>
+                          <div className="divide-y divide-dark-800">
+                            <SettingRow label={t('ssh_security.port')} description={t('ssh_security.port_desc')}>
+                              <NumberInput
+                                value={mergedConfig.port}
+                                onChange={v => updateSSHField('port', v)}
+                                min={1}
+                                max={65535}
+                              />
+                            </SettingRow>
 
-                          <SettingRow label={t('ssh_security.permit_root')} description={t('ssh_security.permit_root_desc')}>
-                            <select
-                              value={mergedConfig.permit_root_login}
-                              onChange={e => updateSSHField('permit_root_login', e.target.value as SSHConfig['permit_root_login'])}
-                              className="bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-dark-100 text-sm
-                                         focus:outline-none focus:border-accent-500"
-                            >
-                              <option value="yes">{t('ssh_security.root_yes')}</option>
-                              <option value="no">{t('ssh_security.root_no')}</option>
-                              <option value="prohibit-password">{t('ssh_security.root_prohibit_password')}</option>
-                            </select>
-                          </SettingRow>
+                            <SettingRow label={t('ssh_security.permit_root')} description={t('ssh_security.permit_root_desc')}>
+                              <select
+                                value={mergedConfig.permit_root_login}
+                                onChange={e => updateSSHField('permit_root_login', e.target.value as SSHConfig['permit_root_login'])}
+                                className="bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-dark-100 text-sm
+                                           focus:outline-none focus:border-accent-500"
+                              >
+                                <option value="yes">{t('ssh_security.root_yes')}</option>
+                                <option value="no">{t('ssh_security.root_no')}</option>
+                                <option value="prohibit-password">{t('ssh_security.root_prohibit_password')}</option>
+                              </select>
+                            </SettingRow>
 
-                          <SettingRow label={t('ssh_security.password_auth')} description={t('ssh_security.password_auth_desc')}>
-                            <ToggleSwitch
-                              value={mergedConfig.password_authentication}
-                              onChange={() => updateSSHField('password_authentication', !mergedConfig.password_authentication)}
-                            />
-                          </SettingRow>
+                            <SettingRow label={t('ssh_security.password_auth')} description={t('ssh_security.password_auth_desc')}>
+                              <ToggleSwitch
+                                value={mergedConfig.password_authentication}
+                                onChange={() => updateSSHField('password_authentication', !mergedConfig.password_authentication)}
+                              />
+                            </SettingRow>
 
-                          <SettingRow label={t('ssh_security.pubkey_auth')} description={t('ssh_security.pubkey_auth_desc')}>
-                            <ToggleSwitch
-                              value={mergedConfig.pubkey_authentication}
-                              onChange={() => updateSSHField('pubkey_authentication', !mergedConfig.pubkey_authentication)}
-                            />
-                          </SettingRow>
+                            <SettingRow label={t('ssh_security.pubkey_auth')} description={t('ssh_security.pubkey_auth_desc')}>
+                              <ToggleSwitch
+                                value={mergedConfig.pubkey_authentication}
+                                onChange={() => updateSSHField('pubkey_authentication', !mergedConfig.pubkey_authentication)}
+                              />
+                            </SettingRow>
 
-                          <SettingRow label={t('ssh_security.allow_users')} description={t('ssh_security.allow_users_desc')}>
-                            <input
-                              type="text"
-                              value={(mergedConfig.allow_users ?? []).join(' ')}
-                              onChange={e => {
-                                const val = e.target.value.trim()
-                                updateSSHField('allow_users', val ? val.split(/\s+/) : [])
-                              }}
-                              placeholder={t('ssh_security.allow_users_placeholder')}
-                              className="w-40 bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-dark-100 text-sm
-                                         focus:outline-none focus:border-accent-500"
-                            />
-                          </SettingRow>
+                            <SettingRow label={t('ssh_security.allow_users')} description={t('ssh_security.allow_users_desc')}>
+                              <input
+                                type="text"
+                                value={(mergedConfig.allow_users ?? []).join(' ')}
+                                onChange={e => {
+                                  const val = e.target.value.trim()
+                                  updateSSHField('allow_users', val ? val.split(/\s+/) : [])
+                                }}
+                                placeholder={t('ssh_security.allow_users_placeholder')}
+                                className="w-40 bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-dark-100 text-sm
+                                           focus:outline-none focus:border-accent-500"
+                              />
+                            </SettingRow>
 
-                          <SettingRow label={t('ssh_security.x11_forwarding')} description={t('ssh_security.x11_forwarding_desc')}>
-                            <ToggleSwitch
-                              value={mergedConfig.x11_forwarding}
-                              onChange={() => updateSSHField('x11_forwarding', !mergedConfig.x11_forwarding)}
-                            />
-                          </SettingRow>
+                            <SettingRow label={t('ssh_security.x11_forwarding')} description={t('ssh_security.x11_forwarding_desc')}>
+                              <ToggleSwitch
+                                value={mergedConfig.x11_forwarding}
+                                onChange={() => updateSSHField('x11_forwarding', !mergedConfig.x11_forwarding)}
+                              />
+                            </SettingRow>
+                          </div>
+                        </div>
+
+                        {/* Limits section */}
+                        <div className="card">
+                          <h3 className="text-lg font-semibold text-dark-100 mb-1">{t('ssh_security.section_limits')}</h3>
+                          <div className="divide-y divide-dark-800">
+                            <SettingRow label={t('ssh_security.max_auth_tries')} description={t('ssh_security.max_auth_tries_desc')}>
+                              <NumberInput
+                                value={mergedConfig.max_auth_tries}
+                                onChange={v => updateSSHField('max_auth_tries', v)}
+                                min={1}
+                                max={10}
+                              />
+                            </SettingRow>
+
+                            <SettingRow label={t('ssh_security.login_grace_time')} description={t('ssh_security.login_grace_time_desc')}>
+                              <NumberInput
+                                value={mergedConfig.login_grace_time}
+                                onChange={v => updateSSHField('login_grace_time', v)}
+                                min={10}
+                                max={600}
+                              />
+                            </SettingRow>
+
+                            <SettingRow label={t('ssh_security.max_sessions')} description={t('ssh_security.max_sessions_desc')}>
+                              <NumberInput
+                                value={mergedConfig.max_sessions}
+                                onChange={v => updateSSHField('max_sessions', v)}
+                                min={1}
+                                max={20}
+                              />
+                            </SettingRow>
+
+                            <SettingRow label={t('ssh_security.client_alive_interval')} description={t('ssh_security.client_alive_interval_desc')}>
+                              <NumberInput
+                                value={mergedConfig.client_alive_interval}
+                                onChange={v => updateSSHField('client_alive_interval', v)}
+                                min={0}
+                                max={3600}
+                              />
+                            </SettingRow>
+
+                            <SettingRow label={t('ssh_security.client_alive_count_max')} description={t('ssh_security.client_alive_count_max_desc')}>
+                              <NumberInput
+                                value={mergedConfig.client_alive_count_max}
+                                onChange={v => updateSSHField('client_alive_count_max', v)}
+                                min={1}
+                                max={10}
+                              />
+                            </SettingRow>
+                          </div>
                         </div>
                       </div>
-
-                      {/* Limits section */}
-                      <div className="card">
-                        <h3 className="text-lg font-semibold text-dark-100 mb-1">{t('ssh_security.section_limits')}</h3>
-                        <div className="divide-y divide-dark-800">
-                          <SettingRow label={t('ssh_security.max_auth_tries')} description={t('ssh_security.max_auth_tries_desc')}>
-                            <NumberInput
-                              value={mergedConfig.max_auth_tries}
-                              onChange={v => updateSSHField('max_auth_tries', v)}
-                              min={1}
-                              max={10}
-                            />
-                          </SettingRow>
-
-                          <SettingRow label={t('ssh_security.login_grace_time')} description={t('ssh_security.login_grace_time_desc')}>
-                            <NumberInput
-                              value={mergedConfig.login_grace_time}
-                              onChange={v => updateSSHField('login_grace_time', v)}
-                              min={10}
-                              max={600}
-                            />
-                          </SettingRow>
-
-                          <SettingRow label={t('ssh_security.max_sessions')} description={t('ssh_security.max_sessions_desc')}>
-                            <NumberInput
-                              value={mergedConfig.max_sessions}
-                              onChange={v => updateSSHField('max_sessions', v)}
-                              min={1}
-                              max={20}
-                            />
-                          </SettingRow>
-
-                          <SettingRow label={t('ssh_security.client_alive_interval')} description={t('ssh_security.client_alive_interval_desc')}>
-                            <NumberInput
-                              value={mergedConfig.client_alive_interval}
-                              onChange={v => updateSSHField('client_alive_interval', v)}
-                              min={0}
-                              max={3600}
-                            />
-                          </SettingRow>
-
-                          <SettingRow label={t('ssh_security.client_alive_count_max')} description={t('ssh_security.client_alive_count_max_desc')}>
-                            <NumberInput
-                              value={mergedConfig.client_alive_count_max}
-                              onChange={v => updateSSHField('client_alive_count_max', v)}
-                              min={1}
-                              max={10}
-                            />
-                          </SettingRow>
-                        </div>
-                      </div>
-                    </div>
+                    ) : (
+                      <NodeLoadState loading={serverLoading} error={loadError} onRetry={retryActive} t={t} />
+                    )}
 
                     {/* Password section */}
                     <div className="card">
@@ -1250,7 +1317,7 @@ export default function SSHSecurity() {
                           {t('ssh_security.f2b_title')}
                           <FAQIcon screen="SSH_SECURITY_FAIL2BAN" size="sm" />
                         </h3>
-                        {mergedFail2ban && (
+                        {mergedFail2ban ? (
                           <>
                             <div className="flex items-center justify-between pb-4 border-b border-dark-800">
                               <div className="text-sm font-medium text-dark-100">
@@ -1297,6 +1364,8 @@ export default function SSHSecurity() {
                               )}
                             </AnimatePresence>
                           </>
+                        ) : (
+                          <NodeLoadState loading={serverLoading} error={loadError} onRetry={retryActive} t={t} />
                         )}
                       </div>
 
@@ -1365,7 +1434,7 @@ export default function SSHSecurity() {
                     exit={{ opacity: 0, x: 20 }}
                     className="space-y-4"
                   >
-                    {sshKeys.length === 0 && mergedConfig && !mergedConfig.password_authentication && (
+                    {sshKeys?.length === 0 && mergedConfig && !mergedConfig.password_authentication && (
                       <div className="flex items-start gap-3 p-4 bg-orange-500/10 border border-orange-500/20 rounded-lg">
                         <AlertTriangle className="w-5 h-5 text-orange-400 mt-0.5 shrink-0" />
                         <p className="text-sm text-orange-300">{t('ssh_security.keys_warning_no_keys')}</p>
@@ -1379,7 +1448,9 @@ export default function SSHSecurity() {
                           {t('ssh_security.keys_title')}
                           <FAQIcon screen="SSH_SECURITY_KEYS" size="sm" />
                         </h3>
-                        {sshKeys.length === 0 ? (
+                        {sshKeys === null ? (
+                          <NodeLoadState loading={serverLoading} error={loadError} onRetry={retryActive} t={t} />
+                        ) : sshKeys.length === 0 ? (
                           <p className="text-dark-400 text-center py-6 text-sm">{t('ssh_security.keys_no_keys')}</p>
                         ) : (
                           <div className="space-y-2 max-h-80 overflow-y-auto">

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 import httpx
@@ -10,6 +11,10 @@ from app.services.node_capabilities import (
 )
 
 logger = logging.getLogger(__name__)
+
+# SOCKS5-рукопожатие с нодой за прокси не входит в таймауты httpx и может
+# висеть бесконечно — запрос к такой ноде ограничиваем жёстко сверху
+HARD_TIMEOUT_MARGIN = 5.0
 
 RECOMMENDED_PRESET = {
     "ssh": {
@@ -72,16 +77,19 @@ async def proxy_to_node(
     headers = node_auth_headers(server)
 
     try:
-        response = await client.request(
-            method=method,
-            url=url,
-            headers=headers,
-            json=json_data,
-            timeout=timeout,
+        response = await asyncio.wait_for(
+            client.request(
+                method=method,
+                url=url,
+                headers=headers,
+                json=json_data,
+                timeout=timeout,
+            ),
+            timeout + HARD_TIMEOUT_MARGIN,
         )
         response.raise_for_status()
         return response.json()
-    except httpx.TimeoutException:
+    except (httpx.TimeoutException, TimeoutError):
         raise TimeoutError(f"Node {server.name} request timed out")
     except httpx.ConnectError:
         raise ConnectionError(f"Node {server.name} unreachable")

@@ -3,6 +3,14 @@ import type { ChartGap } from '../utils/chartUtils'
 
 const DEFAULT_TIMEOUT_MS = 30000
 
+declare module 'axios' {
+  interface AxiosRequestConfig {
+    // Без автоповтора: у ноды со сбоящей связью три попытки подряд — это минута
+    // пустого экрана, а страница и так покажет «не ответил» с кнопкой повтора
+    skipRetry?: boolean
+  }
+}
+
 const api = axios.create({
   baseURL: '/api',
   withCredentials: true,
@@ -60,6 +68,7 @@ api.interceptors.response.use(
     const status = error.response?.status
     const shouldRetry =
       config &&
+      !config.skipRetry &&
       method === 'get' &&
       (status === undefined || RETRYABLE_STATUSES.has(status)) &&
       (config.__retryCount ?? 0) < MAX_RETRIES
@@ -2159,32 +2168,35 @@ export const sshBulkStreamUrls = {
   status: '/api/ssh-security/bulk/status',
 }
 
+// Чтение с одной ноды: ответ панели ограничен по времени, повтор — кнопкой на странице
+const NODE_READ: AxiosRequestConfig = { skipRetry: true }
+
 export const sshSecurityApi = {
   getConfig: (serverId: number) =>
-    api.get<{ config: SSHConfig }>(`/ssh-security/server/${serverId}/config`),
+    api.get<{ config: SSHConfig }>(`/ssh-security/server/${serverId}/config`, NODE_READ),
   updateConfig: (serverId: number, config: Partial<SSHConfig>) =>
     api.post<{ success: boolean; message: string; warnings: string[] }>(`/ssh-security/server/${serverId}/config`, config),
 
   getFail2ban: (serverId: number) =>
-    api.get<Fail2banConfig>(`/ssh-security/server/${serverId}/fail2ban/status`),
+    api.get<Fail2banConfig>(`/ssh-security/server/${serverId}/fail2ban/status`, NODE_READ),
   updateFail2ban: (serverId: number, config: Partial<Fail2banConfig>) =>
     api.post<{ success: boolean; message: string }>(`/ssh-security/server/${serverId}/fail2ban/config`, config),
   getBanned: (serverId: number) =>
-    api.get<{ count: number; ips: Fail2banBannedIP[] }>(`/ssh-security/server/${serverId}/fail2ban/banned`),
+    api.get<{ count: number; ips: Fail2banBannedIP[] }>(`/ssh-security/server/${serverId}/fail2ban/banned`, NODE_READ),
   unbanIp: (serverId: number, ip: string) =>
     api.post<{ success: boolean }>(`/ssh-security/server/${serverId}/fail2ban/unban`, { ip }),
   unbanAll: (serverId: number) =>
     api.post<{ success: boolean }>(`/ssh-security/server/${serverId}/fail2ban/unban-all`),
 
   getKeys: (serverId: number) =>
-    api.get<{ user: string; count: number; keys: SSHKey[] }>(`/ssh-security/server/${serverId}/keys`),
+    api.get<{ user: string; count: number; keys: SSHKey[] }>(`/ssh-security/server/${serverId}/keys`, NODE_READ),
   addKey: (serverId: number, publicKey: string, user: string = 'root') =>
     api.post<{ success: boolean; fingerprint: string }>(`/ssh-security/server/${serverId}/keys`, { public_key: publicKey, user }),
   removeKey: (serverId: number, fingerprint: string, user: string = 'root') =>
     api.delete<{ success: boolean }>(`/ssh-security/server/${serverId}/keys`, { data: { fingerprint, user } }),
 
   getStatus: (serverId: number) =>
-    api.get<SSHStatus>(`/ssh-security/server/${serverId}/status`),
+    api.get<SSHStatus>(`/ssh-security/server/${serverId}/status`, NODE_READ),
 
   changePassword: (serverId: number, password: string, user: string = 'root') =>
     api.post<{ success: boolean; message: string }>(`/ssh-security/server/${serverId}/password`, { user, password }),
