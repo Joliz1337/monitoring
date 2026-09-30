@@ -10,6 +10,7 @@ Grouping for cards so you can find the right node among dozens or hundreds.
 
 ## Good to know
 
+- The folder header shows how many of its servers are online and offline, plus the combined load: CPU, RAM and network speed across the servers that are up. It stays visible when the folder is collapsed. Search and filters don't change these numbers.
 - Folders and card order live **in the panel database** — every administrator sees the same layout, and it survives browser changes and cache clearing. Only collapsed state and view mode are kept locally.
 - One server belongs to one folder. There are no nested folders: use names like `EU-Production-VPN` for hierarchy.
 - Cards are moved one at a time; there is no bulk move in the interface.

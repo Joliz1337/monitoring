@@ -7,6 +7,7 @@ import type { ServerWithMetrics } from '../../stores/serversStore'
 import { useAutoRefresh } from '../../hooks/useAutoRefresh'
 import { useChartDisplay } from '../../hooks/useChartDisplay'
 import { formatBytes, formatBitsPerSecLocalized, createBitsFormatter } from '../../utils/format'
+import { summarizeLoad } from '../../utils/fleetLoad'
 import type { ChartGap } from '../../utils/chartUtils'
 import MultiLineChart, { type ChartSeries } from '../Charts/MultiLineChart'
 import ChartLoadingOverlay from '../Charts/ChartLoadingOverlay'
@@ -73,41 +74,7 @@ function FleetSummaryInner({ servers }: { servers: ServerWithMetrics[] }) {
   const memoryDisplay = useChartDisplay('memory')
   const networkDisplay = useChartDisplay('network')
 
-  const totals = useMemo(() => {
-    let count = 0
-    let cores = 0
-    let cpuWeighted = 0
-    let ramUsed = 0
-    let ramTotal = 0
-    let rx = 0
-    let tx = 0
-
-    for (const s of servers) {
-      if (!s.is_active || s.status !== 'online' || !s.metrics) continue
-      const m = s.metrics
-      count++
-      const serverCores = m.cpu.cores_logical > 0 ? m.cpu.cores_logical : 1
-      cores += serverCores
-      cpuWeighted += (m.cpu.usage_percent || 0) * serverCores
-      ramUsed += m.memory.ram.used || 0
-      ramTotal += m.memory.ram.total || 0
-      rx += m.network.total?.rx_bytes_per_sec || 0
-      tx += m.network.total?.tx_bytes_per_sec || 0
-    }
-
-    if (count === 0) return null
-
-    return {
-      count,
-      cores,
-      cpuPercent: cpuWeighted / cores,
-      ramUsed,
-      ramTotal,
-      ramPercent: ramTotal > 0 ? (ramUsed / ramTotal) * 100 : 0,
-      rx,
-      tx,
-    }
-  }, [servers])
+  const totals = useMemo(() => summarizeLoad(servers), [servers])
 
   const isOpen = expanded !== null
 

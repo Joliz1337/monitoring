@@ -61,6 +61,7 @@ import { useSettingsStore } from '../stores/settingsStore'
 import { useAutoRefresh } from '../hooks/useAutoRefresh'
 import ServerCard, { ServerCardOverlay } from '../components/Dashboard/ServerCard'
 import FleetSummary from '../components/Dashboard/FleetSummary'
+import { FolderLoadBadges, FolderStatusCounts } from '../components/Dashboard/FolderStats'
 import { ServerCardSkeleton } from '../components/ui/Skeleton'
 import { Tooltip } from '../components/ui/Tooltip'
 import { useTranslation } from 'react-i18next'
@@ -83,8 +84,21 @@ const STATUS_FILTERS: { key: StatusFilter; Icon: LucideIcon; text: string; activ
   { key: 'disabled', Icon: PowerOff, text: 'text-dark-500', active: 'bg-dark-700/60 ring-1 ring-dark-500/50' },
 ]
 
+const NO_SERVERS: ServerWithMetrics[] = []
+
 const matchesSearch = (server: ServerWithMetrics, query: string): boolean =>
   server.name.toLowerCase().includes(query) || server.url.toLowerCase().includes(query)
+
+function groupByFolder(list: ServerWithMetrics[]): Map<string | null, ServerWithMetrics[]> {
+  const map = new Map<string | null, ServerWithMetrics[]>()
+  for (const s of list) {
+    const key = s.folder || null
+    const bucket = map.get(key)
+    if (bucket) bucket.push(s)
+    else map.set(key, [s])
+  }
+  return map
+}
 
 function loadCollapsed(): Set<string> {
   try {
@@ -215,15 +229,14 @@ export default function Dashboard() {
     [folders]
   )
 
-  const grouped = useMemo(() => {
-    const map = new Map<string | null, typeof visibleServers>()
-    for (const s of visibleServers) {
-      const key = s.folder || null
-      if (!map.has(key)) map.set(key, [])
-      map.get(key)!.push(s)
-    }
-    return map
-  }, [visibleServers])
+  const grouped = useMemo(() => groupByFolder(visibleServers), [visibleServers])
+
+  // Бейджи папки описывают её целиком, как счётчики в шапке: поиск и фильтр
+  // меняют только показанные карточки
+  const activeGrouped = useMemo(
+    () => (visibleServers === activeServers ? grouped : groupByFolder(activeServers)),
+    [visibleServers, activeServers, grouped],
+  )
 
   const toggleCollapsed = useCallback((folder: string) => {
     setCollapsed(prev => {
@@ -653,6 +666,7 @@ export default function Dashboard() {
                 {folders.map(folderName => {
                   const isCollapsed = !isFiltering && collapsed.has(folderName)
                   const folderServers = grouped.get(folderName) || []
+                  const folderActiveServers = activeGrouped.get(folderName) ?? NO_SERVERS
                   return (
                     <SortableFolderItem
                       key={folderName}
@@ -661,7 +675,7 @@ export default function Dashboard() {
                     >
                       {(handleProps) => (
                         <>
-                          <div className="flex items-center justify-between px-4 py-3">
+                          <div className="flex flex-wrap items-center gap-y-2 px-4 py-3">
                             <div className="flex items-center gap-1 flex-1 min-w-0">
                               <div
                                 ref={handleProps.ref}
@@ -679,10 +693,15 @@ export default function Dashboard() {
                                   {isCollapsed ? <Folder className="w-4 h-4 text-blue-400" /> : <FolderOpen className="w-4 h-4 text-blue-400" />}
                                 </div>
                                 <span className="text-sm font-semibold text-white truncate group-hover:text-blue-300 transition">{folderName}</span>
-                                <span className="text-xs text-dark-500 flex-shrink-0">{folderServers.length}</span>
+                                <FolderStatusCounts servers={folderActiveServers} />
                                 {isCollapsed ? <ChevronRight className="w-3.5 h-3.5 text-dark-600 flex-shrink-0" /> : <ChevronDown className="w-3.5 h-3.5 text-dark-600 flex-shrink-0" />}
                               </button>
                             </div>
+                            {/* На телефоне загрузка уходит второй строкой, чтобы не съедать имя папки */}
+                            <FolderLoadBadges
+                              servers={folderActiveServers}
+                              className="order-last basis-full pl-7 sm:order-none sm:basis-auto sm:pl-0 sm:ml-2"
+                            />
                             <div className="flex items-center gap-1 flex-shrink-0 ml-2">
                               <Tooltip label={t('common.edit')}>
                                 <button onClick={() => setModalState({ kind: 'rename-folder', folderName })} className="p-1.5 text-dark-500 hover:text-dark-300 transition rounded-lg hover:bg-dark-800/50">
