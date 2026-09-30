@@ -1,4 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useRememberedState } from '../hooks/useRememberedState'
 import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
 import {
@@ -1701,7 +1702,7 @@ function ProfileDetail({
 }) {
   const [profile, setProfile] = useState<FirewallProfileWithServers | null>(null)
   const [loading, setLoading] = useState(true)
-  const [tab, setTab] = useState<TabKey>('rules')
+  const [tab, setTab] = useRememberedState<TabKey>('firewall-profiles.detail-tab', 'rules')
   const [availableServers, setAvailableServers] = useState<FirewallAvailableServer[]>([])
   const [log, setLog] = useState<FirewallSyncLogEntry[]>([])
   const [logLoading, setLogLoading] = useState(false)
@@ -2111,7 +2112,7 @@ function ProfileDetail({
 export default function FirewallProfiles() {
   const [profiles, setProfiles] = useState<FirewallProfile[]>([])
   const [loading, setLoading] = useState(true)
-  const [selectedId, setSelectedId] = useState<number | null>(null)
+  const [selectedId, setSelectedId] = useRememberedState<number | null>('firewall-profiles.selected', null)
   const [showCreate, setShowCreate] = useState(false)
   const initialLoadDone = useRef(false)
 
@@ -2158,6 +2159,9 @@ export default function FirewallProfiles() {
     await fetchProfiles()
     setSelectedId(clone.id)
   }
+
+  // Запомненный с прошлого захода профиль мог быть удалён — открываем только живой
+  const openProfileId = profiles.some(p => p.id === selectedId) ? selectedId : null
 
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-6">
@@ -2208,15 +2212,15 @@ export default function FirewallProfiles() {
         </div>
 
         <div className="card">
-          {selectedId === null ? (
+          {openProfileId === null ? (
             <div className="flex flex-col items-center justify-center py-16 text-dark-500">
               <Flame className="w-10 h-10 mb-3 text-dark-600" />
               <p className="text-sm">Выберите профиль слева</p>
             </div>
           ) : (
             <ProfileDetail
-              key={selectedId}
-              profileId={selectedId}
+              key={openProfileId}
+              profileId={openProfileId}
               onProfileDeleted={handleDeleted}
               onProfileChanged={fetchProfiles}
               onProfileCloned={handleCloned}

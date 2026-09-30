@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react'
 import { useNodeCapabilities } from '../hooks/useNodeCapabilities'
+import { useRememberedState } from '../hooks/useRememberedState'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
@@ -34,7 +35,7 @@ function ModeBadge({ node }: { node: NodeAntiDdosState }) {
 
 export default function AntiDdos() {
   const { t } = useTranslation()
-  const [activeTab, setActiveTab] = useState<TabType>('control')
+  const [activeTab, setActiveTab] = useRememberedState<TabType>('anti-ddos.tab', 'control')
   const [status, setStatus] = useState<AntiDdosStatus | null>(null)
   const [settings, setSettings] = useState<AntiDdosSettings | null>(null)
   const [loading, setLoading] = useState(true)

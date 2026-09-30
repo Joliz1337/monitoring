@@ -9,13 +9,14 @@ import NodesTab from '../components/exitproxy/NodesTab'
 import SettingsTab from '../components/exitproxy/SettingsTab'
 import WorkerStatusCard from '../components/exitproxy/WorkerStatusCard'
 import { useSmartRefresh } from '../hooks/useAutoRefresh'
+import { useRememberedState } from '../hooks/useRememberedState'
 import { useExitProxyStore } from '../stores/exitProxyStore'
 
 type TabType = 'nodes' | 'checks' | 'settings' | 'log'
 
 export default function ExitProxy() {
   const { t } = useTranslation()
-  const [activeTab, setActiveTab] = useState<TabType>('nodes')
+  const [activeTab, setActiveTab] = useRememberedState<TabType>('exit-proxy.tab', 'nodes')
   const [refreshing, setRefreshing] = useState(false)
   const loaded = useExitProxyStore(s => s.loaded)
   const settings = useExitProxyStore(s => s.settings)

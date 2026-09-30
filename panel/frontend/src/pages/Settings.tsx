@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useCallback, useEffect } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
@@ -6,6 +6,7 @@ import {
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useSettingsStore } from '../stores/settingsStore'
+import { useRememberedState } from '../hooks/useRememberedState'
 import { FAQIcon } from '../components/FAQ'
 import { InterfaceTab } from '../components/settings/InterfaceTab'
 import { NodesTab } from '../components/settings/NodesTab'
@@ -33,16 +34,23 @@ export default function Settings() {
   const { t } = useTranslation()
   const fetchSettings = useSettingsStore(state => state.fetchSettings)
   const [searchParams, setSearchParams] = useSearchParams()
+  const [lastTab, setLastTab] = useRememberedState<SettingsTab>('settings.tab', DEFAULT_TAB)
 
+  // Меню ведёт на раздел без вкладки в адресе — тогда открываем ту, с которой ушли
   const requestedTab = searchParams.get(TAB_PARAM)
-  const activeTab: SettingsTab = isSettingsTab(requestedTab) ? requestedTab : DEFAULT_TAB
+  const activeTab: SettingsTab = isSettingsTab(requestedTab) ? requestedTab : lastTab
 
-  const selectTab = (id: SettingsTab) => {
+  const selectTab = useCallback((id: SettingsTab) => {
     setSearchParams(prev => {
       prev.set(TAB_PARAM, id)
       return prev
     }, { replace: true })
-  }
+  }, [setSearchParams])
+
+  useEffect(() => {
+    setLastTab(activeTab)
+    if (requestedTab !== activeTab) selectTab(activeTab)
+  }, [activeTab, requestedTab, setLastTab, selectTab])
 
   useEffect(() => { fetchSettings() }, [fetchSettings])
 

@@ -6,6 +6,7 @@ import { serversApi, type FleetHistoryPoint, type FleetHistoryResponse } from '.
 import type { ServerWithMetrics } from '../../stores/serversStore'
 import { useAutoRefresh } from '../../hooks/useAutoRefresh'
 import { useChartDisplay } from '../../hooks/useChartDisplay'
+import { useRememberedState } from '../../hooks/useRememberedState'
 import { formatBytes, formatBitsPerSecLocalized, createBitsFormatter } from '../../utils/format'
 import { summarizeLoad } from '../../utils/fleetLoad'
 import type { ChartGap } from '../../utils/chartUtils'
@@ -66,7 +67,7 @@ function StatTile({ icon, iconBg, label, value, sub, metric, isActive, onSelect 
 function FleetSummaryInner({ servers }: { servers: ServerWithMetrics[] }) {
   const { t } = useTranslation()
   const [expanded, setExpanded] = useState<FleetMetric | null>(null)
-  const [period, setPeriod] = useState('24h')
+  const [period, setPeriod] = useRememberedState('dashboard.fleet-period', '24h')
   const [history, setHistory] = useState<FleetHistoryResponse | null>(null)
   const [isHistoryLoading, setIsHistoryLoading] = useState(false)
 

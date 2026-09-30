@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
+import { useRememberedState } from '../hooks/useRememberedState'
 import { isAxiosError } from 'axios'
 import NodeRestrictedNotice from '../components/servers/NodeRestrictedNotice'
 import { nodeAllows } from '../utils/nodeCapabilities'
@@ -370,12 +371,12 @@ export default function SSHSecurity() {
   const { t } = useTranslation()
 
   const [servers, setServers] = useState<ServerType[]>([])
-  const [activeServerId, setActiveServerId] = useState<number | null>(null)
+  const [activeServerId, setActiveServerId] = useRememberedState<number | null>('ssh-security.server', null)
   const sshAllowed = nodeAllows(servers.find(s => s.id === activeServerId), 'ssh', 'read')
   const [selectedServerIds, setSelectedServerIds] = useState<number[]>([])
 
-  const [mode, setMode] = useState<PageMode>('manage')
-  const [activeTab, setActiveTab] = useState<TabType>('ssh')
+  const [mode, setMode] = useRememberedState<PageMode>('ssh-security.mode', 'manage')
+  const [activeTab, setActiveTab] = useRememberedState<TabType>('ssh-security.tab', 'ssh')
 
   const [loading, setLoading] = useState(true)
   const [applying, setApplying] = useState(false)
@@ -438,8 +439,9 @@ export default function SSHSecurity() {
       const response = await serversApi.list()
       const list = response.data.servers.filter(s => s.is_active)
       setServers(list)
+      // Сервер, запомненный с прошлого захода, мог быть удалён или выключен
+      setActiveServerId(prev => (list.some(s => s.id === prev) ? prev : list[0]?.id ?? null))
       if (list.length > 0) {
-        setActiveServerId(prev => prev ?? list[0].id)
         setSelectedServerIds(prev => (prev.length > 0 ? prev : list.map(s => s.id)))
       }
     } catch {
@@ -460,8 +462,10 @@ export default function SSHSecurity() {
   // Запросы независимы: сервер со сбоящей связью может отдать часть данных,
   // а что не пришло — показывается как «не ответил», а не пустым местом
   const fetchServerData = useCallback(async (serverId: number) => {
+    // Пока список не загружен, сервер (в том числе запомненный) ещё не проверен.
     // В закрытую ноду не идём вовсе: четыре запроса за гарантированным отказом
-    if (!nodeAllows(servers.find(s => s.id === serverId), 'ssh', 'read')) return
+    const server = servers.find(s => s.id === serverId)
+    if (!server || !nodeAllows(server, 'ssh', 'read')) return
 
     setServerLoading(true)
     const [configRes, fail2banRes, keysRes, statusRes] = await Promise.allSettled([

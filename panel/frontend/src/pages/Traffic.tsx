@@ -25,6 +25,7 @@ import { nodeAllows } from '../utils/nodeCapabilities'
 import { useTranslation } from 'react-i18next'
 import { useSmartRefresh } from '../hooks/useAutoRefresh'
 import { useChartDisplay } from '../hooks/useChartDisplay'
+import { useRememberedState } from '../hooks/useRememberedState'
 import { RAW_DISPLAY } from '../config/chartDisplay'
 import { formatBytes, createBitsFormatter } from '../utils/format'
 import type { ChartGap } from '../utils/chartUtils'
@@ -62,8 +63,8 @@ export default function Traffic() {
   const [isLoading, setIsLoading] = useState(true)
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [period, setPeriod] = useState('24h')
-  const [speedPeriod, setSpeedPeriod] = useState('1h')
+  const [period, setPeriod] = useRememberedState('traffic.period', '24h')
+  const [speedPeriod, setSpeedPeriod] = useRememberedState('traffic.speed-period', '1h')
   const [newPort, setNewPort] = useState('')
   const [isAddingPort, setIsAddingPort] = useState(false)
 

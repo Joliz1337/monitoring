@@ -29,6 +29,7 @@ import { proxyApi, ServerMetrics, HistoryPoint, HistoryResponse } from '../api/c
 import { useServersStore } from '../stores/serversStore'
 import { useSmartRefresh } from '../hooks/useAutoRefresh'
 import { useChartDisplay } from '../hooks/useChartDisplay'
+import { useRememberedState } from '../hooks/useRememberedState'
 import { useSettingsStore } from '../stores/settingsStore'
 import { viewMetrics } from '../utils/metricsView'
 import ProgressBar from '../components/ui/ProgressBar'
@@ -118,7 +119,7 @@ export default function ServerDetails() {
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [isHistoryLoading, setIsHistoryLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [period, setPeriod] = useState('1h')
+  const [period, setPeriod] = useRememberedState('server-details.period', '1h')
   
   const [powerAction, setPowerAction] = useState<'reboot' | 'shutdown' | null>(null)
   const [isPowerActionLoading, setIsPowerActionLoading] = useState(false)

@@ -14,6 +14,7 @@ import type {
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { useAutoRefresh } from '../hooks/useAutoRefresh'
+import { useRememberedState } from '../hooks/useRememberedState'
 import { Tooltip } from '../components/ui/Tooltip'
 import { FAQIcon } from '../components/FAQ'
 import { streamNdjsonGet, StreamUnauthorizedError } from '../utils/ndjsonStream'
@@ -28,7 +29,7 @@ type TabType = 'overview' | 'users' | 'anomalies' | 'install' | 'settings'
 
 export default function Remnawave() {
   const { t } = useTranslation()
-  const [activeTab, setActiveTab] = useState<TabType>('overview')
+  const [activeTab, setActiveTab] = useRememberedState<TabType>('remnawave.tab', 'overview')
 
   const tabs: { id: TabType; label: string; icon: typeof Radio }[] = [
     { id: 'overview', label: t('remnawave.overview'), icon: BarChart3 },

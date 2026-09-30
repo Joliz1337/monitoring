@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useMemo } from 'react'
+import { useRememberedState } from '../hooks/useRememberedState'
 import { nodeAllows } from '../utils/nodeCapabilities'
 import { Shield, ShieldCheck, Plus, Trash2, RefreshCw, Server, Globe, List, Loader2, ExternalLink, AlertCircle, Check, X, ArrowDownToLine, ArrowUpFromLine, CheckCircle2, XCircle, ChevronDown, Lock, Search } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
@@ -194,7 +195,7 @@ function RulesList({ rules, onDelete, onBulkDelete, emptyMessage }: {
 export default function Blocklist() {
   const { t } = useTranslation()
 
-  const [activeTab, setActiveTab] = useState<TabType>('global')
+  const [activeTab, setActiveTab] = useRememberedState<TabType>('blocklist.tab', 'global')
   const [loading, setLoading] = useState(true)
 
   // Global rules (both directions)

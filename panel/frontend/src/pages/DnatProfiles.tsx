@@ -1,4 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useRememberedState } from '../hooks/useRememberedState'
 import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
 import { useTranslation } from 'react-i18next'
@@ -1204,7 +1205,7 @@ function ProfileDetail({
   const { t } = useTranslation()
   const [profile, setProfile] = useState<DnatProfileWithServers | null>(null)
   const [loading, setLoading] = useState(true)
-  const [tab, setTab] = useState<TabKey>('rules')
+  const [tab, setTab] = useRememberedState<TabKey>('dnat-profiles.detail-tab', 'rules')
   const [availableServers, setAvailableServers] = useState<DnatAvailableServer[]>([])
   const [log, setLog] = useState<DnatSyncLogEntry[]>([])
   const [logLoading, setLogLoading] = useState(false)
@@ -1490,7 +1491,7 @@ export default function DnatProfiles() {
   const { t } = useTranslation()
   const [profiles, setProfiles] = useState<DnatProfile[]>([])
   const [loading, setLoading] = useState(true)
-  const [selectedId, setSelectedId] = useState<number | null>(null)
+  const [selectedId, setSelectedId] = useRememberedState<number | null>('dnat-profiles.selected', null)
   const [showCreate, setShowCreate] = useState(false)
   const initialLoadDone = useRef(false)
 
@@ -1537,6 +1538,9 @@ export default function DnatProfiles() {
     setSelectedId(clone.id)
   }
 
+  // Запомненный с прошлого захода профиль мог быть удалён — открываем только живой
+  const openProfileId = profiles.some(p => p.id === selectedId) ? selectedId : null
+
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-6">
       <div className="flex items-center justify-between gap-3 flex-wrap">
@@ -1581,15 +1585,15 @@ export default function DnatProfiles() {
         </div>
 
         <div className="card">
-          {selectedId === null ? (
+          {openProfileId === null ? (
             <div className="flex flex-col items-center justify-center py-16 text-dark-500">
               <RouteIcon className="w-10 h-10 mb-3 text-dark-600" />
               <p className="text-sm">{t('dnat_profiles.select_profile')}</p>
             </div>
           ) : (
             <ProfileDetail
-              key={selectedId}
-              profileId={selectedId}
+              key={openProfileId}
+              profileId={openProfileId}
               onProfileDeleted={handleDeleted}
               onProfileChanged={fetchProfiles}
               onProfileCloned={handleCloned}

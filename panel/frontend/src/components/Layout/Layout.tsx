@@ -20,6 +20,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useExtStore } from '../../stores/_extStore'
 import { useNotesStore } from '../../stores/notesStore'
 import { useSettingsStore } from '../../stores/settingsStore'
+import { useScrollRestoration } from '../../hooks/useScrollRestoration'
 import { PANEL_MODULES } from '../../config/modules'
 import { useTranslation } from 'react-i18next'
 import { Tooltip } from '../ui/Tooltip'
@@ -64,6 +65,9 @@ export default function Layout() {
   const { t } = useTranslation()
 
   useEffect(() => { fetchSettings() }, [fetchSettings])
+
+  const pageContentRef = useRef<HTMLDivElement>(null)
+  useScrollRestoration(pageContentRef)
 
   // Каскадное появление пунктов — только при первой отрисовке меню: раздел,
   // включённый в настройках позже, иначе висел бы прозрачным index × 0.1 с
@@ -242,7 +246,7 @@ export default function Layout() {
         
         {/* Page content */}
         <main className="flex-1 overflow-auto">
-          <div className="p-6 lg:p-8">
+          <div ref={pageContentRef} className="p-6 lg:p-8">
             <div key={location.pathname} className="animate-page-enter">
               <Outlet />
             </div>

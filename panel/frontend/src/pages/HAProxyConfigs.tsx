@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useRef, forwardRef, type ForwardedRef, type ReactNode } from 'react'
+import { useRememberedState } from '../hooks/useRememberedState'
 import { DndContext, closestCenter, KeyboardSensor, PointerSensor, TouchSensor, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core'
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, verticalListSortingStrategy, useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
@@ -1574,7 +1575,7 @@ export default function HAProxyConfigs() {
   const { t } = useTranslation()
   const [profiles, setProfiles] = useState<HAProxyConfigProfile[]>([])
   const [loading, setLoading] = useState(true)
-  const [expandedId, setExpandedId] = useState<number | null>(null)
+  const [expandedId, setExpandedId] = useRememberedState<number | null>('haproxy-configs.expanded', null)
   const [modalProfile, setModalProfile] = useState<HAProxyConfigProfile | null | 'new'>(null)
 
   const initialLoadDone = useRef(false)

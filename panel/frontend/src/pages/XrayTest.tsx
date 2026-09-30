@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useRememberedState } from '../hooks/useRememberedState'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   FlaskConical, Link2, FileJson, Rss, Bookmark, History, Play, Square,
@@ -33,7 +34,7 @@ type TabType = 'links' | 'json' | 'subscription' | 'profiles' | 'history' | 'cor
 
 export default function XrayTest() {
   const { t } = useTranslation()
-  const [activeTab, setActiveTab] = useState<TabType>('links')
+  const [activeTab, setActiveTab] = useRememberedState<TabType>('xray-test.tab', 'links')
 
   const tabs: { id: TabType; label: string; icon: typeof Link2 }[] = [
     { id: 'links', label: t('xray_test.tab_links'), icon: Link2 },
