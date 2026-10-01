@@ -71,6 +71,7 @@ import { useFolderBoard, FOLDER_SORTABLE_PREFIX } from '../hooks/useFolderBoard'
 import { useCollapsedFolders } from '../hooks/useCollapsedFolders'
 import { writeStorage } from '../utils/storage'
 import { collectFolders, groupByFolder } from '../utils/folders'
+import { cleanInstallLogLine } from '../utils/installLog'
 
 interface ServerFormData {
   name: string
@@ -106,14 +107,6 @@ const parseServerUrl = (url: string): { host: string; port: string } => {
 
 const buildServerUrl = (host: string, port: string): string => {
   return `https://${host}:${port || '9100'}`
-}
-
-// Лог установки приходит с ANSI-кодами и \r-перерисовкой спиннеров —
-// берём последний сегмент после \r и вырезаем управляющие последовательности
-const cleanLogLine = (line: string): string => {
-  const visible = line.split('\r').pop() ?? line
-  // eslint-disable-next-line no-control-regex
-  return visible.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b/g, '').trimEnd()
 }
 
 // Установка идёт в фоне на бэке — после успеха показываем результат и убираем
@@ -519,7 +512,7 @@ export default function Servers() {
         offline = false
         onLines([t('servers.deploy_poll_online')])
       }
-      if (data.lines.length > 0) onLines(data.lines.map(cleanLogLine))
+      if (data.lines.length > 0) onLines(data.lines.map(cleanInstallLogLine))
       offset = data.next_offset
       if (data.status !== 'running') {
         return { finished: true, ok: data.status === 'success', error: data.error, serverId: data.server_id }

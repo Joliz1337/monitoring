@@ -256,8 +256,12 @@ MSG_EN[warp_install_failed]="Failed to install cloudflare-warp. Check Cloudflare
 MSG_EN[warp_svc_limit]="warp-svc memory limit and auto-restart configured"
 MSG_EN[haproxy_branch_selected]="Newest HAProxy LTS branch built for this release"
 MSG_EN[haproxy_key_failed]="Could not verify the HAProxy repository key — repository not added"
-MSG_EN[haproxy_no_repo_install]="No official HAProxy LTS build for this release or the repository is unreachable — installing the system package"
-MSG_EN[haproxy_no_repo_upgrade]="No official HAProxy LTS build for this release or the repository is unreachable — HAProxy left as is"
+MSG_EN[haproxy_release_unknown]="Could not detect the OS release (no VERSION_CODENAME in /etc/os-release)"
+MSG_EN[haproxy_repo_unreachable]="The HAProxy repository did not answer from this server"
+MSG_EN[haproxy_no_build]="No official HAProxy LTS build for this OS release"
+MSG_EN[haproxy_fallback_system]="Installing the system HAProxy package"
+MSG_EN[haproxy_left_as_is]="HAProxy left as is"
+MSG_EN[haproxy_apt_update_partial]="apt-get update finished with errors (a broken third-party repository?) — continuing, the other package lists are refreshed"
 MSG_EN[haproxy_repo_failed]="Could not install HAProxy from the official repository — installing the system package"
 MSG_EN[haproxy_up_to_date]="HAProxy is already the newest available"
 MSG_EN[haproxy_install_failed]="Failed to install the new HAProxy — the running one is untouched"
@@ -432,8 +436,12 @@ MSG_RU[warp_install_failed]="Не удалось установить cloudflare
 MSG_RU[warp_svc_limit]="Ограничение памяти warp-svc и авторестарт настроены"
 MSG_RU[haproxy_branch_selected]="Новейшая LTS-ветка HAProxy, собранная под этот релиз"
 MSG_RU[haproxy_key_failed]="Не удалось проверить ключ репозитория HAProxy — репозиторий не подключён"
-MSG_RU[haproxy_no_repo_install]="Официальной LTS-сборки HAProxy под этот релиз нет или репозиторий недоступен — ставлю системный пакет"
-MSG_RU[haproxy_no_repo_upgrade]="Официальной LTS-сборки HAProxy под этот релиз нет или репозиторий недоступен — HAProxy оставлен как есть"
+MSG_RU[haproxy_release_unknown]="Не удалось определить релиз системы (нет VERSION_CODENAME в /etc/os-release)"
+MSG_RU[haproxy_repo_unreachable]="Репозиторий HAProxy не ответил с этого сервера"
+MSG_RU[haproxy_no_build]="Под этот релиз системы нет официальной LTS-сборки HAProxy"
+MSG_RU[haproxy_fallback_system]="Ставлю системный пакет HAProxy"
+MSG_RU[haproxy_left_as_is]="HAProxy оставлен как есть"
+MSG_RU[haproxy_apt_update_partial]="apt-get update завершился с ошибками (сломан чужой репозиторий?) — продолжаю, списки остальных репозиториев обновлены"
 MSG_RU[haproxy_repo_failed]="Не удалось поставить HAProxy из официального репозитория — ставлю системный пакет"
 MSG_RU[haproxy_up_to_date]="HAProxy уже новейший из доступных"
 MSG_RU[haproxy_install_failed]="Не удалось установить новый HAProxy — работающий не тронут"
@@ -1920,16 +1928,28 @@ HAPROXY_SOURCES="/etc/apt/sources.list.d/haproxy.list"
 HAPROXY_CONFIG="/etc/haproxy/haproxy.cfg"
 HAPROXY_SWITCH_WAIT_SEC=15
 
-# Печатает "URL дистрибутив" репозитория ветки под этот релиз, если он есть
-haproxy_repo_for_branch() {
-    local os_id="$1" codename="$2" branch="$3" base dist
+# Есть ли репозиторий ветки под этот релиз. 0 — есть, "URL дистрибутив" в
+# HAPROXY_REPO; 1 — сборки нет; 2 — репозиторий не ответил, причина в HAPROXY_REPO_ERROR
+haproxy_probe_branch() {
+    local os_id="$1" codename="$2" branch="$3" base dist url code rc
     case "$os_id" in
         ubuntu) base="https://ppa.launchpadcontent.net/vbernat/haproxy-${branch}/ubuntu"; dist="$codename" ;;
         debian) base="https://haproxy.debian.net"; dist="${codename}-backports-${branch}" ;;
         *) return 1 ;;
     esac
-    curl -fsS --max-time 20 -o /dev/null "${base}/dists/${dist}/Release" 2>/dev/null || return 1
-    echo "$base $dist"
+    url="${base}/dists/${dist}/Release"
+    code=$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' "$url" 2>/dev/null)
+    rc=$?
+    case "$code" in
+        200) HAPROXY_REPO="$base $dist"; return 0 ;;
+        404) return 1 ;;
+    esac
+    if [ $rc -ne 0 ]; then
+        HAPROXY_REPO_ERROR="$url — curl $rc"
+    else
+        HAPROXY_REPO_ERROR="$url — HTTP $code"
+    fi
+    return 2
 }
 
 # Ключ сборщика закреплён отпечатком: в доверенные apt уходит только он,
@@ -1953,27 +1973,68 @@ haproxy_install_key() {
         GNUPGHOME="$gnupg_home" gpg --batch --export "$fpr" > "$HAPROXY_KEYRING" && rc=0
     fi
     rm -rf "$gnupg_home"
-    [ $rc -eq 0 ] || log_error "$(msg haproxy_key_failed)"
+    [ $rc -eq 0 ] || log_warn "$(msg haproxy_key_failed): $url"
     return $rc
 }
 
 # Подключает репозиторий новейшей LTS-ветки под этот релиз и кладёт её в
-# HAPROXY_BRANCH. Код 1 — подходящего репозитория нет или он недоступен
+# HAPROXY_BRANCH. Код 1 — сборки нет или репозиторий не ответил, причина в логе
 haproxy_setup_repo() {
-    local os_id codename branch repo=""
+    local os_id codename branch rc
     os_id=$(. /etc/os-release 2>/dev/null && echo "${ID:-}")
     codename=$(. /etc/os-release 2>/dev/null && echo "${VERSION_CODENAME:-}")
-    [ -n "$codename" ] || return 1
+    if [ -z "$codename" ]; then
+        log_warn "$(msg haproxy_release_unknown)"
+        return 1
+    fi
 
+    HAPROXY_REPO=""
     for branch in $HAPROXY_LTS_BRANCHES; do
-        repo=$(haproxy_repo_for_branch "$os_id" "$codename" "$branch") && break
+        haproxy_probe_branch "$os_id" "$codename" "$branch"
+        rc=$?
+        [ $rc -eq 0 ] && break
+        # Ветки лежат на одном хосте: не ответил один — не ответят и остальные
+        if [ $rc -eq 2 ]; then
+            log_warn "$(msg haproxy_repo_unreachable): ${HAPROXY_REPO_ERROR}"
+            return 1
+        fi
     done
-    [ -n "$repo" ] || return 1
+    if [ -z "$HAPROXY_REPO" ]; then
+        log_warn "$(msg haproxy_no_build): ${os_id:-?} ${codename}"
+        return 1
+    fi
 
     haproxy_install_key "$os_id" || return 1
-    echo "deb [signed-by=${HAPROXY_KEYRING}] ${repo} main" > "$HAPROXY_SOURCES"
+    echo "deb [signed-by=${HAPROXY_KEYRING}] ${HAPROXY_REPO} main" > "$HAPROXY_SOURCES"
     HAPROXY_BRANCH="$branch"
     log_info "$(msg haproxy_branch_selected): ${HAPROXY_BRANCH}"
+}
+
+# Общий update — ради свежих зависимостей. Сломанный чужой репозиторий
+# (заброшенный packagecloud и т.п.) валит его код возврата, но остальные списки
+# apt всё равно обновляет, поэтому ошибка не фатальна — только видна в логе
+haproxy_refresh_system_lists() {
+    local output
+    suppress_needrestart
+    wait_for_apt_lock
+    if ! output=$(env DEBIAN_FRONTEND=noninteractive timeout "$TIMEOUT_APT_UPDATE" \
+            apt-get update -qq -o DPkg::Lock::Timeout=60 2>&1); then
+        log_warn "$(msg haproxy_apt_update_partial)"
+        echo "$output" | grep -E '^(E|W|Err):' | head -5 | sed 's/^/    /'
+    fi
+}
+
+# Список пакетов только репозитория HAProxy: обязан обновиться, иначе apt
+# не увидит новую версию. Списки остальных репозиториев не стираются
+haproxy_update_lists() {
+    wait_for_apt_lock
+    spin_retry "$TIMEOUT_APT_UPDATE" "$MAX_RETRIES" "$RETRY_DELAY" "Updating HAProxy package list" \
+        env DEBIAN_FRONTEND=noninteractive \
+        apt-get update -qq \
+        -o DPkg::Lock::Timeout=60 \
+        -o Dir::Etc::sourcelist="$HAPROXY_SOURCES" \
+        -o Dir::Etc::sourceparts="-" \
+        -o APT::Get::List-Cleanup="0"
 }
 
 haproxy_package_version() {
@@ -1998,8 +2059,8 @@ haproxy_restore_sources() {
 haproxy_rollback() {
     local old_version="$1" backup="$2"
     log_warn "$(msg haproxy_rolling_back) ${old_version}"
+    # Списки прежнего источника на месте: обновление списков идёт с List-Cleanup=0
     haproxy_restore_sources "$backup"
-    apt_update_safe || true
     if apt_install_safe --allow-downgrades "haproxy=${old_version}"; then
         log_success "$(msg haproxy_rolled_back) ${old_version}"
         return 0
@@ -2050,18 +2111,17 @@ haproxy_switch_running() {
 # Новая нода: новейшая LTS-сборка, без неё — системный пакет. Конфиг ещё
 # пустой, поэтому HAProxy остановлен до первой раскатки из панели
 install_haproxy() {
-    apt_update_safe || log_warn "apt update had issues"
+    haproxy_refresh_system_lists
     local installed=0
     if haproxy_setup_repo; then
-        if apt_update_safe && apt_install_safe "haproxy=${HAPROXY_BRANCH}.*"; then
+        if haproxy_update_lists && apt_install_safe "haproxy=${HAPROXY_BRANCH}.*"; then
             installed=1
         else
             log_warn "$(msg haproxy_repo_failed)"
             rm -f "$HAPROXY_SOURCES"
-            apt_update_safe || true
         fi
     else
-        log_warn "$(msg haproxy_no_repo_install)"
+        log_warn "$(msg haproxy_fallback_system)"
     fi
     if [ $installed -eq 0 ]; then
         apt_install_safe haproxy || { log_error "Failed to install HAProxy"; return 1; }
@@ -2085,7 +2145,7 @@ upgrade_haproxy() {
     fi
 
     if ! haproxy_setup_repo; then
-        log_error "$(msg haproxy_no_repo_upgrade)"
+        log_error "$(msg haproxy_left_as_is)"
         haproxy_restore_sources "$sources_backup"
         return 1
     fi
@@ -2095,10 +2155,10 @@ upgrade_haproxy() {
         return 0
     fi
 
-    if ! { apt_update_safe && apt_install_safe "haproxy=${HAPROXY_BRANCH}.*"; }; then
+    haproxy_refresh_system_lists
+    if ! { haproxy_update_lists && apt_install_safe "haproxy=${HAPROXY_BRANCH}.*"; }; then
         log_error "$(msg haproxy_install_failed)"
         haproxy_restore_sources "$sources_backup"
-        apt_update_safe || true
         return 1
     fi
 

@@ -20,6 +20,7 @@ import { FAQIcon } from '../components/FAQ'
 import { streamNdjsonGet, StreamUnauthorizedError } from '../utils/ndjsonStream'
 import { nodeAllows } from '../utils/nodeCapabilities'
 import { getFlag } from '../utils/format'
+import { cleanInstallLogLine } from '../utils/installLog'
 import { Checkbox } from '../components/ui/Checkbox'
 import SshCredsFields, {
   SSH_CREDS_DEFAULTS, SshCredsValue, credsFromSettings, hasSshSecret, hasStoredSshSecret, toDeliveryCreds,
@@ -963,14 +964,6 @@ function AnomaliesTab() {
       </div>
     </motion.div>
   )
-}
-
-// Лог install.sh приходит с ANSI-кодами и \r-перерисовкой спиннеров —
-// берём последний сегмент после \r и вырезаем управляющие последовательности
-const cleanInstallLogLine = (line: string): string => {
-  const visible = line.split('\r').pop() ?? line
-  // eslint-disable-next-line no-control-regex
-  return visible.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b/g, '').trimEnd()
 }
 
 // Незавершённая установка хранится в localStorage: после перезагрузки страницы

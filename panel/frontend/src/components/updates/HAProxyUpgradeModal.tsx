@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { haproxyUpgradeApi, haproxyUpgradeStreamUrl, type RemnawaveInstallEvent } from '../../api/client'
 import { streamNdjsonGet } from '../../utils/ndjsonStream'
+import { cleanInstallLogLine } from '../../utils/installLog'
 
 export interface HAProxyUpgradeTarget {
   id: number
@@ -42,7 +43,7 @@ export default function HAProxyUpgradeModal({ targets, jobId: initialJobId, onSt
     streamNdjsonGet<RemnawaveInstallEvent>(
       haproxyUpgradeStreamUrl(jobId),
       (ev) => {
-        if (ev.type === 'log') setLog(prev => [...prev, ev.line])
+        if (ev.type === 'log') setLog(prev => [...prev, cleanInstallLogLine(ev.line)])
         else if (ev.type === 'error') setLog(prev => [...prev, '✗ ' + ev.message])
         else if (ev.type === 'done') setResult(ev.status)
       },
