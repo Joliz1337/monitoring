@@ -20,6 +20,7 @@ import {
   HAProxySyncResult,
   HAProxySyncLogEntry,
   HAProxyAvailableServer,
+  HAProxyIpOwner,
   HAProxyIpOwners,
   HAProxyServerStatus,
   BackendServer,
@@ -89,19 +90,51 @@ const DEFAULT_BALANCER_OPTIONS: BalancerOptions = {
 
 const BALANCER_TARGETS_SHOWN = 2
 
-function targetOwner(owners: HAProxyIpOwners, address: string): string | undefined {
-  return owners[address.trim().toLowerCase()]?.name
+type AddressRole = (owner: HAProxyIpOwner) => string
+
+interface BalancerTarget {
+  label: string
+  roles: string[]
 }
 
-// Несколько IP одного сервера в балансировщике дают одно имя, неизвестный адрес остаётся адресом
-function balancerTargetLabels(owners: HAProxyIpOwners, servers: BackendServer[]): string[] {
-  return [...new Set(servers.map(s => targetOwner(owners, s.address) ?? s.address).filter(Boolean))]
+function findOwner(owners: HAProxyIpOwners, address: string): HAProxyIpOwner | undefined {
+  return owners[address.trim().toLowerCase()]
 }
 
-function summarizeTargets(labels: string[]): string {
-  const shown = labels.slice(0, BALANCER_TARGETS_SHOWN).join(', ')
-  const hidden = labels.length - BALANCER_TARGETS_SHOWN
+function useAddressRole(): AddressRole {
+  const { t } = useTranslation()
+  return owner => owner.extra_number === null
+    ? t('haproxy_configs.addresses_primary')
+    : t('haproxy_configs.target_extra', { number: owner.extra_number })
+}
+
+function ownerLabel(owner: HAProxyIpOwner | undefined, addressRole: AddressRole): string | undefined {
+  return owner && `${owner.name} · ${addressRole(owner)}`
+}
+
+// Несколько IP одного сервера дают одну цель с перечнем ролей, неизвестный адрес остаётся адресом
+function balancerTargets(owners: HAProxyIpOwners, servers: BackendServer[], addressRole: AddressRole): BalancerTarget[] {
+  const targets = new Map<string, BalancerTarget>()
+  for (const { address } of servers) {
+    if (!address) continue
+    const owner = findOwner(owners, address)
+    const key = owner ? `server:${owner.id}` : `address:${address}`
+    const target = targets.get(key) ?? { label: owner?.name ?? address, roles: [] }
+    const role = owner && addressRole(owner)
+    if (role && !target.roles.includes(role)) target.roles.push(role)
+    targets.set(key, target)
+  }
+  return [...targets.values()]
+}
+
+function summarizeTargets(targets: BalancerTarget[]): string {
+  const shown = targets.slice(0, BALANCER_TARGETS_SHOWN).map(target => target.label).join(', ')
+  const hidden = targets.length - BALANCER_TARGETS_SHOWN
   return hidden > 0 ? `${shown} +${hidden}` : shown
+}
+
+function describeTarget(target: BalancerTarget): string {
+  return target.roles.length > 0 ? `${target.label} — ${target.roles.join(', ')}` : target.label
 }
 
 // ==================== Toggle Component ====================
@@ -523,7 +556,8 @@ function RuleForm({
 }) {
   const { t } = useTranslation()
   const [form, setForm] = useState(initial)
-  const singleTargetOwner = targetOwner(ipOwners, form.target_ip)
+  const addressRole = useAddressRole()
+  const singleTargetLabel = ownerLabel(findOwner(ipOwners, form.target_ip), addressRole)
 
   const toggleBalancer = (enabled: boolean) => {
     if (enabled && form.servers.length === 0) {
@@ -651,10 +685,10 @@ function RuleForm({
                 <label className="block text-xs text-dark-400 mb-1">{t('haproxy.target_ip')}</label>
                 <input type="text" value={form.target_ip} onChange={e => setForm(f => ({ ...f, target_ip: e.target.value }))}
                   placeholder="192.168.1.10" className={inp} />
-                {singleTargetOwner && (
+                {singleTargetLabel && (
                   <p className="flex items-center gap-1 mt-1 text-[10px] text-accent-400 min-w-0">
                     <Server className="w-3 h-3 shrink-0" />
-                    <span className="truncate">{singleTargetOwner}</span>
+                    <span className="truncate">{singleTargetLabel}</span>
                   </p>
                 )}
               </div>
@@ -702,7 +736,7 @@ function RuleForm({
               </div>
               <div className="space-y-2">
                 {form.servers.map((srv, i) => (
-                  <BackendServerRow key={i} srv={srv} index={i} owner={targetOwner(ipOwners, srv.address)} onChange={updateServer}
+                  <BackendServerRow key={i} srv={srv} index={i} owner={ownerLabel(findOwner(ipOwners, srv.address), addressRole)} onChange={updateServer}
                     onRemove={removeServer} canRemove={form.servers.length > 1} t={t} />
                 ))}
               </div>
@@ -847,6 +881,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
   const [rules, setRules] = useState<HAProxyProfileRule[]>([])
   const [availableServers, setAvailableServers] = useState<HAProxyAvailableServer[]>([])
   const [ipOwners, setIpOwners] = useState<HAProxyIpOwners>({})
+  const addressRole = useAddressRole()
   const [serversStatus, setServersStatus] = useState<HAProxyServerStatus[]>([])
   const [syncLog, setSyncLog] = useState<HAProxySyncLogEntry[]>([])
   const [loading, setLoading] = useState(true)
@@ -1223,8 +1258,9 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
               {rules.map(r => {
                 const isEditing = editingRules.has(r.name)
                 const sniActive = r.sni_mode === 'custom' || (r.sni_mode !== 'off' && detail.options.sni_filter_enabled)
-                const balancerTargets = r.is_balancer ? balancerTargetLabels(ipOwners, r.servers ?? []) : []
-                const singleTargetOwner = r.is_balancer ? undefined : targetOwner(ipOwners, r.target_ip)
+                const targets = r.is_balancer ? balancerTargets(ipOwners, r.servers ?? [], addressRole) : []
+                const targetsTooltip = targets.length > BALANCER_TARGETS_SHOWN || targets.some(target => target.roles.length > 0)
+                const singleTargetLabel = r.is_balancer ? undefined : ownerLabel(findOwner(ipOwners, r.target_ip), addressRole)
                 return (
                   <div key={r.name}>
                     <div
@@ -1238,10 +1274,13 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                             <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-accent-500/10 text-accent-400 border border-accent-500/20">
                               <Scale className="w-2.5 h-2.5" /> LB
                             </span>
-                            <Tooltip label={balancerTargets.join(', ')} disabled={balancerTargets.length <= BALANCER_TARGETS_SHOWN}>
+                            <Tooltip
+                              label={<div className="space-y-0.5">{targets.map((target, i) => <div key={i}>{describeTarget(target)}</div>)}</div>}
+                              disabled={!targetsTooltip}
+                            >
                               <span className="text-xs text-dark-500 truncate">
-                                :{r.listen_port} → {balancerTargets.length > 0
-                                  ? summarizeTargets(balancerTargets)
+                                :{r.listen_port} → {targets.length > 0
+                                  ? summarizeTargets(targets)
                                   : `${r.servers?.length ?? 0} ${t('balancer.servers').toLowerCase()}`}
                               </span>
                             </Tooltip>
@@ -1251,7 +1290,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                         ) : (
                           <>
                             <span className="text-xs text-dark-500 truncate">
-                              :{r.listen_port} → {singleTargetOwner && <span className="text-dark-300">{singleTargetOwner} · </span>}{r.target_ip}:{r.target_port}
+                              :{r.listen_port} → {singleTargetLabel && <span className="text-dark-300">{singleTargetLabel} · </span>}{r.target_ip}:{r.target_port}
                             </span>
                             {r.accept_proxy && <span className="text-[10px] text-cyan-400/60 hidden sm:block">ACCEPT</span>}
                             {r.send_proxy && <span className="text-[10px] text-yellow-400/60 hidden sm:block">PROXY</span>}

@@ -2267,6 +2267,7 @@
     "addresses_in": "in",
     "addresses_out": "out",
     "addresses_primary": "primary",
+    "target_extra": "extra {{number}}",
     "addresses_missing": "not on the server",
     "addresses_no_ipv4": "The server has no IPv4 addresses",
     "addresses_load_error": "Failed to load server addresses",

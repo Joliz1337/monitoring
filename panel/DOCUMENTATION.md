@@ -2667,9 +2667,11 @@ UI: строка во вкладке «Привязанные серверы» �
 
 **Подписи целей именами серверов (`services/server_ip_owners.py`):**
 
-`GET /haproxy-profiles/ip-owners` отдаёт карту «адрес → `{id, name}` сервера панели», интерфейс подписывает ею цели правил. Источники — то, что панель уже хранит: хост из `Server.url` (любой, включая домен и приватный IP: его оператор задал сам, а цель правила бывает доменом) и IPv4 интерфейсов из `Server.last_metrics` (`network.interfaces[].addresses`), только `is_global` — docker0 `172.17.0.1` или общий `10.0.0.1` есть на многих нодах и подписывали бы цель случайным сервером. Хост из URL важнее адреса с интерфейса (интерфейсы в метриках отстают, например у переехавшего плавающего IP); между равными источниками адрес достаётся первому серверу по `position`. В конфиг HAProxy подписи не попадают.
+`GET /haproxy-profiles/ip-owners` отдаёт карту «адрес → `{id, name, extra_number}` сервера панели», интерфейс подписывает ею цели правил. Источники — то, что панель уже хранит: хост из `Server.url` (любой, включая домен и приватный IP: его оператор задал сам, а цель правила бывает доменом) и IPv4 интерфейсов из `Server.last_metrics` (`network.interfaces[].addresses`), только `is_global` — docker0 `172.17.0.1` или общий `10.0.0.1` есть на многих нодах и подписывали бы цель случайным сервером. Хост из URL важнее адреса с интерфейса (интерфейсы в метриках отстают, например у переехавшего плавающего IP); между равными источниками адрес достаётся первому серверу по `position`. В конфиг HAProxy подписи не попадают.
 
-UI: `ProfileDetailPanel` грузит карту один раз при открытии профиля, ошибка молча оставляет голые адреса. Ключи — IPv4 и домены в нижнем регистре, `targetOwner()` ищет по `trim().toLowerCase()`. Строка одиночного правила — `:443 → Имя · IP:порт`; строка балансировщика — уникальные имена серверов (неизвестный адрес остаётся адресом), первые `BALANCER_TARGETS_SHOWN = 2` и `+N`, полный список в тултипе. В `RuleForm` имя стоит под полем адреса цели, в `BackendServerRow` — на месте подписи «Адрес» под полем.
+Роль адреса — `extra_number`: `null` у основного, `N` у N-го дополнительного. Основной — хост из URL (по нему панель подключается к ноде), при домене в URL — первый публичный IPv4 интерфейсов. Остальные публичные IPv4 сервера нумеруются с 1 по порядку на интерфейсах (дубли на двух интерфейсах — один номер); если IP из URL на интерфейсах нет (NAT), с 1 нумеруются все. Номер считается по адресам самого сервера и не зависит от того, какие из них достались ему в общей карте, но после удаления адреса следующие сдвигаются. Значок «основной» на странице сервера нода ставит по `prefsrc` маршрута по умолчанию — почти всегда это тот же IP; в метрики нода этот признак не отдаёт, поэтому панель опирается на URL.
+
+UI: `ProfileDetailPanel` грузит карту один раз при открытии профиля, ошибка молча оставляет голые адреса. Ключи — IPv4 и домены в нижнем регистре, `findOwner()` ищет по `trim().toLowerCase()`, `useAddressRole()` даёт подпись роли (`haproxy_configs.addresses_primary` / `target_extra`), `ownerLabel()` — «Имя · роль». Строка одиночного правила — `:443 → Имя · доп. 2 · IP:порт`; строка балансировщика (`balancerTargets()`) — серверы без ролей (несколько IP одного сервера — одна цель, неизвестный адрес остаётся адресом), первые `BALANCER_TARGETS_SHOWN = 2` и `+N`, в тултипе — каждый сервер с перечнем ролей. В `RuleForm` подпись стоит под полем адреса цели, в `BackendServerRow` — на месте подписи «Адрес» под полем.
 
 **Фильтр SNI (`ProfileOptions`, `SniMode` в `services/haproxy_config.py`):**
 
@@ -2717,7 +2719,7 @@ UI: кнопка «Фильтр SNI» (иконка `ShieldCheck`, зелёна�
 | GET | /haproxy-profiles/{id}/servers-status | Статусы серверов профиля (включая `online: bool` и адреса сервера) |
 | POST | /haproxy-profiles/validate | Валидировать config_content без сохранения → `{valid, message}` |
 | GET | /haproxy-profiles/available-servers | Серверы доступные для привязки (`active_profile_id`, `sync_status`, `folder`) |
-| GET | /haproxy-profiles/ip-owners | Адрес → `{id, name}` сервера панели для подписей целей правил |
+| GET | /haproxy-profiles/ip-owners | Адрес → `{id, name, extra_number}` сервера панели для подписей целей правил (`extra_number`: `null` — основной адрес, `N` — доп. N) |
 
 **SyncResult.status:** `success` | `failed` | `queued` (офлайн-нода, синхронизация отложена) | `denied` (закрытый на ноде домен `haproxy`, `NODE_CAPABILITIES` — см. «Права ноды» выше; в очередь на ретрай не попадает).
 
@@ -2743,7 +2745,7 @@ UI: кнопка «Фильтр SNI» (иконка `ShieldCheck`, зелёна�
 - **Тосты sync** (`handleSyncAll`/`handleSyncOne`) раздельно считают synced/queued/failed и показывают корректный текст (включая «отложено (офлайн)»).
 - **Кнопка «Проверить конфиг»** в модалке сырого конфига — вызывает `POST /haproxy-profiles/validate` и показывает результат валидации.
 
-**i18n-ключи** (`haproxy_configs.*`): `drag_to_reorder`, `reorder_error`, `start_haproxy`, `start_all_stopped`, `haproxy_started`, `haproxy_start_error`, `haproxy_start_bulk_success`, `haproxy_start_bulk_partial`, `sync_queued`, `sync_one_queued`, `waiting_server`, `server_online`, `server_offline`, `haproxy_running`, `haproxy_stopped`, `validate_config`, `config_valid`, `config_invalid`, `validate_error`, `unlink_confirm`, `clone_rule`, `clone_rule_title`, `addresses_*` (редактор адресов сервера), `sni_*` (фильтр SNI).
+**i18n-ключи** (`haproxy_configs.*`): `drag_to_reorder`, `reorder_error`, `start_haproxy`, `start_all_stopped`, `haproxy_started`, `haproxy_start_error`, `haproxy_start_bulk_success`, `haproxy_start_bulk_partial`, `sync_queued`, `sync_one_queued`, `waiting_server`, `server_online`, `server_offline`, `haproxy_running`, `haproxy_stopped`, `validate_config`, `config_valid`, `config_invalid`, `validate_error`, `unlink_confirm`, `clone_rule`, `clone_rule_title`, `addresses_*` (редактор адресов сервера), `sni_*` (фильтр SNI), `target_extra` (подпись «доп. N» у цели правила).
 
 **Файлы:**
 - `panel/backend/app/routers/haproxy_profiles.py` — API роутер; `PUT /{id}` с валидацией; `POST /validate`; `PUT /{id}/options`

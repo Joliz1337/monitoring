@@ -25,7 +25,7 @@ Before saving, the panel validates the config with real HAProxy: certificate pat
 
 To add a similar rule, clone an existing one with the copy button in its row: the form opens with all of the original's settings, and you only set a new port.
 
-When a target address belongs to a server in the panel, its name is shown next to the IP — in the rule row, in the form and on every balancer server. The panel recognises a server by the address in its settings and by every public IP on its interfaces, so additional IPs are labelled too. Addresses of other machines stay as they are.
+When a target address belongs to a server in the panel, the IP is labelled with the server's name and which of its addresses it is: "primary" or "extra 1", "extra 2" and so on. The label appears in the rule row, in the form and on every balancer server. The primary is the address from the server's settings; the other public IPs are numbered in the order they sit on its interfaces. Removing an extra address shifts the numbers of the ones after it. Addresses of other machines stay as they are.
 
 ## Server addresses
 

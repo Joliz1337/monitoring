@@ -2272,6 +2272,7 @@
     "addresses_in": "вход",
     "addresses_out": "выход",
     "addresses_primary": "основной",
+    "target_extra": "доп. {{number}}",
     "addresses_missing": "нет на сервере",
     "addresses_no_ipv4": "На сервере нет IPv4-адресов",
     "addresses_load_error": "Не удалось получить адреса сервера",

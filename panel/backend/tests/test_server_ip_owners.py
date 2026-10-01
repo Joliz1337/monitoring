@@ -37,22 +37,48 @@ def server(server_id: int, name: str, url: str, last_metrics: str | None = None)
 
 
 class BuildIpOwnersTest(unittest.TestCase):
-    def test_url_host_and_extra_interface_ips_belong_to_server(self):
+    def test_url_ip_is_primary_and_other_ips_are_numbered_in_interface_order(self):
         owners = build_ip_owners([
-            server(1, "DE", "https://5.9.0.10:9100", metrics_with(
+            server(1, "DE", "https://5.9.0.11:9100", metrics_with(
                 [ipv4("5.9.0.10"), ipv4("5.9.0.11")],
                 [ipv4("95.216.0.7")],
             )),
         ])
 
-        self.assertEqual(owners["5.9.0.10"], IpOwner(1, "DE"))
         self.assertEqual(owners["5.9.0.11"], IpOwner(1, "DE"))
-        self.assertEqual(owners["95.216.0.7"], IpOwner(1, "DE"))
+        self.assertEqual(owners["5.9.0.10"], IpOwner(1, "DE", 1))
+        self.assertEqual(owners["95.216.0.7"], IpOwner(1, "DE", 2))
 
-    def test_domain_url_is_a_key(self):
-        owners = build_ip_owners([server(1, "FI", "https://Node.Example.com:9100")])
+    def test_domain_url_is_primary_key_and_first_interface_ip_is_primary(self):
+        owners = build_ip_owners([
+            server(1, "FI", "https://Node.Example.com:9100", metrics_with(
+                [ipv4("95.216.0.7"), ipv4("95.216.0.8")],
+            )),
+        ])
 
         self.assertEqual(owners["node.example.com"], IpOwner(1, "FI"))
+        self.assertEqual(owners["95.216.0.7"], IpOwner(1, "FI"))
+        self.assertEqual(owners["95.216.0.8"], IpOwner(1, "FI", 1))
+
+    def test_url_ip_missing_on_interfaces_leaves_all_interface_ips_extra(self):
+        owners = build_ip_owners([
+            server(1, "NAT", "https://5.9.0.10:9100", metrics_with([ipv4("95.216.0.7"), ipv4("95.216.0.8")])),
+        ])
+
+        self.assertEqual(owners["5.9.0.10"], IpOwner(1, "NAT"))
+        self.assertEqual(owners["95.216.0.7"], IpOwner(1, "NAT", 1))
+        self.assertEqual(owners["95.216.0.8"], IpOwner(1, "NAT", 2))
+
+    def test_ip_on_two_interfaces_gets_one_number(self):
+        owners = build_ip_owners([
+            server(1, "DE", "https://5.9.0.10:9100", metrics_with(
+                [ipv4("5.9.0.10"), ipv4("5.9.0.11")],
+                [ipv4("5.9.0.11"), ipv4("5.9.0.12")],
+            )),
+        ])
+
+        self.assertEqual(owners["5.9.0.11"], IpOwner(1, "DE", 1))
+        self.assertEqual(owners["5.9.0.12"], IpOwner(1, "DE", 2))
 
     def test_private_and_service_interface_ips_are_skipped(self):
         owners = build_ip_owners([

@@ -2603,6 +2603,8 @@ export interface HAProxyAvailableServer {
 export interface HAProxyIpOwner {
   id: number
   name: string
+  // null — основной адрес сервера, N — его N-й дополнительный адрес
+  extra_number: number | null
 }
 
 // Ключ — IPv4 или домен в нижнем регистре
