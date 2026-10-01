@@ -151,6 +151,7 @@ panel/
 ├── frontend/          # React + Vite + Tailwind
 │   └── src/
 │       ├── components/ui/CopyableIp.tsx  # Клик по IP → копирование в буфер; Tooltip при наведении; зелёная подсветка 1.5 с; fallback на execCommand
+│       ├── components/ui/Checkbox.tsx    # Единственная галочка панели: indeterminate, tone accent/warning; голый <input type="checkbox"> не используется — браузер рисует его системным квадратом (плагина @tailwindcss/forms нет)
 │       ├── utils/format.ts              # Утилиты форматирования; экспортируемая функция extractHost(url) — извлекает хост (IP/домен) из URL ноды
 │       ├── utils/storage.ts             # readStorage/writeStorage — чтение и запись localStorage без исключений (переполненное или запрещённое хранилище не роняет страницу)
 │       ├── pages/SSHSecurity.tsx        # SSH Security Management UI

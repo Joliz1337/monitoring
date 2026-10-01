@@ -12,6 +12,7 @@ import {
   type LossTarget,
 } from '../../api/client'
 import LossProbeBadge from '../ui/LossProbeBadge'
+import { Checkbox } from '../ui/Checkbox'
 import { IPV4_RE, PREVIEW_DEBOUNCE_MS, inputCls, outcomeText } from './editShared'
 
 export type BatchMode = 'delete' | 'replace'
@@ -172,7 +173,7 @@ export default function BatchEditModal({ mode, targets, onClose, onJobStarted }:
 
           {mode === 'delete' && (
             <label className="flex items-center gap-2 text-xs text-dark-300 cursor-pointer">
-              <input type="checkbox" checked={allPorts} onChange={e => setAllPorts(e.target.checked)} className="accent-accent-500" />
+              <Checkbox checked={allPorts} onChange={e => setAllPorts(e.target.checked)} />
               {t('loss.batch_all_ports')}
             </label>
           )}

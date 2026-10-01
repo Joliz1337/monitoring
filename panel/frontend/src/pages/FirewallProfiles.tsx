@@ -860,7 +860,7 @@ function ProfileHeader({
               : 'text-dark-300 bg-dark-800/50 border border-dark-700/50 hover:border-dark-600'
           }`}
         >
-          <input type="checkbox" checked={forceSync} onChange={e => onForceChange(e.target.checked)} className="accent-orange-500" />
+          <Checkbox checked={forceSync} onChange={e => onForceChange(e.target.checked)} tone="warning" />
           {forceSync && <AlertTriangle className="w-3 h-3" />}
           Принудительно
         </label>

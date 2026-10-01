@@ -12,6 +12,7 @@ import {
 } from '../../api/client'
 import { nodeAllows } from '../../utils/nodeCapabilities'
 import { Tooltip } from '../ui/Tooltip'
+import { Checkbox } from '../ui/Checkbox'
 import { FAQIcon } from '../FAQ'
 
 interface Props {
@@ -259,12 +260,7 @@ export default function HosterAccessCard({ serverId, server }: Props) {
               )}
 
               <label className="flex items-start gap-2 text-sm text-dark-300 cursor-pointer mb-4">
-                <input
-                  type="checkbox"
-                  checked={confirmAck}
-                  onChange={e => setConfirmAck(e.target.checked)}
-                  className="accent-accent-500 mt-0.5"
-                />
+                <Checkbox checked={confirmAck} onChange={e => setConfirmAck(e.target.checked)} className="mt-px" />
                 {t('server_details.hoster_confirm_ack')}
               </label>
 
@@ -308,13 +304,7 @@ function FindingRow({
         checked ? 'border-accent-500/40 bg-accent-500/5' : 'border-dark-700 bg-dark-800/40'
       } ${disabled ? 'opacity-60 cursor-default' : 'hover:border-dark-600'}`}
     >
-      <input
-        type="checkbox"
-        checked={checked}
-        disabled={disabled}
-        onChange={onToggle}
-        className="accent-accent-500 mt-0.5"
-      />
+      <Checkbox checked={checked} disabled={disabled} onChange={onToggle} className="mt-px" />
       <span className={`w-1.5 h-1.5 rounded-full mt-2 flex-shrink-0 ${severityDot(finding.severity)}`} />
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2 flex-wrap">

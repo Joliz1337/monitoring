@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { nodeImageApi, ImageDeliveryBulkResult } from '../../api/client'
 import SshCredsFields, { SSH_CREDS_DEFAULTS, SshCredsValue, hasSshSecret, toDeliveryCreds } from './SshCredsFields'
+import { Checkbox } from '../ui/Checkbox'
 
 export interface BulkDeliveryServer {
   id: number
@@ -104,7 +105,7 @@ export default function BulkDeliverImageModal({ servers, onStarted, onClose }: P
               showHost={false}
             />
             <label className="flex items-center gap-2 text-sm text-dark-300 cursor-pointer">
-              <input type="checkbox" checked={saveCreds} onChange={(e) => setSaveCreds(e.target.checked)} disabled={starting || !formFilled} />
+              <Checkbox checked={saveCreds} onChange={(e) => setSaveCreds(e.target.checked)} disabled={starting || !formFilled} />
               {t('imageDelivery.save_creds')}
             </label>
           </div>

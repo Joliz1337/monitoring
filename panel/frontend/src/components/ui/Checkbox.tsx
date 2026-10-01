@@ -9,9 +9,15 @@ interface CheckboxProps {
   disabled?: boolean
   className?: string
   size?: 'sm' | 'md'
+  tone?: 'accent' | 'warning'
 }
 
-export function Checkbox({ checked, indeterminate, onChange, disabled, className = '', size = 'sm', onClick }: CheckboxProps) {
+const ACTIVE_TONE_CLASSES = {
+  accent: 'bg-accent-500 border-accent-500 shadow-[0_0_8px_rgba(6,182,212,0.3)]',
+  warning: 'bg-orange-500 border-orange-500 shadow-[0_0_8px_rgba(249,115,22,0.3)]',
+}
+
+export function Checkbox({ checked, indeterminate, onChange, disabled, className = '', size = 'sm', tone = 'accent', onClick }: CheckboxProps) {
   const sizeClasses = size === 'md' ? 'w-5 h-5' : 'w-[18px] h-[18px]'
   const iconSize = size === 'md' ? 14 : 12
   const isActive = checked || indeterminate
@@ -30,7 +36,7 @@ export function Checkbox({ checked, indeterminate, onChange, disabled, className
       />
       <span className={`${sizeClasses} rounded-[5px] border transition-all duration-200 flex items-center justify-center pointer-events-none
         ${isActive
-          ? 'bg-accent-500 border-accent-500 shadow-[0_0_8px_rgba(6,182,212,0.3)]'
+          ? ACTIVE_TONE_CLASSES[tone]
           : 'bg-dark-800/60 border-dark-600 peer-hover:border-dark-500'
         }
         ${disabled ? 'opacity-50' : ''}

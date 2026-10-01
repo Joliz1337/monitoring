@@ -34,6 +34,7 @@ import {
   Activity,
 } from 'lucide-react'
 import { Tooltip } from '../components/ui/Tooltip'
+import { Checkbox } from '../components/ui/Checkbox'
 import {
   dnatProfilesApi,
   DnatProfile,
@@ -242,8 +243,8 @@ function RuleForm({
           </div>
           <div className="flex items-end gap-4 pb-1.5">
             <Tooltip label={t('dnat_profiles.enabled_hint')} maxWidth={340}>
-              <label className="flex items-center gap-1.5 text-xs text-dark-300 cursor-pointer">
-                <input type="checkbox" checked={form.enabled} onChange={e => update({ enabled: e.target.checked })} className="accent-accent-500" />
+              <label className="flex items-center gap-2 text-xs text-dark-300 cursor-pointer">
+                <Checkbox checked={form.enabled} onChange={e => update({ enabled: e.target.checked })} />
                 {t('dnat_profiles.field_enabled')}
               </label>
             </Tooltip>
@@ -320,14 +321,14 @@ function RuleForm({
           </div>
           <div className="col-span-2 sm:col-span-4 flex flex-wrap gap-x-6 gap-y-2">
             <Tooltip label={t('dnat_profiles.masquerade_hint')} maxWidth={360}>
-              <label className="inline-flex items-center gap-1.5 text-xs text-dark-300 cursor-pointer">
-                <input type="checkbox" checked={form.masquerade} onChange={e => update({ masquerade: e.target.checked })} className="accent-accent-500" />
+              <label className="inline-flex items-center gap-2 text-xs text-dark-300 cursor-pointer">
+                <Checkbox checked={form.masquerade} onChange={e => update({ masquerade: e.target.checked })} />
                 {t('dnat_profiles.field_masquerade')}
               </label>
             </Tooltip>
             <Tooltip label={t('dnat_profiles.mask_ttl_hint')} maxWidth={380}>
-              <label className="inline-flex items-center gap-1.5 text-xs text-dark-300 cursor-pointer">
-                <input type="checkbox" checked={form.mask_ttl} onChange={e => update({ mask_ttl: e.target.checked })} className="accent-accent-500" />
+              <label className="inline-flex items-center gap-2 text-xs text-dark-300 cursor-pointer">
+                <Checkbox checked={form.mask_ttl} onChange={e => update({ mask_ttl: e.target.checked })} />
                 {t('dnat_profiles.field_mask_ttl')}
               </label>
             </Tooltip>

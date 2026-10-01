@@ -198,7 +198,7 @@ export default function Loss() {
           <div className="flex items-center gap-4 flex-wrap">
             {targets && targets.length > 0 && (
               <label className="flex items-center gap-2 text-xs text-dark-400 cursor-pointer">
-                <input type="checkbox" checked={showAll} onChange={e => setShowAll(e.target.checked)} className="accent-accent-500" />
+                <Checkbox checked={showAll} onChange={e => setShowAll(e.target.checked)} />
                 {t('loss.show_all', { count: targets.length })}
               </label>
             )}

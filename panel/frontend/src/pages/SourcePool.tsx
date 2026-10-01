@@ -31,6 +31,7 @@ import { useAutoRefresh } from '../hooks/useAutoRefresh'
 import { useModuleEnabled } from '../hooks/useModuleEnabled'
 import { Tooltip } from '../components/ui/Tooltip'
 import { Toggle } from '../components/ui/Toggle'
+import { Checkbox } from '../components/ui/Checkbox'
 import { FAQIcon } from '../components/FAQ'
 
 const REFRESH_INTERVAL_MS = 10000
@@ -319,9 +320,7 @@ export default function SourcePool() {
                   return (
                     <div key={item.address} className="flex items-center gap-3 py-2.5">
                       {!manual && (
-                        <input
-                          type="checkbox"
-                          className="checkbox"
+                        <Checkbox
                           checked={!item.excluded}
                           disabled={!canToggle}
                           onChange={e => toggleAddress(item.address, e.target.checked)}

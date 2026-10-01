@@ -1219,12 +1219,7 @@ export default function WildcardSSL() {
             <div className="space-y-2">
               <div className="flex items-center gap-4 flex-wrap">
                 <label className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={autoRenew}
-                    onChange={e => setAutoRenew(e.target.checked)}
-                    className="w-4 h-4 rounded border-dark-600 text-accent-500 focus:ring-accent-500 bg-dark-800"
-                  />
+                  <Checkbox checked={autoRenew} onChange={e => setAutoRenew(e.target.checked)} />
                   <span className="text-sm text-dark-200">{t('wildcard_ssl.auto_renew')}</span>
                 </label>
                 <div className="flex items-center gap-2">
@@ -1247,12 +1242,7 @@ export default function WildcardSSL() {
 
             <div className="space-y-2">
               <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={useForPanel}
-                  onChange={e => setUseForPanel(e.target.checked)}
-                  className="w-4 h-4 rounded border-dark-600 text-accent-500 focus:ring-accent-500 bg-dark-800"
-                />
+                <Checkbox checked={useForPanel} onChange={e => setUseForPanel(e.target.checked)} />
                 <span className="text-sm text-dark-200">{t('wildcard_ssl.use_for_panel')}</span>
                 {settings?.panel_domain && (
                   <span className="text-xs text-dark-500 font-mono">({settings.panel_domain})</span>

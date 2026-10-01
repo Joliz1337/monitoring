@@ -12,6 +12,7 @@ import { streamNdjsonGet } from '../../utils/ndjsonStream'
 import SshCredsFields, {
   SSH_CREDS_DEFAULTS, SshCredsValue, credsFromSettings, hasStoredSshSecret, toDeliveryCreds,
 } from './SshCredsFields'
+import { Checkbox } from '../ui/Checkbox'
 
 interface Props {
   serverId: number
@@ -152,7 +153,7 @@ export default function DeliverImageModal({ serverId, serverName, jobId: initial
                   disabled={starting}
                 />
                 <label className="flex items-center gap-2 text-sm text-dark-300 cursor-pointer">
-                  <input type="checkbox" checked={saveCreds} onChange={(e) => setSaveCreds(e.target.checked)} disabled={starting} />
+                  <Checkbox checked={saveCreds} onChange={(e) => setSaveCreds(e.target.checked)} disabled={starting} />
                   {t('imageDelivery.save_creds')}
                 </label>
               </div>

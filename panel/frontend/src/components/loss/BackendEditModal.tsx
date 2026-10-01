@@ -12,6 +12,7 @@ import {
   type LossSuggestion,
 } from '../../api/client'
 import LossProbeBadge from '../ui/LossProbeBadge'
+import { Checkbox } from '../ui/Checkbox'
 import { IPV4_RE, PREVIEW_DEBOUNCE_MS, inputCls, outcomeText } from './editShared'
 
 interface Props {
@@ -165,13 +166,7 @@ export default function BackendEditModal({ ip, port, onClose, onJobStarted }: Pr
           )}
 
           <label className={`flex items-center gap-2 text-xs ${changesPort ? 'text-dark-600' : 'text-dark-300 cursor-pointer'}`}>
-            <input
-              type="checkbox"
-              checked={allPorts}
-              disabled={changesPort}
-              onChange={e => setAllPortsChecked(e.target.checked)}
-              className="accent-accent-500"
-            />
+            <Checkbox checked={allPorts} disabled={changesPort} onChange={e => setAllPortsChecked(e.target.checked)} />
             {changesPort ? t('loss.all_ports_port_change') : t('loss.all_ports', { ip })}
           </label>
 
