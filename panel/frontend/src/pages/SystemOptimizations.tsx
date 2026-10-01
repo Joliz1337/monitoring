@@ -340,24 +340,19 @@ export default function SystemOptimizations() {
 
   // Bulk re-apply preserving each node's own profile (vpn/panel) and NIC mode.
   // A node with NIC mode "none" gets the safe software default (rps).
+  // Все ноды разом, без пула: файлы с GitHub бэкенд качает один раз на волну,
+  // а число одновременных запросов ограничивают потоки HTTP/2 браузера к панели
   const handleUpdateAll = async () => {
     if (updatingAll) return
     const targets = Array.from(nodes.values()).filter(isBulkUpdateTarget)
     if (targets.length === 0) return
 
     setUpdatingAll(true)
-    const queue = [...targets]
-    const POOL_SIZE = 6
-    const worker = async () => {
-      while (queue.length > 0) {
-        const node = queue.shift()
-        if (!node) break
-        const profile = node.optProfile || 'vpn'
-        const nic = node.nicMode === 'multiqueue' || node.nicMode === 'hybrid' ? node.nicMode : 'rps'
-        await handleApply(node.id, node.name, nic, profile)
-      }
-    }
-    await Promise.all(Array.from({ length: Math.min(POOL_SIZE, queue.length) }, worker))
+    await Promise.all(targets.map(node => {
+      const profile = node.optProfile || 'vpn'
+      const nic = node.nicMode === 'multiqueue' || node.nicMode === 'hybrid' ? node.nicMode : 'rps'
+      return handleApply(node.id, node.name, nic, profile)
+    }))
     setUpdatingAll(false)
     toast.success(t('sys_opt.update_all_done', { count: targets.length }))
   }

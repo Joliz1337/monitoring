@@ -32,6 +32,8 @@ logger = logging.getLogger(__name__)
 
 NODE_VERSIONS_CACHE_TTL_SEC = 30.0
 NODE_NIC_INFO_CACHE_TTL_SEC = 20.0
+OPTIMIZATIONS_CACHE_TTL_SEC = 60.0
+OPTIMIZATIONS_FAILED_CACHE_TTL_SEC = 5.0
 
 # Ссылка подставляется в текст shell-скрипта, который апдейтер исполняет в
 # privileged-контейнере с docker.sock — то есть это прямой путь к произвольной
@@ -45,6 +47,9 @@ _node_versions_locks: dict[int, asyncio.Lock] = {}
 
 _node_nic_info_cache: dict[int, tuple[float, Any]] = {}
 _node_nic_info_locks: dict[int, asyncio.Lock] = {}
+
+_optimizations_cache: dict[tuple[str, str], tuple[float, dict]] = {}
+_optimizations_lock = asyncio.Lock()
 
 
 def _get_per_server_lock(locks: dict[int, asyncio.Lock], server_id: int) -> asyncio.Lock:
@@ -369,9 +374,14 @@ async def get_single_node_version(
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
 
+    offline_threshold = await get_offline_threshold(db)
+    # Коннект пула не держим на время запроса к ноде: после «Обновить все»
+    # страница оптимизаций перечитывает все ноды разом
+    await db.commit()
+
     # Ноду, которую коллектор метрик уже считает офлайн, не дёргаем: запрос всё равно
     # упёрся бы в таймаут, а страницы «Обновления»/«Оптимизации» ждали бы его зря
-    if resolve_status(server, await get_offline_threshold(db)) == "offline":
+    if resolve_status(server, offline_threshold) == "offline":
         return await _node_version_payload(server, None)
 
     return await _node_version_payload(server, await get_node_all_versions(server))
@@ -783,6 +793,25 @@ async def get_optimizations_from_github(profile: str = "vpn") -> dict:
     if profile not in ("vpn", "panel"):
         profile = "vpn"
 
+    # «Обновить все» применяет оптимизации на все ноды разом: без общего кэша
+    # каждая нода тянула бы с GitHub те же 12 файлов, и волна упёрлась бы в пул
+    # внешнего клиента (20 соединений) раньше, чем дошла до нод. Неудачу тоже
+    # запоминаем ненадолго — иначе ждущие на локе повторяли бы её по очереди
+    cache_key = (update_channel.github_configs_base(), profile)
+    async with _optimizations_lock:
+        cached = _optimizations_cache.get(cache_key)
+        if cached and time.monotonic() < cached[0]:
+            return cached[1]
+
+        result, complete = await _fetch_optimizations_from_github(profile)
+        ttl = OPTIMIZATIONS_CACHE_TTL_SEC if complete else OPTIMIZATIONS_FAILED_CACHE_TTL_SEC
+        _optimizations_cache[cache_key] = (time.monotonic() + ttl, result)
+        return result
+
+
+async def _fetch_optimizations_from_github(profile: str) -> tuple[dict, bool]:
+    """Скачать файлы оптимизаций; второй элемент — все ли файлы получены."""
+    complete = False
     result = {
         "version": None,
         "profile": profile,
@@ -838,10 +867,12 @@ async def get_optimizations_from_github(profile: str = "vpn") -> dict:
             elif resp.status_code == 200:
                 result[key] = resp.text.strip() if key == "version" else resp.text
 
+        complete = all(result[key] for key, _ in keys)
+
     except Exception as e:
         logger.error(f"Failed to fetch optimizations from GitHub: {e}")
 
-    return result
+    return result, complete
 
 
 # NOTE: GET /optimizations/configs used to exist here and returned the finished

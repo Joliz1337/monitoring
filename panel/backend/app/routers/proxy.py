@@ -967,11 +967,6 @@ async def apply_node_optimizations(
     Fetches latest configs from GitHub and applies them.
     Accepts optional body with nic_mode: "rps" (default), "multiqueue", or "hybrid".
     """
-    server = await get_server_by_id(server_id, db)
-    # До опроса версии и до нескольких запросов на GitHub: иначе за отказ,
-    # известный заранее, платили бы полуминутой ожидания
-    require_capability(server, Capability.SYSTEM, write=True)
-
     from app.routers.settings import cpu_affinity_enabled
     from app.routers.system import (
         MIN_NODE_VERSION_FOR_RENDER,
@@ -980,6 +975,14 @@ async def apply_node_optimizations(
         invalidate_node_cache,
         node_supports_renderer,
     )
+
+    # Настройку читаем до get_server_by_id: его commit вернёт коннект в пул, и
+    # тот не провисит минуту применения — «Обновить все» шлёт его на все ноды разом
+    cpu_affinity = await cpu_affinity_enabled(db)
+    server = await get_server_by_id(server_id, db)
+    # До опроса версии и до нескольких запросов на GitHub: иначе за отказ,
+    # известный заранее, платили бы полуминутой ожидания
+    require_capability(server, Capability.SYSTEM, write=True)
 
     nic_mode = (body or {}).get("nic_mode", "rps")
     opt_profile = (body or {}).get("opt_profile", "vpn")
@@ -1037,7 +1040,7 @@ async def apply_node_optimizations(
         "nic_mode": nic_mode,
         "opt_profile": opt_profile,
         "version": github_data.get("version"),
-        "cpu_affinity": await cpu_affinity_enabled(db),
+        "cpu_affinity": cpu_affinity,
     }
 
     result = await proxy_request(
