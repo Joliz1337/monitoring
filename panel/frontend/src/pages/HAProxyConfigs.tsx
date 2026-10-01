@@ -20,6 +20,7 @@ import {
   HAProxySyncResult,
   HAProxySyncLogEntry,
   HAProxyAvailableServer,
+  HAProxyIpOwners,
   HAProxyServerStatus,
   BackendServer,
   BalancerOptions,
@@ -84,6 +85,25 @@ const DEFAULT_BALANCER_OPTIONS: BalancerOptions = {
   fullconn: 100000, timeout_queue: '30s',
 }
 
+// ==================== Target owners ====================
+
+const BALANCER_TARGETS_SHOWN = 2
+
+function targetOwner(owners: HAProxyIpOwners, address: string): string | undefined {
+  return owners[address.trim().toLowerCase()]?.name
+}
+
+// Несколько IP одного сервера в балансировщике дают одно имя, неизвестный адрес остаётся адресом
+function balancerTargetLabels(owners: HAProxyIpOwners, servers: BackendServer[]): string[] {
+  return [...new Set(servers.map(s => targetOwner(owners, s.address) ?? s.address).filter(Boolean))]
+}
+
+function summarizeTargets(labels: string[]): string {
+  const shown = labels.slice(0, BALANCER_TARGETS_SHOWN).join(', ')
+  const hidden = labels.length - BALANCER_TARGETS_SHOWN
+  return hidden > 0 ? `${shown} +${hidden}` : shown
+}
+
 // ==================== Toggle Component ====================
 
 function Toggle({ value, onChange, label }: { value: boolean; onChange: (v: boolean) => void; label?: string }) {
@@ -101,9 +121,10 @@ function Toggle({ value, onChange, label }: { value: boolean; onChange: (v: bool
 // ==================== Backend Server Row ====================
 
 function BackendServerRow({
-  srv, index, onChange, onRemove, canRemove, t,
+  srv, index, owner, onChange, onRemove, canRemove, t,
 }: {
   srv: BackendServer; index: number
+  owner?: string
   onChange: (i: number, s: BackendServer) => void
   onRemove: (i: number) => void
   canRemove: boolean
@@ -152,7 +173,9 @@ function BackendServerRow({
       {!expanded && (
         <div className="grid grid-cols-4 gap-2 -mt-1">
           <span className="text-[10px] text-dark-500">{t('balancer.server_name')}</span>
-          <span className="text-[10px] text-dark-500">{t('balancer.address')}</span>
+          {owner
+            ? <span className="text-[10px] text-accent-400 truncate" title={owner}>{owner}</span>
+            : <span className="text-[10px] text-dark-500">{t('balancer.address')}</span>}
           <span className="text-[10px] text-dark-500">{t('haproxy.target_port')}</span>
           <span className="text-[10px] text-dark-500">{t('balancer.weight')}</span>
         </div>
@@ -486,6 +509,7 @@ function RuleForm({
   onCancel,
   profileId,
   profileOptions,
+  ipOwners,
 }: {
   initial: RuleFormData
   isEdit: boolean
@@ -495,9 +519,11 @@ function RuleForm({
   onCancel: () => void
   profileId: number
   profileOptions: HAProxyProfileOptions
+  ipOwners: HAProxyIpOwners
 }) {
   const { t } = useTranslation()
   const [form, setForm] = useState(initial)
+  const singleTargetOwner = targetOwner(ipOwners, form.target_ip)
 
   const toggleBalancer = (enabled: boolean) => {
     if (enabled && form.servers.length === 0) {
@@ -625,6 +651,12 @@ function RuleForm({
                 <label className="block text-xs text-dark-400 mb-1">{t('haproxy.target_ip')}</label>
                 <input type="text" value={form.target_ip} onChange={e => setForm(f => ({ ...f, target_ip: e.target.value }))}
                   placeholder="192.168.1.10" className={inp} />
+                {singleTargetOwner && (
+                  <p className="flex items-center gap-1 mt-1 text-[10px] text-accent-400 min-w-0">
+                    <Server className="w-3 h-3 shrink-0" />
+                    <span className="truncate">{singleTargetOwner}</span>
+                  </p>
+                )}
               </div>
               <div>
                 <label className="block text-xs text-dark-400 mb-1">{t('haproxy.target_port')}</label>
@@ -670,7 +702,7 @@ function RuleForm({
               </div>
               <div className="space-y-2">
                 {form.servers.map((srv, i) => (
-                  <BackendServerRow key={i} srv={srv} index={i} onChange={updateServer}
+                  <BackendServerRow key={i} srv={srv} index={i} owner={targetOwner(ipOwners, srv.address)} onChange={updateServer}
                     onRemove={removeServer} canRemove={form.servers.length > 1} t={t} />
                 ))}
               </div>
@@ -814,6 +846,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
   const [detail, setDetail] = useState<HAProxyProfileDetail | null>(null)
   const [rules, setRules] = useState<HAProxyProfileRule[]>([])
   const [availableServers, setAvailableServers] = useState<HAProxyAvailableServer[]>([])
+  const [ipOwners, setIpOwners] = useState<HAProxyIpOwners>({})
   const [serversStatus, setServersStatus] = useState<HAProxyServerStatus[]>([])
   const [syncLog, setSyncLog] = useState<HAProxySyncLogEntry[]>([])
   const [loading, setLoading] = useState(true)
@@ -871,6 +904,11 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
   }, [profileId, t, fetchServersStatus])
 
   useEffect(() => { fetchDetail() }, [fetchDetail])
+
+  // Имена серверов у целей — только подсказка: без них правила показываются голыми адресами
+  useEffect(() => {
+    haproxyProfilesApi.getIpOwners().then(res => setIpOwners(res.data)).catch(() => {})
+  }, [])
 
   // Автообновление статусов серверов каждые 3 секунды
   // (пропускаем, когда вкладка скрыта — не долбим бэкенд в фоне)
@@ -1169,6 +1207,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                   onCancel={() => { setShowRuleForm(false) }}
                   profileId={profileId}
                   profileOptions={detail.options}
+                  ipOwners={ipOwners}
                 />
               </div>
             )}
@@ -1184,6 +1223,8 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
               {rules.map(r => {
                 const isEditing = editingRules.has(r.name)
                 const sniActive = r.sni_mode === 'custom' || (r.sni_mode !== 'off' && detail.options.sni_filter_enabled)
+                const balancerTargets = r.is_balancer ? balancerTargetLabels(ipOwners, r.servers ?? []) : []
+                const singleTargetOwner = r.is_balancer ? undefined : targetOwner(ipOwners, r.target_ip)
                 return (
                   <div key={r.name}>
                     <div
@@ -1197,16 +1238,20 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                             <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-accent-500/10 text-accent-400 border border-accent-500/20">
                               <Scale className="w-2.5 h-2.5" /> LB
                             </span>
-                            <span className="text-xs text-dark-500">
-                              :{r.listen_port} → {r.servers?.length ?? 0} {t('balancer.servers').toLowerCase()}
-                            </span>
+                            <Tooltip label={balancerTargets.join(', ')} disabled={balancerTargets.length <= BALANCER_TARGETS_SHOWN}>
+                              <span className="text-xs text-dark-500 truncate">
+                                :{r.listen_port} → {balancerTargets.length > 0
+                                  ? summarizeTargets(balancerTargets)
+                                  : `${r.servers?.length ?? 0} ${t('balancer.servers').toLowerCase()}`}
+                              </span>
+                            </Tooltip>
                             <span className="text-[10px] text-dark-500 hidden sm:block">{r.balancer_options?.algorithm}</span>
                             {r.accept_proxy && <span className="text-[10px] text-cyan-400/60 hidden sm:block">ACCEPT</span>}
                           </>
                         ) : (
                           <>
-                            <span className="text-xs text-dark-500">
-                              :{r.listen_port} → {r.target_ip}:{r.target_port}
+                            <span className="text-xs text-dark-500 truncate">
+                              :{r.listen_port} → {singleTargetOwner && <span className="text-dark-300">{singleTargetOwner} · </span>}{r.target_ip}:{r.target_port}
                             </span>
                             {r.accept_proxy && <span className="text-[10px] text-cyan-400/60 hidden sm:block">ACCEPT</span>}
                             {r.send_proxy && <span className="text-[10px] text-yellow-400/60 hidden sm:block">PROXY</span>}
@@ -1239,6 +1284,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                               onCancel={() => setEditingRules(prev => { const next = new Set(prev); next.delete(r.name); return next })}
                               profileId={profileId}
                               profileOptions={detail.options}
+                              ipOwners={ipOwners}
                             />
                           </div>
                         </motion.div>
@@ -1255,6 +1301,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                               onCancel={() => setCloningRule(null)}
                               profileId={profileId}
                               profileOptions={detail.options}
+                              ipOwners={ipOwners}
                             />
                           </div>
                         </motion.div>

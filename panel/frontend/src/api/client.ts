@@ -2599,6 +2599,14 @@ export interface HAProxyAvailableServer {
   folder: string | null
 }
 
+export interface HAProxyIpOwner {
+  id: number
+  name: string
+}
+
+// Ключ — IPv4 или домен в нижнем регистре
+export type HAProxyIpOwners = Record<string, HAProxyIpOwner>
+
 export interface HAProxyServerStatus {
   server_id: number
   server_name: string
@@ -2716,6 +2724,8 @@ export const haproxyProfilesApi = {
     api.get<HAProxySyncLogEntry[]>(`/haproxy-profiles/${profileId}/log`, { params: { limit: limit || 50 } }),
   getAvailableServers: () =>
     api.get<HAProxyAvailableServer[]>('/haproxy-profiles/available-servers'),
+  getIpOwners: () =>
+    api.get<HAProxyIpOwners>('/haproxy-profiles/ip-owners'),
   getServersStatus: (profileId: number) =>
     api.get<HAProxyServerStatus[]>(`/haproxy-profiles/${profileId}/servers-status`),
   getRules: (profileId: number) =>

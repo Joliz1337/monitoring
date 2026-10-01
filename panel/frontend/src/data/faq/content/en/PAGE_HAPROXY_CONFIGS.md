@@ -25,6 +25,8 @@ Before saving, the panel validates the config with real HAProxy: certificate pat
 
 To add a similar rule, clone an existing one with the copy button in its row: the form opens with all of the original's settings, and you only set a new port.
 
+When a target address belongs to a server in the panel, its name is shown next to the IP — in the rule row, in the form and on every balancer server. The panel recognises a server by the address in its settings and by every public IP on its interfaces, so additional IPs are labelled too. Addresses of other machines stay as they are.
+
 ## Server addresses
 
 If a server has several IPs, expand its row under "Linked Servers" and check which addresses HAProxy listens on and which it uses to reach the backends. For example, one IP only accepts clients while another only goes out. The setting covers every rule in the profile, and the profile itself stays shared: the panel builds a separate config for each server. With nothing checked, HAProxy listens on all addresses and the system picks the outgoing one.

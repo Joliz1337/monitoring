@@ -2665,6 +2665,12 @@ Whitelist можно наполнять из внешних списков по 
 
 UI: строка во вкладке «Привязанные серверы» раскрывается кликом в любом месте или шевроном (`expandedServers`; `handleServerRowClick` пропускает клики по кнопкам строки — запуск, синхронизация, отвязка) → `components/haproxy/ServerAddressesEditor.tsx` — IPv4-адреса интерфейсов из `GET /proxy/{id}/network/state` с галочками «Слушает»/«Выходит». Сохранённые адреса, которых уже нет на сервере, остаются в списке зачёркнутыми с пометкой «нет на сервере», чтобы их можно было снять; отправляются в порядке строк (первый отмеченный выходной IP получает исходное имя `server`). В свёрнутой строке — сводка `вход … · выход …` (от ширины `md`). `servers-status` отдаёт по серверу `listen_ips`, `source_ips`, `addresses_supported`, `addresses_min_node_version`.
 
+**Подписи целей именами серверов (`services/server_ip_owners.py`):**
+
+`GET /haproxy-profiles/ip-owners` отдаёт карту «адрес → `{id, name}` сервера панели», интерфейс подписывает ею цели правил. Источники — то, что панель уже хранит: хост из `Server.url` (любой, включая домен и приватный IP: его оператор задал сам, а цель правила бывает доменом) и IPv4 интерфейсов из `Server.last_metrics` (`network.interfaces[].addresses`), только `is_global` — docker0 `172.17.0.1` или общий `10.0.0.1` есть на многих нодах и подписывали бы цель случайным сервером. Хост из URL важнее адреса с интерфейса (интерфейсы в метриках отстают, например у переехавшего плавающего IP); между равными источниками адрес достаётся первому серверу по `position`. В конфиг HAProxy подписи не попадают.
+
+UI: `ProfileDetailPanel` грузит карту один раз при открытии профиля, ошибка молча оставляет голые адреса. Ключи — IPv4 и домены в нижнем регистре, `targetOwner()` ищет по `trim().toLowerCase()`. Строка одиночного правила — `:443 → Имя · IP:порт`; строка балансировщика — уникальные имена серверов (неизвестный адрес остаётся адресом), первые `BALANCER_TARGETS_SHOWN = 2` и `+N`, полный список в тултипе. В `RuleForm` имя стоит под полем адреса цели, в `BackendServerRow` — на месте подписи «Адрес» под полем.
+
 **Фильтр SNI (`ProfileOptions`, `SniMode` в `services/haproxy_config.py`):**
 
 Выключен по умолчанию. Общий список профиля лежит в `HAProxyConfigProfile.options` (JSON `{sni_filter_enabled, sni_filter_domains}`) и из конфига не восстанавливается — генератор вписывает его во frontend каждого TCP-правила. У правила поле `sni_mode`: `profile` (по умолчанию — общий список, если фильтр профиля включён), `custom` (свой `sni_domains`, перекрывает профиль), `off` (без фильтра, даже если в профиле он включён). Строки во frontend:
@@ -2711,6 +2717,7 @@ UI: кнопка «Фильтр SNI» (иконка `ShieldCheck`, зелёна�
 | GET | /haproxy-profiles/{id}/servers-status | Статусы серверов профиля (включая `online: bool` и адреса сервера) |
 | POST | /haproxy-profiles/validate | Валидировать config_content без сохранения → `{valid, message}` |
 | GET | /haproxy-profiles/available-servers | Серверы доступные для привязки (`active_profile_id`, `sync_status`, `folder`) |
+| GET | /haproxy-profiles/ip-owners | Адрес → `{id, name}` сервера панели для подписей целей правил |
 
 **SyncResult.status:** `success` | `failed` | `queued` (офлайн-нода, синхронизация отложена) | `denied` (закрытый на ноде домен `haproxy`, `NODE_CAPABILITIES` — см. «Права ноды» выше; в очередь на ретрай не попадает).
 
@@ -2744,12 +2751,13 @@ UI: кнопка «Фильтр SNI» (иконка `ShieldCheck`, зелёна�
 - `panel/backend/app/services/haproxy_validator.py` — `validate_config(config_content)`: запуск `haproxy -c -f`, замена путей `crt` на dummy-сертификат
 - `panel/backend/app/services/haproxy_profile_sync.py` — `is_server_online`, `_sync_single_server` (отдельная DB-сессия, принимает `ensure_started`), `SyncResult` (`status: success|failed|queued`), `retry_pending_haproxy_syncs` (с `ensure_started=True`), `stop_haproxy_on_server` (POST `/api/haproxy/stop`, graceful при офлайн), `render_profile_for_server`/`expected_config_hash`/`mark_outdated_pending`/`check_addresses_on_node` (адреса сервера)
 - `panel/backend/app/services/haproxy_addresses.py` — `ServerAddresses`, `render_for_server`, `normalize_ips`, `missing_on_node`; тесты — `panel/backend/tests/test_haproxy_addresses.py`
+- `panel/backend/app/services/server_ip_owners.py` — `load_ip_owners`, `build_ip_owners` (подписи целей именами серверов); тесты — `panel/backend/tests/test_server_ip_owners.py`
 - `panel/backend/app/services/metrics_collector.py` — фоновый цикл `_haproxy_pending_sync_loop` (интервал `HAPROXY_RETRY_INTERVAL=30` сек)
 - `panel/backend/Dockerfile` — пакет `haproxy` для локальной валидации
 - `panel/frontend/src/pages/HAProxyConfigs.tsx` — страница управления; индикаторы online/offline; `SyncStatusBadge`; кнопка «Проверить конфиг»; раскрытие строки сервера
 - `panel/frontend/src/components/haproxy/ServerAddressesEditor.tsx` — редактор входных/выходных IP сервера
 - `panel/frontend/src/utils/ruleClone.ts` — `uniqueCopyName()`: имя копии правила (общее с DNAT)
-- `panel/frontend/src/api/client.ts` — `haproxyProfilesApi.validateConfig()`, `haproxyProfilesApi.reorderProfiles()`, `HAProxyServerStatus.online`, `HAProxySyncResult.status`
+- `panel/frontend/src/api/client.ts` — `haproxyProfilesApi.validateConfig()`, `haproxyProfilesApi.reorderProfiles()`, `haproxyProfilesApi.getIpOwners()` (`HAProxyIpOwners`), `HAProxyServerStatus.online`, `HAProxySyncResult.status`
 - `panel/frontend/src/App.tsx` — роут `haproxy-configs`
 - `panel/frontend/src/components/Layout/Layout.tsx` — пункт навигации «HAProxy Configs»
 - `panel/frontend/src/locales/ru.json`, `en.json` — i18n ключи пространства имён `haproxy_configs`

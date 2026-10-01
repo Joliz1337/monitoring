@@ -1,5 +1,6 @@
 import asyncio
 import socket
+from dataclasses import asdict
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy import select, update, func, and_, bindparam
@@ -34,6 +35,7 @@ from app.services.haproxy_config import (
 )
 from app.services.haproxy_validator import validate_config
 from app.services.reserved_ports_sync import _version_tuple
+from app.services.server_ip_owners import load_ip_owners
 
 logger = logging.getLogger(__name__)
 
@@ -241,6 +243,13 @@ async def get_available_servers(db: AsyncSession = Depends(get_db), _=Depends(ve
         }
         for row in result.fetchall()
     ]
+
+
+@router.get("/ip-owners")
+async def get_ip_owners(db: AsyncSession = Depends(get_db), _=Depends(verify_auth)):
+    """Адрес → сервер панели: интерфейс подписывает цели правил именами серверов."""
+    owners = await load_ip_owners(db)
+    return {address: asdict(owner) for address, owner in owners.items()}
 
 
 class ValidateRequest(BaseModel):
