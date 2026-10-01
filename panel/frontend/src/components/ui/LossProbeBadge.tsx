@@ -4,7 +4,7 @@ import { Tooltip } from './Tooltip'
 
 // До 2% — фон любой сети, выше 10% — адрес уже заметно деградирует для клиентов
 export const LOSS_WARN_PCT = 2
-const LOSS_BAD_PCT = 10
+export const LOSS_BAD_PCT = 10
 
 function lossClass(lossPct: number): string {
   if (lossPct > LOSS_BAD_PCT) return 'bg-danger/10 text-danger border-danger/20'

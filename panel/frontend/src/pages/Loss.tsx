@@ -13,6 +13,7 @@ import BackendEditModal from '../components/loss/BackendEditModal'
 import BatchEditModal, { type BatchMode } from '../components/loss/BatchEditModal'
 import ActivityStrip, { isJobRunning, type RunningCheck } from '../components/loss/ActivityStrip'
 import LossSettings from '../components/loss/LossSettings'
+import TraceModal from '../components/loss/TraceModal'
 import { readStorage, writeStorage } from '../utils/storage'
 
 // Нода обновляет окно каждые 2 с, панель собирает метрики раз в ~10 с
@@ -53,6 +54,7 @@ export default function Loss() {
   const [checkResult, setCheckResult] = useState<{ ip: string; port: number; results: LossCheckResult[] } | null>(null)
   const checkBlockRef = useRef<HTMLDivElement>(null)
   const [editing, setEditing] = useState<LossTarget | null>(null)
+  const [tracing, setTracing] = useState<{ serverId: number; serverName: string; target: string } | null>(null)
   const [batch, setBatch] = useState<{ mode: BatchMode; targets: LossTarget[] } | null>(null)
   const [picked, setPicked] = useState<Set<string>>(new Set())
   const [jobs, setJobs] = useState<BackendEditJob[]>([])
@@ -298,7 +300,15 @@ export default function Loss() {
                           <td />
                           <td className="px-4 py-1.5 pl-10 text-dark-300">{relay.name}</td>
                           <td className="px-4 py-1.5"><LossProbeBadge probe={relay} /></td>
-                          <td className="px-4 py-1.5 text-dark-500" colSpan={3}>{t('loss.samples', { count: relay.samples })}</td>
+                          <td className="px-4 py-1.5 text-dark-500" colSpan={2}>{t('loss.samples', { count: relay.samples })}</td>
+                          <td className="px-4 py-1.5 text-right">
+                            <button
+                              onClick={() => setTracing({ serverId: relay.server_id, serverName: relay.name, target: target.target })}
+                              className="px-2.5 py-1 rounded-lg text-xs text-accent-400 hover:bg-accent-500/10 transition-colors"
+                            >
+                              {t('loss.trace_open')}
+                            </button>
+                          </td>
                         </tr>
                       ))}
                     </Fragment>
@@ -350,6 +360,16 @@ export default function Loss() {
                         ? <LossProbeBadge probe={{ loss_pct: result.loss_pct, rtt_ms: result.rtt_ms ?? null, samples: result.samples ?? 0 }} />
                         : <span className="text-xs text-dark-500">{t(`loss.status_${result.status}`)}</span>}
                     </td>
+                    <td className="px-4 py-2 text-right">
+                      {result.status === 'ok' && (
+                        <button
+                          onClick={() => setTracing({ serverId: result.server_id, serverName: result.name, target: `${checkResult.ip}:${checkResult.port}` })}
+                          className="px-2.5 py-1 rounded-lg text-xs text-accent-400 hover:bg-accent-500/10 transition-colors"
+                        >
+                          {t('loss.trace_open')}
+                        </button>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -385,6 +405,14 @@ export default function Loss() {
 
       {editing && (
         <BackendEditModal ip={editing.ip} port={editing.port} onClose={() => setEditing(null)} onJobStarted={onJobStarted} />
+      )}
+      {tracing && (
+        <TraceModal
+          serverId={tracing.serverId}
+          serverName={tracing.serverName}
+          target={tracing.target}
+          onClose={() => setTracing(null)}
+        />
       )}
       {batch && (
         <BatchEditModal mode={batch.mode} targets={batch.targets} onClose={() => setBatch(null)} onJobStarted={onJobStarted} />

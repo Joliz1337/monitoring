@@ -1992,7 +1992,46 @@ export interface BackendEditJob {
   profiles: EditJobProfileProgress[]
 }
 
+export interface TraceHop {
+  hop: number
+  host: string | null
+  asn: string | null
+  as_name: string | null
+  owner: string | null
+  sent: number
+  received: number
+  loss_pct: number
+  avg_ms: number | null
+  best_ms: number | null
+  worst_ms: number | null
+}
+
+export interface TraceAnalysis {
+  verdict: 'waiting' | 'clean' | 'loss_from' | 'broken_after' | 'no_replies'
+  preliminary: boolean
+  start_hop: number | null
+  prev_hop: number | null
+  last_hop: number | null
+  dest_loss: number | null
+  problem_hops: number[]
+}
+
+export interface PathTrace {
+  id: string
+  ip: string
+  port: number
+  state: 'running' | 'done' | 'failed'
+  error: string | null
+  rounds_done: number
+  rounds_total: number
+  hops: TraceHop[]
+  analysis: TraceAnalysis
+}
+
 export const lossApi = {
+  startTrace: (serverId: number, target: string) =>
+    api.post<{ trace_id: string; ip: string; port: number }>('/loss/trace', { server_id: serverId, target }),
+  getTrace: (serverId: number, traceId: string) => api.get<PathTrace>(`/loss/trace/${serverId}/${traceId}`),
   overview: () => api.get<{ targets: LossTarget[] }>('/loss/overview'),
   backendsPreview: (edits: BackendEditBody[]) =>
     api.post<{ items: BackendEditProfile[][]; suggestions: Record<string, LossSuggestion[]> }>(

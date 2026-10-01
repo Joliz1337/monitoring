@@ -1,5 +1,5 @@
-"""Страница «Потери»: сводка по адресам назначения релеев, ручная проверка адреса
-и правка бэкенда с этим адресом во всех профилях HAProxy и DNAT."""
+"""Страница «Потери»: сводка по адресам назначения релеев, ручная проверка и
+трасса до адреса, правка бэкенда с этим адресом во всех профилях HAProxy и DNAT."""
 
 import ipaddress
 import logging
@@ -26,6 +26,7 @@ from app.services.backend_edit_jobs import get_edit_jobs
 from app.services.loss_exclusions import load_loss_exclusions, save_loss_exclusions
 from app.services.loss_overview import TargetParseError, build_overview, check_from_servers, parse_target
 from app.services.loss_registry import get_loss_registry
+from app.services.loss_trace import TraceError, TraceErrorCode, analyze_trace, fetch_trace, start_trace
 from app.services.server_alerter import get_server_alerter
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,20 @@ MAX_BATCH_EDITS = 200
 class LossCheckRequest(BaseModel):
     target: str = Field(..., min_length=1, max_length=64)
     server_ids: list[int] = Field(..., min_length=1, max_length=MAX_CHECK_SERVERS)
+
+
+class TraceRequest(BaseModel):
+    server_id: int
+    target: str = Field(..., min_length=1, max_length=64)
+
+
+TRACE_ERROR_STATUS = {
+    TraceErrorCode.UNSUPPORTED: 409,
+    TraceErrorCode.DENIED: 403,
+    TraceErrorCode.BUSY: 429,
+    TraceErrorCode.NOT_FOUND: 404,
+    TraceErrorCode.UNREACHABLE: 502,
+}
 
 
 class BackendEditRequest(BaseModel):
@@ -138,6 +153,53 @@ async def apply_backend_edits(data: BackendEditBatch, bg: BackgroundTasks):
     logger.info("backend_edit_job_started job=%s edits=%s", job.id, len(edits))
     bg.add_task(jobs.run, job)
     return {"job": job.to_dict(progress=[])}
+
+
+async def _active_server(server_id: int, db: AsyncSession) -> Server:
+    server = (await db.execute(
+        select(Server).where(Server.id == server_id, Server.is_active == True)  # noqa: E712
+    )).scalar_one_or_none()
+    if server is None:
+        raise HTTPException(status_code=404, detail="server not found")
+    # Сессию отпускаем до похода на ноду
+    await db.commit()
+    return server
+
+
+def _trace_http_error(exc: TraceError) -> HTTPException:
+    # detail — код: фронт сам переводит его в понятный текст
+    return HTTPException(status_code=TRACE_ERROR_STATUS[exc.code], detail=exc.code.value)
+
+
+@router.post("/trace")
+async def start_path_trace(data: TraceRequest, db: AsyncSession = Depends(get_db)):
+    """mtr с релея до адреса в фоне на ноде; ход — GET /loss/trace/{server_id}/{trace_id}."""
+    try:
+        ip, port = parse_target(data.target)
+    except TargetParseError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    server = await _active_server(data.server_id, db)
+    try:
+        trace_id = await start_trace(server, ip, port)
+    except TraceError as exc:
+        raise _trace_http_error(exc)
+    return {"trace_id": trace_id, "ip": ip, "port": port}
+
+
+@router.get("/trace/{server_id}/{trace_id}")
+async def get_path_trace(server_id: int, trace_id: str, db: AsyncSession = Depends(get_db)):
+    server = await _active_server(server_id, db)
+    try:
+        trace = await fetch_trace(server, trace_id)
+    except TraceError as exc:
+        raise _trace_http_error(exc)
+    owners = get_loss_registry().owners()
+    for hop in trace.get("hops", []):
+        hop["owner"] = owners.get(hop.get("host") or "")
+    trace["analysis"] = analyze_trace(
+        trace.get("hops", []), trace.get("ip", ""), trace.get("state") != "running", trace.get("rounds_done", 0),
+    )
+    return trace
 
 
 @router.get("/jobs")

@@ -25,10 +25,10 @@ class LossProbeEntry(ProbeStats):
     port: int
 
 
-class LossCheckRequest(BaseModel):
+class TargetRequest(BaseModel):
+    """Адрес:порт, к которому нода подключается по запросу панели."""
     ip: str
     port: int = Field(443, ge=1, le=65535)
-    attempts: int = Field(CHECK_ATTEMPTS_DEFAULT, ge=1, le=CHECK_ATTEMPTS_MAX)
 
     @field_validator("ip")
     @classmethod
@@ -37,3 +37,7 @@ class LossCheckRequest(BaseModel):
         if address.is_unspecified or address.is_multicast:
             raise ValueError("ip must be a unicast address")
         return str(address)
+
+
+class LossCheckRequest(TargetRequest):
+    attempts: int = Field(CHECK_ATTEMPTS_DEFAULT, ge=1, le=CHECK_ATTEMPTS_MAX)
