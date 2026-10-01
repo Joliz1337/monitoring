@@ -92,8 +92,15 @@ export default function TraceModal({ serverId, serverName, target, onClose }: Pr
     }
     switch (analysis.verdict) {
       case 'clean':
-        return { tone: 'success', icon: <CheckCircle2 className="w-5 h-5" />, text: t('loss.trace_clean', { loss: analysis.dest_loss ?? 0 }) }
+        return {
+          tone: 'success',
+          icon: <CheckCircle2 className="w-5 h-5" />,
+          text: t(analysis.path_hidden ? 'loss.trace_clean_hidden' : 'loss.trace_clean', { loss: analysis.dest_loss ?? 0 }),
+        }
       case 'loss_from': {
+        if (analysis.path_hidden) {
+          return { tone: 'danger', icon: <AlertTriangle className="w-5 h-5" />, text: t('loss.trace_loss_hidden', { loss: analysis.dest_loss }) }
+        }
         const start = hopByNumber.get(analysis.start_hop ?? -1)
         const prev = hopByNumber.get(analysis.prev_hop ?? -1)
         return {
@@ -175,7 +182,7 @@ export default function TraceModal({ serverId, serverName, target, onClose }: Pr
           {(trace?.hops ?? []).map((hop, index, all) => {
             const silent = !hop.host || hop.received === 0
             const inProblem = problemHops.has(hop.hop)
-            const isStart = analysis?.verdict === 'loss_from' && analysis.start_hop === hop.hop
+            const isStart = analysis?.verdict === 'loss_from' && !analysis.path_hidden && analysis.start_hop === hop.hop
             // «Шум» роутера — только когда вывод уже есть: до него потери на узле ещё могут оказаться началом проблемы
             const noisy = hasVerdict && !silent && !inProblem && hop.loss_pct > LOSS_WARN_PCT
             return (

@@ -71,7 +71,9 @@ class RoundTests(unittest.TestCase):
         self.assertEqual((view["rounds_done"], view["rounds_total"]), (2, ROUNDS))
 
     def test_command_is_tcp_on_the_port(self):
-        self.assertEqual(mtr_round_command("184.107.64.85", 8449), "mtr -n -T -P 8449 -c 1 -G 1 -j 184.107.64.85")
+        self.assertEqual(
+            mtr_round_command("184.107.64.85", 8449), "mtr -n -T -P 8449 -c 1 -G 1 -U 30 -j 184.107.64.85",
+        )
 
 
 class DnsTests(unittest.TestCase):

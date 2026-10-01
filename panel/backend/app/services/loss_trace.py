@@ -59,7 +59,7 @@ def analyze_trace(hops: list[dict], target_ip: str, finished: bool, rounds_done:
     responding = [h for h in sorted(hops, key=lambda h: h["hop"]) if h.get("host") and h.get("received")]
     preliminary = not finished and rounds_done < MIN_ROUNDS_FOR_VERDICT
     result = {"verdict": Verdict.WAITING, "preliminary": preliminary, "start_hop": None,
-              "prev_hop": None, "last_hop": None, "dest_loss": None, "problem_hops": []}
+              "prev_hop": None, "last_hop": None, "dest_loss": None, "problem_hops": [], "path_hidden": False}
     if not responding:
         if finished:
             result["verdict"] = Verdict.NO_REPLIES
@@ -72,6 +72,9 @@ def analyze_trace(hops: list[dict], target_ip: str, finished: bool, rounds_done:
         return result
 
     result["dest_loss"] = dest["loss_pct"]
+    # Адрес ответил, а ни один роутер до него — нет: ответы роутеров до сервера не
+    # доходят (так в облаках вроде VK Cloud), место потерь по такой трассе не найти
+    result["path_hidden"] = dest["hop"] > 1 and all(h["host"] == target_ip for h in responding)
     if dest["loss_pct"] < CLEAN_LOSS_PCT:
         result["verdict"] = Verdict.CLEAN
         return result

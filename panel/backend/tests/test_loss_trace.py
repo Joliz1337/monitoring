@@ -62,6 +62,15 @@ class VerdictTests(unittest.TestCase):
         # Пока трасса идёт, обрыв ещё не вывод
         self.assertEqual(analyze_trace(hops, TARGET, False, 3)["verdict"], Verdict.WAITING)
 
+    def test_only_target_answers_means_path_hidden(self):
+        hops = [hop(1, None, 100), hop(2, None, 100), hop(3, None, 100), hop(4, TARGET, 20)]
+        result = analyze_trace(hops, TARGET, True, 15)
+        self.assertEqual((result["verdict"], result["path_hidden"], result["dest_loss"]), (Verdict.LOSS_FROM, True, 20))
+        hops = [hop(1, "10.0.0.1", 0), hop(2, TARGET, 20)]
+        self.assertFalse(analyze_trace(hops, TARGET, True, 15)["path_hidden"])
+        # Адрес в соседях — скрывать нечего
+        self.assertFalse(analyze_trace([hop(1, TARGET, 0)], TARGET, True, 15)["path_hidden"])
+
     def test_nothing_answers(self):
         self.assertEqual(analyze_trace([hop(1, None, 100)], TARGET, True, 15)["verdict"], Verdict.NO_REPLIES)
 

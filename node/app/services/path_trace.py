@@ -34,6 +34,10 @@ TRACE_TTL_SEC = 600
 MAX_KEPT_TRACES = 20
 MTR_INSTALL_TIMEOUT_SEC = 180
 NO_REPLY_HOST = "???"
+# = max-ttl mtr. По умолчанию mtr бросает раунд после 12 молчащих узлов подряд, а в
+# облаках вроде VK Cloud ответы роутеров до сервера не доходят вовсе — адрес дальше
+# 12-го узла так и не получил бы пробу, хотя на TCP он отвечает
+MAX_SILENT_HOPS = 30
 
 # Team Cymru на холодном кеше резолвера отвечает секунды
 DNS_TIMEOUT_SEC = 3.0
@@ -64,7 +68,7 @@ class TraceBusyError(RuntimeError):
 def mtr_round_command(ip: str, port: int) -> str:
     # ip и port уже проверены моделью запроса — в строку попадают только они.
     # -G 1: ждать ответов секунду после последнего пакета, а не 5 по умолчанию
-    return f"mtr -n -T -P {int(port)} -c 1 -G 1 -j {ip}"
+    return f"mtr -n -T -P {int(port)} -c 1 -G 1 -U {MAX_SILENT_HOPS} -j {ip}"
 
 
 def parse_round(output: str) -> list[tuple[int, Optional[str], Optional[float]]]:

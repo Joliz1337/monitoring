@@ -2014,6 +2014,7 @@ export interface TraceAnalysis {
   last_hop: number | null
   dest_loss: number | null
   problem_hops: number[]
+  path_hidden: boolean
 }
 
 export interface PathTrace {
