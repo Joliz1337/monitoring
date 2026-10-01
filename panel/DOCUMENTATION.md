@@ -169,7 +169,7 @@ panel/
 │       │   ├── CoresTab.tsx             # Выбор версии ядра: список релизов с пометками, загрузка и удаление версий
 │       │   ├── LocationPicker.tsx       # Выбор мест запуска: панель + ноды, поиск, папки, tri-state на папке
 │       │   └── HistoryTab.tsx           # История прогонов с раскрытием результатов
-│       ├── pages/Servers.tsx            # Список серверов по папкам дашборда + InfraTree
+│       ├── pages/Servers.tsx            # Список серверов по папкам с перетаскиванием, как на дашборде, + InfraTree
 │       ├── components/ui/Skeleton.tsx   # Skeleton-лоадеры (Skeleton, ServerCardSkeleton, MetricCardSkeleton, ChartSkeleton)
 │       ├── components/Infra/            # Infrastructure Tree компоненты
 │       │   ├── InfraTree.tsx            # Основной контейнер дерева
@@ -183,6 +183,9 @@ panel/
 │       ├── hooks/useModuleEnabled.ts     # Включён ли раздел — для ссылок на него с чужих страниц
 │       ├── hooks/useScrollRestoration.ts # Прокрутка каждой страницы сохраняется и возвращается при повторном заходе
 │       ├── hooks/useRememberedState.ts   # useState, переживающий уход со страницы (вкладки, выбор, периоды графиков)
+│       ├── hooks/useFolderBoard.ts       # Перетаскивание серверов и папок, создание/переименование/удаление папок (Dashboard, Servers)
+│       ├── hooks/useCollapsedFolders.ts  # Свёрнутые папки страницы в localStorage
+│       ├── components/folders/          # SortableFolder, UnfolderDropZone, FolderDragPreview, FolderDialogs
 │       ├── components/Layout/Layout.tsx # Боковая панель + плавающий amber-таб Notes + рендер NotesDrawer
 │       └── stores/
 │           ├── infraStore.ts            # Zustand-стор дерева инфраструктуры
@@ -954,12 +957,13 @@ interface NicInfo {
 
 ### Dashboard: drag-and-drop серверов по папкам
 
-Карточки серверов на Dashboard перетаскиваются между папками и внутри них через `dnd-kit`; порядок и папка сохраняются одним запросом.
+Карточки серверов на Dashboard и на странице Servers перетаскиваются между папками и внутри них через `dnd-kit`; порядок и папка сохраняются одним запросом. Механика общая для обеих страниц (`hooks/useFolderBoard.ts`), страница рисует только свои карточки и бейджи папки.
 
 **Frontend:**
 - `ServerCard.tsx` разделён на презентационный `ServerCardView`, sortable-обёртку `SortableServerCard` (default export `ServerCard` = `memo` обёртки) и `ServerCardOverlay` — копия карточки для `DragOverlay` без `useSortable`. Важно не заводить `useSortable` внутри `DragOverlay` с тем же `id`, что и у настоящей карточки: это перезаписывает регистрацию draggable/droppable в реестре dnd-kit, а при размонтировании оверлея удаляет её вместе с настоящей карточкой — drag ломается после первого переноса, пока компонент не перемонтируется. Настоящая карточка во время drag — приглушённый placeholder (`opacity-30`), кольцо/тень — только у оверлея.
 - Entrance-анимация карточки (класс `card-enter`, `fill-mode: forwards`) держится дольше, чем нужно: по CSS-каскаду анимация на `transform` перебивает inline-`transform` от dnd-kit, из-за чего live-предпросмотр drag (раздвижение карточек, перемещение placeholder) не работал вообще. `ServerCardView` снимает класс `card-enter` по `animationend` (проверка `e.animationName === 'card-enter'`), после чего dnd-kit применяет свой transform как обычно; у `ServerCardOverlay` этой анимации нет — состояние `entered` там сразу `true`. Карточка, перемонтированная посреди drag (перенос в другую папку двигает её в React-дереве), не должна проигрывать анимацию заново — `entered` инициализируется `isOverlay || isDragging`, а не только `isOverlay`.
-- `Dashboard.tsx` — multi-container паттерн dnd-kit: локальная копия списка на время drag (`dragServers`), `onDragOver` переносит карточку между папками и раздвигает соседей, показывая реальную позицию вставки. Collision detection: карточка под курсором → если курсор попал в зону папки, а не в конкретную карточку (grid gap между карточками) — коллизия ремапится на ближайшую карточку этой зоны через `closestCenter`, а не возвращается зоной целиком (иначе `overIndex` сбрасывался в -1 и раздвижка превью откатывалась на каждом зазоре). `handleDragEnd` одним вызовом сохраняет и папку, и позицию через `applyServerArrangement`; `isDraggingRef` держится до завершения этого вызова (`try`/`finally`), а не сбрасывается сразу при дропе — иначе тик поллинга метрик в окне между дропом и коммитом на бэке приносил старый порядок и карточки скачком откатывались и возвращались. `resetDragState` разделён на `clearDragVisuals` (мгновенная очистка визуала при дропе/отмене) и `handleDragCancel` (`onDragCancel`); папка, из которой утащили последний сервер, не пропадает из-под курсора до конца drag.
+- `hooks/useFolderBoard.ts` — multi-container паттерн dnd-kit: локальная копия списка на время drag (`dragServers`, наружу — `displayedServers`), `onDragOver` переносит карточку между папками и раздвигает соседей, показывая реальную позицию вставки. Collision detection: карточка под курсором → если курсор попал в зону папки, а не в конкретную карточку (grid gap между карточками) — коллизия ремапится на ближайшую карточку этой зоны через `closestCenter`, а не возвращается зоной целиком (иначе `overIndex` сбрасывался в -1 и раздвижка превью откатывалась на каждом зазоре). `handleDragEnd` одним вызовом сохраняет и папку, и позицию через `applyServerArrangement`; `isDraggingRef` держится до завершения этого вызова (`try`/`finally`), а не сбрасывается сразу при дропе — иначе тик поллинга метрик в окне между дропом и коммитом на бэке приносил старый порядок и карточки скачком откатывались и возвращались. `resetDragState` разделён на `clearDragVisuals` (мгновенная очистка визуала при дропе/отмене) и `handleDragCancel` (`onDragCancel`); папка, из которой утащили последний сервер, не пропадает из-под курсора до конца drag. Обработчики DndContext страница получает через `dndContextProps(folders, dragEnabled)` — `folders` нужен в порядке показа для перестановки папок. Там же порядок папок (`folderOrder`, общий `localStorage` `dashboard_folder_order` через `readFolderOrder`/`saveFolderOrder` из `utils/folders.ts`), созданные, но ещё пустые папки (`emptyFolders` — папка существует только как поле сервера, до первого переноса она живёт в состоянии страницы) и создание/переименование/удаление папки с окнами `FolderDialogs`.
+- `components/folders/SortableFolder.tsx` — папка (ручка перетаскивания, кнопка сворачивания со слотом `badges`, правка/удаление, строка `footer`, сворачиваемое тело), `UnfolderDropZone` (зона «без папки») и `FolderDragPreview` для `DragOverlay`; `components/folders/FolderDialogs.tsx` — окна создания и переименования. Свёрнутые папки — `hooks/useCollapsedFolders.ts`, ключ `localStorage` у каждой страницы свой.
 - `serversStore.ts` — единый экшен `applyServerArrangement(orderedIds, movedId, folder)`: атомарный optimistic-апдейт порядка и папки одним `set`, откат при ошибке API; серверы вне переданного порядка (например неактивные) сохраняются в хвосте списка.
 
 **Backend:** мутации раскладки (`/servers/reorder`, `/servers/move-to-folder`, `/servers/folders/rename`, `DELETE /servers/folders/{name}`) сбрасывают кэш ответа `GET /servers?include_metrics=true` (TTL 3с, см. `_LIST_CACHE_TTL` в `routers/servers.py`) сразу после коммита — иначе поллинг в пределах TTL мог вернуть закэшированный старый порядок, и фронт откатывал optimistic-обновление.
@@ -970,11 +974,13 @@ interface NicInfo {
 - Считаются по всем активным серверам папки (`activeGrouped` в `Dashboard.tsx`), а не по видимым: поиск и фильтр по статусу цифры не меняют. Во время drag источник — локальная копия `dragServers`, поэтому бейджи пересчитываются сразу при переносе карточки.
 
 **Файлы:**
+- `panel/frontend/src/hooks/useFolderBoard.ts`, `hooks/useCollapsedFolders.ts`
+- `panel/frontend/src/components/folders/SortableFolder.tsx`, `components/folders/FolderDialogs.tsx`
 - `panel/frontend/src/components/Dashboard/ServerCard.tsx`
 - `panel/frontend/src/components/Dashboard/FolderStats.tsx`
 - `panel/frontend/src/pages/Dashboard.tsx`
 - `panel/frontend/src/stores/serversStore.ts`
-- `panel/frontend/src/utils/fleetLoad.ts`
+- `panel/frontend/src/utils/folders.ts`, `utils/fleetLoad.ts`
 - `panel/backend/app/routers/servers.py`
 
 ### Dashboard: сводная панель флота
@@ -1020,14 +1026,17 @@ interface NicInfo {
 
 ### Servers: папки
 
-Список на странице Servers разложен по папкам дашборда. Перетаскивания и управления папками здесь нет — папки создаются и серверы переносятся на Dashboard.
+Список на странице Servers разложен по папкам дашборда и управляется так же: серверы перетаскиваются между папками и внутри них, папки — между собой, кнопка в шапке создаёт папку, в заголовке папки — переименование и удаление. Механика — общий `useFolderBoard` (см. «Dashboard: drag-and-drop серверов по папкам»), поэтому порядок серверов и папок на обеих страницах один.
 
-- Раскладка — `groupByFolder` (`utils/folders.ts`, сохраняет порядок карточек внутри папки), порядок папок — `orderFolders` (сохранённый на дашборде `dashboard_folder_order`, остальные по алфавиту). Серверы без папки — общей сеткой после папок. Отключённые серверы остаются в своих папках, затемнёнными.
-- Заголовок папки — кнопка сворачивания. Свёрнутые папки хранятся в `localStorage` под ключом `servers_collapsed_folders`, отдельно от дашборда и «Обновлений». Рядом с именем — `FolderStatusCounts` (`components/Dashboard/FolderStats.tsx`) по активным серверам всей папки (`activeByFolder`): поиск цифры не меняет.
-- Поиск раскрывает свёрнутые папки (сохранённое состояние не трогается) и прячет папки без совпадений.
+- Раскладка — `groupByFolder` (`utils/folders.ts`, сохраняет порядок карточек внутри папки), список папок — `collectFolders` (папки серверов плюс созданные пустые, в общем порядке `dashboard_folder_order`, остальные по алфавиту). Серверы без папки — общей сеткой после папок, в зоне `UnfolderDropZone`. Отключённые серверы остаются в своих папках, затемнёнными, и тоже перетаскиваются.
+- Карточка — `SortableServer`: `useSortable` и transform перетаскивания на внешней обёртке, анимация появления — на вложенном `motion.div` (framer-motion пишет свой `transform` и на том же элементе глушил бы сдвиг от dnd-kit; `layout`-анимации у карточек нет по той же причине). Ручка — `GripVertical` в шапке карточки; в `DragOverlay` едет копия карточки (`renderServerCard` без ручки). Карточка, перемонтированная посреди drag (перенос в другую папку), не проигрывает анимацию появления заново (`initial={isDragging ? false : …}`).
+- Заголовок папки — `SortableFolder` с `FolderStatusCounts` (`components/Dashboard/FolderStats.tsx`) по активным серверам всей папки (`activeByFolder`, из `displayedServers` — пересчитывается во время drag): поиск цифры не меняет. Свёрнутые папки — `localStorage` `servers_collapsed_folders`, отдельно от дашборда и «Обновлений».
+- Поиск раскрывает свёрнутые папки (сохранённое состояние не трогается), прячет папки без совпадений и отключает перетаскивание (`dndContextProps(…, false)`), рядом с полем — подсказка `servers.search_drag_hint`.
 
 **Файлы:**
 - `panel/frontend/src/pages/Servers.tsx`
+- `panel/frontend/src/hooks/useFolderBoard.ts`, `hooks/useCollapsedFolders.ts`
+- `panel/frontend/src/components/folders/SortableFolder.tsx`, `components/folders/FolderDialogs.tsx`
 - `panel/frontend/src/utils/folders.ts`
 - `panel/frontend/src/data/faq/content/{ru,en}/PAGE_SERVERS.md`
 

@@ -211,6 +211,7 @@
     "migration_confirm_done": "I reinstalled them",
     "migration_confirm_failed": "{{count}} server(s) still unreachable via mTLS",
     "search_placeholder": "Search servers...",
+    "search_drag_hint": "Drag-and-drop is disabled while searching",
     "done": "Done",
     "deploy_title": "Auto-deploy node over SSH",
     "deploy_subtitle": "The panel connects to the server and installs the node itself. The password is not stored.",

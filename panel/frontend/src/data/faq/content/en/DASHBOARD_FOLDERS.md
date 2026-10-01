@@ -7,6 +7,7 @@ Grouping for cards so you can find the right node among dozens or hundreds.
 - Create, rename or dissolve a folder — servers stay, they just lose the folder.
 - Drag a card into another folder or to a new position inside one.
 - Collapse a folder to free up screen space.
+- Do all of the above on the Servers page too — handy right after adding new servers.
 
 ## Good to know
 

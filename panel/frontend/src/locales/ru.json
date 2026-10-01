@@ -215,6 +215,7 @@
     "migration_confirm_done": "Я переустановил",
     "migration_confirm_failed": "Серверов всё ещё недоступно по mTLS: {{count}}",
     "search_placeholder": "Поиск серверов...",
+    "search_drag_hint": "Перетаскивание отключено на время поиска",
     "done": "Готово",
     "deploy_title": "Автоустановка ноды по SSH",
     "deploy_subtitle": "Панель сама подключится к серверу и установит ноду. Пароль не сохраняется.",

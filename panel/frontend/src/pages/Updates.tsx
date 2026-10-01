@@ -31,24 +31,16 @@ import { Checkbox } from '../components/ui/Checkbox'
 import { FAQIcon } from '../components/FAQ'
 import { useSettingsStore } from '../stores/settingsStore'
 import { orderFolders } from '../utils/folders'
+import { useCollapsedFolders } from '../hooks/useCollapsedFolders'
 import DeliverImageModal from '../components/servers/DeliverImageModal'
 import BulkDeliverImageModal from '../components/servers/BulkDeliverImageModal'
 import NodeUpdateCard, { NodeState } from '../components/updates/NodeUpdateCard'
 import HAProxyUpgradeModal, { HAProxyUpgradeTarget } from '../components/updates/HAProxyUpgradeModal'
-import { writeStorage } from '../utils/storage'
 
 // Пока идёт SSH-доставка или обновление HAProxy хоть на одной ноде — статусы на карточках обновляются с этим шагом
 const JOB_POLL_INTERVAL_MS = 3_000
 const COLLAPSED_FOLDERS_KEY = 'updates_collapsed_folders'
 const NODE_GRID_CLASS = 'grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3'
-
-function readCollapsedFolders(): Set<string> {
-  try {
-    return new Set(JSON.parse(localStorage.getItem(COLLAPSED_FOLDERS_KEY) || '[]'))
-  } catch {
-    return new Set()
-  }
-}
 
 // После запуска обновления панель уходит в перезапуск (updater-контейнер пересобирает образ).
 // Ждём 10с прежде чем начать опрос — за это время старая панель успевает погаснуть.
@@ -112,7 +104,7 @@ export default function Updates() {
   const [haproxyJobs, setHaproxyJobs] = useState<Map<number, RemnawaveInstallJobInfo>>(new Map())
   const [haproxyModal, setHaproxyModal] = useState<{ targets: HAProxyUpgradeTarget[]; jobId: string | null } | null>(null)
   const [selected, setSelected] = useState<Set<number>>(new Set())
-  const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(readCollapsedFolders)
+  const [collapsedFolders, toggleFolderCollapsed] = useCollapsedFolders(COLLAPSED_FOLDERS_KEY)
 
   const abortRef = useRef(false)
   const rebootWaitCancelRef = useRef(false)
@@ -442,16 +434,6 @@ export default function Updates() {
         if (on) next.add(id)
         else next.delete(id)
       }
-      return next
-    })
-  }
-
-  const toggleFolderCollapsed = (folder: string) => {
-    setCollapsedFolders(prev => {
-      const next = new Set(prev)
-      if (next.has(folder)) next.delete(folder)
-      else next.add(folder)
-      writeStorage(COLLAPSED_FOLDERS_KEY, JSON.stringify([...next]))
       return next
     })
   }
