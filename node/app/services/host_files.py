@@ -110,10 +110,14 @@ def _write_succeeded(result, path: str, mode: Optional[str]) -> bool:
     return True
 
 
-async def write_host_file(path: str, content: str, mode: Optional[str] = None) -> bool:
-    """Write a file to the host filesystem via nsenter."""
+async def write_host_file(path: str, content: str, mode: Optional[str] = None, secret: bool = False) -> bool:
+    """Write a file to the host filesystem via nsenter.
+
+    secret — содержимое не попадает в лог: исполнитель логирует начало команды,
+    а в нём начало base64 файла (.env ноды, учётки реестров, пароль прокси)."""
     result = await get_host_executor().execute(
-        _write_command(path, content, mode), timeout=20, shell="bash"
+        _write_command(path, content, mode), timeout=20, shell="bash",
+        log_label=f"write {path}" if secret else None,
     )
     return _write_succeeded(result, path, mode)
 

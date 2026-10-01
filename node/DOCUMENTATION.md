@@ -289,7 +289,7 @@ node/
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
 | GET | /api/version | Версия ноды |
-| GET | /api/system/versions | Объединённый endpoint: версия ноды, оптимизации, версия HAProxy и релиз ОС |
+| GET | /api/system/versions | Объединённый endpoint: версия ноды, оптимизации, версия HAProxy и релиз ОС, сводка прокси для загрузок |
 | POST | /api/system/update | Запуск обновления (target_ref: branch/tag/commit, по умолчанию main; при вызове через панель панель подставляет выбранный канал обновлений — main/dev). В ответе `attempt_id` — идентификатор попытки |
 | GET | /api/system/update/status | Итог последней попытки обновления: `in_progress`, `last_result` (`success`/`failed`/`null` пока идёт), `last_error`, `reason`, `attempt_id`, `target_ref`, `started_at`, `finished_at`, `version` |
 | GET | /api/system/optimizations/version | Версия системных оптимизаций (installed + version) |
@@ -858,6 +858,27 @@ PEM разбирается в процессе агента через `cryptogr
 | POST | /api/system/bandwidth-limit | `{enabled, mbit}` (1–100000); `enabled=false` снимает |
 
 Состояние — `/opt/monitoring/configs/bandwidth-limit.env` (`BANDWIDTH_LIMIT_MBIT`, `BANDWIDTH_LIMIT_IFACE`) на хосте, пишется до применения: если `tc` упал, намерение не теряется. `BandwidthLimiter.start()` в lifespan переприменяет лимит при старте агента и подтверждает раз в `BANDWIDTH_RECHECK_INTERVAL_SEC = 120` (`ensure()`: корневой qdisc не наш или не с той полосой → `_apply`) — `ethtool -L` из тюнинга и ручной `tc qdisc del` сбрасывают корневой qdisc. Тесты: `node/tests/test_bandwidth_limit.py` — разбор состояния и `tc -j`, формула burst (30 мс полосы, пол/потолок), `in_sync`/дрейф, legacy cake = applied но не in_sync, миграция cake → tbf, самолечение только при расхождении, снятие только своего qdisc.
+
+### Прокси для загрузок (`download_proxy.py`)
+
+Прокси, через который хост качает обновления, образы и пакеты. Установщик хранит его в `/etc/monitoring/proxy.conf` и раскладывает в apt (`99monitoring-proxy`), git (`/root/.gitconfig`) и демон Docker (`docker.service.d/proxy.conf`). Но прокси, поставленный руками мимо установщика, живёт и в других местах, а мёртвый прокси в любом из них срывает обновления. Особенно коварны настройки Docker-клиента: из `/root/.docker/config.json` прокси попадает в окружение контейнера агента, и через него идёт каждая команда, которую панель запускает на хосте (так `curl` скачивания `install.sh` упирался в давно мёртвый прокси).
+
+Поэтому разведка (`SCAN_SCRIPT`, один вызов исполнителя: содержимое файлов в base64) смотрит во все места: `proxy.conf`, `apt.conf` и `apt.conf.d/*`, drop-in'ы `docker.service.d/*.conf` и `daemon.json` (`proxies`), `config.json` клиента Docker, `.gitconfig` (`[http]`/`[https] proxy`), `.curlrc`, `/etc/environment`, `.env` ноды и окружение самого агента (`os.environ`). Разбор и правка — чистые функции (`detect`, `plan_removal`, `plan_set`): строки с прокси вырезаются, соседние настройки файлов остаются, свои файлы (`99monitoring-proxy`, `docker.service.d/proxy.conf`) удаляются целиком. Наружу адрес уходит только с маской пароля (`mask_proxy_url`).
+
+Задание прокси = удаление всех найденных + запись схемы установщика (`proxy.conf` в одинарных кавычках — файл sourced, в `Environment=` `%` удваивается — иначе systemd раскроет `%XX` как спецификатор). Адрес проверяется `PROXY_URL_PATTERN` (без кавычек, пробелов и метасимволов shell). Запись — `write_host_file(..., secret=True)`: исполнитель логирует начало команды, а в нём начало base64 файла (`.env` с `NODE_SECRET`, учётки реестров в `config.json`, пароль прокси) — с `secret` в лог идёт только путь.
+
+Изменение для демона Docker действует после его перезапуска, прокси из окружения агента уходит только с пересозданием контейнера. И то и другое убило бы сам запрос, поэтому выполняется через `RESTART_DELAY_SECONDS = 3` после ответа в отдельном юните `systemd-run` (вне cgroup контейнера агента; без systemd-run — `nohup`): `systemctl restart docker`, а если прокси был в окружении агента и найден его источник (клиент Docker, `.env`) — ещё `docker compose up -d --force-recreate` в `/opt/monitoring-node`. Перезапуск Docker перезапускает все контейнеры хоста, Remnawave тоже (`restart: always`/`unless-stopped` поднимает их сами).
+
+Проверка — `urllib` через прокси (`HEAD` на GitHub, `ghcr.io/v2/`, raw.githubusercontent, 10 с на цель): любой HTTP-ответ сайта, даже 401 у реестра, значит прокси довёз запрос. Сводка (`urls`, `sources`) отдаётся в `GET /api/system/versions` → блок `download_proxy`, по нему страница «Обновления» панели показывает прокси на карточке ноды.
+
+| Метод | Endpoint | Описание |
+|-------|----------|----------|
+| GET | /api/system/download-proxy | `entries` — `{source, location, url}` по каждому месту (пароль скрыт), `urls` |
+| PUT | /api/system/download-proxy | `{url}` — один прокси по схеме установщика вместо всех найденных; ответ `{changed, restart_docker, recreate_agent}` |
+| DELETE | /api/system/download-proxy | Убрать прокси отовсюду, где найден |
+| POST | /api/system/download-proxy/test | `{url?}` — без адреса проверяются все найденные; `checks[].results[]` — `{target, ok, status, ms, error}` |
+
+Тесты: `node/tests/test_download_proxy.py` — разведка по всем местам, маска пароля, вырезание с сохранением соседних настроек, когда перезапускать Docker и пересоздавать агента, экранирование `%`, повторная смена без накопления секций gitconfig, шаблон адреса.
 
 ### Дополнительные IP-адреса (`extra_ips.py`)
 

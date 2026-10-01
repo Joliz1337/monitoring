@@ -545,6 +545,71 @@ async def set_bandwidth_limit(
     return await proxy_request(server, "/api/system/bandwidth-limit", method="POST", json_data=data, timeout=40.0)
 
 
+# ==================== Download proxy (прокси для загрузок ноды) ====================
+
+# Тот же шаблон, что у ноды (DOWNLOAD_PROXY_URL_PATTERN): адрес уходит в sourced
+# proxy.conf, apt.conf и Environment= юнита Docker — без кавычек и метасимволов
+DOWNLOAD_PROXY_URL_PATTERN = r"^https?://[A-Za-z0-9._~%!*+,=:@\[\]-]+/?$"
+# Проверка ждёт ответа GitHub и реестра через прокси, до 10 с на адрес
+DOWNLOAD_PROXY_TEST_TIMEOUT = 40.0
+
+
+class DownloadProxyRequest(BaseModel):
+    url: str = Field(..., max_length=255, pattern=DOWNLOAD_PROXY_URL_PATTERN)
+
+
+class DownloadProxyTestRequest(BaseModel):
+    url: Optional[str] = Field(None, max_length=255, pattern=DOWNLOAD_PROXY_URL_PATTERN)
+
+
+@router.get("/{server_id}/system/download-proxy")
+async def get_download_proxy(
+    server_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    server = await get_server_by_id(server_id, db)
+    return await proxy_request(server, "/api/system/download-proxy", timeout=30.0)
+
+
+@router.put("/{server_id}/system/download-proxy")
+async def set_download_proxy(
+    server_id: int,
+    data: DownloadProxyRequest,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Задать прокси для загрузок вместо всех найденных. Нода перезапустит Docker."""
+    server = await get_server_by_id(server_id, db)
+    return await proxy_request(
+        server, "/api/system/download-proxy", method="PUT", json_data=data.model_dump(), timeout=40.0,
+    )
+
+
+@router.delete("/{server_id}/system/download-proxy")
+async def remove_download_proxy(
+    server_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    server = await get_server_by_id(server_id, db)
+    return await proxy_request(server, "/api/system/download-proxy", method="DELETE", timeout=40.0)
+
+
+@router.post("/{server_id}/system/download-proxy/test")
+async def test_download_proxy(
+    server_id: int,
+    data: DownloadProxyTestRequest,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    server = await get_server_by_id(server_id, db)
+    return await proxy_request(
+        server, "/api/system/download-proxy/test", method="POST",
+        json_data=data.model_dump(exclude_none=True), timeout=DOWNLOAD_PROXY_TEST_TIMEOUT,
+    )
+
+
 # ==================== Hoster access (разведка и вырезание доступов хостера) ====================
 # scan — read-only, purge — необратимо (apt purge, стирание ключей/юзеров/репо).
 # Домен `system` (префикс /api/system/), гейт версии ноды 10.29.0.

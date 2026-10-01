@@ -9,10 +9,13 @@ import {
   Check,
   Upload,
   ArrowUpCircle,
+  Globe,
   type LucideIcon,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import type { ImageDeliveryJobInfo, ImageDeliveryJobStatus, RemnawaveInstallJobInfo } from '../../api/client'
+import type {
+  DownloadProxySummary, ImageDeliveryJobInfo, ImageDeliveryJobStatus, RemnawaveInstallJobInfo,
+} from '../../api/client'
 import { shortHAProxyVersion } from './HAProxyUpgradeModal'
 import { Skeleton } from '../ui/Skeleton'
 import { Tooltip } from '../ui/Tooltip'
@@ -31,6 +34,8 @@ export interface NodeState {
   status: 'online' | 'offline'
   haproxyVersion: string | null
   haproxyTarget: string | null
+  // null — нода не ответила или ещё не умеет управлять прокси
+  downloadProxy: DownloadProxySummary | null
 }
 
 const DELIVERY_CHIP: Record<ImageDeliveryJobStatus, { icon: LucideIcon; spin?: boolean; className: string }> = {
@@ -54,11 +59,12 @@ interface Props {
   onUpdate: () => void
   onOpenDelivery: () => void
   onOpenHAProxy: () => void
+  onOpenProxy: () => void
 }
 
 export default function NodeUpdateCard({
   node, index, needsUpdate, isDevChannel, isUpdating, updateResult, deliveryJob, haproxyJob,
-  selected, onToggleSelect, onUpdate, onOpenDelivery, onOpenHAProxy,
+  selected, onToggleSelect, onUpdate, onOpenDelivery, onOpenHAProxy, onOpenProxy,
 }: Props) {
   const { t } = useTranslation()
   const isNodeLoading = node.loadState === 'pending' || node.loadState === 'loading'
@@ -215,6 +221,19 @@ export default function NodeUpdateCard({
               {renderHAProxyAction()}
             </div>
           )}
+          {!isNodeLoading && !!node.downloadProxy?.urls.length && (
+            <Tooltip label={t('updates.proxy_found_hint')} maxWidth={300}>
+              <button
+                onClick={onOpenProxy}
+                className="flex items-center gap-1.5 text-xs text-warning mt-0.5 max-w-full hover:brightness-125 transition"
+              >
+                <Globe className="w-3 h-3 shrink-0" />
+                <span className="shrink-0">{t('updates.proxy_label')}</span>
+                <span className="font-mono truncate">{node.downloadProxy.urls[0]}</span>
+                {node.downloadProxy.urls.length > 1 && <span className="shrink-0">+{node.downloadProxy.urls.length - 1}</span>}
+              </button>
+            </Tooltip>
+          )}
         </div>
       </div>
 
@@ -224,6 +243,19 @@ export default function NodeUpdateCard({
         </div>
 
         <div className="flex items-center gap-2 flex-shrink-0">
+          {!isNodeLoading && isOnline && node.downloadProxy && (
+            <Tooltip label={t('updates.proxy_open')} maxWidth={280}>
+              <motion.button
+                onClick={onOpenProxy}
+                disabled={isUpdating}
+                className="btn btn-secondary text-xs px-2.5 py-1.5"
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+              >
+                <Globe className="w-3.5 h-3.5" />
+              </motion.button>
+            </Tooltip>
+          )}
           {!isNodeLoading && (
             <Tooltip label={t('imageDelivery.deliver_hint')} maxWidth={280}>
               <motion.button

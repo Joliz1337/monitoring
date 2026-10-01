@@ -685,6 +685,14 @@ PK таблицы — `BigInteger` (не int32). При 500 нодах с инт
 
 **Файлы:** `backend/app/services/haproxy_upgrade.py`, `backend/app/routers/haproxy_upgrade.py`, `backend/tests/test_haproxy_upgrade.py`, `frontend/src/components/updates/HAProxyUpgradeModal.tsx`, `NodeUpdateCard.tsx`, `pages/Updates.tsx`. Лог в окне чистится от ANSI-кодов и `\r`-перерисовки спиннеров общим `utils/installLog.ts` (`cleanInstallLogLine`), им же пользуются установка Remnawave и автоустановка на странице серверов.
 
+### Прокси для загрузок ноды
+
+Давно поставленный и умерший прокси срывает обновления: через него нода качает код, образы и пакеты, а прокси из настроек Docker-клиента попадает в окружение агента — и через него же идёт каждая команда, которую панель запускает на хосте. Нода находит прокси во всех местах, где он бывает (схема установщика, чужие `apt.conf`, drop-in'ы и `daemon.json` Docker, `config.json` клиента Docker, git, `.curlrc`, `/etc/environment`, `.env` и окружение агента — подробности в [node/DOCUMENTATION.md](../node/DOCUMENTATION.md#прокси-для-загрузок-download_proxypy)), и отдаёт сводку в блоке `download_proxy` ответа `GET /system/nodes/{id}/version` (`null` — нода не ответила или ещё не умеет).
+
+UI (`components/updates/DownloadProxyModal.tsx`): на карточке ноды с прокси — строка «Прокси <адрес>» (+N, если адресов несколько), у каждой поддерживающей ноды — кнопка-глобус. Окно одной ноды показывает каждое место с адресом (пароль скрыт), проверяет текущие прокси или новый адрес (доходят ли GitHub, `ghcr.io` и raw.githubusercontent), сохраняет новый адрес вместо всех найденных или удаляет прокси отовсюду. Массовая кнопка «Прокси (N)» для выбранных онлайн-нод задаёт один адрес или удаляет на всех. Адрес без схемы дополняется `http://`, шаблон тот же, что у ноды (`DOWNLOAD_PROXY_URL_PATTERN` в `routers/proxy.py` — без кавычек, пробелов и метасимволов shell). Перед сохранением и удалением — подтверждение: нода перезапустит Docker, а с ним все контейнеры, VPN тоже (обрыв 10–30 с). Версия ноды перечитывается через `PROXY_REFRESH_DELAY_MS = 40000` — к этому времени агент снова поднялся.
+
+Маршруты (`routers/proxy.py`, домен прав `system`): `GET/PUT/DELETE /proxy/{id}/system/download-proxy`, `POST /proxy/{id}/system/download-proxy/test` — прямой проброс на ноду, тело проверяется `DownloadProxyRequest`/`DownloadProxyTestRequest` (тесты — `tests/test_download_proxy_request.py`).
+
 **Автоматическая перезагрузка страницы после обновления панели** (`Updates.tsx`):
 
 После успешного запуска обновления фронтенд автоматически ожидает перезапуска панели и перезагружает страницу, когда бэкенд снова поднимется. Логика реализована в функции `waitForPanelRebootAndReload`:

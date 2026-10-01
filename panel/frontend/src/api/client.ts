@@ -1393,6 +1393,62 @@ export interface SingleNodeVersion {
   status: 'online' | 'offline'
   optimizations: NodeOptimizationsInfo
   haproxy: NodeHAProxyInfo | null
+  // null — нода не ответила или ещё не умеет управлять прокси
+  download_proxy: DownloadProxySummary | null
+}
+
+// Прокси для загрузок ноды: где найден (пароль скрыт), проверка и смена
+export type DownloadProxySource =
+  | 'monitoring' | 'apt' | 'docker_daemon' | 'docker_client' | 'git' | 'curl' | 'environment' | 'node_env' | 'agent_env'
+
+export interface DownloadProxySummary {
+  urls: string[]
+  sources: DownloadProxySource[]
+}
+
+export interface DownloadProxyEntry {
+  source: DownloadProxySource
+  location: string
+  url: string
+}
+
+export interface DownloadProxyState {
+  entries: DownloadProxyEntry[]
+  urls: string[]
+}
+
+export interface DownloadProxyCheck {
+  target: string
+  ok: boolean
+  status?: number
+  ms?: number
+  error?: string
+}
+
+export interface DownloadProxyTest {
+  url: string
+  results: DownloadProxyCheck[]
+}
+
+export interface DownloadProxyChange {
+  changed: string[]
+  restart_docker: boolean
+  recreate_agent: boolean
+}
+
+// Смена ждёт записи файлов на ноде, проверка — ответа GitHub и реестра через прокси
+const DOWNLOAD_PROXY_TIMEOUT_MS = 45_000
+
+export const downloadProxyApi = {
+  get: (serverId: number) => api.get<DownloadProxyState>(`/proxy/${serverId}/system/download-proxy`),
+  set: (serverId: number, url: string) =>
+    api.put<DownloadProxyChange>(`/proxy/${serverId}/system/download-proxy`, { url }, { timeout: DOWNLOAD_PROXY_TIMEOUT_MS }),
+  remove: (serverId: number) =>
+    api.delete<DownloadProxyChange>(`/proxy/${serverId}/system/download-proxy`, { timeout: DOWNLOAD_PROXY_TIMEOUT_MS }),
+  test: (serverId: number, url?: string) =>
+    api.post<{ checks: DownloadProxyTest[] }>(
+      `/proxy/${serverId}/system/download-proxy/test`, url ? { url } : {}, { timeout: DOWNLOAD_PROXY_TIMEOUT_MS },
+    ),
 }
 
 export interface UpdateResponse {

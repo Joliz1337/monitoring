@@ -357,6 +357,7 @@ async def _node_version_payload(server: Server, versions_data: Optional[dict]) -
         "status": "online" if versions_data else "offline",
         "optimizations": versions_data.get("optimizations", no_optimizations) if versions_data else no_optimizations,
         "haproxy": await describe_haproxy(versions_data.get("haproxy")) if versions_data else None,
+        "download_proxy": versions_data.get("download_proxy") if versions_data else None,
     }
 
 

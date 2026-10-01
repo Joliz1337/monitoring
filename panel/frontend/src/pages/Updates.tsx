@@ -20,6 +20,7 @@ import {
   ChevronDown,
   ChevronRight,
   X,
+  Globe,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import {
@@ -36,9 +37,12 @@ import DeliverImageModal from '../components/servers/DeliverImageModal'
 import BulkDeliverImageModal from '../components/servers/BulkDeliverImageModal'
 import NodeUpdateCard, { NodeState } from '../components/updates/NodeUpdateCard'
 import HAProxyUpgradeModal, { HAProxyUpgradeTarget } from '../components/updates/HAProxyUpgradeModal'
+import DownloadProxyModal, { DownloadProxyTarget } from '../components/updates/DownloadProxyModal'
 
 // Пока идёт SSH-доставка или обновление HAProxy хоть на одной ноде — статусы на карточках обновляются с этим шагом
 const JOB_POLL_INTERVAL_MS = 3_000
+// После смены прокси нода перезапускает Docker — версию перечитываем, когда агент снова поднялся
+const PROXY_REFRESH_DELAY_MS = 40_000
 const COLLAPSED_FOLDERS_KEY = 'updates_collapsed_folders'
 const NODE_GRID_CLASS = 'grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3'
 
@@ -106,6 +110,7 @@ export default function Updates() {
   // Последнее обновление HAProxy по каждому серверу: идущее или завершённое недавно
   const [haproxyJobs, setHaproxyJobs] = useState<Map<number, RemnawaveInstallJobInfo>>(new Map())
   const [haproxyModal, setHaproxyModal] = useState<{ targets: HAProxyUpgradeTarget[]; jobId: string | null } | null>(null)
+  const [proxyModal, setProxyModal] = useState<DownloadProxyTarget[] | null>(null)
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [collapsedFolders, toggleFolderCollapsed] = useCollapsedFolders(COLLAPSED_FOLDERS_KEY)
 
@@ -151,6 +156,7 @@ export default function Updates() {
           status: data.status,
           haproxyVersion: data.haproxy?.version ?? null,
           haproxyTarget: data.haproxy?.target_version ?? null,
+          downloadProxy: data.download_proxy ?? null,
         })
         return next
       })
@@ -189,6 +195,7 @@ export default function Updates() {
           status: 'offline',
           haproxyVersion: null,
           haproxyTarget: null,
+          downloadProxy: null,
         })
       }
       setNodes(initialNodes)
@@ -464,6 +471,7 @@ export default function Updates() {
 
   const selectedNodes = loadedNodes.filter(n => selected.has(n.id))
   const selectedAgentTargets = selectedNodes.filter(canAgentUpdate)
+  const selectedProxyTargets = selectedNodes.filter(n => n.status === 'online' && n.downloadProxy !== null)
   const selectedHaproxyTargets = selectedNodes.filter(n =>
     n.status === 'online' && n.haproxyTarget && haproxyJobs.get(n.id)?.status !== 'running'
   )
@@ -518,6 +526,7 @@ export default function Updates() {
       onUpdate={() => handleUpdateNode(node.id, node.name)}
       onOpenDelivery={() => setDeliverTarget({ id: node.id, name: node.name })}
       onOpenHAProxy={() => setHaproxyModal({ targets: [toHAProxyTarget(node)], jobId: haproxyJobs.get(node.id)?.job_id ?? null })}
+      onOpenProxy={() => setProxyModal([{ id: node.id, name: node.name }])}
     />
   )
 
@@ -851,6 +860,16 @@ export default function Updates() {
                     {t('updates.haproxy_selected', { count: selectedHaproxyTargets.length })}
                   </button>
                 </Tooltip>
+                <Tooltip label={t('updates.proxy_selected_hint')} maxWidth={300}>
+                  <button
+                    onClick={() => setProxyModal(selectedProxyTargets.map(n => ({ id: n.id, name: n.name })))}
+                    disabled={selectedProxyTargets.length === 0}
+                    className="btn btn-secondary text-sm"
+                  >
+                    <Globe className="w-4 h-4" />
+                    {t('updates.proxy_selected', { count: selectedProxyTargets.length })}
+                  </button>
+                </Tooltip>
                 <Tooltip label={t('updates.clear_selection')}>
                   <button
                     onClick={() => setSelected(new Set())}
@@ -947,6 +966,17 @@ export default function Updates() {
           jobId={deliveryJobs.get(deliverTarget.id)?.job_id ?? null}
           onStarted={fetchDeliveryJobs}
           onClose={() => setDeliverTarget(null)}
+        />
+      )}
+
+      {proxyModal && (
+        <DownloadProxyModal
+          targets={proxyModal}
+          onChanged={(ids) => {
+            if (proxyModal.length > 1) setSelected(new Set())
+            setTimeout(() => ids.forEach(fetchNodeVersion), PROXY_REFRESH_DELAY_MS)
+          }}
+          onClose={() => setProxyModal(null)}
         />
       )}
 

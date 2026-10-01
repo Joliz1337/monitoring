@@ -33,7 +33,7 @@ class FakeExecutor:
         self.files = files
         self.commands: list[str] = []
 
-    async def execute(self, command: str, timeout: int = 5, shell: str = "sh"):
+    async def execute(self, command: str, timeout: int = 5, shell: str = "sh", log_label=None):
         self.commands.append(command)
         for path, content in self.files.items():
             if command == f"cat {path}":
@@ -55,9 +55,11 @@ class WriteExecutor:
         self.final_mode = final_mode
         self.write_succeeds = write_succeeds
         self.commands: list[str] = []
+        self.log_labels: list = []
 
-    async def execute(self, command: str, timeout: int = 5, shell: str = "sh"):
+    async def execute(self, command: str, timeout: int = 5, shell: str = "sh", log_label=None):
         self.commands.append(command)
+        self.log_labels.append(log_label)
         if not self.write_succeeds:
             return FakeResult(success=False, exit_code=1, stderr="Read-only file system")
         return FakeResult(stdout=self.final_mode)
@@ -101,6 +103,17 @@ class WriteWithModeTests(unittest.TestCase):
 
     def tearDown(self):
         host_files.get_host_executor = self._orig
+
+    def test_secret_content_never_reaches_the_log(self):
+        # Исполнитель логирует начало команды, а в нём начало base64 файла
+        executor = self._executor(WriteExecutor())
+        asyncio.run(host_files.write_host_file("/opt/monitoring-node/.env", "NODE_SECRET=abc\n", secret=True))
+        self.assertEqual(executor.log_labels, ["write /opt/monitoring-node/.env"])
+
+    def test_plain_write_logs_as_before(self):
+        executor = self._executor(WriteExecutor())
+        asyncio.run(host_files.write_host_file("/etc/haproxy/haproxy.cfg", "global\n"))
+        self.assertEqual(executor.log_labels, [None])
 
     def test_denied_chmod_passes_when_file_is_not_world_readable(self):
         self._executor(WriteExecutor("640"))

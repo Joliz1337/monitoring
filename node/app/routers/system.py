@@ -28,6 +28,11 @@ from requests.exceptions import ReadTimeout, RequestException
 from app.capabilities import get_policy
 from app.services import cpu_affinity, reserved_ports
 from app.services.bandwidth_limit import MAX_MBIT, MIN_MBIT, get_bandwidth_limiter
+from app.services.download_proxy import (
+    PROXY_URL_PATTERN as DOWNLOAD_PROXY_URL_PATTERN,
+    DownloadProxyError,
+    get_download_proxy_manager,
+)
 from app.services.haproxy_info import read_haproxy_info
 from app.services.host_executor import get_host_executor, MAX_TIMEOUT, DEFAULT_TIMEOUT
 from app.services.host_files import read_host_file, write_host_file
@@ -891,13 +896,14 @@ async def get_all_versions():
     executor = get_host_executor()
     node_version = get_current_version()
 
-    opt_version, sysctl_content, nic_mode, opt_profile, tuning, haproxy = await asyncio.gather(
+    opt_version, sysctl_content, nic_mode, opt_profile, tuning, haproxy, download_proxy = await asyncio.gather(
         read_optimizations_version(),
         read_host_file(SYSCTL_CONFIG_PATH),
         detect_nic_mode(executor),
         read_opt_profile(),
         read_tuning_drift(executor),
         read_haproxy_info(),
+        get_download_proxy_manager().summary(),
     )
 
     opt_installed = sysctl_content is not None
@@ -908,6 +914,7 @@ async def get_all_versions():
         "capabilities": policy.published(),
         "capabilities_unknown": list(policy.unknown_tokens),
         "haproxy": haproxy,
+        "download_proxy": download_proxy,
         "optimizations": {
             "installed": opt_installed,
             "version": opt_version,
@@ -1160,6 +1167,45 @@ async def set_reserved_ports(request: ReservedPortsRequest):
 class BandwidthLimitRequest(BaseModel):
     enabled: bool = Field(..., description="Включить лимит полосы на дефолтном интерфейсе")
     mbit: int = Field(0, ge=0, le=MAX_MBIT, description="Лимит, Мбит/с (при enabled)")
+
+
+class DownloadProxyRequest(BaseModel):
+    url: str = Field(..., max_length=255, pattern=DOWNLOAD_PROXY_URL_PATTERN)
+
+
+class DownloadProxyTestRequest(BaseModel):
+    url: Optional[str] = Field(None, max_length=255, pattern=DOWNLOAD_PROXY_URL_PATTERN)
+
+
+@router.get("/download-proxy")
+async def get_download_proxy():
+    """Где на хосте прописан прокси для загрузок — пароли скрыты."""
+    return await get_download_proxy_manager().state()
+
+
+@router.put("/download-proxy")
+async def set_download_proxy(data: DownloadProxyRequest):
+    """Один прокси по схеме установщика вместо всех найденных. Docker перезапускается
+    через несколько секунд после ответа — контейнеры ноды перезапустятся вместе с ним."""
+    try:
+        return await get_download_proxy_manager().set(data.url)
+    except DownloadProxyError as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@router.delete("/download-proxy")
+async def remove_download_proxy():
+    """Убрать прокси отовсюду, где он найден."""
+    try:
+        return await get_download_proxy_manager().remove()
+    except DownloadProxyError as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@router.post("/download-proxy/test")
+async def test_download_proxy(data: Optional[DownloadProxyTestRequest] = None):
+    """Доходят ли через прокси GitHub и реестр образов. Без url — все найденные."""
+    return {"checks": await get_download_proxy_manager().test(data.url if data else None)}
 
 
 @router.get("/bandwidth-limit")
