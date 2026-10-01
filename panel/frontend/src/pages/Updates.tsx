@@ -100,6 +100,9 @@ export default function Updates() {
   const [bulkDeliverOpen, setBulkDeliverOpen] = useState(false)
   // Последняя SSH-доставка по каждому серверу: идущая или завершённая недавно
   const [deliveryJobs, setDeliveryJobs] = useState<Map<number, ImageDeliveryJobInfo>>(new Map())
+  // Завершённые доставки, после которых запустили обычное обновление: на карточке
+  // они уступают его статусу, иначе старая «SSH: ошибка» прячет идущее обновление
+  const [supersededDeliveries, setSupersededDeliveries] = useState<Set<string>>(new Set())
   // Последнее обновление HAProxy по каждому серверу: идущее или завершённое недавно
   const [haproxyJobs, setHaproxyJobs] = useState<Map<number, RemnawaveInstallJobInfo>>(new Map())
   const [haproxyModal, setHaproxyModal] = useState<{ targets: HAProxyUpgradeTarget[]; jobId: string | null } | null>(null)
@@ -350,6 +353,10 @@ export default function Updates() {
   const handleUpdateNode = async (nodeId: number, nodeName: string) => {
     if (updatingNodes.has(nodeId)) return
 
+    const delivery = deliveryJobs.get(nodeId)
+    if (delivery && (delivery.status === 'success' || delivery.status === 'error')) {
+      setSupersededDeliveries(prev => new Set(prev).add(delivery.job_id))
+    }
     setUpdatingNodes(prev => new Set(prev).add(nodeId))
     setUpdateResults(prev => ({
       ...prev,
@@ -490,6 +497,11 @@ export default function Updates() {
     fetchDeliveryJobs()
   }
 
+  const visibleDeliveryJob = (nodeId: number) => {
+    const job = deliveryJobs.get(nodeId)
+    return job && !supersededDeliveries.has(job.job_id) ? job : undefined
+  }
+
   const renderNodeCard = (node: NodeState, index: number) => (
     <NodeUpdateCard
       key={node.id}
@@ -499,7 +511,7 @@ export default function Updates() {
       isDevChannel={isDevChannel}
       isUpdating={updatingNodes.has(node.id)}
       updateResult={updateResults[`node-${node.id}`]}
-      deliveryJob={deliveryJobs.get(node.id)}
+      deliveryJob={visibleDeliveryJob(node.id)}
       haproxyJob={haproxyJobs.get(node.id)}
       selected={selected.has(node.id)}
       onToggleSelect={() => toggleSelected([node.id], !selected.has(node.id))}
