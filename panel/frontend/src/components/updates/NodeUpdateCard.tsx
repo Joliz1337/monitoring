@@ -95,7 +95,7 @@ export default function NodeUpdateCard({
     }
     if (!node.haproxyTarget || !isOnline) return null
     return (
-      <Tooltip label={t('updates.haproxy_upgrade_hint', { branch: node.haproxyTarget })} maxWidth={300}>
+      <Tooltip label={t('updates.haproxy_upgrade_hint', { version: node.haproxyTarget })} maxWidth={300}>
         <button
           onClick={onOpenHAProxy}
           className="flex items-center gap-1 px-1.5 py-0.5 rounded-md font-mono text-accent-400 bg-accent-500/10 hover:bg-accent-500/20 transition"

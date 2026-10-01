@@ -1079,9 +1079,9 @@
     "haproxy_status_running": "обновляется",
     "haproxy_status_success": "обновлён",
     "haproxy_status_error": "ошибка",
-    "haproxy_upgrade_hint": "Доступна LTS-ветка {{branch}} — нажмите, чтобы обновить",
+    "haproxy_upgrade_hint": "Доступна версия {{version}} — нажмите, чтобы обновить",
     "haproxy_selected": "HAProxy ({{count}})",
-    "haproxy_selected_hint": "Обновить HAProxy на выбранных онлайн-серверах, где доступна ветка новее"
+    "haproxy_selected_hint": "Обновить HAProxy на выбранных онлайн-серверах, где доступна версия новее"
   },
   "remnawave_nginx": {
     "title": "Remnawave nginx",

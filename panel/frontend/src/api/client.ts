@@ -1379,10 +1379,10 @@ export interface VersionBaseInfo {
   update_in_progress: boolean
 }
 
-// target_branch — LTS-ветка новее установленной, собранная под релиз сервера
+// target_version — последняя версия новейшей LTS-ветки под релиз сервера, если она новее установленной
 export interface NodeHAProxyInfo {
   version: string | null
-  target_branch: string | null
+  target_version: string | null
 }
 
 export interface SingleNodeVersion {

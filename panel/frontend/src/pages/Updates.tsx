@@ -51,7 +51,7 @@ const PANEL_PROBE_TIMEOUT_MS = 4_000
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
 
 const toHAProxyTarget = (node: NodeState): HAProxyUpgradeTarget => ({
-  id: node.id, name: node.name, version: node.haproxyVersion, targetBranch: node.haproxyTarget,
+  id: node.id, name: node.name, version: node.haproxyVersion, targetVersion: node.haproxyTarget,
 })
 
 // /health из браузера недоступен (nginx отдаёт его только внутренним IP), поэтому живость
@@ -147,7 +147,7 @@ export default function Updates() {
           version: data.version,
           status: data.status,
           haproxyVersion: data.haproxy?.version ?? null,
-          haproxyTarget: data.haproxy?.target_branch ?? null,
+          haproxyTarget: data.haproxy?.target_version ?? null,
         })
         return next
       })

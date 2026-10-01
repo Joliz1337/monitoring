@@ -1074,9 +1074,9 @@
     "haproxy_status_running": "upgrading",
     "haproxy_status_success": "upgraded",
     "haproxy_status_error": "failed",
-    "haproxy_upgrade_hint": "LTS branch {{branch}} is available — click to upgrade",
+    "haproxy_upgrade_hint": "Version {{version}} is available — click to upgrade",
     "haproxy_selected": "HAProxy ({{count}})",
-    "haproxy_selected_hint": "Upgrade HAProxy on selected online servers that have a newer branch available"
+    "haproxy_selected_hint": "Upgrade HAProxy on selected online servers that have a newer version available"
   },
   "remnawave_nginx": {
     "title": "Remnawave nginx",

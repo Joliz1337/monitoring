@@ -56,7 +56,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/in
 
 HAProxy работает как **нативный systemd сервис** на хосте (не в Docker). При установке ноды HAProxy устанавливается автоматически, если его нет: `install.sh` берёт новейшую LTS-ветку из официальных сборок под релиз хоста (Ubuntu 26.04 — 3.4, 24.04 — 3.2, 22.04 — 3.0), а без них — системный пакет. Уже работающий HAProxy обновляется кнопкой на странице «Обновления» панели (см. [panel/DOCUMENTATION.md](../panel/DOCUMENTATION.md#обновление-haproxy)).
 
-Для этой кнопки `GET /api/system/versions` отдаёт блок `haproxy`: `version` — версия из `haproxy -v` целиком (`HAProxyManager.installed_version()`, например `2.8.16-0ubuntu0.24.04.3`, `null` без HAProxy), `os_id` и `os_codename` — `ID` и `VERSION_CODENAME` из `/etc/os-release` хоста (`services/haproxy_info.py`). По релизу панель сама решает, есть ли сборка новее.
+Для этой кнопки `GET /api/system/versions` отдаёт блок `haproxy`: `version` — версия из `haproxy -v` целиком (`HAProxyManager.installed_version()`, например `2.8.16-0ubuntu0.24.04.3`, `null` без HAProxy), `os_id` и `os_codename` — `ID` и `VERSION_CODENAME` из `/etc/os-release` хоста, `arch` — `dpkg --print-architecture` (`services/haproxy_info.py`). По ним панель читает индекс пакетов своей сборки и сама решает, есть ли версия новее.
 
 **Конфиг**: `/etc/haproxy/haproxy.cfg`
 

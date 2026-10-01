@@ -8,7 +8,7 @@ Panel and node versions in one place, updates in one click.
 - See every node's version and update any of them — one by one or all at once.
 - Select nodes — one by one, by dashboard folder, or all — and update the selected ones the regular way or over SSH.
 - Update everything with one button: the panel starts updating all nodes, then updates itself — the page reloads automatically.
-- Upgrade HAProxy on nodes to the newest official LTS version for their OS: when one exists, a badge with the branch, e.g. "↑ 3.2", appears next to the HAProxy version on the card. Works for one node or for the selected ones.
+- Upgrade HAProxy on nodes to the newest official LTS version for their OS: when a newer version exists — a newer branch or a fresh fix in the current one — a badge such as "↑ 3.4.6" appears next to the HAProxy version on the card. Works for one node or for the selected ones.
 - Force a check for new versions.
 
 ## Update order
