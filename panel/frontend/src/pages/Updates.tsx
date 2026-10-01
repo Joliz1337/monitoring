@@ -278,10 +278,13 @@ export default function Updates() {
       const isIdle = Date.now() - lastActivityRef.current > IDLE_THRESHOLD
       const isVisible = !document.hidden
       const isBusy = updatingPanel || updatingNodes.size > 0 || updatingAll || updatingEverything || isChecking
-      if (isIdle && isVisible && !isBusy) fetchBase()
+      if (!isIdle || !isVisible || isBusy) return
+      fetchBase()
+      // Панель сама запускает обновление по SSH, если нода не обновилась через агента
+      fetchDeliveryJobs()
     }, AUTO_REFRESH_INTERVAL)
     return () => clearInterval(id)
-  }, [fetchBase, updatingPanel, updatingNodes, updatingAll, updatingEverything, isChecking])
+  }, [fetchBase, fetchDeliveryJobs, updatingPanel, updatingNodes, updatingAll, updatingEverything, isChecking])
 
   const handleRefresh = useCallback(() => {
     abortRef.current = true

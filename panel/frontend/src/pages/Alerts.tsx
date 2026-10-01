@@ -169,6 +169,7 @@ export default function Alerts() {
       conntrack_high: t('alerts.type_conntrack_high'),
       packet_loss: t('alerts.type_packet_loss'),
       packet_loss_recovery: t('alerts.type_packet_loss_recovery'),
+      node_update_failed: t('alerts.type_node_update_failed'),
     }
     return map[t_] || t_
   }
@@ -610,6 +611,7 @@ export default function Alerts() {
               <option value="conntrack_high">{t('alerts.type_conntrack_high')}</option>
               <option value="packet_loss">{t('alerts.type_packet_loss')}</option>
               <option value="packet_loss_recovery">{t('alerts.type_packet_loss_recovery')}</option>
+              <option value="node_update_failed">{t('alerts.type_node_update_failed')}</option>
             </select>
             <button
               onClick={handleClearHistory}

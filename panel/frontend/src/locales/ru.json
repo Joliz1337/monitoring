@@ -1831,6 +1831,7 @@
     "type_conntrack_high": "Conntrack заполнен",
     "type_packet_loss": "Потери с релея",
     "type_packet_loss_recovery": "Потери снизились",
+    "type_node_update_failed": "Нода не обновилась",
     "settings_saved": "Настройки алертов сохранены",
     "settings_save_failed": "Не удалось сохранить настройки",
     "excluded_servers": "Исключённые серверы",

@@ -18,13 +18,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import verify_auth
 from app.database import get_db
 from app.models import Server
-from app.routers.node_image import SSHAccessRequest, SSHTargetError, resolve_ssh_target
+from app.routers.node_image import SSHAccessRequest
 from app.routers.proxy import get_server_by_id, require_capability
 from app.routers.server_deploy import resolve_remnawave_cert
 from app.services.deploy_service import build_remnawave_install_command, install_via_panel
 from app.services.node_capabilities import Capability
 from app.services.remnawave_node_install import get_remnawave_install_manager, run_install_on_node
-from app.services.ssh_target import SSHTarget
+from app.services.ssh_target import SSHTarget, SSHTargetError, resolve_ssh_target
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +80,7 @@ async def install_remnawave(
 
 def _ssh_target_or_400(server: Server, access: SSHAccessRequest) -> SSHTarget:
     try:
-        return resolve_ssh_target(server, access)
+        return resolve_ssh_target(server, **access.model_dump())
     except SSHTargetError as exc:
         raise HTTPException(400, str(exc)) from exc
 

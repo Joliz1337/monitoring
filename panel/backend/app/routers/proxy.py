@@ -15,7 +15,7 @@ from app.services.http_client import get_node_client, get_node_apply_client, nod
 from app.database import get_db
 from app.models import Server, ServerCache, MetricsSnapshot
 from app.auth import verify_auth
-from app.services import update_channel
+from app.services import node_update_watcher, update_channel
 from app.services.metrics_history import HistoryPeriod, load_history
 from app.services.metrics_rates import enrich_metrics_with_speeds
 from app.services.node_capabilities import (
@@ -817,12 +817,15 @@ async def trigger_node_update(
     Trigger node update.
     Optional data: { "target_version": "v1.1.0" }
     If not specified, updates to the selected update channel (main/dev).
+    Итог панель дождётся сама и при провале обновит ноду по SSH (node_update_watcher).
     """
     server = await get_server_by_id(server_id, db)
     data = data or {}
     if not data.get("target_version"):
         data["target_version"] = update_channel.current_branch()
-    return await proxy_request(server, "/api/system/update", method="POST", json_data=data)
+    result = await proxy_request(server, "/api/system/update", method="POST", json_data=data)
+    await node_update_watcher.track(db, server, data["target_version"], result.get("attempt_id"))
+    return result
 
 
 @router.post("/{server_id}/system/execute")

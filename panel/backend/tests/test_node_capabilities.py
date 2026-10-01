@@ -259,6 +259,9 @@ class CallSiteCoverageTest(unittest.TestCase):
         "services/metrics_collector.py",
         # гейт в роутере proxy: require_capability(SYSTEM) до старта задачи
         "services/network_transactions.py",
+        # попытку пишет роутер proxy после разрешённого запуска обновления,
+        # опрос итога — server_allows_path на /api/system/update/status
+        "services/node_update_watcher.py",
         "services/recovery_reconciler.py",
         "services/remnawave_nginx_sync.py",
         # гейт в роутере remnawave_install: require_capability(EXEC) до старта job

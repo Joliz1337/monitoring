@@ -225,6 +225,33 @@ class NodePendingSync(Base):
     last_error = Column(String(500), nullable=True)
 
 
+class NodeUpdateAttempt(Base):
+    """Обновление ноды через её агента, за итогом которого следит панель.
+
+    Агент обновляет себя в фоне: ответ на запуск значит лишь «апдейтер стартовал»,
+    а скачать код или образы нода за ТСПУ может и не суметь. Строка живёт, пока
+    панель не узнает итог, и переживает её перезапуск — в том числе собственное
+    обновление панели сразу после рассылки «Обновить всё». При провале панель
+    обновляет ноду по SSH, а без SSH-доступа пишет уведомление.
+    """
+    __tablename__ = "node_update_attempts"
+
+    server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), primary_key=True)
+    # Идентификатор попытки от агента; None — старый агент, итог которого
+    # приходится выводить из версии
+    attempt_id = Column(String(64), nullable=True)
+    target_ref = Column(String(100), nullable=False)
+    from_version = Column(String(20), nullable=True)
+    # Заодно метка версии строки: повторный запуск переписывает её, и наблюдатель
+    # не закроет чужую, более свежую попытку
+    started_at = Column(DateTime(timezone=True), nullable=False)
+    last_contact_at = Column(DateTime(timezone=True), nullable=True)
+    stage = Column(String(10), nullable=False, server_default="agent")  # agent | ssh
+    delivery_job_id = Column(String(64), nullable=True)
+    failure_reason = Column(String(30), nullable=True)
+    failure_detail = Column(String(500), nullable=True)
+
+
 class PanelHostMetric(Base):
     """История нагрузки хоста самой панели: среднее и пик за интервал снапшота.
 

@@ -40,7 +40,7 @@ class BulkDeliverTests(unittest.IsolatedAsyncioTestCase):
         self.manager.start.side_effect = lambda sid, name, target, tag: f"job-{sid}"
         for patcher in (
             mock.patch.object(node_image, "get_image_delivery_manager", return_value=self.manager),
-            mock.patch.object(node_image, "_target_tag", return_value="latest"),
+            mock.patch.object(node_image.update_channel, "current_image_tag", return_value="latest"),
         ):
             patcher.start()
             self.addCleanup(patcher.stop)

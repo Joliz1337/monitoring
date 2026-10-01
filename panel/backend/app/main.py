@@ -28,6 +28,7 @@ from app.services.wildcard_ssl import start_wildcard_ssl_manager, stop_wildcard_
 from app.services.torrent_blocker import start_torrent_blocker, stop_torrent_blocker
 from app.services.antiddos_manager import start_antiddos_manager, stop_antiddos_manager
 from app.services.node_sync_queue import start_node_sync_queue, stop_node_sync_queue
+from app.services.node_update_watcher import start_node_update_watcher, stop_node_update_watcher
 from app.services.exit_proxy.service import start_exit_proxy, stop_exit_proxy
 from app.services.source_pool.service import start_source_pool, stop_source_pool
 from app.services.xray_test.runner import start_xray_test_service, stop_xray_test_service
@@ -118,6 +119,8 @@ async def lifespan(app: FastAPI):
     await start_antiddos_manager()
     # Долги перед нодами лежат в базе — очередь подхватывает их и после перезапуска панели.
     await start_node_sync_queue()
+    # Попытки обновления нод тоже в базе: итог дождётся и рестарта панели после «Обновить всё».
+    await start_node_update_watcher()
     await start_exit_proxy()
     await start_source_pool()
     await start_xray_test_service()
@@ -143,6 +146,7 @@ async def lifespan(app: FastAPI):
     await stop_traffic_import()
     await stop_source_pool()
     await stop_exit_proxy()
+    await stop_node_update_watcher()
     await stop_node_sync_queue()
     await stop_antiddos_manager()
     await stop_torrent_blocker()

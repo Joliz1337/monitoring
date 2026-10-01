@@ -1826,6 +1826,7 @@
     "type_conntrack_high": "Conntrack High",
     "type_packet_loss": "Relay packet loss",
     "type_packet_loss_recovery": "Packet loss recovered",
+    "type_node_update_failed": "Node update failed",
     "settings_saved": "Alert settings saved",
     "settings_save_failed": "Failed to save settings",
     "excluded_servers": "Excluded Servers",

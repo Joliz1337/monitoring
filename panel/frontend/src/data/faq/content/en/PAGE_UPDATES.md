@@ -23,5 +23,6 @@ Updating pulls ready-made images, keeps configuration and data, and restarts the
 - Updating a node restarts only the monitoring agent. VPN services, HAProxy and nginx on the node keep running — client traffic is not interrupted.
 - A node that won't update: check that it is online and can reach the image registry; behind a SOCKS5 proxy, the proxy needs that access too.
 - If the node can't reach the registry, update it over SSH: the panel uploads the image itself. This runs in the background — you can close the log window, the status stays on the node's card. Up to 5 nodes update this way at once, the rest wait in a queue.
+- The panel follows how a regular node update ends. If the node couldn't update itself, the panel updates it over SSH when the server has saved SSH access. If there is no access or SSH fails too, you get a Telegram notification and an entry in the alert history.
 - Some panel features require a minimum node version and will say so plainly if the agent is too old.
 - HAProxy switches to the new version without dropping connections: current clients finish on the old one. If that doesn't work, HAProxy restarts and clients reconnect; if the new version rejects the config, the server rolls back to the previous one.

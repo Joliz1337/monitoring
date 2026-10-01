@@ -38,6 +38,18 @@ from app.services.sysctl_verify import (
     verify_sysctl_values,
 )
 from app.services.time_sync import TIME_SYNC_TIMEOUT, build_time_sync_command, report_from_result
+from app.services.update_state import (
+    ATTEMPT_LABEL,
+    UpdateAttempt,
+    UpdateOutcome,
+    UpdateResult,
+    UpdateStateStore,
+    UpdaterContainer,
+    new_attempt,
+    outcome_from_exit,
+    resolve_orphaned,
+    status_payload,
+)
 
 NGINX_SSL_DIR = Path("/opt/monitoring-node/nginx/ssl")
 NGINX_CONTAINER_NAME = "monitoring-nginx"
@@ -61,17 +73,18 @@ UPDATER_WAIT_TIMEOUT = 7200
 GIT_REF_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._/-]*$"
 PROXY_URL_PATTERN = r"^[a-z][a-z0-9+.-]*://[A-Za-z0-9._%+:@/-]+$"
 
-_update_status = {
-    "in_progress": False,
-    "last_result": None,
-    "last_error": None,
-    "last_update_time": None,
-    "reason": None,  # "image_unavailable" — образ не достался, нужна доставка с панели
-}
+UPDATER_ACTIVE_STATES = ("created", "running", "restarting")
+UPDATER_LOG_TAIL_LINES = 200
+
+_update_state = UpdateStateStore()
 
 # Ссылка на живую таску апдейтера: create_task её не удерживает, и незавершённую
 # корутину может собрать GC вместе с обновлением
 _update_task: Optional[asyncio.Task] = None
+
+# Проверка «не идёт ли обновление» и запуск нового разделены опросом докера —
+# без общей блокировки два быстрых запроса запустили бы два апдейтера
+_update_lock = asyncio.Lock()
 
 
 def get_current_version() -> str:
@@ -207,19 +220,86 @@ async def replace_node_cert(payload: ReplaceCertRequest):
     return {"success": True}
 
 
-async def run_update_in_container(target_ref: str | None = None, proxy: str | None = None, allow_local_build: bool = True):
+def _update_running_here() -> bool:
+    return _update_task is not None and not _update_task.done()
+
+
+async def _inspect_updater() -> Optional[UpdaterContainer]:
+    client = await asyncio.to_thread(get_docker_client)
+    try:
+        container = await asyncio.to_thread(client.containers.get, UPDATER_CONTAINER_NAME)
+    except DockerNotFound:
+        return None
+    running = container.status in UPDATER_ACTIVE_STATES
+    logs = ""
+    if not running:
+        raw_logs = await asyncio.to_thread(container.logs, tail=UPDATER_LOG_TAIL_LINES)
+        logs = raw_logs.decode("utf-8", errors="replace")
+    return UpdaterContainer(
+        running=running,
+        exit_code=container.attrs.get("State", {}).get("ExitCode"),
+        attempt_id=container.labels.get(ATTEMPT_LABEL),
+        logs=logs,
+    )
+
+
+async def _remove_updater() -> None:
+    try:
+        client = await asyncio.to_thread(get_docker_client)
+        container = await asyncio.to_thread(client.containers.get, UPDATER_CONTAINER_NAME)
+        await asyncio.to_thread(container.remove, force=True)
+    except DockerNotFound:
+        pass
+    except (DockerException, RequestException) as e:
+        logger.warning(f"Failed to remove updater container: {e}")
+
+
+async def _record_outcome(attempt_id: str, outcome: UpdateOutcome) -> None:
+    await asyncio.to_thread(_update_state.record, attempt_id, outcome)
+
+
+async def _current_update_state() -> tuple[Optional[UpdateAttempt], bool]:
+    """Последняя попытка обновления и идёт ли апдейтер прямо сейчас."""
+    async with _update_lock:
+        attempt = await asyncio.to_thread(_update_state.load)
+        if _update_running_here():
+            return attempt, True
+        try:
+            container = await _inspect_updater()
+        except (DockerException, RequestException) as e:
+            logger.warning(f"Failed to check updater container state: {e}")
+            return attempt, attempt is not None and attempt.running
+
+        updater_running = container is not None and container.running
+        if attempt is not None and attempt.running and not updater_running:
+            # Попытку начал прежний процесс агента: при успехе apply-update.sh
+            # пересоздал контейнер, и итог остался только в контейнере апдейтера
+            attempt = resolve_orphaned(attempt, container)
+            await asyncio.to_thread(_update_state.save, attempt)
+            if container is not None:
+                await _remove_updater()
+        return attempt, updater_running
+
+
+async def run_update_in_container(
+    attempt_id: str,
+    target_ref: str | None = None,
+    proxy: str | None = None,
+    allow_local_build: bool = True,
+):
     """
     Run update in separate Docker container.
-    
+
     Args:
+        attempt_id: попытка из файла состояния — ей принадлежит итог
         target_ref: Git reference (commit hash, tag, or branch). Default: 'main'
         proxy: HTTP proxy for git (e.g., http://127.0.0.1:3128)
 
-    Флаг in_progress выставляет вызывающий эндпоинт — до create_task, иначе два
-    быстрых запроса успевают пройти проверку раньше старта первого апдейтера.
     Каждый вызов docker-SDK синхронный и уходит в поток: pull образа на медленной
     сети занимает десятки минут, а вставший event loop уронил бы и /health —
     панель на всё это время сочла бы ноду офлайн и подняла алерт.
+    При успехе процесс до итога не доживает: apply-update.sh пересоздаёт контейнер
+    агента, и итог по контейнеру апдейтера дописывает уже новый процесс.
     """
     try:
         client = await asyncio.to_thread(get_docker_client)
@@ -361,6 +441,7 @@ echo "[SUCCESS] Update completed!"
                 "/opt/monitoring-node": {"bind": "/opt/monitoring-node", "mode": "rw"},
             },
             environment=env_vars if env_vars else None,
+            labels={ATTEMPT_LABEL: attempt_id},
             network_mode="host",
             privileged=True,
             pid_mode="host",
@@ -376,46 +457,34 @@ echo "[SUCCESS] Update completed!"
         raw_logs = await asyncio.to_thread(container.logs)
         logs = raw_logs.decode("utf-8", errors="replace")
 
-        if exit_code == 0:
-            _update_status["last_result"] = "success"
-            _update_status["last_update_time"] = datetime.now().isoformat()
+        outcome = outcome_from_exit(exit_code, logs)
+        if outcome.result is UpdateResult.SUCCESS:
             logger.info(f"Update completed successfully\n{logs[-1000:]}")
-        elif exit_code == 20:
-            # apply-update.sh: образ не достался из реестра, сборка отключена —
-            # панель дотолкнёт образ по SSH. Нода осталась на старой версии.
-            _update_status["last_result"] = "failed"
-            _update_status["reason"] = "image_unavailable"
-            _update_status["last_error"] = "Образ недоступен из реестра, сборка отключена — нужна доставка образа с панели"
+        elif outcome.reason == "image_unavailable":
             logger.warning("Update needs image delivery from panel (exit 20)")
         else:
-            _update_status["last_result"] = "failed"
-            _update_status["last_error"] = f"Exit code: {exit_code}\n{logs[-1000:]}"
             logger.error(f"Update failed: {logs[-1000:]}")
-        
-        # Cleanup
+        await _record_outcome(attempt_id, outcome)
+
         try:
             await asyncio.to_thread(container.remove, force=True)
         except (DockerException, RequestException) as e:
             logger.warning(f"Failed to remove updater container: {e}")
 
     except ReadTimeout:
-        _update_status["last_result"] = "failed"
-        _update_status["last_error"] = f"Update timed out ({UPDATER_WAIT_TIMEOUT // 60} minutes)"
         logger.error("Update timed out")
+        await _record_outcome(attempt_id, UpdateOutcome(
+            UpdateResult.FAILED, error=f"Update timed out ({UPDATER_WAIT_TIMEOUT // 60} minutes)",
+        ))
     except ImageNotFound as e:
-        _update_status["last_result"] = "failed"
-        _update_status["last_error"] = f"Image not found: {e}"
         logger.error(f"Image not found: {e}")
+        await _record_outcome(attempt_id, UpdateOutcome(UpdateResult.FAILED, error=f"Image not found: {e}"))
     except DockerException as e:
-        _update_status["last_result"] = "failed"
-        _update_status["last_error"] = f"Docker error: {e}"
         logger.error(f"Docker error: {e}")
+        await _record_outcome(attempt_id, UpdateOutcome(UpdateResult.FAILED, error=f"Docker error: {e}"))
     except Exception as e:
-        _update_status["last_result"] = "failed"
-        _update_status["last_error"] = str(e)
         logger.error(f"Unexpected error: {e}")
-    finally:
-        _update_status["in_progress"] = False
+        await _record_outcome(attempt_id, UpdateOutcome(UpdateResult.FAILED, error=str(e)))
 
 
 class UpdateRequest(BaseModel):
@@ -454,49 +523,42 @@ async def trigger_update(data: UpdateRequest = None):
     """
     global _update_task
 
-    if _update_status["in_progress"]:
-        raise HTTPException(
-            status_code=409,
-            detail="Update already in progress"
-        )
-
     target_ref = data.target_version if data else None
     proxy = data.proxy if data else None
     allow_local_build = data.allow_local_build if data else True
 
-    _update_status["in_progress"] = True
-    _update_status["last_error"] = None
-    _update_status["reason"] = None
-    _update_task = asyncio.create_task(run_update_in_container(target_ref, proxy, allow_local_build))
+    async with _update_lock:
+        if _update_running_here():
+            raise HTTPException(status_code=409, detail="Update already in progress")
+        # Апдейтер, запущенный прежним процессом агента, ещё работает — второй
+        # удалил бы его посреди apply-update.sh
+        try:
+            updater = await _inspect_updater()
+        except (DockerException, RequestException) as e:
+            raise HTTPException(status_code=500, detail=f"Docker error: {e}") from e
+        if updater is not None and updater.running:
+            raise HTTPException(status_code=409, detail="Update already in progress")
+
+        attempt = new_attempt(target_ref or "main", get_current_version())
+        await asyncio.to_thread(_update_state.save, attempt)
+        _update_task = asyncio.create_task(
+            run_update_in_container(attempt.attempt_id, target_ref, proxy, allow_local_build)
+        )
 
     return {
         "success": True,
         "message": "Update started",
         "target": target_ref or "main",
-        "proxy": proxy or "none"
+        "proxy": proxy or "none",
+        "attempt_id": attempt.attempt_id,
     }
 
 
 @router.get("/update/status")
 async def get_update_status():
-    """Get current update status"""
-    container_running = False
-    try:
-        client = await asyncio.to_thread(get_docker_client)
-        container = await asyncio.to_thread(client.containers.get, UPDATER_CONTAINER_NAME)
-        container_running = container.status == "running"
-    except DockerNotFound:
-        pass
-    except (DockerException, RequestException) as e:
-        logger.warning(f"Failed to check updater container state: {e}")
-
-    return {
-        "in_progress": _update_status["in_progress"] or container_running,
-        "last_result": _update_status["last_result"],
-        "last_error": _update_status["last_error"],
-        "last_update_time": _update_status["last_update_time"],
-        "reason": _update_status["reason"],
-    }
+    """Итог последней попытки обновления — панель сверяет его со своей попыткой по attempt_id."""
+    attempt, in_progress = await _current_update_state()
+    return status_payload(attempt, in_progress, get_current_version())
 
 
 class ExecuteRequest(BaseModel):

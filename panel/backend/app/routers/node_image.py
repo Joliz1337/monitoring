@@ -9,7 +9,6 @@
 import json
 import logging
 from typing import Optional
-from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -22,7 +21,13 @@ from app.database import get_db
 from app.models import Server
 from app.services import update_channel
 from app.services.node_image_delivery import get_image_delivery_manager
-from app.services.ssh_target import SSHTarget
+from app.services.ssh_target import (
+    SSHTarget,
+    SSHTargetError,
+    has_stored_creds,
+    host_from_url,
+    resolve_ssh_target,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/servers", tags=["node-image"])
@@ -32,15 +37,6 @@ MAX_BULK_SERVERS = 1000
 
 def _ndjson(obj: dict) -> bytes:
     return (json.dumps(obj, ensure_ascii=False) + "\n").encode()
-
-
-def _host_from_url(url: str) -> str:
-    return urlparse(url).hostname or ""
-
-
-def _target_tag() -> str:
-    """Тег образа по текущему каналу обновлений: dev → :dev, иначе :latest."""
-    return "dev" if update_channel.current_branch() == update_channel.DEV_BRANCH else "latest"
 
 
 class SSHCreds(BaseModel):
@@ -65,38 +61,6 @@ class BulkDeliverRequest(SSHCreds):
     """Креды из запроса идут только серверам без сохранённых — у остальных свои."""
     server_ids: list[int] = Field(min_length=1, max_length=MAX_BULK_SERVERS)
     save_creds: bool = False
-
-
-class SSHTargetError(Exception):
-    def __init__(self, reason: str, message: str):
-        super().__init__(message)
-        self.reason = reason
-
-
-def _has_stored_creds(server: Server) -> bool:
-    return bool(server.ssh_password or server.ssh_private_key)
-
-
-def resolve_ssh_target(server: Server, req: SSHAccessRequest) -> SSHTarget:
-    """SSH-цель сервера: поля запроса поверх сохранённых у сервера."""
-    host = (req.ssh_host or server.ssh_host or _host_from_url(server.url)).strip()
-    port = req.ssh_port or server.ssh_port or 22
-    user = (req.ssh_user or server.ssh_user or "root").strip()
-    password = req.ssh_password if req.ssh_password is not None else server.ssh_password
-    private_key = req.ssh_private_key if req.ssh_private_key is not None else server.ssh_private_key
-    passphrase = req.ssh_passphrase if req.ssh_passphrase is not None else server.ssh_passphrase
-
-    if not host:
-        raise SSHTargetError("no_host", "Не удалось определить SSH-хост ноды")
-    if user != "root":
-        raise SSHTargetError("not_root", "Нужен root-доступ по SSH")
-    if not password and not private_key:
-        raise SSHTargetError("no_creds", "Нет SSH-кредов: сохраните их у сервера или укажите в запросе")
-
-    return SSHTarget(
-        host=host, port=port, user=user,
-        password=password, private_key=private_key, passphrase=passphrase,
-    )
 
 
 def _store_creds(server: Server, req: SSHAccessRequest) -> None:
@@ -131,7 +95,7 @@ async def get_image_delivery(
     server = await _get_server(server_id, db)
     return {
         "image_delivery": server.image_delivery or "auto",
-        "ssh_host": server.ssh_host or _host_from_url(server.url),
+        "ssh_host": server.ssh_host or host_from_url(server.url),
         "ssh_port": server.ssh_port or 22,
         "ssh_user": server.ssh_user or "root",
         # секреты не отдаём — только факт наличия
@@ -170,11 +134,11 @@ async def deliver_image_to_server(
     """Доставить образ ноды по SSH и обновить её. Возвращает job_id — лог в стриме."""
     server = await _get_server(server_id, db)
     try:
-        target = resolve_ssh_target(server, req)
+        target = resolve_ssh_target(server, **req.model_dump())
     except SSHTargetError as exc:
         raise HTTPException(400, str(exc)) from exc
 
-    job_id = get_image_delivery_manager().start(server.id, server.name, target, _target_tag())
+    job_id = get_image_delivery_manager().start(server.id, server.name, target, update_channel.current_image_tag())
     return {"job_id": job_id}
 
 
@@ -197,9 +161,9 @@ async def deliver_image_bulk(
         for sid in req.server_ids if sid not in found_ids
     ]
     for server in servers:
-        uses_fallback = not _has_stored_creds(server)
+        uses_fallback = not has_stored_creds(server)
         try:
-            target = resolve_ssh_target(server, fallback if uses_fallback else SSHAccessRequest())
+            target = resolve_ssh_target(server, **fallback.model_dump()) if uses_fallback else resolve_ssh_target(server)
         except SSHTargetError as exc:
             skipped.append({"server_id": server.id, "name": server.name, "reason": exc.reason})
             continue
@@ -210,7 +174,7 @@ async def deliver_image_bulk(
     if req.save_creds:
         await db.commit()
 
-    tag = _target_tag()
+    tag = update_channel.current_image_tag()
     manager = get_image_delivery_manager()
     started = [
         {"server_id": server.id, "job_id": manager.start(server.id, server.name, target, tag)}

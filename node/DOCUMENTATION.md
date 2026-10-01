@@ -198,6 +198,7 @@ node/
 │       ├── extra_ips.py            # Доп. IP-адреса: детект бэкенда, рендер конфигов, guard'ы, ExtraIpManager (см. «Дополнительные IP-адреса»)
 │       ├── host_extra_ips.sh       # Host-скрипт транзакции (→ /opt/monitoring/scripts/extra-ips.sh): backup/apply/verify/timer/rollback/boot-guard
 │       ├── source_pool.py          # Пул исходящих адресов: раскладка меток по IP, `ip rule`/`ip route`, самолечение (см. «Пул исходящих адресов»)
+│       ├── update_state.py         # Итог попытки обновления на диске: переживает пересоздание контейнера агента (см. «Механизм обновления»)
 │       └── exit_proxy/             # Exit-прокси (см. «Exit-прокси»)
 │           ├── models.py           # Pydantic: ExitProxyConfig (от панели), Candidate, CheckResult, ExitProxyStatus, ExitEvent
 │           ├── selection.py        # Чистые функции: слияние кандидатов, вердикт «здоров», липкий выбор выхода
@@ -289,8 +290,8 @@ node/
 |-------|----------|----------|
 | GET | /api/version | Версия ноды |
 | GET | /api/system/versions | Объединённый endpoint: версия ноды, оптимизации, версия HAProxy и релиз ОС |
-| POST | /api/system/update | Запуск обновления (target_ref: branch/tag/commit, по умолчанию main; при вызове через панель панель подставляет выбранный канал обновлений — main/dev) |
-| GET | /api/system/update/status | Статус обновления |
+| POST | /api/system/update | Запуск обновления (target_ref: branch/tag/commit, по умолчанию main; при вызове через панель панель подставляет выбранный канал обновлений — main/dev). В ответе `attempt_id` — идентификатор попытки |
+| GET | /api/system/update/status | Итог последней попытки обновления: `in_progress`, `last_result` (`success`/`failed`/`null` пока идёт), `last_error`, `reason`, `attempt_id`, `target_ref`, `started_at`, `finished_at`, `version` |
 | GET | /api/system/optimizations/version | Версия системных оптимизаций (installed + version) |
 | POST | /api/system/optimizations/apply | Применить системные оптимизации |
 | POST | /api/system/optimizations/remove | Удалить все системные оптимизации |
@@ -411,6 +412,8 @@ data: {"message": "error description"}
 
 Обновление **всегда** использует актуальную версию логики из GitHub (двойная загрузка гарантирует свежесть).
 
+**Итог попытки** (`app/services/update_state.py`). При успехе `apply-update.sh` пересоздаёт контейнер агента, и процесс, запустивший апдейтер, итога не дожидается — поэтому итог не держится в памяти. Запуск пишет попытку (`attempt_id`, ветка, версия до обновления, время) в `/var/lib/monitoring/update-state.json` на именованном томе агента и помечает контейнер апдейтера меткой `monitoring.update-attempt=<attempt_id>`. Итог записывает тот, кто его увидел: процесс-владелец, если дождался апдейтера, либо новый процесс при первом `GET /api/system/update/status` — по коду выхода оставшегося контейнера с меткой этой попытки (0 — успех, 20 — `image_unavailable`, иное — провал с хвостом лога), после чего контейнер удаляется. Контейнера попытки нет — итог `failed` с `reason=interrupted`. Опоздавший итог старой попытки новую не затирает (`UpdateStateStore.record` сверяет `attempt_id`). Панель по `attempt_id` отличает итог своей попытки от чужой и при провале обновляет ноду по SSH — см. [panel/DOCUMENTATION.md](../panel/DOCUMENTATION.md#итог-обновления-ноды-и-запасной-путь-через-ssh). Тесты — `tests/test_update_state.py`.
+
 **Устойчивость к медленной сети**
 
 Порядок обновления — «сначала скачать, потом рестартовать»: rsync файлов и `docker compose pull` выполняются **до** остановки контейнеров, нода продолжает работать на старой версии всё время скачивания; `docker compose down` + `up` — только после успешного получения образов, даунтайм сокращается до секунд рестарта. Если pull и fallback-сборка не удались — обновление отменяется **без остановки контейнеров**, нода остаётся на старой версии.
@@ -420,7 +423,7 @@ data: {"message": "error description"}
 - Если `docker compose up -d` упал на ожидании healthy у api (`depends_on`), оставив nginx в статусе `Created`, контейнеры поднимаются напрямую: `docker compose start` → `docker start monitoring-api monitoring-nginx`; тот же прямой старт выполняется и в recovery-trap.
 - Ожидание updater-контейнера в node-API (`system.py`): `container.wait` с таймаутом `UPDATER_WAIT_TIMEOUT = 7200` (2 часа) — при коротком таймауте обновление дольше него ошибочно помечалось бы «failed», а повторный запуск убивал бы ещё работающий updater.
 - rsync при работающих контейнерах безопасен: замена файлов идёт через rename (новый inode), bind-mounts запущенных контейнеров видят старые файлы до рестарта. На минимальных образах ОС rsync отсутствует — `ensure_rsync` ставит его через `apt-get` перед копированием, а если поставить нельзя (нет apt, запуск внутри контейнера) — обновление отменяется, контейнеры не тронуты.
-- Каждый вызов Docker SDK (`get_docker_client`, `containers.get/run/wait/logs/remove`, `images.pull`) выполняется через `asyncio.to_thread` — SDK синхронный и общается с сокетом через `requests`; без обёртки pull образа на медленной сети (десятки минут) держал бы event loop и ронял бы `/health` посреди обновления. Флаг `in_progress` роутер выставляет **до** `asyncio.create_task`, а не внутри задачи — иначе два быстрых подряд запроса на обновление успевали бы пройти проверку раньше старта первого апдейтера.
+- Каждый вызов Docker SDK (`get_docker_client`, `containers.get/run/wait/logs/remove`, `images.pull`) выполняется через `asyncio.to_thread` — SDK синхронный и общается с сокетом через `requests`; без обёртки pull образа на медленной сети (десятки минут) держал бы event loop и ронял бы `/health` посреди обновления. Проверка «обновление уже идёт» (живая задача в этом процессе или работающий контейнер апдейтера, запущенный прежним процессом) и запуск новой попытки идут под одной блокировкой `_update_lock` — между ними опрос докера, и два быстрых подряд запроса иначе запустили бы два апдейтера; второй получает `409`.
 
 ### Метрики
 
