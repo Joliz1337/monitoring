@@ -25,9 +25,13 @@ import {
   PlusCircle,
   Lock,
   Activity,
+  Folder,
+  FolderOpen,
+  ChevronRight,
+  ChevronDown,
 } from 'lucide-react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { useServersStore } from '../stores/serversStore'
+import { useServersStore, type ServerWithMetrics } from '../stores/serversStore'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { isAxiosError } from 'axios'
@@ -59,7 +63,9 @@ import DeployTargetFields, { DEPLOY_DEFAULTS, NGINX_DOMAIN_PLACEHOLDER, type Dep
 import ExtraServerCard, { type ExtraTarget, type DeployStatus } from '../components/servers/ExtraServerCard'
 import InstallKeysPanel from '../components/servers/InstallKeysPanel'
 import ManualInstallBlock from '../components/servers/ManualInstallBlock'
+import { FolderStatusCounts } from '../components/Dashboard/FolderStats'
 import { writeStorage } from '../utils/storage'
+import { groupByFolder, orderFolders } from '../utils/folders'
 
 interface ServerFormData {
   name: string
@@ -159,6 +165,18 @@ const removeStoredJob = (jobId: string) => {
   writeStoredJobs(readStoredJobs().filter(j => j.jobId !== jobId))
 }
 
+const COLLAPSED_FOLDERS_KEY = 'servers_collapsed_folders'
+const SERVER_GRID_CLASS = 'grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3'
+const NO_SERVERS: ServerWithMetrics[] = []
+
+const readCollapsedFolders = (): Set<string> => {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(COLLAPSED_FOLDERS_KEY) || '[]'))
+  } catch {
+    return new Set()
+  }
+}
+
 export default function Servers() {
   const { servers, fetchServersWithMetrics, addServer, deleteServer, testServer, updateServer, toggleServer } = useServersStore()
   const { t, i18n } = useTranslation()
@@ -180,6 +198,7 @@ export default function Servers() {
   const [installerToken, setInstallerToken] = useState<string | null>(null)
   const [tokenCopied, setTokenCopied] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
+  const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(readCollapsedFolders)
 
   const [deploy, setDeploy] = useState<DeployFormData>(DEPLOY_DEFAULTS)
   const [remnaCertProfiles, setRemnaCertProfiles] = useState<RemnawaveCertProfile[]>([])
@@ -237,13 +256,36 @@ export default function Servers() {
     resetForm()
   }, [showForm, deploy.enabled, primaryStatus, extras, resetForm])
 
+  const normalizedQuery = searchQuery.toLowerCase().trim()
+  const isSearching = normalizedQuery.length > 0
+
   const filteredServers = useMemo(() => {
-    const q = searchQuery.toLowerCase().trim()
-    if (!q) return servers
+    if (!normalizedQuery) return servers
     return servers.filter(s =>
-      s.name.toLowerCase().includes(q) || s.url.toLowerCase().includes(q)
+      s.name.toLowerCase().includes(normalizedQuery) || s.url.toLowerCase().includes(normalizedQuery)
     )
-  }, [searchQuery, servers])
+  }, [normalizedQuery, servers])
+
+  // Папки как на дашборде: его порядок папок, внутри — порядок карточек
+  const groupedServers = useMemo(() => groupByFolder(filteredServers), [filteredServers])
+  const folderNames = useMemo(
+    () => orderFolders([...groupedServers.keys()].filter((name): name is string => name !== null)),
+    [groupedServers],
+  )
+  const unfolderedServers = groupedServers.get(null) ?? NO_SERVERS
+
+  // Счётчики в заголовке описывают папку целиком: поиск меняет только показанные карточки
+  const activeByFolder = useMemo(() => groupByFolder(servers.filter(s => s.is_active)), [servers])
+
+  const toggleFolderCollapsed = (folder: string) => {
+    setCollapsedFolders(prev => {
+      const next = new Set(prev)
+      if (next.has(folder)) next.delete(folder)
+      else next.add(folder)
+      writeStorage(COLLAPSED_FOLDERS_KEY, JSON.stringify([...next]))
+      return next
+    })
+  }
 
   const handleCopyPanelIp = async () => {
     if (!panelIp) return
@@ -806,6 +848,421 @@ export default function Servers() {
     }
   }
   
+  const renderServerCard = (server: ServerWithMetrics) => {
+    const isEditing = editingId === server.id
+    const isTesting = testingId === server.id
+    const testResult = testResults[server.id]
+
+    return (
+      <motion.div
+        key={server.id}
+        className={isEditing ? 'col-span-full' : ''}
+        layout
+        initial={{ opacity: 0, y: 8 }}
+        animate={{ opacity: 1, y: 0 }}
+        exit={{ opacity: 0, scale: 0.95 }}
+        transition={{ duration: 0.15 }}
+      >
+        <div
+          className={`card group transition-all overflow-visible flex flex-col ${
+            server.is_active
+              ? 'hover:border-dark-700'
+              : 'opacity-60 border-dark-700/50'
+          } ${isEditing ? 'rounded-b-none border-b-0 border-accent-500/30' : ''}`}
+        >
+          {/* Шапка: иконка + имя + URL */}
+          <div className="flex items-center gap-3">
+            <div
+              className={`w-10 h-10 rounded-xl flex items-center justify-center border flex-shrink-0 transition-colors ${
+                server.is_active
+                  ? 'bg-gradient-to-br from-dark-700 to-dark-800 border-dark-700/50 group-hover:border-accent-500/30'
+                  : 'bg-dark-800/50 border-dark-700/30'
+              }`}
+            >
+              <ServerIcon className={`w-4 h-4 ${server.is_active ? 'text-accent-500' : 'text-dark-500'}`} />
+            </div>
+            <div className="min-w-0 flex-1">
+              <h3 className="font-semibold text-dark-100 flex items-center gap-2 truncate">
+                <button
+                  type="button"
+                  onClick={() => openDashboard(server.id)}
+                  title={t('servers.open_dashboard')}
+                  className="truncate text-left hover:text-accent-400 transition-colors"
+                >
+                  {server.name}
+                </button>
+                <span
+                  className={`w-2 h-2 rounded-full flex-shrink-0 ${
+                    !server.is_active
+                      ? 'bg-dark-500'
+                      : server.status === 'online'
+                        ? 'bg-success'
+                        : server.status === 'loading'
+                          ? 'bg-dark-400 animate-pulse'
+                          : 'bg-danger'
+                  }`}
+                />
+                {nodeIsRestricted(server) && (
+                  <Tooltip
+                    maxWidth={320}
+                    label={
+                      <span>
+                        {t('node_caps.badge_tooltip_title')}
+                        <br />
+                        {t('node_caps.allowed', { allowed: describeAllowedDomains(server, t) })}
+                        <br />
+                        {t('node_caps.where')}
+                      </span>
+                    }
+                  >
+                    <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-purple/10 text-purple text-[10px] font-medium flex-shrink-0">
+                      <Lock className="w-3 h-3" />
+                      {t('servers.restricted_badge')}
+                    </span>
+                  </Tooltip>
+                )}
+                {server.uses_shared_cert ? (
+                  <Tooltip label={t('servers.shared_cert_tooltip')}>
+                    <ShieldCheck className="w-3.5 h-3.5 text-success flex-shrink-0" />
+                  </Tooltip>
+                ) : server.auth_kind === 'dedicated' ? (
+                  <Tooltip label={t('servers.dedicated_cert_tooltip')}>
+                    <ShieldCheck className="w-3.5 h-3.5 text-accent-400 flex-shrink-0" />
+                  </Tooltip>
+                ) : (
+                  <Tooltip label={t('servers.needs_migration_tooltip')}>
+                    <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-warning/10 text-warning text-[10px] font-medium flex-shrink-0">
+                      <ShieldAlert className="w-3 h-3" />
+                      {server.auth_kind === 'legacy'
+                        ? t('servers.legacy_badge')
+                        : t('servers.old_key_badge')}
+                    </span>
+                  </Tooltip>
+                )}
+              </h3>
+              <p className="text-xs text-dark-500 flex items-center gap-1.5 min-w-0">
+                <CopyableIp value={extractHost(server.url)} display={server.url} className="truncate" />
+                <a
+                  href={server.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="hover:text-accent-400 transition-colors flex-shrink-0"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <ExternalLink className="w-3 h-3" />
+                </a>
+              </p>
+            </div>
+          </div>
+
+          {/* Статус + кнопки действий */}
+          <div className="flex items-center justify-between mt-3 pt-3 border-t border-dark-700/30 gap-2">
+            <div className="flex-1 min-w-0">
+              <AnimatePresence mode="wait">
+                {testResult ? (
+                  <motion.div
+                    key="test-result"
+                    className={`flex items-center gap-1.5 text-xs px-2 py-1 rounded-lg w-fit ${
+                      testResult.status === 'online'
+                        ? 'text-success bg-success/10'
+                        : 'text-danger bg-danger/10'
+                    }`}
+                    initial={{ opacity: 0, scale: 0.8 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    exit={{ opacity: 0, scale: 0.8 }}
+                  >
+                    {testResult.status === 'online' ? (
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                    ) : (
+                      <XCircle className="w-3.5 h-3.5" />
+                    )}
+                    <span className="truncate max-w-[140px]">
+                      {testResult.status === 'online'
+                        ? t('common.connected')
+                        : testResult.message || t('common.failed')}
+                    </span>
+                  </motion.div>
+                ) : !server.is_active ? (
+                  <motion.span
+                    key="disabled"
+                    className="px-2 py-0.5 text-xs font-medium bg-dark-700/50 text-dark-400 rounded-full"
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                  >
+                    {t('servers.disabled')}
+                  </motion.span>
+                ) : server.status === 'online' ? (
+                  <motion.span
+                    key="online"
+                    className="flex items-center gap-1.5 text-xs text-success"
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                  >
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    {t('common.online')}
+                  </motion.span>
+                ) : server.status === 'loading' ? (
+                  <motion.span
+                    key="loading"
+                    className="flex items-center gap-1.5 text-xs text-dark-400"
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                  >
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    {t('common.loading')}
+                  </motion.span>
+                ) : (
+                  <motion.span
+                    key="offline"
+                    className="flex items-center gap-1.5 text-xs text-danger"
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                  >
+                    <XCircle className="w-3.5 h-3.5" />
+                    <span className="truncate max-w-[140px]">
+                      {server.last_error || t('common.offline')}
+                    </span>
+                  </motion.span>
+                )}
+              </AnimatePresence>
+            </div>
+
+            <div className="flex items-center gap-1 flex-shrink-0">
+              <Tooltip label={t('servers.open_dashboard')}>
+                <motion.button
+                  onClick={() => openDashboard(server.id)}
+                  className="p-2 rounded-lg transition-all text-accent-400 hover:bg-accent-500/10"
+                  whileTap={{ scale: 0.9 }}
+                >
+                  <Activity className="w-3.5 h-3.5" />
+                </motion.button>
+              </Tooltip>
+
+              <Tooltip label={server.is_active ? t('servers.monitoring_enabled') : t('servers.monitoring_disabled')}>
+                <motion.button
+                  onClick={() => toggleServer(server.id, !server.is_active)}
+                  className={`p-2 rounded-lg transition-all ${
+                    server.is_active
+                      ? 'text-success hover:bg-success/10'
+                      : 'text-dark-500 hover:bg-dark-700/50'
+                  }`}
+                  whileTap={{ scale: 0.9 }}
+                >
+                  <Power className="w-3.5 h-3.5" />
+                </motion.button>
+              </Tooltip>
+
+              <Tooltip label={t('common.test')}>
+                <motion.button
+                  onClick={() => handleTest(server.id)}
+                  disabled={isTesting || !server.is_active}
+                  className={`p-2 rounded-lg transition-all text-dark-300 hover:bg-dark-700/50 ${
+                    !server.is_active ? 'opacity-40 cursor-not-allowed' : ''
+                  }`}
+                  whileTap={{ scale: server.is_active ? 0.9 : 1 }}
+                >
+                  {isTesting ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Zap className="w-3.5 h-3.5" />
+                  )}
+                </motion.button>
+              </Tooltip>
+
+              <Tooltip label={isEditing ? t('common.cancel') : t('common.edit')}>
+                <motion.button
+                  onClick={() => (isEditing ? handleCancel() : handleEdit(server))}
+                  className={`p-2 rounded-lg transition-all ${
+                    isEditing
+                      ? 'text-accent-400 bg-accent-500/10'
+                      : 'text-dark-300 hover:bg-dark-700/50'
+                  }`}
+                  whileTap={{ scale: 0.9 }}
+                >
+                  {isEditing ? <X className="w-3.5 h-3.5" /> : <Edit2 className="w-3.5 h-3.5" />}
+                </motion.button>
+              </Tooltip>
+
+              <Tooltip label={t('common.delete')}>
+                <motion.button
+                  onClick={() => handleDelete(server.id)}
+                  className={`p-2 rounded-lg transition-all ${
+                    deleteConfirm === server.id
+                      ? 'bg-danger text-white'
+                      : 'text-danger hover:bg-danger/10'
+                  }`}
+                  whileTap={{ scale: 0.9 }}
+                  animate={deleteConfirm === server.id ? { scale: [1, 1.1, 1] } : {}}
+                  transition={{ duration: 0.15 }}
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </motion.button>
+              </Tooltip>
+            </div>
+          </div>
+        </div>
+
+        {/* Inline Edit Form */}
+        <AnimatePresence>
+          {isEditing && (
+            <motion.div
+              className="card rounded-t-none border-t-0 border-accent-500/30 bg-dark-800/60"
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              transition={{ duration: 0.15 }}
+            >
+              <AnimatePresence>
+                {error && (
+                  <motion.div
+                    className="flex items-center gap-3 p-4 mb-4 bg-danger/10 border border-danger/20 rounded-xl text-danger"
+                    initial={{ opacity: 0, y: -10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -10 }}
+                  >
+                    <AlertTriangle className="w-5 h-5 flex-shrink-0" />
+                    <span className="text-sm">{error}</span>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+              <form onSubmit={handleSubmit} className="space-y-4" autoComplete="off" data-form-type="other">
+                <div>
+                  <label className="block text-sm text-dark-300 mb-2 flex items-center gap-2">
+                    <ServerIcon className="w-4 h-4" />
+                    {t('servers.server_name')}
+                  </label>
+                  <input
+                    type="text"
+                    value={formData.name}
+                    onChange={(e) => setFormData(d => ({ ...d, name: e.target.value }))}
+                    placeholder={t('servers.server_name_placeholder')}
+                    className="input"
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm text-dark-300 mb-2 flex items-center gap-2">
+                    <LinkIcon className="w-4 h-4" />
+                    {t('servers.server_host')}
+                  </label>
+                  <div className="flex gap-3">
+                    <div className="flex-1">
+                      <input
+                        type="text"
+                        value={formData.host}
+                        onChange={(e) => setFormData(d => ({ ...d, host: e.target.value }))}
+                        placeholder={t('servers.server_host_placeholder')}
+                        className="input"
+                        required
+                      />
+                    </div>
+                    <div className="w-28">
+                      <input
+                        type="text"
+                        value={formData.port}
+                        onChange={(e) => setFormData(d => ({ ...d, port: e.target.value.replace(/\D/g, '') }))}
+                        placeholder={t('servers.server_port_placeholder')}
+                        className="input text-center"
+                      />
+                    </div>
+                  </div>
+                  <p className="text-xs text-dark-500 mt-1.5">
+                    {t('servers.server_host_hint')}
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-sm text-dark-300 mb-2 flex items-center gap-2">
+                    <Globe className="w-4 h-4" />
+                    {t('servers.proxy_label')}
+                  </label>
+                  <input
+                    type="text"
+                    value={formData.proxy}
+                    onChange={(e) => setFormData(d => ({ ...d, proxy: e.target.value }))}
+                    placeholder="ip:port@login:pass"
+                    className="input"
+                    autoComplete="off"
+                  />
+                  <p className="text-xs text-dark-500 mt-1.5">
+                    {t('servers.proxy_hint')}
+                  </p>
+                </div>
+
+                <div className="flex gap-3 pt-2">
+                  <motion.button
+                    type="submit"
+                    disabled={isSubmitting}
+                    className="btn btn-primary"
+                    whileTap={{ scale: 0.98 }}
+                  >
+                    {isSubmitting ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      t('servers.update_server')
+                    )}
+                  </motion.button>
+                  <motion.button
+                    type="button"
+                    onClick={handleCancel}
+                    className="btn btn-secondary"
+                    whileTap={{ scale: 0.98 }}
+                  >
+                    {t('common.cancel')}
+                  </motion.button>
+                </div>
+              </form>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </motion.div>
+    )
+  }
+
+  const renderServerGrid = (list: ServerWithMetrics[]) => (
+    <div className={SERVER_GRID_CLASS}>
+      <AnimatePresence mode="popLayout">
+        {list.map(server => renderServerCard(server))}
+      </AnimatePresence>
+    </div>
+  )
+
+  const renderFolder = (name: string, members: ServerWithMetrics[]) => {
+    const isCollapsed = !isSearching && collapsedFolders.has(name)
+    const FolderIcon = isCollapsed ? Folder : FolderOpen
+    const Chevron = isCollapsed ? ChevronRight : ChevronDown
+    return (
+      <div key={name} className="rounded-xl border bg-dark-900/50 border-dark-800/50 overflow-hidden">
+        <button
+          onClick={() => toggleFolderCollapsed(name)}
+          className="flex items-center gap-2.5 w-full min-w-0 px-4 py-3 group"
+        >
+          <div className="w-8 h-8 rounded-lg bg-blue-500/15 flex items-center justify-center flex-shrink-0">
+            <FolderIcon className="w-4 h-4 text-blue-400" />
+          </div>
+          <span className="text-sm font-semibold text-white truncate group-hover:text-blue-300 transition">{name}</span>
+          <FolderStatusCounts servers={activeByFolder.get(name) ?? NO_SERVERS} />
+          <Chevron className="w-3.5 h-3.5 text-dark-600 flex-shrink-0" />
+        </button>
+        <AnimatePresence initial={false}>
+          {!isCollapsed && (
+            <motion.div
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: 'auto', opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              transition={{ duration: 0.2 }}
+              className="overflow-hidden"
+            >
+              <div className="px-3 pb-3">{renderServerGrid(members)}</div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+    )
+  }
+
   return (
     <motion.div
       initial={{ opacity: 0 }}
@@ -1237,420 +1694,47 @@ export default function Servers() {
       </AnimatePresence>
 
       {/* Server list */}
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-        <AnimatePresence mode="popLayout">
-          {filteredServers.length === 0 ? (
-            searchQuery.trim() ? (
-              <motion.div
-                className="card text-center py-16 col-span-full"
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                key="no-results"
-              >
-                <Search className="w-12 h-12 text-dark-600 mx-auto mb-3" />
-                <p className="text-dark-400">{t('common.no_results')}</p>
-              </motion.div>
-            ) : (
-              <motion.div
-                className="card text-center py-16 col-span-full"
-                initial={{ opacity: 0, scale: 0.95 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.95 }}
-                key="empty"
-              >
-                <motion.div
-                  animate={{ y: [0, -6, 0] }}
-                  transition={{ duration: 2.5, repeat: Infinity, ease: 'easeInOut' }}
-                >
-                  <ServerIcon className="w-16 h-16 text-dark-600 mx-auto mb-4" />
-                </motion.div>
-                <p className="text-dark-400 mb-4">{t('servers.no_servers')}</p>
-                <motion.button
-                  onClick={() => setShowForm(true)}
-                  className="btn btn-primary mx-auto"
-                  whileTap={{ scale: 0.97 }}
-                >
-                  <Plus className="w-4 h-4" />
-                  {t('servers.add_first_server')}
-                </motion.button>
-              </motion.div>
-            )
-          ) : (
-            filteredServers.map((server) => {
-              const isEditing = editingId === server.id
-              const isTesting = testingId === server.id
-              const testResult = testResults[server.id]
-
-              return (
-                <motion.div
-                  key={server.id}
-                  className={isEditing ? 'col-span-full' : ''}
-                  layout
-                  initial={{ opacity: 0, y: 8 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, scale: 0.95 }}
-                  transition={{ duration: 0.15 }}
-                >
-                  <div
-                    className={`card group transition-all overflow-visible flex flex-col ${
-                      server.is_active
-                        ? 'hover:border-dark-700'
-                        : 'opacity-60 border-dark-700/50'
-                    } ${isEditing ? 'rounded-b-none border-b-0 border-accent-500/30' : ''}`}
-                  >
-                    {/* Шапка: иконка + имя + URL */}
-                    <div className="flex items-center gap-3">
-                      <div
-                        className={`w-10 h-10 rounded-xl flex items-center justify-center border flex-shrink-0 transition-colors ${
-                          server.is_active
-                            ? 'bg-gradient-to-br from-dark-700 to-dark-800 border-dark-700/50 group-hover:border-accent-500/30'
-                            : 'bg-dark-800/50 border-dark-700/30'
-                        }`}
-                      >
-                        <ServerIcon className={`w-4 h-4 ${server.is_active ? 'text-accent-500' : 'text-dark-500'}`} />
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <h3 className="font-semibold text-dark-100 flex items-center gap-2 truncate">
-                          <button
-                            type="button"
-                            onClick={() => openDashboard(server.id)}
-                            title={t('servers.open_dashboard')}
-                            className="truncate text-left hover:text-accent-400 transition-colors"
-                          >
-                            {server.name}
-                          </button>
-                          <span
-                            className={`w-2 h-2 rounded-full flex-shrink-0 ${
-                              !server.is_active
-                                ? 'bg-dark-500'
-                                : server.status === 'online'
-                                  ? 'bg-success'
-                                  : server.status === 'loading'
-                                    ? 'bg-dark-400 animate-pulse'
-                                    : 'bg-danger'
-                            }`}
-                          />
-                          {nodeIsRestricted(server) && (
-                            <Tooltip
-                              maxWidth={320}
-                              label={
-                                <span>
-                                  {t('node_caps.badge_tooltip_title')}
-                                  <br />
-                                  {t('node_caps.allowed', { allowed: describeAllowedDomains(server, t) })}
-                                  <br />
-                                  {t('node_caps.where')}
-                                </span>
-                              }
-                            >
-                              <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-purple/10 text-purple text-[10px] font-medium flex-shrink-0">
-                                <Lock className="w-3 h-3" />
-                                {t('servers.restricted_badge')}
-                              </span>
-                            </Tooltip>
-                          )}
-                          {server.uses_shared_cert ? (
-                            <Tooltip label={t('servers.shared_cert_tooltip')}>
-                              <ShieldCheck className="w-3.5 h-3.5 text-success flex-shrink-0" />
-                            </Tooltip>
-                          ) : server.auth_kind === 'dedicated' ? (
-                            <Tooltip label={t('servers.dedicated_cert_tooltip')}>
-                              <ShieldCheck className="w-3.5 h-3.5 text-accent-400 flex-shrink-0" />
-                            </Tooltip>
-                          ) : (
-                            <Tooltip label={t('servers.needs_migration_tooltip')}>
-                              <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-warning/10 text-warning text-[10px] font-medium flex-shrink-0">
-                                <ShieldAlert className="w-3 h-3" />
-                                {server.auth_kind === 'legacy'
-                                  ? t('servers.legacy_badge')
-                                  : t('servers.old_key_badge')}
-                              </span>
-                            </Tooltip>
-                          )}
-                        </h3>
-                        <p className="text-xs text-dark-500 flex items-center gap-1.5 min-w-0">
-                          <CopyableIp value={extractHost(server.url)} display={server.url} className="truncate" />
-                          <a
-                            href={server.url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="hover:text-accent-400 transition-colors flex-shrink-0"
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            <ExternalLink className="w-3 h-3" />
-                          </a>
-                        </p>
-                      </div>
-                    </div>
-
-                    {/* Статус + кнопки действий */}
-                    <div className="flex items-center justify-between mt-3 pt-3 border-t border-dark-700/30 gap-2">
-                      <div className="flex-1 min-w-0">
-                        <AnimatePresence mode="wait">
-                          {testResult ? (
-                            <motion.div
-                              key="test-result"
-                              className={`flex items-center gap-1.5 text-xs px-2 py-1 rounded-lg w-fit ${
-                                testResult.status === 'online'
-                                  ? 'text-success bg-success/10'
-                                  : 'text-danger bg-danger/10'
-                              }`}
-                              initial={{ opacity: 0, scale: 0.8 }}
-                              animate={{ opacity: 1, scale: 1 }}
-                              exit={{ opacity: 0, scale: 0.8 }}
-                            >
-                              {testResult.status === 'online' ? (
-                                <CheckCircle2 className="w-3.5 h-3.5" />
-                              ) : (
-                                <XCircle className="w-3.5 h-3.5" />
-                              )}
-                              <span className="truncate max-w-[140px]">
-                                {testResult.status === 'online'
-                                  ? t('common.connected')
-                                  : testResult.message || t('common.failed')}
-                              </span>
-                            </motion.div>
-                          ) : !server.is_active ? (
-                            <motion.span
-                              key="disabled"
-                              className="px-2 py-0.5 text-xs font-medium bg-dark-700/50 text-dark-400 rounded-full"
-                              initial={{ opacity: 0 }}
-                              animate={{ opacity: 1 }}
-                            >
-                              {t('servers.disabled')}
-                            </motion.span>
-                          ) : server.status === 'online' ? (
-                            <motion.span
-                              key="online"
-                              className="flex items-center gap-1.5 text-xs text-success"
-                              initial={{ opacity: 0 }}
-                              animate={{ opacity: 1 }}
-                            >
-                              <CheckCircle2 className="w-3.5 h-3.5" />
-                              {t('common.online')}
-                            </motion.span>
-                          ) : server.status === 'loading' ? (
-                            <motion.span
-                              key="loading"
-                              className="flex items-center gap-1.5 text-xs text-dark-400"
-                              initial={{ opacity: 0 }}
-                              animate={{ opacity: 1 }}
-                            >
-                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                              {t('common.loading')}
-                            </motion.span>
-                          ) : (
-                            <motion.span
-                              key="offline"
-                              className="flex items-center gap-1.5 text-xs text-danger"
-                              initial={{ opacity: 0 }}
-                              animate={{ opacity: 1 }}
-                            >
-                              <XCircle className="w-3.5 h-3.5" />
-                              <span className="truncate max-w-[140px]">
-                                {server.last_error || t('common.offline')}
-                              </span>
-                            </motion.span>
-                          )}
-                        </AnimatePresence>
-                      </div>
-
-                      <div className="flex items-center gap-1 flex-shrink-0">
-                        <Tooltip label={t('servers.open_dashboard')}>
-                          <motion.button
-                            onClick={() => openDashboard(server.id)}
-                            className="p-2 rounded-lg transition-all text-accent-400 hover:bg-accent-500/10"
-                            whileTap={{ scale: 0.9 }}
-                          >
-                            <Activity className="w-3.5 h-3.5" />
-                          </motion.button>
-                        </Tooltip>
-
-                        <Tooltip label={server.is_active ? t('servers.monitoring_enabled') : t('servers.monitoring_disabled')}>
-                          <motion.button
-                            onClick={() => toggleServer(server.id, !server.is_active)}
-                            className={`p-2 rounded-lg transition-all ${
-                              server.is_active
-                                ? 'text-success hover:bg-success/10'
-                                : 'text-dark-500 hover:bg-dark-700/50'
-                            }`}
-                            whileTap={{ scale: 0.9 }}
-                          >
-                            <Power className="w-3.5 h-3.5" />
-                          </motion.button>
-                        </Tooltip>
-
-                        <Tooltip label={t('common.test')}>
-                          <motion.button
-                            onClick={() => handleTest(server.id)}
-                            disabled={isTesting || !server.is_active}
-                            className={`p-2 rounded-lg transition-all text-dark-300 hover:bg-dark-700/50 ${
-                              !server.is_active ? 'opacity-40 cursor-not-allowed' : ''
-                            }`}
-                            whileTap={{ scale: server.is_active ? 0.9 : 1 }}
-                          >
-                            {isTesting ? (
-                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                            ) : (
-                              <Zap className="w-3.5 h-3.5" />
-                            )}
-                          </motion.button>
-                        </Tooltip>
-
-                        <Tooltip label={isEditing ? t('common.cancel') : t('common.edit')}>
-                          <motion.button
-                            onClick={() => (isEditing ? handleCancel() : handleEdit(server))}
-                            className={`p-2 rounded-lg transition-all ${
-                              isEditing
-                                ? 'text-accent-400 bg-accent-500/10'
-                                : 'text-dark-300 hover:bg-dark-700/50'
-                            }`}
-                            whileTap={{ scale: 0.9 }}
-                          >
-                            {isEditing ? <X className="w-3.5 h-3.5" /> : <Edit2 className="w-3.5 h-3.5" />}
-                          </motion.button>
-                        </Tooltip>
-
-                        <Tooltip label={t('common.delete')}>
-                          <motion.button
-                            onClick={() => handleDelete(server.id)}
-                            className={`p-2 rounded-lg transition-all ${
-                              deleteConfirm === server.id
-                                ? 'bg-danger text-white'
-                                : 'text-danger hover:bg-danger/10'
-                            }`}
-                            whileTap={{ scale: 0.9 }}
-                            animate={deleteConfirm === server.id ? { scale: [1, 1.1, 1] } : {}}
-                            transition={{ duration: 0.15 }}
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </motion.button>
-                        </Tooltip>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Inline Edit Form */}
-                  <AnimatePresence>
-                    {isEditing && (
-                      <motion.div
-                        className="card rounded-t-none border-t-0 border-accent-500/30 bg-dark-800/60"
-                        initial={{ opacity: 0, height: 0 }}
-                        animate={{ opacity: 1, height: 'auto' }}
-                        exit={{ opacity: 0, height: 0 }}
-                        transition={{ duration: 0.15 }}
-                      >
-                        <AnimatePresence>
-                          {error && (
-                            <motion.div
-                              className="flex items-center gap-3 p-4 mb-4 bg-danger/10 border border-danger/20 rounded-xl text-danger"
-                              initial={{ opacity: 0, y: -10 }}
-                              animate={{ opacity: 1, y: 0 }}
-                              exit={{ opacity: 0, y: -10 }}
-                            >
-                              <AlertTriangle className="w-5 h-5 flex-shrink-0" />
-                              <span className="text-sm">{error}</span>
-                            </motion.div>
-                          )}
-                        </AnimatePresence>
-
-                        <form onSubmit={handleSubmit} className="space-y-4" autoComplete="off" data-form-type="other">
-                          <div>
-                            <label className="block text-sm text-dark-300 mb-2 flex items-center gap-2">
-                              <ServerIcon className="w-4 h-4" />
-                              {t('servers.server_name')}
-                            </label>
-                            <input
-                              type="text"
-                              value={formData.name}
-                              onChange={(e) => setFormData(d => ({ ...d, name: e.target.value }))}
-                              placeholder={t('servers.server_name_placeholder')}
-                              className="input"
-                              required
-                            />
-                          </div>
-
-                          <div>
-                            <label className="block text-sm text-dark-300 mb-2 flex items-center gap-2">
-                              <LinkIcon className="w-4 h-4" />
-                              {t('servers.server_host')}
-                            </label>
-                            <div className="flex gap-3">
-                              <div className="flex-1">
-                                <input
-                                  type="text"
-                                  value={formData.host}
-                                  onChange={(e) => setFormData(d => ({ ...d, host: e.target.value }))}
-                                  placeholder={t('servers.server_host_placeholder')}
-                                  className="input"
-                                  required
-                                />
-                              </div>
-                              <div className="w-28">
-                                <input
-                                  type="text"
-                                  value={formData.port}
-                                  onChange={(e) => setFormData(d => ({ ...d, port: e.target.value.replace(/\D/g, '') }))}
-                                  placeholder={t('servers.server_port_placeholder')}
-                                  className="input text-center"
-                                />
-                              </div>
-                            </div>
-                            <p className="text-xs text-dark-500 mt-1.5">
-                              {t('servers.server_host_hint')}
-                            </p>
-                          </div>
-
-                          <div>
-                            <label className="block text-sm text-dark-300 mb-2 flex items-center gap-2">
-                              <Globe className="w-4 h-4" />
-                              {t('servers.proxy_label')}
-                            </label>
-                            <input
-                              type="text"
-                              value={formData.proxy}
-                              onChange={(e) => setFormData(d => ({ ...d, proxy: e.target.value }))}
-                              placeholder="ip:port@login:pass"
-                              className="input"
-                              autoComplete="off"
-                            />
-                            <p className="text-xs text-dark-500 mt-1.5">
-                              {t('servers.proxy_hint')}
-                            </p>
-                          </div>
-
-                          <div className="flex gap-3 pt-2">
-                            <motion.button
-                              type="submit"
-                              disabled={isSubmitting}
-                              className="btn btn-primary"
-                              whileTap={{ scale: 0.98 }}
-                            >
-                              {isSubmitting ? (
-                                <Loader2 className="w-4 h-4 animate-spin" />
-                              ) : (
-                                t('servers.update_server')
-                              )}
-                            </motion.button>
-                            <motion.button
-                              type="button"
-                              onClick={handleCancel}
-                              className="btn btn-secondary"
-                              whileTap={{ scale: 0.98 }}
-                            >
-                              {t('common.cancel')}
-                            </motion.button>
-                          </div>
-                        </form>
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
-                </motion.div>
-              )
-            })
-          )}
-        </AnimatePresence>
-      </div>
+      {filteredServers.length === 0 ? (
+        isSearching ? (
+          <motion.div
+            className="card text-center py-16"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            key="no-results"
+          >
+            <Search className="w-12 h-12 text-dark-600 mx-auto mb-3" />
+            <p className="text-dark-400">{t('common.no_results')}</p>
+          </motion.div>
+        ) : (
+          <motion.div
+            className="card text-center py-16"
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            key="empty"
+          >
+            <motion.div
+              animate={{ y: [0, -6, 0] }}
+              transition={{ duration: 2.5, repeat: Infinity, ease: 'easeInOut' }}
+            >
+              <ServerIcon className="w-16 h-16 text-dark-600 mx-auto mb-4" />
+            </motion.div>
+            <p className="text-dark-400 mb-4">{t('servers.no_servers')}</p>
+            <motion.button
+              onClick={() => setShowForm(true)}
+              className="btn btn-primary mx-auto"
+              whileTap={{ scale: 0.97 }}
+            >
+              <Plus className="w-4 h-4" />
+              {t('servers.add_first_server')}
+            </motion.button>
+          </motion.div>
+        )
+      ) : (
+        <div className="space-y-4">
+          {folderNames.map(name => renderFolder(name, groupedServers.get(name) ?? NO_SERVERS))}
+          {unfolderedServers.length > 0 && renderServerGrid(unfolderedServers)}
+        </div>
+      )}
 
     </motion.div>
   )

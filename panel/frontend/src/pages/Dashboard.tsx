@@ -694,14 +694,10 @@ export default function Dashboard() {
                                 </div>
                                 <span className="text-sm font-semibold text-white truncate group-hover:text-blue-300 transition">{folderName}</span>
                                 <FolderStatusCounts servers={folderActiveServers} />
+                                <FolderLoadBadges servers={folderActiveServers} className="hidden sm:flex flex-shrink-0" />
                                 {isCollapsed ? <ChevronRight className="w-3.5 h-3.5 text-dark-600 flex-shrink-0" /> : <ChevronDown className="w-3.5 h-3.5 text-dark-600 flex-shrink-0" />}
                               </button>
                             </div>
-                            {/* На телефоне загрузка уходит второй строкой, чтобы не съедать имя папки */}
-                            <FolderLoadBadges
-                              servers={folderActiveServers}
-                              className="order-last basis-full pl-7 sm:order-none sm:basis-auto sm:pl-0 sm:ml-2"
-                            />
                             <div className="flex items-center gap-1 flex-shrink-0 ml-2">
                               <Tooltip label={t('common.edit')}>
                                 <button onClick={() => setModalState({ kind: 'rename-folder', folderName })} className="p-1.5 text-dark-500 hover:text-dark-300 transition rounded-lg hover:bg-dark-800/50">
@@ -714,6 +710,8 @@ export default function Dashboard() {
                                 </button>
                               </Tooltip>
                             </div>
+                            {/* На телефоне рядом с именем места нет — загрузка уходит второй строкой */}
+                            <FolderLoadBadges servers={folderActiveServers} className="sm:hidden basis-full pl-7" />
                           </div>
                           <AnimatePresence initial={false}>
                             {!isCollapsed && (

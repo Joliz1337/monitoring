@@ -9,3 +9,15 @@ export function orderFolders(names: string[]): string[] {
     return [...names].sort()
   }
 }
+
+/** Раскладка по папкам с сохранением порядка внутри папки; ключ null — серверы без папки */
+export function groupByFolder<T extends { folder?: string | null }>(items: T[]): Map<string | null, T[]> {
+  const map = new Map<string | null, T[]>()
+  for (const item of items) {
+    const key = item.folder || null
+    const bucket = map.get(key)
+    if (bucket) bucket.push(item)
+    else map.set(key, [item])
+  }
+  return map
+}

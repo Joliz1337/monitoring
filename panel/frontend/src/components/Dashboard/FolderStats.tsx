@@ -63,7 +63,7 @@ function FolderLoadBadgesInner({ servers, className = '' }: { servers: ServerWit
   const scope = <div className="text-dark-400">{t('dashboard.fleet_chart_scope', { count: load.count })}</div>
 
   return (
-    <div className={`flex flex-wrap items-center gap-1 ${className}`}>
+    <span className={`flex flex-wrap items-center gap-1 ${className}`}>
       <Badge tooltip={<>{t('common.cpu')} · {t('common.cores_count', { count: load.cores })}{scope}</>}>
         <Cpu className="w-3 h-3 text-accent-400" />
         <span className={loadTone(load.cpuPercent)}>{load.cpuPercent.toFixed(0)}%</span>
@@ -77,7 +77,7 @@ function FolderLoadBadgesInner({ servers, className = '' }: { servers: ServerWit
         <span className="text-success">↓ {formatBitsPerSecLocalized(load.rx, t)}</span>
         <span className="text-accent-400 ml-1">↑ {formatBitsPerSecLocalized(load.tx, t)}</span>
       </Badge>
-    </div>
+    </span>
   )
 }
 
