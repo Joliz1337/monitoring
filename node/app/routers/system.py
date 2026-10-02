@@ -56,6 +56,7 @@ from app.services.update_state import (
     resolve_orphaned,
     status_payload,
 )
+from app.services.updater_image import UPDATER_IMAGE, UpdaterImageUnavailable, ensure_updater_image
 
 NGINX_SSL_DIR = Path("/opt/monitoring-node/nginx/ssl")
 NGINX_CONTAINER_NAME = "monitoring-nginx"
@@ -65,7 +66,6 @@ logger = logging.getLogger(__name__)
 
 VERSION_FILE = Path("/app/VERSION")
 UPDATER_CONTAINER_NAME = "monitoring-updater"
-UPDATER_IMAGE = "docker:cli"
 # apply-update.sh качает образы ДО рестарта контейнеров: на медленной сети pull
 # занимает десятки минут (наблюдалось 755с на слой) — ждём до 2 часов
 UPDATER_WAIT_TIMEOUT = 7200
@@ -324,12 +324,7 @@ async def run_update_in_container(
         except DockerNotFound:
             pass
 
-        # Pull docker:cli image if needed
-        try:
-            await asyncio.to_thread(client.images.get, UPDATER_IMAGE)
-        except ImageNotFound:
-            logger.info(f"Pulling {UPDATER_IMAGE}...")
-            await asyncio.to_thread(client.images.pull, UPDATER_IMAGE)
+        await ensure_updater_image(client)
 
         ref_arg = target_ref if target_ref else "main"
         allow_build_val = "1" if allow_local_build else "0"
@@ -487,6 +482,9 @@ echo "[SUCCESS] Update completed!"
         await _record_outcome(attempt_id, UpdateOutcome(
             UpdateResult.FAILED, error=f"Update timed out ({UPDATER_WAIT_TIMEOUT // 60} minutes)",
         ))
+    except UpdaterImageUnavailable as e:
+        logger.error(str(e))
+        await _record_outcome(attempt_id, UpdateOutcome(UpdateResult.FAILED, error=str(e)))
     except ImageNotFound as e:
         logger.error(f"Image not found: {e}")
         await _record_outcome(attempt_id, UpdateOutcome(UpdateResult.FAILED, error=f"Image not found: {e}"))

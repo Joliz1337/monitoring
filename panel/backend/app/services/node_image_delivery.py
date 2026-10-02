@@ -22,7 +22,7 @@ from typing import AsyncIterator, Optional
 import asyncssh
 
 from app.services.node_image_cache import ensure_image
-from app.services.ssh_target import SSHTarget, ssh_connect_kwargs
+from app.services.ssh_target import CONNECT_TIMEOUT, SSHTarget, ssh_connect_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +32,21 @@ REMOTE_TAR = "/tmp/mon-node-img.tar.gz"
 FINISHED_TTL_SECONDS = 600
 DELIVERY_CONCURRENCY = 5
 LOG_BUFFER_LIMIT = 5000
+# Подключение к серверу за ТСПУ срывается через раз — повторный запуск обычно проходит
+SSH_CONNECT_ATTEMPTS = 3
+SSH_CONNECT_RETRY_DELAY = 10
+
+
+def _error_text(exc: BaseException) -> str:
+    return str(exc) or type(exc).__name__
+
+
+def _connect_error_text(target: SSHTarget, exc: BaseException) -> str:
+    # asyncssh обрывает подключение по connect_timeout через asyncio.wait_for —
+    # исключение приходит без текста
+    if isinstance(exc, asyncio.TimeoutError):
+        return f"{target.host}:{target.port} не ответил за {CONNECT_TIMEOUT} с"
+    return _error_text(exc)
 
 
 async def _run_streamed(conn, command: str, timeout: int) -> AsyncIterator[dict]:
@@ -69,9 +84,29 @@ async def deliver_image(target: SSHTarget, tag: str) -> AsyncIterator[dict]:
         yield {"type": "error", "message": f"Панель не смогла получить образ с реестра: {exc}"}
         return
 
+    connect_kwargs = ssh_connect_kwargs(target)
+    for attempt in range(1, SSH_CONNECT_ATTEMPTS + 1):
+        try:
+            conn = await asyncssh.connect(**connect_kwargs)
+            break
+        except asyncssh.PermissionDenied:
+            yield {"type": "error", "message": "SSH: неверный логин, пароль или ключ"}
+            return
+        except (OSError, asyncssh.Error, asyncio.TimeoutError) as exc:
+            reason = _connect_error_text(target, exc)
+            if attempt == SSH_CONNECT_ATTEMPTS:
+                yield {"type": "error", "message": f"Ошибка SSH: {reason} (попыток: {SSH_CONNECT_ATTEMPTS})"}
+                return
+            yield {
+                "type": "log",
+                "line": f"[panel] SSH не подключился: {reason} — попытка {attempt + 1}/{SSH_CONNECT_ATTEMPTS} "
+                        f"через {SSH_CONNECT_RETRY_DELAY} с",
+            }
+            await asyncio.sleep(SSH_CONNECT_RETRY_DELAY)
+
     size_mb = tar.stat().st_size // (1024 * 1024)
     try:
-        async with await asyncssh.connect(**ssh_connect_kwargs(target)) as conn:
+        async with conn:
             yield {"type": "log", "line": f"[panel] SSH к {target.host}:{target.port} установлен"}
             yield {"type": "step", "step": "upload", "percent": 0}
             yield {"type": "log", "line": f"[panel] Заливаю образ ({size_mb} МБ) — на медленном канале это несколько минут…"}
@@ -127,10 +162,8 @@ async def deliver_image(target: SSHTarget, tag: str) -> AsyncIterator[dict]:
                     yield ev
 
             yield {"type": "done", "message": "Образ доставлен, нода поднята"}
-    except asyncssh.PermissionDenied:
-        yield {"type": "error", "message": "SSH: неверный логин, пароль или ключ"}
     except (OSError, asyncssh.Error, asyncio.TimeoutError) as exc:
-        yield {"type": "error", "message": f"Ошибка SSH: {exc}"}
+        yield {"type": "error", "message": f"Ошибка SSH: {_error_text(exc)}"}
 
 
 @dataclass
