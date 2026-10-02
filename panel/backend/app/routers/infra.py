@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from typing import Optional
 
 from app.database import get_db
-from app.models import InfraAccount, InfraProject, InfraProjectServer, Server
+from app.models import InfraAccount, InfraAccountServer, InfraProject, InfraProjectServer, Server
 from app.auth import verify_auth
 
 router = APIRouter(prefix="/infra", tags=["infra"], dependencies=[Depends(verify_auth)])
@@ -45,19 +45,28 @@ async def get_tree(db: AsyncSession = Depends(get_db)):
     )
     projects = projects_result.scalars().all()
 
-    links_result = await db.execute(
+    project_links_result = await db.execute(
         select(InfraProjectServer).order_by(InfraProjectServer.position, InfraProjectServer.id)
     )
-    links = links_result.scalars().all()
+    project_links = project_links_result.scalars().all()
+
+    account_links_result = await db.execute(
+        select(InfraAccountServer).order_by(InfraAccountServer.position, InfraAccountServer.id)
+    )
+    account_links = account_links_result.scalars().all()
 
     projects_by_account: dict[int, list] = {}
     for p in projects:
         projects_by_account.setdefault(p.account_id, []).append(p)
 
     server_ids_by_project: dict[int, list[int]] = {}
+    server_ids_by_account: dict[int, list[int]] = {}
     assigned_server_ids: set[int] = set()
-    for link in links:
+    for link in project_links:
         server_ids_by_project.setdefault(link.project_id, []).append(link.server_id)
+        assigned_server_ids.add(link.server_id)
+    for link in account_links:
+        server_ids_by_account.setdefault(link.account_id, []).append(link.server_id)
         assigned_server_ids.add(link.server_id)
 
     all_servers_result = await db.execute(select(Server.id))
@@ -79,6 +88,7 @@ async def get_tree(db: AsyncSession = Depends(get_db)):
             "name": acc.name,
             "position": acc.position,
             "projects": acc_projects,
+            "server_ids": server_ids_by_account.get(acc.id, []),
         })
 
     return {"accounts": tree, "unassigned_server_ids": unassigned}
@@ -98,7 +108,13 @@ async def create_account(data: AccountCreate, db: AsyncSession = Depends(get_db)
 
     return {
         "success": True,
-        "account": {"id": account.id, "name": account.name, "position": account.position, "projects": []},
+        "account": {
+            "id": account.id,
+            "name": account.name,
+            "position": account.position,
+            "projects": [],
+            "server_ids": [],
+        },
     }
 
 
@@ -182,15 +198,19 @@ async def delete_project(project_id: int, db: AsyncSession = Depends(get_db)):
 
 # ==================== Project ↔ Server links ====================
 
+async def _ensure_server_exists(db: AsyncSession, server_id: int) -> None:
+    result = await db.execute(select(Server.id).where(Server.id == server_id))
+    if not result.scalar_one_or_none():
+        raise HTTPException(404, "Server not found")
+
+
 @router.post("/projects/{project_id}/servers")
 async def add_server_to_project(project_id: int, data: AddServer, db: AsyncSession = Depends(get_db)):
     proj_check = await db.execute(select(InfraProject.id).where(InfraProject.id == project_id))
     if not proj_check.scalar_one_or_none():
         raise HTTPException(404, "Project not found")
 
-    srv_check = await db.execute(select(Server.id).where(Server.id == data.server_id))
-    if not srv_check.scalar_one_or_none():
-        raise HTTPException(404, "Server not found")
+    await _ensure_server_exists(db, data.server_id)
 
     existing = await db.execute(
         select(InfraProjectServer)
@@ -224,5 +244,47 @@ async def remove_server_from_project(project_id: int, server_id: int, db: AsyncS
         delete(InfraProjectServer)
         .where(InfraProjectServer.project_id == project_id, InfraProjectServer.server_id == server_id)
     )
+    await db.commit()
+    return {"success": True}
+
+
+# ==================== Account ↔ Server links ====================
+
+@router.post("/accounts/{account_id}/servers")
+async def add_server_to_account(account_id: int, data: AddServer, db: AsyncSession = Depends(get_db)):
+    acc_check = await db.execute(select(InfraAccount.id).where(InfraAccount.id == account_id))
+    if not acc_check.scalar_one_or_none():
+        raise HTTPException(404, "Account not found")
+
+    await _ensure_server_exists(db, data.server_id)
+
+    existing = await db.execute(
+        select(InfraAccountServer)
+        .where(InfraAccountServer.account_id == account_id, InfraAccountServer.server_id == data.server_id)
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(409, "Server already in this account")
+
+    max_pos = await db.execute(
+        select(func.coalesce(func.max(InfraAccountServer.position), -1))
+        .where(InfraAccountServer.account_id == account_id)
+    )
+    position = max_pos.scalar() + 1
+
+    link = InfraAccountServer(account_id=account_id, server_id=data.server_id, position=position)
+    db.add(link)
+    await db.commit()
+    return {"success": True}
+
+
+@router.delete("/accounts/{account_id}/servers/{server_id}")
+async def remove_server_from_account(account_id: int, server_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        delete(InfraAccountServer)
+        .where(InfraAccountServer.account_id == account_id, InfraAccountServer.server_id == server_id)
+    )
+    if result.rowcount == 0:
+        raise HTTPException(404, "Link not found")
+
     await db.commit()
     return {"success": True}

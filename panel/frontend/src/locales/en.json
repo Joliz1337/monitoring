@@ -315,7 +315,7 @@
     "add_account": "Account",
     "add_project": "Project",
     "add_server": "Add server",
-    "remove_server": "Remove from project",
+    "remove_server": "Unlink server",
     "account_name": "Account name (email)",
     "project_name": "Project name",
     "unassigned": "Unassigned",

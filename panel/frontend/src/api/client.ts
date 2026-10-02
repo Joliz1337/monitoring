@@ -2483,6 +2483,7 @@ export interface InfraAccount {
   name: string
   position: number
   projects: InfraProject[]
+  server_ids: number[]
 }
 
 export interface InfraTree {
@@ -2509,6 +2510,10 @@ export const infraApi = {
     api.post(`/infra/projects/${projectId}/servers`, { server_id: serverId }),
   removeServerFromProject: (projectId: number, serverId: number) =>
     api.delete(`/infra/projects/${projectId}/servers/${serverId}`),
+  addServerToAccount: (accountId: number, serverId: number) =>
+    api.post(`/infra/accounts/${accountId}/servers`, { server_id: serverId }),
+  removeServerFromAccount: (accountId: number, serverId: number) =>
+    api.delete(`/infra/accounts/${accountId}/servers/${serverId}`),
 }
 
 // ==================== Shared Notes ====================

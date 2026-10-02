@@ -1,25 +1,21 @@
 import { useState, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { ChevronRight, ChevronDown, Mail, Plus, Edit2, Trash2, Check, X, Activity } from 'lucide-react'
+import { ChevronRight, ChevronDown, Mail, Plus, FolderPlus, Edit2, Trash2, Check, X, Activity } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { Tooltip } from '../ui/Tooltip'
 import { toast } from 'sonner'
 import ProjectNode from './ProjectNode'
+import InfraServerRow from './InfraServerRow'
+import ServerSearchDropdown from './ServerSearchDropdown'
+import { FolderStatusCounts } from '../Dashboard/FolderStats'
 import { formatBitsPerSec } from '../../utils/format'
-import type { InfraAccount, ServerMetrics } from '../../api/client'
-
-interface ServerData {
-  id: number
-  name: string
-  url: string
-  status: 'online' | 'offline' | 'loading' | 'error'
-  metrics?: ServerMetrics | null
-}
+import type { InfraAccount } from '../../api/client'
+import type { ServerWithMetrics } from '../../stores/serversStore'
 
 interface AccountNodeProps {
   account: InfraAccount
-  servers: Map<number, ServerData>
-  allServers: ServerData[]
+  servers: Map<number, ServerWithMetrics>
+  allServers: ServerWithMetrics[]
   allAssignedIds: Set<number>
   collapsedProjects: Set<string>
   onToggleProject: (key: string) => void
@@ -32,6 +28,8 @@ interface AccountNodeProps {
   onDeleteProject: (projectId: number) => Promise<void>
   onAddServer: (projectId: number, serverId: number) => Promise<void>
   onRemoveServer: (projectId: number, serverId: number) => Promise<void>
+  onAddAccountServer: (serverId: number) => Promise<void>
+  onRemoveAccountServer: (serverId: number) => Promise<void>
 }
 
 export default function AccountNode({
@@ -40,28 +38,33 @@ export default function AccountNode({
   collapsed, onToggle,
   onRename, onDelete, onCreateProject,
   onRenameProject, onDeleteProject, onAddServer, onRemoveServer,
+  onAddAccountServer, onRemoveAccountServer,
 }: AccountNodeProps) {
   const { t } = useTranslation()
   const [editing, setEditing] = useState(false)
   const [editName, setEditName] = useState(account.name)
   const [addingProject, setAddingProject] = useState(false)
   const [newProjectName, setNewProjectName] = useState('')
+  const [showSearch, setShowSearch] = useState(false)
   const [deleteConfirm, setDeleteConfirm] = useState(false)
 
-  const serverCount = account.projects.reduce((sum, p) => sum + p.server_ids.length, 0)
+  // Сервер может стоять сразу в нескольких проектах аккаунта — считаем его один раз
+  const accountServers = useMemo(() => {
+    const ids = new Set([...account.server_ids, ...account.projects.flatMap(p => p.server_ids)])
+    return [...ids].flatMap(id => servers.get(id) ?? [])
+  }, [account.server_ids, account.projects, servers])
+
+  const activeServers = useMemo(() => accountServers.filter(s => s.is_active), [accountServers])
 
   const totalSpeed = useMemo(() => {
     let rx = 0, tx = 0
-    for (const proj of account.projects) {
-      for (const sid of proj.server_ids) {
-        const srv = servers.get(sid)
-        if (srv?.status !== 'online' || !srv.metrics?.network?.total) continue
-        rx += srv.metrics.network.total.rx_bytes_per_sec ?? 0
-        tx += srv.metrics.network.total.tx_bytes_per_sec ?? 0
-      }
+    for (const srv of accountServers) {
+      if (srv.status !== 'online' || !srv.metrics?.network?.total) continue
+      rx += srv.metrics.network.total.rx_bytes_per_sec ?? 0
+      tx += srv.metrics.network.total.tx_bytes_per_sec ?? 0
     }
     return { rx, tx, hasTraffic: rx > 0 || tx > 0 }
-  }, [account.projects, servers])
+  }, [accountServers])
 
   const handleRename = async () => {
     const trimmed = editName.trim()
@@ -91,6 +94,13 @@ export default function AccountNode({
     } catch { toast.error(t('common.error')) }
   }
 
+  const handleAddServer = async (serverId: number) => {
+    try {
+      await onAddAccountServer(serverId)
+      toast.success(t('infra.server_added'))
+    } catch { toast.error(t('common.error')) }
+  }
+
   return (
     <div className="mb-2">
       {/* Account header */}
@@ -115,7 +125,8 @@ export default function AccountNode({
         ) : (
           <>
             <span className="text-sm font-semibold text-dark-100">{account.name}</span>
-            <span className="text-xs text-dark-500">{account.projects.length} {t('infra.projects_short')} / {serverCount} {t('infra.servers_short')}</span>
+            <span className="text-xs text-dark-500">{account.projects.length} {t('infra.projects_short')} / {accountServers.length} {t('infra.servers_short')}</span>
+            {activeServers.length > 0 && <FolderStatusCounts servers={activeServers} />}
             {totalSpeed.hasTraffic && (
               <div className="flex items-center gap-1 text-xs font-mono font-medium text-dark-200 ml-1">
                 <Activity className="w-3.5 h-3.5 text-accent-400" />
@@ -127,9 +138,14 @@ export default function AccountNode({
 
         {!editing && (
           <div className="flex items-center gap-0.5 ml-auto opacity-0 group-hover:opacity-100 transition-opacity">
+            <Tooltip label={t('infra.add_server')}>
+              <button onClick={() => setShowSearch(!showSearch)} className="p-1 rounded hover:bg-dark-700 text-dark-400 hover:text-primary">
+                <Plus className="w-4 h-4" />
+              </button>
+            </Tooltip>
             <Tooltip label={t('infra.add_project')}>
               <button onClick={() => { setNewProjectName(''); setAddingProject(true) }} className="p-1 rounded hover:bg-dark-700 text-dark-400 hover:text-primary">
-                <Plus className="w-4 h-4" />
+                <FolderPlus className="w-4 h-4" />
               </button>
             </Tooltip>
             <Tooltip label={t('common.edit')}>
@@ -153,6 +169,20 @@ export default function AccountNode({
         )}
       </div>
 
+      {/* Server search dropdown */}
+      <AnimatePresence>
+        {showSearch && (
+          <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="ml-8 mb-2">
+            <ServerSearchDropdown
+              servers={allServers}
+              excludeIds={allAssignedIds}
+              onSelect={handleAddServer}
+              onClose={() => setShowSearch(false)}
+            />
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Add project inline form */}
       <AnimatePresence>
         {addingProject && (
@@ -173,7 +203,7 @@ export default function AccountNode({
         )}
       </AnimatePresence>
 
-      {/* Projects */}
+      {/* Projects and servers linked straight to the account */}
       <AnimatePresence>
         {!collapsed && (
           <motion.div
@@ -196,6 +226,19 @@ export default function AccountNode({
                 onRemoveServer={(serverId) => onRemoveServer(proj.id, serverId)}
               />
             ))}
+            <div className="ml-4">
+              {account.server_ids.map(sid => {
+                const srv = servers.get(sid)
+                if (!srv) return null
+                return (
+                  <InfraServerRow
+                    key={sid}
+                    server={srv}
+                    onRemove={() => onRemoveAccountServer(sid)}
+                  />
+                )
+              })}
+            </div>
           </motion.div>
         )}
       </AnimatePresence>

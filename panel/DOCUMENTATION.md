@@ -16,7 +16,7 @@
 - **Billing** — отслеживание оплаты серверов: помесячная, ресурсная и облачная модели (Yandex Cloud, Selectel, Timeweb Cloud); автосинхронизация баланса у провайдера, сводка расходов, уведомления об истечении через Telegram
 - **Синхронизация времени** — автоматическая установка часового пояса и синхронизация NTP на всех серверах и хосте панели
 - **SSH Security** — управление SSH-безопасностью серверов: настройки sshd, fail2ban, SSH-ключи с пресетами безопасности и bulk-применением
-- **Infrastructure Tree** — двухуровневая иерархия серверов на странице Servers: Аккаунт (облачный email) → Проект (кластер) → Серверы; дерево встроено в существующую страницу, сворачивается, состояние сохраняется в localStorage
+- **Infrastructure Tree** — иерархия серверов на странице Servers: Аккаунт (облачный email) → Проект (кластер) → Серверы, сервер можно привязать и прямо к аккаунту; у аккаунта — счётчики серверов онлайн/офлайн; дерево встроено в существующую страницу, сворачивается, состояние сохраняется в localStorage
 - **Shared Notes & Tasks** — совместный блокнот и список задач с синхронизацией в реальном времени через SSE; открывается через плавающий жёлтый таб на правом крае экрана (amber-500); две вкладки: «Блокнот» и «Задачи»
 - **Wildcard SSL** — выпуск wildcard сертификатов через certbot + Cloudflare DNS challenge, продление, деплой на ноды через API порта 9100; фоновое автопродление каждые 24ч с Telegram-уведомлениями при сбое; настройка пути деплоя и reload-команды для каждого сервера; просмотр и копирование/скачивание PEM-материалов сертификата (fullchain/cert/chain/privkey) для ручного переноса в CDN и сторонние панели
 - **HAProxy Configs** — централизованные профили конфигурации HAProxy с массовой раскаткой на серверы: CRUD профилей и правил, балансировщик нагрузки, привязка серверов с выбором входных и выходных IP каждого сервера при общем профиле, фильтр SNI (общий список профиля и свой у правила), history синхронизаций; запуск HAProxy per-server и bulk-запуск всех остановленных нод одним кликом; **авто-запуск при привязке** (start + enable autostart) и **авто-остановка при отвязке** (stop + disable autostart) сервера
@@ -1089,25 +1089,26 @@ interface NicInfo {
 
 ### Infrastructure Tree (иерархия серверов)
 
-Двухуровневая иерархия для организации серверов на странице Servers: **Аккаунт** (облачный email/имя) → **Проект** (кластер/группа) → **Серверы**.
+Иерархия для организации серверов на странице Servers: **Аккаунт** (облачный email/имя) → **Проект** (кластер/группа) → **Серверы**. Сервер можно привязать и прямо к аккаунту, без проекта — он показывается под проектами аккаунта.
 
 **Архитектурное решение — junction table:**
 
-Серверы связываются с проектами через отдельную таблицу `infra_project_servers` (junction table), а не через FK в модели `Server`. Это не загрязняет основную модель `Server`, которую используют Dashboard, алерты, billing и сборщик метрик.
+Серверы связываются с проектами и аккаунтами через отдельные таблицы `infra_project_servers` и `infra_account_servers` (junction tables), а не через FK в модели `Server`. Это не загрязняет основную модель `Server`, которую используют Dashboard, алерты, billing и сборщик метрик.
 
 **Схема БД (`panel/backend/app/models.py`):**
 
 - `InfraAccount` — id, name (облачный email/метка), created_at
 - `InfraProject` — id, account_id (FK → InfraAccount, cascade), name (кластер), created_at
-- `InfraProjectServer` — project_id (FK → InfraProject, cascade), server_id (FK → Server, cascade), PK(project_id, server_id)
+- `InfraProjectServer` — project_id (FK → InfraProject, cascade), server_id (FK → Server, cascade), position
+- `InfraAccountServer` — account_id (FK → InfraAccount, cascade), server_id (FK → Server, cascade), position
 
-Каскадное удаление: при удалении аккаунта удаляются все его проекты и все привязки серверов к ним. Сами серверы не удаляются.
+Каскадное удаление: при удалении аккаунта удаляются все его проекты и все привязки серверов — и к проектам, и к самому аккаунту. Сами серверы не удаляются.
 
 **API (`panel/backend/app/routers/infra.py`):**
 
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
-| GET | /api/infra/tree | Полное дерево: аккаунты → проекты → server_ids + unassigned_server_ids |
+| GET | /api/infra/tree | Полное дерево: аккаунты (с собственными server_ids) → проекты → server_ids + unassigned_server_ids |
 | POST | /api/infra/accounts | Создать аккаунт |
 | PUT | /api/infra/accounts/{id} | Переименовать аккаунт |
 | DELETE | /api/infra/accounts/{id} | Удалить аккаунт (каскадно) |
@@ -1116,6 +1117,8 @@ interface NicInfo {
 | DELETE | /api/infra/projects/{id} | Удалить проект (каскадно) |
 | POST | /api/infra/projects/{id}/servers | Привязать сервер к проекту (server_id) |
 | DELETE | /api/infra/projects/{id}/servers/{server_id} | Отвязать сервер от проекта |
+| POST | /api/infra/accounts/{id}/servers | Привязать сервер прямо к аккаунту (server_id) |
+| DELETE | /api/infra/accounts/{id}/servers/{server_id} | Отвязать сервер от аккаунта |
 
 Ответ `GET /api/infra/tree`:
 ```json
@@ -1124,6 +1127,7 @@ interface NicInfo {
     {
       "id": 1,
       "name": "user@cloud.com",
+      "server_ids": [9],
       "projects": [
         {
           "id": 1,
@@ -1141,8 +1145,8 @@ interface NicInfo {
 
 - `panel/frontend/src/api/client.ts` — `infraApi`, интерфейсы `InfraAccount`, `InfraProject`, `InfraTree`
 - `panel/frontend/src/stores/infraStore.ts` — Zustand-стор: загрузка дерева, оптимистичные обновления
-- `panel/frontend/src/components/Infra/InfraTree.tsx` — контейнер: сворачиваемое дерево, состояние открытых узлов хранится в localStorage
-- `panel/frontend/src/components/Infra/AccountNode.tsx` — строка аккаунта: создание/переименование/удаление проектов
+- `panel/frontend/src/components/Infra/InfraTree.tsx` — контейнер: сворачиваемое дерево, состояние открытых узлов хранится в localStorage; блок «Без привязки» сворачивается и по умолчанию свёрнут (`infra_unassigned_open`)
+- `panel/frontend/src/components/Infra/AccountNode.tsx` — строка аккаунта: создание/переименование/удаление проектов, привязка/отвязка серверов прямо к аккаунту; счётчики онлайн/офлайн (`FolderStatusCounts`, как у папок) по включённым серверам аккаунта — из его проектов и привязанных напрямую, без повторов
 - `panel/frontend/src/components/Infra/ProjectNode.tsx` — строка проекта: привязка/отвязка серверов
 - `panel/frontend/src/components/Infra/InfraServerRow.tsx` — компактная строка сервера: статус-точка, имя, IP, CPU/RAM/сеть, клик → детали сервера
 - `panel/frontend/src/components/Infra/ServerSearchDropdown.tsx` — поиск по имени/IP при привязке сервера

@@ -319,7 +319,7 @@
     "add_account": "Аккаунт",
     "add_project": "Проект",
     "add_server": "Добавить сервер",
-    "remove_server": "Убрать из проекта",
+    "remove_server": "Отвязать сервер",
     "account_name": "Имя аккаунта (email)",
     "project_name": "Имя проекта",
     "unassigned": "Без привязки",

@@ -14,6 +14,8 @@ interface InfraState {
   deleteProject: (id: number) => Promise<void>
   addServerToProject: (projectId: number, serverId: number) => Promise<void>
   removeServerFromProject: (projectId: number, serverId: number) => Promise<void>
+  addServerToAccount: (accountId: number, serverId: number) => Promise<void>
+  removeServerFromAccount: (accountId: number, serverId: number) => Promise<void>
 }
 
 export const useInfraStore = create<InfraState>((set, get) => ({
@@ -55,7 +57,9 @@ export const useInfraStore = create<InfraState>((set, get) => ({
     const tree = get().tree
     if (!tree) return
     const account = tree.accounts.find(a => a.id === id)
-    const freedServerIds = account?.projects.flatMap(p => p.server_ids) ?? []
+    const freedServerIds = account
+      ? [...account.server_ids, ...account.projects.flatMap(p => p.server_ids)]
+      : []
     set({
       tree: {
         ...tree,
@@ -144,6 +148,36 @@ export const useInfraStore = create<InfraState>((set, get) => ({
             p.id === projectId ? { ...p, server_ids: p.server_ids.filter(id => id !== serverId) } : p,
           ),
         })),
+        unassigned_server_ids: [...tree.unassigned_server_ids, serverId].sort((a, b) => a - b),
+      },
+    })
+  },
+
+  addServerToAccount: async (accountId, serverId) => {
+    await infraApi.addServerToAccount(accountId, serverId)
+    const tree = get().tree
+    if (!tree) return
+    set({
+      tree: {
+        ...tree,
+        accounts: tree.accounts.map(a =>
+          a.id === accountId ? { ...a, server_ids: [...a.server_ids, serverId] } : a,
+        ),
+        unassigned_server_ids: tree.unassigned_server_ids.filter(id => id !== serverId),
+      },
+    })
+  },
+
+  removeServerFromAccount: async (accountId, serverId) => {
+    await infraApi.removeServerFromAccount(accountId, serverId)
+    const tree = get().tree
+    if (!tree) return
+    set({
+      tree: {
+        ...tree,
+        accounts: tree.accounts.map(a =>
+          a.id === accountId ? { ...a, server_ids: a.server_ids.filter(id => id !== serverId) } : a,
+        ),
         unassigned_server_ids: [...tree.unassigned_server_ids, serverId].sort((a, b) => a - b),
       },
     })

@@ -10,6 +10,7 @@ import InfraServerRow from './InfraServerRow'
 import { readStorage, writeStorage } from '../../utils/storage'
 
 const COLLAPSED_KEY = 'infra_collapsed'
+const UNASSIGNED_OPEN_KEY = 'infra_unassigned_open'
 
 function loadCollapsed(): Set<string> {
   try {
@@ -24,17 +25,26 @@ function saveCollapsed(set: Set<string>) {
 
 export default function InfraTree() {
   const { t } = useTranslation()
-  const { tree, isLoading, fetchTree, createAccount, updateAccount, deleteAccount, createProject, updateProject, deleteProject, addServerToProject, removeServerFromProject } = useInfraStore()
+  const {
+    tree, isLoading, fetchTree,
+    createAccount, updateAccount, deleteAccount,
+    createProject, updateProject, deleteProject,
+    addServerToProject, removeServerFromProject,
+    addServerToAccount, removeServerFromAccount,
+  } = useInfraStore()
   const servers = useServersStore(s => s.servers)
 
   const [collapsed, setCollapsed] = useState(loadCollapsed)
   const [showAddAccount, setShowAddAccount] = useState(false)
   const [newAccountName, setNewAccountName] = useState('')
   const [treeVisible, setTreeVisible] = useState(() => readStorage('infra_visible') !== 'false')
+  const [unassignedOpen, setUnassignedOpen] = useState(() => readStorage(UNASSIGNED_OPEN_KEY) === 'true')
 
   useEffect(() => { fetchTree() }, [fetchTree])
 
   useEffect(() => { writeStorage('infra_visible', String(treeVisible)) }, [treeVisible])
+
+  useEffect(() => { writeStorage(UNASSIGNED_OPEN_KEY, String(unassignedOpen)) }, [unassignedOpen])
 
   const toggle = useCallback((key: string) => {
     setCollapsed(prev => {
@@ -55,6 +65,7 @@ export default function InfraTree() {
     if (!tree) return new Set<number>()
     const set = new Set<number>()
     for (const acc of tree.accounts) {
+      for (const sid of acc.server_ids) set.add(sid)
       for (const proj of acc.projects) {
         for (const sid of proj.server_ids) set.add(sid)
       }
@@ -150,22 +161,34 @@ export default function InfraTree() {
                 onDeleteProject={(pid) => deleteProject(pid)}
                 onAddServer={(pid, sid) => addServerToProject(pid, sid)}
                 onRemoveServer={(pid, sid) => removeServerFromProject(pid, sid)}
+                onAddAccountServer={(sid) => addServerToAccount(acc.id, sid)}
+                onRemoveAccountServer={(sid) => removeServerFromAccount(acc.id, sid)}
               />
             ))}
 
             {/* Unassigned servers */}
             {tree && tree.unassigned_server_ids.length > 0 && (
               <div className="mt-2 pt-2 border-t border-dark-700/50">
-                <div className="flex items-center gap-2 px-2 py-1.5 text-dark-400">
+                <button
+                  onClick={() => setUnassignedOpen(!unassignedOpen)}
+                  className="flex items-center gap-2 w-full px-2 py-1.5 rounded-lg text-dark-400 hover:text-dark-200 hover:bg-dark-800/50 transition-colors"
+                >
+                  {unassignedOpen ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
                   <ServerIcon className="w-4 h-4" />
                   <span className="text-xs font-medium">{t('infra.unassigned')}</span>
                   <span className="text-xs text-dark-500">{tree.unassigned_server_ids.length}</span>
-                </div>
-                {tree.unassigned_server_ids.map(sid => {
-                  const srv = serverMap.get(sid)
-                  if (!srv) return null
-                  return <InfraServerRow key={sid} server={srv} />
-                })}
+                </button>
+                <AnimatePresence>
+                  {unassignedOpen && (
+                    <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}>
+                      {tree.unassigned_server_ids.map(sid => {
+                        const srv = serverMap.get(sid)
+                        if (!srv) return null
+                        return <InfraServerRow key={sid} server={srv} />
+                      })}
+                    </motion.div>
+                  )}
+                </AnimatePresence>
               </div>
             )}
 

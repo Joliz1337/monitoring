@@ -905,6 +905,21 @@ class InfraProjectServer(Base):
     )
 
 
+class InfraAccountServer(Base):
+    """Привязка сервера прямо к аккаунту, без проекта"""
+    __tablename__ = "infra_account_servers"
+
+    id = Column(Integer, primary_key=True, index=True)
+    account_id = Column(Integer, ForeignKey("infra_accounts.id", ondelete="CASCADE"), nullable=False)
+    server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), nullable=False)
+    position = Column(Integer, default=0)
+
+    __table_args__ = (
+        Index('idx_infra_as_account', 'account_id'),
+        Index('idx_infra_as_server', 'server_id'),
+    )
+
+
 # ==================== Shared Notes ====================
 
 class SharedNote(Base):
