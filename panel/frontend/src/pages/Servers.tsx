@@ -72,6 +72,7 @@ import { useCollapsedFolders } from '../hooks/useCollapsedFolders'
 import { writeStorage } from '../utils/storage'
 import { collectFolders, groupByFolder } from '../utils/folders'
 import { cleanInstallLogLine } from '../utils/installLog'
+import { isValidProxyInput } from '../utils/proxy'
 
 interface ServerFormData {
   name: string
@@ -79,9 +80,6 @@ interface ServerFormData {
   port: string
   proxy: string
 }
-
-// SOCKS5-прокси панель→нода: ip:port или ip:port@login:pass (пароль может содержать ':' и '@')
-const PROXY_RE = /^[^\s:@/]+:\d{1,5}(@[^\s:@/]+:\S+)?$/
 
 const makeExtraTarget = (seed: DeployFormData): ExtraTarget => ({
   id: typeof crypto !== 'undefined' && 'randomUUID' in crypto
@@ -370,7 +368,7 @@ export default function Servers() {
     setIsSubmitting(true)
 
     const proxyTrim = formData.proxy.trim()
-    if (proxyTrim && !PROXY_RE.test(proxyTrim)) {
+    if (proxyTrim && !isValidProxyInput(proxyTrim)) {
       setError(t('servers.proxy_invalid'))
       setIsSubmitting(false)
       return
@@ -427,7 +425,7 @@ export default function Servers() {
   ): string | null => {
     if (!name.trim()) return t('servers.server_name_placeholder')
     if (!host.trim()) return t('servers.server_host_placeholder')
-    if (proxy.trim() && !PROXY_RE.test(proxy.trim())) return t('servers.proxy_invalid')
+    if (proxy.trim() && !isValidProxyInput(proxy.trim())) return t('servers.proxy_invalid')
     if (!manual && d.sshAuth === 'password' && !d.sshPassword.trim()) return t('servers.deploy_no_password')
     if (!manual && d.sshAuth === 'key' && !d.sshPrivateKey.trim()) return t('servers.deploy_no_key')
     if (d.installRemnawave) {

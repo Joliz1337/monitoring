@@ -10,13 +10,15 @@ import asyncio
 import logging
 from typing import Optional
 
+import httpx
+
 from app.services.cloud_billing.base import (
     CloudAuthError,
     CloudBillingError,
     CloudProvider,
     CloudSnapshot,
+    describe_request_error,
 )
-from app.services.http_client import get_external_client
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +37,10 @@ class TimewebProvider(CloudProvider):
     requires_account_id = False
     uses_balance_history = True
 
-    async def fetch(self, credential: str, account_id: Optional[str]) -> CloudSnapshot:
-        data = await self._get(credential, FINANCES_PATH)
+    async def fetch(
+        self, client: httpx.AsyncClient, credential: str, account_id: Optional[str]
+    ) -> CloudSnapshot:
+        data = await self._get(client, credential, FINANCES_PATH)
 
         finances = data.get("finances")
         if not isinstance(finances, dict):
@@ -53,18 +57,16 @@ class TimewebProvider(CloudProvider):
             daily_cost=_tariff_daily_cost(finances),
         )
 
-    async def _get(self, token: str, path: str) -> dict:
+    async def _get(self, client: httpx.AsyncClient, token: str, path: str) -> dict:
         url = f"{TIMEWEB_BASE}{path}"
         headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
         last_error = "no attempts"
 
         for attempt in range(RETRY_ATTEMPTS):
             try:
-                resp = await get_external_client().get(
-                    url, headers=headers, timeout=REQUEST_TIMEOUT
-                )
+                resp = await client.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
             except Exception as e:
-                last_error = str(e)
+                last_error = describe_request_error(e)
                 logger.warning("Timeweb %s request failed: %s", path, e)
             else:
                 if resp.status_code == 401:

@@ -825,6 +825,8 @@ class BillingServer(Base):
     cloud_provider = Column(String(30), nullable=True)
     cloud_credential = Column(EncryptedString, nullable=True)
     cloud_account_id = Column(String(100), nullable=True)
+    # SOCKS5 для запросов к API провайдера: "ip:port" или "ip:port@login:pass"
+    cloud_proxy = Column(EncryptedString, nullable=True)
     cloud_balance_threshold = Column(Float, nullable=True, default=0)
     cloud_daily_cost = Column(Float, nullable=True)
     cloud_last_sync_at = Column(DateTime(timezone=True), nullable=True)

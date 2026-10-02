@@ -27,6 +27,8 @@ Tracking when each server needs paying so nothing shuts down unexpectedly.
 
 Keys are stored encrypted and never returned to the interface: the field in the edit form stays empty — leave it empty to keep the current key.
 
+If the provider API is unreachable from the panel's address, or accounts shouldn't reach the provider from the same IP, a cloud project can use a SOCKS5 proxy in the `ip:port` or `ip:port@login:pass` format. All panel requests for that project go through it. If the proxy is down, the error on the card says so: “via proxy ip:port”.
+
 ## Good to know
 
 - For the resource type an honest daily cost matters: the panel simply divides the remaining balance by it.

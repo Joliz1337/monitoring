@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Clock, Loader2, Wallet, X } from 'lucide-react'
 import { toast } from 'sonner'
 import { billingApi, BillingServerData } from '../../api/client'
+import { isValidProxyInput } from '../../utils/proxy'
 import { CloudProviderId, PROVIDER_IDS, PROVIDERS, getProvider } from './providers'
 import {
   Field, INPUT_CLASS, Overlay, PaidTotalHint, QUICK_DAYS, Translate,
@@ -23,6 +24,7 @@ interface FormValues {
   notes: string
   folder: string
   threshold: string
+  proxy: string
   credentials: Record<string, string>
 }
 
@@ -42,6 +44,7 @@ function emptyValues(): FormValues {
     notes: '',
     folder: '',
     threshold: '0',
+    proxy: '',
     credentials: {},
   }
 }
@@ -63,6 +66,7 @@ function valuesFromServer(server: BillingServerData): FormValues {
     notes: server.notes || '',
     folder: server.folder || '',
     threshold: server.cloud_balance_threshold?.toString() || '0',
+    proxy: server.cloud_proxy || '',
     credentials: { cloud_account_id: server.cloud_account_id || '' },
   }
 }
@@ -131,8 +135,25 @@ function CredentialFields({ values, setValues, t, server }: {
         />
         <p className="text-[10px] text-dark-500 mt-1">{t('billing.cloud_threshold_hint')}</p>
       </Field>
+      <Field label={`${t('billing.cloud_proxy')} (${t('common.optional')})`}>
+        <input
+          value={values.proxy}
+          onChange={e => setValues({ proxy: e.target.value })}
+          placeholder="ip:port@login:pass"
+          className={INPUT_CLASS}
+          autoComplete="off"
+        />
+        <p className="text-[10px] text-dark-500 mt-1">{t('billing.cloud_proxy_hint')}</p>
+      </Field>
     </>
   )
+}
+
+// Пустое поле — без прокси; иначе формат как у прокси серверов
+function proxyInputError(values: FormValues, t: Translate): string | null {
+  const proxy = values.proxy.trim()
+  if (values.billingType !== 'cloud' || !proxy || isValidProxyInput(proxy)) return null
+  return t('billing.cloud_proxy_invalid')
 }
 
 function ServerForm({ values, setValues, t, folders, mode, server }: {
@@ -348,6 +369,11 @@ export function AddModal({ t, folders, onClose, onCreated }: {
 
   const submit = async () => {
     if (!values.name.trim()) return
+    const proxyError = proxyInputError(values, t)
+    if (proxyError) {
+      toast.error(proxyError)
+      return
+    }
     setSaving(true)
     try {
       const dailyNum = parseFloat(values.dailyCost) || 0
@@ -364,6 +390,7 @@ export function AddModal({ t, folders, onClose, onCreated }: {
         cloud_provider: isCloud ? values.provider : undefined,
         cloud_credential: isCloud ? values.credentials.cloud_credential : undefined,
         cloud_account_id: isCloud ? values.credentials.cloud_account_id : undefined,
+        cloud_proxy: isCloud ? values.proxy.trim() || undefined : undefined,
         cloud_balance_threshold: isCloud ? parseFloat(values.threshold) || 0 : undefined,
       })
       onCreated(res.data.server)
@@ -411,6 +438,11 @@ export function EditModal({ t, server, folders, onClose, onSaved }: {
   const setValues = (patch: Partial<FormValues>) => setAll(prev => ({ ...prev, ...patch }))
 
   const submit = async () => {
+    const proxyError = proxyInputError(values, t)
+    if (proxyError) {
+      toast.error(proxyError)
+      return
+    }
     setSaving(true)
     try {
       const payload: Record<string, unknown> = {
@@ -432,6 +464,7 @@ export function EditModal({ t, server, folders, onClose, onSaved }: {
           payload.cloud_credential = values.credentials.cloud_credential
         }
         payload.cloud_balance_threshold = parseFloat(values.threshold) || 0
+        payload.cloud_proxy = values.proxy.trim() || null
       }
       const res = await billingApi.updateServer(server.id, payload as never)
       onSaved(res.data)

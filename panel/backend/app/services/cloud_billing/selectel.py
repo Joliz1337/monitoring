@@ -9,13 +9,15 @@ import asyncio
 import logging
 from typing import Optional
 
+import httpx
+
 from app.services.cloud_billing.base import (
     CloudAuthError,
     CloudBillingError,
     CloudProvider,
     CloudSnapshot,
+    describe_request_error,
 )
-from app.services.http_client import get_external_client
 
 logger = logging.getLogger(__name__)
 
@@ -35,9 +37,11 @@ class SelectelProvider(CloudProvider):
     default_currency = "RUB"
     requires_account_id = False
 
-    async def fetch(self, credential: str, account_id: Optional[str]) -> CloudSnapshot:
-        balance, currency, warning = await self._fetch_balance(credential)
-        days_left, prediction_warning = await self._fetch_prediction_days(credential)
+    async def fetch(
+        self, client: httpx.AsyncClient, credential: str, account_id: Optional[str]
+    ) -> CloudSnapshot:
+        balance, currency, warning = await self._fetch_balance(client, credential)
+        days_left, prediction_warning = await self._fetch_prediction_days(client, credential)
 
         return CloudSnapshot(
             balance=balance,
@@ -47,8 +51,10 @@ class SelectelProvider(CloudProvider):
             warning=warning or prediction_warning,
         )
 
-    async def _fetch_balance(self, token: str) -> tuple[float, str, Optional[str]]:
-        data = await self._get(token, BALANCES_PATH)
+    async def _fetch_balance(
+        self, client: httpx.AsyncClient, token: str
+    ) -> tuple[float, str, Optional[str]]:
+        data = await self._get(client, token, BALANCES_PATH)
 
         billings = data.get("billings") or []
         total_minor = 0.0
@@ -65,7 +71,7 @@ class SelectelProvider(CloudProvider):
         return total_minor / MINOR_UNITS, currency, warning
 
     async def _fetch_prediction_days(
-        self, token: str
+        self, client: httpx.AsyncClient, token: str
     ) -> tuple[Optional[float], Optional[str]]:
         """Прогноз Selectel: на сколько дней хватит баланса.
 
@@ -74,25 +80,23 @@ class SelectelProvider(CloudProvider):
         сходится с фактическими списаниями только как дни: 46 против посчитанных
         53 дней, тогда как «46 часов» разошлось бы в 28 раз."""
         try:
-            data = await self._get(token, PREDICTION_PATH)
+            data = await self._get(client, token, PREDICTION_PATH)
         except CloudBillingError as e:
             logger.warning("Selectel prediction unavailable: %s", e)
             return None, f"Prediction unavailable: {e}"
 
         return _pick_prediction_days(data), None
 
-    async def _get(self, token: str, path: str) -> dict:
+    async def _get(self, client: httpx.AsyncClient, token: str, path: str) -> dict:
         url = f"{SELECTEL_BASE}{path}"
         headers = {"X-Token": token, "Accept": "application/json"}
         last_error = "no attempts"
 
         for attempt in range(RETRY_ATTEMPTS):
             try:
-                resp = await get_external_client().get(
-                    url, headers=headers, timeout=REQUEST_TIMEOUT
-                )
+                resp = await client.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
             except Exception as e:
-                last_error = str(e)
+                last_error = describe_request_error(e)
                 logger.warning("Selectel %s request failed: %s", path, e)
             else:
                 if resp.status_code == 401:

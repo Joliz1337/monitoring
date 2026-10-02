@@ -360,7 +360,7 @@ Lifecycle управляется через `lifespan` в `main.py`. Выбор 
 
 `new_node_probe_client(server)` — одноразовый клиент без keepalive (`max_keepalive_connections=0`, тот же mTLS/прокси, используется через `async with`) для проверки связи после смены адресов на ноде: соединение из пула могло пережить изменение и «доказать» ложное, проба обязана открыть TCP заново.
 
-Если у сервера задан `proxy_url`, оба метода возвращают клиент через SOCKS5-прокси вместо одного из четырёх основных — см. «SOCKS5-прокси до ноды» в разделе API. Такие клиенты кэшируются лениво (по мере обращения к нодам с прокси) в отдельном `dict`, а не создаются заранее в `init_http_clients()`.
+Если у сервера задан `proxy_url`, оба метода возвращают клиент через SOCKS5-прокси вместо одного из четырёх основных — см. «SOCKS5-прокси до ноды» в разделе API. Такие клиенты кэшируются лениво (по мере обращения к нодам с прокси) в отдельном `dict`, а не создаются заранее в `init_http_clients()`. Так же устроен `get_external_client(proxy)`: без аргумента — общий `_external_client`, со строкой прокси — внешний клиент через SOCKS5 из своего кэша `_external_proxy_clients` (используют облачные биллинги, см. «Billing → Прокси проекта»).
 
 **Параметры основного клиента к нодам (`_NODE_LIMITS`, `_NODE_TIMEOUT`):**
 - `keepalive_expiry=30` сек — намеренно меньше `keepalive_timeout` nginx нод (65 сек), чтобы панель не переиспользовала соединения, уже закрытые сервером
@@ -882,14 +882,14 @@ interface NicInfo {
 
 Опциональное поле сервера `proxy_url`: при заполнении **все** запросы панели к этой ноде идут через указанный SOCKS5-прокси вместо прямого соединения — и HTTP (сбор метрик, proxy-роутер `/api/proxy/{id}/...`, sync-сервисы IP Blocklist/Анти-DDoS, SSE-терминал, тест подключения), и SSH-подключение при авторазвёртывании ноды. Единый способ обслуживать ноду, находящуюся за NAT/файрволом, — до установки и после. По образцу аналогичной функции в Remnawave. Для HTTP-трафика используется `httpx[socks,http2]` (уже в `requirements.txt`); для SSH — зависимость `python-socks==2.8.2` (async SOCKS5-клиент, нужен именно для `asyncssh` — у него нет встроенной поддержки SOCKS).
 
-**Формат ввода:** `ip:port` или `ip:port@login:pass` (пароль может содержать `:`/`@`/любые непробельные символы). Пустая строка = прокси выключен. `validate_proxy_input()` в `http_client.py` проверяет формат (regex, порт 1–65535) на уровне Pydantic-валидатора `ServerCreate`/`ServerUpdate` и `DeployRequest.socks5_proxy` (SSH-деплой); та же проверка дублируется на фронте (`PROXY_RE`) для мгновенной обратной связи.
+**Формат ввода:** `ip:port` или `ip:port@login:pass` (пароль может содержать `:`/`@`/любые непробельные символы). Пустая строка = прокси выключен. `validate_proxy_input()` в `http_client.py` проверяет формат (regex, порт 1–65535) на уровне Pydantic-валидатора `ServerCreate`/`ServerUpdate` и `DeployRequest.socks5_proxy` (SSH-деплой); та же проверка дублируется на фронте (`isValidProxyInput` в `utils/proxy.ts`, ею же проверяется прокси облачного проекта в «Оплате») для мгновенной обратной связи.
 
 **Backend, HTTP-трафик (`panel/backend/app/services/http_client.py`):**
 - `parse_proxy_input(raw) -> (host, port, login, password)` — единый разбор формата `ip:port[@login:pass]`; переиспользуется и HTTP-клиентом, и SSH-деплоем (`deploy_service.py`)
 - `_proxy_raw_to_url()` — строит `socks5://login:pass@ip:port` через `parse_proxy_input()`; логин/пароль percent-квотируются (`urllib.parse.quote`), поэтому спецсимволы в пароле безопасны
 - `_get_proxy_client(raw, mtls, apply)` — ленивое создание и кэширование `httpx.AsyncClient(proxy=...)` в module-level `_proxy_clients` по ключу (строка прокси, mtls, apply); mTLS SSL-контекст переиспользуется из module-global `_mtls_ctx` (сохраняется в `init_http_clients()`), не пересоздаётся на каждый прокси
 - `get_node_client(server)` / `get_node_apply_client(server)` — при наличии `server.proxy_url` прозрачно возвращают прокси-клиент вместо обычного mTLS/legacy; все вызовы по кодовой базе (~30 точек) получают поддержку прокси через эти две функции, без специальной логики в вызывающем коде
-- `close_http_clients()` закрывает и очищает кэш прокси-клиентов (важно для Backup & Restore: восстановление бэкапа делает `close_http_clients()` + `init_http_clients()`, старый mTLS-контекст не должен пережить рестарт)
+- `close_http_clients()` закрывает и очищает кэши прокси-клиентов — к нодам и внешних (важно для Backup & Restore: восстановление бэкапа делает `close_http_clients()` + `init_http_clients()`, старый mTLS-контекст не должен пережить рестарт)
 - `sanitize_proxy()` — маскирует креды до `host:port` в логах
 - Смена/удаление прокси у сервера действует со следующего запроса без рестарта панели; в `PUT /api/servers/{id}` смена `proxy_url` считается `node_changed` (триггерит пере-синк IP Blocklist на ноду, как смена `url`/`api_key`; смена `url` вдобавок рассылает белый список блок-листа на весь парк)
 
@@ -1776,7 +1776,7 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 
 | Провайдер | Учётка | Баланс | Расход/прогноз |
 |-----------|--------|--------|----------------|
-| `yandex_cloud` | OAuth-токен + ID биллинг-аккаунта | REST `GET /billing/v1/billingAccounts/{id}` (Bearer IAM-токен, обмен в `yc_token_manager`) | gRPC `ConsumptionCoreService/GetBillingAccountUsageReport` за 3 дня → средний расход в сутки |
+| `yandex_cloud` | OAuth-токен + ID биллинг-аккаунта | REST `GET /billing/v1/billingAccounts/{id}` (Bearer IAM-токен, обмен в `yc_token_manager`) | gRPC `ConsumptionCoreService/GetBillingAccountUsageReport` за 3 дня → средний расход в сутки; вызов — HTTP/2-запрос тем же httpx-клиентом (см. «Прокси проекта») |
 | `selectel` | Статический API-ключ (заголовок `X-Token`) | `GET /v3/balances` — сумма `final_sum` по биллингам, делённая на 100 (API отдаёт копейки) | `GET /v2/billing/prediction` — прогноз самого Selectel, на сколько дней хватит баланса; расход в день = остаток ÷ дни |
 | `timeweb` | API-токен (Bearer) | `GET /api/v1/account/finances` — `total_balance` (точнее округлённого `balance`) | своя история снимков баланса (`uses_balance_history`, см. ниже); запасной вариант — тариф `hourly_fee × 24` (без него — `monthly_fee ÷ 30`) |
 
@@ -1788,17 +1788,19 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 
 Код валюты приводится к верхнему регистру при записи и в ответе API: Yandex отдаёт `RUB`, Selectel — `rub`, а сводка группирует суммы по нему.
 
+**Прокси проекта (`cloud_proxy`):** у облачного проекта можно задать SOCKS5-прокси в формате прокси серверов — `ip:port` или `ip:port@login:pass` (проверка `validate_proxy_input`, пустая строка = без прокси). Клиент выбирает `sync_cloud_balance`: `get_external_client(server.cloud_proxy)` отдаёт общий внешний клиент или закэшированный по строке прокси клиент с `socks5://` (HTTP/2, те же таймауты, закрываются в `close_http_clients`), и провайдер получает его параметром `fetch(client, credential, account_id)` — через прокси идут все запросы проекта, включая обмен OAuth → IAM у Yandex. Отчёт потребления Yandex — gRPC, а grpcio SOCKS5 не умеет, поэтому унарный вызов отправляется вручную: protobuf в gRPC-кадре (флаг сжатия + длина), `POST` с `content-type: application/grpc` и `te: trailers`. Ответ без HTTP/2 отвергается; ошибку сервер присылает без тела, `grpc-status`/`grpc-message` в заголовках — она становится предупреждением карточки (`gRPC PERMISSION_DENIED: …`). Трейлеры успешного ответа httpx не отдаёт, поэтому успех определяется по телу. Ошибка синхронизации у проекта с прокси дополняется `(via proxy host:port)` без логина и пароля: мёртвый прокси иначе читался бы как недоступность облака.
+
 **Схема BillingServer (облачные поля):**
-`cloud_provider`, `cloud_credential` (шифруется `EncryptedString`, в API не возвращается — только `has_cloud_credential: bool`), `cloud_account_id`, `cloud_balance_threshold`, `cloud_daily_cost`, `cloud_last_sync_at`, `cloud_last_error`, `cloud_balance_history` (JSON-снимки баланса для провайдеров с `uses_balance_history`).
+`cloud_provider`, `cloud_credential` (шифруется `EncryptedString`, в API не возвращается — только `has_cloud_credential: bool`), `cloud_account_id`, `cloud_proxy` (шифруется `EncryptedString`, в API возвращается — форма показывает текущий прокси), `cloud_balance_threshold`, `cloud_daily_cost`, `cloud_last_sync_at`, `cloud_last_error`, `cloud_balance_history` (JSON-снимки баланса для провайдеров с `uses_balance_history`).
 
 **Файлы:**
 - `panel/backend/app/routers/billing.py` — API роутер
 - `panel/backend/app/services/billing_checker.py` — фоновая проверка сроков + Telegram + синхронизация облаков
 - `panel/backend/app/services/cloud_billing/` — `base.py` (контракт, `compute_days_left`), `yandex.py`, `selectel.py`, `timeweb.py`, `__init__.py` (реестр `PROVIDERS`, `sync_cloud_balance`, история баланса)
-- `panel/backend/app/services/yc_token_manager.py` — обмен OAuth-токена Yandex на IAM-токен с кэшем
+- `panel/backend/app/services/yc_token_manager.py` — обмен OAuth-токена Yandex на IAM-токен с кэшем; запрос идёт клиентом вызывающего, с прокси проекта
 - `panel/backend/app/models.py` — `BillingServer`, `BillingSettings`
 - `panel/backend/app/database.py` — миграция `_migrate_cloud_billing()` (`yc_*` → `cloud_*`, тип `yandex_cloud` → `cloud`)
-- `panel/backend/tests/test_cloud_billing.py` — разбор ответов Selectel и Timeweb, расход по истории баланса, расчёт срока, реестр провайдеров
+- `panel/backend/tests/test_cloud_billing.py` — разбор ответов Selectel, Timeweb и Yandex (gRPC-кадры, ошибки в заголовках), расход по истории баланса, расчёт срока, реестр провайдеров, выбор прокси проекта и пометка прокси в ошибке
 - `panel/frontend/src/pages/Billing.tsx` — страница: список, папки, drag-and-drop, настройки уведомлений
 - `panel/frontend/src/components/billing/` — `providers.ts` (реестр провайдеров: поля учётки, ссылки, цвета), `ProjectCard.tsx`, `ServerModals.tsx` (общая форма Add/Edit + продление/пополнение/калькулятор), `FolderModals.tsx`, `BillingSummary.tsx`, `shared.tsx` (формат дат, суммы по валютам, Overlay/Field/ToggleRow)
 - `panel/frontend/src/api/client.ts` — интерфейс `BillingServerData` и API методы

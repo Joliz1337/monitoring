@@ -1861,6 +1861,7 @@ async def _migrate_cloud_billing(conn):
         ("cloud_provider", "VARCHAR(30)"),
         ("cloud_credential", "TEXT"),
         ("cloud_account_id", "VARCHAR(100)"),
+        ("cloud_proxy", "TEXT"),
         ("cloud_balance_threshold", "DOUBLE PRECISION DEFAULT 0"),
         ("cloud_daily_cost", "DOUBLE PRECISION"),
         ("cloud_last_sync_at", "TIMESTAMP WITH TIME ZONE"),
@@ -2202,6 +2203,7 @@ _SECRET_COLUMNS = [
     ("servers", "api_key"),
     ("remnawave_cert_profiles", "secret_key"),
     ("billing_servers", "cloud_credential"),
+    ("billing_servers", "cloud_proxy"),
 ]
 
 

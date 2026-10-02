@@ -17,6 +17,7 @@ from app.services.cloud_billing.base import (
 from app.services.cloud_billing.selectel import SelectelProvider
 from app.services.cloud_billing.timeweb import TimewebProvider
 from app.services.cloud_billing.yandex import YandexCloudProvider
+from app.services.http_client import get_external_client, sanitize_proxy
 
 logger = logging.getLogger(__name__)
 
@@ -62,12 +63,17 @@ async def sync_cloud_balance(server, now: datetime) -> CloudSnapshot:
     if provider.requires_account_id and not server.cloud_account_id:
         raise CloudBillingError("Billing account ID is required")
 
+    client = get_external_client(server.cloud_proxy)
     try:
-        snapshot = await provider.fetch(server.cloud_credential, server.cloud_account_id)
-    except CloudBillingError as e:
-        server.cloud_last_error = str(e)[:500]
-        logger.warning("Cloud sync failed for '%s' (%s): %s", server.name, provider.id, e)
-        raise
+        snapshot = await provider.fetch(client, server.cloud_credential, server.cloud_account_id)
+    except CloudBillingError as error:
+        # Мёртвый прокси выглядит как недоступность провайдера — без пометки
+        # «All connection attempts failed» читалось бы как сбой облака
+        if server.cloud_proxy:
+            error = type(error)(f"{error} (via proxy {sanitize_proxy(server.cloud_proxy)})")
+        server.cloud_last_error = str(error)[:500]
+        logger.warning("Cloud sync failed for '%s' (%s): %s", server.name, provider.id, error)
+        raise error
 
     _apply_snapshot(server, snapshot, now, provider)
     return snapshot

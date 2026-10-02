@@ -2,36 +2,47 @@
 
 Готового Python-SDK биллинга в зависимостях панели нет, а тянуть его ради одного
 метода — лишний вес, поэтому запрос отчёта потребления сериализуется в protobuf
-вручную по схеме consumption_core_service.proto.
+вручную по схеме consumption_core_service.proto. Унарный gRPC-вызов идёт
+обычным HTTP/2-запросом через тот же httpx-клиент, что и REST: grpcio не умеет
+SOCKS5, а у проекта может быть задан прокси.
 """
-import asyncio
 import logging
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from urllib.parse import unquote
 
-import grpc
+import httpx
 
 from app.services.cloud_billing.base import (
     CloudAuthError,
     CloudBillingError,
     CloudProvider,
     CloudSnapshot,
+    describe_request_error,
 )
-from app.services.http_client import get_external_client
 from app.services.yc_token_manager import YCTokenError, get_yc_token_manager
 
 logger = logging.getLogger(__name__)
 
 YC_BILLING_BASE = "https://billing.api.cloud.yandex.net/billing/v1"
-YC_GRPC_HOST = "billing.api.cloud.yandex.net:443"
-YC_USAGE_METHOD = (
+YC_USAGE_URL = (
+    "https://billing.api.cloud.yandex.net"
     "/yandex.cloud.billing.usage_records.v1.ConsumptionCoreService"
     "/GetBillingAccountUsageReport"
 )
 CONSUMPTION_WINDOW_DAYS = 3
+BALANCE_TIMEOUT = 15.0
+CONSUMPTION_TIMEOUT = 15.0
 
-_grpc_pool = ThreadPoolExecutor(max_workers=2)
+# Коды google.rpc.Code по порядку: индекс = числовой grpc-status
+GRPC_STATUS_NAMES = (
+    "OK", "CANCELLED", "UNKNOWN", "INVALID_ARGUMENT", "DEADLINE_EXCEEDED",
+    "NOT_FOUND", "ALREADY_EXISTS", "PERMISSION_DENIED", "RESOURCE_EXHAUSTED",
+    "FAILED_PRECONDITION", "ABORTED", "OUT_OF_RANGE", "UNIMPLEMENTED",
+    "INTERNAL", "UNAVAILABLE", "DATA_LOSS", "UNAUTHENTICATED",
+)
+# Сообщение gRPC: флаг сжатия (1 байт) + длина (4 байта, big-endian) + protobuf
+GRPC_FRAME_HEADER_SIZE = 5
 
 
 # ── Protobuf: ручная сериализация ─────────────────────────────────
@@ -157,30 +168,56 @@ def _extract_string_value(data: bytes) -> Optional[str]:
     return None
 
 
-def _sync_fetch_consumption(
-    iam_token: str,
-    account_id: str,
-    start_seconds: int,
-    end_seconds: int,
-) -> Optional[str]:
-    creds = grpc.composite_channel_credentials(
-        grpc.ssl_channel_credentials(),
-        grpc.access_token_call_credentials(iam_token),
-    )
-    channel = grpc.secure_channel(YC_GRPC_HOST, creds)
+def _grpc_frame(message: bytes) -> bytes:
+    return b"\x00" + len(message).to_bytes(4, "big") + message
+
+
+def _grpc_unframe(body: bytes) -> bytes:
+    if len(body) < GRPC_FRAME_HEADER_SIZE:
+        raise CloudBillingError("Empty gRPC response")
+    if body[0]:
+        raise CloudBillingError("Compressed gRPC response is not supported")
+    length = int.from_bytes(body[1:GRPC_FRAME_HEADER_SIZE], "big")
+    message = body[GRPC_FRAME_HEADER_SIZE:GRPC_FRAME_HEADER_SIZE + length]
+    if len(message) < length:
+        raise CloudBillingError("Truncated gRPC response")
+    return message
+
+
+def _grpc_status_error(status: str, message: str) -> CloudBillingError:
+    code = int(status) if status.isdigit() else -1
+    name = GRPC_STATUS_NAMES[code] if 0 <= code < len(GRPC_STATUS_NAMES) else status
+    return CloudBillingError(f"gRPC {name}: {unquote(message)}")
+
+
+async def _grpc_unary_call(
+    client: httpx.AsyncClient, url: str, iam_token: str, message: bytes
+) -> bytes:
     try:
-        method = channel.unary_unary(
-            YC_USAGE_METHOD,
-            request_serializer=lambda x: x,
-            response_deserializer=lambda x: x,
+        resp = await client.post(
+            url,
+            content=_grpc_frame(message),
+            headers={
+                "content-type": "application/grpc",
+                "te": "trailers",
+                "authorization": f"Bearer {iam_token}",
+            },
+            timeout=CONSUMPTION_TIMEOUT,
         )
-        start_dt = datetime.fromtimestamp(start_seconds, tz=timezone.utc)
-        end_dt = datetime.fromtimestamp(end_seconds, tz=timezone.utc)
-        request = _build_usage_request(account_id, start_dt, end_dt)
-        response: bytes = method(request, timeout=15)
-        return _extract_expense(response)
-    finally:
-        channel.close()
+    except httpx.HTTPError as e:
+        raise CloudBillingError(describe_request_error(e)) from e
+
+    if resp.http_version != "HTTP/2":
+        raise CloudBillingError(f"gRPC needs HTTP/2, got {resp.http_version}")
+    if resp.status_code != 200:
+        raise CloudBillingError(f"HTTP {resp.status_code}: {resp.text[:200]}")
+
+    # Ошибку сервер присылает ответом без тела, grpc-status — в заголовках.
+    # Трейлеры успешного ответа httpx не отдаёт, поэтому успех — по наличию тела
+    status = resp.headers.get("grpc-status")
+    if status is not None and status != "0":
+        raise _grpc_status_error(status, resp.headers.get("grpc-message", ""))
+    return _grpc_unframe(resp.content)
 
 
 class YandexCloudProvider(CloudProvider):
@@ -188,13 +225,15 @@ class YandexCloudProvider(CloudProvider):
     default_currency = "RUB"
     requires_account_id = True
 
-    async def fetch(self, credential: str, account_id: Optional[str]) -> CloudSnapshot:
+    async def fetch(
+        self, client: httpx.AsyncClient, credential: str, account_id: Optional[str]
+    ) -> CloudSnapshot:
         if not account_id:
             raise CloudBillingError("Billing account ID is required")
 
-        iam_token = await self._iam_token(credential)
-        balance, currency = await self._fetch_balance(iam_token, account_id)
-        daily_cost, warning = await self._fetch_daily_cost(iam_token, account_id)
+        iam_token = await self._iam_token(client, credential)
+        balance, currency = await self._fetch_balance(client, iam_token, account_id)
+        daily_cost, warning = await self._fetch_daily_cost(client, iam_token, account_id)
 
         return CloudSnapshot(
             balance=balance,
@@ -203,23 +242,27 @@ class YandexCloudProvider(CloudProvider):
             warning=warning,
         )
 
-    async def _iam_token(self, oauth_token: str) -> str:
+    async def _iam_token(self, client: httpx.AsyncClient, oauth_token: str) -> str:
         try:
-            return await get_yc_token_manager().get_iam_token(oauth_token)
+            return await get_yc_token_manager().get_iam_token(client, oauth_token)
         except YCTokenError as e:
             raise CloudAuthError(str(e)) from e
+        except httpx.HTTPError as e:
+            raise CloudBillingError(f"IAM token request failed: {describe_request_error(e)}") from e
 
-    async def _fetch_balance(self, iam_token: str, account_id: str) -> tuple[float, str]:
+    async def _fetch_balance(
+        self, client: httpx.AsyncClient, iam_token: str, account_id: str
+    ) -> tuple[float, str]:
         url = f"{YC_BILLING_BASE}/billingAccounts/{account_id}"
         try:
-            resp = await get_external_client().get(
+            resp = await client.get(
                 url,
                 headers={"Authorization": f"Bearer {iam_token}"},
-                timeout=15.0,
+                timeout=BALANCE_TIMEOUT,
             )
         except Exception as e:
             logger.warning("YC balance request failed for %s: %s", account_id, e)
-            raise CloudBillingError(str(e)) from e
+            raise CloudBillingError(describe_request_error(e)) from e
 
         if resp.status_code == 401:
             raise CloudAuthError("Auth failed: invalid or expired IAM token")
@@ -234,30 +277,21 @@ class YandexCloudProvider(CloudProvider):
         return float(data.get("balance", "0")), data.get("currency") or self.default_currency
 
     async def _fetch_daily_cost(
-        self, iam_token: str, account_id: str
+        self, client: httpx.AsyncClient, iam_token: str, account_id: str
     ) -> tuple[Optional[float], Optional[str]]:
         """Средний расход в сутки за окно потребления; ошибка здесь не фатальна —
         баланс уже получен, без расхода теряется только прогноз."""
         now = datetime.now(timezone.utc)
         start = now - timedelta(days=CONSUMPTION_WINDOW_DAYS)
+        request = _build_usage_request(account_id, start, now)
 
         try:
-            expense_str = await asyncio.get_event_loop().run_in_executor(
-                _grpc_pool,
-                _sync_fetch_consumption,
-                iam_token,
-                account_id,
-                int(start.timestamp()),
-                int(now.timestamp()),
-            )
-        except grpc.RpcError as e:
-            msg = f"gRPC {e.code()}: {e.details()}"
-            logger.warning("YC consumption API failed for %s: %s", account_id, msg)
-            return None, msg
-        except Exception as e:
-            logger.error("YC consumption error for %s: %s", account_id, e)
+            response = await _grpc_unary_call(client, YC_USAGE_URL, iam_token, request)
+        except CloudBillingError as e:
+            logger.warning("YC consumption API failed for %s: %s", account_id, e)
             return None, str(e)
 
+        expense_str = _extract_expense(response)
         if expense_str is None:
             return None, "No expense data in response"
 
