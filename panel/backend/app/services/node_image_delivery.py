@@ -60,7 +60,8 @@ async def _run_streamed(conn, command: str, timeout: int) -> AsyncIterator[dict]
 
 
 async def deliver_image(target: SSHTarget, tag: str) -> AsyncIterator[dict]:
-    """Доставить образ ноды и поднять её на нём. Стримит события {type: log|error|done}."""
+    """Доставить образ ноды и поднять её на нём. Стримит события {type: log|step|error|done}."""
+    yield {"type": "step", "step": "prepare"}
     yield {"type": "log", "line": f"[panel] Готовлю образ ноды ({tag})…"}
     try:
         tar = await ensure_image(tag)
@@ -72,6 +73,7 @@ async def deliver_image(target: SSHTarget, tag: str) -> AsyncIterator[dict]:
     try:
         async with await asyncssh.connect(**ssh_connect_kwargs(target)) as conn:
             yield {"type": "log", "line": f"[panel] SSH к {target.host}:{target.port} установлен"}
+            yield {"type": "step", "step": "upload", "percent": 0}
             yield {"type": "log", "line": f"[panel] Заливаю образ ({size_mb} МБ) — на медленном канале это несколько минут…"}
             async with conn.start_sftp_client() as sftp:
                 total = tar.stat().st_size
@@ -89,9 +91,11 @@ async def deliver_image(target: SSHTarget, tag: str) -> AsyncIterator[dict]:
                     await asyncio.sleep(8)
                     done_mb = progress["copied"] // (1024 * 1024)
                     pct = int(progress["copied"] * 100 / total) if total else 0
+                    yield {"type": "step", "step": "upload", "percent": pct}
                     yield {"type": "log", "line": f"[panel] Заливка: {pct}% ({done_mb}/{size_mb} МБ)"}
                 await put_task  # пробросить исключение, если заливка упала
 
+            yield {"type": "step", "step": "load"}
             yield {"type": "log", "line": "[panel] Загружаю образ в docker…"}
             load_cmd = f"gunzip -c {shlex.quote(REMOTE_TAR)} | docker load && rm -f {shlex.quote(REMOTE_TAR)}"
             async for ev in _run_streamed(conn, load_cmd, LOAD_TIMEOUT):
@@ -104,6 +108,7 @@ async def deliver_image(target: SSHTarget, tag: str) -> AsyncIterator[dict]:
 
             # Никаких скачиваний с ноды: образ уже загружен, просто поднимаем её на
             # нём. Тег в .env приводим к доставленному, иначе compose полез бы в реестр.
+            yield {"type": "step", "step": "start"}
             yield {"type": "log", "line": "[panel] Поднимаю ноду на доставленном образе (без скачивания)…"}
             apply_cmd = (
                 "cd /opt/monitoring-node && "
@@ -135,6 +140,10 @@ class DeliveryJob:
     name: str
     host: str
     status: str = "queued"  # queued | running | success | error
+    # Этап по порядку: prepare → upload → load → start — статус на карточке ноды
+    # «заливка образа 45% (2/4)»; пока задача идёт
+    step: Optional[str] = None
+    percent: Optional[int] = None  # прогресс заливки образа
     log: list[str] = field(default_factory=list)
     error: Optional[str] = None
     started_at: float = field(default_factory=time.time)
@@ -182,6 +191,8 @@ class ImageDeliveryJobManager:
                 "error": j.error,
                 "started_at": j.started_at,
                 "finished_at": j.finished_at,
+                "step": j.step,
+                "percent": j.percent,
             }
             for j in sorted(self._jobs.values(), key=lambda x: x.started_at)
         ]
@@ -215,6 +226,8 @@ class ImageDeliveryJobManager:
             self._emit(job, {"type": "error", "message": error})
         job.status = status
         job.error = error
+        job.step = None
+        job.percent = None
         job.finished_at = time.time()
         self._emit(job, {"type": "done", "status": status})
 
@@ -237,6 +250,11 @@ class ImageDeliveryJobManager:
                         self._emit(job, {"type": "log", "line": f"[panel] {event.get('message')}"})
                         self._finish(job, "success")
                         return
+                    if etype == "step":
+                        # Этап — для статуса на карточке, в лог окна он не идёт
+                        job.step = event.get("step")
+                        job.percent = event.get("percent")
+                        continue
                     self._emit(job, event)
             self._finish(job, "error", "Доставка прервалась без результата")
         except asyncio.CancelledError:

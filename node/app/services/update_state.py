@@ -11,6 +11,7 @@
 import json
 import logging
 import os
+import re
 import uuid
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
@@ -27,6 +28,12 @@ ATTEMPT_LABEL = "monitoring.update-attempt"
 # apply-update.sh: образ не достался из реестра, а локальная сборка запрещена
 EXIT_IMAGE_UNAVAILABLE = 20
 ERROR_TAIL_CHARS = 1000
+
+# Этапы обновления по порядку. Строки «[STAGE] <этап>» печатают в лог апдейтера
+# скрипт апдейтера (download) и apply-update.sh (files, images, restart) — по
+# последней из них панель показывает, на каком шаге обновление
+UPDATE_STAGES = ("download", "files", "images", "restart")
+_STAGE_MARKER = re.compile(r"^\[STAGE\] (\w+)\s*$", re.MULTILINE)
 
 
 class UpdateResult(str, Enum):
@@ -119,9 +126,18 @@ def resolve_orphaned(attempt: UpdateAttempt, container: Optional[UpdaterContaine
     ))
 
 
-def status_payload(attempt: Optional[UpdateAttempt], in_progress: bool, version: str) -> dict:
+def current_stage(logs: str) -> Optional[str]:
+    """Последний пройденный этап по меткам в логе апдейтера."""
+    stages = [stage for stage in _STAGE_MARKER.findall(logs) if stage in UPDATE_STAGES]
+    return stages[-1] if stages else None
+
+
+def status_payload(
+    attempt: Optional[UpdateAttempt], in_progress: bool, stage: Optional[str], version: str,
+) -> dict:
     return {
         "in_progress": in_progress,
+        "stage": stage,
         "last_result": None if attempt is None or attempt.running else attempt.result.value,
         "last_error": attempt.error if attempt else None,
         "reason": attempt.reason if attempt else None,

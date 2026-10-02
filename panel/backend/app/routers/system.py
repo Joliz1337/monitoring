@@ -20,7 +20,7 @@ from app.auth import verify_auth
 from app.config import get_settings
 from app.database import get_db, async_session
 from app.models import Server, PanelSettings
-from app.services import update_channel
+from app.services import node_update_watcher, update_channel
 from app.services.haproxy_upgrade import describe_haproxy
 from app.services.net_utils import panel_ip_info
 from app.services.panel_host_metrics import HostHistoryPeriod, load_host_history
@@ -294,6 +294,15 @@ def get_docker_client():
     except DockerException as e:
         logger.error(f"Failed to connect to Docker: {e}")
         raise
+
+
+@router.get("/node-updates")
+async def list_node_updates(
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth),
+):
+    """Идущие обновления нод через агента и этап каждого — без запросов к нодам."""
+    return {"updates": await node_update_watcher.list_agent_updates(db)}
 
 
 @router.get("/version/base")

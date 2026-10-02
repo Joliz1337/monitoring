@@ -578,7 +578,9 @@ export const haproxyUpgradeStreamUrl = (jobId: string) =>
   `/api/servers/haproxy-upgrade/${jobId}/stream`
 
 export const haproxyUpgradeApi = {
-  start: (serverId: number) => api.post<{ job_id: string }>(`/servers/${serverId}/haproxy-upgrade`),
+  // via_panel — по SSH, пакеты качаются через панель; ssh — разовые креды поверх сохранённых у сервера
+  start: (serverId: number, body?: { via_panel?: boolean; ssh?: ImageDeliveryCreds }) =>
+    api.post<{ job_id: string }>(`/servers/${serverId}/haproxy-upgrade`, body),
   jobs: () => api.get<{ jobs: RemnawaveInstallJobInfo[] }>('/servers/haproxy-upgrade/jobs'),
 }
 
@@ -834,6 +836,7 @@ export interface ImageDeliveryCreds {
 }
 
 export type ImageDeliveryJobStatus = 'queued' | 'running' | 'success' | 'error'
+export type ImageDeliveryStep = 'prepare' | 'upload' | 'load' | 'start'
 
 export interface ImageDeliveryJobInfo {
   job_id: string
@@ -844,6 +847,19 @@ export interface ImageDeliveryJobInfo {
   error: string | null
   started_at: number
   finished_at: number | null
+  // этап, пока доставка идёт; percent — прогресс заливки образа
+  step: ImageDeliveryStep | null
+  percent: number | null
+}
+
+export type NodeUpdateStep = 'download' | 'files' | 'images' | 'restart'
+
+// Обновление ноды через агента, за итогом которого следит панель
+export interface NodeUpdateProgress {
+  server_id: number
+  // null — нода этапы не сообщает (старый агент) или ещё не ответила
+  step: NodeUpdateStep | null
+  started_at: string
 }
 
 export type ImageDeliverySkipReason = 'no_creds' | 'no_host' | 'not_root' | 'not_found'
@@ -1609,6 +1625,7 @@ export const systemApi = {
   getPanelIp: () => api.get<PanelIpInfo>('/system/panel-ip'),
   getVersionBase: () => api.get<VersionBaseInfo>('/system/version/base'),
   getNodeVersionById: (nodeId: number) => api.get<SingleNodeVersion>(`/system/nodes/${nodeId}/version`, { timeout: 15000 }),
+  nodeUpdates: () => api.get<{ updates: NodeUpdateProgress[] }>('/system/node-updates'),
   updatePanel: (targetRef?: string) =>
     api.post<UpdateResponse>('/system/update', undefined, targetRef ? { params: { target_ref: targetRef } } : undefined),
   

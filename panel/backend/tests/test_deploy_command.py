@@ -17,6 +17,7 @@ from app.routers.server_deploy import DeployRequest  # noqa: E402
 from app.services.deploy_service import (  # noqa: E402
     DeployParams,
     InstallerLanguage,
+    build_haproxy_upgrade_command,
     build_install_command,
 )
 
@@ -70,6 +71,18 @@ class TunnelCommandTests(unittest.TestCase):
         self.assertNotIn("--proxy", command)
         self.assertNotIn("MON_PROXY_TEMPORARY", command)
         self.assertIn("MON_PROXY_URL=http://10.0.0.1:3128", command)
+
+    def test_haproxy_upgrade_through_the_tunnel(self):
+        command = build_haproxy_upgrade_command(self.TUNNEL)
+        self.assertTrue(command.startswith(f"curl -fsSL --proxy {self.TUNNEL} https://"))
+        self.assertIn("MON_INSTALL_HAPROXY=1", command)
+        self.assertIn(f"MON_PROXY_URL={self.TUNNEL}", command)
+        self.assertIn("MON_PROXY_TEMPORARY=1", command)
+
+    def test_haproxy_upgrade_through_agent_has_no_proxy(self):
+        command = build_haproxy_upgrade_command()
+        self.assertNotIn("--proxy", command)
+        self.assertNotIn("MON_PROXY_URL", command)
 
 
 class DeployRequestProxyTests(unittest.TestCase):

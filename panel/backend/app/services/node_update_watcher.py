@@ -13,6 +13,7 @@ import html
 import json
 import logging
 import re
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -35,7 +36,8 @@ from app.services.telegram_bot import get_telegram_bot_service
 logger = logging.getLogger(__name__)
 
 UPDATE_STATUS_PATH = "/api/system/update/status"
-POLL_INTERVAL = 30
+# Этап обновления виден на странице «Обновления» — свежим он бывает не чаще опроса
+POLL_INTERVAL = 10
 START_DELAY = 20
 CHECK_CONCURRENCY = 20
 NODE_REQUEST_TIMEOUT = 15.0
@@ -51,6 +53,8 @@ SILENCE_LIMIT = timedelta(minutes=15)
 
 STAGE_AGENT = "agent"
 STAGE_SSH = "ssh"
+# Этапы обновления на ноде по порядку — UPDATE_STAGES в update_state.py агента
+NODE_UPDATE_STEPS = ("download", "files", "images", "restart")
 
 ALERT_TYPE = "node_update_failed"
 ATTEMPT_ID_MAX_LEN = 64
@@ -165,6 +169,14 @@ def decide(
     return _judge_legacy(attempt, status, node_version, now)
 
 
+def reported_step(attempt: NodeUpdateAttempt, status: Optional[dict]) -> Optional[str]:
+    """Этап, на котором нода сейчас обновляет именно эту попытку."""
+    if status is None or not attempt.attempt_id or status.get("attempt_id") != attempt.attempt_id:
+        return None
+    step = status.get("stage")
+    return step if step in NODE_UPDATE_STEPS else None
+
+
 def _reason_text(lang: str, reason: FailureReason, detail: Optional[str]) -> str:
     deadline_min = int(ATTEMPT_DEADLINE.total_seconds() // 60)
     if lang == "ru":
@@ -246,6 +258,7 @@ async def track(db: AsyncSession, server: Server, target_ref: str, attempt_id: o
         "started_at": now,
         "last_contact_at": now,
         "stage": STAGE_AGENT,
+        "step": None,
         "delivery_job_id": None,
         "failure_reason": None,
         "failure_detail": None,
@@ -308,16 +321,34 @@ async def _mark_ssh(attempt: NodeUpdateAttempt, job_id: str, decision: Decision)
         await db.commit()
 
 
-async def _touch(server_ids: list[int]) -> None:
-    if not server_ids:
+async def _touch(contacts: list[tuple[int, Optional[str]]]) -> None:
+    """Отметить ответившие ноды и их этап — по запросу на этап, а не на ноду."""
+    if not contacts:
         return
+    by_step: dict[Optional[str], list[int]] = defaultdict(list)
+    for server_id, step in contacts:
+        by_step[step].append(server_id)
+    now = _utcnow()
     async with async_session() as db:
-        await db.execute(
-            update(NodeUpdateAttempt)
-            .where(NodeUpdateAttempt.server_id.in_(server_ids))
-            .values(last_contact_at=_utcnow())
-        )
+        for step, server_ids in by_step.items():
+            await db.execute(
+                update(NodeUpdateAttempt)
+                .where(NodeUpdateAttempt.server_id.in_(server_ids))
+                .values(last_contact_at=now, step=step)
+            )
         await db.commit()
+
+
+async def list_agent_updates(db: AsyncSession) -> list[dict]:
+    """Идущие обновления нод через агента с их этапом — статусы на «Обновлениях».
+    Запасной путь через SSH сюда не входит: его видно по задаче доставки."""
+    rows = (await db.execute(
+        select(NodeUpdateAttempt).where(NodeUpdateAttempt.stage == STAGE_AGENT)
+    )).scalars().all()
+    return [
+        {"server_id": row.server_id, "step": row.step, "started_at": row.started_at.isoformat()}
+        for row in rows
+    ]
 
 
 async def _notify(
@@ -402,10 +433,12 @@ class NodeUpdateWatcher:
         if not rows:
             return
         results = await asyncio.gather(*(self._check_guarded(attempt, server) for attempt, server in rows))
-        await _touch([server_id for server_id in results if server_id is not None])
+        await _touch([contact for contact in results if contact is not None])
 
-    async def _check_guarded(self, attempt: NodeUpdateAttempt, server: Server) -> Optional[int]:
-        """Проверить одну попытку; id сервера — если нода ответила и итог ещё не известен."""
+    async def _check_guarded(
+        self, attempt: NodeUpdateAttempt, server: Server,
+    ) -> Optional[tuple[int, Optional[str]]]:
+        """Проверить одну попытку; (id сервера, этап) — если нода ответила и итог ещё не известен."""
         async with self._slots:
             try:
                 if not server.is_active:
@@ -419,7 +452,9 @@ class NodeUpdateWatcher:
                 logger.error(f"Node update check failed for server {server.id}: {e}")
                 return None
 
-    async def _check_agent(self, attempt: NodeUpdateAttempt, server: Server) -> Optional[int]:
+    async def _check_agent(
+        self, attempt: NodeUpdateAttempt, server: Server,
+    ) -> Optional[tuple[int, Optional[str]]]:
         allowed, _, _ = server_allows_path(server, UPDATE_STATUS_PATH)
         if not allowed:
             # Владелец закрыл раздел после запуска: итог не узнать, а молчание
@@ -437,7 +472,7 @@ class NodeUpdateWatcher:
 
         decision = decide(attempt, status, node_version, _utcnow())
         if decision.verdict is Verdict.WAIT:
-            return server.id if status is not None else None
+            return (server.id, reported_step(attempt, status)) if status is not None else None
         if decision.verdict is Verdict.FAILED:
             await self._fall_back(attempt, server, decision)
             return None

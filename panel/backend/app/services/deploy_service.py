@@ -185,12 +185,15 @@ def build_warp_install_command() -> str:
     return _render_unattended_command(env)
 
 
-def build_haproxy_upgrade_command() -> str:
-    """Команда обновления HAProxy до новейшей официальной LTS-сборки под релиз сервера."""
+def build_haproxy_upgrade_command(tunnel_proxy: str | None = None) -> str:
+    """Команда обновления HAProxy до новейшей официальной LTS-сборки под релиз сервера —
+    через агента ноды или, с tunnel_proxy, по SSH с загрузкой пакетов через панель."""
     env = {"MON_INSTALL_HAPROXY": "1"}
     if update_channel.current_branch() != update_channel.STABLE_BRANCH:
         env["MON_BRANCH"] = update_channel.current_branch()
-    return _render_unattended_command(env)
+    if tunnel_proxy:
+        env.update(_temporary_proxy_env(tunnel_proxy))
+    return _render_unattended_command(env, download_proxy=tunnel_proxy)
 
 
 def build_install_command(params: DeployParams, tunnel_proxy: str | None = None) -> str:

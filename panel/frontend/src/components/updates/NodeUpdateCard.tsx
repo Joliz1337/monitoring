@@ -14,7 +14,8 @@ import {
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import type {
-  DownloadProxySummary, ImageDeliveryJobInfo, ImageDeliveryJobStatus, RemnawaveInstallJobInfo,
+  DownloadProxySummary, ImageDeliveryJobInfo, ImageDeliveryJobStatus, ImageDeliveryStep,
+  NodeUpdateProgress, NodeUpdateStep, RemnawaveInstallJobInfo,
 } from '../../api/client'
 import { shortHAProxyVersion } from './HAProxyUpgradeModal'
 import { Skeleton } from '../ui/Skeleton'
@@ -40,9 +41,38 @@ export interface NodeState {
 
 const DELIVERY_CHIP: Record<ImageDeliveryJobStatus, { icon: LucideIcon; spin?: boolean; className: string }> = {
   queued: { icon: Clock, className: 'text-dark-300 bg-dark-700/50' },
-  running: { icon: Loader2, spin: true, className: 'text-accent-400 bg-accent-500/10' },
+  running: { icon: Loader2, spin: true, className: 'text-warning bg-warning/10' },
   success: { icon: CheckCircle2, className: 'text-success bg-success/10' },
   error: { icon: XCircle, className: 'text-danger bg-danger/10' },
+}
+
+// Порядок этапов — для «2/4» и полоски: на ноде UPDATE_STAGES, у доставки — шаги node_image_delivery
+const NODE_UPDATE_STEPS: NodeUpdateStep[] = ['download', 'files', 'images', 'restart']
+const DELIVERY_STEPS: ImageDeliveryStep[] = ['prepare', 'upload', 'load', 'start']
+
+interface ProgressView {
+  label: string
+  // null — этап неизвестен (старый агент): только надпись, без полоски
+  stepIndex: number | null
+  total: number
+  percent: number | null
+  tooltip: string
+  onClick?: () => void
+}
+
+function ProgressBar({ stepIndex, total, percent }: { stepIndex: number; total: number; percent: number | null }) {
+  return (
+    <div className="flex gap-1 mt-1.5">
+      {Array.from({ length: total }, (_, i) => (
+        <div key={i} className="h-1 flex-1 rounded-full bg-dark-700/60 overflow-hidden">
+          {i < stepIndex && <div className="h-full w-full bg-warning" />}
+          {i === stepIndex && (percent !== null
+            ? <div className="h-full bg-warning transition-[width] duration-500" style={{ width: `${percent}%` }} />
+            : <div className="h-full w-full bg-warning/60 animate-pulse" />)}
+        </div>
+      ))}
+    </div>
+  )
 }
 
 interface Props {
@@ -52,6 +82,8 @@ interface Props {
   isDevChannel: boolean
   isUpdating: boolean
   updateResult?: { success: boolean; message: string }
+  // идущее обновление через агента — панель следит за ним и после перезагрузки страницы
+  agentUpdate?: NodeUpdateProgress
   deliveryJob?: ImageDeliveryJobInfo
   haproxyJob?: RemnawaveInstallJobInfo
   selected: boolean
@@ -63,12 +95,66 @@ interface Props {
 }
 
 export default function NodeUpdateCard({
-  node, index, needsUpdate, isDevChannel, isUpdating, updateResult, deliveryJob, haproxyJob,
+  node, index, needsUpdate, isDevChannel, isUpdating, updateResult, agentUpdate, deliveryJob, haproxyJob,
   selected, onToggleSelect, onUpdate, onOpenDelivery, onOpenHAProxy, onOpenProxy,
 }: Props) {
   const { t } = useTranslation()
   const isNodeLoading = node.loadState === 'pending' || node.loadState === 'loading'
   const isOnline = node.status === 'online'
+  const isBusy = isUpdating || !!agentUpdate
+
+  // Идущее обновление — отдельной строкой на всю ширину карточки, чтобы этап и «N/4» не обрезались
+  const progressView = (): ProgressView | null => {
+    if (deliveryJob?.status === 'running') {
+      const step = deliveryJob.step
+      const percent = step === 'upload' ? deliveryJob.percent : null
+      return {
+        label: step
+          ? `SSH: ${t(`imageDelivery.step_${step}`)}${percent !== null ? ` ${percent}%` : ''}`
+          : t('imageDelivery.status_running'),
+        stepIndex: step ? DELIVERY_STEPS.indexOf(step) : null,
+        total: DELIVERY_STEPS.length,
+        percent,
+        tooltip: t('imageDelivery.open_log'),
+        onClick: onOpenDelivery,
+      }
+    }
+    if (!agentUpdate || isUpdating || deliveryJob) return null
+    const since = new Date(agentUpdate.started_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    return {
+      label: agentUpdate.step
+        ? `${t('updates.agent_updating')}: ${t(`updates.step_${agentUpdate.step}`)}`
+        : `${t('updates.agent_updating')}…`,
+      stepIndex: agentUpdate.step ? NODE_UPDATE_STEPS.indexOf(agentUpdate.step) : null,
+      total: NODE_UPDATE_STEPS.length,
+      percent: null,
+      tooltip: t('updates.agent_updating_since', { time: since }),
+    }
+  }
+  const progress = progressView()
+
+  const renderProgress = (view: ProgressView) => {
+    const body = (
+      <>
+        <div className="flex items-center gap-1.5 text-xs text-warning">
+          <Loader2 className="w-3.5 h-3.5 shrink-0 animate-spin" />
+          <span className="truncate flex-1">{view.label}</span>
+          {view.stepIndex !== null && (
+            <span className="font-mono shrink-0">{view.stepIndex + 1}/{view.total}</span>
+          )}
+        </div>
+        {view.stepIndex !== null && <ProgressBar stepIndex={view.stepIndex} total={view.total} percent={view.percent} />}
+      </>
+    )
+    const className = 'mt-3 w-full text-left rounded-lg bg-warning/10 px-2.5 py-2'
+    return (
+      <Tooltip label={view.tooltip} maxWidth={300}>
+        {view.onClick
+          ? <button onClick={view.onClick} className={`${className} hover:brightness-125 transition`}>{body}</button>
+          : <div className={className}>{body}</div>}
+      </Tooltip>
+    )
+  }
 
   const renderDeliveryChip = (job: ImageDeliveryJobInfo) => {
     const chip = DELIVERY_CHIP[job.status]
@@ -77,13 +163,19 @@ export default function NodeUpdateCard({
       <Tooltip label={job.error || t('imageDelivery.open_log')} maxWidth={320}>
         <button
           onClick={onOpenDelivery}
-          className={`flex items-center gap-1.5 text-xs px-2 py-1 rounded-lg w-fit hover:brightness-125 transition ${chip.className}`}
+          className={`flex items-center gap-1.5 text-xs px-2 py-1 rounded-lg w-fit max-w-full hover:brightness-125 transition ${chip.className}`}
         >
-          <Icon className={`w-3.5 h-3.5 ${chip.spin ? 'animate-spin' : ''}`} />
-          <span className="truncate max-w-[140px]">{t(`imageDelivery.status_${job.status}`)}</span>
+          <Icon className={`w-3.5 h-3.5 shrink-0 ${chip.spin ? 'animate-spin' : ''}`} />
+          <span className="truncate">{t(`imageDelivery.status_${job.status}`)}</span>
         </button>
       </Tooltip>
     )
+  }
+
+  const renderStatusArea = () => {
+    if (progress) return null
+    if (deliveryJob) return renderDeliveryChip(deliveryJob)
+    return renderUpdateStatus()
   }
 
   const renderHAProxyAction = () => {
@@ -237,9 +329,11 @@ export default function NodeUpdateCard({
         </div>
       </div>
 
+      {progress && renderProgress(progress)}
+
       <div className="flex items-center justify-between mt-3 pt-3 border-t border-dark-700/30">
         <div className="flex-1 min-w-0">
-          {deliveryJob ? renderDeliveryChip(deliveryJob) : renderUpdateStatus()}
+          {renderStatusArea()}
         </div>
 
         <div className="flex items-center gap-2 flex-shrink-0">
@@ -271,12 +365,12 @@ export default function NodeUpdateCard({
           )}
           <motion.button
             onClick={onUpdate}
-            disabled={isUpdating || isNodeLoading || !isOnline || (!needsUpdate && !isDevChannel)}
+            disabled={isBusy || isNodeLoading || !isOnline || (!needsUpdate && !isDevChannel)}
             className="btn btn-secondary text-xs px-3 py-1.5"
             whileHover={{ scale: 1.05 }}
             whileTap={{ scale: 0.95 }}
           >
-            {isUpdating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+            {isBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
             {t('updates.update')}
           </motion.button>
         </div>

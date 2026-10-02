@@ -3,15 +3,18 @@ import { motion } from 'framer-motion'
 import { ArrowRight, ArrowUpCircle, CheckCircle2, Loader2, X, XCircle } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
-import { haproxyUpgradeApi, haproxyUpgradeStreamUrl, type RemnawaveInstallEvent } from '../../api/client'
+import { haproxyUpgradeApi, haproxyUpgradeStreamUrl, nodeImageApi, type RemnawaveInstallEvent } from '../../api/client'
 import { streamNdjsonGet } from '../../utils/ndjsonStream'
 import { cleanInstallLogLine } from '../../utils/installLog'
+import { Checkbox } from '../ui/Checkbox'
+import SshCredsFields, { SSH_CREDS_DEFAULTS, hasSshSecret, toDeliveryCreds, type SshCredsValue } from '../servers/SshCredsFields'
 
 export interface HAProxyUpgradeTarget {
   id: number
   name: string
   version: string | null
   targetVersion: string | null
+  hasSshCreds: boolean
 }
 
 interface Props {
@@ -31,8 +34,16 @@ export default function HAProxyUpgradeModal({ targets, jobId: initialJobId, onSt
   const [starting, setStarting] = useState(false)
   const [log, setLog] = useState<string[]>([])
   const [result, setResult] = useState<'success' | 'error' | null>(null)
+  // Сервер за ТСПУ: обновление по SSH, пакеты качаются через панель
+  const [viaPanel, setViaPanel] = useState(false)
+  const [sshCreds, setSshCreds] = useState<SshCredsValue>(SSH_CREDS_DEFAULTS)
+  const [saveSsh, setSaveSsh] = useState(false)
   const logEndRef = useRef<HTMLDivElement | null>(null)
   const isSingle = targets.length === 1
+  const withoutCreds = targets.filter(target => !target.hasSshCreds)
+  const formReady = hasSshSecret(sshCreds)
+  // Без сохранённого доступа сервер обновится по SSH, только если доступ введён в форме
+  const runnable = viaPanel ? targets.filter(target => target.hasSshCreds || formReady) : targets
 
   // Стрим переигрывает весь лог задачи, поэтому повторное открытие окна показывает его целиком
   useEffect(() => {
@@ -59,13 +70,32 @@ export default function HAProxyUpgradeModal({ targets, jobId: initialJobId, onSt
     logEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [log])
 
+  const startOne = (target: HAProxyUpgradeTarget) => {
+    if (!viaPanel) return haproxyUpgradeApi.start(target.id)
+    // Пустое ssh — бэк возьмёт сохранённый у сервера доступ
+    return haproxyUpgradeApi.start(target.id, {
+      via_panel: true,
+      ssh: target.hasSshCreds ? {} : toDeliveryCreds(sshCreds),
+    })
+  }
+
   const handleStart = async () => {
+    const skipped = targets.filter(target => !runnable.includes(target))
+    if (skipped.length > 0) {
+      toast.warning(t('updates.haproxy_skipped_no_creds', { names: skipped.map(s => s.name).join(', ') }))
+    }
     setStarting(true)
-    const results = await Promise.allSettled(targets.map(target => haproxyUpgradeApi.start(target.id)))
+    if (viaPanel && formReady && saveSsh) {
+      const creds = toDeliveryCreds(sshCreds)
+      await Promise.allSettled(
+        runnable.filter(target => !target.hasSshCreds).map(target => nodeImageApi.setSettings(target.id, creds)),
+      )
+    }
+    const results = await Promise.allSettled(runnable.map(startOne))
     setStarting(false)
 
     const failures = results.flatMap((res, i) =>
-      res.status === 'rejected' ? [{ name: targets[i].name, reason: res.reason }] : [],
+      res.status === 'rejected' ? [{ name: runnable[i].name, reason: res.reason }] : [],
     )
     for (const { name, reason } of failures) {
       toast.error(`${name}: ${reason?.response?.data?.detail || reason?.message || t('updates.haproxy_failed')}`)
@@ -111,7 +141,7 @@ export default function HAProxyUpgradeModal({ targets, jobId: initialJobId, onSt
             <div ref={logEndRef} />
           </div>
         ) : (
-          <>
+          <div className="flex-1 min-h-0 overflow-y-auto">
             <p className="text-sm text-dark-400 mb-3">{t('updates.haproxy_desc')}</p>
             <div className="mb-4 max-h-56 overflow-y-auto rounded-lg border border-dark-700/40 divide-y divide-dark-700/40">
               {targets.map(target => (
@@ -125,7 +155,37 @@ export default function HAProxyUpgradeModal({ targets, jobId: initialJobId, onSt
                 </div>
               ))}
             </div>
-          </>
+            <div className="mb-4 space-y-3">
+              <div>
+                <label className="flex items-center gap-2.5 cursor-pointer">
+                  <Checkbox checked={viaPanel} onChange={e => setViaPanel(e.target.checked)} disabled={starting} />
+                  <span className="text-sm text-dark-200">{t('servers.deploy_via_panel')}</span>
+                </label>
+                <p className="text-xs text-dark-500 mt-1 ml-6">{t('updates.haproxy_via_panel_hint')}</p>
+              </div>
+              {viaPanel && (withoutCreds.length === 0 ? (
+                <p className="text-xs text-dark-400">{t('updates.haproxy_ssh_stored')}</p>
+              ) : (
+                <div className="space-y-3">
+                  <p className="text-xs text-warning">
+                    {isSingle
+                      ? t('updates.haproxy_ssh_missing_single')
+                      : t('updates.haproxy_ssh_missing', { names: withoutCreds.map(target => target.name).join(', ') })}
+                  </p>
+                  <SshCredsFields
+                    value={sshCreds}
+                    onChange={patch => setSshCreds(prev => ({ ...prev, ...patch }))}
+                    disabled={starting}
+                    showHost={isSingle}
+                  />
+                  <label className="flex items-center gap-2.5 cursor-pointer">
+                    <Checkbox checked={saveSsh} onChange={e => setSaveSsh(e.target.checked)} />
+                    <span className="text-sm text-dark-300">{t('imageDelivery.save_creds')}</span>
+                  </label>
+                </div>
+              ))}
+            </div>
+          </div>
         )}
 
         <div className="flex items-center justify-between gap-3 mt-auto">
@@ -147,7 +207,7 @@ export default function HAProxyUpgradeModal({ targets, jobId: initialJobId, onSt
               {t('common.close')}
             </button>
             {!jobId && (
-              <button onClick={handleStart} className="btn btn-primary" disabled={starting || targets.length === 0}>
+              <button onClick={handleStart} className="btn btn-primary" disabled={starting || runnable.length === 0}>
                 {starting ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowUpCircle className="w-4 h-4" />}
                 {t('updates.haproxy_start')}
               </button>

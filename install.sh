@@ -1566,19 +1566,30 @@ PROXYEOF
 }
 
 remove_proxy_configs() {
+    local docker_proxy=/etc/systemd/system/docker.service.d/proxy.conf
+    local had_docker_proxy=0
+    [ -f "$docker_proxy" ] && had_docker_proxy=1
     rm -f /etc/apt/apt.conf.d/99monitoring-proxy 2>/dev/null || true
     rm -f /etc/apt/apt.conf.d/99proxy 2>/dev/null || true
-    rm -f /etc/systemd/system/docker.service.d/proxy.conf 2>/dev/null || true
+    rm -f "$docker_proxy" 2>/dev/null || true
     git config --global --unset http.proxy 2>/dev/null || true
     git config --global --unset https.proxy 2>/dev/null || true
-    if command -v docker &>/dev/null; then
+    # Рестарт Docker перезапускает все контейнеры сервера, VPN тоже — только
+    # когда прокси у демона действительно был
+    if [ "$had_docker_proxy" = "1" ] && command -v docker &>/dev/null; then
         timeout 60 systemctl daemon-reload >/dev/null 2>&1 || true
         timeout 60 systemctl restart docker >/dev/null 2>&1 || true
     fi
 }
 
-# Рестарт Docker внутри remove_proxy_configs обязателен: демон держит адрес прокси
-# в окружении процесса, и без рестарта следующий pull ушёл бы в мёртвый порт
+# Прокси для Docker нужен только шагам, которые тянут образы: его установка и
+# снятие перезапускают Docker, а обновлению HAProxy или установке WARP это ни к чему
+installer_pulls_images() {
+    [ "${MON_INSTALL_NODE:-0}" = "1" ] || [ "${MON_INSTALL_REMNAWAVE:-0}" = "1" ]
+}
+
+# Если прокси был и у Docker, рестарт внутри remove_proxy_configs обязателен: демон
+# держит адрес прокси в окружении процесса, и следующий pull ушёл бы в мёртвый порт
 remove_temporary_proxy() {
     log_info "Removing temporary installer proxy"
     remove_proxy_configs
@@ -3389,7 +3400,7 @@ PROXYEOF
         chmod 600 /etc/monitoring/proxy.conf 2>/dev/null || true
         load_proxy
         configure_apt_proxy
-        configure_docker_proxy
+        installer_pulls_images && configure_docker_proxy
         log_success "Installer proxy configured"
     fi
 

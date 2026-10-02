@@ -7,7 +7,8 @@
 появляется и на переход между ветками, и на исправления внутри ветки. Само
 обновление — install.sh с MON_INSTALL_HAPROXY=1 на хосте через агента ноды,
 фоновой задачей с логом: переключение reload'ом без обрыва соединений и откат
-при ошибке.
+при ошибке. Серверу за ТСПУ, которому репозиторий сборщика недоступен, тот же
+install.sh запускается по SSH, а пакеты он качает через прокси панели в туннеле.
 """
 from __future__ import annotations
 
@@ -22,9 +23,10 @@ from typing import AsyncIterator, Optional
 import httpx
 
 from app.models import Server
-from app.services.deploy_service import build_haproxy_upgrade_command
+from app.services.deploy_service import build_haproxy_upgrade_command, install_via_panel
 from app.services.http_client import get_external_client
 from app.services.remnawave_node_install import HostInstallJobManager, run_install_on_node
+from app.services.ssh_target import SSHTarget
 
 logger = logging.getLogger(__name__)
 
@@ -179,5 +181,10 @@ async def _queued(events: AsyncIterator[dict]) -> AsyncIterator[dict]:
             yield event
 
 
-def start_upgrade(server: Server) -> str:
-    return _manager.start(server, _queued(run_install_on_node(server, build_haproxy_upgrade_command())))
+def start_upgrade(server: Server, ssh_target: Optional[SSHTarget] = None) -> str:
+    """Запустить обновление: через агента ноды или, с ssh_target, по SSH с загрузкой через панель."""
+    if ssh_target is None:
+        events = run_install_on_node(server, build_haproxy_upgrade_command())
+    else:
+        events = install_via_panel(ssh_target, server.proxy_url, build_haproxy_upgrade_command)
+    return _manager.start(server, _queued(events))

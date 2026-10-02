@@ -20,6 +20,7 @@ from app.services.update_state import (  # noqa: E402
     UpdateResult,
     UpdateStateStore,
     UpdaterContainer,
+    current_stage,
     new_attempt,
     outcome_from_exit,
     resolve_orphaned,
@@ -122,16 +123,40 @@ class StoreTest(unittest.TestCase):
         self.assertIsNone(self.store.load())
 
 
+class CurrentStageTest(unittest.TestCase):
+    def test_last_marker_wins(self):
+        logs = "\n".join([
+            "[STAGE] download",
+            "[INFO] Cloning...",
+            "[STAGE] files",
+            "sending incremental file list",
+            "[STAGE] images",
+            "",
+        ])
+        self.assertEqual(current_stage(logs), "images")
+
+    def test_no_markers(self):
+        # Апдейтер старой ноды меток не печатает — этап неизвестен
+        self.assertIsNone(current_stage("[INFO] Cloning repository...\n"))
+
+    def test_unknown_stage_is_ignored(self):
+        self.assertEqual(current_stage("[STAGE] files\n[STAGE] mystery\n"), "files")
+
+    def test_marker_must_be_whole_line(self):
+        self.assertIsNone(current_stage("echo [STAGE] files later\n"))
+
+
 class StatusPayloadTest(unittest.TestCase):
     def test_running_attempt_has_no_result_yet(self):
         attempt = new_attempt("main", "10.30.0")
-        payload = status_payload(attempt, True, "10.30.0")
+        payload = status_payload(attempt, True, "images", "10.30.0")
         self.assertTrue(payload["in_progress"])
+        self.assertEqual(payload["stage"], "images")
         self.assertIsNone(payload["last_result"])
         self.assertEqual(payload["attempt_id"], attempt.attempt_id)
 
     def test_no_attempt(self):
-        payload = status_payload(None, False, "10.31.0")
+        payload = status_payload(None, False, None, "10.31.0")
         self.assertIsNone(payload["attempt_id"])
         self.assertEqual(payload["version"], "10.31.0")
 

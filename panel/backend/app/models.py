@@ -247,6 +247,9 @@ class NodeUpdateAttempt(Base):
     started_at = Column(DateTime(timezone=True), nullable=False)
     last_contact_at = Column(DateTime(timezone=True), nullable=True)
     stage = Column(String(10), nullable=False, server_default="agent")  # agent | ssh
+    # Этап обновления на самой ноде (download | files | images | restart) — для
+    # статуса на странице «Обновления»; None — агент этапы не сообщает
+    step = Column(String(20), nullable=True)
     delivery_job_id = Column(String(64), nullable=True)
     failure_reason = Column(String(30), nullable=True)
     failure_detail = Column(String(500), nullable=True)

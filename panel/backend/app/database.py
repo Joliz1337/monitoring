@@ -2194,6 +2194,14 @@ async def _migrate_source_pool_manual(conn):
                 logger.warning(f"Could not add source_pool_nodes.{col_name}: {e}")
 
 
+async def _migrate_node_update_step(conn):
+    """Этап обновления ноды для статуса на «Обновлениях» — таблица старше колонки."""
+    try:
+        await conn.execute(text('ALTER TABLE node_update_attempts ADD COLUMN IF NOT EXISTS "step" VARCHAR(20)'))
+    except Exception as e:
+        logger.warning(f"Could not add node_update_attempts.step: {e}")
+
+
 # (таблица, колонка) — целевые секреты: приватные ключи, не публичные сертификаты
 _SECRET_COLUMNS = [
     ("keygen", "ca_key_pem"),
@@ -2260,6 +2268,7 @@ async def init_db():
         await _migrate_metrics_window_peaks(conn)
         await _migrate_haproxy_profile_options(conn)
         await _migrate_source_pool_manual(conn)
+        await _migrate_node_update_step(conn)
         await _migrate_encrypt_secrets(conn)
 
     await _warmup_pool()

@@ -50,6 +50,7 @@ from app.services.update_state import (
     UpdateResult,
     UpdateStateStore,
     UpdaterContainer,
+    current_stage,
     new_attempt,
     outcome_from_exit,
     resolve_orphaned,
@@ -79,7 +80,9 @@ GIT_REF_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._/-]*$"
 PROXY_URL_PATTERN = r"^[a-z][a-z0-9+.-]*://[A-Za-z0-9._%+:@/-]+$"
 
 UPDATER_ACTIVE_STATES = ("created", "running", "restarting")
-UPDATER_LOG_TAIL_LINES = 200
+# Хвост лога апдейтера: в нём и итог, и метки этапов. rsync -av перечисляет
+# каждый файл ноды — запас нужен, чтобы метка этапа не уехала за край
+UPDATER_LOG_TAIL_LINES = 2000
 
 _update_state = UpdateStateStore()
 
@@ -235,16 +238,12 @@ async def _inspect_updater() -> Optional[UpdaterContainer]:
         container = await asyncio.to_thread(client.containers.get, UPDATER_CONTAINER_NAME)
     except DockerNotFound:
         return None
-    running = container.status in UPDATER_ACTIVE_STATES
-    logs = ""
-    if not running:
-        raw_logs = await asyncio.to_thread(container.logs, tail=UPDATER_LOG_TAIL_LINES)
-        logs = raw_logs.decode("utf-8", errors="replace")
+    raw_logs = await asyncio.to_thread(container.logs, tail=UPDATER_LOG_TAIL_LINES)
     return UpdaterContainer(
-        running=running,
+        running=container.status in UPDATER_ACTIVE_STATES,
         exit_code=container.attrs.get("State", {}).get("ExitCode"),
         attempt_id=container.labels.get(ATTEMPT_LABEL),
-        logs=logs,
+        logs=raw_logs.decode("utf-8", errors="replace"),
     )
 
 
@@ -263,27 +262,33 @@ async def _record_outcome(attempt_id: str, outcome: UpdateOutcome) -> None:
     await asyncio.to_thread(_update_state.record, attempt_id, outcome)
 
 
-async def _current_update_state() -> tuple[Optional[UpdateAttempt], bool]:
-    """Последняя попытка обновления и идёт ли апдейтер прямо сейчас."""
+async def _current_update_state() -> tuple[Optional[UpdateAttempt], bool, Optional[str]]:
+    """Последняя попытка обновления, идёт ли апдейтер прямо сейчас и на каком он этапе."""
     async with _update_lock:
         attempt = await asyncio.to_thread(_update_state.load)
-        if _update_running_here():
-            return attempt, True
+        running_here = _update_running_here()
         try:
             container = await _inspect_updater()
         except (DockerException, RequestException) as e:
             logger.warning(f"Failed to check updater container state: {e}")
-            return attempt, attempt is not None and attempt.running
+            return attempt, running_here or (attempt is not None and attempt.running), None
 
-        updater_running = container is not None and container.running
-        if attempt is not None and attempt.running and not updater_running:
+        in_progress = running_here or (container is not None and container.running)
+        if attempt is not None and attempt.running and not in_progress:
             # Попытку начал прежний процесс агента: при успехе apply-update.sh
             # пересоздал контейнер, и итог остался только в контейнере апдейтера
             attempt = resolve_orphaned(attempt, container)
             await asyncio.to_thread(_update_state.save, attempt)
             if container is not None:
                 await _remove_updater()
-        return attempt, updater_running
+            return attempt, False, None
+
+        # Контейнер прошлой попытки, ещё не убранный новой, к её этапу отношения не имеет
+        own_container = (
+            container is not None and attempt is not None and container.attempt_id == attempt.attempt_id
+        )
+        stage = current_stage(container.logs) if in_progress and own_container else None
+        return attempt, in_progress, stage
 
 
 async def run_update_in_container(
@@ -344,6 +349,7 @@ async def run_update_in_container(
         updater_script = f"""#!/bin/sh
 set -e
 
+echo "[STAGE] download"
 echo "[INFO] Installing dependencies..."
 apk add --no-cache git curl rsync bash >/dev/null 2>&1
 command -v nsenter >/dev/null 2>&1 || apk add --no-cache util-linux-misc >/dev/null 2>&1 || apk add --no-cache util-linux >/dev/null 2>&1
@@ -562,8 +568,8 @@ async def trigger_update(data: UpdateRequest = None):
 @router.get("/update/status")
 async def get_update_status():
     """Итог последней попытки обновления — панель сверяет его со своей попыткой по attempt_id."""
-    attempt, in_progress = await _current_update_state()
-    return status_payload(attempt, in_progress, get_current_version())
+    attempt, in_progress, stage = await _current_update_state()
+    return status_payload(attempt, in_progress, stage, get_current_version())
 
 
 class ExecuteRequest(BaseModel):

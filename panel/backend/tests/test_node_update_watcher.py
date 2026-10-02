@@ -24,6 +24,7 @@ try:
         Verdict,
         decide,
         failure_message,
+        reported_step,
         summarize_error,
     )
 except ImportError as e:  # рантайм панели (sqlalchemy, asyncpg, aiogram) не установлен
@@ -136,6 +137,26 @@ class SilentNodeTest(unittest.TestCase):
         contacted = STARTED + timedelta(minutes=30)
         attempt = make_attempt(last_contact_at=contacted)
         self.assertIs(decide(attempt, None, None, contacted + timedelta(minutes=1)).verdict, Verdict.WAIT)
+
+
+class ReportedStepTest(unittest.TestCase):
+    def test_step_of_own_attempt(self):
+        status = {"attempt_id": "a1", "in_progress": True, "stage": "images"}
+        self.assertEqual(reported_step(make_attempt(), status), "images")
+
+    def test_step_of_other_attempt_is_ignored(self):
+        status = {"attempt_id": "b2", "stage": "images"}
+        self.assertIsNone(reported_step(make_attempt(), status))
+
+    def test_legacy_agent_has_no_step(self):
+        self.assertIsNone(reported_step(make_attempt(attempt_id=None), {"in_progress": True}))
+
+    def test_unknown_step_is_dropped(self):
+        status = {"attempt_id": "a1", "stage": "<script>"}
+        self.assertIsNone(reported_step(make_attempt(), status))
+
+    def test_silent_node(self):
+        self.assertIsNone(reported_step(make_attempt(), None))
 
 
 class SummarizeErrorTest(unittest.TestCase):

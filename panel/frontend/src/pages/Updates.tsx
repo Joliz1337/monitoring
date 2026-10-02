@@ -25,6 +25,7 @@ import {
 import { useTranslation } from 'react-i18next'
 import {
   systemApi, nodeImageApi, haproxyUpgradeApi, VersionBaseInfo, SingleNodeVersion, ImageDeliveryJobInfo, RemnawaveInstallJobInfo,
+  NodeUpdateProgress,
 } from '../api/client'
 import { Skeleton } from '../components/ui/Skeleton'
 import { Tooltip } from '../components/ui/Tooltip'
@@ -39,7 +40,7 @@ import NodeUpdateCard, { NodeState } from '../components/updates/NodeUpdateCard'
 import HAProxyUpgradeModal, { HAProxyUpgradeTarget } from '../components/updates/HAProxyUpgradeModal'
 import DownloadProxyModal, { DownloadProxyTarget } from '../components/updates/DownloadProxyModal'
 
-// Пока идёт SSH-доставка или обновление HAProxy хоть на одной ноде — статусы на карточках обновляются с этим шагом
+// Пока идёт обновление ноды, SSH-доставка или обновление HAProxy хоть на одной ноде — статусы на карточках обновляются с этим шагом
 const JOB_POLL_INTERVAL_MS = 3_000
 // После смены прокси нода перезапускает Docker — версию перечитываем, когда агент снова поднялся
 const PROXY_REFRESH_DELAY_MS = 40_000
@@ -56,6 +57,7 @@ const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, m
 
 const toHAProxyTarget = (node: NodeState): HAProxyUpgradeTarget => ({
   id: node.id, name: node.name, version: node.haproxyVersion, targetVersion: node.haproxyTarget,
+  hasSshCreds: node.hasSshCreds,
 })
 
 // /health из браузера недоступен (nginx отдаёт его только внутренним IP), поэтому живость
@@ -109,6 +111,8 @@ export default function Updates() {
   const [supersededDeliveries, setSupersededDeliveries] = useState<Set<string>>(new Set())
   // Последнее обновление HAProxy по каждому серверу: идущее или завершённое недавно
   const [haproxyJobs, setHaproxyJobs] = useState<Map<number, RemnawaveInstallJobInfo>>(new Map())
+  // Идущие обновления нод через агента — их держит панель, поэтому видны и после перезагрузки страницы
+  const [nodeUpdates, setNodeUpdates] = useState<Map<number, NodeUpdateProgress>>(new Map())
   const [haproxyModal, setHaproxyModal] = useState<{ targets: HAProxyUpgradeTarget[]; jobId: string | null } | null>(null)
   const [proxyModal, setProxyModal] = useState<DownloadProxyTarget[] | null>(null)
   const [selected, setSelected] = useState<Set<number>>(new Set())
@@ -118,6 +122,7 @@ export default function Updates() {
   const rebootWaitCancelRef = useRef(false)
   const deliveryStatusRef = useRef<Map<string, ImageDeliveryJobInfo['status']>>(new Map())
   const haproxyStatusRef = useRef<Map<string, RemnawaveInstallJobInfo['status']>>(new Map())
+  const nodeUpdateIdsRef = useRef<Set<number>>(new Set())
   const lastActivityRef = useRef(Date.now())
   const IDLE_THRESHOLD = 5000
   const AUTO_REFRESH_INTERVAL = 12000
@@ -283,6 +288,32 @@ export default function Updates() {
     return () => clearInterval(id)
   }, [hasActiveHaproxyUpgrade, fetchHaproxyJobs])
 
+  const fetchNodeUpdates = useCallback(async () => {
+    try {
+      const { data } = await systemApi.nodeUpdates()
+      const byServer = new Map(data.updates.map(update => [update.server_id, update]))
+      const finished = [...nodeUpdateIdsRef.current].filter(id => !byServer.has(id))
+      nodeUpdateIdsRef.current = new Set(byServer.keys())
+      setNodeUpdates(byServer)
+      if (finished.length === 0) return
+      // Обновление закончилось: показать новую версию, а при провале — запущенное панелью обновление по SSH
+      finished.forEach(id => fetchNodeVersion(id))
+      fetchDeliveryJobs()
+    } catch {
+      // статусы обновлений — дополнение к странице, без них она работает как раньше
+    }
+  }, [fetchNodeVersion, fetchDeliveryJobs])
+
+  useEffect(() => { fetchNodeUpdates() }, [fetchNodeUpdates])
+
+  const hasActiveNodeUpdate = nodeUpdates.size > 0
+
+  useEffect(() => {
+    if (!hasActiveNodeUpdate) return
+    const id = setInterval(fetchNodeUpdates, JOB_POLL_INTERVAL_MS)
+    return () => clearInterval(id)
+  }, [hasActiveNodeUpdate, fetchNodeUpdates])
+
   useEffect(() => {
     const id = setInterval(() => {
       const isIdle = Date.now() - lastActivityRef.current > IDLE_THRESHOLD
@@ -292,9 +323,10 @@ export default function Updates() {
       fetchBase()
       // Панель сама запускает обновление по SSH, если нода не обновилась через агента
       fetchDeliveryJobs()
+      fetchNodeUpdates()
     }, AUTO_REFRESH_INTERVAL)
     return () => clearInterval(id)
-  }, [fetchBase, fetchDeliveryJobs, updatingPanel, updatingNodes, updatingAll, updatingEverything, isChecking])
+  }, [fetchBase, fetchDeliveryJobs, fetchNodeUpdates, updatingPanel, updatingNodes, updatingAll, updatingEverything, isChecking])
 
   const handleRefresh = useCallback(() => {
     abortRef.current = true
@@ -302,7 +334,8 @@ export default function Updates() {
     fetchBase(true)
     fetchDeliveryJobs()
     fetchHaproxyJobs()
-  }, [fetchBase, fetchDeliveryJobs, fetchHaproxyJobs])
+    fetchNodeUpdates()
+  }, [fetchBase, fetchDeliveryJobs, fetchHaproxyJobs, fetchNodeUpdates])
 
   // Дожидаемся, пока панель сначала уйдёт в перезапуск (бэкенд недоступен), а затем снова
   // поднимется, и только тогда перезагружаем страницу. Требование "сначала увидеть падение"
@@ -371,26 +404,21 @@ export default function Updates() {
     }))
 
     try {
-      const response = await systemApi.updateNode(nodeId)
-      setUpdateResults(prev => ({
-        ...prev,
-        [`node-${nodeId}`]: { success: true, message: response.data.message }
-      }))
-
-      setTimeout(() => {
-        fetchNodeVersion(nodeId)
-        setUpdatingNodes(prev => {
-          const next = new Set(prev)
-          next.delete(nodeId)
-          return next
-        })
-      }, 5000)
+      await systemApi.updateNode(nodeId)
+      // Дальше статус ведёт панель: этап обновления приходит из списка идущих обновлений
+      setUpdateResults(prev => {
+        const next = { ...prev }
+        delete next[`node-${nodeId}`]
+        return next
+      })
+      await fetchNodeUpdates()
     } catch (err: any) {
       setUpdateResults(prev => ({
         ...prev,
         [`node-${nodeId}`]: { success: false, message: err.response?.data?.detail || t('updates.failed_update') }
       }))
       toast.error(`${nodeName}: ${err.response?.data?.detail || t('updates.failed_update')}`)
+    } finally {
       setUpdatingNodes(prev => {
         const next = new Set(prev)
         next.delete(nodeId)
@@ -440,9 +468,10 @@ export default function Updates() {
     return node.version !== baseInfo.node.latest_version
   }
 
-  // Обновление через агента ноды: только онлайн, и на стабильном канале — только отстающие
+  // Обновление через агента ноды: только онлайн, не идущее уже, и на стабильном канале — только отстающие
   const canAgentUpdate = (node: NodeState): boolean =>
-    node.loadState === 'loaded' && node.status === 'online' && (isDevChannel || getNodeNeedsUpdate(node))
+    node.loadState === 'loaded' && node.status === 'online' && !nodeUpdates.has(node.id)
+    && (isDevChannel || getNodeNeedsUpdate(node))
 
   const toggleSelected = (ids: number[], on: boolean) => {
     setSelected(prev => {
@@ -519,6 +548,7 @@ export default function Updates() {
       isDevChannel={isDevChannel}
       isUpdating={updatingNodes.has(node.id)}
       updateResult={updateResults[`node-${node.id}`]}
+      agentUpdate={nodeUpdates.get(node.id)}
       deliveryJob={visibleDeliveryJob(node.id)}
       haproxyJob={haproxyJobs.get(node.id)}
       selected={selected.has(node.id)}

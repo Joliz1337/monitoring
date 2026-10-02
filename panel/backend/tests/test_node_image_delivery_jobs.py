@@ -132,6 +132,27 @@ class DeliveryJobManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(lines, ["start h1", "[panel] ok"])
         self.assertEqual(events[-1], {"type": "done", "status": "success"})
 
+    async def test_step_is_shown_in_list_but_not_in_log(self):
+        gate = asyncio.Event()
+
+        async def uploading(_t, _tag):
+            yield {"type": "step", "step": "upload", "percent": 45}
+            await gate.wait()
+            yield {"type": "done", "message": "ok"}
+
+        manager = ImageDeliveryJobManager()
+        with mock.patch.object(module, "deliver_image", uploading):
+            job_id = manager.start(1, "node-1", target("h1"), "latest")
+            await settle()
+            listed = manager.list_jobs()[0]
+            self.assertEqual((listed["step"], listed["percent"]), ("upload", 45))
+            self.assertEqual(manager.get(job_id).log, [])
+
+            gate.set()
+            await settle()
+        # Этап нужен, только пока доставка идёт
+        self.assertIsNone(manager.list_jobs()[0]["step"])
+
 
 if __name__ == "__main__":
     unittest.main()
