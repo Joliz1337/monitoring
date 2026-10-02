@@ -70,9 +70,11 @@ const ALGO_NEEDS_HASH = new Set(['source'])
 
 // maxconn 60000: к одному адресу:порту бэкенда физически не открыть больше
 // ~64k соединений (лимит исходящих портов балансера), запас оставлен на
-// TIME_WAIT и зарезервированные порты
+// TIME_WAIT и зарезервированные порты.
+// Вес 100, а не единица HAProxy: доля задаётся с шагом в процент (120 — на 20% больше),
+// и в той же шкале, что выдают авто-веса по CPU
 const DEFAULT_SERVER: BackendServer = {
-  name: 'srv1', address: '', port: 0, weight: 1,
+  name: 'srv1', address: '', port: 0, weight: 100,
   maxconn: 60000, check: true, inter: '5s', fall: 3, rise: 2,
   send_proxy: false, send_proxy_v2: true,
   backup: false, slowstart: '60s', disabled: false,
