@@ -18,15 +18,20 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from app.services import server_alerter  # noqa: E402
 from app.services.loss_alerts import (  # noqa: E402
     MIN_SAMPLES,
+    RELAY_JOIN_WINDOW_SEC,
     TOTAL_LEVEL,
     Episode,
     NO_DATA_CLOSE_SEC,
     EventKind,
+    LossEvent,
     LossPolicy,
     LossTracker,
+    RelayEvent,
+    RelayEventKind,
     RelayReading,
     collect_observations,
     format_digest,
+    history_records,
     history_text,
     total_only_targets,
 )
@@ -264,6 +269,166 @@ class EpisodeTests(unittest.TestCase):
     def test_loss_below_severity_levels_uses_threshold_only(self):
         self.assertEqual(LossPolicy(60, 300, 900).level_bounds(), [60, 90])
         self.assertEqual(LossPolicy(95, 300, 900).level_bounds(), [95])
+
+    def test_opens_with_current_level_without_worse_right_after(self):
+        # Обрыв: окно ноды доходит до порога сразу, а до 100% — через пару минут
+        tracker = LossTracker()
+        tracker.evaluate(observe(relay(30)), POLICY, 0)
+        tracker.evaluate(observe(relay(100)), POLICY, 120)
+        opened = tracker.evaluate(observe(relay(100)), POLICY, 300)
+        self.assertEqual([(e.kind, e.level) for e in opened], [(EventKind.NEW, 3)])
+        for now in range(360, 1200, 60):
+            self.assertEqual(tracker.evaluate(observe(relay(100)), POLICY, now), [], msg=f"t={now}")
+
+
+VK = (1, "вк 90 1")
+FIRST_WAVE = {  # не-Hetzner адреса — потерялись первыми
+    "176.97.210.169": "тубо", "176.97.210.175": "тубо", "176.97.210.204": "тубо", "176.97.210.52": "тубо",
+    "62.50.144.32": "Ред свитч 3", "62.50.144.34": "Ред свитч 3",
+    "62.50.146.173": "Нидерланды ред свич", "62.50.146.174": "Нидерланды ред свич",
+    "62.50.146.231": "Нидерланды ред свитч 2", "62.50.146.85": "Нидерланды ред свитч 2",
+    "62.50.146.86": "Нидерланды ред свитч 2",
+}
+HETZNER = {
+    **{f"77.42.57.{n}": "Финляндия hetzner" for n in range(73, 79)},
+    **{f"77.42.57.{n}": "Финка хетзнер 2" for n in range(105, 111)},
+    **{f"77.42.57.{n}": "Финка хетзнер 3" for n in range(97, 103)},
+}
+OWNERS = {**FIRST_WAVE, **HETZNER}
+
+
+def fleet(losses: dict[str, float], clean_relays: int = 7, missing: frozenset[int] = frozenset()):
+    """Релей VK теряет адреса из losses, остальные релеи до них доходят."""
+    rows = []
+    for ip, loss in losses.items():
+        rows.append(relay(loss, relay_id=VK[0], name=VK[1], ip=ip, rtt=None if loss >= 100 else 19.0))
+        rows.extend(relay(0, relay_id=r, name=f"relay-{r}", ip=ip) for r in range(2, 2 + clean_relays))
+    return observe(*(r for r in rows if r.relay_id not in missing))
+
+
+def relay_kinds(events) -> list[tuple]:
+    return [(e.kind, e.count, e.added) if isinstance(e, RelayEvent) else (e.kind, e.target) for e in events]
+
+
+class RelayProblemTests(unittest.TestCase):
+    """Один релей теряет много адресов, остальные до них доходят: одно сообщение
+    про релей вместо блока на каждый адрес."""
+
+    def test_incident_is_two_messages(self):
+        # Инцидент 2026-10-02: 11 адресов сразу, Hetzner FI догоняет волнами ещё 5 минут
+        hetzner = list(HETZNER)
+        onset = {ip: 0 for ip in FIRST_WAVE}
+        for start, ips in ((60, hetzner[:3]), (120, hetzner[3:7]), (180, hetzner[7:14]),
+                           (240, hetzner[14:16]), (300, hetzner[16:])):
+            onset.update({ip: start for ip in ips})
+        tracker = LossTracker()
+        messages = {}
+        for now in range(0, 2400, 60):
+            if now < 900:
+                losses = {ip: (100.0 if now - start >= 120 else 30.0) for ip, start in onset.items() if now >= start}
+            else:
+                losses = {ip: 0.0 for ip in onset}
+            events = tracker.evaluate(fleet({ip: losses.get(ip, 0.0) for ip in onset}), POLICY, now)
+            if events:
+                messages[now] = relay_kinds(events)
+        self.assertEqual(messages, {
+            300: [(RelayEventKind.OPEN, 11, 0)],
+            1800: [(RelayEventKind.RECOVERED, 29, 0)],
+        })
+        self.assertEqual((tracker.episodes, tracker.incidents), ({}, {}))
+
+    def test_one_or_two_addresses_stay_address_blocks(self):
+        tracker = LossTracker()
+        losses = {"62.50.144.32": 100.0, "62.50.144.34": 100.0, "62.50.146.86": 0.0}
+        tracker.evaluate(fleet(losses), POLICY, 0)
+        events = tracker.evaluate(fleet(losses), POLICY, 300)
+        self.assertEqual(
+            [(type(e), e.kind, e.blamed_relay_id) for e in events],
+            [(LossEvent, EventKind.NEW, 1), (LossEvent, EventKind.NEW, 1)],
+        )
+        self.assertEqual(tracker.incidents, {})
+
+    def open_incident(self, tracker: LossTracker, losses: dict[str, float]) -> None:
+        tracker.evaluate(fleet(losses), POLICY, 0)
+        events = tracker.evaluate(fleet(losses), POLICY, 300)
+        self.assertEqual(relay_kinds(events), [(RelayEventKind.OPEN, len(losses), 0)])
+
+    def test_address_lost_by_other_relays_leaves_the_group(self):
+        tracker = LossTracker()
+        losses = dict.fromkeys(list(FIRST_WAVE)[:4], 100.0)
+        self.open_incident(tracker, losses)
+        target = "176.97.210.169"
+        both_lose = fleet(losses)
+        both_lose[f"{target}:8443"] = [
+            relay(100, relay_id=2, name="relay-2", ip=target) if r.relay_id == 2 else r
+            for r in both_lose[f"{target}:8443"]
+        ]
+        tracker.evaluate(both_lose, POLICY, 360)
+        events = tracker.evaluate(both_lose, POLICY, 660)
+        self.assertEqual([(type(e), e.kind, e.target, e.blamed_relay_id) for e in events],
+                         [(LossEvent, EventKind.NEW, f"{target}:8443", None)])
+        self.assertIn(VK[0], tracker.incidents)
+
+    def test_growth_after_join_window_is_one_line(self):
+        tracker = LossTracker()
+        losses = dict.fromkeys(list(FIRST_WAVE)[:3], 100.0)
+        self.open_incident(tracker, losses)
+        late = 300 + RELAY_JOIN_WINDOW_SEC
+        losses["77.42.57.73"] = 100.0
+        tracker.evaluate(fleet(losses), POLICY, late)
+        events = tracker.evaluate(fleet(losses), POLICY, late + 300)
+        self.assertEqual(relay_kinds(events), [(RelayEventKind.GREW, 4, 1)])
+
+    def test_missing_blamed_relay_is_no_data_not_recovery(self):
+        tracker = LossTracker()
+        losses = dict.fromkeys(list(FIRST_WAVE)[:3], 100.0)
+        self.open_incident(tracker, losses)
+        # Релей VK пропал из данных, остальные до адресов доходят — это не «снизились»
+        for now in range(360, 3000, 60):
+            self.assertEqual(tracker.evaluate(fleet(losses, missing=frozenset({VK[0]})), POLICY, now), [])
+        self.assertEqual(len(tracker.episodes), 3)
+        # Час без данных — эпизоды и проблема релея закрываются молча
+        self.assertEqual(tracker.evaluate(fleet(losses, missing=frozenset({VK[0]})), POLICY, 300 + NO_DATA_CLOSE_SEC), [])
+        self.assertEqual((tracker.episodes, tracker.incidents), ({}, {}))
+
+    def test_restored_incident_is_not_reported_again(self):
+        first = LossTracker()
+        losses = dict.fromkeys(FIRST_WAVE, 100.0)
+        self.open_incident(first, losses)
+        restored = LossTracker(episodes=dict(first.episodes), incidents=dict(first.incidents))
+        for now in range(360, 2000, 60):
+            self.assertEqual(restored.evaluate(fleet(losses), POLICY, now), [])
+
+    def test_reminder_is_about_relay_not_each_address(self):
+        policy = LossPolicy(threshold=20.0, sustained_sec=300, calm_sec=900, reminder_sec=3600)
+        tracker = LossTracker()
+        losses = dict.fromkeys(FIRST_WAVE, 100.0)
+        tracker.evaluate(fleet(losses), policy, 0)
+        tracker.evaluate(fleet(losses), policy, 300)
+        self.assertEqual(tracker.evaluate(fleet(losses), policy, 3899), [])
+        self.assertEqual(relay_kinds(tracker.evaluate(fleet(losses), policy, 3900)), [(RelayEventKind.STILL, 11, 0)])
+
+    def test_digest_and_history(self):
+        tracker = LossTracker()
+        losses = dict.fromkeys(FIRST_WAVE, 100.0)
+        tracker.evaluate(fleet(losses), POLICY, 0)
+        opened = tracker.evaluate(fleet(losses), POLICY, 300)
+        [text] = format_digest(opened, OWNERS, POLICY, "ru")
+        self.assertIn("<b>Проблема на релее</b>\n<b>вк 90 1</b> — потери до 11 адресов, 100%", text)
+        self.assertIn("• другие релеи до них доходят: 7", text)
+        self.assertIn("• тубо ×4 · Нидерланды ред свитч 2 ×3 · Нидерланды ред свич ×2 · Ред свитч 3 ×2", text)
+        self.assertNotIn("176.97.210.169", text)
+        [record] = history_records(opened, OWNERS, "ru")
+        self.assertEqual((record.server_id, record.recovered, record.message),
+                         (1, False, "Проблема на релее: вк 90 1 — потери до 11 адресов, 100%"))
+        self.assertEqual(len(record.details["targets"]), 11)
+
+        recovered = RelayEvent(RelayEventKind.RECOVERED, 1, "вк 90 1", 21)
+        [text] = format_digest([recovered], OWNERS, POLICY, "ru")
+        self.assertTrue(text.startswith("\U0001f7e2"))
+        self.assertIn("<b>вк 90 1</b> — снова доходит до 21 адреса", text)
+        self.assertEqual(history_text(recovered, OWNERS, "en"),
+                         "Relay problem resolved: вк 90 1 — reaches 21 addresses again")
 
 
 class TotalOnlyEpisodeTests(unittest.TestCase):

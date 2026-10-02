@@ -776,6 +776,18 @@ class PacketLossEpisode(Base):
     last_data_at = Column(Float, nullable=False)
     notified_at = Column(Float, nullable=False)
     calm_since = Column(Float, nullable=True)
+    blamed_relay_id = Column(Integer, nullable=True)  # адрес теряет только этот релей
+
+
+class PacketLossRelayIncident(Base):
+    """Открытая проблема на релее: он один теряет несколько адресов (см. loss_alerts)."""
+    __tablename__ = "packet_loss_relay_incidents"
+
+    relay_id = Column(Integer, primary_key=True)
+    relay_name = Column(String(100), nullable=False)
+    opened_at = Column(Float, nullable=False)
+    notified_at = Column(Float, nullable=False)
+    reported = Column(Integer, nullable=False)
 
 
 class AlertHistory(Base):

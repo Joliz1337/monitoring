@@ -246,6 +246,18 @@ async def run_migrations(conn):
             except Exception:
                 pass
 
+    result = await conn.execute(text("""
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'packet_loss_episodes'
+    """))
+    loss_episode_columns = {row[0] for row in result.fetchall()}
+    if loss_episode_columns and "blamed_relay_id" not in loss_episode_columns:
+        try:
+            await conn.execute(text('ALTER TABLE packet_loss_episodes ADD COLUMN "blamed_relay_id" INTEGER'))
+            logger.info("Added column: packet_loss_episodes.blamed_relay_id")
+        except Exception:
+            pass
+
     # Check remnawave_settings columns
     result = await conn.execute(text("""
         SELECT column_name FROM information_schema.columns 

@@ -10,17 +10,17 @@ from typing import Optional
 from sqlalchemy import select, delete, func
 
 from app.database import async_session
-from app.models import Server, AlertSettings, AlertHistory, PacketLossEpisode
+from app.models import Server, AlertSettings, AlertHistory, PacketLossEpisode, PacketLossRelayIncident
 from app.services.http_client import get_node_client, node_auth_headers, sanitize_proxy
 from app.services.loss_alerts import (
+    AlertEvent,
     Episode,
-    EventKind,
-    LossEvent,
     LossPolicy,
     LossTracker,
+    RelayIncident,
     collect_observations,
     format_digest,
-    history_text,
+    history_records,
     total_only_targets,
 )
 from app.services.loss_registry import get_loss_registry
@@ -694,7 +694,7 @@ class ServerAlerter:
         if events:
             await self._send_loss_digest(settings, events, registry.owners(), policy)
 
-    async def _send_loss_digest(self, settings: AlertSettings, events: list[LossEvent],
+    async def _send_loss_digest(self, settings: AlertSettings, events: list[AlertEvent],
                                 owners: dict[str, str], policy: LossPolicy):
         lang = self._lang(settings)
         notified = False
@@ -707,30 +707,17 @@ class ServerAlerter:
             ]
             notified = all(sent)
 
-        # История — по строке на адрес, за релеем с худшими потерями: так её
-        # видно в фильтре по серверу. Напоминания — не события, в историю не идут
         entries = [
             AlertHistory(
-                server_id=event.relays[0].relay_id,
-                server_name=event.relays[0].relay_name,
-                alert_type="packet_loss_recovery" if event.kind is EventKind.RECOVERED else "packet_loss",
-                severity="info" if event.kind is EventKind.RECOVERED else "warning",
-                message=history_text(event, owners, lang),
-                details=json.dumps({
-                    "kind": event.kind.value,
-                    "target": event.target,
-                    "level": event.level,
-                    "owner": owners.get(event.target.rpartition(":")[0]),
-                    "relays": [
-                        {"server_id": r.relay_id, "name": r.relay_name,
-                         "loss_pct": r.reading.loss_pct, "rtt_ms": r.reading.rtt_ms}
-                        for r in event.relays
-                    ],
-                }, ensure_ascii=False),
+                server_id=record.server_id,
+                server_name=record.server_name,
+                alert_type="packet_loss_recovery" if record.recovered else "packet_loss",
+                severity="info" if record.recovered else "warning",
+                message=record.message,
+                details=json.dumps(record.details, ensure_ascii=False),
                 notified=notified,
             )
-            for event in events
-            if event.kind is not EventKind.STILL and event.relays
+            for record in history_records(events, owners, lang)
         ]
         if not entries:
             return
@@ -745,26 +732,48 @@ class ServerAlerter:
         try:
             async with async_session() as db:
                 rows = (await db.execute(select(PacketLossEpisode))).scalars().all()
+                incident_rows = (await db.execute(select(PacketLossRelayIncident))).scalars().all()
         except Exception as e:
             logger.warning(f"Packet loss episodes restore failed: {e}")
             return
         self._loss.episodes = {
             row.target: Episode(
                 level=row.level, opened_at=row.opened_at, last_data_at=row.last_data_at,
-                notified_at=row.notified_at, calm_since=row.calm_since,
+                notified_at=row.notified_at, calm_since=row.calm_since, blamed_relay_id=row.blamed_relay_id,
             )
             for row in rows
         }
-        self._loss_persisted = {target: asdict(e) for target, e in self._loss.episodes.items()}
+        self._loss.incidents = {
+            row.relay_id: RelayIncident(
+                relay_name=row.relay_name, opened_at=row.opened_at,
+                notified_at=row.notified_at, reported=row.reported,
+            )
+            for row in incident_rows
+        }
+        self._loss_persisted = self._loss_state()
+
+    def _loss_state(self) -> dict:
+        return {
+            "episodes": {target: asdict(e) for target, e in self._loss.episodes.items()},
+            "incidents": {relay_id: asdict(i) for relay_id, i in self._loss.incidents.items()},
+        }
 
     async def _save_loss_episodes(self):
-        current = {target: asdict(e) for target, e in self._loss.episodes.items()}
+        current = self._loss_state()
         if current == self._loss_persisted:
             return
         try:
             async with async_session() as db:
                 await db.execute(delete(PacketLossEpisode))
-                db.add_all([PacketLossEpisode(target=target, **fields) for target, fields in current.items()])
+                await db.execute(delete(PacketLossRelayIncident))
+                db.add_all([
+                    PacketLossEpisode(target=target, **fields)
+                    for target, fields in current["episodes"].items()
+                ])
+                db.add_all([
+                    PacketLossRelayIncident(relay_id=relay_id, **fields)
+                    for relay_id, fields in current["incidents"].items()
+                ])
                 await db.commit()
             self._loss_persisted = current
         except Exception as e:
