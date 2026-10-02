@@ -32,7 +32,8 @@ async def get_state() -> NetworkStateResponse:
 
 @router.post("/apply", response_model=NetworkApplyResponse)
 async def apply_addresses(request: NetworkApplyRequest) -> NetworkApplyResponse:
-    """Добавить/убрать адреса транзакцией с таймером отката; провал применения — 200 с success=false."""
+    """Добавить, убрать или вернуть снятые адреса хостера транзакцией с таймером
+    отката; провал применения — 200 с success=false."""
     try:
         return await get_extra_ip_manager().apply(request)
     except ExtraIpBusyError as exc:

@@ -14,6 +14,9 @@
 транзакция ставит маршрут, откат и провал проверки его снимают, удаление адреса
 забирает маршрут с собой; restore-runtime поднимает всё после «перезагрузки».
 Бэкенд, который поставил или снял адрес раньше самого скрипта, транзакцию не роняет.
+Снятый адрес хостера уходит с интерфейса, откат его возвращает, а цикл
+самолечения и restore-runtime снимают снова, когда конфиг хостера его вернул;
+возврат ставит адрес обратно и убирает его из suppressed.list.
 Второй тест гоняет живой трафик через два роутера-namespace: без своего шлюза
 клиент за шлюзом доп. адреса ответов не получает, со шлюзом — получает, основной
 адрес работает по-прежнему, после сноса маршрута самолечение возвращает ответы.
@@ -44,9 +47,10 @@ ip -6 route add default via fe80::1 dev eth0
 
 printf '%s\n' "eth0 2.2.2.5 2.2.2.1 1001" "eth0 2.2.2.6 2.2.2.1 1001" "eth0 3.3.3.7 3.3.3.1 1002" \
     "eth0 2001:db8:9::5 fe80::9 1003" > "$STATE/routes.list"
-out=$(bash "$SCRIPT" sync-routes) || fail "sync-routes: $out"
-[ "$out" != "ROUTES_CHANGED=0" ] || fail "first sync changed nothing"
-out=$(bash "$SCRIPT" sync-routes)
+routes_changed() { bash "$SCRIPT" sync-runtime | head -1; }
+out=$(routes_changed)
+[ "$out" != "ROUTES_CHANGED=0" ] || fail "first sync changed nothing: $out"
+out=$(routes_changed)
 [ "$out" = "ROUTES_CHANGED=0" ] || fail "second sync is not a no-op: $out"
 ip rule show | grep -q "^999:.*lookup main suppress_prefixlength 0" || fail "v4 suppress rule missing"
 ip -6 rule show | grep -q "^1000:.*from 2001:db8:9::5 lookup 1003" || fail "v6 rule missing"
@@ -58,24 +62,24 @@ ip route get 8.8.8.8 | grep -q "via 10.0.0.1" || fail "unbound traffic must keep
 
 ip route flush table 1002
 ip rule del from 2.2.2.6 lookup 1001 priority 1000
-out=$(bash "$SCRIPT" sync-routes)
+out=$(routes_changed)
 [ "$out" = "ROUTES_CHANGED=2" ] || fail "self-heal: $out"
 
 sed -i '/3.3.3.7/d' "$STATE/routes.list"
-bash "$SCRIPT" sync-routes >/dev/null
+bash "$SCRIPT" sync-runtime >/dev/null
 ip rule show | grep -q "3.3.3.7" && fail "stale rule kept"
 [ -z "$(ip route show table 1002)" ] || fail "unused table kept"
 
 : > "$STATE/routes.list"
-bash "$SCRIPT" sync-routes >/dev/null
+bash "$SCRIPT" sync-runtime >/dev/null
 ip rule show | grep -qE "^(999|1000):" && fail "v4 rules left"
 ip -6 rule show | grep -qE "^(999|1000):" && fail "v6 rules left"
 ip route show table all | grep -qE "table 10[0-9][0-9]" && fail "tables left"
 
 b64() { printf '%s' "$1" | base64 -w0; }
 plan() {
-    printf 'TX_ID=%s\nIFACE=eth0\nBACKEND=fallback\nDETAIL=x\nTIMEOUT=30\nADD=%s\nREMOVE=%s\nPROTECTED=10.0.0.2\nMANAGED_B64=%s\nROUTES_B64=%s\n' \
-        "$1" "$2" "$3" "$(b64 "$4")" "$(b64 "$5")"
+    printf 'TX_ID=%s\nIFACE=eth0\nBACKEND=fallback\nDETAIL=x\nTIMEOUT=30\nADD=%s\nREMOVE=%s\nPROTECTED=10.0.0.2\nMANAGED_B64=%s\nROUTES_B64=%s\nSUPPRESSED_B64=%s\n' \
+        "$1" "$2" "$3" "$(b64 "$4")" "$(b64 "$5")" "$(b64 "${6:-}")"
 }
 NL='
 '
@@ -126,6 +130,32 @@ bash "$SCRIPT" confirm 20260925-120310-abcd >/dev/null
 plan 20260925-120320-abcd "" 7.7.7.7/32 "" "" | racy_apply || fail "remove lost the race with the backend"
 bash "$SCRIPT" confirm 20260925-120320-abcd >/dev/null
 ip addr show dev eth0 | grep -q "7.7.7.7/32" && fail "raced remove left the address"
+
+on_eth0() { ip addr show dev eth0 | grep -q "$1"; }
+ip addr add 6.6.6.6/32 dev eth0
+plan 20260925-120400-eeee "" 6.6.6.6/32 "" "" "eth0 6.6.6.6/32$NL" | bash "$SCRIPT" apply >/dev/null || fail "suppress"
+on_eth0 6.6.6.6/32 && fail "suppressed address is still on the interface"
+grep -qx "eth0 6.6.6.6/32" "$STATE/suppressed.list" || fail "suppressed.list not written"
+bash "$SCRIPT" rollback 20260925-120400-eeee >/dev/null || fail "rollback of suppress"
+on_eth0 6.6.6.6/32 || fail "rollback did not bring the hoster address back"
+[ -s "$STATE/suppressed.list" ] && fail "rollback kept the address in suppressed.list"
+
+plan 20260925-120500-ffff "" 6.6.6.6/32 "" "" "eth0 6.6.6.6/32$NL" | bash "$SCRIPT" apply >/dev/null || fail "suppress 2"
+bash "$SCRIPT" confirm 20260925-120500-ffff >/dev/null
+ip addr add 6.6.6.6/32 dev eth0
+[ "$(bash "$SCRIPT" sync-runtime | tail -1)" = "ADDRS_DROPPED=1" ] || fail "self-heal kept the hoster address"
+on_eth0 6.6.6.6/32 && fail "self-heal did not drop the hoster address"
+[ "$(bash "$SCRIPT" sync-runtime | tail -1)" = "ADDRS_DROPPED=0" ] || fail "idle self-heal is not a no-op"
+ip addr add 6.6.6.6/32 dev eth0
+bash "$SCRIPT" restore-runtime || fail "restore-runtime with a suppressed address"
+on_eth0 6.6.6.6/32 && fail "restore-runtime kept the suppressed address"
+
+plan 20260925-120600-0000 6.6.6.6/32 "" "" "" "" | bash "$SCRIPT" apply >/dev/null || fail "restore"
+bash "$SCRIPT" confirm 20260925-120600-0000 >/dev/null
+on_eth0 6.6.6.6/32 || fail "restored address is missing"
+[ -s "$STATE/suppressed.list" ] && fail "restored address is still suppressed"
+bash "$SCRIPT" sync-runtime >/dev/null
+on_eth0 6.6.6.6/32 || fail "self-heal dropped a restored address"
 echo "ALL OK"
 """
 
@@ -181,7 +211,7 @@ client_ping 10.0.0.2 && fail "primary address replies must keep going via the ma
 
 ip route flush table 1001
 client_ping 5.5.5.5 && fail "damage was not simulated"
-[ "$(bash "$SCRIPT" sync-routes)" = "ROUTES_CHANGED=1" ] || fail "self-heal"
+[ "$(bash "$SCRIPT" sync-runtime | head -1)" = "ROUTES_CHANGED=1" ] || fail "self-heal"
 client_ping 5.5.5.5 || fail "replies are not back after self-heal"
 
 kill "$PA" "$PB" 2>/dev/null

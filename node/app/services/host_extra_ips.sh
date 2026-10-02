@@ -17,6 +17,11 @@
 # `default via <gw> onlink` in that table. routes.list is the desired state;
 # routes_sync makes the kernel match it (apply, rollback, boot, agent self-heal).
 #
+# A hoster address the panel removed stays in the hoster's config — editing a
+# foreign network config risks the server after a reboot. suppressed.list keeps
+# it off the interface instead: it is dropped after boot and whenever the
+# network stack brings it back (apply verification, agent self-heal).
+#
 # Verbs:
 #   detect <iface>             backend facts (netplan/networkd/NetworkManager/ifupdown)
 #   apply                      plan on stdin (KEY=value lines)
@@ -24,8 +29,10 @@
 #   rollback <tx>              manual rollback of a pending transaction
 #   rollback-unconfirmed <tx>  timer target: roll back if still unconfirmed
 #   boot-guard                 systemd unit: roll back a transaction left over from the previous boot
-#   restore-runtime            systemd unit: re-add managed addresses and gateway routes after boot
-#   sync-routes                agent self-heal: restore gateway rules/routes, print ROUTES_CHANGED=n
+#   restore-runtime            systemd unit after boot: re-add managed addresses and gateway routes,
+#                              drop suppressed addresses
+#   sync-runtime               agent self-heal: restore gateway rules/routes, drop suppressed addresses;
+#                              prints ROUTES_CHANGED=n and ADDRS_DROPPED=n
 #   self-test                  check tooling, print SELFTEST=ok
 #
 # Exit codes: 0 ok, 2 bad arguments/plan/status, 3 busy (a transaction is pending),
@@ -39,6 +46,9 @@ STATE_DIR="${EXTRA_IPS_STATE_DIR:-/opt/monitoring/network}"
 MANAGED_FILE="$STATE_DIR/managed.list"
 ROUTES_FILE="$STATE_DIR/routes.list"
 ROUTES_NEXT="$STATE_DIR/routes.list.next"
+SUPPRESSED_FILE="$STATE_DIR/suppressed.list"
+# Saved in every transaction backup and restored together with the config files
+STATE_LISTS="managed.list routes.list suppressed.list"
 TX_FILE="$STATE_DIR/transaction.env"
 HISTORY_FILE="$STATE_DIR/history.log"
 BACKUP_ROOT="$STATE_DIR/backups"
@@ -65,6 +75,7 @@ GW_RULE_PRIORITY=1000
 # default route is picked by source address.
 GW_SUPPRESS_PRIORITY=999
 ROUTES_CHANGED=0
+ADDRS_DROPPED=0
 
 # Transaction fields (mirrored in transaction.env)
 TX_ID=""; TX_STATUS=""; TX_IFACE=""; TX_BACKEND=""; TX_DETAIL=""
@@ -319,6 +330,20 @@ routes_missing() {
     done
 }
 
+# ------------------------------------------------------- suppressed addresses
+
+drop_suppressed() {
+    local iface addr
+    [ -f "$SUPPRESSED_FILE" ] || return 0
+    while read -r iface addr; do
+        [ -n "$iface" ] && [ -n "$addr" ] || continue
+        [ -d "/sys/class/net/$iface" ] || continue
+        has_addr "$iface" "$addr" || continue
+        ip_del "$addr" "$iface" && ADDRS_DROPPED=$((ADDRS_DROPPED + 1))
+    done < "$SUPPRESSED_FILE"
+    return 0
+}
+
 # ------------------------------------------------------------------- backends
 
 # Prints facts for every backend that is present; the agent picks the one that
@@ -389,8 +414,9 @@ backend_apply() {
             out=$(networkctl reload 2>&1) || { log "networkctl reload: $out"; return 1; }
             ;;
         networkmanager)
-            for addr in $TX_ADD; do out=$(nm_modify + "$addr" 2>&1) || { log "nmcli: $out"; return 1; }; done
-            for addr in $TX_REMOVE; do out=$(nm_modify - "$addr" 2>&1) || { log "nmcli: $out"; return 1; }; done
+            # Only panel-managed addresses: a suppressed hoster address stays in the connection
+            for addr in $NM_ADD; do out=$(nm_modify + "$addr" 2>&1) || { log "nmcli: $out"; return 1; }; done
+            for addr in $NM_REMOVE; do out=$(nm_modify - "$addr" 2>&1) || { log "nmcli: $out"; return 1; }; done
             out=$(nmcli device reapply "$TX_IFACE" 2>&1) || { log "nmcli device reapply: $out"; return 1; }
             ;;
         ifupdown)
@@ -424,12 +450,12 @@ backend_restore() {
     esac
 }
 
-# The unit re-adds fallback addresses and gateway routes after boot. restore-runtime
-# is idempotent (addresses a backend already set are skipped), so the unit is
-# simply enabled while there is anything to restore.
+# The unit re-adds fallback addresses and gateway routes and drops suppressed
+# addresses after boot. restore-runtime is idempotent (addresses a backend already
+# set are skipped), so the unit is simply enabled while there is anything to do.
 sync_persist_unit() {
     command -v systemctl >/dev/null 2>&1 || return 0
-    if [ -s "$MANAGED_FILE" ] || [ -s "$ROUTES_FILE" ]; then
+    if [ -s "$MANAGED_FILE" ] || [ -s "$ROUTES_FILE" ] || [ -s "$SUPPRESSED_FILE" ]; then
         systemctl enable "$PERSIST_UNIT" >/dev/null 2>&1
     else
         systemctl disable "$PERSIST_UNIT" >/dev/null 2>&1
@@ -442,7 +468,8 @@ PLAN_FILES=()
 PLAN_ABSENT=()
 PLAN_MANAGED_B64=""
 PLAN_ROUTES_B64=""
-NM_CONNECTION=""; NM_KEYFILE=""; NM_IPV4_ADDRESSES=""; NM_IPV6_ADDRESSES=""
+PLAN_SUPPRESSED_B64=""
+NM_CONNECTION=""; NM_KEYFILE=""; NM_IPV4_ADDRESSES=""; NM_IPV6_ADDRESSES=""; NM_ADD=""; NM_REMOVE=""
 BEFORE_ALL=""; BEFORE_STATIC=""; DEFAULT4=no; DEFAULT6=no
 
 read_plan() {
@@ -458,8 +485,11 @@ read_plan() {
             REMOVE=*) TX_REMOVE="${line#*=}" ;;
             MANAGED_B64=*) PLAN_MANAGED_B64="${line#*=}" ;;
             ROUTES_B64=*) PLAN_ROUTES_B64="${line#*=}" ;;
+            SUPPRESSED_B64=*) PLAN_SUPPRESSED_B64="${line#*=}" ;;
             NM_CONNECTION=*) NM_CONNECTION="${line#*=}" ;;
             NM_KEYFILE=*) NM_KEYFILE="${line#*=}" ;;
+            NM_ADD=*) NM_ADD="${line#*=}" ;;
+            NM_REMOVE=*) NM_REMOVE="${line#*=}" ;;
             FILE=*) PLAN_FILES+=("${line#FILE=}") ;;
             ABSENT=*) PLAN_ABSENT+=("${line#ABSENT=}") ;;
         esac
@@ -481,7 +511,7 @@ validate_plan() {
     [[ "$TX_TIMEOUT" =~ ^[0-9]+$ ]] && [ "$TX_TIMEOUT" -ge 30 ] && [ "$TX_TIMEOUT" -le 600 ] || die 2 "bad timeout"
     case "$TX_BACKEND" in netplan|networkd|networkmanager|ifupdown|fallback) ;; *) die 2 "bad backend" ;; esac
     [ -n "$TX_ADD$TX_REMOVE" ] || die 2 "nothing to apply"
-    for addr in $TX_ADD $TX_REMOVE; do valid_cidr "$addr" || die 2 "bad address $addr"; done
+    for addr in $TX_ADD $TX_REMOVE $NM_ADD $NM_REMOVE; do valid_cidr "$addr" || die 2 "bad address $addr"; done
     for entry in "${PLAN_FILES[@]}"; do
         path=$(printf '%s' "$entry" | awk '{print $2}')
         allowed_path "$path" || die 2 "path not allowed: $path"
@@ -517,7 +547,7 @@ backup_path() {
 }
 
 backup_transaction() {
-    local dir="$BACKUP_ROOT/$TX_ID" entry path
+    local dir="$BACKUP_ROOT/$TX_ID" entry path name
     rm -rf "$dir" && mkdir -p "$dir/files" || return 1
     : > "$dir/manifest"
     BACKUP_COUNT=0
@@ -527,8 +557,9 @@ backup_transaction() {
     done
     for path in "${PLAN_ABSENT[@]}"; do backup_path "$dir" "$path" || return 1; done
     if [ -n "$NM_KEYFILE" ]; then backup_path "$dir" "$NM_KEYFILE" || return 1; fi
-    if [ -f "$MANAGED_FILE" ]; then cp -p "$MANAGED_FILE" "$dir/managed.list.bak" || return 1; fi
-    if [ -f "$ROUTES_FILE" ]; then cp -p "$ROUTES_FILE" "$dir/routes.list.bak" || return 1; fi
+    for name in $STATE_LISTS; do
+        if [ -f "$STATE_DIR/$name" ]; then cp -p "$STATE_DIR/$name" "$dir/$name.bak" || return 1; fi
+    done
     {
         printf 'BACKEND=%s\nIFACE=%s\nADD=%s\nREMOVE=%s\n' "$TX_BACKEND" "$TX_IFACE" "$TX_ADD" "$TX_REMOVE"
         printf 'BEFORE_ALL=%s\nBEFORE_STATIC=%s\nDEFAULT4=%s\nDEFAULT6=%s\n' "$BEFORE_ALL" "$BEFORE_STATIC" "$DEFAULT4" "$DEFAULT6"
@@ -569,7 +600,7 @@ write_plan_files() {
 }
 
 restore_files() {
-    local dir="$BACKUP_ROOT/$1" path copy
+    local dir="$BACKUP_ROOT/$1" path copy name
     [ -f "$dir/manifest" ] || return 1
     while IFS=$'\t' read -r path copy; do
         [ -n "$path" ] || continue
@@ -579,16 +610,13 @@ restore_files() {
             mkdir -p "$(dirname "$path")" && cp -p "$dir/$copy" "$path" || return 1
         fi
     done < "$dir/manifest"
-    if [ -f "$dir/managed.list.bak" ]; then
-        cp -p "$dir/managed.list.bak" "$MANAGED_FILE"
-    else
-        rm -f "$MANAGED_FILE"
-    fi
-    if [ -f "$dir/routes.list.bak" ]; then
-        cp -p "$dir/routes.list.bak" "$ROUTES_FILE"
-    else
-        rm -f "$ROUTES_FILE"
-    fi
+    for name in $STATE_LISTS; do
+        if [ -f "$dir/$name.bak" ]; then
+            cp -p "$dir/$name.bak" "$STATE_DIR/$name"
+        else
+            rm -f "$STATE_DIR/$name"
+        fi
+    done
     rm -f "$ROUTES_NEXT"
 }
 
@@ -634,6 +662,9 @@ verify_apply() {
             return 1
         fi
         [ "$attempt" -eq "$READD_AFTER_ATTEMPT" ] && readd_lost_static
+        # A removed hoster address is still in the hoster config: networkd puts it
+        # back while it reconfigures the link after a reload
+        for addr in $TX_REMOVE; do ip_del "$addr" "$TX_IFACE"; done
         # networkd drops foreign routes and rules while it reconfigures the link after a reload
         [ -n "$routes_gap" ] && routes_sync "$ROUTES_NEXT"
         attempt=$((attempt + 1))
@@ -681,6 +712,10 @@ restore_transaction() {
     cancel_timer
     finish_tx "$status" "$reason"
     return "$failed"
+}
+
+write_b64() {
+    printf '%s' "$1" | base64 -d > "$2.tmp" && mv -f "$2.tmp" "$2"
 }
 
 fail_apply() {
@@ -731,10 +766,12 @@ cmd_apply() {
         fail_apply "$VERIFY_ERROR"
     fi
 
-    if ! { printf '%s' "$PLAN_MANAGED_B64" | base64 -d > "$MANAGED_FILE.tmp" && mv -f "$MANAGED_FILE.tmp" "$MANAGED_FILE" \
+    if ! { write_b64 "$PLAN_MANAGED_B64" "$MANAGED_FILE" && write_b64 "$PLAN_SUPPRESSED_B64" "$SUPPRESSED_FILE" \
             && mv -f "$ROUTES_NEXT" "$ROUTES_FILE"; }; then
-        fail_apply "cannot write managed list"
+        fail_apply "cannot write address lists"
     fi
+    # The backend re-applied the hoster config, and with it the addresses suppressed earlier
+    drop_suppressed
     sync_persist_unit
 
     TX_STATUS=pending; TX_DEADLINE_AT=$(( $(now) + TX_TIMEOUT )); save_tx
@@ -800,16 +837,19 @@ cmd_restore_runtime() {
         done < "$MANAGED_FILE"
     fi
     routes_sync "$ROUTES_FILE"
+    drop_suppressed
 }
 
-cmd_sync_routes() {
+cmd_sync_runtime() {
     local status=0
     ensure_state_dir || die 2 "cannot create $STATE_DIR"
     exec 9>"$LOCK_FILE"
-    # Non-blocking: a running transaction holds the lock and syncs routes itself
+    # Non-blocking: a running transaction holds the lock and syncs everything itself
     flock -n 9 || die 3 "busy: another extra-ips operation holds the lock"
     routes_sync "$ROUTES_FILE" || status=1
+    drop_suppressed
     echo "ROUTES_CHANGED=$ROUTES_CHANGED"
+    echo "ADDRS_DROPPED=$ADDRS_DROPPED"
     return "$status"
 }
 
@@ -831,7 +871,7 @@ case "${1:-}" in
     rollback-unconfirmed) [ -n "${2:-}" ] || die 2 "usage: $0 rollback-unconfirmed <tx>"; cmd_rollback "$2" "not confirmed by the panel in time, restored from backup" yes ;;
     boot-guard) cmd_boot_guard ;;
     restore-runtime) cmd_restore_runtime ;;
-    sync-routes) cmd_sync_routes ;;
+    sync-runtime) cmd_sync_runtime ;;
     self-test) cmd_self_test ;;
-    *) die 2 "usage: $0 detect <iface> | apply | confirm <tx> | rollback <tx> | rollback-unconfirmed <tx> | boot-guard | restore-runtime | sync-routes | self-test" ;;
+    *) die 2 "usage: $0 detect <iface> | apply | confirm <tx> | rollback <tx> | rollback-unconfirmed <tx> | boot-guard | restore-runtime | sync-runtime | self-test" ;;
 esac

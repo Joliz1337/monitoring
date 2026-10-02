@@ -5,8 +5,8 @@ guard'ы, файлы состояния, план для host-скрипта и 
 
 Инварианты, которые здесь закреплены: определение netplan резолвится по
 set-name/MAC, а не только по имени (иначе появится второе определение того же
-устройства); удалять можно только свои адреса и никогда — адрес панели или
-основной; огороженный блок в /etc/network/interfaces заменяется, не трогая
+устройства); свои адреса удаляются из конфига, адреса хостера снимаются поверх
+него, и никогда — адрес панели, основной или DHCP; огороженный блок в /etc/network/interfaces заменяется, не трогая
 байты вне него; таймаут nginx на /api/system/network/ покрывает apply.
 """
 
@@ -37,6 +37,7 @@ from app.services.extra_ips import (  # noqa: E402
     IFUPDOWN_BLOCK_END,
     PERSIST_UNIT,
     TX_ID_RE,
+    AddressChange,
     Backend,
     BackendKind,
     DefaultRoute,
@@ -53,15 +54,15 @@ from app.services.extra_ips import (  # noqa: E402
     parse_apply_output,
     parse_default_routes,
     parse_history,
+    parse_address_list,
     parse_ip_addr,
-    parse_managed,
     parse_netplan_definitions,
     parse_routes,
     parse_transaction,
     plan_routes,
     primary_addresses,
+    render_address_list,
     render_ifupdown_stanzas,
-    render_managed,
     render_netplan,
     render_networkd_dropin,
     render_routes,
@@ -314,13 +315,14 @@ class GuardTests(unittest.TestCase):
         base.update(kwargs)
         return NetworkApplyRequest(**base)
 
-    def check(self, request, routes=()):
-        return check_request(request, self.interfaces, self.physical, self.managed, self.primary, list(routes))
+    def check(self, request, routes=(), suppressed=(), primary=None):
+        return check_request(request, self.interfaces, self.physical, self.managed, list(suppressed),
+                             self.primary if primary is None else primary, list(routes))
 
     def test_add_new_address(self):
-        add, remove = self.check(self.request(add=[{"address": "203.0.113.12", "prefix": 32}]))
-        self.assertEqual([s.cidr for s in add], ["203.0.113.12/32"])
-        self.assertEqual(remove, [])
+        change = self.check(self.request(add=[{"address": "203.0.113.12", "prefix": 32}]))
+        self.assertEqual([s.cidr for s in change.add], ["203.0.113.12/32"])
+        self.assertEqual(change.disappearing, [])
 
     def test_add_of_managed_present_address_is_skipped(self):
         with self.assertRaises(ExtraIpValidationError):
@@ -334,20 +336,48 @@ class GuardTests(unittest.TestCase):
         with self.assertRaises(ExtraIpValidationError):
             self.check(self.request(add=[{"address": "10.0.0.5", "prefix": 32}]))
 
-    def test_remove_only_managed(self):
+    def test_remove_splits_own_and_hoster_addresses(self):
+        change = self.check(self.request(remove=[{"address": "203.0.113.11", "prefix": 32},
+                                                 {"address": "2001:db8::11", "prefix": 128}]),
+                            primary={"203.0.113.10/24"})
+        self.assertEqual([s.cidr for s in change.remove], ["203.0.113.11/32"])
+        self.assertEqual([s.cidr for s in change.suppress], ["2001:db8::11/128"])
+        self.assertEqual([s.cidr for s in change.disappearing], ["203.0.113.11/32", "2001:db8::11/128"])
+
+    def test_hoster_address_that_is_dhcp_or_absent_is_refused(self):
+        with self.assertRaises(ExtraIpValidationError) as ctx:
+            self.check(self.request(protected=[], remove=[{"address": "203.0.113.10", "prefix": 24}]), primary=set())
+        self.assertIn("DHCP", str(ctx.exception))
         with self.assertRaises(ExtraIpValidationError):
-            self.check(self.request(remove=[{"address": "203.0.113.10", "prefix": 24}]))
-        add, remove = self.check(self.request(remove=[{"address": "203.0.113.11", "prefix": 32}]))
-        self.assertEqual([s.cidr for s in remove], ["203.0.113.11/32"])
+            self.check(self.request(remove=[{"address": "198.51.100.9", "prefix": 32}]))
 
     def test_remove_protected_and_primary_refused(self):
         managed = self.managed + [("eth0", "203.0.113.10/24"), ("eth0", "2001:db8::11/128")]
         with self.assertRaises(ExtraIpValidationError):
             check_request(self.request(remove=[{"address": "203.0.113.10", "prefix": 24}]),
-                          self.interfaces, self.physical, managed, self.primary, [])
+                          self.interfaces, self.physical, managed, [], self.primary, [])
         with self.assertRaises(ExtraIpValidationError):
             check_request(self.request(protected=[], remove=[{"address": "2001:db8::11", "prefix": 128}]),
-                          self.interfaces, self.physical, managed, self.primary, [])
+                          self.interfaces, self.physical, managed, [], self.primary, [])
+        # Адрес панели не снимается, даже если он настроен хостером и не основной
+        with self.assertRaises(ExtraIpValidationError):
+            self.check(self.request(protected=["2001:db8::11"], remove=[{"address": "2001:db8::11", "prefix": 128}]),
+                       primary=set())
+
+    def test_restore_only_what_the_panel_removed(self):
+        suppressed = [("eth0", "198.51.100.9/32"), ("eth1", "10.0.0.9/32")]
+        change = self.check(self.request(restore=[{"address": "198.51.100.9", "prefix": 32}]), suppressed=suppressed)
+        self.assertEqual([s.cidr for s in change.restore], ["198.51.100.9/32"])
+        self.assertEqual([s.cidr for s in change.appearing], ["198.51.100.9/32"])
+        for spec in ({"address": "203.0.113.12", "prefix": 32}, {"address": "10.0.0.9", "prefix": 32}):
+            with self.assertRaises(ExtraIpValidationError):
+                self.check(self.request(restore=[spec]), suppressed=suppressed)
+
+    def test_add_of_removed_hoster_address_points_to_restore(self):
+        with self.assertRaises(ExtraIpValidationError) as ctx:
+            self.check(self.request(add=[{"address": "198.51.100.9", "prefix": 32}]),
+                       suppressed=[("eth0", "198.51.100.9/32")])
+        self.assertIn("restore it instead", str(ctx.exception))
 
     def test_interface_must_be_physical_and_up(self):
         with self.assertRaises(ExtraIpValidationError):
@@ -372,6 +402,12 @@ class GuardTests(unittest.TestCase):
                                       protected=["not-an-ip", "1.2.3.1"])
         self.assertEqual(len(request.add), 1)
         self.assertEqual(request.protected, ["1.2.3.1"])
+        self.assertEqual(len(NetworkApplyRequest(interface="eth0", restore=[{"address": "1.2.3.4", "prefix": 32}]).restore), 1)
+        with self.assertRaises(ValueError):
+            NetworkApplyRequest(interface="eth0", restore=[{"address": "1.2.3.4", "prefix": 32}],
+                                remove=[{"address": "1.2.3.4", "prefix": 32}])
+        with self.assertRaises(ValueError):
+            NetworkApplyRequest(interface="eth0", restore=[{"address": "1.2.3.4", "prefix": 32, "gateway": "1.2.3.1"}])
 
     def test_model_validates_gateway(self):
         self.assertEqual(AddressSpec(address="2001:db8::2", prefix=64, gateway="FE80::1").gateway, "fe80::1")
@@ -391,8 +427,8 @@ class GuardTests(unittest.TestCase):
         routes = [GatewayRoute("eth0", "203.0.113.11", "198.51.100.1", 1001)]
         same = self.request(add=[{"address": "203.0.113.11", "prefix": 32, "gateway": "198.51.100.1"},
                                  {"address": "203.0.113.12", "prefix": 32}])
-        add, _ = self.check(same, routes)
-        self.assertEqual([s.cidr for s in add], ["203.0.113.12/32"])
+        change = self.check(same, routes)
+        self.assertEqual([s.cidr for s in change.add], ["203.0.113.12/32"])
         for gateway in ("198.51.100.9", None):
             with self.assertRaises(ExtraIpValidationError) as ctx:
                 self.check(self.request(add=[{"address": "203.0.113.11", "prefix": 32, "gateway": gateway}]), routes)
@@ -440,10 +476,10 @@ class GatewayRouteTests(unittest.TestCase):
 
 
 class StateFileTests(unittest.TestCase):
-    def test_managed_round_trip(self):
+    def test_address_list_round_trip(self):
         entries = [("eth0", "203.0.113.11/32"), ("eth0", "2001:db8::10/64"), ("eth1", "10.0.0.9/32")]
-        self.assertEqual(parse_managed(render_managed(entries)), entries)
-        self.assertEqual(parse_managed("eth0 1.2.3.4/32\neth0 1.2.3.4/32\n\nbroken\n"), [("eth0", "1.2.3.4/32")])
+        self.assertEqual(parse_address_list(render_address_list(entries)), entries)
+        self.assertEqual(parse_address_list("eth0 1.2.3.4/32\neth0 1.2.3.4/32\n\nbroken\n"), [("eth0", "1.2.3.4/32")])
 
     def test_transaction_parse(self):
         text = ("TX_ID=20260902-101500-ab12\nTX_STATUS=pending\nTX_IFACE=eth0\nTX_BACKEND=netplan\n"
@@ -475,17 +511,22 @@ class PlanTests(unittest.TestCase):
 
     def test_plan_text(self):
         backend = Backend(BackendKind.NETWORKMANAGER, detail="Wired", nm_connection="Wired", nm_keyfile="/etc/NetworkManager/system-connections/w.nmconnection")
+        spec = lambda address: AddressSpec(address=address, prefix=32)  # noqa: E731
+        change = AddressChange(add=[spec("203.0.113.11")], remove=[spec("203.0.113.12")],
+                               suppress=[spec("203.0.113.13")], restore=[spec("203.0.113.14")])
         plan = build_plan(
-            "20260902-101500-ab12", "eth0", backend,
-            [AddressSpec(address="203.0.113.11", prefix=32)], [AddressSpec(address="203.0.113.12", prefix=32)],
-            ["203.0.113.10"], 120, "eth0 203.0.113.11/32\n", "eth0 203.0.113.11 198.51.100.1 1001\n",
+            "20260902-101500-ab12", "eth0", backend, change,
+            ["203.0.113.10"], 120, "eth0 203.0.113.11/32\n", "eth0 203.0.113.13/32\n", "eth0 203.0.113.11 198.51.100.1 1001\n",
             [PlanFile("/etc/netplan/60-monitoring-extra-ips.yaml", "600", "network:\n"), PlanFile("/etc/systemd/network/x.d/m.conf", "644", None)],
         )
         self.assertIn("TX_ID=20260902-101500-ab12\nIFACE=eth0\nBACKEND=networkmanager\nDETAIL=Wired\nTIMEOUT=120\n", plan)
-        self.assertIn("ADD=203.0.113.11/32\nREMOVE=203.0.113.12/32\nPROTECTED=203.0.113.10\n", plan)
+        self.assertIn("ADD=203.0.113.11/32 203.0.113.14/32\nREMOVE=203.0.113.12/32 203.0.113.13/32\nPROTECTED=203.0.113.10\n", plan)
         self.assertIn("MANAGED_B64=" + base64.b64encode(b"eth0 203.0.113.11/32\n").decode(), plan)
+        self.assertIn("SUPPRESSED_B64=" + base64.b64encode(b"eth0 203.0.113.13/32\n").decode(), plan)
         self.assertIn("ROUTES_B64=" + base64.b64encode(b"eth0 203.0.113.11 198.51.100.1 1001\n").decode(), plan)
         self.assertIn("NM_CONNECTION=Wired\nNM_KEYFILE=/etc/NetworkManager/system-connections/w.nmconnection\n", plan)
+        # В соединение NetworkManager уходят только свои адреса, адрес хостера в нём остаётся
+        self.assertIn("NM_ADD=203.0.113.11/32\nNM_REMOVE=203.0.113.12/32\n", plan)
         self.assertIn("FILE=600 /etc/netplan/60-monitoring-extra-ips.yaml " + base64.b64encode(b"network:\n").decode(), plan)
         self.assertIn("ABSENT=/etc/systemd/network/x.d/m.conf\n", plan)
 
@@ -514,7 +555,7 @@ class ScriptTests(unittest.TestCase):
         self.assertEqual(check.returncode, 0, check.stderr.decode("utf-8", "replace"))
 
     def test_script_has_every_verb_and_accurate_timer(self):
-        for verb in ("detect", "apply", "confirm", "rollback", "rollback-unconfirmed", "boot-guard", "restore-runtime", "sync-routes", "self-test"):
+        for verb in ("detect", "apply", "confirm", "rollback", "rollback-unconfirmed", "boot-guard", "restore-runtime", "sync-runtime", "self-test"):
             self.assertIsNotNone(re.search(rf"^\s+{re.escape(verb)}\)", HOST_SCRIPT, re.MULTILINE), f"verb {verb} missing")
         self.assertIn("--timer-property=AccuracySec=1s", HOST_SCRIPT)
         self.assertIn("set -u", HOST_SCRIPT)
@@ -614,13 +655,58 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(base64.b64decode(routes_line.split("=", 1)[1]).decode(),
                          "eth1 10.0.0.9 10.0.0.1 1001\neth0 198.51.100.5 198.51.100.1 1002\n")
 
-    def test_sync_routes_runs_only_when_there_are_routes(self):
-        manager, executor = self.manager({"extra-ips.sh sync-routes": FakeResult(stdout="ROUTES_CHANGED=2\n")})
-        run(manager.sync_routes())
+    def test_sync_runs_only_when_there_are_routes_or_removed_hoster_addresses(self):
+        answer = {"extra-ips.sh sync-runtime": FakeResult(stdout="ROUTES_CHANGED=0\nADDRS_DROPPED=1\n")}
+        manager, executor = self.manager(answer)
+        run(manager.sync_runtime())
         self.assertEqual(executor.commands, [])
-        (self.state_dir / "routes.list").write_text("eth0 198.51.100.5 198.51.100.1 1001\n")
-        run(manager.sync_routes())
-        self.assertTrue(any("extra-ips.sh sync-routes" in c for c in executor.commands))
+        for name, line in (("routes.list", "eth0 198.51.100.5 198.51.100.1 1001\n"), ("suppressed.list", "eth0 198.51.100.9/32\n")):
+            for other in ("routes.list", "suppressed.list"):
+                (self.state_dir / other).unlink(missing_ok=True)
+            (self.state_dir / name).write_text(line)
+            manager, executor = self.manager(answer)
+            run(manager.sync_runtime())
+            self.assertTrue(any("extra-ips.sh sync-runtime" in c for c in executor.commands), name)
+
+    def plan_of(self, executor: FakeExecutor) -> dict[str, str]:
+        apply_command = next(c for c in executor.commands if "extra-ips.sh apply" in c)
+        plan = base64.b64decode(re.search(r"printf '%s' '([A-Za-z0-9+/=]+)'", apply_command).group(1)).decode()
+        return dict(line.split("=", 1) for line in plan.splitlines() if "=" in line and not line.startswith("FILE="))
+
+    def test_apply_removes_hoster_address_without_touching_own_config(self):
+        (self.state_dir / "managed.list").write_text("eth0 203.0.113.11/32\n")
+        answers = self.live_answers()
+        answers["extra-ips.sh apply"] = FakeResult(stdout="TX_ID=20260902-101500-ab12\nTX_STATUS=pending\n")
+        manager, executor = self.manager(answers)
+        # Основной IPv6 — 2001:db8::10/64 (первый не наш), 2001:db8::11/128 — адрес хостера
+        request = NetworkApplyRequest(interface="eth0", protected=["203.0.113.10"],
+                                      remove=[{"address": "2001:db8::11", "prefix": 128}])
+        with unittest.mock.patch.object(ExtraIpManager, "_mac", return_value=""):
+            self.assertTrue(run(manager.apply(request)).success)
+        plan = self.plan_of(executor)
+        self.assertEqual((plan["ADD"], plan["REMOVE"]), ("", "2001:db8::11/128"))
+        self.assertEqual(base64.b64decode(plan["MANAGED_B64"]).decode(), "eth0 203.0.113.11/32\n")
+        self.assertEqual(base64.b64decode(plan["SUPPRESSED_B64"]).decode(), "eth0 2001:db8::11/128\n")
+
+    def test_apply_restores_removed_hoster_address(self):
+        (self.state_dir / "suppressed.list").write_text("eth0 198.51.100.9/32\neth1 10.0.0.9/32\n")
+        answers = self.live_answers()
+        answers["extra-ips.sh apply"] = FakeResult(stdout="TX_ID=20260902-101500-ab12\nTX_STATUS=pending\n")
+        manager, executor = self.manager(answers)
+        request = NetworkApplyRequest(interface="eth0", restore=[{"address": "198.51.100.9", "prefix": 32}])
+        with unittest.mock.patch.object(ExtraIpManager, "_mac", return_value=""):
+            self.assertTrue(run(manager.apply(request)).success)
+        plan = self.plan_of(executor)
+        self.assertEqual((plan["ADD"], plan["REMOVE"]), ("198.51.100.9/32", ""))
+        self.assertEqual(base64.b64decode(plan["SUPPRESSED_B64"]).decode(), "eth1 10.0.0.9/32\n")
+        self.assertEqual(base64.b64decode(plan["MANAGED_B64"]).decode(), "")
+
+    def test_state_lists_removed_hoster_addresses(self):
+        (self.state_dir / "suppressed.list").write_text("eth0 198.51.100.9/32\n")
+        manager, _ = self.manager(self.live_answers())
+        with unittest.mock.patch.object(extra_ips, "default_interface", return_value="eth0"):
+            state = run(manager.state())
+        self.assertEqual([(s.interface, s.address, s.prefix) for s in state.suppressed], [("eth0", "198.51.100.9", 32)])
 
     def test_addr_read_failure_is_reported_not_hidden(self):
         answers = self.live_answers()

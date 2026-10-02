@@ -53,7 +53,10 @@ class AddressSpec(BaseModel):
 class NetworkApplyRequest(BaseModel):
     interface: str = Field(..., pattern=INTERFACE_PATTERN)
     add: list[AddressSpec] = Field(default_factory=list)
+    # Свои адреса удаляются из конфига, адреса хостера — снимаются поверх него
     remove: list[AddressSpec] = Field(default_factory=list)
+    # Снятые раньше адреса хостера, которые вернуть на интерфейс
+    restore: list[AddressSpec] = Field(default_factory=list)
     # Адреса, по которым панель ходит на ноду: удалять их нельзя ни при каких условиях
     protected: list[str] = Field(default_factory=list)
     rollback_timeout_sec: int = Field(
@@ -64,13 +67,17 @@ class NetworkApplyRequest(BaseModel):
     def _check_sets(self) -> "NetworkApplyRequest":
         self.add = _dedupe(self.add)
         self.remove = _dedupe(self.remove)
-        if not self.add and not self.remove:
-            raise ValueError("nothing to apply: both add and remove are empty")
-        if len(self.add) + len(self.remove) > MAX_ADDRESSES_PER_TRANSACTION:
+        self.restore = _dedupe(self.restore)
+        if not self.add and not self.remove and not self.restore:
+            raise ValueError("nothing to apply: add, remove and restore are empty")
+        if len(self.add) + len(self.remove) + len(self.restore) > MAX_ADDRESSES_PER_TRANSACTION:
             raise ValueError(f"at most {MAX_ADDRESSES_PER_TRANSACTION} addresses per transaction")
-        overlap = {spec.cidr for spec in self.add} & {spec.cidr for spec in self.remove}
+        appearing = {spec.cidr for spec in self.add} | {spec.cidr for spec in self.restore}
+        overlap = appearing & {spec.cidr for spec in self.remove}
         if overlap:
             raise ValueError(f"addresses both added and removed: {', '.join(sorted(overlap))}")
+        if any(spec.gateway for spec in self.restore):
+            raise ValueError("a restored hoster address keeps the hoster routing and cannot take a gateway")
         added = {spec.address for spec in self.add}
         looped = sorted({spec.gateway for spec in self.add if spec.gateway in added})
         if looped:
@@ -142,6 +149,13 @@ class ManagedAddress(BaseModel):
     gateway: Optional[str] = None
 
 
+class SuppressedAddress(BaseModel):
+    """Адрес хостера, снятый панелью: в конфиге хостера он остаётся."""
+    interface: str
+    address: str
+    prefix: int
+
+
 class TransactionInfo(BaseModel):
     id: str
     status: TransactionStatus
@@ -166,6 +180,7 @@ class NetworkStateResponse(BaseModel):
     default_gateway: dict[AddressFamily, str] = Field(default_factory=dict)
     interfaces: list[InterfaceState]
     managed: list[ManagedAddress]
+    suppressed: list[SuppressedAddress] = Field(default_factory=list)
     transaction: Optional[TransactionInfo]
     history: list[TransactionInfo]
     rollback_timeout_sec: int = DEFAULT_ROLLBACK_TIMEOUT_SEC

@@ -1109,7 +1109,7 @@ export const proxyApi = {
     api.post<NetworkPreview>(`/proxy/${serverId}/network/preview`, { add_text, gateway }, { timeout: 10000 }),
   applyNetworkAddresses: (
     serverId: number,
-    data: { interface: string; add_text: string; gateway?: string; remove: NetworkAddressRef[] },
+    data: { interface: string; add_text: string; gateway?: string; remove: NetworkAddressRef[]; restore?: NetworkAddressRef[] },
   ) =>
     api.post<NetworkJobSnapshot>(`/proxy/${serverId}/network/apply`, data, { timeout: 45000 }),
   rollbackNetworkTransaction: (serverId: number, transaction_id: string) =>
@@ -3318,6 +3318,7 @@ export interface NetworkJobSnapshot {
   interface: string
   added: NetworkAddressRef[]
   removed: NetworkAddressRef[]
+  restored: NetworkAddressRef[]
   started_at: string
   deadline_at: string | null
   attempts: number
@@ -3334,6 +3335,9 @@ export interface NetworkState {
   message?: string | null
   min_node_version: string
   min_node_version_gateway?: string
+  min_node_version_hoster_removal?: string
+  // Адрес, по которому панель ходит на ноду: его удалить нельзя
+  access_address?: string | null
   node_version?: string | null
   backend?: string | null
   backend_detail?: string
@@ -3341,6 +3345,8 @@ export interface NetworkState {
   default_gateway?: Partial<Record<NetworkAddressFamily, string>>
   interfaces: NetworkInterface[]
   managed: { interface: string; address: string; prefix: number; gateway?: string | null }[]
+  // Адреса хостера, снятые панелью: в конфиге хостера остались, нода снимает их после перезагрузки
+  suppressed?: { interface: string; address: string; prefix: number }[]
   transaction: NetworkTransaction | null
   history: NetworkTransaction[]
   rollback_timeout_sec?: number

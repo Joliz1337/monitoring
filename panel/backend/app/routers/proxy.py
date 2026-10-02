@@ -699,6 +699,8 @@ class NetworkApplyRequest(BaseModel):
     # Пусто — адреса ходят через шлюз основного адреса
     gateway: str = Field("", max_length=64)
     remove: list[NetworkAddressRef] = Field(default_factory=list, max_length=MAX_ADDRESSES)
+    # Снятые панелью адреса хостера, которые вернуть на интерфейс
+    restore: list[NetworkAddressRef] = Field(default_factory=list, max_length=MAX_ADDRESSES)
 
 
 class NetworkRollbackRequest(BaseModel):
@@ -762,6 +764,8 @@ async def get_network_state(
     state.setdefault("supported", True)
     state["min_node_version"] = network_transactions.MIN_NODE_VERSION_NETWORK
     state["min_node_version_gateway"] = network_transactions.MIN_NODE_VERSION_NETWORK_GATEWAY
+    state["min_node_version_hoster_removal"] = network_transactions.MIN_NODE_VERSION_NETWORK_HOSTER_REMOVAL
+    state["access_address"] = await network_transactions.access_address(server)
     state["node_version"] = server.node_version
     state["job"] = network_transactions.job_snapshot(server.id)
     return state
@@ -795,10 +799,11 @@ async def apply_network_addresses(
         gateway = parse_gateway(data.gateway)
         add = with_gateway(expand_entries(data.add_text), gateway) if data.add_text.strip() else []
         remove = [normalize_ref(ref.address, ref.prefix) for ref in data.remove]
+        restore = [normalize_ref(ref.address, ref.prefix) for ref in data.restore]
     except AddressInputError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    if not add and not remove:
-        raise HTTPException(status_code=400, detail="Нечего применять: укажите адреса для добавления или удаления")
+    if not add and not remove and not restore:
+        raise HTTPException(status_code=400, detail="Нечего применять: укажите адреса для добавления, удаления или возврата")
     if gateway and not network_transactions.node_supports_network_gateway(server.node_version):
         raise HTTPException(
             status_code=400,
@@ -808,13 +813,23 @@ async def apply_network_addresses(
             ),
         )
     try:
-        job = await network_transactions.start_apply(server, interface=data.interface, add=add, remove=remove)
+        job = await network_transactions.start_apply(
+            server, interface=data.interface, add=add, remove=remove, restore=restore,
+        )
     except network_transactions.PendingTransactionError:
         raise HTTPException(status_code=409, detail="На ноде уже идёт транзакция — дождитесь её завершения")
     except network_transactions.InterfaceNotFoundError as exc:
         raise HTTPException(status_code=400, detail=f"Интерфейс {exc.interface} не найден на ноде")
     except network_transactions.NothingToApplyError:
-        raise HTTPException(status_code=400, detail="Нечего применять: адреса уже настроены или не управляются панелью")
+        raise HTTPException(status_code=400, detail="Нечего применять: адреса уже настроены или уже сняты с интерфейса")
+    except network_transactions.HosterRemovalUnsupportedError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Удалять адреса хостера умеет нода {network_transactions.MIN_NODE_VERSION_NETWORK_HOSTER_REMOVAL} "
+                f"и новее (сейчас {exc.node_version or 'неизвестно'}) — обновите ноду"
+            ),
+        )
     except network_transactions.GatewayConflictError as exc:
         raise HTTPException(status_code=400, detail="; ".join(exc.problems))
     except network_transactions.ProtectedIpUnknownError:
