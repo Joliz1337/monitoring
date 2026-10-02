@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next'
 import type { BackendServer } from '../../api/client'
 import { parseServerLines } from '../../utils/haproxyServerLines'
 
-export type ServersPasteMode = 'append' | 'replace'
+export type ServersMergeMode = 'append' | 'replace'
 
 const UNRECOGNIZED_LINES_SHOWN = 10
 
@@ -11,7 +11,7 @@ export default function ServersPasteBox({
   defaults, onApply, onClose,
 }: {
   defaults: BackendServer
-  onApply: (servers: BackendServer[], mode: ServersPasteMode) => void
+  onApply: (servers: BackendServer[], mode: ServersMergeMode) => void
   onClose: () => void
 }) {
   const { t } = useTranslation()

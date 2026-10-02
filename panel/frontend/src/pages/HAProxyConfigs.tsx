@@ -32,7 +32,8 @@ import { Tooltip } from '../components/ui/Tooltip'
 import { FAQIcon } from '../components/FAQ'
 import FolderedServerPicker from '../components/servers/FolderedServerPicker'
 import ServerAddressesEditor from '../components/haproxy/ServerAddressesEditor'
-import ServersPasteBox, { type ServersPasteMode } from '../components/haproxy/ServersPasteBox'
+import ServersPasteBox, { type ServersMergeMode } from '../components/haproxy/ServersPasteBox'
+import ServersFromNodesBox from '../components/haproxy/ServersFromNodesBox'
 
 
 function SyncStatusBadge({ status, online }: { status: string | null; online?: boolean }) {
@@ -105,16 +106,18 @@ function newBackendServer(servers: BackendServer[]): BackendServer {
   }
 }
 
-// Вставленный сервер без имени или с уже занятым именем получает следующий srvN;
-// при добавлении пустые строки формы (без адреса) уступают место вставленным
-function mergePastedServers(current: BackendServer[], pasted: BackendServer[], mode: ServersPasteMode): BackendServer[] {
+// Новый сервер без имени или с уже занятым именем получает следующий srvN;
+// при добавлении пустые строки формы (без адреса) уступают место новым
+function mergeServers(current: BackendServer[], incoming: BackendServer[], mode: ServersMergeMode): BackendServer[] {
   const merged = mode === 'append' ? current.filter(s => s.address.trim()) : []
-  for (const srv of pasted) {
+  for (const srv of incoming) {
     const nameTaken = !srv.name || merged.some(s => s.name === srv.name)
     merged.push(nameTaken ? { ...srv, name: nextServerName(merged) } : srv)
   }
   return merged
 }
+
+type ServersToolbox = 'paste' | 'nodes'
 
 function duplicateServerName(servers: BackendServer[]): string | undefined {
   const seen = new Set<string>()
@@ -590,6 +593,7 @@ function RuleForm({
   profileId,
   profileOptions,
   ipOwners,
+  nodes,
 }: {
   initial: RuleFormData
   isEdit: boolean
@@ -600,10 +604,11 @@ function RuleForm({
   profileId: number
   profileOptions: HAProxyProfileOptions
   ipOwners: HAProxyIpOwners
+  nodes: HAProxyAvailableServer[]
 }) {
   const { t } = useTranslation()
   const [form, setForm] = useState(initial)
-  const [pasteOpen, setPasteOpen] = useState(false)
+  const [toolbox, setToolbox] = useState<ServersToolbox | null>(null)
   const addressRole = useAddressRole()
   const singleTargetLabel = ownerLabel(findOwner(ipOwners, form.target_ip), addressRole)
 
@@ -642,10 +647,22 @@ function RuleForm({
     toast.success(t('balancer.servers_copied', { count: copyableServers.length }))
   }
 
-  const pasteServers = (pasted: BackendServer[], mode: ServersPasteMode) => {
-    setForm(f => ({ ...f, servers: mergePastedServers(f.servers, pasted, mode) }))
-    setPasteOpen(false)
+  const pasteServers = (pasted: BackendServer[], mode: ServersMergeMode) => {
+    setForm(f => ({ ...f, servers: mergeServers(f.servers, pasted, mode) }))
+    setToolbox(null)
   }
+
+  // Повторный выбор той же ноды не должен дублировать адреса, которые уже в списке
+  const addNodeServers = (incoming: BackendServer[], mode: ServersMergeMode) => {
+    setForm(f => {
+      const isListed = (srv: BackendServer) => f.servers.some(s => s.address.trim() === srv.address && s.port === srv.port)
+      const fresh = mode === 'append' ? incoming.filter(srv => !isListed(srv)) : incoming
+      return { ...f, servers: mergeServers(f.servers, fresh, mode) }
+    })
+    setToolbox(null)
+  }
+
+  const toggleToolbox = (box: ServersToolbox) => setToolbox(open => open === box ? null : box)
 
   const autoWeights = async () => {
     if (form.servers.length === 0) return
@@ -788,9 +805,15 @@ function RuleForm({
                     </Tooltip>
                   )}
                   <Tooltip label={t('balancer.paste_servers_hint')}>
-                    <button type="button" onClick={() => setPasteOpen(open => !open)}
-                      className={`flex items-center gap-1 text-xs transition-colors ${pasteOpen ? 'text-accent-400' : 'text-dark-400 hover:text-dark-200'}`}>
+                    <button type="button" onClick={() => toggleToolbox('paste')}
+                      className={`flex items-center gap-1 text-xs transition-colors ${toolbox === 'paste' ? 'text-accent-400' : 'text-dark-400 hover:text-dark-200'}`}>
                       <ClipboardPaste className="w-3 h-3" /> {t('balancer.paste_servers')}
+                    </button>
+                  </Tooltip>
+                  <Tooltip label={t('balancer.from_nodes_hint')}>
+                    <button type="button" onClick={() => toggleToolbox('nodes')}
+                      className={`flex items-center gap-1 text-xs transition-colors ${toolbox === 'nodes' ? 'text-accent-400' : 'text-dark-400 hover:text-dark-200'}`}>
+                      <Server className="w-3 h-3" /> {t('balancer.from_nodes')}
                     </button>
                   </Tooltip>
                   {form.servers.length > 1 && (
@@ -807,8 +830,12 @@ function RuleForm({
                   </button>
                 </div>
               </div>
-              {pasteOpen && (
-                <ServersPasteBox defaults={newBackendServer(form.servers)} onApply={pasteServers} onClose={() => setPasteOpen(false)} />
+              {toolbox === 'paste' && (
+                <ServersPasteBox defaults={newBackendServer(form.servers)} onApply={pasteServers} onClose={() => setToolbox(null)} />
+              )}
+              {toolbox === 'nodes' && (
+                <ServersFromNodesBox nodes={nodes} ipOwners={ipOwners} defaults={newBackendServer(form.servers)}
+                  onApply={addNodeServers} onClose={() => setToolbox(null)} />
               )}
               <div className="space-y-2">
                 {form.servers.map((srv, i) => (
@@ -1328,6 +1355,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                   profileId={profileId}
                   profileOptions={detail.options}
                   ipOwners={ipOwners}
+                  nodes={availableServers}
                 />
               </div>
             )}
@@ -1409,6 +1437,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                               profileId={profileId}
                               profileOptions={detail.options}
                               ipOwners={ipOwners}
+                              nodes={availableServers}
                             />
                           </div>
                         </motion.div>
@@ -1426,6 +1455,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                               profileId={profileId}
                               profileOptions={detail.options}
                               ipOwners={ipOwners}
+                              nodes={availableServers}
                             />
                           </div>
                         </motion.div>
