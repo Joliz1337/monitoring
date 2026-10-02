@@ -71,6 +71,11 @@
     "remove_from_list": "Remove from list",
     "peak": "peak"
   },
+  "nav": {
+    "group_configs": "Configs",
+    "group_security": "Security",
+    "group_maintenance": "Maintenance"
+  },
   "units": {
     "bps": "bit/s",
     "kbps": "Kbit/s",

@@ -73,6 +73,11 @@
     "remove_from_list": "Убрать из списка",
     "peak": "пик"
   },
+  "nav": {
+    "group_configs": "Конфиги",
+    "group_security": "Защита",
+    "group_maintenance": "Обслуживание"
+  },
   "units": {
     "bps": "бит/с",
     "kbps": "Кбит/с",

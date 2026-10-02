@@ -14,6 +14,7 @@ import {
   Shield,
   Radio,
   StickyNote,
+  ChevronDown,
   type LucideIcon
 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
@@ -21,7 +22,8 @@ import { useExtStore } from '../../stores/_extStore'
 import { useNotesStore } from '../../stores/notesStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useScrollRestoration } from '../../hooks/useScrollRestoration'
-import { PANEL_MODULES } from '../../config/modules'
+import { useExpandedNavGroups } from '../../hooks/useExpandedNavGroups'
+import { PANEL_MODULES, buildNavTree, type NavGroup, type PanelModule } from '../../config/modules'
 import { useTranslation } from 'react-i18next'
 import { Tooltip } from '../ui/Tooltip'
 import NotesDrawer from '../Notes/NotesDrawer'
@@ -53,6 +55,120 @@ const navItemVariants = {
   })
 }
 
+/** Отдельный пункт из стора встаёт сразу после «Массовых операций» */
+const EXTRA_NAV_ITEM_INDEX = 3
+
+interface NavLinkItem {
+  to: string
+  icon: LucideIcon
+  label: string
+  end: boolean
+  active: boolean
+}
+
+type SidebarEntry =
+  | { kind: 'link'; item: NavLinkItem }
+  | { kind: 'group'; group: NavGroup; items: NavLinkItem[] }
+
+interface SidebarLinkProps {
+  item: NavLinkItem
+  nested?: boolean
+  onNavigate: () => void
+}
+
+function SidebarLink({ item, nested = false, onNavigate }: SidebarLinkProps) {
+  return (
+    <NavLink to={item.to} end={item.end} onClick={onNavigate} className="block">
+      <motion.div
+        className={`
+          relative flex items-center gap-3 rounded-xl transition-all duration-200
+          ${nested ? 'px-3 py-2.5 text-sm' : 'px-4 py-3'}
+          ${item.active
+            ? 'bg-accent-500/10 text-accent-400'
+            : 'text-dark-400 hover:text-dark-200 hover:bg-dark-800/50'
+          }
+        `}
+        whileHover={{ x: 4 }}
+        whileTap={{ scale: 0.98 }}
+      >
+        <motion.div
+          animate={item.active ? { rotate: [0, -10, 10, 0] } : {}}
+          transition={{ duration: 0.5 }}
+        >
+          <item.icon className={nested ? 'w-4 h-4' : 'w-5 h-5'} />
+        </motion.div>
+        <span className="font-medium">{item.label}</span>
+
+        {/* Glow effect for active item */}
+        {item.active && (
+          <motion.div
+            className="absolute inset-0 rounded-xl bg-accent-500/5"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+          />
+        )}
+      </motion.div>
+    </NavLink>
+  )
+}
+
+interface SidebarGroupProps {
+  group: NavGroup
+  items: NavLinkItem[]
+  expanded: boolean
+  onToggle: () => void
+  onNavigate: () => void
+}
+
+function SidebarGroup({ group, items, expanded, onToggle, onNavigate }: SidebarGroupProps) {
+  const { t } = useTranslation()
+  // У свёрнутой папки активная вкладка не видна — подсвечиваем саму папку
+  const highlighted = !expanded && items.some(item => item.active)
+
+  return (
+    <div>
+      <motion.button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={expanded}
+        className={`
+          w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200
+          ${highlighted
+            ? 'bg-accent-500/10 text-accent-400'
+            : 'text-dark-400 hover:text-dark-200 hover:bg-dark-800/50'
+          }
+        `}
+        whileHover={{ x: 4 }}
+        whileTap={{ scale: 0.98 }}
+      >
+        <group.icon className="w-5 h-5" />
+        <span className="font-medium">{t(group.labelKey)}</span>
+        <ChevronDown
+          className={`w-4 h-4 ml-auto transition-transform duration-200 ${expanded ? '' : '-rotate-90'}`}
+        />
+      </motion.button>
+
+      <AnimatePresence initial={false}>
+        {expanded && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            className="overflow-hidden"
+          >
+            <div className="ml-6 mt-1 pl-2 border-l border-dark-800 space-y-1">
+              {items.map(item => (
+                <SidebarLink key={item.to} item={item} nested onNavigate={onNavigate} />
+              ))}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  )
+}
+
 export default function Layout() {
   const { uid } = useParams()
   const location = useLocation()
@@ -62,6 +178,7 @@ export default function Layout() {
   const notesOpen = useNotesStore(s => s.isOpen)
   const hiddenModules = useSettingsStore(s => s.hiddenModules)
   const fetchSettings = useSettingsStore(s => s.fetchSettings)
+  const [expandedGroups, setGroupOpen] = useExpandedNavGroups()
   const { t } = useTranslation()
 
   useEffect(() => { fetchSettings() }, [fetchSettings])
@@ -74,19 +191,45 @@ export default function Layout() {
   const introDone = useRef(false)
   useEffect(() => { introDone.current = true }, [])
 
-  const baseNavItems = PANEL_MODULES
-    .filter(module => !hiddenModules.includes(module.id))
-    .map(module => ({
-      to: module.path ? `/${uid}/${module.path}` : `/${uid}`,
-      icon: module.icon,
-      label: t(module.labelKey),
-      end: module.path === '',
-    }))
+  // Сравнение по границе сегмента: иначе /remnawave подсвечивался бы и на /remnawave-nginx
+  const isPathActive = (to: string, end: boolean) =>
+    location.pathname === to || (!end && location.pathname.startsWith(`${to}/`))
 
-  const navItems = navItem 
-    ? [...baseNavItems.slice(0, 3), { to: `/${uid}/${navItem.path}`, icon: iconMap[navItem.icon] || Search, label: navItem.label, end: false }, ...baseNavItems.slice(3)]
-    : baseNavItems
-  
+  const toNavLink = (to: string, icon: LucideIcon, label: string, end: boolean): NavLinkItem =>
+    ({ to, icon, label, end, active: isPathActive(to, end) })
+
+  const moduleLink = (module: PanelModule) => toNavLink(
+    module.path ? `/${uid}/${module.path}` : `/${uid}`,
+    module.icon,
+    t(module.labelKey),
+    module.path === '',
+  )
+
+  const visibleModules = PANEL_MODULES.filter(module => !hiddenModules.includes(module.id))
+  const sidebarEntries: SidebarEntry[] = buildNavTree(visibleModules).map(entry =>
+    entry.kind === 'module'
+      ? { kind: 'link', item: moduleLink(entry.module) }
+      : { kind: 'group', group: entry.group, items: entry.modules.map(moduleLink) }
+  )
+  if (navItem) {
+    sidebarEntries.splice(EXTRA_NAV_ITEM_INDEX, 0, {
+      kind: 'link',
+      item: toNavLink(`/${uid}/${navItem.path}`, iconMap[navItem.icon] || Search, navItem.label, false),
+    })
+  }
+
+  const activeGroupId = sidebarEntries.find(
+    (entry): entry is Extract<SidebarEntry, { kind: 'group' }> =>
+      entry.kind === 'group' && entry.items.some(item => item.active)
+  )?.group.id
+
+  // Переход на вкладку из свёрнутой папки (в том числе по ссылке со страницы) раскрывает её
+  useEffect(() => {
+    if (activeGroupId) setGroupOpen(activeGroupId, true)
+  }, [activeGroupId, setGroupOpen])
+
+  const closeSidebar = () => setSidebarOpen(false)
+
   return (
     <div className="min-h-screen bg-dark-950 flex overflow-hidden">
       {/* Animated background */}
@@ -105,7 +248,7 @@ export default function Layout() {
             animate="visible"
             exit="exit"
             className="fixed inset-0 bg-black/60 backdrop-blur-sm z-40 lg:hidden"
-            onClick={() => setSidebarOpen(false)}
+            onClick={closeSidebar}
           />
         )}
       </AnimatePresence>
@@ -154,7 +297,7 @@ export default function Layout() {
           {/* Close button for mobile */}
           <motion.button
             className="absolute top-4 right-4 p-2 rounded-lg hover:bg-dark-800 text-dark-400 lg:hidden"
-            onClick={() => setSidebarOpen(false)}
+            onClick={closeSidebar}
             whileHover={{ scale: 1.1 }}
             whileTap={{ scale: 0.9 }}
           >
@@ -162,58 +305,28 @@ export default function Layout() {
           </motion.button>
           
           {/* Navigation */}
-          <nav className="flex-1 p-4 space-y-1">
-            {navItems.map((item, index) => {
-              const isActive = item.end 
-                ? location.pathname === item.to 
-                : location.pathname.startsWith(item.to)
-              
-              return (
-                <motion.div
-                  key={item.to}
-                  custom={index}
-                  variants={navItemVariants}
-                  initial={introDone.current ? false : 'hidden'}
-                  animate="visible"
-                >
-                  <NavLink
-                    to={item.to}
-                    end={item.end}
-                    onClick={() => setSidebarOpen(false)}
-                    className="block"
-                  >
-                    <motion.div
-                      className={`
-                        relative flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200
-                        ${isActive 
-                          ? 'bg-accent-500/10 text-accent-400' 
-                          : 'text-dark-400 hover:text-dark-200 hover:bg-dark-800/50'
-                        }
-                      `}
-                      whileHover={{ x: 4 }}
-                      whileTap={{ scale: 0.98 }}
-                    >
-                      <motion.div
-                        animate={isActive ? { rotate: [0, -10, 10, 0] } : {}}
-                        transition={{ duration: 0.5 }}
-                      >
-                        <item.icon className="w-5 h-5" />
-                      </motion.div>
-                      <span className="font-medium">{item.label}</span>
-                      
-                      {/* Glow effect for active item */}
-                      {isActive && (
-                        <motion.div
-                          className="absolute inset-0 rounded-xl bg-accent-500/5"
-                          initial={{ opacity: 0 }}
-                          animate={{ opacity: 1 }}
-                        />
-                      )}
-                    </motion.div>
-                  </NavLink>
-                </motion.div>
-              )
-            })}
+          <nav className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-4 space-y-1">
+            {sidebarEntries.map((entry, index) => (
+              <motion.div
+                key={entry.kind === 'link' ? entry.item.to : entry.group.id}
+                custom={index}
+                variants={navItemVariants}
+                initial={introDone.current ? false : 'hidden'}
+                animate="visible"
+              >
+                {entry.kind === 'link' ? (
+                  <SidebarLink item={entry.item} onNavigate={closeSidebar} />
+                ) : (
+                  <SidebarGroup
+                    group={entry.group}
+                    items={entry.items}
+                    expanded={expandedGroups.has(entry.group.id)}
+                    onToggle={() => setGroupOpen(entry.group.id, !expandedGroups.has(entry.group.id))}
+                    onNavigate={closeSidebar}
+                  />
+                )}
+              </motion.div>
+            ))}
           </nav>
           
         </div>
