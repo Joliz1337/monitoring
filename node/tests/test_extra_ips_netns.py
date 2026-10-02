@@ -13,6 +13,7 @@
 него, свою подсеть — напрямую, а трафик без адреса — через основной шлюз;
 транзакция ставит маршрут, откат и провал проверки его снимают, удаление адреса
 забирает маршрут с собой; restore-runtime поднимает всё после «перезагрузки».
+Бэкенд, который поставил или снял адрес раньше самого скрипта, транзакцию не роняет.
 Второй тест гоняет живой трафик через два роутера-namespace: без своего шлюза
 клиент за шлюзом доп. адреса ответов не получает, со шлюзом — получает, основной
 адрес работает по-прежнему, после сноса маршрута самолечение возвращает ответы.
@@ -109,6 +110,22 @@ rc=$?
 ip link set eth0 up
 [ "$rc" = 4 ] || fail "apply on a down link: exit $rc, expected rolled back (4)"
 ip rule show | grep -qE "5.5.5.5|^999:" && fail "rules left after a failed apply"
+
+# The backend sets the same address a moment before the script's own `ip` call:
+# the kernel refuses ("already assigned" / "cannot assign"), but the change is in place
+RACY_BIN=$(mktemp -d)
+cat > "$RACY_BIN/ip" <<'EOF'
+#!/bin/bash
+case "$1 $2" in "addr add"|"addr del") "$REAL_IP" "$@" >/dev/null 2>&1 ;; esac
+exec "$REAL_IP" "$@"
+EOF
+chmod +x "$RACY_BIN/ip"
+racy_apply() { REAL_IP=$(command -v ip) PATH="$RACY_BIN:$PATH" bash "$SCRIPT" apply >/dev/null; }
+plan 20260925-120310-abcd 7.7.7.7/32 "" "eth0 7.7.7.7/32$NL" "" | racy_apply || fail "add lost the race with the backend"
+bash "$SCRIPT" confirm 20260925-120310-abcd >/dev/null
+plan 20260925-120320-abcd "" 7.7.7.7/32 "" "" | racy_apply || fail "remove lost the race with the backend"
+bash "$SCRIPT" confirm 20260925-120320-abcd >/dev/null
+ip addr show dev eth0 | grep -q "7.7.7.7/32" && fail "raced remove left the address"
 echo "ALL OK"
 """
 

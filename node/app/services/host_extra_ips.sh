@@ -193,11 +193,15 @@ addr_dadfailed() {
     addr_lines "$1" | awk -v a="$2" '$4 == a && $0 ~ /dadfailed/ {found = 1} END {exit !found}'
 }
 
+# After a reload the backend sets addresses asynchronously and may add or drop
+# the same one between the check and the `ip` call. The kernel's wording for that
+# differs by version ("File exists" / "Address already assigned"), so the
+# interface state after the failure decides.
 ip_add() {
     local addr="$1" iface="$2" out
     has_addr "$iface" "$addr" && return 0
     out=$(ip addr add "$addr" dev "$iface" 2>&1) && return 0
-    case "$out" in *"File exists"*) return 0 ;; esac
+    has_addr "$iface" "$addr" && return 0
     log "ip addr add $addr dev $iface: $out"
     return 1
 }
@@ -206,6 +210,7 @@ ip_del() {
     local addr="$1" iface="$2" out
     has_addr "$iface" "$addr" || return 0
     out=$(ip addr del "$addr" dev "$iface" 2>&1) && return 0
+    has_addr "$iface" "$addr" || return 0
     log "ip addr del $addr dev $iface: $out"
     return 1
 }
