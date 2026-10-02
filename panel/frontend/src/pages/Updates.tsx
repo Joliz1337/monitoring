@@ -21,6 +21,7 @@ import {
   ChevronRight,
   X,
   Globe,
+  type LucideIcon,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import {
@@ -32,7 +33,9 @@ import { Tooltip } from '../components/ui/Tooltip'
 import { Checkbox } from '../components/ui/Checkbox'
 import { FAQIcon } from '../components/FAQ'
 import { useSettingsStore } from '../stores/settingsStore'
+import { useUpdateSummaryStore } from '../stores/updateSummaryStore'
 import { orderFolders } from '../utils/folders'
+import { versionAtLeast } from '../utils/version'
 import { useCollapsedFolders } from '../hooks/useCollapsedFolders'
 import DeliverImageModal from '../components/servers/DeliverImageModal'
 import BulkDeliverImageModal from '../components/servers/BulkDeliverImageModal'
@@ -54,6 +57,14 @@ const PANEL_REBOOT_POLL_INTERVAL_MS = 5_000
 const PANEL_PROBE_TIMEOUT_MS = 4_000
 
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
+
+type FolderNodeState = 'current' | 'updating' | 'outdated'
+
+const FOLDER_CHIPS: { state: FolderNodeState; icon: LucideIcon; spin?: boolean; className: string }[] = [
+  { state: 'current', icon: CheckCircle2, className: 'text-success bg-success/10' },
+  { state: 'updating', icon: Loader2, spin: true, className: 'text-warning bg-warning/10' },
+  { state: 'outdated', icon: ArrowUpCircle, className: 'text-accent-400 bg-accent-500/10' },
+]
 
 const toHAProxyTarget = (node: NodeState): HAProxyUpgradeTarget => ({
   id: node.id, name: node.name, version: node.haproxyVersion, targetVersion: node.haproxyTarget,
@@ -85,6 +96,7 @@ async function isPanelBackendAlive(): Promise<boolean> {
 export default function Updates() {
   const { t } = useTranslation()
   const { updateBranch, fetchSettings } = useSettingsStore()
+  const refreshUpdateSummary = useUpdateSummaryStore(s => s.refresh)
   // На dev-ветке версии между пушами могут не меняться — обновление разрешено всегда
   const isDevChannel = updateBranch === 'dev'
 
@@ -186,24 +198,30 @@ export default function Updates() {
       const resp = await systemApi.getVersionBase()
       const data = resp.data
       setBaseInfo(data)
+      // Значок в меню догоняет то, что видно на странице, не дожидаясь своего опроса
+      refreshUpdateSummary()
 
-      const initialNodes = new Map<number, NodeState>()
-      for (const n of data.nodes) {
-        initialNodes.set(n.id, {
-          id: n.id,
-          name: n.name,
-          url: n.url,
-          folder: n.folder,
-          hasSshCreds: n.has_ssh_creds,
-          loadState: 'pending',
-          version: null,
-          status: 'offline',
-          haproxyVersion: null,
-          haproxyTarget: null,
-          downloadProxy: null,
-        })
-      }
-      setNodes(initialNodes)
+      setNodes(prev => {
+        const initialNodes = new Map<number, NodeState>()
+        for (const n of data.nodes) {
+          const known = prev.get(n.id)
+          initialNodes.set(n.id, {
+            id: n.id,
+            name: n.name,
+            url: n.url,
+            folder: n.folder,
+            hasSshCreds: n.has_ssh_creds,
+            loadState: 'pending',
+            // Последние известные версия и статус: пока нода перечитывается, счётчики папок не падают в ноль
+            version: known?.version ?? null,
+            status: known?.status ?? 'offline',
+            haproxyVersion: null,
+            haproxyTarget: null,
+            downloadProxy: null,
+          })
+        }
+        return initialNodes
+      })
 
       // Promise pool: ограничиваем параллельные запросы к нодам, иначе при 100+ нодах
       // autorefresh каждые 12с создаёт лавину одновременных HTTP, и ноды мигают онлайн/оффлайн.
@@ -225,7 +243,7 @@ export default function Updates() {
       setLoading(false)
       setIsChecking(false)
     }
-  }, [t, fetchNodeVersion])
+  }, [t, fetchNodeVersion, refreshUpdateSummary])
 
   useEffect(() => {
     fetchSettings()
@@ -465,7 +483,8 @@ export default function Updates() {
 
   const getNodeNeedsUpdate = (node: NodeState): boolean => {
     if (!node.version || !baseInfo?.node.latest_version) return false
-    return node.version !== baseInfo.node.latest_version
+    // «Ниже», а не «не равно»: после перехода с dev на стабильный канал старый релиз — не обновление
+    return !versionAtLeast(node.version, baseInfo.node.latest_version)
   }
 
   // Обновление через агента ноды: только онлайн, не идущее уже, и на стабильном канале — только отстающие
@@ -539,6 +558,34 @@ export default function Updates() {
     return job && !supersededDeliveries.has(job.job_id) ? job : undefined
   }
 
+  const isNodeUpdating = (node: NodeState): boolean => {
+    const delivery = visibleDeliveryJob(node.id)?.status
+    return updatingNodes.has(node.id) || nodeUpdates.has(node.id) || delivery === 'queued' || delivery === 'running'
+  }
+
+  // Офлайн-нода и нода без известной версии ни в один счётчик папки не попадают
+  const folderNodeState = (node: NodeState): FolderNodeState | null => {
+    if (isNodeUpdating(node)) return 'updating'
+    if (node.status !== 'online' || !node.version) return null
+    return getNodeNeedsUpdate(node) ? 'outdated' : 'current'
+  }
+
+  const renderFolderChips = (members: NodeState[]) => {
+    const counts: Record<FolderNodeState, number> = { current: 0, updating: 0, outdated: 0 }
+    for (const node of members) {
+      const state = folderNodeState(node)
+      if (state) counts[state] += 1
+    }
+    return FOLDER_CHIPS.filter(chip => counts[chip.state] > 0).map(({ state, icon: Icon, spin, className }) => (
+      <Tooltip key={state} label={t(`updates.folder_${state}`, { count: counts[state], total: members.length })}>
+        <span className={`flex items-center gap-1 text-xs font-medium px-1.5 py-0.5 rounded-md flex-shrink-0 ${className}`}>
+          <Icon className={`w-3 h-3 ${spin ? 'animate-spin' : ''}`} />
+          {counts[state]}
+        </span>
+      </Tooltip>
+    ))
+  }
+
   const renderNodeCard = (node: NodeState, index: number) => (
     <NodeUpdateCard
       key={node.id}
@@ -579,6 +626,7 @@ export default function Updates() {
             </div>
             <span className="text-sm font-semibold text-white truncate group-hover:text-blue-300 transition">{name}</span>
             <span className="text-xs text-dark-500 flex-shrink-0">{members.length}</span>
+            {renderFolderChips(members)}
             <Chevron className="w-3.5 h-3.5 text-dark-600 flex-shrink-0" />
           </button>
         </div>

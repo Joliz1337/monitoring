@@ -18,9 +18,13 @@ import {
   type LucideIcon
 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
+import type { TFunction } from 'i18next'
+import type { UpdateSummary } from '../../api/client'
 import { useExtStore } from '../../stores/_extStore'
 import { useNotesStore } from '../../stores/notesStore'
 import { useSettingsStore } from '../../stores/settingsStore'
+import { useUpdateSummaryStore } from '../../stores/updateSummaryStore'
+import { useAutoRefresh } from '../../hooks/useAutoRefresh'
 import { useScrollRestoration } from '../../hooks/useScrollRestoration'
 import { useExpandedNavGroups } from '../../hooks/useExpandedNavGroups'
 import { PANEL_MODULES, buildNavTree, type NavGroup, type PanelModule } from '../../config/modules'
@@ -58,17 +62,55 @@ const navItemVariants = {
 /** Отдельный пункт из стора встаёт сразу после «Массовых операций» */
 const EXTRA_NAV_ITEM_INDEX = 3
 
+// Версии на GitHub панель кэширует на 5 минут — чаще спрашивать сводку незачем
+const UPDATE_SUMMARY_POLL_MS = 5 * 60_000
+const MAX_BADGE_COUNT = 99
+
+interface NavBadge {
+  count: number
+  hints: string[]
+}
+
 interface NavLinkItem {
   to: string
   icon: LucideIcon
   label: string
   end: boolean
   active: boolean
+  badge?: NavBadge
 }
 
 type SidebarEntry =
   | { kind: 'link'; item: NavLinkItem }
   | { kind: 'group'; group: NavGroup; items: NavLinkItem[] }
+
+/** Число на значке — сколько всего обновить: панель считается за одну, плюс каждая отставшая нода */
+function updatesBadge(summary: UpdateSummary | null, t: TFunction): NavBadge | undefined {
+  if (!summary) return undefined
+  const panelUpdate = summary.panel.update_available
+  const outdatedNodes = summary.nodes.outdated
+  if (!panelUpdate && outdatedNodes === 0) return undefined
+
+  const hints: string[] = []
+  if (panelUpdate) {
+    hints.push(t('nav.updates_badge_panel', { current: summary.panel.version, latest: summary.panel.latest_version }))
+  }
+  if (outdatedNodes > 0) {
+    hints.push(t('nav.updates_badge_nodes', { count: outdatedNodes, total: summary.nodes.total, latest: summary.nodes.latest_version }))
+  }
+  return { count: (panelUpdate ? 1 : 0) + outdatedNodes, hints }
+}
+
+function NavBadgePill({ badge }: { badge: NavBadge }) {
+  return (
+    <Tooltip label={<div className="space-y-0.5">{badge.hints.map(hint => <div key={hint}>{hint}</div>)}</div>} position="right" maxWidth={300}>
+      <span className="relative z-10 ml-auto min-w-[1.25rem] h-5 px-1.5 rounded-full bg-accent-500/20 text-accent-300
+                       text-[11px] font-semibold leading-none flex items-center justify-center">
+        {badge.count > MAX_BADGE_COUNT ? `${MAX_BADGE_COUNT}+` : badge.count}
+      </span>
+    </Tooltip>
+  )
+}
 
 interface SidebarLinkProps {
   item: NavLinkItem
@@ -98,6 +140,7 @@ function SidebarLink({ item, nested = false, onNavigate }: SidebarLinkProps) {
           <item.icon className={nested ? 'w-4 h-4' : 'w-5 h-5'} />
         </motion.div>
         <span className="font-medium">{item.label}</span>
+        {item.badge && <NavBadgePill badge={item.badge} />}
 
         {/* Glow effect for active item */}
         {item.active && (
@@ -122,8 +165,9 @@ interface SidebarGroupProps {
 
 function SidebarGroup({ group, items, expanded, onToggle, onNavigate }: SidebarGroupProps) {
   const { t } = useTranslation()
-  // У свёрнутой папки активная вкладка не видна — подсвечиваем саму папку
+  // У свёрнутой папки активная вкладка и значки её вкладок не видны — показываем их на самой папке
   const highlighted = !expanded && items.some(item => item.active)
+  const collapsedBadge = expanded ? undefined : items.find(item => item.badge)?.badge
 
   return (
     <div>
@@ -143,8 +187,9 @@ function SidebarGroup({ group, items, expanded, onToggle, onNavigate }: SidebarG
       >
         <group.icon className="w-5 h-5" />
         <span className="font-medium">{t(group.labelKey)}</span>
+        {collapsedBadge && <NavBadgePill badge={collapsedBadge} />}
         <ChevronDown
-          className={`w-4 h-4 ml-auto transition-transform duration-200 ${expanded ? '' : '-rotate-90'}`}
+          className={`w-4 h-4 transition-transform duration-200 ${collapsedBadge ? '' : 'ml-auto'} ${expanded ? '' : '-rotate-90'}`}
         />
       </motion.button>
 
@@ -183,6 +228,15 @@ export default function Layout() {
 
   useEffect(() => { fetchSettings() }, [fetchSettings])
 
+  const updatesVisible = !hiddenModules.includes('updates')
+  const updateSummary = useUpdateSummaryStore(s => s.summary)
+  const refreshUpdateSummary = useUpdateSummaryStore(s => s.refresh)
+  useAutoRefresh(refreshUpdateSummary, { enabled: updatesVisible, customInterval: UPDATE_SUMMARY_POLL_MS })
+  const moduleBadges: Record<string, NavBadge | undefined> = {
+    updates: updatesVisible ? updatesBadge(updateSummary, t) : undefined,
+  }
+  const hasNavBadge = Object.values(moduleBadges).some(Boolean)
+
   const pageContentRef = useRef<HTMLDivElement>(null)
   useScrollRestoration(pageContentRef)
 
@@ -198,12 +252,15 @@ export default function Layout() {
   const toNavLink = (to: string, icon: LucideIcon, label: string, end: boolean): NavLinkItem =>
     ({ to, icon, label, end, active: isPathActive(to, end) })
 
-  const moduleLink = (module: PanelModule) => toNavLink(
-    module.path ? `/${uid}/${module.path}` : `/${uid}`,
-    module.icon,
-    t(module.labelKey),
-    module.path === '',
-  )
+  const moduleLink = (module: PanelModule): NavLinkItem => ({
+    ...toNavLink(
+      module.path ? `/${uid}/${module.path}` : `/${uid}`,
+      module.icon,
+      t(module.labelKey),
+      module.path === '',
+    ),
+    badge: moduleBadges[module.id],
+  })
 
   const visibleModules = PANEL_MODULES.filter(module => !hiddenModules.includes(module.id))
   const sidebarEntries: SidebarEntry[] = buildNavTree(visibleModules).map(entry =>
@@ -345,11 +402,12 @@ export default function Layout() {
         >
           <motion.button
             onClick={() => setSidebarOpen(true)}
-            className="p-2 rounded-xl hover:bg-dark-800 text-dark-400"
+            className="relative p-2 rounded-xl hover:bg-dark-800 text-dark-400"
             whileHover={{ scale: 1.05 }}
             whileTap={{ scale: 0.95 }}
           >
             <Menu className="w-6 h-6" />
+            {hasNavBadge && <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-accent-400" />}
           </motion.button>
           
           <div className="ml-4 flex items-center gap-2">

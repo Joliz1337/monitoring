@@ -1395,6 +1395,20 @@ export interface VersionBaseInfo {
   update_in_progress: boolean
 }
 
+// Сводка для значка в меню: версии нод панель берёт из своей БД, к нодам не ходит
+export interface UpdateSummary {
+  panel: {
+    version: string
+    latest_version: string | null
+    update_available: boolean
+  }
+  nodes: {
+    latest_version: string | null
+    outdated: number
+    total: number
+  }
+}
+
 // target_version — последняя версия новейшей LTS-ветки под релиз сервера, если она новее установленной
 export interface NodeHAProxyInfo {
   version: string | null
@@ -1624,6 +1638,7 @@ export interface PanelHostHistoryResponse {
 export const systemApi = {
   getPanelIp: () => api.get<PanelIpInfo>('/system/panel-ip'),
   getVersionBase: () => api.get<VersionBaseInfo>('/system/version/base'),
+  getUpdateSummary: () => api.get<UpdateSummary>('/system/update-summary'),
   getNodeVersionById: (nodeId: number) => api.get<SingleNodeVersion>(`/system/nodes/${nodeId}/version`, { timeout: 15000 }),
   nodeUpdates: () => api.get<{ updates: NodeUpdateProgress[] }>('/system/node-updates'),
   updatePanel: (targetRef?: string) =>

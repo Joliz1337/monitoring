@@ -20,7 +20,7 @@ from app.auth import verify_auth
 from app.config import get_settings
 from app.database import get_db, async_session
 from app.models import Server, PanelSettings
-from app.services import node_update_watcher, update_channel
+from app.services import node_update_watcher, release_versions, update_channel
 from app.services.haproxy_upgrade import describe_haproxy
 from app.services.net_utils import panel_ip_info
 from app.services.panel_host_metrics import HostHistoryPeriod, load_host_history
@@ -91,16 +91,8 @@ UPDATER_CONTAINER_NAME = "panel-updater"
 UPDATER_IMAGE = "docker:cli"
 
 
-# URL строятся на каждый запрос: базовая ветка зависит от выбранного канала
+# URL строится на каждый запрос: базовая ветка зависит от выбранного канала
 # обновлений (main/dev) и может меняться в рантайме через настройки панели.
-def _github_panel_version_url() -> str:
-    return f"{update_channel.github_raw_base()}/panel/VERSION"
-
-
-def _github_node_version_url() -> str:
-    return f"{update_channel.github_raw_base()}/node/VERSION"
-
-
 def _github_configs_url(filename: str) -> str:
     return f"{update_channel.github_configs_base()}/{filename}"
 
@@ -155,52 +147,10 @@ def get_current_version() -> str:
     return "unknown"
 
 
-async def get_latest_version_from_github() -> Optional[str]:
-    """Fetch latest panel version from panel/VERSION file on GitHub"""
-    try:
-        client = get_external_client()
-        response = await client.get(_github_panel_version_url(), timeout=10.0)
-
-        if response.status_code == 200:
-            version = response.text.strip()
-            return version if version else None
-
-        return None
-    except Exception as e:
-        logger.error(f"Failed to fetch latest version from GitHub: {e}")
-        return None
-
-
-async def get_latest_node_version_from_github() -> Optional[str]:
-    """Fetch latest node version from node/VERSION file on GitHub"""
-    try:
-        client = get_external_client()
-        response = await client.get(_github_node_version_url(), timeout=10.0)
-
-        if response.status_code == 200:
-            version = response.text.strip()
-            return version if version else None
-
-        return None
-    except Exception as e:
-        logger.error(f"Failed to fetch latest node version from GitHub: {e}")
-        return None
-
-
-async def get_latest_optimizations_version_from_github() -> Optional[str]:
-    """Fetch latest optimizations version from configs/VERSION file on GitHub"""
-    try:
-        client = get_external_client()
-        response = await client.get(_github_configs_url("VERSION"), timeout=10.0)
-
-        if response.status_code == 200:
-            version = response.text.strip()
-            return version if version else None
-
-        return None
-    except Exception as e:
-        logger.error(f"Failed to fetch latest optimizations version from GitHub: {e}")
-        return None
+def _panel_update_available(current_version: str, latest_version: Optional[str]) -> bool:
+    if current_version == "unknown":
+        return False
+    return release_versions.is_newer(latest_version, current_version)
 
 
 async def _fetch_node_all_versions(server: Server) -> Optional[dict]:
@@ -315,21 +265,12 @@ async def get_version_base(
     Загружается мгновенно, ноды приходят без version/status — их грузит фронт поштучно.
     """
     current_version = get_current_version()
+    latest = await release_versions.latest_versions()
 
     result = await db.execute(
         select(Server).where(Server.is_active == True).order_by(Server.position)
     )
     servers = result.scalars().all()
-
-    latest_version, latest_node_version, latest_opt_version = await asyncio.gather(
-        get_latest_version_from_github(),
-        get_latest_node_version_from_github(),
-        get_latest_optimizations_version_from_github(),
-    )
-
-    panel_update_available = False
-    if latest_version and current_version != "unknown":
-        panel_update_available = latest_version != current_version
 
     nodes = [
         {
@@ -346,13 +287,40 @@ async def get_version_base(
     return {
         "panel": {
             "version": current_version,
-            "latest_version": latest_version,
-            "update_available": panel_update_available,
+            "latest_version": latest.panel,
+            "update_available": _panel_update_available(current_version, latest.panel),
         },
-        "node": {"latest_version": latest_node_version},
-        "optimizations": {"latest_version": latest_opt_version},
+        "node": {"latest_version": latest.node},
+        "optimizations": {"latest_version": latest.optimizations},
         "nodes": nodes,
         "update_in_progress": _update_status["in_progress"],
+    }
+
+
+@router.get("/update-summary")
+async def get_update_summary(
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth),
+):
+    """Сводка для значка в меню: вышла ли новая панель и сколько нод отстаёт.
+    К нодам не ходит — их версии в БД держит сборщик метрик."""
+    current_version = get_current_version()
+    latest = await release_versions.latest_versions()
+
+    result = await db.execute(select(Server.node_version).where(Server.is_active == True))
+    node_versions = result.scalars().all()
+
+    return {
+        "panel": {
+            "version": current_version,
+            "latest_version": latest.panel,
+            "update_available": _panel_update_available(current_version, latest.panel),
+        },
+        "nodes": {
+            "latest_version": latest.node,
+            "outdated": sum(1 for version in node_versions if release_versions.is_newer(latest.node, version)),
+            "total": len(node_versions),
+        },
     }
 
 

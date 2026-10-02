@@ -76,7 +76,9 @@
   "nav": {
     "group_configs": "Конфиги",
     "group_security": "Защита",
-    "group_maintenance": "Обслуживание"
+    "group_maintenance": "Обслуживание",
+    "updates_badge_panel": "Панель: обновить {{current}} → {{latest}}",
+    "updates_badge_nodes": "Ноды: обновить {{count}} из {{total}} до {{latest}}"
   },
   "units": {
     "bps": "бит/с",
@@ -1071,6 +1073,9 @@
     "latest": "Последняя",
     "update_available": "Доступно обновление",
     "up_to_date": "Актуальная версия",
+    "folder_current": "Обновлены: {{count}} из {{total}}",
+    "folder_updating": "Обновляются сейчас: {{count}} из {{total}}",
+    "folder_outdated": "Ждут обновления: {{count}} из {{total}}",
     "update": "Обновить",
     "update_panel": "Обновить панель",
     "update_all_nodes": "Обновить все ноды",

@@ -74,7 +74,9 @@
   "nav": {
     "group_configs": "Configs",
     "group_security": "Security",
-    "group_maintenance": "Maintenance"
+    "group_maintenance": "Maintenance",
+    "updates_badge_panel": "Panel: update {{current}} → {{latest}}",
+    "updates_badge_nodes": "Nodes: {{count}} of {{total}} to update to {{latest}}"
   },
   "units": {
     "bps": "bit/s",
@@ -1066,6 +1068,9 @@
     "latest": "Latest",
     "update_available": "Update available",
     "up_to_date": "Up to date",
+    "folder_current": "Up to date: {{count}} of {{total}}",
+    "folder_updating": "Updating now: {{count}} of {{total}}",
+    "folder_outdated": "Need update: {{count}} of {{total}}",
     "update": "Update",
     "update_panel": "Update Panel",
     "update_all_nodes": "Update All Nodes",
