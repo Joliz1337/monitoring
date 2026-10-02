@@ -2659,6 +2659,7 @@
     "timeout_queue": "Таймаут очереди",
     "send_proxy_v2": "PROXY Protocol v2",
     "min_one_server": "Нужен хотя бы один сервер",
+    "duplicate_server_name": "Имя сервера «{{name}}» встречается дважды — у каждого сервера балансировщика должно быть своё имя",
     "auto_weight": "Авто-веса по CPU",
     "alg": {
       "leastconn": "Least Connections",

@@ -17,6 +17,9 @@ VALID_ALGORITHMS = (
     "url_param", "hdr", "random", "first", "rdp-cookie",
 )
 
+# Символы, которые HAProxy допускает в имени сервера; пробел разорвал бы строку `server`
+_SERVER_NAME = re.compile(r"^[a-zA-Z0-9_.:-]+$")
+
 SNI_FILTER_ACL = "sni_allowed"
 SNI_INSPECT_DELAY = "5s"
 SNI_DOMAINS_PER_LINE = 10
@@ -477,7 +480,13 @@ backend {backend_name}
         if rule.is_balancer:
             if not rule.servers:
                 return False, "At least one server required for load balancer"
+            seen_names: set[str] = set()
             for srv in rule.servers:
+                if not _SERVER_NAME.match(srv.name):
+                    return False, f"Invalid server name '{srv.name}' (use a-z, A-Z, 0-9, -, _, ., :)"
+                if srv.name in seen_names:
+                    return False, f"Server name '{srv.name}' is used twice in the balancer"
+                seen_names.add(srv.name)
                 if not srv.address:
                     return False, f"Server '{srv.name}': address is required"
                 if not 1 <= srv.port <= 65535:

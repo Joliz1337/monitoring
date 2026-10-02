@@ -78,6 +78,37 @@ const DEFAULT_SERVER: BackendServer = {
   backup: false, slowstart: '60s', disabled: false,
 }
 
+const SERVER_NAME_PATTERN = /^srv(\d+)$/
+
+// Номер после самого большого srvN: по длине списка выходило занятое имя, стоило удалить сервер из середины
+function nextServerName(servers: BackendServer[]): string {
+  const numbers = servers.map(s => Number(SERVER_NAME_PATTERN.exec(s.name)?.[1] ?? 0))
+  return `srv${Math.max(0, ...numbers) + 1}`
+}
+
+function sharedValue(values: number[]): number | undefined {
+  return values.length > 0 && values.every(v => v === values[0]) ? values[0] : undefined
+}
+
+// Порт и вес нового сервера — как у остальных, если у них они одинаковые
+function newBackendServer(servers: BackendServer[]): BackendServer {
+  return {
+    ...DEFAULT_SERVER,
+    name: nextServerName(servers),
+    port: sharedValue(servers.map(s => s.port).filter(port => port > 0)) ?? DEFAULT_SERVER.port,
+    weight: sharedValue(servers.map(s => s.weight ?? 1)) ?? DEFAULT_SERVER.weight,
+  }
+}
+
+function duplicateServerName(servers: BackendServer[]): string | undefined {
+  const seen = new Set<string>()
+  for (const { name } of servers) {
+    if (seen.has(name)) return name
+    seen.add(name)
+  }
+  return undefined
+}
+
 const DEFAULT_BALANCER_OPTIONS: BalancerOptions = {
   algorithm: 'leastconn', retries: 3, redispatch: true,
   health_check_type: 'tcp-check',
@@ -584,8 +615,7 @@ function RuleForm({
   }
 
   const addServer = () => {
-    const num = form.servers.length + 1
-    setForm(f => ({ ...f, servers: [...f.servers, { ...DEFAULT_SERVER, name: `srv${num}` }] }))
+    setForm(f => ({ ...f, servers: [...f.servers, newBackendServer(f.servers)] }))
   }
 
   const autoWeights = async () => {
@@ -977,6 +1007,13 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
 
   const sniListMissing = (form: RuleFormData) => form.sni_mode === 'custom' && parseSniList(form.sni_domains).length === 0
 
+  // HAProxy не примет конфиг с двумя серверами одного имени в бэкенде — раскатка упала бы на всех нодах
+  const reportDuplicateServer = (form: RuleFormData): boolean => {
+    const name = form.is_balancer ? duplicateServerName(form.servers) : undefined
+    if (name) toast.error(t('balancer.duplicate_server_name', { name }))
+    return name !== undefined
+  }
+
   const handleAddRule = async (form: RuleFormData): Promise<boolean> => {
     if (!form.name || !form.listen_port) {
       toast.error(t('haproxy_configs.rule_fields_required')); return false
@@ -987,6 +1024,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
     if (form.is_balancer && form.servers.length === 0) {
       toast.error(t('balancer.min_one_server')); return false
     }
+    if (reportDuplicateServer(form)) return false
     if (sniListMissing(form)) {
       toast.error(t('haproxy_configs.sni_domains_required')); return false
     }
@@ -1005,6 +1043,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
   }
 
   const handleUpdateRule = async (form: RuleFormData) => {
+    if (reportDuplicateServer(form)) return
     if (sniListMissing(form)) {
       toast.error(t('haproxy_configs.sni_domains_required')); return
     }

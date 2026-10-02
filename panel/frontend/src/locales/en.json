@@ -2653,6 +2653,7 @@
     "timeout_queue": "Queue Timeout",
     "send_proxy_v2": "PROXY Protocol v2",
     "min_one_server": "At least one server required",
+    "duplicate_server_name": "Server name \"{{name}}\" is used twice — each balancer server needs its own name",
     "auto_weight": "Auto-weight by CPU",
     "alg": {
       "leastconn": "Least Connections",
