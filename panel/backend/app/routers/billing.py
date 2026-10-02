@@ -250,6 +250,7 @@ async def create_billing_server(data: BillingServerCreate, db: AsyncSession = De
         else:
             days = data.paid_days or 30
             server.paid_until = now + timedelta(days=days)
+        server.monthly_cost = data.monthly_cost or None
     elif billing_type == "resource":
         server.monthly_cost = data.monthly_cost or 0
         server.account_balance = data.account_balance or 0

@@ -6,7 +6,7 @@ Tracking when each server needs paying so nothing shuts down unexpectedly.
 
 | Type | How the deadline is derived |
 |---|---|
-| Monthly | You set the paid-until date or the number of paid days |
+| Monthly | You set the paid-until date or the number of paid days. Optionally add the monthly price, and the server counts toward monthly spend |
 | Resource | There's a balance and a daily cost — the panel works out how long it lasts |
 | Cloud | Balance and remaining time come from the provider's API: Yandex Cloud, Selectel or Timeweb Cloud |
 

@@ -1938,6 +1938,8 @@
     "mode_days": "Days left",
     "mode_date": "Exact date",
     "daily_cost": "Daily Cost",
+    "monthly_price": "Monthly price",
+    "monthly_price_hint": "What 30 days of this server cost — counted in “Monthly spend”",
     "account_balance": "Balance",
     "currency": "Currency",
     "notes": "Notes",

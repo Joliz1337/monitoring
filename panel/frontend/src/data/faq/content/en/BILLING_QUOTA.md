@@ -7,6 +7,7 @@ How the date after which a server stops being paid for is calculated.
 | Field | Meaning |
 |---|---|
 | Paid until | The end date. Enter it as a date or as a number of paid days |
+| Monthly price | For the monthly type, optional: what 30 days cost. It doesn't change the deadline and is counted in monthly spend |
 | Daily cost | For the resource type: how much is spent per day |
 | Balance | Current funds in the provider account |
 | Currency | For displaying amounts |

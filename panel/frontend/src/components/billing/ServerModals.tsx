@@ -19,6 +19,7 @@ interface FormValues {
   paidDays: number
   paidUntil: string
   dailyCost: string
+  monthlyCost: string
   balance: string
   currency: string
   notes: string
@@ -39,6 +40,7 @@ function emptyValues(): FormValues {
     paidDays: 30,
     paidUntil: '',
     dailyCost: '',
+    monthlyCost: '',
     balance: '',
     currency: 'RUB',
     notes: '',
@@ -61,6 +63,7 @@ function valuesFromServer(server: BillingServerData): FormValues {
       ? new Date(server.paid_until).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' })
       : '',
     dailyCost: currentDaily ? currentDaily.toFixed(2) : '',
+    monthlyCost: server.monthly_cost?.toString() || '',
     balance: server.account_balance?.toString() || '',
     currency: server.currency,
     notes: server.notes || '',
@@ -69,6 +72,13 @@ function valuesFromServer(server: BillingServerData): FormValues {
     proxy: server.cloud_proxy || '',
     credentials: { cloud_account_id: server.cloud_account_id || '' },
   }
+}
+
+// Проект задаётся расходом в день, сервер — необязательной ценой за 30 дней
+function monthlyCostFromForm(values: FormValues): number | null {
+  if (values.billingType === 'resource') return (parseFloat(values.dailyCost) || 0) * 30
+  if (values.billingType === 'monthly') return parseFloat(values.monthlyCost) || null
+  return null
 }
 
 function ModalHeader({ title, onClose }: { title: string; onClose: () => void }) {
@@ -270,6 +280,21 @@ function ServerForm({ values, setValues, t, folders, mode, server }: {
         </Field>
       )}
 
+      {values.billingType === 'monthly' && (
+        <Field label={`${t('billing.monthly_price')} (${t('common.optional')})`}>
+          <input
+            type="number"
+            step="0.01"
+            min={0}
+            value={values.monthlyCost}
+            onChange={e => setValues({ monthlyCost: e.target.value })}
+            placeholder="0.00"
+            className={INPUT_CLASS}
+          />
+          <p className="text-[10px] text-dark-500 mt-1">{t('billing.monthly_price_hint')}</p>
+        </Field>
+      )}
+
       {values.billingType === 'resource' && (
         <>
           <Field label={t('billing.daily_cost')} faqScreen="BILLING_QUOTA">
@@ -376,13 +401,12 @@ export function AddModal({ t, folders, onClose, onCreated }: {
     }
     setSaving(true)
     try {
-      const dailyNum = parseFloat(values.dailyCost) || 0
       const res = await billingApi.createServer({
         name: values.name.trim(),
         billing_type: values.billingType,
         paid_days: values.billingType === 'monthly' && values.paidMode === 'days' ? values.paidDays : undefined,
         paid_until: values.billingType === 'monthly' && values.paidMode === 'date' ? values.paidUntil : undefined,
-        monthly_cost: values.billingType === 'resource' ? dailyNum * 30 : undefined,
+        monthly_cost: monthlyCostFromForm(values) ?? undefined,
         account_balance: values.billingType === 'resource' ? parseFloat(values.balance) || 0 : undefined,
         currency: values.currency,
         notes: values.notes.trim() || undefined,
@@ -453,9 +477,10 @@ export function EditModal({ t, server, folders, onClose, onSaved }: {
       }
       if (server.billing_type === 'monthly') {
         payload.paid_until = values.paidUntil || null
+        payload.monthly_cost = monthlyCostFromForm(values)
       }
       if (server.billing_type === 'resource') {
-        payload.monthly_cost = (parseFloat(values.dailyCost) || 0) * 30
+        payload.monthly_cost = monthlyCostFromForm(values)
         payload.account_balance = parseFloat(values.balance) || 0
       }
       if (server.billing_type === 'cloud') {
