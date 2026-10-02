@@ -18,6 +18,7 @@ import {
 import { nodeAllows } from '../../utils/nodeCapabilities'
 import { versionAtLeast } from '../../utils/version'
 import { Tooltip } from '../ui/Tooltip'
+import { Checkbox } from '../ui/Checkbox'
 import { CopyableIp } from '../ui/CopyableIp'
 import { FAQIcon } from '../FAQ'
 
@@ -25,6 +26,8 @@ const POLL_INTERVAL_MS = 3000
 const PREVIEW_DEBOUNCE_MS = 400
 const DEFAULT_ROLLBACK_SEC = 120
 const MIN_NODE_VERSION_GATEWAY = '10.31.0'
+// Потолок ноды на одну транзакцию (добавление + удаление)
+const MAX_ADDRESSES_PER_APPLY = 256
 
 interface Props {
   serverId: number
@@ -65,7 +68,9 @@ export default function NetworkAddressesCard({ serverId, server }: Props) {
   const [job, setJob] = useState<NetworkJobSnapshot | null>(null)
   const [showProgress, setShowProgress] = useState(false)
   const [addOpen, setAddOpen] = useState(false)
-  const [removeTarget, setRemoveTarget] = useState<{ iface: string; ref: NetworkAddressRef } | null>(null)
+  const [removeTarget, setRemoveTarget] = useState<{ iface: string; refs: NetworkAddressRef[] } | null>(null)
+  // Выбор для массового удаления — по интерфейсам: одна транзакция ноды меняет один интерфейс
+  const [selected, setSelected] = useState<Record<string, Set<string>>>({})
   const [busy, setBusy] = useState(false)
   const [now, setNow] = useState(() => Date.now())
 
@@ -157,6 +162,17 @@ export default function NetworkAddressesCard({ serverId, server }: Props) {
     } finally {
       setBusy(false)
     }
+  }
+
+  const setSelection = (iface: string, cidrs: string[], checked: boolean) => {
+    setSelected(prev => {
+      const next = new Set(prev[iface])
+      for (const value of cidrs) {
+        if (checked) next.add(value)
+        else next.delete(value)
+      }
+      return { ...prev, [iface]: next }
+    })
   }
 
   const rollback = async () => {
@@ -251,8 +267,11 @@ export default function NetworkAddressesCard({ serverId, server }: Props) {
         <InterfaceBlock
           key={iface.name}
           iface={iface}
+          selectable={writable}
           canRemove={canAct}
-          onRemove={ref => setRemoveTarget({ iface: iface.name, ref })}
+          selected={selected[iface.name]}
+          onSelect={(cidrs, checked) => setSelection(iface.name, cidrs, checked)}
+          onRemove={refs => setRemoveTarget({ iface: iface.name, refs })}
         />
       ))}
 
@@ -277,16 +296,18 @@ export default function NetworkAddressesCard({ serverId, server }: Props) {
           />
         )}
         {removeTarget && (
-          <RemoveAddressModal
+          <RemoveAddressesModal
             key="remove"
             iface={removeTarget.iface}
-            ref_={removeTarget.ref}
+            refs={removeTarget.refs}
             rollbackTimeout={rollbackTimeout}
             busy={busy}
             onClose={() => setRemoveTarget(null)}
             onConfirm={async () => {
-              const error = await runApply(removeTarget.iface, '', '', [removeTarget.ref])
+              const { iface, refs } = removeTarget
+              const error = await runApply(iface, '', '', refs)
               if (error) toast.error(error)
+              else setSelection(iface, refs.map(cidr), false)
               setRemoveTarget(null)
             }}
           />
@@ -296,39 +317,87 @@ export default function NetworkAddressesCard({ serverId, server }: Props) {
   )
 }
 
-function InterfaceBlock({ iface, canRemove, onRemove }: {
+function InterfaceBlock({ iface, selectable, canRemove, selected, onSelect, onRemove }: {
   iface: NetworkInterface
+  selectable: boolean
   canRemove: boolean
-  onRemove: (ref: NetworkAddressRef) => void
+  selected?: Set<string>
+  onSelect: (cidrs: string[], checked: boolean) => void
+  onRemove: (refs: NetworkAddressRef[]) => void
 }) {
   const { t } = useTranslation()
+  const managed = iface.addresses.filter(addr => addr.managed)
+  const withCheckboxes = selectable && managed.length > 0
+  const chosen = managed.filter(addr => selected?.has(cidr(addr)))
+  const allChosen = chosen.length === managed.length
+  const overLimit = chosen.length > MAX_ADDRESSES_PER_APPLY
+
   return (
     <div className={`mt-3 ${iface.is_up ? '' : 'opacity-60'}`}>
-      <div className="flex items-center gap-2 text-sm text-dark-200 font-medium mb-1">
+      <div className="flex items-center gap-2 text-sm text-dark-200 font-medium mb-1 flex-wrap">
+        {withCheckboxes && (
+          <Checkbox
+            checked={allChosen}
+            indeterminate={chosen.length > 0 && !allChosen}
+            onChange={() => onSelect(managed.map(cidr), !allChosen)}
+            className="ml-2"
+          />
+        )}
         <span className="font-mono">{iface.name}</span>
         {iface.kind !== 'physical' && <Badge tone="muted">{iface.kind}</Badge>}
         {iface.is_default && <Badge tone="accent">{t('server_details.network_default_badge')}</Badge>}
         {!iface.is_up && <Badge tone="warning">{t('server_details.network_down_badge')}</Badge>}
+        {chosen.length > 0 && (
+          <div className="ml-auto flex items-center gap-2 text-xs font-normal">
+            <span className="text-dark-400">{t('server_details.network_selected_count', { count: chosen.length })}</span>
+            <button
+              onClick={() => onRemove(chosen.map(addr => ({ address: addr.address, prefix: addr.prefix })))}
+              disabled={!canRemove || overLimit}
+              className="px-2 py-1 rounded-md font-medium bg-danger/15 text-danger hover:bg-danger/25 transition-colors disabled:opacity-40 flex items-center gap-1"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              {t('server_details.network_remove_selected')}
+            </button>
+          </div>
+        )}
       </div>
+      {overLimit && (
+        <p className="text-xs text-warning ml-1 mb-1">{t('server_details.network_remove_limit', { max: MAX_ADDRESSES_PER_APPLY })}</p>
+      )}
       {iface.addresses.length === 0 && <p className="text-xs text-dark-500 ml-1">{t('server_details.network_no_addresses')}</p>}
       <div className="space-y-1">
         {iface.addresses.map(addr => (
-          <AddressRow key={`${addr.address}/${addr.prefix}`} addr={addr} canRemove={canRemove} onRemove={onRemove} />
+          <AddressRow
+            key={cidr(addr)}
+            addr={addr}
+            withCheckbox={withCheckboxes}
+            checked={!!selected?.has(cidr(addr))}
+            canRemove={canRemove}
+            onToggle={checked => onSelect([cidr(addr)], checked)}
+            onRemove={ref => onRemove([ref])}
+          />
         ))}
       </div>
     </div>
   )
 }
 
-function AddressRow({ addr, canRemove, onRemove }: {
+function AddressRow({ addr, withCheckbox, checked, canRemove, onToggle, onRemove }: {
   addr: NetworkAddress
+  withCheckbox: boolean
+  checked: boolean
   canRemove: boolean
+  onToggle: (checked: boolean) => void
   onRemove: (ref: NetworkAddressRef) => void
 }) {
   const { t } = useTranslation()
   const locked = !addr.managed
   return (
     <div className="flex items-center gap-2 text-sm px-2 py-1 rounded-lg bg-dark-800/60 flex-wrap">
+      {withCheckbox && (addr.managed
+        ? <Checkbox checked={checked} onChange={e => onToggle(e.target.checked)} />
+        // Пустое место под галочку держит адреса хостера в одной колонке с адресами панели
+        : <span className="w-[18px] shrink-0" />)}
       <span className="font-mono text-dark-100">
         <CopyableIp value={addr.address} display={`${addr.address}/${addr.prefix}`} />
       </span>
@@ -659,20 +728,32 @@ function AddAddressesModal({
   )
 }
 
-function RemoveAddressModal({ iface, ref_, rollbackTimeout, busy, onClose, onConfirm }: {
+function RemoveAddressesModal({ iface, refs, rollbackTimeout, busy, onClose, onConfirm }: {
   iface: string
-  ref_: NetworkAddressRef
+  refs: NetworkAddressRef[]
   rollbackTimeout: number
   busy: boolean
   onClose: () => void
   onConfirm: () => Promise<void>
 }) {
   const { t } = useTranslation()
+  const single = refs.length === 1
   return (
-    <ModalShell title={t('server_details.network_modal_remove_title')} danger onClose={() => !busy && onClose()}>
+    <ModalShell
+      title={t(single ? 'server_details.network_modal_remove_title' : 'server_details.network_modal_remove_many_title')}
+      danger
+      onClose={() => !busy && onClose()}
+    >
       <p className="text-dark-300 text-sm mb-4">
-        {t('server_details.network_remove_confirm', { address: cidr(ref_), iface })}
+        {single
+          ? t('server_details.network_remove_confirm', { address: cidr(refs[0]), iface })
+          : t('server_details.network_remove_many_confirm', { count: refs.length, iface })}
       </p>
+      {!single && (
+        <ul className="mb-4 max-h-48 overflow-y-auto pr-1 font-mono text-xs text-dark-200 space-y-0.5">
+          {refs.map(ref => <li key={cidr(ref)}>{cidr(ref)}</li>)}
+        </ul>
+      )}
       <RollbackWarning seconds={rollbackTimeout} />
       <div className="flex justify-end gap-3 mt-5">
         <button className="btn btn-secondary" onClick={onClose} disabled={busy}>{t('common.cancel')}</button>

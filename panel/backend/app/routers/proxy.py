@@ -32,6 +32,7 @@ from app.services.traffic_import import (
 )
 from app.services import network_transactions
 from app.services.network_addresses import (
+    MAX_ADDRESSES,
     AddressInputError,
     expand_entries,
     normalize_ref,
@@ -697,7 +698,7 @@ class NetworkApplyRequest(BaseModel):
     add_text: str = Field("", max_length=20000)
     # Пусто — адреса ходят через шлюз основного адреса
     gateway: str = Field("", max_length=64)
-    remove: list[NetworkAddressRef] = Field(default_factory=list)
+    remove: list[NetworkAddressRef] = Field(default_factory=list, max_length=MAX_ADDRESSES)
 
 
 class NetworkRollbackRequest(BaseModel):

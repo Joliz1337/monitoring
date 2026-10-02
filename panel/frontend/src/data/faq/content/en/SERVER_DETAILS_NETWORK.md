@@ -1,6 +1,6 @@
 # Network / IP addresses
 
-Your hoster gave the node another address or a block of addresses — attach them to the interface here, without SSH. The node writes them into its own network config (netplan, systemd-networkd, NetworkManager or `/etc/network/interfaces`), so they survive a reboot. The primary address and anything configured by the hoster are never touched: only addresses added through the panel can be removed.
+Your hoster gave the node another address or a block of addresses — attach them to the interface here, without SSH. The node writes them into its own network config (netplan, systemd-networkd, NetworkManager or `/etc/network/interfaces`), so they survive a reboot. The primary address and anything configured by the hoster are never touched: only addresses added through the panel can be removed. To remove several at once, tick them (the checkbox next to the interface name selects them all) and click “Remove selected” — up to 256 addresses of one interface at a time.
 
 ## Input formats
 
