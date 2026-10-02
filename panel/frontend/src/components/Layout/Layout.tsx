@@ -253,10 +253,11 @@ export default function Layout() {
         )}
       </AnimatePresence>
       
-      {/* Sidebar */}
-      <motion.aside 
+      {/* Sidebar: на десктопе закреплено и прокручивается само, если не влезает по высоте.
+          z-0 ниже контента (z-10) — модалки страниц должны перекрывать меню */}
+      <motion.aside
         className={`
-          fixed lg:static inset-y-0 left-0 z-50
+          fixed inset-y-0 left-0 z-50 lg:z-0
           w-72 bg-dark-900/80 backdrop-blur-xl border-r border-dark-800/50
           flex flex-col
           ${sidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}
@@ -305,7 +306,7 @@ export default function Layout() {
           </motion.button>
           
           {/* Navigation */}
-          <nav className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-4 space-y-1">
+          <nav className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden overscroll-contain p-4 space-y-1">
             {sidebarEntries.map((entry, index) => (
               <motion.div
                 key={entry.kind === 'link' ? entry.item.to : entry.group.id}
@@ -332,8 +333,8 @@ export default function Layout() {
         </div>
       </motion.aside>
       
-      {/* Main content */}
-      <div className="flex-1 flex flex-col min-w-0 relative z-10">
+      {/* Main content: отступ margin, а не padding — прозрачный padding поверх меню перехватывал бы клики */}
+      <div className="flex-1 flex flex-col min-w-0 relative z-10 lg:ml-72">
         {/* Mobile header */}
         <motion.header 
           className="h-16 bg-dark-900/60 backdrop-blur-xl border-b border-dark-800/50 
