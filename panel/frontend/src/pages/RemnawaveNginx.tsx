@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { useNodeCapabilities } from '../hooks/useNodeCapabilities'
+import { useOpenIds } from '../hooks/useOpenIds'
 import { Waypoints, Plus, RefreshCw, Trash2, Server, ChevronDown, ChevronRight, Edit3, Link2, Unlink, Loader2, CheckCircle2, XCircle, AlertCircle, Clock, History, X, Code, Save, AlertTriangle, Activity, Globe, Lock, RotateCw, Download, Settings2, Power } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -1210,7 +1211,7 @@ export default function RemnawaveNginx() {
   const { t } = useTranslation()
   const [profiles, setProfiles] = useState<RemnawaveNginxProfile[]>([])
   const [loading, setLoading] = useState(true)
-  const [expandedId, setExpandedId] = useState<number | null>(null)
+  const { openIds, close: collapseProfile, toggle: toggleProfile } = useOpenIds<number>('remnawave-nginx.open')
   const [modalProfile, setModalProfile] = useState<RemnawaveNginxProfile | null | 'new'>(null)
 
   const initialLoadDone = useRef(false)
@@ -1233,14 +1234,12 @@ export default function RemnawaveNginx() {
     return () => clearInterval(id)
   }, [fetchProfiles])
 
-  const handleExpand = (id: number) => setExpandedId(prev => prev === id ? null : id)
-
   const handleDelete = async (id: number) => {
     if (!confirm(t('remnawave_nginx.delete_confirm'))) return
     try {
       await remnawaveNginxApi.deleteProfile(id)
       toast.success(t('remnawave_nginx.profile_deleted'))
-      if (expandedId === id) setExpandedId(null)
+      collapseProfile(id)
       await fetchProfiles()
     } catch { toast.error(t('remnawave_nginx.delete_error')) }
   }
@@ -1283,9 +1282,9 @@ export default function RemnawaveNginx() {
           <AnimatePresence mode="popLayout">
             {profiles.map(p => (
               <div key={p.id}>
-                <ProfileCard profile={p} expanded={expandedId === p.id} onExpand={handleExpand} onEdit={setModalProfile} onDelete={handleDelete} />
+                <ProfileCard profile={p} expanded={openIds.includes(p.id)} onExpand={toggleProfile} onEdit={setModalProfile} onDelete={handleDelete} />
                 <AnimatePresence>
-                  {expandedId === p.id && <ProfileDetailPanel profileId={p.id} onRefreshList={fetchProfiles} />}
+                  {openIds.includes(p.id) && <ProfileDetailPanel profileId={p.id} onRefreshList={fetchProfiles} />}
                 </AnimatePresence>
               </div>
             ))}

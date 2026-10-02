@@ -1,5 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRememberedState } from '../hooks/useRememberedState'
+import { useOpenIds } from '../hooks/useOpenIds'
 import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
 import { useTranslation } from 'react-i18next'
@@ -451,12 +452,12 @@ function CreateProfileModal({
 
 function ProfileListItem({
   profile,
-  selected,
-  onSelect,
+  open,
+  onToggle,
 }: {
   profile: DnatProfile
-  selected: boolean
-  onSelect: (id: number) => void
+  open: boolean
+  onToggle: (id: number) => void
 }) {
   const { t } = useTranslation()
   const linked = profile.linked_servers_count
@@ -470,9 +471,9 @@ function ProfileListItem({
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, y: -4 }}
-      onClick={() => onSelect(profile.id)}
+      onClick={() => onToggle(profile.id)}
       className={`w-full text-left rounded-xl border transition-all duration-200 ${
-        selected
+        open
           ? 'bg-accent-500/10 border-accent-500/40'
           : 'bg-dark-800/60 border-dark-700/60 hover:border-dark-600'
       }`}
@@ -480,8 +481,8 @@ function ProfileListItem({
       <div className="px-4 py-3 flex items-center justify-between gap-3 min-w-0">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <RouteIcon className={`w-4 h-4 shrink-0 ${selected ? 'text-accent-400' : 'text-dark-400'}`} />
-            <span className={`text-sm font-medium truncate ${selected ? 'text-dark-100' : 'text-dark-200'}`}>{profile.name}</span>
+            <RouteIcon className={`w-4 h-4 shrink-0 ${open ? 'text-accent-400' : 'text-dark-400'}`} />
+            <span className={`text-sm font-medium truncate ${open ? 'text-dark-100' : 'text-dark-200'}`}>{profile.name}</span>
             {profile.ssh_port_covered && (
               <Tooltip label={t('dnat_profiles.ssh_warning', { port: profile.ssh_default_port })}>
                 <span className="shrink-0 text-red-400">
@@ -518,6 +519,7 @@ function ProfileHeader({
   onClone,
   onDelete,
   onSave,
+  onClose,
 }: {
   profile: DnatProfileWithServers
   saving: boolean
@@ -526,6 +528,7 @@ function ProfileHeader({
   onClone: () => void
   onDelete: () => void
   onSave: (patch: { name?: string; description?: string | null }) => Promise<void>
+  onClose: () => void
 }) {
   const { t } = useTranslation()
   const [editing, setEditing] = useState(false)
@@ -613,6 +616,14 @@ function ProfileHeader({
         >
           <Trash2 className="w-3.5 h-3.5" /> {t('common.delete')}
         </button>
+        <Tooltip label={t('common.close')}>
+          <button
+            onClick={onClose}
+            className="p-1.5 rounded-lg text-dark-400 hover:text-dark-200 hover:bg-dark-800 transition-colors"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </Tooltip>
       </div>
     </div>
   )
@@ -1197,11 +1208,13 @@ function ProfileDetail({
   onProfileDeleted,
   onProfileChanged,
   onProfileCloned,
+  onClose,
 }: {
   profileId: number
   onProfileDeleted: () => void
   onProfileChanged: () => void
   onProfileCloned: (clone: DnatProfile) => void
+  onClose: () => void
 }) {
   const { t } = useTranslation()
   const [profile, setProfile] = useState<DnatProfileWithServers | null>(null)
@@ -1443,6 +1456,7 @@ function ProfileDetail({
         onClone={handleClone}
         onDelete={handleDelete}
         onSave={handleHeaderSave}
+        onClose={onClose}
       />
 
       <div className="flex items-center gap-1 border-b border-dark-700/60">
@@ -1492,7 +1506,7 @@ export default function DnatProfiles() {
   const { t } = useTranslation()
   const [profiles, setProfiles] = useState<DnatProfile[]>([])
   const [loading, setLoading] = useState(true)
-  const [selectedId, setSelectedId] = useRememberedState<number | null>('dnat-profiles.selected', null)
+  const { openIds, setOpenIds, open: openProfile, close: closeProfile, toggle: toggleProfile } = useOpenIds<number>('dnat-profiles.open')
   const [showCreate, setShowCreate] = useState(false)
   const initialLoadDone = useRef(false)
 
@@ -1500,10 +1514,10 @@ export default function DnatProfiles() {
     try {
       const res = await dnatProfilesApi.list()
       setProfiles(res.data)
-      setSelectedId(prev => {
-        if (prev !== null && res.data.some(p => p.id === prev)) return prev
-        return res.data[0]?.id ?? null
-      })
+      // На первом заходе справа сразу виден первый профиль, а не пустая заглушка
+      if (!initialLoadDone.current && res.data.length > 0) {
+        setOpenIds(prev => (prev.length > 0 ? prev : [res.data[0].id]))
+      }
     } catch (err) {
       if (!initialLoadDone.current) toast.error(extractErrorMessage(err, t('dnat_profiles.load_profiles_error')))
     } finally {
@@ -1512,7 +1526,7 @@ export default function DnatProfiles() {
         setLoading(false)
       }
     }
-  }, [t])
+  }, [t, setOpenIds])
 
   useEffect(() => {
     fetchProfiles()
@@ -1526,21 +1540,21 @@ export default function DnatProfiles() {
   const handleCreated = (profile: DnatProfile) => {
     setShowCreate(false)
     setProfiles(prev => [...prev, profile])
-    setSelectedId(profile.id)
+    openProfile(profile.id)
   }
 
-  const handleDeleted = async () => {
-    setSelectedId(null)
+  const handleDeleted = async (id: number) => {
+    closeProfile(id)
     await fetchProfiles()
   }
 
   const handleCloned = async (clone: DnatProfile) => {
     await fetchProfiles()
-    setSelectedId(clone.id)
+    openProfile(clone.id)
   }
 
-  // Запомненный с прошлого захода профиль мог быть удалён — открываем только живой
-  const openProfileId = profiles.some(p => p.id === selectedId) ? selectedId : null
+  // Запомненный с прошлого захода профиль мог быть удалён — открываем только живые
+  const openProfileIds = openIds.filter(id => profiles.some(p => p.id === id))
 
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-6">
@@ -1579,27 +1593,31 @@ export default function DnatProfiles() {
           ) : (
             <AnimatePresence>
               {profiles.map(p => (
-                <ProfileListItem key={p.id} profile={p} selected={p.id === selectedId} onSelect={setSelectedId} />
+                <ProfileListItem key={p.id} profile={p} open={openIds.includes(p.id)} onToggle={toggleProfile} />
               ))}
             </AnimatePresence>
           )}
         </div>
 
-        <div className="card">
-          {openProfileId === null ? (
-            <div className="flex flex-col items-center justify-center py-16 text-dark-500">
-              <RouteIcon className="w-10 h-10 mb-3 text-dark-600" />
-              <p className="text-sm">{t('dnat_profiles.select_profile')}</p>
+        <div className="space-y-6">
+          {openProfileIds.length === 0 ? (
+            <div className="card">
+              <div className="flex flex-col items-center justify-center py-16 text-dark-500">
+                <RouteIcon className="w-10 h-10 mb-3 text-dark-600" />
+                <p className="text-sm">{t('dnat_profiles.select_profile')}</p>
+              </div>
             </div>
-          ) : (
-            <ProfileDetail
-              key={openProfileId}
-              profileId={openProfileId}
-              onProfileDeleted={handleDeleted}
-              onProfileChanged={fetchProfiles}
-              onProfileCloned={handleCloned}
-            />
-          )}
+          ) : openProfileIds.map(id => (
+            <div key={id} className="card">
+              <ProfileDetail
+                profileId={id}
+                onProfileDeleted={() => handleDeleted(id)}
+                onProfileChanged={fetchProfiles}
+                onProfileCloned={handleCloned}
+                onClose={() => closeProfile(id)}
+              />
+            </div>
+          ))}
         </div>
       </div>
 

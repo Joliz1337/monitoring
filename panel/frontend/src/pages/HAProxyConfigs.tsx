@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef, forwardRef, type ForwardedRef, type ReactNode } from 'react'
-import { useRememberedState } from '../hooks/useRememberedState'
+import { useOpenIds } from '../hooks/useOpenIds'
 import { DndContext, closestCenter, KeyboardSensor, PointerSensor, TouchSensor, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core'
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, verticalListSortingStrategy, useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
@@ -1792,7 +1792,7 @@ export default function HAProxyConfigs() {
   const { t } = useTranslation()
   const [profiles, setProfiles] = useState<HAProxyConfigProfile[]>([])
   const [loading, setLoading] = useState(true)
-  const [expandedId, setExpandedId] = useRememberedState<number | null>('haproxy-configs.expanded', null)
+  const { openIds, close: collapseProfile, toggle: toggleProfile } = useOpenIds<number>('haproxy-configs.open')
   const [modalProfile, setModalProfile] = useState<HAProxyConfigProfile | null | 'new'>(null)
 
   const initialLoadDone = useRef(false)
@@ -1825,8 +1825,6 @@ export default function HAProxyConfigs() {
     return () => clearInterval(id)
   }, [fetchProfiles])
 
-  const handleExpand = (id: number) => setExpandedId(prev => prev === id ? null : id)
-
   const handleDragEnd = async ({ active, over }: DragEndEvent) => {
     if (!over || active.id === over.id) return
     const oldIndex = profiles.findIndex(p => p.id === active.id)
@@ -1849,7 +1847,7 @@ export default function HAProxyConfigs() {
     try {
       await haproxyProfilesApi.deleteProfile(id)
       toast.success(t('haproxy_configs.profile_deleted'))
-      if (expandedId === id) setExpandedId(null)
+      collapseProfile(id)
       await fetchProfiles()
     } catch { toast.error(t('haproxy_configs.delete_error')) }
   }
@@ -1896,9 +1894,9 @@ export default function HAProxyConfigs() {
                   <SortableProfileItem key={p.id} profileId={p.id}>
                     {dragHandle => (
                       <>
-                        <ProfileCard profile={p} expanded={expandedId === p.id} dragHandle={dragHandle} onExpand={handleExpand} onEdit={setModalProfile} onDelete={handleDelete} />
+                        <ProfileCard profile={p} expanded={openIds.includes(p.id)} dragHandle={dragHandle} onExpand={toggleProfile} onEdit={setModalProfile} onDelete={handleDelete} />
                         <AnimatePresence>
-                          {expandedId === p.id && <ProfileDetailPanel profileId={p.id} onRefreshList={fetchProfiles} />}
+                          {openIds.includes(p.id) && <ProfileDetailPanel profileId={p.id} onRefreshList={fetchProfiles} />}
                         </AnimatePresence>
                       </>
                     )}

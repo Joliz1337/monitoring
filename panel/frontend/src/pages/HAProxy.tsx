@@ -37,6 +37,7 @@ import { nodeAllows } from '../utils/nodeCapabilities'
 import { formatBytes, formatUptime } from '../utils/format'
 import { useAutoRefresh } from '../hooks/useAutoRefresh'
 import { useModuleEnabled } from '../hooks/useModuleEnabled'
+import { useOpenIds } from '../hooks/useOpenIds'
 import { useCachedData, createServerCacheKey } from '../hooks/useCachedData'
 import CachedDataBanner from '../components/ui/CachedDataBanner'
 import { Tooltip } from '../components/ui/Tooltip'
@@ -107,8 +108,7 @@ export default function HAProxy() {
   const [renewLog, setRenewLog] = useState<{ domain: string; success: boolean; message: string; log?: string } | null>(null)
   const [renewLogExpanded, setRenewLogExpanded] = useState(false)
   
-  // Certificate details expanded state
-  const [expandedCert, setExpandedCert] = useState<string | null>(null)
+  const { openIds: expandedCerts, toggle: toggleCertExpanded } = useOpenIds<string>('haproxy.open-certs')
   
   // Config editor states
   const [showConfigModal, setShowConfigModal] = useState(false)
@@ -1672,7 +1672,7 @@ export default function HAProxy() {
                     const cert = certDetails[domain]
                     const isExpiringSoon = cert && cert.days_left < 30
                     const isExpired = cert && cert.expired
-                    const isExpanded = expandedCert === domain
+                    const isExpanded = expandedCerts.includes(domain)
                     
                     const copyToClipboard = (text: string) => {
                       navigator.clipboard.writeText(text)
@@ -1689,7 +1689,7 @@ export default function HAProxy() {
                       >
                         <div 
                           className="flex items-center justify-between p-4 cursor-pointer"
-                          onClick={() => setExpandedCert(isExpanded ? null : domain)}
+                          onClick={() => toggleCertExpanded(domain)}
                         >
                           <div className="flex items-center gap-4">
                             <motion.div 

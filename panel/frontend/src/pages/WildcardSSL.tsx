@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback, useMemo, useRef, FormEvent } from 'react'
 import { useNodeCapabilities } from '../hooks/useNodeCapabilities'
+import { useOpenIds } from '../hooks/useOpenIds'
 import { nodeAllows } from '../utils/nodeCapabilities'
 import { ShieldCheck, RefreshCw, Server, Upload, Globe, Loader2, CheckCircle2, XCircle, Trash2, Eye, EyeOff, Save, Search, Send, Settings2, Info, ChevronDown, ChevronRight, Folder, FolderOpen, ToggleLeft, ToggleRight, Lock, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
@@ -605,7 +606,7 @@ export default function WildcardSSL() {
   const { servers: allServers } = useNodeCapabilities()
   const [serversLoading, setServersLoading] = useState(true)
   const [deployingServer, setDeployingServer] = useState<number | null>(null)
-  const [expandedServer, setExpandedServer] = useState<number | null>(null)
+  const { openIds: expandedServers, toggle: toggleServerExpanded } = useOpenIds<number>('wildcard-ssl.open-servers')
   const [reloadPresets, setReloadPresets] = useState<WildcardReloadCmdPreset[]>([])
   const [savingReloadPreset, setSavingReloadPreset] = useState(false)
 
@@ -796,10 +797,6 @@ export default function WildcardSSL() {
     } finally {
       setSavingSettings(false)
     }
-  }
-
-  const handleExpandServer = (serverId: number) => {
-    setExpandedServer(prev => prev === serverId ? null : serverId)
   }
 
   const handleSaveReloadPreset = async (command: string) => {
@@ -996,10 +993,10 @@ export default function WildcardSSL() {
       srv={srv}
       cert={cert}
       deployingServer={deployingServer}
-      expanded={expandedServer === srv.server_id}
+      expanded={expandedServers.includes(srv.server_id)}
       selected={selectedIds.includes(srv.server_id)}
       onToggle={handleServerToggle}
-      onExpand={handleExpandServer}
+      onExpand={toggleServerExpanded}
       onSelect={toggleSelect}
       onSave={handleServerSave}
       onDeploy={handleDeployOne}
