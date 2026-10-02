@@ -3,12 +3,14 @@ import { useRememberedState } from '../hooks/useRememberedState'
 import { DndContext, closestCenter, KeyboardSensor, PointerSensor, TouchSensor, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core'
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, verticalListSortingStrategy, useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { FileCode2, Plus, Play, RefreshCw, Trash2, Server, ChevronDown, ChevronRight, Edit3, Link2, Unlink, Loader2, CheckCircle2, XCircle, AlertCircle, Clock, History, X, Code, Save, AlertTriangle, Activity, Scale, Cpu, Lock, GripVertical, ShieldCheck, Copy } from 'lucide-react'
+import { FileCode2, Plus, Play, RefreshCw, Trash2, Server, ChevronDown, ChevronRight, Edit3, Link2, Unlink, Loader2, CheckCircle2, XCircle, AlertCircle, Clock, History, X, Code, Save, AlertTriangle, Activity, Scale, Cpu, Lock, GripVertical, ShieldCheck, Copy, ClipboardPaste } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
 import { formatBitsPerSec } from '../utils/format'
 import { uniqueCopyName } from '../utils/ruleClone'
+import { copyToClipboard } from '../utils/clipboard'
+import { formatServerLines } from '../utils/haproxyServerLines'
 import {
   haproxyProfilesApi,
   proxyApi,
@@ -30,6 +32,7 @@ import { Tooltip } from '../components/ui/Tooltip'
 import { FAQIcon } from '../components/FAQ'
 import FolderedServerPicker from '../components/servers/FolderedServerPicker'
 import ServerAddressesEditor from '../components/haproxy/ServerAddressesEditor'
+import ServersPasteBox, { type ServersPasteMode } from '../components/haproxy/ServersPasteBox'
 
 
 function SyncStatusBadge({ status, online }: { status: string | null; online?: boolean }) {
@@ -100,6 +103,17 @@ function newBackendServer(servers: BackendServer[]): BackendServer {
     port: sharedValue(servers.map(s => s.port).filter(port => port > 0)) ?? DEFAULT_SERVER.port,
     weight: sharedValue(servers.map(s => s.weight ?? 1)) ?? DEFAULT_SERVER.weight,
   }
+}
+
+// Вставленный сервер без имени или с уже занятым именем получает следующий srvN;
+// при добавлении пустые строки формы (без адреса) уступают место вставленным
+function mergePastedServers(current: BackendServer[], pasted: BackendServer[], mode: ServersPasteMode): BackendServer[] {
+  const merged = mode === 'append' ? current.filter(s => s.address.trim()) : []
+  for (const srv of pasted) {
+    const nameTaken = !srv.name || merged.some(s => s.name === srv.name)
+    merged.push(nameTaken ? { ...srv, name: nextServerName(merged) } : srv)
+  }
+  return merged
 }
 
 function duplicateServerName(servers: BackendServer[]): string | undefined {
@@ -589,6 +603,7 @@ function RuleForm({
 }) {
   const { t } = useTranslation()
   const [form, setForm] = useState(initial)
+  const [pasteOpen, setPasteOpen] = useState(false)
   const addressRole = useAddressRole()
   const singleTargetLabel = ownerLabel(findOwner(ipOwners, form.target_ip), addressRole)
 
@@ -618,6 +633,18 @@ function RuleForm({
 
   const addServer = () => {
     setForm(f => ({ ...f, servers: [...f.servers, newBackendServer(f.servers)] }))
+  }
+
+  const copyableServers = form.servers.filter(s => s.address.trim())
+
+  const copyServers = async () => {
+    await copyToClipboard(formatServerLines(copyableServers))
+    toast.success(t('balancer.servers_copied', { count: copyableServers.length }))
+  }
+
+  const pasteServers = (pasted: BackendServer[], mode: ServersPasteMode) => {
+    setForm(f => ({ ...f, servers: mergePastedServers(f.servers, pasted, mode) }))
+    setPasteOpen(false)
   }
 
   const autoWeights = async () => {
@@ -749,9 +776,23 @@ function RuleForm({
 
             {/* Servers */}
             <div>
-              <div className="flex items-center justify-between mb-2">
+              <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
                 <span className="text-xs text-dark-400 font-medium">{t('balancer.servers')}</span>
-                <div className="flex items-center gap-3">
+                <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1">
+                  {copyableServers.length > 0 && (
+                    <Tooltip label={t('balancer.copy_servers_hint')}>
+                      <button type="button" onClick={copyServers}
+                        className="flex items-center gap-1 text-xs text-dark-400 hover:text-dark-200 transition-colors">
+                        <Copy className="w-3 h-3" /> {t('common.copy')}
+                      </button>
+                    </Tooltip>
+                  )}
+                  <Tooltip label={t('balancer.paste_servers_hint')}>
+                    <button type="button" onClick={() => setPasteOpen(open => !open)}
+                      className={`flex items-center gap-1 text-xs transition-colors ${pasteOpen ? 'text-accent-400' : 'text-dark-400 hover:text-dark-200'}`}>
+                      <ClipboardPaste className="w-3 h-3" /> {t('balancer.paste_servers')}
+                    </button>
+                  </Tooltip>
                   {form.servers.length > 1 && (
                     <Tooltip label={t('balancer.auto_weight')}>
                       <button type="button" onClick={autoWeights}
@@ -766,6 +807,9 @@ function RuleForm({
                   </button>
                 </div>
               </div>
+              {pasteOpen && (
+                <ServersPasteBox defaults={newBackendServer(form.servers)} onApply={pasteServers} onClose={() => setPasteOpen(false)} />
+              )}
               <div className="space-y-2">
                 {form.servers.map((srv, i) => (
                   <BackendServerRow key={i} srv={srv} index={i} owner={ownerLabel(findOwner(ipOwners, srv.address), addressRole)} onChange={updateServer}
