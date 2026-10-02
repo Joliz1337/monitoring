@@ -3,7 +3,7 @@ import { useRememberedState } from '../hooks/useRememberedState'
 import { DndContext, closestCenter, KeyboardSensor, PointerSensor, TouchSensor, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core'
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, verticalListSortingStrategy, useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { FileCode2, Plus, Play, RefreshCw, Trash2, Server, ChevronDown, ChevronRight, Edit3, Link2, Unlink, Loader2, CheckCircle2, XCircle, AlertCircle, Clock, History, X, Code, Save, AlertTriangle, Activity, Scale, Cpu, Lock, GripVertical, ShieldCheck, Copy, ClipboardPaste } from 'lucide-react'
+import { FileCode2, Plus, Play, RefreshCw, Trash2, Server, ChevronDown, ChevronRight, Edit3, Link2, Unlink, Loader2, CheckCircle2, XCircle, AlertCircle, Clock, History, X, Code, Save, AlertTriangle, Activity, Scale, Cpu, Lock, GripVertical, ShieldCheck, Copy, ClipboardPaste, ArrowRightLeft } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
@@ -34,6 +34,7 @@ import FolderedServerPicker from '../components/servers/FolderedServerPicker'
 import ServerAddressesEditor from '../components/haproxy/ServerAddressesEditor'
 import ServersPasteBox, { type ServersMergeMode } from '../components/haproxy/ServersPasteBox'
 import ServersFromNodesBox from '../components/haproxy/ServersFromNodesBox'
+import ServersPortBox from '../components/haproxy/ServersPortBox'
 
 
 function SyncStatusBadge({ status, online }: { status: string | null; online?: boolean }) {
@@ -117,7 +118,7 @@ function mergeServers(current: BackendServer[], incoming: BackendServer[], mode:
   return merged
 }
 
-type ServersToolbox = 'paste' | 'nodes'
+type ServersToolbox = 'paste' | 'nodes' | 'port'
 
 function duplicateServerName(servers: BackendServer[]): string | undefined {
   const seen = new Set<string>()
@@ -662,6 +663,12 @@ function RuleForm({
     setToolbox(null)
   }
 
+  const changeServersPort = (servers: BackendServer[], changed: number) => {
+    setForm(f => ({ ...f, servers }))
+    setToolbox(null)
+    toast.success(t('balancer.port_changed', { count: changed }))
+  }
+
   const toggleToolbox = (box: ServersToolbox) => setToolbox(open => open === box ? null : box)
 
   const autoWeights = async () => {
@@ -816,6 +823,12 @@ function RuleForm({
                       <Server className="w-3 h-3" /> {t('balancer.from_nodes')}
                     </button>
                   </Tooltip>
+                  <Tooltip label={t('balancer.port_change_tooltip')}>
+                    <button type="button" onClick={() => toggleToolbox('port')}
+                      className={`flex items-center gap-1 text-xs transition-colors ${toolbox === 'port' ? 'text-accent-400' : 'text-dark-400 hover:text-dark-200'}`}>
+                      <ArrowRightLeft className="w-3 h-3" /> {t('balancer.port_change')}
+                    </button>
+                  </Tooltip>
                   {form.servers.length > 1 && (
                     <Tooltip label={t('balancer.auto_weight')}>
                       <button type="button" onClick={autoWeights}
@@ -836,6 +849,9 @@ function RuleForm({
               {toolbox === 'nodes' && (
                 <ServersFromNodesBox nodes={nodes} ipOwners={ipOwners} defaults={newBackendServer(form.servers)}
                   onApply={addNodeServers} onClose={() => setToolbox(null)} />
+              )}
+              {toolbox === 'port' && (
+                <ServersPortBox servers={form.servers} onApply={changeServersPort} onClose={() => setToolbox(null)} />
               )}
               <div className="space-y-2">
                 {form.servers.map((srv, i) => (
