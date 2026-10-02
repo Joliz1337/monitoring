@@ -801,8 +801,19 @@
     "excluded_title": "Servers excluded from loss tracking",
     "excluded_hint": "Checks made by these servers are ignored, and addresses hosted on them are not shown in the table and never trigger alerts. The node keeps probing — the panel just ignores its data.",
     "excluded_count": "excluded: {{count}}",
+    "excluded_targets_title": "Addresses excluded from loss tracking",
+    "excluded_targets_hint": "IP excludes the address on every port, IP:port excludes just that backend. These addresses are not shown in the table and never trigger alerts; relays keep probing them. With \"Total loss only\" checked, the address stays silent while loss is below 95%.",
+    "excluded_target_add": "Add",
+    "excluded_target_remove": "Remove from the list",
+    "total_only": "Total loss only",
+    "total_only_hint": "Partial loss is ignored. The address shows up in the table and sends a \"barely reachable\" alert only when loss reaches 95%, and \"recovered\" once every relay sees less than 95%",
+    "total_only_mark": "total loss only",
+    "hide_target": "Hide",
+    "hide_target_hint": "Stop tracking this backend: remove it from the table and from alerts",
+    "target_hidden": "{{target}} is no longer tracked. You can bring it back in Settings at the bottom of the page",
     "settings_saved": "Settings saved",
-    "settings_save_failed": "Could not save settings"
+    "settings_save_failed": "Could not save settings",
+    "settings_load_failed": "Could not load settings. Reload the page"
   },
   "loss_probe": {
     "column": "Loss",

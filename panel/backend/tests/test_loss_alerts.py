@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from app.services import server_alerter  # noqa: E402
 from app.services.loss_alerts import (  # noqa: E402
     MIN_SAMPLES,
+    TOTAL_LEVEL,
     Episode,
     NO_DATA_CLOSE_SEC,
     EventKind,
@@ -27,16 +28,22 @@ from app.services.loss_alerts import (  # noqa: E402
     collect_observations,
     format_digest,
     history_text,
+    total_only_targets,
 )
 from app.services.loss_overview import (  # noqa: E402
     CheckStatus,
     TargetParseError,
     build_overview,
     check_from_servers,
+    format_endpoint,
+    parse_endpoint,
     parse_target,
 )
 from app.services.loss_registry import (  # noqa: E402
+    ExcludedTarget,
     LossReading,
+    TargetMode,
+    TargetRules,
     LossRegistry,
     RelaySnapshot,
     parse_addresses,
@@ -95,17 +102,70 @@ class RegistryTests(unittest.TestCase):
         })
         registry.set_excluded({2})
         self.assertEqual([s.server_id for s in registry.fresh()], [1])
-        self.assertEqual(registry.hidden_addresses(), frozenset({"45.145.56.96"}))
-        observations = collect_observations(registry.fresh(), set(), registry.hidden_addresses())
+        self.assertEqual(registry.target_rules(), TargetRules(ips={"45.145.56.96": TargetMode.HIDDEN}))
+        observations = collect_observations(registry.fresh(), set(), registry.target_rules())
         self.assertEqual({k: [r.relay_id for r in v] for k, v in observations.items()}, {"62.50.146.225:443": [1]})
-        rows = build_overview(registry.fresh(), registry.owners(), {}, registry.hidden_addresses())
+        rows = build_overview(registry.fresh(), registry.owners(), {}, registry.target_rules())
         self.assertEqual([r["target"] for r in rows], ["62.50.146.225:443"])
 
+    def test_excluded_targets_hide_whole_ip_or_one_backend(self):
+        registry = LossRegistry(clock=lambda: 0.0)
+        registry.update(1, "relay", {"loss_probe": [
+            {"ip": "62.50.146.225", "port": 443, "loss_pct": 40.0, "rtt_ms": 1.0, "samples": 60},
+            {"ip": "62.50.146.225", "port": 8443, "loss_pct": 40.0, "rtt_ms": 1.0, "samples": 60},
+            {"ip": "45.145.56.96", "port": 443, "loss_pct": 40.0, "rtt_ms": 1.0, "samples": 60},
+            {"ip": "45.145.56.96", "port": 8449, "loss_pct": 40.0, "rtt_ms": 1.0, "samples": 60},
+        ]})
+        registry.set_excluded_targets([ExcludedTarget("62.50.146.225", 8443), ExcludedTarget("45.145.56.96", None)])
+        rows = build_overview(registry.fresh(), registry.owners(), {}, registry.target_rules())
+        self.assertEqual([r["target"] for r in rows], ["62.50.146.225:443"])
+        observations = collect_observations(registry.fresh(), set(), registry.target_rules())
+        self.assertEqual(list(observations), ["62.50.146.225:443"])
+
+    def test_backend_rule_beats_whole_ip_rule(self):
+        registry = LossRegistry(clock=lambda: 0.0)
+        registry.update(2, "exit", {"network": {"interfaces": [{"addresses": [{"type": "ipv4", "address": "45.145.56.96"}]}]}})
+        registry.set_excluded({2})
+        registry.set_excluded_targets([ExcludedTarget("45.145.56.96", 443, total_only=True)])
+        rules = registry.target_rules()
+        self.assertIs(rules.mode(LossReading("45.145.56.96", 443, 0, None, 60)), TargetMode.TOTAL_ONLY)
+        self.assertIs(rules.mode(LossReading("45.145.56.96", 8449, 0, None, 60)), TargetMode.HIDDEN)
+        self.assertIs(rules.mode(LossReading("62.50.146.225", 443, 0, None, 60)), TargetMode.TRACKED)
+
+    def test_total_only_target_shows_only_on_total_loss_or_open_episode(self):
+        snapshots = [RelaySnapshot(1, "relay", (
+            LossReading("62.50.146.225", 443, 60.0, 1.0, 60),
+            LossReading("62.50.146.225", 8443, 96.7, None, 60),
+            LossReading("45.145.56.96", 443, 40.0, 1.0, 60),
+        ), frozenset(), 0)]
+        rules = TargetRules(ips={"62.50.146.225": TargetMode.TOTAL_ONLY, "45.145.56.96": TargetMode.TOTAL_ONLY})
+        rows = build_overview(snapshots, {}, {}, rules)
+        self.assertEqual([(r["target"], r["total_only"]) for r in rows], [("62.50.146.225:8443", True)])
+        episode = Episode(level=3, opened_at=0, last_data_at=0, notified_at=0)
+        rows = build_overview(snapshots, {}, {"45.145.56.96:443": episode}, rules)
+        self.assertEqual([r["target"] for r in rows], ["62.50.146.225:8443", "45.145.56.96:443"])
+        self.assertFalse(build_overview(snapshots, {}, {}, TargetRules())[0]["total_only"])
+
     def test_exclusion_list_round_trip(self):
-        from app.services.loss_exclusions import format_ids, parse_ids
+        from app.services.loss_exclusions import format_ids, format_targets, parse_ids, parse_targets, target_entry
         self.assertEqual(parse_ids(format_ids([7, 3, 3])), {3, 7})
         self.assertEqual(parse_ids(" 5, x ,, 9"), {5, 9})
         self.assertEqual(parse_ids(None), set())
+        targets = (
+            ExcludedTarget("62.50.146.225", 8443), ExcludedTarget("45.145.56.96", None, total_only=True),
+            ExcludedTarget("2001:db8::1", 443), ExcludedTarget("2001:db8::2", None),
+        )
+        self.assertEqual(
+            [target_entry(t)["target"] for t in targets],
+            ["62.50.146.225:8443", "45.145.56.96", "[2001:db8::1]:443", "2001:db8::2"],
+        )
+        self.assertEqual(parse_targets(format_targets(targets)), targets)
+        raw = ('[{"target": "1.2.3.4"}, {"target": "junk"}, "x", {"target": "1.2.3.4:99999"},'
+               ' {"target": " 1.2.3.4 ", "total_only": true}]')
+        self.assertEqual(parse_targets(raw), (ExcludedTarget("1.2.3.4", None, total_only=True),))
+        for broken in (None, "", "not json", '{"target": "1.2.3.4"}'):
+            with self.subTest(raw=broken):
+                self.assertEqual(parse_targets(broken), ())
 
     def test_observations_skip_short_windows_and_excluded_relays(self):
         snapshots = [
@@ -206,6 +266,41 @@ class EpisodeTests(unittest.TestCase):
         self.assertEqual(LossPolicy(95, 300, 900).level_bounds(), [95])
 
 
+class TotalOnlyEpisodeTests(unittest.TestCase):
+    """Адрес с галочкой «только полные потери»: молчит до 95%, открывается сразу
+    уровнем «почти не отвечает», снижается, как только все релеи ниже 95%."""
+
+    TOTAL = frozenset({TARGET})
+
+    def test_partial_loss_is_silent(self):
+        tracker = LossTracker()
+        for now in range(0, 3000, 60):
+            self.assertEqual(tracker.evaluate(observe(relay(94)), POLICY, now, self.TOTAL), [])
+        self.assertEqual(tracker.episodes, {})
+
+    def test_total_loss_opens_top_level_and_recovers_below_total(self):
+        tracker = LossTracker()
+        tracker.evaluate(observe(relay(100)), POLICY, 0, self.TOTAL)
+        opened = tracker.evaluate(observe(relay(100)), POLICY, 300, self.TOTAL)
+        self.assertEqual([(e.kind, e.level) for e in opened], [(EventKind.NEW, TOTAL_LEVEL)])
+        # Привычные 60% на этом адресе — уже «снизились», а не вечный эпизод
+        self.assertEqual(tracker.evaluate(observe(relay(60)), POLICY, 400, self.TOTAL), [])
+        recovered = tracker.evaluate(observe(relay(60)), POLICY, 1300, self.TOTAL)
+        self.assertEqual(kinds(recovered), [(EventKind.RECOVERED, TARGET)])
+
+    def test_same_loss_on_other_targets_uses_normal_policy(self):
+        tracker = LossTracker()
+        other = relay(60, ip="45.145.56.96")
+        tracker.evaluate(observe(relay(60), other), POLICY, 0, self.TOTAL)
+        events = tracker.evaluate(observe(relay(60), other), POLICY, 300, self.TOTAL)
+        self.assertEqual([(e.target, e.level) for e in events], [("45.145.56.96:8443", 2)])
+
+    def test_total_only_targets_follow_rules(self):
+        observations = observe(relay(60), relay(60, ip="45.145.56.96"))
+        rules = TargetRules(endpoints={("62.50.146.225", 8443): TargetMode.TOTAL_ONLY})
+        self.assertEqual(total_only_targets(observations, rules), frozenset({TARGET}))
+
+
 class DigestTests(unittest.TestCase):
     def events(self, count: int, relays_per_address: int = 2):
         tracker = LossTracker()
@@ -290,6 +385,13 @@ class ParseTargetTests(unittest.TestCase):
         self.assertEqual(parse_target("[2001:db8::1]:8443"), ("2001:db8::1", 8443))
         self.assertEqual(parse_target("2001:db8::1"), ("2001:db8::1", 443))
 
+    def test_endpoint_keeps_missing_port(self):
+        self.assertEqual(parse_endpoint("62.50.146.225"), ("62.50.146.225", None))
+        self.assertEqual(parse_endpoint("[2001:db8::1]"), ("2001:db8::1", None))
+        for text in ("62.50.146.225", "62.50.146.225:8449", "[2001:db8::1]:8443", "2001:db8::1"):
+            with self.subTest(text=text):
+                self.assertEqual(format_endpoint(*parse_endpoint(text)), text)
+
     def test_rejects(self):
         for bad in ("", "example.com", "1.2.3.4:0", "1.2.3.4:70000", "1.2.3.4:x", "0.0.0.0", "224.0.0.1:443"):
             with self.subTest(target=bad), self.assertRaises(TargetParseError):
@@ -372,6 +474,18 @@ class AlerterWiringTests(unittest.IsolatedAsyncioTestCase):
             self.feed(now, (1, "VK", 40.0), (2, "Timeweb", 0.0))
             await self.alerter._check_packet_loss(self.settings, set(), now)
         self.alerter._send_loss_digest.assert_not_awaited()
+
+    async def test_total_only_target_waits_for_total_loss(self):
+        self.registry.set_excluded_targets([ExcludedTarget("62.50.146.225", None, total_only=True)])
+        for now in (0, 300):
+            self.feed(now, (1, "VK", 80.0))
+            await self.alerter._check_packet_loss(self.settings, set(), now)
+        self.alerter._send_loss_digest.assert_not_awaited()
+        for now in (360, 660):
+            self.feed(now, (1, "VK", 100.0))
+            await self.alerter._check_packet_loss(self.settings, set(), now)
+        events = self.alerter._send_loss_digest.await_args.args[1]
+        self.assertEqual([(e.kind, e.level) for e in events], [(EventKind.NEW, TOTAL_LEVEL)])
 
     async def test_disabling_drops_open_episodes(self):
         for now in (0, 300):

@@ -16,7 +16,7 @@ import httpx
 from app.models import Server
 from app.services.http_client import get_node_client, node_auth_headers
 from app.services.loss_alerts import Episode
-from app.services.loss_registry import RelaySnapshot
+from app.services.loss_registry import TOTAL_LOSS_PCT, RelaySnapshot, TargetMode, TargetRules
 from app.services.node_capabilities import learn_from_denial, server_allows_path
 
 logger = logging.getLogger(__name__)
@@ -40,19 +40,22 @@ class TargetParseError(ValueError):
 
 
 def build_overview(snapshots: list[RelaySnapshot], owners: dict[str, str],
-                   episodes: dict[str, Episode], hidden_ips: frozenset[str] = frozenset()) -> list[dict]:
-    """Адрес → что видит каждый релей; худшие потери сверху. Адреса
-    исключённых серверов (hidden_ips) не показываются."""
+                   episodes: dict[str, Episode], rules: TargetRules = TargetRules()) -> list[dict]:
+    """Адрес → что видит каждый релей; худшие потери сверху. Скрытые адреса не
+    показываются, адреса «только полные потери» — пока у них нет полных потерь
+    и открытого эпизода."""
     targets: dict[str, dict] = {}
     for snapshot in snapshots:
         for reading in snapshot.readings:
-            if reading.ip in hidden_ips:
+            mode = rules.mode(reading)
+            if mode is TargetMode.HIDDEN:
                 continue
             entry = targets.setdefault(reading.key, {
                 "target": reading.key,
                 "ip": reading.ip,
                 "port": reading.port,
                 "owner": owners.get(reading.ip),
+                "total_only": mode is TargetMode.TOTAL_ONLY,
                 "relays": [],
             })
             entry["relays"].append({
@@ -67,11 +70,21 @@ def build_overview(snapshots: list[RelaySnapshot], owners: dict[str, str],
         entry["worst_loss"] = entry["relays"][0]["loss_pct"]
         episode = episodes.get(key)
         entry["episode"] = {"level": episode.level, "opened_at": episode.opened_at} if episode else None
-    return sorted(targets.values(), key=lambda entry: (-entry["worst_loss"], entry["target"]))
+    visible = [
+        entry for entry in targets.values()
+        if not entry["total_only"] or entry["episode"] or entry["worst_loss"] >= TOTAL_LOSS_PCT
+    ]
+    return sorted(visible, key=lambda entry: (-entry["worst_loss"], entry["target"]))
 
 
 def parse_target(text: str) -> tuple[str, int]:
     """`1.2.3.4`, `1.2.3.4:8443`, `[2001:db8::1]:443` или голый IPv6 → (ip, порт)."""
+    ip, port = parse_endpoint(text)
+    return ip, DEFAULT_PORT if port is None else port
+
+
+def parse_endpoint(text: str) -> tuple[str, Optional[int]]:
+    """То же, что parse_target, но без порта по умолчанию: (ip, None)."""
     raw = (text or "").strip()
     host, port_text = raw, ""
     if raw.startswith("["):
@@ -86,10 +99,17 @@ def parse_target(text: str) -> tuple[str, int]:
     if ip.is_unspecified or ip.is_multicast:
         raise TargetParseError("address must be unicast")
     if not port_text:
-        return str(ip), DEFAULT_PORT
+        return str(ip), None
     if not port_text.isdigit() or not 1 <= int(port_text) <= 65535:
         raise TargetParseError(f"bad port: {port_text!r}")
     return str(ip), int(port_text)
+
+
+def format_endpoint(ip: str, port: Optional[int]) -> str:
+    """Обратное parse_endpoint: IPv6 с портом — в квадратных скобках."""
+    if port is None:
+        return ip
+    return f"[{ip}]:{port}" if ":" in ip else f"{ip}:{port}"
 
 
 async def check_from_servers(servers: list[Server], ip: str, port: int) -> list[dict]:

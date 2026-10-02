@@ -2,8 +2,8 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type FormE
 import { motion } from 'framer-motion'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
-import { ChevronDown, ChevronRight, ListChecks, Loader2, Radar, Search, Trash2 } from 'lucide-react'
-import { lossApi, type BackendEditJob, type LossCheckResult, type LossTarget } from '../api/client'
+import { ChevronDown, ChevronRight, EyeOff, ListChecks, Loader2, Radar, Search, Trash2 } from 'lucide-react'
+import { lossApi, type BackendEditJob, type LossCheckResult, type LossExclusions, type LossTarget } from '../api/client'
 import { useServersStore } from '../stores/serversStore'
 import { useAutoRefresh } from '../hooks/useAutoRefresh'
 import LossProbeBadge, { LOSS_WARN_PCT } from '../components/ui/LossProbeBadge'
@@ -40,6 +40,16 @@ function isLossy(lossPct: number): boolean {
   return lossPct > LOSS_WARN_PCT
 }
 
+// Ключ строки `ip:port` для IPv6 неоднозначен — в список исключений IPv6 идёт в скобках
+function endpointText(target: LossTarget): string {
+  return target.ip.includes(':') ? `[${target.ip}]:${target.port}` : `${target.ip}:${target.port}`
+}
+
+function errorDetail(err: unknown): string | undefined {
+  const detail = (err as { response?: { data?: { detail?: unknown } } }).response?.data?.detail
+  return typeof detail === 'string' ? detail : undefined
+}
+
 export default function Loss() {
   const { t } = useTranslation()
   const { servers, fetchServers } = useServersStore()
@@ -60,6 +70,9 @@ export default function Loss() {
   const [jobs, setJobs] = useState<BackendEditJob[]>([])
   const [dismissed, setDismissed] = useState<Set<string>>(readDismissed)
   const [runningCheck, setRunningCheck] = useState<RunningCheck | null>(null)
+  // null, пока не загружены: сохранение с пустыми списками стёрло бы настроенные исключения
+  const [exclusions, setExclusions] = useState<LossExclusions | null>(null)
+  const [exclusionsLoadFailed, setExclusionsLoadFailed] = useState(false)
 
   const fetchOverview = useCallback(async () => {
     try {
@@ -69,6 +82,43 @@ export default function Loss() {
       setTargets(prev => prev ?? [])
     }
   }, [])
+
+  useEffect(() => {
+    lossApi.settings()
+      .then(({ data }) => setExclusions(data))
+      .catch(() => setExclusionsLoadFailed(true))
+  }, [])
+
+  const saveExclusions = async (next: LossExclusions, successMessage: string): Promise<boolean> => {
+    try {
+      const { data } = await lossApi.updateSettings(next)
+      setExclusions(data)
+      toast.success(successMessage)
+      fetchOverview()
+      return true
+    } catch (err) {
+      const detail = errorDetail(err)
+      toast.error(detail ? `${t('loss.settings_save_failed')}: ${detail}` : t('loss.settings_save_failed'))
+      return false
+    }
+  }
+
+  const hideTarget = async (target: LossTarget) => {
+    if (!exclusions) return
+    const endpoint = endpointText(target)
+    // Строка с галочкой «только полные потери» скрывается целиком — запись заменяется
+    const others = exclusions.excluded_targets.filter(item => item.target !== endpoint)
+    const saved = await saveExclusions(
+      { ...exclusions, excluded_targets: [...others, { target: endpoint, total_only: false }] },
+      t('loss.target_hidden', { target: endpoint }),
+    )
+    if (!saved) return
+    setPicked(prev => {
+      const next = new Set(prev)
+      next.delete(target.target)
+      return next
+    })
+  }
 
   useAutoRefresh(fetchOverview, { customInterval: REFRESH_INTERVAL_MS })
 
@@ -170,7 +220,7 @@ export default function Loss() {
       const { data } = await lossApi.check(checkTarget.trim(), effectiveSelection)
       setCheckResult(data)
     } catch (err) {
-      const detail = (err as { response?: { data?: { detail?: string } } }).response?.data?.detail
+      const detail = errorDetail(err)
       toast.error(detail ? `${t('loss.check_failed')}: ${detail}` : t('loss.check_failed'))
     } finally {
       setChecking(false)
@@ -265,7 +315,10 @@ export default function Loss() {
                             {isOpen ? <ChevronDown className="w-4 h-4 text-dark-500" /> : <ChevronRight className="w-4 h-4 text-dark-500" />}
                             <div>
                               <div className="font-mono text-dark-100">{target.target}</div>
-                              <div className="text-xs text-dark-500">{target.owner ?? t('loss.owner_unknown')}</div>
+                              <div className="text-xs text-dark-500">
+                                {target.owner ?? t('loss.owner_unknown')}
+                                {target.total_only && <span title={t('loss.total_only_hint')}> · {t('loss.total_only_mark')}</span>}
+                              </div>
                             </div>
                           </div>
                         </td>
@@ -293,6 +346,15 @@ export default function Loss() {
                           >
                             {t('loss.check_this')}
                           </button>
+                          {exclusions && (
+                            <button
+                              onClick={() => hideTarget(target)}
+                              title={t('loss.hide_target_hint')}
+                              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs text-dark-400 hover:text-dark-200 hover:bg-dark-800/60 transition-colors"
+                            >
+                              <EyeOff className="w-3.5 h-3.5" /> {t('loss.hide_target')}
+                            </button>
+                          )}
                         </td>
                       </tr>
                       {isOpen && target.relays.map(relay => (
@@ -378,7 +440,12 @@ export default function Loss() {
         )}
       </div>
 
-      <LossSettings servers={activeServers} onSaved={fetchOverview} />
+      <LossSettings
+        servers={activeServers}
+        exclusions={exclusions}
+        loadFailed={exclusionsLoadFailed}
+        onSave={next => saveExclusions(next, t('loss.settings_saved'))}
+      />
 
       {/* fixed, а не sticky: длинную страницу прокручивает окно, sticky внутри <main> не прилипал.
           По центру области страницы — на десктопе слева статичное меню шириной 18rem */}

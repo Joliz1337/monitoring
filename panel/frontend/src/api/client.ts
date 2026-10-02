@@ -1995,9 +1995,23 @@ export interface LossTarget {
   ip: string
   port: number
   owner: string | null
+  // Адрес вне учёта с галочкой «только полные потери» — виден только при них
+  total_only: boolean
   worst_loss: number
   relays: LossRelay[]
   episode: { level: number; opened_at: number } | null
+}
+
+export interface LossExcludedTarget {
+  // "ip" — все порты адреса, "ip:port" / "[v6]:port" — один бэкенд
+  target: string
+  // Не скрывать совсем, а учитывать только полные потери (от 95%)
+  total_only: boolean
+}
+
+export interface LossExclusions {
+  excluded_server_ids: number[]
+  excluded_targets: LossExcludedTarget[]
 }
 
 export type LossCheckStatus = 'ok' | 'unsupported' | 'denied' | 'unreachable'
@@ -2114,9 +2128,8 @@ export const lossApi = {
   backendsApply: (edits: BackendEditBody[]) =>
     api.post<{ job: BackendEditJob }>('/loss/backends/apply', { edits }),
   jobs: () => api.get<{ jobs: BackendEditJob[] }>('/loss/jobs'),
-  settings: () => api.get<{ excluded_server_ids: number[] }>('/loss/settings'),
-  updateSettings: (excludedServerIds: number[]) =>
-    api.put<{ excluded_server_ids: number[] }>('/loss/settings', { excluded_server_ids: excludedServerIds }),
+  settings: () => api.get<LossExclusions>('/loss/settings'),
+  updateSettings: (data: LossExclusions) => api.put<LossExclusions>('/loss/settings', data),
   check: (target: string, serverIds: number[]) =>
     api.post<{ ip: string; port: number; results: LossCheckResult[] }>('/loss/check', {
       target,

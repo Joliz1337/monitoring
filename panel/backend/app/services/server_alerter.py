@@ -21,6 +21,7 @@ from app.services.loss_alerts import (
     collect_observations,
     format_digest,
     history_text,
+    total_only_targets,
 )
 from app.services.loss_registry import get_loss_registry
 from app.services.socks_probe import ProxyFault, find_proxy_fault
@@ -686,8 +687,9 @@ class ServerAlerter:
         registry = get_loss_registry()
         excluded = excluded_ids | self._trigger_excluded.get("packet_loss", set())
         policy = self._loss_policy(settings)
-        observations = collect_observations(registry.fresh(), excluded, registry.hidden_addresses())
-        events = self._loss.evaluate(observations, policy, now)
+        rules = registry.target_rules()
+        observations = collect_observations(registry.fresh(), excluded, rules)
+        events = self._loss.evaluate(observations, policy, now, total_only_targets(observations, rules))
         await self._save_loss_episodes()
         if events:
             await self._send_loss_digest(settings, events, registry.owners(), policy)

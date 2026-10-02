@@ -23,9 +23,15 @@ from app.services.backend_address import (
     validate_edit,
 )
 from app.services.backend_edit_jobs import get_edit_jobs
-from app.services.loss_exclusions import load_loss_exclusions, save_loss_exclusions
-from app.services.loss_overview import TargetParseError, build_overview, check_from_servers, parse_target
-from app.services.loss_registry import get_loss_registry
+from app.services.loss_exclusions import LossExclusions, load_loss_exclusions, save_loss_exclusions, target_entry
+from app.services.loss_overview import (
+    TargetParseError,
+    build_overview,
+    check_from_servers,
+    parse_endpoint,
+    parse_target,
+)
+from app.services.loss_registry import ExcludedTarget, get_loss_registry
 from app.services.loss_trace import TraceError, TraceErrorCode, analyze_trace, fetch_trace, start_trace
 from app.services.server_alerter import get_server_alerter
 
@@ -35,6 +41,7 @@ router = APIRouter(prefix="/loss", tags=["loss"], dependencies=[Depends(verify_a
 
 MAX_CHECK_SERVERS = 500
 MAX_BATCH_EDITS = 200
+MAX_EXCLUDED_TARGETS = 2000
 
 
 class LossCheckRequest(BaseModel):
@@ -82,8 +89,19 @@ class BackendEditRequest(BaseModel):
         )
 
 
+class ExcludedTargetIn(BaseModel):
+    # "ip" — все порты адреса, "ip:port" / "[v6]:port" — один бэкенд
+    target: str = Field(..., min_length=1, max_length=64)
+    total_only: bool = False
+
+    def to_excluded(self) -> ExcludedTarget:
+        ip, port = parse_endpoint(self.target)
+        return ExcludedTarget(ip, port, self.total_only)
+
+
 class LossSettingsUpdate(BaseModel):
     excluded_server_ids: list[int] = Field(default_factory=list, max_length=5000)
+    excluded_targets: list[ExcludedTargetIn] = Field(default_factory=list, max_length=MAX_EXCLUDED_TARGETS)
 
 
 class BackendEditBatch(BaseModel):
@@ -95,21 +113,36 @@ async def get_overview():
     registry = get_loss_registry()
     return {
         "targets": build_overview(
-            registry.fresh(), registry.owners(), get_server_alerter().loss_episodes(), registry.hidden_addresses(),
+            registry.fresh(), registry.owners(), get_server_alerter().loss_episodes(), registry.target_rules(),
         ),
+    }
+
+
+def _settings_response(exclusions: LossExclusions) -> dict:
+    return {
+        "excluded_server_ids": sorted(exclusions.server_ids),
+        "excluded_targets": [target_entry(target) for target in exclusions.targets],
     }
 
 
 @router.get("/settings")
 async def get_loss_settings(db: AsyncSession = Depends(get_db)):
-    return {"excluded_server_ids": sorted(await load_loss_exclusions(db))}
+    return _settings_response(await load_loss_exclusions(db))
 
 
 @router.put("/settings")
 async def update_loss_settings(data: LossSettingsUpdate, db: AsyncSession = Depends(get_db)):
-    excluded = await save_loss_exclusions(db, data.excluded_server_ids)
-    logger.info("loss_exclusions_updated servers=%s", len(excluded))
-    return {"excluded_server_ids": sorted(excluded)}
+    targets = []
+    for item in data.excluded_targets:
+        try:
+            targets.append(item.to_excluded())
+        except TargetParseError as exc:
+            raise HTTPException(status_code=400, detail=f"{item.target}: {exc}")
+    exclusions = await save_loss_exclusions(db, data.excluded_server_ids, targets)
+    logger.info(
+        "loss_exclusions_updated servers=%s targets=%s", len(exclusions.server_ids), len(exclusions.targets),
+    )
+    return _settings_response(exclusions)
 
 
 @router.post("/check")

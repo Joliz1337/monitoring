@@ -14,24 +14,29 @@
   остаётся в эпизоде, а не шлёт пары «есть / нет»;
 - нет данных (релеи выключены, нода перезапускается) — не изменение: эпизод
   ждёт, а без данных дольше часа закрывается молча;
-- напоминание об открытых эпизодах — только если включено.
+- напоминание об открытых эпизодах — только если включено;
+- адрес вне учёта с галочкой «только полные потери» живёт по своей политике:
+  один уровень от TOTAL_LOSS_PCT («почти не отвечает»), а «снизились» — когда
+  все релеи ниже него всё затишье.
 
 Эпизоды хранятся в базе, поэтому перезапуск панели уже известные потери
 повторно не присылает.
 """
 
 import html
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
-from typing import Optional
+from typing import Callable, Optional
 
-from app.services.loss_registry import LossReading, RelaySnapshot
+from app.services.loss_registry import TOTAL_LOSS_PCT, LossReading, RelaySnapshot, TargetMode, TargetRules
 
 # Нода проверяет адрес раз в 2 с: 30 попыток — минута данных. Доля потерь по
 # меньшему числу — шум первых попыток после старта агента или смены конфига
 MIN_SAMPLES = 30
 RECOVERY_RATIO = 0.5
 SEVERITY_BOUNDS = (50.0, 90.0)
+# Уровень «почти не отвечает» — им сразу открывается эпизод «только полных потерь»
+TOTAL_LEVEL = len(SEVERITY_BOUNDS) + 1
 NO_DATA_CLOSE_SEC = 3600
 # Лимит Telegram — 4096 символов; запас под заголовок части и разметку
 MESSAGE_LIMIT = 3800
@@ -50,9 +55,19 @@ class LossPolicy:
     sustained_sec: float
     calm_sec: float
     reminder_sec: float = 0
+    first_level: int = 1
+    recovery_ratio: float = RECOVERY_RATIO
 
     def level_bounds(self) -> list[float]:
         return [self.threshold] + [bound for bound in SEVERITY_BOUNDS if bound > self.threshold]
+
+    def recovery_bound(self) -> float:
+        return self.threshold * self.recovery_ratio
+
+    def total_only(self) -> "LossPolicy":
+        # Частичные потери на таком адресе — норма, поэтому «снизились» уже ниже
+        # самого порога; от мигания у порога защищает непрерывное затишье
+        return replace(self, threshold=TOTAL_LOSS_PCT, first_level=TOTAL_LEVEL, recovery_ratio=1.0)
 
 
 @dataclass
@@ -80,20 +95,27 @@ class LossEvent:
 
 
 def collect_observations(snapshots: list[RelaySnapshot], excluded: set[int],
-                         hidden_ips: frozenset[str] = frozenset()) -> dict[str, list[RelayReading]]:
-    """Адрес → что видит каждый релей; окно короче MIN_SAMPLES и адреса
-    исключённых серверов (hidden_ips) не считаются."""
+                         rules: TargetRules = TargetRules()) -> dict[str, list[RelayReading]]:
+    """Адрес → что видит каждый релей; окно короче MIN_SAMPLES и скрытые
+    адреса не считаются."""
     observations: dict[str, list[RelayReading]] = {}
     for snapshot in snapshots:
         if snapshot.server_id in excluded:
             continue
         for reading in snapshot.readings:
-            if reading.samples < MIN_SAMPLES or reading.ip in hidden_ips:
+            if reading.samples < MIN_SAMPLES or rules.mode(reading) is TargetMode.HIDDEN:
                 continue
             observations.setdefault(reading.key, []).append(
                 RelayReading(snapshot.server_id, snapshot.name, reading)
             )
     return observations
+
+
+def total_only_targets(observations: dict[str, list[RelayReading]], rules: TargetRules) -> frozenset[str]:
+    return frozenset(
+        target for target, relays in observations.items()
+        if rules.mode(relays[0].reading) is TargetMode.TOTAL_ONLY
+    )
 
 
 @dataclass
@@ -107,23 +129,30 @@ class LossTracker:
         self._above.clear()
 
     def evaluate(self, observations: dict[str, list[RelayReading]], policy: LossPolicy,
-                 now: float) -> list[LossEvent]:
-        self._update_timers(observations, policy, now)
+                 now: float, total_only: frozenset[str] = frozenset()) -> list[LossEvent]:
+        """total_only — адреса с галочкой «только полные потери» (total_only_targets)."""
+        total_policy = policy.total_only()
+
+        def policy_for(target: str) -> LossPolicy:
+            return total_policy if target in total_only else policy
+
+        self._update_timers(observations, policy_for, now)
         events = []
         for target in sorted(set(observations) | set(self.episodes)):
             relays = tuple(sorted(observations.get(target, []), key=lambda r: -r.reading.loss_pct))
-            event = self._step(target, relays, policy, now)
+            event = self._step(target, relays, policy_for(target), now)
             if event is not None:
                 events.append(event)
         return events
 
-    def _update_timers(self, observations: dict[str, list[RelayReading]], policy: LossPolicy,
-                       now: float) -> None:
-        bounds = policy.level_bounds()
+    def _update_timers(self, observations: dict[str, list[RelayReading]],
+                       policy_for: Callable[[str], LossPolicy], now: float) -> None:
         active = {}
         for target, relays in observations.items():
+            policy = policy_for(target)
+            bounds = policy.level_bounds()
             for relay in relays:
-                for level, bound in enumerate(bounds, start=1):
+                for level, bound in enumerate(bounds, start=policy.first_level):
                     if relay.reading.loss_pct >= bound:
                         key = (target, relay.relay_id, level)
                         active[key] = self._above.get(key, now)
@@ -159,7 +188,7 @@ class LossTracker:
             episode.notified_at = now
             return LossEvent(EventKind.WORSE, target, level, relays)
 
-        if all(r.reading.loss_pct < policy.threshold * RECOVERY_RATIO for r in relays):
+        if all(r.reading.loss_pct < policy.recovery_bound() for r in relays):
             if episode.calm_since is None:
                 episode.calm_since = now
             if now - episode.calm_since >= policy.calm_sec:
@@ -206,7 +235,7 @@ def _relay_lines(event: LossEvent, policy: LossPolicy, ru: bool) -> list[str]:
         worst = max(r.reading.loss_pct for r in event.relays)
         count = len(event.relays)
         return [f"• {count} {'релеев' if ru else 'relays'}, {'максимум' if ru else 'max'} {worst:g}%"]
-    quiet_bound = policy.threshold * RECOVERY_RATIO
+    quiet_bound = policy.recovery_bound()
     lossy = [r for r in event.relays if r.reading.loss_pct >= quiet_bound]
     lines = [
         f"• {html.escape(r.relay_name)} — {r.reading.loss_pct:g}% ({_rtt_text(r.reading, ru)})"
