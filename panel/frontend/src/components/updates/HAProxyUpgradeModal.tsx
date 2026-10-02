@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
-import { ArrowRight, ArrowUpCircle, CheckCircle2, Loader2, X, XCircle } from 'lucide-react'
+import { ArrowRight, ArrowUpCircle, CheckCircle2, Loader2, RotateCcw, X, XCircle } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { haproxyUpgradeApi, haproxyUpgradeStreamUrl, nodeImageApi, type RemnawaveInstallEvent } from '../../api/client'
@@ -113,6 +113,12 @@ export default function HAProxyUpgradeModal({ targets, jobId: initialJobId, onSt
     onClose()
   }
 
+  // Обратно к форме запуска: упавшая задача висит на карточке ещё 10 минут и иначе загораживает кнопку обновления
+  const handleRetry = () => {
+    setJobId(null)
+    setResult(null)
+  }
+
   const running = jobId !== null && result === null
 
   return (
@@ -210,6 +216,12 @@ export default function HAProxyUpgradeModal({ targets, jobId: initialJobId, onSt
               <button onClick={handleStart} className="btn btn-primary" disabled={starting || runnable.length === 0}>
                 {starting ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowUpCircle className="w-4 h-4" />}
                 {t('updates.haproxy_start')}
+              </button>
+            )}
+            {result === 'error' && (
+              <button onClick={handleRetry} className="btn btn-primary">
+                <RotateCcw className="w-4 h-4" />
+                {t('updates.haproxy_retry')}
               </button>
             )}
           </div>

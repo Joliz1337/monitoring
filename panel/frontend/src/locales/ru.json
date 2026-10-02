@@ -1120,6 +1120,7 @@
     "haproxy_background_hint": "Обновление идёт на сервере — окно можно закрыть",
     "haproxy_done": "HAProxy обновлён",
     "haproxy_failed": "Обновление HAProxy не удалось",
+    "haproxy_retry": "Повторить",
     "haproxy_open_log": "Открыть лог обновления HAProxy",
     "haproxy_status_running": "обновляется",
     "haproxy_status_success": "обновлён",

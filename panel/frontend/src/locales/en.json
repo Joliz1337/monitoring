@@ -1115,6 +1115,7 @@
     "haproxy_background_hint": "The upgrade runs on the server — you can close this window",
     "haproxy_done": "HAProxy upgraded",
     "haproxy_failed": "HAProxy upgrade failed",
+    "haproxy_retry": "Retry",
     "haproxy_open_log": "Open the HAProxy upgrade log",
     "haproxy_status_running": "upgrading",
     "haproxy_status_success": "upgraded",

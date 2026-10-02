@@ -179,6 +179,29 @@ async def _echo(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> N
     writer.close()
 
 
+class _ClosedUpstreamWriter:
+    """Upstream, который сервер уже сбросил: uvloop на записи в закрытый транспорт
+    бросает RuntimeError, а не молча отбрасывает данные, как asyncio."""
+
+    def __init__(self):
+        self.write_attempted = asyncio.Event()
+
+    def _closed_transport(self, *_args):
+        self.write_attempted.set()
+        raise RuntimeError(
+            "unable to perform operation on <TCPTransport closed=True reading=False 0x1>; "
+            "the handler is closed"
+        )
+
+    write = write_eof = _closed_transport
+
+    async def drain(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
 class LiveTunnelTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.host_key = asyncssh.generate_private_key("ssh-ed25519")
@@ -229,6 +252,30 @@ class LiveTunnelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(echoed, b"ping-through-panel")
         self.assertEqual(tunnel.stats.connections, 1)
         self.assertGreaterEqual(tunnel.stats.bytes_transferred, 36)
+
+    async def test_reset_upstream_does_not_drop_ssh_session(self):
+        # Исключение из обработчика проброса asyncssh считает фатальным и рвёт всю
+        # SSH-сессию — установка умирала посреди загрузки из-за одного соединения
+        upstream_writer = _ClosedUpstreamWriter()
+
+        async def open_reset_upstream(_addresses, _port):
+            return _ChunkReader(), upstream_writer
+
+        conn = await self.connect(await self.start_ssh(_SshServer))
+        with mock.patch.object(install_tunnel, "is_allowed_address", lambda _ip: True), \
+                mock.patch.object(install_tunnel, "_open_upstream", open_reset_upstream):
+            async with open_install_tunnel(conn) as tunnel:
+                _reader, writer, status = await self.ask_proxy(
+                    tunnel.port, b"CONNECT 127.0.0.1:443 HTTP/1.1\r\n\r\n"
+                )
+                self.assertTrue(status.startswith(b"HTTP/1.1 200"))
+                writer.write(b"tls-bytes-after-reset")
+                await writer.drain()
+                await asyncio.wait_for(upstream_writer.write_attempted.wait(), timeout=10)
+                await asyncio.sleep(0.2)
+                writer.close()
+
+                self.assertFalse(conn.is_closed())
 
     async def test_internal_target_gets_forbidden(self):
         conn = await self.connect(await self.start_ssh(_SshServer))

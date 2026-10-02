@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import logging
 import socket
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
@@ -20,6 +21,8 @@ from typing import AsyncIterator, Awaitable, Callable
 from urllib.parse import SplitResult, urlsplit
 
 import asyncssh
+
+logger = logging.getLogger(__name__)
 
 LISTEN_HOST = "127.0.0.1"
 ALLOWED_PORTS = frozenset({80, 443})
@@ -37,7 +40,8 @@ HOP_HEADERS = frozenset({"proxy-connection", "proxy-authorization", "connection"
 STATUS_PHRASES = {400: "Bad Request", 403: "Forbidden", 502: "Bad Gateway"}
 CONNECT_ESTABLISHED = b"HTTP/1.1 200 Connection established\r\n\r\n"
 
-_STREAM_ERRORS = (OSError, asyncio.TimeoutError, asyncssh.Error, asyncio.IncompleteReadError)
+# RuntimeError — запись в уже закрытый транспорт под uvloop (asyncio такую молча отбрасывает)
+_STREAM_ERRORS = (OSError, asyncio.TimeoutError, asyncssh.Error, asyncio.IncompleteReadError, RuntimeError)
 
 
 class TunnelForwardingDenied(Exception):
@@ -236,6 +240,8 @@ class InstallTunnel:
         try:
             async with self._slots:
                 await self._serve(reader, writer)
+        except Exception:  # noqa: BLE001 — исключение из обработчика asyncssh считает фатальным и рвёт всю SSH-сессию вместе с установкой
+            logger.exception("Install tunnel connection failed")
         finally:
             if task:
                 self._handlers.discard(task)
