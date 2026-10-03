@@ -70,7 +70,10 @@ function valuesFromServer(server: BillingServerData): FormValues {
     folder: server.folder || '',
     threshold: server.cloud_balance_threshold?.toString() || '0',
     proxy: server.cloud_proxy || '',
-    credentials: { cloud_account_id: server.cloud_account_id || '' },
+    credentials: {
+      cloud_account_id: server.cloud_account_id || '',
+      cloud_login: server.cloud_login || '',
+    },
   }
 }
 
@@ -216,7 +219,7 @@ function ServerForm({ values, setValues, t, folders, mode, server }: {
 
       {values.billingType === 'cloud' && mode === 'add' && (
         <Field label={t('billing.provider')}>
-          <div className="flex gap-2">
+          <div className="grid grid-cols-2 gap-2">
             {PROVIDER_IDS.map(id => (
               <button
                 key={id}
@@ -225,7 +228,7 @@ function ServerForm({ values, setValues, t, folders, mode, server }: {
                   currency: PROVIDERS[id].defaultCurrency,
                   credentials: {},
                 })}
-                className={`flex-1 py-2 rounded-lg text-sm font-medium transition ${
+                className={`py-2 rounded-lg text-sm font-medium transition ${
                   values.provider === id
                     ? PROVIDERS[id].accent.quickActive
                     : 'bg-dark-800 text-dark-400 border border-dark-700/50'
@@ -414,6 +417,7 @@ export function AddModal({ t, folders, onClose, onCreated }: {
         cloud_provider: isCloud ? values.provider : undefined,
         cloud_credential: isCloud ? values.credentials.cloud_credential : undefined,
         cloud_account_id: isCloud ? values.credentials.cloud_account_id : undefined,
+        cloud_login: isCloud ? values.credentials.cloud_login : undefined,
         cloud_proxy: isCloud ? values.proxy.trim() || undefined : undefined,
         cloud_balance_threshold: isCloud ? parseFloat(values.threshold) || 0 : undefined,
       })
@@ -485,6 +489,7 @@ export function EditModal({ t, server, folders, onClose, onSaved }: {
       }
       if (server.billing_type === 'cloud') {
         payload.cloud_account_id = values.credentials.cloud_account_id || null
+        payload.cloud_login = values.credentials.cloud_login || null
         if (values.credentials.cloud_credential) {
           payload.cloud_credential = values.credentials.cloud_credential
         }

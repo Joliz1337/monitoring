@@ -16,13 +16,15 @@ from app.services.cloud_billing.base import (
 )
 from app.services.cloud_billing.selectel import SelectelProvider
 from app.services.cloud_billing.timeweb import TimewebProvider
+from app.services.cloud_billing.vk_cloud import VkCloudProvider
 from app.services.cloud_billing.yandex import YandexCloudProvider
 from app.services.http_client import get_external_client, sanitize_proxy
 
 logger = logging.getLogger(__name__)
 
 PROVIDERS: dict[str, CloudProvider] = {
-    p.id: p for p in (YandexCloudProvider(), SelectelProvider(), TimewebProvider())
+    p.id: p
+    for p in (YandexCloudProvider(), SelectelProvider(), TimewebProvider(), VkCloudProvider())
 }
 
 # История баланса для провайдеров без API списаний: окно то же, что у окна
@@ -62,10 +64,14 @@ async def sync_cloud_balance(server, now: datetime) -> CloudSnapshot:
         raise CloudBillingError("API token is required")
     if provider.requires_account_id and not server.cloud_account_id:
         raise CloudBillingError("Billing account ID is required")
+    if provider.requires_login and not server.cloud_login:
+        raise CloudBillingError("Login is required")
 
     client = get_external_client(server.cloud_proxy)
     try:
-        snapshot = await provider.fetch(client, server.cloud_credential, server.cloud_account_id)
+        snapshot = await provider.fetch(
+            client, server.cloud_credential, server.cloud_account_id, server.cloud_login
+        )
     except CloudBillingError as error:
         # Мёртвый прокси выглядит как недоступность провайдера — без пометки
         # «All connection attempts failed» читалось бы как сбой облака

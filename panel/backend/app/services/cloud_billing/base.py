@@ -33,13 +33,19 @@ class CloudProvider(ABC):
     id: str
     default_currency: str
     requires_account_id: bool = False
+    # Ключа API нет, вход по логину и паролю: пароль лежит в credential
+    requires_login: bool = False
     # У провайдера нет API истории списаний: расход считается по снижению
     # баланса между синхронизациями, историю снимков ведёт панель
     uses_balance_history: bool = False
 
     @abstractmethod
     async def fetch(
-        self, client: httpx.AsyncClient, credential: str, account_id: Optional[str]
+        self,
+        client: httpx.AsyncClient,
+        credential: str,
+        account_id: Optional[str],
+        login: Optional[str] = None,
     ) -> CloudSnapshot:
         """Снимок аккаунта. Бросает CloudBillingError при любой неудаче.
 

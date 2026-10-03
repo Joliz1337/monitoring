@@ -2186,6 +2186,7 @@ export interface BillingServerData {
   updated_at: string | null
   cloud_provider: string | null
   cloud_account_id: string | null
+  cloud_login: string | null
   cloud_proxy: string | null
   cloud_balance_threshold: number | null
   cloud_daily_cost: number | null
@@ -2216,6 +2217,7 @@ export const billingApi = {
     cloud_provider?: string
     cloud_credential?: string
     cloud_account_id?: string
+    cloud_login?: string
     cloud_proxy?: string
     cloud_balance_threshold?: number
   }) => api.post<{ success: boolean; server: BillingServerData }>('/billing/servers', data),
@@ -2231,6 +2233,7 @@ export const billingApi = {
     cloud_provider?: string
     cloud_credential?: string
     cloud_account_id?: string | null
+    cloud_login?: string | null
     cloud_proxy?: string | null
     cloud_balance_threshold?: number
   }) => api.put<BillingServerData>(`/billing/servers/${id}`, data),

@@ -38,7 +38,11 @@ class TimewebProvider(CloudProvider):
     uses_balance_history = True
 
     async def fetch(
-        self, client: httpx.AsyncClient, credential: str, account_id: Optional[str]
+        self,
+        client: httpx.AsyncClient,
+        credential: str,
+        account_id: Optional[str],
+        login: Optional[str] = None,
     ) -> CloudSnapshot:
         data = await self._get(client, credential, FINANCES_PATH)
 

@@ -1873,6 +1873,7 @@ async def _migrate_cloud_billing(conn):
         ("cloud_provider", "VARCHAR(30)"),
         ("cloud_credential", "TEXT"),
         ("cloud_account_id", "VARCHAR(100)"),
+        ("cloud_login", "VARCHAR(255)"),
         ("cloud_proxy", "TEXT"),
         ("cloud_balance_threshold", "DOUBLE PRECISION DEFAULT 0"),
         ("cloud_daily_cost", "DOUBLE PRECISION"),

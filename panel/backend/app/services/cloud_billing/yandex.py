@@ -226,7 +226,11 @@ class YandexCloudProvider(CloudProvider):
     requires_account_id = True
 
     async def fetch(
-        self, client: httpx.AsyncClient, credential: str, account_id: Optional[str]
+        self,
+        client: httpx.AsyncClient,
+        credential: str,
+        account_id: Optional[str],
+        login: Optional[str] = None,
     ) -> CloudSnapshot:
         if not account_id:
             raise CloudBillingError("Billing account ID is required")

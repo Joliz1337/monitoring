@@ -836,10 +836,12 @@ class BillingServer(Base):
     
     last_notified_days = Column(Text, nullable=True)  # JSON: which day-thresholds already sent
 
-    # Облачный провайдер (billing_type='cloud'): Yandex Cloud, Selectel
+    # Облачный провайдер (billing_type='cloud'): Yandex Cloud, Selectel, Timeweb, VK Cloud
     cloud_provider = Column(String(30), nullable=True)
     cloud_credential = Column(EncryptedString, nullable=True)
     cloud_account_id = Column(String(100), nullable=True)
+    # Логин для провайдеров без ключа API (VK Cloud); пароль — в cloud_credential
+    cloud_login = Column(String(255), nullable=True)
     # SOCKS5 для запросов к API провайдера: "ip:port" или "ip:port@login:pass"
     cloud_proxy = Column(EncryptedString, nullable=True)
     cloud_balance_threshold = Column(Float, nullable=True, default=0)

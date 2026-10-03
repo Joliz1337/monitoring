@@ -130,7 +130,7 @@ If the command is run inside the Hetzner Rescue System, the installer provisions
 | **Remnawave** | User statistics via the Remnawave Panel API: IPs, ASN grouping, HWID devices, anomaly analyzer; Remnawave node install from the panel |
 | **Xray test** | Checks keys, JSON configs and subscriptions with a real Xray / sing-box core from the panel or any node; multi-SNI, export of working keys |
 | **Alerts** | Telegram: offline (with the cause when the proxy is to blame), CPU, RAM, network, TCP states, conntrack, anti-DDoS, relay packet loss, failed node update |
-| **Billing** | Server due dates and costs; Yandex Cloud, Selectel and Timeweb Cloud with balance from their APIs; spending summary and an "account → project → servers" tree |
+| **Billing** | Server due dates and costs; Yandex Cloud, Selectel, Timeweb Cloud and VK Cloud with balance from their APIs; spending summary and an "account → project → servers" tree |
 | **Bulk actions** | HAProxy rules, traffic ports, firewall and commands across many servers at once — as a background job |
 | **Notes & tasks** | Shared notepad and task list with real-time sync |
 

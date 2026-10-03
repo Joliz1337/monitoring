@@ -30,6 +30,7 @@ from app.services.cloud_billing.selectel import (  # noqa: E402
     _pick_prediction_days,
 )
 from app.services.cloud_billing.timeweb import TimewebProvider, _tariff_daily_cost  # noqa: E402
+from app.services.cloud_billing.vk_cloud import VkCloudProvider, _average_daily_spend  # noqa: E402
 from app.services.cloud_billing.yandex import (  # noqa: E402
     YC_USAGE_URL,
     YandexCloudProvider,
@@ -92,6 +93,7 @@ def billing_server(**overrides):
         cloud_provider="selectel",
         cloud_credential="token",
         cloud_account_id=None,
+        cloud_login=None,
         cloud_proxy=None,
         cloud_balance_threshold=0,
         cloud_daily_cost=None,
@@ -290,6 +292,145 @@ class TimewebProviderTests(unittest.TestCase):
             self._fetch(client)
 
 
+class FakeVkResponse(FakeResponse):
+    def __init__(self, status_code: int, payload=None, text: str = "", headers: dict | None = None):
+        super().__init__(status_code, payload, text)
+        self.headers = headers or {}
+
+
+def keystone_token_response(pid: str = "mcs0123456789", token: str = "gAAAA-token"):
+    return FakeVkResponse(
+        201,
+        {"token": {"project": {"id": "b5b7ffd4ef05", "name": pid}}},
+        headers={"X-Subject-Token": token},
+    )
+
+
+def report_item(day: str, money: str, bonus: str = "0"):
+    return {"pid": "mcs0123456789", "usage_day": day, "resource_price": "1", "money": money,
+            "bonus": bonus, "labels": {}}
+
+
+class FakeVkClient:
+    """Ответы по (метод, путь); каждый запрос записывается с телом и параметрами."""
+
+    def __init__(self, by_route: dict):
+        self.by_route = by_route
+        self.calls: list[dict] = []
+
+    async def request(self, method, url, headers=None, timeout=None, **kwargs):
+        path = url.split("://", 1)[1].split("/", 1)[1]
+        self.calls.append({"method": method, "path": path, "headers": headers or {}, **kwargs})
+        response = self.by_route[(method, "/" + path)]
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+VK_BALANCE = ("GET", "/billing/public/v1/projects/mcs0123456789/balances/amount")
+VK_REPORT = ("GET", "/billing/public/v1/projects/mcs0123456789/reports/lite-granular")
+VK_TOKEN = ("POST", "/v3/auth/tokens")
+
+
+class VkCloudProviderTests(unittest.TestCase):
+    def _fetch(self, client, login="user@example.com", account_id="b5b7ffd4ef05"):
+        return asyncio.run(VkCloudProvider().fetch(client, "secret", account_id, login))
+
+    def test_balance_sums_personal_and_bonus_accounts(self):
+        client = FakeVkClient({
+            VK_TOKEN: keystone_token_response(),
+            VK_BALANCE: FakeVkResponse(200, {"base": 1200.5, "bonus": 300}),
+            VK_REPORT: FakeVkResponse(200, {"items": []}),
+        })
+
+        snapshot = self._fetch(client)
+
+        self.assertEqual(snapshot.balance, 1500.5)
+        self.assertEqual(snapshot.currency, "RUB")
+        self.assertIsNone(snapshot.daily_cost)
+
+    def test_token_is_scoped_to_the_project_and_reused_for_billing(self):
+        client = FakeVkClient({
+            VK_TOKEN: keystone_token_response(token="tok-1"),
+            VK_BALANCE: FakeVkResponse(200, {"base": 10, "bonus": 0}),
+            VK_REPORT: FakeVkResponse(200, {"items": []}),
+        })
+
+        self._fetch(client)
+
+        auth = client.calls[0]["json"]["auth"]
+        self.assertEqual(auth["identity"]["password"]["user"]["name"], "user@example.com")
+        self.assertEqual(auth["identity"]["password"]["user"]["domain"]["name"], "users")
+        self.assertEqual(auth["scope"]["project"]["id"], "b5b7ffd4ef05")
+        self.assertEqual(client.calls[1]["headers"]["X-Auth-Token"], "tok-1")
+
+    def test_pid_for_billing_comes_from_keystone_project_name(self):
+        client = FakeVkClient({
+            VK_TOKEN: keystone_token_response(pid="mcs9999999999"),
+            ("GET", "/billing/public/v1/projects/mcs9999999999/balances/amount"):
+                FakeVkResponse(200, {"base": 1, "bonus": 0}),
+            ("GET", "/billing/public/v1/projects/mcs9999999999/reports/lite-granular"):
+                FakeVkResponse(200, {"items": []}),
+        })
+
+        self.assertEqual(self._fetch(client).balance, 1)
+
+    def test_daily_cost_averages_money_and_bonus_over_reported_days(self):
+        client = FakeVkClient({
+            VK_TOKEN: keystone_token_response(),
+            VK_BALANCE: FakeVkResponse(200, {"base": 900, "bonus": 0}),
+            VK_REPORT: FakeVkResponse(200, {"items": [
+                report_item("2026-10-01", "40.5", "9.5"),
+                report_item("2026-10-01", "10"),
+                report_item("2026-10-02", "50"),
+            ]}),
+        })
+
+        snapshot = self._fetch(client)
+
+        self.assertEqual(snapshot.daily_cost, 55.0)
+        params = client.calls[2]["params"]
+        self.assertEqual(params["timezone"], "Europe/Moscow")
+        self.assertLess(params["date_from"], params["date_to"])
+
+    def test_report_failure_keeps_the_balance(self):
+        client = FakeVkClient({
+            VK_TOKEN: keystone_token_response(),
+            VK_BALANCE: FakeVkResponse(200, {"base": 100, "bonus": 0}),
+            VK_REPORT: FakeVkResponse(422, None, "bad range"),
+        })
+
+        snapshot = self._fetch(client)
+
+        self.assertEqual(snapshot.balance, 100)
+        self.assertIsNone(snapshot.daily_cost)
+        self.assertIn("Consumption report unavailable", snapshot.warning)
+
+    def test_wrong_password_raises_auth_error(self):
+        client = FakeVkClient({VK_TOKEN: FakeVkResponse(401, None, "unauthorized")})
+        with self.assertRaises(CloudAuthError):
+            self._fetch(client)
+
+    def test_billing_forbidden_raises_auth_error(self):
+        client = FakeVkClient({
+            VK_TOKEN: keystone_token_response(),
+            VK_BALANCE: FakeVkResponse(403, None, "forbidden"),
+        })
+        with self.assertRaises(CloudAuthError):
+            self._fetch(client)
+
+    def test_login_and_project_are_required(self):
+        with self.assertRaises(CloudBillingError):
+            self._fetch(FakeVkClient({}), login=None)
+        with self.assertRaises(CloudBillingError):
+            self._fetch(FakeVkClient({}), account_id=None)
+
+    def test_average_ignores_malformed_rows(self):
+        self.assertIsNone(_average_daily_spend(None))
+        self.assertIsNone(_average_daily_spend([{"money": "5"}]))
+        self.assertEqual(_average_daily_spend([report_item("2026-10-01", "7", "bad")]), 7.0)
+
+
 class BalanceHistoryTests(unittest.TestCase):
     """Расход по снимкам баланса — для провайдеров без API истории списаний."""
 
@@ -475,6 +616,14 @@ class SyncCloudBalanceTests(unittest.TestCase):
         self.assertFalse(get_provider("selectel").requires_account_id)
         self.assertFalse(get_provider("timeweb").requires_account_id)
         self.assertTrue(get_provider("timeweb").uses_balance_history)
+        self.assertTrue(get_provider("vk_cloud").requires_login)
+        self.assertTrue(get_provider("vk_cloud").requires_account_id)
+        self.assertFalse(get_provider("selectel").requires_login)
+
+    def test_vk_cloud_requires_login(self):
+        server = billing_server(cloud_provider="vk_cloud", cloud_account_id="b5b7ffd4ef05")
+        with self.assertRaises(CloudBillingError):
+            asyncio.run(sync_cloud_balance(server, datetime.now(timezone.utc)))
 
 
 def grpc_response(content: bytes = b"", headers: dict | None = None, http_version: str = "HTTP/2"):
