@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { useParams, useNavigate, Link } from 'react-router-dom'
+import { useParams, useNavigate } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -12,7 +12,6 @@ import {
   XCircle,
   AlertTriangle,
   Clock,
-  DoorOpen,
 } from 'lucide-react'
 import {
   sourcePoolApi,
@@ -25,10 +24,10 @@ import {
 import { useServersStore } from '../stores/serversStore'
 import NodeRestrictedNotice from '../components/servers/NodeRestrictedNotice'
 import MarkLayoutCard from '../components/sourcepool/MarkLayoutCard'
+import SourcePoolSnippetBlock from '../components/sourcepool/SourcePoolSnippetBlock'
 import { nodeAllows } from '../utils/nodeCapabilities'
 import { addressDotClass, bindingsAsAssignments, formatMarks, marksByAddress, poolMarks } from '../utils/sourcePool'
 import { useAutoRefresh } from '../hooks/useAutoRefresh'
-import { useModuleEnabled } from '../hooks/useModuleEnabled'
 import { Tooltip } from '../components/ui/Tooltip'
 import { Toggle } from '../components/ui/Toggle'
 import { Checkbox } from '../components/ui/Checkbox'
@@ -58,7 +57,6 @@ export default function SourcePool() {
   const { servers, fetchServers } = useServersStore()
   const server = servers.find(s => s.id === Number(serverId))
   const systemWritable = nodeAllows(server, 'system', 'write')
-  const exitProxyEnabled = useModuleEnabled('exit-proxy')
 
   const [view, setView] = useState<SourcePoolNodeView | null>(null)
   const [isLoading, setIsLoading] = useState(true)
@@ -351,22 +349,7 @@ export default function SourcePool() {
             onSaveAssignments={saveAssignments}
           />
 
-          <motion.div
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.1 }}
-            className="flex items-center justify-between px-4 py-3 rounded-xl bg-dark-800/40 border border-dark-700/40"
-          >
-            <div className="flex items-center gap-2 text-sm text-dark-300">
-              <DoorOpen className="w-4 h-4 text-accent-400" />
-              {t('source_pool.xray_hint')}
-            </div>
-            {exitProxyEnabled && (
-              <Link to={`/${uid}/exit-proxy`} className="text-xs text-accent-400 hover:text-accent-300 transition-colors">
-                {t('source_pool.open_exit_proxy')} →
-              </Link>
-            )}
-          </motion.div>
+          <SourcePoolSnippetBlock />
         </div>
       )}
     </div>

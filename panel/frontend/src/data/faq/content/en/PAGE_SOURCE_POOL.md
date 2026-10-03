@@ -6,7 +6,7 @@ Each pair "node address → destination address:port" has only 64,512 outbound p
 
 1. Give the node more addresses — the "Network / IP addresses" card on the server page. With a single address there is nothing to spread.
 2. Turn on the toggle on this page. The node installs the rules and keeps them alive on its own; unchecking an address excludes it from the spread.
-3. Paste 30 marked outbounds and a balancer into the Xray config (Remnawave → Config Profiles). The ready-made snippet with a copy button lives in the Exit proxy section, "Nodes" tab, block "Config for Remnawave: source IP pool".
+3. Paste 30 marked outbounds and a balancer into the Xray config (Remnawave → Config Profiles). The ready-made snippet with a copy button is the "Config for Remnawave: source IP pool" block at the bottom of this page.
 
 The config is shared by the whole fleet: marks are the same everywhere, and which mark goes to which address is decided by each node itself, round-robin (30 marks over 3 addresses — 10 each). On a node with the pool off or a single address the marks change nothing — traffic flows as before.
 
